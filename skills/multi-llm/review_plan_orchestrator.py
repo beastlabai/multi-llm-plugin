@@ -689,6 +689,11 @@ def reaggregate_consolidation_mode(
 
     json_path = generate_consolidated_json(consolidated_groups, metadata, phase_dir)
     print(f"Consolidated JSON: {json_path}")
+    # Live run 8 (Claude Code racing 01): the checkpoint kept the
+    # recommendation this pass answers, so `status` and its result line went
+    # on saying "run --consolidate" after it ran.
+    from utils import status_file as _status_file
+    _status_file.remove_status_keys(phase_dir, ["consolidation_recommended"])
 
     if metadata.get("skipped_report"):
         print("Consolidation complete (report skipped -- minimal reduction).")
