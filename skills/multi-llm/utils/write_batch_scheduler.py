@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Collection, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Collection, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import git_utils as _git_utils
@@ -2901,11 +2901,24 @@ class UndeclaredWrites:
 OWN_RUN_CONTEXT_PHASES = frozenset({"apply-fixes"})
 
 
-def last_phase_end(state: Any, phase: Optional[str]) -> Optional[str]:
+def last_phase_end(
+    state: Any, phase: Optional[str], review_stamp: str = "",
+) -> Optional[str]:
     """When *phase* last ended, as ``state.json`` records it: the newer of its
     completion stamp and its skip stamp (under either spelling of the phase,
     :data:`prior_changes.PHASE_ALIASES`), or ``None``. Every prior-changes
-    entry of the phase recorded before it belongs to an earlier run."""
+    entry of the phase recorded before it belongs to an earlier run.
+
+    Fix round 23 (records #4): a completion does not end the run while the
+    phase's ``processed_<phase>`` holds a ``failed`` record of the review
+    being applied (*review_stamp*, the batch's ``inputs.grouped_sha256``; a
+    record or a batch with no stamp counts as that review). Nothing refuses
+    the native ``--mark-completed`` over a failed batch (the runbook forbids
+    it), and the ``--resume`` that dispatches that batch again continues the
+    same run: its earlier batches stay in the prompt, with no new stop. That
+    run is then bounded by the skip stamp and the newest record of another
+    review — the run before it, whose batches are not this one's.
+    """
     if state is None or not hasattr(state, "get") or not phase:
         return None
     canonical = _prior_changes.canonical_phase(phase)
@@ -2915,16 +2928,43 @@ def last_phase_end(state: Any, phase: Optional[str]) -> Optional[str]:
     try:
         completed = dict(state.get("phases_completed") or {})
         skipped = dict(state.get("phases_skipped") or {})
+        processed = [
+            record for name in sorted(names)
+            for record in dict(state.get(f"processed_{name}") or {}).values()
+            if isinstance(record, dict)
+        ]
     except Exception:  # noqa: BLE001 - a read for a prompt's context
         return None
-    stamps = [completed.get(name) for name in names] + [
+
+    def _dated(stamps: Iterable[Any]) -> List[Tuple[Any, str]]:
+        return [
+            (when, stamp) for stamp in stamps
+            if (when := _prior_changes.parse_stamp(stamp)) is not None
+        ]
+
+    def _review(record: Dict[str, Any]) -> str:
+        details = record.get("details") if isinstance(record.get("details"), dict) else {}
+        return str(details.get("grouped_sha256") or "")
+
+    review_stamp = str(review_stamp or "")
+    completions = _dated(completed.get(name) for name in names)
+    skips = _dated(
         (skipped.get(name) or {}).get("skipped_at")
         for name in names if isinstance(skipped.get(name), dict)
-    ]
-    dated = [
-        (when, stamp) for stamp in stamps
-        if (when := _prior_changes.parse_stamp(stamp)) is not None
-    ]
+    )
+    unfinished = any(
+        record.get("status") == "failed"
+        and (not review_stamp or not _review(record) or _review(record) == review_stamp)
+        for record in processed
+    )
+    if completions and unfinished:
+        earlier = _dated(
+            record.get("timestamp") for record in processed
+            if review_stamp and _review(record) and _review(record) != review_stamp
+        )
+        dated = skips + earlier
+    else:
+        dated = completions + skips
     return max(dated)[1] if dated else None
 
 
@@ -3007,6 +3047,7 @@ def bind_prior_changes(
         own_run_only=own_run,
         since=last_phase_end(
             state if hasattr(state, "get") else _state_on_disk(output_dir), phase,
+            _known_checks.review_stamp(task),
         ) if own_run else None,
     )
     note = accepted_checks_section(accepted_checks)
