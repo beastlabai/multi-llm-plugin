@@ -237,20 +237,27 @@ class TestTheWritePolicyIsTheUsersCall:
     def test_the_rule_never_forbids_the_way_the_plugin_offers(self):
         rule = modes.STOP_POLICY_RULE
         assert "Never edit `driver.write_paths`" in rule
-        assert ("when it names allowing a refused file in `driver.write_paths`, "
-                "that is one of them and the user's call") in rule
+        assert ("when it names a change to `driver.write_paths` that lets a "
+                "refused file be written (adding it to `allow`, or removing or "
+                "narrowing a deny rule that covers it), that is one of them "
+                "and the user's call") in rule
         assert "add no advice about the write policy of your own" in rule
 
     def test_it_agrees_with_what_the_plugin_says(self):
-        """The rule's "allowing a refused file in `driver.write_paths`" is the
-        clause every stop, refusal and status line uses."""
-        from utils.write_safety import policy_allow_clause, policy_skip_clause
+        """The rule's two kinds of change are the clauses every stop,
+        refusal and status line uses (fix round 21: per rule)."""
+        from utils.write_safety import (
+            PolicyHit, policy_allow_clause, policy_skip_clause,
+        )
 
-        assert policy_allow_clause(["src/vendor/stamp.js"]) == (
-            "if you want src/vendor/stamp.js written, allow it in "
-            "driver.write_paths (.multi-llm/providers.yaml)")
-        assert policy_allow_clause(["a.js", "b.js"]).endswith(
-            "allow them in driver.write_paths (.multi-llm/providers.yaml)")
+        assert policy_allow_clause([PolicyHit("src/vendor/stamp.js", deny=("src/vendor/**",))]) == (
+            "if you want src/vendor/stamp.js written, remove or narrow the "
+            "deny rule `src/vendor/**` in driver.write_paths "
+            "(.multi-llm/providers.yaml) so the rule no longer covers it")
+        assert policy_allow_clause([PolicyHit("a.js", allowed=False),
+                                    PolicyHit("b.js", allowed=False)]) == (
+            "if you want a.js and b.js written, add them to "
+            "driver.write_paths.allow (.multi-llm/providers.yaml)")
         assert policy_skip_clause("T005") == (
             "if not, skip T005: add --human-task T005=skip to the resume "
             "command (T005 and the tasks after it stay undone)")
@@ -258,8 +265,10 @@ class TestTheWritePolicyIsTheUsersCall:
     def test_the_native_leg_relays_the_refusal_and_the_answers(self):
         text = _flat("instructions/implement.md")
         assert ("its refusal (the emit's `refused_tasks` line, or "
-                "`[WRITE_PROMPT_REFUSED]`) names allowing its file in "
-                "`driver.write_paths` and resuming") in text
+                "`[WRITE_PROMPT_REFUSED]`) names the change to "
+                "`driver.write_paths` that lets its file be written (none for "
+                "a file outside the repository, which no rule can allow) and "
+                "resuming") in text
         assert "relay them as the user's choice, in those words" in text
 
 

@@ -137,6 +137,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from .write_safety import (
         PRE_BATCH_DIRNAME,
         policy_allow_clause,
+        policy_outside_note,
         policy_skip_clause,
         DRY_RUN_FILENAME,
         MAX_SNAPSHOT_BYTES,
@@ -243,6 +244,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
     from utils.write_safety import (
         PRE_BATCH_DIRNAME,
         policy_allow_clause,
+        policy_outside_note,
         policy_skip_clause,
         DRY_RUN_FILENAME,
         MAX_SNAPSHOT_BYTES,
@@ -3078,6 +3080,9 @@ class WriteBatchScheduler:
         #: The paths ``driver.write_paths`` refused, per task refused for it
         #: before dispatch: what its way forward names (fix round 20).
         self._refused_policy_paths: Dict[str, List[str]] = {}
+        #: Each one's rule (``write_safety.PolicyHit``), which its way forward
+        #: is worded from (fix round 21: a deny hit names the deny rule).
+        self._refused_policy_hits: Dict[str, List[Any]] = {}
 
     # -- the write grant (plan step 3, 2026-09-30) ----------------------
 
@@ -4690,9 +4695,12 @@ class WriteBatchScheduler:
             for path in declared_file_set(task)
         ]
         try:
-            self.policy.check(declared, when="pre-dispatch")
+            # As declared (fix round 21): a file outside the repository is
+            # named as the task wrote it, never by its resolved absolute path.
+            self.policy.check(declared_file_set(task), when="pre-dispatch")
         except PolicyViolation as exc:
             self._refused_policy_paths[task_id] = list(exc.paths)
+            self._refused_policy_hits[task_id] = list(exc.hits)
             return self._refuse_before_dispatch(task, TaskOutcome(
                 task_id=task_id, kind=self.kind, runner=self.invoker,
                 status=STATUS_REJECTED, profile=profile, reason=exc.message,
@@ -8717,21 +8725,36 @@ class WriteBatchScheduler:
             policy = any(o.write_outcome == WRITE_POLICY_VIOLATION for o in refused)
             # Fix round 18 (live run 7): that nothing is half-applied is the
             # block's closing line, said once; the bullet is the remedy. Fix
-            # round 20: the policy's, worded as the user's own call.
-            denied = sorted({
-                path for o in refused
-                for path in self._refused_policy_paths.get(o.task_id) or []
-            })
-            lines.append(
-                f"  - "
-                + (
-                    f"your call: {policy_allow_clause(denied)}"
-                    if policy else "fix what the details name"
+            # round 20: the policy's, worded as the user's own call. Fix
+            # round 21: per rule (a deny hit names the deny rule), and none
+            # for a file outside the repository, which no rule can allow.
+            def hits_of(outcome: TaskOutcome) -> List[Any]:
+                return list(
+                    self._refused_policy_hits.get(outcome.task_id)
+                    or self._refused_policy_paths.get(outcome.task_id) or []
                 )
-                + ", then resume this phase; it is checked again before it is "
-                "dispatched, and the tasks after it follow:"
-            )
-            lines.append(f"        {resume}")
+
+            outside = [
+                o for o in refused
+                if any(getattr(hit, "outside", False) for hit in hits_of(o))
+            ]
+            fixable = [o for o in refused if o not in outside]
+            if outside:
+                lines[0] = (
+                    f"To go on ({policy_outside_note([h for o in outside for h in hits_of(o)])}):"
+                )
+            clause = policy_allow_clause(
+                [hit for o in fixable for hit in hits_of(o)]
+            ) if policy and fixable else None
+            offered = bool(fixable or self.kind != "implement")
+            if offered:
+                lines.append(
+                    f"  - "
+                    + (f"your call: {clause}" if clause else "fix what the details name")
+                    + ", then resume this phase; it is checked again before it is "
+                    "dispatched, and the tasks after it follow:"
+                )
+                lines.append(f"        {resume}")
             for outcome in (refused if self.kind == "implement" else ()):
                 task_id = outcome.task_id
                 dependents = [
@@ -8746,7 +8769,8 @@ class WriteBatchScheduler:
                     f"add --human-task {task_id}=skip to the resume command"
                 )
                 lines.append(
-                    f"  - or go on without it: {skip} ({task_id}"
+                    f"  - {'or go on without it' if offered else f'go on without {task_id}'}"
+                    f": {skip} ({task_id}"
                     + (f" and the tasks that depend on it, {', '.join(dependents)},"
                        if dependents else "")
                     + f" stay undone), or, once you have made its change "
@@ -9098,9 +9122,14 @@ class WriteBatchScheduler:
             result.stop["refused_before_dispatch"] = True
             result.stop["policy"] = first.write_outcome == WRITE_POLICY_VIOLATION
             if result.stop["policy"]:
-                # Fix round 20: the files its way forward names.
+                # Fix round 20: the files its way forward names. Fix round
+                # 21: and the rule that refused each, which words it.
                 result.stop["policy_paths"] = list(
                     self._refused_policy_paths.get(first.task_id) or [])
+                result.stop["policy_rules"] = [
+                    hit.to_dict()
+                    for hit in self._refused_policy_hits.get(first.task_id) or []
+                ]
         if first is not None and first.applied_without_changes:
             # Fix round 14: it said `applied` and changed nothing, twice.
             result.stop["applied_without_changes"] = True
@@ -9513,13 +9542,26 @@ class WriteBatchScheduler:
             # Fix round 20 (live run 8 #4, a user decision: permissive):
             # allowing the file stays a way forward, worded as the user's own
             # call and naming the file, beside the skip answer.
-            body.append(
-                "To go on (your call): "
-                + policy_allow_clause(stop.get("policy_paths") or [])
-                + " and resume this phase"
-                + (f"; {policy_skip_clause(task_id)}."
-                   if self.kind == "implement" else ".")
-            )
+            # Fix round 21: worded per rule from `policy_rules` (a deny hit
+            # names the deny rule; the paths alone, from a record that kept
+            # no rule, get the wording right for either), and no policy
+            # change at all for a file outside the repository.
+            refused_rules = stop.get("policy_rules") or stop.get("policy_paths") or []
+            clause = policy_allow_clause(refused_rules)
+            if clause is not None:
+                body.append(
+                    "To go on (your call): " + clause + ", then resume this phase"
+                    + (f"; {policy_skip_clause(task_id)}."
+                       if self.kind == "implement" else ".")
+                )
+            else:
+                note = policy_outside_note(refused_rules)
+                body.append(
+                    f"{note[0].upper()}{note[1:]}. To go on: "
+                    + (f"{policy_skip_clause(task_id, alone=True)}."
+                       if self.kind == "implement"
+                       else "fix what refused it, then resume this phase.")
+                )
         elif stop.get("refused_before_dispatch"):
             body.append(
                 "To go on: fix what refused it"
