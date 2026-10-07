@@ -168,6 +168,12 @@ _CUT_CORPUS = [
     "adding `Math.min(..., MAX_SPEED)` would break it — " + "x" * 40 + " end.",
     "word " * 90,
     "/" + "very-long-path-segment/" * 20 + "file.js and then words",
+    # Fix round 23 (review of round 22, #5): nothing a word boundary keeps,
+    # cut inside on both sides rather than down to the bare mark.
+    "(" * 400,
+    "( [ " * 100,
+    '"' * 30 + "(" * 300,
+    "-" * 400,
 ]
 
 

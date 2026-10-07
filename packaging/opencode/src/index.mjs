@@ -3229,12 +3229,40 @@ function capTitleLine(line, text) {
       }
       break
     }
-    if (!kept.length) break
+    if (!kept.length) return cutTitleInside(chars, max, cut)
     const closers = stack.slice().reverse().map(([, mark]) => TITLE_PAIRS[mark] ?? mark)
     const clipped = kept.join("") + cut + closers.join("")
     const length = Array.from(clipped).length
     if (length <= max) return clipped
     room -= length - max
+  }
+  return Array.from(cut).slice(0, max).join("")
+}
+
+/**
+ * `chars` cut inside within `max`, for a head the word-boundary cut left
+ * nothing of (`text_clip._cut_inside`, fix round 23: a line of openers was
+ * cut to the bare mark): the first characters that fit beside the mark and
+ * the closers of what they open, a trailing separator dropped unless that
+ * leaves nothing.
+ */
+function cutTitleInside(chars, max, cut) {
+  let room = max - Array.from(cut).length
+  while (room > 0) {
+    const head = chars.slice(0, room)
+    let kept = head.slice()
+    while (kept.length && TITLE_DANGLING.has(kept[kept.length - 1])) kept.pop()
+    if (!kept.length) {
+      kept = head.slice()
+      while (kept.length && titleSpace(kept[kept.length - 1])) kept.pop()
+    }
+    if (!kept.length) break
+    const closers = unclosedMarks(kept).reverse().map(([, mark]) => TITLE_PAIRS[mark] ?? mark)
+    const clipped = kept.join("") + cut + closers.join("")
+    const length = Array.from(clipped).length
+    if (length <= max) return clipped
+    // Each character dropped takes at most one closer with it.
+    room -= Math.floor((length - max + 1) / 2)
   }
   return Array.from(cut).slice(0, max).join("")
 }
