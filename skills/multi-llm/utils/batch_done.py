@@ -79,7 +79,11 @@ naming the ``--own-check`` call (fix round 18, live run 7: Claude Code
 recorded ``--check passed`` for T008, a "check" task that declares
 ``index.html``, and its summary then called the code task ``Verified``), and
 ``--own-check`` on a check task is refused naming ``--check``: the two words
-are two kinds of task, and the plugin says which one the host has.
+are two kinds of task, and the plugin says which one the host has. An
+implement task's ``--finding`` that only repeats what the user accepted for
+a check (``--human-task <check>=done``; ``split_accepted_findings``, fix
+round 22) is printed as ``[BATCH_CHECK_ACCEPTED]`` and never recorded as the
+task's own failing check; anything else it reports still is.
 
 Import is side-effect free: argparse and all I/O live inside :func:`main`.
 """
@@ -120,6 +124,8 @@ try:
     from .write_batch_scheduler import (
         BATCH_CHECK_MARKER,
         HALF_APPLIED_PREFIX,
+        accepted_checks_on_record,
+        batch_check_accepted_line,
         batch_check_line,
         BLOCKED_BY_CHECK_PREFIX,
         CODE_WRITE_KINDS,
@@ -127,6 +133,7 @@ try:
         decomposition_graph,
         is_check_task,
         rerunnable_checks,
+        split_accepted_findings,
         transitive_dependents,
         upstream_held_check,
     )
@@ -162,6 +169,8 @@ except ImportError:  # pragma: no cover - direct script invocation
     from utils.write_batch_scheduler import (  # type: ignore
         BATCH_CHECK_MARKER,
         HALF_APPLIED_PREFIX,
+        accepted_checks_on_record,
+        batch_check_accepted_line,
         batch_check_line,
         BLOCKED_BY_CHECK_PREFIX,
         CODE_WRITE_KINDS,
@@ -169,6 +178,7 @@ except ImportError:  # pragma: no cover - direct script invocation
         decomposition_graph,
         is_check_task,
         rerunnable_checks,
+        split_accepted_findings,
         transitive_dependents,
         upstream_held_check,
     )
@@ -500,6 +510,16 @@ def record_batch(
 
         update_task_status_in_state(state, task_id, status, reason)
         blocked: List[str] = []
+        accepted_again: Dict[str, List[str]] = {}
+        if kind == "implement" and batch_check:
+            # Fix round 22: what only repeats findings the user accepted for
+            # a check is that check's, never this task's own failure (the
+            # executor's reading, `split_accepted_findings`).
+            own, accepted_again = split_accepted_findings(
+                batch_check, accepted_checks_on_record(state),
+            )
+            if accepted_again:
+                batch_check = own
         if kind == "implement":
             set_task_check_findings_in_state(state, task_id, check_findings)
             set_task_check_tree_in_state(state, task_id, tree)
@@ -547,6 +567,7 @@ def record_batch(
         "task_id": task_id, "status": status, "items": items,
         "state_file": str(target), "check_findings": check_findings or [],
         "batch_check": batch_check or [],
+        "batch_check_accepted": accepted_again,
         "blocked": blocked,
         "declined": {
             item: why for item, (word, why) in not_applied.items()
@@ -1083,6 +1104,17 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"before the --resume, which dispatches {task_id} again on top of "
             f"what is there; the stop offers no --human-task answer for "
             f"{task_id}."
+        )
+    accepted_again = written.get("batch_check_accepted") or {}
+    if accepted_again:
+        # Fix round 22: reported again, never the task's own failure.
+        task_id = written["task_id"]
+        print(
+            f"{batch_check_accepted_line(task_id, accepted_again)}. List it in "
+            f"the phase's summary.md under ## Check Findings, beside "
+            f"{', '.join(accepted_again)}'s accepted findings, as {task_id} "
+            f"running that check again: it does not make the phase unclean and "
+            f"is not a check of {task_id}'s that fails."
         )
     failing = written.get("batch_check") or []
     if failing:
