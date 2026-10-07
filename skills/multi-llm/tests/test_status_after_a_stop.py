@@ -102,6 +102,33 @@ class TestAForegroundStop:
         ], out
 
 
+class TestTheMirrorNamesTheTasksWhoseRunnerFailed:
+    """What the run block's gloss reads (fix round 23): a refusal before
+    dispatch failed no runner, a runner that failed did."""
+
+    @staticmethod
+    def _write_mirror(repo) -> dict:
+        status = json.loads((repo.phase_dir / ".status.json").read_text())
+        return status["progress"]["write_subagents"]
+
+    def test_a_refusal_fails_no_runner(self, repo, capsys):
+        _first_run(repo, capsys)
+        mirror = self._write_mirror(repo)
+        assert mirror["failed_task_ids"] == ["T005"]
+        assert mirror["runner_failed_task_ids"] == []
+
+    def test_a_task_whose_runner_failed_is_named(self, repo, capsys, monkeypatch):
+        from tests.test_check_gate_fixture import _check
+
+        _check(repo, passed=False)
+        monkeypatch.setenv(
+            "MOCK_LLM_WRITE_FAIL_IF_PROMPT_HAS", "Title: Edit: add the greeting module")
+        monkeypatch.setenv("MOCK_LLM_WRITE_FAIL_SUMMARY", "could not add the greeting")
+        assert _implement(repo) == 3
+        capsys.readouterr()
+        assert self._write_mirror(repo)["runner_failed_task_ids"] == ["T003"]
+
+
 class TestTheCountsAreTasks:
 
     def test_the_first_run_counts_tasks(self, repo, capsys):
@@ -167,6 +194,35 @@ class TestTheHeadOfAStoppedRun:
             "      run.state:      failed (exit 3: the run stopped and needs "
             "you; nothing crashed)"
         ) in out, out
+
+    def test_a_runner_failure_reads_stopped_without_nothing_crashed(self, plan, capsys):
+        """Fix round 23 (review of round 22, #4): a stop on a task whose
+        runner failed needs the user too, but something did fail."""
+        _detached_run(plan, exit_code=3)
+        status_file.update_status(str(plan.parent / plan.stem / "implement"), {
+            "progress": {"step": "stopped", "write_subagents": {
+                "kind": "implement", "total": 3, "ok": 2,
+                "failed_task_ids": ["T003"], "runner_failed_task_ids": ["T003"],
+            }},
+        })
+        out = _run_block(capsys)
+        head = [l for l in out.splitlines() if l.startswith("  implement  run ")]
+        assert head == ["  implement  run 2843b4c3  stopped and needs you (exit 3)"], out
+        assert (
+            "      run.state:      failed (exit 3: the run stopped and needs you)\n"
+        ) in out, out
+        assert "nothing crashed" not in out, out
+
+    def test_an_older_mirror_with_a_failed_task_says_nothing_crashed_neither(
+        self, plan, capsys,
+    ):
+        _detached_run(plan, exit_code=3)
+        status_file.update_status(str(plan.parent / plan.stem / "implement"), {
+            "progress": {"step": "stopped", "write_subagents": {
+                "kind": "implement", "total": 3, "ok": 2, "failed_task_ids": ["T003"],
+            }},
+        })
+        assert "nothing crashed" not in _run_block(capsys)
 
     def test_a_real_failure_still_reads_failed(self, plan, capsys):
         _detached_run(plan, exit_code=1)

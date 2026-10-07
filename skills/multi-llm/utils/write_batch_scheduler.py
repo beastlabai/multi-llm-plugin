@@ -11995,6 +11995,17 @@ class WriteBatchScheduler:
                         "failed_task_ids": [
                             o.task_id for o in outcomes if not o.ok
                         ],
+                        # Fix round 23 (review of round 22, #4): which of
+                        # them a runner ran in this run — not one refused
+                        # before dispatch, nor a failed check not run again
+                        # — so `status` says "nothing crashed" only of a
+                        # stop no runner failed. Always written: an older
+                        # mirror without it is read by `failed_task_ids`.
+                        "runner_failed_task_ids": [
+                            o.task_id for o in outcomes
+                            if not o.ok and not o.skipped and not o.not_rerun
+                            and o.task_id not in self._refused_before_dispatch
+                        ],
                         # Fix round 18 (run 7 #3): the tasks this run kept
                         # from an earlier one instead of dispatching them, so
                         # `status` does not read them as this run's batches.

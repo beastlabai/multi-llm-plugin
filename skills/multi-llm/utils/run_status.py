@@ -952,7 +952,10 @@ def _run_state_text(view: Dict[str, Any]) -> str:
     if result is None:
         if _stopped_for_the_user(view):
             # Fix round 22: the record's word stays; what it means is said.
-            return f"{word} ({STOPPED_FOR_THE_USER_GLOSS})"
+            # Fix round 23 (review of round 22, #4): "nothing crashed" only
+            # when nothing it ran failed.
+            crashed = "" if _a_dispatch_failed(view) else f"; {NOTHING_CRASHED}"
+            return f"{word} ({STOPPED_FOR_THE_USER_GLOSS}{crashed})"
         return str(word)
     failed = _failed_model_specs(view)
     detail = f" — failed: {', '.join(failed)}" if failed else ""
@@ -964,7 +967,28 @@ def _run_state_text(view: Dict[str, Any]) -> str:
 #: "run … failed" for a resume that stopped where the first run had, needing
 #: the user's answer, as the stop's own text said).
 STOPPED_FOR_THE_USER_VERDICT = "stopped and needs you (exit 3)"
-STOPPED_FOR_THE_USER_GLOSS = "exit 3: the run stopped and needs you; nothing crashed"
+STOPPED_FOR_THE_USER_GLOSS = "exit 3: the run stopped and needs you"
+#: Added to the gloss only when no runner and no model of the run failed
+#: (:func:`_a_dispatch_failed`, fix round 23): a stop on a refusal, a check's
+#: findings or an unanswered manual task.
+NOTHING_CRASHED = "nothing crashed"
+
+
+def _a_dispatch_failed(view: Dict[str, Any]) -> bool:
+    """Whether something the run dispatched failed: a write task whose
+    runner ran and failed (the write mirror's ``runner_failed_task_ids``;
+    a mirror written before fix round 23 has only ``failed_task_ids``, read
+    as is), a read task, or a fan-out model."""
+    progress = view.get("progress") if isinstance(view.get("progress"), dict) else {}
+    write = progress.get("write_subagents")
+    if isinstance(write, dict):
+        ran = write.get("runner_failed_task_ids")
+        if ran if isinstance(ran, list) else write.get("failed_task_ids"):
+            return True
+    read = progress.get("subagents")
+    if isinstance(read, dict) and read.get("failed_task_ids"):
+        return True
+    return bool(_failed_model_specs(view))
 
 
 def _stopped_for_the_user(view: Dict[str, Any]) -> bool:
