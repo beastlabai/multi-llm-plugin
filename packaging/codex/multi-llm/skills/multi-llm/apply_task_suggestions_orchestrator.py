@@ -28,6 +28,7 @@ from utils.apply_orchestrator_base import (
     build_common_arg_parser,
 )
 from utils.cli_common import dispatcher_prefix
+from utils.text_clip import clip
 from utils.judge_vocab import JUDGE_AUTO_DECIDE, JUDGE_DECIDE
 from utils.apply_output_helpers import (
     build_skipped_output,
@@ -473,7 +474,7 @@ Bulk Approval Examples:
                 print(f"  Type: {s['type']}")
                 print(f"  Importance: {s['importance']}")
                 print(f"  Task reference: {s.get('task_reference', s['reference'])}")
-                print(f"  Description:\n  {s['description'][:200]}...")
+                print(f"  Description:\n  {clip(s['description'], 200)}")
 
         if self.formatted_human:
             print(f"\n{'=' * 60}")

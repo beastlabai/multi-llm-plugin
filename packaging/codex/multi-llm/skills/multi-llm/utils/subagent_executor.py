@@ -58,6 +58,7 @@ from typing import (
 try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import process_control
     from . import structured_output
+    from .text_clip import clip
     from .json_extractor import (
         describe_syntax_error,
         extract_json_from_text,
@@ -192,6 +193,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
 except ImportError:  # pragma: no cover - direct-script import shim
     from utils import process_control
     from utils import structured_output
+    from utils.text_clip import clip  # type: ignore
     from utils.json_extractor import (
         describe_syntax_error,
         extract_json_from_text,
@@ -836,7 +838,7 @@ def check_findings_from(result: Any) -> Optional[List[str]]:
     if check is None:
         return [f"{CHECK_RESULT_UNKNOWN} (its `check` was null)"]
     if not isinstance(check, dict):
-        shown = " ".join(str(check).split())[:80]
+        shown = clip(check, 80)
         return [
             f"{CHECK_RESULT_UNKNOWN} (its `check` was "
             f"{type(check).__name__} {shown!r}, not an object)"
@@ -857,7 +859,7 @@ def check_findings_from(result: Any) -> Optional[List[str]]:
     for item in items:
         text = _finding_text(item)
         if text:
-            findings.append(text[:CHECK_FINDING_MAX_CHARS])
+            findings.append(clip(text, CHECK_FINDING_MAX_CHARS))
     if len(findings) > CHECK_FINDINGS_MAX:
         extra = len(findings) - (CHECK_FINDINGS_MAX - 1)
         findings = findings[:CHECK_FINDINGS_MAX - 1] + [
@@ -927,7 +929,7 @@ def batch_check_findings(result: Any) -> Optional[List[str]]:
             text = BATCH_CHECK_COULD_NOT_RUN + (
                 f": {'; '.join(listed)}" if listed else ""
             )
-            return [text[:CHECK_FINDING_MAX_CHARS]]
+            return [clip(text, CHECK_FINDING_MAX_CHARS)]
         if _check_passed(check.get("passed")) is True:
             return []
     findings = check_findings_from(result)
@@ -965,7 +967,8 @@ def declined_reason(text: Any) -> str:
         trimmed = reason[:-1].rstrip()
         if trimmed:
             reason = trimmed
-    return reason[:DECLINED_REASON_MAX_CHARS]
+    # Fix round 22: cut at a word and marked, never mid-word.
+    return clip(reason, DECLINED_REASON_MAX_CHARS)
 
 
 @dataclass
@@ -1050,6 +1053,16 @@ def row_declined(row: Any) -> Dict[str, str]:
     return out
 
 
+#: summary.md's sections for an apply phase's items that were not applied
+#: (fix round 22, live run 9: a declined fix sat under "## Applied Fixes" on
+#: the native leg and under its batch in "## Applied Changes" on the
+#: executor's), written by the executor's summary and named by the native
+#: runbooks' template and `util batch-done`'s `[BATCH_DECLINED]` /
+#: `[BATCH_SKIPPED]` lines.
+DECLINED_SECTION_HEADING = "Declined by their batch (not applied)"
+SKIPPED_SECTION_HEADING = "Skipped at your request (not applied)"
+
+
 def declined_record(items: Dict[str, str]) -> List[Dict[str, str]]:
     """The ``declined`` list a row, a verdict stamp and a mirror row carry."""
     return [{"id": item, "reason": reason} for item, reason in items.items()]
@@ -1061,6 +1074,20 @@ def row_batch_check_findings(row: Dict[str, Any]) -> List[str]:
     if not isinstance(check, dict):
         return []
     return [str(item) for item in (check.get("findings") or []) if str(item)]
+
+
+def row_batch_check_accepted(row: Dict[str, Any]) -> Dict[str, List[str]]:
+    """A serialized row's own-check findings that only repeat what the user
+    accepted, by check id (its ``batch_check_accepted``, fix round 22), else
+    ``{}``."""
+    found = row.get("batch_check_accepted") if isinstance(row, dict) else None
+    if not isinstance(found, dict):
+        return {}
+    return {
+        str(check_id): [str(item) for item in items if str(item)]
+        for check_id, items in found.items()
+        if isinstance(items, list) and any(str(item) for item in items)
+    }
 
 
 def row_outcome_label(row: Dict[str, Any]) -> Optional[str]:
@@ -1350,6 +1377,12 @@ class TaskOutcome:
     #: but an ``ok`` row carrying findings is never reported as a plain
     #: success (fix round 14).
     batch_check: Optional[List[str]] = None
+    #: The own-check findings of an implement task that only repeat what the
+    #: user accepted for a check (``--human-task <check>=done``), by check id
+    #: (``write_batch_scheduler.split_accepted_findings``, fix round 22): taken
+    #: out of ``batch_check``, so they never make the task's own failure, and
+    #: named beside that check's accepted findings instead. Empty otherwise.
+    batch_check_accepted: Dict[str, List[str]] = field(default_factory=dict)
     #: A write batch whose reply said ``applied`` while no byte moved, after
     #: its one re-send (the ladder's rule 9): a ``clean-failure`` that is
     #: never ``ok``, worded on the stop as a change that did not land (fix
@@ -1461,6 +1494,12 @@ class TaskOutcome:
                 # Additive and only here, so a row whose reply ran no check
                 # is unchanged.
                 out["batch_check"] = check_record(self.batch_check)
+            if self.batch_check_accepted:
+                # Additive and only here (fix round 22).
+                out["batch_check_accepted"] = {
+                    str(check_id): list(found)
+                    for check_id, found in self.batch_check_accepted.items()
+                }
             if self.runner_notes:
                 out["runner_notes"] = self.runner_notes
             if self.not_rerun:

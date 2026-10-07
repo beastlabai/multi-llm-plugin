@@ -69,6 +69,7 @@ from .state_manager import (
     CURRENT_FORMAT_VERSION,
     StateManager,
     generate_group_id,
+    processed_record_counts,
 )
 from .suggestion_batcher import (
     SuggestionBatch,
@@ -1454,28 +1455,45 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
 
         # Step 23: Handle --resume
         #
-        # `processed_<phase>` is the native leg's per-batch record (`util
-        # batch-done`, 2026-10-05): one entry per member id of every batch
-        # the host recorded, keyed by the id the batch's `expected_ids`
-        # carry — the group's stamped `group_hash`, which is what the
-        # suggestion's `group_id` was copied from. A `failed` record keeps
-        # the group in the work set (the batch is dispatched again, as the
-        # executor leg re-dispatches a failed batch); every other status
-        # drops it. The executor leg never writes this map: its resume
-        # evidence is the result file on disk (`_done_evidence`).
+        # `processed_<phase>` is the per-batch record (`util batch-done` on
+        # the native leg, 2026-10-05; the scheduler on the executor leg since
+        # fix round 22): one entry per member id of every batch recorded,
+        # keyed by the id the batch's `expected_ids` carry — the group's
+        # stamped `group_hash`, which is what the suggestion's `group_id` was
+        # copied from. A `failed` record keeps the group in the work set (the
+        # batch is dispatched again, as the executor leg re-dispatches a
+        # failed batch), and so does a declined or skipped record of an
+        # earlier review (fix round 22: a later review's re-report of an item
+        # its batch did not apply is offered again, on both legs); every other
+        # record drops it (`processed_record_counts`). On the
+        # executor leg a record the executor wrote drops nothing: its resume
+        # evidence is the result file on disk (`_done_evidence`), under the
+        # batch's own id.
         if getattr(self.args, "resume", False) and self.state is not None:
             previous_decisions = self.state.get_all_human_decisions(self.phase_name)
-            processed_items = self.state.get_processed_items(self.phase_name)
+            executor_leg = bool(self.write_kind) and bool(
+                getattr(self.args, "exec_subagents", False)
+                or getattr(self.args, "dry_run_subagents", False)
+            )
+            from .subagent_tasks import file_content_hash
+
+            review_stamp = file_content_hash(
+                os.path.join(self.out_dir, self.review_subdir, "grouped.json"))
+            processed_items = {
+                key: record
+                for key, record in self.state.get_processed_items(self.phase_name).items()
+                if processed_record_counts(
+                    record, review_stamp=review_stamp, executor_leg=executor_leg)
+            }
 
             for group in self.merged:
                 group["_group_id"] = generate_group_id(group)
 
             def _recorded_done(group: Dict[str, Any]) -> bool:
-                for key in (group.get("_group_id"), group.get("group_hash")):
-                    record = processed_items.get(str(key or ""))
-                    if isinstance(record, dict) and record.get("status") != "failed":
-                        return True
-                return False
+                return any(
+                    str(key or "") in processed_items
+                    for key in (group.get("_group_id"), group.get("group_hash"))
+                )
 
             unprocessed_merged = []
             for g in self.merged:
@@ -1496,16 +1514,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                         )
                 unprocessed_merged.append(g)
 
-            # On the write executor's leg nothing writes `processed_items`: the
-            # batches an earlier run finished are kept by the scheduler from
-            # their result files, which no batch exists yet to look up. A count
-            # here read "0 already processed, 12 remaining" on a resume that
-            # then kept batch 0 (OpenCode racing run 4), so this leg defers to
-            # the scheduler's own `resume:` line.
-            executor_leg = bool(self.write_kind) and bool(
-                getattr(self.args, "exec_subagents", False)
-                or getattr(self.args, "dry_run_subagents", False)
-            )
+            # On the write executor's leg its own records count for nothing
+            # here: the batches an earlier run finished are kept by the
+            # scheduler from their result files, which no batch exists yet to
+            # look up. A count here read "0 already processed, 12 remaining"
+            # on a resume that then kept batch 0 (OpenCode racing run 4), so
+            # this leg defers to the scheduler's own `resume:` line.
             if executor_leg and not processed_items:
                 print(
                     f"[resume] {len(unprocessed_merged)} item(s) in scope; the "
@@ -3135,6 +3149,28 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             row_declined({"declined": row.get("skipped_items")}),
         )
 
+    @staticmethod
+    def _item_file_lines(item: Dict[str, Any]) -> List[str]:
+        """An item's ``   - File: <path>[:<a>-<b>]`` line, when it names one."""
+        file_path = item.get("file")
+        if not file_path:
+            return []
+        line_range = item.get("line_range") or []
+        if len(line_range) >= 2:
+            return [f"   - File: {file_path}:{line_range[0]}-{line_range[1]}"]
+        return [f"   - File: {file_path}"]
+
+    def _not_applied_item_lines(
+        self, member: str, item: Optional[Dict[str, Any]], task_id: str, why: str,
+    ) -> List[str]:
+        """One item of a not-applied section (fix round 22): ``- **<title>**
+        (`<id>`, <batch>) — <reason>``, then its file; the id alone when this
+        run's batches no longer hold the item."""
+        if item is None:
+            return [f"- `{member}` ({task_id}) — {why}"]
+        title = item.get("title") or item.get("theme") or "Untitled"
+        return [f"- **{title}** (`{member}`, {task_id}) — {why}"] + self._item_file_lines(item)
+
     def write_apply_summary_report(self) -> Optional[str]:
         """Write ``{phase}/summary.md`` — the report the instructions promise (F3).
 
@@ -3166,7 +3202,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 batch_check_section,
                 verification_line,
             )
-        from .subagent_executor import batch_check_could_not_run, row_batch_check_findings
+        from .subagent_executor import (
+            DECLINED_SECTION_HEADING,
+            SKIPPED_SECTION_HEADING,
+            batch_check_could_not_run,
+            row_batch_check_findings,
+        )
         phase_dir = os.path.join(self.out_dir, self.phase_name)
         result = self.write_result
         # #28: the phase's rows, not this run's outcomes — a `--resume` keeps
@@ -3240,6 +3281,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             "## Applied Changes",
             "",
         ]
+        # Fix round 22 (live run 9): an item its batch declined, or that a
+        # `=skip` answer recorded as skipped at your request, is listed in a
+        # section of its own below, never under this applied heading.
+        not_applied_sections: Dict[str, List[str]] = {
+            DECLINED_SECTION_HEADING: [], SKIPPED_SECTION_HEADING: [],
+        }
         if rows:
             for row in rows:
                 item_ids = self._row_item_ids(row)
@@ -3269,34 +3316,40 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     lines.append(
                         "**Items**: " + ", ".join(f"`{i}`" for i in item_ids)
                     )
-                if items:
+                titles_by_member = {member: item for member, item in members}
+                for kept, heading in (
+                    (declined, DECLINED_SECTION_HEADING),
+                    (skipped, SKIPPED_SECTION_HEADING),
+                ):
+                    for member, why in kept.items():
+                        not_applied_sections[heading] += self._not_applied_item_lines(
+                            member, titles_by_member.get(member),
+                            str(row.get("task_id")), why,
+                        )
+                if declined or skipped:
+                    told = [
+                        f'{len(kept)} {words} (listed under "{heading}" below)'
+                        for kept, words, heading in (
+                            (declined, "declined by the batch", DECLINED_SECTION_HEADING),
+                            (skipped, "skipped at your request", SKIPPED_SECTION_HEADING),
+                        ) if kept
+                    ]
+                    lines.append(f"**Not applied**: {'; '.join(told)}")
+                listed = [
+                    (member, item) for member, item in members
+                    if member not in declined and member not in skipped
+                ]
+                if listed:
                     item_status = {
                         "applied": "Applied",
                         "no-op": "No changes needed",
                         "clean-failure": "No verified changes",
                         "partial-application": "Partial application; inspect batch",
                     }.get(verdict, "Not applied")
-                    for item_index, (member, item) in enumerate(members, 1):
+                    for item_index, (member, item) in enumerate(listed, 1):
                         item_title = item.get("title") or item.get("theme") or "Untitled"
-                        # Fix round 18: an item its batch declined (or one
-                        # skipped at your request) says so, with the reason,
-                        # never the batch's own verdict.
-                        own_status = (
-                            f"Not applied: the batch declined it — {declined[member]}"
-                            if member in declined else
-                            f"Not applied: skipped at your request — {skipped[member]}"
-                            if member in skipped else item_status
-                        )
-                        lines.append(f"{item_index}. **{item_title}** - {own_status}")
-                        file_path = item.get("file")
-                        if file_path:
-                            line_range = item.get("line_range") or []
-                            if len(line_range) >= 2:
-                                lines.append(
-                                    f"   - File: {file_path}:{line_range[0]}-{line_range[1]}"
-                                )
-                            else:
-                                lines.append(f"   - File: {file_path}")
+                        lines.append(f"{item_index}. **{item_title}** - {item_status}")
+                        lines += self._item_file_lines(item)
                 notes = self._read_batch_result_notes(
                     row.get("output_path"), item_ids
                 )
@@ -3310,6 +3363,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             section = batch_check_section(rows)
             if section:
                 lines += section[1:] + [""]
+            for heading, entries in not_applied_sections.items():
+                if entries:
+                    lines += [f"## {heading}", ""] + entries + [""]
         else:
             lines += ["(no batches were dispatched)", ""]
 

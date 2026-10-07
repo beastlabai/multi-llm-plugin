@@ -89,10 +89,13 @@ Every mode ends with this report. Four rules, and a fifth for `ask`:
 
     `ask`, `init` and `status` are not workflow phases: on every host they run
     no lookup and end with no command.
-  - *What to write under `### Next Steps`.* `user_next_step.command` alone in a
+  - *What to write under `### Next Steps`.* `user_next_step.markdown`, copied
+    as it is: it is this section already written, as the rest of this rule
+    describes it. Without it, `user_next_step.command` alone in a
     fenced block, copied character for character, and never "Workflow
     complete." beside it, however much of the work is done: while there is a
-    command, the workflow goes on. Any `optional_before`
+    command, the workflow goes on (its `why`, the `[NEXT_COMMAND_WHY]` line,
+    goes above it as plain text). Any `optional_before`
     entries follow it, never precede it: the line "Optional, before that:",
     then each entry in the order the key lists them — its `why` as plain text
     outside the fence, then its `command` alone in its own fenced block. When
@@ -112,13 +115,13 @@ Every mode ends with this report. Four rules, and a fifth for `ask`:
     that manual task, which implement runs once that one is recorded done (the
     `[MANUAL_TASK]` lines below `[WORKFLOW_COMPLETE]` are the same tasks, and
     such a line says what it waits on), then its `manual_tasks_note`
-    (the `[MANUAL_TASK_NOTE]` line) verbatim: it says how to record them done.
-    Give the note as plain text, never inside a fenced block: a fence holds one
-    command alone, and the note is a sentence that carries one.
+    (the `[MANUAL_TASK_NOTE]` line) verbatim as plain text and its
+    `manual_tasks_command` (the `[MANUAL_TASK_COMMAND]` line) alone in its own
+    fenced block: they say how to record them done.
     A `user_next_step` that names a `command` can carry `manual_tasks` and
     `manual_tasks_note` too, while the run's manual tasks are still owed (on
     Claude Code the same lines follow the `[NEXT_COMMAND]` block): list them
-    after the commands the same way and give the note verbatim, but never
+    after the commands the same way, with the note and its command, but never
     write "Workflow complete." for it. When there is no `user_next_step` at all,
     write neither a command nor "Workflow complete.": an absent key is not a
     completion.

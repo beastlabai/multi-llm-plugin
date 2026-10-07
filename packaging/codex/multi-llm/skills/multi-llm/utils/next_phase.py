@@ -50,6 +50,11 @@ MANUAL_TASK_MARKER = "[MANUAL_TASK]"
 #: (:func:`manual_close_note`, fix round 14). Not a command marker: the line
 #: is a sentence that carries the command, never the command alone.
 MANUAL_TASK_NOTE_MARKER = "[MANUAL_TASK_NOTE]"
+#: The line after ``[MANUAL_TASK_NOTE]``: the command that records the
+#: manual tasks done, alone (fix round 22, live run 9: the note carried it at
+#: its end, and the tool-route hosts folded it into prose). A command marker
+#: like ``[NEXT_COMMAND]``: the Stop hook holds the report to it.
+MANUAL_TASK_COMMAND_MARKER = "[MANUAL_TASK_COMMAND]"
 #: One line above the block when the command it names is certain to be refused
 #: (``check_workflow_prerequisites.repo_wide_sandbox_warning``). Not a command
 #: marker: no consumer of the block reads it as one.
@@ -61,6 +66,17 @@ RUNNER_WARNING_MARKER = "[RUNNER_WARNING]"
 #: A command marker like the others: the text after it is the command alone.
 NEXT_COMMAND_ANSWERS_WHY_MARKER = "[NEXT_COMMAND_ANSWERS_WHY]"
 NEXT_COMMAND_ANSWERS_MARKER = "[NEXT_COMMAND_ANSWERS]"
+
+#: The line ``util next-command`` prints directly above the ``--resume`` of a
+#: stopped native implement (fix round 22): what that plain resume does on an
+#: unchanged tree (``write_batch_scheduler.native_resume_why``), as the
+#: answers' why lines say what each answer does. Not a command marker.
+NEXT_COMMAND_WHY_MARKER = "[NEXT_COMMAND_WHY]"
+
+#: The longest why read back from a run's write mirror
+#: (:func:`stop_resume_why_on_record`): the folder is writable by every
+#: jailed batch, so anything longer, or not one plain line, is not relayed.
+MAX_RECORDED_WHY_CHARS = 600
 
 #: The one line :func:`emit_resume` prints: the command that resumes a stopped
 #: write phase, and nothing else on the line (same rule as ``[NEXT_COMMAND]``).
@@ -190,15 +206,27 @@ class NextPhase:
     #: entries, a why line above each command, and carried as the list
     #: ``user_next_step.answers``.
     answers: Tuple[AnswersStep, ...] = ()
-    #: Beside ``manual_tasks``: how the user records them done, in the host's
-    #: spelling (:func:`manual_close_note`, fix round 14).
+    #: Beside ``manual_tasks``: how the user records them done
+    #: (:func:`manual_close_lead`, a sentence leading into
+    #: ``manual_tasks_command``; fix round 14, the command apart since fix
+    #: round 22).
     manual_tasks_note: Optional[str] = None
+    #: The command that records the manual tasks done, in the host's spelling
+    #: (:func:`close_command`; fix round 22).
+    manual_tasks_command: Optional[str] = None
     #: On a stopped native implement's ``--resume``, from ``util
     #: next-command`` only: the line saying nothing ran the repository's tests
     #: (fix round 18), printed as ``[TESTS_NOT_RUN]`` above the commands and
     #: never part of ``user_next_step`` (the tool routes carry it in the
     #: stop's ``error``).
     tests_note: Optional[str] = None
+    #: On a stopped native implement's ``--resume``, from ``util
+    #: next-command`` only: what that plain resume does on an unchanged tree
+    #: (fix round 22, live run 9: the hosts gave it a why of their own, "re-runs
+    #: the T002 check", false while the files are unchanged). Printed as
+    #: ``[NEXT_COMMAND_WHY]`` above the command and carried as
+    #: ``user_next_step.why``.
+    why: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """The ``user_next_step`` value (§2.1's outcome table).
@@ -207,15 +235,19 @@ class NextPhase:
         plus ``manual_tasks`` (``[{id, title}]``) when the run deferred any —
         additive, so a reader that knows only the three keys reads the same
         completion; otherwise ``optional_before`` is present only when non-empty.
+        Every answer ends with ``markdown``, the step as the report's closing
+        section (:func:`render_next_step_markdown`, fix round 22), also additive.
         """
         if self.complete:
             payload = {"phase": None, "command": None, "complete": True}
             if self.manual_tasks:
                 payload["manual_tasks"] = [task.to_dict() for task in self.manual_tasks]
-                if self.manual_tasks_note:
-                    payload["manual_tasks_note"] = self.manual_tasks_note
+                self._close_keys(payload)
+            payload["markdown"] = render_next_step_markdown(self)
             return payload
         payload: Dict[str, Any] = {"phase": self.phase, "command": self.command}
+        if self.why:
+            payload["why"] = self.why
         if self.optional_before:
             payload["optional_before"] = [step.to_dict() for step in self.optional_before]
         if self.answers:
@@ -224,10 +256,16 @@ class NextPhase:
             # Fix round 16: the tool routes relay this key, and `util
             # next-command` prints it as [MANUAL_TASK_NOTE].
             payload["manual_tasks"] = [task.to_dict() for task in self.manual_tasks]
-            if self.manual_tasks_note:
-                payload["manual_tasks_note"] = self.manual_tasks_note
+            self._close_keys(payload)
         payload["complete"] = False
+        payload["markdown"] = render_next_step_markdown(self)
         return payload
+
+    def _close_keys(self, payload: Dict[str, Any]) -> None:
+        """The note and its command, both or neither."""
+        if self.manual_tasks_note and self.manual_tasks_command:
+            payload["manual_tasks_note"] = self.manual_tasks_note
+            payload["manual_tasks_command"] = self.manual_tasks_command
 
 
 def _complete(
@@ -244,10 +282,10 @@ def _complete(
     host's *template* and the *plan_arg*, the answer also says how to record
     them done (:func:`manual_close_note`).
     """
-    manual, note = _manual_tasks(phases, template=template, plan_arg=plan_arg)
+    manual, note, command = _manual_tasks(phases, template=template, plan_arg=plan_arg)
     return NextPhase(
         phase=None, command=None, complete=True, manual_tasks=manual,
-        manual_tasks_note=note,
+        manual_tasks_note=note, manual_tasks_command=command,
     )
 
 
@@ -256,11 +294,12 @@ def _manual_tasks(
     *,
     template: Optional[str] = None,
     plan_arg: Optional[str] = None,
-) -> Tuple[Tuple["ManualTask", ...], Optional[str]]:
-    """The implement tasks the run deferred, and the note saying how to close
-    them (``None`` without a template and plan, or with nothing to answer).
+) -> Tuple[Tuple["ManualTask", ...], Optional[str], Optional[str]]:
+    """The implement tasks the run deferred, the note saying how to close
+    them and the command that does (both ``None`` without a template and
+    plan, or with nothing to answer).
 
-    The note's command answers :func:`manual_close_ids` only (fix round 16).
+    The command answers :func:`manual_close_ids` only (fix round 16).
     """
     implement = phases.get("implement") or {}
     entries = implement.get("manual_tasks") or ()
@@ -272,11 +311,11 @@ def _manual_tasks(
         for entry in entries
         if isinstance(entry, Mapping) and entry.get("id")
     )
-    note = None
+    note = command = None
     ids = manual_close_ids(implement)
     if manual and ids and template is not None and plan_arg is not None:
-        note = manual_close_note(close_command(template, plan_arg, ids))
-    return manual, note
+        note, command = manual_close_lead(), close_command(template, plan_arg, ids)
+    return manual, note, command
 
 
 def manual_close_ids(implement: Mapping[str, Any]) -> List[str]:
@@ -302,12 +341,13 @@ def _with_manual_tasks(
 ) -> NextPhase:
     """*answer* (a command answer) carrying the deferred manual tasks and the
     note on recording them done, when the run deferred any (fix round 16)."""
-    manual, note = _manual_tasks(phases, template=template, plan_arg=plan_arg)
+    manual, note, command = _manual_tasks(phases, template=template, plan_arg=plan_arg)
     if not manual:
         return answer
     from dataclasses import replace as _replace
 
-    return _replace(answer, manual_tasks=manual, manual_tasks_note=note)
+    return _replace(answer, manual_tasks=manual, manual_tasks_note=note,
+                    manual_tasks_command=command)
 
 
 def close_command(template: str, plan_arg: str, task_ids: Sequence[str]) -> str:
@@ -324,18 +364,27 @@ def close_command(template: str, plan_arg: str, task_ids: Sequence[str]) -> str:
     return template.replace(ARGS_SLOT, args)
 
 
+def manual_close_lead() -> str:
+    """The sentence that leads into the command closing deferred manual
+    tasks (:func:`close_command`), ending with a colon: what
+    ``user_next_step.manual_tasks_note`` and ``[MANUAL_TASK_NOTE]`` say, the
+    command beside it on its own (fix round 22)."""
+    return (
+        "No later phase waits for these manual tasks. Once you have done one "
+        "by hand, record it done with this command, keeping a --human-task "
+        "answer only for each task you did:"
+    )
+
+
 def manual_close_note(command: str) -> str:
-    """The one plain line that says how to close deferred manual tasks.
+    """The one plain line that says how to close deferred manual tasks, for a
+    surface that is one line of text (a summary, ``status``'s trailer).
 
     The command ends the line, with nothing after it (live run 8, Codex
     racing 08: the advice used to follow it in parentheses, and the host
     copied that into the command's fence).
     """
-    return (
-        "No later phase waits for these manual tasks. Once you have done one "
-        "by hand, record it done with this command, keeping a --human-task "
-        f"answer only for each task you did: {command}"
-    )
+    return f"{manual_close_lead()} {command}"
 
 
 # ---------------------------------------------------------------------------
@@ -950,8 +999,8 @@ def render_next_phase_lines(answer: NextPhase) -> List[str]:
     """The block's lines, primary first (§2.2(2), §2.1 "Primary first").
 
     Complete renders ``[WORKFLOW_COMPLETE]``, then one ``[MANUAL_TASK]`` line
-    per task the run deferred to the user (none when it deferred nothing) and
-    the ``[MANUAL_TASK_NOTE]`` line. Otherwise the ``[NEXT_COMMAND]`` line
+    per task the run deferred to the user (none when it deferred nothing), the
+    ``[MANUAL_TASK_NOTE]`` line and the ``[MANUAL_TASK_COMMAND]`` line. Otherwise the ``[NEXT_COMMAND]`` line
     comes first (below a ``[RUNNER_WARNING]`` and a ``[TESTS_NOT_RUN]`` line
     when the answer carries them), then each ``optional_before`` entry's
     ``[NEXT_COMMAND_OPTIONAL_WHY]`` / ``[NEXT_COMMAND_OPTIONAL]`` pair in the
@@ -961,8 +1010,10 @@ def render_next_phase_lines(answer: NextPhase) -> List[str]:
     manual_lines = [
         f"{MANUAL_TASK_MARKER} {task.line()}" for task in answer.manual_tasks
     ]
-    if answer.manual_tasks and answer.manual_tasks_note:
+    if answer.manual_tasks and answer.manual_tasks_note and answer.manual_tasks_command:
         manual_lines.append(f"{MANUAL_TASK_NOTE_MARKER} {answer.manual_tasks_note}")
+        manual_lines.append(
+            f"{MANUAL_TASK_COMMAND_MARKER} {answer.manual_tasks_command}")
     if answer.complete:
         return [WORKFLOW_COMPLETE_MARKER] + manual_lines
     lines = []
@@ -970,6 +1021,8 @@ def render_next_phase_lines(answer: NextPhase) -> List[str]:
         lines.append(f"{RUNNER_WARNING_MARKER} {answer.warning}")
     if answer.tests_note:
         lines.append(f"{TESTS_NOT_RUN_MARKER} {answer.tests_note}")
+    if answer.why:
+        lines.append(f"{NEXT_COMMAND_WHY_MARKER} {answer.why}")
     lines.append(f"{NEXT_COMMAND_MARKER} {answer.command}")
     for step in answer.optional_before:
         lines.append(f"{NEXT_COMMAND_OPTIONAL_WHY_MARKER} {step.why}")
@@ -981,6 +1034,63 @@ def render_next_phase_lines(answer: NextPhase) -> List[str]:
     # round 16): the tasks implement deferred to the user, and how to record
     # them done.
     return lines + manual_lines
+
+
+#: The labels :func:`render_next_step_markdown` writes.
+OPTIONAL_LEAD = "Optional, before that:"
+MANUAL_TASKS_LEAD = "Manual tasks left for you:"
+#: Above a stopped implement's answers (status says "or answer the stop
+#: with:"): what the user types instead of the resume.
+ANSWERS_LEAD = "Or answer the stop with one of these:"
+WORKFLOW_COMPLETE_SENTENCE = "Workflow complete."
+
+
+def fenced_command(command: str) -> str:
+    """*command* alone in a fenced block whose fence is longer than any run
+    of backticks inside it (CommonMark), so it always closes where it
+    should."""
+    longest = max((len(run) for run in re.findall(r"`+", command)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}\n{command}\n{fence}"
+
+
+def render_next_step_markdown(answer: "NextPhase") -> str:
+    """*answer* as the report's closing section, already written
+    (``user_next_step.markdown``; fix round 22).
+
+    Live run 9: Codex 04 printed the primary and the optional command as bare
+    paragraphs, and the manual-task close command reached the user folded
+    into prose on Codex and OpenCode, while each route's rule said to fence
+    every command. The block puts each command alone in its own fence and
+    every why and note as plain text, in the order every route used: the
+    ``command`` first (above it, the resume's why when it has one), then
+    "Optional, before that:" and each optional entry's ``why`` and command,
+    the answers, then the manual tasks, the note and its command — or
+    "Workflow complete." in the command's place. The routes copy it as it
+    is; the Claude Code leg keeps reading the marker lines.
+    """
+    blocks: List[str] = []
+    if answer.complete:
+        blocks.append(WORKFLOW_COMPLETE_SENTENCE)
+    else:
+        if answer.why:
+            blocks.append(answer.why)
+        blocks.append(fenced_command(str(answer.command)))
+        if answer.optional_before:
+            blocks.append(OPTIONAL_LEAD)
+            for step in answer.optional_before:
+                blocks.extend([step.why, fenced_command(step.command)])
+        if answer.answers:
+            blocks.append(ANSWERS_LEAD)
+        for step in answer.answers:
+            blocks.extend([step.why, fenced_command(step.command)])
+    if answer.manual_tasks:
+        blocks.append("\n".join(
+            [MANUAL_TASKS_LEAD] + [f"- {task.line()}" for task in answer.manual_tasks]))
+        if answer.manual_tasks_note and answer.manual_tasks_command:
+            blocks.extend([
+                answer.manual_tasks_note, fenced_command(answer.manual_tasks_command)])
+    return "\n\n".join(block for block in blocks if block)
 
 
 def implement_answers(
@@ -1030,6 +1140,27 @@ def implement_answers(
             ),
         ))
     return tuple(steps)
+
+
+def implement_resume_why(
+    plan_arg: str, *, plan_path: Optional[Union[str, Path]] = None,
+) -> Optional[str]:
+    """What the plain ``--resume`` of a stopped native implement does on an
+    unchanged tree (``write_batch_scheduler.native_resume_why`` over
+    ``state.json`` as recorded), or ``None`` (fix round 22)."""
+    import json as _json
+
+    source = plan_arg if plan_path is None else plan_path
+    try:
+        state = _json.loads(
+            _state_file(os.path.abspath(str(source))).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(state, dict):
+        return None
+    from .write_batch_scheduler import native_resume_why
+
+    return native_resume_why(state)
 
 
 # ---------------------------------------------------------------------------
@@ -1124,6 +1255,10 @@ def emit_answer(
             )
             if answers:
                 answer = _replace(answer, answers=answers)
+            # Fix round 22: and what the plain resume does.
+            why = implement_resume_why(plan_arg, plan_path=plan_path)
+            if why:
+                answer = _replace(answer, why=why)
             # Fix round 18 (live run 7, Claude Code stop 01): the native
             # stop's line saying nothing ran the repository's tests, which
             # the executor stop prints itself.
@@ -1214,6 +1349,10 @@ def emit_resume(
     if answers:
         resume["answers"] = answers
         resume["answers_text"] = render_resume_answers(answers)
+    # Fix round 22: what the plain resume does, as each answer says.
+    why = stop_resume_why_on_record(plan_arg if plan_path is None else plan_path, mode_word)
+    if why:
+        resume["why"] = why
     cli_common.record_user_resume(resume)
     return command
 
@@ -1251,6 +1390,44 @@ def stop_answers_on_record(
                 and isinstance(why, str) and why.strip()):
             answers.append({"flags": list(flags), "why": why.strip()})
     return answers
+
+
+def stop_resume_why_on_record(
+    plan_path: Union[str, Path], mode_word: str,
+) -> Optional[str]:
+    """What the plain resume of the phase's last stop does, as the stop
+    recorded it (``progress.write_subagents.stop.resume_why``, written by
+    ``write_batch_scheduler._stop_resume_why``; fix round 22), or ``None``.
+
+    The run's output folder is writable by every jailed batch, so the value
+    is relayed only when it is one plain line of at most
+    :data:`MAX_RECORDED_WHY_CHARS` characters."""
+    from .output_handler import phase_dir_path
+    from .status_file import read_status
+
+    modes = _skill_module("modes")
+    mode = modes.resolve(mode_word)
+    if mode is None or not mode.phase:
+        return None
+    source = Path(os.path.abspath(str(plan_path)))
+    status = read_status(str(phase_dir_path(source, mode.phase)))
+    progress = status.get("progress") if isinstance(status, dict) else None
+    mirror = progress.get("write_subagents") if isinstance(progress, dict) else None
+    stop = mirror.get("stop") if isinstance(mirror, dict) else None
+    return recorded_why(stop.get("resume_why") if isinstance(stop, dict) else None)
+
+
+def recorded_why(value: Any) -> Optional[str]:
+    """*value*, a why read back from a run's output folder, when it is one
+    plain line of at most :data:`MAX_RECORDED_WHY_CHARS` characters, else
+    ``None``."""
+    if not isinstance(value, str):
+        return None
+    why = value.strip()
+    if (not why or len(why) > MAX_RECORDED_WHY_CHARS
+            or any(not ch.isprintable() for ch in why)):
+        return None
+    return why
 
 
 def resume_answers(

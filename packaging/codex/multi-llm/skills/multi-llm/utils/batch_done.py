@@ -21,8 +21,10 @@ executor leg's ``WriteBatchScheduler`` writes for the same batch:
   ``check_workflow_prerequisites`` reads as the phase's progress and what
   ``implement --resume`` filters its tasks on;
 * for the three apply kinds, ``processed_<phase dir word>[<member id>]`` for
-  every id in the task's ``expected_ids`` (``applied`` | ``failed``) — the
-  map ``ApplyOrchestratorBase`` step 23 drops groups on under ``--resume``.
+  every id in the task's ``expected_ids`` (``applied`` | ``declined`` |
+  ``skipped`` | ``failed``, :func:`state_manager.record_batch_items_in_state`,
+  the scheduler's own writer since fix round 22) — the map
+  ``ApplyOrchestratorBase`` step 23 drops groups on under ``--resume``.
   A ``failed`` record keeps the batch eligible for re-dispatch, as the
   executor leg re-dispatches a failed batch;
 * for the two code kinds (``implement``, ``apply_code_fixes``),
@@ -77,7 +79,11 @@ naming the ``--own-check`` call (fix round 18, live run 7: Claude Code
 recorded ``--check passed`` for T008, a "check" task that declares
 ``index.html``, and its summary then called the code task ``Verified``), and
 ``--own-check`` on a check task is refused naming ``--check``: the two words
-are two kinds of task, and the plugin says which one the host has.
+are two kinds of task, and the plugin says which one the host has. An
+implement task's ``--finding`` that only repeats what the user accepted for
+a check (``--human-task <check>=done``; ``split_accepted_findings``, fix
+round 22) is printed as ``[BATCH_CHECK_ACCEPTED]`` and never recorded as the
+task's own failing check; anything else it reports still is.
 
 Import is side-effect free: argparse and all I/O live inside :func:`main`.
 """
@@ -94,25 +100,33 @@ try:
     from . import known_checks as _known_checks
     from . import prior_changes as _prior_changes
     from .metrics import (
-        _read_state, _write_state, restore_to_progress_in_state,
-        state_file_lock, withdraw_from_progress_in_state,
+        _read_state, _write_state, mark_failed_in_progress,
+        restore_to_progress_in_state, state_file_lock,
+        withdraw_from_progress_in_state,
     )
     from .state_manager import (
+        PROCESSED_LEG_NATIVE,
         TASK_RESET_AT_KEY,
         _parse_completion_time,
-        mark_item_processed_in_state,
+        record_batch_items_in_state,
         set_task_batch_check_in_state,
         set_task_check_findings_in_state,
         set_task_check_tree_in_state,
         update_task_status_in_state,
     )
     from .stream_bootstrap import bootstrap_streams
-    from .subagent_executor import check_findings_from, declined_reason
+    from .subagent_executor import (
+        DECLINED_SECTION_HEADING, SKIPPED_SECTION_HEADING, check_findings_from,
+        declined_reason,
+    )
+    from .text_clip import clip
     from .subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set
     from .write_phase_bridge import WRITE_TASK_FILENAME
     from .write_batch_scheduler import (
         BATCH_CHECK_MARKER,
         HALF_APPLIED_PREFIX,
+        accepted_checks_on_record,
+        batch_check_accepted_line,
         batch_check_line,
         BLOCKED_BY_CHECK_PREFIX,
         CODE_WRITE_KINDS,
@@ -120,6 +134,7 @@ try:
         decomposition_graph,
         is_check_task,
         rerunnable_checks,
+        split_accepted_findings,
         transitive_dependents,
         upstream_held_check,
     )
@@ -131,25 +146,33 @@ except ImportError:  # pragma: no cover - direct script invocation
     from utils import known_checks as _known_checks  # type: ignore
     from utils import prior_changes as _prior_changes  # type: ignore
     from utils.metrics import (  # type: ignore
-        _read_state, _write_state, restore_to_progress_in_state,
-        state_file_lock, withdraw_from_progress_in_state,
+        _read_state, _write_state, mark_failed_in_progress,
+        restore_to_progress_in_state, state_file_lock,
+        withdraw_from_progress_in_state,
     )
     from utils.state_manager import (  # type: ignore
+        PROCESSED_LEG_NATIVE,
         TASK_RESET_AT_KEY,
         _parse_completion_time,
-        mark_item_processed_in_state,
+        record_batch_items_in_state,
         set_task_batch_check_in_state,
         set_task_check_findings_in_state,
         set_task_check_tree_in_state,
         update_task_status_in_state,
     )
     from utils.stream_bootstrap import bootstrap_streams  # type: ignore
-    from utils.subagent_executor import check_findings_from, declined_reason  # type: ignore
+    from utils.subagent_executor import (  # type: ignore
+        DECLINED_SECTION_HEADING, SKIPPED_SECTION_HEADING, check_findings_from,
+        declined_reason,
+    )
+    from utils.text_clip import clip  # type: ignore
     from utils.subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set  # type: ignore
     from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
     from utils.write_batch_scheduler import (  # type: ignore
         BATCH_CHECK_MARKER,
         HALF_APPLIED_PREFIX,
+        accepted_checks_on_record,
+        batch_check_accepted_line,
         batch_check_line,
         BLOCKED_BY_CHECK_PREFIX,
         CODE_WRITE_KINDS,
@@ -157,6 +180,7 @@ except ImportError:  # pragma: no cover - direct script invocation
         decomposition_graph,
         is_check_task,
         rerunnable_checks,
+        split_accepted_findings,
         transitive_dependents,
         upstream_held_check,
     )
@@ -208,9 +232,6 @@ STATUSES = ("completed", "failed")
 #: else (absent, or the ``pending`` the executor seeds / a cancelled run
 #: leaves) is "no record".
 _RECORDED_TASK_STATUSES = frozenset({"completed", "failed", "skipped"})
-
-#: ``processed_<phase>`` status per recorded outcome.
-_ITEM_STATUS = {"completed": "applied", "failed": "failed"}
 
 #: ``--check``'s words: what a check task's reply said in its ``check``
 #: object (``passed: true`` and no finding, problems found, or — fix round
@@ -491,6 +512,16 @@ def record_batch(
 
         update_task_status_in_state(state, task_id, status, reason)
         blocked: List[str] = []
+        accepted_again: Dict[str, List[str]] = {}
+        if kind == "implement" and batch_check:
+            # Fix round 22: what only repeats findings the user accepted for
+            # a check is that check's, never this task's own failure (the
+            # executor's reading, `split_accepted_findings`).
+            own, accepted_again = split_accepted_findings(
+                batch_check, accepted_checks_on_record(state),
+            )
+            if accepted_again:
+                batch_check = own
         if kind == "implement":
             set_task_check_findings_in_state(state, task_id, check_findings)
             set_task_check_tree_in_state(state, task_id, tree)
@@ -519,28 +550,15 @@ def record_batch(
             state["tracked_files"] = tracked
         items: List[str] = []
         if kind != "implement":
-            phase_word = _processed_phase_word(phase_dir)
-            details = {
-                "task_id": task_id,
-                "prior_changes_id": str(task.get("prior_changes_id") or ""),
-            }
-            for item_id in task.get("expected_ids") or []:
-                item_id = str(item_id)
-                if not item_id:
-                    continue
-                if item_id in not_applied:
-                    # Fix round 18: declined by the batch, or skipped at the
-                    # user's request — recorded with its reason, never applied.
-                    word, why = not_applied[item_id]
-                    mark_item_processed_in_state(
-                        state, phase_word, item_id, word,
-                        {**details, "reason": why},
-                    )
-                else:
-                    mark_item_processed_in_state(
-                        state, phase_word, item_id, _ITEM_STATUS[status], details
-                    )
-                items.append(item_id)
+            # Fix round 18: an item declined by the batch, or skipped at the
+            # user's request, is recorded with its reason, never applied. Fix
+            # round 22: in the shape the executor's scheduler writes too.
+            items = record_batch_items_in_state(
+                state, _processed_phase_word(phase_dir), task,
+                completed=status == "completed", leg=PROCESSED_LEG_NATIVE,
+                declined={i: why for i, (w, why) in not_applied.items() if w == "declined"},
+                skipped={i: why for i, (w, why) in not_applied.items() if w == "skipped"},
+            )
         state["updated_at"] = datetime.now().isoformat()
         _write_state(target, state)
     if checking:
@@ -551,6 +569,7 @@ def record_batch(
         "task_id": task_id, "status": status, "items": items,
         "state_file": str(target), "check_findings": check_findings or [],
         "batch_check": batch_check or [],
+        "batch_check_accepted": accepted_again,
         "blocked": blocked,
         "declined": {
             item: why for item, (word, why) in not_applied.items()
@@ -751,8 +770,15 @@ def _settle_eta_total(
         return bool(task.get("is_human")) or str(task.get("executor_role") or "") == "human"
 
     out = [t for t in held if t in handed and not manual(handed[t])]
+    refused = status == "failed" and str(reason or "").strip().lower().startswith(
+        REFUSED_BEFORE_DISPATCH_REASON)
+    # Fix round 22: a task that ran and failed stops the run short of its
+    # phase, so its closing `[ETA]` line says "run stopped", as the
+    # executor's does; a refused one is withdrawn below instead.
+    mark_failed_in_progress(
+        state, phase, task_id, failed=status == "failed" and not refused)
     if status == "failed":
-        if str(reason or "").strip().lower().startswith(REFUSED_BEFORE_DISPATCH_REASON):
+        if refused:
             out.append(task_id)
         statuses = state.get("task_status") or {}
         graph = decomposition_graph(list(handed.values()), state)
@@ -1088,6 +1114,17 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"what is there; the stop offers no --human-task answer for "
             f"{task_id}."
         )
+    accepted_again = written.get("batch_check_accepted") or {}
+    if accepted_again:
+        # Fix round 22: reported again, never the task's own failure.
+        task_id = written["task_id"]
+        print(
+            f"{batch_check_accepted_line(task_id, accepted_again)}. List it in "
+            f"the phase's summary.md under ## Check Findings, beside "
+            f"{', '.join(accepted_again)}'s accepted findings, as {task_id} "
+            f"running that check again: it does not make the phase unclean and "
+            f"is not a check of {task_id}'s that fails."
+        )
     failing = written.get("batch_check") or []
     if failing:
         # Fix round 14: the native leg's counterpart of the executor's line.
@@ -1103,22 +1140,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(
             f"[batch-done] --listed-check not recorded (expected "
             f"<command>=passed|failed|not run, on an apply-code-fixes batch): "
-            f"{'; '.join(ignored)[:400]}",
+            f"{clip('; '.join(ignored), 400)}",
             file=sys.stderr,
         )
     for item, why in (written.get("declined") or {}).items():
-        # Fix round 18: never applied, and never silent.
+        # Fix round 18: never applied, and never silent. Fix round 22: in its
+        # own summary.md section, never under an applied heading.
         print(
             f"{BATCH_DECLINED_MARKER} {written['task_id']} {item}: not applied, "
             f"the batch declined it — {why}. List it in the phase's summary.md "
-            f"as not applied, with this reason, and name it in your report; "
+            f"under \"## {DECLINED_SECTION_HEADING}\", with its id and this "
+            f"reason, never under the applied ones, and name it in your report; "
             f"never count it as applied."
         )
     for item, why in (written.get("skipped") or {}).items():
         print(
             f"{BATCH_SKIPPED_MARKER} {written['task_id']} {item}: not applied, "
-            f"{why}. List it in the phase's summary.md as not applied, skipped "
-            f"at the user's request, and name it in your report."
+            f"{why}. List it in the phase's summary.md under \"## "
+            f"{SKIPPED_SECTION_HEADING}\", with its id, never under the applied "
+            f"ones, and name it in your report."
         )
     blocked = written.get("blocked") or []
     if blocked:

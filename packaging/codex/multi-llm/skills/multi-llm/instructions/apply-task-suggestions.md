@@ -330,7 +330,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
      --phase-dir "{plan}/apply-task-suggestions" --task-id "{task.task_id}" --status {batch_status}
    ```
    `{batch_status}` is `completed` for a success (a verified no-op included) and `failed` for a clean failure — add `--reason "{compact reason}"` to a `failed` one. It prints one `[BATCH_DONE] {task.task_id} {batch_status} (N item(s) recorded)` line and writes the batch's record into `state.json`: the same `task_status` entry the `--exec-subagents` executor writes for this batch, plus every suggestion in it as processed. That record is what a later `--resume` reads to skip this batch (a `failed` record keeps it eligible for another try) and what makes `status` read the phase `in_progress`. Run it **before** step 8's append: a run that dies between the two leaves a record `--resume` honours, never a log entry `--resume` would re-apply. An exit 3 names the problem (no `write_tasks.json`, an unknown task id); treat it as a stop, not a warning.
-   When the reply's `declined` lists suggestions (each `{"id", "reason"}`), add `--declined "{id}={reason}"` for each, with `--status completed`: each prints a `[BATCH_DECLINED]` line — list that suggestion in the summary as not applied, with its reason, and name it in your report; it is never counted as applied. `--skipped {id}` records a suggestion the user chose to skip (above) the same way, as `[BATCH_SKIPPED]`.
+   When the reply's `declined` lists suggestions (each `{"id", "reason"}`), add `--declined "{id}={reason}"` for each, with `--status completed`: each prints a `[BATCH_DECLINED]` line — list that suggestion in the summary under `## Declined by their batch (not applied)`, with its id and reason (never under `## Applied Changes`, not even marked "Not applied"), and name it in your report; it is never counted as applied. `--skipped {id}` records a suggestion the user chose to skip (above) the same way, as `[BATCH_SKIPPED]`, listed under `## Skipped at your request (not applied)`.
 
 8. **Append to prior changes (only after verification)** — This step runs **only** after step 5 has confirmed success or clean failure. It must **never** run for partially-applied batches. Pass the summary via stdin:
    ```bash
@@ -402,7 +402,8 @@ After all batches are processed, create `{prefix}_applied_task_suggestions.md`:
 ## Summary
 - Batches processed: N
 - Suggestions applied: N
-- Suggestions declined by their batch (not applied): N — only when a batch declined any; each one's line in its batch below reads `**[Title]** - Not applied: the batch declined it — {reason}` (and `- Not applied: skipped at your request` for one recorded `--skipped`)
+- Suggestions declined by their batch (not applied): N — only when a batch declined any; each one is listed under `## Declined by their batch (not applied)` below, never under `## Applied Changes`
+- Suggestions skipped at your request (not applied): N — only when you recorded one `--skipped`; each one is listed under `## Skipped at your request (not applied)` below, never under `## Applied Changes`
 - Suggestions skipped: N
 - Human decisions made: N
 - Decided by the judge agent: N (A approved, V salvaged, S skipped) — includes `--agent-decide`, the batch "Let the agent decide" option, and per-item "Let the agent decide" selections
@@ -426,6 +427,18 @@ After all batches are processed, create `{prefix}_applied_task_suggestions.md`:
 
 ### Batch 2 (Task: T003)
 ...
+
+## Declined by their batch (not applied)
+
+(Only when a batch declined a suggestion — a `[BATCH_DECLINED]` line from `util batch-done`. Never list it under `## Applied Changes`, not even marked "Not applied": its batch's block above says `**Not applied**: 1 declined by the batch (listed under "Declined by their batch (not applied)" below)` instead.)
+
+- **[Suggestion Title]** (`{id}`, apply-task-batch-0) — {the reason the batch gave}
+
+## Skipped at your request (not applied)
+
+(Only for a suggestion recorded `--skipped` — a `[BATCH_SKIPPED]` line; never under `## Applied Changes` either.)
+
+- **[Suggestion Title]** (`{id}`, apply-task-batch-0) — skipped at your request
 
 ## Decided by the judge agent (N)
 
