@@ -708,6 +708,21 @@ NEEDS_HUMAN_MESSAGE = {
         "of them of your own: they are the stop's ways forward. Like "
         "`resume_command`, none is a tool call or a shell command for you to run."
     ),
+    # Appended instead of `resume`/`resume_why` and `answers` when the lookup
+    # wrote the stop's ways forward as one section (`user_resume.markdown`,
+    # the result's `resume_markdown`; fix round 24, live run 10: the hosts
+    # composed their own blocks, reworded the whys, added "what ran" lists
+    # and printed `options` entries as "Call multi_llm with …").
+    "resume_markdown": (
+        "`resume_markdown` is the stop's ways forward, already written for "
+        "the user: `resume_command` with what it does and, when the stop "
+        "offers them, the answers they can type instead (each also in "
+        "`resume_answers` and an `options` entry). End your report with it, "
+        "copied as it is, in place of any list of options or ways forward of "
+        "your own: each command stays alone in its fenced block, each why "
+        "stays plain text. None of its commands is a tool call or a shell "
+        "command for you to run, and do not offer to run one."
+    ),
     # Appended instead of `resume` when the result carries no
     # `resume_command` (racing re-run 2026-10-04: a result with neither command
     # key, and the host model composed a "next phase" of its own).

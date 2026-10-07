@@ -4996,6 +4996,37 @@ class TestResumeCommand:
             "ok", "state", "user_next_step", "resume_command", "resume_why",
             "resume_answers"]
 
+    def test_the_written_section_is_the_way_forward(self, built_package, uv_stub):
+        """Fix round 24 (live run 10, OpenCode stop 06: "Options (pick one…)
+        1. Call multi_llm with …"): the lookup's section is
+        `resume_markdown`, and the message's clause says to copy it in place
+        of the resume and answers clauses."""
+        sys.path.insert(0, str(SKILL_ROOT))
+        from utils import next_phase
+
+        why = "runs the tasks that can run; keeps the 4 tasks already done"
+        step = dict(self._answers_step(), why=why)
+        step["markdown"] = next_phase.render_resume_markdown(
+            "implement", "/multi-llm --implement plans/x.md --resume", why,
+            step["answers"])
+        resume_line = {"exit": 3, "stdout": [
+            "      resume with: uv run -- python multi_llm.py implement "
+            "plans/x.md --host opencode --detach --resume",
+            'MULTI_LLM_RESULT: {"state":"needs-human","exit":3,"artifacts":[],'
+            '"next":null,"error":"batch 0 refused"}']}
+        result, _ = uv_stub.run(
+            built_package, self.IMPLEMENT, [self.LAUNCH, resume_line],
+            extra_env={"STUB_RESUME_EXTRA": json.dumps(step)})
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        text = surface["needs_human_message"]
+        assert result["resume_markdown"] == step["markdown"]
+        assert result["message"].endswith(text["resume_markdown"])
+        assert step["answers_text"] not in result["message"]
+        assert text["resume_why"].replace("{why}", why) not in result["message"]
+        assert list(result)[:7] == [
+            "ok", "state", "user_next_step", "resume_command", "resume_why",
+            "resume_answers", "resume_markdown"]
+
     def test_the_plugin_spells_none_of_the_lookup(self, built_package):
         surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
         resume = surface["dispatcher"]["resume"]

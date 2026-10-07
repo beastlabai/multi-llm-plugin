@@ -2867,7 +2867,10 @@ function attachAnswers(step, outcome, surface) {
     outcome.resume_answers = answers
     const clause = surface.needs_human_message?.answers
     const text = step.answers_text
-    if (typeof clause === "string" && typeof text === "string" && text.trim()) {
+    if (
+      typeof clause === "string" && typeof text === "string" && text.trim() &&
+      !("resume_markdown" in outcome)
+    ) {
       outcome.message = `${outcome.message} ${clause.split("{answers}").join(text)}`
     }
   }
@@ -3384,6 +3387,15 @@ async function execute(args, ctx, surface, client) {
           outcome.resume_why = why
           clause = text.resume_why.split("{why}").join(why)
         }
+        if (
+          typeof resume.markdown === "string" && resume.markdown.trim() &&
+          typeof text.resume_markdown === "string"
+        ) {
+          // Fix round 24: the ways forward as one written section, whose
+          // clause stands for the resume's and the answers'.
+          outcome.resume_markdown = resume.markdown
+          clause = text.resume_markdown
+        }
         outcome.message = `${outcome.message} ${clause}`
         attachAnswers(resume, outcome, surface)
       }
@@ -3453,7 +3465,7 @@ function finishFields(outcome, checked, surface) {
 /** The keys that tell the user what to type, right after `ok` and `state`. */
 const WAY_FORWARD_KEYS = [
   "user_next_step", "resume_command", "resume_why", "resume_answers",
-  "no_command_reason",
+  "resume_markdown", "no_command_reason",
 ]
 
 /**
