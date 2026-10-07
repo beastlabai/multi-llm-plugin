@@ -543,7 +543,11 @@ def record_batch(
             blocked = _hold_or_release_dependents(
                 state, document, task_id, held=bool(check_findings),
             )
-            _settle_eta_total(state, document, task_id, status, reason, blocked)
+        # Fix round 23 (review of round 22, #1): every write kind, so a
+        # native apply batch recorded failed closes its run on "run
+        # stopped", as the executor's does, and one refused before dispatch
+        # leaves its total.
+        _settle_eta_total(state, document, task_id, status, reason, blocked)
         if kind == "apply_code_fixes":
             # Fix round 20: what the batch's own checks reported, for the next
             # batch's prompt and the tests-not-run line; any other record of
@@ -762,6 +766,10 @@ def _settle_eta_total(
       6) — and the task itself when ``util write-prompt`` refused it, since
       no subagent ran.
 
+    Every write kind (fix round 23): an apply batch has no dependents and
+    no check, so its record only marks it failed (its run closes on "run
+    stopped") or, refused before dispatch, takes it out of the total.
+
     Only tasks of this phase's ``write_tasks.json`` (what was handed out) and
     never a manual task (``tasks_to_dispatch`` does not count one). A record
     of the same task again first puts back what its earlier record took out,
@@ -788,9 +796,9 @@ def _settle_eta_total(
     # executor's does; a refused one is withdrawn below instead.
     mark_failed_in_progress(
         state, phase, task_id, failed=status == "failed" and not refused)
-    if status == "failed":
-        if refused:
-            out.append(task_id)
+    if refused:
+        out.append(task_id)
+    if status == "failed" and phase == "implement":
         statuses = state.get("task_status") or {}
         graph = decomposition_graph(list(handed.values()), state)
         for dependent in transitive_dependents(graph, task_id):
