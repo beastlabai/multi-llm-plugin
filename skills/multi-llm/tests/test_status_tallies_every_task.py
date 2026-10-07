@@ -69,8 +69,10 @@ class TestAfterAResume:
         # 22: every task it kept, as that line names them.
         assert (
             "1/1 tasks ok (4 kept from an earlier run: T001, T003, T004, T002 "
-            "(accepted with its check findings)), 1/1 items applied"
+            "(accepted with its check findings))"
         ) in progress[0], progress[0]
+        # Fix round 24: an implement task is its own one item.
+        assert "items applied" not in progress[0], progress[0]
         assert "accepted with their check findings" not in progress[0]
         assert "accepted after failing" not in progress[0]
 
