@@ -395,13 +395,13 @@ not cause.
 
 If no `verify_command` is configured, say so in the summary — "not configured" is the
 honest verification status, and it is not the same as "passed". Say it in your report
-too, in one plain line: nothing ran the repository's tests, and the setting to add is
+too, in one plain line: the plugin ran none of the repository's tests, and the setting to add is
 `verify_command` under `driver:` in `.multi-llm/providers.yaml` — name the repository's
 own test command as its value when it has an obvious one (`package.json`'s
 `scripts.test`, a `Makefile` `test` target), without running it or writing the config.
 Step 10's `--mark-completed` prints that line as `[TESTS_NOT_RUN] …` (on stderr): it
 also names the checks the batches were asked to run and what each batch reported, so
-give its text in your report verbatim instead of writing your own.
+give the text after its tag in your report verbatim instead of writing your own.
 
 If the command fails:
 - Report which fix may have caused the issue

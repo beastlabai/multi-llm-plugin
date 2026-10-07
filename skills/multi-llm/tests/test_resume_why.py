@@ -418,8 +418,14 @@ class TestTheNativeLeg:
     "SKILL.md", "instructions/implement.md", "references/summary-format.md"])
 def test_the_claude_code_report_rules_give_the_resume_its_why(path):
     """The native report rules name the line, so the host relays the
-    plugin's why instead of writing one."""
+    plugin's why instead of writing one. Fix round 24: SKILL.md and the
+    implement core name the section that carries it, already written."""
     from pathlib import Path
 
     text = (Path(__file__).resolve().parent.parent / path).read_text(encoding="utf-8")
-    assert "[NEXT_COMMAND_WHY]" in text, path
+    flat = " ".join(text.split())
+    if path == "references/summary-format.md":
+        assert "[NEXT_COMMAND_WHY]" in text, path
+    else:
+        assert "[NEXT_STEP_MARKDOWN]" in text, path
+        assert "with its why" in flat, path

@@ -441,16 +441,20 @@ TOOL_OUTCOMES_LINE = (
 #: close command, which the note carried at its end, reached the user as
 #: prose): the key carries the section already written, each command fenced
 #: (`next_phase.render_next_step_markdown`), and the line says to copy it.
+#: Fix round 24 (live run 10: OpenCode 03 reordered the step under captions
+#: of its own, 08 wrote "Workflow complete." beside the markdown that says
+#: it): its words and order, no caption, and the words never the host's own;
+#: a stop's `resume_markdown` is copied the same way.
 TOOL_USER_NEXT_STEP_LINE = (
     "`user_next_step` in a result is a command for the user to type, never a "
-    "call to make: end your report with its `markdown`, copied as it is (each "
-    "command stays alone in its fenced block, each why and note stays plain "
-    "text, the manual tasks it lists included), then stop. It says "
-    "\"Workflow complete.\" only when it is `complete`: never say that "
-    "otherwise, even when a notice lists manual tasks left for the user; while "
-    "`user_next_step` names a `command`, the workflow goes on. Only `next` is "
-    "a call. A needs-human result's `resume_command` is the same kind of "
-    "thing: the user's to type, never a call."
+    "call to make: end your report with its `markdown`, copied as it is (its "
+    "words and order, each command alone in its fenced block, each why and "
+    "note plain text, the manual tasks it lists included, no caption of your "
+    "own), then stop. It says \"Workflow complete.\" only when it is "
+    "`complete`: never write those words yourself, even when a notice lists "
+    "manual tasks left for the user. Only `next` is a call. At a stop, "
+    "`resume_markdown` is the same kind of thing: copy it the same way, its "
+    "commands (`resume_command` among them) the user's to type, never a call."
 )
 
 #: The finished run's relay (live run 8, OpenCode racing 08): a completed

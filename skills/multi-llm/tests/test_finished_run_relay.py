@@ -30,10 +30,10 @@ import modes  # noqa: E402
 
 from tests.test_next_step_relay_rules import RELAY_SURFACES, _flat  # noqa: E402
 
-COMPLETE_ONLY = (
-    'Say "Workflow complete." only when it is `complete`, never while it names '
-    "a `command`: the workflow goes on."
-)
+#: Fix round 24 (live run 10, OpenCode 08 wrote it twice): the copied
+#: section says it, and only when complete; the host never writes it.
+COMPLETE_ONLY = 'says "Workflow complete.": never write those words yourself.'
+
 
 
 class TestWorkflowCompleteOnlyWhenComplete:

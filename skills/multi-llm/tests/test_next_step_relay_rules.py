@@ -60,21 +60,22 @@ def _relay_texts():
 #: The rule of every route that copies `user_next_step.markdown`, the
 #: section already written (fix round 22: Codex 04 left both commands
 #: unfenced, and the hosts folded the manual close command into prose).
-MARKDOWN_RULE = "its `markdown`, copied as it is (each command stays alone in its fenced block, each why and note stays plain text"
+#: Fix round 24: Claude Code copies it too (the lookup prints it between
+#: `[NEXT_STEP_MARKDOWN]` lines; racing 06 put the manual tasks first), in
+#: its words and order (OpenCode 03 reordered it under captions of its own).
+MARKDOWN_RULE = (
+    "copied as it is (its words and order, each command alone in its fenced "
+    "block, each why and note plain text, the manual tasks it lists included, "
+    "no caption of your own)")
 
 
 class TestEveryRouteRelaysTheOptionalStepWithItsWhy:
 
     @pytest.mark.parametrize("name,text", list(_relay_texts()))
     def test_command_first_then_each_optional_entry_with_its_why(self, name, text):
-        if name != "SKILL.md":
-            # The order and the whys are the markdown's own
-            # (tests/test_next_step_markdown.py).
-            assert MARKDOWN_RULE in text, name
-            return
-        assert "the `command` first" in text, name
-        assert '"Optional, before that:"' in text, name
-        assert "`why` as plain text above its command" in text, name
+        # The order and the whys are the markdown's own
+        # (tests/test_next_step_markdown.py).
+        assert MARKDOWN_RULE in text, name
 
     def test_summary_format_keeps_the_same_order(self):
         text = _flat("references/summary-format.md")
@@ -87,10 +88,7 @@ class TestTheManualTaskNoteIsProse:
 
     @pytest.mark.parametrize("name,text", list(_relay_texts()))
     def test_every_route_keeps_the_note_out_of_a_fence(self, name, text):
-        if name != "SKILL.md":
-            assert MARKDOWN_RULE in text, name
-            return
-        assert "fenced block holds one command and nothing else" in text, name
+        assert MARKDOWN_RULE in text, name
 
     @pytest.mark.parametrize("path,said", [
         ("references/summary-format.md",

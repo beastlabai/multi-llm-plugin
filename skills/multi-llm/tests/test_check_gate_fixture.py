@@ -918,15 +918,12 @@ class TestTheNativeLeg:
         from pathlib import Path
 
         root = Path(__file__).parent.parent
-        skill = (root / "SKILL.md").read_text(encoding="utf-8")
+        skill = " ".join((root / "SKILL.md").read_text(encoding="utf-8").split())
+        # Fix round 24: the lookup prints the stop's section already written.
         assert (
             "A native `implement` that stopped part-way exited `0`, so look it "
-            "up: it prints the `--resume` command below its `[NEXT_COMMAND_WHY]` "
-            "line and, when tasks wait for an "
-            "answer, each answer the stop offers as a `[NEXT_COMMAND_ANSWERS]` "
-            "line below its `[NEXT_COMMAND_ANSWERS_WHY]` line (when more than "
-            "one task waits, first the one command carrying every answer; then "
-            "each answer alone) — end with the resume and every answer"
+            "up: its section is the resume and each answer the stop offers, "
+            "each with its why"
         ) in skill
         summary = " ".join((root / "references" / "summary-format.md").read_text(
             encoding="utf-8").split())
@@ -939,14 +936,10 @@ class TestTheNativeLeg:
             "At a stop (step 10 ran without `--mark-completed`) the next-step "
             "lookup of `references/summary-format.md` still runs"
         ) in core
+        assert "End the report with that section, copied as it is" in core
         assert "never write a resume or `--human-task` command of your own" in core
-        assert ("(when more than one task waits, first the one command carrying "
-                "every answer; then each answer alone, as the tool routes list "
-                "them)") in core
         for text in (skill, summary, core):
             assert "(first the one command carrying every answer" not in text
-        assert ("End the report with the resume command and every answer, each "
-                "alone in its own fenced block") in core
 
     def test_the_handoff_carries_the_plan_as_typed_for_finalize_tracking(
         self, repo, capsys,

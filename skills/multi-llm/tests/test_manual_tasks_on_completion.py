@@ -687,7 +687,7 @@ def test_the_tool_routes_say_workflow_complete_only_on_a_complete_result():
 
     line = modes.TOOL_USER_NEXT_STEP_LINE
     assert "It says \"Workflow complete.\" only when it is `complete`" in line
-    assert "never say that otherwise" in line
+    assert "never write those words yourself" in line
     assert "even when a notice lists manual tasks" in line
 
 
@@ -908,14 +908,15 @@ def test_the_claude_code_host_is_told_to_relay_the_note():
     tasks, never the `[MANUAL_TASK_NOTE]` line saying how to record them
     done."""
     skill = " ".join((SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8").split())
+    # Fix round 24: the lookup prints the section already written, the
+    # sentence, the tasks, the note and its command included.
     assert (
-        "A `[WORKFLOW_COMPLETE]` line, from the lookup or from the phase's own "
-        "output, ends the report with the exact words \"Workflow complete.\", "
-        "each `[MANUAL_TASK]` line's task (id and "
-        "title) as the user's to do, keeping a line's \"(waits on …)\" note "
-        "(implement runs that task once the one it waits on is recorded "
-        "done), then the `[MANUAL_TASK_NOTE]` line's text verbatim"
+        "end your report with the section the lookup prints between its "
+        "`[NEXT_STEP_MARKDOWN]` and `[NEXT_STEP_MARKDOWN_END]` lines"
     ) in skill
+    assert "the manual tasks it lists included" in skill
+    assert ('Only that section says "Workflow complete.": never write those '
+            "words yourself.") in skill
     core = " ".join(
         (SKILL_ROOT / "instructions" / "full-workflow.md").read_text(encoding="utf-8").split()
     )
