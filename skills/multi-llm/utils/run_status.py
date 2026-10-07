@@ -3414,21 +3414,13 @@ def _resume_lines(
     # resume does on an unchanged tree; that replaces the cost line, which
     # read "re-dispatches the 1 failed batch(es)" of a task the write policy
     # refuses again.
+    # Fix round 23 (review of round 22, relay #6): printed as recorded,
+    # which ends with what the resume keeps and whether a failed batch is
+    # half-applied, so it reads word for word as the tool routes'
+    # `resume_why` and `util next-command --blocked` relay it.
     why = _stop_resume_why(view) if mode in _WRITE_MODES else None
     if why:
-        if mode == _IMPLEMENT_PHASE and not redispatch:
-            done = _implement_tasks_done(plan_path, workflow)
-            if done is not None and done > (kept or 0):
-                kept = done
-        if kept:
-            why += f"; keeps the {kept} already applied"
-        if _failed_batches_moved_nothing(view) or not redispatch:
-            lines.append(f"      ({why})")
-        else:
-            lines.append(
-                f"      ({why}; the half-applied state is left in place — inspect "
-                f"it, or `util restore-batch` the failed batch, before resuming)"
-            )
+        lines.append(f"      ({why})")
     elif redispatch:
         mode = str(view["run"].get("mode") or view.get("phase") or "")
         if mode in _WRITE_MODES:

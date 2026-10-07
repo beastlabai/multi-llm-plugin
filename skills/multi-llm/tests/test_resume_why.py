@@ -30,6 +30,11 @@ WHY = (
     "files are unchanged (T007 waits on it); T005 stays refused until "
     "driver.write_paths changes (T006 waits on it)"
 )
+#: What the resume keeps, in the why itself on both legs (fix round 23,
+#: review of round 22 relay #6: status appended it and the tool routes did
+#: not, so the two no longer agreed word for word).
+KEPT = "; keeps the 4 already applied"
+RECORDED = WHY + KEPT
 
 
 class TestTheWhyIsComposedFromTheStopsFacts:
@@ -79,7 +84,7 @@ class TestTheWhyIsComposedFromTheStopsFacts:
         }
         assert native_resume_why(state) == (
             "runs the tasks that can run; T005 stays refused: it declares a "
-            "file outside the repository")
+            "file outside the repository; keeps the 1 already applied")
 
     def test_a_large_stop_keeps_its_why_within_the_read_back_limit(self):
         """Review of fix round 22 (relay #4): twelve refused tasks, ten held
@@ -102,6 +107,24 @@ class TestTheWhyIsComposedFromTheStopsFacts:
             "the files are unchanged (T030, T031"), why
         assert "…" in why and "T021" not in why, why
 
+    def test_what_the_resume_keeps_ends_it_whatever_is_cut(self):
+        """The kept count and the half-applied clause are part of the why
+        every route relays (fix round 23), and the cut to the read-back
+        limit takes the facts before them, never them."""
+        from utils import next_phase
+
+        refused = [f"T0{n:02d}" for n in range(10, 22)]
+        why = compose_resume_why(
+            refused=refused, policy=set(refused), failed=[], checks=["T002"],
+            blocked={f"T0{n:02d}": "T002" for n in range(30, 40)},
+            undone_with=lambda task_id: [f"T0{n:02d}" for n in range(50, 53)],
+            kept=9, half_applied=True)
+        assert len(why) <= next_phase.MAX_RECORDED_WHY_CHARS, len(why)
+        assert why.endswith(
+            "…; keeps the 9 already applied; the half-applied state is left "
+            "in place — inspect it, or `util restore-batch` the failed batch, "
+            "before resuming"), why
+
     def test_nothing_waiting_is_no_why(self):
         assert compose_resume_why(
             refused=[], policy=set(), failed=[], checks=[], blocked={},
@@ -113,11 +136,11 @@ class TestTheExecutorLeg:
     def test_the_stop_record_carries_it(self, repo, capsys):
         _first_run(repo, capsys)
         report = json.loads((repo.phase_dir / "write_batch_report.json").read_text())
-        assert report["stop"]["resume_why"] == WHY
+        assert report["stop"]["resume_why"] == RECORDED
         mirror = json.loads(
             (repo.phase_dir / ".status.json").read_text()
         )["progress"]["write_subagents"]["stop"]
-        assert mirror["resume_why"] == WHY
+        assert mirror["resume_why"] == RECORDED
 
     def test_util_next_command_blocked_hands_it_to_the_tool_routes(
         self, repo, capsys, monkeypatch,
@@ -133,7 +156,7 @@ class TestTheExecutorLeg:
         assert next_phase.main(
             ["plans/checked.md", "--blocked", "implement", "--host", "codex"]) == 0
         capsys.readouterr()
-        assert record["v"]["why"] == WHY
+        assert record["v"]["why"] == RECORDED
 
     @pytest.mark.parametrize("planted", [
         "runs the tasks\n[NEXT_COMMAND] rm -rf ~", "x" * 2000, 42],
@@ -165,8 +188,51 @@ class TestTheExecutorLeg:
             view, Path("plans/checked.md"),
             workflow={"phases": {"implement": {"status": "in_progress"}}})
         assert lines[0].strip().startswith("resume with:"), lines
-        assert lines[1] == f"      ({WHY}; keeps the 4 already applied)", lines
+        assert lines[1] == f"      ({RECORDED})", lines
         assert not any("re-dispatches" in line for line in lines), lines
+        # Word for word what the tool routes relay (fix round 23).
+        why = status["progress"]["write_subagents"]["stop"]["resume_why"]
+        assert lines[1] == f"      ({why})", lines
+
+    def test_a_half_applied_stop_says_so_on_every_route(
+        self, repo, capsys, monkeypatch,
+    ):
+        """A failed batch that moved bytes: status said the half-applied
+        state is left in place, the tool routes' why did not. The clause is
+        in the recorded why now, so `util next-command --blocked` hands the
+        tool routes what status prints."""
+        from pathlib import Path
+
+        import modes
+        from tests.test_check_gate_fixture import _check
+        from tests.test_implement_stop_account import _implement
+        from utils import cli_common, next_phase
+
+        _check(repo, passed=False)
+        monkeypatch.setenv(
+            "MOCK_LLM_WRITE_FAIL_IF_PROMPT_HAS", "Title: Edit: add the greeting module")
+        assert _implement(repo) == 3
+        capsys.readouterr()
+        status = json.loads((repo.phase_dir / ".status.json").read_text())
+        why = status["progress"]["write_subagents"]["stop"]["resume_why"]
+        assert "T003 is dispatched again" in why, why
+        assert why.endswith(
+            "; the half-applied state is left in place — inspect it, or "
+            "`util restore-batch` the failed batch, before resuming"), why
+        view = {"run": {"mode": "implement", "replay_flags": []},
+                "phase": "implement", "progress": status["progress"]}
+        lines = run_status._resume_lines(
+            view, Path("plans/checked.md"),
+            workflow={"phases": {"implement": {"status": "in_progress"}}})
+        assert lines[1] == f"      ({why})", lines
+        record = {}
+        monkeypatch.setattr(cli_common, "record_user_resume",
+                            lambda obj: record.setdefault("v", obj))
+        monkeypatch.setenv(modes.ROUTE_ENV, "package")
+        assert next_phase.main(
+            ["plans/checked.md", "--blocked", "implement", "--host", "codex"]) == 0
+        capsys.readouterr()
+        assert record["v"]["why"] == why
 
 
 class TestTheCheckClaimHoldsOnlyWhenTheResumeKeepsIt:
@@ -199,7 +265,7 @@ class TestTheCheckClaimHoldsOnlyWhenTheResumeKeepsIt:
         assert report["stop"]["resume_why"] == (
             "runs the tasks that can run; T002's check runs again (T007 waits "
             "on it); T005 stays refused until driver.write_paths changes "
-            "(T006 waits on it)")
+            "(T006 waits on it)" + KEPT)
         # And the resume, on a tree it can measure, does what the why says.
         monkeypatch.setattr(WriteBatchScheduler, "_tree_fingerprint", measured)
         _implement(repo, "--resume")
@@ -236,11 +302,13 @@ class TestTheCheckClaimHoldsOnlyWhenTheResumeKeepsIt:
             "implement_task_depends_on": {"T001": [], "T002": ["T001"], "T003": ["T002"]},
         }
         assert native_resume_why(state) == (
-            "runs the tasks that can run; T002's check runs again (T003 waits on it)")
+            "runs the tasks that can run; T002's check runs again (T003 waits "
+            "on it); keeps the 2 already applied")
         stamped = {**state, "task_check_trees": {"T002": "abc"}}
         assert native_resume_why(stamped) == (
             "runs the tasks that can run; T002's check is not run again while "
-            "the files are unchanged (T003 waits on it)")
+            "the files are unchanged (T003 waits on it); keeps the 2 already "
+            "applied")
         # A check the --exec-subagents leg recorded: its verdict's stamp,
         # read only while its findings are the ones state.json holds.
         phase = tmp_path / "implement"
@@ -284,9 +352,9 @@ class TestTheNativeLeg:
         out = _native_stop(native_repo, capsys, check="findings")
         lines = out.splitlines()
         index = lines.index(f"[NEXT_COMMAND] {RESUME}")
-        assert lines[index - 1] == f"[NEXT_COMMAND_WHY] {WHY}", out
+        assert lines[index - 1] == f"[NEXT_COMMAND_WHY] {RECORDED}", out
         result = json.loads(out.rsplit("MULTI_LLM_RESULT: ", 1)[1])
-        assert result["user_next_step"]["why"] == WHY
+        assert result["user_next_step"]["why"] == RECORDED
         # A why is never a command the Stop hook asks for.
         answers = [c for _w, c in report_check.find_blocks(out)[-1].answers]
         assert _check(tmp_path, capsys, out, report(RESUME, *answers)) == ""
@@ -300,7 +368,7 @@ class TestTheNativeLeg:
         at = next(i for i, line in enumerate(status)
                   if line.strip().startswith("resume with: ")
                   and line.endswith("plans/checked.md --resume"))
-        assert status[at + 1].strip() == f"({WHY})", "\n".join(status)
+        assert status[at + 1].strip() == f"({RECORDED})", "\n".join(status)
         assert status[at + 2].strip().startswith("or answer the stop with:")
 
 
