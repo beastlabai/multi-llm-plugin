@@ -52,6 +52,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import git_utils as _git_utils
     from . import known_checks as _known_checks
     from . import landlock_dispatch as _landlock
+    from . import metrics as _metrics
     from . import prompt_files as _prompt_files
     from . import prior_changes as _prior_changes
     from . import process_control as _process_control
@@ -137,6 +138,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from .write_safety import (
         PRE_BATCH_DIRNAME,
         policy_allow_clause,
+        policy_outside_note,
         policy_skip_clause,
         DRY_RUN_FILENAME,
         MAX_SNAPSHOT_BYTES,
@@ -158,6 +160,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
     from utils import git_utils as _git_utils
     from utils import known_checks as _known_checks
     from utils import landlock_dispatch as _landlock
+    from utils import metrics as _metrics
     from utils import prompt_files as _prompt_files
     from utils import prior_changes as _prior_changes
     from utils import process_control as _process_control
@@ -243,6 +246,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
     from utils.write_safety import (
         PRE_BATCH_DIRNAME,
         policy_allow_clause,
+        policy_outside_note,
         policy_skip_clause,
         DRY_RUN_FILENAME,
         MAX_SNAPSHOT_BYTES,
@@ -1587,6 +1591,18 @@ def compose_stop_answers(
 #: policy refuses (``implement_orchestrator``'s ``refused`` map).
 NATIVE_REFUSED_PREFIX = "refused before dispatch: "
 
+#: How ``util batch-done --status failed --partial`` opens the reason of a
+#: native task that failed after its subagent changed files (fix round 21):
+#: the executor's partial application, which no ``--human-task`` answer is
+#: offered for until the half-applied state is inspected.
+HALF_APPLIED_PREFIX = "half-applied: "
+
+#: The reason the native instructions prescribe for a reply that said
+#: ``applied`` and changed no file, twice: the executor's
+#: ``applied_without_changes``, answered ``skip`` first, then ``done`` for a
+#: change made by hand (fix round 21).
+UNLANDED_REASON = "said applied, no file changed"
+
 
 def native_stop_answers(state: Any) -> List[Dict[str, Any]]:
     """:func:`compose_stop_answers` for a stopped native implement, read from
@@ -1600,6 +1616,13 @@ def native_stop_answers(state: Any) -> List[Dict[str, Any]]:
     (:func:`held_back_by_checks`). A ``skip`` leaves undone the tasks that
     depend on its task and have not run (not a manual one). ``[]`` when none
     waits, or when the record cannot be read.
+
+    Fix round 21: a failed task whose edits are half-applied
+    (:data:`HALF_APPLIED_PREFIX`, ``util batch-done --partial``) gets no
+    answer, as the executor offers none for a partial application: it is
+    inspected first. One whose reply said ``applied`` and changed nothing
+    (:data:`UNLANDED_REASON`) is answered ``skip`` first, then ``done`` for
+    a change made by hand, as the executor answers it.
     """
     if state is None or not hasattr(state, "get"):
         return []
@@ -1635,14 +1658,24 @@ def native_stop_answers(state: Any) -> List[Dict[str, Any]]:
             and (not isinstance(scope, list) or dep in scope)
         ]
 
+    def reason(task_id: str) -> str:
+        return str(reasons.get(task_id) or "")
+
     refused = [
         task_id for task_id in failed_ids
-        if str(reasons.get(task_id) or "").startswith(NATIVE_REFUSED_PREFIX)
+        if reason(task_id).startswith(NATIVE_REFUSED_PREFIX)
     ]
     return compose_stop_answers(
         refused=refused,
-        failed=[FailedAnswerable(task_id) for task_id in failed_ids
-                if task_id not in refused],
+        failed=[
+            FailedAnswerable(
+                task_id,
+                unlanded=reason(task_id).lower().startswith(UNLANDED_REASON),
+            )
+            for task_id in failed_ids
+            if task_id not in refused
+            and not reason(task_id).startswith(HALF_APPLIED_PREFIX)
+        ],
         checks=checks,
         blocked=blocked,
         findings={
@@ -1675,14 +1708,17 @@ def _accounting_line(account: Dict[str, Any]) -> str:
         parts.append(f"{len(account['not_run'])} not run ({'; '.join(named)})")
     with_findings = account.get("accepted_with_findings") or []
     after_failing = [tid for tid in account["accepted"] if tid not in with_findings]
+    # The bucket names are the labels every other surface uses (fix round
+    # 21, review of round 20, #3: this line still read "accepted with their
+    # check findings" beside the table's "accepted with its check findings").
     if after_failing:
         parts.append(
-            f"{len(after_failing)} accepted after failing "
+            f"{len(after_failing)} {ACCEPTED_AFTER_FAILING_LABEL} "
             f"({', '.join(after_failing)})"
         )
     if with_findings:
         parts.append(
-            f"{len(with_findings)} accepted with their check findings "
+            f"{len(with_findings)} {ACCEPTED_WITH_FINDINGS_LABEL} "
             f"({', '.join(with_findings)})"
         )
     if account["completed_manual"]:
@@ -2613,9 +2649,9 @@ def with_result_contract(
         "Never run `kill`, `pkill`, `killall` or any process-wide signal: "
         "the orchestrator that dispatched you is a sibling process, and a "
         "write subagent's `killall -9 python3` ended a whole phase "
-        "(measured 2026-09-16). Do not start background servers or "
-        "browsers, and leave no process running when you finish; verify "
-        "with static checks only.\n\n"
+        "(measured 2026-09-16). Do not start background servers, watchers, "
+        "browsers or any other background process, and leave no process "
+        "running when you finish.\n\n"
         "## Scratch files (advisory)\n\n"
         "Keep scratch work (an extracted script to syntax-check, a probe) "
         "out of the repository and out of fixed, shared names such as a "
@@ -2952,6 +2988,18 @@ class WriteBatchScheduler:
         self._eta_scope: Optional[set] = None
         #: Whether this run stamped an `[ETA]` baseline (`_metrics_start`).
         self._eta_started = False
+        #: Fix round 21 (review of round 20, #1): whether this run printed an
+        #: `[ETA]` line, and whether its one closing line is out
+        #: (:meth:`_eta_close`, or `phase complete` from `_metrics_finish`).
+        self._eta_printed = False
+        self._eta_closed = False
+        #: The tasks a check this run recorded with findings holds back, out
+        #: of the `[ETA]` total from that check's own line on (fix round 21),
+        #: before `_block_dependents_of_checks` holds them for the loop.
+        self._eta_held: set = set()
+        #: The result the `[ETA]` lines count over, for an ending that has no
+        #: other hold on it (an exception out of `_run`, an abort's signal).
+        self._eta_result: Optional["SchedulerResult"] = None
         #: Task ids for which a terminal (`completed`) audit line has been
         #: written, so `_audit_terminal` can close out a dispatch that never
         #: reached `_classify` without ever double-recording one that did.
@@ -3078,6 +3126,9 @@ class WriteBatchScheduler:
         #: The paths ``driver.write_paths`` refused, per task refused for it
         #: before dispatch: what its way forward names (fix round 20).
         self._refused_policy_paths: Dict[str, List[str]] = {}
+        #: Each one's rule (``write_safety.PolicyHit``), which its way forward
+        #: is worded from (fix round 21: a deny hit names the deny rule).
+        self._refused_policy_hits: Dict[str, List[Any]] = {}
 
     # -- the write grant (plan step 3, 2026-09-30) ----------------------
 
@@ -3658,11 +3709,23 @@ class WriteBatchScheduler:
             # A batch can replace the phase path after dispatch. Trusted
             # discovery refuses it; report a human-needed stop without reading
             # or writing through that replacement to produce more artifacts.
+            # Fix round 21: an ending too, so the `[ETA]` lines say it.
+            self._eta_close(self._eta_result)
             return SchedulerResult(
                 kind=self.kind, phase=self.phase, exit_code=EXIT_NEEDS_HUMAN,
                 messages=[f"Rollback safety refusal: {exc.message} The phase was not completed."],
             )
+        except KeyboardInterrupt:
+            # A foreground run's Ctrl-C (a detached worker's signal goes
+            # through `metrics.aborted_eta_line` instead, fix round 21).
+            self._eta_close(self._eta_result, verb="interrupted")
+            raise
+        except Exception:
+            self._eta_close(self._eta_result)
+            raise
         finally:
+            # Whatever the ending, no abort may close lines a later run owns.
+            _metrics.close_eta_run(self._eta_abort_line)
             try:
                 self._report_rollback_store_utilization()
                 self._discard_rollback_store()
@@ -4043,7 +4106,7 @@ class WriteBatchScheduler:
                 result.stopped_at_batch = batch_index
                 result.exit_code = int(exc.exit_code or EXIT_NEEDS_HUMAN)
                 self._record_stop(result, batch_index, [], refusal=exc.message)
-                self._eta_stop_line(result)
+                self._eta_close(result)
                 result.messages.extend(
                     self._check_findings_lines(result, stopped=True)
                 )
@@ -4084,8 +4147,9 @@ class WriteBatchScheduler:
                     result, batch_index, [o for o in outcomes if not o.ok],
                 )
                 # Fix round 20: a stop short of the total says so on the
-                # `[ETA]` lines, rather than leaving "~0m 37s remaining".
-                self._eta_stop_line(result)
+                # `[ETA]` lines, rather than leaving "~0m 37s remaining"; fix
+                # round 21: every stop closes them, one at N/N too.
+                self._eta_close(result)
                 stop_lines = self._stop_message(batch_index, outcomes, result)
                 # Fix round 16 (run 6, stop 01): set before the summary is
                 # written, so its Verification line says it too.
@@ -4127,6 +4191,10 @@ class WriteBatchScheduler:
         if result.blocked_by_check:
             result.exit_code = EXIT_NEEDS_HUMAN
             self._record_check_block(result)
+            # Fix round 21 (review of round 20, #1): this ending closes the
+            # `[ETA]` lines too, naming what the checks held; a check that
+            # held the last tasks left "batch 3/5 … remaining" standing.
+            self._eta_close(result, why=self._eta_held_text(result))
             unverified_lines = self._note_unverified_on_stop(result)
             if self.summary_file:
                 result.summary_file = self._write_summary(result)
@@ -4453,28 +4521,39 @@ class WriteBatchScheduler:
         because nothing changed carry the earlier findings, so they block
         the same tasks again. ``implement`` only: no other kind has checks.
         """
-        if self.kind != "implement":
-            return
-        plan = result.human_plan
         for outcome in outcomes:
-            if not (outcome.ok and outcome.check_findings):
-                continue
-            for dependent in self._dependents_of(outcome.task_id):
-                task = self._task_by_id(dependent)
-                if task is None:
-                    # Not in this run (a finished task a resume did not
-                    # materialize): nothing to hold, but the walk went
-                    # through it to the tasks after it (fix round 12).
-                    continue
-                if (
-                    dependent in result.blocked_by_check
-                    or plan.is_skipped(dependent)
-                    or dependent in plan.accepted
-                    or task.get("executor_role") == "human"
-                    or task.get("is_human")
-                ):
-                    continue
+            for dependent in self._check_holds(outcome, result):
                 result.blocked_by_check[dependent] = outcome.task_id
+
+    def _check_holds(
+        self, outcome: TaskOutcome, result: SchedulerResult,
+    ) -> List[str]:
+        """The tasks *outcome*, a check that reported findings, holds back
+        and that nothing holds yet (:meth:`_block_dependents_of_checks`);
+        ``[]`` for any other outcome. Reads only: the check's own ``[ETA]``
+        line asks it before its batch returns (fix round 21)."""
+        if self.kind != "implement" or not (outcome.ok and outcome.check_findings):
+            return []
+        plan = result.human_plan
+        held: List[str] = []
+        for dependent in self._dependents_of(outcome.task_id):
+            task = self._task_by_id(dependent)
+            if task is None:
+                # Not in this run (a finished task a resume did not
+                # materialize): nothing to hold, but the walk went
+                # through it to the tasks after it (fix round 12).
+                continue
+            if (
+                dependent in result.blocked_by_check
+                or dependent in held
+                or plan.is_skipped(dependent)
+                or dependent in plan.accepted
+                or task.get("executor_role") == "human"
+                or task.get("is_human")
+            ):
+                continue
+            held.append(dependent)
+        return held
 
     # -- one batch ------------------------------------------------------
 
@@ -4690,9 +4769,12 @@ class WriteBatchScheduler:
             for path in declared_file_set(task)
         ]
         try:
-            self.policy.check(declared, when="pre-dispatch")
+            # As declared (fix round 21): a file outside the repository is
+            # named as the task wrote it, never by its resolved absolute path.
+            self.policy.check(declared_file_set(task), when="pre-dispatch")
         except PolicyViolation as exc:
             self._refused_policy_paths[task_id] = list(exc.paths)
+            self._refused_policy_hits[task_id] = list(exc.hits)
             return self._refuse_before_dispatch(task, TaskOutcome(
                 task_id=task_id, kind=self.kind, runner=self.invoker,
                 status=STATUS_REJECTED, profile=profile, reason=exc.message,
@@ -7675,6 +7757,15 @@ class WriteBatchScheduler:
             # was not run again: no child ran, and a zero would average in.
             ran = bool(not outcome.not_rerun and dispatched)
             self._eta_mark(task_id, ran=ran)
+            # Fix round 21 (review of round 20, #1): a check that reported
+            # findings holds its dependents only once its batch returns
+            # (`_block_dependents_of_checks`), so its own line and the lines
+            # of the tasks beside it in the batch still counted them, and a
+            # check that held the last tasks ended the run on "batch 3/5 …
+            # remaining". They leave the `[ETA]` total now, as the native
+            # leg's `util batch-done` takes them out before `util metrics
+            # record`.
+            self._eta_held.update(self._check_holds(outcome, result))
             if ran:
                 self._record_metrics(task, outcome, result)
 
@@ -7718,6 +7809,7 @@ class WriteBatchScheduler:
                     _known_checks.set_batch_check_report_in_state(
                         self.state.state, task_id,
                         prior_changes_id=str(task.get("prior_changes_id") or ""),
+                        grouped_sha256=_known_checks.review_stamp(task),
                         findings=outcome.batch_check if outcome.ok else None,
                         listed=(
                             (getattr(self, "_listed_outcomes", None) or {}).get(task_id)
@@ -7905,6 +7997,7 @@ class WriteBatchScheduler:
             # The `[ETA]` line `instructions/implement.md` step 5 describes. It
             # goes through `self.log` rather than stderr so it lands in the
             # phase log `status` points at, beside the batch line above it.
+            self._eta_printed = True
             self.log(eta_line)
 
     # -- snapshots ------------------------------------------------------
@@ -8717,21 +8810,36 @@ class WriteBatchScheduler:
             policy = any(o.write_outcome == WRITE_POLICY_VIOLATION for o in refused)
             # Fix round 18 (live run 7): that nothing is half-applied is the
             # block's closing line, said once; the bullet is the remedy. Fix
-            # round 20: the policy's, worded as the user's own call.
-            denied = sorted({
-                path for o in refused
-                for path in self._refused_policy_paths.get(o.task_id) or []
-            })
-            lines.append(
-                f"  - "
-                + (
-                    f"your call: {policy_allow_clause(denied)}"
-                    if policy else "fix what the details name"
+            # round 20: the policy's, worded as the user's own call. Fix
+            # round 21: per rule (a deny hit names the deny rule), and none
+            # for a file outside the repository, which no rule can allow.
+            def hits_of(outcome: TaskOutcome) -> List[Any]:
+                return list(
+                    self._refused_policy_hits.get(outcome.task_id)
+                    or self._refused_policy_paths.get(outcome.task_id) or []
                 )
-                + ", then resume this phase; it is checked again before it is "
-                "dispatched, and the tasks after it follow:"
-            )
-            lines.append(f"        {resume}")
+
+            outside = [
+                o for o in refused
+                if any(getattr(hit, "outside", False) for hit in hits_of(o))
+            ]
+            fixable = [o for o in refused if o not in outside]
+            if outside:
+                lines[0] = (
+                    f"To go on ({policy_outside_note([h for o in outside for h in hits_of(o)])}):"
+                )
+            clause = policy_allow_clause(
+                [hit for o in fixable for hit in hits_of(o)]
+            ) if policy and fixable else None
+            offered = bool(fixable or self.kind != "implement")
+            if offered:
+                lines.append(
+                    f"  - "
+                    + (f"your call: {clause}" if clause else "fix what the details name")
+                    + ", then resume this phase; it is checked again before it is "
+                    "dispatched, and the tasks after it follow:"
+                )
+                lines.append(f"        {resume}")
             for outcome in (refused if self.kind == "implement" else ()):
                 task_id = outcome.task_id
                 dependents = [
@@ -8746,7 +8854,8 @@ class WriteBatchScheduler:
                     f"add --human-task {task_id}=skip to the resume command"
                 )
                 lines.append(
-                    f"  - or go on without it: {skip} ({task_id}"
+                    f"  - {'or go on without it' if offered else f'go on without {task_id}'}"
+                    f": {skip} ({task_id}"
                     + (f" and the tasks that depend on it, {', '.join(dependents)},"
                        if dependents else "")
                     + f" stay undone), or, once you have made its change "
@@ -9098,9 +9207,14 @@ class WriteBatchScheduler:
             result.stop["refused_before_dispatch"] = True
             result.stop["policy"] = first.write_outcome == WRITE_POLICY_VIOLATION
             if result.stop["policy"]:
-                # Fix round 20: the files its way forward names.
+                # Fix round 20: the files its way forward names. Fix round
+                # 21: and the rule that refused each, which words it.
                 result.stop["policy_paths"] = list(
                     self._refused_policy_paths.get(first.task_id) or [])
+                result.stop["policy_rules"] = [
+                    hit.to_dict()
+                    for hit in self._refused_policy_hits.get(first.task_id) or []
+                ]
         if first is not None and first.applied_without_changes:
             # Fix round 14: it said `applied` and changed nothing, twice.
             result.stop["applied_without_changes"] = True
@@ -9513,13 +9627,26 @@ class WriteBatchScheduler:
             # Fix round 20 (live run 8 #4, a user decision: permissive):
             # allowing the file stays a way forward, worded as the user's own
             # call and naming the file, beside the skip answer.
-            body.append(
-                "To go on (your call): "
-                + policy_allow_clause(stop.get("policy_paths") or [])
-                + " and resume this phase"
-                + (f"; {policy_skip_clause(task_id)}."
-                   if self.kind == "implement" else ".")
-            )
+            # Fix round 21: worded per rule from `policy_rules` (a deny hit
+            # names the deny rule; the paths alone, from a record that kept
+            # no rule, get the wording right for either), and no policy
+            # change at all for a file outside the repository.
+            refused_rules = stop.get("policy_rules") or stop.get("policy_paths") or []
+            clause = policy_allow_clause(refused_rules)
+            if clause is not None:
+                body.append(
+                    "To go on (your call): " + clause + ", then resume this phase"
+                    + (f"; {policy_skip_clause(task_id)}."
+                       if self.kind == "implement" else ".")
+                )
+            else:
+                note = policy_outside_note(refused_rules)
+                body.append(
+                    f"{note[0].upper()}{note[1:]}. To go on: "
+                    + (f"{policy_skip_clause(task_id, alone=True)}."
+                       if self.kind == "implement"
+                       else "fix what refused it, then resume this phase.")
+                )
         elif stop.get("refused_before_dispatch"):
             body.append(
                 "To go on: fix what refused it"
@@ -10075,7 +10202,17 @@ class WriteBatchScheduler:
             # run's own account and `--resume` has no other record of what was
             # applied. Nothing is rolled back and nothing is completed — the
             # plan reference, the tracking census and the phase marker all wait
-            # for a run whose check passes.
+            # for a run whose check passes. Fix round 21: and its `[ETA]` lines
+            # close on the failed command, not on "ALL BATCHES COMPLETE".
+            verification = result.verification or {}
+            self._eta_close(
+                result,
+                why=(
+                    f"`{verification.get('command')}` exited "
+                    f"{verification.get('exit_code')}"
+                    if verification.get("command") else ""
+                ),
+            )
             if self.summary_file:
                 result.summary_file = self._write_summary(result)
                 result.messages.append(
@@ -10213,7 +10350,7 @@ class WriteBatchScheduler:
         """
         out = (
             set(result.human_plan.skipped) | set(result.human_plan.accepted)
-            | set(result.blocked_by_check)
+            | set(result.blocked_by_check) | set(self._eta_held)
         )
         scope = self._eta_scope
         return [
@@ -10248,34 +10385,98 @@ class WriteBatchScheduler:
         counted = self._eta_task_ids(result)
         return sum(1 for task_id in counted if task_id in self._eta_finished), len(counted)
 
-    def _eta_stop_line(self, result: SchedulerResult) -> None:
-        """Say on the ``[ETA]`` lines that the run stopped short (fix round 20).
+    def _eta_held_text(self, result: SchedulerResult) -> str:
+        """``T004, T005 not run: check T003 reported problems`` — what the
+        checks with findings held back, for the closing ``[ETA]`` line."""
+        by_check: Dict[str, List[str]] = {}
+        for task_id, check_id in result.blocked_by_check.items():
+            by_check.setdefault(str(check_id), []).append(str(task_id))
+        return "; ".join(
+            f"{', '.join(sorted(held))} not run: check {check_id} reported problems"
+            for check_id, held in sorted(by_check.items())
+        )
 
-        Live run 8 #1: the stop fixture's last line was "batch 4/6 done in
-        0m 15s · ~0m 37s remaining", left standing by a stop that came before
-        any "N/N". A run that stops with tasks of its total not finished logs
-        one closing line naming how far it got and how many it did not run;
-        one whose last line already read ``N/N`` (the tasks after the stop
-        were never in its total) adds nothing. Best-effort.
+    def _eta_closing_line(
+        self, result: Optional[SchedulerResult], *, verb: str = "stopped",
+        why: str = "",
+    ) -> Optional[str]:
+        """The closing ``[ETA]`` line of a run that ends short of completing
+        its phase, or ``None`` when there is nothing to close (no baseline,
+        or a run that counted no task and printed no line). Pure: it logs
+        and saves nothing, so an abort's signal handler can ask for it."""
+        if not self._eta_started or result is None:
+            return None
+        done, total = self._eta_progress(result)
+        if total <= 0 and not self._eta_printed:
+            return None
+        if done <= 0:
+            head = f"run {verb} before any of its {total} task(s) finished"
+        elif done < total:
+            head = (
+                f"run {verb} after batch {done}/{total} · "
+                f"{total - done} task(s) not run"
+            )
+        else:
+            head = f"run {verb} after batch {done}/{total}"
+        return f"[ETA] {self.phase}: {head}" + (f" · {why}" if why else "")
+
+    def _eta_close(
+        self, result: Optional[SchedulerResult], *, verb: str = "stopped",
+        why: str = "",
+    ) -> None:
+        """Close this run's ``[ETA]`` lines on an ending short of completion.
+
+        Fix round 20 (live run 8 #1): a stop that came before any "N/N" left
+        "batch 4/6 done in 0m 15s · ~0m 37s remaining" standing, so a stop
+        short of its total logged one closing line. Fix round 21 (review of
+        round 20, #1): every ending of a write phase closes them, once — a
+        stop, a refusal, the tasks a check holds back, a failed
+        ``driver.verify_command``, an exception out of the loop, a
+        foreground Ctrl-C (``verb="interrupted"``), a detached worker's
+        abort (:meth:`_eta_abort_line`) — and a finished phase with its
+        ``phase complete`` line (:meth:`_metrics_finish`). A check that
+        reported findings and held the last two tasks used to end the run
+        on "batch 3/5 … ~<1s remaining" with no closing line, and
+        ``metrics_progress.implement.total_batches`` still at 5: the stored
+        total is re-stamped here to the one the line and the write mirror
+        count. Best-effort.
         """
-        if not self._eta_started:
+        if self._eta_closed:
             return
+        self._eta_closed = True
+        _metrics.close_eta_run(self._eta_abort_line)
         try:
-            done, total = self._eta_progress(result)
+            line = self._eta_closing_line(result, verb=verb, why=why)
+            if result is not None and self._eta_started:
+                self._eta_restamp(self._eta_progress(result)[1])
         except Exception:  # noqa: BLE001 - a count line must not fail a phase
             return
-        if done >= total:
-            return
-        if done == 0:
-            self.log(
-                f"[ETA] {self.phase}: run stopped before any of its {total} "
-                f"task(s) finished"
-            )
-            return
-        self.log(
-            f"[ETA] {self.phase}: run stopped after batch {done}/{total} · "
-            f"{total - done} task(s) not run"
+        if line:
+            self.log(line)
+
+    def _eta_restamp(self, total: int) -> None:
+        """Keep ``metrics_progress.{phase}.total_batches`` at the total the
+        ``[ETA]`` lines and the write mirror count (N1; fix round 21: an
+        ending with no later metric re-stamps it here)."""
+        live = getattr(self.state, "state", None)
+        progress = (
+            (live.get("metrics_progress") or {}).get(self.phase)
+            if isinstance(live, dict) else None
         )
+        if not isinstance(progress, dict) or progress.get("total_batches") == total:
+            return
+        progress["total_batches"] = total
+        try:
+            self.state.save()
+        except Exception:  # noqa: BLE001 - bookkeeping must not fail a phase
+            pass
+
+    def _eta_abort_line(self, cause: str) -> Optional[str]:
+        """The closing line a detached worker's abort prints for this run
+        (``metrics.aborted_eta_line``, fix round 21): the signal handler ends
+        the process with ``os._exit``, so no ``finally`` of this run closes
+        its lines. Reads, takes no lock, logs nothing."""
+        return self._eta_closing_line(self._eta_result, verb=f"aborted ({cause})")
 
     def _metrics_start(self, result: SchedulerResult) -> None:
         """Stamp the phase's ETA baseline before the first dispatch.
@@ -10303,6 +10504,11 @@ class WriteBatchScheduler:
             self.state.save()
         except Exception:  # noqa: BLE001 - bookkeeping must not fail a phase
             pass
+        if self._eta_started:
+            # Fix round 21: what an ending with no other hold on the run
+            # counts over, and the line a detached worker's abort prints.
+            self._eta_result = result
+            _metrics.open_eta_run(self._eta_abort_line)
 
     def _metrics_finish(self) -> None:
         """Pop the phase's ETA baseline and log its closing line (F7).
@@ -10315,6 +10521,9 @@ class WriteBatchScheduler:
         """
         if not hasattr(self.state, "finish_metrics_phase"):
             return
+        # The finished phase's closing line (fix round 21: one per ending).
+        self._eta_closed = True
+        _metrics.close_eta_run(self._eta_abort_line)
         try:
             finished = self.state.finish_metrics_phase(self.phase)
         except Exception:  # noqa: BLE001 - bookkeeping must not fail a phase

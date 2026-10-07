@@ -14,7 +14,7 @@ import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 try:
     from . import process_control
@@ -371,11 +371,67 @@ def finish_phase_in_state(
     else:
         state["metrics_progress"] = progress
 
+    withdrawn = entry.get(WITHDRAWN_KEY)
+    if isinstance(withdrawn, dict) and withdrawn and _is_index(entry.get("total_batches")):
+        # Fix round 21 (review of round 20, #1): a native run whose records
+        # kept tasks from running (`util batch-done`: held by a check's
+        # findings, after a failed task, refused at `util write-prompt`)
+        # did not complete its phase, and its closing line said "phase
+        # complete" after a check held the last tasks back. It names them,
+        # against the total its `[ETA]` lines counted, as the executor's
+        # closing line does.
+        run_id = entry.get("run_id")
+        entries = (state.get("metrics") or {}).get(phase)
+        done = sum(
+            1 for item in (entries if isinstance(entries, list) else [])
+            if isinstance(item, dict) and run_id and item.get("run_id") == run_id
+        )
+        return elapsed_ms, (
+            f"[ETA] {phase}: run stopped after batch {done}/"
+            f"{int(entry['total_batches'])} in {format_duration(elapsed_ms)} · "
+            f"{', '.join(sorted(withdrawn))} not run"
+        )
+
     color_on = _should_colorize_stderr()
     complete_segment = _colorize(
         f"phase complete in {format_duration(elapsed_ms)}", "1;32", color_on,
     )
     return elapsed_ms, f"[ETA] {phase}: {complete_segment}"
+
+
+#: The write run whose ``[ETA]`` lines no ending has closed yet (fix round
+#: 21): a callable taking the signal's name and returning that run's closing
+#: line. The write scheduler opens it once its baseline is stamped and closes
+#: it on every ending; a detached worker's abort handler asks for the line
+#: (:func:`aborted_eta_line`), because it ends the process with ``os._exit``
+#: before any ``finally`` of the run could print it.
+_OPEN_ETA_RUN: Optional[Callable[[str], Optional[str]]] = None
+
+
+def open_eta_run(closer: Callable[[str], Optional[str]]) -> None:
+    """Name the run whose ``[ETA]`` lines an abort closes."""
+    global _OPEN_ETA_RUN
+    _OPEN_ETA_RUN = closer
+
+
+def close_eta_run(closer: Callable[[str], Optional[str]]) -> None:
+    """Forget *closer*, if it is still the open run (a later run's stays)."""
+    global _OPEN_ETA_RUN
+    if _OPEN_ETA_RUN is not None and _OPEN_ETA_RUN == closer:
+        _OPEN_ETA_RUN = None
+
+
+def aborted_eta_line(cause: str) -> Optional[str]:
+    """The open run's closing ``[ETA]`` line for an abort by *cause* (the
+    signal's name), or ``None``. Called from a signal handler: it reads, and
+    never raises."""
+    closer = _OPEN_ETA_RUN
+    if closer is None:
+        return None
+    try:
+        return closer(cause)
+    except Exception:  # noqa: BLE001 - an abort's record must still be written
+        return None
 
 
 def finish_phase(state_path: Path, phase: str) -> Optional[int]:

@@ -1815,8 +1815,8 @@ def _native_withheld(
     if candidates:
         try:
             from utils.write_phase_bridge import materialize_write_tasks
-            from utils.write_prompt import policy_refusal_for
-            from utils.write_safety import policy_skip_clause
+            from utils.write_prompt import policy_violation_for
+            from utils.write_safety import policy_allow_clause, policy_skip_clause
 
             phase_dir = get_phase_dir(plan_path, "implement")
             write_tasks = materialize_write_tasks(
@@ -1830,16 +1830,20 @@ def _native_withheld(
             write_tasks = []
         for write_task in write_tasks:
             task_id = str(write_task.get("task_id") or "")
-            message = policy_refusal_for(
+            violation = policy_violation_for(
                 write_task, plan_file=str(plan_path.absolute()),
                 anchor_dir=get_phase_dir(plan_path, "implement"),
             )
-            if message is None:
+            if violation is None:
                 continue
+            message = violation.message
             # Fix round 20 (live run 8 #4): the refusal ends with allowing
             # the file as the user's call (`write_safety.policy_allow_clause`);
-            # beside it, the skip answer, in the executor stop's words.
-            skip = policy_skip_clause(task_id)
+            # beside it, the skip answer, in the executor stop's words. Fix
+            # round 21: per rule, and the skip alone for a file outside the
+            # repository, which no policy change can allow.
+            skip = policy_skip_clause(
+                task_id, alone=policy_allow_clause(violation.hits) is None)
             refused[task_id] = (
                 f"{NATIVE_REFUSED_PREFIX}{message} {skip[0].upper()}{skip[1:]}."
             )
