@@ -97,3 +97,35 @@ class TestNumbersAreWords:
     def test_a_whole_exit_clause_is_still_set_aside(self, accepted, rerun):
         own, matched = split_accepted_findings([rerun], {"T002": [accepted]})
         assert own == [] and matched == {"T002": [rerun]}
+
+
+# -- #3: one accepted finding, from its start ----------------------------------
+
+
+class TestOneAcceptedFinding:
+
+    def test_a_finding_straddling_two_accepted_findings_is_the_tasks_own(self):
+        accepted = {"T002": [
+            "lint: unused variable x in a.js", "lint: missing semicolon in b.js",
+        ]}
+        own, matched = split_accepted_findings(["lint: x in a.js missing"], accepted)
+        assert own == ["lint: x in a.js missing"] and matched == {}
+
+    def test_a_slice_from_the_middle_of_an_accepted_finding_is_the_tasks_own(self):
+        accepted = {"T002": ["eslint src/: no-unused-vars x in src/a.js line 10 col 4"]}
+        own, matched = split_accepted_findings(["eslint src/: x in src/a.js"], accepted)
+        assert own == ["eslint src/: x in src/a.js"] and matched == {}
+
+    def test_the_start_of_an_accepted_finding_still_matches(self):
+        accepted = {"T002": ["eslint src/: no-unused-vars x in src/a.js line 10 col 4"]}
+        rerun = "eslint src/: no-unused-vars x in src/a.js"
+        assert split_accepted_findings([rerun], accepted) == ([], {"T002": [rerun]})
+
+    def test_each_of_two_accepted_findings_matches_on_its_own(self):
+        accepted = {"T002": [
+            "npm test: test parses the config failed",
+            "npm test: test greets the user failed",
+        ]}
+        found = ["npm test: test greets the user failed (exit 1)",
+                 "npm test: test parses the config failed"]
+        assert split_accepted_findings(found, accepted) == ([], {"T002": found})

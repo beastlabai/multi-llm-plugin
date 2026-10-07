@@ -1513,23 +1513,21 @@ def _finding_parts(text: Any) -> Optional[Tuple[str, List[str]]]:
 
 
 def _says_only(words: Sequence[str], accepted: Sequence[Sequence[str]]) -> bool:
-    """Whether *words* say nothing an accepted finding does not: equal to one
-    of them, or (at least :data:`ACCEPTED_MATCH_MIN_WORDS` words) a run of
-    consecutive words of one of them, or of all of them read one after the
-    other (one finding quoting several accepted ones)."""
+    """Whether *words* say nothing one accepted finding does not: equal to
+    one of them, or (at least :data:`ACCEPTED_MATCH_MIN_WORDS` words) the
+    first words of one of them, in its order.
+
+    Fix round 23 (records #3): never a run from the middle of a finding,
+    which matched a slice that dropped its leading qualifier ("x in a.js"
+    of "no-unused-vars x in a.js line 10"), and never several accepted
+    findings read one after the other, which let a finding straddling two
+    of them match: one finding, from its start."""
     words = list(words)
     if any(words == list(item) for item in accepted):
         return True
     if len(words) < ACCEPTED_MATCH_MIN_WORDS:
         return False
-    pools = [list(item) for item in accepted]
-    if len(pools) > 1:
-        pools.append([word for item in accepted for word in item])
-    width = len(words)
-    return any(
-        pool[start:start + width] == words
-        for pool in pools for start in range(len(pool) - width + 1)
-    )
+    return any(list(item)[:len(words)] == words for item in accepted)
 
 
 def split_accepted_findings(
@@ -1549,11 +1547,12 @@ def split_accepted_findings(
     Narrow on purpose, so no new failure is hidden: a finding matches only
     when it names the same command as an accepted finding (the text before
     its ``:`` or before the first word saying what the command did, quotes
-    and case aside) and its words about what failed — exit codes and the
-    wrapper words of :data:`_FINDING_FILLER` aside — are all the accepted
-    finding's, in its order and with nothing between them
-    (:func:`_says_only`). Another command, another number, one more problem,
-    no command, or no words about what failed: the task's own, as before.
+    and case aside) and its words about what failed — a whole exit clause
+    and the wrapper words of :data:`_FINDING_FILLER` aside, every number
+    kept — are one accepted finding's, all of it or its first words, in its
+    order and with nothing between them (:func:`_says_only`). Another
+    command, another number, one more problem, no command, or no words about
+    what failed: the task's own, as before.
     """
     pools: Dict[str, Dict[str, List[List[str]]]] = {}
     for check_id, items in accepted.items():

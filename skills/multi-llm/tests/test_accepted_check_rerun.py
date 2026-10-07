@@ -108,14 +108,17 @@ class TestTheMatch:
     def test_nothing_accepted_matches_nothing(self):
         assert split_accepted_findings([RERUN], {}) == ([RERUN], {})
 
-    def test_two_accepted_findings_of_one_command_quoted_together(self):
+    def test_two_accepted_findings_quoted_together_stay_the_tasks_own(self):
+        """Fix round 23 (records #3): a finding matches one accepted finding,
+        never several read one after the other, which also let a finding
+        straddling two of them match (test_accepted_findings_scope.py)."""
         accepted = {"T002": [
             "npm test: test parses the config failed",
             "npm test: test greets the user failed",
         ]}
         joined = "npm test: test parses the config failed; test greets the user failed"
         own, matched = split_accepted_findings([joined], accepted)
-        assert own == [] and matched == {"T002": [joined]}
+        assert own == [joined] and matched == {}
 
 
 # -- the prompt -------------------------------------------------------------
