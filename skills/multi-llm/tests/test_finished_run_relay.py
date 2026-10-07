@@ -49,7 +49,8 @@ class TestWorkflowCompleteOnlyWhenComplete:
 
     def test_the_tool_description_still_does(self):
         line = " ".join(modes.TOOL_USER_NEXT_STEP_LINE.split())
-        assert "when it is `complete`, and only then, say \"Workflow complete.\"" in line
+        # Fix round 22: the `markdown` it says to copy says it, and only then.
+        assert "It says \"Workflow complete.\" only when it is `complete`" in line
 
 
 class TestAFinishedRunsNoticeIsRelayed:

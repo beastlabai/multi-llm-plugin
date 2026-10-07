@@ -368,11 +368,34 @@ ROWS = [
 ]
 
 
+def with_markdown(payload):
+    """*payload* (a ``user_next_step`` dict) with the ``markdown`` key the
+    builder adds last (fix round 22), rendered from the payload's own fields
+    by the one renderer; ``tests/test_next_step_markdown.py`` pins the text."""
+    answer = NextPhase(
+        phase=payload.get("phase"), command=payload.get("command"),
+        optional_before=tuple(
+            OptionalStep(step["phase"], step["command"], step["why"])
+            for step in payload.get("optional_before") or ()),
+        complete=bool(payload.get("complete")),
+        manual_tasks=tuple(
+            np_.ManualTask(task["id"], task.get("title"), task.get("waits_on"))
+            for task in payload.get("manual_tasks") or ()),
+        answers=tuple(
+            np_.AnswersStep(step["command"], step["why"], tuple(step.get("answers") or ()))
+            for step in payload.get("answers") or ()),
+        manual_tasks_note=payload.get("manual_tasks_note"),
+        manual_tasks_command=payload.get("manual_tasks_command"),
+        why=payload.get("why"),
+    )
+    return dict(payload, markdown=np_.render_next_step_markdown(answer))
+
+
 def _expected(expect, prefix):
     if expect is None:
         return None
     if expect == "complete":
-        return {"phase": None, "command": None, "complete": True}
+        return with_markdown({"phase": None, "command": None, "complete": True})
     primary_args, optional = expect
     primary_phase = modes.phase_for(primary_args.split()[0][2:])
     payload = {"phase": primary_phase, "command": prefix + primary_args}
@@ -382,7 +405,7 @@ def _expected(expect, prefix):
             for phase, args, why in optional
         ]
     payload["complete"] = False
-    return payload
+    return with_markdown(payload)
 
 
 @pytest.mark.parametrize(
@@ -459,6 +482,13 @@ class TestLiteralCommands:
                  "why": WHY_REVIEW_TASKS},
             ],
             "complete": False,
+            # Fix round 22: the section the tool routes copy, last.
+            "markdown": (
+                "```\n/multi-llm:multi-llm --implement plans/foo.md\n```\n\n"
+                "Optional, before that:\n\n"
+                f"{WHY_REVIEW_TASKS}\n\n"
+                "```\n/multi-llm:multi-llm --review-tasks plans/foo.md\n```"
+            ),
         })
 
 
@@ -471,7 +501,8 @@ class TestNoticeAndWalk:
         assert _workflow(plan)["notices"] == [NOTICE_ONE_GROUP]
         answer = np_.next_phase_commands(P, "codex", "package", "review-tasks",
                                          plan_path=plan)
-        assert answer.to_dict() == {"phase": None, "command": None, "complete": True}
+        assert answer.to_dict() == {"phase": None, "command": None, "complete": True,
+                                    "markdown": "Workflow complete."}
 
     def test_the_gate_row_where_suggested_next_is_implement(self, tmp_path):
         """The old `suggested_next == phase` guard printed implement here."""
@@ -751,13 +782,15 @@ class TestRenderNextPhaseLines:
 
 class TestToDict:
     def test_complete_is_exactly_three_keys(self):
+        """The three keys, plus the section the routes copy (fix round 22)."""
         assert NextPhase(phase=None, command=None, complete=True).to_dict() == {
             "phase": None, "command": None, "complete": True,
+            "markdown": "Workflow complete.",
         }
 
     def test_optional_before_is_omitted_when_empty(self):
         payload = NextPhase(phase="implement", command="c").to_dict()
-        assert list(payload) == ["phase", "command", "complete"]
+        assert list(payload) == ["phase", "command", "complete", "markdown"]
         assert payload["complete"] is False
 
     def test_key_order_with_optional_entries(self):
@@ -765,7 +798,8 @@ class TestToDict:
             phase="implement", command="c",
             optional_before=(OptionalStep("review-tasks", "o", "w"),),
         ).to_dict()
-        assert list(payload) == ["phase", "command", "optional_before", "complete"]
+        assert list(payload) == [
+            "phase", "command", "optional_before", "complete", "markdown"]
         assert payload["optional_before"] == [
             {"phase": "review-tasks", "command": "o", "why": "w"},
         ]

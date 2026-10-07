@@ -53,9 +53,14 @@ def test_the_marker_line_ends_with_the_command(workdir, capsys):
         ["util", "next-command", P, "--after", "apply-code-fixes"], capsys
     )
     assert code == 0, err
-    lines = [line for line in out.splitlines() if line.startswith("[MANUAL_TASK_NOTE] ")]
-    assert len(lines) == 1
-    assert lines[0].endswith("--resume --human-task T011=done --human-task T012=done")
+    # Fix round 22: the command on its own line, right after the note.
+    lines = out.splitlines()
+    notes = [i for i, line in enumerate(lines) if line.startswith("[MANUAL_TASK_NOTE] ")]
+    assert len(notes) == 1
+    assert lines[notes[0]] == f"[MANUAL_TASK_NOTE] {np_.manual_close_lead()}"
+    command = lines[notes[0] + 1]
+    assert command.startswith("[MANUAL_TASK_COMMAND] ")
+    assert command.endswith("--resume --human-task T011=done --human-task T012=done")
 
 
 def test_the_manual_line_is_the_trailers_last_so_a_joined_notice_ends_on_it():

@@ -36,7 +36,9 @@ from utils import next_phase as np_  # noqa: E402
 from utils.output_handler import output_dir_path  # noqa: E402
 from utils.state_manager import StateManager  # noqa: E402
 
-from tests.test_next_phase import ALL_REQUIRED, CR_FINDING, P, S, _build  # noqa: E402
+from tests.test_next_phase import (  # noqa: E402
+    ALL_REQUIRED, CR_FINDING, P, S, _build, with_markdown,
+)
 from tests.test_report_check import Transcript, decision_of, run_check  # noqa: E402
 from tests.test_write_executor_orchestrators import (  # noqa: E402,F401
     IMPLEMENT_WRITE_IDS,
@@ -62,6 +64,19 @@ MANUAL = [
 #: The same two when T012 was skipped because it depends on T011 (fix round
 #: 17: the entry says what it waits on).
 WAITING = [MANUAL[0], dict(MANUAL[1], waits_on="T011")]
+
+
+def close_command(prefix: str, plan: str, ids) -> str:
+    """The command that records *ids* done, spelled out by hand."""
+    answers = " ".join(f"--human-task {task_id}=done" for task_id in ids)
+    return f"{prefix}--implement {plan} --resume {answers}"
+
+
+def close_keys(prefix: str, plan: str, ids) -> dict:
+    """`user_next_step`'s note and its command for *ids* (fix round 22: the
+    command apart from the sentence leading into it)."""
+    return {"manual_tasks_note": np_.manual_close_lead(),
+            "manual_tasks_command": close_command(prefix, plan, ids)}
 
 
 def close_note(prefix: str, plan: str, ids) -> str:
@@ -244,11 +259,11 @@ class TestTheCompleteAnswerNamesThem:
             P, "claude-code", None, "apply-code-fixes", plan_path=plan
         )
         assert answer.complete is True
-        assert answer.to_dict() == {
+        assert answer.to_dict() == with_markdown({
             "phase": None, "command": None, "complete": True,
             "manual_tasks": MANUAL,
-            "manual_tasks_note": close_note(PLUGIN, P, ["T011", "T012"]),
-        }
+            **close_keys(PLUGIN, P, ["T011", "T012"]),
+        })
 
     def test_the_fallback_walk_names_them_too(self, tmp_path):
         """`full` and `util next-command` with no `--after` answer from
@@ -266,7 +281,8 @@ class TestTheCompleteAnswerNamesThem:
             "[WORKFLOW_COMPLETE]",
             f"[MANUAL_TASK] T011 {TITLES['T011']}",
             f"[MANUAL_TASK] T012 {TITLES['T012']}",
-            "[MANUAL_TASK_NOTE] " + close_note(PLUGIN, P, ["T011", "T012"]),
+            "[MANUAL_TASK_NOTE] " + np_.manual_close_lead(),
+            "[MANUAL_TASK_COMMAND] " + close_command(PLUGIN, P, ["T011", "T012"]),
         ]
 
     def test_an_untitled_task_renders_its_id_alone(self):
@@ -304,12 +320,14 @@ class TestTheCompleteAnswerNamesThem:
         payload = answer.to_dict()
         assert payload["complete"] is False and payload["command"]
         assert payload["manual_tasks"] == MANUAL
-        assert payload["manual_tasks_note"] == close_note(PLUGIN, P, ["T011", "T012"])
+        assert {key: payload[key] for key in ("manual_tasks_note", "manual_tasks_command")
+                } == close_keys(PLUGIN, P, ["T011", "T012"])
         assert np_.render_next_phase_lines(answer) == [
             f"[NEXT_COMMAND] {payload['command']}",
             f"[MANUAL_TASK] T011 {TITLES['T011']}",
             f"[MANUAL_TASK] T012 {TITLES['T012']}",
-            "[MANUAL_TASK_NOTE] " + close_note(PLUGIN, P, ["T011", "T012"]),
+            "[MANUAL_TASK_NOTE] " + np_.manual_close_lead(),
+            "[MANUAL_TASK_COMMAND] " + close_command(PLUGIN, P, ["T011", "T012"]),
         ]
 
     def test_a_command_answer_with_nothing_deferred_keeps_its_shape(self, tmp_path):
@@ -352,11 +370,11 @@ class TestTheEmittersCarryThem:
             ["util", "next-command", P, "--after", "apply-code-fixes"], capsys
         )
         assert code == 0, err
-        assert result["user_next_step"] == {
+        assert result["user_next_step"] == with_markdown({
             "phase": None, "command": None, "complete": True,
             "manual_tasks": MANUAL,
-            "manual_tasks_note": close_note(PLUGIN, P, ["T011", "T012"]),
-        }
+            **close_keys(PLUGIN, P, ["T011", "T012"]),
+        })
         lines = out.splitlines()
         start = lines.index("[WORKFLOW_COMPLETE]")
         assert lines[start:start + 3] == [
@@ -605,11 +623,12 @@ class TestImplementRecordsTheTitles:
         assert step["complete"] is False
         assert "--review-code" in step["command"]
         assert [task["id"] for task in step["manual_tasks"]] == ["T002", "T003"]
+        assert step["manual_tasks_note"] == np_.manual_close_lead()
         assert (
-            "--implement " in step["manual_tasks_note"]
-            and step["manual_tasks_note"].endswith("--resume --human-task T002=done")
+            "--implement " in step["manual_tasks_command"]
+            and step["manual_tasks_command"].endswith("--resume --human-task T002=done")
         ), step
-        assert "T003=done" not in step["manual_tasks_note"], step
+        assert "T003=done" not in step["manual_tasks_command"], step
 
 
 def test_the_tool_routes_are_told_to_list_them():
@@ -619,7 +638,8 @@ def test_the_tool_routes_are_told_to_list_them():
     import modes
 
     line = modes.TOOL_USER_NEXT_STEP_LINE
-    assert "manual_tasks" in line
+    # Fix round 22: the `markdown` it says to copy lists them.
+    assert "the manual tasks it lists included" in line
     assert "Workflow complete." in line
 
 
@@ -631,16 +651,15 @@ def test_the_tool_routes_are_told_to_relay_them_on_any_result():
     note on any result, complete or not."""
     import modes
 
+    # Fix round 22: on every result the `markdown` they copy lists the tasks,
+    # the note and its command (`render_next_step_markdown`).
     line = modes.TOOL_USER_NEXT_STEP_LINE
-    assert "whenever it carries `manual_tasks`, complete or not" in line
-    assert "then give its `manual_tasks_note` verbatim" in line
+    assert "its `markdown`, copied as it is" in line
+    assert "the manual tasks it lists included" in line
     for template in ("hosts/codex/plugin-skill.md.tmpl", "hosts/codex/shim.md.tmpl",
                      "hosts/opencode/shim.md.tmpl", "hosts/opencode/plugin-command.md.tmpl"):
         text = " ".join((SKILL_ROOT / template).read_text(encoding="utf-8").split())
-        assert (
-            "When it carries `manual_tasks`, complete or not, also list each "
-            "(id and title) and give its `manual_tasks_note` verbatim"
-        ) in text, template
+        assert "the manual tasks it lists included" in text, template
     rule = " ".join(
         (SKILL_ROOT / "references/summary-format.md").read_text(encoding="utf-8").split())
     assert "A `user_next_step` that names a `command` can carry `manual_tasks`" in rule
@@ -667,8 +686,8 @@ def test_the_tool_routes_say_workflow_complete_only_on_a_complete_result():
     import modes
 
     line = modes.TOOL_USER_NEXT_STEP_LINE
-    assert "when it is `complete`, and only then, say \"Workflow complete.\"" in line
-    assert "Never say \"Workflow complete.\" otherwise" in line
+    assert "It says \"Workflow complete.\" only when it is `complete`" in line
+    assert "never say that otherwise" in line
     assert "even when a notice lists manual tasks" in line
 
 
@@ -798,8 +817,9 @@ class TestTheNativeLegRecordsItsDeferrals:
             # Fix round 16: T003, skipped with the manual T002, is listed as
             # owed but never answered `done` (implement refuses a code task
             # that did not fail); it runs on that resume.
-            "manual_tasks_note": close_note(PLUGIN, plan_arg, ["T002"]),
+            **close_keys(PLUGIN, plan_arg, ["T002"]),
         }
+        complete = with_markdown(complete)
         block = [
             "[WORKFLOW_COMPLETE]",
             "[MANUAL_TASK] T002 Implement the core",

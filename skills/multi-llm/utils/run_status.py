@@ -3971,9 +3971,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         and len(views) == 1
         and (args.phase or args.question or args.run_id)
     ):
-        _emit_user_next_step(
+        step = _emit_user_next_step(
             plan_path, args, views[0], workflow=terminal_workflow,
         )
+        if step is not None and step.manual_tasks_command and terminal_workflow:
+            # Fix round 22 (live run 9, Codex 07, OpenCode 06-08): the
+            # notice said how to close the manual tasks, command and all,
+            # beside `user_next_step`, which says it with the command fenced;
+            # the hosts relayed both, the command folded into prose. The
+            # notice keeps naming the tasks and leaves the rest to the step.
+            terminal_notice = "; ".join(
+                _workflow_trailer_lines(terminal_workflow, prefix="")) or None
 
     # Plan §2.4: a `mode: truncated` validation source sets the notice on any
     # terminal poll (every view, not only `--view run`); it qualifies the
@@ -4125,7 +4133,7 @@ def _emit_user_next_step(
     view: Dict[str, Any],
     *,
     workflow: Optional[Dict[str, Any]] = None,
-) -> None:
+) -> Optional[Any]:
     """The terminal poll's ``user_next_step`` and block (next-phase-command §2.2(1)).
 
     Inputs per §2.1 "Where each emitter gets its inputs": ``finished_mode`` is
@@ -4138,7 +4146,7 @@ def _emit_user_next_step(
     the host is this poll's (``--host``, ``$MULTI_LLM_HOST``, the default). The
     workflow is read now, after any ``--wait``; *workflow* is such a read when
     the caller already took one. A failed read or builder raise prints one
-    stderr line and sets nothing.
+    stderr line and sets nothing. Returns the answer it emitted, or ``None``.
     """
     from . import host_capabilities, next_phase
     from .cli_common import _modes
@@ -4147,7 +4155,7 @@ def _emit_user_next_step(
     finished_mode = str(run.get("mode") or view.get("phase") or "") or None
     mode = _modes().resolve(finished_mode) if finished_mode else None
     if mode is None or not (mode.is_workflow_phase or mode.runs_workflow):
-        return  # an ask, or no mode on record: no phase finished, no answer
+        return None  # an ask, or no mode on record: no phase finished, no answer
     plan_arg = next_phase.recorded_plan_spelling(
         run.get("plan_arg"), str(plan_path)
     ) or str(plan_path)
@@ -4156,8 +4164,8 @@ def _emit_user_next_step(
             workflow = _workflow_payload(plan_path, host_id=_reader_host(args))
     except Exception as exc:  # noqa: BLE001 - advisory: the run view is not
         print(next_phase.lookup_failure_line(exc), file=sys.stderr)
-        return
-    next_phase.emit_answer(
+        return None
+    return next_phase.emit_answer(
         plan_arg,
         _reader_host(args),
         finished_mode,
