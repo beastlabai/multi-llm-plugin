@@ -767,6 +767,66 @@ class TestTheNativeLeg:
         assert len(executor) == 6
         assert native == executor
 
+    def test_status_at_the_stop_names_the_resume_and_each_answer(
+        self, repo, capsys,
+    ):
+        """Fix round 20 (live run 8, Claude Code stop 01/01b): `status` at the
+        native stop read "implement  not finished on the host" with the tally
+        and the task notes but no command to go on; round 19 gave a way on to
+        the "in progress" head alone. The block now ends with `resume with:`
+        and each answer, the very commands and whys `util next-command`
+        prints, in the host's spelling; plain `status` lists the same block."""
+        from utils import run_status
+
+        self._native_first_stop(repo, capsys)
+        code, out, _err = self._util(
+            capsys, "next-command", "plans/checked.md", "--after", "implement")
+        assert code == 0
+        resume = next(line.split(" ", 1)[1] for line in out.splitlines()
+                      if line.startswith("[NEXT_COMMAND] "))
+        pairs = self._answer_pairs(out)
+        assert len(pairs) == 6
+
+        expected = [f"      resume with: {resume}"]
+        for why, command in pairs:
+            expected += [f"      or answer the stop with: {command}",
+                         f"        ({why})"]
+        for argv in (
+            ["--plan-file", "plans/checked.md", "--view", "run", "--host", "claude-code"],
+            ["--plan-file", "plans/checked.md", "--host", "claude-code"],
+        ):
+            capsys.readouterr()
+            run_status.main(argv)
+            lines = capsys.readouterr().out.splitlines()
+            head = next(i for i, line in enumerate(lines) if line.startswith(
+                "  implement  not finished on the host (not marked completed)"))
+            at = lines.index(expected[0])
+            assert at > head, lines
+            assert lines[at:at + len(expected)] == expected, lines[at:]
+        assert resume == "/multi-llm:multi-llm --implement plans/checked.md --resume"
+
+    def test_a_completed_implement_offers_no_resume_in_status(self, repo, capsys):
+        from utils import run_status
+
+        handoff = self._emit(repo, capsys)
+        phase = str(repo.phase_dir)
+        for batch in handoff["batches"]:
+            for task in batch["tasks"]:
+                extra = (["--check", "passed"] if task["id"] == "T002" else [])
+                self._util(capsys, "batch-done", "--phase-dir", phase, "--task-id",
+                           task["id"], "--status", "completed", *extra)
+        state = get_or_create_state(repo.plan)
+        state.update_task_status("T005", "skipped")
+        state.update_task_status("T006", "skipped")
+        state.mark_phase_completed("implement")
+        state.save()
+        capsys.readouterr()
+        run_status.main(["--plan-file", "plans/checked.md", "--view", "run",
+                         "--host", "claude-code"])
+        out = capsys.readouterr().out
+        assert "  implement  done on the host (marked completed)" in out, out
+        assert "resume with:" not in out and "or answer the stop" not in out
+
     def test_a_resume_that_answered_everything_prints_no_answers_line(
         self, repo, capsys,
     ):

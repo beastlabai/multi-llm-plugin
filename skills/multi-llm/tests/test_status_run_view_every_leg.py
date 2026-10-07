@@ -465,7 +465,11 @@ class TestALoopThatEndedWithoutItsFinishIsNamedWithTheWayOn:
         assert lines[at + 2] == (
             f"{_ENDED}/multi-llm:multi-llm --implement {PLAN_ARG} --resume")
 
-    def test_one_the_host_finished_names_no_way_on(self, repo, capsys):
+    def test_one_the_host_finished_names_the_resume_not_the_loop_notice(
+        self, repo, capsys,
+    ):
+        """Its loop ended with its finish: no "if no host session is running"
+        notice, and (fix round 20) the stop's own `resume with:`."""
         handoff, _out = _emit(capsys)
         state_file = handoff["state_file"]
         _util(capsys, "metrics", "start", "--state-file", state_file,
@@ -475,6 +479,8 @@ class TestALoopThatEndedWithoutItsFinishIsNamedWithTheWayOn:
         out = _status_text(capsys)
         assert "not finished on the host" in out, out
         assert "continue it with:" not in out and "last changed" not in out
+        assert (f"      resume with: /multi-llm:multi-llm --implement {PLAN_ARG} "
+                "--resume") in out.splitlines(), out
 
     def test_an_apply_phase_too(self, plan, capsys):
         state_file = _native_apply(plan)
@@ -493,6 +499,23 @@ class TestALoopThatEndedWithoutItsFinishIsNamedWithTheWayOn:
         assert lines[at + 1].strip().startswith("batches:")
         assert lines[at + 2] == (
             f"{_ENDED}/multi-llm:multi-llm --apply-suggestions {TYPED} --resume")
+
+    def test_an_apply_phase_the_host_left_names_its_resume(self, plan, capsys):
+        """Fix round 20: a native apply phase listed "not finished on the
+        host" (in progress on the workflow, no `util metrics start` left
+        open) ends with its `resume with:` too."""
+        _native_apply(plan, metrics_start=False)
+        capsys.readouterr()
+        run_status.main(["--plan-file", TYPED, "--view", "run", "--host",
+                         "claude-code"])
+        lines = capsys.readouterr().out.splitlines()
+        at = next(i for i, line in enumerate(lines)
+                  if line.startswith("  apply-suggestions  "))
+        assert lines[at].startswith(
+            "  apply-suggestions  not finished on the host"), lines[at]
+        assert lines[at + 1] == (
+            f"      resume with: /multi-llm:multi-llm --apply-suggestions {TYPED} "
+            "--resume")
 
     def test_json_carries_when_state_json_last_changed(self, plan, capsys):
         state_file = _native_apply(plan)
