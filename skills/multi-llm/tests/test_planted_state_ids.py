@@ -51,7 +51,7 @@ class TestTheIdsReadOffStateJson:
         state = _planted_state()
         why = native_resume_why(state)
         assert why.startswith("runs the tasks that can run; T002's check ")
-        assert why.endswith(" (T006 waits on it)"), why
+        assert " (T006 waits on it)" in why, why
         assert "\n" not in why and "evil" not in why, why
         for answer in native_stop_answers(state):
             assert "\n" not in answer["why"] and "evil" not in answer["why"], answer

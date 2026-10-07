@@ -1773,6 +1773,34 @@ def blocked_by_check_reason(check_id: str) -> str:
     )
 
 
+#: How the resume's why ends when a failed batch moved bytes
+#: (:func:`compose_resume_why`; ``status``'s own words before fix round 23).
+HALF_APPLIED_LEFT_CLAUSE = (
+    "the half-applied state is left in place — inspect it, or "
+    "`util restore-batch` the failed batch, before resuming"
+)
+
+
+def implement_tasks_done(state: Any) -> int:
+    """How many tasks of the decomposition implement ran last
+    (``implement_task_ids``, else every ``T###`` id) ``state.json`` records
+    ``completed``: the workflow view's ``tasks_done``, which ``status``
+    counted as a resume's kept tasks. ``0`` when it cannot be read."""
+    if state is None or not hasattr(state, "get"):
+        return 0
+    try:
+        statuses = dict(state.get("task_status") or {})
+        current = state.get("implement_task_ids")
+    except Exception:  # noqa: BLE001 - an advisory count
+        return 0
+    if isinstance(current, list) and current:
+        return sum(1 for task_id in current if statuses.get(str(task_id)) == "completed")
+    return sum(
+        1 for task_id, status in statuses.items()
+        if _IMPLEMENT_TASK_ID.match(str(task_id)) and status == "completed"
+    )
+
+
 @dataclass(frozen=True)
 class FailedAnswerable:
     """A failed implement task a stop's ``--human-task`` answers can answer
@@ -1802,6 +1830,8 @@ def compose_resume_why(
     blocked: Mapping[str, str] = {},
     undone_with: Callable[[str], List[str]] = lambda _task_id: [],
     unit: str = "tasks",
+    kept: int = 0,
+    half_applied: bool = False,
 ) -> Optional[str]:
     """What the plain ``--resume`` of a stopped write phase does on an
     unchanged tree, from the stop's own facts, or ``None`` when nothing
@@ -1825,6 +1855,14 @@ def compose_resume_why(
     the stop from (the executor's ``_stop_resume_why``,
     :func:`native_resume_why`), and it is cut at a word to
     ``next_phase.MAX_RECORDED_WHY_CHARS`` (fix round 23).
+
+    It ends with what the resume keeps — *kept* tasks or batches already
+    done, and, with *half_applied*, that a failed batch's edits are left in
+    place — so every surface that relays the why says it in the same words:
+    ``status`` used to append those clauses itself, and the tool routes'
+    ``resume_why`` and ``util next-command --blocked`` did not (fix round 23,
+    review of round 22 relay #6). The cut takes the facts before them,
+    never them.
     """
 
     def waits(ids: Sequence[str]) -> str:
@@ -1859,6 +1897,9 @@ def compose_resume_why(
             parts.append(f"{task_id} is checked again before it is dispatched")
     if not parts:
         return None
+    tail = f"; keeps the {kept} already applied" if kept else ""
+    if half_applied:
+        tail += f"; {HALF_APPLIED_LEFT_CLAUSE}"
     # Fix round 23 (review of round 22, relay #4): within the length a route
     # reads back from the run's folder (`next_phase.recorded_why`), cut at a
     # word, so the tool routes and status carry the why the native block
@@ -1868,7 +1909,7 @@ def compose_resume_why(
     except ImportError:  # pragma: no cover - direct script runs
         from utils.next_phase import MAX_RECORDED_WHY_CHARS  # type: ignore
     return clip(f"runs the {unit} that can run; " + "; ".join(parts),
-                MAX_RECORDED_WHY_CHARS)
+                MAX_RECORDED_WHY_CHARS - len(tail)) + tail
 
 
 def compose_stop_answers(
@@ -2207,6 +2248,8 @@ def native_resume_why(
         },
         blocked=facts["blocked"],
         undone_with=facts["undone_with"],
+        # Fix round 23: what it keeps, as the executor's why says it.
+        kept=implement_tasks_done(state),
     )
 
 
@@ -10150,6 +10193,18 @@ class WriteBatchScheduler:
         refused = [o for o in failed if o.task_id in self._refused_before_dispatch]
         blocked = result.blocked_by_check if self.kind == "implement" else {}
         checks = self._blocking_checks(result) if blocked else []
+        # Fix round 23 (review of round 22, relay #6): what the resume keeps,
+        # counted as `status` counted it before it moved here — the rows the
+        # mirror records `ok`, for implement every task of the decomposition
+        # state.json records done — and whether a failed row moved bytes.
+        kept = sum(1 for o in result.outcomes if o.status == STATUS_OK)
+        if self.kind == "implement":
+            kept = max(kept, implement_tasks_done(self.state))
+        failed_rows = [o for o in result.outcomes if not o.ok]
+        half_applied = any(
+            o.files_touched or o.unrestorable or o.write_outcome == WRITE_PARTIAL
+            for o in failed_rows
+        )
         return compose_resume_why(
             refused=[o.task_id for o in refused],
             policy={
@@ -10178,6 +10233,8 @@ class WriteBatchScheduler:
             blocked=blocked,
             undone_with=undone_with,
             unit="tasks" if self.kind == "implement" else "batches",
+            kept=kept,
+            half_applied=half_applied,
         )
 
     def _verdict_carries_tree(self, task_id: str) -> bool:
