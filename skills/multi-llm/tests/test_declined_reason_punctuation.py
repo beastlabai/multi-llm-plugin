@@ -42,12 +42,44 @@ def test_the_executor_reads_a_reason_without_its_closing_stop(given):
     assert read.problems == []
 
 
-def test_a_reason_that_is_only_punctuation_is_no_reason():
+@pytest.mark.parametrize("given, kept", [
+    ("...", ".."), (".", "."), (" . ", "."), (";", ";"), (REASON + "..", REASON + "."),
+])
+def test_one_closing_mark_goes_and_only_when_text_remains(given, kept):
+    """Review of fix round 20, #2: stripping every closing mark read a
+    reason of "..." or "." as no reason, and the decline as a partial
+    application (exit 3) where round 18/19 recorded it declined."""
     read = executor.declined_items(
-        {"ids": ["b"], "declined": [{"id": "a", "reason": " . "}]}, ["a", "b"],
+        {"ids": ["b"], "declined": [{"id": "a", "reason": given}]}, ["a", "b"],
+    )
+    assert read.items == {"a": kept}
+    assert read.problems == []
+
+
+@pytest.mark.parametrize("given", ["", "   ", None])
+def test_no_text_is_still_no_reason(given):
+    read = executor.declined_items(
+        {"ids": ["b"], "declined": [{"id": "a", "reason": given}]}, ["a", "b"],
     )
     assert read.items == {}
     assert read.problems == ["`declined` gives no reason for a"]
+
+
+def test_the_native_leg_records_a_punctuation_only_reason(plan_dir, capsys):
+    plan, out = plan_dir
+    StateManager(plan).save()
+    phase_dir, _tasks = _materialize(
+        plan, out, "apply_suggestions", _suggestion_batches(), "apply-suggestions")
+    code, stdout, err, _result = _run([
+        "util", "batch-done", "--phase-dir", str(phase_dir),
+        "--task-id", "apply-batch-1", "--status", "completed",
+        "--declined", "g-rate=...",
+    ], capsys)
+    assert code == 0, err
+    assert "a decline without its reason" not in err
+    assert f"{batch_done.BATCH_DECLINED_MARKER} apply-batch-1 g-rate:" in stdout
+    processed = _state(out)["processed_apply-suggestions"]
+    assert processed["g-rate"]["details"]["reason"] == ".."
 
 
 def test_a_row_recorded_with_its_stop_reads_without_it():
