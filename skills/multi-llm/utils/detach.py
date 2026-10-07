@@ -1458,6 +1458,11 @@ class RunHandle:
         # ignores the copies.
         stream_bootstrap.streams_for_a_signal_handler()
         print(f"\nReceived {name}: aborting this detached run.", file=sys.stderr)
+        # Fix round 21: a write run's `[ETA]` lines get their closing line
+        # here, since `os._exit` below skips every ending that would print it
+        # ("batch 3/5 … ~0m 20s remaining" was the log's last word). Only a
+        # module already imported: nothing is imported under a signal.
+        _print_aborted_eta_line(name)
         # First, while the snapshots still name them: the provider CLIs this
         # worker is waiting on, and every process group they spawned. The
         # abort's `kill_tree` signals this worker's group, which holds the CLIs
@@ -1476,6 +1481,19 @@ class RunHandle:
             error=f"aborted_by_request ({name})",
         )
         os._exit(EXIT_NEEDS_HUMAN)
+
+
+def _print_aborted_eta_line(signal_name: str) -> None:
+    """Print the open write run's closing ``[ETA]`` line on an abort
+    (``metrics.aborted_eta_line``), when the metrics module is loaded at all
+    — a run that stamped an ``[ETA]`` baseline loaded it. Never raises."""
+    try:
+        metrics = sys.modules.get(f"{__package__}.metrics") if __package__ else None
+        line = metrics.aborted_eta_line(signal_name) if metrics is not None else None
+        if line:
+            print(line, file=sys.stderr)
+    except Exception:  # noqa: BLE001 - the abort's record must still be written
+        pass
 
 
 def _restore_codex_trust() -> None:

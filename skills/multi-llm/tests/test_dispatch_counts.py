@@ -346,13 +346,14 @@ class TestTheFirstRunEtaCountsWhatItDispatches:
         assert _organized(text) == [
             "Organized into 3 execution batches: 5 task(s) to dispatch "
             "(T007 waits on a check's verdict)"], text
-        # T007 leaves the total once T002 reported, as before; T005 and T006
-        # were never in it.
-        assert _etas(text) == [(1, 5), (2, 5), (3, 5), (4, 4)], text
-        last = [l for l in text.splitlines() if l.startswith("[ETA] implement:")][-1]
-        assert "ALL BATCHES COMPLETE" in last, last
-        # Every task the walk counted finished: nothing to say on a stop.
-        assert "run stopped after batch" not in text
+        # T007 leaves the total once T002 reported, on T002's own line since
+        # fix round 21; T005 and T006 were never in it.
+        assert _etas(text) == [(1, 5), (2, 4), (3, 4), (4, 4)], text
+        eta = [l for l in text.splitlines() if l.startswith("[ETA] implement:")]
+        assert "ALL BATCHES COMPLETE" in eta[-2], eta
+        # Every task the walk counted finished, and the stop still closes the
+        # lines (fix round 21: one closing line on every ending).
+        assert eta[-1] == "[ETA] implement: run stopped after batch 4/4", eta
         assert "T005 refused before dispatch" in text
 
     def test_the_status_line_agrees_with_it_at_the_stop(
@@ -391,8 +392,9 @@ class TestTheFirstRunEtaCountsWhatItDispatches:
         text = _first_run(repo, capsys)
         assert "ERROR: implement stopped at T005" in text
         eta = [l for l in text.splitlines() if l.startswith("[ETA] implement:")]
-        # T007 left with T002's findings; T005 ran and failed; T006 did not run.
-        assert _etas(text) == [(1, 7), (2, 7), (3, 7), (4, 6), (5, 6)], eta
+        # T007 left with T002's findings, on T002's own line since fix round
+        # 21; T005 ran and failed; T006 did not run.
+        assert _etas(text) == [(1, 7), (2, 6), (3, 6), (4, 6), (5, 6)], eta
         assert eta[-1] == (
             "[ETA] implement: run stopped after batch 5/6 · 1 task(s) not run"
         ), eta
