@@ -423,3 +423,45 @@ class TestTheAggregateReadsOnlyTheModelsThePhaseRecords:
         assert len(_reported_results(report)) == 2
         assert (phase_dir / MISNAMED).exists()
 
+
+# ---------------------------------------------------------------------------
+# Issue 2: what the host is told to say about a retry and about such a file
+# ---------------------------------------------------------------------------
+
+_REVIEW_RUNBOOKS = ("review-plan.md", "review-tasks.md", "review-code.md")
+
+
+def _flat(name):
+    text = (SKILL_ROOT / "instructions" / name).read_text(encoding="utf-8")
+    return " ".join(text.split())
+
+
+class TestTheRunbooksSayWhatARetryRanAndWhatAFileWas:
+    """Live run 10: the host's `--force --models <both>` retry ran pi alone
+    (`[SKIP] codex:… - already has results`), and it called the misnamed file
+    "a leftover file from an earlier run" — words the plugin never printed."""
+
+    @pytest.mark.parametrize("name", _REVIEW_RUNBOOKS)
+    def test_the_retry_rule_names_the_skip_line_and_asks_which_model_reran(self, name):
+        text = _flat(name)
+        assert "`[SKIP] <model> - already has results`" in text
+        assert "tell the user which model re-ran and which kept its result" in text
+
+    @pytest.mark.parametrize("name", _REVIEW_RUNBOOKS)
+    def test_the_report_step_relays_the_result_file_lines(self, name):
+        text = _flat(name)
+        assert "`[RESULT_FILE_MISNAMED] <model> wrote its result to <file> instead of <file>; …`" in text
+        assert "`[RESULT_SET_ASIDE] <file> is not the result file of any model this review ran (…)`" in text
+        assert "`**Result files:**`" in text
+        assert "Never guess where such a file came from" in text
+
+    def test_the_documented_skip_line_is_what_both_lanes_print(self):
+        for path in ("code_review_orchestrator.py", "utils/review_orchestrator_base.py"):
+            source = (SKILL_ROOT / path).read_text(encoding="utf-8")
+            assert 'print(f"[SKIP] {display_name} - already has results (' in source, path
+
+    def test_the_documented_marker_words_are_the_printed_ones(self):
+        note = result_files.misnamed_result_note(PI, MISNAMED, f"{PI_STEM}.json")
+        assert note.startswith(f"{PI} wrote its result to {MISNAMED} instead of {PI_STEM}.json; ")
+        aside = result_files.set_aside_note(MISNAMED, f"{MISNAMED}.set-aside", [PI, CODEX])
+        assert aside.startswith(f"{MISNAMED} is not the result file of any model this review ran (")

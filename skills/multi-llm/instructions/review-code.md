@@ -152,7 +152,9 @@ to bare `python`.
    - **Partial results** (D6 row 3): under `--yes`, a model that produced nothing
      is re-run once via `--force` with the original run's full `--models`
      selection (only the missing model actually runs; the run's report covers
-     only the models passed) and never with `--rerun-all`; a second failure
+     only the models passed; the retry prints `[SKIP] <model> - already has
+     results` for each model it keeps, so tell the user which model re-ran and
+     which kept its result) and never with `--rerun-all`; a second failure
      is reported as `[PARTIAL_RESULTS: <model>,…]` with
      `MULTI_LLM_RESULT.state: "partial"` and exit **0**. Zero results is exit
      **3** naming the retry command.
@@ -656,6 +658,8 @@ After spawning subagents to apply fixes:
    Report the verdict counts from `MULTI_LLM_RESULT.validation_counts` (`{valid, invalid, needs_human_decision, validation_failed}`, present only when validation ran, and carried by `status --view run` too). If `needs_human_decision` or `validation_failed` is non-zero, point at `report.md` for those groups; they are decided in apply-code-fixes.
 
    Name every reviewer that produced nothing, with its reason (`references/summary-format.md`). `report.md` lists them on its `**Models failed:** N of M requested — …` line, directly under `**Models:**`. A `--reaggregate` also prints one `[MODEL_FAILED] <model>: <reason>` line per requested reviewer that still has no result, and, when any is left, prints `[PARTIAL_RESULTS: <model>,…]` and sets `MULTI_LLM_RESULT.state: "partial"` with exit **0**: the phase is still complete and `next` stays `null`, so nothing is retried — report the failures from those lines (or from the `failed` rows of `progress.models`). A `--reaggregate` that finds no readable result at all while reviewers are recorded failed exits **3** naming them and the `--force` retry, and records no completed phase.
+
+   A reviewer can write its result under the wrong file name. The plugin then says what it did, in a line you give as printed: `[RESULT_FILE_MISNAMED] <model> wrote its result to <file> instead of <file>; …` (it read the result from there, so that reviewer did not fail), or `[RESULT_SET_ASIDE] <file> is not the result file of any model this review ran (…)` (left out of the report and renamed, nothing deleted). `report.md`'s `**Result files:**` line has the same words. Never guess where such a file came from, and never call it a leftover of an earlier run unless the plugin says so.
 
 ---
 
