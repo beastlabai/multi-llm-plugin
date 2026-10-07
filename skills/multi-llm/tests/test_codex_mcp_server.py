@@ -2727,6 +2727,38 @@ class TestTheStopsAnswersLeadTheOptions:
             "ok", "state", "user_next_step", "resume_command", "resume_why",
             "resume_answers"]
 
+    def test_the_written_section_is_the_way_forward(self, harness):
+        """Fix round 24 (live run 10, every stop): with `user_next_step` null
+        the hosts composed their own blocks from `resume_answers`, reworded
+        the whys and listed tool calls as options. The lookup's section
+        (`user_resume.markdown`) is `resume_markdown`, and the message's
+        clause says to copy it, in place of the resume and answers clauses."""
+        sys.path.insert(0, str(SKILL_ROOT))
+        from utils import next_phase
+
+        why = "runs the tasks that can run; keeps the 4 tasks already done"
+        step = dict(stop_answers_step(), why=why)
+        step["markdown"] = next_phase.render_resume_markdown(
+            "implement", SPELLED_RESUME, why, step["answers"])
+        envelope = self._run(harness, step)
+        text = SURFACE["needs_human_message"]
+        assert envelope["resume_markdown"] == step["markdown"]
+        assert envelope["message"].endswith(text["resume_markdown"])
+        assert step["answers_text"] not in envelope["message"]
+        assert text["resume_why"].replace("{why}", why) not in envelope["message"]
+        assert envelope["resume_why"] == why
+        assert [a["command"] for a in envelope["resume_answers"]] == [
+            a["command"] for a in step["answers"]]
+        assert list(envelope)[:7] == [
+            "ok", "state", "user_next_step", "resume_command", "resume_why",
+            "resume_answers", "resume_markdown"]
+
+    def test_a_section_that_is_not_text_is_not_lifted(self, harness):
+        envelope = self._run(harness, dict(stop_answers_step(), markdown=["x"]))
+        assert "resume_markdown" not in envelope
+        assert envelope["message"].endswith(SURFACE["needs_human_message"][
+            "answers"].replace("{answers}", stop_answers_step()["answers_text"]))
+
     def test_a_lookup_with_no_answers_leaves_the_options_as_scraped(self, harness):
         envelope = self._run(harness, {})
         assert "resume_answers" not in envelope
