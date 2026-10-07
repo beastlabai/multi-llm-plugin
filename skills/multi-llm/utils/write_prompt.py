@@ -73,12 +73,14 @@ try:
     )
     from .write_batch_scheduler import (
         DISPATCHED_PROMPTS_SUBDIR,
+        OWN_RUN_CONTEXT_PHASES,
         SWEEP_MAX_FILES,
         accepted_upstream_checks,
         bind_prior_changes,
         decomposition_graph,
         dispatched_prompt_path,
         is_check_task,
+        last_phase_end,
         rerunnable_checks,
         upstream_held_check,
         with_result_contract,
@@ -102,12 +104,14 @@ except ImportError:  # pragma: no cover - direct script invocation
     )
     from utils.write_batch_scheduler import (  # type: ignore
         DISPATCHED_PROMPTS_SUBDIR,
+        OWN_RUN_CONTEXT_PHASES,
         SWEEP_MAX_FILES,
         accepted_upstream_checks,
         bind_prior_changes,
         decomposition_graph,
         dispatched_prompt_path,
         is_check_task,
+        last_phase_end,
         rerunnable_checks,
         upstream_held_check,
         with_result_contract,
@@ -250,10 +254,17 @@ def render_write_prompt(
         checks_section=_known_checks_section(phase_dir, document, task_id),
     )
     scoped = _prior_changes.canonical_phase(phase)
-    entries = [
-        entry for entry in _prior_changes.entries(output_dir)
-        if _prior_changes.canonical_phase(entry.get("phase")) == scoped
-    ]
+    if scoped in OWN_RUN_CONTEXT_PHASES:
+        # Fix round 22: the entries the render bound, this run's own.
+        entries = _prior_changes.run_entries(
+            output_dir, phase,
+            last_phase_end(_known_checks.read_state(output_dir), phase),
+        )
+    else:
+        entries = [
+            entry for entry in _prior_changes.entries(output_dir)
+            if _prior_changes.canonical_phase(entry.get("phase")) == scoped
+        ]
     info = {
         "kind": kind,
         "phase": phase,
@@ -472,10 +483,18 @@ def ordering_warnings(phase_dir: Path, task_id: str) -> List[str]:
     if not isinstance(state, dict):
         return []
     statuses = state.get("task_status") or {}
-    scoped = _prior_changes.canonical_phase(_phase_word(document))
+    phase = _phase_word(document)
+    scoped = _prior_changes.canonical_phase(phase)
+    # Fix round 22: a phase whose prompts carry only this run's batches
+    # counts only this run's entries as logged, as the render binds them.
     logged = {
         str(entry.get("id") or "")
-        for entry in _prior_changes.entries(str(phase_dir.parent))
+        for entry in (
+            _prior_changes.run_entries(
+                str(phase_dir.parent), phase, last_phase_end(state, phase))
+            if scoped in OWN_RUN_CONTEXT_PHASES
+            else _prior_changes.entries(str(phase_dir.parent))
+        )
         if _prior_changes.canonical_phase(entry.get("phase")) == scoped
     }
     lines: List[str] = []

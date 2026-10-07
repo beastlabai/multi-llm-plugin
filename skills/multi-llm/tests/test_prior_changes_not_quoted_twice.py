@@ -6,8 +6,11 @@ with its "do not silently revert" rule) and then again as "Batch 1-3" under
 `## Changes Applied in Prior Batches`, because a phase's first dispatch has no
 entries of its own and the prior-changes block falls back to every phase's.
 The binding (`bind_prior_changes`, both legs) now leaves out what the prompt
-already quotes word for word and counts it on one line; an entry the record
-does not quote (past its five-entry budget) is still shown.
+already quotes word for word and counts it on one line. Fix round 22 (live
+run 9 #7): an apply-code-fixes batch's block lists only the earlier batches of
+its own run, so implement's entries are shown in the record alone, and the
+record names the ones past its five-entry budget by task id
+(`test_code_fix_prior_batches.py`).
 """
 
 from __future__ import annotations
@@ -65,10 +68,11 @@ def test_the_first_fix_batch_shows_the_implement_entries_once(tmp_path):
     assert bound.count("Created src/race.js with formatTime") == 1
     block = _block(bound)
     assert "**Batch" not in block
-    assert "... and 2 earlier entries already quoted in this prompt" in block
+    # Fix round 22: the first batch of the run has nothing of its own to list.
+    assert prior_changes.DEFAULT_TEXT in block, block
 
 
-def test_an_entry_the_record_does_not_quote_is_still_shown(tmp_path):
+def test_an_entry_the_record_does_not_quote_is_named_by_its_task_id(tmp_path):
     entries = [
         (f"T{n:03d}", "implement", f"Task {n} edited src/other{n}.js.")
         for n in range(1, MAX_IMPLEMENTATION_RECORD_ENTRIES + 3)
@@ -79,11 +83,15 @@ def test_an_entry_the_record_does_not_quote_is_still_shown(tmp_path):
         {"task_id": "apply-fix-batch-0", "prompt": prompt},
         output_dir=str(tmp_path), phase="apply-fixes",
     )
-    for _id, _phase, summary in entries:
+    shown = entries[:MAX_IMPLEMENTATION_RECORD_ENTRIES]
+    for _id, _phase, summary in shown:
         assert bound.count(summary) == 1, summary
-    block = _block(bound)
-    assert (f"... and {MAX_IMPLEMENTATION_RECORD_ENTRIES} earlier entries already "
-            "quoted in this prompt") in block
+    left_out = [entry_id for entry_id, _phase, _summary in entries[
+        MAX_IMPLEMENTATION_RECORD_ENTRIES:-1]]
+    assert f"- and 2 more tasks: {', '.join(left_out)}" in bound
+    for _id, _phase, summary in entries[MAX_IMPLEMENTATION_RECORD_ENTRIES:]:
+        assert summary not in bound, summary
+    assert prior_changes.DEFAULT_TEXT in _block(bound)
 
 
 def test_a_prompt_that_quotes_nothing_renders_as_before(tmp_path):
