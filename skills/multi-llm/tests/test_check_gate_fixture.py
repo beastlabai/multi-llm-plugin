@@ -663,14 +663,9 @@ class TestTheNativeLeg:
         assert code == 3, (prompt, err)
         assert "Check findings the user accepted" not in prompt
 
-    def test_next_command_prints_the_resume_and_one_combined_answers_command(
-        self, repo, capsys,
-    ):
-        """Fix round 14 (stop fixture, Claude Code fix/accept 01): the native
-        stop printed no command — the host wrote "re-run with --resume" as
-        prose, or two separate commands the user had to merge. The report's
-        `util next-command` lookup prints the resume and, beside it, one
-        command carrying every answer the stop waits for."""
+    def _native_first_stop(self, repo, capsys) -> None:
+        """The native leg's first stop: T001, T003, T004 done, T002's check
+        with findings (holding T007), T005 refused by the emit."""
         self._emit(repo, capsys)
         phase = str(repo.phase_dir)
         for task_id in ("T001", "T003", "T004"):
@@ -682,30 +677,95 @@ class TestTheNativeLeg:
         state_file = str(get_or_create_state(repo.plan).state_file)
         assert self._util(capsys, "finalize-tracking", "--state-file", state_file)[0] == 0
 
+    @staticmethod
+    def _answer_pairs(out: str) -> list:
+        """``(why, command)`` per ``[NEXT_COMMAND_ANSWERS]`` line, in order,
+        each with the why line printed directly above it."""
+        pairs, why = [], None
+        for line in out.splitlines():
+            if line.startswith("[NEXT_COMMAND_ANSWERS_WHY] "):
+                why = line.split(" ", 1)[1]
+            elif line.startswith("[NEXT_COMMAND_ANSWERS] "):
+                pairs.append((why, line.split(" ", 1)[1]))
+                why = None
+        return pairs
+
+    def test_next_command_prints_the_resume_and_each_answer_the_stop_offers(
+        self, repo, capsys,
+    ):
+        """Fix round 14 (stop fixture, Claude Code fix/accept 01): the native
+        stop printed no command — the host wrote "re-run with --resume" as
+        prose, or two separate commands the user had to merge. The report's
+        `util next-command` lookup prints the resume and, beside it, the
+        combined command. Fix round 20 (live run 8, Claude Code stop 01): that
+        one was all, while the tool routes list each answer alone too; the
+        host described `T005=skip` and `=done` as options the plugin never
+        printed, and the fix path had no T005-only command. It now lists the
+        same six answers, each below its why."""
+        from tests.test_stop_results_surface import FIRST_STOP_FLAGS
+
+        self._native_first_stop(repo, capsys)
         code, out, err = self._util(
             capsys, "next-command", "plans/checked.md", "--after", "implement",
         )
         assert code == 0, err
         lines = [line for line in out.splitlines() if line.startswith("[NEXT_COMMAND")]
         assert lines[0].startswith("[NEXT_COMMAND] ")
-        assert lines[0].endswith("--implement plans/checked.md --resume")
-        assert lines[1].startswith("[NEXT_COMMAND_ANSWERS_WHY] or, in one command: ")
+        resume = lines[0].split(" ", 1)[1]
+        assert resume.endswith("--implement plans/checked.md --resume")
+        pairs = self._answer_pairs(out)
+        prefix = resume[: -len(" --resume")]
+        assert [command for _why, command in pairs] == [
+            f"{prefix} {' '.join(flags)}" for flags in FIRST_STOP_FLAGS]
+        assert all(why for why, _command in pairs), pairs
+        whys = [why for why, _command in pairs]
+        assert whys[0] == (
+            "accept T002's check findings and leave T005 undone, with the "
+            "tasks that depend on it (T006); the rest runs")
+        assert whys[1] == "leave T005 undone, with the tasks that depend on it (T006)"
         # Fix round 16 (live run 6, Claude Code 01): the released task is
         # told the findings were accepted, as the tool routes' stop says.
-        assert (
-            "accept the findings of T002 (then T007 runs, told that you "
-            "accepted the findings)" in lines[1]
-        )
-        assert "leave T005 undone" in lines[1]
-        assert lines[2].startswith("[NEXT_COMMAND_ANSWERS] ")
-        assert lines[2].endswith(
-            "--implement plans/checked.md --resume --human-task T002=done "
-            "--human-task T005=skip"
-        )
+        assert whys[3].startswith(
+            "accept T002's check findings: T007 then run, told that you "
+            "accepted the findings")
         result = json.loads(out.rsplit("MULTI_LLM_RESULT: ", 1)[1])
         step = result["user_next_step"]
-        assert step["answers"]["answers"] == ["T002=done", "T005=skip"]
-        assert step["answers"]["command"] == lines[2].split(" ", 1)[1]
+        assert [entry["command"] for entry in step["answers"]] == [
+            command for _why, command in pairs]
+        assert [entry["why"] for entry in step["answers"]] == whys
+        assert step["answers"][0]["answers"] == ["T002=done", "T005=skip"]
+        assert step["answers"][1]["answers"] == ["T005=skip"]
+
+    def test_its_answers_are_the_executor_stops_word_for_word(
+        self, repo, capsys, tmp_path, monkeypatch,
+    ):
+        """The same fixture's first stop on the executor leg records the
+        answers the tool routes list (`resume_answers`, `options`); the
+        native block gives the same flags with the same whys, in the same
+        order (fix round 20)."""
+        self._native_first_stop(repo, capsys)
+        code, out, err = self._util(
+            capsys, "next-command", "plans/checked.md", "--after", "implement",
+        )
+        assert code == 0, err
+        native = [
+            (why, command.split(" --implement plans/checked.md ", 1)[1].split())
+            for why, command in self._answer_pairs(out)
+        ]
+
+        # A second repository, as a second process would see it.
+        registry._RUN_ANCHOR = None
+        (tmp_path / "executor-leg").mkdir()
+        other = make_repo(tmp_path / "executor-leg", monkeypatch, PLAN)
+        _policy(other, DENY)
+        monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(
+            [f"T00{n}" for n in range(1, 8)]))
+        monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS", CHECK_GATE)
+        _first_run(other, capsys)
+        report = json.loads((other.phase_dir / "write_batch_report.json").read_text())
+        executor = [(entry["why"], entry["flags"]) for entry in report["stop"]["answers"]]
+        assert len(executor) == 6
+        assert native == executor
 
     def test_a_resume_that_answered_everything_prints_no_answers_line(
         self, repo, capsys,
@@ -736,16 +796,23 @@ class TestTheNativeLeg:
         assert (
             "A native `implement` that stopped part-way exited `0`, so look it "
             "up: it prints the `--resume` command and, when tasks wait for an "
-            "answer, `[NEXT_COMMAND_ANSWERS]`"
+            "answer, each answer the stop offers as a `[NEXT_COMMAND_ANSWERS]` "
+            "line below its `[NEXT_COMMAND_ANSWERS_WHY]` line (first the one "
+            "command carrying every answer, then each answer alone) — end with "
+            "the resume and every answer"
         ) in skill
-        summary = (root / "references" / "summary-format.md").read_text(encoding="utf-8")
-        assert "`[NEXT_COMMAND_ANSWERS]` (`user_next_step.answers`" in summary
+        summary = " ".join((root / "references" / "summary-format.md").read_text(
+            encoding="utf-8").split())
+        assert "`[NEXT_COMMAND_ANSWERS]` pairs (`user_next_step.answers`" in summary
+        assert "then each answer alone), write every pair" in summary
         core = (root / "instructions" / "implement.md").read_text(encoding="utf-8")
         assert (
             "At a stop (step 10 ran without `--mark-completed`) the next-step "
             "lookup of `references/summary-format.md` still runs"
         ) in core
         assert "never write a resume or `--human-task` command of your own" in core
+        assert ("End the report with the resume command and every answer, each "
+                "alone in its own fenced block") in core
 
     def test_the_handoff_carries_the_plan_as_typed_for_finalize_tracking(
         self, repo, capsys,

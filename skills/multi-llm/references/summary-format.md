@@ -97,12 +97,13 @@ Every mode ends with this report. Four rules, and a fifth for `ask`:
     then each entry in the order the key lists them — its `why` as plain text
     outside the fence, then its `command` alone in its own fenced block. When
     the lookup also printed `[NEXT_COMMAND_ANSWERS_WHY]` /
-    `[NEXT_COMMAND_ANSWERS]` (`user_next_step.answers`: a stopped implement's
-    one command carrying every `--human-task` answer it waits for), write that
-    why as plain text and that command alone in its own fenced block, last. A
-    stopped implement's lookup can also print a `[TESTS_NOT_RUN]` line above
-    them, saying nothing ran the repository's tests: give its text verbatim in
-    the report, above `### Next Steps`; it is never a command. When
+    `[NEXT_COMMAND_ANSWERS]` pairs (`user_next_step.answers`: a stopped
+    implement's `--human-task` answers, the one command carrying every answer
+    first, then each answer alone), write every pair, in the order printed,
+    last: its why as plain text, then its command alone in its own fenced
+    block. A stopped implement's lookup can also print a `[TESTS_NOT_RUN]`
+    line above them, saying nothing ran the repository's tests: give its text
+    verbatim in the report, above `### Next Steps`; it is never a command. When
     `complete` is `true` (its `command` is then `null`), write
     "Workflow complete." instead, and when it carries `manual_tasks`, list
     each one under it, its `id` and `title`, as the user's to do: implement

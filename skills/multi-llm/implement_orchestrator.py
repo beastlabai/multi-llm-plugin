@@ -1765,6 +1765,7 @@ def _native_withheld(
     ``pending_tasks`` is recounted from what is left.
     """
     from utils.write_batch_scheduler import (
+        NATIVE_REFUSED_PREFIX,
         blocked_by_check_reason,
         decomposition_graph,
         transitive_dependents,
@@ -1834,7 +1835,7 @@ def _native_withheld(
             )
             if message is None:
                 continue
-            refused[task_id] = f"refused before dispatch: {message}"
+            refused[task_id] = f"{NATIVE_REFUSED_PREFIX}{message}"
         for task_id in sorted(refused):
             state.update_task_status(task_id, "failed", reason=refused[task_id])
             for dependent in transitive_dependents(graph, task_id):
