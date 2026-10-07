@@ -450,6 +450,19 @@ TOOL_USER_NEXT_STEP_LINE = (
     "type, never a call."
 )
 
+#: The finished run's relay (live run 8, OpenCode racing 08): a completed
+#: apply-code-fixes result carried, in `result.notice`, that nothing ran the
+#: repository's tests and that two invalid fixes were not applied, and the host
+#: relayed neither: no route's text named the key. The stop's own line is the
+#: result's `error` (:data:`TOOL_OUTCOMES_LINE`); this is the other half.
+#: Rendered after :data:`TOOL_NO_COMPOSED_COMMAND_LINE` on both package hosts.
+TOOL_NOTICE_LINE = (
+    "A finished run's `result` can carry a `notice`: what the run left out or "
+    "could not check, such as items it did not apply or that nothing ran this "
+    "repository's tests. Report what it says, every part of it, as plain text "
+    "outside any fenced block."
+)
+
 #: The user-next-step line's sibling (racing re-run 2026-10-04): after a failed
 #: generate-tasks whose result carried no command at all, an OpenCode host model
 #: printed a "next phase" it composed itself, in the tool-call spelling
