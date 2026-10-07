@@ -1913,36 +1913,48 @@ def _kept_labels(state: StateManager, plan: Any = None) -> Dict[str, str]:
     list — "accepted with its check findings", "accepted after failing",
     "completed by hand" — from *plan* (this run's human-task plan) and the
     answers on record, in the words the executor's ``resume: kept`` line and
-    summary.md use (``write_batch_scheduler.answered_done_label``)."""
+    summary.md use (``write_batch_scheduler.answered_done_label``); and a
+    check whose findings stand, not accepted, as
+    ``write_batch_scheduler.KEPT_WITH_FINDINGS_LABEL`` (fix round 20, live
+    run 8 #6: 01b and 01c listed T002 as if it had passed)."""
     from types import SimpleNamespace
 
     from utils.write_batch_scheduler import (
+        KEPT_WITH_FINDINGS_LABEL,
         answered_done_label,
         answered_done_on_record,
+        rerunnable_checks,
     )
 
     accepted, completed = answered_done_on_record(state)
     accepted = dict(accepted)
     completed = list(completed)
+    retried = set()
     if plan is not None:
         accepted.update(getattr(plan, "accepted", None) or {})
         completed += list(getattr(plan, "completed", None) or [])
+        retried = set(getattr(plan, "retry", None) or ())
     view = SimpleNamespace(accepted=accepted)
-    return {
+    labels = {
+        task_id: KEPT_WITH_FINDINGS_LABEL
+        for task_id in rerunnable_checks(state)
+        if task_id not in retried
+    }
+    labels.update({
         task_id: answered_done_label(view, task_id)
         for task_id in list(accepted) + completed
-    }
+    })
+    return labels
 
 
 def _kept_named(kept: Sequence[str], labels: Dict[str, str]) -> str:
     """The kept tasks as a resume line names them: the plain ones first (at
-    most eight), then each answered one with how it was answered."""
-    plain = [task_id for task_id in kept if task_id not in labels]
-    shown = ", ".join(plain[:8]) + (", …" if len(plain) > 8 else "")
-    answered = ", ".join(
-        f"{task_id} ({labels[task_id]})" for task_id in kept if task_id in labels
-    )
-    return ", ".join(part for part in (shown, answered) if part)
+    most eight), then each labelled one with what it is
+    (``write_batch_scheduler.kept_named``, the executor's and the progress
+    line's words too)."""
+    from utils.write_batch_scheduler import kept_named
+
+    return kept_named(kept, labels)
 
 
 def _continued_line(kept: Sequence[str], labels: Optional[Dict[str, str]] = None) -> str:

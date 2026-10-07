@@ -70,9 +70,12 @@ def test_a_plain_resume_counts_what_it_kept_and_does_not_call_a_refusal_dispatch
     _first_run(repo, capsys)
     assert _implement(repo, "--resume") == 3
     line = _tally(_text(capsys))
+    # Fix round 20 (live run 8 #6): T002 is named as a check whose findings
+    # stand, not listed as if it had passed.
     assert line.endswith(
-        "resume: kept 4 task(s) an earlier run finished — T001, T002, T003, "
-        "T004; dispatched 0; refused before dispatch 1 (T005); not reached 2"
+        "resume: kept 4 task(s) an earlier run finished — T001, T003, T004, "
+        "T002 (its check reported problems, not run again while the files are "
+        "unchanged); dispatched 0; refused before dispatch 1 (T005); not reached 2"
     ), line
 
 

@@ -397,8 +397,10 @@ class TestAcceptingTheFailure:
         write = mirror["progress"]["write_subagents"]
         assert write["accepted_task_ids"] == ["T002"]
         assert write["total"] == 2 and write["completed"] == 2
-        assert "accepted after failing T002" in ", ".join(
-            run_status._mirror_text("write_subagents", write)
+        # Fix round 20 (run 8 #6): kept from the earlier run, not dispatched,
+        # and named in the `resume: kept` line's words.
+        assert "(1 kept from an earlier run: T002 (accepted after failing))" in (
+            ", ".join(run_status._mirror_text("write_subagents", write))
         )
 
     def test_skip_leaves_the_check_and_its_dependents_undone(self, repo, capsys):

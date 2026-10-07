@@ -29,8 +29,10 @@ from tests.test_check_gate_fixture import (  # noqa: E402,F401
 from tests.test_implement_stop_account import _implement  # noqa: E402
 from utils import run_status  # noqa: E402
 
+#: Fix round 20 (run 8 #6): "accepted with its check findings", the words of
+#: the `resume: kept` line and of the progress line's kept note.
 ACCEPTED = (
-    "5/7 done; completed: T001, T003, T004, T007; accepted with their check "
+    "5/7 done; completed: T001, T003, T004, T007; accepted with its check "
     "findings: T002; skipped at your request: T005; skipped (depend on a task "
     "you skipped): T006"
 )
@@ -62,7 +64,13 @@ class TestAfterAResume:
         # check as what it is.
         progress = [l for l in out.splitlines() if "progress:" in l and "implement" in l]
         assert progress and "1/1 batches ok" in progress[0], out
-        assert "accepted with their check findings T002" in progress[0]
+        # Fix round 20 (OpenCode accept 02, run 8 #6): kept from the earlier
+        # run, not dispatched, in the `resume: kept` line's words.
+        assert (
+            "1/1 batches ok (1 kept from an earlier run: T002 (accepted with "
+            "its check findings)), 1/1 items applied"
+        ) in progress[0], progress[0]
+        assert "accepted with their check findings" not in progress[0]
         assert "accepted after failing" not in progress[0]
 
     def test_the_run_view_tallies_them_too(self, repo, capsys):

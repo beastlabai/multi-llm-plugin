@@ -905,6 +905,38 @@ ACCEPTED_WITH_FINDINGS_MARK = "after its check reported problems"
 COMPLETED_MANUAL_REASON = "answered --human-task <id>=done"
 
 
+#: How a check the user accepted with its findings (``--human-task <id>=done``)
+#: and a failed task the user accepted read in a kept list, summary.md's rows
+#: and ``status``'s tally (:func:`answered_done_label`; fix round 20: one
+#: spelling on every surface).
+ACCEPTED_WITH_FINDINGS_LABEL = "accepted with its check findings"
+ACCEPTED_AFTER_FAILING_LABEL = "accepted after failing"
+
+#: How a check kept from an earlier run with its findings standing reads in a
+#: kept list (fix round 20, live run 8 #6: the stop fixture's 01b and 01c
+#: named T002 kept beside T001, T003 and T004 as if it had passed). True
+#: where the run is still to decide (a continued run's opening line: it runs
+#: again once the files changed) and once it decided (the closing ``resume:
+#: kept`` line). An accepted check reads :func:`answered_done_label`'s
+#: "accepted with its check findings" instead.
+KEPT_WITH_FINDINGS_LABEL = (
+    "its check reported problems, not run again while the files are unchanged"
+)
+
+
+def kept_named(ids: Sequence[str], labels: Mapping[str, str], *, limit: int = 8) -> str:
+    """Kept tasks as every kept list names them: the plain ones first (at
+    most *limit*, then ``…``), then each labelled one as ``<id> (<label>)``
+    — the ``resume: kept`` lines of both legs and the progress line's
+    ``(<n> kept from an earlier run: …)`` (fix round 20)."""
+    plain = [str(t) for t in ids if str(t) not in labels]
+    shown = ", ".join(plain[:limit]) + (", …" if len(plain) > limit else "")
+    labelled = ", ".join(
+        f"{t} ({labels[str(t)]})" for t in ids if str(t) in labels
+    )
+    return ", ".join(part for part in (shown, labelled) if part)
+
+
 def answered_done_label(plan: Any, task_id: str) -> str:
     """How a task answered ``--human-task <id>=done`` reads in an account:
     "accepted with its check findings" (a check whose findings the user
@@ -914,9 +946,9 @@ def answered_done_label(plan: Any, task_id: str) -> str:
     accepted = getattr(plan, "accepted", None) or {}
     if task_id in accepted:
         return (
-            "accepted with its check findings"
+            ACCEPTED_WITH_FINDINGS_LABEL
             if ACCEPTED_WITH_FINDINGS_MARK in str(accepted.get(task_id) or "")
-            else "accepted after failing"
+            else ACCEPTED_AFTER_FAILING_LABEL
         )
     return "completed by hand"
 
@@ -3397,9 +3429,21 @@ class WriteBatchScheduler:
 
         kept_ids = [str(row.get("task_id")) for row in kept]
         dispatched_ids = [o.task_id for o in dispatched]
+        # Fix round 20 (live run 8 #6): a check kept with its findings
+        # standing says so, as an accepted one does — 01b read "T001, T002,
+        # T003, T004" as if T002 had passed.
+        with_findings = (
+            {o.task_id for o in result.outcomes if o.skipped and o.check_findings}
+            | set(rerunnable_checks(self.state))
+        ) if self.kind == "implement" else set()
+        plain_ids = [i for i in kept_ids if i not in with_findings]
         kept_named = ", ".join(
             part for part in (
-                named(kept_ids) + counted(kept_ids, kept) if kept_ids else "",
+                named(plain_ids) + counted(plain_ids, kept) if plain_ids else "",
+                ", ".join(
+                    f"{i} ({KEPT_WITH_FINDINGS_LABEL})"
+                    for i in kept_ids if i in with_findings
+                ),
                 ", ".join(answered_kept),
             ) if part
         )
