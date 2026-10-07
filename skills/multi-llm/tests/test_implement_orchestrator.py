@@ -630,7 +630,10 @@ class TestBuildTaskPromptAcceptanceCriteria:
             assert forbidden in dispatched, forbidden
         assert "the orchestrator that dispatched you is a sibling process" in dispatched
         assert "background servers" in dispatched
-        assert "verify with static checks only" in dispatched
+        # Fix round 21: a check the task names is run, so the rule forbids
+        # what stays running, never the checks themselves.
+        assert "watchers, browsers or any other background process" in dispatched
+        assert "static checks only" not in dispatched
 
     def test_the_raw_template_no_longer_duplicates_the_shared_seam(self):
         """The template itself should carry neither the process-safety rule
