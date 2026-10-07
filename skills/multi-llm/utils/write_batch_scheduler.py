@@ -9971,6 +9971,12 @@ class WriteBatchScheduler:
             return
         if done >= total:
             return
+        if done == 0:
+            self.log(
+                f"[ETA] {self.phase}: run stopped before any of its {total} "
+                f"task(s) finished"
+            )
+            return
         self.log(
             f"[ETA] {self.phase}: run stopped after batch {done}/{total} · "
             f"{total - done} task(s) not run"
@@ -9984,7 +9990,8 @@ class WriteBatchScheduler:
         `[ETA]` line `instructions/implement.md` step 5 describes (F4).
 
         The baseline is the number of **tasks** this run will actually dispatch
-        or resume-skip — :meth:`_eta_total`, the same total ``_record_metrics``
+        (or, on an apply phase, resume-skip) — :meth:`_eta_total`, the same
+        total ``_record_metrics``
         uses (and keeps the stored baseline at) — never the
         bare materialized count, which still counts a deferred human task that is
         never dispatched (N1, 2026-09-16: with the bare count, the stored
