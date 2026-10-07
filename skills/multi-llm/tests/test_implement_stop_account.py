@@ -398,8 +398,9 @@ class TestAcceptingTheFailure:
         assert write["accepted_task_ids"] == ["T002"]
         assert write["total"] == 2 and write["completed"] == 2
         # Fix round 20 (run 8 #6): kept from the earlier run, not dispatched,
-        # and named in the `resume: kept` line's words.
-        assert "(1 kept from an earlier run: T002 (accepted after failing))" in (
+        # and named in the `resume: kept` line's words; fix round 22: with
+        # T001, which the earlier run finished too.
+        assert "(2 kept from an earlier run: T001, T002 (accepted after failing))" in (
             ", ".join(run_status._mirror_text("write_subagents", write))
         )
 

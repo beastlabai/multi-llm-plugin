@@ -63,12 +63,13 @@ class TestAfterAResume:
         # The run's own line still counts the run, and names the accepted
         # check as what it is.
         progress = [l for l in out.splitlines() if "progress:" in l and "implement" in l]
-        assert progress and "1/1 batches ok" in progress[0], out
+        assert progress and "1/1 tasks ok" in progress[0], out
         # Fix round 20 (OpenCode accept 02, run 8 #6): kept from the earlier
-        # run, not dispatched, in the `resume: kept` line's words.
+        # run, not dispatched, in the `resume: kept` line's words; fix round
+        # 22: every task it kept, as that line names them.
         assert (
-            "1/1 batches ok (1 kept from an earlier run: T002 (accepted with "
-            "its check findings)), 1/1 items applied"
+            "1/1 tasks ok (4 kept from an earlier run: T001, T003, T004, T002 "
+            "(accepted with its check findings)), 1/1 items applied"
         ) in progress[0], progress[0]
         assert "accepted with their check findings" not in progress[0]
         assert "accepted after failing" not in progress[0]

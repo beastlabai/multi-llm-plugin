@@ -4113,27 +4113,10 @@ class WriteBatchScheduler:
         # kept) says nothing here; its batch lines already say what ran.
         if not self.resume or self.dry_run:
             return
-        # Kept: every task an earlier run finished that this run did not
-        # dispatch — a resume skip, and (fix round 14) a task the resume never
-        # materialized because `state.json` records it completed: implement
-        # materializes only the unfinished tasks, so its skips were empty and
-        # OpenCode racing 06b, which kept 14, printed no line at all. Read
-        # off the phase's report rows (this run's and the earlier runs'), the
-        # account the stop's "Done and kept" line is built from; a task
-        # answered `--human-task <id>=done` is its own bucket.
         this_run = {o.task_id for o in result.outcomes if not o.skipped}
         answered = set(result.human_plan.accepted) | set(result.human_plan.completed)
-        kept: List[Dict[str, Any]] = []
-        seen: set = set()
-        for row in result.report_rows():
-            task_id = str(row.get("task_id") or "")
-            if (
-                not task_id or task_id in seen or task_id in this_run
-                or task_id in answered or row.get("status") != STATUS_OK
-            ):
-                continue
-            seen.add(task_id)
-            kept.append(row)
+        kept = self._resume_kept_rows(result, result.outcomes)
+        seen = {str(row.get("task_id")) for row in kept}
         # Fix round 16 (Codex stop-path accept 02): a task answered
         # `--human-task <id>=done` is kept too, and the line says how — the
         # accepted check T002 was missing from "kept 3 … T001, T003, T004".
@@ -4209,6 +4192,47 @@ class WriteBatchScheduler:
             )
             + (f"; not reached {len(result.not_run)}" if result.not_run else "")
         )
+
+    def _resume_kept_rows(
+        self, result: SchedulerResult, outcomes: Sequence[TaskOutcome],
+    ) -> List[Dict[str, Any]]:
+        """The report rows of the tasks a resume kept: every task an earlier
+        run finished that this run did not dispatch — a resume skip, and
+        (fix round 14) a task the resume never materialized because
+        ``state.json`` records it completed: implement materializes only the
+        unfinished tasks, so its skips were empty and OpenCode racing 06b,
+        which kept 14, printed no line at all. Read off the phase's report
+        rows (this run's and the earlier runs'), the account the stop's
+        "Done and kept" line is built from; a task answered ``--human-task
+        <id>=done`` is its own bucket. ``[]`` on a run that is not a resume.
+
+        The ``resume: kept`` line and the write mirror's ``kept_task_ids``
+        (``status``'s ``(<n> kept from an earlier run: …)``) both read it,
+        so the two name the same tasks: fix round 22 (live run 9 #5) — Codex
+        01b's line kept four, its ``status`` said "1 kept". *outcomes* is
+        what finished so far (the mirror passes a batch's finished tasks
+        before they reach ``result``); a task the run's dispatch walk will
+        dispatch is never kept, though an earlier run finished it (a check
+        run again once the files changed).
+        """
+        if not self.resume or self.dry_run:
+            return []
+        this_run = {o.task_id for o in outcomes if not o.skipped}
+        if self._eta_scope is not None:
+            this_run |= set(self._eta_scope)
+        answered = set(result.human_plan.accepted) | set(result.human_plan.completed)
+        kept: List[Dict[str, Any]] = []
+        seen: set = set()
+        for row in result.report_rows():
+            task_id = str(row.get("task_id") or "")
+            if (
+                not task_id or task_id in seen or task_id in this_run
+                or task_id in answered or row.get("status") != STATUS_OK
+            ):
+                continue
+            seen.add(task_id)
+            kept.append(row)
+        return kept
 
     @staticmethod
     def _jail_line_count() -> int:
@@ -11657,6 +11681,10 @@ class WriteBatchScheduler:
             # since a disjoint group dispatches on threads.
             with self._sweep_lock:
                 in_flight = sorted(self._dispatch_started.items())
+            kept_ids = [
+                str(row.get("task_id"))
+                for row in self._resume_kept_rows(result, outcomes)
+            ] or [o.task_id for o in outcomes if o.skipped]
             _status_file.update_status(self.phase_dir, {
                 # The read phases record a phase-level `state` beside the run
                 # record; without one here `status` printed `phase state: (none)`
@@ -11755,8 +11783,10 @@ class WriteBatchScheduler:
                         # Fix round 18 (run 7 #3): the tasks this run kept
                         # from an earlier one instead of dispatching them, so
                         # `status` does not read them as this run's batches.
-                        **({"kept_task_ids": [o.task_id for o in outcomes if o.skipped]}
-                           if any(o.skipped for o in outcomes) else {}),
+                        # Fix round 22 (live run 9 #5): every task the
+                        # resume kept, as its `resume: kept` line names
+                        # them, not only the ones it materialized again.
+                        **({"kept_task_ids": kept_ids} if kept_ids else {}),
                         **({"check_findings_task_ids": [
                             o.task_id for o in outcomes
                             if o.ok and o.check_findings
