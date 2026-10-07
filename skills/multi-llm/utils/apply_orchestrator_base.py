@@ -1462,9 +1462,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # stamped `group_hash`, which is what the suggestion's `group_id` was
         # copied from. A `failed` record keeps the group in the work set (the
         # batch is dispatched again, as the executor leg re-dispatches a
-        # failed batch), and so does a record of an earlier review (fix round
-        # 22: a later review's re-report is offered again, on both legs);
-        # every other status drops it (`processed_record_counts`). On the
+        # failed batch), and so does a declined or skipped record of an
+        # earlier review (fix round 22: a later review's re-report of an item
+        # its batch did not apply is offered again, on both legs); every other
+        # record drops it (`processed_record_counts`). On the
         # executor leg a record the executor wrote drops nothing: its resume
         # evidence is the result file on disk (`_done_evidence`), under the
         # batch's own id.
