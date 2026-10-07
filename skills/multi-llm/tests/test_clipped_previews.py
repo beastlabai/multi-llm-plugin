@@ -228,3 +228,165 @@ class TestTheStopError:
         context.set_error(text)
         assert len(context.error) <= ERROR_MAX_CHARS
         assert_clean_cut(context.error, text)
+
+
+# ===========================================================================
+# What both legs record: a declined reason, a check's findings (the executor's
+# reading and `util batch-done`'s), and the native leg's printed plan of work
+# ===========================================================================
+
+from utils.subagent_executor import (  # noqa: E402
+    CHECK_FINDING_MAX_CHARS,
+    DECLINED_REASON_MAX_CHARS,
+    check_findings_from,
+    declined_reason,
+)
+
+LONG_REASON = " ".join([OPENCODE_REASON, CODEX_REASON]) + "."
+
+
+class TestRecords:
+    def test_a_declined_reason_is_cut_at_a_word(self):
+        reason = declined_reason(LONG_REASON + " " + LONG_REASON)
+        assert len(reason) <= DECLINED_REASON_MAX_CHARS
+        assert_clean_cut(reason, LONG_REASON)
+
+    def test_a_reason_that_fits_keeps_round_21s_one_mark_rule(self):
+        assert declined_reason(CODEX_REASON + ".") == CODEX_REASON
+
+    def test_a_checks_findings(self):
+        found = check_findings_from(
+            {"check": {"passed": False, "findings": [LONG_REASON * 2, T002_FINDING]}})
+        assert found[1] == T002_FINDING
+        assert len(found[0]) <= CHECK_FINDING_MAX_CHARS
+        assert_clean_cut(found[0], LONG_REASON)
+
+    def test_a_check_that_could_not_run(self):
+        found = check_findings_from({"check": {
+            "passed": False, "could_not_run": True, "findings": [LONG_REASON * 2]}})
+        assert len(found) == 1 and len(found[0]) <= CHECK_FINDING_MAX_CHARS
+        assert_clean_cut(found[0], LONG_REASON)
+
+    def test_a_check_that_is_not_an_object(self):
+        found = check_findings_from({"check": LONG_REASON})
+        shown = found[0][found[0].index("was str ") + 9:found[0].index(", not an object") - 1]
+        assert len(shown) <= 80 and ELLIPSIS in shown
+
+    def test_native_batch_done_prints_and_records_the_cut_reason(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        """`util batch-done --declined` (the native leg) prints `[BATCH_DECLINED]`
+        and records the reason through the same cut, and its stderr line for
+        a garbled `--listed-check` is cut the same way."""
+        import json
+        import subprocess
+
+        from utils import batch_done
+        from utils import provider_registry as registry
+        from utils.subagent_tasks import PRIOR_CHANGES_TOKEN
+        from utils.write_phase_bridge import (
+            materialize_write_tasks,
+            write_task_file_for_phase,
+        )
+
+        root = tmp_path / "repo"
+        root.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        config = tmp_path / "providers.yaml"
+        config.write_text("driver:\n  subagent_runner: codex:gpt-5.5\n", encoding="utf-8")
+        monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(config))
+        monkeypatch.setattr(registry, "_config", None)
+        monkeypatch.setattr(registry, "_config_key", None)
+        plan = root / "plans" / "kart.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("# Kart\n", encoding="utf-8")
+        out = root / "plans" / "kart"
+        phase_dir = out / "apply-fixes"
+        phase_dir.mkdir(parents=True)
+        batches = [{"file_key": "src/opponent.js",
+                    "prompt": f"Fix.\n\n{PRIOR_CHANGES_TOKEN}\n",
+                    "fixes": [{"group_id": "a1", "title": "A"},
+                              {"group_id": "b2", "title": "B"}]}]
+        tasks = materialize_write_tasks(
+            kind="apply_code_fixes", batches=batches, phase_dir=str(phase_dir),
+            plan_file=str(plan))
+        write_task_file_for_phase(
+            kind="apply_code_fixes", tasks=tasks, phase_dir=str(phase_dir),
+            plan_file=str(plan))
+        (out / "state.json").write_text(json.dumps({"plan_path": str(plan)}), encoding="utf-8")
+        declined_id = tasks[0]["expected_ids"][1]
+        reason = LONG_REASON + " " + LONG_REASON
+        assert batch_done.main([
+            "--phase-dir", str(phase_dir), "--task-id", "apply-fix-batch-0",
+            "--status", "completed", "--declined", f"{declined_id}={reason}",
+            "--listed-check", "garbled " + LONG_REASON * 3,
+        ]) == 0
+        captured = capsys.readouterr()
+        line = next(item for item in captured.out.splitlines()
+                    if item.startswith("[BATCH_DECLINED]"))
+        shown = line.split(" — ", 1)[1].split(". List it")[0]
+        assert len(shown) <= DECLINED_REASON_MAX_CHARS
+        assert_clean_cut(shown, reason)
+        ignored = next(item for item in captured.err.splitlines()
+                       if "--listed-check not recorded" in item)
+        assert_clean_cut(ignored.split("): ", 1)[1], "garbled " + LONG_REASON * 3)
+        state = json.loads((out / "state.json").read_text())
+        recorded = json.dumps(state, ensure_ascii=False)
+        assert shown in recorded
+
+
+def _bare(cls, **attrs):
+    orch = cls.__new__(cls)
+    defaults = {"args": type("A", (), {"output_format": "text"})(),
+                "plan_path": "plans/p.md", "valid": [], "needs_human": [],
+                "skipped": [], "batching_stats": {}, "formatted_human": [],
+                "_base_ref": "HEAD", "tasks_file": "plans/p/tasks/tasks.md"}
+    for key, value in {**defaults, **attrs}.items():
+        setattr(orch, key, value)
+    return orch
+
+
+class TestTheNativePlanOfWork:
+    """The apply phases' native emit prints each item's description, bounded."""
+
+    def _item(self, description: str) -> dict:
+        return {"title": "Clamp speed", "type": "bug", "importance": "HIGH",
+                "file": "src/opponent.js", "reference": "## Decisions",
+                "description": description}
+
+    def _shown(self, out: str) -> str:
+        return out.split("Description:\n  ", 1)[1].splitlines()[0]
+
+    def test_code_fixes(self, capsys):
+        from apply_code_fixes_orchestrator import ApplyCodeFixesOrchestrator
+
+        orch = _bare(ApplyCodeFixesOrchestrator)
+        orch.print_text_summary([{"fixes": [self._item(LONG_REASON)]}], "/dev/null")
+        shown = self._shown(capsys.readouterr().out)
+        assert len(shown) <= 200
+        assert_clean_cut(shown, LONG_REASON)
+
+    def test_suggestions(self, capsys):
+        from apply_suggestions_orchestrator import ApplySuggestionsOrchestrator
+
+        orch = _bare(ApplySuggestionsOrchestrator)
+        orch.print_text_summary([{"suggestions": [self._item(LONG_REASON)]}], "/dev/null")
+        assert_clean_cut(self._shown(capsys.readouterr().out), LONG_REASON)
+
+    def test_a_short_description_is_shown_whole_without_a_mark(self, capsys):
+        from apply_code_fixes_orchestrator import ApplyCodeFixesOrchestrator
+
+        orch = _bare(ApplyCodeFixesOrchestrator)
+        orch.print_text_summary([{"fixes": [self._item(T002_FINDING)]}], "/dev/null")
+        assert self._shown(capsys.readouterr().out) == T002_FINDING
+
+
+def test_the_review_fixes_section_of_the_plan(tmp_path):
+    import code_review_orchestrator
+
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Plan\n")
+    code_review_orchestrator.update_plan_with_fixes(
+        plan, [{"fixed": False, "issue_title": "Clamp", "reason": LONG_REASON}])
+    line = next(item for item in plan.read_text().splitlines() if "**Clamp**" in item)
+    assert_clean_cut(line, LONG_REASON)

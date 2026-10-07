@@ -108,6 +108,7 @@ try:
     )
     from .stream_bootstrap import bootstrap_streams
     from .subagent_executor import check_findings_from, declined_reason
+    from .text_clip import clip
     from .subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set
     from .write_phase_bridge import WRITE_TASK_FILENAME
     from .write_batch_scheduler import (
@@ -145,6 +146,7 @@ except ImportError:  # pragma: no cover - direct script invocation
     )
     from utils.stream_bootstrap import bootstrap_streams  # type: ignore
     from utils.subagent_executor import check_findings_from, declined_reason  # type: ignore
+    from utils.text_clip import clip  # type: ignore
     from utils.subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set  # type: ignore
     from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
     from utils.write_batch_scheduler import (  # type: ignore
@@ -1103,7 +1105,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(
             f"[batch-done] --listed-check not recorded (expected "
             f"<command>=passed|failed|not run, on an apply-code-fixes batch): "
-            f"{'; '.join(ignored)[:400]}",
+            f"{clip('; '.join(ignored), 400)}",
             file=sys.stderr,
         )
     for item, why in (written.get("declined") or {}).items():

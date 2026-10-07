@@ -58,6 +58,7 @@ from typing import (
 try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import process_control
     from . import structured_output
+    from .text_clip import clip
     from .json_extractor import (
         describe_syntax_error,
         extract_json_from_text,
@@ -192,6 +193,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
 except ImportError:  # pragma: no cover - direct-script import shim
     from utils import process_control
     from utils import structured_output
+    from utils.text_clip import clip  # type: ignore
     from utils.json_extractor import (
         describe_syntax_error,
         extract_json_from_text,
@@ -836,7 +838,7 @@ def check_findings_from(result: Any) -> Optional[List[str]]:
     if check is None:
         return [f"{CHECK_RESULT_UNKNOWN} (its `check` was null)"]
     if not isinstance(check, dict):
-        shown = " ".join(str(check).split())[:80]
+        shown = clip(check, 80)
         return [
             f"{CHECK_RESULT_UNKNOWN} (its `check` was "
             f"{type(check).__name__} {shown!r}, not an object)"
@@ -857,7 +859,7 @@ def check_findings_from(result: Any) -> Optional[List[str]]:
     for item in items:
         text = _finding_text(item)
         if text:
-            findings.append(text[:CHECK_FINDING_MAX_CHARS])
+            findings.append(clip(text, CHECK_FINDING_MAX_CHARS))
     if len(findings) > CHECK_FINDINGS_MAX:
         extra = len(findings) - (CHECK_FINDINGS_MAX - 1)
         findings = findings[:CHECK_FINDINGS_MAX - 1] + [
@@ -927,7 +929,7 @@ def batch_check_findings(result: Any) -> Optional[List[str]]:
             text = BATCH_CHECK_COULD_NOT_RUN + (
                 f": {'; '.join(listed)}" if listed else ""
             )
-            return [text[:CHECK_FINDING_MAX_CHARS]]
+            return [clip(text, CHECK_FINDING_MAX_CHARS)]
         if _check_passed(check.get("passed")) is True:
             return []
     findings = check_findings_from(result)
@@ -965,7 +967,8 @@ def declined_reason(text: Any) -> str:
         trimmed = reason[:-1].rstrip()
         if trimmed:
             reason = trimmed
-    return reason[:DECLINED_REASON_MAX_CHARS]
+    # Fix round 22: cut at a word and marked, never mid-word.
+    return clip(reason, DECLINED_REASON_MAX_CHARS)
 
 
 @dataclass
