@@ -82,7 +82,7 @@ A `$` mention asks the model to use the skill, and the model then calls the `mul
 
 ### 1.3 OpenCode
 
-Installs as the `opencode-multi-llm` npm package: a `/multi-llm` command plus a `multi_llm` tool. Needs opencode 1.18.34 or newer and `uv` on `PATH`.
+Installs as the `opencode-multi-llm` npm package: a `/multi-llm` command plus a `multi_llm` tool. Needs opencode 1.18.35 or newer and `uv` on `PATH`.
 
 > **This route is not yet published.** Until the package is on npm, the entry below resolves to nothing, and OpenCode fails silently. Until then, use the file route, `install-host opencode`, described in [docs/hosts.md](docs/hosts.md).
 
