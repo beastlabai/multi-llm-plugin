@@ -319,6 +319,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
    `{batch_status}` is `completed` for a success (a verified no-op included) and `failed` for a clean failure — add `--reason "{compact reason}"` to a `failed` one. It prints one `[BATCH_DONE] {task.task_id} {batch_status} (N item(s) recorded)` line and writes the batch's record into `state.json`: the same `task_status` entry the `--exec-subagents` executor writes for this batch, plus every fix in it as processed. That record is what a later `--resume` reads to skip this batch (a `failed` record keeps it eligible for another try) and what makes `status` read the phase `in_progress`. Run it **before** step 7's append: a run that dies between the two leaves a record `--resume` honours, never a log entry `--resume` would re-apply. An exit 3 names the problem (no `write_tasks.json`, an unknown task id); treat it as a stop, not a warning.
    When the reply's `declined` lists fixes (each `{"id", "reason"}`), add `--declined "{id}={reason}"` for each, with `--status completed`: each prints a `[BATCH_DECLINED]` line — list that fix in the summary as not applied, with its reason, and name it in your report; it is never counted as applied. `--skipped {id}` records a fix the user chose to skip (above) the same way, as `[BATCH_SKIPPED]`.
    When the batch's reply carries a `check` object — the checks its subagent ran on its own edits (a test, a build, a syntax check) — add `--own-check passed` when it says `"passed": true` (what it lists beside a pass, such as `npm test: 12 passed`, is not a failing check), else `--own-check findings` and one `--finding "{finding}"` per entry, with `--status completed`; never `--check`, which records only an implement check task's verdict (`batch-done` refuses it here). `batch-done` then prints a `[BATCH_CHECK_FAILED]` line: the fixes stay applied and the loop goes on, but the phase is not a clean success — list the batch in the summary's `## Check Findings` (step 8) and say in your report that its check fails.
+   When that `check` also carries `listed` (the repository's known checks the prompt asked it to run, each mapped to `passed`, `failed` or `not run`), add `--listed-check "{command}={outcome}"` for each entry, the command exactly as the reply wrote it: the next batch's prompt and the tests line in step 7 read it. A command it lists as `failed` is a failing check like a `--finding`.
 
 7. **Append to prior changes (only after verification)** — This step runs **only** after step 4 has confirmed success or clean failure. It must **never** run for partially-applied batches. Pass the summary via stdin:
    ```bash
@@ -397,6 +398,9 @@ too, in one plain line: nothing ran the repository's tests, and the setting to a
 `verify_command` under `driver:` in `.multi-llm/providers.yaml` — name the repository's
 own test command as its value when it has an obvious one (`package.json`'s
 `scripts.test`, a `Makefile` `test` target), without running it or writing the config.
+Step 10's `--mark-completed` prints that line as `[TESTS_NOT_RUN] …` (on stderr): it
+also names the checks the batches were asked to run and what each batch reported, so
+give its text in your report verbatim instead of writing your own.
 
 If the command fails:
 - Report which fix may have caused the issue
