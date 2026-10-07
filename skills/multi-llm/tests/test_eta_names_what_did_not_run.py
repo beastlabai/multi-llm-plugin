@@ -200,7 +200,8 @@ class TestTheLastTaskFailing:
         line = metrics.record_metric_in_state(
             state, "implement", "T002: t", duration_ms=10,
             total_batches=2, batch_index=2)
-        assert line.startswith("[ETA] implement: task 2/2 done in "), line
+        # Fix round 24 (live run 10 #5): it says it failed, never "done".
+        assert line.startswith("[ETA] implement: task 2/2 failed after "), line
         assert "COMPLETE" not in line, line
         _elapsed, closing = metrics.finish_phase_in_state(state, "implement")
         assert re.fullmatch(
