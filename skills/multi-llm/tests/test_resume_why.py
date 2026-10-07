@@ -33,7 +33,7 @@ WHY = (
 #: What the resume keeps, in the why itself on both legs (fix round 23,
 #: review of round 22 relay #6: status appended it and the tool routes did
 #: not, so the two no longer agreed word for word).
-KEPT = "; keeps the 4 already applied"
+KEPT = "; keeps the 4 tasks already done"
 RECORDED = WHY + KEPT
 
 
@@ -84,7 +84,7 @@ class TestTheWhyIsComposedFromTheStopsFacts:
         }
         assert native_resume_why(state) == (
             "runs the tasks that can run; T005 stays refused: it declares a "
-            "file outside the repository; keeps the 1 already applied")
+            "file outside the repository; keeps the 1 task already done")
 
     def test_a_large_stop_keeps_its_why_within_the_read_back_limit(self):
         """Review of fix round 22 (relay #4): twelve refused tasks, ten held
@@ -121,9 +121,26 @@ class TestTheWhyIsComposedFromTheStopsFacts:
             kept=9, half_applied=True)
         assert len(why) <= next_phase.MAX_RECORDED_WHY_CHARS, len(why)
         assert why.endswith(
-            "…; keeps the 9 already applied; the half-applied state is left "
+            "…; keeps the 9 tasks already done; the half-applied state is left "
             "in place — inspect it, or `util restore-batch` the failed batch, "
             "before resuming"), why
+
+    def test_the_kept_clause_counts_tasks_done_not_applied(self):
+        """Fix round 24 (live run 10, Claude Code accept 01): the stop
+        fixture's four kept tasks include T002, a check task that applied
+        nothing, and "keeps the 4 already applied" had the host tell the
+        user "3 of 7 applied". The clause names its unit and says done."""
+        def why(kept, unit="tasks"):
+            return compose_resume_why(
+                refused=["T005"], policy={"T005"}, unit=unit, kept=kept)
+
+        assert why(4).endswith("; keeps the 4 tasks already done"), why(4)
+        assert why(1).endswith("; keeps the 1 task already done"), why(1)
+        assert why(2, "batches").endswith(
+            "; keeps the 2 batches already done"), why(2, "batches")
+        assert why(1, "batches").endswith(
+            "; keeps the 1 batch already done"), why(1, "batches")
+        assert "applied" not in why(4)
 
     def test_nothing_waiting_is_no_why(self):
         assert compose_resume_why(
@@ -328,12 +345,12 @@ class TestTheCheckClaimHoldsOnlyWhenTheResumeKeepsIt:
         }
         assert native_resume_why(state) == (
             "runs the tasks that can run; T002's check runs again (T003 waits "
-            "on it); keeps the 2 already applied")
+            "on it); keeps the 2 tasks already done")
         stamped = {**state, "task_check_trees": {"T002": "abc"}}
         assert native_resume_why(stamped) == (
             "runs the tasks that can run; T002's check is not run again while "
-            "the files are unchanged (T003 waits on it); keeps the 2 already "
-            "applied")
+            "the files are unchanged (T003 waits on it); keeps the 2 tasks "
+            "already done")
         # A check the --exec-subagents leg recorded: its verdict's stamp,
         # read only while its findings are the ones state.json holds.
         phase = tmp_path / "implement"

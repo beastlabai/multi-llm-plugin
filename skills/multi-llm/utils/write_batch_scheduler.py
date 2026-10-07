@@ -1931,7 +1931,11 @@ def compose_resume_why(
             parts.append(f"{task_id} is checked again before it is dispatched")
     if not parts:
         return None
-    tail = f"; keeps the {kept} already applied" if kept else ""
+    # Fix round 24 (live run 10, Claude Code accept 01): "done", not
+    # "applied" — a kept check task applied nothing, and the host told the
+    # user "3 of 7 applied" from "keeps the 4 already applied".
+    noun = {"tasks": "task", "batches": "batch"}.get(unit, unit) if kept == 1 else unit
+    tail = f"; keeps the {kept} {noun} already done" if kept else ""
     if half_applied:
         tail += f"; {HALF_APPLIED_LEFT_CLAUSE}"
     # Fix round 23 (review of round 22, relay #4): within the length a route
