@@ -394,7 +394,9 @@ def record_batch_items_in_state(
     ``{status, details: {task_id, prior_changes_id, grouped_sha256, leg,
     reason?}, timestamp}``: ``declined`` / ``skipped`` with its reason
     (never ``applied``), else ``applied`` — ``no-op`` for a batch the
-    executor read as changing nothing — for a finished batch, and ``failed``
+    executor read as changing nothing; the native leg has no such reading
+    and records a verified no-op ``applied`` (fix round 23: documented, no
+    reader tells the two apart) — for a finished batch, and ``failed``
     for every item of a batch that did not finish, which keeps it in a
     ``--resume``'s work set. ``grouped_sha256`` is the review the batch
     applies (its task's ``inputs``), so a later review's run can tell this
