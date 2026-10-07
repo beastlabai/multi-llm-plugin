@@ -35,6 +35,7 @@ from . import validation_context as _validation_context
 from . import cli_common
 from . import progress_tracker as _progress
 from . import readonly_audit as _readonly_audit
+from . import result_files as _result_files
 from .progress_tracker import DEADLINE_ERROR, FanoutProgress, PhaseProgress
 from .cli_common import (
     dispatcher_command,
@@ -1270,15 +1271,10 @@ def retire_salvage_artifacts(
     return retired
 
 
-#: Basenames that are never a per-model result file: every artifact a phase dir
-#: holds that is also a ``*.json``. The union of what the two reaggregate globs
-#: exclude, so a retire-by-selection can never rename a file those would not
-#: have read as a model.
-NON_MODEL_JSON_MARKERS = (
-    'grouped', 'validation', 'salvage', 'revalidation', 'consolidated',
-    'consolidation', 'issues', 'fix_tasks', 'report_data', 'subagent_batch_report',
-    'subagent_dry_run', 'write_batch_report', 'write_tasks',
-)
+#: Basenames that are never a per-model result file (defined in the leaf
+#: ``utils/result_files.py``, which the slot's misnamed-result lookup in
+#: ``llm_client`` needs too; re-exported here under the name callers use).
+NON_MODEL_JSON_MARKERS = _result_files.NON_MODEL_JSON_MARKERS
 
 #: Suffix of a result retired because its model left the selection.
 RETIRED_UNSELECTED = "stale-unselected"
@@ -1351,8 +1347,10 @@ def retire_unselected_results(
     2026-10-02; the previous ``.status.json`` is no guard, because the
     fan-out has already replaced ``models_requested`` by the time this runs).
     A result of a model that simply left the selection stays, as it did
-    before #30: the fan-out's report never read it, and a dir that keeps
-    several models' results still reaggregates whole.
+    before #30: the fan-out's report never read it. (Since fix round 24 a
+    ``--reaggregate`` does not read it either: it reads only the models
+    ``.status.json`` records and sets any other result file aside, named,
+    ``utils/result_files.set_aside_unrecorded_results``.)
 
     Called by a **fan-out** only, with the run's selection, before any model
     starts. ``--reaggregate`` never calls it. Same naming as
@@ -4326,6 +4324,32 @@ def fanout_ignore_prefixes(
     return prefixes
 
 
+def report_misnamed_result(
+    model_spec: str,
+    result: Dict[str, Any],
+    phase_dir: Union[str, Path],
+    tracker: Optional[FanoutProgress] = None,
+) -> str:
+    """Say that a slot read its answer from a misnamed file (both lanes).
+
+    One ``[RESULT_FILE_MISNAMED]`` line on stdout, the same sentence on the
+    slot's row (``progress.models[spec].warning``, which ``status`` shows) and
+    in ``.status.json``'s ``result_notes``, which the report renders as its
+    ``**Result files:**`` line. Returns the sentence.
+    """
+    expected = os.path.basename(str(result.get("output_file") or "")) or (
+        f"{sanitize_model_name(model_spec)}.json"
+    )
+    note = _result_files.misnamed_result_note(
+        model_spec, str(result.get("misnamed_from")), expected
+    )
+    print(f"[RESULT_FILE_MISNAMED] {note}")
+    if tracker is not None:
+        tracker.warn(model_spec, note)
+    _result_files.append_result_note(phase_dir, note)
+    return note
+
+
 async def run_single_model(
     model_spec: str,
     plan_path: str,
@@ -4339,6 +4363,7 @@ async def run_single_model(
     prefix: Optional[str] = None,
     *,
     tracker: Optional[FanoutProgress] = None,
+    run_model_specs: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """Run a single model review with file-based JSON output.
 
@@ -4382,6 +4407,10 @@ async def run_single_model(
             it. Passing a non-zero value has no effect.
         out_dir: Optional output directory for log files and JSON output
         prefix: Optional prefix for log file names
+        run_model_specs: Every model of this fan-out, forwarded to
+            ``invoke_with_file_output`` so a result written under the wrong
+            name is read from where the model put it (live run 10). ``None``
+            (a direct call) never looks.
 
     Returns:
         Dict with keys: success, output, error, prompt, stdout, stderr,
@@ -4789,6 +4818,7 @@ async def run_single_model(
                 prefer_arrays=True,
                 cwd=project_root,
                 anchor=plan_path,
+                run_model_specs=run_model_specs,
                 **sandbox_fallback_kwargs(sandbox),
             )
 
@@ -5006,6 +5036,11 @@ async def run_single_model(
             }
 
         if result.get("success"):
+            if result.get("misnamed_from"):
+                report_misnamed_result(
+                    model_spec, result,
+                    get_phase_dir(Path(plan_path), phase_name), tracker,
+                )
             print(f"[{display_name}] Completed successfully in {duration:.1f}s (source: {source})")
             output_data = result.get("data", "")
             if output_data and not isinstance(output_data, str):
@@ -5633,6 +5668,7 @@ async def run_all_models(
             model_spec, plan_path, prompt_template, prompt_context,
             phase_name, invoke_phase, timeout,
             out_dir=out_dir, prefix=prefix, tracker=tracker,
+            run_model_specs=list(model_specs),
         )
 
     return await run_models_concurrent(
@@ -6185,6 +6221,11 @@ def aggregate_results(
     )
     if failure_line:
         report_lines.append(failure_line)
+    # A result file read from under the wrong name, or set aside as no
+    # recorded model's (`utils/result_files.py`); absent when neither happened.
+    result_files_line = _result_files.result_notes_line(phase_dir)
+    if result_files_line:
+        report_lines.append(result_files_line)
     report_lines += [
         # `G<n>` below counts from 1; `group_index` in grouped.json,
         # validation.json and validation_tasks.json counts from 0 (G12 is
@@ -6685,6 +6726,12 @@ async def reaggregate_from_existing_files(
         f for f in all_files
         if not any(os.path.basename(f).startswith(ex) or ex in os.path.basename(f) for ex in exclude_patterns)
     ]
+    # Only the models this phase records are read (live run 10: a reviewer's
+    # misnamed file was loaded as a third reviewer by its stem). Any other
+    # result file is named and set aside; a dir with no recorded models keeps
+    # the stem-as-identity reading below.
+    result_files = _result_files.set_aside_unrecorded_results(phase_dir, sorted(result_files))
+    _result_files.publish_result_notes(phase_dir)
 
     # The mode word a zero-result exit names in its `--force` retry command.
     reaggregate_mode = _modes().mode_for_script(orchestrator_script) or phase_name
