@@ -505,7 +505,7 @@ class TestTheResumeCostCountsEveryKeptTask:
         run_status.main(["--plan-file", str(repo.plan), "--view", "run",
                          "--run-id", "R1B"])
         out = capsys.readouterr().out
-        assert "keeps the 4 already applied" in out, out
+        assert "keeps the 4 tasks already done" in out, out
 
 
 class TestASingleTaskRerunStillReopensImplement:
