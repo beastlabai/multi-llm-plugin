@@ -330,7 +330,8 @@ def _tool_description(host_id: str, rows: Sequence[Dict[str, Any]]) -> str:
     (``modes.TOOL_USER_NEXT_STEP_LINE``: a lifted next-phase command is the
     user's to type, never a call; plans/next-phase-command.md §2.4) and its
     sibling ``modes.TOOL_NO_COMPOSED_COMMAND_LINE`` (those keys and
-    ``resume_command`` are the only commands, never one the model composes),
+    ``resume_command`` are the only commands, never one the model composes)
+    and ``modes.TOOL_NOTICE_LINE`` (a finished run's ``notice`` is relayed),
     then any host-keyed note, then the worked examples. Examples travel inside the
     description because a JSON-Schema fallback has nowhere to put an
     ``examples`` key a host would render.
@@ -345,6 +346,7 @@ def _tool_description(host_id: str, rows: Sequence[Dict[str, Any]]) -> str:
     lines.append(mode_table.TOOL_OUTCOMES_LINE)
     lines.append(mode_table.TOOL_USER_NEXT_STEP_LINE)
     lines.append(mode_table.TOOL_NO_COMPOSED_COMMAND_LINE)
+    lines.append(mode_table.TOOL_NOTICE_LINE)
     note = _DESCRIPTION_NOTE.get(host_id)
     if note:
         writers = ", ".join(row["name"] for row in rows if row["writes_worktree"])

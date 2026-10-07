@@ -90,7 +90,9 @@ Every mode ends with this report. Four rules, and a fifth for `ask`:
     `ask`, `init` and `status` are not workflow phases: on every host they run
     no lookup and end with no command.
   - *What to write under `### Next Steps`.* `user_next_step.command` alone in a
-    fenced block, copied character for character. Any `optional_before`
+    fenced block, copied character for character, and never "Workflow
+    complete." beside it, however much of the work is done: while there is a
+    command, the workflow goes on. Any `optional_before`
     entries follow it, never precede it: the line "Optional, before that:",
     then each entry in the order the key lists them — its `why` as plain text
     outside the fence, then its `command` alone in its own fenced block. When
