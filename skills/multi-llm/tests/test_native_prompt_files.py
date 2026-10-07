@@ -149,6 +149,35 @@ class TestConsolidationBatchesCarryTheirPromptFile:
         assert len(_consolidation_batches(phase_dir)) == 1
         assert not (phase_dir / "consolidation_batch_1.prompt.txt").exists()
 
+    def test_a_moved_phase_folder_hands_the_host_files_inside_it(self, tmp_path):
+        """Review of fix round 20, #4 (checked, no change needed): a moved
+        folder's `consolidation_tasks.json` names the old folder's files,
+        but nothing hands that JSON to a host again. Every hand-off is a
+        `--consolidate` run, which materializes the batches afresh in the
+        folder it runs in, prompt files included; validation needs
+        `ensure_prompt_sidecars` because its resume and `--reaggregate`
+        reuse a stored round, which consolidation never does."""
+        import shutil
+
+        old = tmp_path / "old"
+        old.mkdir()
+        _plan, old_phase = _reviewed(old)
+        rpo.consolidate_mode(str(old_phase), str(_plan))
+        new = tmp_path / "new"
+        shutil.copytree(old, new)
+        shutil.rmtree(old)
+        plan = new / "plan.md"
+        phase_dir = output_dir_path(plan) / "review-plan"
+        stale = _consolidation_batches(phase_dir)
+        assert not Path(stale[0]["prompt_path"]).exists()
+
+        rpo.consolidate_mode(str(phase_dir), str(plan))
+        for batch in _consolidation_batches(phase_dir):
+            path = Path(batch["prompt_path"])
+            assert path.parent == phase_dir
+            with open(path, "r", encoding="utf-8", newline="") as handle:
+                assert handle.read() == batch["prompt"]
+
     def test_a_file_that_cannot_be_written_leaves_every_batch_on_its_prompt(
         self, tmp_path, monkeypatch, capsys
     ):
