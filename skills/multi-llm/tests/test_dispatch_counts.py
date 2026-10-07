@@ -399,6 +399,30 @@ class TestTheFirstRunEtaCountsWhatItDispatches:
         # Logged as the run stops, before the stop's own block.
         assert text.index(eta[-1]) < text.index("ERROR: implement stopped")
 
+    def test_a_refusal_the_walk_did_not_foresee_leaves_the_total(
+        self, repo, capsys, monkeypatch,
+    ):
+        """A task refused before dispatch for a reason the walk does not
+        test (here the grant check) leaves the total, as the native leg's
+        `util batch-done` withdraws one; nothing finished, and the line says
+        so."""
+        from utils.write_batch_scheduler import WriteBatchScheduler
+
+        monkeypatch.setattr(
+            WriteBatchScheduler, "_grant_mismatch",
+            lambda self, task: (
+                "the grant does not match" if task.get("task_id") == "T001" else None
+            ),
+        )
+        text = _first_run(repo, capsys)
+        assert _organized(text) == [
+            "Organized into 3 execution batches: 4 task(s) to dispatch"], text
+        assert "T001 refused before dispatch" in text, text
+        eta = [l for l in text.splitlines() if l.startswith("[ETA] implement:")]
+        assert eta == [
+            "[ETA] implement: run stopped before any of its 3 task(s) finished"
+        ], eta
+
     def test_the_resume_shapes_still_read_as_they_did(self, repo, capsys):
         """01b dispatches nothing (no `[ETA]` line), fix 02 reads 1/2, 2/2,
         accept 02 1/1: what the walk counts, as the round-18 lines say."""
