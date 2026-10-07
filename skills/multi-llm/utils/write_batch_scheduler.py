@@ -295,6 +295,8 @@ __all__ = [
     "split_accepted_findings",
     "BLOCKED_BY_CHECK_PREFIX",
     "bind_prior_changes",
+    "last_phase_end",
+    "OWN_RUN_CONTEXT_PHASES",
     "blocked_by_check_reason",
     "decomposition_graph",
     "DISPATCHED_PROMPTS_SUBDIR",
@@ -2638,9 +2640,52 @@ class UndeclaredWrites:
         return [path for path in self.paths if path not in keepable]
 
 
+#: The phases whose batch prompts list, under ``## Changes Applied in Prior
+#: Batches``, only the earlier batches of their own run (fix round 22, live
+#: run 9 #7): apply-code-fixes, whose implement record has its own section
+#: and to which the planning phases' plan-edit batches are noise.
+OWN_RUN_CONTEXT_PHASES = frozenset({"apply-fixes"})
+
+
+def last_phase_end(state: Any, phase: Optional[str]) -> Optional[str]:
+    """When *phase* last ended, as ``state.json`` records it: the newer of its
+    completion stamp and its skip stamp (under either spelling of the phase,
+    :data:`prior_changes.PHASE_ALIASES`), or ``None``. Every prior-changes
+    entry of the phase recorded before it belongs to an earlier run."""
+    if state is None or not hasattr(state, "get") or not phase:
+        return None
+    canonical = _prior_changes.canonical_phase(phase)
+    names = {phase, canonical} | {
+        word for word, alias in _prior_changes.PHASE_ALIASES.items() if alias == canonical
+    }
+    try:
+        completed = dict(state.get("phases_completed") or {})
+        skipped = dict(state.get("phases_skipped") or {})
+    except Exception:  # noqa: BLE001 - a read for a prompt's context
+        return None
+    stamps = [completed.get(name) for name in names] + [
+        (skipped.get(name) or {}).get("skipped_at")
+        for name in names if isinstance(skipped.get(name), dict)
+    ]
+    dated = [
+        (when, stamp) for stamp in stamps
+        if (when := _prior_changes.parse_stamp(stamp)) is not None
+    ]
+    return max(dated)[1] if dated else None
+
+
+def _state_on_disk(output_dir: str) -> Optional[Dict[str, Any]]:
+    try:
+        state = json.loads((Path(output_dir) / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return state if isinstance(state, dict) else None
+
+
 def bind_prior_changes(
     task: Dict[str, Any], *, output_dir: str, phase: Optional[str],
     accepted_checks: Sequence[Tuple[str, str, List[str]]] = (),
+    state: Any = None,
 ) -> str:
     """The prompt that actually goes to the runner, bound *now*.
 
@@ -2682,6 +2727,12 @@ def bind_prior_changes(
     context, where the check's own ``(check findings — …)`` entry is, so a
     task released by ``--human-task <check>=done`` reads that the problems
     were accepted, not only that they were found.
+
+    A phase in :data:`OWN_RUN_CONTEXT_PHASES` (fix round 22) is shown only the
+    earlier batches of its own run: its entries recorded after the phase
+    last ended (:func:`last_phase_end`, read from *state* — the executor's,
+    else the plan dir's ``state.json``, which ``util write-prompt`` reads),
+    never another phase's.
     """
     prompt = str(task.get("prompt") or "")
     if PRIOR_CHANGES_TOKEN not in prompt:
@@ -2696,8 +2747,13 @@ def bind_prior_changes(
         )
     # An entry the prompt already quotes word for word (apply-code-fixes'
     # `## Implementation record`) is counted, not shown a second time.
+    own_run = _prior_changes.canonical_phase(phase) in OWN_RUN_CONTEXT_PHASES
     context = _prior_changes.render(
         output_dir, phase=phase, quoted=_prior_changes.quoted_in(prompt, output_dir),
+        own_run_only=own_run,
+        since=last_phase_end(
+            state if hasattr(state, "get") else _state_on_disk(output_dir), phase,
+        ) if own_run else None,
     )
     note = accepted_checks_section(accepted_checks)
     if note:
@@ -3698,7 +3754,7 @@ class WriteBatchScheduler:
             )
         return bind_prior_changes(
             task, output_dir=self.output_dir, phase=self.phase,
-            accepted_checks=accepted,
+            accepted_checks=accepted, state=state,
         )
 
     def _with_result_contract(self, task: Dict[str, Any], prompt: str) -> str:
