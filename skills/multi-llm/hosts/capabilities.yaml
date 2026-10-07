@@ -354,7 +354,7 @@ hosts:
                                       # `danger-full-access` allow them. The renderer reads this cell into
                                       # the generated install paragraph, so a user meets it
                                       # before installing, not after.
-      min_host_version: "0.159.2"     # the pin; replaced by the version the first green plugin row
+      min_host_version: "0.161.0"     # the pin; replaced by the version the first green plugin row
                                       # reports, since the schema's own wording is "the lowest actually RUN"
                                       # — and not bisected (Open question 5)
       invocation: >-

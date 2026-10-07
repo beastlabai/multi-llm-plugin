@@ -55,7 +55,7 @@ Then invoke the skill (plugin skills are namespaced `plugin:skill`):
 
 ### 1.2 Codex
 
-Installs as a Codex plugin: a `multi_llm` tool plus a `multi-llm:multi-llm` skill. Needs codex >= 0.159.2, python3 >= 3.9 and `uv` on `PATH`. Linux is verified; on Windows use the file route.
+Installs as a Codex plugin: a `multi_llm` tool plus a `multi-llm:multi-llm` skill. Needs codex >= 0.161.0, python3 >= 3.9 and `uv` on `PATH`. Linux is verified; on Windows use the file route.
 
 > **This route is not yet published.** The `release` ref the install names does not exist yet, so the commands below fail with a git error until the first release. Until then, use the file route, `install-host codex`, described in [docs/hosts.md](docs/hosts.md).
 

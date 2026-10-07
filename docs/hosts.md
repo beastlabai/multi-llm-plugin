@@ -78,7 +78,7 @@ codex plugin marketplace add beastlabai/multi-llm-plugin --ref release --sparse 
 codex plugin add multi-llm@beastlabai
 ```
 
-Needs codex 0.159.2 or newer. It provides a skill and a model-callable tool, and you invoke it with a `$` mention of the namespaced skill — `$multi-llm:multi-llm <the same arguments the Claude Code skill takes>`; plugins add no slash command, so `/multi-llm` stays unrecognized. If the model ever reworks the arguments, spell it out — `Use the multi-llm:multi-llm skill with exactly these arguments: <args>` — or let the model call the `multi_llm` tool directly.
+Needs codex 0.161.0 or newer. It provides a skill and a model-callable tool, and you invoke it with a `$` mention of the namespaced skill — `$multi-llm:multi-llm <the same arguments the Claude Code skill takes>`; plugins add no slash command, so `/multi-llm` stays unrecognized. If the model ever reworks the arguments, spell it out — `Use the multi-llm:multi-llm skill with exactly these arguments: <args>` — or let the model call the `multi_llm` tool directly.
 
 ```text
 $multi-llm:multi-llm plans/my-feature.md
@@ -168,10 +168,10 @@ Repair is always re-render, never in-place patching, and a re-install with nothi
 
 The README has the two install commands. This section has what they don't cover. **The route is not yet published**: the `release` ref the install names does not exist until the first release is promoted, so `--ref release` does not resolve yet and `codex plugin marketplace add` fails with a git error. **What works today is `install-host codex`** (the file route above).
 
-**Floors.** These are published but not enforced, since nothing in the plugin checks them: **codex >= 0.159.2**, **python3 >= 3.9** on `PATH` under that exact name, and **uv** at any version. Neither install command installs dependencies. The first invocation builds the plugin's venv (`pyyaml` alone), which needs the network or a warm uv cache.
+**Floors.** These are published but not enforced, since nothing in the plugin checks them: **codex >= 0.161.0**, **python3 >= 3.9** on `PATH` under that exact name, and **uv** at any version. Neither install command installs dependencies. The first invocation builds the plugin's venv (`pyyaml` alone), which needs the network or a warm uv cache.
 
 ```bash
-codex --version                     # 0.159.2 or newer
+codex --version                     # 0.161.0 or newer
 python3 --version && uv --version   # python3 3.9 or newer, under these exact names
 ```
 
@@ -181,9 +181,9 @@ python3 --version && uv --version   # python3 3.9 or newer, under these exact na
 
 | Platform | Status | Prerequisites |
 | --- | --- | --- |
-| Linux | `verified` — the only platform this route claims | codex >= 0.159.2; `uv` and python3 >= 3.9 on `PATH` |
-| macOS | `unmeasured` | codex >= 0.159.2; `uv` and python3 >= 3.9 on `PATH` (the command-line-tools `python3` is 3.9). Caveat: the run starts through a `bash -lc` login shell, which reads `~/.bash_profile` / `~/.profile` and **not** `~/.zprofile` or `~/.zshrc` — keys and `PATH` edits that live only in the zsh files never reach it |
-| Windows | `unsupported for the tool route` — `python3` is usually absent under that name, so the plugin's server never starts and the tool never lists. Use `install-host codex` (the file route) instead | codex >= 0.159.2; `uv`; python3 >= 3.9 **under that exact name**; **plus Git Bash (or another POSIX `bash`) on `PATH` — a hard prerequisite**: without it the tool refuses with a missing-`bash` error naming the `PATH` it searched, rather than running without a login shell |
+| Linux | `verified` — the only platform this route claims | codex >= 0.161.0; `uv` and python3 >= 3.9 on `PATH` |
+| macOS | `unmeasured` | codex >= 0.161.0; `uv` and python3 >= 3.9 on `PATH` (the command-line-tools `python3` is 3.9). Caveat: the run starts through a `bash -lc` login shell, which reads `~/.bash_profile` / `~/.profile` and **not** `~/.zprofile` or `~/.zshrc` — keys and `PATH` edits that live only in the zsh files never reach it |
+| Windows | `unsupported for the tool route` — `python3` is usually absent under that name, so the plugin's server never starts and the tool never lists. Use `install-host codex` (the file route) instead | codex >= 0.161.0; `uv`; python3 >= 3.9 **under that exact name**; **plus Git Bash (or another POSIX `bash`) on `PATH` — a hard prerequisite**: without it the tool refuses with a missing-`bash` error naming the `PATH` it searched, rather than running without a login shell |
 
 **Provider keys go in the file your login shell reads.** Codex starts the plugin's server with a stripped environment, so a key exported only in the terminal you launched Codex from never reaches the run. Put `export OPENROUTER_API_KEY=…` (and whatever else your providers read) in `~/.profile` or `~/.bash_profile`, not `~/.bashrc`, and on macOS not `~/.zprofile`. Do not edit the installed `.mcp.json` to pass keys: the next `codex plugin add` replaces it wholesale. When a key does not arrive, the `environment` block in the tool result (`login_shell`, `profile_shell`) says which startup file was read.
 
