@@ -400,11 +400,15 @@ def processed_record_counts(
     ``--resume``'s work set (``apply_orchestrator_base`` step 23).
 
     Not a ``failed`` one (that batch is dispatched again, on both legs). Not
-    one stamped with another review than *review_stamp* (the current
-    ``grouped.json``'s hash): an earlier review cycle's, so an item a later
-    review reports again — one a batch declined, say — is offered again, as
-    the executor leg offers it (fix round 22). A record with no stamp counts,
-    as before: absence of a stamp is not staleness. And on the executor leg
+    a ``declined`` or ``skipped`` one stamped with another review than
+    *review_stamp* (the current ``grouped.json``'s hash): an item an earlier
+    review's batch did not apply, which a later review reports again, is
+    offered again (fix round 22) — as the executor leg offers it in the
+    batch the later review makes — and never counted as applied. An
+    ``applied`` record counts whatever review it names, so a native
+    ``--resume`` never hands an applied item out twice. A record with no
+    stamp counts, as before: absence of a stamp is not staleness. And on
+    the executor leg
     (*executor_leg*) not one the executor wrote: the scheduler keeps that
     batch from its own result file under its own id, so dropping its items
     here would renumber the batches a stop's ``--human-task <batch>=skip``
@@ -415,7 +419,8 @@ def processed_record_counts(
         return False
     details = record.get("details") if isinstance(record.get("details"), dict) else {}
     stamp = str(details.get("grouped_sha256") or "")
-    if review_stamp and stamp and stamp != review_stamp:
+    if (review_stamp and stamp and stamp != review_stamp
+            and record.get("status") in ("declined", "skipped")):
         return False
     if executor_leg and details.get("leg") == PROCESSED_LEG_EXECUTOR:
         return False
