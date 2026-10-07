@@ -142,6 +142,12 @@ MANUAL_TASK_NOTE = "[MANUAL_TASK_NOTE] "
 #: report carries in a fenced block like the block's others.
 MANUAL_TASK_COMMAND = "[MANUAL_TASK_COMMAND] "
 
+#: The lines around the section ``util next-command`` prints below the block
+#: (``next_phase.NEXT_STEP_MARKDOWN_MARKER``, fix round 24). Every line
+#: between them is the section's, never a marker line of the block.
+NEXT_STEP_MARKDOWN = "[NEXT_STEP_MARKDOWN]"
+NEXT_STEP_MARKDOWN_END = "[NEXT_STEP_MARKDOWN_END]"
+
 #: What the report says when the block is ``[WORKFLOW_COMPLETE]`` (§2.3).
 COMPLETE_SENTENCE = "Workflow complete."
 
@@ -223,8 +229,19 @@ def find_blocks(text: str) -> List[Block]:
     blocks: List[Block] = []
     current: Optional[Block] = None
     pending_why: Optional[str] = None
+    in_section = False
     for raw in text.splitlines():
         line = raw.rstrip("\r")
+        # The section printed below the block (fix round 24) is the
+        # block's own rendering: none of its lines is a marker line.
+        if line.rstrip() == NEXT_STEP_MARKDOWN:
+            in_section = True
+            continue
+        if line.rstrip() == NEXT_STEP_MARKDOWN_END:
+            in_section = False
+            continue
+        if in_section:
+            continue
         if line.startswith(NEXT_COMMAND):
             command = line[len(NEXT_COMMAND):].strip()
             current = Block(complete=False, command=command) if command else None
