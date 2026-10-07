@@ -1169,20 +1169,23 @@ def implement_resume_why(
 ) -> Optional[str]:
     """What the plain ``--resume`` of a stopped native implement does on an
     unchanged tree (``write_batch_scheduler.native_resume_why`` over
-    ``state.json`` as recorded), or ``None`` (fix round 22)."""
+    ``state.json`` as recorded, and the implement folder for the executor's
+    check stamps), or ``None`` (fix round 22)."""
     import json as _json
 
-    source = plan_arg if plan_path is None else plan_path
+    from .output_handler import phase_dir_path
+
+    source = os.path.abspath(str(plan_arg if plan_path is None else plan_path))
     try:
-        state = _json.loads(
-            _state_file(os.path.abspath(str(source))).read_text(encoding="utf-8"))
+        state = _json.loads(_state_file(source).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(state, dict):
         return None
     from .write_batch_scheduler import native_resume_why
 
-    return native_resume_why(state)
+    return native_resume_why(
+        state, phase_dir=str(phase_dir_path(Path(source), "implement")))
 
 
 # ---------------------------------------------------------------------------
