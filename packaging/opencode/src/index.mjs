@@ -3348,7 +3348,15 @@ async function execute(args, ctx, surface, client) {
       })
       if (resume) {
         outcome.resume_command = resume.command
-        outcome.message = `${outcome.message} ${surface.needs_human_message.resume}`
+        const text = surface.needs_human_message
+        const why = typeof resume.why === "string" ? resume.why.trim() : ""
+        let clause = text.resume
+        if (why && typeof text.resume_why === "string") {
+          // Fix round 22: what the plain resume does, from the stop.
+          outcome.resume_why = why
+          clause = text.resume_why.split("{why}").join(why)
+        }
+        outcome.message = `${outcome.message} ${clause}`
         attachAnswers(resume, outcome, surface)
       }
     }
@@ -3416,7 +3424,8 @@ function finishFields(outcome, checked, surface) {
 
 /** The keys that tell the user what to type, right after `ok` and `state`. */
 const WAY_FORWARD_KEYS = [
-  "user_next_step", "resume_command", "resume_answers", "no_command_reason",
+  "user_next_step", "resume_command", "resume_why", "resume_answers",
+  "no_command_reason",
 ]
 
 /**

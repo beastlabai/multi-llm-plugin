@@ -770,8 +770,10 @@ class TestTheNativeLeg:
         )
         assert code == 0, err
         lines = [line for line in out.splitlines() if line.startswith("[NEXT_COMMAND")]
-        assert lines[0].startswith("[NEXT_COMMAND] ")
-        resume = lines[0].split(" ", 1)[1]
+        # Fix round 22: the resume's own why above it (test_resume_why.py).
+        assert lines[0].startswith("[NEXT_COMMAND_WHY] runs the tasks that can run")
+        assert lines[1].startswith("[NEXT_COMMAND] ")
+        resume = lines[1].split(" ", 1)[1]
         assert resume.endswith("--implement plans/checked.md --resume")
         pairs = self._answer_pairs(out)
         prefix = resume[: -len(" --resume")]
@@ -847,7 +849,10 @@ class TestTheNativeLeg:
         pairs = self._answer_pairs(out)
         assert len(pairs) == 6
 
-        expected = [f"      resume with: {resume}"]
+        # Fix round 22: the resume's own why below it (test_resume_why.py).
+        resume_why = next(line.split(" ", 1)[1] for line in out.splitlines()
+                          if line.startswith("[NEXT_COMMAND_WHY] "))
+        expected = [f"      resume with: {resume}", f"        ({resume_why})"]
         for why, command in pairs:
             expected += [f"      or answer the stop with: {command}",
                          f"        ({why})"]
@@ -915,7 +920,8 @@ class TestTheNativeLeg:
         skill = (root / "SKILL.md").read_text(encoding="utf-8")
         assert (
             "A native `implement` that stopped part-way exited `0`, so look it "
-            "up: it prints the `--resume` command and, when tasks wait for an "
+            "up: it prints the `--resume` command below its `[NEXT_COMMAND_WHY]` "
+            "line and, when tasks wait for an "
             "answer, each answer the stop offers as a `[NEXT_COMMAND_ANSWERS]` "
             "line below its `[NEXT_COMMAND_ANSWERS_WHY]` line (when more than "
             "one task waits, first the one command carrying every answer; then "

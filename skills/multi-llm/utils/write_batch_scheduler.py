@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Collection, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import git_utils as _git_utils
@@ -1638,6 +1638,67 @@ class FailedAnswerable:
     task_id: str
     unlanded: bool = False
     not_rerun: bool = False
+    #: A check task (it declares no file) whose failure a resume does not run
+    #: again while the files are unchanged (the executor's
+    #: ``_unchanged_since_failure``; fix round 22, :func:`compose_resume_why`).
+    check: bool = False
+
+
+def compose_resume_why(
+    *,
+    refused: Sequence[str],
+    policy: Collection[str] = (),
+    failed: Sequence[FailedAnswerable] = (),
+    checks: Sequence[str] = (),
+    blocked: Mapping[str, str] = {},
+    undone_with: Callable[[str], List[str]] = lambda _task_id: [],
+    unit: str = "tasks",
+) -> Optional[str]:
+    """What the plain ``--resume`` of a stopped write phase does on an
+    unchanged tree, from the stop's own facts, or ``None`` when nothing
+    waits (fix round 22).
+
+    Live run 9 (the stop-path fixture): every surface gave each
+    ``--human-task`` answer its why and the plain resume none, and the hosts
+    invented one — "(re-runs the T002 check)", false on unchanged files, or
+    "To resume after addressing the write policy:". One clause per task the
+    resume does not simply run: each check of *checks* whose findings hold
+    tasks back (*blocked*) is not run again while the files are unchanged; a
+    *failed* check task neither, and any other failed task is dispatched
+    again; a task *refused* before dispatch stays refused until
+    ``driver.write_paths`` changes when *policy* names it, else is checked
+    again before it is dispatched. *undone_with* names the tasks waiting on a
+    task that does not run. Both legs compose it from the facts they answer
+    the stop from (the executor's ``_stop_resume_why``,
+    :func:`native_resume_why`).
+    """
+
+    def waits(ids: Sequence[str]) -> str:
+        if not ids:
+            return ""
+        return f" ({', '.join(ids)} {'waits' if len(ids) == 1 else 'wait'} on it)"
+
+    unchanged = "is not run again while the files are unchanged"
+    parts: List[str] = []
+    for check_id in checks:
+        waiting = sorted(t for t, c in blocked.items() if c == check_id)
+        parts.append(f"{check_id}'s check {unchanged}{waits(waiting)}")
+    for item in failed:
+        if item.check or item.not_rerun:
+            parts.append(
+                f"{item.task_id}'s check {unchanged}{waits(undone_with(item.task_id))}")
+        else:
+            parts.append(f"{item.task_id} is dispatched again")
+    for task_id in refused:
+        if task_id in policy:
+            parts.append(
+                f"{task_id} stays refused until driver.write_paths changes"
+                f"{waits(undone_with(task_id))}")
+        else:
+            parts.append(f"{task_id} is checked again before it is dispatched")
+    if not parts:
+        return None
+    return f"runs the {unit} that can run; " + "; ".join(parts)
 
 
 def compose_stop_answers(
@@ -1772,28 +1833,13 @@ HALF_APPLIED_PREFIX = "half-applied: "
 UNLANDED_REASON = "said applied, no file changed"
 
 
-def native_stop_answers(state: Any) -> List[Dict[str, Any]]:
-    """:func:`compose_stop_answers` for a stopped native implement, read from
-    ``state.json`` as recorded (a ``StateManager`` or the file's dict).
-
-    The native leg leaves no stop record: the answers are what the record
-    shows waiting for one — each task of the decomposition implement ran
-    last (``implement_task_ids``) recorded ``failed`` (one the emit refused
-    before dispatch, :data:`NATIVE_REFUSED_PREFIX`, answered as the executor
-    answers a refusal), and each check whose findings hold tasks back
-    (:func:`held_back_by_checks`). A ``skip`` leaves undone the tasks that
-    depend on its task and have not run (not a manual one). ``[]`` when none
-    waits, or when the record cannot be read.
-
-    Fix round 21: a failed task whose edits are half-applied
-    (:data:`HALF_APPLIED_PREFIX`, ``util batch-done --partial``) gets no
-    answer, as the executor offers none for a partial application: it is
-    inspected first. One whose reply said ``applied`` and changed nothing
-    (:data:`UNLANDED_REASON`) is answered ``skip`` first, then ``done`` for
-    a change made by hand, as the executor answers it.
-    """
+def _native_stop_facts(state: Any) -> Optional[Dict[str, Any]]:
+    """The facts a stopped native implement is answered from, read from
+    ``state.json`` as recorded (:func:`native_stop_answers`,
+    :func:`native_resume_why`), or ``None`` when none waits or the record
+    cannot be read."""
     if state is None or not hasattr(state, "get"):
-        return []
+        return None
     try:
         statuses = dict(state.get("task_status") or {})
         reasons = dict(state.get("task_status_reasons") or {})
@@ -1801,7 +1847,7 @@ def native_stop_answers(state: Any) -> List[Dict[str, Any]]:
         human = {str(t) for t in (state.get("implement_human_task_ids") or [])}
         recorded = state.get("task_check_findings") or {}
     except Exception:  # noqa: BLE001 - an advisory read, never fatal
-        return []
+        return None
     failed_ids = sorted(
         str(task_id) for task_id, status in statuses.items()
         if status == "failed" and _IMPLEMENT_TASK_ID.match(str(task_id))
@@ -1811,7 +1857,7 @@ def native_stop_answers(state: Any) -> List[Dict[str, Any]]:
     blocked = {task_id: check_id for task_id, check_id in held}
     checks = sorted(set(blocked.values()))
     if not failed_ids and not checks:
-        return []
+        return None
     graph = decomposition_graph([], state)
     manual = human | {
         str(node.get("task_id", "")) for node in graph
@@ -1833,6 +1879,45 @@ def native_stop_answers(state: Any) -> List[Dict[str, Any]]:
         task_id for task_id in failed_ids
         if reason(task_id).startswith(NATIVE_REFUSED_PREFIX)
     ]
+    return {
+        "failed_ids": failed_ids,
+        "refused": refused,
+        "reason": reason,
+        "checks": checks,
+        "blocked": blocked,
+        "findings": {
+            check_id: [str(f) for f in (recorded.get(check_id) or [])]
+            for check_id in checks
+        } if isinstance(recorded, dict) else {},
+        "undone_with": undone_with,
+    }
+
+
+def native_stop_answers(state: Any) -> List[Dict[str, Any]]:
+    """:func:`compose_stop_answers` for a stopped native implement, read from
+    ``state.json`` as recorded (a ``StateManager`` or the file's dict).
+
+    The native leg leaves no stop record: the answers are what the record
+    shows waiting for one — each task of the decomposition implement ran
+    last (``implement_task_ids``) recorded ``failed`` (one the emit refused
+    before dispatch, :data:`NATIVE_REFUSED_PREFIX`, answered as the executor
+    answers a refusal), and each check whose findings hold tasks back
+    (:func:`held_back_by_checks`). A ``skip`` leaves undone the tasks that
+    depend on its task and have not run (not a manual one). ``[]`` when none
+    waits, or when the record cannot be read.
+
+    Fix round 21: a failed task whose edits are half-applied
+    (:data:`HALF_APPLIED_PREFIX`, ``util batch-done --partial``) gets no
+    answer, as the executor offers none for a partial application: it is
+    inspected first. One whose reply said ``applied`` and changed nothing
+    (:data:`UNLANDED_REASON`) is answered ``skip`` first, then ``done`` for
+    a change made by hand, as the executor answers it.
+    """
+    facts = _native_stop_facts(state)
+    if facts is None:
+        return []
+    reason = facts["reason"]
+    refused = facts["refused"]
     return compose_stop_answers(
         refused=refused,
         failed=[
@@ -1840,17 +1925,36 @@ def native_stop_answers(state: Any) -> List[Dict[str, Any]]:
                 task_id,
                 unlanded=reason(task_id).lower().startswith(UNLANDED_REASON),
             )
-            for task_id in failed_ids
+            for task_id in facts["failed_ids"]
             if task_id not in refused
             and not reason(task_id).startswith(HALF_APPLIED_PREFIX)
         ],
-        checks=checks,
-        blocked=blocked,
-        findings={
-            check_id: [str(f) for f in (recorded.get(check_id) or [])]
-            for check_id in checks
-        } if isinstance(recorded, dict) else {},
-        undone_with=undone_with,
+        checks=facts["checks"],
+        blocked=facts["blocked"],
+        findings=facts["findings"],
+        undone_with=facts["undone_with"],
+    )
+
+
+def native_resume_why(state: Any) -> Optional[str]:
+    """:func:`compose_resume_why` for a stopped native implement, from the
+    facts :func:`native_stop_answers` answers it from (fix round 22): every
+    refusal the native emit records is the write policy's, and a failed task
+    — a half-applied one too — is handed out again on a resume."""
+    facts = _native_stop_facts(state)
+    if facts is None:
+        return None
+    refused = facts["refused"]
+    return compose_resume_why(
+        refused=refused,
+        policy=set(refused),
+        failed=[
+            FailedAnswerable(task_id) for task_id in facts["failed_ids"]
+            if task_id not in refused
+        ],
+        checks=facts["checks"],
+        blocked=facts["blocked"],
+        undone_with=facts["undone_with"],
     )
 
 
@@ -9543,6 +9647,9 @@ class WriteBatchScheduler:
         answers = self._stop_answers(result, failed)
         if answers:
             result.stop["answers"] = answers
+        why = self._stop_resume_why(result, failed)
+        if why:
+            result.stop["resume_why"] = why
         result.stop["headline"] = self._stop_headline(result.stop)
 
     def _stop_answers(
@@ -9617,6 +9724,50 @@ class WriteBatchScheduler:
             blocked=blocked,
             findings=result.check_findings(),
             undone_with=undone_with,
+        )
+
+    def _stop_resume_why(
+        self, result: SchedulerResult, failed: Sequence[TaskOutcome] = (),
+    ) -> Optional[str]:
+        """What this stop's plain ``--resume`` does on an unchanged tree
+        (:func:`compose_resume_why`, fix round 22), recorded on the stop as
+        ``resume_why`` beside its ``answers``: every failed task, not only
+        the answerable ones, since a resume dispatches a half-applied batch
+        again too. A failed check task is not run again while the files are
+        unchanged (:meth:`_unchanged_since_failure`)."""
+        already = set(result.human_plan.skipped)
+        manual = {
+            str(t.get("task_id", "")) for t in self.tasks
+            if t.get("executor_role") == "human" or t.get("is_human")
+        }
+
+        def undone_with(task_id: str) -> List[str]:
+            return [
+                dep for dep in self._dependents_of(task_id)
+                if dep not in already and dep not in manual
+                and self._task_by_id(dep) is not None
+            ]
+
+        refused = [o for o in failed if o.task_id in self._refused_before_dispatch]
+        blocked = result.blocked_by_check if self.kind == "implement" else {}
+        return compose_resume_why(
+            refused=[o.task_id for o in refused],
+            policy={
+                o.task_id for o in refused
+                if o.write_outcome == WRITE_POLICY_VIOLATION
+            },
+            failed=[
+                FailedAnswerable(
+                    task_id=o.task_id, not_rerun=bool(o.not_rerun),
+                    check=self.kind == "implement" and not declared_file_set(
+                        self._task_by_id(o.task_id) or {}),
+                )
+                for o in failed if o not in refused
+            ],
+            checks=self._blocking_checks(result) if blocked else [],
+            blocked=blocked,
+            undone_with=undone_with,
+            unit="tasks" if self.kind == "implement" else "batches",
         )
 
     def _record_not_run_in_state(self, result: SchedulerResult) -> None:
@@ -9728,6 +9879,9 @@ class WriteBatchScheduler:
         answers = self._stop_answers(result)
         if answers:
             result.stop["answers"] = answers
+        why = self._stop_resume_why(result)
+        if why:
+            result.stop["resume_why"] = why
         result.stop["headline"] = self._stop_headline(result.stop)
 
     def _check_block_message(self, result: SchedulerResult) -> List[str]:

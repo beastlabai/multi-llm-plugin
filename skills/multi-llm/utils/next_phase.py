@@ -62,6 +62,17 @@ RUNNER_WARNING_MARKER = "[RUNNER_WARNING]"
 NEXT_COMMAND_ANSWERS_WHY_MARKER = "[NEXT_COMMAND_ANSWERS_WHY]"
 NEXT_COMMAND_ANSWERS_MARKER = "[NEXT_COMMAND_ANSWERS]"
 
+#: The line ``util next-command`` prints directly above the ``--resume`` of a
+#: stopped native implement (fix round 22): what that plain resume does on an
+#: unchanged tree (``write_batch_scheduler.native_resume_why``), as the
+#: answers' why lines say what each answer does. Not a command marker.
+NEXT_COMMAND_WHY_MARKER = "[NEXT_COMMAND_WHY]"
+
+#: The longest why read back from a run's write mirror
+#: (:func:`stop_resume_why_on_record`): the folder is writable by every
+#: jailed batch, so anything longer, or not one plain line, is not relayed.
+MAX_RECORDED_WHY_CHARS = 600
+
 #: The one line :func:`emit_resume` prints: the command that resumes a stopped
 #: write phase, and nothing else on the line (same rule as ``[NEXT_COMMAND]``).
 RESUME_COMMAND_MARKER = "[RESUME_COMMAND]"
@@ -199,6 +210,13 @@ class NextPhase:
     #: never part of ``user_next_step`` (the tool routes carry it in the
     #: stop's ``error``).
     tests_note: Optional[str] = None
+    #: On a stopped native implement's ``--resume``, from ``util
+    #: next-command`` only: what that plain resume does on an unchanged tree
+    #: (fix round 22, live run 9: the hosts gave it a why of their own, "re-runs
+    #: the T002 check", false while the files are unchanged). Printed as
+    #: ``[NEXT_COMMAND_WHY]`` above the command and carried as
+    #: ``user_next_step.why``.
+    why: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """The ``user_next_step`` value (§2.1's outcome table).
@@ -216,6 +234,8 @@ class NextPhase:
                     payload["manual_tasks_note"] = self.manual_tasks_note
             return payload
         payload: Dict[str, Any] = {"phase": self.phase, "command": self.command}
+        if self.why:
+            payload["why"] = self.why
         if self.optional_before:
             payload["optional_before"] = [step.to_dict() for step in self.optional_before]
         if self.answers:
@@ -970,6 +990,8 @@ def render_next_phase_lines(answer: NextPhase) -> List[str]:
         lines.append(f"{RUNNER_WARNING_MARKER} {answer.warning}")
     if answer.tests_note:
         lines.append(f"{TESTS_NOT_RUN_MARKER} {answer.tests_note}")
+    if answer.why:
+        lines.append(f"{NEXT_COMMAND_WHY_MARKER} {answer.why}")
     lines.append(f"{NEXT_COMMAND_MARKER} {answer.command}")
     for step in answer.optional_before:
         lines.append(f"{NEXT_COMMAND_OPTIONAL_WHY_MARKER} {step.why}")
@@ -1030,6 +1052,27 @@ def implement_answers(
             ),
         ))
     return tuple(steps)
+
+
+def implement_resume_why(
+    plan_arg: str, *, plan_path: Optional[Union[str, Path]] = None,
+) -> Optional[str]:
+    """What the plain ``--resume`` of a stopped native implement does on an
+    unchanged tree (``write_batch_scheduler.native_resume_why`` over
+    ``state.json`` as recorded), or ``None`` (fix round 22)."""
+    import json as _json
+
+    source = plan_arg if plan_path is None else plan_path
+    try:
+        state = _json.loads(
+            _state_file(os.path.abspath(str(source))).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(state, dict):
+        return None
+    from .write_batch_scheduler import native_resume_why
+
+    return native_resume_why(state)
 
 
 # ---------------------------------------------------------------------------
@@ -1124,6 +1167,10 @@ def emit_answer(
             )
             if answers:
                 answer = _replace(answer, answers=answers)
+            # Fix round 22: and what the plain resume does.
+            why = implement_resume_why(plan_arg, plan_path=plan_path)
+            if why:
+                answer = _replace(answer, why=why)
             # Fix round 18 (live run 7, Claude Code stop 01): the native
             # stop's line saying nothing ran the repository's tests, which
             # the executor stop prints itself.
@@ -1214,6 +1261,10 @@ def emit_resume(
     if answers:
         resume["answers"] = answers
         resume["answers_text"] = render_resume_answers(answers)
+    # Fix round 22: what the plain resume does, as each answer says.
+    why = stop_resume_why_on_record(plan_arg if plan_path is None else plan_path, mode_word)
+    if why:
+        resume["why"] = why
     cli_common.record_user_resume(resume)
     return command
 
@@ -1251,6 +1302,44 @@ def stop_answers_on_record(
                 and isinstance(why, str) and why.strip()):
             answers.append({"flags": list(flags), "why": why.strip()})
     return answers
+
+
+def stop_resume_why_on_record(
+    plan_path: Union[str, Path], mode_word: str,
+) -> Optional[str]:
+    """What the plain resume of the phase's last stop does, as the stop
+    recorded it (``progress.write_subagents.stop.resume_why``, written by
+    ``write_batch_scheduler._stop_resume_why``; fix round 22), or ``None``.
+
+    The run's output folder is writable by every jailed batch, so the value
+    is relayed only when it is one plain line of at most
+    :data:`MAX_RECORDED_WHY_CHARS` characters."""
+    from .output_handler import phase_dir_path
+    from .status_file import read_status
+
+    modes = _skill_module("modes")
+    mode = modes.resolve(mode_word)
+    if mode is None or not mode.phase:
+        return None
+    source = Path(os.path.abspath(str(plan_path)))
+    status = read_status(str(phase_dir_path(source, mode.phase)))
+    progress = status.get("progress") if isinstance(status, dict) else None
+    mirror = progress.get("write_subagents") if isinstance(progress, dict) else None
+    stop = mirror.get("stop") if isinstance(mirror, dict) else None
+    return recorded_why(stop.get("resume_why") if isinstance(stop, dict) else None)
+
+
+def recorded_why(value: Any) -> Optional[str]:
+    """*value*, a why read back from a run's output folder, when it is one
+    plain line of at most :data:`MAX_RECORDED_WHY_CHARS` characters, else
+    ``None``."""
+    if not isinstance(value, str):
+        return None
+    why = value.strip()
+    if (not why or len(why) > MAX_RECORDED_WHY_CHARS
+            or any(not ch.isprintable() for ch in why)):
+        return None
+    return why
 
 
 def resume_answers(

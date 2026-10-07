@@ -2709,6 +2709,24 @@ class TestTheStopsAnswersLeadTheOptions:
         assert list(envelope)[:5] == [
             "ok", "state", "user_next_step", "resume_command", "resume_answers"]
 
+    def test_the_plain_resume_carries_what_it_does(self, harness):
+        """Fix round 22 (live run 9, Codex stop fix 01): the plain resume had
+        no why, the message said "once the cause above is fixed", and the
+        host framed it "To resume after addressing the write policy:". The
+        stop's own why (`user_resume.why`) is `resume_why` and fills the
+        message's resume clause."""
+        why = ("runs the tasks that can run; T005 stays refused until "
+               "driver.write_paths changes (T006 waits on it)")
+        step = dict(stop_answers_step(), why=why)
+        envelope = self._run(harness, step)
+        assert envelope["resume_why"] == why
+        text = SURFACE["needs_human_message"]
+        assert text["resume_why"].replace("{why}", why) in envelope["message"]
+        assert text["resume"] not in envelope["message"]
+        assert list(envelope)[:6] == [
+            "ok", "state", "user_next_step", "resume_command", "resume_why",
+            "resume_answers"]
+
     def test_a_lookup_with_no_answers_leaves_the_options_as_scraped(self, harness):
         envelope = self._run(harness, {})
         assert "resume_answers" not in envelope

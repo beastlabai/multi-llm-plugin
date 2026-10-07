@@ -2077,10 +2077,14 @@ def state_implement_view(
         or any(statuses.get(str(t)) == "completed" for t in decomposition)
     )
     stop_answers: List[Dict[str, Any]] = []
+    stop_resume_why: Optional[str] = None
     if resumable:
-        from .write_batch_scheduler import native_stop_answers
+        from .write_batch_scheduler import native_resume_why, native_stop_answers
 
         stop_answers = native_stop_answers(record)
+        # Fix round 22: what the plain resume does, as `util next-command`
+        # says it above the resume.
+        stop_resume_why = native_resume_why(record)
     return {
         "completed": completed,
         # Fix round 20: whether `--implement <plan> --resume` continues it,
@@ -2088,6 +2092,7 @@ def state_implement_view(
         # `util next-command` gives them (`{flags, why}`, `--resume` first).
         "resumable": resumable,
         "stop_answers": stop_answers,
+        "stop_resume_why": stop_resume_why,
         # Fix round 18 (Claude Code racing 06, mid-run): when the host's loop
         # is between `util metrics start` and `finish`.
         "in_progress_since": None if completed else _host_run_started_at(
@@ -2225,6 +2230,7 @@ def native_stop_answer_commands(
 
 def _native_stop_lines(
     resume: Optional[str], answers: Sequence[Tuple[str, str]] = (),
+    why: Optional[str] = None,
 ) -> List[str]:
     """The way on from a native phase that stopped (fix round 20).
 
@@ -2239,9 +2245,12 @@ def _native_stop_lines(
     if not resume:
         return []
     lines = [f"      resume with: {resume}"]
-    for command, why in answers:
-        lines.append(f"      or answer the stop with: {command}")
+    if why:
+        # Fix round 22: what the plain resume does, like each answer below.
         lines.append(f"        ({why})")
+    for command, answer_why in answers:
+        lines.append(f"      or answer the stop with: {command}")
+        lines.append(f"        ({answer_why})")
     return lines
 
 
@@ -2289,7 +2298,7 @@ def render_state_implement_lines(
                         for task_id, action in sorted(view["answers"].items()))
         )
     if not since and view.get("resumable"):
-        lines += _native_stop_lines(resume, answers)
+        lines += _native_stop_lines(resume, answers, view.get("stop_resume_why"))
     return lines
 
 
@@ -3139,6 +3148,18 @@ def _write_mirror_as_counts(mirror: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _stop_resume_why(view: Dict[str, Any]) -> Optional[str]:
+    """The write run's stop's ``resume_why`` (fix round 22), from its mirror,
+    under ``next_phase.stop_resume_why_on_record``'s rule: one plain line of
+    a sane length, since a jailed batch can write the folder it lives in."""
+    from .next_phase import recorded_why
+
+    progress = view.get("progress") or {}
+    mirror = progress.get("write_subagents") if isinstance(progress, dict) else None
+    stop = mirror.get("stop") if isinstance(mirror, dict) else None
+    return recorded_why(stop.get("resume_why") if isinstance(stop, dict) else None)
+
+
 def _failed_batches_moved_nothing(view: Dict[str, Any]) -> bool:
     """Whether every failed row of a write run's mirror records that no file
     moved (``files_touched`` present and empty). A row without the key — an
@@ -3260,7 +3281,26 @@ def _resume_lines(
     if shape == cli_common.SHAPE_REPAIR:
         lines.append(f"      repair first: {repair}")
     lines.append(f"      resume with: {_resume_command(view, plan_path, spell)}")
-    if redispatch:
+    # Fix round 22 (live run 9): a write run's stop says what its plain
+    # resume does on an unchanged tree; that replaces the cost line, which
+    # read "re-dispatches the 1 failed batch(es)" of a task the write policy
+    # refuses again.
+    why = _stop_resume_why(view) if mode in _WRITE_MODES else None
+    if why:
+        if mode == _IMPLEMENT_PHASE and not redispatch:
+            done = _implement_tasks_done(plan_path, workflow)
+            if done is not None and done > (kept or 0):
+                kept = done
+        if kept:
+            why += f"; keeps the {kept} already applied"
+        if _failed_batches_moved_nothing(view) or not redispatch:
+            lines.append(f"      ({why})")
+        else:
+            lines.append(
+                f"      ({why}; the half-applied state is left in place — inspect "
+                f"it, or `util restore-batch` the failed batch, before resuming)"
+            )
+    elif redispatch:
         mode = str(view["run"].get("mode") or view.get("phase") or "")
         if mode in _WRITE_MODES:
             # The write loop stops at the failed batch, so what a resume
