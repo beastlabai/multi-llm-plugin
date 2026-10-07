@@ -463,6 +463,27 @@ TOOL_NOTICE_LINE = (
     "outside any fenced block."
 )
 
+#: What every host does with the write policy at a stop (fix round 20, live
+#: run 8 #4; a user decision, 2026-10-07: permissive). Round 18 told hosts
+#: never to suggest loosening ``driver.write_paths`` after a Claude Code host
+#: offered "remove the deny rule" on its own, while the plugin's own stop line
+#: offered allowing the file, which hosts are told to relay whole. The plugin
+#: keeps offering it, worded as the user's own call
+#: (``write_safety.policy_allow_clause``), since it is theirs to decide and it
+#: lets the run complete; a host relays it as given, adds no policy advice of
+#: its own and never edits the setting itself. Rendered into
+#: :data:`NEEDS_HUMAN_RULE` (every file route, both plugin instructions and
+#: Claude Code's ``SKILL.md``), :data:`TOOL_NO_COMPOSED_COMMAND_LINE` (both
+#: tool descriptions) and :data:`NEEDS_HUMAN_MESSAGE` (the tool routes'
+#: exit-3 message), and held word for word in implement's stop rule.
+STOP_POLICY_RULE = (
+    "Never edit `driver.write_paths`, or any other multi-llm setting in "
+    "`.multi-llm/providers.yaml`, yourself. At a stop, offer only the ways "
+    "forward the stop itself names, as it words them: when it names allowing "
+    "a refused file in `driver.write_paths`, that is one of them and the "
+    "user's call; add no advice about the write policy of your own."
+)
+
 #: The user-next-step line's sibling (racing re-run 2026-10-04): after a failed
 #: generate-tasks whose result carried no command at all, an OpenCode host model
 #: printed a "next phase" it composed itself, in the tool-call spelling
@@ -473,7 +494,8 @@ TOOL_NOTICE_LINE = (
 #: ``user_next_step: null`` and :data:`NO_COMMAND_REASON`. Rendered directly
 #: after :data:`TOOL_USER_NEXT_STEP_LINE` on both package hosts. Fix round 18
 #: (live run 7, the Claude Code stop path): a host offered "remove the deny
-#: rule" as a way past a task the write policy refused; it never suggests that.
+#: rule" as a way past a task the write policy refused. Fix round 20: it ends
+#: with :data:`STOP_POLICY_RULE` instead of "never suggest loosening".
 TOOL_NO_COMPOSED_COMMAND_LINE = (
     "Never compose a command for the user yourself, and never spell one from "
     "this tool's arguments: the only commands you may give them are "
@@ -482,10 +504,7 @@ TOOL_NO_COMPOSED_COMMAND_LINE = (
     "A result whose `user_next_step` is "
     "null and that carries no `resume_command` has no command to give "
     "(`no_command_reason` says why): name no command and no next phase. "
-    "Offer only the ways forward the result itself names: never suggest loosening "
-    "the write policy (`driver.write_paths` in `.multi-llm/providers.yaml`, a "
-    "`deny` rule removed or `allow` widened) to get past a task it refused; that "
-    "policy is the user's own setting."
+    + STOP_POLICY_RULE
 )
 
 #: The value of ``no_command_reason``, the key both package servers set beside
@@ -574,7 +593,7 @@ NEEDS_HUMAN_RULE = (
     "run and whether anything ran the repository's tests), "
     "and the options its output names (`next` included); do not run a "
     "different mode. " + NEEDS_HUMAN_WORK_SENTENCE + " Run an option only "
-    "after the user has picked it."
+    "after the user has picked it. " + STOP_POLICY_RULE
 )
 
 #: The plugin's exit-3 ``message``, as a **template**: the JS selects a clause
@@ -629,7 +648,7 @@ NEEDS_HUMAN_MESSAGE = {
         "not run a different mode. Never quote `argv` or its flags to the user, "
         "which are this tool's own (`--host`, `--yes`, `--exec-subagents`, "
         "`--detach`) and nothing the user ran or types. "
-        + NEEDS_HUMAN_WORK_SENTENCE + " Send back "
+        + NEEDS_HUMAN_WORK_SENTENCE + " " + STOP_POLICY_RULE + " Send back "
         "an `options` entry only after the user has picked one."
     ),
     "phase_incomplete": "The `{phase}` phase did not complete.",
