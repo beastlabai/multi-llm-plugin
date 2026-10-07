@@ -2,8 +2,8 @@
 #
 # `uv pip install --require-hashes -r` against this file is the PyPI twin of
 # `npm ci` against package-lock.json: the version is named, and so is every byte
-# behind it. `mistral-vibe` pulls 95 transitive packages, and a bare
-# `pip install mistral-vibe==2.25.8` re-resolves every one of them per build and
+# behind it. `mistral-vibe` pulls 96 transitive packages, and a bare
+# `pip install mistral-vibe==2.26.0` re-resolves every one of them per build and
 # accepts whatever wheel PyPI serves for each today.
 #
 # THE INTERPRETER IS NOT THE BASE IMAGE'S, and that is why the resolution flags
@@ -265,6 +265,9 @@ charset-normalizer==3.4.7 \
 click==8.3.3 \
     --hash=sha256:398329ad4837b2ff7cbe1dd166a4c0f8900c3ca3a218de04466f38f6497f18a2 \
     --hash=sha256:a2bf429bb3033c89fa4936ffb35d5cb471e3719e1f3c8a7c3fff0b8314305613
+croniter==6.2.4 \
+    --hash=sha256:8ef3d544107a5c05a150a2d78f8bf5a8eb9c5c4d93405a736b824109574e3f4d \
+    --hash=sha256:fc124f751b1b04805c2a04b061898b436b45ab2320b045e1e052ea895de65189
 cryptography==50.0.0 \
     --hash=sha256:031e2d5dd4bb9caa3ca9c82e5a197fd8ae680232cee62603d1a813f3f07e3d03 \
     --hash=sha256:06a32a980526a6ab9a4b9bf8f7385800791e2bb960903cb6b530e4817509a3b7 \
@@ -431,12 +434,13 @@ miniaudio==1.71 \
     --hash=sha256:f4a44b70b66628b0c307e40ae0ae857695978cae18462179b806d8edc807d416 \
     --hash=sha256:f7042af3a4db5b90e5efaea257b6dfcff9389239ea643e6b0faa80169528e2e6 \
     --hash=sha256:ff51e2887bb673e2e757752b586b3dc924d59aa5fbcae9bbc45f4a111bd3262b
-mistral-vibe==2.25.8 \
-    --hash=sha256:22a3eef4015ae16cdd3654be41cd5d1bdeb23a18cc5bf845d0cdf291277ed824 \
-    --hash=sha256:6c21acc2bffdfd1a94c9da6d54db51ee4e2542a60165e46d5727ff06e0a57ae1 \
-    --hash=sha256:9b2a3f9c1078e8cf2bd0a2cd860336b3ad8039894ecf423994588be4545d73ea \
-    --hash=sha256:a73727361c98440d20c376bff69edf92fd18d01c03f81e54e3d47135df2c9f20 \
-    --hash=sha256:d0d004cb834e8e7973378bb779411fe97bb4ed9d7e533c121d64c7fbd2ec3dea
+mistral-vibe==2.26.0 \
+    --hash=sha256:6c61e33781ddbd54e3cacf098589e49234df45c6f2498858c3e0d3bb8181c454 \
+    --hash=sha256:86ee13da13f9ca6b2f023cc5ca254a81bd99eeb5d2caa7b9e791421531bb2f5c \
+    --hash=sha256:91087d3507924f44823be8567d8d051da7669b1ad2b60e549e75e91ede282a4e \
+    --hash=sha256:bc8d3ec765d844be7b51ec0247296042113784b8b6925aac5e445cec69409a27 \
+    --hash=sha256:d8230b8abd7c39a8e90d60884b1f5ee8c95ffb459c62c21f3ea0e3041117a114 \
+    --hash=sha256:e3807c3670f0a74357f63e82aa77648076a12ab97abc10c579d002950e082955
 mistralai==2.6.0 \
     --hash=sha256:4b7202b0cab84ea03f8ff4a933c8cfc615b3057520d9d76467c07aa23939dab2 \
     --hash=sha256:531a86292ad498fc0fcd6dfcd480a3f4db9e92f558e14ffb22172824831e3a6e
@@ -623,9 +627,9 @@ pydantic-settings==2.14.2 \
 pygments==2.20.0 \
     --hash=sha256:6757cd03768053ff99f3039c1a36d6c0aa0b263438fcab17520b30a303a82b5f \
     --hash=sha256:81a9e26dd42fd28a23a2d169d86d7ac03b46e2f8b59ed4698fb4785f946d0176
-pyjwt==2.13.0 \
-    --hash=sha256:41571c89ca91598c79e8ef18a2d07367d4810fbbd6f637794879baf1b7703423 \
-    --hash=sha256:66adcc2aff09b3f1bbd95fc1e1577df8ac8723c978552fd43304c8a290ac5728
+pyjwt==2.15.1 \
+    --hash=sha256:42d59d631f7768a1028a64c7ff581a9bf7519804daf91fc5b6c56e30eec5e193 \
+    --hash=sha256:4f259e80cdfb6b3fc18a7de51fd1ef9ec79652f25019bae68975ca2468a34df8
 pyperclip==1.11.0 \
     --hash=sha256:244035963e4428530d9e3a6101a1ef97209c6825edab1567beac148ccc1db1b6 \
     --hash=sha256:299403e9ff44581cb9ba2ffeed69c7aa96a008622ad0c46cb575ca75b5b84273
@@ -1131,9 +1135,9 @@ typing-inspection==0.4.2 \
 uc-micro-py==2.0.0 \
     --hash=sha256:3603a3859af53e5a39bc7677713c78ea6589ff188d70f4fee165db88e22b242c \
     --hash=sha256:c53691e495c8db60e16ffc4861a35469b0ba0821fe409a8a7a0a71864d33a811
-urllib3==2.7.0 \
-    --hash=sha256:231e0ec3b63ceb14667c67be60f2f2c40a518cb38b03af60abc813da26505f4c \
-    --hash=sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897
+urllib3==2.8.0 \
+    --hash=sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3 \
+    --hash=sha256:63bf2ead4c879426ebf22ef2a781eeb4aa3b4ae798a0435506f8687fd5bb9b63
 uvicorn==0.46.0 \
     --hash=sha256:bbebbcbed972d162afca128605223022bedd345b7bc7855ce66deb31487a9048 \
     --hash=sha256:fb9da0926999cc6cb22dc7cd71a94a632f078e6ae47ff683c5c420750fb7413d
