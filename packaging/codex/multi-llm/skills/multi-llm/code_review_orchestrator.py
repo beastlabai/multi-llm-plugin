@@ -51,6 +51,7 @@ from utils import (
     PlanUpdater,
 )
 from utils.stream_bootstrap import bootstrap_streams
+from utils.text_clip import clip
 from utils import cli_common
 from utils import prior_changes
 from utils.cli_common import (
@@ -1717,7 +1718,7 @@ def update_plan_with_fixes(
         lines.append("### Could Not Fix")
         lines.append("")
         for item in failed_items:
-            reason = (item.get("reason") or "Unknown reason")[:100]
+            reason = clip(item.get("reason") or "Unknown reason", 100)
             lines.append(f"- **{item.get('issue_title', 'Unknown')}**: {reason}")
         lines.append("")
 

@@ -70,25 +70,13 @@ INTERNAL_FLAG_PREFIX = "--internal-"
 #: The marker every dispatcher invocation ends its stdout with.
 RESULT_MARKER = "MULTI_LLM_RESULT:"
 
-#: What :func:`plain_line` removes after collapsing whitespace: the C0
-#: controls, DEL, the C1 controls and the bidirectional overrides and
-#: isolates. A terminal acts on any of them — an ESC sequence can erase or
-#: rewrite the line it sits on — and none belongs in a line a host shows.
-_CONTROL_CHARACTERS = re.compile(
-    "[\x00-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]"
-)
-
-
-def plain_line(text: Any) -> str:
-    """``text`` as one plain line: whitespace runs collapsed to one space and
-    every control character removed (:data:`_CONTROL_CHARACTERS`).
-
-    Fix round 17 (the Fable review of round 16): the stop headline carries a
-    task title from tasks.md and the runner's own summary, and ``set_error``
-    only collapsed whitespace, so an ANSI sequence in either reached the
-    OpenCode tool line, the codex tool result and ``status`` intact."""
-    collapsed = " ".join(str(text).split()) if text else ""
-    return " ".join(_CONTROL_CHARACTERS.sub("", collapsed).split())
+# `plain_line` and its control-character set live in `text_clip` (fix round
+# 22), beside the one rule for cutting a preview short; re-exported here, the
+# name every caller has always imported.
+try:
+    from .text_clip import _CONTROL_CHARACTERS, clip, plain_line  # noqa: E402,F401
+except ImportError:  # pragma: no cover - direct script runs with utils/ on path
+    from text_clip import _CONTROL_CHARACTERS, clip, plain_line  # type: ignore # noqa: E402,F401
 
 #: Uniform exit codes across every mode. The dispatcher never remaps a target's
 #: code and invents one of its own only for an unknown mode or a rejected flag
@@ -823,10 +811,10 @@ class ResultContext:
         """Record the one-line reason the run stopped (``MULTI_LLM_RESULT.error``),
         as a :func:`plain_line`: every host shows it, and it carries text a
         runner or a task file wrote."""
-        cleaned = plain_line(text)
         # One line the hosts quote inside their message: bounded, so a long
-        # refusal cannot bury the message it decorates.
-        self.error = cleaned[:ERROR_MAX_CHARS] or None
+        # refusal cannot bury the message it decorates; cut at a word, marked
+        # (fix round 22).
+        self.error = clip(text, ERROR_MAX_CHARS) or None
 
     def set_user_resume(self, obj: Optional[Dict[str, Any]]) -> None:
         """Record the command that *resumes* a stopped write phase, for the user.

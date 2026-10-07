@@ -91,6 +91,11 @@ class Mode:
             Set on exactly the rows whose phase is in
             ``check_workflow_prerequisites.OPTIONAL_PHASES`` and ``None`` on
             every other row; ``utils/next_phase.py`` holds no prose of its own.
+            A sentence that reads after the host's own "Optional, before
+            that:" label, saying what the step does and what skipping it
+            means, never one that starts "optional" itself (fix round 22: a
+            host printed "Optional, before that: optional: have the models
+            review…").
     """
 
     name: str
@@ -174,7 +179,10 @@ MODES: Tuple[Mode, ...] = (
         instruction_file="review-tasks.md",
         is_workflow_phase=True,
         supports_detach=True,
-        optional_why="optional: have the models review the tasks before implementing",
+        optional_why=(
+            "Have the models review the task list before implementing it; "
+            "skipping this implements the tasks as they were generated."
+        ),
     ),
     Mode(
         name="apply-task-suggestions",
@@ -185,7 +193,10 @@ MODES: Tuple[Mode, ...] = (
         instruction_file="apply-task-suggestions.md",
         is_workflow_phase=True,
         supports_detach=True,
-        optional_why="optional: apply the task-review suggestions before implementing",
+        optional_why=(
+            "Apply the task-review suggestions to the task list before "
+            "implementing it; skipping this implements the task list as it stands."
+        ),
     ),
     Mode(
         name="implement",
@@ -425,29 +436,21 @@ TOOL_OUTCOMES_LINE = (
 #: (live run 7): the `command` first and each optional entry after it with its
 #: `why` (plans/next-phase-command.md §2.1, "Primary first"; Codex had put the
 #: optional step first, OpenCode had dropped its `why`), and the note as prose
-#: (Codex racing 06 put it in a ```text fence).
+#: (Codex racing 06 put it in a ```text fence). Fix round 22 (live run 9:
+#: Codex 04 printed both commands as bare paragraphs, and the manual-task
+#: close command, which the note carried at its end, reached the user as
+#: prose): the key carries the section already written, each command fenced
+#: (`next_phase.render_next_step_markdown`), and the line says to copy it.
 TOOL_USER_NEXT_STEP_LINE = (
     "`user_next_step` in a result is a command for the user to type, never a "
-    "call to make: copy its `command`, and each `optional_before` command, into your "
-    "report, each in its own fenced block, the `command` first; then the line "
-    "\"Optional, before that:\" and, for each `optional_before` entry, its `why` "
-    "as plain text above its command (the `why` says what the optional step "
-    "would do and what skipping it means); when it is `complete`, and "
-    "only then, say \"Workflow complete.\"; and whenever it carries "
-    "`manual_tasks`, complete or not, list each of them "
-    "(id and title): tasks implement left for the user to do by hand, or, for one "
-    "with `waits_on`, a task skipped with that one, which implement runs once "
-    "that one is recorded done; "
-    "then give its `manual_tasks_note` verbatim, which says how to record them done, "
-    "as plain text and never inside a fenced block: a fenced block holds one command "
-    "and nothing else. "
-    "Then stop. "
-    "Never say \"Workflow complete.\" otherwise, even when a notice lists manual "
-    "tasks left for the user: while `user_next_step` names a `command`, the "
-    "workflow goes on. Only `next` is "
-    "a call. A "
-    "needs-human result's `resume_command` is the same kind of thing: the user's to "
-    "type, never a call."
+    "call to make: end your report with its `markdown`, copied as it is (each "
+    "command stays alone in its fenced block, each why and note stays plain "
+    "text, the manual tasks it lists included), then stop. It says "
+    "\"Workflow complete.\" only when it is `complete`: never say that "
+    "otherwise, even when a notice lists manual tasks left for the user; while "
+    "`user_next_step` names a `command`, the workflow goes on. Only `next` is "
+    "a call. A needs-human result's `resume_command` is the same kind of "
+    "thing: the user's to type, never a call."
 )
 
 #: The finished run's relay (live run 8, OpenCode racing 08): a completed
@@ -502,9 +505,9 @@ STOP_POLICY_RULE = (
 #: with :data:`STOP_POLICY_RULE` instead of "never suggest loosening".
 TOOL_NO_COMPOSED_COMMAND_LINE = (
     "Never compose a command for the user yourself, and never spell one from "
-    "this tool's arguments: the only commands you may give them are "
-    "`user_next_step.command`, its `optional_before` commands, "
-    "`resume_command` and each `resume_answers` command, each copied verbatim. "
+    "this tool's arguments: the only commands you may give them are the ones "
+    "in `user_next_step`, `resume_command` and each `resume_answers` "
+    "command, each copied verbatim. "
     "A result whose `user_next_step` is "
     "null and that carries no `resume_command` has no command to give "
     "(`no_command_reason` says why): name no command and no next phase. "
@@ -534,6 +537,8 @@ NO_COMMAND_REASON = (
 #: ``{command}`` filled with ``resume_command``, when the result carries one.
 #: Fix round 17: ``{line}`` is shown without control characters and cut at
 #: ``max_line`` characters, ending in ``cut``; the command is never cut.
+#: Fix round 22: by ``utils.text_clip.clip``'s rule (a word boundary, no
+#: separator before ``cut``, a bracket the kept part opened closed after it).
 STOP_TITLE = {
     "template": "stopped and needs you: {line}",
     "no_line": "the run did not finish; the tool output says why.",
@@ -588,10 +593,11 @@ NEEDS_HUMAN_WORK_SENTENCE = (
 #: incident hinges on. Fix round 19: it asked for "what was being run", which
 #: on a file route is the dispatcher command with the flags the shim composed
 #: (the needs-human message's `argv`, run-7 #13); it asks for the phase and
-#: the plan.
+#: the plan. Fix round 22: "which phase was running" came back as "Phase
+#: running: implement" for a phase that had stopped (OpenCode, live run 9).
 NEEDS_HUMAN_RULE = (
     "Run `next` verbatim when it is not `null` on `0` and `2`. On `3` stop: "
-    "report to the user which phase was running on which plan, the last "
+    "report to the user which phase stopped, on which plan, the last "
     "error line it printed, "
     "whole (on a stop it says what stopped, what it reported, what did not "
     "run and whether anything ran the repository's tests), "
@@ -636,7 +642,7 @@ NEEDS_HUMAN_RULE = (
 NEEDS_HUMAN_MESSAGE = {
     "template": (
         "Stop here: this run is blocked and needs a human. {phase} {error} "
-        "Report to the user which phase was running on which plan, that line whole, word "
+        "Report to the user which phase stopped, on which plan, that line whole, word "
         "for word (on a stop it says what stopped, what the task reported, what "
         "did not run and whether anything ran the repository's tests), and the "
         "`options`; an `options` entry is a tool call for you, never a command "
@@ -672,19 +678,35 @@ NEEDS_HUMAN_MESSAGE = {
         "block, as the way forward. It is never a tool call and never a shell "
         "command: do not run it, and do not offer to run it for them."
     ),
+    # Appended instead of `resume` when the lookup says what the plain resume
+    # does (`user_resume.why`, the result's `resume_why`; fix round 22, live
+    # run 9: with no why the hosts wrote one — "re-runs the T002 check",
+    # false on unchanged files, or "after addressing the write policy").
+    # `{why}` is substituted as it comes.
+    "resume_why": (
+        "`resume_command` is what the user types to resume this phase; it "
+        "{why}. Give it to the user verbatim in its own fenced block, with "
+        "what it does as plain text above it. It is never a tool call and "
+        "never a shell command: do not run it, and do not offer to run it for "
+        "them."
+    ),
     # Appended after `resume` when the stop offers answers as well (fix round
     # 14, live run 5: the `--human-task` answers lived only in `error`, and
     # hosts relayed them in two of four first stops). `{answers}` is the
     # dispatcher's `user_resume.answers_text` — each command in backticks and
     # what it does, `; `-joined — substituted as it comes; the server authors
     # none of it. Each is also in `resume_answers` and an `options` entry.
+    # Fix round 22 (live run 9, OpenCode accept 01): the host headed each
+    # answer "Optional, before that:" and added a paraphrased "Ways forward"
+    # list beside them; the clause says what they are and where the why goes.
     "answers": (
-        "The stop also offers these ways forward, each a command the user "
-        "types instead of `resume_command` (each is in `resume_answers` and is "
-        "also an `options` entry, in the same order): {answers}. Give the user "
-        "every one of them verbatim, each in its own fenced block with what it "
-        "does, after `resume_command`; like it, none is a tool call or a shell "
-        "command for you to run."
+        "Instead of `resume_command` the user can type any of these, each "
+        "with what it does (each is in `resume_answers` and is also an "
+        "`options` entry, in the same order): {answers}. After "
+        "`resume_command`, give the user every one of them verbatim in its own "
+        "fenced block, its why as plain text above it, and no list or summary "
+        "of them of your own: they are the stop's ways forward. Like "
+        "`resume_command`, none is a tool call or a shell command for you to run."
     ),
     # Appended instead of `resume` when the result carries no
     # `resume_command` (racing re-run 2026-10-04: a result with neither command

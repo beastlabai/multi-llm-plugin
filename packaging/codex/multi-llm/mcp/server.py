@@ -206,8 +206,9 @@ USER_NEXT_STEP_KEY = "user_next_step"
 #: handoff's way forward is its re-attach ``next`` and its ``abort_command``,
 #: and a needs-human result's ``options`` trailed ``result``, ``output`` and
 #: ``stderr`` into the dropped middle.
-WAY_FORWARD_KEYS = (USER_NEXT_STEP_KEY, "resume_command", "resume_answers",
-                    "no_command_reason", "next", "abort_command", "options")
+WAY_FORWARD_KEYS = (USER_NEXT_STEP_KEY, "resume_command", "resume_why",
+                    "resume_answers", "no_command_reason", "next",
+                    "abort_command", "options")
 
 #: The keys placed last: the long runbook (Open question 20 of
 #: plans/codex-native-plugin.md: a cut must lose runbook text, never the
@@ -2457,8 +2458,15 @@ class Server:
         command = step.get("command") if isinstance(step, dict) else None
         if isinstance(command, str) and command.strip():
             outcome["resume_command"] = command
-            outcome["message"] = "{} {}".format(
-                outcome.get("message") or "", self.surface["needs_human_message"]["resume"])
+            text = self.surface["needs_human_message"]
+            why = step.get("why")
+            clause = text["resume"]
+            if isinstance(why, str) and why.strip() and isinstance(
+                    text.get("resume_why"), str):
+                # Fix round 22: what the plain resume does, from the stop.
+                outcome["resume_why"] = why.strip()
+                clause = fill(text["resume_why"], {"why": why.strip()})
+            outcome["message"] = "{} {}".format(outcome.get("message") or "", clause)
             self.attach_answers(step, word, plan, outcome)
 
     def attach_answers(self, step: dict, word: str, plan: str, outcome: dict) -> None:

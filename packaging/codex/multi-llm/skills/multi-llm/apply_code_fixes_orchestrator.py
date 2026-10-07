@@ -29,6 +29,7 @@ from utils.apply_orchestrator_base import (
     build_common_arg_parser,
 )
 from utils.cli_common import dispatcher_prefix
+from utils.text_clip import clip
 from utils.judge_vocab import JUDGE_AUTO_DECIDE, JUDGE_DECIDE, canonical_value
 from utils.apply_output_helpers import (
     build_skipped_output,
@@ -1163,8 +1164,8 @@ Finalization (run by the host AFTER every batch has been applied and verified):
                     print(f"  Type: {f['type']}")
                     print(f"  Importance: {f['importance']}")
                     print(f"  File: {f.get('file', 'unknown')}")
-                    desc = f.get('description', f.get('desc', ''))[:200]
-                    print(f"  Description:\n  {desc}...")
+                    desc = clip(f.get('description', f.get('desc', '')), 200)
+                    print(f"  Description:\n  {desc}")
 
             if self.formatted_human:
                 print(f"\n{'='*60}")

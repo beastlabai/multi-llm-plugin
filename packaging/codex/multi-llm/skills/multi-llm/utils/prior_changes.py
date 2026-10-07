@@ -179,6 +179,40 @@ def _latest_for(raw: Sequence[dict], entry_id: str, phase: Optional[str]) -> Opt
     return None
 
 
+def parse_stamp(value: Any) -> Optional[datetime]:
+    """An entry's ``timestamp`` (or a ``state.json`` stamp) as a naive local
+    datetime, or ``None`` when it does not parse."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    return parsed
+
+
+def run_entries(
+    output_dir: str, phase: Optional[str], since: Optional[str] = None,
+) -> list[dict]:
+    """The newest entry per id of *phase* alone (:func:`latest_entries`),
+    recorded after *since* (an ISO stamp; ``None`` keeps them all, and so
+    does an entry whose own stamp does not parse), in log order: one run's
+    own batches, never another phase's (fix round 22)."""
+    scoped = canonical_phase(phase)
+    boundary = parse_stamp(since)
+    out = []
+    for entry in latest_entries(_load_entries(_jsonl_path(output_dir))):
+        if canonical_phase(entry.get("phase")) != scoped:
+            continue
+        stamp = parse_stamp(entry.get("timestamp"))
+        if boundary is not None and stamp is not None and stamp <= boundary:
+            continue
+        out.append(entry)
+    return out
+
+
 def render(
     output_dir: str,
     phase: Optional[str] = None,
@@ -186,6 +220,8 @@ def render(
     tail: int = DEFAULT_TAIL,
     max_chars: int = MAX_CHARS,
     quoted: Collection[Tuple[str, Optional[str]]] = (),
+    own_run_only: bool = False,
+    since: Optional[str] = None,
 ) -> str:
     """The prior-batch context block, exactly as `read` prints it.
 
@@ -222,8 +258,19 @@ def render(
     fixture, 2026-10-07: an apply-code-fixes batch's first prompt showed the
     implement phase's three entries under ``## Implementation record`` and
     again, as "Batch 1-3", under ``## Changes Applied in Prior Batches``.
+
+    *own_run_only* (fix round 22, live run 9 #7) lists *phase*'s own entries
+    recorded after *since* (:func:`run_entries`) and nothing else: no other
+    phase's entries, no count of them, and no fall-back to the whole log on a
+    first batch. An apply-code-fixes batch's context is the earlier batches
+    of its own run (implement's record has its own section, and the
+    plan-edit batches of the planning phases are not code changes); Codex
+    racing 08's first fix batch listed nine of them.
     """
-    entries = latest_entries(_load_entries(_jsonl_path(output_dir)))
+    if own_run_only:
+        entries = run_entries(output_dir, phase, since)
+    else:
+        entries = latest_entries(_load_entries(_jsonl_path(output_dir)))
     if max_chars <= 0:
         return ""
     quoted_keys = {(str(eid), canonical_phase(ph)) for eid, ph in quoted}

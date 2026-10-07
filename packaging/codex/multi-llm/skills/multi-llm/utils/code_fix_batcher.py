@@ -38,6 +38,9 @@ MAX_DESCRIPTION_CHARS = 3000  # Total description length limit per batch
 # MAX_CHARS, scoped to one phase's entries rather than the whole shared log.
 MAX_IMPLEMENTATION_RECORD_ENTRIES = 5
 MAX_IMPLEMENTATION_RECORD_CHARS = 1200
+# How many of the implement entries past that budget the record names by task
+# id on its closing "and N more tasks: …" line (fix round 22).
+MAX_IMPLEMENTATION_RECORD_LEFT_OUT_IDS = 30
 
 
 def fix_member_ids(fixes: List[Dict[str, Any]]) -> List[str]:
@@ -363,6 +366,10 @@ def _implementation_record_lines(
     own, that belong here. Entries whose summary names one of the batch's own
     files sort first, so a deliberate tune to the exact line a fix touches is
     never crowded out of the (small) budget by an unrelated implement note.
+    The entries past that budget are named by task id on one closing ``- and
+    N more tasks: …`` line (fix round 22): the prior-batches section lists
+    only this apply-code-fixes run's own batches, so this is the one place a
+    batch learns which implement tasks it was not shown.
     """
     implement_entries = [
         e for e in prior_changes_entries(output_dir) if e.get("phase") == "implement"
@@ -377,17 +384,35 @@ def _implementation_record_lines(
         return any(name and name in summary for name in names)
 
     ordered = sorted(
-        implement_entries, key=lambda e: 0 if mentions_a_batch_file(e) else 1
+        range(len(implement_entries)),
+        key=lambda index: 0 if mentions_a_batch_file(implement_entries[index]) else 1,
     )[:MAX_IMPLEMENTATION_RECORD_ENTRIES]
 
     lines: List[str] = []
+    shown = set()
     total_chars = 0
-    for entry in ordered:
+    for index in ordered:
+        entry = implement_entries[index]
         line = f"- ({entry.get('id', '?')}): {entry.get('summary', '')}"
         if lines and total_chars + len(line) > MAX_IMPLEMENTATION_RECORD_CHARS:
             break
         lines.append(line)
+        shown.add(index)
         total_chars += len(line)
+    # Fix round 22 (live run 9, Claude Code racing 08): the entries past the
+    # budget are named here by task id, once, and never listed again under
+    # the prior-batches section ("Batch 15-18" named no batch of anything).
+    left_out = [
+        str(entry.get("id") or "?") for index, entry in enumerate(implement_entries)
+        if index not in shown
+    ]
+    if left_out:
+        named = ", ".join(left_out[:MAX_IMPLEMENTATION_RECORD_LEFT_OUT_IDS])
+        if len(left_out) > MAX_IMPLEMENTATION_RECORD_LEFT_OUT_IDS:
+            named += f" (+{len(left_out) - MAX_IMPLEMENTATION_RECORD_LEFT_OUT_IDS} more)"
+        lines.append(
+            f"- and {len(left_out)} more task{'' if len(left_out) == 1 else 's'}: {named}"
+        )
     return lines
 
 

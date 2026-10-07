@@ -330,6 +330,102 @@ def mark_item_processed_in_state(
     }
 
 
+#: ``details.leg`` of a ``processed_<phase>`` record (fix round 22): which
+#: leg wrote it — the write executor's scheduler, or ``util batch-done`` for
+#: the native host.
+PROCESSED_LEG_EXECUTOR = "executor"
+PROCESSED_LEG_NATIVE = "native"
+
+
+def record_batch_items_in_state(
+    state: Dict[str, Any],
+    phase: str,
+    task: Dict[str, Any],
+    *,
+    completed: bool,
+    leg: str,
+    declined: Optional[Dict[str, str]] = None,
+    skipped: Optional[Dict[str, str]] = None,
+    no_op: bool = False,
+) -> List[str]:
+    """Record every item of an apply batch in ``processed_<phase>``; the ids.
+
+    One shape on both legs (fix round 22, live run 9: the executor leg wrote
+    no record at all, so ``state.json`` named a declined fix on Claude Code
+    and nowhere on Codex or OpenCode). Each of *task*'s ``expected_ids`` gets
+    ``{status, details: {task_id, prior_changes_id, grouped_sha256, leg,
+    reason?}, timestamp}``: ``declined`` / ``skipped`` with its reason
+    (never ``applied``), else ``applied`` — ``no-op`` for a batch the
+    executor read as changing nothing — for a finished batch, and ``failed``
+    for every item of a batch that did not finish, which keeps it in a
+    ``--resume``'s work set. ``grouped_sha256`` is the review the batch
+    applies (its task's ``inputs``), so a later review's run can tell this
+    cycle's records from its own (:func:`processed_record_counts`).
+    """
+    inputs = task.get("inputs") if isinstance(task.get("inputs"), dict) else {}
+    details = {
+        "task_id": str(task.get("task_id") or ""),
+        "prior_changes_id": str(task.get("prior_changes_id") or ""),
+        "grouped_sha256": str(inputs.get("grouped_sha256") or ""),
+        "leg": leg,
+    }
+    declined = declined or {}
+    skipped = skipped or {}
+    items: List[str] = []
+    for item_id in task.get("expected_ids") or []:
+        item_id = str(item_id)
+        if not item_id:
+            continue
+        if not completed:
+            mark_item_processed_in_state(state, phase, item_id, "failed", dict(details))
+        elif item_id in declined:
+            mark_item_processed_in_state(
+                state, phase, item_id, "declined",
+                {**details, "reason": str(declined[item_id])})
+        elif item_id in skipped:
+            mark_item_processed_in_state(
+                state, phase, item_id, "skipped",
+                {**details, "reason": str(skipped[item_id])})
+        else:
+            mark_item_processed_in_state(
+                state, phase, item_id, "no-op" if no_op else "applied", dict(details))
+        items.append(item_id)
+    return items
+
+
+def processed_record_counts(
+    record: Any, *, review_stamp: str = "", executor_leg: bool = False,
+) -> bool:
+    """Whether a ``processed_<phase>`` record keeps its item out of a
+    ``--resume``'s work set (``apply_orchestrator_base`` step 23).
+
+    Not a ``failed`` one (that batch is dispatched again, on both legs). Not
+    a ``declined`` or ``skipped`` one stamped with another review than
+    *review_stamp* (the current ``grouped.json``'s hash): an item an earlier
+    review's batch did not apply, which a later review reports again, is
+    offered again (fix round 22) — as the executor leg offers it in the
+    batch the later review makes — and never counted as applied. An
+    ``applied`` record counts whatever review it names, so a native
+    ``--resume`` never hands an applied item out twice. A record with no
+    stamp counts, as before: absence of a stamp is not staleness. And on
+    the executor leg (*executor_leg*) not one the executor wrote: the
+    scheduler keeps that batch from its own result file under its own id,
+    so dropping its items here would renumber the batches a stop's
+    ``--human-task <batch>=skip`` names; a record the native host wrote
+    still counts there, since no result file stands behind it.
+    """
+    if not isinstance(record, dict) or record.get("status") == "failed":
+        return False
+    details = record.get("details") if isinstance(record.get("details"), dict) else {}
+    stamp = str(details.get("grouped_sha256") or "")
+    if (review_stamp and stamp and stamp != review_stamp
+            and record.get("status") in ("declined", "skipped")):
+        return False
+    if executor_leg and details.get("leg") == PROCESSED_LEG_EXECUTOR:
+        return False
+    return True
+
+
 def compute_plan_hash(plan_path: Path) -> str:
     """Hash a plan's content the way ``state.json``'s ``plan_hash`` records it.
 
