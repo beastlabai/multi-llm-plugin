@@ -1117,18 +1117,14 @@ class TestTheDispatchOnTheRung:
 
     @pytest.mark.parametrize("where", ["other", "root", "sub"])
     def test_a_trust_entry_added_during_the_run_is_named_in_the_summary(
-        self, repo, wrapper, runner_env, jail_home, capsys, where, monkeypatch
+        self, repo, wrapper, runner_env, jail_home, capsys, where
     ):
         """Fix round 17: a jailed batch can write ``$CODEX_HOME``, so a table
         for another repository or for ``/`` may be this run's own; round 16
         named only one inside the repository (run 6, #11a), which hid them.
         Every one is named, in the closing summary only, blaming no one. Fix
-        round 22: with no codex session running in that directory (pinned
-        here: the machine's own live sessions are not this test's input), the
-        wording stays cautious — removing the table is the user's call, and
-        it never says nothing needs doing."""
-        monkeypatch.setattr(
-            landlock_dispatch, "live_codex_trust_keys", lambda proc_root="/proc": set())
+        round 23: always in the cautious words — removing the table is the
+        user's call — since no running process is read to explain one."""
         runner_env.use("codex:gpt-5.5")
         runner_env.echo("validation")
         path = {"other": "/elsewhere/other-repo", "root": "/",
@@ -1146,10 +1142,14 @@ class TestTheDispatchOnTheRung:
         assert "[CODEX_HOME_CHECK]" not in capsys.readouterr().out, "summary only"
         named = landlock_dispatch.render_name(landlock_dispatch.render_home(path))
         trust = [ln for ln in executor.jail_summary_lines(before)
-                 if f"(not a failure): {named}: added by this run or by another "
-                    "codex session;" in ln]
+                 if f"(not a failure): {named}. " in ln]
         assert len(trust) == 1, executor.jail_summary_lines(before)
-        assert trust[0].endswith("is your call."), trust[0]
+        assert ("added by this run or by another codex session running at the "
+                "same time") in trust[0]
+        assert trust[0].endswith(
+            f"if you never ran codex in {named}, removing its "
+            '[projects."<path>"] table from ' + landlock_dispatch.render_home(
+                str(jail_home)) + "/config.toml is your call."), trust[0]
         assert "nothing needs doing" not in trust[0]
 
     def test_a_trust_entry_gone_again_by_the_summary_is_not_named(
