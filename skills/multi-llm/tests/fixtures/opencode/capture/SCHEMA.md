@@ -15,11 +15,12 @@ seeding the scratch data-dir DB with an account whose URL is the stub.
 
 **Versions.** opencode supports its newest release only, and that release is
 both `min_version` and `verified_version` (the pin). The committed directory is
-the pin's, every case: **1.18.34** (2026-10-02, 72 cases). A bump
+the pin's, every case: **1.18.35** (2026-10-08, 72 cases). A bump
 (`make opencode-bump VERSION=<x.y.z>`, which drives `run.sh`) captures the new
 release into `<new version>/` and deletes the old directory: git history keeps
 the earlier captures. On 1.18.34 the 68 permission cases gave a `summary.tsv`
-identical to 1.18.32's. While the floor was lower, 1.17.15 and 1.18.32 ran every
+identical to 1.18.32's; on 1.18.35 all 72 cases gave one identical to 1.18.34's
+(timestamps and session ids aside), with the same event keys in every stream. While the floor was lower, 1.17.15 and 1.18.32 ran every
 case and 1.18.18, 1.18.23 and 1.18.30 the T4.0 subset; the tables below keep
 those results where they say so.
 
@@ -75,7 +76,7 @@ are what `OpenCodeProvider`'s parser and classifier are graded on
 `auth_error` and `invalid_model` run with `HTTP(S)_PROXY` pointed at a closed
 local port, so any egress they attempted would die; neither attempts one.
 
-## Stream shape (identical on 1.17.15, 1.18.32 and 1.18.34)
+## Stream shape (identical on 1.17.15, 1.18.32, 1.18.34 and 1.18.35)
 
 - The top-level `type` is one of `step_start`, `tool_use`, `step_finish`,
   `text` or `error`. The payload is under `part`, whose `part.type` is
@@ -185,12 +186,12 @@ with and without `experimental.continue_loop_on_deny: true`. The target is
   not fatal. The schema entry, `continue_loop_on_deny: optional(Boolean)`, is
   present in the 1.17.15 binary.
 - **Result.** `continue_loop_on_deny` had its effect on every build from 1.17.15
-  to 1.18.34. With the floor at the newest release, the range is the support
+  to 1.18.35. With the floor at the newest release, the range is the support
   window (`CONTINUE_LOOP_ON_DENY_RANGE = (min_version, verified_version)`), and
   `t40_cont_*` / `s41_cont_read` re-measure it at every bump. The permission
   block needs **no version gate**.
 
-## Every case (1.17.15, 1.18.32 and 1.18.34 agree on every row; `summary.tsv`)
+## Every case (1.17.15, 1.18.32, 1.18.34 and 1.18.35 agree on every row; `summary.tsv`)
 
 `/etc/hostname` is read only where the plan names it (§4.1 and `q2_ustar_*`).
 Every other case reads a scratch file. "Our block" is the §4.2 step 1 block
@@ -348,7 +349,7 @@ commented `opencode.jsonc`, the project layer with and without
 and the hermetic `OPENCODE_CONFIG_CONTENT` with and without `--pure`, carrying
 the §4.2 permission block under `agent.plan.permission` so the fixture shows the
 reducer ignoring it. Every `apiKey` is a `sk-canary-not-a-key-<n>` canary.
-**1.18.34 masks every declared `apiKey` as `"***"`** (an empty one and an unset
+**1.18.34 and 1.18.35 mask every declared `apiKey` as `"***"`** (an empty one and an unset
 `{env:}` reference included); 1.18.32 printed them in plaintext, `""` for the
 unset reference. `auth_list.<pin>.json` (`auth_list_capture.py`, same
 procedure) is the `opencode auth list` envelope the auth probe is graded on.

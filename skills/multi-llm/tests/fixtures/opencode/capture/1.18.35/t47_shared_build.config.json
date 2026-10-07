@@ -1,0 +1,85 @@
+{
+ "opencode_version": "1.18.35",
+ "note": "re-listed user allow: read completes",
+ "argv": [
+  "opencode",
+  "run",
+  "--agent",
+  "build",
+  "--format",
+  "json",
+  "--print-logs",
+  "--log-level",
+  "ERROR",
+  "--model",
+  "stub/m",
+  "please read /rig/shared/f.txt"
+ ],
+ "env": {
+  "HOME": "/rig/home",
+  "XDG_CONFIG_HOME": "/rig/cfg",
+  "XDG_DATA_HOME": "/rig/data",
+  "XDG_CACHE_HOME": "/rig/cache",
+  "XDG_STATE_HOME": "/rig/state",
+  "TMPDIR": "/rig/tmp",
+  "OPENCODE_DISABLE_MODELS_FETCH": "1",
+  "OPENCODE_DISABLE_AUTOUPDATE": "1",
+  "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+  "OPENCODE_CONFIG_CONTENT": "{\"agent\": {\"build\": {\"permission\": {\"external_directory\": {\"*\": \"deny\", \"/rig/shared/*\": \"allow\", \"/rig/shared/private/*\": \"deny\"}, \"read\": {\"*.env\": \"deny\", \"*.env.*\": \"deny\", \"*.env.example\": \"allow\"}, \"doom_loop\": \"deny\"}}}}"
+ },
+ "OPENCODE_CONFIG_CONTENT": {
+  "agent": {
+   "build": {
+    "permission": {
+     "external_directory": {
+      "*": "deny",
+      "/rig/shared/*": "allow",
+      "/rig/shared/private/*": "deny"
+     },
+     "read": {
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "*.env.example": "allow"
+     },
+     "doom_loop": "deny"
+    }
+   }
+  }
+ },
+ "global_opencode_json": {
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+   "stub": {
+    "npm": "@ai-sdk/openai-compatible",
+    "name": "stub",
+    "options": {
+     "baseURL": "http://127.0.0.1:PORT/v1",
+     "apiKey": "x"
+    },
+    "models": {
+     "m": {
+      "name": "m",
+      "tool_call": true
+     }
+    }
+   }
+  },
+  "model": "stub/m",
+  "small_model": "stub/m",
+  "permission": {
+   "external_directory": {
+    "/rig/shared/*": "allow",
+    "/rig/shared/private/*": "deny"
+   }
+  }
+ },
+ "managed_opencode_json": null,
+ "org_config": null,
+ "stub_tool_call": {
+  "tool": "read",
+  "args": {
+   "filePath": "/rig/shared/f.txt"
+  }
+ },
+ "stub_script": null
+}
