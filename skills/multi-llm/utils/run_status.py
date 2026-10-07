@@ -2737,11 +2737,14 @@ def _is_executor_implement_view(view: Dict[str, Any]) -> bool:
 def _kept_labels(mirror: Mapping[str, Any], kept: Sequence[str]) -> Dict[str, str]:
     """What each task a write mirror kept is, in the ``resume: kept`` line's
     words (fix round 20): a check whose findings stand (its row carries
-    them) and an accepted task (``accepted_task_ids``, a check apart from a
-    failed task). Plain kept tasks carry no label."""
+    them), an accepted task (``accepted_task_ids``, a check apart from a
+    failed task) and a manual task completed by hand
+    (``completed_by_hand_task_ids``, fix round 23). Plain kept tasks carry
+    no label."""
     from .write_batch_scheduler import (
         ACCEPTED_AFTER_FAILING_LABEL,
         ACCEPTED_WITH_FINDINGS_LABEL,
+        COMPLETED_BY_HAND_LABEL,
         KEPT_WITH_FINDINGS_LABEL,
     )
 
@@ -2758,6 +2761,9 @@ def _kept_labels(mirror: Mapping[str, Any], kept: Sequence[str]) -> Dict[str, st
             ACCEPTED_WITH_FINDINGS_LABEL if task_id in with_findings
             else ACCEPTED_AFTER_FAILING_LABEL
         )
+    # Fix round 23: a manual task kept on the user's `=done` answer.
+    for task_id in _id_list(mirror.get("completed_by_hand_task_ids")):
+        labels[task_id] = COMPLETED_BY_HAND_LABEL
     return labels
 
 
