@@ -938,6 +938,8 @@ COMPLETED_MANUAL_REASON = "answered --human-task <id>=done"
 #: spelling on every surface).
 ACCEPTED_WITH_FINDINGS_LABEL = "accepted with its check findings"
 ACCEPTED_AFTER_FAILING_LABEL = "accepted after failing"
+#: How a manual task the user answered ``--human-task <id>=done`` reads.
+COMPLETED_BY_HAND_LABEL = "completed by hand"
 
 #: How a check kept from an earlier run with its findings standing reads in a
 #: kept list (fix round 20, live run 8 #6: the stop fixture's 01b and 01c
@@ -977,7 +979,7 @@ def answered_done_label(plan: Any, task_id: str) -> str:
             if ACCEPTED_WITH_FINDINGS_MARK in str(accepted.get(task_id) or "")
             else ACCEPTED_AFTER_FAILING_LABEL
         )
-    return "completed by hand"
+    return COMPLETED_BY_HAND_LABEL
 
 
 def answered_done_on_record(
@@ -4286,17 +4288,13 @@ class WriteBatchScheduler:
         # kept) says nothing here; its batch lines already say what ran.
         if not self.resume or self.dry_run:
             return
-        this_run = {o.task_id for o in result.outcomes if not o.skipped}
-        answered = set(result.human_plan.accepted) | set(result.human_plan.completed)
         kept = self._resume_kept_rows(result, result.outcomes)
-        seen = {str(row.get("task_id")) for row in kept}
         # Fix round 16 (Codex stop-path accept 02): a task answered
         # `--human-task <id>=done` is kept too, and the line says how — the
         # accepted check T002 was missing from "kept 3 … T001, T003, T004".
         answered_kept = [
             f"{task_id} ({answered_done_label(result.human_plan, task_id)})"
-            for task_id in sorted(answered)
-            if task_id not in this_run and task_id not in seen
+            for task_id in self._resume_answered_ids(result, result.outcomes, kept)
         ]
         if not kept and not answered_kept:
             return
@@ -4381,8 +4379,9 @@ class WriteBatchScheduler:
 
         The ``resume: kept`` line and the write mirror's ``kept_task_ids``
         (``status``'s ``(<n> kept from an earlier run: …)``) both read it,
-        so the two name the same tasks: fix round 22 (live run 9 #5) — Codex
-        01b's line kept four, its ``status`` said "1 kept". *outcomes* is
+        then :meth:`_resume_answered_ids`, so the two name the same tasks:
+        fix round 22 (live run 9 #5) — Codex 01b's line kept four, its
+        ``status`` said "1 kept". *outcomes* is
         what finished so far (the mirror passes a batch's finished tasks
         before they reach ``result``); a task the run's dispatch walk will
         dispatch is never kept, though an earlier run finished it (a check
@@ -4406,6 +4405,27 @@ class WriteBatchScheduler:
             seen.add(task_id)
             kept.append(row)
         return kept
+
+    def _resume_answered_ids(
+        self, result: SchedulerResult, outcomes: Sequence[TaskOutcome],
+        kept_rows: Sequence[Dict[str, Any]],
+    ) -> List[str]:
+        """The tasks a resume keeps on the user's ``--human-task <id>=done``
+        answer — an accepted check or failed task, a manual task completed by
+        hand — that this run did not dispatch and *kept_rows* do not hold, in
+        id order: the last part of the ``resume: kept`` line, and of the write
+        mirror's ``kept_task_ids`` (fix round 23, review of round 22 #3: the
+        mirror left them out, so ``--json`` read three kept beside the line's
+        four). ``[]`` on a run that is not a resume."""
+        if not self.resume or self.dry_run:
+            return []
+        this_run = {o.task_id for o in outcomes if not o.skipped}
+        seen = {str(row.get("task_id")) for row in kept_rows}
+        answered = set(result.human_plan.accepted) | set(result.human_plan.completed)
+        return [
+            task_id for task_id in sorted(answered)
+            if task_id not in this_run and task_id not in seen
+        ]
 
     @staticmethod
     def _jail_line_count() -> int:
@@ -11875,10 +11895,11 @@ class WriteBatchScheduler:
             # since a disjoint group dispatches on threads.
             with self._sweep_lock:
                 in_flight = sorted(self._dispatch_started.items())
-            kept_ids = [
-                str(row.get("task_id"))
-                for row in self._resume_kept_rows(result, outcomes)
-            ] or [o.task_id for o in outcomes if o.skipped]
+            kept_rows = self._resume_kept_rows(result, outcomes)
+            kept_ids = (
+                [str(row.get("task_id")) for row in kept_rows]
+                + self._resume_answered_ids(result, outcomes, kept_rows)
+            ) or [o.task_id for o in outcomes if o.skipped]
             _status_file.update_status(self.phase_dir, {
                 # The read phases record a phase-level `state` beside the run
                 # record; without one here `status` printed `phase state: (none)`
@@ -11980,7 +12001,18 @@ class WriteBatchScheduler:
                         # Fix round 22 (live run 9 #5): every task the
                         # resume kept, as its `resume: kept` line names
                         # them, not only the ones it materialized again.
+                        # Fix round 23: the line's whole set — the tasks an
+                        # earlier run finished and this one did not
+                        # dispatch, then the ones kept on the user's
+                        # `--human-task <id>=done` (an accepted check or
+                        # failed task, a manual task completed by hand).
                         **({"kept_task_ids": kept_ids} if kept_ids else {}),
+                        # Which of them the user completed by hand, so
+                        # `status` names them in the line's words.
+                        **({"completed_by_hand_task_ids": sorted(
+                            set(result.human_plan.completed) & set(kept_ids)
+                        )} if set(result.human_plan.completed) & set(kept_ids)
+                           else {}),
                         **({"check_findings_task_ids": [
                             o.task_id for o in outcomes
                             if o.ok and o.check_findings
