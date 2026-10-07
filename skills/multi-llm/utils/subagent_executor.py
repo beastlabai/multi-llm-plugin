@@ -942,6 +942,21 @@ def batch_check_findings(result: Any) -> Optional[List[str]]:
 DECLINED_REASON_MAX_CHARS = 300
 
 
+def declined_reason(text: Any) -> str:
+    """One declined item's reason as every surface carries it: whitespace
+    collapsed, a closing full stop or semicolon dropped, bounded; ``""`` for
+    no text.
+
+    Every line that quotes a reason puts its own punctuation after it, so a
+    reason that ended in one printed it twice (the decline fixture,
+    2026-10-07: "… MAX_SPEED.."). Both legs read a reason through here: the
+    executor's :func:`declined_items` and ``util batch-done --declined``.
+    """
+    if not isinstance(text, str):
+        return ""
+    return " ".join(text.split()).rstrip(" .;")[:DECLINED_REASON_MAX_CHARS]
+
+
 @dataclass
 class DeclinedItems:
     """What a write reply's ``declined`` says, read against its batch (fix round 18).
@@ -1003,12 +1018,11 @@ def declined_items(
                 out.conflicting.append(item)
                 out.problems.append(f"{item} is in both `ids` and `declined`")
             continue
-        reason = entry.get("reason")
-        reason = " ".join(str(reason).split()) if isinstance(reason, str) else ""
+        reason = declined_reason(entry.get("reason"))
         if not reason:
             out.problems.append(f"`declined` gives no reason for {item}")
             continue
-        found.setdefault(item, reason[:DECLINED_REASON_MAX_CHARS])
+        found.setdefault(item, reason)
     out.items = {item: found[item] for item in expected if item in found}
     return out
 
@@ -1019,7 +1033,9 @@ def row_declined(row: Any) -> Dict[str, str]:
     out: Dict[str, str] = {}
     for entry in raw if isinstance(raw, list) else []:
         if isinstance(entry, dict) and entry.get("id") and entry.get("reason"):
-            out.setdefault(str(entry["id"]), str(entry["reason"]))
+            # A record written before `declined_reason` reads the same way.
+            reason = declined_reason(str(entry["reason"])) or str(entry["reason"])
+            out.setdefault(str(entry["id"]), reason)
     return out
 
 

@@ -106,7 +106,7 @@ try:
         update_task_status_in_state,
     )
     from .stream_bootstrap import bootstrap_streams
-    from .subagent_executor import check_findings_from
+    from .subagent_executor import check_findings_from, declined_reason
     from .subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set
     from .write_phase_bridge import WRITE_TASK_FILENAME
     from .write_batch_scheduler import (
@@ -141,7 +141,7 @@ except ImportError:  # pragma: no cover - direct script invocation
         update_task_status_in_state,
     )
     from utils.stream_bootstrap import bootstrap_streams  # type: ignore
-    from utils.subagent_executor import check_findings_from  # type: ignore
+    from utils.subagent_executor import check_findings_from, declined_reason  # type: ignore
     from utils.subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set  # type: ignore
     from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
     from utils.write_batch_scheduler import (  # type: ignore
@@ -572,13 +572,13 @@ def _not_applied_items(
     out: Dict[str, Tuple[str, str]] = {}
     for value in declined or []:
         item, sep, why = str(value).partition("=")
-        item, why = item.strip(), " ".join(why.split())
+        item, why = item.strip(), declined_reason(why)
         if not sep or not item or not why:
             raise WritePromptError(
                 f"--declined expects <id>=<the reason the batch gave>, got "
                 f"{value!r}: a decline without its reason is not recorded."
             )
-        out[item] = ("declined", why[:300])
+        out[item] = ("declined", why)
     for value in skipped or []:
         item = str(value).strip()
         if item in out:
