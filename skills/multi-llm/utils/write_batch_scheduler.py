@@ -1823,7 +1823,8 @@ def compose_resume_why(
     *undone_with* names the tasks waiting on a
     task that does not run. Both legs compose it from the facts they answer
     the stop from (the executor's ``_stop_resume_why``,
-    :func:`native_resume_why`).
+    :func:`native_resume_why`), and it is cut at a word to
+    ``next_phase.MAX_RECORDED_WHY_CHARS`` (fix round 23).
     """
 
     def waits(ids: Sequence[str]) -> str:
@@ -1858,7 +1859,16 @@ def compose_resume_why(
             parts.append(f"{task_id} is checked again before it is dispatched")
     if not parts:
         return None
-    return f"runs the {unit} that can run; " + "; ".join(parts)
+    # Fix round 23 (review of round 22, relay #4): within the length a route
+    # reads back from the run's folder (`next_phase.recorded_why`), cut at a
+    # word, so the tool routes and status carry the why the native block
+    # prints instead of falling back on a large stop.
+    try:
+        from .next_phase import MAX_RECORDED_WHY_CHARS
+    except ImportError:  # pragma: no cover - direct script runs
+        from utils.next_phase import MAX_RECORDED_WHY_CHARS  # type: ignore
+    return clip(f"runs the {unit} that can run; " + "; ".join(parts),
+                MAX_RECORDED_WHY_CHARS)
 
 
 def compose_stop_answers(
