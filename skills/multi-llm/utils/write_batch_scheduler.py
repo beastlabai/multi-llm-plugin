@@ -2014,14 +2014,23 @@ def compose_stop_answers(
     for task_id in [*refused, *(item.task_id for item in failed)]:
         combined_flags += answer(task_id, "skip")
         clauses.append(skipped_clause(task_id))
+    # Fix round 23: each why within the length the tool routes read back
+    # from the run's folder (`next_phase.stop_answers_on_record`), cut at a
+    # word, so a large stop's answers are not dropped on the way.
+    try:
+        from .next_phase import MAX_RECORDED_WHY_CHARS
+    except ImportError:  # pragma: no cover - direct script runs
+        from utils.next_phase import MAX_RECORDED_WHY_CHARS  # type: ignore
+    rest = "; the rest runs"
     answers: List[Dict[str, Any]] = []
     if len(clauses) > 1:
         answers.append({
             "flags": ["--resume", *combined_flags],
-            "why": " and ".join(clauses) + "; the rest runs",
+            "why": clip(" and ".join(clauses), MAX_RECORDED_WHY_CHARS - len(rest)) + rest,
         })
     answers.extend(
-        {"flags": ["--resume", *item["flags"]], "why": item["why"]}
+        {"flags": ["--resume", *item["flags"]],
+         "why": clip(item["why"], MAX_RECORDED_WHY_CHARS)}
         for item in each
     )
     return answers
