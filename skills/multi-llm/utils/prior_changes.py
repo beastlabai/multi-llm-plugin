@@ -219,6 +219,22 @@ def run_entries(
     return out
 
 
+#: A batch id a prompt line may show (``T003``, ``apply-fix-batch-0``): the
+#: log and the phase's task file sit where a batch can write, so a recorded
+#: ``task_id`` of any other shape (a newline forging a prompt line, markup) is
+#: never shown, and the entry is named by its own id.
+_PLAIN_TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._#:-]{0,79}\Z")
+
+#: A phase folder name :func:`append` may read a task file from.
+_PHASE_DIR_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
+
+
+def plain_task_id(value: Any) -> str:
+    """*value* as a batch id a line may show, or ``""``."""
+    text = str(value or "").strip()
+    return text if _PLAIN_TASK_ID.match(text) else ""
+
+
 #: What may follow a leading id for :func:`summary_without_ids` to read it as
 #: a label: a colon or a dash, spaced or not (a hyphen only after a space,
 #: so ``T002-fix`` stays whole).
@@ -255,7 +271,7 @@ def summary_without_ids(summary: str, ids: Iterable[Any]) -> str:
 def entry_task_id(entry: dict) -> str:
     """The id of the batch that wrote *entry* — what summary.md, ``status``
     and ``--human-task <id>=…`` call it — else the entry's own id."""
-    return str(entry.get("task_id") or "").strip() or str(entry.get("id") or "?")
+    return plain_task_id(entry.get("task_id")) or str(entry.get("id") or "?")
 
 
 def entry_line(entry: dict) -> str:
@@ -424,7 +440,7 @@ def _task_id_in_task_file(output_dir: str, entry_id: str, phase: Optional[str]) 
     """The ``task_id`` of the batch whose ``prior_changes_id`` is *entry_id*
     in the phase's ``write_tasks.json`` (``<output_dir>/<phase dir>/``), or
     ``""``. Best-effort: a missing or unreadable file names nothing."""
-    if not phase:
+    if not phase or not _PHASE_DIR_WORD.match(phase):
         return ""
     try:
         document = json.loads(
@@ -435,7 +451,7 @@ def _task_id_in_task_file(output_dir: str, entry_id: str, phase: Optional[str]) 
         return ""
     for task in document.get("batches") or document.get("tasks") or []:
         if isinstance(task, dict) and str(task.get("prior_changes_id") or "") == entry_id:
-            return str(task.get("task_id") or "").strip()
+            return plain_task_id(task.get("task_id"))
     return ""
 
 
@@ -451,7 +467,7 @@ def append(
     none given (the native ``append`` command) it is read off the phase's
     ``write_tasks.json``, the file the host dispatched the batch from. It is
     recorded only when it differs from *entry_id* (an implement task's entry
-    id is its task id).
+    id is its task id), and only as a plain id (:func:`plain_task_id`).
 
     The in-process half of ``append``, for the same reason :func:`render` exists.
     Idempotent on ``(id, phase)`` **and summary**: a re-dispatched batch that
@@ -472,7 +488,7 @@ def append(
     latest = _latest_for(_load_entries(path), entry_id, phase)
     if latest is not None and latest.get("summary") == summary:
         return False
-    named = str(task_id or "").strip() or _task_id_in_task_file(output_dir, entry_id, phase)
+    named = plain_task_id(task_id) or _task_id_in_task_file(output_dir, entry_id, phase)
     record = {"id": entry_id}
     if named and named != entry_id:
         record["task_id"] = named
