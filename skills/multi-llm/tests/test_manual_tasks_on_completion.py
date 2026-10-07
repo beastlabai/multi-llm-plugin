@@ -895,7 +895,13 @@ class TestTheNativeLegRecordsItsDeferrals:
 
 
 def test_the_claude_code_host_is_told_to_relay_the_note():
-    """Fix round 15 (round 14's leftover): the close note reached the tool
+    """Fix round 22 (live run 9, the decline fixture): the Claude Code host
+    saw `[WORKFLOW_COMPLETE]` in `apply-code-fixes --mark-completed`'s own
+    output, ran no lookup, and wrote "the tool reports the workflow as
+    complete"; the Stop hook asked for the sentence. The rule names any
+    `[WORKFLOW_COMPLETE]` line and the exact words.
+
+    Fix round 15 (round 14's leftover): the close note reached the tool
     routes' `user_next_step` line and summary-format.md, but the Claude Code
     shim, where that host learns what a `[WORKFLOW_COMPLETE]` lookup means,
     and full-workflow.md's `### Next Steps` block named only the manual
@@ -903,8 +909,9 @@ def test_the_claude_code_host_is_told_to_relay_the_note():
     done."""
     skill = " ".join((SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8").split())
     assert (
-        "A lookup that prints `[WORKFLOW_COMPLETE]` ends the report with "
-        "\"Workflow complete.\", each `[MANUAL_TASK]` line's task (id and "
+        "A `[WORKFLOW_COMPLETE]` line, from the lookup or from the phase's own "
+        "output, ends the report with the exact words \"Workflow complete.\", "
+        "each `[MANUAL_TASK]` line's task (id and "
         "title) as the user's to do, keeping a line's \"(waits on …)\" note "
         "(implement runs that task once the one it waits on is recorded "
         "done), then the `[MANUAL_TASK_NOTE]` line's text verbatim"
