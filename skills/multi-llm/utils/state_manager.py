@@ -256,6 +256,35 @@ def set_task_batch_check_in_state(
         state.pop(TASK_BATCH_CHECK_KEY, None)
 
 
+#: ``state.json``'s list of the implement tasks whose last record carried a
+#: report of their OWN checks (passed, failing, or repeating only accepted
+#: findings), sorted, present only while some task has one (fix round 24,
+#: live run 10: every racing task ran ``npm test`` and passed, and the tests
+#: line still said that nothing had run the repository's tests — a passing
+#: own check was recorded nowhere). Written by both legs (``util batch-done
+#: --own-check``, the scheduler from ``TaskOutcome.batch_check``); every
+#: other record of the task clears it; the tests line reads it
+#: (``write_batch_scheduler.implement_checks_ran``).
+TASK_OWN_CHECK_RAN_KEY = "task_own_check_ran"
+
+
+def set_task_own_check_ran_in_state(
+    state: Dict[str, Any], task_id: str, ran: bool,
+) -> None:
+    """Record (or clear) that *task_id*'s own check reported; the key is
+    dropped when the list empties."""
+    recorded = state.get(TASK_OWN_CHECK_RAN_KEY)
+    current = {str(t) for t in recorded} if isinstance(recorded, list) else set()
+    if ran:
+        current.add(str(task_id))
+    else:
+        current.discard(str(task_id))
+    if current:
+        state[TASK_OWN_CHECK_RAN_KEY] = sorted(current)
+    else:
+        state.pop(TASK_OWN_CHECK_RAN_KEY, None)
+
+
 #: ``state.json``'s map of what an implement task's own check reported again
 #: of findings the user accepted for a check (``--human-task <check>=done``),
 #: by check: ``{task_id: {check_id: [finding, ...]}}``, present only while

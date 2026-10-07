@@ -33,7 +33,13 @@ from tests.test_check_gate_fixture import (  # noqa: E402,F401
 from tests import test_write_executor_orchestrators as _orchestrators  # noqa: E402
 from tests.test_write_executor_orchestrators import _ApplyRig  # noqa: E402
 
-UNVERIFIED = "Nothing ran this repository's tests: driver.verify_command is not set."
+#: The fixture's T002 is a check that reports problems: the line leads with
+#: it (fix round 24); "Nothing ran" only when no check ran.
+UNVERIFIED = (
+    "The tasks ran checks: reported problems in T002. The plugin itself ran "
+    "no tests: driver.verify_command is not set.")
+#: In every form of the line, for the cases that must print none.
+NOT_SET = "driver.verify_command is not set"
 
 
 @pytest.fixture
@@ -124,7 +130,7 @@ class TestTheTestsLineTravelsWithTheStop:
         _policy(repo, DENY + "  verify_command: \"true\"\n")
         _text, result = _stop(repo, capsys)
         assert result["error"].startswith("implement stopped at T005")
-        assert "Nothing ran this repository's tests" not in result["error"]
+        assert NOT_SET not in result["error"]
 
 
 class TestAnApplyStopNamesItsLine(_ApplyRig):

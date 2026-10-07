@@ -78,6 +78,11 @@
         "additionalProperties": { "type": "array", "items": { "type": "string" } }
       }
     },
+    "task_own_check_ran": {
+      "type": "array",
+      "description": "The implement tasks that edit files whose last record carried a report of their own checks (passed, failing, or repeating only accepted findings), sorted. Every other record of the task clears it. Present only while some task has one; read by the line saying what ran the repository's tests",
+      "items": { "type": "string" }
+    },
     "apply_fix_batch_checks": {
       "type": "object",
       "description": "Per apply-code-fixes batch whose reply reported its own checks: its prior_changes_id and grouped_sha256 (the record belongs to that batch's fixes of that review), its failing checks and, per known check command its prompt listed, what it says that check did (passed, failed, not run). Never a hold; read by the next batch's prompt, status and the line saying nothing ran the tests",
