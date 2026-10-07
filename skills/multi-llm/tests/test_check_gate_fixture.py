@@ -94,6 +94,14 @@ ALLOW = (
     "driver:\n  subagent_runner: codex:gpt-5.5\n  write_paths:\n"
     "    allow: ['**']\n    deny: ['.git/**', '.multi-llm/**']\n"
 )
+#: The way past T005's refusal (fix round 21): a deny hit names the deny
+#: rule to narrow, since the deny list wins over `allow` and "allow it in
+#: driver.write_paths" resumed into the same refusal (live run 8's case).
+DENY_CLAUSE = (
+    "if you want src/vendor/stamp.js written, remove or narrow the deny rule "
+    "`src/vendor/**` in driver.write_paths (.multi-llm/providers.yaml) so the "
+    "rule no longer covers it"
+)
 STAMP = "Edit: add the build stamp module"
 NOTE = "Edit: write the release note"
 PRINT = "Edit: print the build stamp"
@@ -183,12 +191,11 @@ class TestThePolicyStop:
         assert text.count("half-applied") == 1, text
         assert "nothing to restore" not in text
         # Fix round 20 (live run 8 #4, permissive): allowing the file stays
-        # a way forward, as the user's call, naming the file.
-        assert (
-            "  - your call: if you want src/vendor/stamp.js written, allow it "
-            "in driver.write_paths (.multi-llm/providers.yaml), then resume "
-            "this phase" in text
-        ), text
+        # a way forward, as the user's call, naming the file. Fix round 21:
+        # T005 is a deny hit, which "allow it" never got past (deny wins),
+        # so the way forward names the deny rule to narrow.
+        assert f"  - your call: {DENY_CLAUSE}, then resume this phase" in text, text
+        assert "allow it in driver.write_paths" not in text
         assert "widen" not in text and "genuinely in scope" not in text
         assert "driver.write_paths" in text and ".multi-llm/providers.yaml" in text
         assert "--human-task T005=skip" in text
@@ -210,7 +217,7 @@ class TestThePolicyStop:
         path is genuinely in scope", while the hosts were told never to
         suggest loosening the policy. Allowing the file stays a way forward,
         named and worded as the user's own call, beside the skip answer."""
-        from utils.write_safety import policy_allow_clause, policy_skip_clause
+        from utils.write_safety import policy_skip_clause
 
         _check(repo, passed=False)
         assert multi_llm.main([
@@ -219,15 +226,21 @@ class TestThePolicyStop:
         out = capsys.readouterr().out
         line = [l for l in out.splitlines() if l.startswith("MULTI_LLM_RESULT:")][-1]
         error = json.loads(line.split(" ", 1)[1])["error"]
-        allow = policy_allow_clause(["src/vendor/stamp.js"])
-        assert (f"To go on (your call): {allow} and resume this phase; "
+        # Fix round 21: a deny hit names the deny rule (deny wins over allow).
+        allow = DENY_CLAUSE
+        assert (f"To go on (your call): {allow}, then resume this phase; "
                 f"{policy_skip_clause('T005')}.") in error, error
         report = json.loads((repo.phase_dir / "write_batch_report.json").read_text())
         assert report["stop"]["policy_paths"] == ["src/vendor/stamp.js"]
+        assert report["stop"]["policy_rules"] == [{
+            "path": "src/vendor/stamp.js", "deny": ["src/vendor/**"],
+            "allowed": True,
+        }]
         reason = _reason(repo, "T005")
-        assert reason.endswith(f"Your call: {allow} and resume."), reason
+        assert reason.endswith(f"Your call: {allow}, then resume."), reason
         for text in (out, error, reason):
             assert "widen" not in text and "genuinely in scope" not in text
+            assert "allow it in driver.write_paths" not in text
 
     def test_the_result_line_names_both_answers(self, repo, capsys):
         _check(repo, passed=False)
@@ -508,8 +521,7 @@ class TestTheNativeLeg:
         # Fix round 20 (live run 8 #4): both ways forward, as the user's
         # call, in the executor stop's words.
         assert handoff["refused_tasks"]["T005"].endswith(
-            "Your call: if you want src/vendor/stamp.js written, allow it in "
-            "driver.write_paths (.multi-llm/providers.yaml) and resume. If not, "
+            f"Your call: {DENY_CLAUSE}, then resume. If not, "
             "skip T005: add --human-task T005=skip to the resume command (T005 "
             "and the tasks after it stay undone)."
         ), handoff["refused_tasks"]["T005"]
@@ -651,11 +663,9 @@ class TestTheNativeLeg:
         assert "--resume --human-task T005=skip" in err
         # Fix round 20: as the user's call, naming the file.
         assert (
-            "report both ways forward as the user's call, in these words: if "
-            "you want src/vendor/stamp.js written, allow it in "
-            "driver.write_paths (.multi-llm/providers.yaml) and re-run "
-            "implement with --resume; if not, skip T005 with --resume "
-            "--human-task T005=skip" in err
+            "report both ways forward as the user's call, in these words: "
+            f"{DENY_CLAUSE}, then re-run implement with --resume; if not, skip "
+            "T005 with --resume --human-task T005=skip" in err
         ), err
         assert "Never change driver.write_paths yourself." in err
         assert not (repo.phase_dir / "prompts" / "T005.prompt.txt").exists()
