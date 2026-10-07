@@ -534,6 +534,8 @@ NO_COMMAND_REASON = (
 #: ``{command}`` filled with ``resume_command``, when the result carries one.
 #: Fix round 17: ``{line}`` is shown without control characters and cut at
 #: ``max_line`` characters, ending in ``cut``; the command is never cut.
+#: Fix round 22: by ``utils.text_clip.clip``'s rule (a word boundary, no
+#: separator before ``cut``, a bracket the kept part opened closed after it).
 STOP_TITLE = {
     "template": "stopped and needs you: {line}",
     "no_line": "the run did not finish; the tool output says why.",

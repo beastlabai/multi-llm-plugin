@@ -46,9 +46,9 @@ _CLOSING = {closer: opener for opener, closer in _PAIRS.items()}
 _TOGGLES = ('"', "`")
 
 #: A cut backs off to the last word boundary only while that keeps at least
-#: this share of the room; past it the text is one long token (a path, a
-#: URL), which is cut inside rather than dropped.
-_WORD_FLOOR = 2 / 3
+#: two thirds of the room (``3 * kept >= 2 * room``, integers, so the
+#: OpenCode plugin's copy of this rule decides alike); past it the text is
+#: one long token (a path, a URL), which is cut inside rather than dropped.
 
 
 def plain_line(text: Any) -> str:
@@ -126,7 +126,7 @@ def _cut_at_word(text: str, room: int) -> str:
         return head
     for index in range(len(head) - 1, -1, -1):
         if head[index].isspace():
-            return head[:index] if index >= room * _WORD_FLOOR else head
+            return head[:index] if 3 * index >= 2 * room else head
     return head
 
 
