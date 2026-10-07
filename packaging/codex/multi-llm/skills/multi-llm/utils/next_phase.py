@@ -36,6 +36,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
+from .text_clip import plain_line
+
 #: The four line kinds of the block (§2.2(2)). The text after a command
 #: marker and one space is the builder's ``command`` byte for byte; an
 #: optional entry's ``why`` sits on its own line directly above its command.
@@ -78,6 +80,14 @@ NEXT_COMMAND_WHY_MARKER = "[NEXT_COMMAND_WHY]"
 #: jailed batch, so anything longer, or not one plain line, is not relayed.
 MAX_RECORDED_WHY_CHARS = 600
 
+#: One ``--human-task`` value a stop's recorded answer may carry: the shapes
+#: the executor composes — an implement task's ``done``/``skip``/``retry``
+#: (``write_batch_scheduler.compose_stop_answers``) and an apply batch's
+#: ``skip`` of a partial application (``WriteBatchScheduler._stop_answers``).
+#: Matched whole (fix round 23).
+_RECORDED_ANSWER = re.compile(
+    r"T[0-9]{3}=(?:done|skip|retry)|apply-(?:task-|fix-)?batch-[0-9]+=skip")
+
 #: The one line :func:`emit_resume` prints: the command that resumes a stopped
 #: write phase, and nothing else on the line (same rule as ``[NEXT_COMMAND]``).
 RESUME_COMMAND_MARKER = "[RESUME_COMMAND]"
@@ -101,6 +111,11 @@ RESUME_FLAG = "--resume"
 #: The route key of a plain-skill install, told apart from the plugin by the
 #: dispatcher's own skill root rather than by any environment variable.
 SKILL_ROUTE = "skill"
+
+#: An implement task id, the whole string (``task_decomposer.TASK_ID_PATTERN``).
+#: The manual tasks and the ids a close command answers are read back from
+#: ``state.json``, which a repo-wide batch can write (fix round 23).
+_TASK_ID = re.compile(r"T[0-9]{3}")
 
 #: Whitespace-free path components in ``install_paths`` that stand for a
 #: variable prefix (``$HOME``, ``%USERPROFILE%``, ``~``); the tail after the
@@ -303,13 +318,17 @@ def _manual_tasks(
     """
     implement = phases.get("implement") or {}
     entries = implement.get("manual_tasks") or ()
+
+    def task_id(value: Any) -> Optional[str]:
+        return str(value) if value and _TASK_ID.fullmatch(str(value)) else None
+
     manual = tuple(
         ManualTask(
             str(entry.get("id")), entry.get("title") or None,
-            str(entry.get("waits_on")) if entry.get("waits_on") else None,
+            task_id(entry.get("waits_on")),
         )
         for entry in entries
-        if isinstance(entry, Mapping) and entry.get("id")
+        if isinstance(entry, Mapping) and task_id(entry.get("id"))
     )
     note = command = None
     ids = manual_close_ids(implement)
@@ -325,10 +344,12 @@ def manual_close_ids(implement: Mapping[str, Any]) -> List[str]:
     every ``manual_tasks`` id (a payload built before fix round 16)."""
     recorded = implement.get("manual_close_ids")
     if isinstance(recorded, list):
-        return [str(task_id) for task_id in recorded if task_id]
+        return [str(task_id) for task_id in recorded
+                if task_id and _TASK_ID.fullmatch(str(task_id))]
     return [
         str(entry.get("id")) for entry in implement.get("manual_tasks") or ()
         if isinstance(entry, Mapping) and entry.get("id")
+        and _TASK_ID.fullmatch(str(entry.get("id")))
     ]
 
 
@@ -1005,30 +1026,35 @@ def render_next_phase_lines(answer: NextPhase) -> List[str]:
     when the answer carries them), then each ``optional_before`` entry's
     ``[NEXT_COMMAND_OPTIONAL_WHY]`` / ``[NEXT_COMMAND_OPTIONAL]`` pair in the
     answer's order, the answers pair, and then the same manual-task lines. A
-    command line holds the command and nothing else.
+    command line holds the command and nothing else, and every other line
+    holds one plain line (:func:`~utils.text_clip.plain_line`, fix round 23):
+    a why, a note or a task title comes from records a batch can write, and a
+    newline in one would forge a marker line of its own.
     """
     manual_lines = [
-        f"{MANUAL_TASK_MARKER} {task.line()}" for task in answer.manual_tasks
+        f"{MANUAL_TASK_MARKER} {plain_line(task.line())}"
+        for task in answer.manual_tasks
     ]
     if answer.manual_tasks and answer.manual_tasks_note and answer.manual_tasks_command:
-        manual_lines.append(f"{MANUAL_TASK_NOTE_MARKER} {answer.manual_tasks_note}")
+        manual_lines.append(
+            f"{MANUAL_TASK_NOTE_MARKER} {plain_line(answer.manual_tasks_note)}")
         manual_lines.append(
             f"{MANUAL_TASK_COMMAND_MARKER} {answer.manual_tasks_command}")
     if answer.complete:
         return [WORKFLOW_COMPLETE_MARKER] + manual_lines
     lines = []
     if answer.warning:
-        lines.append(f"{RUNNER_WARNING_MARKER} {answer.warning}")
+        lines.append(f"{RUNNER_WARNING_MARKER} {plain_line(answer.warning)}")
     if answer.tests_note:
-        lines.append(f"{TESTS_NOT_RUN_MARKER} {answer.tests_note}")
+        lines.append(f"{TESTS_NOT_RUN_MARKER} {plain_line(answer.tests_note)}")
     if answer.why:
-        lines.append(f"{NEXT_COMMAND_WHY_MARKER} {answer.why}")
+        lines.append(f"{NEXT_COMMAND_WHY_MARKER} {plain_line(answer.why)}")
     lines.append(f"{NEXT_COMMAND_MARKER} {answer.command}")
     for step in answer.optional_before:
-        lines.append(f"{NEXT_COMMAND_OPTIONAL_WHY_MARKER} {step.why}")
+        lines.append(f"{NEXT_COMMAND_OPTIONAL_WHY_MARKER} {plain_line(step.why)}")
         lines.append(f"{NEXT_COMMAND_OPTIONAL_MARKER} {step.command}")
     for step in answer.answers:
-        lines.append(f"{NEXT_COMMAND_ANSWERS_WHY_MARKER} {step.why}")
+        lines.append(f"{NEXT_COMMAND_ANSWERS_WHY_MARKER} {plain_line(step.why)}")
         lines.append(f"{NEXT_COMMAND_ANSWERS_MARKER} {step.command}")
     # After the commands, on every command answer that carries them (fix
     # round 16): the tasks implement deferred to the user, and how to record
@@ -1067,29 +1093,33 @@ def render_next_step_markdown(answer: "NextPhase") -> str:
     "Optional, before that:" and each optional entry's ``why`` and command,
     the answers, then the manual tasks, the note and its command — or
     "Workflow complete." in the command's place. The routes copy it as it
-    is; the Claude Code leg keeps reading the marker lines.
+    is; the Claude Code leg keeps reading the marker lines. Every why, note
+    and task line is one plain line (fix round 23), so nothing read back
+    from a run's records opens a fence or a heading of its own.
     """
     blocks: List[str] = []
     if answer.complete:
         blocks.append(WORKFLOW_COMPLETE_SENTENCE)
     else:
         if answer.why:
-            blocks.append(answer.why)
+            blocks.append(plain_line(answer.why))
         blocks.append(fenced_command(str(answer.command)))
         if answer.optional_before:
             blocks.append(OPTIONAL_LEAD)
             for step in answer.optional_before:
-                blocks.extend([step.why, fenced_command(step.command)])
+                blocks.extend([plain_line(step.why), fenced_command(step.command)])
         if answer.answers:
             blocks.append(ANSWERS_LEAD)
         for step in answer.answers:
-            blocks.extend([step.why, fenced_command(step.command)])
+            blocks.extend([plain_line(step.why), fenced_command(step.command)])
     if answer.manual_tasks:
         blocks.append("\n".join(
-            [MANUAL_TASKS_LEAD] + [f"- {task.line()}" for task in answer.manual_tasks]))
+            [MANUAL_TASKS_LEAD]
+            + [f"- {plain_line(task.line())}" for task in answer.manual_tasks]))
         if answer.manual_tasks_note and answer.manual_tasks_command:
             blocks.extend([
-                answer.manual_tasks_note, fenced_command(answer.manual_tasks_command)])
+                plain_line(answer.manual_tasks_note),
+                fenced_command(answer.manual_tasks_command)])
     return "\n\n".join(block for block in blocks if block)
 
 
@@ -1147,20 +1177,23 @@ def implement_resume_why(
 ) -> Optional[str]:
     """What the plain ``--resume`` of a stopped native implement does on an
     unchanged tree (``write_batch_scheduler.native_resume_why`` over
-    ``state.json`` as recorded), or ``None`` (fix round 22)."""
+    ``state.json`` as recorded, and the implement folder for the executor's
+    check stamps), or ``None`` (fix round 22)."""
     import json as _json
 
-    source = plan_arg if plan_path is None else plan_path
+    from .output_handler import phase_dir_path
+
+    source = os.path.abspath(str(plan_arg if plan_path is None else plan_path))
     try:
-        state = _json.loads(
-            _state_file(os.path.abspath(str(source))).read_text(encoding="utf-8"))
+        state = _json.loads(_state_file(source).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(state, dict):
         return None
     from .write_batch_scheduler import native_resume_why
 
-    return native_resume_why(state)
+    return native_resume_why(
+        state, phase_dir=str(phase_dir_path(Path(source), "implement")))
 
 
 # ---------------------------------------------------------------------------
@@ -1365,8 +1398,12 @@ def stop_answers_on_record(
     Read from ``{phase}/.status.json``'s write mirror
     (``progress.write_subagents.stop.answers``, written by
     ``write_batch_scheduler._stop_answers``): the run's own record of which
-    ``--human-task`` answers its stop named. Each entry is kept only when it
-    is ``{"flags": [str, …], "why": str}`` with ``--resume`` first.
+    ``--human-task`` answers its stop named. The folder is writable by every
+    jailed batch and the entries become the tool routes' options, so each is
+    kept only in the shape the plugin composes (fix round 23, review of round
+    22 relay #5): ``flags`` as :func:`recorded_answer_flags` reads them and a
+    ``why`` that passes :func:`recorded_why`. Any other entry is dropped,
+    never relayed.
     """
     from .output_handler import phase_dir_path
     from .status_file import read_status
@@ -1383,13 +1420,28 @@ def stop_answers_on_record(
     raw = stop.get("answers") if isinstance(stop, dict) else None
     answers: List[Dict[str, Any]] = []
     for entry in raw if isinstance(raw, list) else []:
-        flags = entry.get("flags") if isinstance(entry, dict) else None
-        why = entry.get("why") if isinstance(entry, dict) else None
-        if (isinstance(flags, list) and flags and flags[0] == RESUME_FLAG
-                and all(isinstance(flag, str) and flag for flag in flags)
-                and isinstance(why, str) and why.strip()):
-            answers.append({"flags": list(flags), "why": why.strip()})
+        if not isinstance(entry, dict):
+            continue
+        flags = recorded_answer_flags(entry.get("flags"))
+        why = recorded_why(entry.get("why"))
+        if flags is not None and why is not None:
+            answers.append({"flags": flags, "why": why})
     return answers
+
+
+def recorded_answer_flags(flags: Any) -> Optional[List[str]]:
+    """*flags*, a stop answer's flags read back from a run's output folder,
+    when they are what the plugin composes: ``--resume`` and then one or
+    more ``--human-task <answer>`` pairs, each answer one
+    :data:`_RECORDED_ANSWER`; else ``None`` (fix round 23)."""
+    if (not isinstance(flags, list) or len(flags) < 3 or len(flags) % 2 == 0
+            or flags[0] != RESUME_FLAG):
+        return None
+    for name, value in zip(flags[1::2], flags[2::2]):
+        if (name != "--human-task" or not isinstance(value, str)
+                or not _RECORDED_ANSWER.fullmatch(value)):
+            return None
+    return list(flags)
 
 
 def stop_resume_why_on_record(

@@ -161,6 +161,12 @@ VIEW_ALL = "all"
 #: Anything else means the phase is still working.
 CHECKPOINT_TERMINAL_STEPS = frozenset({"complete", "validation_pending", "stopped"})
 
+#: The write scheduler's ``progress.step`` on a stop, and how a foreground
+#: run that ended on it heads its block (fix round 23): a stop needs the
+#: user, as a detached run's exit 3 does (:data:`STOPPED_FOR_THE_USER_VERDICT`).
+STOPPED_STEP = "stopped"
+STOPPED_IN_FOREGROUND = "stopped in foreground (needs you; no detached run record)"
+
 #: The *phase* machine's terminal words — ``status_file``'s
 #: ``models_running -> models_complete/grouping_complete -> validation_pending ->
 #: complete`` ladder plus the ways a phase stops without reaching ``complete``
@@ -663,6 +669,16 @@ def _workflow_trailer_lines(
                 f"{prefix}a task's own report says a check it ran fails (see "
                 f"implement/summary.md): {named}"
             )
+    # And those whose own check reported again only the findings the user
+    # accepted for a check (`phases.implement.batch_check_accepted`, fix
+    # round 23), by the same rule: not a failure, but on record.
+    accepted_reruns = _accepted_reruns_by_task(
+        (phases.get("implement") or {}).get("batch_check_accepted"))
+    if accepted_reruns and not (implement_done and review_settled):
+        lines += [
+            f"{prefix}{clause} — not counted as a failure (see implement/summary.md)"
+            for clause in accepted_rerun_clauses(accepted_reruns)
+        ]
     if manual_line:
         lines.append(manual_line)
     return lines
@@ -936,7 +952,10 @@ def _run_state_text(view: Dict[str, Any]) -> str:
     if result is None:
         if _stopped_for_the_user(view):
             # Fix round 22: the record's word stays; what it means is said.
-            return f"{word} ({STOPPED_FOR_THE_USER_GLOSS})"
+            # Fix round 23 (review of round 22, #4): "nothing crashed" only
+            # when nothing it ran failed.
+            crashed = "" if _a_dispatch_failed(view) else f"; {NOTHING_CRASHED}"
+            return f"{word} ({STOPPED_FOR_THE_USER_GLOSS}{crashed})"
         return str(word)
     failed = _failed_model_specs(view)
     detail = f" — failed: {', '.join(failed)}" if failed else ""
@@ -948,7 +967,28 @@ def _run_state_text(view: Dict[str, Any]) -> str:
 #: "run … failed" for a resume that stopped where the first run had, needing
 #: the user's answer, as the stop's own text said).
 STOPPED_FOR_THE_USER_VERDICT = "stopped and needs you (exit 3)"
-STOPPED_FOR_THE_USER_GLOSS = "exit 3: the run stopped and needs you; nothing crashed"
+STOPPED_FOR_THE_USER_GLOSS = "exit 3: the run stopped and needs you"
+#: Added to the gloss only when no runner and no model of the run failed
+#: (:func:`_a_dispatch_failed`, fix round 23): a stop on a refusal, a check's
+#: findings or an unanswered manual task.
+NOTHING_CRASHED = "nothing crashed"
+
+
+def _a_dispatch_failed(view: Dict[str, Any]) -> bool:
+    """Whether something the run dispatched failed: a write task whose
+    runner ran and failed (the write mirror's ``runner_failed_task_ids``;
+    a mirror written before fix round 23 has only ``failed_task_ids``, read
+    as is), a read task, or a fan-out model."""
+    progress = view.get("progress") if isinstance(view.get("progress"), dict) else {}
+    write = progress.get("write_subagents")
+    if isinstance(write, dict):
+        ran = write.get("runner_failed_task_ids")
+        if ran if isinstance(ran, list) else write.get("failed_task_ids"):
+            return True
+    read = progress.get("subagents")
+    if isinstance(read, dict) and read.get("failed_task_ids"):
+        return True
+    return bool(_failed_model_specs(view))
 
 
 def _stopped_for_the_user(view: Dict[str, Any]) -> bool:
@@ -1027,6 +1067,11 @@ def _verdict_text(view: Dict[str, Any]) -> str:
         # `phase state:` line right below, which prints `complete`,
         # `subagents_failed` or whatever the phase wrote.
         progress = view.get("progress") or {}
+        if progress.get("step") == STOPPED_STEP:
+            # Fix round 23 (review of round 22, #2): the write mirror's stop,
+            # which read "finished in foreground" while the same ending
+            # detached heads "stopped and needs you (exit 3)".
+            return STOPPED_IN_FOREGROUND
         if progress:
             tense = "running" if _checkpoint_in_flight(view) else "finished"
             total = progress.get("models_total")
@@ -2109,7 +2154,8 @@ def state_implement_view(
         stop_answers = native_stop_answers(record)
         # Fix round 22: what the plain resume does, as `util next-command`
         # says it above the resume.
-        stop_resume_why = native_resume_why(record)
+        stop_resume_why = native_resume_why(
+            record, phase_dir=str(phase_dir_path(plan_path, _IMPLEMENT_PHASE)))
     return {
         "completed": completed,
         # Fix round 20: whether `--implement <plan> --resume` continues it,
@@ -2146,6 +2192,8 @@ def state_implement_view(
         "findings": [] if settled else state.implementation_check_findings(),
         # A code task whose own check failed after its edits (fix round 15).
         "batch_checks": [] if settled else state.implementation_batch_check_findings(),
+        # And one whose own check repeated the accepted findings (round 23).
+        "batch_check_accepted": [] if settled else state.implementation_batch_check_accepted(),
         "answers": dict(answers) if isinstance(answers, dict) else {},
     }
 
@@ -2316,6 +2364,10 @@ def render_state_implement_lines(
         lines.append(
             f"      own check fails {entry['id']}: {clip('; '.join(findings), 300)}"
         )
+    lines += [
+        f"      {clause}" for clause in accepted_rerun_clauses(
+            _accepted_reruns_by_task(view.get("batch_check_accepted")))
+    ]
     if view["answers"]:
         lines.append(
             "      answers on record: "
@@ -2462,6 +2514,36 @@ def not_applied_item_clauses(source: Mapping[str, Any]) -> List[str]:
                 for entry in entries[:5]
             ) + (f" (+{len(entries) - 5} more)" if len(entries) > 5 else ""))
     return clauses
+
+
+def accepted_rerun_clauses(by_task: Mapping[str, Sequence[str]]) -> List[str]:
+    """``completed, its check repeated T002's accepted findings: T007`` per
+    set of checks, from ``{task_id: [check ids]}`` (fix round 23): the code
+    tasks whose own check reported again only what the user accepted for a
+    check (``--human-task <check>=done``), named on every ``status`` surface
+    of both legs where a failing own check is named, never as a failure."""
+    groups: Dict[str, List[str]] = {}
+    for task_id, checks in sorted(by_task.items()):
+        names = sorted({str(check) for check in (checks or []) if str(check)})
+        if not names:
+            continue
+        named = " and ".join(f"{check}'s" for check in names)
+        groups.setdefault(named, []).append(str(task_id))
+    return [
+        f"completed, its check repeated {named} accepted findings: {', '.join(ids)}"
+        for named, ids in groups.items()
+    ]
+
+
+def _accepted_reruns_by_task(entries: Any) -> Dict[str, List[str]]:
+    """``{task_id: [check ids]}`` from
+    ``StateManager.implementation_batch_check_accepted``'s entries."""
+    return {
+        str(entry["id"]): list(entry.get("checks") or {})
+        for entry in (entries if isinstance(entries, list) else [])
+        if isinstance(entry, dict) and entry.get("id")
+        and isinstance(entry.get("checks"), dict)
+    }
 
 
 def _native_apply_not_applied(
@@ -2680,11 +2762,14 @@ def _is_executor_implement_view(view: Dict[str, Any]) -> bool:
 def _kept_labels(mirror: Mapping[str, Any], kept: Sequence[str]) -> Dict[str, str]:
     """What each task a write mirror kept is, in the ``resume: kept`` line's
     words (fix round 20): a check whose findings stand (its row carries
-    them) and an accepted task (``accepted_task_ids``, a check apart from a
-    failed task). Plain kept tasks carry no label."""
+    them), an accepted task (``accepted_task_ids``, a check apart from a
+    failed task) and a manual task completed by hand
+    (``completed_by_hand_task_ids``, fix round 23). Plain kept tasks carry
+    no label."""
     from .write_batch_scheduler import (
         ACCEPTED_AFTER_FAILING_LABEL,
         ACCEPTED_WITH_FINDINGS_LABEL,
+        COMPLETED_BY_HAND_LABEL,
         KEPT_WITH_FINDINGS_LABEL,
     )
 
@@ -2701,6 +2786,9 @@ def _kept_labels(mirror: Mapping[str, Any], kept: Sequence[str]) -> Dict[str, st
             ACCEPTED_WITH_FINDINGS_LABEL if task_id in with_findings
             else ACCEPTED_AFTER_FAILING_LABEL
         )
+    # Fix round 23: a manual task kept on the user's `=done` answer.
+    for task_id in _id_list(mirror.get("completed_by_hand_task_ids")):
+        labels[task_id] = COMPLETED_BY_HAND_LABEL
     return labels
 
 
@@ -2847,6 +2935,14 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
         unrun = [str(t) for t in failing if str(t) in could_not]
         if unrun:
             parts.append(f"own check could not run {', '.join(unrun)}")
+    # Fix round 23: a task whose own check repeated only the findings the
+    # user accepted for a check is named, never only counted `ok`.
+    repeated = mirror.get("batch_check_accepted")
+    if isinstance(repeated, dict) and repeated:
+        parts += accepted_rerun_clauses({
+            str(task_id): checks for task_id, checks in repeated.items()
+            if isinstance(checks, list)
+        })
     # Fix round 18: an item a finished batch declined (or one skipped at the
     # user's request) is named, never only left out of `items applied`.
     parts += not_applied_item_clauses(mirror)
@@ -3318,21 +3414,13 @@ def _resume_lines(
     # resume does on an unchanged tree; that replaces the cost line, which
     # read "re-dispatches the 1 failed batch(es)" of a task the write policy
     # refuses again.
+    # Fix round 23 (review of round 22, relay #6): printed as recorded,
+    # which ends with what the resume keeps and whether a failed batch is
+    # half-applied, so it reads word for word as the tool routes'
+    # `resume_why` and `util next-command --blocked` relay it.
     why = _stop_resume_why(view) if mode in _WRITE_MODES else None
     if why:
-        if mode == _IMPLEMENT_PHASE and not redispatch:
-            done = _implement_tasks_done(plan_path, workflow)
-            if done is not None and done > (kept or 0):
-                kept = done
-        if kept:
-            why += f"; keeps the {kept} already applied"
-        if _failed_batches_moved_nothing(view) or not redispatch:
-            lines.append(f"      ({why})")
-        else:
-            lines.append(
-                f"      ({why}; the half-applied state is left in place — inspect "
-                f"it, or `util restore-batch` the failed batch, before resuming)"
-            )
+        lines.append(f"      ({why})")
     elif redispatch:
         mode = str(view["run"].get("mode") or view.get("phase") or "")
         if mode in _WRITE_MODES:

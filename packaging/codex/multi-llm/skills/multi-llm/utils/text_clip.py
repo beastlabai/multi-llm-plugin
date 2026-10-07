@@ -142,6 +142,26 @@ def _trimmed(kept: str) -> Tuple[str, List[Tuple[int, str]]]:
         return kept, stack
 
 
+def _cut_inside(flat: str, limit: int) -> str:
+    """*flat* cut inside within *limit*, for a head the word-boundary cut
+    left nothing of (fix round 23, review of round 22 #5: ``clip("(" *
+    5000, 1200)`` was the bare mark): the first characters that fit beside
+    the mark and the closers of what they open, a trailing separator
+    dropped unless that leaves nothing."""
+    room = limit - len(ELLIPSIS)
+    while room > 0:
+        head = flat[:room]
+        kept = head.rstrip(DANGLING) or head.rstrip()
+        if not kept:
+            break
+        clipped = kept + ELLIPSIS + _closers(unclosed(kept))
+        if len(clipped) <= limit:
+            return clipped
+        # Each character dropped takes at most one closer with it.
+        room -= (len(clipped) - limit + 1) // 2
+    return ELLIPSIS[:limit]
+
+
 def clip(text: Any, limit: int, *, flatten: bool = True) -> str:
     """*text* within *limit* characters, cut at a word boundary.
 
@@ -151,8 +171,9 @@ def clip(text: Any, limit: int, *, flatten: bool = True) -> str:
     ends in :data:`ELLIPSIS` and then closes every bracket or quote the kept
     part left open, so ``f"({clip(reason, 120)})"`` never reads ``(…, )``
     and never leaves a ``(`` or ``"`` unpaired. A single token longer than
-    two thirds of the room (a path, a URL) is cut inside. The result is never
-    longer than *limit*.
+    two thirds of the room (a path, a URL) is cut inside, and so is a head
+    made only of openers or separators (:func:`_cut_inside`). The result is
+    never longer than *limit*.
     """
     flat = plain_line(text) if flatten else ("" if text is None else str(text))
     if limit is None or len(flat) <= limit:
@@ -163,7 +184,7 @@ def clip(text: Any, limit: int, *, flatten: bool = True) -> str:
     while room > 0:
         kept, stack = _trimmed(_cut_at_word(flat, room))
         if not kept:
-            break
+            return _cut_inside(flat, limit)
         clipped = kept + ELLIPSIS + _closers(stack)
         if len(clipped) <= limit:
             return clipped
