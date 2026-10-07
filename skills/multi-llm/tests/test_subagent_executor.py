@@ -2705,7 +2705,7 @@ class TestRunnerVersions:
             [_validation_batch(tmp_path, i) for i in range(2)],
             phase_dir=str(tmp_path), kind="validation",
         )
-        assert report.runner_versions == {"codex:gpt-5.5": "0.160.1"}
+        assert report.runner_versions == {"codex:gpt-5.5": "0.161.0"}
 
     def test_below_minimum_fails_fast_before_any_child(
         self, tmp_path, runner_env, monkeypatch

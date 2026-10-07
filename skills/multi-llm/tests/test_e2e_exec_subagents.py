@@ -168,7 +168,7 @@ class TestSelfContainedRun:
         assert report["invoker"] == "executor"
         assert report["tasks"] and all(t["status"] == "ok" for t in report["tasks"])
         assert all(t["profile"] == "agent-readonly" for t in report["tasks"])
-        assert report["runner_versions"] == {"codex:gpt-5.5": "0.160.1"}
+        assert report["runner_versions"] == {"codex:gpt-5.5": "0.161.0"}
 
         # ...and the same counts are mirrored into .status.json, so a detached or
         # CI run is diagnosable without any stdout at all (D4a).
@@ -176,7 +176,7 @@ class TestSelfContainedRun:
         mirrored = status["progress"]["subagents"]
         assert mirrored["ok"] == mirrored["total"] == len(report["tasks"])
         assert mirrored["failed_task_ids"] == []
-        assert mirrored["runner_versions"] == {"codex:gpt-5.5": "0.160.1"}
+        assert mirrored["runner_versions"] == {"codex:gpt-5.5": "0.161.0"}
 
         # No follow-up is owed: the run is finished when the process exits.
         marker = [

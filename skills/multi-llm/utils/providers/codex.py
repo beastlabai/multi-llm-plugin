@@ -1140,7 +1140,11 @@ class CodexProvider(LLMProvider):
     # installed 0.160.1 gave byte-identical streams for the three kept cases
     # (thread ids aside) and the same event kinds and keys for
     # `writes_patches_sessions` and `exec_session` (`tests/fixtures/codex/0.160.1/`).
-    verified_version = "0.160.1"
+    # 0.161.0 since 2026-10-08 (run 10, #10, the same WARN): the same rig on the
+    # installed 0.161.0 gave byte-identical streams for the three kept cases
+    # (thread ids and the commit hash aside) and the same event kinds and keys
+    # for all five scripted cases (`tests/fixtures/codex/0.161.0/`).
+    verified_version = "0.161.0"
 
     # M14/§5.4.1(a) — the exemption, as data. Each of these was re-verified
     # FUNCTIONALLY (not merely found in help text) at the declared floor above
