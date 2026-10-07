@@ -1053,6 +1053,16 @@ def row_declined(row: Any) -> Dict[str, str]:
     return out
 
 
+#: summary.md's sections for an apply phase's items that were not applied
+#: (fix round 22, live run 9: a declined fix sat under "## Applied Fixes" on
+#: the native leg and under its batch in "## Applied Changes" on the
+#: executor's), written by the executor's summary and named by the native
+#: runbooks' template and `util batch-done`'s `[BATCH_DECLINED]` /
+#: `[BATCH_SKIPPED]` lines.
+DECLINED_SECTION_HEADING = "Declined by their batch (not applied)"
+SKIPPED_SECTION_HEADING = "Skipped at your request (not applied)"
+
+
 def declined_record(items: Dict[str, str]) -> List[Dict[str, str]]:
     """The ``declined`` list a row, a verdict stamp and a mirror row carry."""
     return [{"id": item, "reason": reason} for item, reason in items.items()]
