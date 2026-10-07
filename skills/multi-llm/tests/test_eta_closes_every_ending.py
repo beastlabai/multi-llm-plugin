@@ -207,7 +207,10 @@ class TestTheOtherEndings:
             "MOCK_LLM_WRITE_FAIL_IF_PROMPT_HAS", "Title: Edit: extend the module")
         code, text = _run(two_edits, capsys)
         assert code == 3, text
-        assert _etas(text) == [(1, 2), (2, 2)], text
+        # Fix round 24 (live run 10 #5): the failed task's line says so.
+        assert _etas(text) == [(1, 2)], text
+        assert _eta_lines(text)[-2].startswith(
+            "[ETA] implement: task 2/2 failed "), text
         assert "COMPLETE" not in _eta_lines(text)[-2], text
         assert _eta_lines(text)[-1] == (
             "[ETA] implement: run stopped after task 2/2"

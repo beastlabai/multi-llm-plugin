@@ -8808,6 +8808,10 @@ class WriteBatchScheduler:
         ends_short = (
             run_batch_index >= total_batches and self._eta_ends_short(result)
         )
+        # Fix round 24 (live run 10 #5): a failed task's line says what
+        # happened.
+        failed = not outcome.ok
+        failure, half_applied = self._eta_failure(outcome) if failed else ("", False)
         live = getattr(self.state, "state", None)
         progress = (
             (live.get("metrics_progress") or {}).get(self.phase)
@@ -8835,6 +8839,9 @@ class WriteBatchScheduler:
                 total_batches=total_batches or None,
                 batch_index=run_batch_index,
                 ends_short=ends_short,
+                failed=failed,
+                failure=failure,
+                half_applied=half_applied,
             )
         except Exception as exc:  # noqa: BLE001 - metrics must not fail a phase
             self.log(f"[write-subagents] warning: metrics record failed: {exc}")
@@ -11403,6 +11410,26 @@ class WriteBatchScheduler:
         failed or was left (:meth:`_eta_left_out`). The ``[ETA]`` line that
         reaches N/N then claims no completion (fix round 22)."""
         return bool(self._eta_failed or self._eta_unrun or self._eta_left_out(result))
+
+    def _eta_failure(self, outcome: TaskOutcome) -> Tuple[str, bool]:
+        """What a failed dispatch's ``[ETA]`` line says happened, and whether
+        its edits are half-applied (fix round 24, live run 10 #5: OpenCode's
+        T002 timed out and its line read "task 2/11 done in 20m 5s"). The
+        status its batch line shows (``timeout``, ``batch failed``); for a
+        partial application, what stopped it."""
+        half = outcome.write_outcome == WRITE_PARTIAL or outcome.status == STATUS_PARTIAL
+        if outcome.applied_without_changes:
+            return "its change did not land", half
+        status = str(outcome.status or "")
+        if half:
+            status = "timeout" if self._ran_out_of_time(outcome) else next(
+                (
+                    str(attempt.status) for attempt in reversed(outcome.attempts)
+                    if attempt.status not in (STATUS_OK, STATUS_PARTIAL)
+                ),
+                "",
+            )
+        return status.replace("_", " "), half
 
     def _eta_closing_line(
         self, result: Optional[SchedulerResult], *, verb: str = "stopped",

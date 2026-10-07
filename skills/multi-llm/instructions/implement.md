@@ -488,11 +488,11 @@ your host.
      ```bash
      uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
        --state-file "$STATE_FILE" --phase "implement" \
-       --label "{task_id}: {task_title}" --subagent-type "{executor_role}" \
+       --label "{task_id}: {task_title}" --task-id "{task_id}" --subagent-type "{executor_role}" \
        --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
        --total-batches {tasks_to_dispatch} --batch-index {N}
      ```
-     Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports, and `{N}` is the cumulative 1-based index of the tasks you dispatched, across all batches. Omit any flag it does not report. Never pass `0` for an unknown value; omit the flag — a made-up zero is averaged into the phase totals as a real measurement. The script prints an `[ETA]` line to stderr after each call.
+     Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports, and `{N}` is the cumulative 1-based index of the tasks you dispatched, across all batches. Omit any flag it does not report. Never pass `0` for an unknown value; omit the flag — a made-up zero is averaged into the phase totals as a real measurement. The script prints an `[ETA]` line to stderr after each call; for a task `util batch-done` recorded `failed` it says the task failed and why, never "done".
 
    **The last subagent returning is not the end of the phase.** Steps 6 through 11
    still owe work — the finalization that computes which files this phase

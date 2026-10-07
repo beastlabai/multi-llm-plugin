@@ -22,11 +22,13 @@ from typing import (
 try:
     from . import process_control
     from .stream_bootstrap import bootstrap_streams
+    from .text_clip import clip
 except ImportError:
     # Direct script invocation (`python utils/metrics.py`): sys.path[0]
     # is the utils/ directory, so import the sibling module directly.
     import process_control  # type: ignore[no-redef]
     from stream_bootstrap import bootstrap_streams
+    from text_clip import clip  # type: ignore[no-redef]
 
 
 #: The interprocess lock every raw read-modify-write of ``state.json`` holds
@@ -351,6 +353,55 @@ def mark_failed_in_progress(
         progress.pop(FAILED_KEY, None)
 
 
+#: A metric entry whose task failed carries ``"failed": true`` (fix round
+#: 24, live run 10 #5: OpenCode's T002 timed out at its 1200 s slot budget
+#: and its line read "task 2/11 done in 20m 5s · ~109m 30s remaining"). Its
+#: ``[ETA]`` line says it failed, and no remaining-time estimate averages its
+#: duration in or counts it as progress (:func:`_compute_eta`).
+FAILED_ENTRY_KEY = "failed"
+#: How a half-applied task's reason starts on record (``util batch-done
+#: --partial``; ``write_batch_scheduler.HALF_APPLIED_PREFIX``, spelled here so
+#: this module imports nothing heavy: a test holds the two together).
+HALF_APPLIED_PREFIX = "half-applied: "
+#: What a failed task's line adds when it changed files before it failed.
+HALF_APPLIED_WORDS = "half-applied: its edits are kept"
+#: How much of a native failed task's recorded reason its line quotes.
+FAILURE_WORDS_CHARS = 80
+
+
+def label_task_id(label: str) -> Optional[str]:
+    """The task id an implement record's label starts with (``T002: Build
+    the track``, ``instructions/implement.md``'s ``--label``), or ``None``
+    (an apply batch's ``Batch 2 (index.html)``)."""
+    match = re.match(r"\s*([A-Za-z][\w.-]*):\s", str(label or ""))
+    return match.group(1) if match else None
+
+
+def native_failure(
+    state: dict, phase: str, task_id: Optional[str],
+) -> Optional[Tuple[str, bool]]:
+    """``(what failed, half-applied)`` for a task this run's ``util
+    batch-done`` recorded ``failed`` (:data:`FAILED_KEY`), read off the reason
+    it recorded (the host's ``--reason``, cut at a word; ``--partial``
+    prefixes :data:`HALF_APPLIED_PREFIX`); ``None`` for any other task, a
+    task refused before dispatch included (fix round 24)."""
+    if not task_id:
+        return None
+    progress = (state.get("metrics_progress") or {}).get(phase)
+    if not isinstance(progress, dict) or str(task_id) not in {
+        str(t) for t in (progress.get(FAILED_KEY) or [])
+    }:
+        return None
+    reasons = state.get("task_status_reasons")
+    reason = " ".join(str(
+        (reasons.get(str(task_id)) if isinstance(reasons, dict) else "") or ""
+    ).split())
+    half = (reason + " ").startswith(HALF_APPLIED_PREFIX)
+    if half:
+        reason = reason[len(HALF_APPLIED_PREFIX):].strip()
+    return (clip(reason, FAILURE_WORDS_CHARS) if reason else ""), half
+
+
 #: ``state.json``'s ``metrics_left_out.{phase}``: ``{task id: how it was
 #: left}`` for the tasks the native implement emit kept out of the batches it
 #: handed the host — refused by the write policy, after a refused task, held
@@ -669,6 +720,9 @@ def _compute_eta(
     this_duration_ms: Optional[int],
     colorize: bool = False,
     ends_short: bool = False,
+    *,
+    failure: Optional[str] = None,
+    half_applied: bool = False,
 ) -> dict:
     """Compute ETA from two independent remaining-time estimates.
 
@@ -692,6 +746,10 @@ def _compute_eta(
         total_batches: Total batch count for the phase.
         this_duration_ms: Duration of the just-completed batch (for the
             `done in X` display).
+        failure: ``None`` for a task that did not fail; else what failed
+            (``""`` when nothing says), and the line reads ``task 2/11
+            failed (timeout) after 20m 5s`` with no estimate (fix round 24).
+        half_applied: the failed task changed files before it failed.
 
     Returns:
         Dict with keys: ``per_item_ms``, ``wall_clock_ms``, ``eta_ms``,
@@ -701,13 +759,25 @@ def _compute_eta(
     total = max(int(total_batches), 0)
     remaining = max(total - done, 0) if total > 0 else 0
 
+    def failed(entry: Any) -> bool:
+        return isinstance(entry, dict) and bool(entry.get(FAILED_ENTRY_KEY))
+
+    # Fix round 24 (live run 10 #5): a failed task is no progress. Its
+    # duration (a 20-minute timeout) is not how long a task takes, so it is
+    # averaged in nowhere, and the wall-clock rate is the time the run spent
+    # on the tasks that did not fail, over those tasks.
     durations = [
         e["duration_ms"] for e in entries
-        if isinstance(e, dict) and e.get("duration_ms") is not None
+        if isinstance(e, dict) and e.get("duration_ms") is not None and not failed(e)
     ]
     per_item_ms: Optional[int] = None
     if durations:
         per_item_ms = (sum(durations) // len(durations)) * remaining
+    run_id = progress.get("run_id") if isinstance(progress, dict) else None
+    failed_here = [
+        e for e in entries if failed(e) and run_id and e.get("run_id") == run_id
+    ]
+    failed_ms = sum(int(e.get("duration_ms") or 0) for e in failed_here)
 
     wall_clock_ms: Optional[int] = None
     elapsed_ms: Optional[int] = None
@@ -715,8 +785,10 @@ def _compute_eta(
         try:
             started_at = datetime.fromisoformat(progress["started_at"])
             elapsed_ms = int((datetime.now() - started_at).total_seconds() * 1000)
-            if done > 0:
-                wall_clock_ms = (elapsed_ms // done) * remaining
+            worked = done - len(failed_here)
+            worked_ms = elapsed_ms - failed_ms
+            if worked > 0 and worked_ms >= 0:
+                wall_clock_ms = (worked_ms // worked) * remaining
         except (ValueError, TypeError):
             elapsed_ms = None
             wall_clock_ms = None
@@ -731,17 +803,32 @@ def _compute_eta(
         eta_ms = None
 
     unit = eta_unit(phase)
-    parts = [f"[ETA] {phase}: {unit} {done}/{total} done in {format_duration(this_duration_ms)}"]
-    if remaining == 0:
-        # Fix round 22 (live run 9 #1): a run about to stop short of
-        # completing its phase (*ends_short*) said "ALL BATCHES COMPLETE"
-        # on this line and "run stopped" on the next. "N/N done" is all that
-        # is true of it; its closing line says what it left.
-        if not ends_short:
-            everything = "ALL TASKS COMPLETE" if unit == "task" else "ALL BATCHES COMPLETE"
-            parts.append(_colorize(everything, "1;32", colorize))
-    elif eta_ms is not None:
-        parts.append(_colorize(f"~{format_duration(eta_ms)} remaining", "1;36", colorize))
+    if failure is not None:
+        # Fix round 24 (live run 10 #5): what happened, never "done", and
+        # no estimate (the run stops short, or goes on without it).
+        parts = [
+            f"[ETA] {phase}: {unit} {done}/{total} failed"
+            + (f" ({failure})" if failure else "")
+            + (f" after {format_duration(this_duration_ms)}"
+               if this_duration_ms is not None else "")
+        ]
+        if half_applied:
+            parts.append(HALF_APPLIED_WORDS)
+    else:
+        parts = [
+            f"[ETA] {phase}: {unit} {done}/{total} done in "
+            f"{format_duration(this_duration_ms)}"
+        ]
+        if remaining == 0:
+            # Fix round 22 (live run 9 #1): a run about to stop short of
+            # completing its phase (*ends_short*) said "ALL BATCHES COMPLETE"
+            # on this line and "run stopped" on the next. "N/N done" is all
+            # that is true of it; its closing line says what it left.
+            if not ends_short:
+                everything = "ALL TASKS COMPLETE" if unit == "task" else "ALL BATCHES COMPLETE"
+                parts.append(_colorize(everything, "1;32", colorize))
+        elif eta_ms is not None:
+            parts.append(_colorize(f"~{format_duration(eta_ms)} remaining", "1;36", colorize))
 
     if done > total:
         # Defensive: caller bug — emit a warning but still return a usable line.
@@ -930,6 +1017,11 @@ def record_metric_in_state(
     total_batches: Optional[int] = None,
     batch_index: Optional[int] = None,
     ends_short: Optional[bool] = None,
+    *,
+    task_id: Optional[str] = None,
+    failed: Optional[bool] = None,
+    failure: str = "",
+    half_applied: bool = False,
 ) -> Optional[str]:
     """``record_metric``'s mutation, applied to an in-memory state dict.
 
@@ -940,6 +1032,13 @@ def record_metric_in_state(
     the in-memory form exists. *ends_short*: the run will stop short of
     completing its phase, so the line that reaches N/N claims no completion
     (fix round 22); ``None`` reads it off the state (:func:`native_ends_short`).
+
+    Fix round 24 (live run 10): *failed* says the task failed (*failure*:
+    what failed, *half_applied*: it changed files first), so its line says
+    so and its entry is marked :data:`FAILED_ENTRY_KEY`; ``None`` reads it
+    off the state, where ``util batch-done`` recorded it, for *task_id* or
+    the id the label starts with (:func:`native_failure`). The executor
+    passes it.
 
     **A second record of the same event collapses; nothing else does.** An
     event is ``(phase, run_id, label, batch_index)``, where ``run_id`` is the
@@ -1008,6 +1107,15 @@ def record_metric_in_state(
         entry["duration_ms"] = duration_ms
     if batch_index is not None:
         entry["batch_index"] = batch_index
+    if task_id:
+        entry["task_id"] = str(task_id)
+    if failed is None:
+        found = native_failure(state, phase, task_id or label_task_id(label))
+        failed = found is not None
+        if found is not None:
+            failure, half_applied = found
+    if failed:
+        entry[FAILED_ENTRY_KEY] = True
 
     run_id = _current_run_id(state, phase)
     if run_id is not None:
@@ -1061,6 +1169,8 @@ def record_metric_in_state(
         ends_short=(
             native_ends_short(state, phase) if ends_short is None else ends_short
         ),
+        failure=(failure if failed else None),
+        half_applied=bool(failed and half_applied),
     )
     return result["line"]
 
@@ -1076,6 +1186,7 @@ def record_metric(
     total_batches: Optional[int] = None,
     batch_index: Optional[int] = None,
     print_eta: bool = True,
+    task_id: Optional[str] = None,
 ) -> None:
     """Record a single metric entry into the state file.
 
@@ -1101,6 +1212,9 @@ def record_metric(
         total_batches: Optional total batch count (for ETA).
         batch_index: Optional 1-based batch index (for ETA).
         print_eta: When False, suppresses ETA stderr output.
+        task_id: Optional id of the task or batch the entry measures (an
+            apply batch's label carries none): the line of one ``util
+            batch-done`` recorded failed says so (fix round 24).
     """
     with state_file_lock(state_path):
         state = _read_state(state_path)
@@ -1114,6 +1228,7 @@ def record_metric(
             duration_ms=duration_ms,
             total_batches=total_batches,
             batch_index=batch_index,
+            task_id=task_id,
         )
         _write_state(state_path, state)
 
@@ -1283,6 +1398,9 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="Total batch count for ETA (use with --batch-index)")
     rec.add_argument("--batch-index", type=int, default=None,
                      help="1-based index of this batch (use with --total-batches)")
+    rec.add_argument("--task-id", default=None,
+                     help="The task or batch this entry measures (as given to "
+                          "util batch-done), so a failed one's line says so")
     rec.add_argument("--no-eta", action="store_true",
                      help="Suppress ETA stderr line even when --total-batches/--batch-index are set")
 
@@ -1346,6 +1464,7 @@ def _run_command(args, state_file: Path) -> int:
             total_batches=args.total_batches,
             batch_index=args.batch_index,
             print_eta=not args.no_eta,
+            task_id=args.task_id,
         )
 
     elif args.command == "start":

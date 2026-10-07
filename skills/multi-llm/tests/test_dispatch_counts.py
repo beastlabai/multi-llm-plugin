@@ -136,7 +136,18 @@ class TestTheNativeEtaEndsAtTheTasksDispatched:
             self._done(repo, capsys, task_id, "--status", "completed", *extra)
             self._record(capsys, state_file, handoff, task_id, index)
         self._done(repo, capsys, "T005", "--status", "failed", "--reason", "no stamp")
-        assert self._record(capsys, state_file, handoff, "T005", 5)[0] == (5, 6)
+        code, _out, err = _util(
+            capsys, "metrics", "record", "--state-file", state_file,
+            "--phase", "implement", "--label", "T005: task",
+            "--subagent-type", "agent", "--duration-ms", "1000",
+            "--total-batches", str(handoff["tasks_to_dispatch"]),
+            "--batch-index", "5",
+        )
+        assert code == 0, err
+        # Fix round 24 (live run 10 #5): its line says it failed.
+        assert (
+            "[ETA] implement: task 5/6 failed (no stamp) after 0m 1s\n"
+        ) in err, err
         self._done(repo, capsys, "T007", "--status", "completed")
         last, err = self._record(capsys, state_file, handoff, "T007", 6)
         # T005 failed and T006 did not run: no completion at N/N.
@@ -409,8 +420,13 @@ class TestTheFirstRunEtaCountsWhatItDispatches:
         assert "ERROR: implement stopped at T005" in text
         eta = [l for l in text.splitlines() if l.startswith("[ETA] implement:")]
         # T007 left with T002's findings, on T002's own line since fix round
-        # 21; T005 ran and failed; T006 did not run.
-        assert _etas(text) == [(1, 7), (2, 6), (3, 6), (4, 6), (5, 6)], eta
+        # 21; T005 ran and failed, and its line says so (fix round 24); T006
+        # did not run.
+        assert _etas(text) == [(1, 7), (2, 6), (3, 6), (4, 6)], eta
+        assert re.fullmatch(
+            r"\[ETA\] implement: task 5/6 failed \(batch failed\) after [^·]+",
+            eta[-2],
+        ), eta
         assert eta[-1] == (
             "[ETA] implement: run stopped after task 5/6 · T006 not run; "
             "T007 not run: check T002 reported problems"
