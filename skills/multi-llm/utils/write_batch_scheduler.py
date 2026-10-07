@@ -2195,7 +2195,11 @@ def bind_prior_changes(
             f"prompts/implementation_task.txt). Nothing was dispatched.",
             STATUS_REJECTED,
         )
-    context = _prior_changes.render(output_dir, phase=phase)
+    # An entry the prompt already quotes word for word (apply-code-fixes'
+    # `## Implementation record`) is counted, not shown a second time.
+    context = _prior_changes.render(
+        output_dir, phase=phase, quoted=_prior_changes.quoted_in(prompt, output_dir),
+    )
     note = accepted_checks_section(accepted_checks)
     if note:
         context = f"{context.rstrip()}\n\n{note.rstrip()}"
