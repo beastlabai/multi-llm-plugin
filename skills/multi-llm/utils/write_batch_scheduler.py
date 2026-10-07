@@ -3690,6 +3690,10 @@ class WriteBatchScheduler:
         self._eta_failed: set = set()
         self._eta_unrun: set = set()
         self._eta_walk_left: Dict[str, str] = {}
+        #: Fix round 24 (live run 10 #7): the tasks the last `[ETA]` line
+        #: counted, so the next line whose total dropped names what left it
+        #: (:meth:`_eta_dropped`). `None` before the baseline.
+        self._eta_line_ids: Optional[set] = None
         #: The result the `[ETA]` lines count over, for an ending that has no
         #: other hold on it (an exception out of `_run`, an abort's signal).
         self._eta_result: Optional["SchedulerResult"] = None
@@ -8808,10 +8812,11 @@ class WriteBatchScheduler:
         ends_short = (
             run_batch_index >= total_batches and self._eta_ends_short(result)
         )
-        # Fix round 24 (live run 10 #5): a failed task's line says what
-        # happened.
+        # Fix round 24 (live run 10): a failed task's line says what
+        # happened (#5), and the line whose total dropped says why (#7).
         failed = not outcome.ok
         failure, half_applied = self._eta_failure(outcome) if failed else ("", False)
+        dropped = self._eta_dropped(result)
         live = getattr(self.state, "state", None)
         progress = (
             (live.get("metrics_progress") or {}).get(self.phase)
@@ -8842,6 +8847,7 @@ class WriteBatchScheduler:
                 failed=failed,
                 failure=failure,
                 half_applied=half_applied,
+                dropped=dropped,
             )
         except Exception as exc:  # noqa: BLE001 - metrics must not fail a phase
             self.log(f"[write-subagents] warning: metrics record failed: {exc}")
@@ -11431,6 +11437,29 @@ class WriteBatchScheduler:
             )
         return status.replace("_", " "), half
 
+    def _eta_dropped(self, result: SchedulerResult) -> str:
+        """Why this line's total is lower than the last line's, in
+        ``metrics.left_out_tail``'s words, or ``""`` (fix round 24, live run
+        10 #7: the stop fixture's lines went "task 1/5", "task 2/4" with
+        nothing saying T007 left when check T002 reported problems). Moves
+        the baseline to this line's tasks."""
+        counted = set(self._eta_task_ids(result))
+        before, self._eta_line_ids = self._eta_line_ids, counted
+        gone = (before or set()) - counted
+        if not gone:
+            return ""
+        left = self._eta_left_out(result)
+        how = {
+            task_id: (
+                _metrics.LEFT_KEPT
+                if task_id in self._eta_finished and task_id not in self._eta_unrun
+                and task_id not in left
+                else left.get(task_id, _metrics.LEFT_NOT_RUN)
+            )
+            for task_id in gone
+        }
+        return _metrics.left_out_tail(how, unit=_metrics.eta_unit(self.phase))
+
     def _eta_closing_line(
         self, result: Optional[SchedulerResult], *, verb: str = "stopped",
         why: str = "",
@@ -11547,6 +11576,8 @@ class WriteBatchScheduler:
             # counts over, and the line a detached worker's abort prints.
             self._eta_result = result
             _metrics.open_eta_run(self._eta_abort_line)
+            # Fix round 24: the total the first line is held to.
+            self._eta_line_ids = set(self._eta_task_ids(result))
 
     def _metrics_finish(self) -> None:
         """Pop the phase's ETA baseline and log its closing line (F7).

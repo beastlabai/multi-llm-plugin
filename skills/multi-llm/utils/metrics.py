@@ -402,6 +402,31 @@ def native_failure(
     return (clip(reason, FAILURE_WORDS_CHARS) if reason else ""), half
 
 
+#: ``metrics_progress.{phase}.named_out``: the tasks taken out of this run's
+#: total (:data:`WITHDRAWN_KEY`) that a line already named (fix round 24,
+#: live run 10 #7: the stop fixture's lines went "task 1/5", "task 2/4" and
+#: nothing said why). The next line after a record that took one out names
+#: it beside the new total.
+NAMED_OUT_KEY = "named_out"
+
+
+def _newly_withdrawn_tail(state: dict, phase: str, progress: dict) -> str:
+    """What left this run's total since its last line, in
+    :func:`left_out_tail`'s words, or ``""``; remembers what it named."""
+    withdrawn = progress.get(WITHDRAWN_KEY)
+    withdrawn = withdrawn if isinstance(withdrawn, dict) else {}
+    named = {str(t) for t in (progress.get(NAMED_OUT_KEY) or [])}
+    fresh = {str(t): c for t, c in withdrawn.items() if str(t) not in named}
+    if withdrawn:
+        progress[NAMED_OUT_KEY] = sorted((str(t) for t in withdrawn), key=_id_key)
+    else:
+        progress.pop(NAMED_OUT_KEY, None)
+    if not fresh:
+        return ""
+    return left_out_tail(
+        _withdrawn_left_out(state, {WITHDRAWN_KEY: fresh}), unit=eta_unit(phase))
+
+
 #: ``state.json``'s ``metrics_left_out.{phase}``: ``{task id: how it was
 #: left}`` for the tasks the native implement emit kept out of the batches it
 #: handed the host — refused by the write policy, after a refused task, held
@@ -416,6 +441,9 @@ LEFT_OUT_KEY = "metrics_left_out"
 LEFT_REFUSED = "refused"
 LEFT_CHECK_PREFIX = "check:"
 LEFT_NOT_RUN = ""
+#: A task the run counted that it kept from an earlier run instead (fix
+#: round 24: only a line's dropped total names one).
+LEFT_KEPT = "kept"
 #: How many ids one clause of :func:`left_out_tail` names, and how many
 #: clauses it shows.
 LEFT_OUT_IDS_SHOWN = 5
@@ -499,6 +527,8 @@ def left_out_tail(left_out: Mapping[str, str], *, unit: str = "task") -> str:
         )
         if how == LEFT_REFUSED:
             text = f"{named} refused before dispatch"
+        elif how == LEFT_KEPT:
+            text = f"{named} kept from an earlier run"
         elif how.startswith(LEFT_CHECK_PREFIX):
             text = (
                 f"{named} not run: check {how[len(LEFT_CHECK_PREFIX):]} "
@@ -723,6 +753,7 @@ def _compute_eta(
     *,
     failure: Optional[str] = None,
     half_applied: bool = False,
+    dropped: str = "",
 ) -> dict:
     """Compute ETA from two independent remaining-time estimates.
 
@@ -750,6 +781,8 @@ def _compute_eta(
             (``""`` when nothing says), and the line reads ``task 2/11
             failed (timeout) after 20m 5s`` with no estimate (fix round 24).
         half_applied: the failed task changed files before it failed.
+        dropped: why the total dropped since the run's last line
+            (``T007 not run: check T002 reported problems``), or ``""``.
 
     Returns:
         Dict with keys: ``per_item_ms``, ``wall_clock_ms``, ``eta_ms``,
@@ -803,6 +836,8 @@ def _compute_eta(
         eta_ms = None
 
     unit = eta_unit(phase)
+    # Fix round 24 (live run 10 #7): the line whose total dropped says why.
+    why_total = [f"total now {total} ({dropped})"] if dropped else []
     if failure is not None:
         # Fix round 24 (live run 10 #5): what happened, never "done", and
         # no estimate (the run stops short, or goes on without it).
@@ -814,11 +849,12 @@ def _compute_eta(
         ]
         if half_applied:
             parts.append(HALF_APPLIED_WORDS)
+        parts += why_total
     else:
         parts = [
             f"[ETA] {phase}: {unit} {done}/{total} done in "
             f"{format_duration(this_duration_ms)}"
-        ]
+        ] + why_total
         if remaining == 0:
             # Fix round 22 (live run 9 #1): a run about to stop short of
             # completing its phase (*ends_short*) said "ALL BATCHES COMPLETE"
@@ -1022,6 +1058,7 @@ def record_metric_in_state(
     failed: Optional[bool] = None,
     failure: str = "",
     half_applied: bool = False,
+    dropped: Optional[str] = None,
 ) -> Optional[str]:
     """``record_metric``'s mutation, applied to an in-memory state dict.
 
@@ -1037,8 +1074,10 @@ def record_metric_in_state(
     what failed, *half_applied*: it changed files first), so its line says
     so and its entry is marked :data:`FAILED_ENTRY_KEY`; ``None`` reads it
     off the state, where ``util batch-done`` recorded it, for *task_id* or
-    the id the label starts with (:func:`native_failure`). The executor
-    passes it.
+    the id the label starts with (:func:`native_failure`). *dropped* is why
+    the total dropped since the last line, ``None`` reading it off the
+    tasks a record took out (:func:`_newly_withdrawn_tail`). The executor
+    passes both.
 
     **A second record of the same event collapses; nothing else does.** An
     event is ``(phase, run_id, label, batch_index)``, where ``run_id`` is the
@@ -1156,6 +1195,11 @@ def record_metric_in_state(
         # (`withdraw_from_progress_in_state`); the host still passes the
         # count it was handed at the emit.
         total_batches = int(progress["total_batches"])
+    if dropped is None:
+        dropped = (
+            _newly_withdrawn_tail(state, phase, progress)
+            if isinstance(progress, dict) else ""
+        )
     result = _compute_eta(
         entries=entries,
         progress=progress,
@@ -1171,6 +1215,7 @@ def record_metric_in_state(
         ),
         failure=(failure if failed else None),
         half_applied=bool(failed and half_applied),
+        dropped=dropped,
     )
     return result["line"]
 

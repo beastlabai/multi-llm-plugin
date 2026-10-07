@@ -144,9 +144,11 @@ class TestTheNativeEtaEndsAtTheTasksDispatched:
             "--batch-index", "5",
         )
         assert code == 0, err
-        # Fix round 24 (live run 10 #5): its line says it failed.
+        # Fix round 24 (live run 10 #5, #7): its line says it failed, and
+        # why the total dropped.
         assert (
-            "[ETA] implement: task 5/6 failed (no stamp) after 0m 1s\n"
+            "[ETA] implement: task 5/6 failed (no stamp) after 0m 1s · "
+            "total now 6 (T006 not run)"
         ) in err, err
         self._done(repo, capsys, "T007", "--status", "completed")
         last, err = self._record(capsys, state_file, handoff, "T007", 6)
