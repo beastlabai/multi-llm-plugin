@@ -82,23 +82,23 @@ ARG MLLM_PIN_MODE=pinned
 # tests/test_container_dockerfile_pins.py, so the two cannot drift apart.
 ARG UV_VERSION=0.11.28
 ARG UV_SHA256=e490a6464492183c5d4534a5527fb4440f7f2bb2f228162ad7e4afe076dc0224
-ARG GOOSE_VERSION=1.52.0
-ARG GOOSE_URL=https://github.com/aaif-goose/goose/releases/download/v1.52.0/goose-x86_64-unknown-linux-gnu.tar.bz2
-ARG GOOSE_SHA256=2609109a43012ddece0f78e1e4a179b82749c424f2164b97186d3ad38518d262
-ARG GROK_VERSION=1.0.44
-ARG GROK_URL=https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-1.0.44-linux-x86_64
-ARG GROK_SHA256=f76431873efc5c8a50892d1e1247eaee23f6664bca385fbd55a06a8e7d3caedc
-ARG MUSE_VERSION=1.4.1-R4503.1
-ARG MUSE_URL=https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.1-R4503.1&file=muse-x86-linux
-ARG MUSE_SHA256=8b53c9cdbc025bc2d9068bc7016e2c1e51c3a0c608821da17528ad23be900a12
+ARG GOOSE_VERSION=1.53.0
+ARG GOOSE_URL=https://github.com/aaif-goose/goose/releases/download/v1.53.0/goose-x86_64-unknown-linux-gnu.tar.bz2
+ARG GOOSE_SHA256=2d010c66dfd4348bb437b3a94001882468a5db1aa556858920481522f57752d7
+ARG GROK_VERSION=1.0.46
+ARG GROK_URL=https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-1.0.46-linux-x86_64
+ARG GROK_SHA256=41626a53292324140b92556b9d42ff5542e3dcd04aff85eafb8689dd4adb44fc
+ARG MUSE_VERSION=1.4.3-R5018.1
+ARG MUSE_URL=https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.3-R5018.1&file=muse-x86-linux
+ARG MUSE_SHA256=e671790882bc88d65edb4ae0f713becf378ebf91011034ab75abebe3592dde4f
 # The documented install is `curl https://cursor.com/install | bash`, and that
 # script is SERVER-RENDERED: it bakes the current version into its body as a
 # literal DOWNLOAD_URL, so the URL is stable while what it installs is not.
 # Piping it into a shell would pin nothing, so the tarball is named by its bytes
 # here instead. The sha256 is ours -- Cursor publishes none.
-ARG CURSOR_AGENT_VERSION=2026.09.28-64d2043
-ARG CURSOR_AGENT_URL=https://downloads.cursor.com/lab/2026.09.28-64d2043/linux/x64/agent-cli-package.tar.gz
-ARG CURSOR_AGENT_SHA256=6e4cd936a4866b8a77c50ff51a564460d715772fabc477a01aa0f0455d9559f0
+ARG CURSOR_AGENT_VERSION=2026.10.01-e373342
+ARG CURSOR_AGENT_URL=https://downloads.cursor.com/lab/2026.10.01-e373342/linux/x64/agent-cli-package.tar.gz
+ARG CURSOR_AGENT_SHA256=a79726c6e644520e993970be4c45775a6889802b67abe461a677a53219ae28e8
 # Google's Antigravity CLI. The sha256 is UPSTREAM'S OWN -- the GitHub release
 # API publishes a `digest` per asset -- unlike cursor-agent's, which is ours
 # because Cursor publishes none. The build checks it anyway: a published digest
@@ -106,9 +106,9 @@ ARG CURSOR_AGENT_SHA256=6e4cd936a4866b8a77c50ff51a564460d715772fabc477a01aa0f045
 #
 # agy RELEASES DAILY (1.1.15 on 2026-08-19, 1.2.7 on 2026-09-19), so this is a
 # pin to re-confirm whenever this file is touched.
-ARG AGY_VERSION=1.2.14
-ARG AGY_URL=https://github.com/google-antigravity/antigravity-cli/releases/download/1.2.14/agy_cli_linux_x64.tar.gz
-ARG AGY_SHA256=68cf4d221cb62e0289245439d3d37f599bdc8e0c4e1e3dae03f326463a0c26dc
+ARG AGY_VERSION=1.3.1
+ARG AGY_URL=https://github.com/google-antigravity/antigravity-cli/releases/download/1.3.1/agy_cli_linux_x64.tar.gz
+ARG AGY_SHA256=0e313b309ea58c71431ce86bb820936a3700e17e44eabce7bf2264617dc822db
 # oh-my-pi. A DOWNLOAD, never the npm layer: the npm package
 # `@oh-my-pi/pi-coding-agent` needs Bun >= 1.3.14 and does not run under node at
 # all, so `npm ci` cannot install it into this image. What ships instead is the
@@ -120,9 +120,9 @@ ARG AGY_SHA256=68cf4d221cb62e0289245439d3d37f599bdc8e0c4e1e3dae03f326463a0c26dc
 # OWN: the release publishes a SHA256SUMS.txt naming it against
 # `omp-linux-x64`. Confirmed on 2026-09-17 to agree with sha256sum over the
 # fetched file -- which is the point of checking it below anyway.
-ARG OMP_VERSION=18.4.4
-ARG OMP_URL=https://github.com/can1357/oh-my-pi/releases/download/v18.4.4/omp-linux-x64
-ARG OMP_SHA256=24c830fceb0bd6884bf5bf2c7a2b7407bc23fafe655e924c695ef9be308e46f3
+ARG OMP_VERSION=18.8.3
+ARG OMP_URL=https://github.com/can1357/oh-my-pi/releases/download/v18.8.3/omp-linux-x64
+ARG OMP_SHA256=8cb6d6a0035a3c5d9c40a58852ca361569eafc2cecbbeef4521e0fefc8ccbc37
 # vibe's interpreter, NOT the product's. `mistral-vibe` declares
 # `requires_python >=3.12` and bookworm-slim ships 3.11.2 -- and this file sets
 # `UV_PYTHON_DOWNLOADS=never`, so `uv venv --python 3.12` cannot fetch one
@@ -439,8 +439,8 @@ RUN if [ "${MLLM_PIN_MODE}" = "latest" ]; then \
 # cli-surface help-drift probe (seed_cli_surface.py, likewise). cli-versions.lock
 # carries the full reasoning above its `clis:` block.
 #
-# COST, because it is the largest single thing in this image: +245 MiB unpacked
-# (254,358,760 bytes measured) from an 84 MB tarball -- and 129 MB of that is a
+# COST, because it is the largest single thing in this image: +555 MiB unpacked
+# (581,699,910 bytes measured) from a 183 MB tarball -- and 129 MB of that is a
 # SECOND bundled node, on top of the base image's own. Cursor ships the bundle
 # self-contained and offers no variant that reuses the system runtime, so the
 # duplicate interpreter is the price of the row, not an oversight to trim later.
@@ -506,8 +506,8 @@ RUN if [ "${MLLM_PIN_MODE}" = "latest" ]; then \
 # directly, offline, as uid 10001, and diffs the flags our adapter emits against
 # the flags this version still documents.
 #
-# COST: +196 MiB unpacked (205,537,320 bytes) from a 55 MB tarball -- second
-# only to cursor-agent's 245 MiB. Nothing else in the image gets larger for it:
+# COST: +201 MiB unpacked (211,026,152 bytes) from a 62 MB tarball -- second
+# only to cursor-agent's 555 MiB. Nothing else in the image gets larger for it:
 # a dynamically linked glibc binary, no bundled node, no second interpreter.
 #
 # The goose pattern, not cursor-agent's: ONE tarball member, named `antigravity`

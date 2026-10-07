@@ -336,15 +336,15 @@ def test_npm_rows_match_package_json(lock):
 #: this file's own rule: the registry-hash and same-publisher facts were verified
 #: against the real `@latest` image before this change, not assumed from the
 #: pattern.
-UNHASHED_BY_UPSTREAM = {
-    "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core",
-    "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai",
-    "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui",
-    "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/chord",
-    "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-telemetry",
-    "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-codemode",
-    "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-mcp",
-}
+#:
+#: EMPTIED 7 -> 0 on 2026-10-08, for the pi 0.99.1 -> 1.1.0 bump. 1.1.0 no longer
+#: publishes with `hasShrinkwrap: true`: npm hoists the seven siblings to the top
+#: level of the tree and records an `integrity` for every one of them, so the
+#: lockfile has no unhashed entry left anywhere (the test below found all seven
+#: stale). The set stays, empty, so the next unhashed entry is a decision again.
+#: (`set()` is not a literal; `lock_update._adjudicated_unhashed` reads that as
+#: the empty set, its documented safe direction.)
+UNHASHED_BY_UPSTREAM: set = set()
 
 
 def test_package_lock_carries_integrity_hashes():

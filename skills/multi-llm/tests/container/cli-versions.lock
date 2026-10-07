@@ -65,15 +65,15 @@ artifacts:
     url: "https://github.com/astral-sh/uv/releases/download/0.11.28/uv-x86_64-unknown-linux-gnu.tar.gz"
     sha256: "e490a6464492183c5d4534a5527fb4440f7f2bb2f228162ad7e4afe076dc0224"
   goose:
-    version: "1.52.0"
-    url: "https://github.com/aaif-goose/goose/releases/download/v1.52.0/goose-x86_64-unknown-linux-gnu.tar.bz2"
-    sha256: "2609109a43012ddece0f78e1e4a179b82749c424f2164b97186d3ad38518d262"
+    version: "1.53.0"
+    url: "https://github.com/aaif-goose/goose/releases/download/v1.53.0/goose-x86_64-unknown-linux-gnu.tar.bz2"
+    sha256: "2d010c66dfd4348bb437b3a94001882468a5db1aa556858920481522f57752d7"
   grok:
-    version: "1.0.44"
-    url: "https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-1.0.44-linux-x86_64"
-    sha256: "f76431873efc5c8a50892d1e1247eaee23f6664bca385fbd55a06a8e7d3caedc"
+    version: "1.0.46"
+    url: "https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-1.0.46-linux-x86_64"
+    sha256: "41626a53292324140b92556b9d42ff5542e3dcd04aff85eafb8689dd4adb44fc"
   muse:
-    version: "1.4.1-R4503.1"
+    version: "1.4.3-R5018.1"
     # The `muse` on a developer's PATH is a bash LAUNCHER that phones
     # api.meta.ai on every invocation and updates itself synchronously and
     # fatally. The image installs the artifact the launcher would have
@@ -81,12 +81,12 @@ artifacts:
     # -- which is what makes `muse --version` answer under --network none.
     # Meta publishes the sha256 in the channel manifest; this is that value,
     # confirmed byte-for-byte against a fetched artifact.
-    url: "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.1-R4503.1&file=muse-x86-linux"
-    sha256: "8b53c9cdbc025bc2d9068bc7016e2c1e51c3a0c608821da17528ad23be900a12"
-    manifest_url: "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.1-R4503.1&file=manifest.json"
+    url: "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.3-R5018.1&file=muse-x86-linux"
+    sha256: "e671790882bc88d65edb4ae0f713becf378ebf91011034ab75abebe3592dde4f"
+    manifest_url: "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.3-R5018.1&file=manifest.json"
     channel_url: "https://api.meta.ai/muse-code/channels/muse-stable"
   cursor-agent:
-    version: "2026.09.28-64d2043"
+    version: "2026.10.01-e373342"
     # The documented install is `curl https://cursor.com/install | bash` -- a
     # live remote input executing as root, which is the one shape this file
     # exists to refuse. And the refusal is not merely stylistic: that script is
@@ -97,26 +97,26 @@ artifacts:
     # tarball it would have fetched is named here by its own bytes instead.
     #
     # Cursor publishes no checksum anywhere, so unlike muse's this sha256 is
-    # OURS: measured over the fetched artifact (182,574,768 bytes, content-type
+    # OURS: measured over the fetched artifact (182,613,962 bytes, content-type
     # application/x-tar), and re-confirmable by re-fetching the same URL.
     #
     # One tarball, one root directory (`dist-package/`), hence
-    # `--strip-components=1`. 245 MiB unpacked, of which 129 MB is a second
+    # `--strip-components=1`. 555 MiB unpacked, of which 129 MB is a second
     # bundled node -- see the Dockerfile's §7 block for what that buys.
-    url: "https://downloads.cursor.com/lab/2026.09.28-64d2043/linux/x64/agent-cli-package.tar.gz"
-    sha256: "6e4cd936a4866b8a77c50ff51a564460d715772fabc477a01aa0f0455d9559f0"
+    url: "https://downloads.cursor.com/lab/2026.10.01-e373342/linux/x64/agent-cli-package.tar.gz"
+    sha256: "a79726c6e644520e993970be4c45775a6889802b67abe461a677a53219ae28e8"
     # Where `latest` mode re-reads the version, the way muse re-reads its
     # channel: the URL above is grepped back out of this script's body.
     installer_url: "https://cursor.com/install"
   agy:
-    version: "1.2.14"
+    version: "1.3.1"
     # Google's Antigravity CLI. Like muse's and unlike cursor-agent's, this
     # sha256 is UPSTREAM'S OWN: the GitHub release API publishes a `digest` per
     # asset, so the value below is what Google says the bytes are, not what we
     # measured after fetching them. The build still checks it -- an upstream
     # digest is a claim until sha256sum --check --strict agrees.
     #
-    # 55,556,510 bytes compressed -> 205,537,320 unpacked: +196 MiB of layer,
+    # 61,780,683 bytes compressed -> 211,026,152 unpacked: +201 MiB of layer,
     # second only to cursor-agent's 245, and the reason this row needs a stated
     # justification rather than "it was easy to add". What it buys is the
     # cli-surface help-drift probe (C8) -- see the `clis` row below.
@@ -135,8 +135,8 @@ artifacts:
     # lands, the way kimi's and qwen-code's notes already say of theirs, and it
     # is the reason the auto-update opt-out below is load-bearing rather than
     # tidy: a self-updating binary on a daily channel unpins itself within a day.
-    url: "https://github.com/google-antigravity/antigravity-cli/releases/download/1.2.14/agy_cli_linux_x64.tar.gz"
-    sha256: "68cf4d221cb62e0289245439d3d37f599bdc8e0c4e1e3dae03f326463a0c26dc"
+    url: "https://github.com/google-antigravity/antigravity-cli/releases/download/1.3.1/agy_cli_linux_x64.tar.gz"
+    sha256: "0e313b309ea58c71431ce86bb820936a3700e17e44eabce7bf2264617dc822db"
     # The single tarball member, named here rather than discovered by the RUN:
     # `tar -xzf` into /tmp and then `install /tmp/<member>` is only correct while
     # the member is what this file says it is, and a renamed member would
@@ -147,7 +147,7 @@ artifacts:
     # `tag_name`. It is also where the `digest` above comes from.
     releases_url: "https://api.github.com/repos/google-antigravity/antigravity-cli/releases/latest"
   omp:
-    version: "18.4.4"
+    version: "18.8.3"
     # oh-my-pi's release asset. Like agy's and muse's and unlike cursor-agent's,
     # this sha256 is UPSTREAM'S OWN: the release page publishes a
     # SHA256SUMS.txt naming this value against `omp-linux-x64`. Confirmed on
@@ -176,8 +176,8 @@ artifacts:
     # `make e2e-image-latest`; `install: download` then keeps the fetched file
     # unchanged, so `plan_artifacts` recovers the new digest by hashing
     # /opt/mllm/real/omp out of the @latest image.
-    url: "https://github.com/can1357/oh-my-pi/releases/download/v18.4.4/omp-linux-x64"
-    sha256: "24c830fceb0bd6884bf5bf2c7a2b7407bc23fafe655e924c695ef9be308e46f3"
+    url: "https://github.com/can1357/oh-my-pi/releases/download/v18.8.3/omp-linux-x64"
+    sha256: "8cb6d6a0035a3c5d9c40a58852ca361569eafc2cecbbeef4521e0fefc8ccbc37"
     # Where `latest` mode re-reads the version: the release API's `tag_name`,
     # which carries a leading `v` this row's version does not.
     releases_url: "https://api.github.com/repos/can1357/oh-my-pi/releases/latest"
@@ -281,7 +281,7 @@ toolchain:
 #                                needs the real binary and nothing else.
 #
 # Both read the binary directly, which is why a row with no stub is still worth
-# 245 MiB of layer. `cursor-agent` keeps its fake-binary (C5) row for the
+# 555 MiB of layer. `cursor-agent` keeps its fake-binary (C5) row for the
 # mock-based suite -- that lane is a host-side mock and is unaffected by what the
 # image contains.
 #
@@ -301,7 +301,7 @@ clis:
     binary: codex
     install: npm
     package: "@openai/codex"
-    version: "0.159.2"
+    version: "0.161.0"
     verify:
       command: ["codex", "--version"]
       pattern: "^codex-cli (?P<version>\\S+)$"
@@ -313,7 +313,7 @@ clis:
     binary: claude
     install: npm
     package: "@anthropic-ai/claude-code"
-    version: "2.1.285"
+    version: "2.1.293"
     verify:
       command: ["claude", "--version"]
       pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+) \\(Claude Code\\)$"
@@ -322,7 +322,7 @@ clis:
     binary: gemini
     install: npm
     package: "@google/gemini-cli"
-    version: "0.62.0"
+    version: "0.63.0"
     verify:
       command: ["gemini", "--version"]
       pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
@@ -340,7 +340,7 @@ clis:
     binary: cline
     install: npm
     package: "cline"
-    version: "3.0.66"
+    version: "3.0.69"
     verify:
       command: ["cline", "--version"]
       pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
@@ -356,7 +356,7 @@ clis:
     binary: kilocode
     install: npm
     package: "@kilocode/cli"
-    version: "7.8.1"
+    version: "7.8.8"
     verify:
       command: ["kilocode", "--version"]
       pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
@@ -382,7 +382,7 @@ clis:
     binary: copilot
     install: npm
     package: "@github/copilot"
-    version: "1.0.89"
+    version: "1.0.93"
     verify:
       command: ["copilot", "--version"]
       # MEASURED, and the anchoring is the whole point: `copilot --version`
@@ -412,7 +412,7 @@ clis:
     binary: qwen
     install: npm
     package: "@qwen-code/qwen-code"
-    version: "0.24.7"
+    version: "0.25.0"
     verify:
       command: ["qwen", "--version"]
       # MEASURED, not guessed: `qwen --version` prints a BARE semver with no
@@ -432,18 +432,17 @@ clis:
     binary: pi
     install: npm
     package: "@earendil-works/pi-coding-agent"
-    version: "0.99.1"
+    version: "1.1.0"
     verify:
       command: ["pi", "--version"]
       pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
     note: >-
-      reads PI_CODING_AGENT_DIR ahead of $HOME. It is also the one package in
-      the set that is NOT pinned all the way down: it publishes with
-      `hasShrinkwrap: true`, and its own shrinkwrap gives no `integrity` for
-      three sibling packages, so npm records those with a resolved URL and no
-      hash. The exception is named and asserted exactly in
-      tests/test_dockerfile_pins.py (UNHASHED_BY_UPSTREAM); a fourth entry, or
-      an entry upstream later fixes, fails that test.
+      reads PI_CODING_AGENT_DIR ahead of $HOME. Through 0.99.1 it was the one
+      package in the set NOT pinned all the way down (`hasShrinkwrap: true`, and
+      a shrinkwrap with no `integrity` for its sibling packages); 1.1.0 dropped
+      the shrinkwrap, so every entry of the tree is hashed now and
+      tests/test_dockerfile_pins.py's UNHASHED_BY_UPSTREAM is empty. A new
+      unhashed entry fails that test.
 
   - id: aider
     binary: aider
@@ -461,7 +460,7 @@ clis:
     binary: vibe
     install: pypi
     package: "mistral-vibe"
-    version: "2.25.8"
+    version: "2.26.0"
     # A `--generate-hashes` lock of the WHOLE transitive tree (96 packages),
     # installed with --require-hashes, on the pinned CPython 3.12 above rather
     # than the base image's 3.11.2.
@@ -474,7 +473,7 @@ clis:
     binary: goose
     install: archive
     artifact: goose
-    version: "1.52.0"
+    version: "1.53.0"
     verify:
       command: ["goose", "--version"]
       pattern: "^\\s*(?P<version>\\d+\\.\\d+\\.\\d+)\\s*$"
@@ -484,7 +483,7 @@ clis:
     binary: grok
     install: download
     artifact: grok
-    version: "1.0.44"
+    version: "1.0.46"
     verify:
       command: ["grok", "--version"]
       pattern: "^grok (?P<version>\\S+)"
@@ -498,7 +497,7 @@ clis:
     binary: muse
     install: download
     artifact: muse
-    version: "1.4.1-R4503.1"
+    version: "1.4.3-R5018.1"
     verify:
       command: ["muse", "--version"]
       pattern: "^Muse Code \\S+ \\((?P<version>[^)]+)\\)$"
@@ -512,7 +511,7 @@ clis:
     binary: cursor-agent
     install: archive
     artifact: cursor-agent
-    version: "2026.09.28-64d2043"
+    version: "2026.10.01-e373342"
     verify:
       # MEASURED: `cursor-agent --version` prints a BARE calendar version and
       # nothing else -- no product-name prefix, no second line. The date part is
@@ -533,7 +532,7 @@ clis:
       unwrapped row here would be a red build, not a quiet exemption. The wrapper
       finds no redirect.yaml row for it, returns an empty row, and still scrubs
       the environment -- which for a CLI with no stub is the correct default.
-      What ships is a self-contained 245 MiB bundle carrying its own node; the
+      What ships is a self-contained 555 MiB bundle carrying its own node; the
       `cursor-agent` entry point is a bash launcher that resolves its own
       directory through realpath, so the /opt/mllm/real symlink works the way
       vibe's does. That launcher runs under `set -u` and dereferences $HOME
@@ -544,7 +543,7 @@ clis:
     binary: agy
     install: archive
     artifact: agy
-    version: "1.2.14"
+    version: "1.3.1"
     verify:
       # MEASURED: `agy --version` prints a BARE dotted version and nothing else
       # -- no product-name prefix, no second line, no leading whitespace -- and
@@ -585,7 +584,7 @@ clis:
     binary: omp
     install: download
     artifact: omp
-    version: "18.4.4"
+    version: "18.8.3"
     verify:
       # MEASURED: `omp --version` prints a bare `omp/18.2.2` on stdout with
       # stderr EMPTY and exit 0, offline, with no credential -- and, unlike the
