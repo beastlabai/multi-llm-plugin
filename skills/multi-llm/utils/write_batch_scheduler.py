@@ -1449,6 +1449,203 @@ def blocked_by_check_reason(check_id: str) -> str:
     )
 
 
+@dataclass(frozen=True)
+class FailedAnswerable:
+    """A failed implement task a stop's ``--human-task`` answers can answer
+    (:func:`compose_stop_answers`): ``unlanded`` when its reply said applied
+    and nothing it declares changed (fix round 15), ``not_rerun`` when a
+    resume kept a failed check from running again on unchanged files."""
+
+    task_id: str
+    unlanded: bool = False
+    not_rerun: bool = False
+
+
+def compose_stop_answers(
+    *,
+    refused: Sequence[str],
+    failed: Sequence[FailedAnswerable],
+    checks: Sequence[str],
+    blocked: Mapping[str, str],
+    findings: Mapping[str, Sequence[str]],
+    undone_with: Callable[[str], List[str]],
+) -> List[Dict[str, Any]]:
+    """A stopped implement's ``--human-task`` answers, as data, on both legs.
+
+    ``[{"flags": ["--resume", …], "why": …}]`` in the order a user weighs
+    them: the one combined command that goes on without fixing anything
+    (when more than one task needs an answer), then each task's own answers
+    — a task *refused* before dispatch (``skip``, ``done``), each *failed*
+    one (``done``, ``skip``, ``retry`` when it was not run again; ``skip``
+    then ``done`` when its change never landed) and each of *checks* whose
+    findings hold tasks back (``done``, ``skip``, ``retry``). *blocked* maps
+    each held task to its check, *findings* each check to what it reported,
+    and *undone_with* names the tasks a ``skip`` leaves undone with a task.
+
+    The executor's stop (:meth:`WriteBatchScheduler._stop_answers`) and the
+    native leg's (:func:`native_stop_answers`, fix round 20) both answer
+    through this, so each answer and its why read the same on every host:
+    on live run 8 the native block offered only the combined command while
+    the tool routes listed six, and the Claude Code host described a
+    T005-only answer the plugin never printed.
+    """
+
+    def answer(task_id: str, word: str) -> List[str]:
+        return ["--human-task", f"{task_id}={word}"]
+
+    def skipped_clause(task_id: str) -> str:
+        deps = undone_with(task_id)
+        return f"leave {task_id} undone" + (
+            f", with the tasks that depend on it ({', '.join(deps)})" if deps else ""
+        )
+
+    def made_by_hand(task_id: str) -> Dict[str, Any]:
+        return {
+            "flags": answer(task_id, "done"),
+            "why": (f"once you have made {task_id}'s change yourself: "
+                    f"{task_id} counts as done and the tasks after it run"),
+        }
+
+    each: List[Dict[str, Any]] = []
+    for task_id in refused:
+        each.append({"flags": answer(task_id, "skip"),
+                     "why": skipped_clause(task_id)})
+        each.append(made_by_hand(task_id))
+    for item in failed:
+        task_id = item.task_id
+        if item.unlanded:
+            # Fix round 15 (review R1): its change did not land, so there is
+            # no failure to accept — going on without it comes first, and
+            # `done` is for a change the user made by hand, as the stop
+            # message says.
+            each.append({"flags": answer(task_id, "skip"),
+                         "why": skipped_clause(task_id)})
+            each.append(made_by_hand(task_id))
+            continue
+        each.append({
+            "flags": answer(task_id, "done"),
+            "why": (f"accept {task_id}'s failure: {task_id} counts as done "
+                    "and the tasks after it run"),
+        })
+        each.append({"flags": answer(task_id, "skip"),
+                     "why": skipped_clause(task_id)})
+        if item.not_rerun:
+            each.append({
+                "flags": answer(task_id, "retry"),
+                "why": f"run {task_id}'s check again on unchanged files",
+            })
+    for check_id in checks:
+        waiting = sorted(t for t, c in blocked.items() if c == check_id)
+        reported = list(findings.get(check_id) or [])
+        each.append({
+            "flags": answer(check_id, "done"),
+            "why": (f"accept {check_id}'s check findings: "
+                    f"{', '.join(waiting)} then run, told that you accepted "
+                    "the findings, and the findings stay listed for "
+                    "review-code"
+                    + (f" ({'; '.join(reported)[:200]})" if reported else "")),
+        })
+        each.append({
+            "flags": answer(check_id, "skip"),
+            "why": f"leave {check_id} and {', '.join(waiting)} undone",
+        })
+        each.append({
+            "flags": answer(check_id, "retry"),
+            "why": f"run {check_id}'s check again on unchanged files",
+        })
+    # One command that goes on without fixing anything: every check with
+    # findings accepted, every refused or failed task left undone.
+    combined_flags: List[str] = []
+    clauses: List[str] = []
+    for check_id in checks:
+        combined_flags += answer(check_id, "done")
+        clauses.append(f"accept {check_id}'s check findings")
+    for task_id in [*refused, *(item.task_id for item in failed)]:
+        combined_flags += answer(task_id, "skip")
+        clauses.append(skipped_clause(task_id))
+    answers: List[Dict[str, Any]] = []
+    if len(clauses) > 1:
+        answers.append({
+            "flags": ["--resume", *combined_flags],
+            "why": " and ".join(clauses) + "; the rest runs",
+        })
+    answers.extend(
+        {"flags": ["--resume", *item["flags"]], "why": item["why"]}
+        for item in each
+    )
+    return answers
+
+
+#: How the native emit opens the reason it records for a task the write
+#: policy refuses (``implement_orchestrator``'s ``refused`` map).
+NATIVE_REFUSED_PREFIX = "refused before dispatch: "
+
+
+def native_stop_answers(state: Any) -> List[Dict[str, Any]]:
+    """:func:`compose_stop_answers` for a stopped native implement, read from
+    ``state.json`` as recorded (a ``StateManager`` or the file's dict).
+
+    The native leg leaves no stop record: the answers are what the record
+    shows waiting for one — each task of the decomposition implement ran
+    last (``implement_task_ids``) recorded ``failed`` (one the emit refused
+    before dispatch, :data:`NATIVE_REFUSED_PREFIX`, answered as the executor
+    answers a refusal), and each check whose findings hold tasks back
+    (:func:`held_back_by_checks`). A ``skip`` leaves undone the tasks that
+    depend on its task and have not run (not a manual one). ``[]`` when none
+    waits, or when the record cannot be read.
+    """
+    if state is None or not hasattr(state, "get"):
+        return []
+    try:
+        statuses = dict(state.get("task_status") or {})
+        reasons = dict(state.get("task_status_reasons") or {})
+        scope = state.get("implement_task_ids")
+        human = {str(t) for t in (state.get("implement_human_task_ids") or [])}
+        recorded = state.get("task_check_findings") or {}
+    except Exception:  # noqa: BLE001 - an advisory read, never fatal
+        return []
+    failed_ids = sorted(
+        str(task_id) for task_id, status in statuses.items()
+        if status == "failed" and _IMPLEMENT_TASK_ID.match(str(task_id))
+        and (not isinstance(scope, list) or task_id in scope)
+    )
+    held = held_back_by_checks([], state)
+    blocked = {task_id: check_id for task_id, check_id in held}
+    checks = sorted(set(blocked.values()))
+    if not failed_ids and not checks:
+        return []
+    graph = decomposition_graph([], state)
+    manual = human | {
+        str(node.get("task_id", "")) for node in graph
+        if node.get("executor_role") == "human" or node.get("is_human")
+    }
+
+    def undone_with(task_id: str) -> List[str]:
+        return [
+            dep for dep in transitive_dependents(graph, task_id)
+            if dep not in manual
+            and statuses.get(dep) not in ("completed", "skipped")
+            and (not isinstance(scope, list) or dep in scope)
+        ]
+
+    refused = [
+        task_id for task_id in failed_ids
+        if str(reasons.get(task_id) or "").startswith(NATIVE_REFUSED_PREFIX)
+    ]
+    return compose_stop_answers(
+        refused=refused,
+        failed=[FailedAnswerable(task_id) for task_id in failed_ids
+                if task_id not in refused],
+        checks=checks,
+        blocked=blocked,
+        findings={
+            check_id: [str(f) for f in (recorded.get(check_id) or [])]
+            for check_id in checks
+        } if isinstance(recorded, dict) else {},
+        undone_with=undone_with,
+    )
+
+
 def _accounting_line(account: Dict[str, Any]) -> str:
     """``N tasks in this decomposition: a done, b failed (…), …`` — every
     bucket, named, adding up to the total."""
@@ -8830,15 +9027,6 @@ class WriteBatchScheduler:
                 and self._task_by_id(dep) is not None
             ]
 
-        def answer(task_id: str, word: str) -> List[str]:
-            return ["--human-task", f"{task_id}={word}"]
-
-        def skipped_clause(task_id: str) -> str:
-            deps = undone_with(task_id)
-            return f"leave {task_id} undone" + (
-                f", with the tasks that depend on it ({', '.join(deps)})" if deps else ""
-            )
-
         refused = [o for o in failed if o.task_id in self._refused_before_dispatch]
         acceptable = [
             o for o in failed
@@ -8846,86 +9034,21 @@ class WriteBatchScheduler:
             and o.write_outcome == WRITE_CLEAN_FAILURE and not o.bytes_moved
         ]
         blocked = result.blocked_by_check
-        checks = self._blocking_checks(result) if blocked else []
-        found = result.check_findings()
-        each: List[Dict[str, Any]] = []
-        for outcome in refused:
-            task_id = outcome.task_id
-            each.append({"flags": answer(task_id, "skip"),
-                         "why": skipped_clause(task_id)})
-            each.append({
-                "flags": answer(task_id, "done"),
-                "why": (f"once you have made {task_id}'s change yourself: "
-                        f"{task_id} counts as done and the tasks after it run"),
-            })
-        for outcome in acceptable:
-            task_id = outcome.task_id
-            if outcome.applied_without_changes:
-                # Fix round 15 (review R1): its change did not land, so there
-                # is no failure to accept — going on without it comes first,
-                # and `done` is for a change the user made by hand, as the
-                # stop message says.
-                each.append({"flags": answer(task_id, "skip"),
-                             "why": skipped_clause(task_id)})
-                each.append({
-                    "flags": answer(task_id, "done"),
-                    "why": (f"once you have made {task_id}'s change yourself: "
-                            f"{task_id} counts as done and the tasks after it "
-                            "run"),
-                })
-                continue
-            each.append({
-                "flags": answer(task_id, "done"),
-                "why": (f"accept {task_id}'s failure: {task_id} counts as done "
-                        "and the tasks after it run"),
-            })
-            each.append({"flags": answer(task_id, "skip"),
-                         "why": skipped_clause(task_id)})
-            if outcome.not_rerun:
-                each.append({
-                    "flags": answer(task_id, "retry"),
-                    "why": f"run {task_id}'s check again on unchanged files",
-                })
-        for check_id in checks:
-            waiting = sorted(t for t, c in blocked.items() if c == check_id)
-            each.append({
-                "flags": answer(check_id, "done"),
-                "why": (f"accept {check_id}'s check findings: "
-                        f"{', '.join(waiting)} then run, told that you accepted "
-                        "the findings, and the findings stay listed for "
-                        "review-code"
-                        + (f" ({'; '.join(found.get(check_id) or [])[:200]})"
-                           if found.get(check_id) else "")),
-            })
-            each.append({
-                "flags": answer(check_id, "skip"),
-                "why": f"leave {check_id} and {', '.join(waiting)} undone",
-            })
-            each.append({
-                "flags": answer(check_id, "retry"),
-                "why": f"run {check_id}'s check again on unchanged files",
-            })
-        # One command that goes on without fixing anything: every check with
-        # findings accepted, every refused or cleanly failed task left undone.
-        combined_flags: List[str] = []
-        clauses: List[str] = []
-        for check_id in checks:
-            combined_flags += answer(check_id, "done")
-            clauses.append(f"accept {check_id}'s check findings")
-        for outcome in [*refused, *acceptable]:
-            combined_flags += answer(outcome.task_id, "skip")
-            clauses.append(skipped_clause(outcome.task_id))
-        answers: List[Dict[str, Any]] = []
-        if len(clauses) > 1:
-            answers.append({
-                "flags": ["--resume", *combined_flags],
-                "why": " and ".join(clauses) + "; the rest runs",
-            })
-        answers.extend(
-            {"flags": ["--resume", *item["flags"]], "why": item["why"]}
-            for item in each
+        return compose_stop_answers(
+            refused=[o.task_id for o in refused],
+            failed=[
+                FailedAnswerable(
+                    task_id=o.task_id,
+                    unlanded=bool(o.applied_without_changes),
+                    not_rerun=bool(o.not_rerun),
+                )
+                for o in acceptable
+            ],
+            checks=self._blocking_checks(result) if blocked else [],
+            blocked=blocked,
+            findings=result.check_findings(),
+            undone_with=undone_with,
         )
-        return answers
 
     def _record_not_run_in_state(self, result: SchedulerResult) -> None:
         """Give each ``result.not_run`` task its reason on a ``pending`` status.
