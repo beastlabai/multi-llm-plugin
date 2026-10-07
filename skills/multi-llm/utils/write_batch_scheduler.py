@@ -11074,11 +11074,15 @@ class WriteBatchScheduler:
         "5 task(s) to dispatch" and stopped at "4/6". A task that finishes
         without a runner leaves it, one dispatched against the walk's
         reading joins it (:meth:`_eta_mark`), and a held task leaves it as
-        before.
+        before. Fix round 23 (review of round 22, #1): on every phase, a task
+        that ended without a runner and not ok (an apply batch refused before
+        dispatch) is out, so "run stopped after batch 2/3" no longer counts
+        the refused batch among the ones done; a resume's kept batch stays in.
         """
         out = (
             set(result.human_plan.skipped) | set(result.human_plan.accepted)
             | set(result.blocked_by_check) | set(self._eta_held)
+            | set(self._eta_unrun)
         )
         scope = self._eta_scope
         return [
@@ -11178,7 +11182,9 @@ class WriteBatchScheduler:
         done, total = self._eta_progress(result)
         return _metrics.closing_line(
             self.phase, done=done, total=total, verb=verb,
-            tail=_metrics.left_out_tail(self._eta_left_out(result)), why=why,
+            tail=_metrics.left_out_tail(
+                self._eta_left_out(result), unit=_metrics.eta_unit(self.phase),
+            ), why=why,
         )
 
     def _eta_close(
