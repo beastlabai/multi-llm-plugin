@@ -1765,117 +1765,33 @@ def describe_changed(names: Sequence[str], config_keys: Sequence[str] = ()) -> s
 
 def own_trust_entries_line(
     paths: Sequence[str], *, home: Optional[str] = None,
-    provider: Optional[str] = None, running: Sequence[str] = (),
+    provider: Optional[str] = None,
 ) -> str:
     """The closing-summary note for :attr:`HomeChange.foreign_trust`, both lanes.
 
     It names every trust table that appeared during the run besides the
-    run's own cwds. One that *running* holds is the directory of a codex
-    session running there now (:func:`live_codex_trust_keys`): codex trusts
-    the directory it runs in, so nothing needs doing, and the line says so
-    and asks nothing of the user (live run 9: a host advised deleting a
-    sibling run's table from ``~/.codex/config.toml`` because the line said
-    to delete one "if you did not run codex there"). For every other one the
-    check cannot tell this run (a jailed batch can write ``$CODEX_HOME``) from
-    another codex session, so it blames no one, and removing the table is
-    offered as the user's own call, never as an order. Each path is a name a
-    jailed turn could have written into the config, so it goes through
+    run's own cwds, and says who could have added one without blaming
+    anyone: this run (a jailed batch can write ``$CODEX_HOME``) or another
+    codex session running at the same time — the check cannot tell them
+    apart, and it reads no other process's state to try (fix round 23: any
+    process can be named codex, so a running "codex" in ``/`` explained a
+    planted ``[projects."/"]``). Removing a table is offered as the user's
+    own call, never as an order (live run 9: a host turned "delete its
+    table" into advice to edit the config). Each path is a name a jailed
+    turn could have written into the config, so it goes through
     :func:`render_name` and can never start a line of its own."""
     who = f"{provider}: " if provider else ""
     where = f"{render_home(home)}/config.toml" if home else "$CODEX_HOME/config.toml"
-    live = [path for path in paths if path in set(running)]
-    other = [path for path in paths if path not in set(running)]
-
-    def names(group: Sequence[str]) -> str:
-        return ", ".join(render_name(render_home(path)) for path in group)
-
-    parts = []
-    if live:
-        parts.append(
-            f"{names(live)}: another codex session is running there now, and "
-            f"codex trusts the directory it runs in, so nothing needs doing"
-        )
-    if other:
-        parts.append(
-            f"{names(other)}: added by this run or by another codex session; "
-            f"codex trusts a listed directory in later sessions without asking "
-            f"and loads its .codex/config.toml, so if you never ran codex "
-            f"there, removing its [projects.\"<path>\"] table from {where} is "
-            f"your call"
-        )
+    names = ", ".join(render_name(render_home(path)) for path in paths)
+    which = names if len(paths) == 1 else "one of them"
     return (
         f"{CODEX_HOME_CHECK_MARKER} {who}{where} gained trust entries during "
-        f"this run (not a failure): " + "; ".join(parts) + "."
+        f"this run, added by this run or by another codex session running at "
+        f"the same time (not a failure): {names}. Codex trusts a listed "
+        f"directory in later sessions without asking and loads its "
+        f".codex/config.toml; if you never ran codex in {which}, removing its "
+        f"[projects.\"<path>\"] table from {where} is your call."
     )
-
-
-#: Where :func:`live_codex_trust_keys` reads the running processes (Linux).
-PROC_ROOT = "/proc"
-
-
-def _trust_keys_of(cwd: str) -> List[str]:
-    """The keys codex records trust under for a session in *cwd*, read off
-    the filesystem alone: the nearest directory holding ``.git`` (and, when
-    that ``.git`` is a linked worktree's ``gitdir:`` file, its main
-    repository's root), else *cwd* itself. Never runs ``git``: *cwd* is
-    another process's directory, and a jailed batch could have planted it
-    with a configuration git would act on."""
-    start = os.path.realpath(cwd)
-    probe = start
-    while True:
-        marker = os.path.join(probe, ".git")
-        if os.path.isdir(marker):
-            return [probe]
-        if os.path.isfile(marker):
-            keys = [probe]
-            try:
-                with open(marker, encoding="utf-8", errors="replace") as handle:
-                    head = handle.read(4096).strip()
-            except OSError:
-                return keys
-            if head.startswith("gitdir:"):
-                gitdir = head[len("gitdir:"):].strip()
-                if not os.path.isabs(gitdir):
-                    gitdir = os.path.join(probe, gitdir)
-                gitdir = os.path.realpath(gitdir)
-                parts = gitdir.split(os.sep)
-                if len(parts) > 3 and parts[-2] == "worktrees" and parts[-3] == ".git":
-                    main = os.sep.join(parts[:-3]) or os.sep
-                    if main not in keys:
-                        keys.append(main)
-            return keys
-        parent = os.path.dirname(probe)
-        if parent == probe:
-            return [start]
-        probe = parent
-
-
-def live_codex_trust_keys(proc_root: str = PROC_ROOT) -> set:
-    """The trust keys (:func:`_trust_keys_of`) of every codex process
-    running now: each ``<proc_root>/<pid>`` whose ``comm`` is ``codex`` and
-    whose ``cwd`` can be read (a zombie's cannot). An empty set where there
-    is no ``/proc`` to read (macOS): nothing is then attributed, and every
-    table keeps the cautious wording."""
-    keys: set = set()
-    try:
-        entries = os.listdir(proc_root)
-    except OSError:
-        return keys
-    for pid in entries:
-        if not pid.isdigit():
-            continue
-        base = os.path.join(proc_root, pid)
-        try:
-            with open(os.path.join(base, "comm"), encoding="utf-8", errors="replace") as handle:
-                if handle.read().strip() != "codex":
-                    continue
-            cwd = os.readlink(os.path.join(base, "cwd"))
-        except OSError:
-            continue
-        if not os.path.isabs(cwd) or not os.path.isdir(cwd):
-            continue
-        keys.update(_trust_keys_of(cwd))
-    return keys
 
 
 #: A ``[projects."<key>"]`` or ``[projects.'<key>']`` header, any table body.
@@ -1928,13 +1844,7 @@ class TrustEntriesNote:
         left = self.remaining()
         if not left:
             return ""
-        # Live run 9: which of them a codex session running there now
-        # explains, read when the line prints, like `remaining`.
-        live = live_codex_trust_keys()
-        return own_trust_entries_line(
-            left, home=self.home, provider=self.provider,
-            running=[path for path in left if os.path.realpath(path) in live],
-        )
+        return own_trust_entries_line(left, home=self.home, provider=self.provider)
 
 
 def render_summary_entries(entries: Sequence[Any]) -> List[str]:
