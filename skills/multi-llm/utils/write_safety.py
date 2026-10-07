@@ -541,6 +541,52 @@ def glob_to_regex(pattern: str) -> "re.Pattern[str]":
 _glob_to_regex = glob_to_regex
 
 
+#: Where the user's own ``driver.write_paths`` lives, as every way-forward
+#: line names it.
+POLICY_FILE = ".multi-llm/providers.yaml"
+
+
+def describe_paths(paths: Sequence[str], limit: int = 3) -> str:
+    """``a``, ``a and b``, ``a, b and c``, ``a, b, c and 2 more``."""
+    names = [str(path) for path in paths if str(path)]
+    if not names:
+        return "the file it declares"
+    if len(names) > limit:
+        return f"{', '.join(names[:limit])} and {len(names) - limit} more"
+    if len(names) == 1:
+        return names[0]
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+def policy_allow_clause(paths: Sequence[str]) -> str:
+    """The way past a write ``driver.write_paths`` refused that changes the
+    policy, worded as the user's own call: ``if you want <paths> written,
+    allow it in driver.write_paths (.multi-llm/providers.yaml)``.
+
+    Fix round 20 (live run 8 #4, a user decision: permissive): the plugin
+    keeps offering it, since it is the user's to decide and it lets the run
+    complete, but plainly as their choice, naming the file, and no longer as
+    "widen `allow`/narrow `deny` … if this path is genuinely in scope". Every
+    stop, refusal and status line that offers it says it in these words, and
+    the hosts relay it as given and never change the policy themselves
+    (``modes.STOP_POLICY_RULE``).
+    """
+    it = "it" if len([p for p in paths if str(p)]) <= 1 else "them"
+    return (
+        f"if you want {describe_paths(paths)} written, allow {it} in "
+        f"driver.write_paths ({POLICY_FILE})"
+    )
+
+
+def policy_skip_clause(task_id: str) -> str:
+    """The way past an implement task the policy refused that leaves it
+    undone, beside :func:`policy_allow_clause`: ``if not, skip T005: …``."""
+    return (
+        f"if not, skip {task_id}: add --human-task {task_id}=skip to the "
+        f"resume command ({task_id} and the tasks after it stay undone)"
+    )
+
+
 @dataclass
 class WritePolicy:
     """``driver.write_paths``, resolved against the pinned repo root (D3l)."""
@@ -612,12 +658,12 @@ class WritePolicy:
         if not offenders:
             return
         detail = "; ".join(f"{path} ({rule})" for path, rule in offenders)
+        named = [path for path, _ in offenders]
         raise PolicyViolation(
             f"Write policy violation ({when}): {detail}. Repo root: {self.root}. "
-            f"driver.write_paths is enforced both before dispatch and after the "
-            f"run; widen `allow`/narrow `deny` in .multi-llm/providers.yaml if this "
-            f"path is genuinely in scope.",
-            paths=[path for path, _ in offenders],
+            f"driver.write_paths is checked before dispatch and after the run. "
+            f"Your call: {policy_allow_clause(named)} and resume.",
+            paths=named,
             rule=offenders[0][1],
         )
 

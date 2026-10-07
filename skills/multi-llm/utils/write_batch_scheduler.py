@@ -135,6 +135,8 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from .write_phase_bridge import WRITE_TASK_FILENAME
     from .write_safety import (
         PRE_BATCH_DIRNAME,
+        policy_allow_clause,
+        policy_skip_clause,
         DRY_RUN_FILENAME,
         MAX_SNAPSHOT_BYTES,
         AuditLog,
@@ -238,6 +240,8 @@ except ImportError:  # pragma: no cover - direct-script import shim
     from utils.write_phase_bridge import WRITE_TASK_FILENAME
     from utils.write_safety import (
         PRE_BATCH_DIRNAME,
+        policy_allow_clause,
+        policy_skip_clause,
         DRY_RUN_FILENAME,
         MAX_SNAPSHOT_BYTES,
         AuditLog,
@@ -3011,6 +3015,9 @@ class WriteBatchScheduler:
         #: policy, the grant, the snapshot or the census refused them), so
         #: the stop says nothing was dispatched (fix round 13).
         self._refused_before_dispatch: set = set()
+        #: The paths ``driver.write_paths`` refused, per task refused for it
+        #: before dispatch: what its way forward names (fix round 20).
+        self._refused_policy_paths: Dict[str, List[str]] = {}
 
     # -- the write grant (plan step 3, 2026-09-30) ----------------------
 
@@ -4570,6 +4577,7 @@ class WriteBatchScheduler:
         try:
             self.policy.check(declared, when="pre-dispatch")
         except PolicyViolation as exc:
+            self._refused_policy_paths[task_id] = list(exc.paths)
             return self._refuse_before_dispatch(task, TaskOutcome(
                 task_id=task_id, kind=self.kind, runner=self.invoker,
                 status=STATUS_REJECTED, profile=profile, reason=exc.message,
@@ -8562,13 +8570,16 @@ class WriteBatchScheduler:
         if refused and not acceptable:
             policy = any(o.write_outcome == WRITE_POLICY_VIOLATION for o in refused)
             # Fix round 18 (live run 7): that nothing is half-applied is the
-            # block's closing line, said once; the bullet is the remedy.
+            # block's closing line, said once; the bullet is the remedy. Fix
+            # round 20: the policy's, worded as the user's own call.
+            denied = sorted({
+                path for o in refused
+                for path in self._refused_policy_paths.get(o.task_id) or []
+            })
             lines.append(
                 f"  - "
                 + (
-                    "if the file the details name is meant to be written, "
-                    "allow it in driver.write_paths (widen `allow` or narrow "
-                    "`deny` in .multi-llm/providers.yaml)"
+                    f"your call: {policy_allow_clause(denied)}"
                     if policy else "fix what the details name"
                 )
                 + ", then resume this phase; it is checked again before it is "
@@ -8940,6 +8951,10 @@ class WriteBatchScheduler:
             # half-applied, and the task can be skipped or accepted.
             result.stop["refused_before_dispatch"] = True
             result.stop["policy"] = first.write_outcome == WRITE_POLICY_VIOLATION
+            if result.stop["policy"]:
+                # Fix round 20: the files its way forward names.
+                result.stop["policy_paths"] = list(
+                    self._refused_policy_paths.get(first.task_id) or [])
         if first is not None and first.applied_without_changes:
             # Fix round 14: it said `applied` and changed nothing, twice.
             result.stop["applied_without_changes"] = True
@@ -9348,14 +9363,20 @@ class WriteBatchScheduler:
                     if self.kind == "implement" else "."
                 )
             )
+        elif stop.get("refused_before_dispatch") and stop.get("policy"):
+            # Fix round 20 (live run 8 #4, a user decision: permissive):
+            # allowing the file stays a way forward, worded as the user's own
+            # call and naming the file, beside the skip answer.
+            body.append(
+                "To go on (your call): "
+                + policy_allow_clause(stop.get("policy_paths") or [])
+                + " and resume this phase"
+                + (f"; {policy_skip_clause(task_id)}."
+                   if self.kind == "implement" else ".")
+            )
         elif stop.get("refused_before_dispatch"):
             body.append(
-                "To go on: "
-                + (
-                    "allow the file it declares in driver.write_paths "
-                    "(.multi-llm/providers.yaml)"
-                    if stop.get("policy") else "fix what refused it"
-                )
+                "To go on: fix what refused it"
                 + (
                     ", then resume this phase; or leave it and the tasks after "
                     f"it undone by adding --human-task {task_id}=skip to the "

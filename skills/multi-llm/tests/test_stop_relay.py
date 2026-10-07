@@ -111,10 +111,10 @@ class TestTheTestsLineTravelsWithTheStop:
         tail = error[error.index(UNVERIFIED):]
         assert tail.endswith("set to the command that runs your tests or checks your build."), tail
         assert (
-            "To go on: allow the file it declares in driver.write_paths "
-            "(.multi-llm/providers.yaml), then resume this phase; or leave it "
-            "and the tasks after it undone by adding --human-task T005=skip to "
-            "the resume command."
+            "To go on (your call): if you want src/vendor/stamp.js written, "
+            "allow it in driver.write_paths (.multi-llm/providers.yaml) and "
+            "resume this phase; if not, skip T005: add --human-task T005=skip "
+            "to the resume command (T005 and the tasks after it stay undone)."
         ) in error, error
         assert "by adding --human-task T002=done to the resume command" in error
 

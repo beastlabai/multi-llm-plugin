@@ -182,10 +182,14 @@ class TestThePolicyStop:
         # block's closing line; the remedy bullet no longer repeats it.
         assert text.count("half-applied") == 1, text
         assert "nothing to restore" not in text
+        # Fix round 20 (live run 8 #4, permissive): allowing the file stays
+        # a way forward, as the user's call, naming the file.
         assert (
-            "  - if the file the details name is meant to be written, allow it "
-            "in driver.write_paths" in text
+            "  - your call: if you want src/vendor/stamp.js written, allow it "
+            "in driver.write_paths (.multi-llm/providers.yaml), then resume "
+            "this phase" in text
         ), text
+        assert "widen" not in text and "genuinely in scope" not in text
         assert "driver.write_paths" in text and ".multi-llm/providers.yaml" in text
         assert "--human-task T005=skip" in text
         assert "(T005 and the tasks that depend on it, T006, stay undone)" in text
@@ -196,6 +200,34 @@ class TestThePolicyStop:
         assert "--human-task T002=done --human-task T005=skip" in text
         # Fix round 14: what `=done` does to the held task, in a few words.
         assert "(T007 then run, told that you accepted the findings" in text
+
+    def test_the_refusal_offers_allowing_the_file_as_the_users_call(
+        self, repo, capsys,
+    ):
+        """Fix round 20 (live run 8 #4; the user's decision: permissive).
+        The stop line said "allow the file it declares in driver.write_paths
+        …, then resume" and the details "widen `allow`/narrow `deny` … if this
+        path is genuinely in scope", while the hosts were told never to
+        suggest loosening the policy. Allowing the file stays a way forward,
+        named and worded as the user's own call, beside the skip answer."""
+        from utils.write_safety import policy_allow_clause, policy_skip_clause
+
+        _check(repo, passed=False)
+        assert multi_llm.main([
+            "implement", str(repo.plan), "--yes", "--exec-subagents",
+        ]) == 3
+        out = capsys.readouterr().out
+        line = [l for l in out.splitlines() if l.startswith("MULTI_LLM_RESULT:")][-1]
+        error = json.loads(line.split(" ", 1)[1])["error"]
+        allow = policy_allow_clause(["src/vendor/stamp.js"])
+        assert (f"To go on (your call): {allow} and resume this phase; "
+                f"{policy_skip_clause('T005')}.") in error, error
+        report = json.loads((repo.phase_dir / "write_batch_report.json").read_text())
+        assert report["stop"]["policy_paths"] == ["src/vendor/stamp.js"]
+        reason = _reason(repo, "T005")
+        assert reason.endswith(f"Your call: {allow} and resume."), reason
+        for text in (out, error, reason):
+            assert "widen" not in text and "genuinely in scope" not in text
 
     def test_the_result_line_names_both_answers(self, repo, capsys):
         _check(repo, passed=False)
@@ -473,6 +505,15 @@ class TestTheNativeLeg:
         assert handoff["not_run_tasks"]["T006"].startswith(
             "not run — depends on T005, which was refused before dispatch"
         )
+        # Fix round 20 (live run 8 #4): both ways forward, as the user's
+        # call, in the executor stop's words.
+        assert handoff["refused_tasks"]["T005"].endswith(
+            "Your call: if you want src/vendor/stamp.js written, allow it in "
+            "driver.write_paths (.multi-llm/providers.yaml) and resume. If not, "
+            "skip T005: add --human-task T005=skip to the resume command (T005 "
+            "and the tasks after it stay undone)."
+        ), handoff["refused_tasks"]["T005"]
+        assert "never change driver.write_paths yourself" in out
         assert _statuses(repo)["T005"] == "failed"
         assert _reason(repo, "T005").startswith("refused before dispatch: ")
         written = json.loads((repo.phase_dir / "write_tasks.json").read_text())
@@ -608,6 +649,15 @@ class TestTheNativeLeg:
         ), err
         assert "--task-id T005 --status failed --reason" in err
         assert "--resume --human-task T005=skip" in err
+        # Fix round 20: as the user's call, naming the file.
+        assert (
+            "report both ways forward as the user's call, in these words: if "
+            "you want src/vendor/stamp.js written, allow it in "
+            "driver.write_paths (.multi-llm/providers.yaml) and re-run "
+            "implement with --resume; if not, skip T005 with --resume "
+            "--human-task T005=skip" in err
+        ), err
+        assert "Never change driver.write_paths yourself." in err
         assert not (repo.phase_dir / "prompts" / "T005.prompt.txt").exists()
         # A task the policy allows is bound as before.
         assert self._util(
