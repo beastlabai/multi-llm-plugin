@@ -1460,10 +1460,20 @@ _FINDING_FILLER = frozenset({
 #: Quote marks a finding may put around a command or its output.
 _FINDING_QUOTES = str.maketrans({mark: " " for mark in "`'\"‘’“”"})
 
-#: An exit status ("exited 1", "(exit 1)", "exited with code 1"): dropped,
-#: so the same failure reported with its exit code still matches.
+#: An exit status, dropped so the same failure reported with its exit code
+#: still matches — only a whole exit clause (fix round 23: "exited with 9
+#: failures in …" lost its count, read as an exit code, and matched an
+#: accepted "exited with 3 failures in …"): a parenthesized one ("(exit 1)",
+#: "(exited with code 2)"), one that says `code`/`status` ("exit code 1",
+#: "exited with status 2", "returned code 1"), or a bare "exited 1" /
+#: "returned 1" / "exit 1" that ends the finding or its clause (end, a
+#: punctuation mark, or "and"/"but"/"with"/"then"). A number followed by
+#: any other word is a count, and stays a word.
 _FINDING_EXIT = re.compile(
-    r"\(?\b(?:exit(?:ed|s)?|returned)\b(?:\s+(?:with|code|status))*\s*[:=]?\s*-?\d+\s*\)?"
+    r"\(\s*(?:exit(?:ed|s)?|returned)(?:\s+(?:with|code|status))*\s*[:=]?\s*-?\d+\s*\)"
+    r"|\b(?:exit(?:ed|s)?|returned)(?:\s+with)?\s+(?:code|status)\s*[:=]?\s*-?\d+\b"
+    r"|\b(?:exit(?:ed|s)?|returned)(?:\s+with)?\s*[:=]?\s*-?\d+"
+    r"(?=\s*(?:$|[),;:!?]|\.(?!\d)|(?:and|but|with|then)\b))"
 )
 
 #: Where a finding's command ends: the contract's "<command>: <what it
