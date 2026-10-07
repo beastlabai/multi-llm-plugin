@@ -132,6 +132,8 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     )
     from .state_manager import (
         IMPLEMENT_TASK_GRAPH_KEY,
+        PROCESSED_LEG_EXECUTOR,
+        record_batch_items_in_state,
         set_task_check_findings_in_state,
     )
     from .subagent_prompts import build_nothing_changed_resend_prompt
@@ -241,6 +243,8 @@ except ImportError:  # pragma: no cover - direct-script import shim
     )
     from utils.state_manager import (  # type: ignore
         IMPLEMENT_TASK_GRAPH_KEY,
+        PROCESSED_LEG_EXECUTOR,
+        record_batch_items_in_state,
         set_task_check_findings_in_state,
     )
     from utils.subagent_prompts import build_nothing_changed_resend_prompt  # type: ignore
@@ -4731,6 +4735,7 @@ class WriteBatchScheduler:
                             f"resumed from {Path(outcome.output_path).name}"
                         ),
                     )
+                    self._record_processed_items(task, outcome)
                     self.state.save()
             return outcome
 
@@ -7663,6 +7668,30 @@ class WriteBatchScheduler:
 
     # -- per-batch bookkeeping (D3n: append BEFORE the next substitution) ---
 
+    def _record_processed_items(self, task: Dict[str, Any], outcome: TaskOutcome) -> None:
+        """An apply batch's items in ``processed_<phase dir>`` (fix round 22).
+
+        Live run 9: the native leg's ``util batch-done`` recorded a declined
+        fix there with its reason and this leg recorded nothing, so
+        ``state.json`` named the fix on Claude Code only. The same writer
+        (:func:`state_manager.record_batch_items_in_state`), so both legs
+        carry one shape: ``applied`` / ``no-op``, ``declined`` / ``skipped``
+        with the reason, ``failed`` for a batch that did not finish. This
+        leg's own resume still decides from its result files
+        (``state_manager.processed_record_counts``). Caller holds the lock.
+        """
+        if self.kind not in APPLY_WRITE_KINDS or not isinstance(
+            getattr(self.state, "state", None), dict
+        ):
+            return
+        record_batch_items_in_state(
+            self.state.state, os.path.basename(os.path.normpath(self.phase_dir)),
+            task, completed=outcome.ok, leg=PROCESSED_LEG_EXECUTOR,
+            declined=dict(outcome.declined or {}),
+            skipped=dict(outcome.skipped_items or {}),
+            no_op=outcome.write_outcome == WRITE_NO_OP,
+        )
+
     def _record_batch_effects(
         self,
         task: Dict[str, Any],
@@ -7816,6 +7845,9 @@ class WriteBatchScheduler:
                             if outcome.ok else None
                         ),
                     )
+                # Fix round 22: an apply batch's items, as `util batch-done`
+                # records them on the native leg.
+                self._record_processed_items(task, outcome)
                 # Persists the metric recorded just above too: it is a mutation
                 # of this object's dict now, not a second writer's file (F4).
                 self.state.save()

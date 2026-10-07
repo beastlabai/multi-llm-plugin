@@ -21,8 +21,10 @@ executor leg's ``WriteBatchScheduler`` writes for the same batch:
   ``check_workflow_prerequisites`` reads as the phase's progress and what
   ``implement --resume`` filters its tasks on;
 * for the three apply kinds, ``processed_<phase dir word>[<member id>]`` for
-  every id in the task's ``expected_ids`` (``applied`` | ``failed``) — the
-  map ``ApplyOrchestratorBase`` step 23 drops groups on under ``--resume``.
+  every id in the task's ``expected_ids`` (``applied`` | ``declined`` |
+  ``skipped`` | ``failed``, :func:`state_manager.record_batch_items_in_state`,
+  the scheduler's own writer since fix round 22) — the map
+  ``ApplyOrchestratorBase`` step 23 drops groups on under ``--resume``.
   A ``failed`` record keeps the batch eligible for re-dispatch, as the
   executor leg re-dispatches a failed batch;
 * for the two code kinds (``implement``, ``apply_code_fixes``),
@@ -98,9 +100,10 @@ try:
         state_file_lock, withdraw_from_progress_in_state,
     )
     from .state_manager import (
+        PROCESSED_LEG_NATIVE,
         TASK_RESET_AT_KEY,
         _parse_completion_time,
-        mark_item_processed_in_state,
+        record_batch_items_in_state,
         set_task_batch_check_in_state,
         set_task_check_findings_in_state,
         set_task_check_tree_in_state,
@@ -136,9 +139,10 @@ except ImportError:  # pragma: no cover - direct script invocation
         state_file_lock, withdraw_from_progress_in_state,
     )
     from utils.state_manager import (  # type: ignore
+        PROCESSED_LEG_NATIVE,
         TASK_RESET_AT_KEY,
         _parse_completion_time,
-        mark_item_processed_in_state,
+        record_batch_items_in_state,
         set_task_batch_check_in_state,
         set_task_check_findings_in_state,
         set_task_check_tree_in_state,
@@ -210,9 +214,6 @@ STATUSES = ("completed", "failed")
 #: else (absent, or the ``pending`` the executor seeds / a cancelled run
 #: leaves) is "no record".
 _RECORDED_TASK_STATUSES = frozenset({"completed", "failed", "skipped"})
-
-#: ``processed_<phase>`` status per recorded outcome.
-_ITEM_STATUS = {"completed": "applied", "failed": "failed"}
 
 #: ``--check``'s words: what a check task's reply said in its ``check``
 #: object (``passed: true`` and no finding, problems found, or — fix round
@@ -521,28 +522,15 @@ def record_batch(
             state["tracked_files"] = tracked
         items: List[str] = []
         if kind != "implement":
-            phase_word = _processed_phase_word(phase_dir)
-            details = {
-                "task_id": task_id,
-                "prior_changes_id": str(task.get("prior_changes_id") or ""),
-            }
-            for item_id in task.get("expected_ids") or []:
-                item_id = str(item_id)
-                if not item_id:
-                    continue
-                if item_id in not_applied:
-                    # Fix round 18: declined by the batch, or skipped at the
-                    # user's request — recorded with its reason, never applied.
-                    word, why = not_applied[item_id]
-                    mark_item_processed_in_state(
-                        state, phase_word, item_id, word,
-                        {**details, "reason": why},
-                    )
-                else:
-                    mark_item_processed_in_state(
-                        state, phase_word, item_id, _ITEM_STATUS[status], details
-                    )
-                items.append(item_id)
+            # Fix round 18: an item declined by the batch, or skipped at the
+            # user's request, is recorded with its reason, never applied. Fix
+            # round 22: in the shape the executor's scheduler writes too.
+            items = record_batch_items_in_state(
+                state, _processed_phase_word(phase_dir), task,
+                completed=status == "completed", leg=PROCESSED_LEG_NATIVE,
+                declined={i: why for i, (w, why) in not_applied.items() if w == "declined"},
+                skipped={i: why for i, (w, why) in not_applied.items() if w == "skipped"},
+            )
         state["updated_at"] = datetime.now().isoformat()
         _write_state(target, state)
     if checking:
