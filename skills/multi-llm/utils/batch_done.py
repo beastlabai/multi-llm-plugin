@@ -125,7 +125,7 @@ try:
     from .write_batch_scheduler import (
         BATCH_CHECK_MARKER,
         HALF_APPLIED_PREFIX,
-        accepted_checks_on_record,
+        accepted_findings_for,
         batch_check_accepted_line,
         batch_check_line,
         BLOCKED_BY_CHECK_PREFIX,
@@ -171,7 +171,7 @@ except ImportError:  # pragma: no cover - direct script invocation
     from utils.write_batch_scheduler import (  # type: ignore
         BATCH_CHECK_MARKER,
         HALF_APPLIED_PREFIX,
-        accepted_checks_on_record,
+        accepted_findings_for,
         batch_check_accepted_line,
         batch_check_line,
         BLOCKED_BY_CHECK_PREFIX,
@@ -516,9 +516,15 @@ def record_batch(
         if kind == "implement" and batch_check:
             # Fix round 22: what only repeats findings the user accepted for
             # a check is that check's, never this task's own failure (the
-            # executor's reading, `split_accepted_findings`).
+            # executor's reading, `split_accepted_findings`). Fix round 23:
+            # only the checks this task was told were accepted, and none
+            # whose failure is its own job (`accepted_findings_for`).
             own, accepted_again = split_accepted_findings(
-                batch_check, accepted_checks_on_record(state),
+                batch_check, accepted_findings_for(
+                    [t for t in (document.get("batches") or document.get("tasks") or [])
+                     if isinstance(t, dict)],
+                    task, state,
+                ),
             )
             if accepted_again:
                 batch_check = own

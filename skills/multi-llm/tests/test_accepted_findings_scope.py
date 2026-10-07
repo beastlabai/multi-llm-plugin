@@ -47,6 +47,7 @@ from utils.state_manager import get_or_create_state  # noqa: E402
 from utils.write_batch_scheduler import (  # noqa: E402
     BATCH_CHECK_ACCEPTED_MARKER,
     BATCH_CHECK_MARKER,
+    accepted_findings_for,
     split_accepted_findings,
 )
 
@@ -129,3 +130,222 @@ class TestOneAcceptedFinding:
         found = ["npm test: test greets the user failed (exit 1)",
                  "npm test: test parses the config failed"]
         assert split_accepted_findings(found, accepted) == ([], {"T002": found})
+
+
+# -- #2: which task's check may repeat the accepted findings ------------------
+
+
+def _task(task_id, title, description, *, depends_on=(), criteria=()):
+    """A materialized implement task, its prompt in the template's shape."""
+    criteria_block = (
+        "## Acceptance Criteria\nVerify these.\n\n"
+        + "".join(f"- [ ] {item}\n" for item in criteria)
+        if criteria else ""
+    )
+    return {
+        "task_id": task_id, "task_title": title,
+        "depends_on": list(depends_on), "declared_files": ["src/main.py"],
+        "prompt": (
+            "You are implementing a specific task from a larger plan.\n\n"
+            "## Plan Context\nThe release check `node scripts/check.mjs` gates "
+            "the greeting module; fix nothing it reports by hand.\n\n"
+            f"## Task\nTitle: {title}\nDescription: {description}\n\n"
+            "## Relevant Files to Review\nsrc/main.py\n\n"
+            f"{criteria_block}\n## Changes Applied in Prior Batches\n"
+            "{prior_changes_context}\n"
+        ),
+    }
+
+
+def _state():
+    return {
+        "task_status": {"T002": "completed", "T003": "completed"},
+        "task_status_reasons": {
+            "T002": "accepted — the user answered --human-task T002=done"},
+        "task_check_findings": {"T002": [ACCEPTED]},
+        "implement_task_depends_on": {
+            "T001": [], "T002": ["T001"], "T003": ["T001"],
+        },
+    }
+
+
+class TestWhichTask:
+    """`accepted_findings_for`: the accepted findings a task's own check may
+    repeat — those of the accepted checks its prompt was told about, unless
+    its own text makes them its job."""
+
+    #: Run 9's T007, word for word: it names T002 and says "resolved", and
+    #: is the task the split is for.
+    RELEASE_NOTE = (
+        "Create `docs/release.md` with release notes for check-gate 1.0: a "
+        "first line naming the version, then one line stating the outcome of "
+        "the release check (T002) as recorded: that it passed, or the problems "
+        "it reported and how they were resolved."
+    )
+
+    def test_a_released_task_may_repeat_them(self):
+        task = _task("T007", "Write the release note", self.RELEASE_NOTE,
+                     depends_on=["T002"],
+                     criteria=["docs/release.md states the release check's outcome truthfully."])
+        assert accepted_findings_for([task], task, _state()) == {"T002": [ACCEPTED]}
+
+    def test_a_task_that_does_not_depend_on_the_check_may_not(self):
+        task = _task("T006", "Print the build stamp", "Print it.", depends_on=["T003"])
+        assert accepted_findings_for([task], task, _state()) == {}
+
+    @pytest.mark.parametrize("title, description, criteria", [
+        ("Make the release check pass", "Change src/main.py.", ()),
+        ("Fix the release check", "Fix the problems T002 reported.", ()),
+        ("Run the suite and fix failures", "Run it; fix what fails.", ()),
+        ("Set retries", "Change src/main.py so `node scripts/check.mjs` reports nothing.", ()),
+        ("Set retries", "Change src/main.py.", ("`node scripts/check.mjs` exits 0.",)),
+        ("Repair the config", "Resolve the findings of T002.", ()),
+    ])
+    def test_a_task_whose_job_is_the_check_may_not(self, title, description, criteria):
+        task = _task("T008", title, description, depends_on=["T002"], criteria=criteria)
+        assert accepted_findings_for([task], task, _state()) == {}
+
+    def test_a_task_told_not_to_fix_them_may_repeat_them(self):
+        task = _task("T007", "Write the release note",
+                     "Write the note. Do not fix the problems T002 reported.",
+                     depends_on=["T002"])
+        assert accepted_findings_for([task], task, _state()) == {"T002": [ACCEPTED]}
+
+    def test_the_plan_context_naming_the_command_is_not_the_tasks_own_text(self):
+        # `_task`'s plan context names `node scripts/check.mjs` and says "fix".
+        task = _task("T007", "Write the release note", "Write the note.",
+                     depends_on=["T002"])
+        assert "node scripts/check.mjs" in task["prompt"]
+        assert accepted_findings_for([task], task, _state()) == {"T002": [ACCEPTED]}
+
+    def test_through_a_finished_task(self):
+        """Transitive, over the recorded decomposition, as the section is."""
+        task = _task("T009", "Write the changelog", "Write it.", depends_on=["T007"])
+        state = _state()
+        state["implement_task_depends_on"]["T007"] = ["T002"]
+        assert accepted_findings_for([task], task, state) == {"T002": [ACCEPTED]}
+
+
+# -- #2 and #6 on the executor leg --------------------------------------------
+
+#: The check-gate fixture plus a task whose own job is T002's check.
+FIXER = "Edit: make the release check pass"
+SCOPE_PLAN = PLAN + f"""
+### T008: {FIXER}
+Change src/main.py so `node scripts/check.mjs` reports nothing.
+- Depends on: T002
+- Files to modify: src/main.py
+"""
+
+
+@pytest.fixture
+def scope_repo(tmp_path, monkeypatch):
+    obj = make_repo(tmp_path, monkeypatch, SCOPE_PLAN)
+    _policy(obj, DENY)
+    monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(
+        [f"T00{n}" for n in range(1, 9)]))
+    monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS", CHECK_GATE)
+    yield obj
+    registry._config = None
+    registry._config_key = None
+
+
+def _every_edit_reports(repo, findings) -> None:
+    """Every code task's reply carries the same own `check`."""
+    repo.monkeypatch.setenv("MOCK_LLM_WRITE_BATCH_CHECK", json.dumps(
+        {"passed": False, "findings": list(findings)}))
+    repo.monkeypatch.setenv("MOCK_LLM_WRITE_BATCH_CHECK_IF_PROMPT_HAS", "Title: Edit:")
+
+
+def _first_stop(repo, capsys) -> None:
+    """T002 reports ACCEPTED, T005 is refused by the write policy, T007 and
+    T008 wait on T002."""
+    repo.monkeypatch.setenv("MOCK_LLM_WRITE_CHECK", json.dumps(
+        {"passed": False, "findings": [ACCEPTED]}))
+    assert _implement(repo) == 3
+    capsys.readouterr()
+    repo.log.unlink(missing_ok=True)
+
+
+def _lines(text: str, marker: str) -> dict:
+    return {
+        line.split(":", 1)[0].split()[-1]: line
+        for line in text.splitlines() if line.startswith(marker)
+    }
+
+
+class TestTheExecutorLeg:
+
+    def test_only_the_released_task_repeats_the_accepted_findings(self, scope_repo, capsys):
+        repo = scope_repo
+        _first_stop(repo, capsys)
+        _policy(repo, ALLOW)
+        _every_edit_reports(repo, [RERUN])
+        rc = _implement(repo, "--resume", "--human-task", "T002=done",
+                        "--human-task", "T005=retry")
+        captured = capsys.readouterr()
+        text = captured.out + captured.err
+        assert rc == 0, text[-3000:]
+        statuses = _statuses(repo)
+        assert all(statuses[t] == "completed" for t in ("T005", "T006", "T007", "T008"))
+        # T007 was told the findings were accepted; T005 and T006 were not
+        # (they do not depend on T002), and T008's job is T002's check.
+        assert set(_lines(text, BATCH_CHECK_ACCEPTED_MARKER)) == {"T007"}, text[-3000:]
+        assert set(_lines(text, BATCH_CHECK_MARKER)) == {"T005", "T006", "T008"}, text[-3000:]
+        state = get_or_create_state(repo.plan).state
+        assert state["task_batch_check"] == {
+            "T005": [RERUN], "T006": [RERUN], "T008": [RERUN]}
+
+# -- #2 and #6 on the native leg ----------------------------------------------
+
+
+class TestTheNativeLeg:
+
+    def _util(self, capsys, *argv):
+        code = multi_llm.main(["util", *argv])
+        captured = capsys.readouterr()
+        return code, captured.out, captured.err
+
+    def _accept(self, repo, capsys) -> str:
+        """The native first run: T002 reports NATIVE, T005-T008 are left;
+        then the accept emit hands them out."""
+        import implement_orchestrator
+
+        _policy(repo, ALLOW)
+        assert implement_orchestrator.main(["--plan-file", str(repo.plan), "--yes"]) == 0
+        capsys.readouterr()
+        phase = str(repo.phase_dir)
+        for task_id in ("T001", "T003", "T004"):
+            assert self._util(capsys, "batch-done", "--phase-dir", phase,
+                              "--task-id", task_id, "--status", "completed")[0] == 0
+        assert self._util(capsys, "batch-done", "--phase-dir", phase, "--task-id",
+                          "T002", "--status", "completed", "--check", "findings",
+                          "--finding", NATIVE)[0] == 0
+        assert implement_orchestrator.main(
+            ["--plan-file", str(repo.plan), "--yes", "--resume",
+             "--human-task", "T002=done"]
+        ) == 0
+        capsys.readouterr()
+        return phase
+
+    def _own_check(self, capsys, phase, task_id):
+        return self._util(
+            capsys, "batch-done", "--phase-dir", phase, "--task-id", task_id,
+            "--status", "completed", "--own-check", "findings", "--finding", RERUN)
+
+    def test_batch_done_splits_only_the_released_tasks_check(self, scope_repo, capsys):
+        repo = scope_repo
+        phase = self._accept(repo, capsys)
+        for task_id in ("T005", "T006", "T008"):
+            code, out, err = self._own_check(capsys, phase, task_id)
+            assert code == 0, err
+            assert BATCH_CHECK_ACCEPTED_MARKER not in out, (task_id, out)
+            assert any(line.startswith(f"{BATCH_CHECK_MARKER} {task_id}:")
+                       for line in out.splitlines()), (task_id, out)
+        code, out, err = self._own_check(capsys, phase, "T007")
+        assert code == 0, err
+        assert any(line.startswith(f"{BATCH_CHECK_ACCEPTED_MARKER} T007:")
+                   for line in out.splitlines()), out
+        state = json.loads((repo.phase_dir.parent / "state.json").read_text())
+        assert state["task_batch_check"] == {
+            "T005": [RERUN], "T006": [RERUN], "T008": [RERUN]}

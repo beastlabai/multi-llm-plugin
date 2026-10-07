@@ -293,6 +293,8 @@ __all__ = [
     "BATCH_CHECK_ACCEPTED_MARKER",
     "batch_check_accepted_line",
     "split_accepted_findings",
+    "accepted_findings_for",
+    "task_owns_the_check",
     "BLOCKED_BY_CHECK_PREFIX",
     "bind_prior_changes",
     "last_phase_end",
@@ -1530,13 +1532,134 @@ def _says_only(words: Sequence[str], accepted: Sequence[Sequence[str]]) -> bool:
     return any(list(item)[:len(words)] == words for item in accepted)
 
 
+#: A word asking the task to fix something (fix round 23), and what such an
+#: ask names when it is about a check's report; "make … pass" / "until …
+#: passes" asks for a passing check by itself.
+_FIX_ASK = re.compile(
+    r"\b(?:fix|fixes|fixing|repair|repairs|repairing|resolve|resolves|resolving)\b"
+)
+_FIX_TARGET = re.compile(
+    r"\b(?:fail\w*|findings?|problems?|errors?|issues?|checks?|tests?)\b"
+)
+_PASS_ASK = re.compile(r"\b(?:make|makes|making|until|so)\b[^.;!?]{0,80}?\bpass(?:es)?\b")
+#: Words before a fix ask that turn it around ("do not fix", "without fixing").
+_FIX_NEGATIONS = frozenset({"not", "never", "don", "dont", "without", "no"})
+#: A one-word command too common a word to tell a task names it.
+_BARE_COMMAND_WORDS = frozenset({
+    "make", "go", "run", "test", "tests", "check", "checks", "lint", "build",
+    "node", "npm", "npx", "python", "python3", "sh", "bash",
+})
+#: A sentence of a task's own text.
+_SENTENCE_END = re.compile(r"[.;!?](?=\s|$)|\n")
+
+
+def _task_own_text(task: Mapping[str, Any]) -> str:
+    """What a materialized implement task itself says: its title, and the
+    ``## Task`` section and acceptance criteria of its prompt — never the
+    plan context, the dependency titles or the prior batches around them."""
+    prompt = str(task.get("prompt") or "")
+    parts = [str(task.get("task_title") or task.get("title") or ""),
+             str(task.get("description") or "")]
+    section = re.search(r"^## Task\n(.*?)(?=^## |\Z)", prompt, re.S | re.M)
+    if section:
+        parts.append(section.group(1))
+    criteria = re.search(r"^## Acceptance Criteria\n(.*?)(?=^## |\Z)", prompt, re.S | re.M)
+    if criteria:
+        parts += [
+            line[len("- [ ] "):] for line in criteria.group(1).splitlines()
+            if line.startswith("- [ ] ")
+        ]
+    return "\n".join(part for part in parts if part.strip())
+
+
+def _plain_words(text: str) -> str:
+    """*text* as :func:`_finding_parts` reads a finding: quotes dropped,
+    lowercased, whitespace collapsed."""
+    return " ".join(str(text or "").translate(_FINDING_QUOTES).lower().split())
+
+
+def _names_command(plain: str, command: str) -> bool:
+    """Whether *plain* names *command* (its trailing flags aside)."""
+    tokens = command.split()
+    while len(tokens) > 1 and tokens[-1].startswith("-"):
+        tokens.pop()
+    key = " ".join(tokens)
+    if not key or (len(tokens) == 1 and key in _BARE_COMMAND_WORDS):
+        return False
+    return re.search(rf"(?<![\w./-]){re.escape(key)}(?![\w/-])", plain) is not None
+
+
+def _asks_to_fix(sentence: str, check_id: str) -> bool:
+    """Whether one sentence of a task's own text asks it to fix what the
+    check reported: a fix word not turned around ("do not fix") beside the
+    check's id or a word for what a check reports, or "make … pass"."""
+    if _PASS_ASK.search(sentence):
+        return True
+    names_it = bool(
+        _FIX_TARGET.search(sentence)
+        or re.search(rf"\b{re.escape(check_id.lower())}\b", sentence)
+    )
+    if not names_it:
+        return False
+    for ask in _FIX_ASK.finditer(sentence):
+        before = re.findall(r"[a-z0-9]+", sentence[:ask.start()])[-4:]
+        if not _FIX_NEGATIONS.intersection(before):
+            return True
+    return False
+
+
+def task_owns_the_check(
+    task: Mapping[str, Any], check_id: str, findings: Sequence[str],
+) -> bool:
+    """Whether *task*'s own text (:func:`_task_own_text`) makes the accepted
+    check's failure its own: it names the check's command (any accepted
+    finding's, :func:`_finding_parts`), or asks to fix what it reported or
+    to make it pass (:func:`_asks_to_fix`). Fix round 23 (records #2): "T009:
+    run the suite and fix failures", released by the check it fixes, had its
+    still-failing check read as the accepted findings."""
+    text = _task_own_text(task)
+    plain = _plain_words(text)
+    for finding in findings:
+        parts = _finding_parts(finding)
+        if parts is not None and _names_command(plain, parts[0]):
+            return True
+    return any(
+        _asks_to_fix(_plain_words(sentence), str(check_id))
+        for sentence in _SENTENCE_END.split(text) if sentence.strip()
+    )
+
+
+def accepted_findings_for(
+    tasks: Sequence[Dict[str, Any]], task: Mapping[str, Any], state: Any,
+) -> Dict[str, List[str]]:
+    """``{check id: findings}`` an implement task's own check may report
+    again as what the user accepted (:func:`split_accepted_findings`).
+
+    Fix round 23 (records #2): round 22 split every implement task's own
+    check against every accepted check of the phase. Only a task whose
+    prompt carried the accepted-checks section — one that depends on the
+    check, directly or transitively (:func:`accepted_upstream_checks`) — was
+    told the problems are known and not its own, and only for those checks;
+    and a task whose own text makes the check its job
+    (:func:`task_owns_the_check`) keeps its failing check as its own. Both
+    legs ask this (the scheduler's classification, ``util batch-done
+    --own-check findings``).
+    """
+    task_id = str(task.get("task_id") or "")
+    return {
+        check_id: list(findings)
+        for check_id, _title, findings in accepted_upstream_checks(tasks, task_id, state)
+        if not task_owns_the_check(task, check_id, findings)
+    }
+
+
 def split_accepted_findings(
     findings: Sequence[str], accepted: Mapping[str, Sequence[str]],
 ) -> Tuple[List[str], Dict[str, List[str]]]:
     """``(own, matched)``: a code task's own check *findings*, split into the
     ones that are its own and, by check id, the ones that only repeat what
-    the user accepted for that check (*accepted*:
-    :func:`accepted_checks_on_record`).
+    the user accepted for that check (*accepted*: the task's
+    :func:`accepted_findings_for`).
 
     Fix round 22 (live run 9, OpenCode accept 02): T007, released by
     ``--human-task T002=done``, ran T002's check again and reported
@@ -6897,9 +7020,14 @@ class WriteBatchScheduler:
             if self.kind == "implement" and outcome.batch_check:
                 # Fix round 22: what only repeats findings the user accepted
                 # for a check is that check's, never this task's own failure.
+                # Fix round 23: only the checks this task was told were
+                # accepted, and none whose failure is its own job.
                 own, matched = split_accepted_findings(
                     outcome.batch_check,
-                    accepted_checks_on_record(getattr(self, "state", None)),
+                    accepted_findings_for(
+                        getattr(self, "tasks", None) or [], task,
+                        getattr(self, "state", None),
+                    ),
                 )
                 if matched:
                     outcome.batch_check_accepted = matched
