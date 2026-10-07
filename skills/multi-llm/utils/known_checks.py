@@ -23,8 +23,8 @@ were asked to run and what each batch reported (:func:`checks_tally`).
 The known commands (:func:`known_check_commands`), in this order, each named
 once: ``driver.verify_command``; the commands implement's finished tasks name
 in the task list (a check task's description and acceptance criteria, a code
-task's acceptance criteria: a command in backticks whose first word is a
-known test runner); and the test command a ``package.json`` (or the like)
+task's acceptance criteria: a plain check command in backticks,
+:func:`is_check_command`); and the test command a ``package.json`` (or the like)
 declares (``write_batch_scheduler.verify_command_candidate``). Shown as
 found; never run by the plugin.
 """
@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -67,33 +68,78 @@ EARLIER_MAX_FINDINGS = 2
 #: Bound on the tally the tests-not-run line carries.
 TALLY_MAX_CHARS = 700
 
-#: The first word of a command a task names (in backticks) that is a check:
-#: a test runner, a build or type checker, a linter, a script interpreter.
-_RUNNERS = frozenset({
-    "node", "deno", "bun", "bunx", "npm", "npx", "pnpm", "yarn",
-    "python", "python3", "pytest", "uv", "uvx", "poetry", "tox", "nox", "hatch",
-    "make", "cargo", "go", "tsc", "eslint", "ruff", "mypy", "pyright", "flake8",
-    "jest", "vitest", "mocha", "bash", "sh",
-    "ruby", "rake", "bundle", "rspec", "php", "phpunit", "composer",
-    "mvn", "gradle", "./gradlew", "dotnet", "swift", "java",
+#: Words that make a command something other than a check, wherever they
+#: appear in it (each word is split at punctuation and camelCase, so
+#: ``test:watch``, ``start:prod`` and ``--updateSnapshot`` are caught): it
+#: deploys, publishes, migrates or seeds data, deletes or installs, reaches
+#: the network, runs a string as code, edits files in place (``--fix``,
+#: ``--write``), or starts a server or a watcher (fix round 21: ``npm run
+#: deploy`` and ``node scripts/seed.js`` were listed as checks).
+_SIDE_EFFECT_WORDS = frozenset({
+    "deploy", "deploys", "deployment", "release", "releases", "publish",
+    "migrate", "migrates", "migration", "migrations", "seed", "seeds",
+    "seeder", "seeding", "prod", "production", "push", "upload",
+    "install", "uninstall", "upgrade", "update", "clean", "reset", "drop",
+    "wipe", "purge", "delete", "destroy", "rm", "rmdir", "kill", "pkill",
+    "killall", "curl", "wget", "sudo", "su", "doas", "ssh", "scp", "rsync",
+    "nc", "ncat", "eval", "exec", "fix", "write", "watch", "serve", "start",
+    "dev",
 })
 
-#: Runners that are a whole check with no argument (``pytest``, ``tsc``).
-_STANDALONE = frozenset({
-    "pytest", "tox", "nox", "tsc", "jest", "vitest", "mocha", "rspec",
-    "phpunit", "mypy", "pyright", "flake8",
+#: Flags no listed check carries: they run a string as code (``-c``,
+#: ``-e``), watch (``-w``), rewrite snapshots (``-u``) or open a UI.
+_REFUSED_FLAGS = frozenset({
+    "-c", "-e", "-w", "-u", "--ui", "--open", "--command", "-toolexec",
 })
 
-#: A word that makes a command something other than a check: it installs or
-#: changes dependencies, or starts a server or a watcher, which a batch is
-#: told never to leave running.
-_NOT_A_CHECK = frozenset({
-    "install", "i", "add", "ci", "init", "create", "remove", "rm", "uninstall",
-    "publish", "link", "get", "update", "upgrade",
-    "start", "dev", "serve", "preview", "watch", "--watch", "http.server",
+#: Characters that make a span more than one plain command: a shell
+#: operator, a substitution, a redirection, an escape, a placeholder.
+_SHELL_CHARACTERS = frozenset("&|;$`\\<>(){}!#\n\r\u2026")
+
+#: The words a script, an npm script or a make target is named with when it
+#: is a check (``scripts/check-race-logic.mjs``, ``test:unit``, ``lint``).
+_CHECK_NAME_WORDS = frozenset({
+    "test", "tests", "testing", "spec", "specs", "check", "checks", "checker",
+    "lint", "linter", "linting", "typecheck", "typechecks", "types", "tsc",
+    "verify", "validate", "validation", "validator", "smoke", "build",
+    "compile", "ci",
 })
+
+#: Checkers ``npx``/``bunx`` may start, and their own rules below.
+_PACKAGE_RUNNER_TOOLS = frozenset({
+    "tsc", "vue-tsc", "jest", "vitest", "mocha", "ava", "eslint", "prettier",
+    "html-validate", "stylelint", "biome", "svelte-check",
+})
+
+#: ``python -m <module>``: the modules that are a check.
+_PYTHON_CHECK_MODULES = frozenset({
+    "pytest", "unittest", "doctest", "mypy", "py_compile", "compileall",
+    "pyflakes", "flake8", "pylint", "ruff", "black", "isort", "tox", "nox",
+})
+
+#: The ``uv run`` / ``poetry run`` / ``pdm run`` flags a check may carry.
+_RUN_WRAPPER_FLAGS = frozenset({
+    "--frozen", "--locked", "--offline", "--no-sync", "--quiet", "-q",
+})
+
+#: The package-manager commands ``yarn <name>`` / ``pnpm <name>`` would run
+#: instead of a script of that name.
+_PACKAGE_MANAGER_COMMANDS = frozenset({
+    "add", "audit", "bin", "cache", "ci", "config", "create", "dlx", "exec", "help",
+    "import", "info", "init", "install", "link", "node", "outdated", "pack",
+    "patch", "publish", "rebuild", "remove", "run", "set", "store", "unlink",
+    "up", "update", "upgrade", "version", "why", "workspace", "workspaces",
+})
+
+#: The tasks/goals a JVM build tool may be told (``./gradlew test``).
+_JVM_CHECK_TASKS = frozenset({"test", "check", "build", "verify", "compile"})
+_JVM_FLAGS = frozenset({"-q", "--quiet", "--offline", "-o", "-B", "--batch-mode"})
+
+_JS_EXTENSIONS = (".js", ".mjs", ".cjs", ".ts", ".mts", ".cts")
 
 _SPAN = re.compile(r"`([^`\n]+)`")
+_CAMEL = re.compile(r"([a-z0-9])([A-Z])")
+_GO_PATTERN = re.compile(r"\./(?:[A-Za-z0-9_.\-]+/)*\.\.\.")
 
 
 def normalized(command: Any) -> str:
@@ -101,33 +147,223 @@ def normalized(command: Any) -> str:
     return " ".join(str(command or "").split())
 
 
-def commands_in_text(text: Any) -> List[str]:
-    """The check commands *text* names in backticks, in order.
+def _words(token: str) -> List[str]:
+    """*token*'s words, lowercased: split at camelCase and at anything that
+    is not a letter or a digit (``check-race-logic.mjs`` -> check, race,
+    logic, mjs)."""
+    return [w for w in re.split(r"[^a-z0-9]+", _CAMEL.sub(r"\1 \2", token).lower()) if w]
 
-    A span is a command when its first word is a known runner
-    (:data:`_RUNNERS`, or a ``./`` script path) and it carries a non-flag
-    argument (``node --check`` alone is a fragment) unless it is a whole
-    check alone (:data:`_STANDALONE`, a ``./`` script). A placeholder (``<file>``), an
-    install, a server or a watcher (:data:`_NOT_A_CHECK`) is not a check.
+
+def _check_named(name: str) -> bool:
+    """Whether *name* (a script, an npm script, a make target) says it is a
+    check and says nothing a check never does."""
+    words = set(_words(name))
+    return bool(words & _CHECK_NAME_WORDS) and not words & _SIDE_EFFECT_WORDS
+
+
+def _relative_path(token: str) -> bool:
+    """Whether *token* names something under the repository root: not
+    absolute, not under a home directory, never through ``..``."""
+    if not token or token.startswith(("/", "~", "-")):
+        return False
+    return ".." not in token.replace("\\", "/").split("/")
+
+
+def _script(token: str, extensions: Optional[Tuple[str, ...]]) -> bool:
+    """Whether *token* is a script file under the repository whose name says
+    it is a check (``scripts/check-race-logic.mjs``)."""
+    if not _relative_path(token) or len(token) < 3 or token in ("./",):
+        return False
+    if extensions is not None and not token.lower().endswith(extensions):
+        return False
+    return _check_named(token)
+
+
+def _safe_argument(token: str) -> bool:
+    """Whether *token*, one word a listed check carries, is plain: no refused
+    flag, no side-effect word, no absolute path or ``..``, and ``...`` only as
+    a Go package pattern (``./...``, ``./pkg/...``)."""
+    if token in _REFUSED_FLAGS:
+        return False
+    if set(_words(token)) & _SIDE_EFFECT_WORDS:
+        return False
+    value = token.split("=", 1)[1] if token.startswith("-") and "=" in token else token
+    if "..." in value:
+        return bool(_GO_PATTERN.fullmatch(value)) and ".." not in value[:-3].split("/")
+    if value.startswith(("/", "~")):
+        return False
+    return ".." not in value.replace("\\", "/").split("/")
+
+
+def _tool_arguments(tool: str, rest: List[str]) -> Optional[List[str]]:
+    """The arguments of a checker started by name (``pytest``, ``tsc``),
+    ``None`` when this form of it is not a check (``tsc`` without
+    ``--noEmit`` writes files, ``vitest`` alone watches, ``prettier``
+    without ``--check`` rewrites)."""
+    sub = rest[0] if rest else ""
+    if tool in ("tsc", "vue-tsc"):
+        return rest if any(t in ("--noEmit", "-noEmit") for t in rest) else None
+    if tool == "vitest":
+        return rest if sub == "run" or "--run" in rest else None
+    if tool == "prettier":
+        return rest if "--check" in rest or "--list-different" in rest else None
+    if tool == "black":
+        return rest if "--check" in rest else None
+    if tool == "isort":
+        return rest if "--check" in rest or "--check-only" in rest else None
+    if tool == "ruff":
+        if sub == "check" or (sub == "format" and "--check" in rest):
+            return rest[1:]
+        return None
+    if tool == "biome":
+        return rest[1:] if sub in ("check", "lint", "ci") else None
+    if tool in (
+        "pytest", "tox", "nox", "jest", "mocha", "ava", "rspec", "phpunit",
+        "mypy", "pyright", "flake8", "pylint", "pyflakes", "eslint",
+        "html-validate", "stylelint", "svelte-check", "unittest", "doctest",
+        "py_compile", "compileall",
+    ):
+        return rest
+    return None
+
+
+def _check_arguments(tokens: List[str]) -> Optional[List[str]]:
+    """The words of *tokens* a check leaves free (arguments, script paths),
+    each to be read by :func:`_safe_argument`; ``None`` when *tokens* is not
+    one of the check forms below. The runner and its subcommand are matched
+    exactly, so only the free words need reading."""
+    if not tokens:
+        return None
+    first, rest = tokens[0], tokens[1:]
+    sub = rest[0] if rest else ""
+    if first in ("uv", "poetry", "pdm"):
+        if sub != "run":
+            return None
+        index = 1
+        while index < len(rest) and rest[index].startswith("-"):
+            flag = rest[index]
+            if flag == "--":
+                index += 1
+                break
+            if first == "uv" and flag in ("--project", "--directory") and index + 1 < len(rest):
+                if not _relative_path(rest[index + 1]):
+                    return None
+                index += 2
+                continue
+            if flag not in _RUN_WRAPPER_FLAGS:
+                return None
+            index += 1
+        inner = rest[index:]
+        if not inner or inner[0] in ("uv", "poetry", "pdm"):
+            return None
+        return _check_arguments(inner)
+    if first == "bundle":
+        if sub != "exec" or len(rest) < 2 or rest[1] not in ("rspec", "rake"):
+            return None
+        return _check_arguments(rest[1:])
+    if first in ("npx", "bunx"):
+        index = 0
+        while index < len(rest) and rest[index] in ("--no-install", "--no", "--offline"):
+            index += 1
+        inner = rest[index:]
+        if not inner or inner[0] not in _PACKAGE_RUNNER_TOOLS:
+            return None
+        return _tool_arguments(inner[0], inner[1:])
+    if first in ("npm", "pnpm", "yarn", "bun"):
+        if sub == "test" or (sub == "t" and first != "bun"):
+            return rest[1:]
+        if sub == "run":
+            if len(rest) >= 2 and _check_named(rest[1]):
+                return rest[2:]
+            return None
+        if first in ("pnpm", "yarn") and sub not in _PACKAGE_MANAGER_COMMANDS and _check_named(sub):
+            return rest[1:]
+        if first == "bun" and _script(sub, _JS_EXTENSIONS):
+            return rest
+        return None
+    if first == "node":
+        index, mode = 0, None
+        while index < len(rest) and rest[index].startswith("-"):
+            if rest[index] in ("--test", "--check") and mode is None:
+                mode = rest[index]
+                index += 1
+                continue
+            return None
+        arguments = rest[index:]
+        if mode == "--test":
+            return arguments if all(_relative_path(a) for a in arguments) else None
+        if mode == "--check":
+            ok = arguments and all(_relative_path(a) for a in arguments)
+            return arguments if ok else None
+        return arguments if arguments and _script(arguments[0], _JS_EXTENSIONS) else None
+    if first == "deno":
+        if sub in ("test", "check", "lint") or (sub == "fmt" and "--check" in rest):
+            return rest[1:]
+        return None
+    if first in ("python", "python3"):
+        if sub == "-m" and len(rest) >= 2 and rest[1] in _PYTHON_CHECK_MODULES:
+            return _tool_arguments(rest[1], rest[2:])
+        return rest if _script(sub, (".py",)) else None
+    if first in ("ruby", "php", "bash", "sh"):
+        extension = {"ruby": (".rb",), "php": (".php",)}.get(first, (".sh",))
+        return rest if _script(sub, extension) else None
+    if first in ("gradle", "./gradlew", "mvn", "./mvnw"):
+        goals = [t for t in rest if t not in _JVM_FLAGS]
+        if goals and all(t in _JVM_CHECK_TASKS for t in goals):
+            return []
+        return None
+    if first.startswith("./"):
+        return tokens if _script(first, None) else None
+    if first == "go":
+        return rest[1:] if sub in ("test", "vet", "build") else None
+    if first == "cargo":
+        return rest[1:] if sub in ("test", "check", "clippy", "build") else None
+    if first == "make":
+        if rest and all(not t.startswith("-") and "=" not in t and _check_named(t) for t in rest):
+            return rest
+        return None
+    if first in ("dotnet", "swift"):
+        return rest[1:] if sub in ("test", "build") else None
+    if first == "rake":
+        return rest[1:] if sub in ("test", "spec") else None
+    if first == "composer":
+        return rest[1:] if sub == "test" else None
+    return _tool_arguments(first, rest)
+
+
+def is_check_command(command: Any) -> bool:
+    """Whether *command* (one backticked span of a task's text) is a check a
+    batch may be told to run (fix round 21): one plain command — no shell
+    operator, substitution, redirection, escape or placeholder — in one of
+    the check forms :func:`_check_arguments` knows (a test runner, a type
+    checker, a linter, a build, a script under the repository whose name
+    says it checks), with no word a check never carries
+    (:data:`_SIDE_EFFECT_WORDS`, :data:`_REFUSED_FLAGS`). Strict on
+    purpose: a real check left out is only not listed; a command that
+    deploys or deletes, once listed, is run by every batch.
     """
-    found: List[str] = []
-    for span in _SPAN.findall(str(text or "")):
-        command = normalized(span)
-        if not command or len(command) > KNOWN_CHECK_MAX_CHARS:
-            continue
-        if "<" in command or ">" in command or "..." in command:
-            continue
-        words = command.split(" ")
-        first = words[0]
-        if first not in _RUNNERS and not (first.startswith("./") and len(first) > 2):
-            continue
-        if any(word in _NOT_A_CHECK for word in words[1:3]):
-            continue
-        arguments = [word for word in words[1:] if not word.startswith("-")]
-        if not arguments and first not in _STANDALONE and not first.startswith("./"):
-            continue
-        found.append(command)
-    return found
+    text = normalized(command)
+    if not text or len(text) > KNOWN_CHECK_MAX_CHARS:
+        return False
+    if any(character in _SHELL_CHARACTERS for character in text):
+        return False
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        return False
+    free = _check_arguments(tokens)
+    if free is None:
+        return False
+    return all(_safe_argument(token) for token in free)
+
+
+def commands_in_text(text: Any) -> List[str]:
+    """The check commands *text* names in backticks, in order: each span
+    :func:`is_check_command` accepts, whitespace collapsed."""
+    return [
+        normalized(span) for span in _SPAN.findall(str(text or ""))
+        if is_check_command(span)
+    ]
 
 
 def read_state(output_dir: Any) -> Dict[str, Any]:
