@@ -1589,6 +1589,18 @@ def compose_stop_answers(
 #: policy refuses (``implement_orchestrator``'s ``refused`` map).
 NATIVE_REFUSED_PREFIX = "refused before dispatch: "
 
+#: How ``util batch-done --status failed --partial`` opens the reason of a
+#: native task that failed after its subagent changed files (fix round 21):
+#: the executor's partial application, which no ``--human-task`` answer is
+#: offered for until the half-applied state is inspected.
+HALF_APPLIED_PREFIX = "half-applied: "
+
+#: The reason the native instructions prescribe for a reply that said
+#: ``applied`` and changed no file, twice: the executor's
+#: ``applied_without_changes``, answered ``skip`` first, then ``done`` for a
+#: change made by hand (fix round 21).
+UNLANDED_REASON = "said applied, no file changed"
+
 
 def native_stop_answers(state: Any) -> List[Dict[str, Any]]:
     """:func:`compose_stop_answers` for a stopped native implement, read from
@@ -1602,6 +1614,13 @@ def native_stop_answers(state: Any) -> List[Dict[str, Any]]:
     (:func:`held_back_by_checks`). A ``skip`` leaves undone the tasks that
     depend on its task and have not run (not a manual one). ``[]`` when none
     waits, or when the record cannot be read.
+
+    Fix round 21: a failed task whose edits are half-applied
+    (:data:`HALF_APPLIED_PREFIX`, ``util batch-done --partial``) gets no
+    answer, as the executor offers none for a partial application: it is
+    inspected first. One whose reply said ``applied`` and changed nothing
+    (:data:`UNLANDED_REASON`) is answered ``skip`` first, then ``done`` for
+    a change made by hand, as the executor answers it.
     """
     if state is None or not hasattr(state, "get"):
         return []
@@ -1637,14 +1656,24 @@ def native_stop_answers(state: Any) -> List[Dict[str, Any]]:
             and (not isinstance(scope, list) or dep in scope)
         ]
 
+    def reason(task_id: str) -> str:
+        return str(reasons.get(task_id) or "")
+
     refused = [
         task_id for task_id in failed_ids
-        if str(reasons.get(task_id) or "").startswith(NATIVE_REFUSED_PREFIX)
+        if reason(task_id).startswith(NATIVE_REFUSED_PREFIX)
     ]
     return compose_stop_answers(
         refused=refused,
-        failed=[FailedAnswerable(task_id) for task_id in failed_ids
-                if task_id not in refused],
+        failed=[
+            FailedAnswerable(
+                task_id,
+                unlanded=reason(task_id).lower().startswith(UNLANDED_REASON),
+            )
+            for task_id in failed_ids
+            if task_id not in refused
+            and not reason(task_id).startswith(HALF_APPLIED_PREFIX)
+        ],
         checks=checks,
         blocked=blocked,
         findings={
