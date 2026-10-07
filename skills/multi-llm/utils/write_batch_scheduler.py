@@ -2646,8 +2646,19 @@ class WriteBatchScheduler:
         #: repeated the same ordinal for every member of such a batch, so a
         #: parallelizable plan could never reach `N/N` or print
         #: `ALL BATCHES COMPLETE`. Read and incremented under `_effects_lock`
-        #: because a disjoint group finishes on several threads.
-        self._tasks_finished = 0
+        #: because a disjoint group finishes on several threads. A set of
+        #: task ids since fix round 20: the numerator is the finished tasks
+        #: the total counts (:meth:`_eta_progress`).
+        self._eta_finished: set = set()
+        #: Implement only: the tasks this run will dispatch, from the walk
+        #: the `Organized into …` line prints (:meth:`_dispatch_walk`, fix
+        #: round 20, live run 8 #1: the first run's `[ETA]` total still
+        #: counted T005, refused before dispatch, and T006 after it, so the
+        #: lines read 1/7 … 4/6 under "5 task(s) to dispatch"). `None`: no
+        #: walk (an apply phase), and the total counts every task.
+        self._eta_scope: Optional[set] = None
+        #: Whether this run stamped an `[ETA]` baseline (`_metrics_start`).
+        self._eta_started = False
         #: Task ids for which a terminal (`completed`) audit line has been
         #: written, so `_audit_terminal` can close out a dispatch that never
         #: reached `_classify` without ever double-recording one that did.
@@ -3606,6 +3617,8 @@ class WriteBatchScheduler:
         # (fix round 18, run 7 #3): the orchestrator's line counted every
         # task a resume took up, so "4 task(s) to dispatch" preceded
         # "dispatched 0".
+        # Fix round 20 (live run 8 #1): the `[ETA]` total starts from the
+        # same walk, so the two never disagree.
         if self.kind == "implement":
             self.log(self._dispatch_preview(ordered, result))
 
@@ -3667,6 +3680,7 @@ class WriteBatchScheduler:
                 result.stopped_at_batch = batch_index
                 result.exit_code = int(exc.exit_code or EXIT_NEEDS_HUMAN)
                 self._record_stop(result, batch_index, [], refusal=exc.message)
+                self._eta_stop_line(result)
                 result.messages.extend(
                     self._check_findings_lines(result, stopped=True)
                 )
@@ -3706,6 +3720,9 @@ class WriteBatchScheduler:
                 self._record_stop(
                     result, batch_index, [o for o in outcomes if not o.ok],
                 )
+                # Fix round 20: a stop short of the total says so on the
+                # `[ETA]` lines, rather than leaving "~0m 37s remaining".
+                self._eta_stop_line(result)
                 stop_lines = self._stop_message(batch_index, outcomes, result)
                 # Fix round 16 (run 6, stop 01): set before the summary is
                 # written, so its Verification line says it too.
@@ -3775,7 +3792,27 @@ class WriteBatchScheduler:
         self, ordered: Sequence[Tuple[int, List[Dict[str, Any]]]],
         result: SchedulerResult,
     ) -> str:
-        """The ``Organized into …`` line for what this run will dispatch.
+        """The ``Organized into …`` line for what this run will dispatch
+        (:meth:`_dispatch_walk`), which also sets the ``[ETA]`` line's task
+        set (``_eta_scope``, fix round 20): the tasks the line counts. A walk
+        that fails counts every task, and the ``[ETA]`` total with it."""
+        walk = self._dispatch_walk(ordered, result)
+        if walk is None:
+            self._eta_scope = None
+            return dispatch_line(
+                len([1 for _i, b in ordered if b]),
+                sum(len(b) for _i, b in ordered),
+            )
+        batches, picked_ids, waiting = walk
+        self._eta_scope = set(picked_ids)
+        return dispatch_line(batches, len(picked_ids), waiting=waiting)
+
+    def _dispatch_walk(
+        self, ordered: Sequence[Tuple[int, List[Dict[str, Any]]]],
+        result: SchedulerResult,
+    ) -> Optional[Tuple[int, List[str], List[str]]]:
+        """``(batches, task ids, waiting ids)`` this run will dispatch, or
+        ``None`` when the walk fails.
 
         Fix round 18 (live run 7, Codex and OpenCode stop resumes): the line
         the orchestrator printed counted every task a resume took up, so
@@ -3814,7 +3851,7 @@ class WriteBatchScheduler:
         dispatched_checks: List[str] = []
         waiting: Dict[str, List[str]] = {}
         picked_batches = 0
-        picked = 0
+        picked_ids: List[str] = []
         edits_dispatched = False
         stopped = False
         quiet_log = self.log
@@ -3875,6 +3912,7 @@ class WriteBatchScheduler:
                             stopped = True
                             continue
                         in_batch += 1
+                        picked_ids.append(task_id)
                         upstream = [
                             check for check in dispatched_checks
                             if task_id in transitive_dependents(graph, check)
@@ -3889,15 +3927,11 @@ class WriteBatchScheduler:
                         break
                 if in_batch:
                     picked_batches += 1
-                    picked += in_batch
         except Exception:  # noqa: BLE001 - a count line must not fail a phase
-            return dispatch_line(
-                len([1 for _i, b in ordered if b]),
-                sum(len(b) for _i, b in ordered),
-            )
+            return None
         finally:
             self.log = quiet_log
-        return dispatch_line(picked_batches, picked, waiting=list(waiting))
+        return picked_batches, picked_ids, list(waiting)
 
     def _check_findings_lines(
         self, result: SchedulerResult, *, stopped: bool = False,
@@ -4115,9 +4149,11 @@ class WriteBatchScheduler:
                 # — the mirror counts it in `completed` — and its branch returns
                 # before `_record_batch_effects`, so the `[ETA]` numerator is
                 # advanced here instead, or a resumed run's last line stops short
-                # of its own total by exactly the batches it skipped (F3).
+                # of its own total by exactly the batches it skipped (F3). An
+                # implement run counts only what it dispatches (fix round 20),
+                # so there the skip leaves both halves.
                 with self._effects_lock:
-                    self._tasks_finished += 1
+                    self._eta_mark(outcome.task_id, ran=False)
             with mirror_lock:
                 outcomes_so_far.append(outcome)
                 self._mirror_status(result, finished_in_batch=outcomes_so_far)
@@ -7258,8 +7294,9 @@ class WriteBatchScheduler:
             # Before the metric, so the `[ETA]` line this task drives carries its
             # own 1-based position in the run (F3). No metric for a check that
             # was not run again: no child ran, and a zero would average in.
-            self._tasks_finished += 1
-            if not outcome.not_rerun and dispatched:
+            ran = bool(not outcome.not_rerun and dispatched)
+            self._eta_mark(task_id, ran=ran)
+            if ran:
                 self._record_metrics(task, outcome, result)
 
             if self.state is not None:
@@ -7425,10 +7462,10 @@ class WriteBatchScheduler:
         tasks is one batch of k — every one of those k metric entries recorded
         the same ordinal, so a 14-task plan in 9 batches ended at
         ``batch 9/14 · ~Nm remaining``, never reached ``N/N`` and never printed
-        ``ALL BATCHES COMPLETE``. ``self._tasks_finished`` is the count
-        ``_mirror_status`` publishes as ``completed`` (resume skips included),
-        and :meth:`_eta_total` counts the tasks that numerator can reach (fix
-        round 18: not an accepted task, a manual one, or one a check holds).
+        ``ALL BATCHES COMPLETE``. Both come from :meth:`_eta_progress`: the
+        finished tasks among the ones :meth:`_eta_total` counts (fix round
+        18: not an accepted task, a manual one, or one a check holds; fix
+        round 20: on implement, only what the run dispatches).
         """
         if self.state is None or not hasattr(self.state, "record_metric"):
             return
@@ -7438,8 +7475,7 @@ class WriteBatchScheduler:
             f"{task.get('task_title') or self.kind} "
             f"[{outcome.write_outcome or outcome.status}]"
         ).strip()
-        total_batches = self._eta_total(result)
-        run_batch_index = self._tasks_finished
+        run_batch_index, total_batches = self._eta_progress(result)
         live = getattr(self.state, "state", None)
         progress = (
             (live.get("metrics_progress") or {}).get(self.phase)
@@ -9811,7 +9847,8 @@ class WriteBatchScheduler:
         18 (live run 7): the accept path's resume counted the accepted check
         T002 and its last line read "batch 1/2 … ~0m 24s remaining" after the
         one task it dispatched; a check holding T007 left "6/7" the same way.
-        The numerator, ``self._tasks_finished``, never counts those tasks.
+        On implement, only the tasks the run dispatches (fix round 20,
+        :meth:`_eta_task_ids`). The numerator never counts the others.
         """
         return len(self._eta_task_ids(result))
 
@@ -9823,16 +9860,77 @@ class WriteBatchScheduler:
         run read "batch 6/6 … ALL BATCHES COMPLETE" in its log and
         "implement 6/7 batches ok" on ``status`` and the OpenCode poll.
         :meth:`_mirror_status` counts over this one too.
+
+        Fix round 20 (live run 8 #1): on implement, the set starts from what
+        the run will dispatch (``_eta_scope``, the walk the ``Organized into
+        …`` line counts), so a task the write policy refuses before dispatch,
+        the tasks after it that the run never reaches, a task kept from an
+        earlier run and one held by a check's findings on record are out from
+        the first line; the stop fixture's first run read "batch 1/7" under
+        "5 task(s) to dispatch" and stopped at "4/6". A task that finishes
+        without a runner leaves it, one dispatched against the walk's
+        reading joins it (:meth:`_eta_mark`), and a held task leaves it as
+        before.
         """
         out = (
             set(result.human_plan.skipped) | set(result.human_plan.accepted)
             | set(result.blocked_by_check)
         )
+        scope = self._eta_scope
         return [
             str(task.get("task_id", "")) for task in self.tasks
             if str(task.get("task_id", "")) not in out
+            and (scope is None or str(task.get("task_id", "")) in scope)
             and not task.get("is_human") and task.get("executor_role") != "human"
         ]
+
+    def _eta_mark(self, task_id: str, *, ran: bool) -> None:
+        """One more finished task for the ``[ETA]`` numerator (F3).
+
+        *ran*: a runner was started for it (its metric is recorded). On
+        implement (fix round 20) a task finished without one — kept from an
+        earlier run, refused before dispatch, a check not run again — was
+        not dispatched, so it leaves the counted set, as the native leg's
+        ``util batch-done`` withdraws a refused task; a task dispatched that
+        the walk did not foresee joins it, so the line never reads past its
+        own total. Called under ``_effects_lock``.
+        """
+        task_id = str(task_id)
+        self._eta_finished.add(task_id)
+        if self._eta_scope is not None:
+            if ran:
+                self._eta_scope.add(task_id)
+            else:
+                self._eta_scope.discard(task_id)
+
+    def _eta_progress(self, result: SchedulerResult) -> Tuple[int, int]:
+        """``(finished, total)`` over the tasks :meth:`_eta_task_ids` counts:
+        the two numbers every ``[ETA]`` line of this run prints."""
+        counted = self._eta_task_ids(result)
+        return sum(1 for task_id in counted if task_id in self._eta_finished), len(counted)
+
+    def _eta_stop_line(self, result: SchedulerResult) -> None:
+        """Say on the ``[ETA]`` lines that the run stopped short (fix round 20).
+
+        Live run 8 #1: the stop fixture's last line was "batch 4/6 done in
+        0m 15s · ~0m 37s remaining", left standing by a stop that came before
+        any "N/N". A run that stops with tasks of its total not finished logs
+        one closing line naming how far it got and how many it did not run;
+        one whose last line already read ``N/N`` (the tasks after the stop
+        were never in its total) adds nothing. Best-effort.
+        """
+        if not self._eta_started:
+            return
+        try:
+            done, total = self._eta_progress(result)
+        except Exception:  # noqa: BLE001 - a count line must not fail a phase
+            return
+        if done >= total:
+            return
+        self.log(
+            f"[ETA] {self.phase}: run stopped after batch {done}/{total} · "
+            f"{total - done} task(s) not run"
+        )
 
     def _metrics_start(self, result: SchedulerResult) -> None:
         """Stamp the phase's ETA baseline before the first dispatch.
@@ -9855,6 +9953,7 @@ class WriteBatchScheduler:
         total_batches = self._eta_total(result)
         try:
             self.state.start_metrics_phase(self.phase, total_batches)
+            self._eta_started = True
             self.state.save()
         except Exception:  # noqa: BLE001 - bookkeeping must not fail a phase
             pass
@@ -10406,6 +10505,11 @@ class WriteBatchScheduler:
                 if str(task.get("task_id", "")) in counted
             }
             total = len(counted_ids)
+            # Fix round 20: the `ok` of `<ok>/<total> batches ok`, over the
+            # same tasks, so a task an implement run kept from an earlier one
+            # (never dispatched, never in `total`) is not counted as one of
+            # its batches; the progress line names it as kept instead.
+            ok_count = sum(1 for o in outcomes if o.ok and o.task_id in counted)
             items_total = sum(len(ids) for ids in expected_ids_by_task.values())
             items_applied = sum(
                 len([
@@ -10447,6 +10551,7 @@ class WriteBatchScheduler:
                         # they will never dispatch, so counting them here read
                         # a clean run as short by exactly its deferred tasks.
                         "total": total,
+                        "ok": ok_count,
                         # F10: was `dispatched`, and counted FINISHED tasks —
                         # for an 11-minute single-task batch it read
                         # `dispatched: 0` the whole time, which a reader

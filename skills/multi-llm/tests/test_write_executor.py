@@ -4666,10 +4666,12 @@ class TestTheEtaLineUsesThisRunsOwnBatchCount:
         on_disk = json.loads(Path(state.state_file).read_text(encoding="utf-8"))
         assert on_disk["metrics_progress"]["implement"]["total_batches"] == 2
 
-    def test_a_resumed_skip_counts_toward_the_runs_own_total(self, env):
-        """A skipped task is one of the run's finished tasks, so the last line
-        still reads `N/N` — without this the denominator includes the skips and
-        the numerator does not, and a mostly-resumed run stops short."""
+    def test_a_resumed_skip_leaves_both_halves_of_an_implement_line(self, env):
+        """A skipped task is out of both halves alike, so the last line still
+        reads `N/N` — with the skip in the denominator alone, a mostly-resumed
+        run stopped short. Fix round 20 (live run 8 #1): an implement run's
+        total is what it dispatches (the `Organized into …` walk), so the skip
+        is in neither half; an apply run keeps it in both (below)."""
         state = FakeState(env.tmp_path / "state.json")
         tasks = [
             env.apply_task(
@@ -4696,6 +4698,31 @@ class TestTheEtaLineUsesThisRunsOwnBatchCount:
         assert [o.skipped for o in result.outcomes] == [True, False]
 
         eta_lines = [l for l in lines if l.startswith("[ETA] implement:")]
+        assert len(eta_lines) == 1, lines
+        assert "batch 1/1" in eta_lines[0], eta_lines
+        assert "ALL BATCHES COMPLETE" in eta_lines[0], eta_lines
+        assert "Organized into 1 execution batch: 1 task(s) to dispatch" in lines
+
+    def test_a_resumed_skip_counts_toward_an_apply_runs_own_total(self, env):
+        """An apply phase has no dispatch walk: its skip still counts in both
+        halves (F3), so the line ends `2/2`."""
+        state = FakeState(env.tmp_path / "state.json")
+        tasks = [env.apply_task(i) for i in range(2)]
+        (env.phase_dir / tasks[0]["output_name"]).write_text(
+            json.dumps({"status": "applied", "ids": ["s0"],
+                        "files_touched": ["plans/p.md"], "summary": "done"}),
+            encoding="utf-8",
+        )
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s1"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        lines = []
+        result = env.scheduler(
+            tasks, state=state, resume=True, finalize=False, log=lines.append,
+        ).run()
+        assert result.exit_code == 0, result.messages
+        assert [o.skipped for o in result.outcomes] == [True, False]
+        eta_lines = [l for l in lines if l.startswith("[ETA] apply-suggestions:")]
         assert len(eta_lines) == 1, lines
         assert "batch 2/2" in eta_lines[0], eta_lines
         assert "ALL BATCHES COMPLETE" in eta_lines[0], eta_lines
