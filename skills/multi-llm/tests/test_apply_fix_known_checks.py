@@ -962,3 +962,25 @@ class TestARecordIsThisReviewsOnly:
         assert result.success, result.stderr
         state = json.loads(Path(state_file).read_text(encoding="utf-8"))
         assert known_checks.APPLY_FIX_BATCH_CHECKS_KEY not in state
+
+
+class TestProcessSafetyAgreesWithTheChecks:
+    """Process safety said "verify with static checks only" above the
+    section that asks the batch to run the repository's checks
+    (review20/verify #6)."""
+
+    def test_the_contract_forbids_background_processes_not_checks(self):
+        task = {"task_id": "apply-fix-batch-0", "expected_ids": ["f0"],
+                "declared_files": ["src/a.py"]}
+        text = with_result_contract(
+            "apply_code_fixes", task, "Fix it.",
+            checks_section=known_checks.known_checks_section(
+                [("npm test", "package.json defines scripts.test")]),
+        )
+        assert "static checks only" not in text
+        assert (
+            "Do not start background servers, watchers, browsers or any other "
+            "background process, and leave no process running when you finish."
+            in " ".join(text.split())
+        )
+        assert "run each one from the repository root" in " ".join(text.split())
