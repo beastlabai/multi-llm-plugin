@@ -2383,8 +2383,32 @@ def state_apply_views(
             total = progress.get("total_batches")
             if isinstance(total, int) and not isinstance(total, bool) and total > 0:
                 entry["batches_total"] = total
+        if phase == "apply-code-fixes":
+            # Fix round 20: the batches whose own check failed after their
+            # edits, as `util batch-done` recorded them, named as the native
+            # implement view names its tasks'.
+            checks = _native_apply_batch_checks(record, directory)
+            if checks:
+                entry["batch_checks"] = checks
         out.append(entry)
     return out
+
+
+def _native_apply_batch_checks(record: Dict[str, Any], directory: Path) -> List[Dict[str, Any]]:
+    """``[{id, findings}]`` for the native apply-code-fixes batches whose own
+    check failed (``known_checks.earlier_batch_check_failures`` over the
+    phase's ``write_tasks.json``); ``[]`` when either cannot be read."""
+    try:
+        from .known_checks import earlier_batch_check_failures
+
+        document = json.loads((directory / _WRITE_TASKS).read_text(encoding="utf-8"))
+        tasks = document.get("batches") or document.get("tasks") or []
+        return [
+            {"id": task_id, "findings": findings}
+            for task_id, findings in earlier_batch_check_failures(record, tasks, "")
+        ]
+    except Exception:  # noqa: BLE001 - advisory
+        return []
 
 
 def render_state_apply_lines(
@@ -2400,6 +2424,11 @@ def render_state_apply_lines(
     recorded, total = view.get("batches_recorded"), view.get("batches_total")
     if isinstance(recorded, int) and isinstance(total, int):
         lines.append(f"      batches:        {recorded}/{total} recorded by this run")
+    for entry in view.get("batch_checks") or []:
+        findings = entry.get("findings") or []
+        lines.append(
+            f"      own check fails {entry['id']}: {'; '.join(findings)[:300]}"
+        )
     if since:
         lines += _native_resume_line(resume)
     elif not view.get("completed"):

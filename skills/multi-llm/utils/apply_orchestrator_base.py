@@ -986,6 +986,15 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             if self.edits_the_plan:
                 state.refresh_plan_hash()
             state.save()
+            if self.write_kind == "apply_code_fixes":
+                # Fix round 20: the native leg's line saying nothing ran the
+                # repository's tests, naming the checks the batches were
+                # asked to run and what each reported (the executor's own).
+                from .write_batch_scheduler import native_apply_fixes_unverified_line
+
+                tests = native_apply_fixes_unverified_line(self.plan_path)
+                if tests:
+                    print(f"[TESTS_NOT_RUN] {tests}", file=sys.stderr)
             print(
                 json.dumps(
                     {

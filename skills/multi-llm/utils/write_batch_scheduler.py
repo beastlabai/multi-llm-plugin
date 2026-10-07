@@ -50,6 +50,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import git_utils as _git_utils
+    from . import known_checks as _known_checks
     from . import landlock_dispatch as _landlock
     from . import prompt_files as _prompt_files
     from . import prior_changes as _prior_changes
@@ -155,6 +156,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     )
 except ImportError:  # pragma: no cover - direct-script import shim
     from utils import git_utils as _git_utils
+    from utils import known_checks as _known_checks
     from utils import landlock_dispatch as _landlock
     from utils import prompt_files as _prompt_files
     from utils import prior_changes as _prior_changes
@@ -299,6 +301,7 @@ __all__ = [
     "quoted_findings",
     "unverified_line",
     "native_stop_unverified_line",
+    "native_apply_fixes_unverified_line",
     "write_result_notice",
     "verification_line",
     "verify_command_candidate",
@@ -1840,6 +1843,56 @@ def native_stop_unverified_line(plan_path: Union[str, Path]) -> Optional[str]:
         return None
 
 
+def native_apply_fixes_unverified_line(plan_path: Union[str, Path]) -> Optional[str]:
+    """The :func:`unverified_line` a finished native apply-code-fixes owes,
+    with what its batches reported about the known checks, or ``None``.
+
+    Fix round 20 (live run 8, Codex racing 08): the executor's line also
+    names the checks the batches were asked to run and what each batch
+    reported (:func:`known_checks.checks_tally`); on the native leg the host
+    wrote its own "nothing ran the tests" line from the instructions.
+    ``apply-code-fixes --mark-completed`` prints this one as
+    ``[TESTS_NOT_RUN]``. Owed when no ``driver.verify_command`` is set and a
+    batch of the phase's ``write_tasks.json`` is recorded ``completed`` (the
+    native leg keeps no audit log, so a completed batch counts as an edit).
+    Never fatal: any read that fails answers ``None``.
+    """
+    try:
+        plan = Path(plan_path).resolve()
+        try:
+            from .output_handler import output_dir_path
+        except ImportError:  # pragma: no cover - direct script invocation
+            from utils.output_handler import output_dir_path  # type: ignore
+        out = output_dir_path(plan)
+        if get_verify_command(anchor=str(plan)):
+            return None
+        document = json.loads(
+            (out / "apply-fixes" / WRITE_TASK_FILENAME).read_text(encoding="utf-8")
+        )
+        tasks = [
+            task for task in (document.get("batches") or document.get("tasks") or [])
+            if isinstance(task, dict)
+        ]
+        state = _known_checks.read_state(out)
+        statuses = state.get("task_status") or {}
+        if not any(statuses.get(str(task.get("task_id"))) == "completed" for task in tasks):
+            return None
+        try:
+            root = resolve_repo_root(str(plan))
+        except Exception:  # noqa: BLE001 - the line still stands without a candidate
+            root = None
+        line = unverified_line(root)
+        tally = _known_checks.checks_tally(
+            _known_checks.known_check_commands(
+                out, plan_file=str(plan), repo_root=root, state=state,
+            ),
+            state, tasks,
+        )
+        return f"{line} {tally}" if tally else line
+    except Exception:  # noqa: BLE001 - advisory
+        return None
+
+
 def _check_task_ids_of_plan(plan: Path) -> set:
     """The ids of the agent tasks in *plan*'s task list that declare no files
     (check tasks), parsed as implement parses it; empty when it cannot be read,
@@ -2470,7 +2523,9 @@ def dispatched_prompt_path(
     )
 
 
-def with_result_contract(kind: str, task: Dict[str, Any], prompt: str) -> str:
+def with_result_contract(
+    kind: str, task: Dict[str, Any], prompt: str, *, checks_section: str = "",
+) -> str:
     """Append the write-batch result contract the classification reads.
 
     The batchers' prompts end in the prose "Return Format" the native
@@ -2495,6 +2550,11 @@ def with_result_contract(kind: str, task: Dict[str, Any], prompt: str) -> str:
     subagent's closing JSON object carries the ``summary`` the prior-changes
     append wants and the ``status``/``files_touched`` the host's verification
     step reads.
+
+    *checks_section* (fix round 20, :func:`known_checks.known_checks_section`):
+    an apply-code-fixes batch's list of the repository's known check
+    commands, bound at dispatch on both legs, after the code batch's
+    ``## Checks you ran``, whose ``check`` object it extends with ``listed``.
     """
     expected = [str(i) for i in (task.get("expected_ids") or [])]
     declining = kind in APPLY_WRITE_KINDS
@@ -2582,7 +2642,7 @@ def with_result_contract(kind: str, task: Dict[str, Any], prompt: str) -> str:
         "nothing needed changing.\n"
         + (CHECK_RESULT_CONTRACT if is_check_task(kind, task) else "")
         + (
-            WRITE_CHECK_CONTRACT
+            WRITE_CHECK_CONTRACT + (checks_section or "")
             if kind in CODE_WRITE_KINDS and not is_check_task(kind, task) else ""
         )
     )
@@ -3414,8 +3474,63 @@ class WriteBatchScheduler:
         )
 
     def _with_result_contract(self, task: Dict[str, Any], prompt: str) -> str:
-        """Append the write-batch result contract (:func:`with_result_contract`)."""
-        return with_result_contract(self.kind, task, prompt)
+        """Append the write-batch result contract (:func:`with_result_contract`),
+        with an apply-code-fixes batch's known checks (fix round 20)."""
+        return with_result_contract(
+            self.kind, task, prompt, checks_section=self._known_checks_section(task),
+        )
+
+    def _known_checks(self) -> List[Tuple[str, str]]:
+        """The repository's known check commands
+        (:func:`known_checks.known_check_commands`), read now from the state
+        this run holds (else the plan dir's ``state.json``), as ``util
+        write-prompt`` reads them on the native leg. Never run here."""
+        state = getattr(self, "state", None)
+        return _known_checks.known_check_commands(
+            self.output_dir, plan_file=getattr(self, "plan_file", None),
+            repo_root=getattr(self, "repo_root", None), state=state,
+        )
+
+    def _known_checks_tally(self) -> Optional[str]:
+        """What this phase's batches reported about the known checks they
+        were told to run (:func:`known_checks.checks_tally`), for the line
+        saying nothing ran the tests; ``None`` for every other kind, or with
+        no check known. Never fatal."""
+        if self.kind != "apply_code_fixes":
+            return None
+        try:
+            state = getattr(self, "state", None)
+            if state is None:
+                state = _known_checks.read_state(self.output_dir)
+            return _known_checks.checks_tally(
+                self._known_checks(), state, getattr(self, "tasks", None) or [],
+            )
+        except Exception:  # noqa: BLE001 - advisory
+            return None
+
+    def _known_checks_section(self, task: Dict[str, Any]) -> str:
+        """Fix round 20 (live run 8, Codex racing 08): an apply-code-fixes
+        batch is told the repository's known check commands, to run after its
+        edits, and which earlier batch of the run reported a failing check.
+        ``""`` for every other kind. The commands told to each batch are kept
+        (``_told_checks``), so its reply's ``listed`` is read against them."""
+        if self.kind != "apply_code_fixes":
+            return ""
+        task_id = str(task.get("task_id") or "")
+        try:
+            checks = self._known_checks()
+            state = getattr(self, "state", None)
+            earlier = _known_checks.earlier_batch_check_failures(
+                state if state is not None else _known_checks.read_state(self.output_dir),
+                getattr(self, "tasks", None) or [], task_id,
+            )
+        except Exception:  # noqa: BLE001 - advisory: the batch is still dispatched
+            checks, earlier = [], []
+        told = getattr(self, "_told_checks", None)
+        if told is None:
+            told = self._told_checks = {}
+        told[task_id] = [command for command, _where in checks]
+        return _known_checks.known_checks_section(checks, earlier)
 
     def _pinned_phase_dir(self) -> "_prompt_files.PhasePin":
         """The phase dir as pinned for the prompt files (fix round 17): its
@@ -6260,6 +6375,21 @@ class WriteBatchScheduler:
         if self.kind in CODE_WRITE_KINDS and not outcome.verification_only:
             # Fix round 14: the checks a code batch ran on its own edits.
             outcome.batch_check = batch_check_findings(result)
+        if self.kind == "apply_code_fixes":
+            # Fix round 20: what it says each known check it was told to run
+            # did, read against the commands its prompt listed; a command it
+            # lists as failed is a failing check on every surface.
+            listed = _known_checks.listed_check_outcomes(
+                _known_checks.reply_listed(result),
+                (getattr(self, "_told_checks", None) or {}).get(outcome.task_id) or (),
+            )
+            outcomes = getattr(self, "_listed_outcomes", None)
+            if outcomes is None:
+                outcomes = self._listed_outcomes = {}
+            outcomes[outcome.task_id] = listed
+            outcome.batch_check = _known_checks.with_listed_failures(
+                outcome.batch_check, listed,
+            )
         outcome.sha256_before = {
             relative: row.get("sha256_before") for relative, row in observed.items()
         }
@@ -7577,6 +7707,22 @@ class WriteBatchScheduler:
                     set_task_batch_check_in_state(
                         self.state.state, task_id,
                         outcome.batch_check if outcome.ok else None,
+                    )
+                elif self.kind == "apply_code_fixes" and isinstance(
+                    getattr(self.state, "state", None), dict
+                ) and (dispatched or kept or not outcome.ok):
+                    # Fix round 20: what the batch's own checks reported, for
+                    # the next batch's prompt and the tests-not-run line, as
+                    # `util batch-done` records it; any other record of the
+                    # batch clears an earlier one.
+                    _known_checks.set_batch_check_report_in_state(
+                        self.state.state, task_id,
+                        prior_changes_id=str(task.get("prior_changes_id") or ""),
+                        findings=outcome.batch_check if outcome.ok else None,
+                        listed=(
+                            (getattr(self, "_listed_outcomes", None) or {}).get(task_id)
+                            if outcome.ok else None
+                        ),
                     )
                 # Persists the metric recorded just above too: it is a mutation
                 # of this object's dict now, not a second writer's file (F4).
@@ -9616,6 +9762,11 @@ class WriteBatchScheduler:
             # codex racing run 5's apply-code-fixes left the repository's own
             # test failing and every surface a host relays read clean.
             result.unverified = unverified_line(self.repo_root)
+            # Fix round 20: and which checks the batches were asked to run,
+            # with what each batch reported (apply-code-fixes).
+            tally = self._known_checks_tally()
+            if tally:
+                result.unverified = f"{result.unverified} {tally}"
             result.messages.append(result.unverified)
             return True
         timeout = get_verify_timeout_s(anchor=self.anchor)
