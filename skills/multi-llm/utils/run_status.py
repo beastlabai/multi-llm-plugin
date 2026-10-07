@@ -2946,11 +2946,16 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
             # dispatched nothing read "implement 0/0 batches ok (1 kept …),
             # 0/0 items applied" under "failed".
             parts = [f"{kind}: nothing dispatched{kept_note}"]
+        elif kind == "implement":
+            # Implement counts tasks, as its `[ETA]` lines say (fix round
+            # 22). An implement task is its own one item, so "3/4 items
+            # applied" beside "4/4 tasks ok" counted the same tasks a second
+            # way (fix round 24, live run 10 #7); the outcome clauses below
+            # say which applied an edit.
+            parts = [f"{kind} {ok}/{total} tasks ok{kept_note}"]
         else:
-            # Implement counts tasks, as its `[ETA]` lines say (fix round 22).
-            unit = "tasks" if kind == "implement" else "batches"
             parts = [
-                f"{kind} {ok}/{total} {unit} ok{kept_note}, "
+                f"{kind} {ok}/{total} batches ok{kept_note}, "
                 f"{items_applied}/{items_total} items applied"
             ]
     else:

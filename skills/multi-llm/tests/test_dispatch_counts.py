@@ -396,7 +396,10 @@ class TestTheFirstRunEtaCountsWhatItDispatches:
         repo = self._live(tmp_path, monkeypatch)
         _first_run(repo, capsys)
         line, polled = _status_progress(repo, capsys)
-        assert "stopped, implement 4/4 tasks ok, 3/4 items applied" in line, line
+        assert "stopped, implement 4/4 tasks ok, " in line, line
+        # Fix round 24 (live run 10 #7): tasks, not a second count of them
+        # as "items".
+        assert "items applied" not in line, line
         assert "failed T005" in line and "not run T006" in line, line
         assert any("implement 4/4 tasks ok" in row for row in polled), polled
         mirror = json.loads((repo.phase_dir / ".status.json").read_text())
@@ -756,7 +759,7 @@ class TestEverySurfaceCountsTheSameTasks:
         text = capsys.readouterr()
         assert _etas(text.out + text.err)[-1] == (6, 6)
         line, polled = _status_progress(repo, capsys)
-        assert "implement 6/6 tasks ok, 5/6 items applied" in line, line
+        assert "implement 6/6 tasks ok, " in line and "items applied" not in line, line
         # Still named on the line, with the check that holds it.
         assert "not run (upstream check T002 reported problems) T007" in line, line
         assert any("implement 6/6 tasks ok" in row for row in polled), polled
@@ -782,4 +785,4 @@ class TestEverySurfaceCountsTheSameTasks:
         text = capsys.readouterr()
         assert _etas(text.out + text.err)[-1] == (4, 4)
         line, _polled = _status_progress(stop, capsys)
-        assert "implement 4/4 tasks ok, 3/4 items applied" in line, line
+        assert "implement 4/4 tasks ok, " in line and "items applied" not in line, line

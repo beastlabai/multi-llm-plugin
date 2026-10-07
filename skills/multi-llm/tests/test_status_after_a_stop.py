@@ -134,8 +134,9 @@ class TestTheCountsAreTasks:
     def test_the_first_run_counts_tasks(self, repo, capsys):
         _first_run(repo, capsys)
         line, _polled = _progress(repo, capsys)
-        assert "stopped, implement 4/4 tasks ok, 3/4 items applied" in line, line
-        assert "batches ok" not in line, line
+        assert "stopped, implement 4/4 tasks ok, " in line, line
+        # Fix round 24 (live run 10 #7): tasks only, never "items".
+        assert "batches ok" not in line and "items applied" not in line, line
 
     def test_a_resume_that_ran_one_task_counts_what_it_kept_whole(self, repo, capsys):
         _first_run(repo, capsys)
@@ -146,8 +147,9 @@ class TestTheCountsAreTasks:
         line, _polled = _progress(repo, capsys)
         assert (
             "implement 1/1 tasks ok (4 kept from an earlier run: T001, T003, "
-            "T004, T002 (accepted with its check findings)), 1/1 items applied"
+            "T004, T002 (accepted with its check findings))"
         ) in line, line
+        assert "items applied" not in line, line
 
 
 @pytest.fixture
