@@ -796,6 +796,35 @@ class TestReplyContractIsRobustToAMalformedReply:
             assert "balanced brackets" in prompt
 
 
+    @pytest.mark.parametrize("kind", ["validation", "revalidation"])
+    def test_the_validation_reply_ends_on_the_groups_array(self, kind):
+        """Claude Code racing runs (2026-10-01: 3 of 14 Sonnet batches; 10-04:
+        3 of about 18; 10-07: in phases 01, 04 and 07) came back
+        `{"groups":[{…},"metadata":{…}}` — the `]` dropped at the one junction
+        where the array is followed by another key, on one-group batches too.
+        The judge's reply, whose array is its last key, has not shown it. So
+        `metadata` comes first, `groups` last, and the reply's ending is named:
+        the last result's `}`, the `]`, the object's `}`. A re-ask stays the rule
+        for a reply that still breaks (`util check-reply`)."""
+        prompt = build_validation_prompt(
+            plan_excerpt=PLAN_EXCERPT, suggestion_records=SUGGESTION_RECORDS,
+            kind=kind,
+        )
+        reply = prompt[prompt.index("## Reply"):]
+        template = reply[reply.index("\n{\n") + 1: reply.index("\n}\n") + 2]
+        assert template.index('"metadata"') < template.index('"groups"')
+        assert "`}]}`" in reply
+        assert "`metadata` comes first and `groups` last" in reply
+        # The template itself, placeholders filled, is one object ending `}]}`.
+        filled = (
+            template.replace("<the group's group_index value>", "3")
+            .replace("valid|invalid|needs-human-decision", "valid")
+        )
+        compact = json.dumps(json.loads(filled), separators=(",", ":"))
+        assert compact.endswith("}]}")
+        assert list(json.loads(filled)) == ["metadata", "groups"]
+
+
 class TestJudgePrompt:
     def test_a_code_fix_item_may_not_be_salvaged_into_a_plan_edit(self):
         prompt = build_human_decision_judge_prompt(

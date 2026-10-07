@@ -97,20 +97,31 @@ def _json_block(value: Any) -> str:
 #: the mismatch — but the cheaper fix is a template with no number to copy. A
 #: model that copies the placeholder *text* is tolerated too: the merge coerces a
 #: non-integer echo to "matches nothing" rather than crashing.
+#:
+#: ``metadata`` comes first and ``groups`` last (fix round 24). With ``groups``
+#: first, Claude Code's Sonnet validators kept writing
+#: ``{"groups":[{…},"metadata":{…}}`` — the ``]`` dropped at the one place the
+#: array is followed by another key (3 of 14 batches on 2026-10-01, again on
+#: 10-04 and 10-07, one-group batches included), while the judge's reply, whose
+#: array is its last key, has not shown it. Key order means nothing to any
+#: reader of the reply; a reply that still breaks is re-asked once
+#: (``util check-reply``), never repaired.
 _VALIDATION_REPLY_CONTRACT = '''## Reply
 
 Print ONE JSON object and nothing else — no prose, no markdown fences, no
 explanation. Do not write any file; whoever invoked you persists your reply.
 Your reply is parsed as-is, and a reply that does not parse is thrown away:
 the first character is `{` and the last is the `}` that closes it. Keep every
-`reason` to one short line with no raw double quotes or line breaks inside it,
-and re-read the object once for balanced brackets before you finish.
+`reason` to one short line with no raw double quotes or line breaks inside it.
+`metadata` comes first and `groups` last, so the reply ends with the last
+result's `}`, the `]` that closes `groups` and the `}` that closes the object:
+`}]}`. Re-read the object once for balanced brackets before you finish.
 
 {
+  "metadata": {"model": "<the model you are>", "timestamp": "<ISO 8601>", "schema_version": "2.1"},
   "groups": [
     {"group_index": <the group's group_index value>, "group_hash": "<copy the group_hash of the group verbatim>", "status": "valid|invalid|needs-human-decision", "reason": "<one brief sentence>", "confidence": 0.0}
-  ],
-  "metadata": {"model": "<the model you are>", "timestamp": "<ISO 8601>", "schema_version": "2.1"}
+  ]
 }
 
 Rules:
