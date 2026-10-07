@@ -39,6 +39,7 @@ from utils import (
     get_current_head,
 )
 from utils.stream_bootstrap import bootstrap_streams
+from utils.text_clip import clip
 from utils.cli_common import (
     EXIT_NEEDS_HUMAN,
     build_parent_parser,
@@ -1342,12 +1343,11 @@ def check_findings_notice(found: Dict[str, List[str]]) -> str:
     for task_id, findings in found.items():
         first = findings[0] if findings else ""
         more = f" (+{len(findings) - 1} more)" if len(findings) > 1 else ""
-        parts.append(f"{task_id}: {first[:160]}{more}")
-    return (
+        parts.append(f"{task_id}: {clip(first, 160)}{more}")
+    return clip(
         "check findings (review-code is told about them; all listed in "
         "implement/summary.md): "
-        + "; ".join(parts)
-    )[:900]
+        + "; ".join(parts), 900)
 
 
 def run_implement_write_phase(
@@ -2907,7 +2907,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"[CHECK_NOT_RERUN] {check_id} is not run again: nothing in the "
                 f"repository changed since its check reported problems, so it "
                 f"would report the same"
-                + (f" ({'; '.join(findings)[:300]})" if findings else "")
+                + (f" ({clip('; '.join(findings), 300)})" if findings else "")
                 + ". Its findings stand"
                 + (
                     f", and {', '.join(waiting)} "

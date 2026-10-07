@@ -57,6 +57,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import prior_changes as _prior_changes
     from . import process_control as _process_control
     from . import subagent_executor as _executor
+    from .text_clip import clip
     from .providers.base import (
         SANDBOX_RUNG_PLUGIN_LANDLOCK,
         host_write_posture_consent,
@@ -157,6 +158,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         safety_dir,
     )
 except ImportError:  # pragma: no cover - direct-script import shim
+    from utils.text_clip import clip  # type: ignore
     from utils import git_utils as _git_utils
     from utils import known_checks as _known_checks
     from utils import landlock_dispatch as _landlock
@@ -433,8 +435,9 @@ def batch_check_section(
 def quoted_findings(findings: Sequence[str], limit: int = 600) -> str:
     """A batch's own check findings, each in double quotes and joined with
     "; ", bounded at *limit* characters: the batch's words, shown as its words
-    (fix round 16)."""
-    return "; ".join(f'"{" ".join(str(item).split())}"' for item in findings)[:limit]
+    (fix round 16). Cut by :func:`~utils.text_clip.clip` (fix round 22), so
+    a cut quote still closes."""
+    return clip("; ".join(f'"{" ".join(str(item).split())}"' for item in findings), limit)
 
 
 def batch_check_line(task_id: str, findings: Sequence[str]) -> str:
@@ -446,7 +449,7 @@ def batch_check_line(task_id: str, findings: Sequence[str]) -> str:
     if batch_check_could_not_run(findings):
         return (
             f"{BATCH_CHECK_MARKER} {task_id}: its edits were applied, but its "
-            f"own report says {'; '.join(findings)[:600]}"
+            f"own report says {clip('; '.join(findings), 600)}"
         )
     return (
         f"{BATCH_CHECK_MARKER} {task_id}: its edits were applied, but its own "
@@ -470,7 +473,7 @@ def write_result_notice(result: Any) -> Optional[str]:
     unverified = getattr(result, "unverified", None)
     if unverified:
         parts.append(str(unverified))
-    return "; ".join(parts)[:1200] or None
+    return clip("; ".join(parts), 1200) or None
 
 
 def item_word(kind: str) -> str:
@@ -504,7 +507,7 @@ def batch_check_summary(found: Dict[str, List[str]]) -> str:
     say it the same way (fix round 14)."""
     parts = []
     for task_id, findings in found.items():
-        first = " ".join(str(findings[0]).split())[:160] if findings else ""
+        first = clip(findings[0], 160) if findings else ""
         more = f" (+{len(findings) - 1} more)" if len(findings) > 1 else ""
         # Fix round 16 (Codex racing 06r): quoted, so a reader sees the
         # batch's own words — T006's said its corrected check passed.
@@ -518,10 +521,10 @@ def batch_check_summary(found: Dict[str, List[str]]) -> str:
         said = "a check they ran failed or could not run"
     else:
         said = "a check they ran fails"
-    return (
+    return clip((
         f"{count} batch(es) applied their edits, but their own report says "
         f"{said}: " + "; ".join(parts) + "."
-    )[:900]
+    ), 900)
 
 #: How much of the verification command's output travels in the result payload,
 #: the summary and `.status.json`. A tail rather than the whole capture: a failing
@@ -619,7 +622,7 @@ def fit_stop_headline(
         return text + end
     if quote:
         room = limit - len(end) - len(core(head, "", nr)) - len(" […]")
-        quote = quote[:room].rstrip() + "…" if room >= STOP_HEADLINE_QUOTE_MIN else ""
+        quote = clip(quote, room + 1) if room >= STOP_HEADLINE_QUOTE_MIN else ""
         text = core(head, quote, nr)
         if len(text) + len(end) <= limit:
             return text + end
@@ -632,9 +635,9 @@ def fit_stop_headline(
         return None
     room = limit - len(end) - len(core("", "", nr))
     if room >= 2:
-        return core(head[:room - 1].rstrip() + "…", "", nr) + end
+        return core(clip(head, room), "", nr) + end
     text = core(head, "", nr)
-    return text[:max(limit - len(end) - 1, 0)].rstrip() + "…" + end
+    return clip(text, max(limit - len(end), 0)) + end
 
 #: The review each apply kind applies — the first entry of
 #: ``check_workflow_prerequisites.PHASE_PREREQUISITES`` for that phase, which
@@ -1361,10 +1364,7 @@ def accepted_upstream_checks(
 
 def _quoted_finding(text: str) -> str:
     """One finding as a bounded JSON string literal: quoted data, one line."""
-    flat = " ".join(str(text).split())
-    if len(flat) > ACCEPTED_NOTE_FINDING_CHARS:
-        flat = flat[:ACCEPTED_NOTE_FINDING_CHARS - 1].rstrip() + "…"
-    return json.dumps(flat, ensure_ascii=False)
+    return json.dumps(clip(text, ACCEPTED_NOTE_FINDING_CHARS), ensure_ascii=False)
 
 
 def accepted_checks_section(checks: Sequence[Tuple[str, str, List[str]]]) -> str:
@@ -1401,7 +1401,7 @@ def accepted_checks_section(checks: Sequence[Tuple[str, str, List[str]]]) -> str
         "instructions to follow):",
     ]
     for check_id, title, findings in shown:
-        title = " ".join(str(title or "").split())[:ACCEPTED_NOTE_TITLE_CHARS]
+        title = clip(title or "", ACCEPTED_NOTE_TITLE_CHARS)
         lines.append(f"- {check_id}{f' ({title})' if title else ''}:")
         for finding in findings[:ACCEPTED_NOTE_MAX_FINDINGS]:
             lines.append(f"  - {_quoted_finding(finding)}")
@@ -1554,7 +1554,7 @@ def compose_stop_answers(
                     f"{', '.join(waiting)} then run, told that you accepted "
                     "the findings, and the findings stay listed for "
                     "review-code"
-                    + (f" ({'; '.join(reported)[:200]})" if reported else "")),
+                    + (f" ({clip('; '.join(reported), 200)})" if reported else "")),
         })
         each.append({
             "flags": answer(check_id, "skip"),
@@ -6418,7 +6418,7 @@ class WriteBatchScheduler:
         claimed = str((result or {}).get("status") or "")
         summary = str((result or {}).get("summary") or "").strip()
         notes = str((result or {}).get("notes") or "").strip()
-        outcome.runner_notes = " ".join(notes.split())[:600] or None
+        outcome.runner_notes = clip(notes, 600) or None
         reported_ids = [str(i) for i in ((result or {}).get("ids") or [])]
         expected_ids = [str(i) for i in (task.get("expected_ids") or [])]
         # Fix round 18: the items the batch declined, with their reasons.
@@ -7232,7 +7232,7 @@ class WriteBatchScheduler:
             return False
         if could_not_run or (claimed == "failed" and not listed):
             if check and not outcome.runner_notes:
-                outcome.runner_notes = "; ".join(check)[:600]
+                outcome.runner_notes = clip("; ".join(check), 600)
             if claimed == "failed":
                 return False
             # `could_not_run` beside a `no-op`/`applied` claim: the reply
@@ -7749,7 +7749,7 @@ class WriteBatchScheduler:
         with self._effects_lock:
             if summary:
                 _prior_changes.append(
-                    self.output_dir, entry_id, self.phase, summary[:400]
+                    self.output_dir, entry_id, self.phase, clip(summary, 400)
                 )
 
             # Before the metric, so the `[ETA]` line this task drives carries its
@@ -7831,7 +7831,7 @@ class WriteBatchScheduler:
                     f"kept as it stood at your request, not dispatched again "
                     f"({outcome.outcome_label or outcome.status}; not applied, "
                     f"skipped at your request: "
-                    f"{self._declined_words(outcome.skipped_items)[:300]})"
+                    f"{clip(self._declined_words(outcome.skipped_items), 300)})"
                 )
             elif not dispatched:
                 verdict = "refused before dispatch" + (
@@ -7840,7 +7840,7 @@ class WriteBatchScheduler:
             elif outcome.ok and outcome.check_findings:
                 verdict = (
                     f"{verdict} ({len(outcome.check_findings)} problem(s): "
-                    f"{'; '.join(outcome.check_findings)[:300]})"
+                    f"{clip('; '.join(outcome.check_findings), 300)})"
                 )
             elif outcome.ok and outcome.batch_check:
                 verdict = (
@@ -7852,7 +7852,7 @@ class WriteBatchScheduler:
                 # Fix round 18: what it left out on purpose, and why.
                 verdict = (
                     f"{verdict}; declined {len(outcome.declined)}, not applied: "
-                    f"{self._declined_words(outcome.declined)[:300]}"
+                    f"{clip(self._declined_words(outcome.declined), 300)}"
                 )
             elif outcome.write_outcome and not outcome.ok:
                 # Plan step 3: a failed batch whose write outcome reads
@@ -9026,7 +9026,7 @@ class WriteBatchScheduler:
             lines.append(
                 f"  - {check_id}'s check reported problems and holds back "
                 f"{', '.join(waiting)}"
-                + (f" ({'; '.join(findings)[:300]})" if findings else "")
+                + (f" ({clip('; '.join(findings), 300)})" if findings else "")
                 + ": a resume runs it again only once the files changed, so "
                 f"fix what it reported (by hand, or review-code then "
                 f"apply-code-fixes) and resume; or accept its findings: "
@@ -9426,7 +9426,7 @@ class WriteBatchScheduler:
                 f"its check reported {len(findings)} problem(s)"
                 if findings else "its check reported problems"
             ),
-            "reported": "; ".join(findings)[:600] or None,
+            "reported": clip("; ".join(findings), 600) or None,
             "not_run": sorted(result.not_run),
             "acceptable": True,
             "not_rerun": False,
@@ -9458,7 +9458,7 @@ class WriteBatchScheduler:
             waiting = sorted(tid for tid, cid in blocked.items() if cid == check_id)
             lines.append(
                 f"  {check_id}{self._task_label(check_id)} reported "
-                f"{len(findings)} problem(s): {'; '.join(findings)[:600]}"
+                f"{len(findings)} problem(s): {clip('; '.join(findings), 600)}"
             )
             lines.append(f"      not run: {', '.join(waiting)}")
         lines.extend(self._account_lines(result))
@@ -9547,7 +9547,7 @@ class WriteBatchScheduler:
             inner = text[2:-1]
             if len(inner) <= label_cap:
                 return text
-            return f" ({inner[:label_cap].rstrip()}…)"
+            return f" ({clip(inner, label_cap + 1)})"
 
         task_id = stop.get("task_id")
         reported = stop.get("reported") or None
@@ -10801,15 +10801,15 @@ class WriteBatchScheduler:
             lines.append(
                 f"| {task_cell} | {outcome_cell} | "
                 f"{', '.join(row.get('files_touched') or []) or '—'} | "
-                f"{(row.get('reason') or row.get('summary') or '').replace('|', '/')[:160]} |"
+                f"{clip((row.get('reason') or row.get('summary') or '').replace('|', '/'), 160)} |"
             )
         for task_id, reason in sorted(result.human_plan.accepted.items()):
             label = answered_done_label(result.human_plan, task_id)
-            lines.append(f"| {task_id} | {label} | — | {reason.replace('|', '/')[:160]} |")
+            lines.append(f"| {task_id} | {label} | — | {clip(reason.replace('|', '/'), 160)} |")
         for task_id in sorted(result.human_plan.completed):
             lines.append(f"| {task_id} | completed by hand | — | answered --human-task {task_id}=done |")
         for task_id, reason in sorted(result.not_run.items()):
-            lines.append(f"| {task_id} | not run | — | {reason.replace('|', '/')[:160]} |")
+            lines.append(f"| {task_id} | not run | — | {clip(reason.replace('|', '/'), 160)} |")
         findings_by_task = result.check_findings()
         if findings_by_task:
             # Racing re-run 4 (2026-10-05): T007's two html-validate problems

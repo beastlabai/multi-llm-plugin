@@ -74,9 +74,9 @@ RESULT_MARKER = "MULTI_LLM_RESULT:"
 # 22), beside the one rule for cutting a preview short; re-exported here, the
 # name every caller has always imported.
 try:
-    from .text_clip import _CONTROL_CHARACTERS, plain_line  # noqa: E402,F401
+    from .text_clip import _CONTROL_CHARACTERS, clip, plain_line  # noqa: E402,F401
 except ImportError:  # pragma: no cover - direct script runs with utils/ on path
-    from text_clip import _CONTROL_CHARACTERS, plain_line  # type: ignore # noqa: E402,F401
+    from text_clip import _CONTROL_CHARACTERS, clip, plain_line  # type: ignore # noqa: E402,F401
 
 #: Uniform exit codes across every mode. The dispatcher never remaps a target's
 #: code and invents one of its own only for an unknown mode or a rejected flag
@@ -811,10 +811,10 @@ class ResultContext:
         """Record the one-line reason the run stopped (``MULTI_LLM_RESULT.error``),
         as a :func:`plain_line`: every host shows it, and it carries text a
         runner or a task file wrote."""
-        cleaned = plain_line(text)
         # One line the hosts quote inside their message: bounded, so a long
-        # refusal cannot bury the message it decorates.
-        self.error = cleaned[:ERROR_MAX_CHARS] or None
+        # refusal cannot bury the message it decorates; cut at a word, marked
+        # (fix round 22).
+        self.error = clip(text, ERROR_MAX_CHARS) or None
 
     def set_user_resume(self, obj: Optional[Dict[str, Any]]) -> None:
         """Record the command that *resumes* a stopped write phase, for the user.

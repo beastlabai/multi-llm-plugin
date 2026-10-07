@@ -39,6 +39,11 @@ import shlex
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+try:
+    from .text_clip import clip
+except ImportError:  # pragma: no cover - direct script runs with utils/ on path
+    from text_clip import clip  # type: ignore
+
 #: At most this many commands are listed in a prompt (prompt size).
 KNOWN_CHECKS_MAX = 6
 
@@ -540,10 +545,7 @@ def shown_command(command: str) -> str:
 
 
 def _quoted(text: Any) -> str:
-    flat = normalized(text)
-    if len(flat) > EARLIER_FINDING_MAX_CHARS:
-        flat = flat[:EARLIER_FINDING_MAX_CHARS - 1].rstrip() + "…"
-    return json.dumps(flat, ensure_ascii=False)
+    return json.dumps(clip(normalized(text), EARLIER_FINDING_MAX_CHARS), ensure_ascii=False)
 
 
 def known_checks_section(
@@ -877,6 +879,4 @@ def checks_tally(
         "The batches were asked to run the repository's known checks after "
         "their edits: " + "; ".join(parts) + "."
     )
-    if len(text) > TALLY_MAX_CHARS:
-        text = text[:TALLY_MAX_CHARS - 1].rstrip() + "…"
-    return text
+    return clip(text, TALLY_MAX_CHARS)
