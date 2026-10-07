@@ -4173,7 +4173,7 @@ hosts:
     # rows install does not exist yet (Phase 1 items 2–4). The first run of the
     # tier promotes or reds each row by bundle id, per this file's header.
     # -------------------------------------------------------------------------
-    plugin_floor: "0.159.2"
+    plugin_floor: "0.161.0"
     plugin_floor_note: >
       The codex version every plugin row below was designed against (the pin in
       cli-versions.lock, and `SOURCE_CODEX_VERSION` in

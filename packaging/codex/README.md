@@ -23,7 +23,7 @@ Published here because nothing enforces them — the plugin manifest has no host
 field, so an older host does not refuse the install, it quietly lacks the skill or the
 tool:
 
-- **codex >= 0.159.2**
+- **codex >= 0.161.0**
 - **python3 >= 3.9** on `PATH`, under exactly that name (the tool's server runs on it
   before `uv` is involved)
 - **uv**, any version, on `PATH`
@@ -31,7 +31,7 @@ tool:
 ## Install
 
 ```bash
-codex --version                     # 0.159.2 or newer
+codex --version                     # 0.161.0 or newer
 python3 --version && uv --version   # python3 3.9 or newer, under these exact names
 codex plugin marketplace add beastlabai/multi-llm-plugin --ref release \
   --sparse .agents --sparse packaging/codex
@@ -117,7 +117,7 @@ Every failure on this route is silent: exit 0, nothing printed. What each one lo
 - **The tool answers, but models fail with provider errors.** A key did not reach the
   run: the result's `environment` block says whether a login shell ran and which startup
   file it read.
-- **The install command "succeeds" on an old codex.** Below 0.159.2 the plugin surface is
+- **The install command "succeeds" on an old codex.** Below 0.161.0 the plugin surface is
   unmeasured; check `codex --version` first.
 
 `codex doctor` does not see plugin servers, so it cannot diagnose any of these.
