@@ -144,7 +144,8 @@ def waits_on_note(task_id: str) -> str:
 
 @dataclass(frozen=True)
 class AnswersStep:
-    """One resume of a stopped implement carrying every answer it waits for."""
+    """One resume of a stopped implement carrying one or more of the
+    ``--human-task`` answers it waits for (:func:`implement_answers`)."""
 
     command: str
     why: str
@@ -183,10 +184,12 @@ class NextPhase:
     #: (:func:`render_next_phase_lines`).
     manual_tasks: Tuple[ManualTask, ...] = ()
     #: On a ``--resume`` of a stopped implement, from ``util next-command``
-    #: only: the one command that answers every task the stop waits for
-    #: (:func:`implement_answers`). Rendered after the primary and the
-    #: optional entries, and carried as ``user_next_step.answers``.
-    answers: Optional[AnswersStep] = None
+    #: only: each answer the stop offers, the one combined command first
+    #: (:func:`implement_answers`; fix round 20: each alone too, as the tool
+    #: routes list them). Rendered after the primary and the optional
+    #: entries, a why line above each command, and carried as the list
+    #: ``user_next_step.answers``.
+    answers: Tuple[AnswersStep, ...] = ()
     #: Beside ``manual_tasks``: how the user records them done, in the host's
     #: spelling (:func:`manual_close_note`, fix round 14).
     manual_tasks_note: Optional[str] = None
@@ -215,8 +218,8 @@ class NextPhase:
         payload: Dict[str, Any] = {"phase": self.phase, "command": self.command}
         if self.optional_before:
             payload["optional_before"] = [step.to_dict() for step in self.optional_before]
-        if self.answers is not None:
-            payload["answers"] = self.answers.to_dict()
+        if self.answers:
+            payload["answers"] = [step.to_dict() for step in self.answers]
         if self.manual_tasks:
             # Fix round 16: the tool routes relay this key, and `util
             # next-command` prints it as [MANUAL_TASK_NOTE].
@@ -322,11 +325,16 @@ def close_command(template: str, plan_arg: str, task_ids: Sequence[str]) -> str:
 
 
 def manual_close_note(command: str) -> str:
-    """The one plain line that says how to close deferred manual tasks."""
+    """The one plain line that says how to close deferred manual tasks.
+
+    The command ends the line, with nothing after it (live run 8, Codex
+    racing 08: the advice used to follow it in parentheses, and the host
+    copied that into the command's fence).
+    """
     return (
         "No later phase waits for these manual tasks. Once you have done one "
-        f"by hand, record it done with {command} (keep a --human-task answer "
-        "only for each task you did)."
+        "by hand, record it done with this command, keeping a --human-task "
+        f"answer only for each task you did: {command}"
     )
 
 
@@ -966,9 +974,9 @@ def render_next_phase_lines(answer: NextPhase) -> List[str]:
     for step in answer.optional_before:
         lines.append(f"{NEXT_COMMAND_OPTIONAL_WHY_MARKER} {step.why}")
         lines.append(f"{NEXT_COMMAND_OPTIONAL_MARKER} {step.command}")
-    if answer.answers is not None:
-        lines.append(f"{NEXT_COMMAND_ANSWERS_WHY_MARKER} {answer.answers.why}")
-        lines.append(f"{NEXT_COMMAND_ANSWERS_MARKER} {answer.answers.command}")
+    for step in answer.answers:
+        lines.append(f"{NEXT_COMMAND_ANSWERS_WHY_MARKER} {step.why}")
+        lines.append(f"{NEXT_COMMAND_ANSWERS_MARKER} {step.command}")
     # After the commands, on every command answer that carries them (fix
     # round 16): the tasks implement deferred to the user, and how to record
     # them done.
@@ -981,21 +989,22 @@ def implement_answers(
     route: Optional[str],
     *,
     plan_path: Optional[Union[str, Path]] = None,
-) -> Optional[AnswersStep]:
-    """One ``--resume`` carrying every answer a stopped implement waits for.
+) -> Tuple[AnswersStep, ...]:
+    """Each ``--resume`` answer a stopped native implement waits for.
 
     Fix round 14 (stop fixture, Claude Code fix/accept 01): the native leg's
     stop printed no command, so the host wrote "re-run with --resume" as
-    prose, or two separate commands (``--human-task T002=done`` in one,
-    ``T005=skip`` in another) the user had to merge. ``util next-command``
-    already answers the resume; this is the second command beside it, the
-    executor stop's combined answer (``user_commands["answers"]``): accept the
-    findings of each check that holds tasks back (``=done``: the tasks after
-    it then run) and leave each failed task undone (``=skip``, with the tasks
-    after it). Read from ``state.json`` as recorded — the checks
-    ``write_batch_scheduler.held_back_by_checks`` names, and the implement
-    tasks recorded ``failed`` in the decomposition implement ran last.
-    ``None`` when no task waits for an answer.
+    prose, or two separate commands the user had to merge; this answered with
+    one command carrying every answer. Fix round 20 (live run 8, Claude Code
+    stop 01): that one command was all, while the tool routes list each
+    answer alone too (``T005=skip`` alone, ``T002=done`` alone, …), so the
+    host described answers the plugin never printed and the fix path had no
+    T005-only command to run. The answers now come from the executor's own
+    composer (``write_batch_scheduler.native_stop_answers`` →
+    ``compose_stop_answers``) over ``state.json`` as recorded: the combined
+    command first when more than one task waits, then each task's answers,
+    each with its why, in the tool routes' words, every command in this
+    host's spelling (:func:`phase_command`). ``()`` when no task waits.
     """
     import json as _json
 
@@ -1004,41 +1013,23 @@ def implement_answers(
     try:
         state = _json.loads(state_file.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return None
+        return ()
     if not isinstance(state, dict):
-        return None
-    from .write_batch_scheduler import held_back_by_checks
+        return ()
+    from .write_batch_scheduler import native_stop_answers
 
-    holding: Dict[str, List[str]] = {}
-    for task_id, check_id in held_back_by_checks([], state):
-        holding.setdefault(check_id, []).append(task_id)
-    scope = state.get("implement_task_ids")
-    statuses = state.get("task_status") or {}
-    failed = sorted(
-        str(task_id) for task_id, status in statuses.items()
-        if status == "failed" and re.fullmatch(r"T\d+", str(task_id))
-        and (not isinstance(scope, list) or task_id in scope)
-    )
-    answers = [f"{check_id}=done" for check_id in sorted(holding)] + [
-        f"{task_id}=skip" for task_id in failed
-    ]
-    if not answers:
-        return None
-    flags: List[str] = []
-    for answer in answers:
-        flags.extend(["--human-task", answer])
-    command = phase_command(plan_arg, host_id, route, "implement", "--resume", *flags)
-    # Fix round 16 (live run 6, Claude Code stop 01): "(then T007 runs)"
-    # alone, while the tool routes' stop says the held tasks run told that
-    # the user accepted the findings, which `util write-prompt` tells them.
-    parts = [
-        f"accept the findings of {check_id} (then {', '.join(sorted(waiting))} "
-        f"{'runs' if len(waiting) == 1 else 'run'}, told that you accepted "
-        f"the findings)"
-        for check_id, waiting in sorted(holding.items())
-    ] + [f"leave {task_id} undone (and the tasks after it)" for task_id in failed]
-    why = "or, in one command: " + "; ".join(parts)
-    return AnswersStep(command=command, why=why, answers=tuple(answers))
+    steps: List[AnswersStep] = []
+    for entry in native_stop_answers(state):
+        flags = list(entry["flags"])
+        steps.append(AnswersStep(
+            command=phase_command(plan_arg, host_id, route, "implement", *flags),
+            why=str(entry["why"]),
+            answers=tuple(
+                flags[index + 1] for index, flag in enumerate(flags[:-1])
+                if flag == "--human-task"
+            ),
+        ))
+    return tuple(steps)
 
 
 # ---------------------------------------------------------------------------
@@ -1124,13 +1115,14 @@ def emit_answer(
             and str(answer.command or "").endswith(f" {RESUME_FLAG}")
         ):
             # `util next-command` only (with_answers): a stopped implement's
-            # one combined answer, beside its resume (fix round 14).
+            # answers, beside its resume (fix round 14; each alone too since
+            # fix round 20).
             from dataclasses import replace as _replace
 
             answers = implement_answers(
                 plan_arg, host_id, route, plan_path=plan_path,
             )
-            if answers is not None:
+            if answers:
                 answer = _replace(answer, answers=answers)
             # Fix round 18 (live run 7, Claude Code stop 01): the native
             # stop's line saying nothing ran the repository's tests, which

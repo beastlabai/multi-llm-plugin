@@ -28,8 +28,11 @@ driving agent re-implements.
    the plan's prose.
 
 3. **Dispatch it, either way.** With `--exec-subagents` the executor runs it and
-   persists the reply. On a host with its own subagent tool, run `task.prompt` as a
-   subagent, write the JSON it returns to the task's `output_path`
+   persists the reply. On a host with its own subagent tool, run the task as a
+   subagent — have it read the file at `task.prompt_path` (exactly the bytes of
+   `task.prompt`, `task_generation.prompt.txt` in the phase dir) in full, through
+   line `task.prompt_lines`, and follow it; pass `task.prompt` only when the task
+   has no `prompt_path` or the file is absent — write the JSON it returns to the task's `output_path`
    (`task_generation_result.json` under the phase dir) and re-invoke the mode with
    `--reaggregate` — the one follow-up command the orchestrator prints. The
    subagent **only prints**; the invoker persists. There is no temp file, no
@@ -268,8 +271,11 @@ proceeds, because consent was already given explicitly.
 The remaining steps are the orchestrator's, and they are described in Process
 above. What a host with a native subagent tool contributes is exactly one thing:
 
-- run the `prompt` of the single task in
-  `{plan}/generate-tasks/task_generation_tasks.json` as a subagent,
+- run the single task in
+  `{plan}/generate-tasks/task_generation_tasks.json` as a subagent: hand it
+  the file at the task's `prompt_path` to read in full and follow (never paste
+  the prompt into the subagent call), or `task.prompt` when the task has no
+  `prompt_path` or the file is absent,
 - write the JSON object it prints to that task's `output_path`,
 - re-invoke the mode with `--reaggregate`.
 

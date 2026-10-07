@@ -479,6 +479,13 @@ class FullWorkflow:
         if not self.args.consolidate:
             if not self.unattended:
                 return SKIPPED, "not requested (--consolidate)", None
+            from utils.consolidation import consolidation_is_current
+
+            # This step is not skippable, so a resumed `--full` re-entered it
+            # and ran the pass again on groups it had already consolidated
+            # (live run 8's stale recommendation, the workflow's copy).
+            if consolidation_is_current(str(self.plan_dir / "review-plan")):
+                return SKIPPED, "already ran on these review groups", None
             if not self._consolidation_recommended():
                 return SKIPPED, "not recommended by review-plan", None
             unattended_mod.record_resolution(

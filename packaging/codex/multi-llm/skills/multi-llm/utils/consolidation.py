@@ -89,6 +89,14 @@ CONSOLIDATION_SUBAGENT_TIMEOUT = 90
 # [CONSOLIDATION_RECOMMENDED]. Configurable via --consolidation-threshold.
 CONSOLIDATION_RECOMMENDED_THRESHOLD = 15
 
+#: Beside ``consolidation_batch_{N}.json``, exactly the bytes of that batch's
+#: ``prompt`` (``validation.PROMPT_SIDECAR_TEMPLATE``'s rule; ``.txt``, so the
+#: ``*.json`` reaggregation globs never read it). Live run 8, Claude Code
+#: racing 01: with no ``prompt_path`` on the batches the host wrote each prompt
+#: to a temp file of its own, outside the repository, to hand its subagents
+#: a file.
+CONSOLIDATION_PROMPT_TEMPLATE = "consolidation_batch_{index}.prompt.txt"
+
 # Character budget for combined suggestion content per batch (themes +
 # descriptions). Batches exceeding this limit are split further.
 CONSOLIDATION_CHAR_BUDGET = 12000
@@ -572,6 +580,10 @@ def prepare_consolidation_tasks(
                 output_name=output_name,
                 inputs=inputs,
                 output_path=str(output_path),
+                prompt_path=str(
+                    phase_path / CONSOLIDATION_PROMPT_TEMPLATE.format(index=batch_counter)
+                ),
+                prompt_lines=prompt.count("\n") + 1,
                 extra={
                     "batch_index": batch_counter,
                     "section_key": section_key,
@@ -583,6 +595,17 @@ def prepare_consolidation_tasks(
                 },
             ))
             batch_counter += 1
+
+    # The prompt files a native host hands its subagents, written beside the
+    # batches (validation's sidecar rule: all or none, `prompt` stays the source).
+    try:
+        from .validation import write_prompt_sidecars
+    except ImportError:  # pragma: no cover - direct script runs
+        from utils.validation import write_prompt_sidecars  # type: ignore
+    write_prompt_sidecars(
+        batches, str(phase_path),
+        stale_glob=CONSOLIDATION_PROMPT_TEMPLATE.format(index="*"),
+    )
 
     # Build the tasks metadata
     tasks_metadata: Dict[str, Any] = make_task_file(
@@ -1998,6 +2021,34 @@ def _compute_file_hash(file_path: str) -> str:
         return hashlib.sha256(content.encode("utf-8")).hexdigest()
     except (FileNotFoundError, OSError, UnicodeDecodeError):
         return ""
+
+
+def consolidation_is_current(phase_dir: str) -> bool:
+    """Whether ``consolidated.json`` in *phase_dir* was built from today's
+    ``grouped.json``: the consolidation already ran on these groups.
+
+    The staleness rule :func:`load_merged_suggestions` applies, read the
+    same way: the file's ``metadata.grouped_hash`` against the hash of the
+    ``grouped.json`` beside it. A minimal-reduction pass
+    (``skipped_report``) counts too: it ran, and found little to merge.
+    ``False`` when the file is missing, unreadable, carries no hash, or the
+    groups changed since (a later review round rewrote ``grouped.json``).
+
+    Live run 8 (Claude Code racing 01): ``status`` and its result line still
+    said "consolidation recommended: 17 valid groups >= 15 — run
+    --consolidate" after the same run had consolidated them, so every
+    reader of the recommendation asks this first.
+    """
+    path = Path(phase_dir) / "consolidated.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    metadata = data.get("metadata") if isinstance(data, dict) else None
+    stored = metadata.get("grouped_hash") if isinstance(metadata, dict) else None
+    if not isinstance(stored, str) or not stored:
+        return False
+    return stored == _compute_file_hash(str(Path(phase_dir) / "grouped.json"))
 
 
 # ---------------------------------------------------------------------------

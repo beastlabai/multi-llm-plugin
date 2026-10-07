@@ -593,6 +593,7 @@ def _workflow_trailer_lines(
     # no trailer at all, so a finished plan with two manual playthroughs still
     # owed read as done (2026-10-04, OpenCode racing re-run).
     manual = (payload.get("phases", {}).get("implement") or {}).get("manual_tasks")
+    manual_line: Optional[str] = None
     if isinstance(manual, list) and manual:
         from .next_phase import ManualTask
 
@@ -607,7 +608,10 @@ def _workflow_trailer_lines(
             if isinstance(entry, dict) and entry.get("id")
         )
         if named:
-            lines.append(
+            # Appended last, below: its note ends with the command that
+            # records the tasks done, and a joined `notice` must not run on
+            # past it (live run 8, Codex racing 08 fenced the text after it).
+            manual_line = (
                 f"{prefix}manual tasks left for you: {named}"
                 + (f". {close_note}" if close_note else "")
             )
@@ -656,6 +660,8 @@ def _workflow_trailer_lines(
                 f"{prefix}a task's own report says a check it ran fails (see "
                 f"implement/summary.md): {named}"
             )
+    if manual_line:
+        lines.append(manual_line)
     return lines
 
 
@@ -2062,8 +2068,25 @@ def state_implement_view(
         state.is_phase_completed("code-review") or state.is_phase_skipped("code-review")
     )
     tally_buckets, _waits = _implement_buckets(state)
+    # Fix round 20 (live run 8, Claude Code stop): the workflow view's own
+    # test for an implement a `--resume` continues (`get_workflow_status`:
+    # started on the host, or a task of its decomposition recorded done).
+    resumable = not completed and (
+        state.is_phase_started(_IMPLEMENT_PHASE)
+        or any(statuses.get(str(t)) == "completed" for t in decomposition)
+    )
+    stop_answers: List[Dict[str, Any]] = []
+    if resumable:
+        from .write_batch_scheduler import native_stop_answers
+
+        stop_answers = native_stop_answers(record)
     return {
         "completed": completed,
+        # Fix round 20: whether `--implement <plan> --resume` continues it,
+        # and the `--human-task` answers its stop waits for, as the native
+        # `util next-command` gives them (`{flags, why}`, `--resume` first).
+        "resumable": resumable,
+        "stop_answers": stop_answers,
         # Fix round 18 (Claude Code racing 06, mid-run): when the host's loop
         # is between `util metrics start` and `finish`.
         "in_progress_since": None if completed else _host_run_started_at(
@@ -2168,20 +2191,62 @@ def _native_resume_line(resume: Optional[str]) -> List[str]:
 
 def native_resume_command(
     mode: str, plan_path: Path, spell: Optional["Speller"] = None,
+    flags: Sequence[str] = (),
 ) -> str:
     """``--<mode> <plan> --resume`` in the host's spelling (:func:`user_speller`),
     else the dispatcher's: the way on for a native phase whose loop ended
-    without its finish."""
+    without its finish, or that stopped. *flags* replace the bare verb with a
+    whole answer (``--resume --human-task T005=skip``, fix round 20)."""
+    tokens = [str(flag) for flag in flags] or [_RESUME_VERB_BY_MODE.get(mode, "--resume")]
     if spell is not None:
-        spelled = spell(mode, [], [_RESUME_VERB_BY_MODE.get(mode, "--resume")])
+        spelled = spell(mode, [], tokens)
         if spelled:
             return spelled
-    return cli_common.retry_command(
-        mode, str(plan_path), _RESUME_VERB_BY_MODE.get(mode, "--resume"))
+    return cli_common.retry_command(mode, str(plan_path), *tokens)
+
+
+def native_stop_answer_commands(
+    view: Mapping[str, Any], plan_path: Path, spell: Optional["Speller"] = None,
+) -> List[Tuple[str, str]]:
+    """``(command, why)`` for each answer *view*'s stop waits for
+    (``stop_answers``), spelled as :func:`native_resume_command` spells the
+    resume beside them."""
+    out: List[Tuple[str, str]] = []
+    for entry in view.get("stop_answers") or []:
+        flags = entry.get("flags") if isinstance(entry, Mapping) else None
+        why = entry.get("why") if isinstance(entry, Mapping) else None
+        if not isinstance(flags, list) or not flags or not why:
+            continue
+        out.append((native_resume_command(
+            _IMPLEMENT_PHASE, plan_path, spell, flags=flags), str(why)))
+    return out
+
+
+def _native_stop_lines(
+    resume: Optional[str], answers: Sequence[Tuple[str, str]] = (),
+) -> List[str]:
+    """The way on from a native phase that stopped (fix round 20).
+
+    Live run 8 (Claude Code stop path): a native implement the host closed
+    without ``--mark-completed`` read "not finished on the host" with no
+    command at all, where the tool routes' view says ``resume with:``; round
+    19 had added a way on only to the "in progress on the host" head. The
+    ``resume with:`` line, then each answer the stop waits for, in the words
+    and order ``util next-command`` gives them on that leg and the tool
+    routes' ``resume_answers`` on theirs.
+    """
+    if not resume:
+        return []
+    lines = [f"      resume with: {resume}"]
+    for command, why in answers:
+        lines.append(f"      or answer the stop with: {command}")
+        lines.append(f"        ({why})")
+    return lines
 
 
 def render_state_implement_lines(
     view: Dict[str, Any], *, resume: Optional[str] = None,
+    answers: Sequence[Tuple[str, str]] = (),
 ) -> List[str]:
     """:func:`state_implement_view` as the run view's text: one block.
 
@@ -2189,7 +2254,10 @@ def render_state_implement_lines(
     ``all tasks:``, in the executor routes' words (:func:`implement_tally_text`),
     and its head says whether the host's run is in progress. Fix round 19:
     an in-progress head says when state.json last changed and, with
-    *resume* (:func:`native_resume_command`), what it may also mean.
+    *resume* (:func:`native_resume_command`), what it may also mean. Fix
+    round 20: a "not finished" one that a ``--resume`` continues
+    (``resumable``) ends with *resume* and each of *answers*
+    (:func:`native_stop_answer_commands`), :func:`_native_stop_lines`.
     """
     since = view.get("in_progress_since")
     lines = [_native_head(
@@ -2219,6 +2287,8 @@ def render_state_implement_lines(
             + ", ".join(f"--human-task {task_id}={action}"
                         for task_id, action in sorted(view["answers"].items()))
         )
+    if not since and view.get("resumable"):
+        lines += _native_stop_lines(resume, answers)
     return lines
 
 
@@ -2313,8 +2383,32 @@ def state_apply_views(
             total = progress.get("total_batches")
             if isinstance(total, int) and not isinstance(total, bool) and total > 0:
                 entry["batches_total"] = total
+        if phase == "apply-code-fixes":
+            # Fix round 20: the batches whose own check failed after their
+            # edits, as `util batch-done` recorded them, named as the native
+            # implement view names its tasks'.
+            checks = _native_apply_batch_checks(record, directory)
+            if checks:
+                entry["batch_checks"] = checks
         out.append(entry)
     return out
+
+
+def _native_apply_batch_checks(record: Dict[str, Any], directory: Path) -> List[Dict[str, Any]]:
+    """``[{id, findings}]`` for the native apply-code-fixes batches whose own
+    check failed (``known_checks.earlier_batch_check_failures`` over the
+    phase's ``write_tasks.json``); ``[]`` when either cannot be read."""
+    try:
+        from .known_checks import earlier_batch_check_failures
+
+        document = json.loads((directory / _WRITE_TASKS).read_text(encoding="utf-8"))
+        tasks = document.get("batches") or document.get("tasks") or []
+        return [
+            {"id": task_id, "findings": findings}
+            for task_id, findings in earlier_batch_check_failures(record, tasks, "")
+        ]
+    except Exception:  # noqa: BLE001 - advisory
+        return []
 
 
 def render_state_apply_lines(
@@ -2330,8 +2424,17 @@ def render_state_apply_lines(
     recorded, total = view.get("batches_recorded"), view.get("batches_total")
     if isinstance(recorded, int) and isinstance(total, int):
         lines.append(f"      batches:        {recorded}/{total} recorded by this run")
+    for entry in view.get("batch_checks") or []:
+        findings = entry.get("findings") or []
+        lines.append(
+            f"      own check fails {entry['id']}: {'; '.join(findings)[:300]}"
+        )
     if since:
         lines += _native_resume_line(resume)
+    elif not view.get("completed"):
+        # Fix round 20: listed unfinished only while the workflow shows it
+        # `in_progress` (`state_apply_views`), which a `--resume` continues.
+        lines += _native_stop_lines(resume)
     return lines
 
 
@@ -2356,7 +2459,9 @@ def _id_list(value: Any) -> List[str]:
 _TALLY_LABELS: Tuple[Tuple[str, str], ...] = (
     ("completed", "completed"),
     ("check_findings", "completed, its check reported problems"),
-    ("accepted_findings", "accepted with their check findings"),
+    # Fix round 20 (run 8 #6): in the words of the `resume: kept` line and
+    # the progress line's kept note (`answered_done_label`).
+    ("accepted_findings", "accepted with its check findings"),
     ("accepted_failed", "accepted after failing"),
     ("completed_manual", "completed by hand"),
     ("failed", "failed"),
@@ -2374,7 +2479,7 @@ _VIEW_MERGE: Dict[str, str] = {
 }
 _VIEW_LABELS: Tuple[Tuple[str, str], ...] = (
     ("completed", "completed"),
-    ("accepted", "accepted with their check findings or after failing"),
+    ("accepted", "accepted with its check findings or after failing"),
     ("completed_manual", "completed by hand"),
     ("failed", "failed"),
     ("declined", "skipped at your request"),
@@ -2421,7 +2526,7 @@ def implement_task_tally(plan_path: Path) -> Optional[Dict[str, Any]]:
 
 def implement_tally_text(tally: Dict[str, Any], *, live: bool = False) -> str:
     """:func:`implement_task_tally` as one clause list: ``5/7 done;
-    completed: …; accepted with their check findings: …``. A task not run
+    completed: …; accepted with its check findings: …``. A task not run
     yet reads "pending" while the run is *live*, "not run" once it ended."""
     parts = [f"{tally['done']}/{tally['total']} done"] + _bucket_clauses(
         tally["buckets"], tally.get("waits_on") or {}, _TALLY_LABELS, live=live,
@@ -2451,6 +2556,41 @@ def _is_executor_implement_view(view: Dict[str, Any]) -> bool:
     return isinstance(progress.get("write_subagents"), dict)
 
 
+def _kept_labels(mirror: Mapping[str, Any], kept: Sequence[str]) -> Dict[str, str]:
+    """What each task a write mirror kept is, in the ``resume: kept`` line's
+    words (fix round 20): a check whose findings stand (its row carries
+    them) and an accepted task (``accepted_task_ids``, a check apart from a
+    failed task). Plain kept tasks carry no label."""
+    from .write_batch_scheduler import (
+        ACCEPTED_AFTER_FAILING_LABEL,
+        ACCEPTED_WITH_FINDINGS_LABEL,
+        KEPT_WITH_FINDINGS_LABEL,
+    )
+
+    kept_ids = {str(t) for t in kept}
+    labels = {
+        str(row.get("task_id")): KEPT_WITH_FINDINGS_LABEL
+        for row in (mirror.get("tasks") or [])
+        if isinstance(row, dict) and str(row.get("task_id")) in kept_ids
+        and isinstance(row.get("check_findings"), list) and row["check_findings"]
+    }
+    with_findings = set(_id_list(mirror.get("accepted_with_findings_task_ids")))
+    for task_id in _id_list(mirror.get("accepted_task_ids")):
+        labels[task_id] = (
+            ACCEPTED_WITH_FINDINGS_LABEL if task_id in with_findings
+            else ACCEPTED_AFTER_FAILING_LABEL
+        )
+    return labels
+
+
+def _kept_text(kept: Sequence[str], labels: Mapping[str, str]) -> str:
+    """The kept note's list: ``write_batch_scheduler.kept_named``, at most
+    five plain ids as before."""
+    from .write_batch_scheduler import kept_named
+
+    return kept_named(kept, labels, limit=5)
+
+
 def _mirror_text(key: str, mirror: Any) -> List[str]:
     """One clause per executor mirror: ``<kind> <ok>/<total> ok`` and, when any
     task did not end ``ok``, the non-ok statuses and the failed ids."""
@@ -2468,6 +2608,12 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     ok = mirror.get("ok")
     if not isinstance(ok, int):
         ok = counts.get("ok", 0) if isinstance(counts.get("ok"), int) else 0
+    accepted = mirror.get("accepted_task_ids") if isinstance(mirror.get("accepted_task_ids"), list) else []
+    # Fix round 20 (run 8 #6): an implement run's accepted tasks were kept
+    # from an earlier run, not dispatched, so they are named in the kept note
+    # ("T002 (accepted with its check findings)"), not in a clause of their
+    # own; OpenCode accept 02 read "accepted with their check findings T002".
+    folded = [str(t) for t in accepted if t] if kind == "implement" else []
     items_total = mirror.get("items_total")
     items_applied = mirror.get("items_applied")
     if isinstance(items_total, int) and isinstance(items_applied, int):
@@ -2481,11 +2627,15 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
             str(task_id) for task_id in (mirror.get("kept_task_ids") or [])
             if task_id
         ] if isinstance(mirror.get("kept_task_ids"), list) else []
+        kept_labels = _kept_labels(mirror, kept) if kept or folded else {}
+        kept += [task_id for task_id in folded if task_id not in kept]
         # Fix round 18 (run 7 #3): a resume that dispatched nothing read
         # "1/4 batches ok", the one being a check an earlier run finished.
+        # Fix round 20 (run 8 #6): each kept task is named with what it is,
+        # in the `resume: kept` line's words, an accepted one included.
         kept_note = (
             f" ({len(kept)} kept from an earlier run: "
-            f"{', '.join(kept[:5])}{', …' if len(kept) > 5 else ''})"
+            f"{_kept_text(kept, kept_labels)})"
             if kept else ""
         )
         parts = [
@@ -2598,15 +2748,20 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
         parts.append(
             f"not run (upstream check {check_id} reported problems) {', '.join(waiting)}"
         )
-    accepted = mirror.get("accepted_task_ids") if isinstance(mirror.get("accepted_task_ids"), list) else []
     # Fix round 16 (Codex stop-path accept 02): a check accepted with its
     # findings read "accepted after failing T002"; the mirror names those
-    # apart (a mirror without the key reads as before).
+    # apart (a mirror without the key reads as before). An implement mirror
+    # names them in the kept note instead (fix round 20).
     with_findings = set(_id_list(mirror.get("accepted_with_findings_task_ids")))
-    accepted_checks = [str(t) for t in accepted if str(t) in with_findings]
-    accepted_failed = [str(t) for t in accepted if str(t) not in with_findings]
+    shown = set(folded) if isinstance(items_total, int) and isinstance(items_applied, int) else set()
+    accepted_checks = [
+        str(t) for t in accepted if str(t) in with_findings and str(t) not in shown
+    ]
+    accepted_failed = [
+        str(t) for t in accepted if str(t) not in with_findings and str(t) not in shown
+    ]
     if accepted_checks:
-        parts.append(f"accepted with their check findings {', '.join(accepted_checks)}")
+        parts.append(f"accepted with its check findings {', '.join(accepted_checks)}")
     if accepted_failed:
         parts.append(f"accepted after failing {', '.join(accepted_failed)}")
     # F9: `skipped_task_ids`/`human_task_strategy` (resolved before dispatch,
@@ -3667,7 +3822,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if implement_tasks is not None:
             native.append((_IMPLEMENT_PHASE, render_state_implement_lines(
                 implement_tasks,
-                resume=native_resume_command(_IMPLEMENT_PHASE, plan_path, spell))))
+                resume=native_resume_command(_IMPLEMENT_PHASE, plan_path, spell),
+                answers=native_stop_answer_commands(implement_tasks, plan_path, spell))))
         for _phase, block in sorted(
                 native, key=lambda item: NATIVE_PHASE_ORDER.index(item[0])):
             lines += block

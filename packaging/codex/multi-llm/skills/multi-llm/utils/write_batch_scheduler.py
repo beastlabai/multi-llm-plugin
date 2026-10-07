@@ -50,6 +50,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import git_utils as _git_utils
+    from . import known_checks as _known_checks
     from . import landlock_dispatch as _landlock
     from . import prompt_files as _prompt_files
     from . import prior_changes as _prior_changes
@@ -135,6 +136,8 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from .write_phase_bridge import WRITE_TASK_FILENAME
     from .write_safety import (
         PRE_BATCH_DIRNAME,
+        policy_allow_clause,
+        policy_skip_clause,
         DRY_RUN_FILENAME,
         MAX_SNAPSHOT_BYTES,
         AuditLog,
@@ -153,6 +156,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     )
 except ImportError:  # pragma: no cover - direct-script import shim
     from utils import git_utils as _git_utils
+    from utils import known_checks as _known_checks
     from utils import landlock_dispatch as _landlock
     from utils import prompt_files as _prompt_files
     from utils import prior_changes as _prior_changes
@@ -238,6 +242,8 @@ except ImportError:  # pragma: no cover - direct-script import shim
     from utils.write_phase_bridge import WRITE_TASK_FILENAME
     from utils.write_safety import (
         PRE_BATCH_DIRNAME,
+        policy_allow_clause,
+        policy_skip_clause,
         DRY_RUN_FILENAME,
         MAX_SNAPSHOT_BYTES,
         AuditLog,
@@ -295,6 +301,7 @@ __all__ = [
     "quoted_findings",
     "unverified_line",
     "native_stop_unverified_line",
+    "native_apply_fixes_unverified_line",
     "write_result_notice",
     "verification_line",
     "verify_command_candidate",
@@ -905,6 +912,38 @@ ACCEPTED_WITH_FINDINGS_MARK = "after its check reported problems"
 COMPLETED_MANUAL_REASON = "answered --human-task <id>=done"
 
 
+#: How a check the user accepted with its findings (``--human-task <id>=done``)
+#: and a failed task the user accepted read in a kept list, summary.md's rows
+#: and ``status``'s tally (:func:`answered_done_label`; fix round 20: one
+#: spelling on every surface).
+ACCEPTED_WITH_FINDINGS_LABEL = "accepted with its check findings"
+ACCEPTED_AFTER_FAILING_LABEL = "accepted after failing"
+
+#: How a check kept from an earlier run with its findings standing reads in a
+#: kept list (fix round 20, live run 8 #6: the stop fixture's 01b and 01c
+#: named T002 kept beside T001, T003 and T004 as if it had passed). True
+#: where the run is still to decide (a continued run's opening line: it runs
+#: again once the files changed) and once it decided (the closing ``resume:
+#: kept`` line). An accepted check reads :func:`answered_done_label`'s
+#: "accepted with its check findings" instead.
+KEPT_WITH_FINDINGS_LABEL = (
+    "its check reported problems, not run again while the files are unchanged"
+)
+
+
+def kept_named(ids: Sequence[str], labels: Mapping[str, str], *, limit: int = 8) -> str:
+    """Kept tasks as every kept list names them: the plain ones first (at
+    most *limit*, then ``…``), then each labelled one as ``<id> (<label>)``
+    — the ``resume: kept`` lines of both legs and the progress line's
+    ``(<n> kept from an earlier run: …)`` (fix round 20)."""
+    plain = [str(t) for t in ids if str(t) not in labels]
+    shown = ", ".join(plain[:limit]) + (", …" if len(plain) > limit else "")
+    labelled = ", ".join(
+        f"{t} ({labels[str(t)]})" for t in ids if str(t) in labels
+    )
+    return ", ".join(part for part in (shown, labelled) if part)
+
+
 def answered_done_label(plan: Any, task_id: str) -> str:
     """How a task answered ``--human-task <id>=done`` reads in an account:
     "accepted with its check findings" (a check whose findings the user
@@ -914,9 +953,9 @@ def answered_done_label(plan: Any, task_id: str) -> str:
     accepted = getattr(plan, "accepted", None) or {}
     if task_id in accepted:
         return (
-            "accepted with its check findings"
+            ACCEPTED_WITH_FINDINGS_LABEL
             if ACCEPTED_WITH_FINDINGS_MARK in str(accepted.get(task_id) or "")
-            else "accepted after failing"
+            else ACCEPTED_AFTER_FAILING_LABEL
         )
     return "completed by hand"
 
@@ -1417,6 +1456,203 @@ def blocked_by_check_reason(check_id: str) -> str:
     )
 
 
+@dataclass(frozen=True)
+class FailedAnswerable:
+    """A failed implement task a stop's ``--human-task`` answers can answer
+    (:func:`compose_stop_answers`): ``unlanded`` when its reply said applied
+    and nothing it declares changed (fix round 15), ``not_rerun`` when a
+    resume kept a failed check from running again on unchanged files."""
+
+    task_id: str
+    unlanded: bool = False
+    not_rerun: bool = False
+
+
+def compose_stop_answers(
+    *,
+    refused: Sequence[str],
+    failed: Sequence[FailedAnswerable],
+    checks: Sequence[str],
+    blocked: Mapping[str, str],
+    findings: Mapping[str, Sequence[str]],
+    undone_with: Callable[[str], List[str]],
+) -> List[Dict[str, Any]]:
+    """A stopped implement's ``--human-task`` answers, as data, on both legs.
+
+    ``[{"flags": ["--resume", …], "why": …}]`` in the order a user weighs
+    them: the one combined command that goes on without fixing anything
+    (when more than one task needs an answer), then each task's own answers
+    — a task *refused* before dispatch (``skip``, ``done``), each *failed*
+    one (``done``, ``skip``, ``retry`` when it was not run again; ``skip``
+    then ``done`` when its change never landed) and each of *checks* whose
+    findings hold tasks back (``done``, ``skip``, ``retry``). *blocked* maps
+    each held task to its check, *findings* each check to what it reported,
+    and *undone_with* names the tasks a ``skip`` leaves undone with a task.
+
+    The executor's stop (:meth:`WriteBatchScheduler._stop_answers`) and the
+    native leg's (:func:`native_stop_answers`, fix round 20) both answer
+    through this, so each answer and its why read the same on every host:
+    on live run 8 the native block offered only the combined command while
+    the tool routes listed six, and the Claude Code host described a
+    T005-only answer the plugin never printed.
+    """
+
+    def answer(task_id: str, word: str) -> List[str]:
+        return ["--human-task", f"{task_id}={word}"]
+
+    def skipped_clause(task_id: str) -> str:
+        deps = undone_with(task_id)
+        return f"leave {task_id} undone" + (
+            f", with the tasks that depend on it ({', '.join(deps)})" if deps else ""
+        )
+
+    def made_by_hand(task_id: str) -> Dict[str, Any]:
+        return {
+            "flags": answer(task_id, "done"),
+            "why": (f"once you have made {task_id}'s change yourself: "
+                    f"{task_id} counts as done and the tasks after it run"),
+        }
+
+    each: List[Dict[str, Any]] = []
+    for task_id in refused:
+        each.append({"flags": answer(task_id, "skip"),
+                     "why": skipped_clause(task_id)})
+        each.append(made_by_hand(task_id))
+    for item in failed:
+        task_id = item.task_id
+        if item.unlanded:
+            # Fix round 15 (review R1): its change did not land, so there is
+            # no failure to accept — going on without it comes first, and
+            # `done` is for a change the user made by hand, as the stop
+            # message says.
+            each.append({"flags": answer(task_id, "skip"),
+                         "why": skipped_clause(task_id)})
+            each.append(made_by_hand(task_id))
+            continue
+        each.append({
+            "flags": answer(task_id, "done"),
+            "why": (f"accept {task_id}'s failure: {task_id} counts as done "
+                    "and the tasks after it run"),
+        })
+        each.append({"flags": answer(task_id, "skip"),
+                     "why": skipped_clause(task_id)})
+        if item.not_rerun:
+            each.append({
+                "flags": answer(task_id, "retry"),
+                "why": f"run {task_id}'s check again on unchanged files",
+            })
+    for check_id in checks:
+        waiting = sorted(t for t, c in blocked.items() if c == check_id)
+        reported = list(findings.get(check_id) or [])
+        each.append({
+            "flags": answer(check_id, "done"),
+            "why": (f"accept {check_id}'s check findings: "
+                    f"{', '.join(waiting)} then run, told that you accepted "
+                    "the findings, and the findings stay listed for "
+                    "review-code"
+                    + (f" ({'; '.join(reported)[:200]})" if reported else "")),
+        })
+        each.append({
+            "flags": answer(check_id, "skip"),
+            "why": f"leave {check_id} and {', '.join(waiting)} undone",
+        })
+        each.append({
+            "flags": answer(check_id, "retry"),
+            "why": f"run {check_id}'s check again on unchanged files",
+        })
+    # One command that goes on without fixing anything: every check with
+    # findings accepted, every refused or failed task left undone.
+    combined_flags: List[str] = []
+    clauses: List[str] = []
+    for check_id in checks:
+        combined_flags += answer(check_id, "done")
+        clauses.append(f"accept {check_id}'s check findings")
+    for task_id in [*refused, *(item.task_id for item in failed)]:
+        combined_flags += answer(task_id, "skip")
+        clauses.append(skipped_clause(task_id))
+    answers: List[Dict[str, Any]] = []
+    if len(clauses) > 1:
+        answers.append({
+            "flags": ["--resume", *combined_flags],
+            "why": " and ".join(clauses) + "; the rest runs",
+        })
+    answers.extend(
+        {"flags": ["--resume", *item["flags"]], "why": item["why"]}
+        for item in each
+    )
+    return answers
+
+
+#: How the native emit opens the reason it records for a task the write
+#: policy refuses (``implement_orchestrator``'s ``refused`` map).
+NATIVE_REFUSED_PREFIX = "refused before dispatch: "
+
+
+def native_stop_answers(state: Any) -> List[Dict[str, Any]]:
+    """:func:`compose_stop_answers` for a stopped native implement, read from
+    ``state.json`` as recorded (a ``StateManager`` or the file's dict).
+
+    The native leg leaves no stop record: the answers are what the record
+    shows waiting for one — each task of the decomposition implement ran
+    last (``implement_task_ids``) recorded ``failed`` (one the emit refused
+    before dispatch, :data:`NATIVE_REFUSED_PREFIX`, answered as the executor
+    answers a refusal), and each check whose findings hold tasks back
+    (:func:`held_back_by_checks`). A ``skip`` leaves undone the tasks that
+    depend on its task and have not run (not a manual one). ``[]`` when none
+    waits, or when the record cannot be read.
+    """
+    if state is None or not hasattr(state, "get"):
+        return []
+    try:
+        statuses = dict(state.get("task_status") or {})
+        reasons = dict(state.get("task_status_reasons") or {})
+        scope = state.get("implement_task_ids")
+        human = {str(t) for t in (state.get("implement_human_task_ids") or [])}
+        recorded = state.get("task_check_findings") or {}
+    except Exception:  # noqa: BLE001 - an advisory read, never fatal
+        return []
+    failed_ids = sorted(
+        str(task_id) for task_id, status in statuses.items()
+        if status == "failed" and _IMPLEMENT_TASK_ID.match(str(task_id))
+        and (not isinstance(scope, list) or task_id in scope)
+    )
+    held = held_back_by_checks([], state)
+    blocked = {task_id: check_id for task_id, check_id in held}
+    checks = sorted(set(blocked.values()))
+    if not failed_ids and not checks:
+        return []
+    graph = decomposition_graph([], state)
+    manual = human | {
+        str(node.get("task_id", "")) for node in graph
+        if node.get("executor_role") == "human" or node.get("is_human")
+    }
+
+    def undone_with(task_id: str) -> List[str]:
+        return [
+            dep for dep in transitive_dependents(graph, task_id)
+            if dep not in manual
+            and statuses.get(dep) not in ("completed", "skipped")
+            and (not isinstance(scope, list) or dep in scope)
+        ]
+
+    refused = [
+        task_id for task_id in failed_ids
+        if str(reasons.get(task_id) or "").startswith(NATIVE_REFUSED_PREFIX)
+    ]
+    return compose_stop_answers(
+        refused=refused,
+        failed=[FailedAnswerable(task_id) for task_id in failed_ids
+                if task_id not in refused],
+        checks=checks,
+        blocked=blocked,
+        findings={
+            check_id: [str(f) for f in (recorded.get(check_id) or [])]
+            for check_id in checks
+        } if isinstance(recorded, dict) else {},
+        undone_with=undone_with,
+    )
+
+
 def _accounting_line(account: Dict[str, Any]) -> str:
     """``N tasks in this decomposition: a done, b failed (…), …`` — every
     bucket, named, adding up to the total."""
@@ -1604,6 +1840,56 @@ def native_stop_unverified_line(plan_path: Union[str, Path]) -> Optional[str]:
             root = None
         return unverified_line(root)
     except Exception:  # noqa: BLE001 - advisory: never fails the lookup
+        return None
+
+
+def native_apply_fixes_unverified_line(plan_path: Union[str, Path]) -> Optional[str]:
+    """The :func:`unverified_line` a finished native apply-code-fixes owes,
+    with what its batches reported about the known checks, or ``None``.
+
+    Fix round 20 (live run 8, Codex racing 08): the executor's line also
+    names the checks the batches were asked to run and what each batch
+    reported (:func:`known_checks.checks_tally`); on the native leg the host
+    wrote its own "nothing ran the tests" line from the instructions.
+    ``apply-code-fixes --mark-completed`` prints this one as
+    ``[TESTS_NOT_RUN]``. Owed when no ``driver.verify_command`` is set and a
+    batch of the phase's ``write_tasks.json`` is recorded ``completed`` (the
+    native leg keeps no audit log, so a completed batch counts as an edit).
+    Never fatal: any read that fails answers ``None``.
+    """
+    try:
+        plan = Path(plan_path).resolve()
+        try:
+            from .output_handler import output_dir_path
+        except ImportError:  # pragma: no cover - direct script invocation
+            from utils.output_handler import output_dir_path  # type: ignore
+        out = output_dir_path(plan)
+        if get_verify_command(anchor=str(plan)):
+            return None
+        document = json.loads(
+            (out / "apply-fixes" / WRITE_TASK_FILENAME).read_text(encoding="utf-8")
+        )
+        tasks = [
+            task for task in (document.get("batches") or document.get("tasks") or [])
+            if isinstance(task, dict)
+        ]
+        state = _known_checks.read_state(out)
+        statuses = state.get("task_status") or {}
+        if not any(statuses.get(str(task.get("task_id"))) == "completed" for task in tasks):
+            return None
+        try:
+            root = resolve_repo_root(str(plan))
+        except Exception:  # noqa: BLE001 - the line still stands without a candidate
+            root = None
+        line = unverified_line(root)
+        tally = _known_checks.checks_tally(
+            _known_checks.known_check_commands(
+                out, plan_file=str(plan), repo_root=root, state=state,
+            ),
+            state, tasks,
+        )
+        return f"{line} {tally}" if tally else line
+    except Exception:  # noqa: BLE001 - advisory
         return None
 
 
@@ -2195,7 +2481,11 @@ def bind_prior_changes(
             f"prompts/implementation_task.txt). Nothing was dispatched.",
             STATUS_REJECTED,
         )
-    context = _prior_changes.render(output_dir, phase=phase)
+    # An entry the prompt already quotes word for word (apply-code-fixes'
+    # `## Implementation record`) is counted, not shown a second time.
+    context = _prior_changes.render(
+        output_dir, phase=phase, quoted=_prior_changes.quoted_in(prompt, output_dir),
+    )
     note = accepted_checks_section(accepted_checks)
     if note:
         context = f"{context.rstrip()}\n\n{note.rstrip()}"
@@ -2233,7 +2523,9 @@ def dispatched_prompt_path(
     )
 
 
-def with_result_contract(kind: str, task: Dict[str, Any], prompt: str) -> str:
+def with_result_contract(
+    kind: str, task: Dict[str, Any], prompt: str, *, checks_section: str = "",
+) -> str:
     """Append the write-batch result contract the classification reads.
 
     The batchers' prompts end in the prose "Return Format" the native
@@ -2258,6 +2550,11 @@ def with_result_contract(kind: str, task: Dict[str, Any], prompt: str) -> str:
     subagent's closing JSON object carries the ``summary`` the prior-changes
     append wants and the ``status``/``files_touched`` the host's verification
     step reads.
+
+    *checks_section* (fix round 20, :func:`known_checks.known_checks_section`):
+    an apply-code-fixes batch's list of the repository's known check
+    commands, bound at dispatch on both legs, after the code batch's
+    ``## Checks you ran``, whose ``check`` object it extends with ``listed``.
     """
     expected = [str(i) for i in (task.get("expected_ids") or [])]
     declining = kind in APPLY_WRITE_KINDS
@@ -2345,7 +2642,7 @@ def with_result_contract(kind: str, task: Dict[str, Any], prompt: str) -> str:
         "nothing needed changing.\n"
         + (CHECK_RESULT_CONTRACT if is_check_task(kind, task) else "")
         + (
-            WRITE_CHECK_CONTRACT
+            WRITE_CHECK_CONTRACT + (checks_section or "")
             if kind in CODE_WRITE_KINDS and not is_check_task(kind, task) else ""
         )
     )
@@ -2642,8 +2939,19 @@ class WriteBatchScheduler:
         #: repeated the same ordinal for every member of such a batch, so a
         #: parallelizable plan could never reach `N/N` or print
         #: `ALL BATCHES COMPLETE`. Read and incremented under `_effects_lock`
-        #: because a disjoint group finishes on several threads.
-        self._tasks_finished = 0
+        #: because a disjoint group finishes on several threads. A set of
+        #: task ids since fix round 20: the numerator is the finished tasks
+        #: the total counts (:meth:`_eta_progress`).
+        self._eta_finished: set = set()
+        #: Implement only: the tasks this run will dispatch, from the walk
+        #: the `Organized into …` line prints (:meth:`_dispatch_walk`, fix
+        #: round 20, live run 8 #1: the first run's `[ETA]` total still
+        #: counted T005, refused before dispatch, and T006 after it, so the
+        #: lines read 1/7 … 4/6 under "5 task(s) to dispatch"). `None`: no
+        #: walk (an apply phase), and the total counts every task.
+        self._eta_scope: Optional[set] = None
+        #: Whether this run stamped an `[ETA]` baseline (`_metrics_start`).
+        self._eta_started = False
         #: Task ids for which a terminal (`completed`) audit line has been
         #: written, so `_audit_terminal` can close out a dispatch that never
         #: reached `_classify` without ever double-recording one that did.
@@ -2767,6 +3075,9 @@ class WriteBatchScheduler:
         #: policy, the grant, the snapshot or the census refused them), so
         #: the stop says nothing was dispatched (fix round 13).
         self._refused_before_dispatch: set = set()
+        #: The paths ``driver.write_paths`` refused, per task refused for it
+        #: before dispatch: what its way forward names (fix round 20).
+        self._refused_policy_paths: Dict[str, List[str]] = {}
 
     # -- the write grant (plan step 3, 2026-09-30) ----------------------
 
@@ -3163,8 +3474,63 @@ class WriteBatchScheduler:
         )
 
     def _with_result_contract(self, task: Dict[str, Any], prompt: str) -> str:
-        """Append the write-batch result contract (:func:`with_result_contract`)."""
-        return with_result_contract(self.kind, task, prompt)
+        """Append the write-batch result contract (:func:`with_result_contract`),
+        with an apply-code-fixes batch's known checks (fix round 20)."""
+        return with_result_contract(
+            self.kind, task, prompt, checks_section=self._known_checks_section(task),
+        )
+
+    def _known_checks(self) -> List[Tuple[str, str]]:
+        """The repository's known check commands
+        (:func:`known_checks.known_check_commands`), read now from the state
+        this run holds (else the plan dir's ``state.json``), as ``util
+        write-prompt`` reads them on the native leg. Never run here."""
+        state = getattr(self, "state", None)
+        return _known_checks.known_check_commands(
+            self.output_dir, plan_file=getattr(self, "plan_file", None),
+            repo_root=getattr(self, "repo_root", None), state=state,
+        )
+
+    def _known_checks_tally(self) -> Optional[str]:
+        """What this phase's batches reported about the known checks they
+        were told to run (:func:`known_checks.checks_tally`), for the line
+        saying nothing ran the tests; ``None`` for every other kind, or with
+        no check known. Never fatal."""
+        if self.kind != "apply_code_fixes":
+            return None
+        try:
+            state = getattr(self, "state", None)
+            if state is None:
+                state = _known_checks.read_state(self.output_dir)
+            return _known_checks.checks_tally(
+                self._known_checks(), state, getattr(self, "tasks", None) or [],
+            )
+        except Exception:  # noqa: BLE001 - advisory
+            return None
+
+    def _known_checks_section(self, task: Dict[str, Any]) -> str:
+        """Fix round 20 (live run 8, Codex racing 08): an apply-code-fixes
+        batch is told the repository's known check commands, to run after its
+        edits, and which earlier batch of the run reported a failing check.
+        ``""`` for every other kind. The commands told to each batch are kept
+        (``_told_checks``), so its reply's ``listed`` is read against them."""
+        if self.kind != "apply_code_fixes":
+            return ""
+        task_id = str(task.get("task_id") or "")
+        try:
+            checks = self._known_checks()
+            state = getattr(self, "state", None)
+            earlier = _known_checks.earlier_batch_check_failures(
+                state if state is not None else _known_checks.read_state(self.output_dir),
+                getattr(self, "tasks", None) or [], task_id,
+            )
+        except Exception:  # noqa: BLE001 - advisory: the batch is still dispatched
+            checks, earlier = [], []
+        told = getattr(self, "_told_checks", None)
+        if told is None:
+            told = self._told_checks = {}
+        told[task_id] = [command for command, _where in checks]
+        return _known_checks.known_checks_section(checks, earlier)
 
     def _pinned_phase_dir(self) -> "_prompt_files.PhasePin":
         """The phase dir as pinned for the prompt files (fix round 17): its
@@ -3382,9 +3748,21 @@ class WriteBatchScheduler:
 
         kept_ids = [str(row.get("task_id")) for row in kept]
         dispatched_ids = [o.task_id for o in dispatched]
+        # Fix round 20 (live run 8 #6): a check kept with its findings
+        # standing says so, as an accepted one does — 01b read "T001, T002,
+        # T003, T004" as if T002 had passed.
+        with_findings = (
+            {o.task_id for o in result.outcomes if o.skipped and o.check_findings}
+            | set(rerunnable_checks(self.state))
+        ) if self.kind == "implement" else set()
+        plain_ids = [i for i in kept_ids if i not in with_findings]
         kept_named = ", ".join(
             part for part in (
-                named(kept_ids) + counted(kept_ids, kept) if kept_ids else "",
+                named(plain_ids) + counted(plain_ids, kept) if plain_ids else "",
+                ", ".join(
+                    f"{i} ({KEPT_WITH_FINDINGS_LABEL})"
+                    for i in kept_ids if i in with_findings
+                ),
                 ", ".join(answered_kept),
             ) if part
         )
@@ -3602,6 +3980,8 @@ class WriteBatchScheduler:
         # (fix round 18, run 7 #3): the orchestrator's line counted every
         # task a resume took up, so "4 task(s) to dispatch" preceded
         # "dispatched 0".
+        # Fix round 20 (live run 8 #1): the `[ETA]` total starts from the
+        # same walk, so the two never disagree.
         if self.kind == "implement":
             self.log(self._dispatch_preview(ordered, result))
 
@@ -3663,6 +4043,7 @@ class WriteBatchScheduler:
                 result.stopped_at_batch = batch_index
                 result.exit_code = int(exc.exit_code or EXIT_NEEDS_HUMAN)
                 self._record_stop(result, batch_index, [], refusal=exc.message)
+                self._eta_stop_line(result)
                 result.messages.extend(
                     self._check_findings_lines(result, stopped=True)
                 )
@@ -3702,6 +4083,9 @@ class WriteBatchScheduler:
                 self._record_stop(
                     result, batch_index, [o for o in outcomes if not o.ok],
                 )
+                # Fix round 20: a stop short of the total says so on the
+                # `[ETA]` lines, rather than leaving "~0m 37s remaining".
+                self._eta_stop_line(result)
                 stop_lines = self._stop_message(batch_index, outcomes, result)
                 # Fix round 16 (run 6, stop 01): set before the summary is
                 # written, so its Verification line says it too.
@@ -3771,7 +4155,27 @@ class WriteBatchScheduler:
         self, ordered: Sequence[Tuple[int, List[Dict[str, Any]]]],
         result: SchedulerResult,
     ) -> str:
-        """The ``Organized into …`` line for what this run will dispatch.
+        """The ``Organized into …`` line for what this run will dispatch
+        (:meth:`_dispatch_walk`), which also sets the ``[ETA]`` line's task
+        set (``_eta_scope``, fix round 20): the tasks the line counts. A walk
+        that fails counts every task, and the ``[ETA]`` total with it."""
+        walk = self._dispatch_walk(ordered, result)
+        if walk is None:
+            self._eta_scope = None
+            return dispatch_line(
+                len([1 for _i, b in ordered if b]),
+                sum(len(b) for _i, b in ordered),
+            )
+        batches, picked_ids, waiting = walk
+        self._eta_scope = set(picked_ids)
+        return dispatch_line(batches, len(picked_ids), waiting=waiting)
+
+    def _dispatch_walk(
+        self, ordered: Sequence[Tuple[int, List[Dict[str, Any]]]],
+        result: SchedulerResult,
+    ) -> Optional[Tuple[int, List[str], List[str]]]:
+        """``(batches, task ids, waiting ids)`` this run will dispatch, or
+        ``None`` when the walk fails.
 
         Fix round 18 (live run 7, Codex and OpenCode stop resumes): the line
         the orchestrator printed counted every task a resume took up, so
@@ -3810,7 +4214,7 @@ class WriteBatchScheduler:
         dispatched_checks: List[str] = []
         waiting: Dict[str, List[str]] = {}
         picked_batches = 0
-        picked = 0
+        picked_ids: List[str] = []
         edits_dispatched = False
         stopped = False
         quiet_log = self.log
@@ -3871,6 +4275,7 @@ class WriteBatchScheduler:
                             stopped = True
                             continue
                         in_batch += 1
+                        picked_ids.append(task_id)
                         upstream = [
                             check for check in dispatched_checks
                             if task_id in transitive_dependents(graph, check)
@@ -3885,15 +4290,11 @@ class WriteBatchScheduler:
                         break
                 if in_batch:
                     picked_batches += 1
-                    picked += in_batch
         except Exception:  # noqa: BLE001 - a count line must not fail a phase
-            return dispatch_line(
-                len([1 for _i, b in ordered if b]),
-                sum(len(b) for _i, b in ordered),
-            )
+            return None
         finally:
             self.log = quiet_log
-        return dispatch_line(picked_batches, picked, waiting=list(waiting))
+        return picked_batches, picked_ids, list(waiting)
 
     def _check_findings_lines(
         self, result: SchedulerResult, *, stopped: bool = False,
@@ -4111,9 +4512,11 @@ class WriteBatchScheduler:
                 # — the mirror counts it in `completed` — and its branch returns
                 # before `_record_batch_effects`, so the `[ETA]` numerator is
                 # advanced here instead, or a resumed run's last line stops short
-                # of its own total by exactly the batches it skipped (F3).
+                # of its own total by exactly the batches it skipped (F3). An
+                # implement run counts only what it dispatches (fix round 20),
+                # so there the skip leaves both halves.
                 with self._effects_lock:
-                    self._tasks_finished += 1
+                    self._eta_mark(outcome.task_id, ran=False)
             with mirror_lock:
                 outcomes_so_far.append(outcome)
                 self._mirror_status(result, finished_in_batch=outcomes_so_far)
@@ -4289,6 +4692,7 @@ class WriteBatchScheduler:
         try:
             self.policy.check(declared, when="pre-dispatch")
         except PolicyViolation as exc:
+            self._refused_policy_paths[task_id] = list(exc.paths)
             return self._refuse_before_dispatch(task, TaskOutcome(
                 task_id=task_id, kind=self.kind, runner=self.invoker,
                 status=STATUS_REJECTED, profile=profile, reason=exc.message,
@@ -5971,6 +6375,21 @@ class WriteBatchScheduler:
         if self.kind in CODE_WRITE_KINDS and not outcome.verification_only:
             # Fix round 14: the checks a code batch ran on its own edits.
             outcome.batch_check = batch_check_findings(result)
+        if self.kind == "apply_code_fixes":
+            # Fix round 20: what it says each known check it was told to run
+            # did, read against the commands its prompt listed; a command it
+            # lists as failed is a failing check on every surface.
+            listed = _known_checks.listed_check_outcomes(
+                _known_checks.reply_listed(result),
+                (getattr(self, "_told_checks", None) or {}).get(outcome.task_id) or (),
+            )
+            outcomes = getattr(self, "_listed_outcomes", None)
+            if outcomes is None:
+                outcomes = self._listed_outcomes = {}
+            outcomes[outcome.task_id] = listed
+            outcome.batch_check = _known_checks.with_listed_failures(
+                outcome.batch_check, listed,
+            )
         outcome.sha256_before = {
             relative: row.get("sha256_before") for relative, row in observed.items()
         }
@@ -7254,8 +7673,9 @@ class WriteBatchScheduler:
             # Before the metric, so the `[ETA]` line this task drives carries its
             # own 1-based position in the run (F3). No metric for a check that
             # was not run again: no child ran, and a zero would average in.
-            self._tasks_finished += 1
-            if not outcome.not_rerun and dispatched:
+            ran = bool(not outcome.not_rerun and dispatched)
+            self._eta_mark(task_id, ran=ran)
+            if ran:
                 self._record_metrics(task, outcome, result)
 
             if self.state is not None:
@@ -7287,6 +7707,22 @@ class WriteBatchScheduler:
                     set_task_batch_check_in_state(
                         self.state.state, task_id,
                         outcome.batch_check if outcome.ok else None,
+                    )
+                elif self.kind == "apply_code_fixes" and isinstance(
+                    getattr(self.state, "state", None), dict
+                ) and (dispatched or kept or not outcome.ok):
+                    # Fix round 20: what the batch's own checks reported, for
+                    # the next batch's prompt and the tests-not-run line, as
+                    # `util batch-done` records it; any other record of the
+                    # batch clears an earlier one.
+                    _known_checks.set_batch_check_report_in_state(
+                        self.state.state, task_id,
+                        prior_changes_id=str(task.get("prior_changes_id") or ""),
+                        findings=outcome.batch_check if outcome.ok else None,
+                        listed=(
+                            (getattr(self, "_listed_outcomes", None) or {}).get(task_id)
+                            if outcome.ok else None
+                        ),
                     )
                 # Persists the metric recorded just above too: it is a mutation
                 # of this object's dict now, not a second writer's file (F4).
@@ -7421,10 +7857,10 @@ class WriteBatchScheduler:
         tasks is one batch of k — every one of those k metric entries recorded
         the same ordinal, so a 14-task plan in 9 batches ended at
         ``batch 9/14 · ~Nm remaining``, never reached ``N/N`` and never printed
-        ``ALL BATCHES COMPLETE``. ``self._tasks_finished`` is the count
-        ``_mirror_status`` publishes as ``completed`` (resume skips included),
-        and :meth:`_eta_total` counts the tasks that numerator can reach (fix
-        round 18: not an accepted task, a manual one, or one a check holds).
+        ``ALL BATCHES COMPLETE``. Both come from :meth:`_eta_progress`: the
+        finished tasks among the ones :meth:`_eta_total` counts (fix round
+        18: not an accepted task, a manual one, or one a check holds; fix
+        round 20: on implement, only what the run dispatches).
         """
         if self.state is None or not hasattr(self.state, "record_metric"):
             return
@@ -7434,8 +7870,7 @@ class WriteBatchScheduler:
             f"{task.get('task_title') or self.kind} "
             f"[{outcome.write_outcome or outcome.status}]"
         ).strip()
-        total_batches = self._eta_total(result)
-        run_batch_index = self._tasks_finished
+        run_batch_index, total_batches = self._eta_progress(result)
         live = getattr(self.state, "state", None)
         progress = (
             (live.get("metrics_progress") or {}).get(self.phase)
@@ -8281,13 +8716,16 @@ class WriteBatchScheduler:
         if refused and not acceptable:
             policy = any(o.write_outcome == WRITE_POLICY_VIOLATION for o in refused)
             # Fix round 18 (live run 7): that nothing is half-applied is the
-            # block's closing line, said once; the bullet is the remedy.
+            # block's closing line, said once; the bullet is the remedy. Fix
+            # round 20: the policy's, worded as the user's own call.
+            denied = sorted({
+                path for o in refused
+                for path in self._refused_policy_paths.get(o.task_id) or []
+            })
             lines.append(
                 f"  - "
                 + (
-                    "if the file the details name is meant to be written, "
-                    "allow it in driver.write_paths (widen `allow` or narrow "
-                    "`deny` in .multi-llm/providers.yaml)"
+                    f"your call: {policy_allow_clause(denied)}"
                     if policy else "fix what the details name"
                 )
                 + ", then resume this phase; it is checked again before it is "
@@ -8659,6 +9097,10 @@ class WriteBatchScheduler:
             # half-applied, and the task can be skipped or accepted.
             result.stop["refused_before_dispatch"] = True
             result.stop["policy"] = first.write_outcome == WRITE_POLICY_VIOLATION
+            if result.stop["policy"]:
+                # Fix round 20: the files its way forward names.
+                result.stop["policy_paths"] = list(
+                    self._refused_policy_paths.get(first.task_id) or [])
         if first is not None and first.applied_without_changes:
             # Fix round 14: it said `applied` and changed nothing, twice.
             result.stop["applied_without_changes"] = True
@@ -8746,15 +9188,6 @@ class WriteBatchScheduler:
                 and self._task_by_id(dep) is not None
             ]
 
-        def answer(task_id: str, word: str) -> List[str]:
-            return ["--human-task", f"{task_id}={word}"]
-
-        def skipped_clause(task_id: str) -> str:
-            deps = undone_with(task_id)
-            return f"leave {task_id} undone" + (
-                f", with the tasks that depend on it ({', '.join(deps)})" if deps else ""
-            )
-
         refused = [o for o in failed if o.task_id in self._refused_before_dispatch]
         acceptable = [
             o for o in failed
@@ -8762,86 +9195,21 @@ class WriteBatchScheduler:
             and o.write_outcome == WRITE_CLEAN_FAILURE and not o.bytes_moved
         ]
         blocked = result.blocked_by_check
-        checks = self._blocking_checks(result) if blocked else []
-        found = result.check_findings()
-        each: List[Dict[str, Any]] = []
-        for outcome in refused:
-            task_id = outcome.task_id
-            each.append({"flags": answer(task_id, "skip"),
-                         "why": skipped_clause(task_id)})
-            each.append({
-                "flags": answer(task_id, "done"),
-                "why": (f"once you have made {task_id}'s change yourself: "
-                        f"{task_id} counts as done and the tasks after it run"),
-            })
-        for outcome in acceptable:
-            task_id = outcome.task_id
-            if outcome.applied_without_changes:
-                # Fix round 15 (review R1): its change did not land, so there
-                # is no failure to accept — going on without it comes first,
-                # and `done` is for a change the user made by hand, as the
-                # stop message says.
-                each.append({"flags": answer(task_id, "skip"),
-                             "why": skipped_clause(task_id)})
-                each.append({
-                    "flags": answer(task_id, "done"),
-                    "why": (f"once you have made {task_id}'s change yourself: "
-                            f"{task_id} counts as done and the tasks after it "
-                            "run"),
-                })
-                continue
-            each.append({
-                "flags": answer(task_id, "done"),
-                "why": (f"accept {task_id}'s failure: {task_id} counts as done "
-                        "and the tasks after it run"),
-            })
-            each.append({"flags": answer(task_id, "skip"),
-                         "why": skipped_clause(task_id)})
-            if outcome.not_rerun:
-                each.append({
-                    "flags": answer(task_id, "retry"),
-                    "why": f"run {task_id}'s check again on unchanged files",
-                })
-        for check_id in checks:
-            waiting = sorted(t for t, c in blocked.items() if c == check_id)
-            each.append({
-                "flags": answer(check_id, "done"),
-                "why": (f"accept {check_id}'s check findings: "
-                        f"{', '.join(waiting)} then run, told that you accepted "
-                        "the findings, and the findings stay listed for "
-                        "review-code"
-                        + (f" ({'; '.join(found.get(check_id) or [])[:200]})"
-                           if found.get(check_id) else "")),
-            })
-            each.append({
-                "flags": answer(check_id, "skip"),
-                "why": f"leave {check_id} and {', '.join(waiting)} undone",
-            })
-            each.append({
-                "flags": answer(check_id, "retry"),
-                "why": f"run {check_id}'s check again on unchanged files",
-            })
-        # One command that goes on without fixing anything: every check with
-        # findings accepted, every refused or cleanly failed task left undone.
-        combined_flags: List[str] = []
-        clauses: List[str] = []
-        for check_id in checks:
-            combined_flags += answer(check_id, "done")
-            clauses.append(f"accept {check_id}'s check findings")
-        for outcome in [*refused, *acceptable]:
-            combined_flags += answer(outcome.task_id, "skip")
-            clauses.append(skipped_clause(outcome.task_id))
-        answers: List[Dict[str, Any]] = []
-        if len(clauses) > 1:
-            answers.append({
-                "flags": ["--resume", *combined_flags],
-                "why": " and ".join(clauses) + "; the rest runs",
-            })
-        answers.extend(
-            {"flags": ["--resume", *item["flags"]], "why": item["why"]}
-            for item in each
+        return compose_stop_answers(
+            refused=[o.task_id for o in refused],
+            failed=[
+                FailedAnswerable(
+                    task_id=o.task_id,
+                    unlanded=bool(o.applied_without_changes),
+                    not_rerun=bool(o.not_rerun),
+                )
+                for o in acceptable
+            ],
+            checks=self._blocking_checks(result) if blocked else [],
+            blocked=blocked,
+            findings=result.check_findings(),
+            undone_with=undone_with,
         )
-        return answers
 
     def _record_not_run_in_state(self, result: SchedulerResult) -> None:
         """Give each ``result.not_run`` task its reason on a ``pending`` status.
@@ -9141,14 +9509,20 @@ class WriteBatchScheduler:
                     if self.kind == "implement" else "."
                 )
             )
+        elif stop.get("refused_before_dispatch") and stop.get("policy"):
+            # Fix round 20 (live run 8 #4, a user decision: permissive):
+            # allowing the file stays a way forward, worded as the user's own
+            # call and naming the file, beside the skip answer.
+            body.append(
+                "To go on (your call): "
+                + policy_allow_clause(stop.get("policy_paths") or [])
+                + " and resume this phase"
+                + (f"; {policy_skip_clause(task_id)}."
+                   if self.kind == "implement" else ".")
+            )
         elif stop.get("refused_before_dispatch"):
             body.append(
-                "To go on: "
-                + (
-                    "allow the file it declares in driver.write_paths "
-                    "(.multi-llm/providers.yaml)"
-                    if stop.get("policy") else "fix what refused it"
-                )
+                "To go on: fix what refused it"
                 + (
                     ", then resume this phase; or leave it and the tasks after "
                     f"it undone by adding --human-task {task_id}=skip to the "
@@ -9388,6 +9762,11 @@ class WriteBatchScheduler:
             # codex racing run 5's apply-code-fixes left the repository's own
             # test failing and every surface a host relays read clean.
             result.unverified = unverified_line(self.repo_root)
+            # Fix round 20: and which checks the batches were asked to run,
+            # with what each batch reported (apply-code-fixes).
+            tally = self._known_checks_tally()
+            if tally:
+                result.unverified = f"{result.unverified} {tally}"
             result.messages.append(result.unverified)
             return True
         timeout = get_verify_timeout_s(anchor=self.anchor)
@@ -9807,7 +10186,8 @@ class WriteBatchScheduler:
         18 (live run 7): the accept path's resume counted the accepted check
         T002 and its last line read "batch 1/2 … ~0m 24s remaining" after the
         one task it dispatched; a check holding T007 left "6/7" the same way.
-        The numerator, ``self._tasks_finished``, never counts those tasks.
+        On implement, only the tasks the run dispatches (fix round 20,
+        :meth:`_eta_task_ids`). The numerator never counts the others.
         """
         return len(self._eta_task_ids(result))
 
@@ -9819,16 +10199,83 @@ class WriteBatchScheduler:
         run read "batch 6/6 … ALL BATCHES COMPLETE" in its log and
         "implement 6/7 batches ok" on ``status`` and the OpenCode poll.
         :meth:`_mirror_status` counts over this one too.
+
+        Fix round 20 (live run 8 #1): on implement, the set starts from what
+        the run will dispatch (``_eta_scope``, the walk the ``Organized into
+        …`` line counts), so a task the write policy refuses before dispatch,
+        the tasks after it that the run never reaches, a task kept from an
+        earlier run and one held by a check's findings on record are out from
+        the first line; the stop fixture's first run read "batch 1/7" under
+        "5 task(s) to dispatch" and stopped at "4/6". A task that finishes
+        without a runner leaves it, one dispatched against the walk's
+        reading joins it (:meth:`_eta_mark`), and a held task leaves it as
+        before.
         """
         out = (
             set(result.human_plan.skipped) | set(result.human_plan.accepted)
             | set(result.blocked_by_check)
         )
+        scope = self._eta_scope
         return [
             str(task.get("task_id", "")) for task in self.tasks
             if str(task.get("task_id", "")) not in out
+            and (scope is None or str(task.get("task_id", "")) in scope)
             and not task.get("is_human") and task.get("executor_role") != "human"
         ]
+
+    def _eta_mark(self, task_id: str, *, ran: bool) -> None:
+        """One more finished task for the ``[ETA]`` numerator (F3).
+
+        *ran*: a runner was started for it (its metric is recorded). On
+        implement (fix round 20) a task finished without one — kept from an
+        earlier run, refused before dispatch, a check not run again — was
+        not dispatched, so it leaves the counted set, as the native leg's
+        ``util batch-done`` withdraws a refused task; a task dispatched that
+        the walk did not foresee joins it, so the line never reads past its
+        own total. Called under ``_effects_lock``.
+        """
+        task_id = str(task_id)
+        self._eta_finished.add(task_id)
+        if self._eta_scope is not None:
+            if ran:
+                self._eta_scope.add(task_id)
+            else:
+                self._eta_scope.discard(task_id)
+
+    def _eta_progress(self, result: SchedulerResult) -> Tuple[int, int]:
+        """``(finished, total)`` over the tasks :meth:`_eta_task_ids` counts:
+        the two numbers every ``[ETA]`` line of this run prints."""
+        counted = self._eta_task_ids(result)
+        return sum(1 for task_id in counted if task_id in self._eta_finished), len(counted)
+
+    def _eta_stop_line(self, result: SchedulerResult) -> None:
+        """Say on the ``[ETA]`` lines that the run stopped short (fix round 20).
+
+        Live run 8 #1: the stop fixture's last line was "batch 4/6 done in
+        0m 15s · ~0m 37s remaining", left standing by a stop that came before
+        any "N/N". A run that stops with tasks of its total not finished logs
+        one closing line naming how far it got and how many it did not run;
+        one whose last line already read ``N/N`` (the tasks after the stop
+        were never in its total) adds nothing. Best-effort.
+        """
+        if not self._eta_started:
+            return
+        try:
+            done, total = self._eta_progress(result)
+        except Exception:  # noqa: BLE001 - a count line must not fail a phase
+            return
+        if done >= total:
+            return
+        if done == 0:
+            self.log(
+                f"[ETA] {self.phase}: run stopped before any of its {total} "
+                f"task(s) finished"
+            )
+            return
+        self.log(
+            f"[ETA] {self.phase}: run stopped after batch {done}/{total} · "
+            f"{total - done} task(s) not run"
+        )
 
     def _metrics_start(self, result: SchedulerResult) -> None:
         """Stamp the phase's ETA baseline before the first dispatch.
@@ -9838,7 +10285,8 @@ class WriteBatchScheduler:
         `[ETA]` line `instructions/implement.md` step 5 describes (F4).
 
         The baseline is the number of **tasks** this run will actually dispatch
-        or resume-skip — :meth:`_eta_total`, the same total ``_record_metrics``
+        (or, on an apply phase, resume-skip) — :meth:`_eta_total`, the same
+        total ``_record_metrics``
         uses (and keeps the stored baseline at) — never the
         bare materialized count, which still counts a deferred human task that is
         never dispatched (N1, 2026-09-16: with the bare count, the stored
@@ -9851,6 +10299,7 @@ class WriteBatchScheduler:
         total_batches = self._eta_total(result)
         try:
             self.state.start_metrics_phase(self.phase, total_batches)
+            self._eta_started = True
             self.state.save()
         except Exception:  # noqa: BLE001 - bookkeeping must not fail a phase
             pass
@@ -10402,6 +10851,11 @@ class WriteBatchScheduler:
                 if str(task.get("task_id", "")) in counted
             }
             total = len(counted_ids)
+            # Fix round 20: the `ok` of `<ok>/<total> batches ok`, over the
+            # same tasks, so a task an implement run kept from an earlier one
+            # (never dispatched, never in `total`) is not counted as one of
+            # its batches; the progress line names it as kept instead.
+            ok_count = sum(1 for o in outcomes if o.ok and o.task_id in counted)
             items_total = sum(len(ids) for ids in expected_ids_by_task.values())
             items_applied = sum(
                 len([
@@ -10443,6 +10897,7 @@ class WriteBatchScheduler:
                         # they will never dispatch, so counting them here read
                         # a clean run as short by exactly its deferred tasks.
                         "total": total,
+                        "ok": ok_count,
                         # F10: was `dispatched`, and counted FINISHED tasks —
                         # for an 11-minute single-task batch it read
                         # `dispatched: 0` the whole time, which a reader

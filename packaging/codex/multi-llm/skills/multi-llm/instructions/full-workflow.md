@@ -135,7 +135,9 @@ After Phase 1 completes (including any validation and reaggregation), check the 
    - Load `consolidation_tasks.json` from `{plan}/review-plan/`
    - Every task in that file already carries a complete `prompt` (the filled
      consolidation template plus that batch's group records), so there is no
-     template to open and no prompt to assemble
+     template to open and no prompt to assemble, and its `prompt_path` file
+     holds the same bytes: hand the subagent that file to read in full, or
+     `task.prompt` when the task has no `prompt_path` or the file is absent
    - Before step 3, confirm every task's `output_path` exists and is not empty,
      and re-dispatch any batch whose file is missing. Do not end your turn with a
      batch still outstanding: **you** write these files, and a host that runs one
