@@ -90,6 +90,28 @@ class TestTheCut:
         assert len(shown) == 40 and shown.endswith(ELLIPSIS)
         assert shown.startswith("see /very/long/xxx")
 
+    @pytest.mark.parametrize("text", [
+        "(" * 5000, "[{(" * 400, '"' * 50 + "(" * 50, "( " * 600,
+        "-" * 300, "((((, , , ((((" * 30,
+    ])
+    @pytest.mark.parametrize("limit", [4, 5, 20, 121, 1200])
+    def test_a_text_of_openers_or_separators_is_cut_inside(self, text, limit):
+        """Fix round 23 (review of round 22, #5): every trailing opener was
+        popped and the loop ended on nothing, so ``clip("(" * 5000, 1200)``
+        was the bare mark. Nothing a word boundary can keep falls back to a
+        plain cut inside, still within the limit and closing what it opened."""
+        shown = clip(text, limit)
+        if len(plain_line(text)) <= limit:
+            assert shown == plain_line(text)
+            return
+        assert len(shown) <= limit, shown
+        assert shown != ELLIPSIS, shown
+        assert ELLIPSIS in shown and shown.startswith(text[0]), shown
+        assert unclosed(shown) == [], shown
+
+    def test_openers_keep_as_many_as_their_closers_leave_room_for(self):
+        assert clip("(" * 5000, 1200) == "(" * 599 + ELLIPSIS + ")" * 599
+
     @pytest.mark.parametrize("limit", [0, 1, 2, 3])
     def test_tiny_budgets(self, limit):
         assert len(clip(CODEX_REASON, limit)) <= limit
