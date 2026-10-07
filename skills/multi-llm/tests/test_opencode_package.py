@@ -4971,6 +4971,31 @@ class TestResumeCommand:
         assert list(result)[:5] == [
             "ok", "state", "user_next_step", "resume_command", "resume_answers"]
 
+    def test_the_plain_resume_carries_what_it_does(self, built_package, uv_stub):
+        """Fix round 22 (live run 9, OpenCode accept 01): the plain resume had
+        no why and the message said "once the cause above is fixed". The
+        stop's own why (`user_resume.why`) is `resume_why` and fills the
+        message's resume clause."""
+        why = ("runs the tasks that can run; T005 stays refused until "
+               "driver.write_paths changes (T006 waits on it)")
+        step = dict(self._answers_step(), why=why)
+        resume_line = {"exit": 3, "stdout": [
+            "      resume with: uv run -- python multi_llm.py implement "
+            "plans/x.md --host opencode --detach --resume",
+            'MULTI_LLM_RESULT: {"state":"needs-human","exit":3,"artifacts":[],'
+            '"next":null,"error":"batch 0 refused"}']}
+        result, _ = uv_stub.run(
+            built_package, self.IMPLEMENT, [self.LAUNCH, resume_line],
+            extra_env={"STUB_RESUME_EXTRA": json.dumps(step)})
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        text = surface["needs_human_message"]
+        assert result["resume_why"] == why
+        assert text["resume_why"].replace("{why}", why) in result["message"]
+        assert text["resume"] not in result["message"]
+        assert list(result)[:6] == [
+            "ok", "state", "user_next_step", "resume_command", "resume_why",
+            "resume_answers"]
+
     def test_the_plugin_spells_none_of_the_lookup(self, built_package):
         surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
         resume = surface["dispatcher"]["resume"]

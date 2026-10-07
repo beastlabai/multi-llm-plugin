@@ -685,6 +685,18 @@ NEEDS_HUMAN_MESSAGE = {
         "block, as the way forward. It is never a tool call and never a shell "
         "command: do not run it, and do not offer to run it for them."
     ),
+    # Appended instead of `resume` when the lookup says what the plain resume
+    # does (`user_resume.why`, the result's `resume_why`; fix round 22, live
+    # run 9: with no why the hosts wrote one — "re-runs the T002 check",
+    # false on unchanged files, or "after addressing the write policy").
+    # `{why}` is substituted as it comes.
+    "resume_why": (
+        "`resume_command` is what the user types to resume this phase; it "
+        "{why}. Give it to the user verbatim in its own fenced block, with "
+        "what it does as plain text above it. It is never a tool call and "
+        "never a shell command: do not run it, and do not offer to run it for "
+        "them."
+    ),
     # Appended after `resume` when the stop offers answers as well (fix round
     # 14, live run 5: the `--human-task` answers lived only in `error`, and
     # hosts relayed them in two of four first stops). `{answers}` is the
