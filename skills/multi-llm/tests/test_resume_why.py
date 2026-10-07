@@ -55,6 +55,32 @@ class TestTheWhyIsComposedFromTheStopsFacts:
             "check is not run again while the files are unchanged (T010, T011 "
             "wait on it); T009 is checked again before it is dispatched")
 
+    def test_a_file_outside_the_repository_waits_on_no_policy_change(self):
+        """No driver.write_paths rule can allow a file outside the repository
+        (fix round 21), so the why does not say a policy change lets it run."""
+        why = compose_resume_why(
+            refused=["T005"], policy={"T005"}, outside={"T005"},
+            undone_with=lambda task_id: ["T006"])
+        assert why == (
+            "runs the tasks that can run; T005 stays refused: it declares a "
+            "file outside the repository (T006 waits on it)")
+
+    def test_the_native_leg_reads_an_outside_refusal_off_its_reason(self):
+        from utils.write_batch_scheduler import (
+            NATIVE_REFUSED_PREFIX, native_resume_why)
+        from utils.write_safety import PolicyHit, policy_outside_note
+
+        note = policy_outside_note([PolicyHit("../x.js", outside=True)])
+        state = {
+            "task_status": {"T001": "completed", "T005": "failed"},
+            "task_status_reasons": {
+                "T005": f"{NATIVE_REFUSED_PREFIX}Write policy violation: {note}."},
+            "implement_task_ids": ["T001", "T005"],
+        }
+        assert native_resume_why(state) == (
+            "runs the tasks that can run; T005 stays refused: it declares a "
+            "file outside the repository")
+
     def test_nothing_waiting_is_no_why(self):
         assert compose_resume_why(
             refused=[], policy=set(), failed=[], checks=[], blocked={},

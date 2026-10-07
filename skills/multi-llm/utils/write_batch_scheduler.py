@@ -1648,6 +1648,7 @@ def compose_resume_why(
     *,
     refused: Sequence[str],
     policy: Collection[str] = (),
+    outside: Collection[str] = (),
     failed: Sequence[FailedAnswerable] = (),
     checks: Sequence[str] = (),
     blocked: Mapping[str, str] = {},
@@ -1666,8 +1667,10 @@ def compose_resume_why(
     tasks back (*blocked*) is not run again while the files are unchanged; a
     *failed* check task neither, and any other failed task is dispatched
     again; a task *refused* before dispatch stays refused until
-    ``driver.write_paths`` changes when *policy* names it, else is checked
-    again before it is dispatched. *undone_with* names the tasks waiting on a
+    ``driver.write_paths`` changes when *policy* names it — or for good when
+    *outside* does too, since no rule can allow a file outside the
+    repository — else is checked again before it is dispatched.
+    *undone_with* names the tasks waiting on a
     task that does not run. Both legs compose it from the facts they answer
     the stop from (the executor's ``_stop_resume_why``,
     :func:`native_resume_why`).
@@ -1690,7 +1693,11 @@ def compose_resume_why(
         else:
             parts.append(f"{item.task_id} is dispatched again")
     for task_id in refused:
-        if task_id in policy:
+        if task_id in outside:
+            parts.append(
+                f"{task_id} stays refused: it declares a file outside the "
+                f"repository{waits(undone_with(task_id))}")
+        elif task_id in policy:
             parts.append(
                 f"{task_id} stays refused until driver.write_paths changes"
                 f"{waits(undone_with(task_id))}")
@@ -1936,6 +1943,11 @@ def native_stop_answers(state: Any) -> List[Dict[str, Any]]:
     )
 
 
+#: What a refusal of a file outside the repository says
+#: (``write_safety.policy_outside_note``), read off a native refusal's reason.
+OUTSIDE_REFUSAL_WORDS = "outside the repository, so no driver.write_paths rule can allow"
+
+
 def native_resume_why(state: Any) -> Optional[str]:
     """:func:`compose_resume_why` for a stopped native implement, from the
     facts :func:`native_stop_answers` answers it from (fix round 22): every
@@ -1945,9 +1957,15 @@ def native_resume_why(state: Any) -> Optional[str]:
     if facts is None:
         return None
     refused = facts["refused"]
+    reason = facts["reason"]
     return compose_resume_why(
         refused=refused,
         policy=set(refused),
+        # The refusal's own words (`write_safety.policy_outside_note`).
+        outside={
+            task_id for task_id in refused
+            if OUTSIDE_REFUSAL_WORDS in reason(task_id)
+        },
         failed=[
             FailedAnswerable(task_id) for task_id in facts["failed_ids"]
             if task_id not in refused
@@ -9755,6 +9773,11 @@ class WriteBatchScheduler:
             policy={
                 o.task_id for o in refused
                 if o.write_outcome == WRITE_POLICY_VIOLATION
+            },
+            outside={
+                o.task_id for o in refused
+                if any(getattr(hit, "outside", False)
+                       for hit in self._refused_policy_hits.get(o.task_id) or [])
             },
             failed=[
                 FailedAnswerable(
