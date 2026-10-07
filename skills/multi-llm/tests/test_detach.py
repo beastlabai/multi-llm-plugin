@@ -2873,7 +2873,11 @@ class TestStatusSurface:
         assert "workflow notice: review-tasks left 1 valid task suggestion group unapplied" in out
         assert payload["notice"] is not None
         assert "review-tasks left 1 valid task suggestion group unapplied" in payload["notice"]
-        assert "suggested next:" in payload["notice"]
+        # Fix round 24 (live run 10): the follow-up rides `user_next_step`,
+        # written with its commands, so the notice no longer says it again
+        # as "suggested next:" for the hosts to relay beside it.
+        assert "suggested next:" not in payload["notice"]
+        assert payload["user_next_step"]["phase"] == "implement"
         # The notice is advisory prose, never a mechanical continuation.
         assert payload["next"] is None
 

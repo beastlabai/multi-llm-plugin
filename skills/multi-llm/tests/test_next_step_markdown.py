@@ -170,6 +170,48 @@ class TestTheNoticeDoesNotRepeatTheNote:
         assert "--human-task T011=done" in out
 
 
+class TestTheNoticeDoesNotRepeatTheStep:
+
+    def test_a_poll_that_carries_the_step_drops_suggested_next(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        """Fix round 24 (live run 10, OpenCode 03 and Codex 01): a terminal
+        poll's `notice` said "suggested next: implement (review-tasks /
+        apply-task-suggestions optional, not run)" beside `user_next_step`,
+        whose `markdown` says it with the commands. The hosts relayed both,
+        and OpenCode 03 reordered the step after the notice's words. The
+        notice leaves the next step to `user_next_step`; the text view a
+        person reads keeps the line."""
+        from tests.test_next_phase import RT_ACTIONABLE, S, UP_TO_REVIEW_TASKS, _build
+
+        plan = _build(tmp_path, S(UP_TO_REVIEW_TASKS, files=RT_ACTIONABLE))
+        monkeypatch.chdir(tmp_path)
+        for name in ("MULTI_LLM_HOST", "MULTI_LLM_ROUTE"):
+            monkeypatch.delenv(name, raising=False)
+        phase_dir = output_dir_path(plan) / "review-tasks"
+        status_file.write_status(str(phase_dir), {
+            "phase": "review-tasks", "state": "complete"})
+        status_file.claim_run(str(phase_dir), {
+            "run_id": "run-rt-0024", "state": "done", "exit_code": 0,
+            "detached": True, "mode": "review-tasks"})
+        ctx = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            assert run_status.main([
+                "--plan-file", str(plan), "--view", "run",
+                "--phase", "review-tasks"]) == 0
+            payload = ctx.payload(0)
+        finally:
+            cli_common.deactivate_result()
+        out = capsys.readouterr().out
+        step = payload["user_next_step"]
+        assert step["command"].endswith("plans/foo.md"), step
+        assert "--implement" in step["command"], step
+        assert "suggested next" not in (payload.get("notice") or ""), payload
+        # The other notice lines stay: what the review left unapplied.
+        assert "review-tasks left 1 valid task suggestion group" in payload["notice"]
+        assert "workflow suggested next: implement" in out
+
+
 class TestTheRoutesSayToCopyIt:
     """Every route that reads `user_next_step` off a result: one short rule."""
 
