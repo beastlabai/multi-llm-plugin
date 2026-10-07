@@ -42,7 +42,7 @@
   "manifest": {
     "axis": "reviewer",
     "bundle_version": 1,
-    "captured_at": "2026-10-07T11:06:57Z",
+    "captured_at": "2026-10-07T17:38:20Z",
     "cli": "kimi",
     "host": {
       "host_id": "sha256:e9ce53674803",
@@ -58,10 +58,10 @@
         "verdict": "permitted"
       }
     },
-    "image": "mllm-e2e:r21",
+    "image": "mllm-e2e:r23",
     "reviewer": "kimi",
     "row_id": "chain-kimi",
-    "run_bundle": "20261007T104315Z"
+    "run_bundle": "20261007T171524Z"
   },
   "markers": [
     "[PROGRESS]",
@@ -4755,6 +4755,7 @@
       "user_next_step": {
         "command": null,
         "complete": true,
+        "markdown": "Workflow complete.",
         "phase": null
       },
       "validation_counts": {
@@ -4972,6 +4973,132 @@
       "src/auth.py",
       "src/security.py"
     ],
+    "processed_apply-fixes": {
+      "5d4efdfb196e11f2": {
+        "details": {
+          "grouped_sha256": "d7be4728919bce17",
+          "leg": "executor",
+          "prior_changes_id": "src/security.py#22cf58a5",
+          "task_id": "apply-fix-batch-2"
+        },
+        "status": "no-op",
+        "timestamp": "<str>"
+      },
+      "93c4a25d0e7f6cf6": {
+        "details": {
+          "grouped_sha256": "d7be4728919bce17",
+          "leg": "executor",
+          "prior_changes_id": "src/security.py#b17808f6",
+          "task_id": "apply-fix-batch-0"
+        },
+        "status": "no-op",
+        "timestamp": "<str>"
+      },
+      "cf093f90d561613c": {
+        "details": {
+          "grouped_sha256": "d7be4728919bce17",
+          "leg": "executor",
+          "prior_changes_id": "src/security.py#b17808f6",
+          "task_id": "apply-fix-batch-0"
+        },
+        "status": "no-op",
+        "timestamp": "<str>"
+      },
+      "d948c7a933b2e244": {
+        "details": {
+          "grouped_sha256": "d7be4728919bce17",
+          "leg": "executor",
+          "prior_changes_id": "src/security.py#b17808f6",
+          "task_id": "apply-fix-batch-0"
+        },
+        "status": "no-op",
+        "timestamp": "<str>"
+      },
+      "ed2a0235cc4d9050": {
+        "details": {
+          "grouped_sha256": "d7be4728919bce17",
+          "leg": "executor",
+          "prior_changes_id": "src/auth.py#fd43b6fc",
+          "task_id": "apply-fix-batch-1"
+        },
+        "status": "no-op",
+        "timestamp": "<str>"
+      }
+    },
+    "processed_apply-suggestions": {
+      "1558bbe6cea433cf": {
+        "details": {
+          "grouped_sha256": "45d65af34a3b3eeb",
+          "leg": "executor",
+          "prior_changes_id": "step_6#4d10ac91",
+          "task_id": "apply-batch-1"
+        },
+        "status": "no-op",
+        "timestamp": "<str>"
+      },
+      "64ba7f164d362232": {
+        "details": {
+          "grouped_sha256": "45d65af34a3b3eeb",
+          "leg": "executor",
+          "prior_changes_id": "step_3#a35270ee",
+          "task_id": "apply-batch-3"
+        },
+        "status": "no-op",
+        "timestamp": "<str>"
+      },
+      "a4ba681281e554b8": {
+        "details": {
+          "grouped_sha256": "45d65af34a3b3eeb",
+          "leg": "executor",
+          "prior_changes_id": "step_1#4ad56b19",
+          "task_id": "apply-batch-0"
+        },
+        "status": "no-op",
+        "timestamp": "<str>"
+      },
+      "c948ad24b1b8e432": {
+        "details": {
+          "grouped_sha256": "45d65af34a3b3eeb",
+          "leg": "executor",
+          "prior_changes_id": "step_2#5e8e6c98",
+          "task_id": "apply-batch-2"
+        },
+        "status": "no-op",
+        "timestamp": "<str>"
+      }
+    },
+    "processed_apply-task-suggestions": {
+      "139bdba80f54ba7d": {
+        "details": {
+          "grouped_sha256": "7d8f9413a8f88597",
+          "leg": "executor",
+          "prior_changes_id": "section:t002#3f5dc1a6",
+          "task_id": "apply-task-batch-1"
+        },
+        "status": "no-op",
+        "timestamp": "<str>"
+      },
+      "6779911c6f8b335b": {
+        "details": {
+          "grouped_sha256": "7d8f9413a8f88597",
+          "leg": "executor",
+          "prior_changes_id": "section:plan_coverage#f6649fb6",
+          "task_id": "apply-task-batch-0"
+        },
+        "status": "no-op",
+        "timestamp": "<str>"
+      },
+      "ef911087fcf05304": {
+        "details": {
+          "grouped_sha256": "7d8f9413a8f88597",
+          "leg": "executor",
+          "prior_changes_id": "section:t003#65f886c7",
+          "task_id": "apply-task-batch-2"
+        },
+        "status": "no-op",
+        "timestamp": "<str>"
+      }
+    },
     "review_phase_completed": true,
     "schema_version": "2.0",
     "task_status": {
@@ -5228,6 +5355,132 @@
       ],
       "<list>": 5
     },
+    "processed_apply-fixes": {
+      "5d4efdfb196e11f2": {
+        "details": {
+          "grouped_sha256": "<str>",
+          "leg": "<str>",
+          "prior_changes_id": "<str>",
+          "task_id": "<str>"
+        },
+        "status": "<str>",
+        "timestamp": "<str>"
+      },
+      "93c4a25d0e7f6cf6": {
+        "details": {
+          "grouped_sha256": "<str>",
+          "leg": "<str>",
+          "prior_changes_id": "<str>",
+          "task_id": "<str>"
+        },
+        "status": "<str>",
+        "timestamp": "<str>"
+      },
+      "cf093f90d561613c": {
+        "details": {
+          "grouped_sha256": "<str>",
+          "leg": "<str>",
+          "prior_changes_id": "<str>",
+          "task_id": "<str>"
+        },
+        "status": "<str>",
+        "timestamp": "<str>"
+      },
+      "d948c7a933b2e244": {
+        "details": {
+          "grouped_sha256": "<str>",
+          "leg": "<str>",
+          "prior_changes_id": "<str>",
+          "task_id": "<str>"
+        },
+        "status": "<str>",
+        "timestamp": "<str>"
+      },
+      "ed2a0235cc4d9050": {
+        "details": {
+          "grouped_sha256": "<str>",
+          "leg": "<str>",
+          "prior_changes_id": "<str>",
+          "task_id": "<str>"
+        },
+        "status": "<str>",
+        "timestamp": "<str>"
+      }
+    },
+    "processed_apply-suggestions": {
+      "1558bbe6cea433cf": {
+        "details": {
+          "grouped_sha256": "<str>",
+          "leg": "<str>",
+          "prior_changes_id": "<str>",
+          "task_id": "<str>"
+        },
+        "status": "<str>",
+        "timestamp": "<str>"
+      },
+      "64ba7f164d362232": {
+        "details": {
+          "grouped_sha256": "<str>",
+          "leg": "<str>",
+          "prior_changes_id": "<str>",
+          "task_id": "<str>"
+        },
+        "status": "<str>",
+        "timestamp": "<str>"
+      },
+      "a4ba681281e554b8": {
+        "details": {
+          "grouped_sha256": "<str>",
+          "leg": "<str>",
+          "prior_changes_id": "<str>",
+          "task_id": "<str>"
+        },
+        "status": "<str>",
+        "timestamp": "<str>"
+      },
+      "c948ad24b1b8e432": {
+        "details": {
+          "grouped_sha256": "<str>",
+          "leg": "<str>",
+          "prior_changes_id": "<str>",
+          "task_id": "<str>"
+        },
+        "status": "<str>",
+        "timestamp": "<str>"
+      }
+    },
+    "processed_apply-task-suggestions": {
+      "139bdba80f54ba7d": {
+        "details": {
+          "grouped_sha256": "<str>",
+          "leg": "<str>",
+          "prior_changes_id": "<str>",
+          "task_id": "<str>"
+        },
+        "status": "<str>",
+        "timestamp": "<str>"
+      },
+      "6779911c6f8b335b": {
+        "details": {
+          "grouped_sha256": "<str>",
+          "leg": "<str>",
+          "prior_changes_id": "<str>",
+          "task_id": "<str>"
+        },
+        "status": "<str>",
+        "timestamp": "<str>"
+      },
+      "ef911087fcf05304": {
+        "details": {
+          "grouped_sha256": "<str>",
+          "leg": "<str>",
+          "prior_changes_id": "<str>",
+          "task_id": "<str>"
+        },
+        "status": "<str>",
+        "timestamp": "<str>"
+      }
+    },
     "review_phase_completed": "<bool>",
     "schema_version": "<str>",
     "task_status": {
@@ -5304,6 +5557,11 @@
             },
             "ok": "<int>",
             "pending_human_task_ids": {
+              "<item-types>": [],
+              "<items>": [],
+              "<list>": 0
+            },
+            "runner_failed_task_ids": {
               "<item-types>": [],
               "<items>": [],
               "<list>": 0
@@ -5418,6 +5676,11 @@
             },
             "ok": "<int>",
             "pending_human_task_ids": {
+              "<item-types>": [],
+              "<items>": [],
+              "<list>": 0
+            },
+            "runner_failed_task_ids": {
               "<item-types>": [],
               "<items>": [],
               "<list>": 0
@@ -5542,6 +5805,11 @@
             },
             "ok": "<int>",
             "pending_human_task_ids": {
+              "<item-types>": [],
+              "<items>": [],
+              "<list>": 0
+            },
+            "runner_failed_task_ids": {
               "<item-types>": [],
               "<items>": [],
               "<list>": 0
@@ -5845,6 +6113,11 @@
             },
             "ok": "<int>",
             "pending_human_task_ids": {
+              "<item-types>": [],
+              "<items>": [],
+              "<list>": 0
+            },
+            "runner_failed_task_ids": {
               "<item-types>": [],
               "<items>": [],
               "<list>": 0
