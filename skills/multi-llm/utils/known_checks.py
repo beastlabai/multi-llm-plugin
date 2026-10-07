@@ -823,9 +823,28 @@ def _joined(names: Sequence[str]) -> str:
 def checks_tally(
     checks: Sequence[Tuple[str, str]], state: Any, tasks: Sequence[Dict[str, Any]],
 ) -> Optional[str]:
+    """:func:`checks_report`'s sentence alone."""
+    report = checks_report(checks, state, tasks)
+    return report[0] if report else None
+
+
+#: How a tally opens when a batch ran a listed check, and when none did
+#: (fix round 24: the tests line leads with what ran).
+TALLY_RAN_LEAD = "The batches ran the repository's known checks after their edits: "
+TALLY_ASKED_LEAD = (
+    "The batches were asked to run the repository's known checks after "
+    "their edits: "
+)
+
+
+def checks_report(
+    checks: Sequence[Tuple[str, str]], state: Any, tasks: Sequence[Dict[str, Any]],
+    *, max_chars: int = TALLY_MAX_CHARS,
+) -> Optional[Tuple[str, bool]]:
     """What the batches reported about each check they were asked to run,
-    as one sentence for the tests-not-run line, or ``None`` with no check
-    listed or no batch finished.
+    as one sentence for the tests-not-run line, and whether a batch ran one
+    (it passed or failed somewhere); ``None`` with no check listed or no
+    batch finished. Cut at a word to *max_chars*.
 
     Per command: the batches it passed in, failed in, the batches that said
     they did not run it, and the finished batches that did not report it.
@@ -849,6 +868,7 @@ def checks_tally(
         for task_id, record in batch_check_reports(state, tasks)
     }
     parts: List[str] = []
+    ran = False
     for command, _where in checks:
         key = normalized(command)
         passed, failed, not_run, silent = [], [], [], []
@@ -875,8 +895,6 @@ def checks_tally(
                 else f"not reported by {_joined(silent)}"
             )
         parts.append(f"{shown_command(command)}: {', '.join(said)}")
-    text = (
-        "The batches were asked to run the repository's known checks after "
-        "their edits: " + "; ".join(parts) + "."
-    )
-    return clip(text, TALLY_MAX_CHARS)
+        ran = ran or bool(passed or failed)
+    text = (TALLY_RAN_LEAD if ran else TALLY_ASKED_LEAD) + "; ".join(parts) + "."
+    return clip(text, max_chars), ran

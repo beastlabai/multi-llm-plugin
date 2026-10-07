@@ -580,7 +580,10 @@ class TestImplementsResultLineSaysTheCheckFails:
         assert notice.startswith(
             "not a clean finish: 1 batch(es) applied their edits, but their own "
             "report says a check they ran fails: T001 (\"")
-        assert "Nothing ran this repository's tests: driver.verify_command is not set." in notice
+        # Fix round 24: led by the check that ran, which failed.
+        assert (
+            "The tasks ran checks: reported problems in T001. The plugin itself "
+            "ran no tests: driver.verify_command is not set.") in notice
         summary = (repo.phase_dir / "summary.md").read_text(encoding="utf-8")
         assert "### T001: a check it ran fails" in summary
 

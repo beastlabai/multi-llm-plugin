@@ -26,7 +26,13 @@ from tests.test_check_gate_fixture import (  # noqa: E402,F401
     repo,
 )
 
-UNVERIFIED = "Nothing ran this repository's tests: driver.verify_command is not set."
+#: The fixture's T002 is a check that reports problems: the line leads with
+#: it (fix round 24); "Nothing ran" only when no check ran.
+UNVERIFIED = (
+    "The tasks ran checks: reported problems in T002. The plugin itself ran "
+    "no tests: driver.verify_command is not set.")
+#: In every form of the line, for the cases that must print none.
+NOT_SET = "driver.verify_command is not set"
 
 
 def _stop(repo, capsys):
@@ -71,8 +77,8 @@ def test_a_stop_with_a_verify_command_set_says_nothing(repo, capsys):
     _policy(repo, DENY + "  verify_command: \"true\"\n")
     text, result = _stop(repo, capsys)
     assert "ERROR: implement stopped at T005" in text
-    assert "Nothing ran this repository's tests" not in text
-    assert "Nothing ran this repository's tests" not in (result.get("notice") or "")
+    assert NOT_SET not in text
+    assert NOT_SET not in (result.get("notice") or "")
 
 
 def test_a_stop_before_any_code_ran_says_nothing(repo, capsys):
@@ -82,8 +88,8 @@ def test_a_stop_before_any_code_ran_says_nothing(repo, capsys):
         "MOCK_LLM_WRITE_FAIL_IF_PROMPT_HAS", "Title: Edit: create the configuration file")
     text, result = _stop(repo, capsys)
     assert "ERROR: implement stopped at T001" in text
-    assert "Nothing ran this repository's tests" not in text
-    assert "Nothing ran this repository's tests" not in (result.get("notice") or "")
+    assert NOT_SET not in text
+    assert NOT_SET not in (result.get("notice") or "")
 
 
 #: Fix round 17 (review of round 16): a check (T001) that reports findings
@@ -146,7 +152,7 @@ def test_a_stop_after_only_a_check_ran_says_nothing(check_first, capsys):
     assert statuses["T001"] == "completed", statuses
     assert statuses["T003"] == "failed", statuses
     assert "ERROR: implement stopped at T003" in text, text
-    assert "Nothing ran this repository's tests" not in text
+    assert NOT_SET not in text
     report = json.loads(
         (check_first.phase_dir / "write_batch_report.json").read_text())
     assert not report.get("unverified"), report
@@ -167,7 +173,7 @@ def test_a_resume_after_only_a_check_completed_says_nothing_either(
     captured = capsys.readouterr()
     text = captured.out + captured.err
     assert "ERROR: implement stopped at T003" in text, text
-    assert "Nothing ran this repository's tests" not in text
+    assert NOT_SET not in text
 
 
 CHECK_ONLY = """# Check only
@@ -212,6 +218,6 @@ def test_a_finished_run_of_a_check_alone_runs_no_verify_command(
         registry._config_key = None
     captured = capsys.readouterr()
     assert not (repo.root / "verify-ran").exists()
-    assert "Nothing ran this repository's tests" not in captured.out + captured.err
+    assert NOT_SET not in captured.out + captured.err
     report = json.loads((repo.phase_dir / "write_batch_report.json").read_text())
     assert not report.get("verification") and not report.get("unverified"), report

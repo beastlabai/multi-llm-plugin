@@ -245,7 +245,11 @@ class TestACheckFindingsStopKeepsItsAnswer:
             "resume command (the tasks after it then run, told that you "
             "accepted the findings)."
         ) in error, error
-        assert UNVERIFIED in error
+        # Fix round 24: led by the check that ran.
+        assert (
+            "The tasks ran checks: reported problems in T002. The plugin "
+            "itself ran no tests: driver.verify_command is not set."
+        ) in error, error
         assert error.endswith("(package.json defines scripts.test)."), error[-200:]
         # The findings are quoted as far as they fit, and cut there.
         assert "[src/game.js:142 the physics step reads dt" in error

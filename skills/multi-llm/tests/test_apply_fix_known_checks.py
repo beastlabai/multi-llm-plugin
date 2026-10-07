@@ -461,12 +461,13 @@ class TestTheTestsLineNamesWhatTheBatchesReported:
             check={"passed": False, "findings": ["npm test: 1 failing"],
                    "listed": {"npm test": "failed"}},
         )
+        # Fix round 24: a check a batch ran (failing included) leads the line.
         tally = (
-            "The batches were asked to run the repository's known checks after "
+            "The batches ran the repository's known checks after "
             "their edits: `npm test`: failed in apply-fix-batch-1, not reported "
             "by apply-fix-batch-0."
         )
-        assert result.unverified == f"{unverified_line(str(env.root))} {tally}"
+        assert result.unverified == unverified_line(str(env.root), ran=tally)
         assert result.unverified in result.messages
         report = json.loads((env.phase_dir / "write_batch_report.json").read_text())
         assert tally in json.dumps(report)
@@ -489,7 +490,7 @@ class TestTheTestsLineNamesWhatTheBatchesReported:
             [(RACE_CHECK, "named by task T004"), (HTML_CHECK, "named by task T008"),
              ("npm test", "package.json defines scripts.test")], state, tasks,
         ) == (
-            "The batches were asked to run the repository's known checks after "
+            "The batches ran the repository's known checks after "
             f"their edits: `{RACE_CHECK}`: passed in apply-fix-batch-0, failed in "
             "apply-fix-batch-1, not run in apply-fix-batch-2, not reported by "
             f"apply-fix-batch-3; `{HTML_CHECK}`: passed in apply-fix-batch-0, "
@@ -569,13 +570,15 @@ class TestTheTestsLineNamesWhatTheBatchesReported:
         assert f"- `{RACE_CHECK}` (named by task T004)" in native
 
         line = native_apply_fixes_unverified_line(plan)
-        assert line.startswith("Nothing ran this repository's tests")
-        assert line.endswith(
+        # Fix round 24: led by the checks the batches ran.
+        assert line.startswith(
+            "The batches ran the repository's known checks after "
             f"their edits: `{RACE_CHECK}`: passed in apply-fix-batch-0, failed in "
             f"apply-fix-batch-1; `{HTML_CHECK}`: passed in apply-fix-batch-0, not "
             f"reported by apply-fix-batch-1; `node scripts/smoke-check.mjs`: not "
-            f"reported by any batch."
-        )
+            f"reported by any batch. The plugin itself ran no tests: "
+            f"driver.verify_command is not set."
+        ), line
 
         import apply_code_fixes_orchestrator
 

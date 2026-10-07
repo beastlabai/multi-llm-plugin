@@ -57,7 +57,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import prior_changes as _prior_changes
     from . import process_control as _process_control
     from . import subagent_executor as _executor
-    from .text_clip import clip
+    from .text_clip import clip, plain_line
     from .providers.base import (
         SANDBOX_RUNG_PLUGIN_LANDLOCK,
         host_write_posture_consent,
@@ -161,7 +161,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         safety_dir,
     )
 except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.text_clip import clip  # type: ignore
+    from utils.text_clip import clip, plain_line  # type: ignore
     from utils import git_utils as _git_utils
     from utils import known_checks as _known_checks
     from utils import landlock_dispatch as _landlock
@@ -2419,25 +2419,152 @@ def verify_command_candidate(repo_root: Optional[str]) -> Optional[Tuple[str, st
     return None
 
 
-def unverified_line(repo_root: Optional[str]) -> str:
+#: How the tests line opens when nothing ran a check (fix round 14).
+NOTHING_RAN_TESTS = "Nothing ran this repository's tests"
+#: What follows the checks that did run (fix round 24): the plugin's own part.
+PLUGIN_RAN_NO_TESTS = "The plugin itself ran no tests"
+#: The known checks' tally on a stop's tests line (fix round 24): the line
+#: ends the bounded ``error`` whole, so its tally is cut shorter than a
+#: finished run's (``known_checks.TALLY_MAX_CHARS``).
+STOP_TALLY_MAX_CHARS = 300
+#: How many task ids a bucket of :func:`implement_checks_ran` names before
+#: "and N more", so the stop's tests line stays short enough to stay whole.
+CHECKS_RAN_MAX_IDS = 8
+
+
+def unverified_line(repo_root: Optional[str], ran: Optional[str] = None) -> str:
     """The one plain line a code phase's result carries when no
     ``driver.verify_command`` is set (fix round 14): nothing ran the
     repository's tests, and the setting that would, naming an obvious
-    command when the repository declares one."""
+    command when the repository declares one.
+
+    Fix round 24 (live run 10, Codex and OpenCode racing 06 and 08): every
+    task had run ``npm test`` as its own check and passed, and the line
+    still opened "Nothing ran this repository's tests" — at 08 beside a
+    tally saying ``npm test`` passed in every batch. With *ran*, the
+    sentence saying what did run (:func:`implement_checks_ran`, or
+    :func:`known_checks.checks_report`'s), the line leads with it and says
+    the plugin itself ran none; "Nothing ran" only when nothing did."""
     candidate = verify_command_candidate(repo_root)
     where = "under driver: in .multi-llm/providers.yaml"
+    lead = (
+        f"{plain_line(ran)} {PLUGIN_RAN_NO_TESTS}" if ran and plain_line(ran)
+        else NOTHING_RAN_TESTS
+    )
     if candidate:
         command, why = candidate
         return (
-            f"Nothing ran this repository's tests: driver.verify_command is "
+            f"{lead}: driver.verify_command is "
             f"not set. To have every code phase run them, add "
             f"verify_command: \"{command}\" {where} ({why})."
         )
     return (
-        f"Nothing ran this repository's tests: driver.verify_command is not "
+        f"{lead}: driver.verify_command is not "
         f"set. To have every code phase run them, add verify_command {where}, "
         f"set to the command that runs your tests or checks your build."
     )
+
+
+def unverified_with_report(
+    repo_root: Optional[str], report: Optional[Tuple[str, bool]],
+) -> str:
+    """:func:`unverified_line` for apply-code-fixes, with what its batches
+    reported about the known checks (:func:`known_checks.checks_report`):
+    led by the tally when a batch ran one of them, else "Nothing ran …"
+    followed by it (fix round 24); the bare line without a tally."""
+    if not report:
+        return unverified_line(repo_root)
+    text, ran = report
+    if ran:
+        return unverified_line(repo_root, ran=text)
+    return f"{unverified_line(repo_root)} {text}"
+
+
+def implement_checks_ran(
+    state: Any, check_ids: Collection[str] = (),
+) -> Optional[str]:
+    """What ran a check in implement, as recorded, or ``None`` when nothing
+    did (fix round 24): ``The tasks ran checks: passed in T001 and T003;
+    reported problems in T002.``
+
+    Counted: each code task recorded ``completed`` whose own check reported
+    (:data:`state_manager.TASK_OWN_CHECK_RAN_KEY`) — failing when
+    ``task_batch_check`` or ``task_batch_check_accepted`` holds it, never
+    when its only finding says the check could not run — and each check
+    task of *check_ids* recorded ``completed`` (its check is its job),
+    failing when ``task_check_findings`` holds it. Manual tasks and tasks
+    outside the decomposition implement ran last are not. Only task ids
+    (held to ``T###``) and counts: no model text."""
+    if not hasattr(state, "get"):
+        return None
+    try:
+        from .state_manager import (
+            TASK_BATCH_CHECK_ACCEPTED_KEY,
+            TASK_BATCH_CHECK_KEY,
+            TASK_CHECK_FINDINGS_KEY,
+            TASK_OWN_CHECK_RAN_KEY,
+        )
+    except ImportError:  # pragma: no cover - direct script invocation
+        from utils.state_manager import (  # type: ignore
+            TASK_BATCH_CHECK_ACCEPTED_KEY,
+            TASK_BATCH_CHECK_KEY,
+            TASK_CHECK_FINDINGS_KEY,
+            TASK_OWN_CHECK_RAN_KEY,
+        )
+
+    def mapping(key: str) -> Dict[str, Any]:
+        value = state.get(key)
+        return value if isinstance(value, dict) else {}
+
+    statuses = mapping("task_status")
+    reasons = mapping("task_status_reasons")
+    scope = state.get("implement_task_ids")
+    human = {str(t) for t in (state.get("implement_human_task_ids") or [])}
+
+    def counted(task_id: str) -> bool:
+        return (
+            bool(_IMPLEMENT_TASK_ID.match(task_id))
+            and statuses.get(task_id) == "completed"
+            and (not isinstance(scope, list) or task_id in scope)
+            and task_id not in human
+            and str(reasons.get(task_id) or "") != COMPLETED_MANUAL_REASON
+        )
+
+    own = state.get(TASK_OWN_CHECK_RAN_KEY)
+    own_ids = {str(t) for t in own} if isinstance(own, list) else set()
+    failing_own = mapping(TASK_BATCH_CHECK_KEY)
+    accepted = mapping(TASK_BATCH_CHECK_ACCEPTED_KEY)
+    check_findings = mapping(TASK_CHECK_FINDINGS_KEY)
+    passed: List[str] = []
+    problems: List[str] = []
+    for task_id in sorted(own_ids | {str(t) for t in check_ids}):
+        if not counted(task_id):
+            continue
+        if task_id in own_ids and task_id not in check_ids:
+            findings = failing_own.get(task_id)
+            if isinstance(findings, list) and findings and batch_check_could_not_run(
+                    [str(item) for item in findings]):
+                continue
+            failed = bool(findings) or bool(accepted.get(task_id))
+        else:
+            failed = bool(check_findings.get(task_id))
+        (problems if failed else passed).append(task_id)
+    if not passed and not problems:
+        return None
+
+    def named(ids: List[str]) -> str:
+        shown = ids[:CHECKS_RAN_MAX_IDS]
+        rest = len(ids) - len(shown)
+        if rest:
+            return ", ".join(shown) + f" and {rest} more"
+        return shown[0] if len(shown) == 1 else ", ".join(shown[:-1]) + f" and {shown[-1]}"
+
+    said = []
+    if passed:
+        said.append(f"passed in {named(passed)}")
+    if problems:
+        said.append(f"reported problems in {named(problems)}")
+    return "The tasks ran checks: " + "; ".join(said) + "."
 
 
 def native_stop_unverified_line(plan_path: Union[str, Path]) -> Optional[str]:
@@ -2488,7 +2615,8 @@ def native_stop_unverified_line(plan_path: Union[str, Path]) -> Optional[str]:
             root = resolve_repo_root(str(plan))
         except Exception:  # noqa: BLE001 - the line still stands without a candidate
             root = None
-        return unverified_line(root)
+        # Fix round 24: led by the checks the tasks ran, as the executor's.
+        return unverified_line(root, ran=implement_checks_ran(state, checks))
     except Exception:  # noqa: BLE001 - advisory: never fails the lookup
         return None
 
@@ -2531,14 +2659,13 @@ def native_apply_fixes_unverified_line(plan_path: Union[str, Path]) -> Optional[
             root = resolve_repo_root(str(plan))
         except Exception:  # noqa: BLE001 - the line still stands without a candidate
             root = None
-        line = unverified_line(root)
-        tally = _known_checks.checks_tally(
+        # Fix round 24: led by the tally when a batch ran a known check.
+        return unverified_with_report(root, _known_checks.checks_report(
             _known_checks.known_check_commands(
                 out, plan_file=str(plan), repo_root=root, state=state,
             ),
             state, tasks,
-        )
-        return f"{line} {tally}" if tally else line
+        ))
     except Exception:  # noqa: BLE001 - advisory
         return None
 
@@ -4277,21 +4404,61 @@ class WriteBatchScheduler:
             repo_root=getattr(self, "repo_root", None), state=state,
         )
 
-    def _known_checks_tally(self) -> Optional[str]:
+    def _known_checks_report(
+        self, max_chars: Optional[int] = None,
+    ) -> Optional[Tuple[str, bool]]:
         """What this phase's batches reported about the known checks they
-        were told to run (:func:`known_checks.checks_tally`), for the line
-        saying nothing ran the tests; ``None`` for every other kind, or with
-        no check known. Never fatal."""
+        were told to run, and whether one ran (:func:`known_checks.checks_report`),
+        for the tests line; ``None`` for every other kind, or with no check
+        known. Never fatal."""
         if self.kind != "apply_code_fixes":
             return None
         try:
             state = getattr(self, "state", None)
             if state is None:
                 state = _known_checks.read_state(self.output_dir)
-            return _known_checks.checks_tally(
+            return _known_checks.checks_report(
                 self._known_checks(), state, getattr(self, "tasks", None) or [],
+                **({} if max_chars is None else {"max_chars": max_chars}),
             )
         except Exception:  # noqa: BLE001 - advisory
+            return None
+
+    def _unverified_text(self, *, stop: bool = False) -> str:
+        """The tests line this code phase owes with no ``driver.verify_command``
+        (:func:`unverified_line`), led by what ran (fix round 24): implement's
+        tasks' checks (:func:`implement_checks_ran`), apply-code-fixes' known
+        checks (:meth:`_known_checks_report`; at a stop only when a batch
+        ran one, cut to :data:`STOP_TALLY_MAX_CHARS`, so the stop's remedy
+        and answers keep their room beside it in the bounded ``error``)."""
+        if self.kind == "implement":
+            return unverified_line(self.repo_root, ran=self._implement_checks_ran())
+        report = self._known_checks_report(STOP_TALLY_MAX_CHARS if stop else None)
+        if stop and not (report and report[1]):
+            # A stop's line names the tally only to lead with what ran.
+            return unverified_line(self.repo_root)
+        return unverified_with_report(self.repo_root, report)
+
+    def _implement_checks_ran(self) -> Optional[str]:
+        """:func:`implement_checks_ran` over the state this run holds, the
+        check tasks read off this run's tasks and the plan's task list (a
+        resume's batches leave out the tasks an earlier run finished)."""
+        try:
+            holder = getattr(self, "state", None)
+            state = getattr(holder, "state", None) if holder is not None else None
+            if not isinstance(state, dict):
+                state = _known_checks.read_state(self.output_dir)
+            checks = {
+                str(task.get("task_id") or "")
+                for task in (getattr(self, "tasks", None) or [])
+                if isinstance(task, dict) and not declared_file_set(task)
+                and task.get("executor_role") != "human" and not task.get("is_human")
+            }
+            plan_file = getattr(self, "plan_file", None)
+            if plan_file:
+                checks |= _check_task_ids_of_plan(Path(plan_file))
+            return implement_checks_ran(state, checks)
+        except Exception:  # noqa: BLE001 - advisory: the line still stands
             return None
 
     def _known_checks_section(self, task: Dict[str, Any]) -> str:
@@ -8656,15 +8823,24 @@ class WriteBatchScheduler:
                         from .state_manager import (
                             set_task_batch_check_accepted_in_state,
                             set_task_batch_check_in_state,
+                            set_task_own_check_ran_in_state,
                         )
                     except ImportError:  # pragma: no cover - direct script runs
                         from utils.state_manager import (  # type: ignore
                             set_task_batch_check_accepted_in_state,
                             set_task_batch_check_in_state,
+                            set_task_own_check_ran_in_state,
                         )
                     set_task_batch_check_in_state(
                         self.state.state, task_id,
                         outcome.batch_check if outcome.ok else None,
+                    )
+                    # Fix round 24: that it ran one at all, passing ones
+                    # included, for the tests line.
+                    set_task_own_check_ran_in_state(
+                        self.state.state, task_id,
+                        outcome.ok and (outcome.batch_check is not None
+                                        or bool(outcome.batch_check_accepted)),
                     )
                     # Fix round 23: what it reported again of the accepted
                     # findings, by check, as `util batch-done` records it.
@@ -10856,7 +11032,7 @@ class WriteBatchScheduler:
             return []
         if command:
             return []
-        result.unverified = unverified_line(self.repo_root)
+        result.unverified = self._unverified_text(stop=True)
         headline = (result.stop or {}).get("headline")
         if headline and result.unverified not in headline:
             # The result line's `error` is bounded: the headline is fitted
@@ -10913,12 +11089,10 @@ class WriteBatchScheduler:
             # Fix round 14: said on the result too, not only in the log —
             # codex racing run 5's apply-code-fixes left the repository's own
             # test failing and every surface a host relays read clean.
-            result.unverified = unverified_line(self.repo_root)
             # Fix round 20: and which checks the batches were asked to run,
-            # with what each batch reported (apply-code-fixes).
-            tally = self._known_checks_tally()
-            if tally:
-                result.unverified = f"{result.unverified} {tally}"
+            # with what each batch reported (apply-code-fixes); fix round 24:
+            # led by what ran, implement's tasks' checks too.
+            result.unverified = self._unverified_text()
             result.messages.append(result.unverified)
             return True
         timeout = get_verify_timeout_s(anchor=self.anchor)
