@@ -42,7 +42,7 @@ COMMAND = "/multi-llm:multi-llm --generate-tasks 'plans/my plan.md'"
 #: The same command with one character dropped: the closing quote.
 ALTERED = "/multi-llm:multi-llm --generate-tasks 'plans/my plan.md"
 OPTIONAL = "/multi-llm:multi-llm --review-plan 'plans/my plan.md'"
-WHY = "optional: have the models review the plan again"
+WHY = "Have the models review the plan again; skipping this keeps the plan as it stands."
 
 
 # ---------------------------------------------------------------------------
