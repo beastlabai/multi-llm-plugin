@@ -863,8 +863,9 @@ class TestTheNativeLeg:
             capsys.readouterr()
             run_status.main(argv)
             lines = capsys.readouterr().out.splitlines()
+            # Fix round 24: a stop is headed as the executor routes head it.
             head = next(i for i, line in enumerate(lines) if line.startswith(
-                "  implement  not finished on the host (not marked completed)"))
+                "  implement  stopped and needs you (not marked completed)"))
             at = lines.index(expected[0])
             assert at > head, lines
             assert lines[at:at + len(expected)] == expected, lines[at:]

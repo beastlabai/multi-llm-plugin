@@ -284,7 +284,8 @@ class TestStatusReadsANativeImplementFromState:
         self._native_stop(repo, capsys)
         assert not (repo.phase_dir / "write_batch_report.json").exists()
         out = _status_run(repo, capsys)
-        assert ("implement  not finished on the host (not marked completed) — "
+        # Fix round 24: headed as the executor routes head the same stop.
+        assert ("implement  stopped and needs you (not marked completed) — "
                 "no run record, since the host ran these tasks itself") in out, out
         # Fix round 18: the executor routes' `all tasks:` tally, word for word.
         line = next(l for l in out.splitlines() if l.strip().startswith("all tasks:"))
