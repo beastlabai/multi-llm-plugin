@@ -1770,9 +1770,14 @@ class TestTheHomeCheck:
         assert "nothing needs doing" in sibling
         assert line.count("is your call") == 1
 
-    def test_the_note_names_only_the_tables_still_there_when_it_prints(self, lay):
+    def test_the_note_names_only_the_tables_still_there_when_it_prints(
+        self, lay, monkeypatch,
+    ):
         """Run 6's noise was sibling runs' tables that their own runs removed
         again; one this run planted stays until someone deletes it."""
+        # No live session explains `/` here, whatever runs on this machine.
+        monkeypatch.setattr(
+            ld, "live_codex_trust_keys", lambda proc_root="/proc": set())
         home = _make_home(lay.root)
         config = home / "config.toml"
         _append(config, self._trust("/"))
