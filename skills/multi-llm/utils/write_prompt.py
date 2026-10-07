@@ -258,7 +258,10 @@ def render_write_prompt(
         # Fix round 22: the entries the render bound, this run's own.
         entries = _prior_changes.run_entries(
             output_dir, phase,
-            last_phase_end(_known_checks.read_state(output_dir), phase),
+            last_phase_end(
+                _known_checks.read_state(output_dir), phase,
+                _known_checks.review_stamp(task),
+            ),
         )
     else:
         entries = [
@@ -491,7 +494,8 @@ def ordering_warnings(phase_dir: Path, task_id: str) -> List[str]:
         str(entry.get("id") or "")
         for entry in (
             _prior_changes.run_entries(
-                str(phase_dir.parent), phase, last_phase_end(state, phase))
+                str(phase_dir.parent), phase,
+                last_phase_end(state, phase, _known_checks.review_stamp(task)))
             if scoped in OWN_RUN_CONTEXT_PHASES
             else _prior_changes.entries(str(phase_dir.parent))
         )

@@ -253,3 +253,140 @@ def test_an_earlier_runs_entry_is_not_this_batchs_for_the_order_warning(tmp_path
     assert len(lines) == 1 and "apply-fix-batch-0 is recorded completed" in lines[0], lines
     native, _task, _info = write_prompt.render_write_prompt(phase_dir, "apply-fix-batch-1")
     assert "Cycle 1" not in native
+
+
+# -- fix round 23 (records #4): a phase closed over a failed batch ----------
+
+
+def _bind_review(out: Path, prompt: str, task_id: str, review: str) -> str:
+    return bind_prior_changes(
+        {"task_id": task_id, "prompt": prompt, "inputs": {"grouped_sha256": review}},
+        output_dir=str(out), phase="apply-code-fixes",
+    )
+
+
+def _run_one(out: Path) -> None:
+    """Batches 0 and 1 of a run applied; its batch 2 failed."""
+    _log(out, [
+        _line("T001", "implement", "implement task 1", "2026-10-07T14:00:00"),
+        _line("index.html#b0", "apply-fixes", "Fix batch 0 applied (run 1).",
+              "2026-10-07T14:01:00"),
+        _line("index.html#b1", "apply-fixes", "Fix batch 1 applied (run 1).",
+              "2026-10-07T14:02:00"),
+    ])
+
+
+def test_a_phase_closed_over_a_failed_batch_keeps_this_runs_batches(tmp_path):
+    """The reviewer's probe §4: nothing refuses the native `--mark-completed`
+    while `processed_apply-fixes` holds a `failed` record (the runbook
+    forbids it; hosts have mis-closed phases before). The `--resume` that
+    dispatches the failed batch again continues the same run, so its
+    prompt still lists batches 0 and 1 (permissive: no new stop)."""
+    _run_one(tmp_path)
+    (tmp_path / "state.json").write_text(json.dumps({
+        "phases_completed": {"apply-code-fixes": "2026-10-07T14:03:00"},
+        "processed_apply-fixes": {"i2": {"status": "failed", "details": {}}},
+    }), encoding="utf-8")
+    block = _block(_bind(tmp_path, _fix_prompt(tmp_path), "apply-fix-batch-2"))
+    assert "Fix batch 0 applied (run 1)." in block, block
+    assert "Fix batch 1 applied (run 1)." in block, block
+
+
+def test_and_after_the_resumed_batch_failed_again(tmp_path):
+    """Its record is re-stamped after the completion: still this run."""
+    _run_one(tmp_path)
+    (tmp_path / "state.json").write_text(json.dumps({
+        "phases_completed": {"apply-code-fixes": "2026-10-07T14:03:00"},
+        "processed_apply-fixes": {"i2": {
+            "status": "failed", "details": {"grouped_sha256": "S1"},
+            "timestamp": "2026-10-07T14:10:00"}},
+    }), encoding="utf-8")
+    block = _block(_bind_review(
+        tmp_path, _fix_prompt(tmp_path), "apply-fix-batch-2", "S1"))
+    assert "Fix batch 0 applied (run 1)." in block, block
+
+
+def test_an_earlier_review_stays_out_of_a_phase_closed_over_a_failed_batch(tmp_path):
+    """The run before it ends at its last record: a finished earlier cycle's
+    batches are still not this run's."""
+    _log(tmp_path, [
+        _line("index.html#0ld0ld00", "apply-fixes", "Cycle 1: clamped the speed.",
+              "2026-10-07T13:00:00"),
+    ])
+    _run_one(tmp_path)
+    (tmp_path / "state.json").write_text(json.dumps({
+        "phases_completed": {"apply-code-fixes": "2026-10-07T14:03:00"},
+        "processed_apply-fixes": {
+            "c1": {"status": "applied", "details": {"grouped_sha256": "S1"},
+                   "timestamp": "2026-10-07T13:00:01"},
+            "b0": {"status": "applied", "details": {"grouped_sha256": "S2"},
+                   "timestamp": "2026-10-07T14:01:01"},
+            "i2": {"status": "failed", "details": {"grouped_sha256": "S2"},
+                   "timestamp": "2026-10-07T14:02:30"},
+        },
+    }), encoding="utf-8")
+    block = _block(_bind_review(
+        tmp_path, _fix_prompt(tmp_path), "apply-fix-batch-2", "S2"))
+    assert "Cycle 1" not in block, block
+    assert "Fix batch 0 applied (run 1)." in block, block
+
+
+def test_an_earlier_reviews_failed_batch_does_not_reopen_a_finished_run(tmp_path):
+    """A `failed` record of another review is that cycle's: the completion
+    that came after it still ends the run before this one."""
+    _run_one(tmp_path)
+    _log(tmp_path, [_line("index.html#n3w", "apply-fixes", "Cycle 3: first batch.",
+                          "2026-10-07T15:00:00")])
+    (tmp_path / "state.json").write_text(json.dumps({
+        "phases_completed": {"apply-code-fixes": "2026-10-07T14:03:00"},
+        "processed_apply-fixes": {"i2": {
+            "status": "failed", "details": {"grouped_sha256": "S1"},
+            "timestamp": "2026-10-07T14:02:30"}},
+    }), encoding="utf-8")
+    block = _block(_bind_review(
+        tmp_path, _fix_prompt(tmp_path), "apply-fix-batch-1", "S3"))
+    assert "(run 1)" not in block, block
+    assert "Cycle 3: first batch." in block, block
+
+
+def test_both_legs_keep_this_runs_batches_after_a_phase_closed_over_a_failure(tmp_path):
+    plan = tmp_path / "plans" / "racing-game.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("# Racing\n", encoding="utf-8")
+    out = tmp_path / "plans" / "racing-game"
+    phase_dir = out / "apply-fixes"
+    phase_dir.mkdir(parents=True)
+    _run_one(out)
+    (out / "state.json").write_text(json.dumps({
+        "phases_completed": {"apply-code-fixes": "2026-10-07T14:03:00"},
+        "processed_apply-fixes": {"g2": {"status": "failed", "details": {},
+                                         "timestamp": "2026-10-07T14:02:30"}},
+    }), encoding="utf-8")
+    prompt = _fix_prompt(out)
+    batches = [
+        {"file_key": "index.html", "prompt": prompt,
+         "fixes": [{"group_id": f"g{n}", "title": f"Fix {n}"}]}
+        for n in range(3)
+    ]
+    tasks = materialize_write_tasks(
+        kind="apply_code_fixes", batches=batches, phase_dir=str(phase_dir),
+        plan_file=str(plan),
+    )
+    write_task_file_for_phase(
+        kind="apply_code_fixes", tasks=tasks, phase_dir=str(phase_dir),
+        plan_file=str(plan),
+    )
+    native, _task, info = write_prompt.render_write_prompt(phase_dir, "apply-fix-batch-2")
+    scheduler = WriteBatchScheduler.__new__(WriteBatchScheduler)
+    scheduler.kind = "apply_code_fixes"
+    scheduler.output_dir = str(out)
+    scheduler.phase = "apply-code-fixes"
+    scheduler.state = json.loads((out / "state.json").read_text())
+    scheduler.tasks = tasks
+    scheduler.plan_file = str(plan)
+    executor = scheduler._with_result_contract(
+        tasks[2], scheduler.dispatched_prompt(tasks[2]))
+    assert native == executor
+    block = _block(native)
+    assert "Fix batch 0 applied (run 1)." in block and "Fix batch 1 applied (run 1)." in block
+    assert info["context_entries"] == 2
