@@ -2146,6 +2146,8 @@ def state_implement_view(
         state.is_phase_started(_IMPLEMENT_PHASE)
         or any(statuses.get(str(t)) == "completed" for t in decomposition)
     )
+    in_progress_since = None if completed else _host_run_started_at(
+        record, _IMPLEMENT_PHASE)
     stop_answers: List[Dict[str, Any]] = []
     stop_resume_why: Optional[str] = None
     if resumable:
@@ -2164,10 +2166,14 @@ def state_implement_view(
         "resumable": resumable,
         "stop_answers": stop_answers,
         "stop_resume_why": stop_resume_why,
+        # Fix round 24 (live run 10, Claude Code stop 01/01b): whether the
+        # run ended short and waits for the user, as the executor routes'
+        # "stopped and needs you" head says (:func:`native_run_stopped`).
+        "stopped": resumable and not in_progress_since
+        and native_run_stopped(record, statuses),
         # Fix round 18 (Claude Code racing 06, mid-run): when the host's loop
         # is between `util metrics start` and `finish`.
-        "in_progress_since": None if completed else _host_run_started_at(
-            record, _IMPLEMENT_PHASE),
+        "in_progress_since": in_progress_since,
         # Fix round 19: when state.json last changed, so a loop that ended
         # without `util metrics finish` can be told from a live one.
         "state_changed_at": _state_changed_at(state.state_file),
@@ -2196,6 +2202,59 @@ def state_implement_view(
         "batch_check_accepted": [] if settled else state.implementation_batch_check_accepted(),
         "answers": dict(answers) if isinstance(answers, dict) else {},
     }
+
+
+def native_run_stopped(
+    record: Mapping[str, Any], statuses: Mapping[str, Any],
+) -> bool:
+    """Whether a native implement the host ran ended short and waits for the
+    user: the run the executor routes head "stopped and needs you".
+
+    Fix round 24 (live run 10, Claude Code stop 01/01b): the native head read
+    "not finished on the host" for a stop, since that leg leaves no run
+    record and "not finished" also covers a host still working. The caller
+    has already ruled out a completed phase and an open loop (``util metrics
+    start`` without its ``finish``, the "in progress on the host" head).
+    *record* is ``state.json``'s dict and *statuses* its implement task
+    statuses (``StateManager.implementation_task_statuses``). True when:
+
+    * no task is recorded ``in_progress``;
+    * something waits for an answer: a task of the decomposition recorded
+      ``failed`` (a refusal before dispatch included, which the emit records
+      itself) or a check whose findings hold tasks back — what the stop's
+      answers are composed from
+      (``write_batch_scheduler.native_stop_answers``);
+    * no task is left that the host could still run without that answer:
+      every task not completed, skipped or failed is a manual one, held by a
+      check, or after a failed task. A task the emit handed out and the host
+      has not recorded yet can still run, so the moments between the emit
+      and the host's records never read as a stop.
+
+    The emit's left-out record (``metrics_left_out``) is not needed: each
+    task it names is refused (recorded failed), after a refused task, or
+    held by a check, and ``util metrics finish`` removes it. Advisory: an
+    unreadable record is not a stop.
+    """
+    from .write_batch_scheduler import _native_stop_facts
+
+    try:
+        scope = [str(t) for t in record.get("implement_task_ids") or []]
+        if any(statuses.get(task_id) == "in_progress" for task_id in scope):
+            return False
+        facts = _native_stop_facts(record)
+        if facts is None:
+            return False
+        manual = {str(t) for t in (record.get("implement_human_task_ids") or [])}
+        kept_out = set(facts["failed_ids"]) | set(facts["blocked"])
+        for task_id in facts["failed_ids"]:
+            kept_out.update(facts["undone_with"](task_id))
+    except Exception:  # noqa: BLE001 - advisory: the run view is not
+        return False
+    return not any(
+        statuses.get(task_id) not in ("completed", "skipped", "failed")
+        and task_id not in manual and task_id not in kept_out
+        for task_id in scope
+    )
 
 
 def _host_run_started_at(record: Mapping[str, Any], phase: str) -> Optional[str]:
@@ -2227,15 +2286,24 @@ def _state_changed_at(state_file: Path) -> Optional[str]:
     return datetime.fromtimestamp(stamp).isoformat(timespec="seconds")
 
 
+#: A native implement that stopped and waits for the user's answer
+#: (:func:`native_run_stopped`, fix round 24): the executor routes' words
+#: (:data:`STOPPED_FOR_THE_USER_VERDICT`), with no exit code to name, since
+#: the native leg's phase exits 0 and the host closed it.
+NATIVE_STOPPED_VERDICT = "stopped and needs you (not marked completed)"
+
+
 def _native_head(
     dir_name: str, *, completed: bool, since: Optional[str], unit: str,
-    changed: Optional[str] = None,
+    changed: Optional[str] = None, stopped: bool = False,
 ) -> str:
     """A native write phase's head line: what state.json says it is doing.
 
     Fix round 18 (Claude Code racing 06): a running native implement read
     "no run record — the host ran these tasks itself" exactly as a stopped
-    one did, so the view could not say whether anything was going on.
+    one did, so the view could not say whether anything was going on. Fix
+    round 24: one that stopped needing the user (*stopped*) reads
+    :data:`NATIVE_STOPPED_VERDICT`.
     """
     if completed:
         verdict = "done on the host (marked completed)"
@@ -2244,6 +2312,9 @@ def _native_head(
         last = f"; state.json last changed {changed}" if changed else ""
         verdict = f"in progress on the host (started {since}{last})"
         tense = "runs"
+    elif stopped:
+        verdict = NATIVE_STOPPED_VERDICT
+        tense = "ran"
     else:
         verdict = "not finished on the host (not marked completed)"
         tense = "ran"
@@ -2346,6 +2417,7 @@ def render_state_implement_lines(
     lines = [_native_head(
         _IMPLEMENT_PHASE, completed=bool(view.get("completed")), since=since,
         unit="tasks", changed=view.get("state_changed_at"),
+        stopped=bool(view.get("stopped")),
     )]
     lines.append(
         f"      all tasks:      {implement_tally_text(view['tally'], live=bool(since))}"
