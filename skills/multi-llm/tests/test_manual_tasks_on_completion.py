@@ -607,7 +607,7 @@ class TestImplementRecordsTheTitles:
         assert [task["id"] for task in step["manual_tasks"]] == ["T002", "T003"]
         assert (
             "--implement " in step["manual_tasks_note"]
-            and "--resume --human-task T002=done " in step["manual_tasks_note"]
+            and step["manual_tasks_note"].endswith("--resume --human-task T002=done")
         ), step
         assert "T003=done" not in step["manual_tasks_note"], step
 

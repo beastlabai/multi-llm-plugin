@@ -593,6 +593,7 @@ def _workflow_trailer_lines(
     # no trailer at all, so a finished plan with two manual playthroughs still
     # owed read as done (2026-10-04, OpenCode racing re-run).
     manual = (payload.get("phases", {}).get("implement") or {}).get("manual_tasks")
+    manual_line: Optional[str] = None
     if isinstance(manual, list) and manual:
         from .next_phase import ManualTask
 
@@ -607,7 +608,10 @@ def _workflow_trailer_lines(
             if isinstance(entry, dict) and entry.get("id")
         )
         if named:
-            lines.append(
+            # Appended last, below: its note ends with the command that
+            # records the tasks done, and a joined `notice` must not run on
+            # past it (live run 8, Codex racing 08 fenced the text after it).
+            manual_line = (
                 f"{prefix}manual tasks left for you: {named}"
                 + (f". {close_note}" if close_note else "")
             )
@@ -656,6 +660,8 @@ def _workflow_trailer_lines(
                 f"{prefix}a task's own report says a check it ran fails (see "
                 f"implement/summary.md): {named}"
             )
+    if manual_line:
+        lines.append(manual_line)
     return lines
 
 
