@@ -663,6 +663,16 @@ def _workflow_trailer_lines(
                 f"{prefix}a task's own report says a check it ran fails (see "
                 f"implement/summary.md): {named}"
             )
+    # And those whose own check reported again only the findings the user
+    # accepted for a check (`phases.implement.batch_check_accepted`, fix
+    # round 23), by the same rule: not a failure, but on record.
+    accepted_reruns = _accepted_reruns_by_task(
+        (phases.get("implement") or {}).get("batch_check_accepted"))
+    if accepted_reruns and not (implement_done and review_settled):
+        lines += [
+            f"{prefix}{clause} — not counted as a failure (see implement/summary.md)"
+            for clause in accepted_rerun_clauses(accepted_reruns)
+        ]
     if manual_line:
         lines.append(manual_line)
     return lines
@@ -2146,6 +2156,8 @@ def state_implement_view(
         "findings": [] if settled else state.implementation_check_findings(),
         # A code task whose own check failed after its edits (fix round 15).
         "batch_checks": [] if settled else state.implementation_batch_check_findings(),
+        # And one whose own check repeated the accepted findings (round 23).
+        "batch_check_accepted": [] if settled else state.implementation_batch_check_accepted(),
         "answers": dict(answers) if isinstance(answers, dict) else {},
     }
 
@@ -2316,6 +2328,10 @@ def render_state_implement_lines(
         lines.append(
             f"      own check fails {entry['id']}: {clip('; '.join(findings), 300)}"
         )
+    lines += [
+        f"      {clause}" for clause in accepted_rerun_clauses(
+            _accepted_reruns_by_task(view.get("batch_check_accepted")))
+    ]
     if view["answers"]:
         lines.append(
             "      answers on record: "
@@ -2462,6 +2478,36 @@ def not_applied_item_clauses(source: Mapping[str, Any]) -> List[str]:
                 for entry in entries[:5]
             ) + (f" (+{len(entries) - 5} more)" if len(entries) > 5 else ""))
     return clauses
+
+
+def accepted_rerun_clauses(by_task: Mapping[str, Sequence[str]]) -> List[str]:
+    """``completed, its check repeated T002's accepted findings: T007`` per
+    set of checks, from ``{task_id: [check ids]}`` (fix round 23): the code
+    tasks whose own check reported again only what the user accepted for a
+    check (``--human-task <check>=done``), named on every ``status`` surface
+    of both legs where a failing own check is named, never as a failure."""
+    groups: Dict[str, List[str]] = {}
+    for task_id, checks in sorted(by_task.items()):
+        names = sorted({str(check) for check in (checks or []) if str(check)})
+        if not names:
+            continue
+        named = " and ".join(f"{check}'s" for check in names)
+        groups.setdefault(named, []).append(str(task_id))
+    return [
+        f"completed, its check repeated {named} accepted findings: {', '.join(ids)}"
+        for named, ids in groups.items()
+    ]
+
+
+def _accepted_reruns_by_task(entries: Any) -> Dict[str, List[str]]:
+    """``{task_id: [check ids]}`` from
+    ``StateManager.implementation_batch_check_accepted``'s entries."""
+    return {
+        str(entry["id"]): list(entry.get("checks") or {})
+        for entry in (entries if isinstance(entries, list) else [])
+        if isinstance(entry, dict) and entry.get("id")
+        and isinstance(entry.get("checks"), dict)
+    }
 
 
 def _native_apply_not_applied(
@@ -2847,6 +2893,14 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
         unrun = [str(t) for t in failing if str(t) in could_not]
         if unrun:
             parts.append(f"own check could not run {', '.join(unrun)}")
+    # Fix round 23: a task whose own check repeated only the findings the
+    # user accepted for a check is named, never only counted `ok`.
+    repeated = mirror.get("batch_check_accepted")
+    if isinstance(repeated, dict) and repeated:
+        parts += accepted_rerun_clauses({
+            str(task_id): checks for task_id, checks in repeated.items()
+            if isinstance(checks, list)
+        })
     # Fix round 18: an item a finished batch declined (or one skipped at the
     # user's request) is named, never only left out of `items applied`.
     parts += not_applied_item_clauses(mirror)
