@@ -161,6 +161,12 @@ VIEW_ALL = "all"
 #: Anything else means the phase is still working.
 CHECKPOINT_TERMINAL_STEPS = frozenset({"complete", "validation_pending", "stopped"})
 
+#: The write scheduler's ``progress.step`` on a stop, and how a foreground
+#: run that ended on it heads its block (fix round 23): a stop needs the
+#: user, as a detached run's exit 3 does (:data:`STOPPED_FOR_THE_USER_VERDICT`).
+STOPPED_STEP = "stopped"
+STOPPED_IN_FOREGROUND = "stopped in foreground (needs you; no detached run record)"
+
 #: The *phase* machine's terminal words — ``status_file``'s
 #: ``models_running -> models_complete/grouping_complete -> validation_pending ->
 #: complete`` ladder plus the ways a phase stops without reaching ``complete``
@@ -1037,6 +1043,11 @@ def _verdict_text(view: Dict[str, Any]) -> str:
         # `phase state:` line right below, which prints `complete`,
         # `subagents_failed` or whatever the phase wrote.
         progress = view.get("progress") or {}
+        if progress.get("step") == STOPPED_STEP:
+            # Fix round 23 (review of round 22, #2): the write mirror's stop,
+            # which read "finished in foreground" while the same ending
+            # detached heads "stopped and needs you (exit 3)".
+            return STOPPED_IN_FOREGROUND
         if progress:
             tense = "running" if _checkpoint_in_flight(view) else "finished"
             total = progress.get("models_total")

@@ -72,12 +72,27 @@ class TestAZeroDispatchResume:
 
 class TestAForegroundStop:
 
-    def test_its_head_does_not_read_as_running(self, repo, capsys):
+    def test_its_head_reads_as_stopped_and_needing_the_user(self, repo, capsys):
         """The write mirror's `progress.step` on a stop is `stopped`, which
         the run view did not count as terminal: a foreground executor run
-        that stopped read "running in foreground"."""
+        that stopped read "running in foreground". Fix round 23 (review of
+        round 22, #2): then "finished in foreground", while the same ending
+        detached heads "stopped and needs you (exit 3)"; it says so too."""
         _first_run(repo, capsys)
         assert _implement(repo, "--resume") == 3
+        capsys.readouterr()
+        multi_llm.main(["status", str(repo.plan), "--view", "run"])
+        out = capsys.readouterr().out
+        head = [l for l in out.splitlines() if l.startswith("  implement  ")]
+        assert head == [
+            "  implement  stopped in foreground (needs you; no detached run record)"
+        ], out
+
+    def test_a_finished_foreground_run_still_reads_finished(self, repo, capsys):
+        _first_run(repo, capsys)
+        assert _implement(
+            repo, "--resume", "--human-task", "T002=done", "--human-task", "T005=skip",
+        ) == 0
         capsys.readouterr()
         multi_llm.main(["status", str(repo.plan), "--view", "run"])
         out = capsys.readouterr().out
