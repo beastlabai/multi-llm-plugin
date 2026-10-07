@@ -1389,7 +1389,9 @@ class TestAnApplyResumeKeepsTheEarlierRunsRows(_ApplyRig):
     def test_the_resume_lines_count_what_the_resume_kept(self, repo, capsys):
         """OpenCode racing run 4: the executor leg's resume printed `[resume]
         0 already processed, 12 remaining` (the native leg's record, which
-        this leg never writes) and then kept batch 0 from the earlier run."""
+        this leg did not write; since fix round 22 it writes one, which its
+        own resume leaves to the result files) and then kept batch 0 from the
+        earlier run."""
         plan = self._review(repo, "one")
         ids = self._ids(plan)
         assert self._run(repo, plan, ids[0]) == 3
