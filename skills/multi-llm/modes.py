@@ -436,29 +436,21 @@ TOOL_OUTCOMES_LINE = (
 #: (live run 7): the `command` first and each optional entry after it with its
 #: `why` (plans/next-phase-command.md §2.1, "Primary first"; Codex had put the
 #: optional step first, OpenCode had dropped its `why`), and the note as prose
-#: (Codex racing 06 put it in a ```text fence).
+#: (Codex racing 06 put it in a ```text fence). Fix round 22 (live run 9:
+#: Codex 04 printed both commands as bare paragraphs, and the manual-task
+#: close command, which the note carried at its end, reached the user as
+#: prose): the key carries the section already written, each command fenced
+#: (`next_phase.render_next_step_markdown`), and the line says to copy it.
 TOOL_USER_NEXT_STEP_LINE = (
     "`user_next_step` in a result is a command for the user to type, never a "
-    "call to make: copy its `command`, and each `optional_before` command, into your "
-    "report, each in its own fenced block, the `command` first; then the line "
-    "\"Optional, before that:\" and, for each `optional_before` entry, its `why` "
-    "as plain text above its command (the `why` says what the optional step "
-    "would do and what skipping it means); when it is `complete`, and "
-    "only then, say \"Workflow complete.\"; and whenever it carries "
-    "`manual_tasks`, complete or not, list each of them "
-    "(id and title): tasks implement left for the user to do by hand, or, for one "
-    "with `waits_on`, a task skipped with that one, which implement runs once "
-    "that one is recorded done; "
-    "then give its `manual_tasks_note` verbatim, which says how to record them done, "
-    "as plain text and never inside a fenced block: a fenced block holds one command "
-    "and nothing else. "
-    "Then stop. "
-    "Never say \"Workflow complete.\" otherwise, even when a notice lists manual "
-    "tasks left for the user: while `user_next_step` names a `command`, the "
-    "workflow goes on. Only `next` is "
-    "a call. A "
-    "needs-human result's `resume_command` is the same kind of thing: the user's to "
-    "type, never a call."
+    "call to make: end your report with its `markdown`, copied as it is (each "
+    "command stays alone in its fenced block, each why and note stays plain "
+    "text, the manual tasks it lists included), then stop. It says "
+    "\"Workflow complete.\" only when it is `complete`: never say that "
+    "otherwise, even when a notice lists manual tasks left for the user; while "
+    "`user_next_step` names a `command`, the workflow goes on. Only `next` is "
+    "a call. A needs-human result's `resume_command` is the same kind of "
+    "thing: the user's to type, never a call."
 )
 
 #: The finished run's relay (live run 8, OpenCode racing 08): a completed
@@ -513,9 +505,9 @@ STOP_POLICY_RULE = (
 #: with :data:`STOP_POLICY_RULE` instead of "never suggest loosening".
 TOOL_NO_COMPOSED_COMMAND_LINE = (
     "Never compose a command for the user yourself, and never spell one from "
-    "this tool's arguments: the only commands you may give them are "
-    "`user_next_step.command`, its `optional_before` commands, "
-    "`resume_command` and each `resume_answers` command, each copied verbatim. "
+    "this tool's arguments: the only commands you may give them are the ones "
+    "in `user_next_step`, `resume_command` and each `resume_answers` "
+    "command, each copied verbatim. "
     "A result whose `user_next_step` is "
     "null and that carries no `resume_command` has no command to give "
     "(`no_command_reason` says why): name no command and no next phase. "

@@ -63,6 +63,14 @@ def repo(tmp_path, monkeypatch):
     registry._config_key = None
 
 
+def _close_command(plan_arg: str, ids) -> str:
+    """The close command alone, as the next-step lookup prints it beside the
+    note's lead sentence (fix round 22)."""
+    template = host_capabilities.next_command_template(
+        "claude-code", np_.resolve_route("claude-code", stderr=io.StringIO()))
+    return np_.close_command(template, plan_arg, ids)
+
+
 def _close_note(plan_arg: str, ids) -> str:
     """The note for *ids*, its command spelled the way Claude Code types it."""
     template = host_capabilities.next_command_template(
@@ -152,14 +160,15 @@ class TestTheReportLookupCarriesIt:
             capsys, "next-command", PLAN_ARG, "--after", "implement",
             "--host", "claude-code")
         assert code == 0, err
-        note = _close_note(PLAN_ARG, ["T005"])
+        command = _close_command(PLAN_ARG, ["T005"])
         lines = [line for line in out.splitlines() if line.startswith("[")]
         assert lines[0].startswith("[NEXT_COMMAND] ")
         assert lines[0].endswith(f"--review-code {PLAN_ARG}")
-        assert lines[-3:] == [
+        assert lines[-4:] == [
             f"[MANUAL_TASK] T005 {MANUAL_TITLE}",
             f"[MANUAL_TASK] T006 {DEPENDENT_TITLE} {WAITS}",
-            f"[MANUAL_TASK_NOTE] {note}",
+            f"[MANUAL_TASK_NOTE] {np_.manual_close_lead()}",
+            f"[MANUAL_TASK_COMMAND] {command}",
         ]
         step = cli_common.parse_result_line(out)["user_next_step"]
         assert step["complete"] is False
@@ -168,7 +177,8 @@ class TestTheReportLookupCarriesIt:
             {"id": "T005", "title": MANUAL_TITLE},
             {"id": "T006", "title": DEPENDENT_TITLE, "waits_on": "T005"},
         ]
-        assert step["manual_tasks_note"] == note
+        assert step["manual_tasks_note"] == np_.manual_close_lead()
+        assert step["manual_tasks_command"] == command
 
     def test_after_another_phase_it_names_them_too(self, repo, capsys):
         """Fix round 17: the two packages of round 16 disagreed here. Every
@@ -181,18 +191,19 @@ class TestTheReportLookupCarriesIt:
             capsys, "next-command", PLAN_ARG, "--after", "generate-tasks",
             "--host", "claude-code")
         assert code == 0, err
-        note = _close_note(PLAN_ARG, ["T005"])
+        command = _close_command(PLAN_ARG, ["T005"])
         lines = [line for line in out.splitlines() if line.startswith("[")]
         assert lines[0].startswith("[NEXT_COMMAND] ")
-        assert lines[-3:] == [
+        assert lines[-4:] == [
             f"[MANUAL_TASK] T005 {MANUAL_TITLE}",
             f"[MANUAL_TASK] T006 {DEPENDENT_TITLE} {WAITS}",
-            f"[MANUAL_TASK_NOTE] {note}",
+            f"[MANUAL_TASK_NOTE] {np_.manual_close_lead()}",
+            f"[MANUAL_TASK_COMMAND] {command}",
         ]
         step = cli_common.parse_result_line(out)["user_next_step"]
         assert step["complete"] is False
         assert [task["id"] for task in step["manual_tasks"]] == ["T005", "T006"]
-        assert step["manual_tasks_note"] == note
+        assert step["manual_tasks_command"] == command
 
     def test_the_complete_answer_closes_only_the_manual_task(self, repo, capsys):
         """The same rule on `[WORKFLOW_COMPLETE]`, both legs' builder: T006,
@@ -208,7 +219,7 @@ class TestTheReportLookupCarriesIt:
             "--host", "claude-code")
         assert code == 0, err
         assert "[WORKFLOW_COMPLETE]" in out
-        assert f"[MANUAL_TASK_NOTE] {_close_note(PLAN_ARG, ['T005'])}" in out
+        assert f"[MANUAL_TASK_COMMAND] {_close_command(PLAN_ARG, ['T005'])}" in out
 
 
 class TestTheExecutorSummaryCarriesItToo:
@@ -272,11 +283,12 @@ class TestATaskSkippedWithAManualOneIsNamedApart:
 
         line = modes.TOOL_USER_NEXT_STEP_LINE
         assert "no phase will run" not in line
-        assert (
-            "tasks implement left for the user to do by hand, or, for one with "
-            "`waits_on`, a task skipped with that one, which implement runs once "
-            "that one is recorded done"
-        ) in line
+        # Fix round 22: the `markdown` the line says to copy lists such a
+        # task with what it waits on.
+        markdown = np_.render_next_step_markdown(np_.NextPhase(
+            phase=None, command=None, complete=True,
+            manual_tasks=(np_.ManualTask("T006", DEPENDENT_TITLE, "T005"),)))
+        assert f"- T006 {DEPENDENT_TITLE} {WAITS}" in markdown
         reference = " ".join(
             (SKILL_DIR / "references" / "summary-format.md").read_text(
                 encoding="utf-8").split())
@@ -296,8 +308,9 @@ class TestTheHostIsToldToCarryIt:
             "JSON's `manual_tasks_note`), verbatim: it says how to record them done"
         ) == 2
         assert (
-            "Each manual task step 2 deferred, as the user's to do, with the "
-            "`[MANUAL_TASK_NOTE]` text verbatim"
+            "Each manual task step 2 deferred, as the user's to do, then the "
+            "next-step lookup's `[MANUAL_TASK_NOTE]` text verbatim and its "
+            "`[MANUAL_TASK_COMMAND]` alone in a fenced block"
         ) in core
         skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
         # Fix round 17: after any phase, not only implement (the merged

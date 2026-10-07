@@ -19,7 +19,9 @@ commands printed, in any order, so one waiting task means no combined
 command to carry), or ``[WORKFLOW_COMPLETE]``. Either kind is followed by one
 ``[MANUAL_TASK] <id> <title>`` line per implement task the run deferred to the
 user, while any is owed, and one ``[MANUAL_TASK_NOTE]`` line saying how to
-record them done (after the commands of a command block since fix round 16).
+record them done (after the commands of a command block since fix round 16),
+then the ``[MANUAL_TASK_COMMAND]`` line that does it, a command the report
+fences like the others (fix round 22).
 The model is told to end its report with each command in a fenced block,
 copied character for character, or with "Workflow complete.", and then those
 tasks listed. This checks the copy, and only the copy:
@@ -135,6 +137,10 @@ MANUAL_TASK = "[MANUAL_TASK] "
 #: After those lines: how the user records them done
 #: (``next_phase.MANUAL_TASK_NOTE_MARKER``). Quoted in a block's reason.
 MANUAL_TASK_NOTE = "[MANUAL_TASK_NOTE] "
+#: After the note: the command that records them done, alone
+#: (``next_phase.MANUAL_TASK_COMMAND_MARKER``, fix round 22). A command the
+#: report carries in a fenced block like the block's others.
+MANUAL_TASK_COMMAND = "[MANUAL_TASK_COMMAND] "
 
 #: What the report says when the block is ``[WORKFLOW_COMPLETE]`` (§2.3).
 COMPLETE_SENTENCE = "Workflow complete."
@@ -187,15 +193,21 @@ class Block:
         self.manual: List[tuple] = []
         #: The ``[MANUAL_TASK_NOTE]`` text after them, when printed.
         self.note: Optional[str] = None
+        #: The ``[MANUAL_TASK_COMMAND]`` after the note, when printed.
+        self.manual_command: Optional[str] = None
 
     def commands(self) -> List[str]:
-        """Every command the report has to carry: the primary one first."""
+        """Every command the report has to carry: the primary one first, the
+        manual tasks' close command last. A complete block's only command is
+        that last one (its primary is the sentence)."""
+        manual = [self.manual_command] if self.manual_command else []
         if self.complete or self.command is None:
-            return []
+            return manual
         return (
             [self.command]
             + [command for _why, command in self.optional]
             + [command for _why, command in self.answers]
+            + manual
         )
 
 
@@ -241,6 +253,10 @@ def find_blocks(text: str) -> List[Block]:
             note = line[len(MANUAL_TASK_NOTE):].strip()
             if current is not None and current.manual and note:
                 current.note = note
+        elif line.startswith(MANUAL_TASK_COMMAND):
+            command = line[len(MANUAL_TASK_COMMAND):].strip()
+            if current is not None and current.manual and command:
+                current.manual_command = command
         elif line.startswith(MANUAL_TASK):
             task_id, _, title = line[len(MANUAL_TASK):].strip().partition(" ")
             if current is not None and task_id:
@@ -294,14 +310,14 @@ def missing_commands(block: Block, message: str) -> List[str]:
     it as a word of its own (``T011``, not ``T0110``): a final message that
     lists them passes, and one that drops them does not.
     """
-    if block.complete:
-        missing = [] if COMPLETE_SENTENCE in message else [COMPLETE_SENTENCE]
-    else:
-        carried = fenced_lines(message)
-        missing = []
-        for command in block.commands():
-            if command not in carried and command not in missing:
-                missing.append(command)
+    missing = (
+        [] if not block.complete or COMPLETE_SENTENCE in message
+        else [COMPLETE_SENTENCE]
+    )
+    carried = fenced_lines(message)
+    for command in block.commands():
+        if command not in carried and command not in missing:
+            missing.append(command)
     for task_id in missing_manual_tasks(block, message):
         if task_id not in missing:
             missing.append(task_id)
@@ -330,15 +346,20 @@ WHOLE_REPORT = (
 
 
 def _manual_list(block: Block) -> str:
-    """The block's manual tasks as a list, then its note when it printed one."""
+    """The block's manual tasks as a list, then its note when it printed one,
+    and on a complete block the command after it, fenced (a command block
+    lists it among its commands)."""
     listed = "\n".join(
         f"- {task_id} {title}".rstrip() for task_id, title in block.manual
     )
     if block.note:
         listed += (
-            "\n\nThen this note, verbatim (its command is the user's to type, "
-            "never yours to run):\n\n" + block.note
+            "\n\nThen this note, verbatim, and the command after it alone in its "
+            "own fenced block (the user's to type, never yours to run):\n\n"
+            + block.note
         )
+        if block.complete and block.manual_command:
+            listed += f"\n\n```\n{block.manual_command}\n```"
     return listed
 
 
@@ -362,9 +383,14 @@ def block_reason(block: Block, missing: Sequence[str]) -> str:
         lacks = []
         if COMPLETE_SENTENCE in missing:
             lacks.append(f'does not say "{COMPLETE_SENTENCE}"')
-        dropped = [item for item in missing if item != COMPLETE_SENTENCE]
+        dropped = [item for item in missing
+                   if item not in (COMPLETE_SENTENCE, block.manual_command)]
         if dropped:
             lacks.append(f"does not name the {_tasks_noun(dropped)}")
+        if block.manual_command and block.manual_command in missing:
+            lacks.append(
+                "does not carry the command that records them done alone in a "
+                "fenced block")
         return (
             "multi-llm report check: the last phase result in this turn printed "
             f"{WORKFLOW_COMPLETE} with the tasks implement deferred to the "
@@ -407,7 +433,8 @@ def block_reason(block: Block, missing: Sequence[str]) -> str:
         f"below exactly. {WHOLE_REPORT} its `### Next Steps` "
         "section, with each command in its own fenced code block, "
         "copied character for character from its [NEXT_COMMAND], "
-        "[NEXT_COMMAND_OPTIONAL] or [NEXT_COMMAND_ANSWERS] line (optional "
+        "[NEXT_COMMAND_OPTIONAL], [NEXT_COMMAND_ANSWERS] or "
+        "[MANUAL_TASK_COMMAND] line (optional "
         "commands after the main one, under the line \"Optional, before "
         "that:\", each with its why; the answers commands last, each with its why). "
         "Do not "

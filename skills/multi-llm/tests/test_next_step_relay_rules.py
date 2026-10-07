@@ -57,10 +57,21 @@ def _relay_texts():
         yield path, _flat(path)
 
 
+#: The rule of every route that copies `user_next_step.markdown`, the
+#: section already written (fix round 22: Codex 04 left both commands
+#: unfenced, and the hosts folded the manual close command into prose).
+MARKDOWN_RULE = "its `markdown`, copied as it is (each command stays alone in its fenced block, each why and note stays plain text"
+
+
 class TestEveryRouteRelaysTheOptionalStepWithItsWhy:
 
     @pytest.mark.parametrize("name,text", list(_relay_texts()))
     def test_command_first_then_each_optional_entry_with_its_why(self, name, text):
+        if name != "SKILL.md":
+            # The order and the whys are the markdown's own
+            # (tests/test_next_step_markdown.py).
+            assert MARKDOWN_RULE in text, name
+            return
         assert "the `command` first" in text, name
         assert '"Optional, before that:"' in text, name
         assert "`why` as plain text above its command" in text, name
@@ -76,14 +87,20 @@ class TestTheManualTaskNoteIsProse:
 
     @pytest.mark.parametrize("name,text", list(_relay_texts()))
     def test_every_route_keeps_the_note_out_of_a_fence(self, name, text):
+        if name != "SKILL.md":
+            assert MARKDOWN_RULE in text, name
+            return
         assert "fenced block holds one command and nothing else" in text, name
 
-    @pytest.mark.parametrize("path", [
-        "references/summary-format.md", "instructions/implement.md"])
-    def test_the_claude_code_report_rules_say_so_too(self, path):
-        text = _flat(path)
-        assert ("as plain text, never inside a fenced block" in text
-                or "as plain text and never in a fenced block" in text), path
+    @pytest.mark.parametrize("path,said", [
+        ("references/summary-format.md",
+         "verbatim as plain text and its `manual_tasks_command` (the "
+         "`[MANUAL_TASK_COMMAND]` line) alone in its own fenced block"),
+        ("instructions/implement.md",
+         "as plain text and never in a fenced block"),
+    ])
+    def test_the_claude_code_report_rules_say_so_too(self, path, said):
+        assert said in _flat(path), path
 
 
 #: A word that asks the host to tell the user something.

@@ -167,8 +167,10 @@ def _block(text):
 
 
 def _expected_payload(expect, prefix):
+    from tests.test_next_phase import with_markdown
+
     if expect == "complete":
-        return {"phase": None, "command": None, "complete": True}
+        return with_markdown({"phase": None, "command": None, "complete": True})
     primary_args, optional = expect
     import modes
 
@@ -182,7 +184,7 @@ def _expected_payload(expect, prefix):
             for phase, args, why in optional
         ]
     payload["complete"] = False
-    return payload
+    return with_markdown(payload)
 
 
 def _assert_neither(out, err, result):
@@ -276,6 +278,7 @@ class TestEachModeEndsWithTheBlockAndTheKey:
         assert code == 0, err
         assert result["user_next_step"] == {
             "phase": None, "command": None, "complete": True,
+            "markdown": "Workflow complete.",
         }
         assert _block(out) == [WORKFLOW_COMPLETE_MARKER]
 
@@ -988,6 +991,7 @@ class TestUtilNextCommand:
         assert code == 0, err
         assert result["user_next_step"] == {
             "phase": None, "command": None, "complete": True,
+            "markdown": "Workflow complete.",
         }
         assert _block(out) == [WORKFLOW_COMPLETE_MARKER]
 
@@ -996,6 +1000,7 @@ class TestUtilNextCommand:
         assert _block(out) == [WORKFLOW_COMPLETE_MARKER]
         assert result["user_next_step"] == {
             "phase": None, "command": None, "complete": True,
+            "markdown": "Workflow complete.",
         }
 
     def test_a_builder_raise_is_exit_3_with_one_line_and_no_block(
