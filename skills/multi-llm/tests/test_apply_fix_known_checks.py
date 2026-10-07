@@ -136,6 +136,21 @@ Play the game.
 - [ ] Running `node scripts/manual-check.mjs` in a browser console works.
 """
 
+SMOKE_CHECK = "node scripts/smoke-check.mjs"
+
+
+def _record_implement(out, plan, tasks_file=None):
+    """What implement's emit leaves (fix round 21): its ``write_tasks.json``,
+    whose ``inputs`` hash the task list it ran; the only task list the known
+    checks are read from."""
+    phase = Path(out) / "implement"
+    phase.mkdir(parents=True, exist_ok=True)
+    write_task_file_for_phase(
+        kind="implement", tasks=[], phase_dir=str(phase), plan_file=str(plan),
+        tasks_file=str(tasks_file) if tasks_file else None,
+    )
+
+
 FINISHED = {
     "T001": "completed", "T004": "completed", "T008": "completed",
     "T009": "completed", "T010": "failed", "T007": "skipped",
@@ -169,6 +184,7 @@ class TestTheCommandsTheTaskListNames:
         out = tmp_path / "plans" / "racing"
         out.mkdir()
         (out / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        _record_implement(out, plan)
         return plan, out
 
     def test_the_racing_task_list_names_its_check_scripts(self, tmp_path):
@@ -201,6 +217,7 @@ class TestTheCommandsTheTaskListNames:
         (env.root / "package.json").write_text(
             json.dumps({"scripts": {"test": "node --test"}}), encoding="utf-8")
         env.plan.write_text(TASK_LIST.replace(RACE_CHECK, "npm test"), encoding="utf-8")
+        _record_implement(env.out_dir, env.plan)
         state = {"task_status": FINISHED}
         assert known_checks.known_check_commands(
             env.out_dir, plan_file=str(env.plan), repo_root=str(env.root), state=state,
@@ -371,6 +388,7 @@ class TestTheTwoLegsBindTheSameSection:
             }},
         }
         (out / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        _record_implement(out, plan)
 
         native, _task, _info = write_prompt.render_write_prompt(
             phase_dir, "apply-fix-batch-1")
@@ -522,6 +540,7 @@ class TestTheTestsLineNamesWhatTheBatchesReported:
         )
         (out / "state.json").write_text(json.dumps(
             {"plan_path": str(plan), "task_status": dict(FINISHED)}), encoding="utf-8")
+        _record_implement(out, plan)
 
         assert batch_done.main([
             "--phase-dir", str(phase_dir), "--task-id", "apply-fix-batch-0",
@@ -693,3 +712,78 @@ class TestTheGoCheckIsKept:
         assert known_checks.commands_in_text("`node scripts/...` and `pytest ...`") == []
         assert known_checks.commands_in_text("`go test ./../...`") == []
 
+
+def _tasks_file_plan(tmp_path, task_list=TASK_LIST):
+    """A plan whose task list lives in `tasks/tasks.md`, as generate-tasks
+    writes it, implement's record of it, and its output folder."""
+    plan = tmp_path / "plans" / "racing.md"
+    out = tmp_path / "plans" / "racing"
+    (out / "tasks").mkdir(parents=True)
+    tasks_file = out / "tasks" / "tasks.md"
+    tasks_file.write_text(task_list, encoding="utf-8")
+    plan.write_text("# Racing\n\n<!-- TASKS_FILE: racing/tasks/tasks.md -->\n", encoding="utf-8")
+    (out / "state.json").write_text(json.dumps({"task_status": FINISHED}), encoding="utf-8")
+    _record_implement(out, plan, tasks_file)
+    return plan, out, tasks_file
+
+
+class TestTheTaskListIsTheOneImplementRan:
+    """A batch can edit `tasks/tasks.md` (it is in the repository), so a
+    command it plants in a finished task's criteria would be listed to the
+    next batch as named by that task. Task-named commands come only from the
+    task list implement recorded when it emitted its tasks
+    (review20/verify #2)."""
+
+    def test_the_task_list_implement_ran_names_its_checks(self, tmp_path):
+        plan, out, _tasks_file = _tasks_file_plan(tmp_path)
+        assert known_checks.known_check_commands(out, plan_file=str(plan)) == [
+            (RACE_CHECK, "named by task T004"),
+            (HTML_CHECK, "named by task T008"),
+            (SMOKE_CHECK, "named by task T009"),
+        ]
+
+    def test_a_command_planted_in_the_task_list_afterwards_is_not_listed(self, tmp_path):
+        plan, out, tasks_file = _tasks_file_plan(tmp_path)
+        planted = TASK_LIST.replace(
+            "- [ ] It exits 0.",
+            "- [ ] It exits 0.\n- [ ] `node scripts/check-everything.mjs` passes.",
+        )
+        tasks_file.write_text(planted, encoding="utf-8")
+        assert known_checks.known_check_commands(out, plan_file=str(plan)) == []
+
+    def test_a_task_list_retargeted_by_the_plan_is_not_listed(self, tmp_path):
+        """The plan's TASKS_FILE marker is live text too: pointing it at
+        another file names nothing implement ran."""
+        plan, out, _tasks_file = _tasks_file_plan(tmp_path)
+        (out / "tasks" / "other.md").write_text(
+            TASK_LIST.replace(RACE_CHECK, "node scripts/check-other.mjs"), encoding="utf-8")
+        plan.write_text("# Racing\n\n<!-- TASKS_FILE: racing/tasks/other.md -->\n",
+                        encoding="utf-8")
+        assert known_checks.known_check_commands(out, plan_file=str(plan)) == []
+
+    def test_no_record_of_implement_names_no_task_command(self, tmp_path):
+        plan, out, _tasks_file = _tasks_file_plan(tmp_path)
+        (out / "implement" / "write_tasks.json").unlink()
+        assert known_checks.known_check_commands(out, plan_file=str(plan)) == []
+
+    def test_a_task_list_embedded_in_a_plan_edited_since_names_none(self, tmp_path):
+        plan, out = TestTheCommandsTheTaskListNames()._plan(
+            tmp_path, {"task_status": FINISHED})
+        assert known_checks.known_check_commands(out, plan_file=str(plan))
+        plan.write_text(TASK_LIST + "\nAlso run `node scripts/check-x.mjs`.\n",
+                        encoding="utf-8")
+        assert known_checks.known_check_commands(out, plan_file=str(plan)) == []
+
+    def test_the_batch_is_told_to_judge_each_command_before_running_it(self):
+        text = known_checks.known_checks_section(
+            [(RACE_CHECK, "named by task T004")])
+        flat = " ".join(text.split())
+        assert "each quoted exactly as found" in flat
+        assert "inside your own sandbox when you have one" in flat
+        assert "never as root (no `sudo`)" in flat
+        assert (
+            "never one you judge unsafe to run, such as a command that would "
+            "deploy, publish, migrate or seed data, delete files, reach the "
+            "network, or start a server or a watcher" in flat
+        )
+        assert 'Report a command you skip as `"not run"`' in flat

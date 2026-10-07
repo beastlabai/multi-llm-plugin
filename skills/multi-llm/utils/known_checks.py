@@ -22,9 +22,11 @@ were asked to run and what each batch reported (:func:`checks_tally`).
 
 The known commands (:func:`known_check_commands`), in this order, each named
 once: ``driver.verify_command``; the commands implement's finished tasks name
-in the task list (a check task's description and acceptance criteria, a code
-task's acceptance criteria: a plain check command in backticks,
-:func:`is_check_command`); and the test command a ``package.json`` (or the like)
+in the task list implement ran (:func:`implement_task_list_text`: never a task
+list edited since, which a batch may have written), in a check task's
+description and acceptance criteria and a code task's acceptance criteria (a
+plain check command in backticks, :func:`is_check_command`); and the test
+command a ``package.json`` (or the like)
 declares (``write_batch_scheduler.verify_command_candidate``). Shown as
 found; never run by the plugin.
 """
@@ -374,34 +376,57 @@ def read_state(output_dir: Any) -> Dict[str, Any]:
     return state if isinstance(state, dict) else {}
 
 
-def plan_tasks(plan: Path) -> list:
-    """The tasks of *plan*'s task list (its tasks file when it names one),
-    parsed as implement parses them; ``[]`` when it cannot be read."""
+def implement_task_list_text(output_dir: Any, plan: Optional[Path]) -> Optional[str]:
+    """The task list implement ran, as text, or ``None``.
+
+    Fix round 21: a batch can edit ``tasks/tasks.md`` (it lives in the
+    repository), so a command it planted there would be listed to the next
+    batch as "named by task T004". The task list is read only when its
+    bytes are still the ones implement's ``write_tasks.json`` recorded when it
+    emitted its tasks (``inputs.tasks_sha256``; ``inputs.plan_sha256`` for a
+    task list embedded in the plan), read once and parsed as hashed; any
+    other text, or no record, is no task-named command.
+    """
+    if plan is None or output_dir is None:
+        return None
     try:
         try:
             from .plan_updater import get_tasks_file_path
-            from .task_decomposer import TaskDecomposer
+            from .subagent_tasks import content_hash
+            from .write_phase_bridge import WRITE_TASK_FILENAME
         except ImportError:  # pragma: no cover - direct script invocation
             from utils.plan_updater import get_tasks_file_path  # type: ignore
-            from utils.task_decomposer import TaskDecomposer  # type: ignore
+            from utils.subagent_tasks import content_hash  # type: ignore
+            from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
+        document = json.loads(
+            (Path(str(output_dir)) / "implement" / WRITE_TASK_FILENAME).read_text(encoding="utf-8")
+        )
+        inputs = document.get("inputs") if isinstance(document, dict) else None
+        if not isinstance(inputs, dict):
+            return None
         content = Path(plan).read_text(encoding="utf-8")
         reference = get_tasks_file_path(content)
         if reference:
-            tasks_file = Path(plan).parent / reference
-            if not tasks_file.is_file():
-                return []
-            content = tasks_file.read_text(encoding="utf-8")
-        return list(TaskDecomposer().parse_plan(content))
-    except Exception:  # noqa: BLE001 - no task list is no command from it
-        return []
+            expected = inputs.get("tasks_sha256")
+            content = (Path(plan).parent / reference).read_text(encoding="utf-8")
+        else:
+            expected = inputs.get("plan_sha256")
+        if not expected or content_hash(content) != str(expected):
+            return None
+        return content
+    except Exception:  # noqa: BLE001 - no record is no command from it
+        return None
 
 
-def _task_list_commands(plan: Optional[Path], state: Any) -> List[Tuple[str, str]]:
+def _task_list_commands(
+    plan: Optional[Path], state: Any, output_dir: Any = None,
+) -> List[Tuple[str, str]]:
     """``(command, where)`` for each command implement's finished agent
     tasks name: a check task's (no files) description and criteria, a code
-    task's criteria. Only tasks recorded ``completed`` (in the decomposition
-    implement ran last, when recorded): a task that did not finish may name a
-    script that does not exist."""
+    task's criteria. Only from the task list implement ran
+    (:func:`implement_task_list_text`), and only tasks recorded
+    ``completed`` (in the decomposition implement ran last, when recorded):
+    a task that did not finish may name a script that does not exist."""
     if plan is None or not hasattr(state, "get"):
         return []
     try:
@@ -409,8 +434,19 @@ def _task_list_commands(plan: Optional[Path], state: Any) -> List[Tuple[str, str
         scope = state.get("implement_task_ids")
     except Exception:  # noqa: BLE001 - a read for a prompt note
         return []
+    text = implement_task_list_text(output_dir, plan)
+    if text is None:
+        return []
+    try:
+        try:
+            from .task_decomposer import TaskDecomposer
+        except ImportError:  # pragma: no cover - direct script invocation
+            from utils.task_decomposer import TaskDecomposer  # type: ignore
+        tasks = list(TaskDecomposer().parse_plan(text))
+    except Exception:  # noqa: BLE001 - a task list that cannot be parsed names none
+        return []
     found: List[Tuple[str, str]] = []
-    for task in plan_tasks(plan):
+    for task in tasks:
         task_id = str(getattr(task, "id", "") or "")
         if getattr(task, "executor_role", "") == "human":
             continue
@@ -458,7 +494,7 @@ def known_check_commands(
         verify = None
     if verify:
         found.append((verify, "the repository's driver.verify_command"))
-    found.extend(_task_list_commands(plan, state))
+    found.extend(_task_list_commands(plan, state, output_dir))
     root = repo_root
     if root is None and plan is not None:
         try:
@@ -522,9 +558,16 @@ def known_checks_section(
         "",
         "## The repository's checks (run them after your edits)",
         "",
-        "This repository is known to have these check commands. The plugin "
-        "never runs them itself. After your edits, run each one from the "
-        "repository root, as it is written here:",
+        "This repository is known to have these check commands, each quoted "
+        "exactly as found (in the repository's configuration, its package "
+        "files, or the task list implement ran) and named by where it came "
+        "from. The plugin never runs them itself. After your edits, run each "
+        "one from the repository root, as it is written here: inside your own "
+        "sandbox when you have one, never as root (no `sudo`), and never one "
+        "you judge unsafe to run, such as a command that would deploy, "
+        "publish, migrate or seed data, delete files, reach the network, or "
+        "start a server or a watcher. Report a command you skip as "
+        "`\"not run\"` and say why in `summary`.",
         "",
     ]
     for command, where in checks:
