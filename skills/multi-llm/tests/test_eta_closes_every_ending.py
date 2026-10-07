@@ -146,9 +146,11 @@ class TestACheckThatHoldsTheLastTasks:
         # out, so the run ends at N/N rather than "3/5 … remaining".
         assert _etas(text) == [(1, 5), (2, 5), (3, 3)], text
         lines = _eta_lines(text)
-        assert "ALL BATCHES COMPLETE" in lines[-2], lines
+        # Fix round 22: the run is about to end short, so N/N claims no
+        # completion; the closing line says what it left.
+        assert "COMPLETE" not in lines[-2], lines
         assert lines[-1] == (
-            "[ETA] implement: run stopped after batch 3/3 · T004, T005 not "
+            "[ETA] implement: run stopped after task 3/3 · T004, T005 not "
             "run: check T003 reported problems"
         ), lines
         assert not any("remaining" in line for line in lines[-2:]), lines
@@ -166,7 +168,7 @@ class TestACheckThatHoldsTheLastTasks:
         # T002's own line already leaves T007 out.
         assert _etas(text) == [(1, 7), (2, 6), (3, 6), (4, 6), (5, 6), (6, 6)], text
         assert _eta_lines(text)[-1] == (
-            "[ETA] implement: run stopped after batch 6/6 · T007 not run: "
+            "[ETA] implement: run stopped after task 6/6 · T007 not run: "
             "check T002 reported problems"
         ), text
         assert _stored_total(repo) == _mirror(repo)["total"] == 6
@@ -183,9 +185,10 @@ class TestTheOtherEndings:
         code, text = _run(two_edits, capsys)
         assert code == 3, text
         lines = _eta_lines(text)
-        assert "ALL BATCHES COMPLETE" in lines[-2], lines
+        # Every task ran: the verify command, run after them, is what fails.
+        assert "ALL TASKS COMPLETE" in lines[-2], lines
         assert lines[-1] == (
-            "[ETA] implement: run stopped after batch 2/2 · `false` exited 1"
+            "[ETA] implement: run stopped after task 2/2 · `false` exited 1"
         ), lines
         assert "phase complete" not in text
 
@@ -198,14 +201,16 @@ class TestTheOtherEndings:
 
     def test_a_stop_at_n_over_n_closes_too(self, two_edits, capsys):
         """A failed task that was the last of the total: "ALL BATCHES
-        COMPLETE" is not the run's last word."""
+        COMPLETE" is not the run's last word (fix round 22: and the failed
+        task's own line claims no completion)."""
         two_edits.monkeypatch.setenv(
             "MOCK_LLM_WRITE_FAIL_IF_PROMPT_HAS", "Title: Edit: extend the module")
         code, text = _run(two_edits, capsys)
         assert code == 3, text
         assert _etas(text) == [(1, 2), (2, 2)], text
+        assert "COMPLETE" not in _eta_lines(text)[-2], text
         assert _eta_lines(text)[-1] == (
-            "[ETA] implement: run stopped after batch 2/2"
+            "[ETA] implement: run stopped after task 2/2"
         ), text
 
     def test_an_exception_out_of_the_loop_closes_them(
@@ -225,7 +230,7 @@ class TestTheOtherEndings:
         assert code == 3, text
         assert "Rollback safety refusal" in text
         assert _eta_lines(text)[-1] == (
-            "[ETA] implement: run stopped after batch 1/2 · 1 task(s) not run"
+            "[ETA] implement: run stopped after task 1/2 · T002 not run"
         ), text
 
     def test_an_abort_asks_the_open_run_for_its_line(
@@ -249,8 +254,8 @@ class TestTheOtherEndings:
         code, _text = _run(two_edits, capsys)
         assert code == 0
         assert asked == [
-            "[ETA] implement: run aborted (SIGTERM) after batch 1/2 · "
-            "1 task(s) not run"
+            "[ETA] implement: run aborted (SIGTERM) after task 1/2 · "
+            "T002 not run"
         ]
         assert metrics.aborted_eta_line("SIGTERM") is None
 
@@ -281,7 +286,7 @@ class TestTheAbortHandlerPrintsIt:
         handle.start()
 
         def closer(cause):
-            return f"[ETA] implement: run aborted ({cause}) after batch 2/5 · 3 task(s) not run"
+            return f"[ETA] implement: run aborted ({cause}) after task 2/5 · T003, T004, T005 not run"
 
         metrics.open_eta_run(closer)
         exits = []
@@ -293,8 +298,8 @@ class TestTheAbortHandlerPrintsIt:
         assert exits == [3]
         err = capsys.readouterr().err
         assert (
-            "[ETA] implement: run aborted (SIGTERM) after batch 2/5 · "
-            "3 task(s) not run"
+            "[ETA] implement: run aborted (SIGTERM) after task 2/5 · "
+            "T003, T004, T005 not run"
         ) in err, err
         assert status_file.read_run(str(phase))["state"] == detach.RUN_STATE_ABORTED
 
@@ -331,8 +336,12 @@ class TestTheNativeFinishLine:
         assert code == 0, err
         line = [l for l in err.splitlines() if l.startswith("[ETA] implement:")]
         assert len(line) == 1, err
+        # Fix round 22 (live run 9 #1): the emit's refusal and the task after
+        # it are named too, in the executor's closing line's words.
         assert re.fullmatch(
-            r"\[ETA\] implement: run stopped after batch 4/4 in [^·]+ · T007 not run",
+            r"\[ETA\] implement: run stopped after task 4/4 in [^·]+ · "
+            r"T005 refused before dispatch; T006 not run; "
+            r"T007 not run: check T002 reported problems",
             line[0],
         ), line
         assert "phase complete" not in err
