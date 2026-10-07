@@ -7755,6 +7755,7 @@ class WriteBatchScheduler:
                     _known_checks.set_batch_check_report_in_state(
                         self.state.state, task_id,
                         prior_changes_id=str(task.get("prior_changes_id") or ""),
+                        grouped_sha256=_known_checks.review_stamp(task),
                         findings=outcome.batch_check if outcome.ok else None,
                         listed=(
                             (getattr(self, "_listed_outcomes", None) or {}).get(task_id)

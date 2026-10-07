@@ -52,12 +52,16 @@ LISTED_NOT_RUN = "not run"
 LISTED_OUTCOMES = (LISTED_PASSED, LISTED_FAILED, LISTED_NOT_RUN)
 
 #: ``state.json``'s record of what each apply-code-fixes batch reported about
-#: its own checks: ``{task_id: {prior_changes_id, findings, listed}}``, present
-#: only while a batch's record holds a report. ``prior_changes_id`` ties the
-#: record to the batch's own fixes, so a later review cycle's batch of the
-#: same name never reads an older batch's report as its own. Written by both
-#: legs (the scheduler, ``util batch-done``); read by the next batch's prompt
-#: and by :func:`checks_tally`.
+#: its own checks: ``{task_id: {prior_changes_id, grouped_sha256, findings,
+#: listed}}``, present only while a batch's record holds a report.
+#: ``prior_changes_id`` ties the record to the batch's own fixes and
+#: ``grouped_sha256`` (the batch's ``inputs``) to the review it applies: a
+#: fix a later review reports again makes a batch with the same
+#: ``prior_changes_id`` (fix round 21), so only both together keep a later
+#: review cycle's batch of the same name from reading an older batch's report
+#: as this run's. ``--fresh`` drops the map. Written by both legs (the
+#: scheduler, ``util batch-done``); read by the next batch's prompt and by
+#: :func:`checks_tally`.
 APPLY_FIX_BATCH_CHECKS_KEY = "apply_fix_batch_checks"
 
 #: How much of an earlier batch's finding a later batch's prompt quotes.
@@ -727,12 +731,22 @@ def with_listed_failures(
     return current
 
 
+def review_stamp(task: Any) -> str:
+    """The review an apply-code-fixes batch applies, as its task records it
+    (``inputs.grouped_sha256``), or ``""``: what a batch's own-check record
+    is stamped with (:data:`APPLY_FIX_BATCH_CHECKS_KEY`)."""
+    inputs = task.get("inputs") if isinstance(task, dict) else None
+    return str((inputs or {}).get("grouped_sha256") or "") if isinstance(inputs, dict) else ""
+
+
 def set_batch_check_report_in_state(
     state: Dict[str, Any], task_id: str, *, prior_changes_id: Optional[str],
     findings: Optional[Sequence[str]], listed: Optional[Mapping[str, str]],
+    grouped_sha256: Optional[str] = None,
 ) -> None:
     """Record *task_id*'s own-check report (or clear it: no findings record
-    and nothing listed); the key is dropped when the map empties."""
+    and nothing listed); the key is dropped when the map empties.
+    *grouped_sha256* is the batch's :func:`review_stamp`."""
     recorded = state.get(APPLY_FIX_BATCH_CHECKS_KEY)
     current = dict(recorded) if isinstance(recorded, dict) else {}
     if findings is None and not listed:
@@ -740,6 +754,7 @@ def set_batch_check_report_in_state(
     else:
         current[str(task_id)] = {
             "prior_changes_id": str(prior_changes_id or ""),
+            "grouped_sha256": str(grouped_sha256 or ""),
             "findings": [str(item) for item in (findings or []) if str(item).strip()],
             "listed": {normalized(k): str(v) for k, v in (listed or {}).items()},
         }
@@ -754,7 +769,8 @@ def batch_check_reports(
 ) -> List[Tuple[str, Dict[str, Any]]]:
     """``[(task_id, record)]`` for this phase's batches, in dispatch order:
     each batch of *tasks* recorded ``completed`` whose report is on record
-    for its own fixes (the same ``prior_changes_id``)."""
+    for its own fixes of the same review (the same ``prior_changes_id`` and
+    :func:`review_stamp`)."""
     if not hasattr(state, "get"):
         return []
     try:
@@ -773,6 +789,8 @@ def batch_check_reports(
         if not isinstance(record, dict) or statuses.get(task_id) != "completed":
             continue
         if str(record.get("prior_changes_id") or "") != str(task.get("prior_changes_id") or ""):
+            continue
+        if str(record.get("grouped_sha256") or "") != review_stamp(task):
             continue
         out.append((task_id, record))
     return out
