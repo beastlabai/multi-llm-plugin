@@ -2748,7 +2748,7 @@ async def run_single_review(
         return False, None, error_msg
 
     if result.get("misnamed_from"):
-        report_misnamed_result(model_spec, result, phase_dir, tracker)
+        report_misnamed_result(model_spec, result, phase_dir)
     print(f"[{display_name}] Completed in {duration:.1f}s (source: {source})")
 
     # Get the parsed data from result
