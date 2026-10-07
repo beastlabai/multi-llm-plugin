@@ -13,7 +13,9 @@ Fix round 24, from live run 10 (2026-10-07):
 * #7 (the stop fixture, every host): "Organized into 3 execution batches: 5
   task(s) to dispatch", then "task 1/5" and "task 2/4" with nothing saying
   why the total dropped, and summary.md said "5 batch task(s) dispatched
-  across 4 batch(es)". The line that drops the total says why.
+  across 4 batch(es)" for a run that dispatched 4 tasks in 3 batches: T005,
+  refused before dispatch, and its batch were counted. The line that drops
+  the total says why, and summary.md counts what ran.
 * Claude Code racing #6: "task 10/10 done … ALL TASKS COMPLETE" while the
   manual T011 and T012 were left for the user. The line says what is true:
   every dispatched task is complete, and it names what is left.
@@ -360,6 +362,31 @@ class TestTheLineThatDropsTheTotalSaysWhy:
         ), lines
         # Only the line that dropped it says so.
         assert not any("total now" in line for line in lines[2:]), lines
+
+    def test_summary_md_counts_the_tasks_and_batches_that_ran(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        obj = self._live(tmp_path, monkeypatch)
+        _first_run(obj, capsys)
+        summary = (obj.phase_dir / "summary.md").read_text(encoding="utf-8")
+        assert "4 task(s) dispatched across 3 batch(es)" in summary, summary
+        assert "batch task(s)" not in summary, summary
+        assert "Refused before dispatch (no runner started): T005." in summary, summary
+
+    def test_summary_md_of_a_resume_that_dispatched_nothing_says_so(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        """01b: the same stop on unchanged files, nothing dispatched."""
+        obj = self._live(tmp_path, monkeypatch)
+        _first_run(obj, capsys)
+        code, _text = _run(obj, capsys, "--resume")
+        assert code == 3, _text
+        summary = (obj.phase_dir / "summary.md").read_text(encoding="utf-8")
+        assert (
+            "Nothing was dispatched in this run. Refused before dispatch (no "
+            "runner started): T005."
+        ) in summary, summary
+        assert "dispatched across" not in summary, summary
 
     def test_the_native_leg_names_it_on_the_checks_line_too(self, repo, capsys):
         handoff, _out = _emit(repo, capsys)
