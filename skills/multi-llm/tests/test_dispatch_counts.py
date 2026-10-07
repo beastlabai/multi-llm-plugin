@@ -378,9 +378,9 @@ class TestTheFirstRunEtaCountsWhatItDispatches:
         repo = self._live(tmp_path, monkeypatch)
         _first_run(repo, capsys)
         line, polled = _status_progress(repo, capsys)
-        assert "stopped, implement 4/4 batches ok, 3/4 items applied" in line, line
+        assert "stopped, implement 4/4 tasks ok, 3/4 items applied" in line, line
         assert "failed T005" in line and "not run T006" in line, line
-        assert any("implement 4/4 batches ok" in row for row in polled), polled
+        assert any("implement 4/4 tasks ok" in row for row in polled), polled
         mirror = json.loads((repo.phase_dir / ".status.json").read_text())
         counts = mirror["progress"]["write_subagents"]
         assert (counts["total"], counts["ok"], counts["items_total"]) == (4, 4, 4)
@@ -641,7 +641,7 @@ class TestTheStatusProgressLineNamesWhatAResumeKept:
             "status", str(repo.plan), "--view", "run", "--phase", "implement"])
         captured = capsys.readouterr()
         line = [
-            l for l in captured.out.splitlines() if "progress:" in l and "implement " in l
+            l for l in captured.out.splitlines() if "progress:" in l and "implement" in l
         ]
         assert line, (code, captured.out)
         result = json.loads(
@@ -659,11 +659,14 @@ class TestTheStatusProgressLineNamesWhatAResumeKept:
         # T002, kept rather than dispatched, T005, refused before dispatch,
         # and T006 after it: the run dispatched nothing ("Organized into 0
         # execution batches: 0 task(s)"), and T002 is named as what it is.
+        # Fix round 22 (live run 9 #5): every task the resume kept, as its
+        # `resume: kept 4 task(s)` line names them, and "nothing dispatched"
+        # rather than "0/0".
         kept = (
-            "(1 kept from an earlier run: T002 (its check reported problems, "
-            "not run again while the files are unchanged))"
+            "(4 kept from an earlier run: T001, T003, T004, T002 (its check "
+            "reported problems, not run again while the files are unchanged))"
         )
-        assert f"implement 0/0 batches ok {kept}, 0/0 items applied" in line, line
+        assert f"implement: nothing dispatched {kept}" in line, line
         # The OpenCode route shows the poll's own rendered lines.
         assert any(
             kept in text for text in result.get("progress_lines") or []
@@ -727,10 +730,10 @@ class TestEverySurfaceCountsTheSameTasks:
         text = capsys.readouterr()
         assert _etas(text.out + text.err)[-1] == (6, 6)
         line, polled = _status_progress(repo, capsys)
-        assert "implement 6/6 batches ok, 5/6 items applied" in line, line
+        assert "implement 6/6 tasks ok, 5/6 items applied" in line, line
         # Still named on the line, with the check that holds it.
         assert "not run (upstream check T002 reported problems) T007" in line, line
-        assert any("implement 6/6 batches ok" in row for row in polled), polled
+        assert any("implement 6/6 tasks ok" in row for row in polled), polled
         mirror = json.loads((repo.phase_dir / ".status.json").read_text())
         counts = mirror["progress"]["write_subagents"]
         assert (counts["total"], counts["items_total"]) == (6, 6), counts
@@ -753,4 +756,4 @@ class TestEverySurfaceCountsTheSameTasks:
         text = capsys.readouterr()
         assert _etas(text.out + text.err)[-1] == (4, 4)
         line, _polled = _status_progress(stop, capsys)
-        assert "implement 4/4 batches ok, 3/4 items applied" in line, line
+        assert "implement 4/4 tasks ok, 3/4 items applied" in line, line

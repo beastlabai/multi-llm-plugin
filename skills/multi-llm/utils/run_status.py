@@ -152,12 +152,14 @@ VIEW_WORKFLOW = "workflow"
 VIEW_RUN = "run"
 VIEW_ALL = "all"
 
-#: ``progress.step``'s two terminal values. ``progress_tracker.PhaseProgress``
-#: owns the pair and names them in its own docstring: ``complete``, and the
-#: host-driven ``validation_pending`` early return where the process exits and
-#: the agent's own subagents take over. Anything else means the phase is still
-#: working.
-CHECKPOINT_TERMINAL_STEPS = frozenset({"complete", "validation_pending"})
+#: ``progress.step``'s terminal values. ``progress_tracker.PhaseProgress``
+#: owns the first pair and names them in its own docstring: ``complete``, and
+#: the host-driven ``validation_pending`` early return where the process exits
+#: and the agent's own subagents take over. ``stopped`` is the write
+#: scheduler's mirror on a stop (``_mirror_status``), which a foreground
+#: executor run that stopped read as "running in foreground" (fix round 22).
+#: Anything else means the phase is still working.
+CHECKPOINT_TERMINAL_STEPS = frozenset({"complete", "validation_pending", "stopped"})
 
 #: The *phase* machine's terminal words — ``status_file``'s
 #: ``models_running -> models_complete/grouping_complete -> validation_pending ->
@@ -932,10 +934,31 @@ def _run_state_text(view: Dict[str, Any]) -> str:
     word = (view.get("run") or {}).get("state") or "(none)"
     result = _result_state(view)
     if result is None:
+        if _stopped_for_the_user(view):
+            # Fix round 22: the record's word stays; what it means is said.
+            return f"{word} ({STOPPED_FOR_THE_USER_GLOSS})"
         return str(word)
     failed = _failed_model_specs(view)
     detail = f" — failed: {', '.join(failed)}" if failed else ""
     return f"{word} ({result}{detail})"
+
+
+#: How ``status`` reads a run that ended needing the user (exit 3), whose run
+#: record says ``failed`` (fix round 22, live run 9 #5: Codex 01b's poll read
+#: "run … failed" for a resume that stopped where the first run had, needing
+#: the user's answer, as the stop's own text said).
+STOPPED_FOR_THE_USER_VERDICT = "stopped and needs you (exit 3)"
+STOPPED_FOR_THE_USER_GLOSS = "exit 3: the run stopped and needs you; nothing crashed"
+
+
+def _stopped_for_the_user(view: Dict[str, Any]) -> bool:
+    """A terminal run record that ended with exit 3, the needs-a-human code
+    every mode shares."""
+    run = view.get("run") or {}
+    return (
+        view.get("verdict") == detach.VERDICT_FAILED
+        and run.get("exit_code") == EXIT_NEEDS_HUMAN
+    )
 
 
 def _died(view: Dict[str, Any]) -> bool:
@@ -971,6 +994,8 @@ def _verdict_text(view: Dict[str, Any]) -> str:
         return f"running (last beat {age:.0f}s ago)"
     if verdict == detach.VERDICT_FAILED and view.get("reason") == "heartbeat_timeout":
         return "failed (heartbeat_timeout — the worker died without recording an outcome)"
+    if _stopped_for_the_user(view):
+        return STOPPED_FOR_THE_USER_VERDICT
     if verdict == detach.VERDICT_NO_RUN:
         # "Checkpoint but no run record" stopped being an oddity the moment a
         # foreground run started writing `progress`: it is the normal Claude
@@ -2734,10 +2759,18 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
             f"{_kept_text(kept, kept_labels)})"
             if kept else ""
         )
-        parts = [
-            f"{kind} {ok}/{total} batches ok{kept_note}, "
-            f"{items_applied}/{items_total} items applied"
-        ]
+        if total == 0:
+            # Fix round 22 (live run 9 #5, Codex 01b): a resume that
+            # dispatched nothing read "implement 0/0 batches ok (1 kept …),
+            # 0/0 items applied" under "failed".
+            parts = [f"{kind}: nothing dispatched{kept_note}"]
+        else:
+            # Implement counts tasks, as its `[ETA]` lines say (fix round 22).
+            unit = "tasks" if kind == "implement" else "batches"
+            parts = [
+                f"{kind} {ok}/{total} {unit} ok{kept_note}, "
+                f"{items_applied}/{items_total} items applied"
+            ]
     else:
         parts = [f"{kind} {ok}/{total} ok"]
     # F10: `in_flight` (`write_batch_scheduler._mirror_status`/`_begin_sweep`)
