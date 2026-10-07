@@ -201,17 +201,66 @@ class TestTheStopNamesThePhaseNotTheToolsArgv:
         assert "argv" not in modes.NEEDS_HUMAN_MESSAGE[key]
 
 
-class TestTheWritePolicyIsNeverAWayForward:
+def _hosts_texts():
+    """Every text a host reads its stop rule in: both tool descriptions and
+    exit-3 messages, the exit-3 rule every file route and plugin instruction
+    renders (`{NEEDS_HUMAN_RULE}`), Claude Code's SKILL.md, and implement's
+    stop rule (the native leg's stop exits 0)."""
+    sys.path.insert(0, str(SKILL_ROOT.parent.parent / "packaging"))
+    from common import surface
 
-    def test_the_tool_routes_are_told(self):
-        text = " ".join(modes.TOOL_NO_COMPOSED_COMMAND_LINE.split())
-        assert "never suggest loosening the write policy" in text
-        assert "`driver.write_paths`" in text
+    for host in ("codex", "opencode"):
+        rendered = surface.cli_surface(host)
+        yield f"{host} tool description", " ".join(rendered["tool_description"].split())
+        yield (f"{host} needs-human message",
+               " ".join(rendered["needs_human_message"]["template"].split()))
+    yield "modes.NEEDS_HUMAN_RULE", " ".join(modes.NEEDS_HUMAN_RULE.split())
+    for path in ("SKILL.md", "instructions/implement.md"):
+        yield path, _flat(path)
 
-    def test_the_native_leg_is_told_at_a_stop(self):
+
+class TestTheWritePolicyIsTheUsersCall:
+    """Fix round 20 (live run 8 #4; the user's decision: permissive). Round
+    18 told every host "never suggest loosening driver.write_paths", while
+    the plugin's own stop line offered allowing the file and the hosts were
+    told to relay that line whole. The plugin keeps offering it as the user's
+    call; the hosts never edit the setting themselves and relay the ways
+    forward the stop names, as it words them."""
+
+    @pytest.mark.parametrize(
+        "name,text", list(_hosts_texts()), ids=[n for n, _t in _hosts_texts()])
+    def test_every_host_reads_the_one_rule(self, name, text):
+        rule = " ".join(modes.STOP_POLICY_RULE.split())
+        assert rule in text, name
+        assert "loosen" not in text.lower(), name
+
+    def test_the_rule_never_forbids_the_way_the_plugin_offers(self):
+        rule = modes.STOP_POLICY_RULE
+        assert "Never edit `driver.write_paths`" in rule
+        assert ("when it names allowing a refused file in `driver.write_paths`, "
+                "that is one of them and the user's call") in rule
+        assert "add no advice about the write policy of your own" in rule
+
+    def test_it_agrees_with_what_the_plugin_says(self):
+        """The rule's "allowing a refused file in `driver.write_paths`" is the
+        clause every stop, refusal and status line uses."""
+        from utils.write_safety import policy_allow_clause, policy_skip_clause
+
+        assert policy_allow_clause(["src/vendor/stamp.js"]) == (
+            "if you want src/vendor/stamp.js written, allow it in "
+            "driver.write_paths (.multi-llm/providers.yaml)")
+        assert policy_allow_clause(["a.js", "b.js"]).endswith(
+            "allow them in driver.write_paths (.multi-llm/providers.yaml)")
+        assert policy_skip_clause("T005") == (
+            "if not, skip T005: add --human-task T005=skip to the resume "
+            "command (T005 and the tasks after it stay undone)")
+
+    def test_the_native_leg_relays_the_refusal_and_the_answers(self):
         text = _flat("instructions/implement.md")
-        assert "Never suggest loosening the write policy for a task it refused" in text
-        assert "the policy is the user's own" in text
+        assert ("its refusal (the emit's `refused_tasks` line, or "
+                "`[WRITE_PROMPT_REFUSED]`) names allowing its file in "
+                "`driver.write_paths` and resuming") in text
+        assert "relay them as the user's choice, in those words" in text
 
 
 def test_the_native_summary_describes_files_as_they_are_now():

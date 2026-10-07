@@ -647,7 +647,7 @@ your host.
    - Files modified
    - Resource usage summary (if metrics were captured)
    - The `[MANUAL_TASK_NOTE]` text, wherever you give it, as plain text and never in a fenced block: a fenced block holds one command and nothing else
-   - At a stop, the ways forward you name are the stop's own: its commands below and the fixes its text names. Never suggest loosening the write policy for a task it refused (removing a `deny` rule or widening `allow` under `driver.write_paths` in `.multi-llm/providers.yaml`), even though the refusal names that setting: the policy is the user's own, and the stop's answers for such a task are `--human-task <id>=skip`, or `=done` once the user did the task by hand
+   - Never edit `driver.write_paths`, or any other multi-llm setting in `.multi-llm/providers.yaml`, yourself. At a stop, offer only the ways forward the stop itself names, as it words them: when it names allowing a refused file in `driver.write_paths`, that is one of them and the user's call; add no advice about the write policy of your own. The ways forward a stop names are its commands below and the fixes its text names. For a task the write policy refused, its refusal (the emit's `refused_tasks` line, or `[WRITE_PROMPT_REFUSED]`) names allowing its file in `driver.write_paths` and resuming, and the next-step lookup's answers name `--human-task <id>=skip`, or `=done` once the user did the task by hand: relay them as the user's choice, in those words
 
 **IMPORTANT:** You orchestrate the execution by **spawning subagents**. Do NOT implement the code yourself — delegate every task to a subagent.
 
