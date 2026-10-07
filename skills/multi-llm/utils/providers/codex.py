@@ -351,13 +351,13 @@ PLUGIN_LANDLOCK_WRAPPER = "landlock_exec"
 #: names a newer installed codex as the likely cause. Raising it needs the
 #: allow-list re-measurement (plan §8.2) to pass on the newer build.
 PLUGIN_LANDLOCK_MEASURED_THROUGH: Tuple[str, str] = (
-    "0.159.2",
+    "0.161.0",
     "measured 2026-09-29 on 0.158.0 (preflight step 1), re-measured "
-    "2026-09-30 on 0.159.0 and 0.159.1 (step 1c) and on 0.159.2 "
-    "(tests/test_codex_jail_rig.py, the promoted rig): a read-only turn, a "
-    "code-mode turn and a plan-file edit completed inside the jail; every "
-    "write outside the allow-list denied; codex writes nothing new outside "
-    "$CODEX_HOME",
+    "2026-09-30 on 0.159.0 and 0.159.1 (step 1c), on 0.159.2 and on "
+    "2026-10-08 on 0.161.0 (tests/test_codex_jail_rig.py, the promoted rig, "
+    "all 12 rows): a read-only turn, a code-mode turn and a plan-file edit "
+    "completed inside the jail; every write outside the allow-list denied; "
+    "codex writes nothing new outside $CODEX_HOME",
 )
 
 #: The env names the rung's canary reads. The targets reach the script through
