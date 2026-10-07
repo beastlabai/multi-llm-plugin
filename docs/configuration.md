@@ -70,6 +70,12 @@ prints the path), so you can port any custom settings into the regenerated file.
   the bound is on the command's whole process group rather than on the
   `/bin/sh` that started it, so a hung `tsc` is killed rather than orphaned.
   The markdown apply phases never run it.
+  Set or not, every `apply-code-fixes` batch is also told the checks this
+  repository is known to have (this command, the commands the task list's
+  finished tasks name, `package.json`'s test script) and asked to run them
+  after its edits and say what each did. The plugin itself runs none of them;
+  a failing one is reported as that batch's failing check, and when this key is
+  unset the closing line says what each batch reported for each command.
 - **`progress.interval_s` / `progress.poll_s` price two different cadences.**
   `interval_s` (default 30 s) is how often a running fan-out prints a
   `[PROGRESS]` ticker line — a stdout cadence only, so `interval_s: 0` is the
