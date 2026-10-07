@@ -91,7 +91,8 @@ class TestPriorChanges:
         assert "timestamp" in entries[0]
 
     def test_append_then_read(self, tmp_path: Path) -> None:
-        """Append 2 entries with different IDs, read returns formatted numbered list."""
+        """Append 2 entries with different IDs, read lists each by its id
+        (fix round 24: never "Batch N", a number that named no batch)."""
         _append(str(tmp_path), "step_1", "review", "First review pass")
         _append(str(tmp_path), "step_2", "apply-suggestions", "Applied formatting fixes")
 
@@ -99,11 +100,12 @@ class TestPriorChanges:
         assert result.returncode == 0
         output = result.stdout.strip()
 
-        assert "1. **Batch 1** (step_1): First review pass" in output
-        assert "2. **Batch 2** (step_2): Applied formatting fixes" in output
+        assert "- **step_1**: First review pass" in output
+        assert "- **step_2**: Applied formatting fixes" in output
+        assert "Batch" not in output
 
     def test_read_ordering(self, tmp_path: Path) -> None:
-        """Entries returned in append order. Batch numbers sequential from 1."""
+        """Entries returned in append order, each named by its id."""
         _append(str(tmp_path), "z_last", "phase_a", "Summary Z")
         _append(str(tmp_path), "a_first", "phase_b", "Summary A")
         _append(str(tmp_path), "m_middle", "phase_c", "Summary M")
@@ -112,9 +114,9 @@ class TestPriorChanges:
         output = result.stdout.strip()
         lines = output.splitlines()
 
-        assert lines[0].startswith("1. **Batch 1** (z_last):")
-        assert lines[1].startswith("2. **Batch 2** (a_first):")
-        assert lines[2].startswith("3. **Batch 3** (m_middle):")
+        assert lines[0].startswith("- **z_last**:")
+        assert lines[1].startswith("- **a_first**:")
+        assert lines[2].startswith("- **m_middle**:")
 
     def test_clear_removes_file(self, tmp_path: Path) -> None:
         """Clear removes the JSONL file entirely."""
@@ -165,7 +167,7 @@ class TestPriorChanges:
         lines = result.stdout.strip().splitlines()
 
         for i, eid in enumerate(ids_in_order):
-            assert lines[i].startswith(f"{i + 1}. **Batch {i + 1}** ({eid}):")
+            assert lines[i].startswith(f"- **{eid}**:")
 
     def test_append_via_summary_stdin(self, tmp_path: Path) -> None:
         """Append using --summary-stdin flag, piping summary via stdin."""
@@ -252,7 +254,7 @@ class TestPriorChanges:
         # Step 4: Read returns formatted list
         result = _read(str(tmp_path))
         prior_text = result.stdout.strip()
-        assert "**Batch 1** (step_1): Added error handling guidance" in prior_text
+        assert "- **step_1**: Added error handling guidance" in prior_text
 
         # Step 5: Substitute again, verify prompt has prior changes
         prompt = prompt_template.replace("{prior_changes_context}", prior_text)
@@ -434,13 +436,13 @@ class TestPriorChangesEdgeCases:
         # Should contain compressed summary for earlier batches
         assert "... and 20 earlier batches applied miscellaneous changes" in output
 
-        # Should still show the last 15 entries with correct numbering
+        # Should still show the last 15 entries, each by its id
         lines = output.splitlines()
         # First line is the compressed summary
         assert lines[0].startswith("... and ")
         # Remaining lines should be the last 15 entries (batch 21 through 35)
-        for idx, line in enumerate(lines[1:], start=21):
-            assert line.startswith(f"{idx}. **Batch {idx}**")
+        for idx, line in enumerate(lines[1:], start=20):
+            assert line.startswith(f"- **step_{idx}**:")
 
     def test_special_characters_in_summary(self, tmp_path: Path) -> None:
         """Multiline summaries and shell metacharacters stored correctly."""
@@ -641,7 +643,7 @@ class TestRenderPhaseFiltering:
 
         output = render(out, phase="implement")
         lines = output.splitlines()
-        assert lines[0] == "1. **Batch 1** (t1): T001 done"
+        assert lines[0] == "- **t1**: T001 done"
         assert lines[1] == "... and 2 earlier batches from other phases"
 
     def test_phase_scoped_tail_respects_the_entry_cap(self, tmp_path: Path) -> None:

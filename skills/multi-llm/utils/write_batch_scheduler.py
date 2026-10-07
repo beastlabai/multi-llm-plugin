@@ -8567,7 +8567,8 @@ class WriteBatchScheduler:
         with self._effects_lock:
             if summary:
                 _prior_changes.append(
-                    self.output_dir, entry_id, self.phase, clip(summary, 400)
+                    self.output_dir, entry_id, self.phase, clip(summary, 400),
+                    task_id=task_id,
                 )
 
             # Before the metric, so the `[ETA]` line this task drives carries its
