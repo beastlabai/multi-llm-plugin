@@ -2068,8 +2068,25 @@ def state_implement_view(
         state.is_phase_completed("code-review") or state.is_phase_skipped("code-review")
     )
     tally_buckets, _waits = _implement_buckets(state)
+    # Fix round 20 (live run 8, Claude Code stop): the workflow view's own
+    # test for an implement a `--resume` continues (`get_workflow_status`:
+    # started on the host, or a task of its decomposition recorded done).
+    resumable = not completed and (
+        state.is_phase_started(_IMPLEMENT_PHASE)
+        or any(statuses.get(str(t)) == "completed" for t in decomposition)
+    )
+    stop_answers: List[Dict[str, Any]] = []
+    if resumable:
+        from .write_batch_scheduler import native_stop_answers
+
+        stop_answers = native_stop_answers(record)
     return {
         "completed": completed,
+        # Fix round 20: whether `--implement <plan> --resume` continues it,
+        # and the `--human-task` answers its stop waits for, as the native
+        # `util next-command` gives them (`{flags, why}`, `--resume` first).
+        "resumable": resumable,
+        "stop_answers": stop_answers,
         # Fix round 18 (Claude Code racing 06, mid-run): when the host's loop
         # is between `util metrics start` and `finish`.
         "in_progress_since": None if completed else _host_run_started_at(
@@ -2174,20 +2191,62 @@ def _native_resume_line(resume: Optional[str]) -> List[str]:
 
 def native_resume_command(
     mode: str, plan_path: Path, spell: Optional["Speller"] = None,
+    flags: Sequence[str] = (),
 ) -> str:
     """``--<mode> <plan> --resume`` in the host's spelling (:func:`user_speller`),
     else the dispatcher's: the way on for a native phase whose loop ended
-    without its finish."""
+    without its finish, or that stopped. *flags* replace the bare verb with a
+    whole answer (``--resume --human-task T005=skip``, fix round 20)."""
+    tokens = [str(flag) for flag in flags] or [_RESUME_VERB_BY_MODE.get(mode, "--resume")]
     if spell is not None:
-        spelled = spell(mode, [], [_RESUME_VERB_BY_MODE.get(mode, "--resume")])
+        spelled = spell(mode, [], tokens)
         if spelled:
             return spelled
-    return cli_common.retry_command(
-        mode, str(plan_path), _RESUME_VERB_BY_MODE.get(mode, "--resume"))
+    return cli_common.retry_command(mode, str(plan_path), *tokens)
+
+
+def native_stop_answer_commands(
+    view: Mapping[str, Any], plan_path: Path, spell: Optional["Speller"] = None,
+) -> List[Tuple[str, str]]:
+    """``(command, why)`` for each answer *view*'s stop waits for
+    (``stop_answers``), spelled as :func:`native_resume_command` spells the
+    resume beside them."""
+    out: List[Tuple[str, str]] = []
+    for entry in view.get("stop_answers") or []:
+        flags = entry.get("flags") if isinstance(entry, Mapping) else None
+        why = entry.get("why") if isinstance(entry, Mapping) else None
+        if not isinstance(flags, list) or not flags or not why:
+            continue
+        out.append((native_resume_command(
+            _IMPLEMENT_PHASE, plan_path, spell, flags=flags), str(why)))
+    return out
+
+
+def _native_stop_lines(
+    resume: Optional[str], answers: Sequence[Tuple[str, str]] = (),
+) -> List[str]:
+    """The way on from a native phase that stopped (fix round 20).
+
+    Live run 8 (Claude Code stop path): a native implement the host closed
+    without ``--mark-completed`` read "not finished on the host" with no
+    command at all, where the tool routes' view says ``resume with:``; round
+    19 had added a way on only to the "in progress on the host" head. The
+    ``resume with:`` line, then each answer the stop waits for, in the words
+    and order ``util next-command`` gives them on that leg and the tool
+    routes' ``resume_answers`` on theirs.
+    """
+    if not resume:
+        return []
+    lines = [f"      resume with: {resume}"]
+    for command, why in answers:
+        lines.append(f"      or answer the stop with: {command}")
+        lines.append(f"        ({why})")
+    return lines
 
 
 def render_state_implement_lines(
     view: Dict[str, Any], *, resume: Optional[str] = None,
+    answers: Sequence[Tuple[str, str]] = (),
 ) -> List[str]:
     """:func:`state_implement_view` as the run view's text: one block.
 
@@ -2195,7 +2254,10 @@ def render_state_implement_lines(
     ``all tasks:``, in the executor routes' words (:func:`implement_tally_text`),
     and its head says whether the host's run is in progress. Fix round 19:
     an in-progress head says when state.json last changed and, with
-    *resume* (:func:`native_resume_command`), what it may also mean.
+    *resume* (:func:`native_resume_command`), what it may also mean. Fix
+    round 20: a "not finished" one that a ``--resume`` continues
+    (``resumable``) ends with *resume* and each of *answers*
+    (:func:`native_stop_answer_commands`), :func:`_native_stop_lines`.
     """
     since = view.get("in_progress_since")
     lines = [_native_head(
@@ -2225,6 +2287,8 @@ def render_state_implement_lines(
             + ", ".join(f"--human-task {task_id}={action}"
                         for task_id, action in sorted(view["answers"].items()))
         )
+    if not since and view.get("resumable"):
+        lines += _native_stop_lines(resume, answers)
     return lines
 
 
@@ -2338,6 +2402,10 @@ def render_state_apply_lines(
         lines.append(f"      batches:        {recorded}/{total} recorded by this run")
     if since:
         lines += _native_resume_line(resume)
+    elif not view.get("completed"):
+        # Fix round 20: listed unfinished only while the workflow shows it
+        # `in_progress` (`state_apply_views`), which a `--resume` continues.
+        lines += _native_stop_lines(resume)
     return lines
 
 
@@ -3725,7 +3793,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if implement_tasks is not None:
             native.append((_IMPLEMENT_PHASE, render_state_implement_lines(
                 implement_tasks,
-                resume=native_resume_command(_IMPLEMENT_PHASE, plan_path, spell))))
+                resume=native_resume_command(_IMPLEMENT_PHASE, plan_path, spell),
+                answers=native_stop_answer_commands(implement_tasks, plan_path, spell))))
         for _phase, block in sorted(
                 native, key=lambda item: NATIVE_PHASE_ORDER.index(item[0])):
             lines += block
