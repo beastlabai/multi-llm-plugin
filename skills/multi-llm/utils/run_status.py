@@ -583,8 +583,10 @@ def manual_close_note(
 def _workflow_trailer_lines(
     payload: Dict[str, Any], *, prefix: str = "  ",
     close_note: Optional[str] = None,
+    suggested: bool = True,
 ) -> List[str]:
-    """The workflow view's ``suggested next``/``notice`` lines, alone.
+    """The workflow view's ``suggested next``/``notice`` lines, alone
+    (without the ``suggested next`` line when *suggested* is false).
 
     Split out of ``render_workflow_text`` so the terminal ``--view run`` carry-
     over (F7, 2026-09-16, below) renders the identical text instead of a second
@@ -592,7 +594,7 @@ def _workflow_trailer_lines(
     channels can never say something different about the same ``state.json``.
     """
     lines: List[str] = []
-    if payload.get("suggested_next"):
+    if suggested and payload.get("suggested_next"):
         # `suggested_next` already skips every optional phase in its way
         # (`check_workflow_prerequisites.get_workflow_status`'s own
         # `OPTIONAL_PHASES` walk), so the bare word reads as "nothing else is
@@ -4237,14 +4239,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         step = _emit_user_next_step(
             plan_path, args, views[0], workflow=terminal_workflow,
         )
-        if step is not None and step.manual_tasks_command and terminal_workflow:
+        if step is not None and terminal_workflow:
             # Fix round 22 (live run 9, Codex 07, OpenCode 06-08): the
             # notice said how to close the manual tasks, command and all,
             # beside `user_next_step`, which says it with the command fenced;
             # the hosts relayed both, the command folded into prose. The
             # notice keeps naming the tasks and leaves the rest to the step.
-            terminal_notice = "; ".join(
-                _workflow_trailer_lines(terminal_workflow, prefix="")) or None
+            # Fix round 24 (live run 10, OpenCode 03, Codex 01): so with the
+            # `suggested next` line, which the hosts relayed beside the
+            # step's markdown and reordered the step after.
+            terminal_notice = "; ".join(_workflow_trailer_lines(
+                terminal_workflow, prefix="", suggested=False)) or None
 
     # Plan §2.4: a `mode: truncated` validation source sets the notice on any
     # terminal poll (every view, not only `--view run`); it qualifies the

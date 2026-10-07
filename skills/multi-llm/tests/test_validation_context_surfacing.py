@@ -165,7 +165,10 @@ class TestTheTerminalPoll:
         assert notice.startswith(TASKS_SENTENCE + "; ")
         trailer = notice[len(TASKS_SENTENCE) + 2:]
         assert "review-tasks left 1 valid task suggestion group unapplied" in trailer
-        assert "suggested next:" in trailer
+        # Fix round 24: the next step is the poll's `user_next_step`, not a
+        # second "suggested next:" line in the notice.
+        assert "suggested next:" not in trailer
+        assert payload["user_next_step"]["phase"] == "implement"
         assert "workflow notice: review-tasks left 1 valid" in out
         assert payload["next"] is None
 
