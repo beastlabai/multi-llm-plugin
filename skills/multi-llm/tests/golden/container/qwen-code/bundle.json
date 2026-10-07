@@ -42,7 +42,7 @@
   "manifest": {
     "axis": "reviewer",
     "bundle_version": 1,
-    "captured_at": "2026-10-06T22:35:17Z",
+    "captured_at": "2026-10-07T11:06:57Z",
     "cli": "qwen-code",
     "host": {
       "host_id": "sha256:e9ce53674803",
@@ -58,10 +58,10 @@
         "verdict": "permitted"
       }
     },
-    "image": "mllm-e2e:r19",
+    "image": "mllm-e2e:r21",
     "reviewer": "qwen-code",
     "row_id": "chain-qwen-code",
-    "run_bundle": "20261006T221233Z"
+    "run_bundle": "20261007T104315Z"
   },
   "markers": [
     "[PROGRESS]",
@@ -379,6 +379,7 @@
     "generate-tasks/.status.json",
     "generate-tasks/.status.lock",
     "generate-tasks/subagent_batch_report.json",
+    "generate-tasks/task_generation.prompt.txt",
     "generate-tasks/task_generation_result.json",
     "generate-tasks/task_generation_tasks.json",
     "implement/",
@@ -3438,6 +3439,8 @@
               "phase": "generate-tasks",
               "plan_file": "<run-root>/plans/auth-feature.md",
               "prompt": "<text:sha256:28440c014d81:9366>",
+              "prompt_lines": 239,
+              "prompt_path": "<run-root>/plans/auth-feature/generate-tasks/task_generation.prompt.txt",
               "repo_root": "<run-root>",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -5298,6 +5301,7 @@
               "<items>": [],
               "<list>": 0
             },
+            "ok": "<int>",
             "pending_human_task_ids": {
               "<item-types>": [],
               "<items>": [],
@@ -5411,6 +5415,7 @@
               "<items>": [],
               "<list>": 0
             },
+            "ok": "<int>",
             "pending_human_task_ids": {
               "<item-types>": [],
               "<items>": [],
@@ -5534,6 +5539,7 @@
               "<items>": [],
               "<list>": 0
             },
+            "ok": "<int>",
             "pending_human_task_ids": {
               "<item-types>": [],
               "<items>": [],
@@ -5836,6 +5842,7 @@
               "<items>": [],
               "<list>": 0
             },
+            "ok": "<int>",
             "pending_human_task_ids": {
               "<item-types>": [],
               "<items>": [],
