@@ -38,11 +38,12 @@ from tests.test_check_gate_fixture import (  # noqa: F401  (the fixture)
 from tests.test_implement_stop_account import _dispatched_titles, _implement
 from utils.state_manager import get_or_create_state
 
-ETA = re.compile(r"\[ETA\] implement: batch (\d+)/(\d+) done")
+#: Implement's `[ETA]` lines count tasks and say so (fix round 22).
+ETA = re.compile(r"\[ETA\] implement: task (\d+)/(\d+) done")
 
 
 def _etas(text: str) -> list:
-    """Every ``[ETA] implement: batch N/M`` line's ``(N, M)``, in order."""
+    """Every ``[ETA] implement: task N/M`` line's ``(N, M)``, in order."""
     return [(int(a), int(b)) for a, b in ETA.findall(text)]
 
 
@@ -117,7 +118,9 @@ class TestTheNativeEtaEndsAtTheTasksDispatched:
         self._done(repo, capsys, "T004", "--status", "completed")
         last, err = self._record(capsys, state_file, handoff, "T004", 4)
         assert last == (4, 4), err
-        assert "ALL BATCHES COMPLETE" in err
+        # Fix round 22: the run ends short (T005 refused at the emit, T006
+        # after it, T007 held), so N/N claims no completion.
+        assert "COMPLETE" not in err
 
         progress = get_or_create_state(repo.plan).state["metrics_progress"]["implement"]
         assert progress["total_batches"] == 4
@@ -136,7 +139,8 @@ class TestTheNativeEtaEndsAtTheTasksDispatched:
         assert self._record(capsys, state_file, handoff, "T005", 5)[0] == (5, 6)
         self._done(repo, capsys, "T007", "--status", "completed")
         last, err = self._record(capsys, state_file, handoff, "T007", 6)
-        assert last == (6, 6) and "ALL BATCHES COMPLETE" in err, err
+        # T005 failed and T006 did not run: no completion at N/N.
+        assert last == (6, 6) and "COMPLETE" not in err, err
 
     def test_a_task_write_prompt_refused_leaves_it_with_its_dependents(
         self, repo, capsys,
@@ -159,7 +163,8 @@ class TestTheNativeEtaEndsAtTheTasksDispatched:
             "does not allow a file it declares")
         self._done(repo, capsys, "T007", "--status", "completed")
         last, err = self._record(capsys, state_file, handoff, "T007", 5)
-        assert last == (5, 5) and "ALL BATCHES COMPLETE" in err, err
+        # T005 refused at `util write-prompt`, T006 after it: no completion.
+        assert last == (5, 5) and "COMPLETE" not in err, err
 
     def test_recording_the_check_again_puts_its_held_tasks_back(self, repo, capsys):
         handoff, _out = _emit(repo, capsys)
@@ -290,7 +295,7 @@ class TestTheExecutorEtaEndsAtTheTasksDispatched:
         text = text.out + text.err
         assert _dispatched_titles(repo) == ["Edit: write the release note"]
         assert _etas(text) == [(1, 1)], text
-        assert "ALL BATCHES COMPLETE" in text
+        assert "ALL TASKS COMPLETE" in text
 
     def test_a_task_a_check_holds_leaves_the_total(self, repo, capsys):
         _policy(repo, ALLOW)
@@ -301,7 +306,12 @@ class TestTheExecutorEtaEndsAtTheTasksDispatched:
         etas = _etas(text)
         assert etas[-1] == (6, 6), etas
         assert etas[0] == (1, 7), etas  # T007 counted until T002 reported
-        assert "ALL BATCHES COMPLETE" in text
+        # T007 is held: the run ends short, and its closing line says so.
+        assert "COMPLETE" not in text
+        assert (
+            "[ETA] implement: run stopped after task 6/6 · T007 not run: "
+            "check T002 reported problems"
+        ) in text
 
 
 def _organized(text: str) -> list:
@@ -350,10 +360,16 @@ class TestTheFirstRunEtaCountsWhatItDispatches:
         # fix round 21; T005 and T006 were never in it.
         assert _etas(text) == [(1, 5), (2, 4), (3, 4), (4, 4)], text
         eta = [l for l in text.splitlines() if l.startswith("[ETA] implement:")]
-        assert "ALL BATCHES COMPLETE" in eta[-2], eta
         # Every task the walk counted finished, and the stop still closes the
-        # lines (fix round 21: one closing line on every ending).
-        assert eta[-1] == "[ETA] implement: run stopped after batch 4/4", eta
+        # lines (fix round 21: one closing line on every ending). Fix round
+        # 22 (live run 9 #1): the 4/4 line no longer says "ALL BATCHES
+        # COMPLETE" before the stop, and the closing line names what the run
+        # left, as the native leg's `util metrics finish` does.
+        assert "COMPLETE" not in eta[-2], eta
+        assert eta[-1] == (
+            "[ETA] implement: run stopped after task 4/4 · T005 refused before "
+            "dispatch; T006 not run; T007 not run: check T002 reported problems"
+        ), eta
         assert "T005 refused before dispatch" in text
 
     def test_the_status_line_agrees_with_it_at_the_stop(
@@ -396,7 +412,8 @@ class TestTheFirstRunEtaCountsWhatItDispatches:
         # 21; T005 ran and failed; T006 did not run.
         assert _etas(text) == [(1, 7), (2, 6), (3, 6), (4, 6), (5, 6)], eta
         assert eta[-1] == (
-            "[ETA] implement: run stopped after batch 5/6 · 1 task(s) not run"
+            "[ETA] implement: run stopped after task 5/6 · T006 not run; "
+            "T007 not run: check T002 reported problems"
         ), eta
         # Logged as the run stops, before the stop's own block.
         assert text.index(eta[-1]) < text.index("ERROR: implement stopped")
@@ -422,12 +439,15 @@ class TestTheFirstRunEtaCountsWhatItDispatches:
         assert "T001 refused before dispatch" in text, text
         eta = [l for l in text.splitlines() if l.startswith("[ETA] implement:")]
         assert eta == [
-            "[ETA] implement: run stopped before any of its 3 task(s) finished"
+            "[ETA] implement: run stopped before any of its 3 task(s) finished · "
+            "T001 refused before dispatch; T002, T003, T004, T005, T006 and 1 "
+            "more not run"
         ], eta
 
     def test_the_resume_shapes_still_read_as_they_did(self, repo, capsys):
-        """01b dispatches nothing (no `[ETA]` line), fix 02 reads 1/2, 2/2,
-        accept 02 1/1: what the walk counts, as the round-18 lines say."""
+        """01b dispatches nothing (only its closing `[ETA]` line, fix round
+        22), fix 02 reads 1/2, 2/2, accept 02 1/1: what the walk counts, as
+        the round-18 lines say."""
         _first_run(repo, capsys)
         code, text = _run(repo, capsys, "--resume")
         assert code == 3 and _etas(text) == [], text
@@ -439,7 +459,7 @@ class TestTheFirstRunEtaCountsWhatItDispatches:
         code, text = _run(repo, capsys, "--resume", "--human-task", "T005=skip")
         assert code == 0, text
         assert _etas(text) == [(1, 2), (2, 2)], text
-        assert "ALL BATCHES COMPLETE" in text
+        assert "ALL TASKS COMPLETE" in text
 
 
 def _run(repo, capsys, *flags) -> tuple:
@@ -459,7 +479,7 @@ class TestTheExecutorSaysWhatItsRunDispatches:
         # T007 (in later batches of this decomposition) are never reached.
         assert _organized(text) == [
             "Organized into 3 execution batches: 4 task(s) to dispatch"]
-        assert text.count("[ETA] implement: batch ") == 4
+        assert text.count("[ETA] implement: task ") == 4
 
     def test_a_resume_that_changes_nothing_says_it_dispatches_nothing(
         self, repo, capsys,

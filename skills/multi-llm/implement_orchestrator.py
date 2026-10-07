@@ -38,6 +38,7 @@ from utils import (
     get_staged_files,
     get_current_head,
 )
+from utils import metrics as metrics_mod
 from utils.stream_bootstrap import bootstrap_streams
 from utils.text_clip import clip
 from utils.cli_common import (
@@ -1794,6 +1795,7 @@ def _native_withheld(
     present = {str(task.get("id") or "") for task in entries}
 
     held: Dict[str, str] = {}
+    held_by: Dict[str, str] = {}
     # An explicit selection can omit its upstream check altogether. Its
     # recorded findings still hold; a check present in these batches can
     # instead run before its dependent and release the hold normally.
@@ -1805,6 +1807,7 @@ def _native_withheld(
         for dependent in transitive_dependents(graph, check_id):
             if dependent in present and dependent not in gone | human:
                 held.setdefault(dependent, blocked_by_check_reason(check_id))
+                held_by.setdefault(dependent, check_id)
 
     refused: Dict[str, str] = {}
     not_run: Dict[str, str] = {}
@@ -1899,6 +1902,18 @@ def _native_withheld(
         output_data["refused_tasks"] = dict(sorted(refused.items()))
     if not_run:
         output_data["not_run_tasks"] = dict(sorted(not_run.items()))
+    # Fix round 22 (live run 9 #1): what the host's `util metrics finish`
+    # names on its closing `[ETA]` line, as the executor's closing line
+    # names the same tasks — also when this emit hands out nothing and the
+    # host runs no `util metrics start`. Replaced by every native emit.
+    left: Dict[str, str] = {}
+    left.update({task_id: metrics_mod.LEFT_NOT_RUN for task_id in not_run})
+    left.update({
+        task_id: metrics_mod.left_out_check(check_id)
+        for task_id, check_id in held_by.items()
+    })
+    left.update({task_id: metrics_mod.LEFT_REFUSED for task_id in refused})
+    metrics_mod.set_left_out_in_state(state.state, "implement", left)
     return {"held": held, "refused": refused, "not_run": not_run}
 
 
@@ -2957,7 +2972,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not output_data["batches"]:
             print(
                 "Nothing to dispatch: every task is done, skipped, accepted or "
-                "listed above. Do not spawn a subagent."
+                "listed above. Do not spawn a subagent; still run step 7's "
+                "`util metrics finish`, which prints this run's closing [ETA] "
+                "line (no `util metrics start` is needed)."
             )
 
     # Fix round 14: a resume of a completed implement that only records

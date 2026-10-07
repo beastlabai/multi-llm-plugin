@@ -8,13 +8,16 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import (
+    Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple,
+)
 
 try:
     from . import process_control
@@ -321,6 +324,187 @@ def restore_to_progress_in_state(state: dict, phase: str, cause: str) -> List[st
     return back
 
 
+#: ``metrics_progress.{phase}.failed``: the tasks this run recorded
+#: ``failed`` after a runner ran them (fix round 22). A task refused before
+#: dispatch is withdrawn instead. Their run stops short, so the line of the
+#: last task does not say "complete" and ``util metrics finish`` closes on
+#: "run stopped" rather than "phase complete", as the executor does.
+FAILED_KEY = "failed"
+
+
+def mark_failed_in_progress(
+    state: dict, phase: str, task_id: str, *, failed: bool,
+) -> None:
+    """Record whether *task_id*'s latest record in this run is a failure.
+    No-op when the phase was not started."""
+    progress = (state.get("metrics_progress") or {}).get(phase)
+    if not isinstance(progress, dict):
+        return
+    current = {
+        str(t) for t in (progress.get(FAILED_KEY) or []) if str(t) != str(task_id)
+    }
+    if failed:
+        current.add(str(task_id))
+    if current:
+        progress[FAILED_KEY] = sorted(current, key=_id_key)
+    else:
+        progress.pop(FAILED_KEY, None)
+
+
+#: ``state.json``'s ``metrics_left_out.{phase}``: ``{task id: how it was
+#: left}`` for the tasks the native implement emit kept out of the batches it
+#: handed the host — refused by the write policy, after a refused task, held
+#: by a check whose findings stand (fix round 22, live run 9 #1). The host's
+#: ``util metrics finish`` names them on its closing line, as the executor's
+#: closing line names the same tasks, also when nothing was dispatched and
+#: the host ran no ``util metrics start``. Each emit replaces it; ``finish``
+#: removes it.
+LEFT_OUT_KEY = "metrics_left_out"
+#: How a task was left: refused before dispatch, held by a check
+#: (:func:`left_out_check`), or plainly not run.
+LEFT_REFUSED = "refused"
+LEFT_CHECK_PREFIX = "check:"
+LEFT_NOT_RUN = ""
+#: How many ids one clause of :func:`left_out_tail` names, and how many
+#: clauses it shows.
+LEFT_OUT_IDS_SHOWN = 5
+LEFT_OUT_CLAUSES_SHOWN = 4
+
+
+def left_out_check(check_id: str) -> str:
+    """How a task held by check *check_id*'s findings was left."""
+    return f"{LEFT_CHECK_PREFIX}{check_id}"
+
+
+def _id_key(task_id: str) -> List[Any]:
+    """Sort key for task ids by their numbers: T9 before T10."""
+    return [int(part) if part.isdigit() else part
+            for part in re.split(r"(\d+)", str(task_id))]
+
+
+def set_left_out_in_state(
+    state: dict, phase: str, left_out: Mapping[str, str],
+) -> None:
+    """Replace *phase*'s left-out tasks (:data:`LEFT_OUT_KEY`); an empty
+    mapping removes them."""
+    stash = state.get(LEFT_OUT_KEY)
+    stash = dict(stash) if isinstance(stash, dict) else {}
+    if left_out:
+        stash[phase] = {str(k): str(v or "") for k, v in sorted(left_out.items())}
+    else:
+        stash.pop(phase, None)
+    if stash:
+        state[LEFT_OUT_KEY] = stash
+    else:
+        state.pop(LEFT_OUT_KEY, None)
+
+
+def left_out_in_state(state: dict, phase: str) -> Dict[str, str]:
+    """*phase*'s left-out tasks on record, ``{}`` when none."""
+    stash = state.get(LEFT_OUT_KEY)
+    entry = stash.get(phase) if isinstance(stash, dict) else None
+    if not isinstance(entry, dict):
+        return {}
+    return {str(k): str(v or "") for k, v in entry.items()}
+
+
+def _withdrawn_left_out(state: dict, entry: dict) -> Dict[str, str]:
+    """A started run's withdrawn tasks, as :func:`left_out_tail` names them:
+    the record that took a task out was its own (refused at ``util
+    write-prompt``), a check's with findings (held), or a failed task's."""
+    withdrawn = entry.get(WITHDRAWN_KEY)
+    if not isinstance(withdrawn, dict):
+        return {}
+    findings = state.get("task_check_findings")
+    checks = {str(k) for k in findings} if isinstance(findings, dict) else set()
+    left: Dict[str, str] = {}
+    for task_id, cause in withdrawn.items():
+        if str(cause) == str(task_id):
+            left[str(task_id)] = LEFT_REFUSED
+        elif str(cause) in checks:
+            left[str(task_id)] = left_out_check(str(cause))
+        else:
+            left[str(task_id)] = LEFT_NOT_RUN
+    return left
+
+
+def left_out_tail(left_out: Mapping[str, str]) -> str:
+    """What a run left, for its closing ``[ETA]`` line (fix round 22):
+    ``T005 refused before dispatch; T006 not run; T007 not run: check T002
+    reported problems``. One clause per way a task was left, in task order;
+    at most :data:`LEFT_OUT_IDS_SHOWN` ids a clause and
+    :data:`LEFT_OUT_CLAUSES_SHOWN` clauses, the rest counted. Both legs
+    render it, so the same story closes on the same words."""
+    groups: Dict[str, List[str]] = {}
+    for task_id, how in left_out.items():
+        groups.setdefault(str(how or ""), []).append(str(task_id))
+    clauses: List[Tuple[List[Any], str, int]] = []
+    for how, ids in groups.items():
+        ids = sorted(ids, key=_id_key)
+        shown = ids[:LEFT_OUT_IDS_SHOWN]
+        named = ", ".join(shown) + (
+            f" and {len(ids) - len(shown)} more" if len(ids) > len(shown) else ""
+        )
+        if how == LEFT_REFUSED:
+            text = f"{named} refused before dispatch"
+        elif how.startswith(LEFT_CHECK_PREFIX):
+            text = (
+                f"{named} not run: check {how[len(LEFT_CHECK_PREFIX):]} "
+                f"reported problems"
+            )
+        else:
+            text = f"{named} not run"
+        clauses.append((_id_key(ids[0]), text, len(ids)))
+    clauses.sort(key=lambda clause: clause[0])
+    shown_clauses = clauses[:LEFT_OUT_CLAUSES_SHOWN]
+    rest = sum(count for _key, _text, count in clauses[LEFT_OUT_CLAUSES_SHOWN:])
+    return "; ".join(
+        [text for _key, text, _count in shown_clauses]
+        + ([f"{rest} more task(s) not run"] if rest else [])
+    )
+
+
+def eta_unit(phase: str) -> str:
+    """What the ``[ETA]`` lines of *phase* count (fix round 22, live run 9):
+    implement counts one record per task it dispatches, so its lines say
+    "task 1/5" beside "Organized into 3 execution batches: 5 task(s)"; the
+    other phases count batches."""
+    return "task" if phase == "implement" else "batch"
+
+
+def closing_line(
+    phase: str, *, done: int, total: int, verb: str = "stopped",
+    elapsed_ms: Optional[int] = None, tail: str = "", why: str = "",
+) -> str:
+    """The closing ``[ETA]`` line of a run that ends short of completing
+    its phase, on both legs (fix round 22): ``run stopped after task 4/4 ·
+    <what it left>``, ``run stopped with nothing dispatched · …`` when it
+    dispatched nothing, then *why* (a failed verify command)."""
+    if done <= 0 and total <= 0:
+        head = f"run {verb} with nothing dispatched"
+    elif done <= 0:
+        head = f"run {verb} before any of its {total} task(s) finished"
+    else:
+        timing = f" in {format_duration(elapsed_ms)}" if elapsed_ms is not None else ""
+        head = f"run {verb} after {eta_unit(phase)} {done}/{total}{timing}"
+    return f"[ETA] {phase}: {head}" + "".join(
+        f" · {part}" for part in (tail, why) if part
+    )
+
+
+def native_ends_short(state: dict, phase: str) -> bool:
+    """Whether the native run on record will end short of completing its
+    phase: a record took tasks out of its total or failed, or the emit left
+    tasks out (fix round 22). Its last ``[ETA]`` line then claims no
+    completion."""
+    progress = (state.get("metrics_progress") or {}).get(phase)
+    if isinstance(progress, dict) and (
+        progress.get(WITHDRAWN_KEY) or progress.get(FAILED_KEY)
+    ):
+        return True
+    return bool(left_out_in_state(state, phase))
+
+
 def start_phase(state_path: Path, phase: str, total_batches: int) -> None:
     """Record the start time and total batch count for a phase.
 
@@ -343,18 +527,27 @@ def finish_phase_in_state(
     """``finish_phase``'s mutation, applied to an in-memory state dict.
 
     Returns None — leaving ``state`` untouched — when the phase was never
-    started; otherwise pops the progress entry and returns
+    started and its emit left no task out; otherwise pops the progress entry
+    (and the left-out tasks, :data:`LEFT_OUT_KEY`) and returns
     ``(elapsed_ms, line)``, where ``line`` is the closing ``[ETA] … phase
-    complete`` line. It is **returned, not printed**, mirroring
-    ``record_metric_in_state``: the caller decides where it goes — stderr for
-    the CLI, the phase log for the scheduler, which is where every other
-    ``[ETA]`` line of that run already went (F7). See ``start_phase_in_state``
-    for why the in-memory form exists.
+    complete`` line, or the run's stop line (:func:`closing_line`). It is
+    **returned, not printed**, mirroring ``record_metric_in_state``: the
+    caller decides where it goes — stderr for the CLI, the phase log for the
+    scheduler, which is where every other ``[ETA]`` line of that run already
+    went (F7). See ``start_phase_in_state`` for why the in-memory form exists.
     """
     progress = state.get("metrics_progress") or {}
     entry = progress.pop(phase, None)
+    left = left_out_in_state(state, phase)
     if entry is None:
-        return None
+        if not left:
+            return None
+        # Fix round 22 (live run 9 #1, 01b/01c): a native resume that
+        # handed out nothing ran no `util metrics start`, and its `finish`
+        # printed nothing; every ending closes its run's lines, this one too.
+        set_left_out_in_state(state, phase, {})
+        return None, closing_line(phase, done=0, total=0, tail=left_out_tail(left))
+    set_left_out_in_state(state, phase, {})
 
     elapsed_ms: Optional[int] = None
     started_at_raw = entry.get("started_at")
@@ -371,25 +564,26 @@ def finish_phase_in_state(
     else:
         state["metrics_progress"] = progress
 
-    withdrawn = entry.get(WITHDRAWN_KEY)
-    if isinstance(withdrawn, dict) and withdrawn and _is_index(entry.get("total_batches")):
+    left.update(_withdrawn_left_out(state, entry))
+    if left or entry.get(FAILED_KEY):
         # Fix round 21 (review of round 20, #1): a native run whose records
         # kept tasks from running (`util batch-done`: held by a check's
         # findings, after a failed task, refused at `util write-prompt`)
         # did not complete its phase, and its closing line said "phase
-        # complete" after a check held the last tasks back. It names them,
-        # against the total its `[ETA]` lines counted, as the executor's
-        # closing line does.
+        # complete" after a check held the last tasks back. Fix round 22
+        # (live run 9 #1): the tasks its emit left out are named too, in the
+        # executor's closing line's words, and a run whose last task failed
+        # closes on "run stopped" as well.
         run_id = entry.get("run_id")
         entries = (state.get("metrics") or {}).get(phase)
         done = sum(
             1 for item in (entries if isinstance(entries, list) else [])
             if isinstance(item, dict) and run_id and item.get("run_id") == run_id
         )
-        return elapsed_ms, (
-            f"[ETA] {phase}: run stopped after batch {done}/"
-            f"{int(entry['total_batches'])} in {format_duration(elapsed_ms)} · "
-            f"{', '.join(sorted(withdrawn))} not run"
+        total = int(entry["total_batches"]) if _is_index(entry.get("total_batches")) else done
+        return elapsed_ms, closing_line(
+            phase, done=done, total=total, elapsed_ms=elapsed_ms,
+            tail=left_out_tail(left),
         )
 
     color_on = _should_colorize_stderr()
@@ -441,8 +635,12 @@ def finish_phase(state_path: Path, phase: str) -> Optional[int]:
     """
     with state_file_lock(state_path):
         state = _read_state(state_path)
-        if phase not in (state.get("metrics_progress") or {}):
-            # Never started: nothing to mutate, so nothing to write back.
+        if (
+            phase not in (state.get("metrics_progress") or {})
+            and not left_out_in_state(state, phase)
+        ):
+            # Never started and nothing left out: nothing to mutate, so
+            # nothing to write back.
             return None
         finished = finish_phase_in_state(state, phase)
         if finished is None:  # pragma: no cover - guarded above
@@ -463,6 +661,7 @@ def _compute_eta(
     total_batches: int,
     this_duration_ms: Optional[int],
     colorize: bool = False,
+    ends_short: bool = False,
 ) -> dict:
     """Compute ETA from two independent remaining-time estimates.
 
@@ -524,9 +723,16 @@ def _compute_eta(
     else:
         eta_ms = None
 
-    parts = [f"[ETA] {phase}: batch {done}/{total} done in {format_duration(this_duration_ms)}"]
+    unit = eta_unit(phase)
+    parts = [f"[ETA] {phase}: {unit} {done}/{total} done in {format_duration(this_duration_ms)}"]
     if remaining == 0:
-        parts.append(_colorize("ALL BATCHES COMPLETE", "1;32", colorize))
+        # Fix round 22 (live run 9 #1): a run about to stop short of
+        # completing its phase (*ends_short*) said "ALL BATCHES COMPLETE"
+        # on this line and "run stopped" on the next. "N/N done" is all that
+        # is true of it; its closing line says what it left.
+        if not ends_short:
+            everything = "ALL TASKS COMPLETE" if unit == "task" else "ALL BATCHES COMPLETE"
+            parts.append(_colorize(everything, "1;32", colorize))
     elif eta_ms is not None:
         parts.append(_colorize(f"~{format_duration(eta_ms)} remaining", "1;36", colorize))
 
@@ -716,6 +922,7 @@ def record_metric_in_state(
     duration_ms: Optional[int] = None,
     total_batches: Optional[int] = None,
     batch_index: Optional[int] = None,
+    ends_short: Optional[bool] = None,
 ) -> Optional[str]:
     """``record_metric``'s mutation, applied to an in-memory state dict.
 
@@ -723,7 +930,9 @@ def record_metric_in_state(
     ``batch_index`` are both given, so the caller decides *where* it goes —
     stderr for the CLI, the phase log for the scheduler — and nothing is
     printed for a caller that wants none. See ``start_phase_in_state`` for why
-    the in-memory form exists.
+    the in-memory form exists. *ends_short*: the run will stop short of
+    completing its phase, so the line that reaches N/N claims no completion
+    (fix round 22); ``None`` reads it off the state (:func:`native_ends_short`).
 
     **A second record of the same event collapses; nothing else does.** An
     event is ``(phase, run_id, label, batch_index)``, where ``run_id`` is the
@@ -840,6 +1049,11 @@ def record_metric_in_state(
         total_batches=total_batches,
         this_duration_ms=duration_ms,
         colorize=_should_colorize_stderr(),
+        # The executor knows (*ends_short*); on the native leg the state says
+        # it (fix round 22).
+        ends_short=(
+            native_ends_short(state, phase) if ends_short is None else ends_short
+        ),
     )
     return result["line"]
 

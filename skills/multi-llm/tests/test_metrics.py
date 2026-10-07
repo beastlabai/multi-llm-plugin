@@ -650,7 +650,7 @@ class TestTheInMemoryMutators:
             total_batches=4, batch_index=1,
         )
 
-        assert line.startswith("[ETA] implement: batch 1/4")
+        assert line.startswith("[ETA] implement: task 1/4")
         captured = capsys.readouterr()
         assert captured.out == "" and captured.err == ""
 
@@ -838,7 +838,8 @@ class TestEta:
         assert "~1m 30s remaining" in last
 
     def test_eta_complete_at_last_batch(self, tmp_path, capsys):
-        """When batch_index == total_batches, ALL BATCHES COMPLETE is shown."""
+        """When batch_index == total_batches, the line says everything it
+        counts is complete (implement counts tasks, fix round 22)."""
         state_file = _create_state(tmp_path)
 
         record_metric(
@@ -860,8 +861,8 @@ class TestEta:
 
         err = capsys.readouterr().err
         last = [l for l in err.splitlines() if l.startswith("[ETA]")][-1]
-        assert "batch 2/2" in last
-        assert "ALL BATCHES COMPLETE" in last
+        assert "task 2/2" in last
+        assert "ALL TASKS COMPLETE" in last
         assert "remaining" not in last
 
     def test_eta_suppressed_with_no_eta_flag(self, tmp_path, capsys):
@@ -1009,7 +1010,7 @@ class TestEta:
             this_duration_ms=60000,
             colorize=True,
         )
-        assert "\033[1;32mALL BATCHES COMPLETE\033[0m" in result["line"]
+        assert "\033[1;32mALL TASKS COMPLETE\033[0m" in result["line"]
 
     def test_eta_no_color_when_disabled(self):
         """When ``colorize=False`` (default), no ANSI codes are emitted."""
@@ -1047,10 +1048,10 @@ class TestEta:
         assert result["wall_clock_ms"] is None
         assert result["eta_ms"] == 120000
         assert result["remaining"] == 2
-        assert result["line"].startswith("[ETA] implement: batch 2/4 done in 1m 0s")
+        assert result["line"].startswith("[ETA] implement: task 2/4 done in 1m 0s")
 
     def test_eta_single_batch_phase(self, tmp_path, capsys):
-        """A 1-batch phase: ``batch 1/1 done in Xs · ALL BATCHES COMPLETE``."""
+        """A 1-task implement: ``task 1/1 done in Xs · ALL TASKS COMPLETE``."""
         state_file = _create_state(tmp_path)
 
         record_metric(
@@ -1064,8 +1065,8 @@ class TestEta:
 
         err = capsys.readouterr().err
         last = [l for l in err.splitlines() if l.startswith("[ETA]")][-1]
-        assert "batch 1/1" in last
-        assert "ALL BATCHES COMPLETE" in last
+        assert "task 1/1" in last
+        assert "ALL TASKS COMPLETE" in last
         assert "remaining" not in last
 
     def test_cli_start_finish_record(self, tmp_path):
@@ -1107,7 +1108,7 @@ class TestEta:
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
         # ETA line should land on stderr
-        assert "[ETA] implement: batch 1/3" in result.stderr
+        assert "[ETA] implement: task 1/3" in result.stderr
 
         # record with --no-eta suppresses the ETA line
         result = subprocess.run(

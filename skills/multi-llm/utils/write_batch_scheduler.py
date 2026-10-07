@@ -3350,8 +3350,19 @@ class WriteBatchScheduler:
         self._eta_closed = False
         #: The tasks a check this run recorded with findings holds back, out
         #: of the `[ETA]` total from that check's own line on (fix round 21),
-        #: before `_block_dependents_of_checks` holds them for the loop.
-        self._eta_held: set = set()
+        #: before `_block_dependents_of_checks` holds them for the loop. Fix
+        #: round 22: each with its check, which the closing line names.
+        self._eta_held: Dict[str, str] = {}
+        #: Fix round 22 (live run 9 #1): the tasks this run dispatched that
+        #: failed, and the tasks the dispatch walk foresaw it would not run
+        #: (`{task id: how}`, `metrics.left_out_tail`'s words) — a task the
+        #: write policy refuses, the tasks after a stop, a task a check on
+        #: record holds. Together with what the run met on the way, they say
+        #: whether the last `[ETA]` line may read "complete", and what the
+        #: closing line names (:meth:`_eta_left_out`).
+        self._eta_failed: set = set()
+        self._eta_unrun: set = set()
+        self._eta_walk_left: Dict[str, str] = {}
         #: The result the `[ETA]` lines count over, for an ending that has no
         #: other hold on it (an exception out of `_run`, an abort's signal).
         self._eta_result: Optional["SchedulerResult"] = None
@@ -4549,7 +4560,7 @@ class WriteBatchScheduler:
             # Fix round 21 (review of round 20, #1): this ending closes the
             # `[ETA]` lines too, naming what the checks held; a check that
             # held the last tasks left "batch 3/5 … remaining" standing.
-            self._eta_close(result, why=self._eta_held_text(result))
+            self._eta_close(result)
             unverified_lines = self._note_unverified_on_stop(result)
             if self.summary_file:
                 result.summary_file = self._write_summary(result)
@@ -4585,6 +4596,7 @@ class WriteBatchScheduler:
         walk = self._dispatch_walk(ordered, result)
         if walk is None:
             self._eta_scope = None
+            self._eta_walk_left = {}
             return dispatch_line(
                 len([1 for _i, b in ordered if b]),
                 sum(len(b) for _i, b in ordered),
@@ -4638,6 +4650,11 @@ class WriteBatchScheduler:
         waiting: Dict[str, List[str]] = {}
         picked_batches = 0
         picked_ids: List[str] = []
+        # Fix round 22: what the walk foresees this run leaves (refused, held
+        # by a check on record, not reached) and keeps, for `_eta_left_out`.
+        left: Dict[str, str] = {}
+        kept_ids: set = set()
+        candidates: List[str] = []
         edits_dispatched = False
         stopped = False
         quiet_log = self.log
@@ -4645,8 +4662,17 @@ class WriteBatchScheduler:
         try:
             ceiling = self.write_ceiling()
             for _index, batch_tasks in ordered:
+                candidates.extend(
+                    str(task.get("task_id", "")) for task in batch_tasks
+                    if not (
+                        plan.is_skipped(str(task.get("task_id", "")))
+                        or str(task.get("task_id", "")) in plan.accepted
+                        or task.get("is_human")
+                        or task.get("executor_role") == "human"
+                    )
+                )
                 if stopped:
-                    break
+                    continue
                 in_batch = 0
                 # The loop's runnable list, as far as a preview can tell, in
                 # the groups `_run_batch` admits together (fix round 19,
@@ -4654,17 +4680,20 @@ class WriteBatchScheduler:
                 # group's tasks are dispatched at once and a stop takes
                 # effect only once the whole group settled, so a refused
                 # task's siblings in its group run.
-                runnable = [
-                    task for task in batch_tasks
-                    if not (
-                        plan.is_skipped(str(task.get("task_id", "")))
-                        or str(task.get("task_id", "")) in plan.accepted
+                runnable = []
+                for task in batch_tasks:
+                    task_id = str(task.get("task_id", ""))
+                    if (
+                        plan.is_skipped(task_id) or task_id in plan.accepted
                         or task.get("is_human")
                         or task.get("executor_role") == "human"
-                        or upstream_held_check(
-                            graph, str(task.get("task_id", "")), on_record - rerun)
-                    )
-                ]
+                    ):
+                        continue
+                    holder = upstream_held_check(graph, task_id, on_record - rerun)
+                    if holder:
+                        left[task_id] = _metrics.left_out_check(holder)
+                        continue
+                    runnable.append(task)
                 for group in admit_disjoint_groups(
                     runnable, ceiling=ceiling, root=self.repo_root,
                 ):
@@ -4680,6 +4709,7 @@ class WriteBatchScheduler:
                                 again = self._check_findings_rerun(
                                     task, evidence[0], result)
                                 if again is not True and not (again is False and moved):
+                                    kept_ids.add(task_id)
                                     continue
                                 rerun.add(task_id)
                             elif task_id in on_record:
@@ -4688,6 +4718,7 @@ class WriteBatchScheduler:
                                 task, result,
                             ) is not None:
                                 stopped = True
+                                left[task_id] = _metrics.LEFT_NOT_RUN
                                 continue
                         try:
                             self.policy.check([
@@ -4696,6 +4727,7 @@ class WriteBatchScheduler:
                             ], when="pre-dispatch")
                         except PolicyViolation:
                             stopped = True
+                            left[task_id] = _metrics.LEFT_REFUSED
                             continue
                         in_batch += 1
                         picked_ids.append(task_id)
@@ -4717,6 +4749,11 @@ class WriteBatchScheduler:
             return None
         finally:
             self.log = quiet_log
+        for task_id in candidates:
+            if task_id not in left and task_id not in kept_ids and task_id not in picked_ids:
+                # After the stop: not reached.
+                left[task_id] = _metrics.LEFT_NOT_RUN
+        self._eta_walk_left = left
         return picked_batches, picked_ids, list(waiting)
 
     def _check_findings_lines(
@@ -8163,7 +8200,7 @@ class WriteBatchScheduler:
             # own 1-based position in the run (F3). No metric for a check that
             # was not run again: no child ran, and a zero would average in.
             ran = bool(not outcome.not_rerun and dispatched)
-            self._eta_mark(task_id, ran=ran)
+            self._eta_mark(task_id, ran=ran, ok=outcome.ok)
             # Fix round 21 (review of round 20, #1): a check that reported
             # findings holds its dependents only once its batch returns
             # (`_block_dependents_of_checks`), so its own line and the lines
@@ -8172,7 +8209,9 @@ class WriteBatchScheduler:
             # remaining". They leave the `[ETA]` total now, as the native
             # leg's `util batch-done` takes them out before `util metrics
             # record`.
-            self._eta_held.update(self._check_holds(outcome, result))
+            self._eta_held.update({
+                held: outcome.task_id for held in self._check_holds(outcome, result)
+            })
             if ran:
                 self._record_metrics(task, outcome, result)
 
@@ -8379,6 +8418,11 @@ class WriteBatchScheduler:
             f"[{outcome.write_outcome or outcome.status}]"
         ).strip()
         run_batch_index, total_batches = self._eta_progress(result)
+        # Fix round 22 (live run 9 #1): the line that reaches N/N said "ALL
+        # BATCHES COMPLETE" before the run stopped on T005.
+        ends_short = (
+            run_batch_index >= total_batches and self._eta_ends_short(result)
+        )
         live = getattr(self.state, "state", None)
         progress = (
             (live.get("metrics_progress") or {}).get(self.phase)
@@ -8405,6 +8449,7 @@ class WriteBatchScheduler:
                 duration_ms=int(outcome.duration_seconds * 1000),
                 total_batches=total_batches or None,
                 batch_index=run_batch_index,
+                ends_short=ends_short,
             )
         except Exception as exc:  # noqa: BLE001 - metrics must not fail a phase
             self.log(f"[write-subagents] warning: metrics record failed: {exc}")
@@ -10831,7 +10876,7 @@ class WriteBatchScheduler:
             and not task.get("is_human") and task.get("executor_role") != "human"
         ]
 
-    def _eta_mark(self, task_id: str, *, ran: bool) -> None:
+    def _eta_mark(self, task_id: str, *, ran: bool, ok: bool = True) -> None:
         """One more finished task for the ``[ETA]`` numerator (F3).
 
         *ran*: a runner was started for it (its metric is recorded). On
@@ -10841,9 +10886,19 @@ class WriteBatchScheduler:
         ``util batch-done`` withdraws a refused task; a task dispatched that
         the walk did not foresee joins it, so the line never reads past its
         own total. Called under ``_effects_lock``.
+
+        *ok*: how it ended; a dispatched task that failed stops the run
+        short of its phase (fix round 22), so the line it drives at N/N
+        claims no completion.
         """
         task_id = str(task_id)
         self._eta_finished.add(task_id)
+        self._eta_failed.discard(task_id)
+        self._eta_unrun.discard(task_id)
+        if not ok:
+            # Ran and failed, or ended without a runner: refused before
+            # dispatch, a failed check not run again on unchanged files.
+            (self._eta_failed if ran else self._eta_unrun).add(task_id)
         if self._eta_scope is not None:
             if ran:
                 self._eta_scope.add(task_id)
@@ -10856,40 +10911,63 @@ class WriteBatchScheduler:
         counted = self._eta_task_ids(result)
         return sum(1 for task_id in counted if task_id in self._eta_finished), len(counted)
 
-    def _eta_held_text(self, result: SchedulerResult) -> str:
-        """``T004, T005 not run: check T003 reported problems`` — what the
-        checks with findings held back, for the closing ``[ETA]`` line."""
-        by_check: Dict[str, List[str]] = {}
-        for task_id, check_id in result.blocked_by_check.items():
-            by_check.setdefault(str(check_id), []).append(str(task_id))
-        return "; ".join(
-            f"{', '.join(sorted(held))} not run: check {check_id} reported problems"
-            for check_id, held in sorted(by_check.items())
-        )
+    def _eta_left_out(self, result: SchedulerResult) -> Dict[str, str]:
+        """``{task id: how}`` for every task this run leaves undone, in
+        ``metrics.left_out_tail``'s words (fix round 22, live run 9 #1): the
+        stop fixture's executor closed on a bare "run stopped after batch
+        4/4" while T005 (refused), T006 (after it) and T007 (held by check
+        T002) had not run. What the dispatch walk foresaw and the run has
+        not met yet, a counted task not finished, a task the stop left
+        (``result.not_run``), a task a check holds and a task that ended
+        without a runner and not ok (refused, or a failed check not run
+        again). A task that ran and failed is not in it: it ran. Reads,
+        over copies: an abort's signal handler asks it mid-batch."""
+        finished = set(self._eta_finished)
+        left: Dict[str, str] = {
+            task_id: how for task_id, how in dict(self._eta_walk_left).items()
+            if task_id not in finished
+        }
+        for task_id in self._eta_task_ids(result):
+            if task_id not in finished:
+                left.setdefault(task_id, _metrics.LEFT_NOT_RUN)
+        for task_id in list(result.not_run):
+            if task_id not in finished:
+                left[str(task_id)] = _metrics.LEFT_NOT_RUN
+        held = {**dict(self._eta_held), **dict(result.blocked_by_check)}
+        for task_id, check_id in held.items():
+            left[str(task_id)] = _metrics.left_out_check(str(check_id))
+        for task_id in set(self._eta_unrun):
+            left[task_id] = (
+                _metrics.LEFT_REFUSED if task_id in self._refused_before_dispatch
+                else _metrics.LEFT_NOT_RUN
+            )
+        return left
+
+    def _eta_ends_short(self, result: SchedulerResult) -> bool:
+        """Whether this run will end short of completing its phase: a task
+        failed or was left (:meth:`_eta_left_out`). The ``[ETA]`` line that
+        reaches N/N then claims no completion (fix round 22)."""
+        return bool(self._eta_failed or self._eta_unrun or self._eta_left_out(result))
 
     def _eta_closing_line(
         self, result: Optional[SchedulerResult], *, verb: str = "stopped",
         why: str = "",
     ) -> Optional[str]:
         """The closing ``[ETA]`` line of a run that ends short of completing
-        its phase, or ``None`` when there is nothing to close (no baseline,
-        or a run that counted no task and printed no line). Pure: it logs
-        and saves nothing, so an abort's signal handler can ask for it."""
+        its phase (``metrics.closing_line``: the native leg's ``util metrics
+        finish`` words it the same), or ``None`` when there is nothing to
+        close (no baseline). Fix round 22: it names what the run left
+        (:meth:`_eta_left_out`), and a run that dispatched nothing closes
+        too ("run stopped with nothing dispatched · …"; 01b and 01c of live
+        run 9 logged no line). Pure: it logs and saves nothing, so an
+        abort's signal handler can ask for it."""
         if not self._eta_started or result is None:
             return None
         done, total = self._eta_progress(result)
-        if total <= 0 and not self._eta_printed:
-            return None
-        if done <= 0:
-            head = f"run {verb} before any of its {total} task(s) finished"
-        elif done < total:
-            head = (
-                f"run {verb} after batch {done}/{total} · "
-                f"{total - done} task(s) not run"
-            )
-        else:
-            head = f"run {verb} after batch {done}/{total}"
-        return f"[ETA] {self.phase}: {head}" + (f" · {why}" if why else "")
+        return _metrics.closing_line(
+            self.phase, done=done, total=total, verb=verb,
+            tail=_metrics.left_out_tail(self._eta_left_out(result)), why=why,
+        )
 
     def _eta_close(
         self, result: Optional[SchedulerResult], *, verb: str = "stopped",
@@ -10971,6 +11049,11 @@ class WriteBatchScheduler:
         total_batches = self._eta_total(result)
         try:
             self.state.start_metrics_phase(self.phase, total_batches)
+            live = getattr(self.state, "state", None)
+            if isinstance(live, dict):
+                # A native emit's left-out tasks are that leg's (fix round
+                # 22): this run closes its own lines.
+                _metrics.set_left_out_in_state(live, self.phase, {})
             self._eta_started = True
             self.state.save()
         except Exception:  # noqa: BLE001 - bookkeeping must not fail a phase

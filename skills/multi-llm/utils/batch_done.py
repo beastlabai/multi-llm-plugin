@@ -100,8 +100,9 @@ try:
     from . import known_checks as _known_checks
     from . import prior_changes as _prior_changes
     from .metrics import (
-        _read_state, _write_state, restore_to_progress_in_state,
-        state_file_lock, withdraw_from_progress_in_state,
+        _read_state, _write_state, mark_failed_in_progress,
+        restore_to_progress_in_state, state_file_lock,
+        withdraw_from_progress_in_state,
     )
     from .state_manager import (
         PROCESSED_LEG_NATIVE,
@@ -145,8 +146,9 @@ except ImportError:  # pragma: no cover - direct script invocation
     from utils import known_checks as _known_checks  # type: ignore
     from utils import prior_changes as _prior_changes  # type: ignore
     from utils.metrics import (  # type: ignore
-        _read_state, _write_state, restore_to_progress_in_state,
-        state_file_lock, withdraw_from_progress_in_state,
+        _read_state, _write_state, mark_failed_in_progress,
+        restore_to_progress_in_state, state_file_lock,
+        withdraw_from_progress_in_state,
     )
     from utils.state_manager import (  # type: ignore
         PROCESSED_LEG_NATIVE,
@@ -768,8 +770,15 @@ def _settle_eta_total(
         return bool(task.get("is_human")) or str(task.get("executor_role") or "") == "human"
 
     out = [t for t in held if t in handed and not manual(handed[t])]
+    refused = status == "failed" and str(reason or "").strip().lower().startswith(
+        REFUSED_BEFORE_DISPATCH_REASON)
+    # Fix round 22: a task that ran and failed stops the run short of its
+    # phase, so its closing `[ETA]` line says "run stopped", as the
+    # executor's does; a refused one is withdrawn below instead.
+    mark_failed_in_progress(
+        state, phase, task_id, failed=status == "failed" and not refused)
     if status == "failed":
-        if str(reason or "").strip().lower().startswith(REFUSED_BEFORE_DISPATCH_REASON):
+        if refused:
             out.append(task_id)
         statuses = state.get("task_status") or {}
         graph = decomposition_graph(list(handed.values()), state)

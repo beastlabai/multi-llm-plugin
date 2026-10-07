@@ -4612,11 +4612,12 @@ class TestTheEtaLineUsesThisRunsOwnBatchCount:
         eta_lines = [l for l in lines if l.startswith("[ETA] implement:")]
         assert len(eta_lines) == 5, lines
         for position, line in enumerate(eta_lines, start=1):
-            assert f"batch {position}/5" in line, line
+            assert f"task {position}/5" in line, line
             if position < 5:
-                assert "ALL BATCHES COMPLETE" not in line, line
+                assert "ALL TASKS COMPLETE" not in line, line
             else:
-                assert "ALL BATCHES COMPLETE" in line, line
+                # The deferred manual task does not stop the run short.
+                assert "ALL TASKS COMPLETE" in line, line
             assert "WARNING" not in line, line
 
         on_disk = json.loads(Path(state.state_file).read_text(encoding="utf-8"))
@@ -4657,10 +4658,10 @@ class TestTheEtaLineUsesThisRunsOwnBatchCount:
 
         eta_lines = [l for l in lines if l.startswith("[ETA] implement:")]
         assert len(eta_lines) == 2, lines
-        assert "batch 1/2" in eta_lines[0], eta_lines
-        assert "ALL BATCHES COMPLETE" not in eta_lines[0], eta_lines
-        assert "batch 2/2" in eta_lines[1], eta_lines
-        assert "ALL BATCHES COMPLETE" in eta_lines[1], eta_lines
+        assert "task 1/2" in eta_lines[0], eta_lines
+        assert "ALL TASKS COMPLETE" not in eta_lines[0], eta_lines
+        assert "task 2/2" in eta_lines[1], eta_lines
+        assert "ALL TASKS COMPLETE" in eta_lines[1], eta_lines
         assert not [l for l in eta_lines if "WARNING" in l], eta_lines
 
         on_disk = json.loads(Path(state.state_file).read_text(encoding="utf-8"))
@@ -4699,8 +4700,8 @@ class TestTheEtaLineUsesThisRunsOwnBatchCount:
 
         eta_lines = [l for l in lines if l.startswith("[ETA] implement:")]
         assert len(eta_lines) == 1, lines
-        assert "batch 1/1" in eta_lines[0], eta_lines
-        assert "ALL BATCHES COMPLETE" in eta_lines[0], eta_lines
+        assert "task 1/1" in eta_lines[0], eta_lines
+        assert "ALL TASKS COMPLETE" in eta_lines[0], eta_lines
         assert "Organized into 1 execution batch: 1 task(s) to dispatch" in lines
 
     def test_a_resumed_skip_counts_toward_an_apply_runs_own_total(self, env):
@@ -4747,7 +4748,7 @@ class TestAStoppedRunSaysSoOnItsEtaLines:
         eta = [l for l in lines if l.startswith("[ETA] apply-suggestions:")]
         assert "batch 1/2" in eta[0], eta
         assert eta[-1] == (
-            "[ETA] apply-suggestions: run stopped after batch 1/2 · 1 task(s) not run"
+            "[ETA] apply-suggestions: run stopped after batch 1/2 · apply-batch-1 not run"
         ), eta
 
     def test_a_run_that_finishes_says_nothing_of_a_stop(self, env):
