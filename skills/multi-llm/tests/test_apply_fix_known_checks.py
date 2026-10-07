@@ -787,3 +787,84 @@ class TestTheTaskListIsTheOneImplementRan:
             "network, or start a server or a watcher" in flat
         )
         assert 'Report a command you skip as `"not run"`' in flat
+
+
+class TestABatchThatRanNothingThatFailedHasNoFailingCheck:
+    """The prompt asks for `check` with `listed` even when the batch could
+    run none of the commands; `passed: false` with no finding beside a
+    `listed` that names no failure is not a failing check, on either leg
+    (review20/verify #4)."""
+
+    def test_the_prompt_says_passed_is_true_when_none_failed(self):
+        flat = " ".join(known_checks.known_checks_section(
+            [("npm test", "package.json defines scripts.test")]).split())
+        assert (
+            "Send `check` with `listed` even when you could run none of them. "
+            "When none of them failed (each one passed or was not run, or you "
+            "ran none), `passed` is `true` and `findings` is `[]`, unless "
+            "another check you ran failed." in flat
+        )
+        assert "chose not to run is `\"not run\"`: say why in `summary`; it is never a finding." in flat
+
+    @pytest.mark.parametrize("listed", [
+        {"npm test": "not run"},
+        {"npm test": "passed"},
+    ])
+    def test_executor_leg(self, env, monkeypatch, listed):
+        _declare_npm_test(env)
+        result, state = _two_batches(
+            env, monkeypatch, check_on="Apply fix 1",
+            check={"passed": False, "findings": [], "listed": listed},
+        )
+        assert result.exit_code == 0
+        assert result.batch_check_findings() == {}
+        assert BATCH_CHECK_MARKER not in "\n".join(result.messages)
+        record = state.state[known_checks.APPLY_FIX_BATCH_CHECKS_KEY]["apply-fix-batch-1"]
+        assert record["findings"] == [] and record["listed"] == listed
+
+    def test_a_listed_failure_still_fails(self, env, monkeypatch):
+        _declare_npm_test(env)
+        result, _state = _two_batches(
+            env, monkeypatch, check_on="Apply fix 1",
+            check={"passed": False, "findings": [], "listed": {"npm test": "failed"}},
+        )
+        assert result.batch_check_findings() == {"apply-fix-batch-1": [
+            "the check reported that it did not pass but listed no finding; "
+            "see the runner notes",
+            "npm test: failed (the batch's report lists it as failed)"]}
+
+    def test_without_listed_a_bare_failure_still_fails(self):
+        from utils.subagent_executor import CHECK_FAILED_WITHOUT_FINDINGS
+
+        assert known_checks.with_listed_failures(
+            [CHECK_FAILED_WITHOUT_FINDINGS], {}) == [CHECK_FAILED_WITHOUT_FINDINGS]
+
+    def test_native_leg(self, tmp_path, capsys):
+        from utils import batch_done
+
+        plan = tmp_path / "plans" / "racing.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text(TASK_LIST, encoding="utf-8")
+        out = tmp_path / "plans" / "racing"
+        phase_dir = out / "apply-fixes"
+        phase_dir.mkdir(parents=True)
+        batches = [{"file_key": "index.html", "prompt": f"Fix.\n\n{PRIOR_CHANGES_TOKEN}\n",
+                    "fixes": [{"group_id": "g0", "title": "Fix"}]}]
+        tasks = materialize_write_tasks(
+            kind="apply_code_fixes", batches=batches, phase_dir=str(phase_dir),
+            plan_file=str(plan))
+        write_task_file_for_phase(
+            kind="apply_code_fixes", tasks=tasks, phase_dir=str(phase_dir),
+            plan_file=str(plan))
+        (out / "state.json").write_text(json.dumps({"plan_path": str(plan)}),
+                                        encoding="utf-8")
+        # The host maps `"passed": false` with no finding as step 6 says.
+        assert batch_done.main([
+            "--phase-dir", str(phase_dir), "--task-id", "apply-fix-batch-0",
+            "--status", "completed", "--own-check", "findings",
+            "--listed-check", f"{RACE_CHECK}=not run",
+        ]) == 0
+        assert BATCH_CHECK_MARKER not in capsys.readouterr().out
+        state = json.loads((out / "state.json").read_text())
+        record = state[known_checks.APPLY_FIX_BATCH_CHECKS_KEY]["apply-fix-batch-0"]
+        assert record["findings"] == [] and record["listed"] == {RACE_CHECK: "not run"}

@@ -585,10 +585,14 @@ def known_checks_section(
         "- `listed`: every command above, copied exactly as listed (without "
         "the backticks), mapped to "
         "`\"passed\"`, `\"failed\"` or `\"not run\"`. A command you could not "
-        "run (its tool is missing, it needs the network or a browser) is "
-        "`\"not run\"`: say why in `summary`. A failing one is also one of the "
-        "`findings`, and `passed` is then `false`. Send `check` with `listed` "
-        "even when you could run none of them.",
+        "run (its tool is missing, it needs the network or a browser) or chose "
+        "not to run is `\"not run\"`: say why in `summary`; it is never a "
+        "finding. A failing one is also one of the `findings`, and `passed` is "
+        "then `false`.",
+        "- Send `check` with `listed` even when you could run none of them. "
+        "When none of them failed (each one passed or was not run, or you ran "
+        "none), `passed` is `true` and `findings` is `[]`, unless another check "
+        "you ran failed.",
         "- Report a listed check that fails even when your fixes did not cause "
         "it. If it fails because of a change you made, put it right as part of "
         "your fixes. Never make a check pass by weakening it (deleting or "
@@ -685,15 +689,34 @@ def listed_check_outcomes(
     return out
 
 
+def _failed_without_findings() -> str:
+    """``subagent_executor.CHECK_FAILED_WITHOUT_FINDINGS``: what a check that
+    said ``passed: false`` and listed no finding reads as."""
+    try:
+        from .subagent_executor import CHECK_FAILED_WITHOUT_FINDINGS
+    except ImportError:  # pragma: no cover - direct script invocation
+        from utils.subagent_executor import CHECK_FAILED_WITHOUT_FINDINGS  # type: ignore
+    return CHECK_FAILED_WITHOUT_FINDINGS
+
+
 def with_listed_failures(
     findings: Optional[List[str]], listed: Mapping[str, str],
 ) -> Optional[List[str]]:
     """*findings* (a code batch's own check, ``batch_check_findings``) with a
     finding added for each command ``listed`` says failed that no finding
     names, so a reply that says ``passed: true`` beside a listed failure is
-    never read as a clean pass on one surface and a failure on another."""
+    never read as a clean pass on one surface and a failure on another.
+
+    Fix round 21: a reply whose ``passed`` is ``false`` with no finding, beside
+    a ``listed`` that names no failure (each command passed or was not run),
+    is a batch that ran nothing that failed, not a failing check: it reads as
+    the ``passed: true`` the prompt asks for in that case
+    (:func:`known_checks_section`), on both legs.
+    """
     failed = [command for command, word in listed.items() if word == LISTED_FAILED]
     if not failed:
+        if listed and list(findings or []) == [_failed_without_findings()]:
+            return []
         return findings
     current = list(findings or [])
     for command in failed:
