@@ -1076,6 +1076,20 @@ def row_batch_check_findings(row: Dict[str, Any]) -> List[str]:
     return [str(item) for item in (check.get("findings") or []) if str(item)]
 
 
+def row_batch_check_accepted(row: Dict[str, Any]) -> Dict[str, List[str]]:
+    """A serialized row's own-check findings that only repeat what the user
+    accepted, by check id (its ``batch_check_accepted``, fix round 22), else
+    ``{}``."""
+    found = row.get("batch_check_accepted") if isinstance(row, dict) else None
+    if not isinstance(found, dict):
+        return {}
+    return {
+        str(check_id): [str(item) for item in items if str(item)]
+        for check_id, items in found.items()
+        if isinstance(items, list) and any(str(item) for item in items)
+    }
+
+
 def row_outcome_label(row: Dict[str, Any]) -> Optional[str]:
     """A serialized row's label: ``outcome_label`` when present, else ``write_outcome``.
 
@@ -1363,6 +1377,12 @@ class TaskOutcome:
     #: but an ``ok`` row carrying findings is never reported as a plain
     #: success (fix round 14).
     batch_check: Optional[List[str]] = None
+    #: The own-check findings of an implement task that only repeat what the
+    #: user accepted for a check (``--human-task <check>=done``), by check id
+    #: (``write_batch_scheduler.split_accepted_findings``, fix round 22): taken
+    #: out of ``batch_check``, so they never make the task's own failure, and
+    #: named beside that check's accepted findings instead. Empty otherwise.
+    batch_check_accepted: Dict[str, List[str]] = field(default_factory=dict)
     #: A write batch whose reply said ``applied`` while no byte moved, after
     #: its one re-send (the ladder's rule 9): a ``clean-failure`` that is
     #: never ``ok``, worded on the stop as a change that did not land (fix
@@ -1474,6 +1494,12 @@ class TaskOutcome:
                 # Additive and only here, so a row whose reply ran no check
                 # is unchanged.
                 out["batch_check"] = check_record(self.batch_check)
+            if self.batch_check_accepted:
+                # Additive and only here (fix round 22).
+                out["batch_check_accepted"] = {
+                    str(check_id): list(found)
+                    for check_id, found in self.batch_check_accepted.items()
+                }
             if self.runner_notes:
                 out["runner_notes"] = self.runner_notes
             if self.not_rerun:
