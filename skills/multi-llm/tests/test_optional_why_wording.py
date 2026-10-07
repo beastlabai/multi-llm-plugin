@@ -3,9 +3,9 @@
 Fix round 22 (live run 9, #8; OpenCode racing 03): the host printed
 "Optional, before that: optional: have the models review the task list…",
 because ``Mode.optional_why`` began "optional:" while every host rule already
-labels the step ("Optional, before that:", ``modes.TOOL_USER_NEXT_STEP_LINE``
-and the shims). The why is a sentence that reads after that label and says
-what the step would do and what skipping it means. These rows read it off
+labels the step ("Optional, before that:", which ``user_next_step.markdown``
+carries since fix round 22, and the shims). The why is a sentence that reads
+after that label and says what the step would do and what skipping it means. These rows read it off
 every surface that carries it: the mode table, ``user_next_step.optional_before``,
 the ``[NEXT_COMMAND_OPTIONAL_WHY]`` line, ``util next-command`` and a terminal
 ``status`` poll (both build it through the one builder), and the generated CLI
@@ -48,14 +48,27 @@ def test_the_mode_table():
         _reads_after_the_label(why)
 
 
-def test_the_host_rule_still_labels_the_step():
-    assert '"Optional, before that:"' in modes.TOOL_USER_NEXT_STEP_LINE
-    assert "its `why`" in modes.TOOL_USER_NEXT_STEP_LINE
-
-
 @pytest.fixture
 def plan(tmp_path):
     return _build(tmp_path, S(UP_TO_TASKS))
+
+
+def test_the_markdown_still_labels_the_step(plan):
+    """Fix round 22 moved the label out of the tool routes' rule into
+    ``user_next_step.markdown``, which the rule says to copy as it is: the
+    markdown carries "Optional, before that:" and right after it the step's
+    why, which reads after the label with no "optional" of its own."""
+    assert "`markdown`, copied as it is" in modes.TOOL_USER_NEXT_STEP_LINE
+    answer = np_.next_phase_commands(
+        "plans/foo.md", "opencode", "package", "generate-tasks", plan_path=plan)
+    payload = answer.to_dict()
+    (step,) = payload["optional_before"]
+    blocks = payload["markdown"].split("\n\n")
+    at = blocks.index(np_.OPTIONAL_LEAD)
+    assert np_.OPTIONAL_LEAD == "Optional, before that:"
+    assert blocks[at + 1] == step["why"], blocks
+    _reads_after_the_label(blocks[at + 1])
+    assert payload["markdown"].lower().count("optional") == 1, payload["markdown"]
 
 
 def test_user_next_step_and_its_block(plan):
