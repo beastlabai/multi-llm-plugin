@@ -1112,6 +1112,25 @@ def active_run() -> Optional["RunHandle"]:
     return _ACTIVE
 
 
+def _tool_route(host: Optional[str]) -> Optional[str]:
+    """The tool route (``modes.TOOL_ROUTES``) this process runs on for *host*,
+    or ``None``: ``next_phase.resolve_route`` over this process's
+    environment, which the tool servers set and a launch's ``child_env``
+    carries to the worker; its stderr note is the dispatcher's to print.
+    Advisory: anything unreadable records nothing."""
+    import io
+
+    try:
+        from . import host_capabilities, next_phase
+
+        modes = next_phase._skill_module("modes")
+        host_id = host_capabilities.resolve_host_id(explicit=host)
+        route = next_phase.resolve_route(host_id, stderr=io.StringIO())
+    except Exception:  # noqa: BLE001 - the record stands without it
+        return None
+    return route if route in modes.TOOL_ROUTES else None
+
+
 class RunHandle:
     """The worker's ownership of a phase dir: lock, record, heartbeat, close-out."""
 
@@ -1188,6 +1207,13 @@ class RunHandle:
         if self.replay_flags is not None:
             # Not process state: written once here, never by update_run.
             record["replay_flags"] = list(self.replay_flags)
+        route = _tool_route(self.host)
+        if route:
+            # Fix round 24 (live run 10): the tool route that started this
+            # run, so a reader with no route of its own (a shell's `status`,
+            # `util next-command`) spells its commands as that route's user
+            # types them (`next_phase.recorded_route`). Written once.
+            record["route"] = route
         status_file.claim_run(self.phase_dir, record)
         run_registry.write_entry(
             self.project_root,

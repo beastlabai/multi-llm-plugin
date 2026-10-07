@@ -528,8 +528,24 @@ def _plan_spelling(
     return str(args.plan_file)
 
 
+def _recorded_route(
+    args: argparse.Namespace, views: Sequence[Dict[str, Any]], plan_path: Path,
+) -> Optional[str]:
+    """The route the commands of this view's plan were started on (fix round
+    24): a poll pinned to one run takes that run's record (:func:`_run_route`),
+    anything else the newest run of the reader's host under the plan
+    (``next_phase.recorded_route``). ``None`` when none is on record."""
+    from . import next_phase
+
+    host = _reader_host(args)
+    if len(views) == 1 and (args.phase or args.question or args.run_id):
+        return _run_route(views[0], host)
+    return next_phase.recorded_route(plan_path, host)
+
+
 def manual_close_note(
     payload: Dict[str, Any], plan_spelling: str, host_id: Optional[str],
+    recorded_route: Optional[str] = None,
 ) -> Optional[str]:
     """How to record the deferred manual tasks done, in *host_id*'s spelling.
 
@@ -537,6 +553,8 @@ def manual_close_note(
     ``phases.implement.manual_tasks`` (fix round 14: Codex racing 06/08
     listed T007 and never said how to close it). ``None`` when nothing is
     owed or the host has no command template for this route.
+    *recorded_route* is the route the plan's run was started on
+    (:func:`_recorded_route`), for a reader that names none (fix round 24).
     """
     import io
 
@@ -552,7 +570,8 @@ def manual_close_note(
         host = host_capabilities.resolve_host_id(explicit=host_id)
         # The route's one stderr line, if any, is the emitter's to print.
         template = host_capabilities.next_command_template(
-            host, next_phase.resolve_route(host, stderr=io.StringIO()),
+            host, next_phase.resolve_route(
+                host, stderr=io.StringIO(), recorded=recorded_route),
         )
     except Exception:  # noqa: BLE001 - advisory: the list still stands
         return None
@@ -728,8 +747,11 @@ def render_run_text(
             # (`render_state_implement_lines`, fix round 16).
             lines.append(f"  no run recorded for {scope or 'this plan'}")
         return lines
+    outer_spell = spell
     for view in views:
         run = view["run"]
+        # Fix round 24: each run's commands in the route that started it.
+        spell = _view_speller(outer_spell, view)
         name = os.path.basename(view["phase_dir"])
         head = f"  {name}"
         if run.get("run_id"):
@@ -3169,6 +3191,13 @@ def user_speller(
     back as a tool call in ``options``, which it can only do from the
     dispatcher command. ``None`` too when the host has no template for its
     route; the dispatcher command stands then.
+
+    Fix round 24 (live run 10, Codex): a reader whose environment names no
+    route — a shell's ``status`` — spells a run in the route that run was
+    started on, passed per call as *route* (its record's ``run.route``,
+    :func:`_view_speller`): that route's template and the flags it composes
+    (the tool routes' reserved set). A shell's ``status --host codex`` used
+    to print the file shim's sentence for a run the plugin's tool started.
     """
     import io
 
@@ -3177,17 +3206,30 @@ def user_speller(
     try:
         modes = next_phase._skill_module("modes")
         host = host_capabilities.resolve_host_id(explicit=host_id)
-        route = next_phase.resolve_route(host, stderr=io.StringIO())
-        if route in modes.TOOL_ROUTES:
+        if next_phase.resolve_route(host, stderr=io.StringIO()) in modes.TOOL_ROUTES:
             return None
-        template = host_capabilities.next_command_template(host, route)
-        composed = cli_common.file_route_composed_flags(host)
     except Exception:  # noqa: BLE001 - advisory: the dispatcher command stands
         return None
 
-    def spell(mode: str, extra: Sequence[str], tokens: Sequence[str]) -> Optional[str]:
+    def spell(
+        mode: str, extra: Sequence[str], tokens: Sequence[str],
+        route: Optional[str] = None,
+    ) -> Optional[str]:
         resolved = modes.resolve(mode)
         if resolved is None:
+            return None
+        try:
+            chosen = next_phase.resolve_route(
+                host, stderr=io.StringIO(), recorded=route)
+            template = host_capabilities.next_command_template(host, chosen)
+            # A tool route composes the reserved set the servers refuse in
+            # a call's flags (`cli_common._HOST_COMPOSED`); a file route its
+            # skill's or shim's own.
+            composed = (
+                cli_common._HOST_COMPOSED if chosen in modes.TOOL_ROUTES
+                else cli_common.file_route_composed_flags(host)
+            )
+        except Exception:  # noqa: BLE001 - advisory: the dispatcher command stands
             return None
         # What the run's own host composed too, when another host reads it
         # (its `--host` is in the replay): never something the user typed.
@@ -3211,7 +3253,30 @@ def user_speller(
         words += [next_phase.quote_plan_arg(token) for token in kept]
         return template.replace(next_phase.ARGS_SLOT, " ".join(words))
 
+    spell.host = host  # type: ignore[attr-defined]
     return spell
+
+
+def _run_route(view: Mapping[str, Any], host: Optional[str]) -> Optional[str]:
+    """The route *view*'s run recorded (``run.route``, fix round 24) when
+    that run is *host*'s, else ``None``: another host's route says nothing
+    of how this host's user types a command."""
+    run = view.get("run") if isinstance(view.get("run"), Mapping) else {}
+    route = run.get("route")
+    if not isinstance(route, str) or not host or run.get("host") != host:
+        return None
+    return route
+
+
+def _view_speller(spell: Optional[Speller], view: Mapping[str, Any]) -> Optional[Speller]:
+    """*spell* for one run view: its commands in the route that run was
+    started on (:func:`_run_route`), else *spell* as it is."""
+    route = _run_route(view, getattr(spell, "host", None)) if spell else None
+    if route is None:
+        return spell
+    import functools
+
+    return functools.partial(spell, route=route)
 
 
 def _resume_command(
@@ -4055,7 +4120,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 terminal_workflow, prefix="",
                 close_note=manual_close_note(
                     terminal_workflow, _plan_spelling(args, views, plan_path),
-                    _reader_host(args),
+                    _reader_host(args), _recorded_route(args, views, plan_path),
                 ),
             )
             if trailer:
@@ -4107,7 +4172,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 workflow,
                 close_note=manual_close_note(
                     workflow, _plan_spelling(args, views, plan_path),
-                    _reader_host(args),
+                    _reader_host(args), _recorded_route(args, views, plan_path),
                 ),
             )
             lines.append("")
@@ -4365,6 +4430,8 @@ def _emit_user_next_step(
         plan_path=plan_path,
         workflow=workflow,
         stream=sys.stderr if args.json else sys.stdout,
+        # Fix round 24: the route the pinned run was started on.
+        recorded_route=_run_route(view, _reader_host(args)),
     )
 
 
