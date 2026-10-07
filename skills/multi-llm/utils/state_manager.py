@@ -10,7 +10,7 @@ import tempfile
 import unicodedata
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .git_utils import get_current_head, get_branch_name
 from .judge_vocab import upgrade_legacy
@@ -254,6 +254,44 @@ def set_task_batch_check_in_state(
         state[TASK_BATCH_CHECK_KEY] = current
     else:
         state.pop(TASK_BATCH_CHECK_KEY, None)
+
+
+#: ``state.json``'s map of what an implement task's own check reported again
+#: of findings the user accepted for a check (``--human-task <check>=done``),
+#: by check: ``{task_id: {check_id: [finding, ...]}}``, present only while
+#: some task has one (fix round 23: round 22 kept them only in the result
+#: row and the printed line, so ``status`` showed the task as plainly
+#: ``completed``). Beside :data:`TASK_BATCH_CHECK_KEY`, never in it: they
+#: are not the task's own failure. Written by both legs
+#: (``write_batch_scheduler.split_accepted_findings``: the scheduler and
+#: ``util batch-done --own-check findings``); every other record of the task
+#: clears it; ``status`` reads it through
+#: :meth:`StateManager.implementation_batch_check_accepted`.
+TASK_BATCH_CHECK_ACCEPTED_KEY = "task_batch_check_accepted"
+
+
+def set_task_batch_check_accepted_in_state(
+    state: Dict[str, Any], task_id: str,
+    matched: Optional[Mapping[str, Iterable[str]]],
+) -> None:
+    """Record (or, with nothing matched, clear) what *task_id*'s own check
+    reported again of the accepted findings, by check id; the key is dropped
+    when the map empties."""
+    recorded = state.get(TASK_BATCH_CHECK_ACCEPTED_KEY)
+    current = dict(recorded) if isinstance(recorded, dict) else {}
+    kept = {
+        str(check_id): [str(item) for item in (findings or []) if str(item).strip()]
+        for check_id, findings in sorted((matched or {}).items())
+    }
+    kept = {check_id: findings for check_id, findings in kept.items() if findings}
+    if kept:
+        current[str(task_id)] = kept
+    else:
+        current.pop(str(task_id), None)
+    if current:
+        state[TASK_BATCH_CHECK_ACCEPTED_KEY] = current
+    else:
+        state.pop(TASK_BATCH_CHECK_ACCEPTED_KEY, None)
 
 
 #: ``task id -> tree fingerprint`` for each check with findings on the native
@@ -1409,6 +1447,43 @@ class StateManager:
                 "id": task_id,
                 "title": titles.get(task_id) or None,
                 "findings": [str(item) for item in findings],
+            })
+        return out
+
+    def implementation_batch_check_accepted(self) -> List[Dict[str, Any]]:
+        """The implement tasks whose own check reported again only what the
+        user accepted for a check (fix round 23).
+
+        ``[{id, title, checks: {check_id: findings}}]`` from
+        :data:`TASK_BATCH_CHECK_ACCEPTED_KEY`, for tasks recorded
+        ``completed`` and scoped to the decomposition implement ran last, as
+        :meth:`implementation_batch_check_findings` is.
+        """
+        recorded = self.state.get(TASK_BATCH_CHECK_ACCEPTED_KEY)
+        if not isinstance(recorded, dict) or not recorded:
+            return []
+        titles = self.state.get("task_titles") or {}
+        current = self.state.get("implement_task_ids")
+        scope = set(current) if isinstance(current, list) else None
+        statuses = self.implementation_task_statuses()
+        out: List[Dict[str, Any]] = []
+        for task_id in sorted(recorded):
+            checks = recorded.get(task_id)
+            if not isinstance(checks, dict):
+                continue
+            kept = {
+                str(check_id): [str(item) for item in findings]
+                for check_id, findings in sorted(checks.items())
+                if isinstance(findings, list) and findings
+            }
+            if not kept or statuses.get(task_id) != "completed":
+                continue
+            if scope is not None and task_id not in scope:
+                continue
+            out.append({
+                "id": task_id,
+                "title": titles.get(task_id) or None,
+                "checks": kept,
             })
         return out
 

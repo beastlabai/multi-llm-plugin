@@ -109,6 +109,7 @@ try:
         TASK_RESET_AT_KEY,
         _parse_completion_time,
         record_batch_items_in_state,
+        set_task_batch_check_accepted_in_state,
         set_task_batch_check_in_state,
         set_task_check_findings_in_state,
         set_task_check_tree_in_state,
@@ -155,6 +156,7 @@ except ImportError:  # pragma: no cover - direct script invocation
         TASK_RESET_AT_KEY,
         _parse_completion_time,
         record_batch_items_in_state,
+        set_task_batch_check_accepted_in_state,
         set_task_batch_check_in_state,
         set_task_check_findings_in_state,
         set_task_check_tree_in_state,
@@ -535,6 +537,9 @@ def record_batch(
             # findings and never among them (fix round 15): it holds
             # nothing back, and every other record of the task clears it.
             set_task_batch_check_in_state(state, task_id, batch_check)
+            # Fix round 23: what it reported again of the accepted findings,
+            # by check, beside it (and cleared by any other record).
+            set_task_batch_check_accepted_in_state(state, task_id, accepted_again)
             blocked = _hold_or_release_dependents(
                 state, document, task_id, held=bool(check_findings),
             )

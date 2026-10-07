@@ -916,13 +916,14 @@ def _prepare_selected_task(
     # A fresh result replaces these; until then the old verdict is not the
     # selected attempt's verdict, including after a host dies mid-handoff.
     from utils.state_manager import (
-        set_task_batch_check_in_state, set_task_check_findings_in_state,
-        set_task_check_tree_in_state,
+        set_task_batch_check_accepted_in_state, set_task_batch_check_in_state,
+        set_task_check_findings_in_state, set_task_check_tree_in_state,
     )
 
     set_task_check_findings_in_state(state.state, task.id, None)
     set_task_check_tree_in_state(state.state, task.id, None)
     set_task_batch_check_in_state(state.state, task.id, None)
+    set_task_batch_check_accepted_in_state(state.state, task.id, None)
     # Fix round 17: the log line its earlier run wrote is not this rerun's
     # (`batch_done.unrecorded_logged_batches`): a host gone before its
     # `batch-done` left T001 refused on the next plain emit.
@@ -971,8 +972,8 @@ def _start_over(
     :func:`_has_earlier_implement_records`.
     """
     from utils.state_manager import (
-        set_task_batch_check_in_state, set_task_check_findings_in_state,
-        set_task_check_tree_in_state,
+        set_task_batch_check_accepted_in_state, set_task_batch_check_in_state,
+        set_task_check_findings_in_state, set_task_check_tree_in_state,
     )
     from utils.subagent_tasks import implement_output_name
     from utils.write_safety import TaskSnapshot, WriteSafetyError, resolve_repo_root
@@ -1023,6 +1024,7 @@ def _start_over(
         set_task_check_findings_in_state(state.state, task_id, None)
         set_task_check_tree_in_state(state.state, task_id, None)
         set_task_batch_check_in_state(state.state, task_id, None)
+        set_task_batch_check_accepted_in_state(state.state, task_id, None)
         if touched:
             set_aside.append(task_id)
     mark_tasks_reset_in_state(state.state, code_ids)

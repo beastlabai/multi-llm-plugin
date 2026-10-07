@@ -274,6 +274,15 @@ def _lines(text: str, marker: str) -> dict:
     }
 
 
+def _status_text(repo, capsys, *host) -> str:
+    from utils import run_status
+
+    capsys.readouterr()
+    run_status.main(["--plan-file", str(repo.plan), *host])
+    captured = capsys.readouterr()
+    return captured.out + captured.err
+
+
 class TestTheExecutorLeg:
 
     def test_only_the_released_task_repeats_the_accepted_findings(self, scope_repo, capsys):
@@ -295,6 +304,23 @@ class TestTheExecutorLeg:
         state = get_or_create_state(repo.plan).state
         assert state["task_batch_check"] == {
             "T005": [RERUN], "T006": [RERUN], "T008": [RERUN]}
+        # #6: the accepted re-run is on record beside the check findings.
+        assert state["task_batch_check_accepted"] == {"T007": {"T002": [RERUN]}}
+    def test_status_names_the_accepted_rerun(self, scope_repo, capsys):
+        repo = scope_repo
+        _first_stop(repo, capsys)
+        _policy(repo, ALLOW)
+        _every_edit_reports(repo, [RERUN])
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_BATCH_CHECK_IF_PROMPT_HAS", f"Title: {NOTE}\n")
+        assert _implement(repo, "--resume", "--human-task", "T002=done",
+                          "--human-task", "T005=retry") == 0
+        capsys.readouterr()
+        text = _status_text(repo, capsys)
+        clause = "completed, its check repeated T002's accepted findings: T007"
+        # The run's progress line and the workflow trailer.
+        assert text.count(clause) == 2, text
+        assert "own check fails" not in text, text
+
 
 # -- #2 and #6 on the native leg ----------------------------------------------
 
@@ -349,3 +375,22 @@ class TestTheNativeLeg:
         state = json.loads((repo.phase_dir.parent / "state.json").read_text())
         assert state["task_batch_check"] == {
             "T005": [RERUN], "T006": [RERUN], "T008": [RERUN]}
+        assert state["task_batch_check_accepted"] == {"T007": {"T002": [RERUN]}}
+
+    def test_status_names_the_accepted_rerun(self, scope_repo, capsys):
+        repo = scope_repo
+        phase = self._accept(repo, capsys)
+        assert self._own_check(capsys, phase, "T007")[0] == 0
+        text = _status_text(repo, capsys, "--host", "claude-code")
+        clause = "completed, its check repeated T002's accepted findings: T007"
+        # The native implement block and the workflow trailer.
+        assert text.count(clause) == 2, text
+
+    def test_a_later_record_of_the_task_clears_it(self, scope_repo, capsys):
+        repo = scope_repo
+        phase = self._accept(repo, capsys)
+        assert self._own_check(capsys, phase, "T007")[0] == 0
+        assert self._util(capsys, "batch-done", "--phase-dir", phase, "--task-id",
+                          "T007", "--status", "completed", "--own-check", "passed")[0] == 0
+        state = json.loads((repo.phase_dir.parent / "state.json").read_text())
+        assert "task_batch_check_accepted" not in state

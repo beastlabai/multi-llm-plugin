@@ -8397,14 +8397,24 @@ class WriteBatchScheduler:
                     # A code task's own failing check, beside (never among)
                     # them, as `util batch-done` records it (fix round 15).
                     try:
-                        from .state_manager import set_task_batch_check_in_state
+                        from .state_manager import (
+                            set_task_batch_check_accepted_in_state,
+                            set_task_batch_check_in_state,
+                        )
                     except ImportError:  # pragma: no cover - direct script runs
                         from utils.state_manager import (  # type: ignore
+                            set_task_batch_check_accepted_in_state,
                             set_task_batch_check_in_state,
                         )
                     set_task_batch_check_in_state(
                         self.state.state, task_id,
                         outcome.batch_check if outcome.ok else None,
+                    )
+                    # Fix round 23: what it reported again of the accepted
+                    # findings, by check, as `util batch-done` records it.
+                    set_task_batch_check_accepted_in_state(
+                        self.state.state, task_id,
+                        outcome.batch_check_accepted if outcome.ok else None,
                     )
                 elif self.kind == "apply_code_fixes" and isinstance(
                     getattr(self.state, "state", None), dict
@@ -11933,6 +11943,13 @@ class WriteBatchScheduler:
                             o.task_id for o in outcomes
                             if o.ok and o.batch_check
                         ]} if any(o.ok and o.batch_check for o in outcomes)
+                           else {}),
+                        # Fix round 23: a task whose own check repeated only
+                        # the findings the user accepted, by the checks.
+                        **({"batch_check_accepted": {
+                            o.task_id: sorted(o.batch_check_accepted)
+                            for o in outcomes if o.ok and o.batch_check_accepted
+                        }} if any(o.ok and o.batch_check_accepted for o in outcomes)
                            else {}),
                         # Fix round 14: nothing ran the repository's tests.
                         **({"unverified": result.unverified}
