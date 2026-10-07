@@ -132,7 +132,7 @@
         },
         "prompt_path": {
           "type": "string",
-          "description": "Optional absolute path to a sidecar holding exactly the bytes of `prompt` (validation and revalidation only). Invoker plumbing, never a subagent instruction: a host whose subagent tool takes a prompt string may hand the subagent this file instead of re-emitting ~65 KB of prompt through its own context. `prompt` stays the source of truth and every other reader ignores this key."
+          "description": "Optional absolute path to a sidecar holding exactly the bytes of `prompt` (validation, revalidation, consolidation and task generation only). Invoker plumbing, never a subagent instruction: a host whose subagent tool takes a prompt string may hand the subagent this file instead of re-emitting its prompt (~65 KB for a validation batch, ~21 KB for task generation) through its own context. `prompt` stays the source of truth and every other reader ignores this key."
         },
         "prompt_lines": {
           "type": "integer",
@@ -326,7 +326,7 @@
           }
         },
         {
-          "if": {"required": ["kind"], "properties": {"kind": {"not": {"enum": ["validation", "revalidation"]}}}},
+          "if": {"required": ["kind"], "properties": {"kind": {"not": {"enum": ["validation", "revalidation", "consolidation", "task_generation"]}}}},
           "then": {"not": {"anyOf": [{"required": ["prompt_path"]}, {"required": ["prompt_lines"]}]}}
         },
         {

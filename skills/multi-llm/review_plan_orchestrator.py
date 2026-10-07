@@ -539,6 +539,14 @@ def consolidate_mode(phase_dir: str, plan_path: str, args=None) -> None:
         print(f"Batches: {total_batches}")
 
     print(f"\nConsolidation prepared for Claude Code subagent.")
+    if any(batch.get("prompt_path") for batch in tasks_metadata.get("batches", [])):
+        # Live run 8: the host wrote these files itself, to /tmp, when the
+        # batches named none.
+        print(
+            "Each batch's prompt is also in its own file "
+            "(`prompt_path`, consolidation_batch_N.prompt.txt in the phase "
+            "directory, the same bytes as its `prompt`)."
+        )
     print(f"Sections with 2+ groups: {len([s for s in section_groups.values() if len(s) >= 2])}")
     print(f"Singleton sections: {len(tasks_metadata.get('singleton_sections', {}))}")
 
