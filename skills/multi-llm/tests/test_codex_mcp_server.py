@@ -2603,6 +2603,15 @@ class TestNoCommandToCompose:
         assert module.split_extra_flags(["--yes"], bare) == ([], [], ("--yes", "--yes"))
         assert module.split_extra_flags(["--yes"], SURFACE) == ([], ["--yes"], None)
 
+    def test_an_equals_form_answer_is_forwarded_as_sent(self):
+        """Live run 9 (OpenCode stop fix 02): a host sent
+        `--human-task=T005=skip`; the tool forwards it untouched, and the
+        implement parser reads it as `--human-task T005=skip`
+        (test_unattended.py)."""
+        module = _server_module()
+        flags = ["--resume", "--human-task=T005=skip", "--human-task", "T002=done"]
+        assert module.split_extra_flags(flags, SURFACE) == (flags, [], None)
+
 
 def _server_module(name="mcp_server_under_test"):
     import importlib.util

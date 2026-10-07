@@ -1164,6 +1164,24 @@ class TestArguments:
                     f"{flag}, a flag the plugin composes, was accepted in extra_flags"
                 )
 
+    def test_an_equals_form_answer_is_forwarded_as_sent(self, built_package):
+        """Live run 9 (OpenCode stop fix 02): the host sent
+        `--human-task=T005=skip`; it is forwarded untouched, and the implement
+        parser reads it as `--human-task T005=skip` (test_unattended.py)."""
+        flags = ["--resume", "--human-task=T005=skip", "--human-task", "T002=done"]
+        verdict = node_json(
+            f"""
+            emit(T.validateArgs(
+              {{mode: "implement", plan: "p.md", question: "",
+                extra_flags: {json.dumps(flags)}}},
+              surface,
+            ))
+            """,
+            built_package,
+        )
+        assert verdict["ok"] is True
+        assert verdict["extraFlags"] == flags and verdict["dropped"] == []
+
     def test_composed_argv_order_and_empties(self, built_package):
         """Positionals precede every flag; an empty one contributes **zero**
         elements.
