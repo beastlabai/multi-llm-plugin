@@ -2128,7 +2128,7 @@ class TestUserNextStep:
     """§2.4: lifted to the top level on exit 0 and exit 2, never followed."""
 
     def test_exit_0_lifts_it_beside_the_payload_copy(self, harness):
-        why = "optional: have the models review the tasks before implementing"
+        why = "Have the models review the task list before implementing it."
         step = next_step("/multi-llm --implement /w/plans/p.md", optional=[{
             "phase": "review-tasks", "command": "/multi-llm --review-tasks /w/plans/p.md",
             "why": why}])

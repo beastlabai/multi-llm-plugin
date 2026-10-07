@@ -91,6 +91,11 @@ class Mode:
             Set on exactly the rows whose phase is in
             ``check_workflow_prerequisites.OPTIONAL_PHASES`` and ``None`` on
             every other row; ``utils/next_phase.py`` holds no prose of its own.
+            A sentence that reads after the host's own "Optional, before
+            that:" label, saying what the step does and what skipping it
+            means, never one that starts "optional" itself (fix round 22: a
+            host printed "Optional, before that: optional: have the models
+            review…").
     """
 
     name: str
@@ -174,7 +179,10 @@ MODES: Tuple[Mode, ...] = (
         instruction_file="review-tasks.md",
         is_workflow_phase=True,
         supports_detach=True,
-        optional_why="optional: have the models review the tasks before implementing",
+        optional_why=(
+            "Have the models review the task list before implementing it; "
+            "skipping this implements the tasks as they were generated."
+        ),
     ),
     Mode(
         name="apply-task-suggestions",
@@ -185,7 +193,10 @@ MODES: Tuple[Mode, ...] = (
         instruction_file="apply-task-suggestions.md",
         is_workflow_phase=True,
         supports_detach=True,
-        optional_why="optional: apply the task-review suggestions before implementing",
+        optional_why=(
+            "Apply the task-review suggestions to the task list before "
+            "implementing it; skipping this implements the task list as it stands."
+        ),
     ),
     Mode(
         name="implement",

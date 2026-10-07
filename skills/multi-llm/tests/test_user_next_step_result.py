@@ -44,7 +44,7 @@ ANSWER = {
         {
             "phase": "review-plan",
             "command": "/multi-llm:multi-llm --review-plan 'plans/my plan.md'",
-            "why": "optional: have the models review the plan again",
+            "why": "Have the models review the plan again; skipping this keeps the plan as it stands.",
         }
     ],
     "complete": False,

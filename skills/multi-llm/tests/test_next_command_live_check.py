@@ -51,7 +51,7 @@ def _step(prefix: str, plan: str = '"plans/next phase.md"') -> dict:
         "optional_before": [{
             "phase": "review-tasks",
             "command": f"{prefix}--review-tasks {plan}",
-            "why": "optional: have the models review the tasks before implementing",
+            "why": "Have the models review the task list before implementing it.",
         }],
         "complete": False,
     }

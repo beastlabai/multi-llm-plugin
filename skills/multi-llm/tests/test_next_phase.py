@@ -42,8 +42,15 @@ ROUTE_IDS = [f"{host}.{route or 'default'}" for host, route, _ in ROUTES]
 
 P = "plans/foo.md"
 
-WHY_REVIEW_TASKS = "optional: have the models review the tasks before implementing"
-WHY_APPLY_TASKS = "optional: apply the task-review suggestions before implementing"
+#: Fix round 22: no "optional:" of its own (the host labels the step).
+WHY_REVIEW_TASKS = (
+    "Have the models review the task list before implementing it; skipping "
+    "this implements the tasks as they were generated."
+)
+WHY_APPLY_TASKS = (
+    "Apply the task-review suggestions to the task list before implementing "
+    "it; skipping this implements the task list as it stands."
+)
 NOTICE_ONE_GROUP = (
     "review-tasks left 1 valid task suggestion group unapplied. Run "
     "--apply-task-suggestions first to apply it to the task list; going "
@@ -449,7 +456,7 @@ class TestLiteralCommands:
             "optional_before": [
                 {"phase": "review-tasks",
                  "command": "/multi-llm:multi-llm --review-tasks plans/foo.md",
-                 "why": "optional: have the models review the tasks before implementing"},
+                 "why": WHY_REVIEW_TASKS},
             ],
             "complete": False,
         })
