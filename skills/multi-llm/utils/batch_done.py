@@ -48,7 +48,7 @@ twice, so the resume is refused (exit 3) naming the batch, this command and
 Usage::
 
     multi_llm.py util batch-done --phase-dir <dir> --task-id <id> \\
-        --status completed|failed [--reason TEXT] [--state-file PATH] \\
+        --status completed|failed [--reason TEXT] [--partial] [--state-file PATH] \\
         [--check passed|findings|could-not-run [--finding TEXT ...]] \\
         [--own-check passed|findings [--finding TEXT ...]]
 
@@ -112,6 +112,7 @@ try:
     from .write_phase_bridge import WRITE_TASK_FILENAME
     from .write_batch_scheduler import (
         BATCH_CHECK_MARKER,
+        HALF_APPLIED_PREFIX,
         batch_check_line,
         BLOCKED_BY_CHECK_PREFIX,
         CODE_WRITE_KINDS,
@@ -148,6 +149,7 @@ except ImportError:  # pragma: no cover - direct script invocation
     from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
     from utils.write_batch_scheduler import (  # type: ignore
         BATCH_CHECK_MARKER,
+        HALF_APPLIED_PREFIX,
         batch_check_line,
         BLOCKED_BY_CHECK_PREFIX,
         CODE_WRITE_KINDS,
@@ -286,9 +288,18 @@ def record_batch(
     declined: Optional[List[str]] = None,
     skipped: Optional[List[str]] = None,
     listed: Optional[List[str]] = None,
+    partial: bool = False,
 ) -> Dict[str, Any]:
     """Record *task_id*'s outcome; the ``{task_id, status, items, state_file,
     check_findings}`` written.
+
+    *partial* (``--partial``, fix round 21) is a ``failed`` task whose
+    subagent changed files before it failed: the executor's partial
+    application. Its reason is recorded opening with
+    ``write_batch_scheduler.HALF_APPLIED_PREFIX``, so the native stop offers
+    no ``--human-task`` answer for it until the half-applied state is
+    inspected (``native_stop_answers``), as the executor's stop offers none.
+    Only with ``--status failed``.
 
     *listed* (``<command>=passed|failed|not run`` each; fix round 20) is an
     apply-code-fixes batch's reply's ``check.listed``: what it says each
@@ -326,6 +337,13 @@ def record_batch(
     if status not in STATUSES:
         raise WritePromptError(
             f"--status must be one of {', '.join(STATUSES)}, not {status!r}."
+        )
+    if partial and status != "failed":
+        raise WritePromptError(
+            "--partial is recorded only with --status failed: it says the "
+            "task failed after its subagent changed files (its edits are "
+            "half-applied). A task whose edits are verified on disk is "
+            "--status completed, without --partial. Nothing was recorded."
         )
     if check is not None and check not in CHECK_RESULTS:
         raise WritePromptError(
@@ -425,6 +443,12 @@ def record_batch(
             raise WritePromptError(_changed_a_file_message(phase_dir, task_id, changed))
     check_findings: Optional[List[str]] = None
     batch_check: Optional[List[str]] = None
+    if partial:
+        # Fix round 21: the executor's partial application, on record.
+        reason = HALF_APPLIED_PREFIX + (
+            str(reason or "").strip()
+            or "its subagent failed after changing some of its files"
+        )
     if check == "could-not-run":
         reason = reason or COULD_NOT_RUN_REASON
     elif check is not None:
@@ -537,6 +561,7 @@ def record_batch(
         },
         "listed": listed_outcomes,
         "listed_ignored": listed_ignored,
+        "partial": bool(partial),
     }
 
 
@@ -1006,6 +1031,12 @@ def _build_parser() -> argparse.ArgumentParser:
              "says that check did — passed, failed or not run (repeatable).",
     )
     parser.add_argument(
+        "--partial", action="store_true", default=False,
+        help="With --status failed: the task's subagent changed files before "
+             "it failed, so its edits are half-applied. The stop then offers "
+             "no --human-task answer for it until they are inspected.",
+    )
+    parser.add_argument(
         "--skipped", action="append", default=None, metavar="ID",
         help="An apply batch's item its reply left out of both ids and "
              "declined, which the user chose to skip, keeping the batch as it "
@@ -1030,6 +1061,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             declined=args.declined,
             skipped=args.skipped,
             listed=args.listed_check,
+            partial=args.partial,
         )
     except WritePromptError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -1043,6 +1075,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     if found:
         suffix += f" ({len(found)} check finding(s) recorded)"
     print(f"{MARKER} {written['task_id']} {written['status']}{suffix}")
+    if written.get("partial"):
+        # Fix round 21: the executor's partial-application stop, in words.
+        task_id = written["task_id"]
+        print(
+            f"{task_id}'s edits are half-applied. List it in the phase's "
+            f"summary.md as failed with its edits half-applied, naming the "
+            f"files its subagent changed, and say in your report that the "
+            f"user inspects them (keeps or undoes them) and fixes the cause "
+            f"before the --resume, which dispatches {task_id} again on top of "
+            f"what is there; the stop offers no --human-task answer for "
+            f"{task_id}."
+        )
     failing = written.get("batch_check") or []
     if failing:
         # Fix round 14: the native leg's counterpart of the executor's line.
