@@ -309,6 +309,25 @@ class TestRowFifteen:
     def test_repeating_a_task_with_the_same_answer_is_fine(self):
         assert un.parse_human_task_decisions(["T1=done", "T1=done"]) == {"T1": "done"}
 
+    def test_the_equals_form_answers_like_the_spaced_one(self):
+        """Live run 9 (OpenCode stop fix 02): the host sent
+        `--human-task=T005=skip` where the stop offered `--human-task
+        T005=skip`. Both spellings validate, parse and decide the same."""
+        import implement_orchestrator
+
+        spaced = ["--human-task", "T002=done", "--human-task", "T005=skip"]
+        joined = ["--human-task=T002=done", "--human-task=T005=skip"]
+        un.validate_decision_flags(joined)
+        with pytest.raises(un.NeedsHuman):
+            un.validate_decision_flags(["--human-task=T005="])
+        parsed = [
+            implement_orchestrator.parse_args(["--plan-file", "p.md", "--resume", *argv])
+            for argv in (spaced, joined)
+        ]
+        assert parsed[0].human_task == parsed[1].human_task == ["T002=done", "T005=skip"]
+        assert un.parse_human_task_decisions(parsed[1].human_task) == {
+            "T002": "done", "T005": "skip"}
+
     @pytest.mark.parametrize("argv,needle", [
         (["review-plan", "p.md", "--yes", "--models", ""], "--models"),
         (["implement", "p.md", "--human-task", "T1="], "--human-task"),
