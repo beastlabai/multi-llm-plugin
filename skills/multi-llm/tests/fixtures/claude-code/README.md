@@ -4,7 +4,8 @@ Every `*.stdout.txt` / `*.stderr.txt` here is a **real capture** of `claude`'s
 streams under the argv `ClaudeCodeProvider.build_command` emitted at capture
 time (see `manifest.yaml`'s `method:` for the one pair it has gained since, and
 why these bytes are still the measurement), taken against a
-stub in the containerized §6 probe (`@anthropic-ai/claude-code 2.1.232`,
+stub in the containerized §6 probe (`@anthropic-ai/claude-code 2.1.293`, re-captured
+2026-10-08 by the same rig; first captured on 2.1.232,
 `--network none`, **no credential** — `ANTHROPIC_API_KEY` was the PATH wrapper's
 fake per-exec session key `mllm-stub-<id>`, which is meaningful only on
 127.0.0.1). They are raw bytes as claude-code wrote them; nothing here is
@@ -23,16 +24,15 @@ the way they do:
   files are committed rather than omitted, because "stderr was empty" is the
   measurement. Every failure row here is therefore also the `stdout-error` trap
   (§6 step 3's opencode shape) in miniature.
-- **The exit code is authoritative at 2.1.232.** Eight injected failure modes,
+- **The exit code is authoritative at 2.1.293** (as at 2.1.232). Eight injected failure modes,
   eight exits of **1**; both answering rows exit **0**. That is what makes the
   adapter's empty `exit_zero_failure_markers` correct *today*, measured rather
   than assumed — and it is the cell that has to move first if a later release
   stops reporting through the exit code.
-- **Two requests per exec, not one.** The first is claude-code's own
-  session-title generator: tool-free, **same model**, same surface, so only
-  `has_tools` separates the two in the stub's log. Every `requests:` count is
-  both calls, and on a failure-injection run the injected error hits the *title*
-  call first.
+- **One API call per exec since 2.1.293.** 2.1.232 sent a tool-free
+  session-title call ahead of the main one, so its counts were both calls;
+  2.1.293 sends no title call, so every `requests:` count is the one call and
+  its retries.
 - **The envelope measured is the pinned one.** `get_env` sets
   `CLAUDE_CODE_MAX_RETRIES=3` (adapter declares `max_requests=4`) and
   `API_TIMEOUT_MS=300000`, and the wrapper's `ENV_CARRY_EXACT` carries both into
@@ -41,29 +41,29 @@ the way they do:
 
 | Fixture | What it pins |
 | --- | --- |
-| `success` | the single-line result envelope, unwrapped by `parse_result_envelope`'s fast path. The test asserts the unwrapped `data` **is** the suggestion-list document and that `classify_failure` is `None`. Also pins that the `haiku` alias is resolved to `claude-haiku-4-5-20251001` **before the request leaves** — the wire never carries the alias |
-| `ephemeral-only` | an all-noise run is a **failure**, not an empty-string success. The CLI emits one record and everything in it except `result` is bookkeeping the parser discards; the stub answered with an empty assistant message, so 1,164 bytes on disk are 1,164 bytes of filtered noise. `is_error: false`, `subtype: "success"`, **exit 0** — the only thing wrong is that the answer is empty |
+| `success` | the single-line result envelope, unwrapped by `parse_result_envelope`'s fast path. The test asserts the unwrapped `data` **is** the suggestion-list document and that `classify_failure` is `None`. Also pins that the `haiku` alias is resolved to `claude-haiku-5-5` (2.1.232: `claude-haiku-4-5-20251001`) **before the request leaves** — the wire never carries the alias |
+| `ephemeral-only` | an all-noise run is a **failure**, not an empty-string success. The CLI emits one record and everything in it except `result` is bookkeeping the parser discards; the stub answered with an empty assistant message, so 1,566 bytes on disk are 1,566 bytes of filtered noise. `is_error: false`, `subtype: "success"`, **exit 0** — the only thing wrong is that the answer is empty |
 | `multi-assistant` | **last**-wins, and the last document is the answer. Two JSON arrays in one `result`, the first reading `FIRST ANSWER (must NOT be selected)` and the second carrying S001/S002 — see defect 1 |
-| `truncated` | a **real** cut mid-record on the *anthropic* surface (SSE cut inside `content_block_start`), then claude-code's own **non-streamed retry**, cut again. 4 requests = 2 calls × (streamed + non-streamed); exit 1; gloss `Connection to the API was lost (ECONNRESET)` |
+| `truncated` | a **real** cut mid-record on the *anthropic* surface (SSE cut inside `content_block_start`), then claude-code's own **non-streamed retry**, cut again. 2 requests = streamed + non-streamed; exit 1; gloss `Connection to the API was lost (ECONNRESET)` |
 | `error-envelope` | a provider error object on a **200**. claude-code does *not* serve it as the answer — it detects the shape and substitutes `API returned an empty or malformed response (HTTP 200) …`, so the provider's text is lost rather than mis-served. Note the self-contradicting envelope: `is_error: true` and `terminal_reason: "api_error"` beside `subtype: "success"` — and the parser now refuses ON that verdict rather than by accident of the substituted sentence carrying no JSON — see defect 2 |
-| `stdout-error` | 5xx-forever: nonzero exit, diagnosis entirely on stdout, stderr 0 bytes — and the whole pinned retry envelope in one capture, 8 requests over 4.4 s |
-| `auth-error` | 401 → **retried 8 times**, and classified `server_error` when captured. Now `auth_failed` by **two** independent routes, and the row grades both — see defect 3 |
-| `rate-limit` | 429-forever → claude-code **does** retry rate limits internally (7 requests / 4.4 s), so an executor-level re-dispatch of a rate-limited slot repeats a chain the CLI already ran (§7.5 rule 6b). The one failure row classified on the vendor's words rather than claude-code's prefix |
-| `invalid-model` | 404 **naming the model** — and naming the *resolved* id `claude-haiku-4-5-20251001`, not the `haiku` spec. The text ladder answers **`None`** on these bytes at any ladder order; `invalid_model` now comes from the envelope's own `api_error_status` — see defect 4 |
-| `context-overflow` | 400 context-length, passed through **unedited**, so `maximum context length` reaches the classifier and the terminal category wins. **2 requests, not 8**: a 400 is not retried |
-| `zero-byte-response` | beyond §6.2's twelve, and the measurement behind the `empty` cell: a server that writes zero bytes still leaves 853 bytes of well-formed envelope. Distinct wording from `truncated` (`Connection dropped` vs `Connection to the API was lost`) and a different retry count (8 vs 4), which is why it is its own file |
+| `stdout-error` | 5xx-forever: nonzero exit, diagnosis entirely on stdout, stderr 0 bytes — and the whole pinned retry envelope in one capture, 4 requests over 4.3 s |
+| `auth-error` | 401 → **retried** (4 requests at 2.1.293, 8 at 2.1.232), and classified `server_error` when captured. Now `auth_failed` by **two** independent routes, and the row grades both — see defect 3 |
+| `rate-limit` | 429-forever → claude-code **does** retry rate limits internally (4 requests / 4.2 s), so an executor-level re-dispatch of a rate-limited slot repeats a chain the CLI already ran (§7.5 rule 6b). The one failure row classified on the vendor's words rather than claude-code's prefix |
+| `invalid-model` | 404 **naming the model** — and naming the *resolved* id `claude-haiku-5-5`, not the `haiku` spec. The text ladder answers **`None`** on these bytes at any ladder order; `invalid_model` now comes from the envelope's own `api_error_status` — see defect 4 |
+| `context-overflow` | 400 context-length, passed through **unedited**, so `maximum context length` reaches the classifier and the terminal category wins. **1 request, not 4**: a 400 is not retried |
+| `zero-byte-response` | beyond §6.2's twelve, and the measurement behind the `empty` cell: a server that writes zero bytes still leaves 1,223 bytes of well-formed envelope. Distinct wording from `truncated` (`Connection dropped` vs `Connection to the API was lost`) and a different retry count (4 vs 2), which is why it is its own file |
 
 ## Two rows that are "not applicable, because …"
 
 Both carry their measurement in `manifest.yaml` rather than being absent (§6.3).
 
-- **`exit-zero-failure`** — no producer at 2.1.232: 401, 429, 404, 400, 500,
+- **`exit-zero-failure`** — no producer at 2.1.293 (nor at 2.1.232): 401, 429, 404, 400, 500,
   a truncated stream, a zero-byte response and a 200 carrying an error object all
   exit **1**. The nearest exit-0 non-answer is `ephemeral-only`, and it prints no
   error at all, so `exit_zero_failure_markers` would have nothing to match.
 - **`empty`** — zero bytes on both of the CLI's channels is unreachable while
   claude-code runs at all: `--output-format json` always prints the envelope, and
-  the smallest capture here is **853 bytes**. Manufacturing one would mean
+  the smallest capture here is **1,223 bytes**. Manufacturing one would mean
   killing the process, the `timeout(1)` artifact §6 step 3 forbids. The
   server-side half is captured as `zero-byte-response`.
 

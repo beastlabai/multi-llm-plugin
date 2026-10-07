@@ -1528,12 +1528,13 @@ def parse_provider_args(provider: str) -> tuple[argparse.Namespace, str]:
 VERSION_STRINGS = {
     "codex": "codex-cli 0.161.0",
     "opencode": "1.18.35",
-    # Moved 2.1.224 -> 2.1.232 with the adapter, 2026-08-20: the shipped
-    # claude-code fixtures were captured at 2.1.232 and the image installs it
-    # (cli-versions.lock). This entry and `ClaudeCodeProvider.verified_version`
-    # are one fact written twice, and test_subagent_executor.py::
-    # test_the_mock_version_matches_each_verified_version is what keeps them so.
-    "claude-code": "2.1.232 (Claude Code)",
+    # Moved 2.1.224 -> 2.1.232 with the adapter, 2026-08-20, and to 2.1.293 on
+    # 2026-10-08: the shipped claude-code fixtures were captured at 2.1.293 and
+    # the image installs it (cli-versions.lock). This entry and
+    # `ClaudeCodeProvider.verified_version` are one fact written twice, and
+    # test_subagent_executor.py::test_the_mock_version_matches_each_verified_version
+    # is what keeps them so.
+    "claude-code": "2.1.293 (Claude Code)",
     "cursor-agent": "2026.02.01-abcdef",
     "gemini": "0.9.0",
     "kilocode": "1.4.0",
