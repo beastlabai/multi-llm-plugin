@@ -926,7 +926,7 @@ def write_prompt_sidecars(
     names the kind's own sidecars in *phase_dir*, removed first: validation's
     by default; consolidation (``consolidation_batch_*.prompt.txt``) and task
     generation (``task_generation.prompt.txt``) pass theirs (live run 8:
-    the Claude Code host wrote both kinds' prompts to ``/tmp`` by hand, or
+    the Claude Code host wrote both kinds' prompts to temp files by hand, or
     pasted a 21 KB prompt into its subagent call). A phase where some
     tasks carry the key and others do not invites non-identical prompt bytes
     across batches, so on any ``OSError`` every written file is removed, both

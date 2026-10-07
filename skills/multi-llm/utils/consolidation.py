@@ -93,7 +93,8 @@ CONSOLIDATION_RECOMMENDED_THRESHOLD = 15
 #: ``prompt`` (``validation.PROMPT_SIDECAR_TEMPLATE``'s rule; ``.txt``, so the
 #: ``*.json`` reaggregation globs never read it). Live run 8, Claude Code
 #: racing 01: with no ``prompt_path`` on the batches the host wrote each prompt
-#: to ``/tmp/consol_prompt_N.txt`` itself to hand its subagents a file.
+#: to a temp file of its own, outside the repository, to hand its subagents
+#: a file.
 CONSOLIDATION_PROMPT_TEMPLATE = "consolidation_batch_{index}.prompt.txt"
 
 # Character budget for combined suggestion content per batch (themes +
