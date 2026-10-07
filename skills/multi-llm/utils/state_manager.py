@@ -408,12 +408,11 @@ def processed_record_counts(
     ``applied`` record counts whatever review it names, so a native
     ``--resume`` never hands an applied item out twice. A record with no
     stamp counts, as before: absence of a stamp is not staleness. And on
-    the executor leg
-    (*executor_leg*) not one the executor wrote: the scheduler keeps that
-    batch from its own result file under its own id, so dropping its items
-    here would renumber the batches a stop's ``--human-task <batch>=skip``
-    names; a record the native host wrote still counts there, since no
-    result file stands behind it.
+    the executor leg (*executor_leg*) not one the executor wrote: the
+    scheduler keeps that batch from its own result file under its own id,
+    so dropping its items here would renumber the batches a stop's
+    ``--human-task <batch>=skip`` names; a record the native host wrote
+    still counts there, since no result file stands behind it.
     """
     if not isinstance(record, dict) or record.get("status") == "failed":
         return False
