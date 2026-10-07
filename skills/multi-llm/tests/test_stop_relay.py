@@ -280,16 +280,20 @@ class TestTheNativeStopPrintsTheTestsLine:
 
         root = Path(modes.__file__).parent
         skill = " ".join((root / "SKILL.md").read_text(encoding="utf-8").split())
+        # Fix round 24 (live run 10, Claude Code stop 01b/01c pasted the raw
+        # tag into prose): the text after the tag, as plain text.
         assert (
-            "and, when nothing ran the repository's tests, a `[TESTS_NOT_RUN]` "
-            "line: give its text in the report, verbatim"
+            "when the plugin ran no tests, the lookup also prints a "
+            "`[TESTS_NOT_RUN]` line: give the text after the tag in the "
+            "report, verbatim, as plain text"
         ) in skill
         core = " ".join((root / "instructions" / "implement.md").read_text(
             encoding="utf-8").split())
         assert (
             "At a stop after a code task completed, with no "
             "`driver.verify_command` configured: the `[TESTS_NOT_RUN]` line "
-            "the next-step lookup prints, its text verbatim"
+            "the next-step lookup prints, the text after its tag verbatim, "
+            "as plain text"
         ) in core
         summary = " ".join((root / "references" / "summary-format.md").read_text(
             encoding="utf-8").split())

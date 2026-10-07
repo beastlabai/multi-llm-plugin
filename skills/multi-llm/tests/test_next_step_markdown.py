@@ -190,8 +190,11 @@ class TestTheRoutesSayToCopyIt:
         assert "verbatim, as plain text outside any fenced block" not in text, name
 
     def test_claude_code_fences_the_native_command(self):
+        """Fix round 24: Claude Code copies the lookup's section, which
+        fences the close command alone like every other route's."""
         text = " ".join((SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8").split())
-        assert "`[MANUAL_TASK_COMMAND]`" in text
+        assert "`[NEXT_STEP_MARKDOWN]`" in text
+        assert "each command alone in its fenced block" in text
 
 
 def test_a_stops_answers_follow_the_resume_under_their_own_lead():
