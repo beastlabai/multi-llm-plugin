@@ -917,20 +917,27 @@ class TestTheNativeLeg:
             "A native `implement` that stopped part-way exited `0`, so look it "
             "up: it prints the `--resume` command and, when tasks wait for an "
             "answer, each answer the stop offers as a `[NEXT_COMMAND_ANSWERS]` "
-            "line below its `[NEXT_COMMAND_ANSWERS_WHY]` line (first the one "
-            "command carrying every answer, then each answer alone) — end with "
-            "the resume and every answer"
+            "line below its `[NEXT_COMMAND_ANSWERS_WHY]` line (when more than "
+            "one task waits, first the one command carrying every answer; then "
+            "each answer alone) — end with the resume and every answer"
         ) in skill
         summary = " ".join((root / "references" / "summary-format.md").read_text(
             encoding="utf-8").split())
         assert "`[NEXT_COMMAND_ANSWERS]` pairs (`user_next_step.answers`" in summary
-        assert "then each answer alone), write every pair" in summary
+        # Fix round 21: one waiting task prints no combined command.
+        assert ("the one command carrying every answer first when more than "
+                "one task waits, then each answer alone), write every pair") in summary
         core = (root / "instructions" / "implement.md").read_text(encoding="utf-8")
         assert (
             "At a stop (step 10 ran without `--mark-completed`) the next-step "
             "lookup of `references/summary-format.md` still runs"
         ) in core
         assert "never write a resume or `--human-task` command of your own" in core
+        assert ("(when more than one task waits, first the one command carrying "
+                "every answer; then each answer alone, as the tool routes list "
+                "them)") in core
+        for text in (skill, summary, core):
+            assert "(first the one command carrying every answer" not in text
         assert ("End the report with the resume command and every answer, each "
                 "alone in its own fenced block") in core
 
