@@ -80,6 +80,14 @@ NEXT_COMMAND_WHY_MARKER = "[NEXT_COMMAND_WHY]"
 #: jailed batch, so anything longer, or not one plain line, is not relayed.
 MAX_RECORDED_WHY_CHARS = 600
 
+#: One ``--human-task`` value a stop's recorded answer may carry: the shapes
+#: the executor composes — an implement task's ``done``/``skip``/``retry``
+#: (``write_batch_scheduler.compose_stop_answers``) and an apply batch's
+#: ``skip`` of a partial application (``WriteBatchScheduler._stop_answers``).
+#: Matched whole (fix round 23).
+_RECORDED_ANSWER = re.compile(
+    r"T[0-9]{3}=(?:done|skip|retry)|apply-(?:task-|fix-)?batch-[0-9]+=skip")
+
 #: The one line :func:`emit_resume` prints: the command that resumes a stopped
 #: write phase, and nothing else on the line (same rule as ``[NEXT_COMMAND]``).
 RESUME_COMMAND_MARKER = "[RESUME_COMMAND]"
@@ -1390,8 +1398,12 @@ def stop_answers_on_record(
     Read from ``{phase}/.status.json``'s write mirror
     (``progress.write_subagents.stop.answers``, written by
     ``write_batch_scheduler._stop_answers``): the run's own record of which
-    ``--human-task`` answers its stop named. Each entry is kept only when it
-    is ``{"flags": [str, …], "why": str}`` with ``--resume`` first.
+    ``--human-task`` answers its stop named. The folder is writable by every
+    jailed batch and the entries become the tool routes' options, so each is
+    kept only in the shape the plugin composes (fix round 23, review of round
+    22 relay #5): ``flags`` as :func:`recorded_answer_flags` reads them and a
+    ``why`` that passes :func:`recorded_why`. Any other entry is dropped,
+    never relayed.
     """
     from .output_handler import phase_dir_path
     from .status_file import read_status
@@ -1408,13 +1420,28 @@ def stop_answers_on_record(
     raw = stop.get("answers") if isinstance(stop, dict) else None
     answers: List[Dict[str, Any]] = []
     for entry in raw if isinstance(raw, list) else []:
-        flags = entry.get("flags") if isinstance(entry, dict) else None
-        why = entry.get("why") if isinstance(entry, dict) else None
-        if (isinstance(flags, list) and flags and flags[0] == RESUME_FLAG
-                and all(isinstance(flag, str) and flag for flag in flags)
-                and isinstance(why, str) and why.strip()):
-            answers.append({"flags": list(flags), "why": why.strip()})
+        if not isinstance(entry, dict):
+            continue
+        flags = recorded_answer_flags(entry.get("flags"))
+        why = recorded_why(entry.get("why"))
+        if flags is not None and why is not None:
+            answers.append({"flags": flags, "why": why})
     return answers
+
+
+def recorded_answer_flags(flags: Any) -> Optional[List[str]]:
+    """*flags*, a stop answer's flags read back from a run's output folder,
+    when they are what the plugin composes: ``--resume`` and then one or
+    more ``--human-task <answer>`` pairs, each answer one
+    :data:`_RECORDED_ANSWER`; else ``None`` (fix round 23)."""
+    if (not isinstance(flags, list) or len(flags) < 3 or len(flags) % 2 == 0
+            or flags[0] != RESUME_FLAG):
+        return None
+    for name, value in zip(flags[1::2], flags[2::2]):
+        if (name != "--human-task" or not isinstance(value, str)
+                or not _RECORDED_ANSWER.fullmatch(value)):
+            return None
+    return list(flags)
 
 
 def stop_resume_why_on_record(
