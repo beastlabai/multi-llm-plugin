@@ -322,11 +322,16 @@ def close_command(template: str, plan_arg: str, task_ids: Sequence[str]) -> str:
 
 
 def manual_close_note(command: str) -> str:
-    """The one plain line that says how to close deferred manual tasks."""
+    """The one plain line that says how to close deferred manual tasks.
+
+    The command ends the line, with nothing after it (live run 8, Codex
+    racing 08: the advice used to follow it in parentheses, and the host
+    copied that into the command's fence).
+    """
     return (
         "No later phase waits for these manual tasks. Once you have done one "
-        f"by hand, record it done with {command} (keep a --human-task answer "
-        "only for each task you did)."
+        "by hand, record it done with this command, keeping a --human-task "
+        f"answer only for each task you did: {command}"
     )
 
 
