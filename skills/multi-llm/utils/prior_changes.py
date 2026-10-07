@@ -12,7 +12,7 @@ import sys
 import warnings
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Collection, List, Optional, Sequence, Tuple
 
 try:
     from .stream_bootstrap import bootstrap_streams
@@ -185,6 +185,7 @@ def render(
     *,
     tail: int = DEFAULT_TAIL,
     max_chars: int = MAX_CHARS,
+    quoted: Collection[Tuple[str, Optional[str]]] = (),
 ) -> str:
     """The prior-batch context block, exactly as `read` prints it.
 
@@ -214,12 +215,34 @@ def render(
     the top: the very entry that motivated showing reviewers this log at all
     (``accel tuned 28->32``, recorded against the phase's third task) was the
     third of thirteen and so was trimmed away.
+
+    *quoted* names entries, as ``(id, phase)``, that the prompt this block
+    goes into already quotes word for word (:func:`quoted_in`): they are left
+    out and counted on one closing line instead of shown twice. The decline
+    fixture, 2026-10-07: an apply-code-fixes batch's first prompt showed the
+    implement phase's three entries under ``## Implementation record`` and
+    again, as "Batch 1-3", under ``## Changes Applied in Prior Batches``.
     """
     entries = latest_entries(_load_entries(_jsonl_path(output_dir)))
     if max_chars <= 0:
         return ""
+    quoted_keys = {(str(eid), canonical_phase(ph)) for eid, ph in quoted}
+    quoted_count = 0
+    if quoted_keys:
+        kept = [
+            e for e in entries
+            if (str(e.get("id")), canonical_phase(e.get("phase"))) not in quoted_keys
+        ]
+        quoted_count = len(entries) - len(kept)
+        entries = kept
+    quoted_line = (
+        f"... and {quoted_count} earlier "
+        f"{'entry' if quoted_count == 1 else 'entries'} already quoted in "
+        f"this prompt"
+        if quoted_count else ""
+    )
     if not entries:
-        return DEFAULT_TEXT[:max_chars]
+        return (quoted_line or DEFAULT_TEXT)[:max_chars]
 
     phase = canonical_phase(phase)
     same_phase = (
@@ -251,6 +274,8 @@ def render(
 
         if other_count > 0:
             lines.append(f"... and {other_count} earlier batches from other phases")
+        if quoted_line:
+            lines.append(quoted_line)
         output = "\n".join(lines)
         if len(output) <= max_chars:
             break
@@ -263,6 +288,21 @@ def render(
         tail -= 1
 
     return output
+
+
+def quoted_in(text: str, output_dir: str) -> List[Tuple[str, Optional[str]]]:
+    """The entries of *output_dir*'s log that *text* already quotes, as
+    ``(id, phase)``: each line ``- (<id>): <summary>`` found in it word for
+    word — the shape apply-code-fixes' ``## Implementation record`` quotes
+    the implement phase's entries in (``code_fix_batcher``). What
+    :func:`render`'s *quoted* takes, so a prompt never shows one entry twice.
+    """
+    out: List[Tuple[str, Optional[str]]] = []
+    for entry in latest_entries(_load_entries(_jsonl_path(output_dir))):
+        eid, summary = entry.get("id"), entry.get("summary")
+        if eid and summary and f"- ({eid}): {summary}" in text:
+            out.append((str(eid), entry.get("phase")))
+    return out
 
 
 def append(output_dir: str, entry_id: str, phase: str, summary: str) -> bool:
