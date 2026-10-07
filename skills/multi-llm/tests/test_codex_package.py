@@ -730,12 +730,13 @@ _ALLOWED_ABSOLUTE = {
     f"{PAYLOAD}/utils/landlock_exec.py": {"/dev/null", "/dev/ptmx", "/dev/pts"},
     # its dispatch half: the same device entries, `/dev/tty` in the step-1c
     # note, the scratch directory's name pattern in a docstring, `/tmp` and
-    # `/dev/shm` in step 1b's redirect docstring (kept denied), and
+    # `/dev/shm` in step 1b's redirect docstring (kept denied),
     # `/bin/bash` in the measured denial shape `/bin/bash: line 1: f.txt:
-    # Permission denied` the denied-edit parser documents.
+    # Permission denied` the denied-edit parser documents, and `/proc`, where
+    # the trust-entry note reads the live codex sessions (fix round 22).
     f"{PAYLOAD}/utils/landlock_dispatch.py": {
         "/dev/null", "/dev/ptmx", "/dev/pts", "/dev/tty", "/tmp/multi-llm-slot-",
-        "/tmp", "/dev/shm", "/bin/bash"},
+        "/tmp", "/dev/shm", "/bin/bash", "/proc"},
     f"{PAYLOAD}/utils/providers/base.py": {"/usr/bin/bwrap", "/dev/tty", "/tmp"},
     # (5) the container image's paths, in provider docstrings.
     f"{PAYLOAD}/hosts/capabilities.yaml": {"/opt/mllm/opencode-plugin"},
