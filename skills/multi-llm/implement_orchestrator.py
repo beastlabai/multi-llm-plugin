@@ -1816,6 +1816,7 @@ def _native_withheld(
         try:
             from utils.write_phase_bridge import materialize_write_tasks
             from utils.write_prompt import policy_refusal_for
+            from utils.write_safety import policy_skip_clause
 
             phase_dir = get_phase_dir(plan_path, "implement")
             write_tasks = materialize_write_tasks(
@@ -1835,7 +1836,13 @@ def _native_withheld(
             )
             if message is None:
                 continue
-            refused[task_id] = f"{NATIVE_REFUSED_PREFIX}{message}"
+            # Fix round 20 (live run 8 #4): the refusal ends with allowing
+            # the file as the user's call (`write_safety.policy_allow_clause`);
+            # beside it, the skip answer, in the executor stop's words.
+            skip = policy_skip_clause(task_id)
+            refused[task_id] = (
+                f"{NATIVE_REFUSED_PREFIX}{message} {skip[0].upper()}{skip[1:]}."
+            )
         for task_id in sorted(refused):
             state.update_task_status(task_id, "failed", reason=refused[task_id])
             for dependent in transitive_dependents(graph, task_id):
@@ -2917,7 +2924,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(
                 "Refused before dispatch (recorded failed in state.json; not in "
                 "the batches, do not dispatch or record them; list them in the "
-                "summary as failed, refused before dispatch):"
+                "summary as failed, refused before dispatch; in your report give "
+                "each one's way forward as its line words it, the user's call, "
+                "and never change driver.write_paths yourself):"
             )
             for task_id, reason in sorted(native_withheld["refused"].items()):
                 print(f"  {_titled(task_id)}: {reason}")

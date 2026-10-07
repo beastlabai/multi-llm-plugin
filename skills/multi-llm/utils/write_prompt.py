@@ -83,7 +83,9 @@ try:
         with_result_contract,
     )
     from .write_phase_bridge import WRITE_TASK_FILENAME
-    from .write_safety import PolicyViolation, WritePolicy, relative_to_root
+    from .write_safety import (
+        PolicyViolation, WritePolicy, policy_allow_clause, relative_to_root,
+    )
 except ImportError:  # pragma: no cover - direct script invocation
     from utils import prior_changes as _prior_changes  # type: ignore
     from utils import prompt_files as _prompt_files  # type: ignore
@@ -109,7 +111,7 @@ except ImportError:  # pragma: no cover - direct script invocation
     )
     from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
     from utils.write_safety import (  # type: ignore
-        PolicyViolation, WritePolicy, relative_to_root,
+        PolicyViolation, WritePolicy, policy_allow_clause, relative_to_root,
     )
 
 
@@ -119,6 +121,7 @@ __all__ = [
     "check_tree_fingerprint",
     "policy_refusal",
     "policy_refusal_for",
+    "policy_refused_paths",
     "WritePromptError",
     "check_tree_path",
     "changed_since_bound",
@@ -304,17 +307,25 @@ def policy_refusal(phase_dir: Path, task_id: str) -> Optional[str]:
     )
 
 
-def policy_refusal_for(
-    task: Dict[str, Any], *, plan_file: Optional[str], anchor_dir: Path,
-) -> Optional[str]:
-    """:func:`policy_refusal` for a materialized write task in hand.
+def policy_refused_paths(phase_dir: Path, task_id: str) -> List[str]:
+    """The declared files the policy refuses for *task_id* (fix round 20: the
+    way forward names them), or ``[]``."""
+    phase_dir = Path(os.path.abspath(str(phase_dir)))
+    try:
+        document, task = load_write_task(phase_dir, task_id)
+    except Exception:  # noqa: BLE001 - only a wording input
+        return []
+    violation = _policy_violation_for(
+        task, plan_file=str(document.get("plan_file") or "") or None,
+        anchor_dir=phase_dir,
+    )
+    return list(violation.paths) if violation is not None else []
 
-    What the native implement emit asks of every task before it hands the
-    task out (fix round 14: a task the policy refuses is recorded failed and
-    left out of the batches, as the executor refuses it before dispatch).
-    *anchor_dir* is any directory inside the repository (the phase dir, or
-    the plan's output folder before the phase dir exists).
-    """
+
+def _policy_violation_for(
+    task: Dict[str, Any], *, plan_file: Optional[str], anchor_dir: Path,
+) -> Optional[PolicyViolation]:
+    """The policy check :func:`policy_refusal_for` makes, its exception kept."""
     try:
         declared = declared_file_set(task)
         if not declared:
@@ -330,10 +341,25 @@ def policy_refusal_for(
             [relative_to_root(path, root) for path in declared], when="pre-dispatch",
         )
     except PolicyViolation as exc:
-        return exc.message
+        return exc
     except Exception:  # noqa: BLE001 - never refuse on a policy that cannot be read
         return None
     return None
+
+
+def policy_refusal_for(
+    task: Dict[str, Any], *, plan_file: Optional[str], anchor_dir: Path,
+) -> Optional[str]:
+    """:func:`policy_refusal` for a materialized write task in hand.
+
+    What the native implement emit asks of every task before it hands the
+    task out (fix round 14: a task the policy refuses is recorded failed and
+    left out of the batches, as the executor refuses it before dispatch).
+    *anchor_dir* is any directory inside the repository (the phase dir, or
+    the plan's output folder before the phase dir exists).
+    """
+    violation = _policy_violation_for(task, plan_file=plan_file, anchor_dir=anchor_dir)
+    return violation.message if violation is not None else None
 
 
 def held_by_check(phase_dir: Path, task_id: str) -> Optional[Tuple[str, List[str]]]:
@@ -722,6 +748,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     refused = policy_refusal(Path(args.phase_dir), args.task_id)
     if refused is not None:
         task_id = args.task_id
+        paths = policy_refused_paths(Path(args.phase_dir), task_id)
         implement = info.get("kind") == "implement"
         print(
             f"{MARKER_REFUSED} {task_id} is refused before dispatch: {refused} "
@@ -731,15 +758,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"policy (driver.write_paths) does not allow a file it declares\""
             + (
                 f", skip the tasks that depend on it, run the others, close "
-                f"the phase without --mark-completed, and report the way "
-                f"forward: allow the file in driver.write_paths "
-                f"(.multi-llm/providers.yaml) and re-run implement with "
-                f"--resume, or leave it and the tasks after it undone with "
-                f"--resume --human-task {task_id}=skip."
+                f"the phase without --mark-completed, and report both ways "
+                f"forward as the user's call, in these words: "
+                f"{policy_allow_clause(paths)} and re-run implement with "
+                f"--resume; if not, skip {task_id} with --resume --human-task "
+                f"{task_id}=skip ({task_id} and the tasks after it stay undone). "
+                f"Never change driver.write_paths yourself."
                 if implement else
-                f", stop, and report the way forward: allow the file in "
-                f"driver.write_paths (.multi-llm/providers.yaml) and re-run "
-                f"this phase with --resume."
+                f", stop, and report the way forward as the user's call, in "
+                f"these words: {policy_allow_clause(paths)} and re-run this "
+                f"phase with --resume. Never change driver.write_paths yourself."
             ),
             file=sys.stderr,
         )
