@@ -81,6 +81,27 @@ class TestTheWhyIsComposedFromTheStopsFacts:
             "runs the tasks that can run; T005 stays refused: it declares a "
             "file outside the repository")
 
+    def test_a_large_stop_keeps_its_why_within_the_read_back_limit(self):
+        """Review of fix round 22 (relay #4): twelve refused tasks, ten held
+        by a check and three dependents each made a 1156-character why, which
+        the tool routes and status refuse to read back (more than
+        ``MAX_RECORDED_WHY_CHARS``) while the native block printed it whole.
+        It is cut at composition, at a word, so every route carries the same
+        why."""
+        from utils import next_phase
+
+        refused = [f"T0{n:02d}" for n in range(10, 22)]
+        why = compose_resume_why(
+            refused=refused, policy=set(refused), failed=[], checks=["T002"],
+            blocked={f"T0{n:02d}": "T002" for n in range(30, 40)},
+            undone_with=lambda task_id: [f"T0{n:02d}" for n in range(50, 53)])
+        assert len(why) <= next_phase.MAX_RECORDED_WHY_CHARS, len(why)
+        assert next_phase.recorded_why(why) == why
+        assert why.startswith(
+            "runs the tasks that can run; T002's check is not run again while "
+            "the files are unchanged (T030, T031"), why
+        assert "…" in why and "T021" not in why, why
+
     def test_nothing_waiting_is_no_why(self):
         assert compose_resume_why(
             refused=[], policy=set(), failed=[], checks=[], blocked={},
