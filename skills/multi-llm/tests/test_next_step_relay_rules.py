@@ -174,14 +174,18 @@ class TestTheStopNamesThePhaseNotTheToolsArgv:
 
     def test_the_message_asks_for_the_phase_and_plan_and_forbids_argv(self):
         text = modes.NEEDS_HUMAN_MESSAGE["template"]
-        assert "Report to the user which phase was running on which plan" in text
+        # Fix round 22 (live run 9, OpenCode accept 01): "which phase was
+        # running" came back as "Phase running: implement" for a stopped one.
+        assert "Report to the user which phase stopped, on which plan" in text
+        assert "was running" not in text
         assert "Never quote `argv` or its flags to the user" in text
         for flag in ("--exec-subagents", "--detach"):
             assert flag in text
 
     def test_the_file_routes_rule_asks_for_the_phase_and_plan_too(self):
-        assert "report to the user which phase was running on which plan" in (
+        assert "report to the user which phase stopped, on which plan" in (
             modes.NEEDS_HUMAN_RULE)
+        assert "was running" not in modes.NEEDS_HUMAN_RULE
 
     def test_no_host_facing_text_asks_for_argv(self):
         """Fix round 19: the merge of round 18 kept "Report to the user what
@@ -295,3 +299,19 @@ def test_the_native_summary_describes_files_as_they_are_now():
             "as it is on disk now: when you quote a value it holds, read the file "
             "for it.") in text
     assert "a value copied from them can be out of date" in text
+
+
+class TestTheStopsWaysForwardAreItsOwn:
+    """Live run 9, OpenCode stop accept 01: beside the stop's line and its
+    commands, the host wrote a paraphrased "Ways forward (as named)" list,
+    and headed every answer "Optional, before that:", the label of an
+    optional phase. The answers clause says each answer's why goes above
+    it, that the answers are alternatives to `resume_command`, and that no
+    list of the host's own goes beside them."""
+
+    def test_the_answers_clause(self):
+        clause = " ".join(modes.NEEDS_HUMAN_MESSAGE["answers"].split())
+        assert "Instead of `resume_command` the user can type any of these" in clause
+        assert "its why as plain text above it" in clause
+        assert "no list or summary of them of your own" in clause
+        assert "{answers}" in clause

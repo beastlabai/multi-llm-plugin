@@ -593,10 +593,11 @@ NEEDS_HUMAN_WORK_SENTENCE = (
 #: incident hinges on. Fix round 19: it asked for "what was being run", which
 #: on a file route is the dispatcher command with the flags the shim composed
 #: (the needs-human message's `argv`, run-7 #13); it asks for the phase and
-#: the plan.
+#: the plan. Fix round 22: "which phase was running" came back as "Phase
+#: running: implement" for a phase that had stopped (OpenCode, live run 9).
 NEEDS_HUMAN_RULE = (
     "Run `next` verbatim when it is not `null` on `0` and `2`. On `3` stop: "
-    "report to the user which phase was running on which plan, the last "
+    "report to the user which phase stopped, on which plan, the last "
     "error line it printed, "
     "whole (on a stop it says what stopped, what it reported, what did not "
     "run and whether anything ran the repository's tests), "
@@ -641,7 +642,7 @@ NEEDS_HUMAN_RULE = (
 NEEDS_HUMAN_MESSAGE = {
     "template": (
         "Stop here: this run is blocked and needs a human. {phase} {error} "
-        "Report to the user which phase was running on which plan, that line whole, word "
+        "Report to the user which phase stopped, on which plan, that line whole, word "
         "for word (on a stop it says what stopped, what the task reported, what "
         "did not run and whether anything ran the repository's tests), and the "
         "`options`; an `options` entry is a tool call for you, never a command "
@@ -695,13 +696,17 @@ NEEDS_HUMAN_MESSAGE = {
     # dispatcher's `user_resume.answers_text` — each command in backticks and
     # what it does, `; `-joined — substituted as it comes; the server authors
     # none of it. Each is also in `resume_answers` and an `options` entry.
+    # Fix round 22 (live run 9, OpenCode accept 01): the host headed each
+    # answer "Optional, before that:" and added a paraphrased "Ways forward"
+    # list beside them; the clause says what they are and where the why goes.
     "answers": (
-        "The stop also offers these ways forward, each a command the user "
-        "types instead of `resume_command` (each is in `resume_answers` and is "
-        "also an `options` entry, in the same order): {answers}. Give the user "
-        "every one of them verbatim, each in its own fenced block with what it "
-        "does, after `resume_command`; like it, none is a tool call or a shell "
-        "command for you to run."
+        "Instead of `resume_command` the user can type any of these, each "
+        "with what it does (each is in `resume_answers` and is also an "
+        "`options` entry, in the same order): {answers}. After "
+        "`resume_command`, give the user every one of them verbatim in its own "
+        "fenced block, its why as plain text above it, and no list or summary "
+        "of them of your own: they are the stop's ways forward. Like "
+        "`resume_command`, none is a tool call or a shell command for you to run."
     ),
     # Appended instead of `resume` when the result carries no
     # `resume_command` (racing re-run 2026-10-04: a result with neither command
