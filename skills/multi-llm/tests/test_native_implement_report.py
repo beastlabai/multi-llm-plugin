@@ -161,7 +161,9 @@ class TestTheReportLookupCarriesIt:
             "--host", "claude-code")
         assert code == 0, err
         command = _close_command(PLAN_ARG, ["T005"])
-        lines = [line for line in out.splitlines() if line.startswith("[")]
+        # The marker lines, above the section printed below them (fix round 24).
+        block = out.split(np_.NEXT_STEP_MARKDOWN_MARKER)[0]
+        lines = [line for line in block.splitlines() if line.startswith("[")]
         assert lines[0].startswith("[NEXT_COMMAND] ")
         assert lines[0].endswith(f"--review-code {PLAN_ARG}")
         assert lines[-4:] == [
@@ -192,7 +194,9 @@ class TestTheReportLookupCarriesIt:
             "--host", "claude-code")
         assert code == 0, err
         command = _close_command(PLAN_ARG, ["T005"])
-        lines = [line for line in out.splitlines() if line.startswith("[")]
+        # The marker lines, above the section printed below them (fix round 24).
+        block = out.split(np_.NEXT_STEP_MARKDOWN_MARKER)[0]
+        lines = [line for line in block.splitlines() if line.startswith("[")]
         assert lines[0].startswith("[NEXT_COMMAND] ")
         assert lines[-4:] == [
             f"[MANUAL_TASK] T005 {MANUAL_TITLE}",

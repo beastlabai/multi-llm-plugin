@@ -99,6 +99,15 @@ RESUME_COMMAND_MARKER = "[RESUME_COMMAND]"
 #: after it is a sentence that names a setting, never a command to copy.
 TESTS_NOT_RUN_MARKER = "[TESTS_NOT_RUN]"
 
+#: The lines ``util next-command`` prints around its answer's ``markdown``
+#: (fix round 24, live run 10: Claude Code racing 06 put the manual tasks
+#: before the next-step fence, and its stops captioned the resume three ways):
+#: the report's closing section already written, below the marker lines, for
+#: the report to copy as it is. Every line between the two is the section's;
+#: the Stop hook reads no marker line there (``report_check.find_blocks``).
+NEXT_STEP_MARKDOWN_MARKER = "[NEXT_STEP_MARKDOWN]"
+NEXT_STEP_MARKDOWN_END_MARKER = "[NEXT_STEP_MARKDOWN_END]"
+
 #: The one slot every ``next_command`` template ends with (schema pattern
 #: ``^[^{}]+\{args\}$``). Filled with ``str.replace``, never ``str.format``.
 ARGS_SLOT = "{args}"
@@ -242,6 +251,9 @@ class NextPhase:
     #: ``[NEXT_COMMAND_WHY]`` above the command and carried as
     #: ``user_next_step.why``.
     why: Optional[str] = None
+    #: On a resume of a stopped phase (fix round 24): the line the section
+    #: opens with (:func:`resume_lead`), in ``markdown`` only.
+    lead: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """The ``user_next_step`` value (§2.1's outcome table).
@@ -1128,12 +1140,37 @@ def render_next_phase_lines(answer: NextPhase) -> List[str]:
 
 
 #: The labels :func:`render_next_step_markdown` writes.
+#: Above a stopped phase's resume (fix round 24); ``{phase}`` is its mode word.
+RESUME_LEAD = "To go on with {phase}:"
 OPTIONAL_LEAD = "Optional, before that:"
 MANUAL_TASKS_LEAD = "Manual tasks left for you:"
 #: Above a stopped implement's answers (status says "or answer the stop
 #: with:"): what the user types instead of the resume.
 ANSWERS_LEAD = "Or answer the stop with one of these:"
 WORKFLOW_COMPLETE_SENTENCE = "Workflow complete."
+
+
+def resume_lead(phase: str) -> str:
+    """:data:`RESUME_LEAD` for *phase* (fix round 24)."""
+    return RESUME_LEAD.replace("{phase}", str(phase))
+
+
+#: A first character that could open a fence, a heading, a quote, a list, an
+#: HTML block or a marker line when a text line of the section starts with it.
+_MARKDOWN_OPENERS = frozenset("`~#>[<-*+_|=")
+
+
+def markdown_text(text: Any) -> str:
+    """*text* as one plain text line of the section (:func:`plain_line`),
+    its first character escaped (CommonMark's backslash) when it could open
+    a block of its own (fix round 24): a why or a note is read back from a
+    run's records, which a jailed batch can write, and one starting with
+    ``` would fence the commands after it, one starting with ``[`` would
+    read as a marker line where the native lookup prints the section."""
+    line = plain_line(text)
+    if line and line[0] in _MARKDOWN_OPENERS:
+        return "\\" + line
+    return line
 
 
 def fenced_command(command: str) -> str:
@@ -1166,26 +1203,49 @@ def render_next_step_markdown(answer: "NextPhase") -> str:
     if answer.complete:
         blocks.append(WORKFLOW_COMPLETE_SENTENCE)
     else:
+        if answer.lead:
+            blocks.append(markdown_text(answer.lead))
         if answer.why:
-            blocks.append(plain_line(answer.why))
+            blocks.append(markdown_text(answer.why))
         blocks.append(fenced_command(str(answer.command)))
         if answer.optional_before:
             blocks.append(OPTIONAL_LEAD)
             for step in answer.optional_before:
-                blocks.extend([plain_line(step.why), fenced_command(step.command)])
+                blocks.extend([markdown_text(step.why), fenced_command(step.command)])
         if answer.answers:
             blocks.append(ANSWERS_LEAD)
         for step in answer.answers:
-            blocks.extend([plain_line(step.why), fenced_command(step.command)])
+            blocks.extend([markdown_text(step.why), fenced_command(step.command)])
     if answer.manual_tasks:
         blocks.append("\n".join(
             [MANUAL_TASKS_LEAD]
             + [f"- {plain_line(task.line())}" for task in answer.manual_tasks]))
         if answer.manual_tasks_note and answer.manual_tasks_command:
             blocks.extend([
-                plain_line(answer.manual_tasks_note),
+                markdown_text(answer.manual_tasks_note),
                 fenced_command(answer.manual_tasks_command)])
     return "\n\n".join(block for block in blocks if block)
+
+
+def render_resume_markdown(
+    phase: str, command: str, why: Optional[str],
+    answers: Sequence[Mapping[str, Any]],
+) -> str:
+    """A stopped phase's ways forward as the report's closing section, by
+    :func:`render_next_step_markdown`'s rules (fix round 24, live run 10:
+    with ``user_next_step`` null at a stop, the hosts composed their own
+    blocks, reworded the whys and listed tool calls as options): the lead
+    line naming *phase*, the resume's *why* and *command*, then
+    :data:`ANSWERS_LEAD` and each answer's why and command. Carried as
+    ``user_resume.markdown`` (the tool routes' ``resume_markdown``)."""
+    return render_next_step_markdown(NextPhase(
+        phase=phase, command=command, why=why or None,
+        answers=tuple(
+            AnswersStep(str(entry["command"]), str(entry["why"]))
+            for entry in answers
+        ),
+        lead=resume_lead(phase),
+    ))
 
 
 def implement_answers(
@@ -1301,6 +1361,7 @@ def emit_answer(
     strict: bool = False,
     with_answers: bool = False,
     recorded_route: Optional[str] = None,
+    with_markdown: bool = False,
 ) -> Optional[NextPhase]:
     """Build the answer, print its block and set ``user_next_step``: all or nothing.
 
@@ -1321,6 +1382,10 @@ def emit_answer(
     *recorded_route* is the route the run being answered for was started on
     (:func:`recorded_route`), used when this process names none (fix round
     24).
+    With *with_markdown* (``util next-command``, fix round 24) the block is
+    followed by the answer's ``markdown`` between
+    :data:`NEXT_STEP_MARKDOWN_MARKER` and :data:`NEXT_STEP_MARKDOWN_END_MARKER`,
+    the section the Claude Code report copies as it is.
 
     With *finished_mode* given and no *workflow* handed in, a plan whose
     ``state.json`` does not exist answers ``None`` without reading anything:
@@ -1361,6 +1426,8 @@ def emit_answer(
             why = implement_resume_why(plan_arg, plan_path=plan_path)
             if why:
                 answer = _replace(answer, why=why)
+            # Fix round 24: under the line the tool routes' section opens with.
+            answer = _replace(answer, lead=resume_lead(answer.phase))
             # Fix round 18 (live run 7, Claude Code stop 01): the native
             # stop's line saying nothing ran the repository's tests, which
             # the executor stop prints itself.
@@ -1375,6 +1442,10 @@ def emit_answer(
         out = sys.stdout if stream is None else stream
         for line in render_next_phase_lines(answer):
             print(line, file=out)
+        if with_markdown:
+            print(NEXT_STEP_MARKDOWN_MARKER, file=out)
+            print(payload["markdown"], file=out)
+            print(NEXT_STEP_MARKDOWN_END_MARKER, file=out)
         try:
             out.flush()
         except (AttributeError, ValueError):  # pragma: no cover - closed stream
@@ -1457,6 +1528,9 @@ def emit_resume(
     why = stop_resume_why_on_record(plan_arg if plan_path is None else plan_path, mode_word)
     if why:
         resume["why"] = why
+    # Fix round 24: all of it as the report's closing section, ready to copy.
+    resume["markdown"] = render_resume_markdown(
+        mode.name if mode is not None else mode_word, command, why, answers or [])
     cli_common.record_user_resume(resume)
     return command
 
@@ -1684,7 +1758,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         emit_answer(
             args.plan, host_id, None,
             after_mode=args.after, plan_path=plan_path, strict=True,
-            with_answers=True, recorded_route=recorded,
+            with_answers=True, recorded_route=recorded, with_markdown=True,
         )
     except LookupFailed:
         return 3

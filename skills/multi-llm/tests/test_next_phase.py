@@ -1074,9 +1074,11 @@ class TestResumeCommand:
             [P, "--blocked", "implement", "--host", "codex"], monkeypatch, capsys)
         assert code == 0
         assert out.out == f"[RESUME_COMMAND] $multi-llm:multi-llm --implement {P} --resume\n"
-        assert key == {"phase": "implement",
-                       "command": f"$multi-llm:multi-llm --implement {P} --resume",
-                       "flags": ["--resume"]}
+        command = f"$multi-llm:multi-llm --implement {P} --resume"
+        assert key == {"phase": "implement", "command": command,
+                       "flags": ["--resume"],
+                       # Fix round 24: the section a tool route copies.
+                       "markdown": f"To go on with implement:\n\n```\n{command}\n```"}
 
     def test_util_prints_nothing_for_a_mode_with_no_resume(self, tmp_path, monkeypatch, capsys):
         _build(tmp_path, S(UP_TO_TASKS, tasks=IMPLEMENT_PARTIAL))
@@ -1213,9 +1215,9 @@ class TestResumeCommand:
             [P, "--blocked", "generate-tasks", "--host", "opencode"], monkeypatch, capsys)
         assert code == 0
         assert out.out == f"[RESUME_COMMAND] /multi-llm --generate-tasks {P}\n"
-        assert key == {"phase": "generate-tasks",
-                       "command": f"/multi-llm --generate-tasks {P}",
-                       "flags": []}
+        command = f"/multi-llm --generate-tasks {P}"
+        assert key == {"phase": "generate-tasks", "command": command, "flags": [],
+                       "markdown": f"To go on with generate-tasks:\n\n```\n{command}\n```"}
 
     def test_no_re_invoke_after_a_prerequisite_refusal(self, tmp_path, monkeypatch, capsys):
         """Adversarial review 2026-10-05: the gate exits 3 before any status
