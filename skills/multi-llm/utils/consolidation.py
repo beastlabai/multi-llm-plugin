@@ -2000,6 +2000,34 @@ def _compute_file_hash(file_path: str) -> str:
         return ""
 
 
+def consolidation_is_current(phase_dir: str) -> bool:
+    """Whether ``consolidated.json`` in *phase_dir* was built from today's
+    ``grouped.json``: the consolidation already ran on these groups.
+
+    The staleness rule :func:`load_merged_suggestions` applies, read the
+    same way: the file's ``metadata.grouped_hash`` against the hash of the
+    ``grouped.json`` beside it. A minimal-reduction pass
+    (``skipped_report``) counts too: it ran, and found little to merge.
+    ``False`` when the file is missing, unreadable, carries no hash, or the
+    groups changed since (a later review round rewrote ``grouped.json``).
+
+    Live run 8 (Claude Code racing 01): ``status`` and its result line still
+    said "consolidation recommended: 17 valid groups >= 15 — run
+    --consolidate" after the same run had consolidated them, so every
+    reader of the recommendation asks this first.
+    """
+    path = Path(phase_dir) / "consolidated.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    metadata = data.get("metadata") if isinstance(data, dict) else None
+    stored = metadata.get("grouped_hash") if isinstance(metadata, dict) else None
+    if not isinstance(stored, str) or not stored:
+        return False
+    return stored == _compute_file_hash(str(Path(phase_dir) / "grouped.json"))
+
+
 # ---------------------------------------------------------------------------
 # Consolidated decision loading for apply-suggestions
 # ---------------------------------------------------------------------------
