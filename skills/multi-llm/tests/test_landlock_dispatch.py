@@ -1688,10 +1688,87 @@ class TestTheHomeCheck:
             home="~/.codex", provider="codex")
         assert line.startswith("[CODEX_HOME_CHECK] codex: ")
         assert "~/.codex/config.toml" in line
-        assert ("added by this run or by another codex session running at the "
-                "same time") in line
-        assert "not a failure" in line and "delete its [projects." in line
+        assert "added by this run or by another codex session" in line
+        assert "not a failure" in line
+        # The user's call, worded as theirs: never an order to edit it.
+        assert "is your call" in line and "delete its" not in line
         assert line.splitlines() == [line]
+
+    def test_a_running_sessions_entry_asks_nothing_of_the_user(self):
+        """Live run 9 (Claude Code racing 01, Codex stop fix 01): a sibling
+        run's codex session, running in its own repository, added that
+        directory's trust table, and the host advised deleting it from
+        `~/.codex/config.toml` because the line said "if you did not run codex
+        there, delete its table". An entry a codex session running there now
+        explains gets no such invitation: nothing needs doing."""
+        line = ld.own_trust_entries_line(
+            ["/r/sibling", "/"], home="~/.codex", provider="codex",
+            running=["/r/sibling"])
+        head, _, rest = line.partition("/r/sibling")
+        assert "/" not in head.split("(not a failure)")[-1].strip(": ")
+        sibling, _, other = rest.partition("; ")
+        assert "codex session is running there now" in sibling
+        assert "nothing needs doing" in sibling
+        assert "config.toml" not in sibling and "your call" not in sibling
+        assert other.startswith("/: added by this run or by another codex session")
+        assert "is your call" in other
+        alone = ld.own_trust_entries_line(
+            ["/r/sibling"], home="~/.codex", running=["/r/sibling"])
+        assert "nothing needs doing" in alone
+        assert "your call" not in alone and "[projects." not in alone
+
+    def test_the_running_sessions_are_read_from_proc_by_exact_directory(self, tmp_path):
+        """A codex process (``comm`` ``codex``) explains the trust table of its
+        cwd's repository root (the nearest ``.git``, or the main repository of
+        a linked worktree) or of its cwd outside a repository — never of an
+        ancestor such as ``/``, which a jailed batch could plant beside any
+        live session. No ``git`` is run: the directories are other
+        processes', and a batch could have planted one."""
+        repo = tmp_path / "sibling"
+        (repo / ".git").mkdir(parents=True)
+        (repo / "src").mkdir()
+        main = tmp_path / "main"
+        (main / ".git" / "worktrees" / "wt").mkdir(parents=True)
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        (worktree / ".git").write_text(f"gitdir: {main}/.git/worktrees/wt\n")
+        loose = tmp_path / "loose"
+        loose.mkdir()
+        proc = tmp_path / "proc"
+
+        def process(pid, comm, cwd):
+            entry = proc / str(pid)
+            entry.mkdir(parents=True)
+            (entry / "comm").write_text(comm + "\n")
+            if cwd is not None:
+                (entry / "cwd").symlink_to(cwd)
+
+        process(10, "codex", repo / "src")
+        process(11, "codex", worktree)
+        process(12, "codex", loose)
+        process(13, "node", tmp_path)        # not codex
+        process(14, "codex", None)           # a zombie: no cwd to read
+        (proc / "self").mkdir()
+        keys = ld.live_codex_trust_keys(proc_root=str(proc))
+        assert keys == {
+            os.path.realpath(repo), os.path.realpath(worktree),
+            os.path.realpath(main), os.path.realpath(loose)}
+        assert ld.live_codex_trust_keys(proc_root=str(tmp_path / "absent")) == set()
+
+    def test_the_note_attributes_a_table_to_a_live_session_when_it_prints(
+        self, lay, monkeypatch,
+    ):
+        home = _make_home(lay.root)
+        _append(home / "config.toml", self._trust("/"))
+        _append(home / "config.toml", self._trust(str(lay.root / "sibling")))
+        monkeypatch.setattr(
+            ld, "live_codex_trust_keys",
+            lambda proc_root="/proc": {os.path.realpath(lay.root / "sibling")})
+        line = str(ld.TrustEntriesNote(
+            str(home), ("/", str(lay.root / "sibling")), provider="codex"))
+        sibling = line.split(str(lay.root / "sibling"), 1)[1].split("; ")[0]
+        assert "nothing needs doing" in sibling
+        assert line.count("is your call") == 1
 
     def test_the_note_names_only_the_tables_still_there_when_it_prints(self, lay):
         """Run 6's noise was sibling runs' tables that their own runs removed
@@ -1705,7 +1782,7 @@ class TestTheHomeCheck:
         config.write_text(text.replace(self._trust("/sibling"), ""))
         assert ld.TrustEntriesNote(str(home), ("/sibling",)).remaining() == ()
         line = str(note)
-        assert '/,' not in line and ": /." in line and "/sibling" not in line
+        assert '/,' not in line and ": /: added by" in line and "/sibling" not in line
         config.write_text(text.replace(self._trust("/"), "").replace(self._trust("/sibling"), ""))
         assert str(note) == ""
         # A home whose config cannot be read keeps every path named.
@@ -1724,7 +1801,7 @@ class TestTheHomeCheck:
         ])
         assert len(lines) == 3
         assert lines[0] == "[JAIL_DENIED] first" and lines[2] == "[CODEX_HOME_CHECK] second"
-        assert ": /a, /b. " in lines[1] and "/gone" not in lines[1]
+        assert ": /a, /b: added by" in lines[1] and "/gone" not in lines[1]
 
     def test_what_a_normal_turn_rewrites_is_not_a_change(self, lay):
         home = _make_home(lay.root)
