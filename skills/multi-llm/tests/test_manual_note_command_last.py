@@ -103,7 +103,9 @@ def test_codex_status_spells_the_route_it_runs_on(
     status included, and a shell without it is the file-shim route by
     definition. A Codex host reads status through its own route; only a
     driver's shell reads it outside one (set `MULTI_LLM_ROUTE=package` there
-    to see the plugin's spelling)."""
+    to see the plugin's spelling). Fix round 24: unless a run of the plan
+    recorded the tool route it was started on (`run.route`), which this plan
+    has none of (`test_status_recorded_route.py`)."""
     from utils import run_status as rs
 
     if route:

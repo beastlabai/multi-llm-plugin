@@ -537,6 +537,7 @@ def resolve_route(
     environ: Optional[Mapping[str, str]] = None,
     skill_root: Optional[Union[str, Path]] = None,
     stderr=None,
+    recorded: Optional[str] = None,
 ) -> Optional[str]:
     """The ``next_command`` route key for this process, or ``None`` for ``default``.
 
@@ -555,6 +556,12 @@ def resolve_route(
       cell; any other value (empty, a typo, ``skill``, a product name, a tool
       route this host has no cell for) is ``None`` plus one stderr line naming
       the ignored value.
+    * *recorded* is the route the run whose commands are printed was started
+      on (:func:`recorded_route`, fix round 24): when the environment names
+      none, it is honoured under the same test, silently. Live run 10: a
+      shell's ``status --host codex`` spelled a run the Codex plugin's tool
+      had started in the file shim's words. The environment still wins, and
+      a host that reads its route from the skill root ignores it.
 
     *environ* defaults to ``os.environ`` and *stderr* to ``sys.stderr``.
     """
@@ -580,6 +587,8 @@ def resolve_route(
         return SKILL_ROUTE if _is_skill_install(host_id, skill_root) else None
 
     if value is None:
+        if recorded in modes.TOOL_ROUTES and recorded in routes:
+            return recorded
         return None
     if value in modes.TOOL_ROUTES and value in routes:
         return value
@@ -591,6 +600,62 @@ def resolve_route(
         file=stream,
     )
     return None
+
+
+def recorded_route(
+    plan_path: Union[str, Path],
+    host_id: str,
+    mode_word: Optional[str] = None,
+) -> Optional[str]:
+    """The tool route a run of *plan_path* on *host_id* was started on, or
+    ``None`` (fix round 24).
+
+    The detached worker records its route as ``run.route`` in its phase's
+    ``.status.json`` (``detach.RunHandle``): the tool servers set
+    ``modes.ROUTE_ENV`` on every child, and a file shim sets nothing. Read
+    here for a reader whose environment names no route (:func:`resolve_route`'s
+    *recorded*): with *mode_word*, that phase's run when one of this host is
+    on record, else the newest run of this host under the plan (by
+    ``started_at``). Only a member of ``modes.TOOL_ROUTES`` is returned: the
+    folder is writable by every jailed batch. Read-only; ``None`` when
+    nothing is on record or it cannot be read.
+    """
+    from .output_handler import PHASE_DIR_NAMES, output_dir_path, phase_dir_path
+    from .status_file import read_status
+
+    modes = _skill_module("modes")
+
+    def run_of(directory: Path) -> Optional[Dict[str, Any]]:
+        run = read_status(str(directory)).get("run")
+        if not isinstance(run, dict) or run.get("host") != host_id:
+            return None
+        return run
+
+    def route_of(run: Mapping[str, Any]) -> Optional[str]:
+        value = run.get("route")
+        return value if isinstance(value, str) and value in modes.TOOL_ROUTES else None
+
+    try:
+        source = Path(os.path.abspath(str(plan_path)))
+        mode = modes.resolve(mode_word) if mode_word else None
+        if mode is not None and mode.phase:
+            run = run_of(phase_dir_path(source, mode.phase))
+            if run is not None:
+                return route_of(run)
+        plan_dir = output_dir_path(source)
+        newest: Optional[Tuple[str, Dict[str, Any]]] = None
+        for child in sorted(plan_dir.iterdir()) if plan_dir.is_dir() else []:
+            if not child.is_dir() or child.name not in PHASE_DIR_NAMES:
+                continue
+            run = run_of(child)
+            if run is None:
+                continue
+            started = str(run.get("started_at") or "")
+            if newest is None or started > newest[0]:
+                newest = (started, run)
+    except Exception:  # noqa: BLE001 - advisory: the default route stands
+        return None
+    return route_of(newest[1]) if newest else None
 
 
 # ---------------------------------------------------------------------------
@@ -1235,6 +1300,7 @@ def emit_answer(
     stderr=None,
     strict: bool = False,
     with_answers: bool = False,
+    recorded_route: Optional[str] = None,
 ) -> Optional[NextPhase]:
     """Build the answer, print its block and set ``user_next_step``: all or nothing.
 
@@ -1252,6 +1318,9 @@ def emit_answer(
     either: one stderr line (:func:`lookup_failure_line`) names it and this
     returns ``None``, or raises :class:`LookupFailed` under *strict*. The block
     is written before the key is recorded, so a failed write leaves no key.
+    *recorded_route* is the route the run being answered for was started on
+    (:func:`recorded_route`), used when this process names none (fix round
+    24).
 
     With *finished_mode* given and no *workflow* handed in, a plan whose
     ``state.json`` does not exist answers ``None`` without reading anything:
@@ -1267,7 +1336,7 @@ def emit_answer(
             source = plan_arg if plan_path is None else plan_path
             if not _state_file(os.path.abspath(str(source))).is_file():
                 return None
-        route = resolve_route(host_id, stderr=err)
+        route = resolve_route(host_id, stderr=err, recorded=recorded_route)
         answer = next_phase_commands(
             plan_arg, host_id, route, finished_mode,
             after_mode=after_mode, plan_path=plan_path, workflow=workflow,
@@ -1328,11 +1397,13 @@ def emit_resume(
     stream=None,
     stderr=None,
     strict: bool = False,
+    recorded_route: Optional[str] = None,
 ) -> Optional[str]:
     """Print the ``[RESUME_COMMAND]`` line and set ``user_resume``: all or nothing.
 
     :func:`emit_answer`'s sibling for ``util next-command --blocked``; the
-    same failure rule (one stderr line, ``None`` or :class:`LookupFailed`).
+    same failure rule (one stderr line, ``None`` or :class:`LookupFailed`)
+    and the same *recorded_route*.
     Nothing is printed for a mode that has no resume command, or for a plan
     whose ``state.json`` does not exist: nothing can be in progress there, and
     the workflow read would create the plan's output dir (as in
@@ -1345,7 +1416,7 @@ def emit_resume(
         source = plan_arg if plan_path is None else plan_path
         if not _state_file(os.path.abspath(str(source))).is_file():
             return None
-        route = resolve_route(host_id, stderr=err)
+        route = resolve_route(host_id, stderr=err, recorded=recorded_route)
         command = resume_command(
             plan_arg, host_id, route, mode_word, plan_path=plan_path,
         )
@@ -1596,11 +1667,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"ERROR: plan file not found: {plan_path}", file=sys.stderr)
         return 3
     host_id = _host_capabilities().resolve_host_id(explicit=args.host)
+    # Fix round 24: from a shell, the route the plan's run was started on.
+    recorded = recorded_route(plan_path, host_id, args.blocked or args.after)
 
     if args.blocked is not None:
         try:
             emit_resume(
                 args.plan, host_id, args.blocked, plan_path=plan_path, strict=True,
+                recorded_route=recorded,
             )
         except LookupFailed:
             return 3
@@ -1610,7 +1684,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         emit_answer(
             args.plan, host_id, None,
             after_mode=args.after, plan_path=plan_path, strict=True,
-            with_answers=True,
+            with_answers=True, recorded_route=recorded,
         )
     except LookupFailed:
         return 3
