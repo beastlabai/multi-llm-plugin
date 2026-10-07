@@ -360,3 +360,18 @@ class TestALaterReviewOffersADeclinedItemAgainOnTheExecutorLeg(_PairRig):
         record = _processed(state_json)[declined_id]
         assert record["status"] == "declined"
         assert record["details"]["task_id"] == rows[0]["task_id"]
+
+
+def test_the_native_no_op_asymmetry_is_documented():
+    """Fix round 23 (records #5): the native leg has no way to record a
+    verified no-op (`util batch-done` takes no flag for it; the runbooks say
+    a verified no-op is `--status completed`), so the same batch outcome is
+    `applied` on Claude Code and `no-op` on Codex/OpenCode. No reader tells
+    them apart (`processed_record_counts` treats both as applied), so it is
+    documented rather than given a host flag."""
+    schema = json.loads((SKILL_DIR / "schemas" / "state_file.schema.json").read_text())
+    text = schema["patternProperties"]["^processed_"]["description"]
+    assert "the native leg records a verified no-op batch as applied" in text, text
+    assert "no reader tells the two apart" in text, text
+    agents = (SKILL_DIR / "AGENTS.md").read_text(encoding="utf-8")
+    assert "the native leg records a verified no-op batch as `applied`" in agents

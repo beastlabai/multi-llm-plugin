@@ -181,7 +181,7 @@
     },
     "^processed_": {
       "type": "object",
-      "description": "Processed items keyed by group_id, written per apply batch by both legs in one shape (util batch-done on the native leg, the write scheduler on the executor leg): applied, no-op (the executor read the batch as changing nothing), declined or skipped with details.reason, failed for a batch that did not finish. details also carries task_id, prior_changes_id, grouped_sha256 (the review the batch applied) and leg (native or executor)",
+      "description": "Processed items keyed by group_id, written per apply batch by both legs in one shape (util batch-done on the native leg, the write scheduler on the executor leg): applied, no-op (the executor read the batch as changing nothing), declined or skipped with details.reason, failed for a batch that did not finish. details also carries task_id, prior_changes_id, grouped_sha256 (the review the batch applied) and leg (native or executor). One difference between the legs: the native leg records a verified no-op batch as applied (util batch-done takes no flag for it; the runbooks record it --status completed) where the executor records no-op; no reader tells the two apart (a --resume counts both as applied)",
       "additionalProperties": {
         "type": "object",
         "properties": {
