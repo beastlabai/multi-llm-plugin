@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -76,9 +77,11 @@ def snapshot_candidates(phase_dir: os.PathLike | str) -> Snapshot:
         if not _is_candidate_name(entry.name):
             continue
         try:
-            if not entry.is_file():
+            # A regular file only, never through a link: a model can leave a
+            # link or a FIFO under a `.json` name, and reading a FIFO hangs.
+            if not entry.is_file(follow_symlinks=False):
                 continue
-            st = entry.stat()
+            st = entry.stat(follow_symlinks=False)
         except OSError:
             continue
         snapshot[entry.name] = (st.st_mtime_ns, st.st_size)
@@ -160,7 +163,7 @@ def append_result_note(phase_dir: os.PathLike | str, note: str) -> None:
             return
         notes.append(note)
         _status_file.update_status(phase_dir, {RESULT_NOTES_KEY: notes})
-    _publish(phase_dir, notes)
+    publish_result_notes(phase_dir)
 
 
 def publish_result_notes(phase_dir: os.PathLike | str) -> None:
@@ -238,7 +241,10 @@ def _claimed_stems(specs: Iterable[str]) -> set:
 
 
 def _is_result_list(path: str) -> bool:
+    """A regular file (not a link, not a FIFO) holding one JSON array."""
     try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return False
         with open(path, "r", encoding="utf-8") as handle:
             return isinstance(json.load(handle), list)
     except (OSError, ValueError):

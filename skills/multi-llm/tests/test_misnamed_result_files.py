@@ -211,6 +211,24 @@ class TestAMisnamedResultIsReadFromWhereTheModelWroteIt:
         assert result["success"] is False
         assert (phase_dir / MISNAMED).exists()
 
+    def test_a_link_under_a_result_name_is_never_followed(self, tmp_path):
+        target = tmp_path / "elsewhere.json"
+        target.write_text(json.dumps(_issues(["Planted"])), encoding="utf-8")
+        phase_dir = tmp_path / "code-review"
+
+        def provider(*_args, **_kwargs):
+            (phase_dir / MISNAMED).symlink_to(target)
+            return _parse_failure()
+
+        with patch("utils.llm_client.invoke_with_provider", side_effect=provider):
+            result = invoke_with_file_output(
+                prompt_template="Write to {output_json_path}", model_spec=PI,
+                prompt_context={}, output_dir=tmp_path, phase="code_review",
+                timeout=600, run_model_specs=[PI, CODEX],
+            )
+        assert result["success"] is False
+        assert (phase_dir / MISNAMED).is_symlink()
+
     def test_the_requested_file_still_wins_when_both_exist(self, tmp_path):
         mine = _issues(["Mine"])
         result, phase_dir = _invoke(tmp_path, {
@@ -410,6 +428,33 @@ class TestTheAggregateReadsOnlyTheModelsThePhaseRecords:
         assert list(_reported_results(report)) == [CODEX]
         assert (phase_dir / "notes.json").exists()
         assert "notes.json is not a result file of any model this review ran" in out
+
+    def test_a_fifo_under_a_result_name_is_not_opened(self, tmp_path, capsys):
+        """A FIFO named `*.json` would hang the read that decides whether it is
+        a result; it is named and left where it is instead."""
+        import os as _os
+        import threading
+        plan, phase_dir = _cro_phase(tmp_path, {CODEX_STEM: _issues(["A"])},
+                                     models_requested=[CODEX])
+        fifo = phase_dir / "pi_stray.json"
+        _os.mkfifo(fifo)
+        spy = patch.object(cro, "resolve_result_files_by_model",
+                           wraps=rob.resolve_result_files_by_model)
+        with spy as resolved:
+            # In a thread, so a regression that opens the FIFO fails here
+            # instead of hanging the suite: a writer is opened to release it.
+            worker = threading.Thread(
+                target=_run_cro_reaggregate, args=(plan, phase_dir), daemon=True)
+            worker.start()
+            worker.join(timeout=30)
+            if worker.is_alive():
+                _os.close(_os.open(fifo, _os.O_WRONLY | _os.O_NONBLOCK))
+                worker.join(timeout=30)
+                pytest.fail("the reaggregate opened a FIFO named like a result")
+        out = capsys.readouterr().out
+        spy = resolved
+        assert "[RESULT_NOT_READ] pi_stray.json" in out
+        assert [p for p in spy.call_args.args[1] if p.endswith("pi_stray.json")] == []
 
     def test_a_dir_with_no_checkpoint_still_reads_every_file_by_stem(self, tmp_path, capsys):
         """No `.status.json`: nothing says which models ran, so nothing is a stray

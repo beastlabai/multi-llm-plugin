@@ -4328,14 +4328,15 @@ def report_misnamed_result(
     model_spec: str,
     result: Dict[str, Any],
     phase_dir: Union[str, Path],
-    tracker: Optional[FanoutProgress] = None,
 ) -> str:
     """Say that a slot read its answer from a misnamed file (both lanes).
 
-    One ``[RESULT_FILE_MISNAMED]`` line on stdout, the same sentence on the
-    slot's row (``progress.models[spec].warning``, which ``status`` shows) and
-    in ``.status.json``'s ``result_notes``, which the report renders as its
-    ``**Result files:**`` line. Returns the sentence.
+    One ``[RESULT_FILE_MISNAMED]`` line on stdout, and the same sentence in
+    ``.status.json``'s ``result_notes`` (the report's ``**Result files:**``
+    line) and ``progress.notes`` (``status``'s ``note:`` lines and a terminal
+    poll's ``notice``). Not the slot's ``warning``: that key holds one
+    sentence, and a bypassed slot's ``[SANDBOX_BYPASSED] … not attributed``
+    warning must not be overwritten by this one. Returns the sentence.
     """
     expected = os.path.basename(str(result.get("output_file") or "")) or (
         f"{sanitize_model_name(model_spec)}.json"
@@ -4344,8 +4345,6 @@ def report_misnamed_result(
         model_spec, str(result.get("misnamed_from")), expected
     )
     print(f"[RESULT_FILE_MISNAMED] {note}")
-    if tracker is not None:
-        tracker.warn(model_spec, note)
     _result_files.append_result_note(phase_dir, note)
     return note
 
@@ -5038,8 +5037,7 @@ async def run_single_model(
         if result.get("success"):
             if result.get("misnamed_from"):
                 report_misnamed_result(
-                    model_spec, result,
-                    get_phase_dir(Path(plan_path), phase_name), tracker,
+                    model_spec, result, get_phase_dir(Path(plan_path), phase_name),
                 )
             print(f"[{display_name}] Completed successfully in {duration:.1f}s (source: {source})")
             output_data = result.get("data", "")
