@@ -305,7 +305,8 @@ class TestStatusReadsANativeImplementFromState:
         assert "skipped at your request: T005" in line, line
         assert "skipped (depend on a task you skipped): T006" in line, line
         assert "deferred manual" not in line
-        assert "accepted with their check findings: T002" in line
+        # Fix round 20: in the `resume: kept` line's words.
+        assert "accepted with its check findings: T002" in line
         assert ("answers on record: --human-task T002=done, "
                 "--human-task T005=skip") in out
 

@@ -612,8 +612,11 @@ class TestTheStatusProgressLineNamesWhatAResumeKept:
         # round 19), as it is out of the `[ETA]` line's. Fix round 20: so are
         # T002, kept rather than dispatched, T005, refused before dispatch,
         # and T006 after it: the run dispatched nothing ("Organized into 0
-        # execution batches: 0 task(s)").
-        kept = "(1 kept from an earlier run: T002)"
+        # execution batches: 0 task(s)"), and T002 is named as what it is.
+        kept = (
+            "(1 kept from an earlier run: T002 (its check reported problems, "
+            "not run again while the files are unchanged))"
+        )
         assert f"implement 0/0 batches ok {kept}, 0/0 items applied" in line, line
         # The OpenCode route shows the poll's own rendered lines.
         assert any(

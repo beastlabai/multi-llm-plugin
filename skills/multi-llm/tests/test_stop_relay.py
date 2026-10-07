@@ -328,10 +328,15 @@ class TestAnExplicitNativeResumeSaysWhatItKept:
         return [l for l in text.splitlines() if l.startswith("resume: ")]
 
     def test_an_unchanged_resume_names_the_four_it_kept(self, repo, capsys):
+        """Fix round 20 (live run 8 #6): T002 is named as a check whose
+        findings stand, not listed beside T001, T003 and T004 as if it had
+        passed."""
         self._stop(repo, capsys)
         text = self._emit(repo, capsys, "--resume")
         assert self._kept(text) == [
-            "resume: kept 4 task(s) an earlier run finished (T001, T002, T003, T004)."
+            "resume: kept 4 task(s) an earlier run finished (T001, T003, T004, "
+            "T002 (its check reported problems, not run again while the files "
+            "are unchanged))."
         ], text
 
     def test_the_accept_resume_names_the_accepted_check(self, repo, capsys):
@@ -371,8 +376,9 @@ class TestAnExplicitNativeResumeSaysWhatItKept:
         assert self._kept(text) == [
             "resume: implement started earlier and did not finish, so this run "
             "continues it as --resume: kept 4 task(s) an earlier run finished "
-            "(T001, T002, T003, T004) and runs what is left. To run every task "
-            "again instead, add --fresh."
+            "(T001, T003, T004, T002 (its check reported problems, not run "
+            "again while the files are unchanged)) and runs what is left. To "
+            "run every task again instead, add --fresh."
         ], text
 
     def test_a_first_resume_with_nothing_finished_prints_none(self, repo, capsys):

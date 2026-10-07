@@ -2362,7 +2362,9 @@ def _id_list(value: Any) -> List[str]:
 _TALLY_LABELS: Tuple[Tuple[str, str], ...] = (
     ("completed", "completed"),
     ("check_findings", "completed, its check reported problems"),
-    ("accepted_findings", "accepted with their check findings"),
+    # Fix round 20 (run 8 #6): in the words of the `resume: kept` line and
+    # the progress line's kept note (`answered_done_label`).
+    ("accepted_findings", "accepted with its check findings"),
     ("accepted_failed", "accepted after failing"),
     ("completed_manual", "completed by hand"),
     ("failed", "failed"),
@@ -2380,7 +2382,7 @@ _VIEW_MERGE: Dict[str, str] = {
 }
 _VIEW_LABELS: Tuple[Tuple[str, str], ...] = (
     ("completed", "completed"),
-    ("accepted", "accepted with their check findings or after failing"),
+    ("accepted", "accepted with its check findings or after failing"),
     ("completed_manual", "completed by hand"),
     ("failed", "failed"),
     ("declined", "skipped at your request"),
@@ -2427,7 +2429,7 @@ def implement_task_tally(plan_path: Path) -> Optional[Dict[str, Any]]:
 
 def implement_tally_text(tally: Dict[str, Any], *, live: bool = False) -> str:
     """:func:`implement_task_tally` as one clause list: ``5/7 done;
-    completed: …; accepted with their check findings: …``. A task not run
+    completed: …; accepted with its check findings: …``. A task not run
     yet reads "pending" while the run is *live*, "not run" once it ended."""
     parts = [f"{tally['done']}/{tally['total']} done"] + _bucket_clauses(
         tally["buckets"], tally.get("waits_on") or {}, _TALLY_LABELS, live=live,
@@ -2457,6 +2459,41 @@ def _is_executor_implement_view(view: Dict[str, Any]) -> bool:
     return isinstance(progress.get("write_subagents"), dict)
 
 
+def _kept_labels(mirror: Mapping[str, Any], kept: Sequence[str]) -> Dict[str, str]:
+    """What each task a write mirror kept is, in the ``resume: kept`` line's
+    words (fix round 20): a check whose findings stand (its row carries
+    them) and an accepted task (``accepted_task_ids``, a check apart from a
+    failed task). Plain kept tasks carry no label."""
+    from .write_batch_scheduler import (
+        ACCEPTED_AFTER_FAILING_LABEL,
+        ACCEPTED_WITH_FINDINGS_LABEL,
+        KEPT_WITH_FINDINGS_LABEL,
+    )
+
+    kept_ids = {str(t) for t in kept}
+    labels = {
+        str(row.get("task_id")): KEPT_WITH_FINDINGS_LABEL
+        for row in (mirror.get("tasks") or [])
+        if isinstance(row, dict) and str(row.get("task_id")) in kept_ids
+        and isinstance(row.get("check_findings"), list) and row["check_findings"]
+    }
+    with_findings = set(_id_list(mirror.get("accepted_with_findings_task_ids")))
+    for task_id in _id_list(mirror.get("accepted_task_ids")):
+        labels[task_id] = (
+            ACCEPTED_WITH_FINDINGS_LABEL if task_id in with_findings
+            else ACCEPTED_AFTER_FAILING_LABEL
+        )
+    return labels
+
+
+def _kept_text(kept: Sequence[str], labels: Mapping[str, str]) -> str:
+    """The kept note's list: ``write_batch_scheduler.kept_named``, at most
+    five plain ids as before."""
+    from .write_batch_scheduler import kept_named
+
+    return kept_named(kept, labels, limit=5)
+
+
 def _mirror_text(key: str, mirror: Any) -> List[str]:
     """One clause per executor mirror: ``<kind> <ok>/<total> ok`` and, when any
     task did not end ``ok``, the non-ok statuses and the failed ids."""
@@ -2474,6 +2511,12 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     ok = mirror.get("ok")
     if not isinstance(ok, int):
         ok = counts.get("ok", 0) if isinstance(counts.get("ok"), int) else 0
+    accepted = mirror.get("accepted_task_ids") if isinstance(mirror.get("accepted_task_ids"), list) else []
+    # Fix round 20 (run 8 #6): an implement run's accepted tasks were kept
+    # from an earlier run, not dispatched, so they are named in the kept note
+    # ("T002 (accepted with its check findings)"), not in a clause of their
+    # own; OpenCode accept 02 read "accepted with their check findings T002".
+    folded = [str(t) for t in accepted if t] if kind == "implement" else []
     items_total = mirror.get("items_total")
     items_applied = mirror.get("items_applied")
     if isinstance(items_total, int) and isinstance(items_applied, int):
@@ -2487,11 +2530,15 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
             str(task_id) for task_id in (mirror.get("kept_task_ids") or [])
             if task_id
         ] if isinstance(mirror.get("kept_task_ids"), list) else []
+        kept_labels = _kept_labels(mirror, kept) if kept or folded else {}
+        kept += [task_id for task_id in folded if task_id not in kept]
         # Fix round 18 (run 7 #3): a resume that dispatched nothing read
         # "1/4 batches ok", the one being a check an earlier run finished.
+        # Fix round 20 (run 8 #6): each kept task is named with what it is,
+        # in the `resume: kept` line's words, an accepted one included.
         kept_note = (
             f" ({len(kept)} kept from an earlier run: "
-            f"{', '.join(kept[:5])}{', …' if len(kept) > 5 else ''})"
+            f"{_kept_text(kept, kept_labels)})"
             if kept else ""
         )
         parts = [
@@ -2604,15 +2651,20 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
         parts.append(
             f"not run (upstream check {check_id} reported problems) {', '.join(waiting)}"
         )
-    accepted = mirror.get("accepted_task_ids") if isinstance(mirror.get("accepted_task_ids"), list) else []
     # Fix round 16 (Codex stop-path accept 02): a check accepted with its
     # findings read "accepted after failing T002"; the mirror names those
-    # apart (a mirror without the key reads as before).
+    # apart (a mirror without the key reads as before). An implement mirror
+    # names them in the kept note instead (fix round 20).
     with_findings = set(_id_list(mirror.get("accepted_with_findings_task_ids")))
-    accepted_checks = [str(t) for t in accepted if str(t) in with_findings]
-    accepted_failed = [str(t) for t in accepted if str(t) not in with_findings]
+    shown = set(folded) if isinstance(items_total, int) and isinstance(items_applied, int) else set()
+    accepted_checks = [
+        str(t) for t in accepted if str(t) in with_findings and str(t) not in shown
+    ]
+    accepted_failed = [
+        str(t) for t in accepted if str(t) not in with_findings and str(t) not in shown
+    ]
     if accepted_checks:
-        parts.append(f"accepted with their check findings {', '.join(accepted_checks)}")
+        parts.append(f"accepted with its check findings {', '.join(accepted_checks)}")
     if accepted_failed:
         parts.append(f"accepted after failing {', '.join(accepted_failed)}")
     # F9: `skipped_task_ids`/`human_task_strategy` (resolved before dispatch,
