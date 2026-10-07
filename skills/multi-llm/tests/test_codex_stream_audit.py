@@ -93,25 +93,27 @@ class TestTheCapturedFixtures:
     def test_the_verified_version_is_the_newest_recapture(self):
         """Run 6 (#11b): "codex 0.160.1 is newer than the release the shipped
         parser fixtures were captured from (0.160.0)" opened every phase's
-        log; the rig re-run on the installed 0.160.1 moves the pin."""
+        log; the rig re-run on the installed 0.160.1 moves the pin. Run 10
+        (#10) logged the same for 0.161.0, and the rig moved it again."""
         newest = max(
             (path.name for path in FIXTURES.parent.iterdir()
              if path.is_dir() and path.name[0].isdigit()),
             key=lambda name: tuple(int(part) for part in name.split(".")),
         )
-        assert newest == "0.160.1"
+        assert newest == "0.161.0"
         assert CodexProvider().verified_version == newest
 
-    @pytest.mark.parametrize("version", ["0.160.0", "0.160.1"])
+    @pytest.mark.parametrize("version", ["0.160.0", "0.160.1", "0.161.0"])
     @pytest.mark.parametrize("name", [
         "read_only_clean.jsonl", "quoting_render.jsonl", "collab_spawn_agent.jsonl",
     ])
     def test_each_recapture_parses_and_keeps_the_0_156_1_event_shapes(
         self, name, version,
     ):
-        """2026-10-02 (0.160.0) and 2026-10-06 (0.160.1): the offline rig re-run
-        on the installed codex (the version-lag WARN's cause was the pin
-        trailing the install). Same event kinds, same keys."""
+        """2026-10-02 (0.160.0), 2026-10-06 (0.160.1) and 2026-10-08
+        (0.161.0): the offline rig re-run on the installed codex (the
+        version-lag WARN's cause was the pin trailing the install). Same event
+        kinds, same keys."""
         newer = FIXTURES.parent / version / name
         result = CodexProvider().parse_output(newer.read_text(), "")
         assert result["success"] is True and result["data"] == []
