@@ -916,13 +916,14 @@ def _prepare_selected_task(
     # A fresh result replaces these; until then the old verdict is not the
     # selected attempt's verdict, including after a host dies mid-handoff.
     from utils.state_manager import (
-        set_task_batch_check_in_state, set_task_check_findings_in_state,
-        set_task_check_tree_in_state,
+        set_task_batch_check_accepted_in_state, set_task_batch_check_in_state,
+        set_task_check_findings_in_state, set_task_check_tree_in_state,
     )
 
     set_task_check_findings_in_state(state.state, task.id, None)
     set_task_check_tree_in_state(state.state, task.id, None)
     set_task_batch_check_in_state(state.state, task.id, None)
+    set_task_batch_check_accepted_in_state(state.state, task.id, None)
     # Fix round 17: the log line its earlier run wrote is not this rerun's
     # (`batch_done.unrecorded_logged_batches`): a host gone before its
     # `batch-done` left T001 refused on the next plain emit.
@@ -971,8 +972,8 @@ def _start_over(
     :func:`_has_earlier_implement_records`.
     """
     from utils.state_manager import (
-        set_task_batch_check_in_state, set_task_check_findings_in_state,
-        set_task_check_tree_in_state,
+        set_task_batch_check_accepted_in_state, set_task_batch_check_in_state,
+        set_task_check_findings_in_state, set_task_check_tree_in_state,
     )
     from utils.subagent_tasks import implement_output_name
     from utils.write_safety import TaskSnapshot, WriteSafetyError, resolve_repo_root
@@ -1023,6 +1024,7 @@ def _start_over(
         set_task_check_findings_in_state(state.state, task_id, None)
         set_task_check_tree_in_state(state.state, task_id, None)
         set_task_batch_check_in_state(state.state, task_id, None)
+        set_task_batch_check_accepted_in_state(state.state, task_id, None)
         if touched:
             set_aside.append(task_id)
     mark_tasks_reset_in_state(state.state, code_ids)
@@ -1711,25 +1713,12 @@ def _executor_check_stamp(
     (*findings*), so a stamp is never read off another run of the check than
     the one on record. ``None`` otherwise.
     """
-    from utils.subagent_executor import row_check_findings
-    from utils.subagent_tasks import implement_output_name
+    # One reader for both the resume and its why (fix round 23:
+    # `write_batch_scheduler.check_kept_on_resume`).
+    from utils.write_batch_scheduler import executor_check_stamp
 
-    if not isinstance(findings, list) or not findings:
-        return None
-    path = Path(get_phase_dir(plan_path, "implement")) / implement_output_name(check_id)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    verdict = data.get("verdict") if isinstance(data, dict) else None
-    if not isinstance(verdict, dict) or verdict.get("ok") is not True:
-        return None
-    if not verdict.get("verification_only"):
-        return None
-    if row_check_findings(verdict) != [str(item) for item in findings]:
-        return None
-    stamp = verdict.get("tree_fingerprint")
-    return stamp if isinstance(stamp, str) and stamp else None
+    return executor_check_stamp(
+        get_phase_dir(plan_path, "implement"), check_id, findings)
 
 
 def _native_withheld(

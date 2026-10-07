@@ -109,6 +109,7 @@ try:
         TASK_RESET_AT_KEY,
         _parse_completion_time,
         record_batch_items_in_state,
+        set_task_batch_check_accepted_in_state,
         set_task_batch_check_in_state,
         set_task_check_findings_in_state,
         set_task_check_tree_in_state,
@@ -125,7 +126,7 @@ try:
     from .write_batch_scheduler import (
         BATCH_CHECK_MARKER,
         HALF_APPLIED_PREFIX,
-        accepted_checks_on_record,
+        accepted_findings_for,
         batch_check_accepted_line,
         batch_check_line,
         BLOCKED_BY_CHECK_PREFIX,
@@ -155,6 +156,7 @@ except ImportError:  # pragma: no cover - direct script invocation
         TASK_RESET_AT_KEY,
         _parse_completion_time,
         record_batch_items_in_state,
+        set_task_batch_check_accepted_in_state,
         set_task_batch_check_in_state,
         set_task_check_findings_in_state,
         set_task_check_tree_in_state,
@@ -171,7 +173,7 @@ except ImportError:  # pragma: no cover - direct script invocation
     from utils.write_batch_scheduler import (  # type: ignore
         BATCH_CHECK_MARKER,
         HALF_APPLIED_PREFIX,
-        accepted_checks_on_record,
+        accepted_findings_for,
         batch_check_accepted_line,
         batch_check_line,
         BLOCKED_BY_CHECK_PREFIX,
@@ -516,9 +518,15 @@ def record_batch(
         if kind == "implement" and batch_check:
             # Fix round 22: what only repeats findings the user accepted for
             # a check is that check's, never this task's own failure (the
-            # executor's reading, `split_accepted_findings`).
+            # executor's reading, `split_accepted_findings`). Fix round 23:
+            # only the checks this task was told were accepted, and none
+            # whose failure is its own job (`accepted_findings_for`).
             own, accepted_again = split_accepted_findings(
-                batch_check, accepted_checks_on_record(state),
+                batch_check, accepted_findings_for(
+                    [t for t in (document.get("batches") or document.get("tasks") or [])
+                     if isinstance(t, dict)],
+                    task, state,
+                ),
             )
             if accepted_again:
                 batch_check = own
@@ -529,10 +537,17 @@ def record_batch(
             # findings and never among them (fix round 15): it holds
             # nothing back, and every other record of the task clears it.
             set_task_batch_check_in_state(state, task_id, batch_check)
+            # Fix round 23: what it reported again of the accepted findings,
+            # by check, beside it (and cleared by any other record).
+            set_task_batch_check_accepted_in_state(state, task_id, accepted_again)
             blocked = _hold_or_release_dependents(
                 state, document, task_id, held=bool(check_findings),
             )
-            _settle_eta_total(state, document, task_id, status, reason, blocked)
+        # Fix round 23 (review of round 22, #1): every write kind, so a
+        # native apply batch recorded failed closes its run on "run
+        # stopped", as the executor's does, and one refused before dispatch
+        # leaves its total.
+        _settle_eta_total(state, document, task_id, status, reason, blocked)
         if kind == "apply_code_fixes":
             # Fix round 20: what the batch's own checks reported, for the next
             # batch's prompt and the tests-not-run line; any other record of
@@ -751,6 +766,10 @@ def _settle_eta_total(
       6) — and the task itself when ``util write-prompt`` refused it, since
       no subagent ran.
 
+    Every write kind (fix round 23): an apply batch has no dependents and
+    no check, so its record only marks it failed (its run closes on "run
+    stopped") or, refused before dispatch, takes it out of the total.
+
     Only tasks of this phase's ``write_tasks.json`` (what was handed out) and
     never a manual task (``tasks_to_dispatch`` does not count one). A record
     of the same task again first puts back what its earlier record took out,
@@ -777,9 +796,9 @@ def _settle_eta_total(
     # executor's does; a refused one is withdrawn below instead.
     mark_failed_in_progress(
         state, phase, task_id, failed=status == "failed" and not refused)
-    if status == "failed":
-        if refused:
-            out.append(task_id)
+    if refused:
+        out.append(task_id)
+    if status == "failed" and phase == "implement":
         statuses = state.get("task_status") or {}
         graph = decomposition_graph(list(handed.values()), state)
         for dependent in transitive_dependents(graph, task_id):

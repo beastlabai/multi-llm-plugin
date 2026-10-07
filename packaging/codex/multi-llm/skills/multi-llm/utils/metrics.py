@@ -428,13 +428,14 @@ def _withdrawn_left_out(state: dict, entry: dict) -> Dict[str, str]:
     return left
 
 
-def left_out_tail(left_out: Mapping[str, str]) -> str:
+def left_out_tail(left_out: Mapping[str, str], *, unit: str = "task") -> str:
     """What a run left, for its closing ``[ETA]`` line (fix round 22):
     ``T005 refused before dispatch; T006 not run; T007 not run: check T002
     reported problems``. One clause per way a task was left, in task order;
     at most :data:`LEFT_OUT_IDS_SHOWN` ids a clause and
-    :data:`LEFT_OUT_CLAUSES_SHOWN` clauses, the rest counted. Both legs
-    render it, so the same story closes on the same words."""
+    :data:`LEFT_OUT_CLAUSES_SHOWN` clauses, the rest counted in *unit*s
+    (:func:`eta_unit`: an apply phase's are batches, fix round 23). Both
+    legs render it, so the same story closes on the same words."""
     groups: Dict[str, List[str]] = {}
     for task_id, how in left_out.items():
         groups.setdefault(str(how or ""), []).append(str(task_id))
@@ -460,7 +461,7 @@ def left_out_tail(left_out: Mapping[str, str]) -> str:
     rest = sum(count for _key, _text, count in clauses[LEFT_OUT_CLAUSES_SHOWN:])
     return "; ".join(
         [text for _key, text, _count in shown_clauses]
-        + ([f"{rest} more task(s) not run"] if rest else [])
+        + ([f"{rest} more {_units(unit)} not run"] if rest else [])
     )
 
 
@@ -470,6 +471,11 @@ def eta_unit(phase: str) -> str:
     "task 1/5" beside "Organized into 3 execution batches: 5 task(s)"; the
     other phases count batches."""
     return "task" if phase == "implement" else "batch"
+
+
+def _units(unit: str) -> str:
+    """*unit*'s count word: ``task(s)``, ``batch(es)``."""
+    return "batch(es)" if unit == "batch" else f"{unit}(s)"
 
 
 def closing_line(
@@ -483,7 +489,7 @@ def closing_line(
     if done <= 0 and total <= 0:
         head = f"run {verb} with nothing dispatched"
     elif done <= 0:
-        head = f"run {verb} before any of its {total} task(s) finished"
+        head = f"run {verb} before any of its {total} {_units(eta_unit(phase))} finished"
     else:
         timing = f" in {format_duration(elapsed_ms)}" if elapsed_ms is not None else ""
         head = f"run {verb} after {eta_unit(phase)} {done}/{total}{timing}"
@@ -546,7 +552,8 @@ def finish_phase_in_state(
         # handed out nothing ran no `util metrics start`, and its `finish`
         # printed nothing; every ending closes its run's lines, this one too.
         set_left_out_in_state(state, phase, {})
-        return None, closing_line(phase, done=0, total=0, tail=left_out_tail(left))
+        return None, closing_line(
+            phase, done=0, total=0, tail=left_out_tail(left, unit=eta_unit(phase)))
     set_left_out_in_state(state, phase, {})
 
     elapsed_ms: Optional[int] = None
@@ -583,7 +590,7 @@ def finish_phase_in_state(
         total = int(entry["total_batches"]) if _is_index(entry.get("total_batches")) else done
         return elapsed_ms, closing_line(
             phase, done=done, total=total, elapsed_ms=elapsed_ms,
-            tail=left_out_tail(left),
+            tail=left_out_tail(left, unit=eta_unit(phase)),
         )
 
     color_on = _should_colorize_stderr()
