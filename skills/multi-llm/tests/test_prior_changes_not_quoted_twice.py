@@ -99,7 +99,7 @@ def test_a_prompt_that_quotes_nothing_renders_as_before(tmp_path):
     assert prior_changes.quoted_in("no record here", str(tmp_path)) == []
     assert prior_changes.render(str(tmp_path), phase="apply-fixes", quoted=[]) == (
         prior_changes.render(str(tmp_path), phase="apply-fixes")
-    ) == "1. **Batch 1** (T001): Created src/a.js."
+    ) == "- **T001**: Created src/a.js."
 
 
 def test_quoted_in_reads_the_record_line_shape(tmp_path):
@@ -110,6 +110,6 @@ def test_quoted_in_reads_the_record_line_shape(tmp_path):
     assert prior_changes.render(
         str(tmp_path), phase="apply-fixes", quoted=[("T002", "implement")]
     ) == (
-        "1. **Batch 1** (T001): Created src/a.js.\n"
+        "- **T001**: Created src/a.js.\n"
         "... and 1 earlier entry already quoted in this prompt"
     )

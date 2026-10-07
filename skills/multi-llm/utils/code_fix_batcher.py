@@ -19,12 +19,12 @@ from typing import Any, Dict, List, Optional, Sequence
 try:
     from .plan_updater import get_tasks_file_path
     from .prior_changes import entries as prior_changes_entries
-    from .prior_changes import entry_id, stable_key
+    from .prior_changes import entry_id, record_line, stable_key
     from .subagent_tasks import subagent_type_for_role
 except ImportError:
     from utils.plan_updater import get_tasks_file_path
     from utils.prior_changes import entries as prior_changes_entries
-    from utils.prior_changes import entry_id, stable_key
+    from utils.prior_changes import entry_id, record_line, stable_key
     from utils.subagent_tasks import subagent_type_for_role
 
 
@@ -393,7 +393,9 @@ def _implementation_record_lines(
     total_chars = 0
     for index in ordered:
         entry = implement_entries[index]
-        line = f"- ({entry.get('id', '?')}): {entry.get('summary', '')}"
+        # Fix round 24 (live run 10 #6): the id once, even when the
+        # subagent's summary opens with it ("- (T002): T002: …").
+        line = record_line(entry)
         if lines and total_chars + len(line) > MAX_IMPLEMENTATION_RECORD_CHARS:
             break
         lines.append(line)

@@ -146,8 +146,7 @@ def test_a_later_batch_lists_the_earlier_batches_of_this_run_only(tmp_path):
                           "2026-10-07T14:11:33")])
     block = _block(_bind(tmp_path, _fix_prompt(tmp_path), "apply-fix-batch-1"))
     assert block.strip().splitlines()[-1] == (
-        "1. **Batch 1** (index.html#d7631f8e): Initialize camera aspect and "
-        "renderer size."
+        "- **index.html#d7631f8e**: Initialize camera aspect and renderer size."
     ), block
     assert "other phases" not in block and "already quoted" not in block
 
@@ -169,7 +168,7 @@ def test_an_earlier_apply_code_fixes_run_is_not_this_runs(tmp_path):
     _state(tmp_path, "2026-10-07T14:30:00")
     block = _block(_bind(tmp_path, _fix_prompt(tmp_path), "apply-fix-batch-1"))
     assert "Cycle 1" not in block, block
-    assert "1. **Batch 1** (index.html#d7631f8e): Cycle 2: camera aspect." in block
+    assert "- **index.html#d7631f8e**: Cycle 2: camera aspect." in block
 
 
 def test_both_legs_bind_the_same_section(tmp_path):
