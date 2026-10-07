@@ -1708,14 +1708,17 @@ def _accounting_line(account: Dict[str, Any]) -> str:
         parts.append(f"{len(account['not_run'])} not run ({'; '.join(named)})")
     with_findings = account.get("accepted_with_findings") or []
     after_failing = [tid for tid in account["accepted"] if tid not in with_findings]
+    # The bucket names are the labels every other surface uses (fix round
+    # 21, review of round 20, #3: this line still read "accepted with their
+    # check findings" beside the table's "accepted with its check findings").
     if after_failing:
         parts.append(
-            f"{len(after_failing)} accepted after failing "
+            f"{len(after_failing)} {ACCEPTED_AFTER_FAILING_LABEL} "
             f"({', '.join(after_failing)})"
         )
     if with_findings:
         parts.append(
-            f"{len(with_findings)} accepted with their check findings "
+            f"{len(with_findings)} {ACCEPTED_WITH_FINDINGS_LABEL} "
             f"({', '.join(with_findings)})"
         )
     if account["completed_manual"]:

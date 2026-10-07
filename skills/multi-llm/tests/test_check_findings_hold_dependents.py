@@ -361,7 +361,10 @@ class TestAnsweringACheckWithFindings:
         assert report["blocked_by_check"] == {}
         summary = Path(report["summary_file"]).read_text()
         assert "| T002 | accepted with its check findings |" in summary
-        assert "1 accepted with their check findings (T002)" in summary
+        # The accounting line names the bucket in the same words (review of
+        # fix round 20, #3).
+        assert "1 accepted with its check findings (T002)" in summary
+        assert "accepted with their check findings" not in summary
         assert "accepted after failing" not in summary
         # A later resume keeps the answer: the check is not handed out again.
         repo.log.unlink(missing_ok=True)
