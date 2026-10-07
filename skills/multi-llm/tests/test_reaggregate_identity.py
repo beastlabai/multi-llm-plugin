@@ -1491,12 +1491,14 @@ class TestTheCodeReviewReaggregateNamesTheModelsThatProducedNothing:
         assert requested == _FIVE[:4]
         assert failures == {_FIVE[3]: "exited with code 1"}
 
-    def test_an_old_file_from_a_dropped_model_counts_once_on_each_side(
+    def test_an_old_file_from_a_dropped_model_is_set_aside_and_named(
         self, tmp_path, capsys
     ):
         """A model the latest run did not request, whose old result file is
-        still in the dir: loaded, recorded completed, counted as succeeded and
-        once in the denominator — so the numbers still add up."""
+        still in the dir: not read (fix round 24 — live run 10 loaded a
+        reviewer's misnamed file this way, as a third reviewer named by its
+        stem), set aside under a name no glob reads, and named on the report's
+        `**Result files:**` line — so the numbers add up over what ran."""
         plan, phase_dir = _five_spec_phase(
             tmp_path,
             models_requested=list(_FIVE[:2]) + [_FIVE[3]],
@@ -1505,18 +1507,23 @@ class TestTheCodeReviewReaggregateNamesTheModelsThatProducedNothing:
         )
         # _FIVE[2]'s file is on disk (written by the fixture) but unrequested.
         _run_cro_reaggregate(plan, phase_dir, render_report=True)
-        capsys.readouterr()
+        out = capsys.readouterr().out
 
+        stale = f"{cro.sanitize_model_name(_FIVE[2])}.json"
+        assert f"[RESULT_SET_ASIDE] {stale} is not the result file" in out
+        assert not (phase_dir / stale).exists()
+        assert (phase_dir / f"{stale}.set-aside").exists()
         report = _cro_report_md(plan)
         models_line = next(
             line for line in report.splitlines() if line.startswith("**Models:**")
         )
         succeeded = [spec for spec in _FIVE if spec in models_line]
-        assert len(succeeded) == 2  # a, b by spec; c by its stem
-        assert cro.sanitize_model_name(_FIVE[2]) in models_line
+        assert succeeded == list(_FIVE[:2])
+        assert cro.sanitize_model_name(_FIVE[2]) not in models_line
         assert _line_after_models(report) == (
-            f"**Models failed:** 1 of 4 requested — {_FIVE[3]}: exited with code 1"
+            f"**Models failed:** 1 of 3 requested — {_FIVE[3]}: exited with code 1"
         )
+        assert f"**Result files:** {stale} is not the result file" in report
 
     def test_a_checkpoint_with_none_of_the_fields_writes_no_line(
         self, tmp_path, capsys

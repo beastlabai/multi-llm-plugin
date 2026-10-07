@@ -87,6 +87,7 @@ from utils.review_orchestrator_base import (
     merge_validation_batches,
     record_high_priority_groups,
     record_validation_counts,
+    report_misnamed_result,
     validation_counts,
     VALIDATION_COUNT_KEYS,
     record_models_present,
@@ -143,6 +144,7 @@ from utils.review_orchestrator_base import (
 # directly too. Its one use below is the read-back that turns a silently failed
 # checkpoint write into a warning.
 from utils.status_file import read_status
+from utils import result_files as _result_files
 from utils.validation_context import RECORD_CUT_REASON, report_header_lines
 from utils.validation import (
     VALIDATION_CONTEXT_LIMIT,
@@ -2151,6 +2153,7 @@ async def run_single_review(
     diff_dir: Optional[str] = None,
     scope_id: Optional[str] = None,
     diff_coverage: Optional[str] = None,
+    run_model_specs: Optional[List[str]] = None,
 ) -> Tuple[bool, Optional[List[Dict]], Optional[str]]:
     """
     Run a single model code review using agent exploration with file-based output.
@@ -2495,6 +2498,9 @@ async def run_single_review(
         prefer_arrays=True,
         cwd=project_root,
         anchor=str(plan_path),
+        # Every model of the fan-out, so a result written under the wrong name
+        # is read from where the model put it (live run 10, pi).
+        run_model_specs=run_model_specs,
         **sandbox_fallback_kwargs(sandbox),
     )
 
@@ -2741,6 +2747,8 @@ async def run_single_review(
             tracker.failed(model_spec, error=error_msg, source=source)
         return False, None, error_msg
 
+    if result.get("misnamed_from"):
+        report_misnamed_result(model_spec, result, phase_dir, tracker)
     print(f"[{display_name}] Completed in {duration:.1f}s (source: {source})")
 
     # Get the parsed data from result
@@ -3041,6 +3049,7 @@ async def run_all_reviews(
                             task_ids=task_ids, scope_file=scope_file,
                             diff_dir=diff_dir, scope_id=scope_id,
                             diff_coverage=diff_coverage,
+                            run_model_specs=list(model_specs),
                         )
             else:
                 async with semaphore:
@@ -3051,6 +3060,7 @@ async def run_all_reviews(
                         task_ids=task_ids, scope_file=scope_file,
                         diff_dir=diff_dir, scope_id=scope_id,
                         diff_coverage=diff_coverage,
+                        run_model_specs=list(model_specs),
                     )
         except Exception as exc:
             # F5, 2026-09-20: two lanes, one event, two different answers. A
@@ -3302,6 +3312,11 @@ def generate_review_report(
     )
     if failure_line:
         lines.append(failure_line)
+    # A result file read from under the wrong name, or set aside as no
+    # recorded model's (`utils/result_files.py`); absent when neither happened.
+    result_files_line = _result_files.result_notes_line(phase_dir)
+    if result_files_line:
+        lines.append(result_files_line)
     lines.append(f"**Total Issues:** {len(all_issues)}")
 
     # The blocks below are per issue (one per model finding) but every count
@@ -3695,6 +3710,12 @@ async def reaggregate_from_existing_files(
         f for f in all_files
         if not any(ex in os.path.basename(f) for ex in exclude_patterns)
     ]
+    # Only the models this phase records are read: live run 10's misnamed
+    # `pi_…_v4-flash.json` was loaded as a third reviewer by its stem, with
+    # "scope unknown". Any other result file is named and set aside; a dir
+    # with no recorded models keeps the stem-as-identity reading below.
+    result_files = _result_files.set_aside_unrecorded_results(phase_dir, result_files)
+    _result_files.publish_result_notes(phase_dir)
 
     if not result_files:
         print(f"No model result files found matching: {pattern}")

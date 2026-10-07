@@ -13,12 +13,13 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Collection, Dict, List, NamedTuple, Optional, Tuple, Union
+from typing import Any, Collection, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
 
 from . import structured_output
 from . import process_control
 from . import landlock_dispatch as _landlock
 from . import readonly_audit as _readonly_audit_mod
+from . import result_files as _result_files
 from .metrics import describe_usage as _describe_usage
 from .provider_registry import parse_model_spec, get_provider, get_provider_timeout
 from .json_extractor import _ANSI_ESCAPE, looks_like_ndjson
@@ -1115,7 +1116,9 @@ def _save_log(
             lines.append(f"Result source: {result_source}")
 
         if stdout_parse_error:
-            if result_source in FILE_WRITTEN_SOURCES:
+            # `file (written as <name>)` is the file channel too: a result
+            # read from under the wrong name (`invoke_with_file_output` 1b).
+            if (result_source or "").split(" ", 1)[0] in FILE_WRITTEN_SOURCES:
                 # `render_output_location` told this provider NOT to print
                 # JSON on stdout, so a failed stdout parse is the expected
                 # shape of a run the file channel already answered for — not
@@ -3408,6 +3411,39 @@ def argv_prompt_bytes(
     return len(prompt.encode("utf-8"))
 
 
+def _adopt_misnamed_result(
+    output_json_path: Path,
+    before: Dict[str, Tuple[int, int]],
+    model_spec: str,
+    run_model_specs: Sequence[str],
+    *,
+    prefer_arrays: bool,
+) -> Optional[Tuple[Any, str]]:
+    """Read and rename the one misnamed result this slot wrote (step 1b).
+
+    ``(data, the name it was written under)``, or ``None`` — no unambiguous
+    candidate, one that does not parse as a JSON array (the shape every review
+    asks for), or a rename that failed. The rename puts the file at the
+    requested name, so it is this model's file from here on and no glob can
+    read it a second time as somebody else's.
+    """
+    from .json_extractor import read_json_from_file
+
+    found = _result_files.find_misnamed_result(
+        output_json_path.parent, before, model_spec, run_model_specs
+    )
+    if found is None:
+        return None
+    read = read_json_from_file(found, prefer_arrays=prefer_arrays)
+    if not read.get("success") or not isinstance(read.get("data"), list):
+        return None
+    try:
+        os.replace(found, output_json_path)
+    except OSError:
+        return None
+    return read["data"], found.name
+
+
 def invoke_with_file_output(
     prompt_template: str,
     model_spec: str,
@@ -3420,6 +3456,7 @@ def invoke_with_file_output(
     cwd: Optional[str] = None,
     anchor: Optional[Union[str, Path]] = None,
     sandbox_fallback: Optional[str] = None,
+    run_model_specs: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """Invoke LLM with file-based JSON output.
 
@@ -3433,6 +3470,10 @@ def invoke_with_file_output(
 
     Fallback strategy:
     1. Primary: Read from output file (with extraction fallback for code blocks)
+    1b. With ``run_model_specs``, when the output file is missing: the one JSON
+        array this model's provider prefix wrote elsewhere in the phase dir
+        during the call (``utils/result_files.find_misnamed_result``), renamed
+        to the requested name and reported as ``misnamed_from``
     2. Secondary: Parse stdout (current behavior)
     3. Tertiary: Return error for salvage request
 
@@ -3452,6 +3493,13 @@ def invoke_with_file_output(
             block is unchanged by it (a bypassed codex still answers on
             stdout, measured 2026-09-17 — its final ``agent_message`` was the
             array, exactly the ``stdout_fallback`` shape this reads).
+        run_model_specs: Every model of the fan-out this slot belongs to,
+            itself included. Given, a missing output file is looked for under a
+            wrong name (step 1b): live run 10, pi wrote
+            ``…deepseek-v4-flash.json`` for ``…deepseek-v4_1-flash.json`` and
+            its three findings were recorded as a failed model. ``None`` (the
+            default) never looks, which is every caller that does not know
+            which other models write into the same dir.
 
     Returns:
         Dict with keys:
@@ -3470,6 +3518,12 @@ def invoke_with_file_output(
 
     full_context, output_json_path = _file_output_context(
         model_spec, prompt_context, output_dir, phase, timeout, anchor
+    )
+    # Step 1b's baseline, taken before the child can write anything: a file
+    # this call adopts must have appeared (or changed) during it.
+    phase_files_before = (
+        _result_files.snapshot_candidates(output_json_path.parent)
+        if run_model_specs is not None else None
     )
 
     # Format prompt
@@ -3544,6 +3598,29 @@ def invoke_with_file_output(
             "output_file": str(output_json_path),
             "details": result.get("details", {}),
         }
+
+    # Step 1b: the requested file is missing, but the model may have written
+    # its answer under another name. Before stdout, because a file the model
+    # wrote is its deliberate answer and stdout is a scrape.
+    if phase_files_before is not None and file_result.get("source") == "missing":
+        adopted = _adopt_misnamed_result(
+            output_json_path, phase_files_before, model_spec, run_model_specs,
+            prefer_arrays=prefer_arrays,
+        )
+        if adopted is not None:
+            data, wrote = adopted
+            _finalize_file_output_log(
+                log_file, deferred_log, result, model_spec, prompt,
+                success=True, error=None, result_source=f"file (written as {wrote})",
+            )
+            return {
+                "success": True,
+                "data": data,
+                "source": "file",
+                "output_file": str(output_json_path),
+                "misnamed_from": wrote,
+                "details": result.get("details", {}),
+            }
 
     # Fall back to stdout parsing (the data parsed by the provider)
     stdout_data = result.get("data")

@@ -74,8 +74,9 @@ writing a second file with a private shape — ``run`` only ever on a detached r
   ``models_total`` is the number of specs requested. ``interval_s`` is the
   ticker cadence the run resolved. ``notes`` is a finished apply phase's list
   of plain lines a host must relay beside its counts — a consistency warning,
-  the items left unapplied and why (fix round 14) — which ``status`` renders
-  and carries into a terminal poll's ``notice``. This enumeration is the in-code contract for
+  the items left unapplied and why (fix round 14), or a review phase's notes
+  on its result files (``utils/result_files.py``, fix round 24) — which
+  ``status`` renders and carries into a terminal poll's ``notice``. This enumeration is the in-code contract for
   the object — a reader who finds a key missing from it concludes the key is not
   part of the schema and writes a second file for it, so a new ``progress`` key
   lands here in the same commit as its writer.
