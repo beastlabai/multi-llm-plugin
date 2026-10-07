@@ -526,13 +526,13 @@ to bare `python`.
    - `[CONSOLIDATION_BATCHES_PENDING]` — multiple batches
 
    Then:
-   1. Load `consolidation_tasks.json` from the phase directory (`{plan}/review-plan/`) — every task in its `batches` array carries a complete `prompt`
+   1. Load `consolidation_tasks.json` from the phase directory (`{plan}/review-plan/`) — every task in its `batches` array carries a complete `prompt`, and `prompt_path` (`consolidation_batch_N.prompt.txt` in the same directory, exactly the bytes of `prompt`) with its line count `prompt_lines`
    2. Count the number of batches as `{total_batches}` and mark the consolidation phase start:
       ```bash
       uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
         --state-file "$STATE_FILE" --phase "review-plan-consolidation" --total-batches {total_batches}
       ```
-   3. For each task in the file, run `task.prompt` as a subagent — the filled `consolidate_suggestions.txt` template and that batch's group records are already inside it
+   3. For each task in the file, run a subagent the way validation's contract above says: when the task carries `prompt_path`, the subagent reads that file in full (through line `prompt_lines`) and follows it; otherwise, or if the file is absent, pass `task.prompt`. The filled `consolidate_suggestions.txt` template and that batch's group records are already inside it, so write no prompt file of your own
    4. Write the JSON each subagent returns to that task's `output_path` (`consolidation_batch_N.json` in the phase directory)
    5. After each batch completes, record metrics with cumulative `--batch-index`:
       ```bash

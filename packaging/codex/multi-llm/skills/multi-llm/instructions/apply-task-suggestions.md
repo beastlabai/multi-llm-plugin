@@ -471,7 +471,7 @@ Suggestions whose decision was offloaded to the judge agent — via `--agent-dec
      --state-file "$STATE_FILE" \
      --apply-phase "apply-task-suggestions"
    ```
-   Best-effort: if `report_data.json` is missing from the review dir (the review predates this feature), the command prints a notice and exits 0 without changing the report — just continue.
+   Best-effort: if `report_data.json` is missing from the review dir (the review predates this feature), the command prints a notice and exits 0 without changing the report — just continue. The same holds when the phase recorded no human or judge decision: the report stays as the review wrote it, and the command says so (never edit the report yourself).
 
 ### 8. Mark Phase Completed
 

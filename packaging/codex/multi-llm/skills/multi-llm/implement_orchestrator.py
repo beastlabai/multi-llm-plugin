@@ -1765,6 +1765,7 @@ def _native_withheld(
     ``pending_tasks`` is recounted from what is left.
     """
     from utils.write_batch_scheduler import (
+        NATIVE_REFUSED_PREFIX,
         blocked_by_check_reason,
         decomposition_graph,
         transitive_dependents,
@@ -1815,6 +1816,7 @@ def _native_withheld(
         try:
             from utils.write_phase_bridge import materialize_write_tasks
             from utils.write_prompt import policy_refusal_for
+            from utils.write_safety import policy_skip_clause
 
             phase_dir = get_phase_dir(plan_path, "implement")
             write_tasks = materialize_write_tasks(
@@ -1834,7 +1836,13 @@ def _native_withheld(
             )
             if message is None:
                 continue
-            refused[task_id] = f"refused before dispatch: {message}"
+            # Fix round 20 (live run 8 #4): the refusal ends with allowing
+            # the file as the user's call (`write_safety.policy_allow_clause`);
+            # beside it, the skip answer, in the executor stop's words.
+            skip = policy_skip_clause(task_id)
+            refused[task_id] = (
+                f"{NATIVE_REFUSED_PREFIX}{message} {skip[0].upper()}{skip[1:]}."
+            )
         for task_id in sorted(refused):
             state.update_task_status(task_id, "failed", reason=refused[task_id])
             for dependent in transitive_dependents(graph, task_id):
@@ -1913,36 +1921,48 @@ def _kept_labels(state: StateManager, plan: Any = None) -> Dict[str, str]:
     list — "accepted with its check findings", "accepted after failing",
     "completed by hand" — from *plan* (this run's human-task plan) and the
     answers on record, in the words the executor's ``resume: kept`` line and
-    summary.md use (``write_batch_scheduler.answered_done_label``)."""
+    summary.md use (``write_batch_scheduler.answered_done_label``); and a
+    check whose findings stand, not accepted, as
+    ``write_batch_scheduler.KEPT_WITH_FINDINGS_LABEL`` (fix round 20, live
+    run 8 #6: 01b and 01c listed T002 as if it had passed)."""
     from types import SimpleNamespace
 
     from utils.write_batch_scheduler import (
+        KEPT_WITH_FINDINGS_LABEL,
         answered_done_label,
         answered_done_on_record,
+        rerunnable_checks,
     )
 
     accepted, completed = answered_done_on_record(state)
     accepted = dict(accepted)
     completed = list(completed)
+    retried = set()
     if plan is not None:
         accepted.update(getattr(plan, "accepted", None) or {})
         completed += list(getattr(plan, "completed", None) or [])
+        retried = set(getattr(plan, "retry", None) or ())
     view = SimpleNamespace(accepted=accepted)
-    return {
+    labels = {
+        task_id: KEPT_WITH_FINDINGS_LABEL
+        for task_id in rerunnable_checks(state)
+        if task_id not in retried
+    }
+    labels.update({
         task_id: answered_done_label(view, task_id)
         for task_id in list(accepted) + completed
-    }
+    })
+    return labels
 
 
 def _kept_named(kept: Sequence[str], labels: Dict[str, str]) -> str:
     """The kept tasks as a resume line names them: the plain ones first (at
-    most eight), then each answered one with how it was answered."""
-    plain = [task_id for task_id in kept if task_id not in labels]
-    shown = ", ".join(plain[:8]) + (", …" if len(plain) > 8 else "")
-    answered = ", ".join(
-        f"{task_id} ({labels[task_id]})" for task_id in kept if task_id in labels
-    )
-    return ", ".join(part for part in (shown, answered) if part)
+    most eight), then each labelled one with what it is
+    (``write_batch_scheduler.kept_named``, the executor's and the progress
+    line's words too)."""
+    from utils.write_batch_scheduler import kept_named
+
+    return kept_named(kept, labels)
 
 
 def _continued_line(kept: Sequence[str], labels: Optional[Dict[str, str]] = None) -> str:
@@ -2904,7 +2924,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(
                 "Refused before dispatch (recorded failed in state.json; not in "
                 "the batches, do not dispatch or record them; list them in the "
-                "summary as failed, refused before dispatch):"
+                "summary as failed, refused before dispatch; in your report give "
+                "each one's way forward as its line words it, the user's call, "
+                "and never change driver.write_paths yourself):"
             )
             for task_id, reason in sorted(native_withheld["refused"].items()):
                 print(f"  {_titled(task_id)}: {reason}")

@@ -914,11 +914,20 @@ def _write_one_sidecar(target: str, prompt: str) -> None:
         raise
 
 
-def write_prompt_sidecars(tasks: List[Dict[str, Any]], phase_dir: str) -> bool:
+def write_prompt_sidecars(
+    tasks: List[Dict[str, Any]],
+    phase_dir: str,
+    stale_glob: str = "validation_batch_*.prompt.txt",
+) -> bool:
     """Write every task's prompt sidecar; all tasks or none.
 
     Each task already carries ``prompt_path``/``prompt_lines`` (set by the
-    caller before :func:`make_task`, so the schema saw them). A phase where some
+    caller before :func:`make_task`, so the schema saw them). *stale_glob*
+    names the kind's own sidecars in *phase_dir*, removed first: validation's
+    by default; consolidation (``consolidation_batch_*.prompt.txt``) and task
+    generation (``task_generation.prompt.txt``) pass theirs (live run 8:
+    the Claude Code host wrote both kinds' prompts to temp files by hand, or
+    pasted a 21 KB prompt into its subagent call). A phase where some
     tasks carry the key and others do not invites non-identical prompt bytes
     across batches, so on any ``OSError`` every written file is removed, both
     keys are popped from every task, one ``[PROMPT_SIDECAR_SKIPPED]`` line goes
@@ -935,7 +944,7 @@ def write_prompt_sidecars(tasks: List[Dict[str, Any]], phase_dir: str) -> bool:
         # A wider previous round may have left higher-numbered sidecars.
         # Cleanup is optional too: a locked file must not abort materialization
         # or leave any task advertising a prompt from that earlier round.
-        for stale in Path(phase_dir).glob("validation_batch_*.prompt.txt"):
+        for stale in Path(phase_dir).glob(stale_glob):
             stale.unlink(missing_ok=True)
         for task in tasks:
             _write_one_sidecar(task["prompt_path"], task["prompt"])

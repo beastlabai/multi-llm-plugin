@@ -12,8 +12,9 @@ prints the next step as a block of marker lines above its result line::
     [NEXT_COMMAND_ANSWERS_WHY] <why>
     [NEXT_COMMAND_ANSWERS] <command>
 
-(the answers pair only from ``util next-command`` on a stopped implement,
-fix round 14), or ``[WORKFLOW_COMPLETE]``. Either kind is followed by one
+(the answers pairs only from ``util next-command`` on a stopped implement,
+fix round 14: the combined answer first, then each answer alone since fix
+round 20), or ``[WORKFLOW_COMPLETE]``. Either kind is followed by one
 ``[MANUAL_TASK] <id> <title>`` line per implement task the run deferred to the
 user, while any is owed, and one ``[MANUAL_TASK_NOTE]`` line saying how to
 record them done (after the commands of a command block since fix round 16).
@@ -32,7 +33,7 @@ tasks listed. This checks the copy, and only the copy:
   it. An indented example of the block (a plan or a doc quoting it, read by a
   tool) is not a phase result.
 * It passes when every command of that block (the ``[NEXT_COMMAND]`` one,
-  each ``[NEXT_COMMAND_OPTIONAL]`` one and the ``[NEXT_COMMAND_ANSWERS]`` one)
+  each ``[NEXT_COMMAND_OPTIONAL]`` one and each ``[NEXT_COMMAND_ANSWERS]`` one)
   is, byte for byte, a line inside a
   fenced code block of the final assistant message. Only the whitespace around
   a line is ignored, so a fence nested in a list item still counts. For
@@ -119,8 +120,9 @@ except ImportError:  # direct script invocation
 NEXT_COMMAND = "[NEXT_COMMAND] "
 NEXT_COMMAND_OPTIONAL = "[NEXT_COMMAND_OPTIONAL] "
 NEXT_COMMAND_OPTIONAL_WHY = "[NEXT_COMMAND_OPTIONAL_WHY] "
-#: A stopped implement's one combined answer (``util next-command``, fix
-#: round 14), after the primary and any optional entries.
+#: A stopped implement's answers (``util next-command``, fix round 14; each
+#: alone after the combined one since fix round 20), after the primary and
+#: any optional entries, each below its why line.
 NEXT_COMMAND_ANSWERS = "[NEXT_COMMAND_ANSWERS] "
 NEXT_COMMAND_ANSWERS_WHY = "[NEXT_COMMAND_ANSWERS_WHY] "
 WORKFLOW_COMPLETE = "[WORKFLOW_COMPLETE]"
@@ -176,7 +178,7 @@ class Block:
         self.command = command
         #: ``(why, command)`` pairs, in the order the block printed them.
         self.optional: List[tuple] = []
-        #: ``(why, command)``: the combined answers line, when printed.
+        #: ``(why, command)`` pairs: the answers lines, in the order printed.
         self.answers: List[tuple] = []
         #: ``(id, title)`` pairs the block names: the manual tasks the user
         #: still owes (``title`` may be ``""``), on either kind of block.
@@ -405,7 +407,7 @@ def block_reason(block: Block, missing: Sequence[str]) -> str:
         "copied character for character from its [NEXT_COMMAND], "
         "[NEXT_COMMAND_OPTIONAL] or [NEXT_COMMAND_ANSWERS] line (optional "
         "commands after the main one, under the line \"Optional, before "
-        "that:\", each with its why; the answers command last, with its why). "
+        "that:\", each with its why; the answers commands last, each with its why). "
         "Do not "
         "rebuild, shorten, re-quote or rephrase a command, and do not run it: "
         "it is for the user to type.",

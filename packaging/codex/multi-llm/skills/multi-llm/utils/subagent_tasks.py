@@ -383,7 +383,8 @@ def make_task(
         model_hint: Free-form model string or ``auto``; keeps its historical
             meaning. ``full``/``cheap`` belong to ``capability_tier`` alone.
         prompt_path: Absolute path of a sidecar holding exactly the bytes of
-            ``prompt`` (validation and revalidation only). Invoker plumbing of
+            ``prompt`` (validation, revalidation, consolidation and task
+            generation only). Invoker plumbing of
             the same class as ``output_path``, so it is a named kwarg rather
             than an ``extra`` key: it is not per-kind metadata a reader
             consults, it is how a native-subagent host hands ``prompt`` to a

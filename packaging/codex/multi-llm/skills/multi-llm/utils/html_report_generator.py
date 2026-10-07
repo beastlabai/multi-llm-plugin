@@ -2663,6 +2663,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         decisions = _read_human_decisions_from_state(
             Path(args.state_file), args.apply_phase
         )
+        if not decisions and (phase_dir / "report_data.json").exists():
+            # Live run 8 (Claude Code racing 05/08): a phase that decided
+            # nothing by hand or by judge re-rendered the report anyway and
+            # printed "0 of 0 human decision(s) matched", which the host
+            # relayed. The executor leg's twin
+            # (`ApplyOrchestratorBase.regenerate_decisions_overlay`) has
+            # always left the report alone then; this leg now does too.
+            print(
+                f"No human or judge decisions are recorded for "
+                f"{args.apply_phase}, so {phase_dir / 'report.html'} is left "
+                "as it was."
+            )
+            return 0
         result, matched = regenerate_report_with_human_decisions(
             phase_dir, decisions, args.template_style
         )

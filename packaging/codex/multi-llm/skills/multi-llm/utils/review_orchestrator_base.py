@@ -228,7 +228,9 @@ def recompute_consolidation_recommendation(
 
     At or above the threshold the object is written with ``update_status`` and
     put on the result line through ``cli_common.record_consolidation_recommended``
-    (never as ``next``). Below it the key is **deleted** from ``.status.json``
+    (never as ``next``). Below it, or when ``consolidated.json`` was already
+    built from these groups (:func:`consolidation.consolidation_is_current`),
+    the key is **deleted** from ``.status.json``
     with ``status_file.remove_status_keys`` — not written as ``null`` through
     ``update_status``, whose merge cannot remove a key — and nothing is
     recorded, so ``MULTI_LLM_RESULT`` omits it.
@@ -238,7 +240,15 @@ def recompute_consolidation_recommendation(
     """
     if not supports_consolidation:
         return None
-    from .consolidation import CONSOLIDATION_RECOMMENDED_THRESHOLD
+    from .consolidation import (
+        CONSOLIDATION_RECOMMENDED_THRESHOLD, consolidation_is_current,
+    )
+    # Live run 8: a consolidation that already ran on these groups is not
+    # recommended again (a `--reaggregate` after `--consolidate` re-enters
+    # here); groups that changed since make it stale, and it is again.
+    if consolidation_is_current(phase_dir):
+        _status_file.remove_status_keys(phase_dir, ["consolidation_recommended"])
+        return None
     groups = groups or []
     valid_group_count = sum(
         1 for g in groups

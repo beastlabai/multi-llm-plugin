@@ -618,6 +618,30 @@ def effective_age(run: Dict[str, Any], now: Optional[float] = None) -> Optional[
     return _elapsed_since(run.get("started_at"), now)
 
 
+def _open_recommendation(phase_dir: str, recommendation: Any) -> Any:
+    """*recommendation* (the checkpoint's ``consolidation_recommended``), or
+    ``None`` once ``consolidated.json`` was built from the phase's current
+    ``grouped.json`` (:func:`consolidation.consolidation_is_current`).
+
+    The checkpoint loses the key when the consolidation pass finishes, but one
+    written before that rule (or by a pass that failed to rewrite it) still
+    holds it, and a recommendation for work already done is the noise live
+    run 8 reported. Checked only when there is a recommendation to drop.
+    """
+    if not recommendation:
+        return recommendation
+    try:
+        from .consolidation import consolidation_is_current
+    except ImportError:  # pragma: no cover - direct script runs
+        from utils.consolidation import consolidation_is_current  # type: ignore
+    try:
+        if consolidation_is_current(phase_dir):
+            return None
+    except Exception:  # noqa: BLE001 - advisory: keep what the checkpoint says
+        pass
+    return recommendation
+
+
 def classify_run(
     phase_dir: str,
     *,
@@ -659,7 +683,12 @@ def classify_run(
         # `{valid_groups, threshold, command}`, written by the review base's
         # `[CONSOLIDATION_RECOMMENDED]` site. A detached run's caller never saw
         # that stdout, so this view is the only route it reaches a host by.
-        "consolidation_recommended": status.get("consolidation_recommended"),
+        # Dropped once the consolidation it recommends has run on these groups
+        # (live run 8: a checkpoint written before that pass kept saying "run
+        # --consolidate" after it).
+        "consolidation_recommended": _open_recommendation(
+            phase_dir, status.get("consolidation_recommended")
+        ),
         # Plan §2.4: optional, top-level, written only by
         # `validation.publish_validation_context` when a context document was
         # over the inline limit. Same route as `consolidation_recommended`: the
