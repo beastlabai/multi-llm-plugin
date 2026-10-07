@@ -4728,6 +4728,41 @@ class TestTheEtaLineUsesThisRunsOwnBatchCount:
         assert "ALL BATCHES COMPLETE" in eta_lines[0], eta_lines
 
 
+class TestAStoppedRunSaysSoOnItsEtaLines:
+    """Fix round 20 (live run 8 #1): a stop left the last `[ETA]` line at
+    "batch 4/6 … ~0m 37s remaining". Any write phase that stops short of its
+    total logs one closing line saying it stopped."""
+
+    def test_an_apply_stop_after_its_first_batch(self, env):
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "failed", "ids": [], "files_touched": [],
+                          "summary": "gave up"})
+        state = FakeState(env.tmp_path / "state.json")
+        lines = []
+        result = env.scheduler(
+            [env.apply_task(0), env.apply_task(1)], state=state, finalize=False,
+            log=lines.append,
+        ).run()
+        assert result.exit_code == 3, result.messages
+        eta = [l for l in lines if l.startswith("[ETA] apply-suggestions:")]
+        assert "batch 1/2" in eta[0], eta
+        assert eta[-1] == (
+            "[ETA] apply-suggestions: run stopped after batch 1/2 · 1 task(s) not run"
+        ), eta
+
+    def test_a_run_that_finishes_says_nothing_of_a_stop(self, env):
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        state = FakeState(env.tmp_path / "state.json")
+        lines = []
+        result = env.scheduler(
+            [env.apply_task(0)], state=state, finalize=False, log=lines.append,
+        ).run()
+        assert result.exit_code == 0, result.messages
+        assert not [l for l in lines if "run stopped" in l], lines
+
+
 class TestTheClosingEtaLineGoesToThePhaseLog:
     """F7 (2026-09-17): `metrics.finish_phase_in_state` printed the closing
     `[ETA] … phase complete` line to stderr itself, so in a foreground or
