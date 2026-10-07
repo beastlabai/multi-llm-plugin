@@ -1785,7 +1785,9 @@ class FailedAnswerable:
     not_rerun: bool = False
     #: A check task (it declares no file) whose failure a resume does not run
     #: again while the files are unchanged (the executor's
-    #: ``_unchanged_since_failure``; fix round 22, :func:`compose_resume_why`).
+    #: ``_unchanged_since_failure``; fix round 22, :func:`compose_resume_why`):
+    #: only one whose verdict carries the tree it failed on, or one the run
+    #: already kept (fix round 23).
     check: bool = False
 
 
@@ -1796,6 +1798,7 @@ def compose_resume_why(
     outside: Collection[str] = (),
     failed: Sequence[FailedAnswerable] = (),
     checks: Sequence[str] = (),
+    rerun_checks: Collection[str] = (),
     blocked: Mapping[str, str] = {},
     undone_with: Callable[[str], List[str]] = lambda _task_id: [],
     unit: str = "tasks",
@@ -1809,9 +1812,11 @@ def compose_resume_why(
     invented one — "(re-runs the T002 check)", false on unchanged files, or
     "To resume after addressing the write policy:". One clause per task the
     resume does not simply run: each check of *checks* whose findings hold
-    tasks back (*blocked*) is not run again while the files are unchanged; a
-    *failed* check task neither, and any other failed task is dispatched
-    again; a task *refused* before dispatch stays refused until
+    tasks back (*blocked*) is not run again while the files are unchanged,
+    unless *rerun_checks* names it (no record of the tree it ran on, so a
+    resume runs it again; fix round 23); a *failed* check task the resume
+    keeps (``FailedAnswerable.check``) neither, and any other failed task is
+    dispatched again; a task *refused* before dispatch stays refused until
     ``driver.write_paths`` changes when *policy* names it — or for good when
     *outside* does too, since no rule can allow a file outside the
     repository — else is checked again before it is dispatched.
@@ -1830,7 +1835,10 @@ def compose_resume_why(
     parts: List[str] = []
     for check_id in checks:
         waiting = sorted(t for t, c in blocked.items() if c == check_id)
-        parts.append(f"{check_id}'s check {unchanged}{waits(waiting)}")
+        if check_id in rerun_checks:
+            parts.append(f"{check_id}'s check runs again{waits(waiting)}")
+        else:
+            parts.append(f"{check_id}'s check {unchanged}{waits(waiting)}")
     for item in failed:
         if item.check or item.not_rerun:
             parts.append(
@@ -2088,16 +2096,83 @@ def native_stop_answers(state: Any) -> List[Dict[str, Any]]:
     )
 
 
+def executor_check_stamp(
+    phase_dir: Union[str, Path], check_id: str, findings: Any,
+) -> Optional[str]:
+    """The tree the ``--exec-subagents`` leg stamped on *check_id*'s verdict.
+
+    ``verdict.tree_fingerprint`` of ``{phase}/implement_batch_<id>.json``
+    (:meth:`WriteBatchScheduler._stamp_verdict`, re-stamped with the tree the
+    run left by its ``_restamp_check_trees``), the same digest
+    ``write_prompt.check_tree_fingerprint`` takes. Only a verdict that is an
+    ``ok`` check with findings, and the very findings ``state.json`` holds
+    (*findings*), so a stamp is never read off another run of the check than
+    the one on record. ``None`` otherwise. Shared by the native ``--resume``
+    (``implement_orchestrator._executor_check_stamp``) and the native why
+    (:func:`check_kept_on_resume`).
+    """
+    try:
+        from .subagent_tasks import implement_output_name
+    except ImportError:  # pragma: no cover - direct script runs
+        from utils.subagent_tasks import implement_output_name  # type: ignore
+    if not isinstance(findings, list) or not findings:
+        return None
+    path = Path(phase_dir) / implement_output_name(check_id)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    verdict = data.get("verdict") if isinstance(data, dict) else None
+    if not isinstance(verdict, dict) or verdict.get("ok") is not True:
+        return None
+    if not verdict.get("verification_only"):
+        return None
+    if row_check_findings(verdict) != [str(item) for item in findings]:
+        return None
+    stamp = verdict.get("tree_fingerprint")
+    return stamp if isinstance(stamp, str) and stamp else None
+
+
+def check_kept_on_resume(
+    state: Any, check_id: str, phase_dir: Optional[Union[str, Path]] = None,
+) -> bool:
+    """Whether a native ``--resume`` on an unchanged tree keeps *check_id*'s
+    findings instead of handing the check out again
+    (``implement_orchestrator._native_check_reruns``): a ``task_check_trees``
+    stamp on record, else, with *phase_dir*, the executor's verdict stamp
+    (:func:`executor_check_stamp`). With neither, the check runs again, and
+    the resume's why says so (fix round 23)."""
+    try:
+        from .state_manager import TASK_CHECK_TREES_KEY
+    except ImportError:  # pragma: no cover - direct script runs
+        from utils.state_manager import TASK_CHECK_TREES_KEY  # type: ignore
+    try:
+        stamps = state.get(TASK_CHECK_TREES_KEY)
+        findings = (state.get("task_check_findings") or {})
+    except Exception:  # noqa: BLE001 - an advisory read
+        return False
+    if isinstance(stamps, dict) and stamps.get(check_id):
+        return True
+    if phase_dir is None or not isinstance(findings, dict):
+        return False
+    return executor_check_stamp(phase_dir, check_id, findings.get(check_id)) is not None
+
+
 #: What a refusal of a file outside the repository says
 #: (``write_safety.policy_outside_note``), read off a native refusal's reason.
 OUTSIDE_REFUSAL_WORDS = "outside the repository, so no driver.write_paths rule can allow"
 
 
-def native_resume_why(state: Any) -> Optional[str]:
+def native_resume_why(
+    state: Any, *, phase_dir: Optional[Union[str, Path]] = None,
+) -> Optional[str]:
     """:func:`compose_resume_why` for a stopped native implement, from the
     facts :func:`native_stop_answers` answers it from (fix round 22): every
     refusal the native emit records is the write policy's, and a failed task
-    — a half-applied one too — is handed out again on a resume."""
+    — a half-applied one too — is handed out again on a resume. A check
+    whose findings hold tasks back is said to stay unrun only when the
+    resume keeps it (:func:`check_kept_on_resume`, with the implement
+    *phase_dir* for the executor's stamp; fix round 23)."""
     facts = _native_stop_facts(state)
     if facts is None:
         return None
@@ -2116,6 +2191,10 @@ def native_resume_why(state: Any) -> Optional[str]:
             if task_id not in refused
         ],
         checks=facts["checks"],
+        rerun_checks={
+            check_id for check_id in facts["checks"]
+            if not check_kept_on_resume(state, check_id, phase_dir)
+        },
         blocked=facts["blocked"],
         undone_with=facts["undone_with"],
     )
@@ -10040,7 +10119,11 @@ class WriteBatchScheduler:
         ``resume_why`` beside its ``answers``: every failed task, not only
         the answerable ones, since a resume dispatches a half-applied batch
         again too. A failed check task is not run again while the files are
-        unchanged (:meth:`_unchanged_since_failure`)."""
+        unchanged (:meth:`_unchanged_since_failure`), and a check whose
+        findings hold tasks back neither (:meth:`_check_findings_rerun`) —
+        each only when its verdict carries the tree it ran on, or the run
+        already kept it (fix round 23: a timeout, a prose reply or a crash
+        leaves no result file to stamp, and the resume runs it again)."""
         already = set(result.human_plan.skipped)
         manual = {
             str(t.get("task_id", "")) for t in self.tasks
@@ -10056,6 +10139,7 @@ class WriteBatchScheduler:
 
         refused = [o for o in failed if o.task_id in self._refused_before_dispatch]
         blocked = result.blocked_by_check if self.kind == "implement" else {}
+        checks = self._blocking_checks(result) if blocked else []
         return compose_resume_why(
             refused=[o.task_id for o in refused],
             policy={
@@ -10071,14 +10155,44 @@ class WriteBatchScheduler:
                 FailedAnswerable(
                     task_id=o.task_id, not_rerun=bool(o.not_rerun),
                     check=self.kind == "implement" and not declared_file_set(
-                        self._task_by_id(o.task_id) or {}),
+                        self._task_by_id(o.task_id) or {})
+                    and (bool(o.not_rerun) or self._verdict_carries_tree(o.task_id)),
                 )
                 for o in failed if o not in refused
             ],
-            checks=self._blocking_checks(result) if blocked else [],
+            checks=checks,
+            rerun_checks={
+                check_id for check_id in checks
+                if not self._verdict_carries_tree(check_id)
+            },
             blocked=blocked,
             undone_with=undone_with,
             unit="tasks" if self.kind == "implement" else "batches",
+        )
+
+    def _verdict_carries_tree(self, task_id: str) -> bool:
+        """Whether *task_id*'s result file holds a check's verdict stamped
+        with the tree it ran on (``verdict.tree_fingerprint``), which is what
+        :meth:`_unchanged_since_failure` and :meth:`_check_findings_rerun`
+        compare a resume's tree against. No file, no stamp, no check: the
+        resume dispatches it again (fix round 23)."""
+        task = self._task_by_id(task_id)
+        if task is None:
+            return False
+        try:
+            own = resolve_output_target(task, self.phase_dir)
+        except ResultRejected:
+            return False
+        if own is None:
+            return False
+        try:
+            data = json.loads(Path(own).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        verdict = data.get("verdict") if isinstance(data, dict) else None
+        return (
+            isinstance(verdict, dict) and bool(verdict.get("verification_only"))
+            and bool(verdict.get("tree_fingerprint"))
         )
 
     def _record_not_run_in_state(self, result: SchedulerResult) -> None:

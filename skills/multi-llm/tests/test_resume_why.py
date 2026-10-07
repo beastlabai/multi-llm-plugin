@@ -148,6 +148,94 @@ class TestTheExecutorLeg:
         assert not any("re-dispatches" in line for line in lines), lines
 
 
+class TestTheCheckClaimHoldsOnlyWhenTheResumeKeepsIt:
+    """Review of fix round 22 (relay #2): the why said a check "is not run
+    again while the files are unchanged" for every check task, but a resume
+    keeps one only on a record of the tree it ran on: the executor's
+    verdict ``tree_fingerprint`` (a timeout, a prose reply or a crash leaves
+    no result file to stamp), the native leg's ``task_check_trees`` stamp,
+    or the run's own not-rerun record. Without one, the check runs again,
+    and the why says so."""
+
+    @staticmethod
+    def _no_tree(monkeypatch):
+        """No tree on record: the fingerprint git could not take."""
+        from utils.write_batch_scheduler import WriteBatchScheduler
+
+        monkeypatch.setattr(WriteBatchScheduler, "_tree_fingerprint", lambda self: None)
+
+    def test_a_check_with_findings_and_no_tree_runs_again(
+        self, repo, capsys, monkeypatch,
+    ):
+        from tests.test_implement_stop_account import _dispatched_titles, _implement
+
+        from utils.write_batch_scheduler import WriteBatchScheduler
+
+        measured = WriteBatchScheduler._tree_fingerprint
+        self._no_tree(monkeypatch)
+        _first_run(repo, capsys)
+        report = json.loads((repo.phase_dir / "write_batch_report.json").read_text())
+        assert report["stop"]["resume_why"] == (
+            "runs the tasks that can run; T002's check runs again (T007 waits "
+            "on it); T005 stays refused until driver.write_paths changes "
+            "(T006 waits on it)")
+        # And the resume, on a tree it can measure, does what the why says.
+        monkeypatch.setattr(WriteBatchScheduler, "_tree_fingerprint", measured)
+        _implement(repo, "--resume")
+        capsys.readouterr()
+        assert "Check the module" in _dispatched_titles(repo)
+
+    @pytest.mark.parametrize("tree", [True, False], ids=["tree", "no-tree"])
+    def test_a_failed_check_is_kept_only_on_its_tree(
+        self, repo, capsys, monkeypatch, tree,
+    ):
+        from tests.test_check_gate_fixture import CHECK_GATE
+        from tests.test_implement_stop_account import _implement
+
+        if not tree:
+            self._no_tree(monkeypatch)
+        monkeypatch.setenv("MOCK_LLM_WRITE_FAIL_IF_PROMPT_HAS", CHECK_GATE)
+        assert _implement(repo) == 3
+        capsys.readouterr()
+        why = json.loads(
+            (repo.phase_dir / "write_batch_report.json").read_text()
+        )["stop"]["resume_why"]
+        if tree:
+            assert "T002's check is not run again while the files are unchanged" in why, why
+        else:
+            assert "T002 is dispatched again" in why, why
+            assert "not run again" not in why, why
+
+    def test_the_native_leg_reads_the_stamp(self, tmp_path):
+        from utils.write_batch_scheduler import native_resume_why
+
+        state = {
+            "task_status": {"T001": "completed", "T002": "completed", "T003": "pending"},
+            "task_check_findings": {"T002": ["retries must be 3 (found 2)"]},
+            "implement_task_depends_on": {"T001": [], "T002": ["T001"], "T003": ["T002"]},
+        }
+        assert native_resume_why(state) == (
+            "runs the tasks that can run; T002's check runs again (T003 waits on it)")
+        stamped = {**state, "task_check_trees": {"T002": "abc"}}
+        assert native_resume_why(stamped) == (
+            "runs the tasks that can run; T002's check is not run again while "
+            "the files are unchanged (T003 waits on it)")
+        # A check the --exec-subagents leg recorded: its verdict's stamp,
+        # read only while its findings are the ones state.json holds.
+        phase = tmp_path / "implement"
+        phase.mkdir()
+        verdict = {"ok": True, "verification_only": True,
+                   "check": {"passed": False, "findings": ["retries must be 3 (found 2)"]},
+                   "tree_fingerprint": "abc"}
+        (phase / "implement_batch_T002.json").write_text(json.dumps(
+            {"status": "no-op", "ids": ["T002"], "verdict": verdict}))
+        assert "is not run again" in native_resume_why(state, phase_dir=str(phase))
+        verdict["check"]["findings"] = ["another problem"]
+        (phase / "implement_batch_T002.json").write_text(json.dumps(
+            {"status": "no-op", "ids": ["T002"], "verdict": verdict}))
+        assert "T002's check runs again" in native_resume_why(state, phase_dir=str(phase))
+
+
 @pytest.fixture
 def native_repo(tmp_path, monkeypatch):
     """`test_report_check_stop_answers`' check-gate repo, for the native leg."""

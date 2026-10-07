@@ -2154,7 +2154,8 @@ def state_implement_view(
         stop_answers = native_stop_answers(record)
         # Fix round 22: what the plain resume does, as `util next-command`
         # says it above the resume.
-        stop_resume_why = native_resume_why(record)
+        stop_resume_why = native_resume_why(
+            record, phase_dir=str(phase_dir_path(plan_path, _IMPLEMENT_PHASE)))
     return {
         "completed": completed,
         # Fix round 20: whether `--implement <plan> --resume` continues it,
