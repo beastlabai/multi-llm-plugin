@@ -561,6 +561,7 @@ class TestTheTestsLineNamesWhatTheBatchesReported:
         state = json.loads((out / "state.json").read_text())
         assert state[known_checks.APPLY_FIX_BATCH_CHECKS_KEY]["apply-fix-batch-1"] == {
             "prior_changes_id": tasks[1]["prior_changes_id"],
+            "grouped_sha256": known_checks.review_stamp(tasks[1]),
             "findings": [FAILING], "listed": {RACE_CHECK: "failed"},
         }
         # The next batch's native prompt is told.
@@ -868,3 +869,96 @@ class TestABatchThatRanNothingThatFailedHasNoFailingCheck:
         state = json.loads((out / "state.json").read_text())
         record = state[known_checks.APPLY_FIX_BATCH_CHECKS_KEY]["apply-fix-batch-0"]
         assert record["findings"] == [] and record["listed"] == {RACE_CHECK: "not run"}
+
+
+class TestARecordIsThisReviewsOnly:
+    """A fix a later review reports again makes a batch with the same
+    `prior_changes_id`, and a batch's `task_status` is never reset between
+    cycles, so cycle 1's failing check was told to a cycle-2 batch as "an
+    earlier batch of this run". Each record carries the review it applied
+    (`grouped_sha256`), and `--fresh` drops the map (review20/verify #5)."""
+
+    def _cycle(self, tmp_path, review):
+        plan = tmp_path / "plans" / "racing.md"
+        plan.parent.mkdir(parents=True, exist_ok=True)
+        plan.write_text(TASK_LIST, encoding="utf-8")
+        out = tmp_path / "plans" / "racing"
+        phase_dir = out / "apply-fixes"
+        (out / "code-review").mkdir(parents=True, exist_ok=True)
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        grouped = out / "code-review" / "grouped.json"
+        grouped.write_text(json.dumps(review), encoding="utf-8")
+        batches = [
+            {"file_key": "index.html", "prompt": f"Fix {n}.\n\n{PRIOR_CHANGES_TOKEN}\n",
+             "fixes": [{"group_id": f"g{n}", "title": f"Fix {n}"}]}
+            for n in range(2)
+        ]
+        tasks = materialize_write_tasks(
+            kind="apply_code_fixes", batches=batches, phase_dir=str(phase_dir),
+            plan_file=str(plan), grouped_file=str(grouped))
+        write_task_file_for_phase(
+            kind="apply_code_fixes", tasks=tasks, phase_dir=str(phase_dir),
+            plan_file=str(plan), grouped_file=str(grouped))
+        return plan, out, phase_dir, tasks
+
+    def test_cycle_1_s_failure_is_not_told_to_cycle_2(self, tmp_path, capsys):
+        from utils import batch_done
+
+        _plan, out, phase_dir, first = self._cycle(tmp_path, [{"theme": "cycle 1"}])
+        (out / "state.json").write_text(json.dumps({"task_status": {}}), encoding="utf-8")
+        assert batch_done.main([
+            "--phase-dir", str(phase_dir), "--task-id", "apply-fix-batch-1",
+            "--status", "completed", "--own-check", "findings", "--finding", FAILING,
+        ]) == 0
+        capsys.readouterr()
+        state = json.loads((out / "state.json").read_text())
+        record = state[known_checks.APPLY_FIX_BATCH_CHECKS_KEY]["apply-fix-batch-1"]
+        assert record["grouped_sha256"] == first[1]["inputs"]["grouped_sha256"] != ""
+        # Within the cycle, batch 0 (say, re-run on a resume) is told.
+        assert known_checks.earlier_batch_check_failures(
+            state, first, "apply-fix-batch-0") == [("apply-fix-batch-1", [FAILING])]
+
+        # Cycle 2: another review; the same fixes again make the same batches.
+        _plan, out, phase_dir, second = self._cycle(
+            tmp_path, [{"theme": "cycle 1"}, {"theme": "cycle 2"}])
+        assert [t["prior_changes_id"] for t in second] == [
+            t["prior_changes_id"] for t in first]
+        assert known_checks.earlier_batch_check_failures(
+            state, second, "apply-fix-batch-0") == []
+        native, _task, _info = write_prompt.render_write_prompt(
+            phase_dir, "apply-fix-batch-0")
+        assert "An earlier batch of this run" not in native
+
+    def test_the_executor_leg_stamps_its_record(self, env, monkeypatch):
+        _declare_npm_test(env)
+        _result, state = _two_batches(
+            env, monkeypatch, check_on="Apply fix 0",
+            check={"passed": False, "findings": [FAILING],
+                   "listed": {"npm test": "failed"}},
+        )
+        record = state.state[known_checks.APPLY_FIX_BATCH_CHECKS_KEY]["apply-fix-batch-0"]
+        assert "grouped_sha256" in record
+        assert record["grouped_sha256"] == known_checks.review_stamp(_fix_task(env, 0))
+
+    def test_fresh_drops_the_records(self, skill_runner, fixture_manager, mock_provider):
+        plan = fixture_manager.create_plan("fresh-checks", "# Test Plan\n")
+        code_review = plan.ensure_phase_dir("code-review")
+        (code_review / "grouped.json").write_text(json.dumps([{
+            "theme": "Issue", "models": ["cursor-agent"],
+            "suggestions": [{"title": "Issue", "desc": "Desc", "importance": "MEDIUM",
+                             "type": "bug", "file": "test.py",
+                             "source_model": "cursor-agent"}],
+        }]), encoding="utf-8")
+        (code_review / "validation.json").write_text(json.dumps(
+            [{"group_index": 0, "status": "valid", "reason": "Valid"}]), encoding="utf-8")
+        state_file = fixture_manager.create_state_file(
+            plan, phases_completed=["code-review"],
+            extra_state={known_checks.APPLY_FIX_BATCH_CHECKS_KEY: {"apply-fix-batch-0": {
+                "prior_changes_id": "test.py#00000000", "grouped_sha256": "",
+                "findings": [FAILING], "listed": {}}}},
+        )
+        result = skill_runner.run_orchestrator(
+            "apply_fixes", plan.plan_path, "--fresh", "--dry-run")
+        assert result.success, result.stderr
+        state = json.loads(Path(state_file).read_text(encoding="utf-8"))
+        assert known_checks.APPLY_FIX_BATCH_CHECKS_KEY not in state

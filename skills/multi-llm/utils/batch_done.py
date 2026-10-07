@@ -510,6 +510,7 @@ def record_batch(
             _known_checks.set_batch_check_report_in_state(
                 state, task_id,
                 prior_changes_id=str(task.get("prior_changes_id") or ""),
+                grouped_sha256=_known_checks.review_stamp(task),
                 findings=batch_check if completed else None,
                 listed=listed_outcomes if completed else None,
             )
