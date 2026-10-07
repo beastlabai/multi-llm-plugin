@@ -84,6 +84,7 @@ __all__ = [
     "WriteSafetyError",
     "PathEscape",
     "PolicyViolation",
+    "PolicyHit",
     "WritePolicy",
     "AuditLog",
     "TaskSnapshot",
@@ -349,12 +350,18 @@ class PathEscape(WriteSafetyError):
 
 
 class PolicyViolation(WriteSafetyError):
-    """A path is outside ``driver.write_paths`` (D3l). Carries the offenders."""
+    """A path is outside ``driver.write_paths`` (D3l). Carries the offenders:
+    ``paths`` as named, and ``hits`` (fix round 21), each one's
+    :class:`PolicyHit`, which every way forward is worded from."""
 
-    def __init__(self, message: str, paths: Sequence[str], rule: str = "") -> None:
+    def __init__(
+        self, message: str, paths: Sequence[str], rule: str = "",
+        hits: Optional[Sequence["PolicyHit"]] = None,
+    ) -> None:
         super().__init__(message)
         self.paths = list(paths)
         self.rule = rule
+        self.hits = list(hits or [])
 
 
 # ---------------------------------------------------------------------------
@@ -479,6 +486,11 @@ def relative_to_root(path: str, root: str) -> str:
         return resolved.resolve().as_posix()
 
 
+def _outside_root(relative: str) -> bool:
+    """Whether :func:`relative_to_root`'s answer lies outside the root."""
+    return Path(relative).is_absolute() or relative.startswith("..")
+
+
 def file_sha256(path: str) -> Optional[str]:
     """The file's sha256, or ``None`` when it does not exist.
 
@@ -558,33 +570,194 @@ def describe_paths(paths: Sequence[str], limit: int = 3) -> str:
     return f"{', '.join(names[:-1])} and {names[-1]}"
 
 
-def policy_allow_clause(paths: Sequence[str]) -> str:
+@dataclass(frozen=True)
+class PolicyHit:
+    """One file ``driver.write_paths`` refuses, and which of its rules do.
+
+    Fix round 21 (review of round 20, the run-8 case): the way forward said
+    "allow it in driver.write_paths" for every refusal, while the deny list
+    wins over ``allow`` — so for a deny hit, adding the file to ``allow``
+    resumed into the same refusal with the same advice. The way forward is
+    now worded from what refused each file: *deny* is every deny pattern
+    that covers it (each must be removed or narrowed), *allowed* whether an
+    ``allow`` pattern matches it (when not, it must be added), and
+    *outside* a path outside the repository, which no rule can allow.
+    *path* is repo-relative, or, outside the repository, as the task
+    declared it (never resolved to an absolute path).
+    """
+
+    path: str
+    deny: Tuple[str, ...] = ()
+    allowed: bool = True
+    outside: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        """The stop record's entry (``policy_rules``)."""
+        if self.outside:
+            return {"path": self.path, "outside": True}
+        return {"path": self.path, "deny": list(self.deny), "allowed": self.allowed}
+
+    @classmethod
+    def from_dict(cls, data: Any) -> Optional["PolicyHit"]:
+        """The entry back, or ``None`` for one that cannot be read."""
+        if not isinstance(data, dict) or not str(data.get("path") or ""):
+            return None
+        if data.get("outside"):
+            return cls(path=str(data["path"]), outside=True)
+        deny = data.get("deny")
+        return cls(
+            path=str(data["path"]),
+            deny=tuple(str(p) for p in deny) if isinstance(deny, list) else (),
+            allowed=bool(data.get("allowed", True)),
+        )
+
+
+def policy_hits(entries: Iterable[Any]) -> List[PolicyHit]:
+    """:class:`PolicyHit` entries from hits or their recorded dicts."""
+    hits: List[PolicyHit] = []
+    for entry in entries or ():
+        hit = entry if isinstance(entry, PolicyHit) else PolicyHit.from_dict(entry)
+        if hit is not None:
+            hits.append(hit)
+    return hits
+
+
+def _quoted_rules(patterns: Sequence[str]) -> str:
+    quoted = [f"`{pattern}`" for pattern in patterns]
+    if len(quoted) == 1:
+        return quoted[0]
+    return f"{', '.join(quoted[:-1])} and {quoted[-1]}"
+
+
+#: How many deny rules a way forward names one by one; the rest are counted.
+POLICY_RULES_SHOWN = 3
+
+
+def policy_allow_clause(refused: Sequence[Any]) -> Optional[str]:
     """The way past a write ``driver.write_paths`` refused that changes the
-    policy, worded as the user's own call: ``if you want <paths> written,
-    allow it in driver.write_paths (.multi-llm/providers.yaml)``.
+    policy, worded as the user's own call and per rule: ``if you want <paths>
+    written, remove or narrow the deny rule `<pattern>` in driver.write_paths
+    (.multi-llm/providers.yaml) so it no longer covers <paths>`` for a deny
+    hit, ``… add <paths> to driver.write_paths.allow (…)`` for an allow miss,
+    each refused file under its own rule. ``None`` when a refused file is
+    outside the repository: no policy change lets the task run, and the
+    way forward is the skip alone (:func:`policy_outside_note`).
+
+    *refused* holds :class:`PolicyHit` entries (or their recorded dicts).
+    Plain path strings, a record from before fix round 21 that kept no rule,
+    get the wording that is right for either rule.
 
     Fix round 20 (live run 8 #4, a user decision: permissive): the plugin
     keeps offering it, since it is the user's to decide and it lets the run
-    complete, but plainly as their choice, naming the file, and no longer as
-    "widen `allow`/narrow `deny` … if this path is genuinely in scope". Every
-    stop, refusal and status line that offers it says it in these words, and
-    the hosts relay it as given and never change the policy themselves
+    complete, but plainly as their choice, naming the file. Fix round 21: a
+    deny hit names the deny rule to narrow (the deny list wins over
+    ``allow``, so "allow it" resumed into the same refusal). Every stop,
+    refusal and status line that offers it says it in these words, and the
+    hosts relay it as given and never change the policy themselves
     (``modes.STOP_POLICY_RULE``).
     """
-    it = "it" if len([p for p in paths if str(p)]) <= 1 else "them"
+    entries = list(refused or ())
+    plain = [str(e) for e in entries if isinstance(e, str) and str(e)]
+    hits = policy_hits(e for e in entries if not isinstance(e, str))
+    if any(hit.outside for hit in hits):
+        return None
+    where = f"driver.write_paths ({POLICY_FILE})"
+    if plain or not hits:
+        names = plain + [hit.path for hit in hits]
+        it = "it" if len(names) <= 1 else "them"
+        return (
+            f"if you want {describe_paths(names)} written, change {where} so "
+            f"it allows {it}: add {it} to `allow`, and remove or narrow any "
+            f"deny rule that covers {it}"
+        )
+    groups: Dict[Tuple[str, ...], List[str]] = {}
+    for hit in hits:
+        if hit.deny:
+            groups.setdefault(tuple(hit.deny), []).append(hit.path)
+    unallowed = [hit.path for hit in hits if not hit.allowed]
+    actions: List[str] = []
+    shown_rules = 0
+    hidden: List[str] = []
+    hidden_paths: List[str] = []
+    for patterns, paths in groups.items():
+        if shown_rules >= POLICY_RULES_SHOWN:
+            hidden += [p for p in patterns if p not in hidden]
+            hidden_paths += [p for p in paths if p not in hidden_paths]
+            continue
+        shown_rules += len(patterns)
+        many = len(patterns) > 1
+        # Every file the clause opens with: "covers it", not the list again
+        # (the stop's headline has a budget, `fit_stop_headline`).
+        covered = (
+            ("it" if len(paths) == 1 else "them")
+            if len(paths) == len(hits) else describe_paths(paths)
+        )
+        actions.append(
+            f"remove or narrow the deny rule{'s' if many else ''} "
+            f"{_quoted_rules(patterns)} in {where if not actions else 'driver.write_paths'} "
+            f"so the rule{'s' if many else ''} no longer cover{'' if many else 's'} "
+            f"{covered}"
+        )
+    if hidden:
+        many = len(hidden) > 1
+        actions.append(
+            f"remove or narrow the {len(hidden)} other deny rule"
+            f"{'s' if many else ''} that cover{'' if many else 's'} "
+            f"{describe_paths(hidden_paths)} (the refusal's details name "
+            f"{'each' if many else 'it'})"
+        )
+    if unallowed:
+        # Every file the clause opens with: "add it", not the list again.
+        named = (
+            ("it" if len(hits) == 1 else "them")
+            if len(unallowed) == len(hits) else describe_paths(unallowed)
+        )
+        actions.append(
+            f"add {named} to driver.write_paths.allow"
+            + (f" ({POLICY_FILE})" if not actions else "")
+        )
+    if len(actions) > 1:
+        done = f"{', '.join(actions[:-1])}, and {actions[-1]}"
+    else:
+        done = actions[0] if actions else f"change {where}"
+    return f"if you want {describe_paths([hit.path for hit in hits])} written, {done}"
+
+
+def policy_outside_note(refused: Sequence[Any]) -> str:
+    """Why no policy change can let a task run (fix round 21): ``../x is
+    outside the repository, so no driver.write_paths rule can allow it``,
+    naming each such file as the task declared it."""
+    outside = [hit.path for hit in policy_hits(
+        e for e in (refused or ()) if not isinstance(e, str)) if hit.outside]
+    one = len(outside) <= 1
     return (
-        f"if you want {describe_paths(paths)} written, allow {it} in "
-        f"driver.write_paths ({POLICY_FILE})"
+        f"{describe_paths(outside)} {'is' if one else 'are'} outside the "
+        f"repository, so no driver.write_paths rule can allow "
+        f"{'it' if one else 'them'}"
     )
 
 
-def policy_skip_clause(task_id: str) -> str:
+def policy_skip_clause(task_id: str, *, alone: bool = False) -> str:
     """The way past an implement task the policy refused that leaves it
-    undone, beside :func:`policy_allow_clause`: ``if not, skip T005: …``."""
+    undone, beside :func:`policy_allow_clause`: ``if not, skip T005: …``.
+    *alone* drops the ``if not,`` for a refusal no policy change answers
+    (fix round 21: a file outside the repository)."""
     return (
-        f"if not, skip {task_id}: add --human-task {task_id}=skip to the "
+        ("" if alone else "if not, ")
+        + f"skip {task_id}: add --human-task {task_id}=skip to the "
         f"resume command ({task_id} and the tasks after it stay undone)"
     )
+
+
+def policy_way_forward(refused: Sequence[Any], *, then: str = "resume") -> str:
+    """:func:`policy_allow_clause` and *then*, or, when no policy change can
+    let the task run, :func:`policy_outside_note` — the sentence every
+    refusal ends with (``WritePolicy.check``'s message)."""
+    clause = policy_allow_clause(refused)
+    if clause is None:
+        note = policy_outside_note(refused)
+        return f"{note[0].upper()}{note[1:]}."
+    return f"Your call: {clause}, then {then}."
 
 
 @dataclass
@@ -620,7 +793,7 @@ class WritePolicy:
         #22 was fixed for), while :meth:`violation` keeps asking both.
         """
         relative = relative_to_root(path, self.root)
-        if Path(relative).is_absolute() or relative.startswith(".."):
+        if _outside_root(relative):
             return f"outside the pinned repo root {self.root}"
         for pattern, matcher in zip(self.deny, self._deny):
             if matcher.match(relative):
@@ -648,13 +821,37 @@ class WritePolicy:
             f"(allow: {', '.join(self.allow)})"
         )
 
+    def hit(self, path: str) -> Optional[PolicyHit]:
+        """``path``'s :class:`PolicyHit`, or ``None`` when the policy permits
+        it: every deny pattern that covers it and whether ``allow`` matches
+        it, so the way forward names each rule to change (fix round 21)."""
+        relative = relative_to_root(path, self.root)
+        if _outside_root(relative):
+            return PolicyHit(path=str(path), outside=True)
+        deny = tuple(
+            pattern for pattern, matcher in zip(self.deny, self._deny)
+            if matcher.match(relative)
+        )
+        allowed = any(matcher.match(relative) for matcher in self._allow)
+        if not deny and allowed:
+            return None
+        return PolicyHit(path=relative, deny=deny, allowed=allowed)
+
     def check(self, paths: Iterable[str], *, when: str) -> None:
-        """Raise :class:`PolicyViolation` naming every offender and its rule."""
+        """Raise :class:`PolicyViolation` naming every offender and its rule.
+
+        Each offender is named repo-relative, or, outside the repository, as
+        given (fix round 21: a task's ``../x`` was named by its resolved
+        absolute path, in the way forward and every record of it).
+        """
         offenders: List[Tuple[str, str]] = []
+        hits: List[PolicyHit] = []
         for path in paths:
             rule = self.violation(path)
             if rule is not None:
-                offenders.append((relative_to_root(path, self.root), rule))
+                hit = self.hit(path) or PolicyHit(path=relative_to_root(path, self.root))
+                offenders.append((hit.path, rule))
+                hits.append(hit)
         if not offenders:
             return
         detail = "; ".join(f"{path} ({rule})" for path, rule in offenders)
@@ -662,9 +859,10 @@ class WritePolicy:
         raise PolicyViolation(
             f"Write policy violation ({when}): {detail}. Repo root: {self.root}. "
             f"driver.write_paths is checked before dispatch and after the run. "
-            f"Your call: {policy_allow_clause(named)} and resume.",
+            f"{policy_way_forward(hits)}",
             paths=named,
             rule=offenders[0][1],
+            hits=hits,
         )
 
     def to_dict(self) -> Dict[str, Any]:

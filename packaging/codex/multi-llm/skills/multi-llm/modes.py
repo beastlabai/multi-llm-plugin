@@ -471,7 +471,9 @@ TOOL_NOTICE_LINE = (
 #: keeps offering it, worded as the user's own call
 #: (``write_safety.policy_allow_clause``), since it is theirs to decide and it
 #: lets the run complete; a host relays it as given, adds no policy advice of
-#: its own and never edits the setting itself. Rendered into
+#: its own and never edits the setting itself. Fix round 21: the change is
+#: worded per rule (a deny hit names the deny rule to narrow, since the deny
+#: list wins over ``allow``), so the rule names both kinds. Rendered into
 #: :data:`NEEDS_HUMAN_RULE` (every file route, both plugin instructions and
 #: Claude Code's ``SKILL.md``), :data:`TOOL_NO_COMPOSED_COMMAND_LINE` (both
 #: tool descriptions) and :data:`NEEDS_HUMAN_MESSAGE` (the tool routes'
@@ -479,9 +481,11 @@ TOOL_NOTICE_LINE = (
 STOP_POLICY_RULE = (
     "Never edit `driver.write_paths`, or any other multi-llm setting in "
     "`.multi-llm/providers.yaml`, yourself. At a stop, offer only the ways "
-    "forward the stop itself names, as it words them: when it names allowing "
-    "a refused file in `driver.write_paths`, that is one of them and the "
-    "user's call; add no advice about the write policy of your own."
+    "forward the stop itself names, as it words them: when it names a change "
+    "to `driver.write_paths` that lets a refused file be written (adding it to "
+    "`allow`, or removing or narrowing a deny rule that covers it), that is "
+    "one of them and the user's call; add no advice about the write policy of "
+    "your own."
 )
 
 #: The user-next-step line's sibling (racing re-run 2026-10-04): after a failed

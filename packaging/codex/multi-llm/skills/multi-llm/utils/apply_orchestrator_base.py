@@ -1138,6 +1138,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             self.state.clear_human_decisions(self.phase_name)
             self.state.clear_processed_items(self.phase_name)
             self.state.clear_processing_progress(self.phase_name)
+            if self.write_kind == "apply_code_fixes":
+                # Fix round 21: what the void run's batches reported about
+                # their own checks is no earlier batch of this run.
+                from .known_checks import APPLY_FIX_BATCH_CHECKS_KEY
+                self.state.state.pop(APPLY_FIX_BATCH_CHECKS_KEY, None)
             self.state.save()
             # Clear prior changes history for a fresh start
             prior_changes_file = Path(self.out_dir) / "prior_changes.jsonl"

@@ -944,17 +944,28 @@ DECLINED_REASON_MAX_CHARS = 300
 
 def declined_reason(text: Any) -> str:
     """One declined item's reason as every surface carries it: whitespace
-    collapsed, a closing full stop or semicolon dropped, bounded; ``""`` for
-    no text.
+    collapsed, one closing full stop or semicolon dropped, bounded; ``""``
+    for no text.
 
     Every line that quotes a reason puts its own punctuation after it, so a
     reason that ended in one printed it twice (the decline fixture,
     2026-10-07: "… MAX_SPEED.."). Both legs read a reason through here: the
     executor's :func:`declined_items` and ``util batch-done --declined``.
+
+    Fix round 21 (review of round 20, #2): at most one mark, and only when
+    text remains. Stripping every closing mark turned a reason of ``...`` or
+    ``.`` into no reason, so the executor stopped on the decline as a
+    partial application and the native leg refused ``--declined f2=...``;
+    such a reason is the batch's own words, kept.
     """
     if not isinstance(text, str):
         return ""
-    return " ".join(text.split()).rstrip(" .;")[:DECLINED_REASON_MAX_CHARS]
+    reason = " ".join(text.split())
+    if reason[-1:] in (".", ";"):
+        trimmed = reason[:-1].rstrip()
+        if trimmed:
+            reason = trimmed
+    return reason[:DECLINED_REASON_MAX_CHARS]
 
 
 @dataclass

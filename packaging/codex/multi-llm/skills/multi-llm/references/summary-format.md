@@ -99,7 +99,8 @@ Every mode ends with this report. Four rules, and a fifth for `ask`:
     the lookup also printed `[NEXT_COMMAND_ANSWERS_WHY]` /
     `[NEXT_COMMAND_ANSWERS]` pairs (`user_next_step.answers`: a stopped
     implement's `--human-task` answers, the one command carrying every answer
-    first, then each answer alone), write every pair, in the order printed,
+    first when more than one task waits, then each answer alone), write every
+    pair, in the order printed,
     last: its why as plain text, then its command alone in its own fenced
     block. A stopped implement's lookup can also print a `[TESTS_NOT_RUN]`
     line above them, saying nothing ran the repository's tests: give its text

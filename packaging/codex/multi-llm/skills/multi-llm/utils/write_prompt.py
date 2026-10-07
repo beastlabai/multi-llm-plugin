@@ -85,7 +85,8 @@ try:
     )
     from .write_phase_bridge import WRITE_TASK_FILENAME
     from .write_safety import (
-        PolicyViolation, WritePolicy, policy_allow_clause, relative_to_root,
+        PolicyViolation, WritePolicy, policy_allow_clause, policy_outside_note,
+        relative_to_root,
     )
 except ImportError:  # pragma: no cover - direct script invocation
     from utils import known_checks as _known_checks  # type: ignore
@@ -113,7 +114,8 @@ except ImportError:  # pragma: no cover - direct script invocation
     )
     from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
     from utils.write_safety import (  # type: ignore
-        PolicyViolation, WritePolicy, policy_allow_clause, relative_to_root,
+        PolicyViolation, WritePolicy, policy_allow_clause, policy_outside_note,
+        relative_to_root,
     )
 
 
@@ -123,7 +125,9 @@ __all__ = [
     "check_tree_fingerprint",
     "policy_refusal",
     "policy_refusal_for",
+    "policy_refused_hits",
     "policy_refused_paths",
+    "policy_violation_for",
     "WritePromptError",
     "check_tree_path",
     "changed_since_bound",
@@ -339,22 +343,30 @@ def policy_refusal(phase_dir: Path, task_id: str) -> Optional[str]:
 def policy_refused_paths(phase_dir: Path, task_id: str) -> List[str]:
     """The declared files the policy refuses for *task_id* (fix round 20: the
     way forward names them), or ``[]``."""
+    return [str(getattr(hit, "path", hit)) for hit in policy_refused_hits(phase_dir, task_id)]
+
+
+def policy_refused_hits(phase_dir: Path, task_id: str) -> List[Any]:
+    """Each declared file the policy refuses for *task_id*, with its rule
+    (``write_safety.PolicyHit``; fix round 21: the way forward is worded
+    from it), or ``[]``."""
     phase_dir = Path(os.path.abspath(str(phase_dir)))
     try:
         document, task = load_write_task(phase_dir, task_id)
     except Exception:  # noqa: BLE001 - only a wording input
         return []
-    violation = _policy_violation_for(
+    violation = policy_violation_for(
         task, plan_file=str(document.get("plan_file") or "") or None,
         anchor_dir=phase_dir,
     )
-    return list(violation.paths) if violation is not None else []
+    return list(violation.hits) if violation is not None else []
 
 
-def _policy_violation_for(
+def policy_violation_for(
     task: Dict[str, Any], *, plan_file: Optional[str], anchor_dir: Path,
 ) -> Optional[PolicyViolation]:
-    """The policy check :func:`policy_refusal_for` makes, its exception kept."""
+    """The policy check :func:`policy_refusal_for` makes, its exception kept
+    (its ``hits`` word the way forward, fix round 21)."""
     try:
         declared = declared_file_set(task)
         if not declared:
@@ -366,9 +378,9 @@ def _policy_violation_for(
         if root is None or problem:
             return None
         policy = WritePolicy.load(root, anchor=plan_file)
-        policy.check(
-            [relative_to_root(path, root) for path in declared], when="pre-dispatch",
-        )
+        # As declared (fix round 21): a file outside the repository is named
+        # as the task wrote it, not by its resolved absolute path.
+        policy.check(declared, when="pre-dispatch")
     except PolicyViolation as exc:
         return exc
     except Exception:  # noqa: BLE001 - never refuse on a policy that cannot be read
@@ -387,8 +399,12 @@ def policy_refusal_for(
     *anchor_dir* is any directory inside the repository (the phase dir, or
     the plan's output folder before the phase dir exists).
     """
-    violation = _policy_violation_for(task, plan_file=plan_file, anchor_dir=anchor_dir)
+    violation = policy_violation_for(task, plan_file=plan_file, anchor_dir=anchor_dir)
     return violation.message if violation is not None else None
+
+
+#: The pre-rename spelling.
+_policy_violation_for = policy_violation_for
 
 
 def held_by_check(phase_dir: Path, task_id: str) -> Optional[Tuple[str, List[str]]]:
@@ -777,27 +793,42 @@ def main(argv: Optional[List[str]] = None) -> int:
     refused = policy_refusal(Path(args.phase_dir), args.task_id)
     if refused is not None:
         task_id = args.task_id
-        paths = policy_refused_paths(Path(args.phase_dir), task_id)
+        hits = policy_refused_hits(Path(args.phase_dir), task_id)
         implement = info.get("kind") == "implement"
+        # Fix round 21: worded per rule (a deny hit names the deny rule to
+        # narrow), and, for a file outside the repository, the skip alone.
+        clause = policy_allow_clause(hits)
+        skip = (
+            f"skip {task_id} with --resume --human-task {task_id}=skip "
+            f"({task_id} and the tasks after it stay undone)"
+        )
+        if clause is None:
+            note = policy_outside_note(hits)
+            forward = (
+                f", skip the tasks that depend on it, run the others, close "
+                f"the phase without --mark-completed, and report the way "
+                f"forward as the user's call, in these words: {note}; "
+                f"{skip}."
+                if implement else
+                f", stop, and report that {note}."
+            )
+        else:
+            forward = (
+                f", skip the tasks that depend on it, run the others, close "
+                f"the phase without --mark-completed, and report both ways "
+                f"forward as the user's call, in these words: {clause}, then "
+                f"re-run implement with --resume; if not, {skip}."
+                if implement else
+                f", stop, and report the way forward as the user's call, in "
+                f"these words: {clause}, then re-run this phase with --resume."
+            )
         print(
             f"{MARKER_REFUSED} {task_id} is refused before dispatch: {refused} "
             f"Do not dispatch {task_id}. Record it with util batch-done "
             f"--phase-dir \"{os.path.abspath(args.phase_dir)}\" --task-id {task_id} "
             f"--status failed --reason \"refused before dispatch: the write "
             f"policy (driver.write_paths) does not allow a file it declares\""
-            + (
-                f", skip the tasks that depend on it, run the others, close "
-                f"the phase without --mark-completed, and report both ways "
-                f"forward as the user's call, in these words: "
-                f"{policy_allow_clause(paths)} and re-run implement with "
-                f"--resume; if not, skip {task_id} with --resume --human-task "
-                f"{task_id}=skip ({task_id} and the tasks after it stay undone). "
-                f"Never change driver.write_paths yourself."
-                if implement else
-                f", stop, and report the way forward as the user's call, in "
-                f"these words: {policy_allow_clause(paths)} and re-run this "
-                f"phase with --resume. Never change driver.write_paths yourself."
-            ),
+            + forward + " Never change driver.write_paths yourself.",
             file=sys.stderr,
         )
         return 3
