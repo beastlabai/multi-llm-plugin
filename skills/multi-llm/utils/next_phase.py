@@ -1039,6 +1039,9 @@ def render_next_phase_lines(answer: NextPhase) -> List[str]:
 #: The labels :func:`render_next_step_markdown` writes.
 OPTIONAL_LEAD = "Optional, before that:"
 MANUAL_TASKS_LEAD = "Manual tasks left for you:"
+#: Above a stopped implement's answers (status says "or answer the stop
+#: with:"): what the user types instead of the resume.
+ANSWERS_LEAD = "Or answer the stop with one of these:"
 WORKFLOW_COMPLETE_SENTENCE = "Workflow complete."
 
 
@@ -1077,6 +1080,8 @@ def render_next_step_markdown(answer: "NextPhase") -> str:
             blocks.append(OPTIONAL_LEAD)
             for step in answer.optional_before:
                 blocks.extend([step.why, fenced_command(step.command)])
+        if answer.answers:
+            blocks.append(ANSWERS_LEAD)
         for step in answer.answers:
             blocks.extend([step.why, fenced_command(step.command)])
     if answer.manual_tasks:

@@ -192,3 +192,24 @@ class TestTheRoutesSayToCopyIt:
     def test_claude_code_fences_the_native_command(self):
         text = " ".join((SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8").split())
         assert "`[MANUAL_TASK_COMMAND]`" in text
+
+
+def test_a_stops_answers_follow_the_resume_under_their_own_lead():
+    """The native lookup's answer (a stopped implement): the resume's why
+    and command, then the answers under one line saying what they are, as
+    `status` says "or answer the stop with:" — never "Optional, before
+    that:", the label OpenCode's accept 01 put on each of them."""
+    resume = "/multi-llm:multi-llm --implement plans/r.md --resume"
+    answer = np_.NextPhase(
+        phase="implement", command=resume, why="runs the tasks that can run",
+        answers=(np_.AnswersStep(f"{resume} --human-task T005=skip",
+                                 "leave T005 undone", ("T005=skip",)),),
+    )
+    assert answer.to_dict()["markdown"] == "\n\n".join([
+        "runs the tasks that can run",
+        _fenced(resume),
+        np_.ANSWERS_LEAD,
+        "leave T005 undone",
+        _fenced(f"{resume} --human-task T005=skip"),
+    ])
+    assert "Optional, before that:" not in answer.to_dict()["markdown"]
