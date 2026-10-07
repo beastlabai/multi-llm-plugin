@@ -1,4 +1,4 @@
-"""The ``[ETA]`` line of a failed task says it failed.
+"""The ``[ETA]`` lines say what happened, and one run is counted one way.
 
 Fix round 24, from live run 10 (2026-10-07):
 
@@ -10,6 +10,10 @@ Fix round 24, from live run 10 (2026-10-07):
   20-minute timeout in. The line of a failed task now says it failed, how,
   and whether its edits were half-applied, on both legs, and no
   remaining-time estimate counts a failed task as progress.
+* #7 (the stop fixture, every host): "Organized into 3 execution batches: 5
+  task(s) to dispatch", then "task 1/5" and "task 2/4" with nothing saying
+  why the total dropped, and summary.md said "5 batch task(s) dispatched
+  across 4 batch(es)". The line that drops the total says why.
 """
 
 from __future__ import annotations
@@ -21,8 +25,14 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_check_gate_fixture import repo  # noqa: F401  (the fixture)
-from tests.test_dispatch_counts import _emit, _util
+from tests.test_check_gate_fixture import (  # noqa: F401  (the fixture)
+    DENY,
+    FINDINGS,
+    _first_run,
+    _policy,
+    repo,
+)
+from tests.test_dispatch_counts import LIVE_LAYOUT, _emit, _util
 from tests.test_implement_stop_account import _implement, make_repo
 from utils import metrics
 from utils import provider_registry as registry
@@ -265,13 +275,73 @@ class TestTheNativeRecordsReadTheBatchDoneRecord:
             "--task-id", "T001", "--duration-ms", "1205600",
             "--total-batches", total, "--batch-index", "1")
         assert code == 0, err
-        # Every other task depends on T001, so the host skips them.
+        # Every other task depends on T001, so the host skips them: the
+        # line that took them out of the total names them.
         assert _eta_lines(err) == [
             "[ETA] implement: task 1/1 failed (the subagent timed out after 20 "
-            "minutes) after 20m 5s · half-applied: its edits are kept"
+            "minutes) after 20m 5s · half-applied: its edits are kept · total now "
+            "1 (T002, T003, T004, T007 not run)"
         ], err
 
     def test_the_half_applied_prefix_is_the_schedulers(self):
         from utils.write_batch_scheduler import HALF_APPLIED_PREFIX
 
         assert metrics.HALF_APPLIED_PREFIX == HALF_APPLIED_PREFIX
+
+
+class TestTheLineThatDropsTheTotalSaysWhy:
+    """The stop fixture in the live layout: T007 waits on check T002."""
+
+    @staticmethod
+    def _live(tmp_path, monkeypatch):
+        obj = make_repo(tmp_path, monkeypatch, LIVE_LAYOUT)
+        _policy(obj, DENY)
+        monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(
+            [f"T00{n}" for n in range(1, 8)]))
+        monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS", "Title: Check the module")
+        return obj
+
+    def test_the_executor_names_the_held_task_on_the_checks_line(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        obj = self._live(tmp_path, monkeypatch)
+        text = _first_run(obj, capsys)
+        lines = _eta_lines(text)
+        assert lines[0].startswith("[ETA] implement: task 1/5 done in "), lines
+        assert re.fullmatch(
+            r"\[ETA\] implement: task 2/4 done in [^·]+ · total now 4 \(T007 "
+            r"not run: check T002 reported problems\)( · ~[^·]+ remaining)?",
+            lines[1],
+        ), lines
+        # Only the line that dropped it says so.
+        assert not any("total now" in line for line in lines[2:]), lines
+
+    def test_the_native_leg_names_it_on_the_checks_line_too(self, repo, capsys):
+        handoff, _out = _emit(repo, capsys)
+        state_file = handoff["state_file"]
+        total = str(handoff["tasks_to_dispatch"])
+        assert _util(capsys, "metrics", "start", "--state-file", state_file,
+                     "--phase", "implement", "--total-batches", total)[0] == 0
+        lines = []
+        for index, task_id in enumerate(("T001", "T002", "T003", "T004"), 1):
+            extra = (
+                ("--check", "findings", "--finding", FINDINGS[0])
+                if task_id == "T002" else ()
+            )
+            code, _o, err = _util(
+                capsys, "batch-done", "--phase-dir", str(repo.phase_dir),
+                "--task-id", task_id, "--status", "completed", *extra)
+            assert code == 0, err
+            code, _o, err = _util(
+                capsys, "metrics", "record", "--state-file", state_file,
+                "--phase", "implement", "--label", f"{task_id}: task",
+                "--subagent-type", "agent", "--duration-ms", "1000",
+                "--total-batches", total, "--batch-index", str(index))
+            assert code == 0, err
+            lines += _eta_lines(err)
+        assert re.fullmatch(
+            r"\[ETA\] implement: task 2/4 done in [^·]+ · total now 4 \(T007 "
+            r"not run: check T002 reported problems\)( · ~[^·]+ remaining)?",
+            lines[1],
+        ), lines
+        assert not any("total now" in line for line in lines[2:]), lines
