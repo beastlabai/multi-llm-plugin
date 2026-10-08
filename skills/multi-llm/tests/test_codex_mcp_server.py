@@ -2127,7 +2127,9 @@ class TestRouteSignal:
 class TestUserNextStep:
     """§2.4: lifted to the top level on exit 0 and exit 2, never followed."""
 
-    def test_exit_0_lifts_it_beside_the_payload_copy(self, harness):
+    def test_exit_0_moves_it_out_of_the_payload(self, harness):
+        """Fix round 26 (live run 11): moved, not copied, so the section the
+        host copies is in the result once."""
         why = "Have the models review the task list before implementing it."
         step = next_step("/multi-llm --implement /w/plans/p.md", optional=[{
             "phase": "review-tasks", "command": "/multi-llm --review-tasks /w/plans/p.md",
@@ -2136,7 +2138,8 @@ class TestUserNextStep:
             REVIEW, [launch_step(), poll_step(0, user_next_step=step)])
         assert not result["isError"]
         assert envelope["user_next_step"] == step
-        assert envelope["result"]["user_next_step"] == step
+        assert "user_next_step" not in envelope["result"]
+        assert json.dumps(envelope).count(why) == 1
         assert envelope.get("next") is None  # the envelope drops a null key
         assert "next_phase" not in json.dumps(envelope)
         assert len(calls) == 2  # launch + terminal poll: nothing followed
@@ -2199,15 +2202,15 @@ class TestUserNextStep:
     @pytest.mark.parametrize("host_id, route", NEXT_COMMAND_CELLS)
     def test_redaction_leaves_every_spelling_intact(self, harness, host_id, route):
         """The command is the host's own spelling, never a ``uv run`` line, so
-        ``redact`` passes it through byte for byte: in the lifted copy, the
-        payload copy and the human output."""
+        ``redact`` passes it through byte for byte: in the lifted step and the
+        human output."""
         command = _caps.next_command_template(host_id, route).replace(
             "{args}", PHASE_ARGS)
         done = poll_step(0, user_next_step=next_step(command))
         done["stdout"].insert(0, "[NEXT_COMMAND] " + command)
         envelope, _, _, _ = harness.run(REVIEW, [launch_step(), done])
         assert envelope["user_next_step"]["command"] == command
-        assert envelope["result"]["user_next_step"]["command"] == command
+        assert "user_next_step" not in envelope["result"]
         assert "[NEXT_COMMAND] " + command in envelope["output"].split("\n")
         assert RUNNABLE_MARKER not in json.dumps(envelope)
 

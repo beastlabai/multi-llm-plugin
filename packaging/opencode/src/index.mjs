@@ -2180,16 +2180,24 @@ function terminalResult(child, context) {
  * `{ user_next_step }` off the *redacted* payload, or `{}` when it has none.
  *
  * Exit 0 and exit 2 only: a finished phase or a terminal poll, and a phase
- * already complete. The copy is the payload's own, byte for byte, the completed
- * form (`command: null`, `complete: true`) included, under the same key name,
- * so a model reading the top-level keys cannot miss it. A payload without the
- * key lifts nothing: an absent key keeps meaning "no answer", never "workflow
- * complete". It is the user's to type, never a call: `isMechanical` reads
- * `next` alone, so the continuation loop never follows it.
+ * already complete. The value is the payload's own, byte for byte, the
+ * completed form (`command: null`, `complete: true`) included, under the same
+ * key name, so a model reading the top-level keys cannot miss it. A payload
+ * without the key lifts nothing: an absent key keeps meaning "no answer", never
+ * "workflow complete". It is the user's to type, never a call: `isMechanical`
+ * reads `next` alone, so the continuation loop never follows it.
+ *
+ * Moved, not copied (fix round 26, live run 11): the section the model copies
+ * was in the result twice, and the decline run printed "Workflow complete."
+ * twice, plain and then fenced. One copy, in the field that owns it, as
+ * `humanOutput` drops the parsed result line. `payload` is `redactCommand`'s
+ * own copy, so the child's parsed result is untouched.
  */
 function liftedUserNextStep(payload) {
   const step = payload?.user_next_step
-  return step === undefined || step === null ? {} : { user_next_step: step }
+  if (step === undefined || step === null) return {}
+  delete payload.user_next_step
+  return { user_next_step: step }
 }
 
 /**

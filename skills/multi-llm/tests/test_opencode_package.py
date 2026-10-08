@@ -7832,13 +7832,16 @@ class TestTheRouteSignalReachesEveryChild:
 class TestTheNextStepIsLiftedAndNeverFollowed:
     """§2.4 on this route: ``terminalResult`` lifts, ``isMechanical`` ignores."""
 
-    def test_exit_0_lifts_it_beside_the_payload_copy(self, built_package):
+    def test_exit_0_moves_it_out_of_the_payload(self, built_package):
+        """Fix round 26 (live run 11, the decline run printed "Workflow
+        complete." twice): moved, not copied, so the section the model
+        copies is in the result once."""
         step = _next_step("/multi-llm --implement /w/p.md")
         out = _terminal(built_package, _child(0, "done", user_next_step=step),
                         NEXT_STEP_VALUES)
         assert out["ok"] is True
         assert out["user_next_step"] == step
-        assert out["result"]["user_next_step"] == step
+        assert "user_next_step" not in out["result"]
         assert "next_phase" not in json.dumps(out)
 
     def test_the_completed_form_is_lifted_too(self, built_package):
@@ -7913,7 +7916,7 @@ class TestTheNextStepIsLiftedAndNeverFollowed:
         assert out["redacted"] == commands
         for command, result in zip(commands, out["lifted"]):
             assert result["user_next_step"]["command"] == command
-            assert result["result"]["user_next_step"]["command"] == command
+            assert "user_next_step" not in result["result"]
             assert f"[NEXT_COMMAND] {command}" in result["output"].split("\n")
 
     def test_the_continuation_loop_never_follows_it(self, built_package, uv_stub):
