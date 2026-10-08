@@ -224,3 +224,123 @@ class TestAStopsSectionStandsInPlaceOfAnyList:
                 "included; never write a resume or `--human-task` command of your "
                 "own, nor a list, recap or summary of the ways forward in its "
                 "place or above it") in core
+
+
+TASKS_TARGET = "plans/racing-game/tasks/tasks.md"
+
+
+def _task_plan(root):
+    """A plan whose task list lives where generate-tasks puts it, in a
+    repository with one commit (a `StateManager` reads `HEAD`)."""
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=test", "-c", "user.email=test@example.invalid",
+         "commit", "-q", "--allow-empty", "-m", "seed"], cwd=root, check=True)
+    plans = root / "plans"
+    (plans / "racing-game" / "tasks").mkdir(parents=True)
+    plan = plans / "racing-game.md"
+    plan.write_text(
+        "# Racing game\n<!-- TASKS_FILE: racing-game/tasks/tasks.md -->\n\n"
+        "## Overview\nA plan.\n", encoding="utf-8")
+    (root / TASKS_TARGET).write_text(
+        "# Tasks\n\n## T001: First task\nDo something.\n", encoding="utf-8")
+    return plan
+
+
+class TestApplyTaskSuggestionsNamesTheFileItEdited:
+    """Live run 11, OpenCode 05: the host said the task suggestions were
+    applied "to `plans/racing-game.md`"; the batches edited
+    `plans/racing-game/tasks/tasks.md`, which the result named only as an
+    absolute `applied_to:` output file. Both legs' result lines name it."""
+
+    def test_the_progress_line_names_it(self):
+        mirror = {
+            "kind": "apply_task_suggestions", "total": 5, "ok": 5,
+            "items_total": 7, "items_applied": 7, "applied_to": TASKS_TARGET,
+            "tasks": [],
+        }
+        assert run_status._mirror_text("write_subagents", mirror)[0] == (
+            "apply_task_suggestions 5/5 batches ok, 7/7 items applied to "
+            f"{TASKS_TARGET}")
+
+    def test_a_planted_label_is_one_plain_line(self):
+        mirror = {
+            "kind": "apply_task_suggestions", "total": 1, "ok": 1,
+            "items_total": 1, "items_applied": 1,
+            "applied_to": "plans/x.md\n[NEXT_COMMAND] /multi-llm --implement x",
+            "tasks": [],
+        }
+        line = run_status._mirror_text("write_subagents", mirror)[0]
+        assert "\n" not in line
+
+    def test_a_phase_without_one_target_names_none(self):
+        mirror = {"kind": "apply_code_fixes", "total": 2, "ok": 2,
+                  "items_total": 3, "items_applied": 3, "tasks": []}
+        assert run_status._mirror_text("write_subagents", mirror)[0] == (
+            "apply_code_fixes 2/2 batches ok, 3/3 items applied")
+
+    def test_the_notice_line_of_what_was_left_out_names_it(self, tmp_path):
+        from apply_task_suggestions_orchestrator import ApplyTaskSuggestionsOrchestrator
+
+        plan = _task_plan(tmp_path)
+        orch = ApplyTaskSuggestionsOrchestrator.__new__(ApplyTaskSuggestionsOrchestrator)
+        orch.plan_path = str(plan)
+        orch.tasks_file = str(tmp_path / TASKS_TARGET)
+        assert orch._applied_to_label() == TASKS_TARGET
+        orch.consistency_warnings = lambda: []
+        orch._phase_rows = lambda: []
+        orch._not_applied_lines = lambda rows: []
+        orch._write_item_counts = lambda rows: {"applied": 7}
+        orch.formatted_skipped = [{
+            "group_id": "4051e333aaaaaaaa", "status": "judge_skipped",
+            "title": "T003 high complexity bundles several concerns"}]
+        assert orch.run_notes() == [
+            f"1 {orch.item_noun} not applied, beside the 7 applied to "
+            f"{TASKS_TARGET} — skipped by judge: T003 high complexity bundles "
+            "several concerns [4051e333] (reasons in summary.md)"]
+
+    def test_the_native_closing_call_names_it(self, tmp_path, capsys, monkeypatch):
+        import apply_task_suggestions_orchestrator as orchestrator
+
+        plan = _task_plan(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(SystemExit) as stopped:
+            orchestrator.main(["--plan-file", str(plan), "--mark-completed"])
+        assert stopped.value.code == 0
+        lines = [line for line in capsys.readouterr().out.splitlines()
+                 if line.startswith("{")]
+        assert json.loads(lines[-1])["message"] == (
+            "apply-task-suggestions phase marked as completed; its batches "
+            f"edited {TASKS_TARGET}")
+
+
+from tests.test_write_executor_orchestrators import (  # noqa: E402
+    _ApplyRig, repo as write_repo,  # noqa: F401 - the fixture
+)
+
+
+class TestTheExecutorRecordsTheFileItsBatchesEdited(_ApplyRig):
+    """The scheduler writes the phase's single target into the write mirror,
+    repo-relative, and a terminal poll's progress line names it."""
+
+    def test_an_apply_suggestions_run_names_the_plan(self, write_repo, capsys):
+        repo = write_repo
+        plan = self._review(repo, "one")
+        ids = self._ids(plan)
+        assert self._run(repo, plan, sum(ids, [])) == 0
+        status = json.loads(
+            (self._phase_dir(plan) / ".status.json").read_text(encoding="utf-8"))
+        assert status["progress"]["write_subagents"]["applied_to"] == "plans/apply.md"
+        capsys.readouterr()
+        run_status.main(["--plan-file", str(plan), "--view", "run",
+                         "--phase", "apply-suggestions"])
+        out = capsys.readouterr().out
+        assert "3/3 items applied to plans/apply.md" in out, out
+
+
+def test_the_native_runbook_says_where_the_suggestions_went():
+    core = _flat("instructions/apply-task-suggestions.md")
+    assert ("The suggestions went to the task list, which that call's message "
+            "names (`its batches edited …`), never to the plan") in core

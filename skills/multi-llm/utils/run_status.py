@@ -3208,9 +3208,17 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
             # say which applied an edit.
             parts = [f"{kind} {ok}/{total} tasks ok{kept_note}"]
         else:
+            # Fix round 26 (live run 11, OpenCode 05 said the task
+            # suggestions went "to plans/racing-game.md"): a single-target
+            # phase's line names the file its items were applied to.
+            applied_to = mirror.get("applied_to")
+            target = (
+                f" to {clip(plain_line(applied_to), 200)}"
+                if isinstance(applied_to, str) and plain_line(applied_to) else ""
+            )
             parts = [
                 f"{kind} {ok}/{total} batches ok{kept_note}, "
-                f"{items_applied}/{items_total} items applied"
+                f"{items_applied}/{items_total} items applied{target}"
             ]
             # Fix round 26 (live run 11 #7): the items not applied follow
             # the count they are left out of, after a semicolon.

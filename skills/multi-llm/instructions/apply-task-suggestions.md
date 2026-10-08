@@ -496,7 +496,7 @@ uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.p
 
 This ensures subsequent phases (e.g., `--implement`) recognize that task suggestions have been applied.
 
-**Then report to the user** following `references/summary-format.md`, naming the summary report and every other file this phase wrote.
+**Then report to the user** following `references/summary-format.md`, naming the summary report and every other file this phase wrote. The suggestions went to the task list, which that call's message names (`its batches edited …`), never to the plan: say so in those words.
 
 ---
 

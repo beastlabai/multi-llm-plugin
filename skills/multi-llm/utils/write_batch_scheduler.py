@@ -12115,6 +12115,18 @@ class WriteBatchScheduler:
             return None
         return _parse_local_timestamp(completed.get(review))
 
+    def _applied_to_label(self) -> Optional[str]:
+        """The phase's single write target relative to the repository root
+        (the plan for apply-suggestions, the task list for
+        apply-task-suggestions), or ``None`` for a phase without one."""
+        if not self.write_target:
+            return None
+        try:
+            return os.path.relpath(
+                self.write_target, os.path.realpath(self.repo_root))
+        except ValueError:  # pragma: no cover - another drive (Windows)
+            return self.write_target
+
     def _manual_close_note(self, deferred: Dict[str, str]) -> Optional[str]:
         """How to record the deferred manual tasks done, in the host's
         spelling (``user_commands["answers"]``), or ``None``.
@@ -12646,6 +12658,12 @@ class WriteBatchScheduler:
                         ],
                         "items_total": items_total,
                         "items_applied": items_applied,
+                        # Fix round 26 (live run 11, OpenCode 05): the one
+                        # file a single-target phase edits, repo-relative,
+                        # so `status` says where the items were applied
+                        # ("applied to plans/x.md" was the host's guess).
+                        **({"applied_to": self._applied_to_label()}
+                           if self._applied_to_label() else {}),
                         # Fix round 18: what finished batches did not apply
                         # on purpose, and why — `status` names each one.
                         **({"declined_items": declined_rows}
