@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Collection, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Collection, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import git_utils as _git_utils
@@ -2489,12 +2489,20 @@ def implement_checks_ran(
 
     Counted: each code task recorded ``completed`` whose own check reported
     (:data:`state_manager.TASK_OWN_CHECK_RAN_KEY`) — failing when
-    ``task_batch_check`` or ``task_batch_check_accepted`` holds it, never
-    when its only finding says the check could not run — and each check
-    task of *check_ids* recorded ``completed`` (its check is its job),
-    failing when ``task_check_findings`` holds it. Manual tasks and tasks
-    outside the decomposition implement ran last are not. Only task ids
-    (held to ``T###``) and counts: no model text."""
+    ``task_batch_check`` holds it, never when its only finding says the
+    check could not run — and each check task of *check_ids* recorded
+    ``completed`` (its check is its job), failing when
+    ``task_check_findings`` holds it. Manual tasks and tasks outside the
+    decomposition implement ran last are not. Only task ids (held to
+    ``T###``) and counts: no model text.
+
+    Fix round 25 (review of round 24, stops #1): a code task whose own check
+    reported again only what the user accepted for a check
+    (``task_batch_check_accepted``, nothing in ``task_batch_check``) is
+    never "reported problems" — the ``[BATCH_CHECK_ACCEPTED]`` line beside
+    it says it is not the task's own failure. It has its own clause:
+    ``repeated the accepted findings of T002 in T007``, the checks named
+    once for all such tasks, each list cut at :data:`CHECKS_RAN_MAX_IDS`."""
     if not hasattr(state, "get"):
         return None
     try:
@@ -2537,6 +2545,8 @@ def implement_checks_ran(
     check_findings = mapping(TASK_CHECK_FINDINGS_KEY)
     passed: List[str] = []
     problems: List[str] = []
+    repeated: List[str] = []
+    repeated_of: Set[str] = set()
     for task_id in sorted(own_ids | {str(t) for t in check_ids}):
         if not counted(task_id):
             continue
@@ -2545,11 +2555,19 @@ def implement_checks_ran(
             if isinstance(findings, list) and findings and batch_check_could_not_run(
                     [str(item) for item in findings]):
                 continue
-            failed = bool(findings) or bool(accepted.get(task_id))
+            again = accepted.get(task_id)
+            if not findings and again:
+                repeated.append(task_id)
+                if isinstance(again, dict):
+                    repeated_of.update(
+                        str(check) for check in again
+                        if _IMPLEMENT_TASK_ID.match(str(check)))
+                continue
+            failed = bool(findings)
         else:
             failed = bool(check_findings.get(task_id))
         (problems if failed else passed).append(task_id)
-    if not passed and not problems:
+    if not passed and not problems and not repeated:
         return None
 
     def named(ids: List[str]) -> str:
@@ -2564,6 +2582,9 @@ def implement_checks_ran(
         said.append(f"passed in {named(passed)}")
     if problems:
         said.append(f"reported problems in {named(problems)}")
+    if repeated:
+        of = f" of {named(sorted(repeated_of))}" if repeated_of else ""
+        said.append(f"repeated the accepted findings{of} in {named(repeated)}")
     return "The tasks ran checks: " + "; ".join(said) + "."
 
 
