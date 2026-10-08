@@ -1,0 +1,9 @@
+Ripgrep not available: spawn /opt/mllm/npm/node_modules/@qwen-code/qwen-code/vendor/ripgrep/x64-linux/rg EACCES. Falling back to built-in grep.
+Retrying in 60s (attempt 1/10): [API Error: 429 rate limit exceeded]
+{
+  "error": {
+    "type": "FatalBudgetExceededError",
+    "message": "Run aborted: wall-clock budget of 120s exceeded (--max-wall-time).",
+    "code": 55
+  }
+}

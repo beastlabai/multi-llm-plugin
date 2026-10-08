@@ -3885,7 +3885,9 @@ class LLMProvider(ABC):
           parse of an envelope the adapter does not control.
         * **stderr is not reduced** by any shipped override: the echo lives in
           the structured stdout envelope, and the diagnosis a real failure
-          carries must reach the tables untouched.
+          carries must reach the tables untouched. The one exception is
+          qwen-code's, which drops a single named advisory line (its ripgrep
+          fallback notice, whose ``EACCES`` is not a diagnosis) and nothing else.
 
         Applied in exactly two places. :meth:`classify_failure` applies it **to
         classify**. ``subagent_executor._classify_failed_run`` applies it a

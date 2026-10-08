@@ -1,0 +1,7 @@
+{
+  "error": {
+    "type": "AlreadyReportedError",
+    "message": "[API Error: 404 The model `stub-model` does not exist]",
+    "code": 1
+  }
+}
