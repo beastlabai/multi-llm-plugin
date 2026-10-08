@@ -219,7 +219,12 @@ class TestEveryUtilThatTakesAPathRunsFromTheRoot:
             root_code, root_out, root_err = _run(argv, capsys)
         finally:
             os.chdir(here)
-        assert (code, out) == (root_code, root_out)
+        assert code == root_code
+        # Line for line, but for the root the result line names (fix round 27).
+        assert out.splitlines()[:-1] == root_out.splitlines()[:-1]
+        moved, stayed = parse_result_line(out), parse_result_line(root_out)
+        assert moved.pop("ran_from_root") == str(root)
+        assert moved == stayed
         assert NOTICE not in root_err
         assert f"[NEXT_COMMAND] /multi-llm:multi-llm --apply-suggestions {PLAN}" in out
 
@@ -369,6 +374,7 @@ def test_run_11_the_reaggregate_typed_in_the_phase_folder_finishes_the_phase(aut
     assert finished.returncode == 0, finished.stderr
     assert "Plan file not found" not in finished.stderr
     assert f"{NOTICE} {os.path.realpath(repo_dir)}, where {TYPED} is" in finished.stderr
+    assert result["ran_from_root"] == os.path.realpath(repo_dir)
     assert (repo_dir / "plans" / "auth" / "tasks" / "tasks.md").is_file()
     assert result["user_next_step"]["command"] == f"/multi-llm:multi-llm --implement {TYPED}"
 
@@ -526,3 +532,65 @@ def test_every_path_option_is_classified():
     # Every path a detached worker is handed absolute is one the move reads.
     assert set(detach._PATH_FLAGS) <= (set(multi_llm._MODE_INPUT_PATH_OPTIONS)
                                        | set(multi_llm._MODE_OUTPUT_PATH_OPTIONS))
+
+
+# ---------------------------------------------------------------------------
+# Fix round 27 (the Fable review of round 26, claude #5): the result line says
+# where the command ran, so the tool servers name the plan the way it was read
+# ---------------------------------------------------------------------------
+
+class TestTheResultLineSaysWhereTheCommandRan:
+    """The servers used to walk to the nearest `.git` themselves and name the
+    root's plan for their polls and abort, while the dispatcher refused to
+    move (`GIT_DIR` set, a planted `core.worktree`, a planted nested `.git`):
+    the poll then named a file the run never read. The result line now
+    carries `ran_from_root` when, and only when, the command moved."""
+
+    def _result(self, argv, monkeypatch, capsys):
+        _stub_targets(monkeypatch)
+        code, out, err = _run(argv, capsys)
+        assert code == 0, err
+        return parse_result_line(out), err
+
+    def test_a_command_that_moved_names_the_root(self, repo, monkeypatch, capsys):
+        root, _here = repo
+        result, err = self._result(_mode_argv("review-plan"), monkeypatch, capsys)
+        assert NOTICE in err
+        assert result["ran_from_root"] == str(root)
+
+    def test_a_util_command_that_moved_names_it_too(self, repo, monkeypatch, capsys):
+        root, _here = repo
+        result, _err = self._result(["util", "next-command", PLAN, "--host", "claude-code"],
+                                    monkeypatch, capsys)
+        assert result["ran_from_root"] == str(root)
+
+    def test_a_command_that_stayed_names_none(self, repo, monkeypatch, capsys):
+        root, _here = repo
+        result, err = self._result(_mode_argv("review-plan", str(root / PLAN)),
+                                   monkeypatch, capsys)
+        assert NOTICE not in err
+        assert "ran_from_root" not in result
+
+    @pytest.mark.parametrize("redirect", ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"])
+    def test_while_git_is_redirected(self, repo, monkeypatch, capsys, redirect):
+        root, _here = repo
+        monkeypatch.setenv(redirect, str(root / ".git"))
+        result, err = self._result(_mode_argv("review-plan"), monkeypatch, capsys)
+        assert NOTICE not in err and "ran_from_root" not in result
+
+    def test_under_a_planted_core_worktree(self, repo, monkeypatch, capsys, tmp_path):
+        root, _here = repo
+        _git(root, "config", "core.worktree", str(tmp_path))
+        result, err = self._result(_mode_argv("review-plan"), monkeypatch, capsys)
+        assert NOTICE not in err and "ran_from_root" not in result
+
+    def test_under_a_planted_nested_git_entry(self, repo, monkeypatch, capsys):
+        """A `.git` directory planted between the cwd and the root, beside a
+        plan of its own: git does not confirm it, so nothing moves."""
+        root, _here = repo
+        planted = root / "plans" / "x"
+        (planted / ".git").mkdir()
+        (planted / "plans").mkdir()
+        (planted / PLAN).write_text("# planted\n", encoding="utf-8")
+        result, err = self._result(_mode_argv("review-plan"), monkeypatch, capsys)
+        assert NOTICE not in err and "ran_from_root" not in result

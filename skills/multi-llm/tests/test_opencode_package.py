@@ -3383,47 +3383,79 @@ class TestExecuteStateMachine:
         """Fix round 26 (live run 11): the dispatcher runs a plan that names
         nothing from the anchor from the root of the repository the anchor is
         in, so this server names that root's file for its polls and abort too.
-        A file under the anchor still wins, and nothing resolves outside the
-        repository or outside one."""
+        Fix round 27 (the Fable review of round 26, claude #5): it walked to
+        the nearest `.git` itself, which named the root's plan where the
+        dispatcher refused to move (`GIT_DIR` set, a planted `core.worktree`,
+        a planted nested `.git`). `normalizePlan` now resolves from the anchor
+        alone, and `planFromRoot` renames the plan only by the root the
+        dispatcher's result line says it ran from."""
         repo = Path(os.path.realpath(tmp_path)) / "repo"
         sub = repo / "sub"
         sub.mkdir(parents=True)
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
         (repo / "plans").mkdir()
         (repo / "plans" / "x.md").write_text("# Plan\n", encoding="utf-8")
-        (tmp_path / "outside.md").write_text("# outside\n", encoding="utf-8")
-        (repo / "plans" / "link.md").symlink_to(tmp_path / "outside.md")
-        (sub / "plans").mkdir()
-        (sub / "plans" / "own.md").write_text("# Plan\n", encoding="utf-8")
-        (repo / "plans" / "own.md").write_text("# Plan\n", encoding="utf-8")
-        loose = tmp_path / "loose"
-        loose.mkdir()
+        other = Path(os.path.realpath(tmp_path)) / "other"
+        other.mkdir()
+        key = pkg_build.cli_surface()["dispatcher"]["ran_from_root_key"]
         resolved = node_json(
             f"""
             const sub = {json.dumps(str(sub))}
+            const moved = (root, planArg, plan) => {{
+              const values = {{ plan, planArg }}
+              T.planFromRoot({{ {key}: root }}, values, sub, surface)
+              return values.plan
+            }}
+            const joined = T.normalizePlan("plans/x.md", sub)
             emit({{
-              root: T.normalizePlan("plans/x.md", sub),
+              joined,
               sigil: T.normalizePlan("@plans/x.md", sub),
-              own: T.normalizePlan("plans/own.md", sub),
-              missing: T.normalizePlan("plans/nope.md", sub),
-              escape: T.normalizePlan("../outside.md", sub),
-              link: T.normalizePlan("plans/link.md", sub),
-              atRoot: T.normalizePlan("plans/x.md", {json.dumps(str(repo))}),
-              loose: T.normalizePlan("plans/x.md", {json.dumps(str(loose))}),
+              root: moved({json.dumps(str(repo))}, "plans/x.md", joined),
+              none: moved(undefined, "plans/x.md", joined),
+              other: moved({json.dumps(str(other))}, "plans/x.md", joined),
+              relative: moved("repo", "plans/x.md", joined),
+              absolute: moved({json.dumps(str(repo))}, "/abs/x.md", "/abs/x.md"),
+              noPlan: moved({json.dumps(str(repo))}, "", ""),
             }})
             """,
             built_package,
             cwd=Path("/"),
         )
+        # Nothing is walked: from the anchor, whatever the root holds.
+        assert resolved["joined"] == str(sub / "plans" / "x.md")
+        assert resolved["sigil"] == str(sub / "plans" / "x.md")
         assert resolved["root"] == str(repo / "plans" / "x.md")
-        assert resolved["sigil"] == str(repo / "plans" / "x.md")
-        assert resolved["own"] == str(sub / "plans" / "own.md")
-        assert resolved["missing"] == str(sub / "plans" / "nope.md")
-        # From the root, ../outside.md is a file outside the repository.
-        assert resolved["escape"] == str(repo / "outside.md")
-        assert resolved["link"] == str(sub / "plans" / "link.md")
-        assert resolved["atRoot"] == str(repo / "plans" / "x.md")
-        assert resolved["loose"] == str(loose / "plans" / "x.md")
+        assert resolved["none"] == str(sub / "plans" / "x.md")
+        assert resolved["other"] == str(sub / "plans" / "x.md")
+        assert resolved["relative"] == str(sub / "plans" / "x.md")
+        assert resolved["absolute"] == "/abs/x.md"
+        assert resolved["noPlan"] == ""
+
+    @pytest.mark.parametrize("moved", [True, False])
+    def test_the_polls_name_the_plan_the_launch_read(
+        self, built_package, uv_stub, tmp_path, moved,
+    ):
+        repo = Path(os.path.realpath(tmp_path)) / "repo"
+        sub = repo / "sub"
+        sub.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "plans").mkdir()
+        (repo / "plans" / "x.md").write_text("# Plan\n", encoding="utf-8")
+        key = pkg_build.cli_surface()["dispatcher"]["ran_from_root_key"]
+        body = {"mode": "review-plan", "state": "done", "exit": 0,
+                "artifacts": [], "next": None}
+        if moved:
+            body[key] = str(repo)
+        launch = {"exit": 0, "stdout": [
+            "run_id: RID-R", "log: /tmp/r.log",
+            f"{cli_common.RESULT_MARKER} {json.dumps(body)}"]}
+        _result, calls = uv_stub.run(
+            built_package, dict(NEXT_STEP_ARGS, plan="plans/x.md"),
+            [launch, _poll(0, state="done")], ctx={"directory": str(sub)})
+        assert _dispatcher_argv(calls[0])[1] == "plans/x.md"
+        polls = [_dispatcher_argv(c) for c in calls[1:]]
+        base = repo if moved else sub
+        assert polls and all(p[1] == str(base / "plans" / "x.md") for p in polls)
 
     def test_init_scaffolds_in_the_workspace_not_the_package(
         self, built_package, tmp_path

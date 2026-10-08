@@ -926,42 +926,37 @@ def hand_back_typed(outcome, values) -> None:
             outcome[key] = dict(call_args, plan=typed_plan(call_args["plan"], values))
 
 
-def repository_root_plan(anchor, relative):
-    """*relative* under the root of the repository *anchor* sits in, else ``None``.
+def plan_from_root(result, values, anchor, key) -> None:
+    """Name a plan typed from the repository root by the root's file, when the
+    dispatcher's result line says it ran from there.
 
     The dispatcher runs a command whose relative paths name nothing from its
-    cwd (the anchor, here) from the root of the repository that cwd is in, when
-    each names something inside it (fix round 26, live run 11:
-    ``multi_llm._run_from_repository_root``). So a plan spelled from that root
-    names the root's file for this server's polls and abort too, never a path
-    under the anchor that does not exist. The root is the nearest directory at
-    or above the anchor holding a ``.git`` entry, the anchor itself excluded;
-    the file must exist there and stay inside it, as spelled and resolved. The
-    port of ``repositoryRootPlan``.
+    cwd (the anchor, here) from the root of the repository that cwd is in
+    (fix round 26, live run 11: ``multi_llm._run_from_repository_root``), and
+    its result line names that root (*key*, the surface's
+    ``dispatcher.ran_from_root_key``). So the polls, the abort and the
+    options this server composes name the file that run reads, never a path
+    under the anchor that does not exist. Fix round 27 (the Fable review of
+    round 26): this server walked to the nearest ``.git`` itself, which named
+    the root's plan where the dispatcher refused to move (``GIT_DIR`` set, a
+    planted ``core.worktree``, a planted nested ``.git``); it now takes the
+    dispatcher's own answer, off a line it reads anyway, and nothing else. A
+    root that is not absolute or that the anchor is not inside is ignored, as
+    is a plan typed absolute. The port of ``planFromRoot``.
     """
+    root = result.get(key) if key and isinstance(result, dict) else None
+    typed = values.get("plan_arg")
+    if (not isinstance(root, str) or not os.path.isabs(root)
+            or not isinstance(typed, str) or not typed or os.path.isabs(typed)):
+        return
     try:
-        start = os.path.realpath(anchor)
-    except (OSError, ValueError):
-        return None
-    root = start
-    while not os.path.lexists(os.path.join(root, ".git")):
-        parent = os.path.dirname(root)
-        if parent == root:
-            return None
-        root = parent
-    if root == start:
-        return None
-    candidate = os.path.normpath(os.path.join(root, relative))
-    try:
-        if not os.path.exists(candidate):
-            return None
-        real = os.path.realpath(candidate)
-    except (OSError, ValueError):
-        return None
-    prefix = root.rstrip(os.sep) + os.sep
-    if all(path == root or path.startswith(prefix) for path in (candidate, real)):
-        return candidate
-    return None
+        here = os.path.realpath(anchor)
+    except (OSError, ValueError, TypeError):
+        return
+    root = os.path.normpath(root)
+    if here != root and not here.startswith(root.rstrip(os.sep) + os.sep):
+        return
+    values["plan"] = os.path.normpath(os.path.join(root, typed))
 
 
 def same_plan_file(left, right) -> bool:
@@ -1906,18 +1901,15 @@ class Server:
         return expand_home(plan, self.layer1) if plan else ""
 
     def normalize_plan(self, plan: str, call: Call) -> str:
-        """A relative plan resolved against the anchor, ``~`` expanded; one that
-        names nothing there resolves from the repository root the dispatcher
-        runs it from (:func:`repository_root_plan`)."""
+        """A relative plan resolved against the anchor, ``~`` expanded. One the
+        dispatcher runs from the repository root is renamed by the root's file
+        once its result line says so (:func:`plan_from_root`)."""
         if not plan:
             return ""
         expanded = self.plan_spelling(plan)
         if os.path.isabs(expanded):
             return expanded
-        joined = os.path.normpath(os.path.join(call.anchor, expanded))
-        if os.path.lexists(joined):
-            return joined
-        return repository_root_plan(call.anchor, expanded) or joined
+        return os.path.normpath(os.path.join(call.anchor, expanded))
 
     # -- argv composition (D3 rule 3) ---------------------------------------------
 
@@ -2076,6 +2068,10 @@ class Server:
                 return "spawn-error", self.error_result(
                     call, launch, "could not start the dispatcher: {}".format(
                         launch.spawn_error))
+            # Fix round 27: the plan the dispatcher read, before any poll,
+            # abort or option names it.
+            plan_from_root(launch.result, cycle_values, call.anchor,
+                           dispatcher.get("ran_from_root_key"))
             if cycle_row.get("supports_detach"):
                 # S2 — the run id, off the banner and nothing else (rule f).
                 launched = launch.banner.get(banner["run_id_field"])
