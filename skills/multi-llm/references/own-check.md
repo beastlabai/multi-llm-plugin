@@ -7,7 +7,7 @@ A subagent that edited code — an implement task that declares files, or an app
 - **A finding**: an entry of its `findings` (a bare string or object is one entry) that is not empty. Beside a `passed` that is true, an entry that only says nothing was found (`"none"`, `"n/a"`, `"no problems found"`, `0`) is no finding either.
 - **`passed` is true** when it reads `true`, `"true"`, `"yes"`, `"pass"`, `"passed"` or `1`; **false** when it reads `false`, `"false"`, `"no"`, `"fail"`, `"failed"` or `0`; anything else (missing, `null`, `"maybe"`) is **neither**.
 - **`ran` maps a command to failed** when that command's outcome reads `"failed"`, `"fail"`, `"fails"`, `"failing"` or `false`; to **passed** for `"passed"`, `"pass"`, `"ok"`, `"success"` or `true`; to **not run** for `"not run"`, `"skipped"` or `"could not run"`. A list of `"<command>: <outcome>"` strings, or of `{"command": …, "outcome": …}` objects, is read the same way.
-- **It ran nothing** when its `ran` is there and names no command it ran: `ran` is empty (`{}` or `[]`), or each entry is not run or the result shape's placeholder `<each check command you ran>` copied as it is (as a key, a string, or an object's `command`).
+- **It ran nothing** when its `ran` is there and names no command it ran: `ran` is empty (`{}` or `[]`), or each entry is not run or the result shape's placeholder `<each check command you ran>` copied as it is (as a key, a string, or an object's `command`); or it has no `ran` at all but gives a `not_run` reason (a non-blank string).
 
 ## The rules
 
@@ -17,7 +17,7 @@ A subagent that edited code — an implement task that declares files, or an app
    - it names a finding: `--own-check findings` and one `--finding` per finding, whatever `passed` says;
    - else, `passed` is false: `--own-check findings` with no `--finding` (it said its check failed and named nothing);
    - else: `--own-check none` — it ran no check, which is never a pass.
-4. **Otherwise** — its `ran` names a command it ran, or its `check` has no `ran` at all (an older reply):
+4. **Otherwise** — its `ran` names a command it ran, or its `check` has neither `ran` nor a `not_run` reason (an older reply):
    - `passed` is true: `--own-check passed` (what it lists beside a pass, such as `npm test: 12 passed`, is not a failing check), unless `ran` maps a command to failed: then `--own-check findings` and one `--finding "<command>: failed"` per such command;
    - `passed` is false: `--own-check findings` and one `--finding` per finding, plus one `--finding "<command>: failed"` per command `ran` maps to failed that no finding names (no `--finding` at all when there is neither);
    - `passed` is neither: as for false when it names a finding or `ran` maps a command to failed; else `--own-check passed` when `ran` maps a command to passed; else `--own-check none`.

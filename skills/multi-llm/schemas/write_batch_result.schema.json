@@ -65,7 +65,7 @@
           "description": "A code batch's checks (fix round 26): each check command it ran on its own edits mapped to how its last run ended, \"passed\" or \"failed\" (read as leniently as an apply-code-fixes batch's `listed`; a list of \"<command>: <outcome>\" strings or of {command, outcome} objects is read too). Asked for in every code batch's reply. Empty (or every entry \"not run\", or only the contract's own <placeholder> copied as it is, as a key, a string or an object's command) says the batch ran no check: never a pass, whatever `passed` says (`subagent_executor.ran_no_check`); recorded as no check (`util batch-done --own-check none` on the native leg) unless it names a finding or says `passed: false`, which is a failing check (fix round 27, references/own-check.md). A command it maps to \"failed\" is a failing check whatever `passed` says."
         },
         "not_run": {
-          "description": "Beside an empty `ran` (fix round 26): why the batch could run no check on its edits. Informational."
+          "description": "Beside an empty `ran` (fix round 26): why the batch could run no check on its edits. A `not_run` reason with no `ran` at all says it ran nothing too (fix round 27, references/own-check.md)."
         }
       }
     }

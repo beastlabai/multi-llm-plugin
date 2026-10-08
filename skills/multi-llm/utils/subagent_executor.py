@@ -928,7 +928,7 @@ def batch_check_findings(result: Any) -> Optional[List[str]]:
     (:func:`ran_no_check`) is failing when it names a finding, whatever
     ``passed`` says (a pass of nothing is no verdict), or says ``passed:
     false`` (:data:`CHECK_FAILED_WITHOUT_FINDINGS` kept), and no check
-    otherwise; any other reply is a pass on ``passed: true`` (fix round 15,
+    otherwise (a ``not_run`` reason with no ``ran`` ran nothing too); any other reply is a pass on ``passed: true`` (fix round 15,
     a command ``ran`` maps to ``failed`` aside), failing on ``passed:
     false`` or a finding, a pass when only ``ran`` says what passed, and no
     check when it says nothing at all.
@@ -1066,14 +1066,20 @@ def _names_a_command(entry: Any) -> bool:
 def ran_no_check(result: Any) -> bool:
     """Whether a code batch's ``check`` says it ran no check (fix round 26):
     its ``ran`` is present and empty, holds only the contract's placeholder,
-    or every entry in it reads ``not run``.
+    or every entry in it reads ``not run`` — or (fix round 27) it has no
+    ``ran`` at all but gives a ``not_run`` reason, the contract's other half
+    of "I ran no check", so ``{"passed": true, "not_run": "…"}`` is never a
+    pass of nothing.
 
-    A missing ``ran`` is not this (an older reply, read as before), and
-    neither is a ``ran`` holding an entry that cannot be read: what it ran
-    is then unknown, and ``passed``/``findings`` decide.
+    A missing ``ran`` with no ``not_run`` reason is not this (an older reply,
+    read as before), and neither is a ``ran`` holding an entry that cannot be
+    read: what it ran is then unknown, and ``passed``/``findings`` decide.
     """
     check = result.get("check") if isinstance(result, dict) else None
     ran = check.get("ran") if isinstance(check, dict) else None
+    if ran is None and isinstance(check, dict):
+        reason = check.get("not_run")
+        return isinstance(reason, str) and bool(reason.strip())
     if not isinstance(ran, (dict, list)):
         return False
     # The contract's placeholder copied as it is names no command (a reply
