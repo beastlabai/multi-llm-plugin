@@ -727,15 +727,16 @@ NEEDS_HUMAN_MESSAGE = {
     # 14, live run 5: the `--human-task` answers lived only in `error`, and
     # hosts relayed them in two of four first stops). `{answers}` is the
     # dispatcher's `user_resume.answers_text` — each command in backticks and
-    # what it does, `; `-joined — substituted as it comes; the server authors
-    # none of it. Each is also in `resume_answers` and an `options` entry.
+    # what it does, one sentence apiece and ending its own (the merge of fix
+    # round 28: a bracketed why read "(T006))") — substituted as it comes; the
+    # server authors none of it. Each is also in `resume_answers` and an `options` entry.
     # Fix round 22 (live run 9, OpenCode accept 01): the host headed each
     # answer "Optional, before that:" and added a paraphrased "Ways forward"
     # list beside them; the clause says what they are and where the why goes.
     "answers": (
         "Instead of `resume_command` the user can type any of these, each "
         "with what it does (each is in `resume_answers` and is also an "
-        "`options` entry, in the same order): {answers}. After "
+        "`options` entry, in the same order): {answers} After "
         "`resume_command`, give the user every one of them verbatim in its own "
         "fenced block, its why as plain text above it, and no list or summary "
         "of them of your own: they are the stop's ways forward. Like "
