@@ -178,8 +178,10 @@ UTIL_CALLS = {
 
 
 class TestEveryUtilThatTakesAPathRunsFromTheRoot:
-    def test_the_table_covers_every_util_command_but_the_two_that_take_none(self):
-        assert set(UTIL_CALLS) == set(multi_llm.UTIL_COMMANDS) - {"report-check", "instructions"}
+    def test_the_table_covers_every_util_command_but_those_that_take_none(self):
+        # report-check and wakeup-check read a Claude Code hook's input on stdin.
+        assert set(UTIL_CALLS) == set(multi_llm.UTIL_COMMANDS) - {
+            "report-check", "wakeup-check", "instructions"}
 
     @pytest.mark.parametrize("name", sorted(UTIL_CALLS))
     def test_a_root_relative_path_typed_in_the_phase_folder(
