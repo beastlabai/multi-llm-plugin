@@ -2,7 +2,7 @@
 
 Every `*.stdout.txt` / `*.stderr.txt` at this level is a **real capture** of pi
 1.1.0's streams under `pi --no-session -p --mode json --tools
-read,grep,find,bash,write --model stub/stub-model <prompt>`, re-taken on
+read,grep,find,bash,write --no-mcp --model stub/stub-model <prompt>`, re-taken on
 2026-10-08 by the same rig that first took them on 0.87.1 (2026-09-25, before
 the `--tools` allow-list existed) in the pinned image built from
 `tests/container/Dockerfile` (`--network none`, **no credential**, one container
@@ -17,7 +17,7 @@ set looks the way it does.
 | Directory | What it is |
 | --- | --- |
 | `.` | the graded json-mode set (this file, `manifest.yaml`, the captures) |
-| `capture/` | the rig that produced it: `run_row.sh` (host side; it names the image `mllm-e2e:local`, the tag `make e2e-image` builds at the cli-versions.lock pins), `incontainer.py`, `scriptserver.py` (the throwaway server for `length`, `length-recovery`, `context-overflow-compacted` and omp's `compaction-summarized`), the scenarios, the argv (`argv.json`, asserted equal to `PiProvider.build_command`) and the prompt. `batch.sh` reruns the whole session (~2.5 min, $0) |
+| `capture/` | the rig that produced it: `run_row.sh` (host side; the image is `$MLLM_E2E_IMAGE`, default `mllm-e2e:local`, the tag `make e2e-image` builds at the cli-versions.lock pins), `incontainer.py`, `scriptserver.py` (the throwaway server for `length`, `length-recovery`, `context-overflow-compacted` and omp's `compaction-summarized`), the scenarios, the argv (`argv.json`, asserted equal to `PiProvider.build_command`) and the prompt. `batch.sh` reruns the whole session (~2.5 min, $0) |
 | `json-mode/` | the 2026-09-25 **live** usage probe (one OpenRouter call, scrubbed) — the only row carrying real usage and cost |
 | `text-mode-0.80.6/` | the historical 0.80.6 text-mode set, **ungraded** (see its README) |
 

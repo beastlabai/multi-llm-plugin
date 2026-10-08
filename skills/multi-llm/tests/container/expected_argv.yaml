@@ -749,10 +749,13 @@ entries:
     # `--tools` since review-run-scope-salvage-and-failure-visibility T3.1, also
     # by hand: PiProvider's PI_TOOLS as ONE comma-joined value, verbatim because
     # the value is the policy (a space-separated or repeated form would silently
-    # empty pi's toolset). Not timeout-derived either.
+    # empty pi's toolset). Not timeout-derived either. `--no-mcp` since fix
+    # round 24, by hand: pi 1.1.0's `--tools` keeps MCP tools, so the allow-list
+    # needs pi's MCP client switched off to mean what it says (PI_NO_MCP_FLAG).
     options:
       "--mode": "json"
       "--model": "<model>"
+      "--no-mcp": null
       "--no-session": null
       "--tools": "read,grep,find,bash,write"
       "-p": null

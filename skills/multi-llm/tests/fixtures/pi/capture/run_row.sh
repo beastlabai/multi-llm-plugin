@@ -6,7 +6,8 @@
 #
 #   run_row.sh <cli> <row> <stub|fail|script> [<mode>] [<drop_api_key 0|1>]
 #
-# Env: CAPTURE_OUT (default ~/.cache/multi-llm-capture/pi-json) is the scratch
+# Env: MLLM_E2E_IMAGE (default mllm-e2e:local) is the image, as for the
+# container lane; CAPTURE_OUT (default ~/.cache/multi-llm-capture/pi-json) is the scratch
 # dir mounted at /work/out; PART_BYTES sizes big/partN.txt for the compaction
 # rows; PI_SETTINGS is written to the per-exec .pi/agent/settings.json.
 # prompt.txt is the 4844-byte stdout-demanding review prompt the 0.80.6 set used.
@@ -32,5 +33,5 @@ timeout --signal=KILL 600 docker run --rm --network none \
   -e MLLM_CALL_LOG=/work/out/rows/$CLI/calls.jsonl \
   -e CLI="$CLI" -e ROW="$ROW" -e SERVER="$SERVER" -e MODE="$MODE" -e DROP_API_KEY="$DROP" \
   -e PART_BYTES="${PART_BYTES:-}" -e PI_SETTINGS="${PI_SETTINGS:-}" \
-  --entrypoint /bin/bash mllm-e2e:local -lc 'python3 /work/out/incontainer.py'
+  --entrypoint /bin/bash "${MLLM_E2E_IMAGE:-mllm-e2e:local}" -lc 'python3 /work/out/incontainer.py'
 echo "docker exit: $?"

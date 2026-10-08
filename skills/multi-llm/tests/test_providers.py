@@ -8274,20 +8274,38 @@ class TestPiToolAllowlist:
 
         assert cmd == [
             "pi", "--no-session", "-p", "--mode", "json",
-            "--tools", "read,grep,find,bash,write",
+            "--tools", "read,grep,find,bash,write", "--no-mcp",
             "--model", self.MODEL, self.PROMPT,
         ]
-        assert gate["asked"] == ["--tools"]
+        assert gate["asked"] == ["--tools", "--no-mcp"]
 
     def test_exact_argv_with_the_flag_and_an_effort(self, gate):
         cmd = PiProvider().build_command(self.PROMPT, f"{self.MODEL}:high")
 
         assert cmd == [
             "pi", "--no-session", "-p", "--mode", "json",
-            "--tools", "read,grep,find,bash,write",
+            "--tools", "read,grep,find,bash,write", "--no-mcp",
             "--thinking", "high",
             "--model", self.MODEL, self.PROMPT,
         ]
+
+    def test_mcp_is_switched_off_when_the_installed_pi_documents_it(self, gate):
+        """pi 1.1.0: ``--tools`` KEEPS MCP tools unless an entry starts with
+        ``mcp__``, and every server in ``~/.pi/agent/mcp.json`` connects at
+        start-up, so the allow-list alone no longer bounds the reviewer's tools.
+        ``--no-mcp`` once, after the allow-list; absent where pi's help does not
+        document it (no built-in MCP client to switch off), with no warning."""
+        from utils.providers.pi import PI_NO_MCP_FLAG
+
+        assert PI_NO_MCP_FLAG == "--no-mcp"
+        cmd = PiProvider().build_command(self.PROMPT, self.MODEL)
+        assert cmd.count("--no-mcp") == 1
+        assert cmd.index("--no-mcp") == cmd.index("--tools") + 2
+
+        with patch.object(PiProvider, "supports_flag",
+                          lambda _provider, flag: flag != "--no-mcp"):
+            older = PiProvider().build_command(self.PROMPT, self.MODEL)
+        assert "--no-mcp" not in older and "--tools" in older
 
     def test_exact_argv_without_the_flag_is_todays(self, gate, capsys):
         """A pi whose help does not document ``--tools``: today's argv + one WARN."""

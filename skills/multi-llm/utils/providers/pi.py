@@ -159,6 +159,20 @@ PI_TOOLS = ("read", "grep", "find", "bash", "write")
 #: optional flags: a pi whose help does not document it gets today's argv.
 PI_TOOLS_FLAG = "--tools"
 
+#: pi's built-in MCP client, switched off for the run. pi 1.1.0 changed what
+#: :data:`PI_TOOLS_FLAG` bounds: "``--tools`` now keeps MCP tools unless an
+#: entry starts with ``mcp__``" (its CHANGELOG and ``pi --help``), and pi
+#: connects every server in ``~/.pi/agent/mcp.json`` (and a trusted project's
+#: ``.pi/mcp.json``) at start-up. So under the allow-list above a reviewer still
+#: got every MCP tool the user configured for their own sessions — tools this
+#: list never names, launched as processes the run never asked for.
+#: ``--no-mcp`` ("no servers connect and no MCP tools", 1.1.0's help) restores
+#: what the list claims, the way codex runs with ``-c features.plugins=false``
+#: and copilot with ``--disable-builtin-mcps``. Gated on the installed help like
+#: ``--tools``: a pi that does not document it has no built-in MCP client to
+#: turn off, so it gets today's argv with no warning.
+PI_NO_MCP_FLAG = "--no-mcp"
+
 
 def parse_answer_text(text: str) -> Dict[str, Any]:
     """The answer-channel reader: a bare model answer in, a result dict out.
@@ -461,7 +475,10 @@ class PiProvider(LLMProvider):
     read,grep,find,bash,write`` (:data:`PI_TOOLS`, gated on the installed help
     documenting the flag), so which tool *names* are active no longer depends on
     the user's settings, a trusted project's ``.pi/settings.json`` or pi's own
-    default (``read, bash, edit, write``). Three things it does not do:
+    default (``read, bash, edit, write``). Since pi 1.1.0 that list no longer
+    bounds MCP tools, so ``--no-mcp`` (:data:`PI_NO_MCP_FLAG`, gated the same
+    way) keeps the servers in the user's ``~/.pi/agent/mcp.json`` from
+    connecting. Three things it does not do:
 
     * **It is not read-only.** ``bash`` stays, because the code-review prompt
       runs ``git diff``; a model can still run any command, so
@@ -619,8 +636,8 @@ class PiProvider(LLMProvider):
         timeout_s: Optional[int] = None,
         schema: Optional[StructuredSchema] = None,
     ) -> List[str]:
-        # pi --no-session -p --mode json [--tools <PI_TOOLS>] [--thinking <effort>]
-        #    --model <model> "<prompt>"
+        # pi --no-session -p --mode json [--tools <PI_TOOLS>] [--no-mcp]
+        #    [--thinking <effort>] --model <model> "<prompt>"
         # -p prints and exits; `--mode json` right after it (omp's order) makes
         # stdout the JSONL event stream parse_output reads. The prompt goes last
         # as a bare positional (adding `--` is a separate change: `@file`
@@ -642,6 +659,8 @@ class PiProvider(LLMProvider):
                 f"runs with whatever toolset its own defaults, settings and "
                 f"extensions enable. Everything else is unchanged.",
             )
+        if self.supports_flag(PI_NO_MCP_FLAG):
+            cmd.append(PI_NO_MCP_FLAG)
         if effort is not None:
             cmd += ["--thinking", effort]
         cmd += ["--model", base_model, prompt]

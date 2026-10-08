@@ -491,9 +491,13 @@ clis:
     # 2026-09-30 re-seed moved the digest for unrelated reasons (new flags like
     # `--skill`, `--prompt-template`, `--use-theme`, `--fork`, `--offline`, and
     # a longer provider-env-var list, none of them options this adapter emits).
+    # `--no-mcp` since fix round 24 (pi 1.1.0: "Disable built-in MCP support:
+    # no servers connect and no MCP tools"), which PiProvider now passes because
+    # 1.1.0's `--tools` keeps MCP tools; the 1.1.0 digest above already has it.
     options:
       - "--mode"
       - "--model"
+      - "--no-mcp"
       - "--no-session"
       - "--tools"
       - "-p"
