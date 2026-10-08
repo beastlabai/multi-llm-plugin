@@ -877,7 +877,9 @@ phase with `--force` to re-materialize it.
 
 **Check each reply right after you write it.** Run
 `uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util check-reply --tasks-file "{plan}/code-review/revalidation_tasks.json" --task-id <task_id>`
-(omit `--task-id` to check every batch). `[REPLY_INVALID]` means the subagent's reply
+(omit `--task-id` to check every batch, and only once every batch's subagent has
+returned: a reply not written yet prints `[REPLY_MISSING]`, which is no bad reply and
+no re-ask). `[REPLY_INVALID]` means the subagent's reply
 did not parse or did not cover its groups — Sonnet subagents lost a closing `]` on 3 of
 14 batches in the 2026-10-01 Claude Code run. Re-ask the same subagent once for the
 whole reply and write the new reply over the file. Never edit, trim or complete a reply
