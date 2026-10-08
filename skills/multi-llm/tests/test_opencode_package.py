@@ -4912,6 +4912,16 @@ class TestPlanSpelling:
         assert all(argv[1] == absolute for argv in polls)
 
 
+from tests.test_write_executor_orchestrators import repo  # noqa: E402,F401
+
+
+@pytest.fixture
+def host_path() -> str:
+    """``PATH`` as the session had it, taken before ``repo`` narrows it to
+    the mock runner's (node lives elsewhere)."""
+    return os.environ.get("PATH", "")
+
+
 class TestResumeCommand:
     """Issue #5: a blocked write phase leaves the user a command they can type.
 
@@ -5183,6 +5193,51 @@ class TestResumeCommand:
             error_line=self.STOP_LINE, error_beside_section=self.STOP_LINE_BESIDE)
         assert "resume_markdown" not in result
         assert result["error"] == self.STOP_LINE
+
+    def test_a_manual_gate_stop_relays_the_gate_beside_its_section(
+        self, built_package, uv_stub, host_path, repo, capsys,
+    ):
+        """The merge of fix round 28: implement's manual-task gate recorded
+        no line beside its section, so this plugin relayed "To go on: …
+        --human-task T001=done" beside a `resume_markdown` giving the same
+        command. Driven on the real path: the executor's stop and the real
+        `util next-command --blocked` lookup, handed over as it answered."""
+        from tests.test_manual_task_gate import (
+            IMPLEMENT_WRITE_IDS, _clean_env, _manual, _run, _seed_generate_tasks,
+        )
+
+        _clean_env(repo.monkeypatch)
+        _seed_generate_tasks(repo)
+        _manual(repo, "T001")
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", IMPLEMENT_WRITE_IDS)
+        code, _out, err, stopped = _run([
+            "implement", str(repo.plan), "--yes", "--exec-subagents",
+            "--host", "opencode"], capsys)
+        assert code == 3, err
+        code, _out, err, lookup = _run([
+            "util", "next-command", str(repo.plan), "--blocked", "implement",
+            "--host", "opencode"], capsys)
+        assert code == 0, err
+        step = dict(lookup["user_resume"])
+        command = step.pop("command")
+        step.pop("phase")
+        repo.monkeypatch.setenv("PATH", host_path)
+        resume_line = {"exit": 3, "stdout": [
+            "MULTI_LLM_RESULT: " + json.dumps({
+                "state": "needs-human", "exit": 3, "artifacts": [],
+                "next": None, "error": stopped["error"]})]}
+        result, _ = uv_stub.run(
+            built_package, self.IMPLEMENT, [self.LAUNCH, resume_line],
+            extra_env={"STUB_RESUME_COMMAND": command,
+                       "STUB_RESUME_EXTRA": json.dumps(step)})
+        beside = result["error"]
+        assert "--human-task" not in beside, beside
+        assert beside.startswith(
+            "implement ran nothing: 2 code tasks wait on manual task T001"), beside
+        assert result["result"]["error"] == beside
+        assert f'"{beside}"' in result["message"]
+        assert "--human-task" not in result["message"].split("`resume_markdown`")[0]
+        assert result["resume_markdown"].count("--human-task T001=done") == 1
 
     def test_the_plugin_spells_none_of_the_lookup(self, built_package):
         surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
