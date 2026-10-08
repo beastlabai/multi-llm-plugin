@@ -120,6 +120,27 @@ class TestTheExecutorReadsIt:
         assert executor.batch_check_findings({"check": check}) is None
         assert executor.ran_no_check({"check": check})
 
+    @pytest.mark.parametrize("ran", [
+        {"<each check command you ran>": "passed"},
+        ["<each check command you ran>: passed"],
+    ])
+    def test_the_shape_copied_as_it_is_is_no_check(self, ran):
+        """A reply that pasted the result shape without running anything
+        names no command: no check, never a pass."""
+        reply = {"check": {"passed": True, "findings": [], "ran": ran}}
+        assert executor.batch_check_findings(reply) is None
+        assert executor.ran_no_check(reply)
+
+    def test_an_entry_written_as_an_object_is_read(self):
+        failed = {"check": {"passed": True, "findings": [],
+                            "ran": [{"command": "npm test", "outcome": "failed"}]}}
+        (finding,) = executor.batch_check_findings(failed)
+        assert finding.startswith("npm test: failed")
+        passed = {"check": {"passed": True, "findings": [],
+                            "ran": [{"command": "npm test", "passed": True}]}}
+        assert executor.batch_check_findings(passed) == []
+        assert not executor.ran_no_check(passed)
+
     def test_a_failure_it_names_anyway_still_counts(self):
         reply = {"check": {"passed": False, "findings": ["npm test: 1 failing"], "ran": {}}}
         assert executor.batch_check_findings(reply) == ["npm test: 1 failing"]

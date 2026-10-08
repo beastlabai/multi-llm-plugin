@@ -975,6 +975,12 @@ def ran_check_outcomes(result: Any) -> Dict[str, str]:
                 command, sep, word = item.rpartition(":")
                 if sep and command.strip():
                     pairs[command] = word
+            elif isinstance(item, dict):
+                # `{"command": …, "outcome": …}` per check, a near miss.
+                command = next((item[k] for k in _RAN_COMMAND_KEYS if k in item), None)
+                word = next((item[k] for k in _RAN_OUTCOME_KEYS if k in item), None)
+                if isinstance(command, str) and command.strip():
+                    pairs[command] = word
         ran = pairs
     if not isinstance(ran, dict) or not ran:
         return {}
@@ -982,12 +988,29 @@ def ran_check_outcomes(result: Any) -> Dict[str, str]:
         from .known_checks import listed_check_outcomes
     except ImportError:  # pragma: no cover - direct script import shim
         from utils.known_checks import listed_check_outcomes
-    return listed_check_outcomes(ran)
+    return {
+        command: word for command, word in listed_check_outcomes(ran).items()
+        if not _is_placeholder(command)
+    }
+
+
+#: The keys a ``ran`` entry written as an object names its command and its
+#: outcome under (fix round 26), first found wins.
+_RAN_COMMAND_KEYS = ("command", "cmd", "check", "name")
+_RAN_OUTCOME_KEYS = ("outcome", "result", "status", "passed")
+
+
+def _is_placeholder(command: str) -> bool:
+    """Whether a ``ran`` key is the contract's own placeholder copied as it
+    is (``<each check command you ran>``): it names no command."""
+    text = command.strip()
+    return len(text) > 1 and text[0] == "<" and text[-1] == ">"
 
 
 def ran_no_check(result: Any) -> bool:
     """Whether a code batch's ``check`` says it ran no check (fix round 26):
-    its ``ran`` is present and empty, or every entry in it reads ``not run``.
+    its ``ran`` is present and empty, holds only the contract's placeholder,
+    or every entry in it reads ``not run``.
 
     A missing ``ran`` is not this (an older reply, read as before), and
     neither is a ``ran`` holding an entry that cannot be read: what it ran
@@ -997,14 +1020,20 @@ def ran_no_check(result: Any) -> bool:
     ran = check.get("ran") if isinstance(check, dict) else None
     if not isinstance(ran, (dict, list)):
         return False
-    if not ran:
+    # The contract's placeholder copied as it is names no command (a reply
+    # that pasted the shape without running anything).
+    named = [
+        entry for entry in ran
+        if not (isinstance(entry, str) and _is_placeholder(entry.rpartition(":")[0] or entry))
+    ] if isinstance(ran, list) else [key for key in ran if not _is_placeholder(str(key))]
+    if not named:
         return True
     try:
         from .known_checks import LISTED_NOT_RUN
     except ImportError:  # pragma: no cover - direct script import shim
         from utils.known_checks import LISTED_NOT_RUN
     outcomes = ran_check_outcomes(result)
-    return len(outcomes) == len(ran) and all(
+    return len(outcomes) == len(named) and all(
         word == LISTED_NOT_RUN for word in outcomes.values()
     )
 
