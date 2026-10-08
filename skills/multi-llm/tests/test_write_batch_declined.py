@@ -494,6 +494,52 @@ class TestADeclinedItemIsNamedOnEverySurface(_PairRig):
         assert f"note: {expected}" in view
 
 
+class TestADeclinedReasonIsRecordedAsWritten(_PairRig):
+    """Fix round 26 (live run 11 #10): `processed_<phase>` (and the mirror,
+    the verdict stamp, the report) dropped a reason's closing stop while the
+    reply, the log and summary.md kept it. The records keep the batch's
+    words; every line that adds its own mark after a reason still reads one
+    full stop."""
+
+    def test_the_records_keep_the_stop_and_no_line_doubles_it(self, repo, capsys):
+        import multi_llm
+        from utils import cli_common
+
+        plan = self._review_pair(repo)
+        declined_id, applied_id = self._ids(plan)[0]
+        written = REASON + "."
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_DECLINED", json.dumps(
+            [{"id": declined_id, "reason": written}]))
+        capsys.readouterr()
+        context = cli_common.activate_result(cli_common.ResultContext(
+            mode="apply-suggestions", phase="apply-suggestions"))
+        try:
+            assert self._run(repo, plan, [applied_id] + self._ids(plan)[1]) == 0
+            notice = context.notice or ""
+        finally:
+            cli_common.deactivate_result()
+        out = capsys.readouterr()
+        phase_dir = self._phase_dir(plan)
+        state = json.loads((plan.parent / plan.stem / "state.json").read_text())
+        record = state["processed_apply-suggestions"][declined_id]
+        assert record["status"] == "declined"
+        assert record["details"]["reason"] == written
+        mirror = json.loads((phase_dir / ".status.json").read_text())["progress"]
+        assert mirror["write_subagents"]["declined_items"][0]["reason"] == written
+        report = json.loads((phase_dir / "write_batch_report.json").read_text())
+        rows = [row for row in report["tasks"] if row.get("declined")]
+        assert rows and rows[0]["declined"] == [{"id": declined_id, "reason": written}]
+        summary = (phase_dir / "summary.md").read_text(encoding="utf-8")
+        assert f"(`{declined_id}`, apply-batch-0) — {written}" in summary
+        multi_llm.main(["status", str(plan), "--view", "run", "--phase",
+                        "apply-suggestions"])
+        view = capsys.readouterr().out
+        assert f"({REASON})" in view
+        for text in (out.out, out.err, notice, summary, view, "\n".join(mirror["notes"])):
+            assert f"{REASON}.." not in text and f"{REASON}.;" not in text, text
+            assert f"{REASON}. ." not in text, text
+
+
 # ===========================================================================
 # The way forward from a partial application a resume would only repeat
 # ===========================================================================

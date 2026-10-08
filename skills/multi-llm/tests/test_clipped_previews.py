@@ -253,8 +253,11 @@ class TestRecords:
         assert len(reason) <= DECLINED_REASON_MAX_CHARS
         assert_clean_cut(reason, LONG_REASON)
 
-    def test_a_reason_that_fits_keeps_round_21s_one_mark_rule(self):
-        assert declined_reason(CODEX_REASON + ".") == CODEX_REASON
+    def test_a_reason_that_fits_is_recorded_as_written(self):
+        """Fix round 26 (live run 11 #10): the record keeps the closing stop;
+        a line that adds its own mark drops it (round 21's one-mark rule,
+        `text_clip.without_closing_mark`)."""
+        assert declined_reason(CODEX_REASON + ".") == CODEX_REASON + "."
 
     def test_a_checks_findings(self):
         found = check_findings_from(

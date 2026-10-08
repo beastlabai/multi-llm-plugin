@@ -57,7 +57,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import prior_changes as _prior_changes
     from . import process_control as _process_control
     from . import subagent_executor as _executor
-    from .text_clip import clip, plain_line
+    from .text_clip import clip, plain_line, without_closing_mark
     from .providers.base import (
         SANDBOX_RUNG_PLUGIN_LANDLOCK,
         host_write_posture_consent,
@@ -161,7 +161,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         safety_dir,
     )
 except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.text_clip import clip, plain_line  # type: ignore
+    from utils.text_clip import clip, plain_line, without_closing_mark  # type: ignore
     from utils import git_utils as _git_utils
     from utils import known_checks as _known_checks
     from utils import landlock_dispatch as _landlock
@@ -526,7 +526,9 @@ def declined_words(
     for member, reason in declined.items():
         where = positions.get(str(member))
         label = f"{item} {where[1]} (`{member}`)" if where else f"`{member}`"
-        parts.append(f"{label} — {reason}")
+        # Fix round 26: the record keeps the reason's closing stop; every
+        # caller puts a mark after these words.
+        parts.append(f"{label} — {without_closing_mark(reason)}")
     return "; ".join(parts)
 
 
