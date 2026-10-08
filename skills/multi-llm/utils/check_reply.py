@@ -31,6 +31,12 @@ For every task it prints one ``[REPLY_OK]`` or ``[REPLY_INVALID]`` line and exit
 
 Other kinds are only checked for being JSON: their shape is checked by their own
 reaggregation. Advisory about nothing else: it never edits or deletes a file.
+
+A reply holding several JSON objects (an answer, then a correction and a second
+answer) is named as such (fix round 26) and still re-asked: it is never cut down to
+one of them, here or by the host. Which object the subagent meant cannot be read
+from the file, and a draft's hashes that cover the batch exactly can still be
+swapped against its own verdicts (live run 11, Claude Code review-plan batch 5).
 """
 
 from __future__ import annotations
@@ -57,6 +63,32 @@ def _entries(document: Any) -> Optional[List[Any]]:
     return document if isinstance(document, list) else None
 
 
+def _objects_in(text: str) -> int:
+    """How many whole JSON objects the reply text holds one after another,
+    prose between them skipped: the count a "not one object" diagnosis names.
+
+    A diagnosis only, for a reply that already failed to parse: nothing is
+    ever kept from it. The first object must open the reply and parse; each
+    later ``{`` must start an object that parses, else the count stops there
+    (a broken object is never counted by the pieces inside it). A reply
+    whose first object does not parse counts 0.
+    """
+    decoder = json.JSONDecoder()
+    start = len(text) - len(text.lstrip())
+    count, index = 0, start
+    while True:
+        try:
+            value, end = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            return count
+        if not isinstance(value, dict):
+            return count
+        count += 1
+        index = text.find("{", end)
+        if index < 0:
+            return count
+
+
 def check_task_reply(task: Dict[str, Any], phase_dir: str) -> List[str]:
     """Return the problems with one task's persisted reply; empty means fine."""
     path = os.path.join(phase_dir, task["output_name"]) if task.get("output_name") \
@@ -73,7 +105,17 @@ def check_task_reply(task: Dict[str, Any], phase_dir: str) -> List[str]:
     try:
         document = json.loads(text)
     except json.JSONDecodeError as exc:
-        return [f"reply is not valid JSON ({exc.msg} at line {exc.lineno} column {exc.colno})"]
+        where = f"{exc.msg} at line {exc.lineno} column {exc.colno}"
+        objects = _objects_in(text)
+        if objects > 1:
+            # Fix round 26 (live run 11): an answer, "Wait, the hashes above
+            # are swapped …; corrected reply:", and a second answer.
+            return [
+                f"reply holds {objects} JSON objects, not one ({where}): "
+                f"re-ask for the whole reply, printed once; never keep one "
+                f"of them yourself"
+            ]
+        return [f"reply is not valid JSON ({where})"]
     if task.get("kind") not in _GROUP_KINDS:
         return []
 

@@ -102,6 +102,9 @@ the first character is `{` and the last is the `}` that closes it. Keep every
 `metadata` comes first and `groups` last, so the reply ends with the last
 result's `}`, the `]` that closes `groups` and the `}` that closes the object:
 `}]}`. Re-read the object once for balanced brackets before you finish.
+Settle every verdict, and check each result's `group_hash` against its group
+above, before you print anything, then print the object once: a reply that
+adds a correction, a note or a second object after the first does not parse.
 
 {
   "metadata": {"model": "<the model you are>", "timestamp": "<ISO 8601>", "schema_version": "2.1"},
@@ -115,7 +118,8 @@ Rules:
 2. Each group above carries its own `group_index` — echo that group's
    `group_index` value back into its result, and copy its `group_hash` value
    verbatim too. The `group_index` you echo is advisory; the hash is what the
-   results are joined on, so a wrong hash discards the result.
+   results are joined on, so a wrong hash discards the result, and the hash
+   of another group in this batch puts your verdict on that group.
 3. Confidence is a number between 0.0 and 1.0.
 4. Be conservative: when you cannot decide from the context given, answer
    "needs-human-decision" rather than guessing.
