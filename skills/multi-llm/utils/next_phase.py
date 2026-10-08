@@ -184,7 +184,7 @@ class ManualTask:
     waits_on: Optional[str] = None
     #: A manual task that comes after code tasks implement has not run yet
     #: (fix round 28, live run 12, Codex racing 06: T008 and T009 depend on
-    #: code T010 held back): those code tasks, by id. Such a task is not in
+    #: code the manual T010 held back): those code tasks, by id. Such a task is not in
     #: the command that records manual tasks done until they have run.
     after: Tuple[str, ...] = ()
 
@@ -503,8 +503,8 @@ def manual_gate_why(implement: Mapping[str, Any], *, stopped: bool = True) -> Op
     if len(ids) == 1:
         task_id = ids[0]
         held = (
-            f"Every code task implement has left waits on manual task {names}, "
-            f"which is not recorded done, so a plain resume runs nothing."
+            f"Implement can run no code task until manual task {names} is "
+            f"recorded done, so a plain resume runs nothing."
             if stopped else
             f"Implement has not run {that_wait} on manual task {names}."
         )
@@ -513,8 +513,8 @@ def manual_gate_why(implement: Mapping[str, Any], *, stopped: bool = True) -> Op
             f"it done and runs {that_wait} on it."
         )
     held = (
-        f"Every code task implement has left waits on a manual task not "
-        f"recorded done ({names}), so a plain resume runs nothing."
+        f"Implement can run no code task until a manual task is recorded done "
+        f"({names}), so a plain resume runs nothing."
         if stopped else
         f"Implement has not run {that_wait} on manual tasks {names}."
     )
@@ -1781,7 +1781,17 @@ def emit_resume(
         if not _state_file(os.path.abspath(str(source))).is_file():
             return None
         route = resolve_route(host_id, stderr=err, recorded=recorded_route)
-        workflow = _workflow_payload(Path(os.path.abspath(str(source))), host_id)
+        # Read once here only for a phase whose resume reads it (fix round
+        # 28: an implement's resume also carries a manual task's answer);
+        # generate-tasks' plain re-invoke reads its own status file.
+        from .subagent_tasks import PHASE_BY_WRITE_KIND
+
+        resumed = _skill_module("modes").resolve(mode_word)
+        workflow = (
+            _workflow_payload(Path(os.path.abspath(str(source))), host_id)
+            if resumed is not None and resumed.phase in PHASE_BY_WRITE_KIND.values()
+            else None
+        )
         command = resume_command(
             plan_arg, host_id, route, mode_word, plan_path=plan_path,
             workflow=workflow,
@@ -1801,7 +1811,7 @@ def emit_resume(
         return None
     modes = _skill_module("modes")
     mode = modes.resolve(mode_word)
-    phases = workflow.get("phases") or {}
+    phases = (workflow or {}).get("phases") or {}
     resume: Dict[str, Any] = {
         "phase": mode.phase,
         "command": command,

@@ -190,8 +190,9 @@ class TestTheExecutorLegStops:
         assert "user_next_step" not in result
         error = result["error"]
         assert error.startswith(
-            "implement ran nothing: all 2 code tasks left wait on manual task "
-            "T001 (Create the module), which is not recorded done"), error
+            "implement ran nothing: 2 code tasks wait on manual task T001 "
+            "(Create the module), which is not recorded done, and no other "
+            "code task can run"), error
         assert "--human-task T001=done" in error
         # The log says so, and how many tasks wait.
         assert "T001 (Create the module): 2 code task(s) wait on it (T002, T003)" in err
@@ -216,7 +217,9 @@ class TestTheExecutorLegStops:
         assert resume["command"].endswith(
             "--implement " + str(repo.plan) + " --resume --human-task T001=done")
         assert resume["flags"] == ["--resume", "--human-task", "T001=done"]
-        assert "waits on manual task T001 (Create the module)" in resume["why"]
+        assert resume["why"].startswith(
+            "Implement can run no code task until manual task T001 (Create "
+            "the module) is recorded done"), resume["why"]
         assert "runs the 2 code tasks that wait on it" in resume["why"]
         markdown = resume["markdown"]
         assert markdown.startswith("To go on with implement:")
@@ -241,7 +244,7 @@ class TestTheExecutorLegStops:
         lines = run_status._resume_lines(view, repo.plan, workflow=workflow)
         assert lines[0].strip().startswith("resume with:"), lines
         assert lines[0].rstrip().endswith("--resume --human-task T001=done"), lines
-        assert "waits on manual task T001 (Create the module)" in lines[1], lines
+        assert "until manual task T001 (Create the module) is recorded done" in lines[1], lines
         # The workflow trailer's note says what waits, never that nothing does.
         code, out, err, result = _run(["status", str(repo.plan)], capsys)
         assert "No later phase waits" not in out
@@ -301,8 +304,8 @@ class TestTheNativeLegStops:
         assert code == 3, err
         assert result["state"] == "needs-human"
         assert result["error"].startswith(
-            "implement ran nothing: all 2 code tasks left wait on manual task "
-            "T001 (Create the module)"), result["error"]
+            "implement ran nothing: 2 code tasks wait on manual task T001 "
+            "(Create the module)"), result["error"]
         assert "--human-task T001=done" in result["error"]
         assert f"[MANUAL_GATE] {result['error']}" in out
         assert "T001 (Create the module): 2 code task(s) wait on it (T002, T003)" in out
@@ -314,6 +317,7 @@ class TestTheNativeLegStops:
         assert "Claude Code should now:" not in out
         assert "[MANUAL_TASK_NOTE]" not in out
         assert "Manual Tasks (Deferred) section" not in out
+        assert "Tasks to dispatch:" not in out  # no `util metrics start` asked
         state = _state(repo)
         assert state["task_status"]["T001"] == "skipped"
         assert state["task_status"]["T002"] == "skipped"
@@ -335,7 +339,8 @@ class TestTheNativeLegStops:
         assert markdown.startswith("To go on with implement:")
         assert "--review-code" not in markdown
         assert "No later phase waits" not in markdown
-        assert "[NEXT_COMMAND_WHY] Every code task implement has left waits on manual task T001" in out
+        assert ("[NEXT_COMMAND_WHY] Implement can run no code task until manual "
+                "task T001") in out
         # The same command is not given twice.
         assert "manual_tasks_command" not in step
 
@@ -398,3 +403,31 @@ def test_a_gate_over_two_manual_tasks_names_how_many_wait_on_each():
         "To go on: do T010, T011 by hand, then resume this phase with "
         "--human-task T010=done --human-task T011=done (the code tasks that "
         "wait on them then run).")
+
+
+def test_a_code_task_behind_a_later_manual_task_is_not_counted_as_released():
+    """T001 (manual) -> T002 -> T003 (manual) -> T004: recording T001 done
+    runs T002 only; T004 still waits on T003, which comes after T002. The
+    gate's words count only what the resume runs and never say every code
+    task waits on T001."""
+    from utils.write_batch_scheduler import manual_gate_head
+
+    graph = {"T001": [], "T002": ["T001"], "T003": ["T002"], "T004": ["T003"]}
+    gates = manual_task_gates(
+        graph, human_ids=["T001", "T003"], done=(), owed=["T001", "T003"])
+    assert gates["closable"] == ["T001"]
+    assert gates["waiting"] == {"T001": ["T002"]}
+    assert gates["after"] == {"T003": ["T002"]}
+    assert gates["gated"] is True
+    head = manual_gate_head("implement", {"T001": ""}, gates["waiting"])
+    assert head == (
+        "implement ran nothing: 1 code task waits on manual task T001, which "
+        "is not recorded done, and no other code task can run")
+    why = np_.manual_gate_why({
+        "manual_close_ids": ["T001"], "manual_waiting": gates["waiting"],
+        "manual_tasks": [{"id": "T001", "title": "Fixture"}]})
+    assert why == (
+        "Implement can run no code task until manual task T001 (Fixture) is "
+        "recorded done, so a plain resume runs nothing. Once you have done "
+        "T001 by hand, this command records it done and runs the code task "
+        "that waits on it.")
