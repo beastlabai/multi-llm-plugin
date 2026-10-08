@@ -1483,12 +1483,15 @@ def run_implement_write_phase(
 
 def _materialize_native_write_tasks(
     plan_path: Path, output_data: Dict[str, Any], *, tasks_file: Optional[Path],
+    host: Optional[str] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """Write ``{phase}/write_tasks.json`` for the native leg; its path and tasks.
 
     The same two bridge calls :func:`run_implement_write_phase` makes, with
     the same inputs, so the file a native host's ``util write-prompt`` reads
-    is the one the executor leg would have dispatched from.
+    is the one the executor leg would have dispatched from. Stamped native
+    with *host* (fix round 26), so ``status`` shows this run rather than an
+    earlier executor run's ``.status.json``.
     """
     from utils.write_phase_bridge import (
         materialize_write_tasks,
@@ -1507,7 +1510,7 @@ def _materialize_native_write_tasks(
     )
     path = write_task_file_for_phase(
         kind="implement", tasks=tasks, phase_dir=phase_dir, plan_file=plan_file,
-        tasks_file=tasks_file_str,
+        tasks_file=tasks_file_str, native_host=host or "claude-code",
     )
     return path, tasks
 
@@ -2793,8 +2796,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     # by hand (measured 2026-10-04: 3-6 tool calls per subagent, and one that
     # read tasks.md instead of its prompt).
     try:
+        from utils.host_capabilities import resolve_host_id
+
         write_task_file, native_tasks = _materialize_native_write_tasks(
             plan_path, output_data, tasks_file=implement_tasks_file,
+            host=resolve_host_id(explicit=getattr(args, "host", None)),
         )
     except Exception as exc:  # noqa: BLE001 - the handoff JSON is still usable
         print(f"WARNING: write_tasks.json not written: {exc}", file=sys.stderr)
