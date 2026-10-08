@@ -2190,11 +2190,12 @@ def restate_findings_problem(
     return (
         f"In {task_id}'s `check`, " + "; and ".join(shown) + ". If the added "
         f"words are your own comment, restate that finding as the accepted "
-        f"finding alone, character for character, and put the comment in the "
-        f"`check` object's `note`: it is then recorded as the problem the user "
-        f"accepted. If they report something the check printed beyond the "
-        f"accepted finding, keep the finding exactly as it is: it is then "
-        f"recorded as {task_id}'s own failure, which is right."
+        f"finding alone, character for character, and move the added words, "
+        f"as they are, into the `check` object's `note`: it is then recorded "
+        f"as the problem the user accepted. If they report something the "
+        f"check printed beyond the accepted finding, keep the finding exactly "
+        f"as it is: it is then recorded as {task_id}'s own failure, which is "
+        f"right."
     )
 
 

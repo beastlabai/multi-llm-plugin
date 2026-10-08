@@ -1316,10 +1316,10 @@ def build_schema_repair_prompt(
                 "outcome unchanged. In `findings`,\nchange only what the "
                 "problem above asks: a finding may be cut down to the\n"
                 "accepted finding it names, never reworded and never given "
-                "words of yours, and\nthe words you cut go in the `check` "
-                "object's `note`. Do not omit a finding or\nturn a failure "
-                "into a pass. Do not run any check again or invent one the\n"
-                "previous reply never reported."
+                "words of yours, and\nthe words you cut go, as they are, in "
+                "the `check` object's `note`. Do not omit a\nfinding or turn "
+                "a failure into a pass. Do not run any check again or invent\n"
+                "one the previous reply never reported."
             )
         else:
             take += (
