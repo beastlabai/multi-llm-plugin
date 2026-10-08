@@ -101,6 +101,7 @@ class TestTheTrigger:
         )
         assert "has a check finding\nthat needs restating" in prompt
         assert "a finding may be cut down to the\naccepted finding it names" in prompt
+        assert "the words you cut go, as they are, in the `check` object's `note`" in prompt
         assert "include that entire object unchanged" not in prompt
 
 
@@ -113,10 +114,21 @@ ORIGINAL = {"passed": False, "findings": [ADDED], "ran": {"node scripts/check.mj
 class TestTheMerge:
 
     def test_a_finding_cut_down_to_the_accepted_one_is_taken_with_its_note(self):
+        note = "(Known problem the user accepted in T002.)"
         merged = merge_restated_check(
-            ORIGINAL, {"passed": False, "findings": [ACCEPTED], "note": "known"}, [ACCEPTED])
-        assert merged["findings"] == [ACCEPTED] and merged["note"] == "known"
+            ORIGINAL, {"passed": False, "findings": [ACCEPTED], "note": note}, [ACCEPTED])
+        assert merged["findings"] == [ACCEPTED] and merged["note"] == note
         assert merged["ran"] == ORIGINAL["ran"] and merged["passed"] is False
+
+    @pytest.mark.parametrize("note", [None, "known", "the accepted one"])
+    def test_words_cut_and_not_moved_to_the_note_keep_the_finding(self, note):
+        """Nothing a finding said leaves the record: a cut whose words are
+        not in the note is no restatement."""
+        restated = {"passed": False, "findings": [ACCEPTED]}
+        if note is not None:
+            restated["note"] = note
+        merged = merge_restated_check(ORIGINAL, restated, [ACCEPTED])
+        assert merged["findings"] == [ADDED]
 
     @pytest.mark.parametrize("restated", [
         {"passed": True, "findings": []},
@@ -134,7 +146,8 @@ class TestTheMerge:
         extra = "node scripts/check.mjs: mode must be strict (found loose)"
         merged = merge_restated_check(
             {**ORIGINAL, "findings": [MORE]},
-            {"findings": [ACCEPTED, extra], "note": "split in two"}, [ACCEPTED])
+            {"findings": [ACCEPTED, extra],
+             "note": "split in two: mode must be strict (found loose)"}, [ACCEPTED])
         assert merged["findings"] == [ACCEPTED, extra]
         own, matched = split_accepted_findings(merged["findings"], {"T002": [ACCEPTED]})
         assert own == [extra] and matched == {"T002": [ACCEPTED]}
@@ -182,7 +195,8 @@ class TestTheExecutorLeg:
     def test_a_restatement_down_to_the_accepted_finding_is_accepted(self, repo, capsys):
         _stop_with_accepted(repo, capsys)
         _t007_reports(repo, ADDED, {
-            "passed": False, "findings": [ACCEPTED], "note": "known problem the user accepted",
+            "passed": False, "findings": [ACCEPTED],
+            "note": "known problem the user accepted in T002",
             "ran": {"node scripts/check.mjs": "failed"}})
         text = _resume(repo, capsys)
         reasks = _reasks(repo)
@@ -191,7 +205,7 @@ class TestTheExecutorLeg:
         assert "its own check reports a finding the user accepted with words added" in text
         assert BATCH_CHECK_MARKER not in text, text[-3000:]
         line = next(l for l in text.splitlines() if l.startswith(BATCH_CHECK_ACCEPTED_MARKER))
-        assert '(its note: "known problem the user accepted")' in line
+        assert '(its note: "known problem the user accepted in T002")' in line
         assert "not a clean finish" not in str(_result_line(text).get("notice") or "")
         assert _row(repo, "T007")["batch_check_accepted"] == {"T002": [ACCEPTED]}
         state = get_or_create_state(repo.plan).state

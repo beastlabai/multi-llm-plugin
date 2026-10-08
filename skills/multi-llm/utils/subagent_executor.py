@@ -1649,7 +1649,7 @@ class TaskOutcome:
     batch_check_accepted: Dict[str, List[str]] = field(default_factory=dict)
     #: The own-check findings of an implement task that are the same
     #: findings a check task of the run reported (the strict comparison of
-    #: ``write_batch_scheduler.split_accepted_findings``), by that check's id
+    #: ``write_batch_scheduler.split_repeated_findings``), by that check's id
     #: (``write_batch_scheduler.repeated_findings_for``, fix round 28, live
     #: run 12 OpenCode accept 01: T001 ran T002's release check and was
     #: blamed for T002's finding). Taken out of ``batch_check`` whichever of
@@ -8444,11 +8444,14 @@ def merge_restated_check(
 
     * its ``findings``, when every finding of the first report it changed
       was cut down to one of *allowed* (the accepted findings the re-ask
-      named), whitespace aside, that the changed finding held word for word.
-      A restatement that drops a finding, rewords one or turns the check
-      into a pass keeps the first report's findings: a report-only turn ran
-      no check, so it can say less about one only by cutting the words the
-      re-ask said were not the check's. A finding it adds is kept.
+      named), whitespace aside, that the changed finding held word for word,
+      and the words cut are in its ``note`` (case and punctuation aside), so
+      nothing a finding said leaves the record. A restatement that drops a
+      finding, rewords one, turns the check into a pass or cuts words it
+      does not move to its note keeps the first report's findings: a
+      report-only turn ran no check, so it can say less about one only by
+      moving the words the re-ask named to the note. A finding it adds is
+      kept.
     * its ``note``, when it is a non-blank string.
 
     Never a classification: what is accepted is still decided by
@@ -8461,6 +8464,16 @@ def merge_restated_check(
     def plain(text: Any) -> str:
         return " ".join(str(text or "").split())
 
+    def words(text: Any) -> str:
+        return " ".join(re.findall(r"[a-z0-9]+", str(text or "").lower()))
+
+    note = restated.get("note")
+    note_words = words(note) if isinstance(note, str) else ""
+
+    def moved_to_note(old: str, new: str) -> bool:
+        head, _, tail = plain(old).partition(plain(new))
+        return all(words(part) in note_words for part in (head, tail) if words(part))
+
     before = batch_check_findings({"check": original}) or []
     candidate = copy.deepcopy(original)
     candidate["findings"] = copy.deepcopy(restated.get("findings"))
@@ -8469,12 +8482,15 @@ def merge_restated_check(
     changed = [finding for finding in before if finding not in after]
     added = [finding for finding in after if finding not in before]
     cut_down = all(
-        any(plain(new) in accepted and plain(new) in plain(old) for new in added)
+        any(
+            plain(new) in accepted and plain(new) in plain(old)
+            and moved_to_note(old, new)
+            for new in added
+        )
         for old in changed
     )
     if after and cut_down:
         merged["findings"] = candidate["findings"]
-    note = restated.get("note")
     if isinstance(note, str) and note.strip():
         merged["note"] = note
     return merged
