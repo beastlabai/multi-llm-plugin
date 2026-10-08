@@ -466,6 +466,18 @@ def manual_gate_flags(implement: Mapping[str, Any]) -> List[str]:
     return flags
 
 
+def gate_resume_closes_the_manual_tasks(implement: Mapping[str, Any]) -> bool:
+    """Whether the resume a stopped implement's section leads with
+    (:func:`_resume_flags` under ``manual_gate``) is the very command that
+    records the deferred manual tasks done: the gate's ids are every one
+    :func:`manual_close_ids` names (the merge of fix round 28). A stop's
+    notice then names the tasks and leaves that command to the section."""
+    if not implement.get("manual_gate"):
+        return False
+    ids = manual_gate_ids(implement)
+    return bool(ids) and ids == manual_close_ids(implement)
+
+
 def _manual_gate_names(implement: Mapping[str, Any], ids: Sequence[str]) -> str:
     """``T010 (Provision the checker fixture)``, the ids joined, at most
     :data:`GATE_IDS_SHOWN`, each with its recorded title cut."""
@@ -1851,7 +1863,8 @@ def emit_resume(
     # servers relay in its place beside the section.
     try:
         lines = stop_headlines_on_record(
-            plan_arg if plan_path is None else plan_path, mode_word)
+            plan_arg if plan_path is None else plan_path, mode_word,
+            section_flags=resume["flags"])
     except Exception as exc:  # noqa: BLE001 - advisory: the resume still stands
         print(lookup_failure_line(exc), file=err)
         lines = None
@@ -1902,6 +1915,7 @@ def stop_answers_on_record(
 
 def stop_headlines_on_record(
     plan_path: Union[str, Path], mode_word: str,
+    *, section_flags: Optional[Sequence[str]] = None,
 ) -> Optional[Tuple[str, str]]:
     """``(headline, beside_section)`` of the phase's last stop, as it
     recorded them (``progress.write_subagents.stop``: ``headline`` and
@@ -1917,7 +1931,10 @@ def stop_headlines_on_record(
     must be one plain line within ``cli_common.ERROR_MAX_CHARS``, and every
     answer the stop recorded must have passed :func:`stop_answers_on_record`
     (the section lists all of them), else ``None``: the folder is writable
-    by every jailed batch.
+    by every jailed batch. A stop whose own resume carries answers (a
+    manual-task gate's ``resume_flags``, the merge of fix round 28) hands
+    the lines back only while those flags are the plugin's shape and the
+    section's resume, *section_flags*, is that very resume.
     """
     from . import cli_common
     from .output_handler import phase_dir_path
@@ -1951,6 +1968,10 @@ def stop_headlines_on_record(
     recorded = raw if isinstance(raw, list) else []
     if len(stop_answers_on_record(source, mode_word)) != len(recorded):
         return None
+    if "resume_flags" in stop:
+        flags = recorded_answer_flags(stop.get("resume_flags"))
+        if flags is None or flags != list(section_flags or ()):
+            return None
     return headline, beside
 
 
@@ -2036,13 +2057,25 @@ def resume_answers(
 
 
 def render_resume_answers(answers: Sequence[Mapping[str, Any]]) -> str:
-    """The answers as one run of text: `` `<command>` (<why>)`` joined by ``; ``.
+    """The answers as one run of text: `` `<command>` — <why>.`` each, one
+    sentence apiece, the last ending the text.
 
     What the tool routes put in their needs-human ``message`` through the
     surface's ``needs_human_message.answers`` clause, so a host that relays
     only the message relays every way forward. Python owns the wording.
+    The merge of fix round 28: each why was bracketed and the answers
+    ``; ``-joined, so a why that ends in a bracket of its own ("… depend on
+    it (T006)", a quoted finding "… (found 2)") read "(T006))", and the
+    clause's stop after the last doubled one that ends in "…"; ``status``
+    prints each unbracketed (``run_status.why_line``). Each why now follows
+    its command and ends its sentence once (``text_clip.with_closing_mark``),
+    and the clause adds no mark of its own after the text.
     """
-    return "; ".join(f"`{entry['command']}` ({entry['why']})" for entry in answers)
+    from .text_clip import with_closing_mark
+
+    return " ".join(
+        f"`{entry['command']}` — {with_closing_mark(entry['why'])}"
+        for entry in answers)
 
 
 # ---------------------------------------------------------------------------
