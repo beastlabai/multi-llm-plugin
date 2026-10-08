@@ -84,8 +84,13 @@ def _user_overlay() -> Optional[Dict[str, Any]]:
     path = (os.environ.get(GROK_CONFIG_PATH_ENV) or "").strip()
     if not path:
         return {}
+    path = os.path.expanduser(path)
+    if not os.path.isabs(path):
+        # grok resolves it against the child's cwd, which is not this
+        # process's: reading it here could carry another file's overlay.
+        return None
     try:
-        with open(os.path.expanduser(path), "rb") as handle:
+        with open(path, "rb") as handle:
             raw = handle.read(_OVERLAY_READ_LIMIT + 1)
     except OSError:
         return None
