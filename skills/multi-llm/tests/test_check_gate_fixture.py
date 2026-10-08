@@ -174,7 +174,7 @@ class TestThePolicyStop:
         assert statuses["T007"] == "pending"
         assert _reason(repo, "T007").startswith(
             "not run — upstream check T002 reported problems")
-        assert "[write-subagents] batch 3: T005 refused before dispatch" in text
+        assert "[write-subagents] T005 refused before dispatch" in text
 
     def test_the_stop_names_every_answer_it_needs(self, repo, capsys):
         text = _first_run(repo, capsys)
