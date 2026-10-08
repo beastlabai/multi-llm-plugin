@@ -98,6 +98,20 @@ TABLE = [
     pytest.param(
         {"passed": True, "findings": "none", "ran": {}},
         NONE, "none", id="a-bare-none-is-no-finding"),
+    # A `not_run` reason with no `ran` at all ran nothing too (fix round 27,
+    # coordinator's follow-up): a pass of nothing is never a pass.
+    pytest.param(
+        {"passed": True, "findings": [], "not_run": "no test runner here"},
+        NONE, "none", id="not-run-without-ran"),
+    pytest.param(
+        {"passed": True, "findings": ["npm test: 2 failing"], "not_run": "no test runner here"},
+        _findings("npm test: 2 failing"), "findings", id="not-run-without-ran-naming-a-finding"),
+    pytest.param(
+        {"passed": False, "findings": [], "not_run": "no test runner here"},
+        _findings(), "findings", id="not-run-without-ran-said-it-failed"),
+    pytest.param(
+        {"passed": True, "findings": [], "not_run": "  "},
+        PASSED, "pass", id="a-blank-not-run-is-no-reason"),
     pytest.param(
         {"passed": True, "findings": ["n/a"], "ran": []},
         NONE, "none", id="an-n/a-entry-is-no-finding"),
@@ -179,6 +193,16 @@ class TestTheExecutorLeg:
             "passed": False, "findings": [], "ran": {"npm test": "failed"}}})
         assert finding.startswith("npm test: failed")
 
+    def test_a_not_run_reason_without_ran_says_nothing_ran(self):
+        reply = {"check": {"passed": True, "findings": [], "not_run": "no browser"}}
+        assert executor.ran_no_check(reply)
+        assert executor.batch_check_findings(reply) is None
+        # F4: kept across a report-only repair, so it cannot become a pass.
+        assert executor._report_check_evidence(reply) == reply["check"]
+        # Beside a `ran` that names a command, `ran` decides.
+        assert not executor.ran_no_check({"check": {
+            "passed": True, "ran": {"npm test": "passed"}, "not_run": "lint: no config"}})
+
     def test_a_placeholder_object_says_nothing_ran(self):
         reply = {"check": {"passed": True, "findings": [],
                            "ran": [{"command": PLACEHOLDER, "outcome": "passed"}]}}
@@ -241,6 +265,7 @@ class TestTheRuleIsStatedOnce:
             "what it lists beside a pass, such as `npm test: 12 passed`, is not "
             "a failing check",
             "the result shape's placeholder `<each check command you ran>`",
+            "or it has no `ran` at all but gives a `not_run` reason",
             '`--own-check findings --finding "its check could not run: ',
             "`subagent_executor.batch_check_findings`",
         ):
