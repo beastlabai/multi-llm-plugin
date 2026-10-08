@@ -202,6 +202,134 @@ TASK_CHECK_FINDINGS_KEY = "task_check_findings"
 IMPLEMENT_TASK_GRAPH_KEY = "implement_task_depends_on"
 
 
+def manual_task_gates(
+    graph: Mapping[str, Sequence[str]],
+    *,
+    human_ids: Iterable[str],
+    done: Iterable[str],
+    owed: Iterable[str],
+    dropped: Iterable[str] = (),
+) -> Dict[str, Any]:
+    """Which owed manual tasks the user can do now, and what waits on them.
+
+    Fix round 28 (live run 12, Codex racing 06): T010, a manual task every
+    code task depended on, was deferred under ``--yes``; implement ran
+    nothing, reported done, said "No later phase waits for these manual
+    tasks" and offered a command recording T008, T009 and T010 done at once,
+    while T008 and T009 depend on code nothing had run yet. Pure, over the
+    decomposition *graph* (``{task: [the ids it depends on]}``):
+
+    * *done*: the tasks on record ``completed`` (a code task that ran or was
+      accepted, a manual task answered done);
+    * *owed*: the manual tasks left for the user (deferred, not done);
+    * *dropped*: the tasks skipped at the user's request and the ones skipped
+      with them, which nobody runs.
+
+    Returns ``{"closable", "waiting", "after", "gated"}``:
+
+    * ``closable``: the owed manual tasks whose own dependencies are done, or
+      are closable manual tasks themselves: the ones a ``--human-task
+      <id>=done`` can honestly record now;
+    * ``waiting``: ``{closable id: [code ids]}``, the code tasks not done that
+      wait on it and that a resume runs once the closable tasks are recorded
+      done (each of their other dependencies done, closable, or such a task);
+    * ``after``: ``{owed id not closable: [code ids]}``, the code tasks not
+      done that it comes after;
+    * ``gated``: some code task is not done, and every one that is not waits,
+      directly or through other tasks, on a manual task not done — so a
+      resume runs nothing until one is recorded done.
+    """
+    human = {str(task_id) for task_id in human_ids}
+    finished = {str(task_id) for task_id in done}
+    owed_ids = {str(task_id) for task_id in owed} - finished
+    gone = {str(task_id) for task_id in dropped} - finished
+    deps: Dict[str, List[str]] = {
+        str(task_id): [str(dep) for dep in (values or []) if dep]
+        for task_id, values in graph.items()
+    }
+
+    def open_deps(task_id: str) -> List[str]:
+        return [
+            dep for dep in deps.get(task_id, ())
+            if dep not in finished and dep not in gone
+        ]
+
+    blockers_memo: Dict[str, frozenset] = {}
+
+    def blockers(task_id: str, path: frozenset = frozenset()) -> frozenset:
+        """The manual tasks not done that *task_id* waits on, transitively."""
+        if task_id in blockers_memo:
+            return blockers_memo[task_id]
+        if task_id in path:  # a cycle: tasks.md never has one; stay finite
+            return frozenset()
+        found: set = set()
+        for dep in open_deps(task_id):
+            if dep in human:
+                found.add(dep)
+            found |= blockers(dep, path | {task_id})
+        blockers_memo[task_id] = frozenset(found)
+        return blockers_memo[task_id]
+
+    code_after_memo: Dict[str, frozenset] = {}
+
+    def code_after(task_id: str, path: frozenset = frozenset()) -> frozenset:
+        """The code tasks not done that *task_id* comes after, transitively."""
+        if task_id in code_after_memo:
+            return code_after_memo[task_id]
+        if task_id in path:
+            return frozenset()
+        found: set = set()
+        for dep in open_deps(task_id):
+            if dep not in human:
+                found.add(dep)
+            found |= code_after(dep, path | {task_id})
+        code_after_memo[task_id] = frozenset(found)
+        return code_after_memo[task_id]
+
+    closable = sorted(m for m in owed_ids if not code_after(m))
+    closable_set = set(closable)
+    pending_code = sorted(
+        task_id for task_id in deps
+        if task_id not in human and task_id not in finished and task_id not in gone
+    )
+
+    released_memo: Dict[str, bool] = {}
+
+    def released(task_id: str, path: frozenset = frozenset()) -> bool:
+        """Whether a resume runs *task_id* once the closable tasks are done."""
+        if task_id in released_memo:
+            return released_memo[task_id]
+        if task_id in path:
+            return False
+        ok = all(
+            dep in closable_set
+            or (dep not in human and released(dep, path | {task_id}))
+            for dep in open_deps(task_id)
+        )
+        released_memo[task_id] = ok
+        return ok
+
+    waiting: Dict[str, List[str]] = {}
+    for task_id in pending_code:
+        held = blockers(task_id)
+        if not held or not released(task_id):
+            continue
+        for manual in sorted(held & closable_set):
+            waiting.setdefault(manual, []).append(task_id)
+    after = {
+        manual: sorted(code_after(manual))
+        for manual in sorted(owed_ids - closable_set)
+        if code_after(manual)
+    }
+    gated = bool(pending_code) and all(blockers(task_id) for task_id in pending_code)
+    return {
+        "closable": closable,
+        "waiting": waiting,
+        "after": after,
+        "gated": gated,
+    }
+
+
 def set_task_check_findings_in_state(
     state: Dict[str, Any], task_id: str, findings: Optional[Iterable[str]],
 ) -> None:
@@ -1414,7 +1542,48 @@ class StateManager:
         if not isinstance(human, list):
             return ids
         manual = {str(task_id) for task_id in human}
-        return [task_id for task_id in ids if task_id in manual]
+        # Fix round 28 (live run 12, Codex racing 06): only the ones the user
+        # can do now. T008 and T009 depend on code nothing had run yet, and
+        # the command recorded them done beside T010.
+        gates = self.manual_task_gates(deferred)
+        closable = set(gates["closable"]) if gates is not None else manual
+        return [task_id for task_id in ids if task_id in manual and task_id in closable]
+
+    def manual_task_gates(
+        self, deferred: Optional[Sequence[Dict[str, Any]]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """:func:`manual_task_gates` over this state's record of implement's
+        decomposition (``IMPLEMENT_TASK_GRAPH_KEY``), or ``None`` for a state
+        written before that graph or the manual task ids were recorded.
+
+        *deferred* is :meth:`deferred_implementation_tasks` when the caller
+        already has it. Done is a task on record ``completed``; owed, a manual
+        task of *deferred*; dropped, a task skipped that is not owed (the
+        user's own skip and the tasks skipped with it)."""
+        graph = self.state.get(IMPLEMENT_TASK_GRAPH_KEY)
+        human = self.state.get("implement_human_task_ids")
+        if not isinstance(graph, dict) or not isinstance(human, list):
+            return None
+        if deferred is None:
+            deferred = self.deferred_implementation_tasks()
+        statuses = self.implementation_task_statuses()
+        current = self.state.get("implement_task_ids")
+        scope = set(current) if isinstance(current, list) else set(graph)
+        manual = {str(task_id) for task_id in human}
+        owed = [
+            str(entry.get("id")) for entry in deferred
+            if isinstance(entry, dict) and str(entry.get("id")) in manual
+        ]
+        return manual_task_gates(
+            {task_id: deps for task_id, deps in graph.items() if task_id in scope},
+            human_ids=manual,
+            done=[task_id for task_id, status in statuses.items() if status == "completed"],
+            owed=owed,
+            dropped=[
+                task_id for task_id, status in statuses.items()
+                if status == "skipped" and not self._deferred_to_user(task_id)
+            ],
+        )
 
     def implementation_check_findings(self) -> List[Dict[str, Any]]:
         """The implement check tasks whose check reported problems, by id.

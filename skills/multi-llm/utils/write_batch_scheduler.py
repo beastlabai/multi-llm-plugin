@@ -136,6 +136,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from .state_manager import (
         IMPLEMENT_TASK_GRAPH_KEY,
         PROCESSED_LEG_EXECUTOR,
+        manual_task_gates,
         record_batch_items_in_state,
         set_task_check_findings_in_state,
     )
@@ -250,6 +251,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
     from utils.state_manager import (  # type: ignore
         IMPLEMENT_TASK_GRAPH_KEY,
         PROCESSED_LEG_EXECUTOR,
+        manual_task_gates,
         record_batch_items_in_state,
         set_task_check_findings_in_state,
     )
@@ -974,6 +976,88 @@ def _deferred_split(plan: "HumanTaskPlan") -> Dict[str, Dict[str, str]]:
         if current != task_id:
             waits[task_id] = current
     return {"deferred_waits_on": dict(sorted(waits.items()))} if waits else {}
+
+
+def manual_gate_head(
+    phase: str, labels: Mapping[str, str], waiting: Mapping[str, Sequence[str]],
+) -> str:
+    """What a run a manual task gates says first, on both implement legs
+    (fix round 28, live run 12, Codex racing 06): that nothing ran, the
+    gating manual task(s) by id and title (*labels*: ``{id: " (title)"}``)
+    and how many code tasks wait on each."""
+    gating = sorted(waiting, key=_metrics._id_key)
+    held = {code for codes in waiting.values() for code in codes}
+    if len(gating) == 1:
+        task_id = gating[0]
+        count = len(held)
+        return (
+            f"{phase} ran nothing: "
+            + ("the 1 code task left waits" if count == 1
+               else f"all {count} code tasks left wait")
+            + f" on manual task {task_id}{labels.get(task_id, '')}, which is "
+            f"not recorded done"
+        )
+    named = ", ".join(
+        f"{task_id}{labels.get(task_id, '')} holds {len(waiting[task_id])}"
+        for task_id in gating
+    )
+    return (
+        f"{phase} ran nothing: every code task left waits on a manual task "
+        f"not recorded done ({named})"
+    )
+
+
+def manual_gate_way_on(gating: Sequence[str]) -> str:
+    """The gate's one way on, as a stop headline says it (fix round 28)."""
+    it = "it" if len(gating) == 1 else "them"
+    answers = " ".join(f"--human-task {task_id}=done" for task_id in gating)
+    return (
+        f"To go on: do {', '.join(gating)} by hand, then resume this phase "
+        f"with {answers} (the code tasks that wait on {it} then run)."
+    )
+
+
+def plan_manual_gates(
+    plan: Optional["HumanTaskPlan"],
+    nodes: Sequence[Dict[str, Any]],
+    statuses: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """``state_manager.manual_task_gates`` over a resolved *plan*, before
+    or after it is persisted (fix round 28, live run 12, Codex racing 06).
+
+    *nodes* is the decomposition (:func:`decomposition_graph`), *statuses*
+    ``state.json``'s ``task_status`` as recorded. Done: a task on record
+    ``completed`` that the plan does not skip, a manual task the plan
+    completes, a failed task it accepts. Owed: the manual tasks the plan
+    defers. Dropped: the tasks the user skipped and the ones skipped with
+    them (:meth:`HumanTaskPlan.declined`). Both implement legs ask it: the
+    executor at the end of a run that dispatched nothing, the native emit
+    for the note on recording the manual tasks done."""
+    graph: Dict[str, List[str]] = {}
+    human: set = set()
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        task_id = str(node.get("task_id") or node.get("id") or "")
+        if not task_id:
+            continue
+        graph[task_id] = [str(dep) for dep in (node.get("depends_on") or []) if dep]
+        if node.get("is_human") or node.get("executor_role") == "human":
+            human.add(task_id)
+    if plan is None:
+        return manual_task_gates(graph, human_ids=human, done=(), owed=())
+    recorded = {str(k): str(v) for k, v in dict(statuses or {}).items()}
+    done = (
+        {task_id for task_id, status in recorded.items() if status == "completed"}
+        | set(plan.completed) | set(plan.accepted)
+    ) - set(plan.skipped)
+    return manual_task_gates(
+        graph,
+        human_ids=human,
+        done=done,
+        owed=[task_id for task_id in plan.deferred() if task_id in human],
+        dropped=list(plan.declined()),
+    )
 
 
 def set_aside_by_plan(
@@ -5305,6 +5389,14 @@ class WriteBatchScheduler:
             result.report_path = self._write_report(result)
             self._mirror_status(result)
             return result
+
+        # 4b. Fix round 28 (live run 12, Codex racing 06): a run that
+        # dispatched nothing because every code task left waits on a manual
+        # task not recorded done is not a finished implement. It stops for
+        # the user, naming the manual task and the resume that records it.
+        gates = self._manual_gate(result)
+        if gates is not None:
+            return self._stop_on_manual_gate(result, gates)
 
         # 5. Finalization is part of the contract, not the caller's courtesy.
         if self.finalize:
@@ -10807,6 +10899,160 @@ class WriteBatchScheduler:
             result.stop["resume_why"] = why
         self._set_stop_headline(result.stop)
 
+    def _manual_gate(self, result: SchedulerResult) -> Optional[Dict[str, Any]]:
+        """The manual-task gates (:func:`plan_manual_gates`) when this run
+        must stop on them, else ``None`` (fix round 28): an implement run
+        that started no runner, on an implement not on record completed (a
+        resume of a completed one that runs nothing keeps it completed, fix
+        round 14), whose every code task left waits on a manual task not
+        recorded done, one the user can do now among them."""
+        if self.kind != "implement" or self.dry_run or self.state is None:
+            return None
+        if any(self._started_a_runner(o) for o in result.outcomes):
+            return None
+        try:
+            if self.state.is_phase_completed(self.phase):
+                return None
+        except Exception:  # noqa: BLE001 - a state fake without the record
+            return None
+        gates = self._manual_gates(result.human_plan)
+        if not gates or not gates.get("gated") or not gates.get("waiting"):
+            return None
+        return gates
+
+    def _stop_on_manual_gate(
+        self, result: SchedulerResult, gates: Dict[str, Any],
+    ) -> SchedulerResult:
+        """End a run that ran nothing because a manual task gates every code
+        task left: exit 3, the phase recorded started and not completed (so
+        every reader offers its resume), the stop record, the closing
+        ``[ETA]`` line, summary.md and the block naming the way on."""
+        result.exit_code = EXIT_NEEDS_HUMAN
+        self._mark_implement_started()
+        self._record_manual_gate(result, gates)
+        gating = list(result.stop.get("manual_task_ids") or [])
+        held = list(result.stop.get("held_task_ids") or [])
+        self._eta_close(result, why=(
+            f"{', '.join(gating)} left for you (manual); {len(held)} code "
+            f"task(s) wait on {'it' if len(gating) == 1 else 'them'}"
+        ))
+        if self.summary_file:
+            result.summary_file = self._write_summary(result)
+        result.messages.extend(self._manual_gate_message(result))
+        if result.summary_file:
+            result.messages.append(f"Implementation summary: {result.summary_file}")
+        result.report_path = self._write_report(result)
+        self._mirror_status(result)
+        return result
+
+    def _record_manual_gate(
+        self, result: SchedulerResult, gates: Dict[str, Any],
+    ) -> None:
+        """The stop record of a run a manual task gates (``kind:
+        "manual-gate"``): the gating manual tasks (the ones the user can do
+        now that code tasks wait on), the code tasks waiting on each, the
+        resume that records them done (``resume_flags``) and what it does
+        (``resume_why``), and the headline the result line's ``error``
+        carries."""
+        waiting = {
+            manual: list(codes) for manual, codes in sorted(gates["waiting"].items())
+            if codes
+        }
+        gating = sorted(waiting, key=_metrics._id_key)
+        flags: List[str] = ["--resume"]
+        for manual in gating:
+            flags += ["--human-task", f"{manual}=done"]
+        held = sorted({code for codes in waiting.values() for code in codes},
+                      key=_metrics._id_key)
+        result.stop = {
+            "batch_index": None,
+            "failed_task_ids": [],
+            "task_id": gating[0],
+            "kind": "manual-gate",
+            "manual_task_ids": gating,
+            "waiting": waiting,
+            "what": (
+                f"every code task left waits on "
+                f"{'manual task' if len(gating) == 1 else 'manual tasks'} "
+                f"{', '.join(gating)}, not recorded done"
+            ),
+            "reported": None,
+            "not_run": [],
+            "acceptable": True,
+            "not_rerun": False,
+            "resume_flags": flags,
+            "held_task_ids": held,
+        }
+        why = self._manual_gate_why(gating, waiting)
+        if why:
+            result.stop["resume_why"] = why
+        result.stop["headline"] = self._stop_headline(result.stop)
+
+    def _manual_gate_why(
+        self, gating: Sequence[str], waiting: Mapping[str, Sequence[str]],
+    ) -> Optional[str]:
+        """What the gate's resume does, in ``next_phase.manual_gate_why``'s
+        words, over this run's titles."""
+        from .next_phase import manual_gate_why
+
+        entry = {
+            "manual_close_ids": list(gating),
+            "manual_waiting": {k: list(v) for k, v in waiting.items()},
+            "manual_tasks": [
+                {"id": manual, "title": self._task_title(manual)}
+                for manual in gating
+            ],
+        }
+        try:
+            return manual_gate_why(entry)
+        except Exception:  # noqa: BLE001 - advisory wording
+            return None
+
+    def _task_title(self, task_id: str) -> Optional[str]:
+        """*task_id*'s title from this run's tasks, else ``state.json``'s
+        ``task_titles``, else ``None``."""
+        task = self._task_by_id(task_id) or {}
+        title = task.get("task_title") or task.get("title")
+        if not title and self.state is not None:
+            try:
+                title = (self.state.get("task_titles") or {}).get(task_id)
+            except Exception:  # noqa: BLE001 - a state fake without the map
+                title = None
+        return str(title) if title else None
+
+    def _manual_gate_message(self, result: SchedulerResult) -> List[str]:
+        """The exit-3 block of a run a manual task gates: nothing ran and
+        why, each gating manual task with the code tasks waiting on it, the
+        account of every task, and the one way on."""
+        stop = result.stop or {}
+        gating = list(stop.get("manual_task_ids") or [])
+        waiting = stop.get("waiting") or {}
+        lines = [
+            "",
+            f"ERROR: {self.phase} ran nothing: every code task left waits on "
+            f"{'a manual task' if len(gating) == 1 else 'manual tasks'} not "
+            f"recorded done, and implement does not do a manual task:",
+        ]
+        for manual in gating:
+            codes = sorted(waiting.get(manual) or [], key=_metrics._id_key)
+            lines.append(
+                f"  {manual}{self._task_label(manual)}: {len(codes)} code "
+                f"task(s) wait on it ({_id_range(codes)})"
+            )
+        lines.extend(self._account_lines(result))
+        flags = list(stop.get("resume_flags") or [])
+        answers = " ".join(flags[1:])
+        template = self.user_commands.get("answers") or ""
+        command = template.replace("{answers}", answers) if "{answers}" in template else ""
+        it = "it" if len(gating) == 1 else "them"
+        lines.append("To go on:")
+        lines.append(
+            f"  - do {', '.join(gating)} by hand, then resume this phase "
+            f"recording {it} done; the code tasks that wait on {it} then run:"
+        )
+        lines.append(f"        {command or 'add ' + answers + ' to the resume command'}")
+        return lines
+
     def _check_block_message(self, result: SchedulerResult) -> List[str]:
         """The exit-3 block after a run whose checks kept tasks from running.
 
@@ -10964,6 +11210,19 @@ class WriteBatchScheduler:
                  REFUSED_SKIP_WAY_FORWARD],
                 ".",
             )
+        if stop.get("kind") == "manual-gate":
+            # Fix round 28 (live run 12, Codex racing 06).
+            gating = list(stop.get("manual_task_ids") or [task_id])
+            waiting = {
+                mid: list((stop.get("waiting") or {}).get(mid) or [])
+                for mid in gating
+            }
+            held = sorted(
+                {code for codes in waiting.values() for code in codes},
+                key=_metrics._id_key)
+            head = manual_gate_head(
+                self.phase, {mid: label(mid) for mid in gating}, waiting)
+            return head, None, held, [manual_gate_way_on(gating)], "."
         if stop.get("kind") == "check-findings":
             checks = stop.get("check_task_ids") or [task_id]
             named = ", ".join(f"{cid}{label(cid)}" for cid in checks)
@@ -12244,14 +12503,17 @@ class WriteBatchScheduler:
         except ValueError:  # pragma: no cover - another drive (Windows)
             return self.write_target
 
-    def _manual_close_note(self, deferred: Dict[str, str]) -> Optional[str]:
+    def _manual_close_note(
+        self, deferred: Dict[str, str], plan: Optional[HumanTaskPlan] = None,
+    ) -> Optional[str]:
         """How to record the deferred manual tasks done, in the host's
         spelling (``user_commands["answers"]``), or ``None``.
 
         Fix round 16 (live run 6): the how-to-close note rode implement's
         result only, never its summary.md, on either leg. The manual tasks
         only: a code task skipped with one is not answerable ``done`` and
-        runs on that resume.
+        runs on that resume. Fix round 28: only the ones the user can do now
+        (:meth:`_manual_gates`), and the note says what waits on them.
         """
         template = self.user_commands.get("answers")
         if self.kind != "implement" or not template or "{answers}" not in template:
@@ -12261,13 +12523,37 @@ class WriteBatchScheduler:
             if (self._task_by_id(task_id) or {}).get("executor_role") == "human"
             or (self._task_by_id(task_id) or {}).get("is_human")
         )
+        gates = self._manual_gates(plan) if plan is not None else None
+        waiting = 0
+        if gates is not None:
+            manual = [task_id for task_id in manual if task_id in gates["closable"]]
+            waiting = len({
+                code for task_id in manual
+                for code in gates["waiting"].get(task_id, ())
+            })
         if not manual:
             return None
         from .next_phase import manual_close_note
 
         return manual_close_note(template.replace(
             "{answers}", " ".join(f"--human-task {task_id}=done" for task_id in manual)),
-            len(manual))
+            len(manual), waiting=waiting)
+
+    def _manual_gates(self, plan: Optional[HumanTaskPlan]) -> Optional[Dict[str, Any]]:
+        """:func:`plan_manual_gates` over this run's decomposition and
+        ``state.json`` as recorded, or ``None`` when it cannot be read."""
+        try:
+            statuses = (
+                dict(self.state.get_all_task_statuses())
+                if self.state is not None else {}
+            )
+        except Exception:  # noqa: BLE001 - a state fake without the map
+            statuses = {}
+        try:
+            return plan_manual_gates(
+                plan, decomposition_graph(self.tasks, self.state), statuses)
+        except Exception:  # noqa: BLE001 - advisory wording, never fatal
+            return None
 
     def _dispatched_sentence(self, result: SchedulerResult) -> str:
         """summary.md's count of what this run dispatched: the tasks a
@@ -12504,7 +12790,7 @@ class WriteBatchScheduler:
             lines += ["| Task | Reason |", "|------|--------|"]
             for task_id, reason in sorted(deferred.items()):
                 lines.append(f"| {task_id} | {reason} |")
-            note = self._manual_close_note(deferred)
+            note = self._manual_close_note(deferred, plan)
             if note:
                 lines += ["", note]
         if declined:
@@ -12548,6 +12834,13 @@ class WriteBatchScheduler:
             ]
             for task_id, check_id in sorted(blocked.items()):
                 lines.append(f"| {task_id} | {check_id} |")
+        if (result.stop or {}).get("kind") == "manual-gate":
+            # Fix round 28 (live run 12, Codex racing 06): nothing ran, and
+            # the summary says why rather than reading as a finished run.
+            lines += [
+                "", "## Not Finished: Waiting On A Manual Task", "",
+                str(result.stop.get("headline") or ""),
+            ]
         if result.stopped_at_batch is not None:
             stop = result.stop or {}
             lines += ["", "## Cancelled", ""]

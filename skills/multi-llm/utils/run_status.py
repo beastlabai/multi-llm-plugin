@@ -564,7 +564,8 @@ def manual_close_note(
 
     # The manual tasks themselves, never a code task skipped with one
     # (`next_phase.manual_close_ids`, fix round 16).
-    ids = next_phase.manual_close_ids(payload.get("phases", {}).get("implement") or {})
+    implement = payload.get("phases", {}).get("implement") or {}
+    ids = next_phase.manual_close_ids(implement)
     if not ids:
         return None
 
@@ -579,6 +580,8 @@ def manual_close_note(
         return None
     return next_phase.manual_close_note(
         next_phase.close_command(template, plan_spelling, ids), len(ids),
+        # Fix round 28: never "No later phase waits" beside code tasks that do.
+        waiting=next_phase.manual_waiting_count(implement, ids),
     )
 
 
@@ -650,6 +653,9 @@ def _workflow_trailer_lines(
             ManualTask(
                 str(entry["id"]), entry.get("title") or None,
                 str(entry["waits_on"]) if entry.get("waits_on") else None,
+                # Fix round 28: a later manual task names the code it comes after.
+                tuple(str(t) for t in entry.get("after") or ()
+                      if isinstance(entry.get("after"), list)),
             ).line()
             for entry in manual
             if isinstance(entry, dict) and entry.get("id")
@@ -2211,6 +2217,7 @@ def state_implement_view(
     stop_resume_why: Optional[str] = None
     stopped = bool(
         resumable and not in_progress_since and native_run_stopped(record, statuses))
+    gate_flags: List[str] = []
     if resumable:
         from .write_batch_scheduler import native_resume_why, native_stop_answers
 
@@ -2219,6 +2226,13 @@ def state_implement_view(
         # says it above the resume.
         stop_resume_why = native_resume_why(
             record, phase_dir=str(phase_dir_path(plan_path, _IMPLEMENT_PHASE)))
+        # Fix round 28 (live run 12, Codex racing 06): every code task left
+        # waits on a manual task the user can do now, so the resume records
+        # it done; the run stopped for the user.
+        gate_flags, gate_why = _native_manual_gate(state)
+        if gate_flags:
+            stop_resume_why = gate_why or stop_resume_why
+            stopped = not in_progress_since
     return {
         "completed": completed,
         # Fix round 20: whether `--implement <plan> --resume` continues it,
@@ -2227,6 +2241,8 @@ def state_implement_view(
         "resumable": resumable,
         "stop_answers": stop_answers,
         "stop_resume_why": stop_resume_why,
+        # Fix round 28: the flags the resume carries after the plan.
+        "resume_flags": gate_flags,
         # Fix round 24 (live run 10, Claude Code stop 01/01b): whether the
         # run ended short and waits for the user, as the executor routes'
         # "stopped and needs you" head says (:func:`native_run_stopped`).
@@ -2294,6 +2310,29 @@ def native_still_runnable(
         if statuses.get(task_id) not in ("completed", "skipped", "failed")
         and task_id not in manual and task_id not in kept_out
     ]
+
+
+def _native_manual_gate(state: Any) -> Tuple[List[str], Optional[str]]:
+    """``(resume flags, why)`` of a native implement whose every code task
+    left waits on a manual task the user can do now (fix round 28), the
+    words ``util next-command`` gives them, else ``([], None)``."""
+    from . import next_phase
+
+    try:
+        deferred = state.deferred_implementation_tasks()
+        gates = state.manual_task_gates(deferred)
+        if not gates or not gates.get("gated"):
+            return [], None
+        entry = {
+            "manual_gate": True,
+            "manual_tasks": deferred,
+            "manual_close_ids": state.manual_tasks_to_close(deferred),
+            "manual_waiting": gates.get("waiting") or {},
+        }
+        flags = next_phase.manual_gate_flags(entry)
+        return (flags, next_phase.manual_gate_why(entry)) if flags else ([], None)
+    except Exception:  # noqa: BLE001 - advisory: the plain resume stands
+        return [], None
 
 
 def native_run_stopped(
@@ -3646,6 +3685,7 @@ def _view_speller(spell: Optional[Speller], view: Mapping[str, Any]) -> Optional
 
 def _resume_command(
     view: Dict[str, Any], plan_path: Path, spell: Optional[Speller] = None,
+    extra: Sequence[str] = (),
 ) -> str:
     """The ``resume with:`` command, with the run's own flags spliced back in.
 
@@ -3666,12 +3706,33 @@ def _resume_command(
     verb = _RESUME_VERB_BY_MODE.get(mode) or (
         "--reaggregate" if mode in _REAGGREGATE_MODES else "--force"
     )
+    # *extra*: the answers the resume carries (fix round 28: a manual task
+    # every code task left waits on, `_manual_gate_answers`).
+    verbs = [verb, *[str(token) for token in extra]]
     if spell is not None:
-        _positionals, tokens = cli_common.retry_tokens(*positionals, verb, flags=flags)
+        _positionals, tokens = cli_common.retry_tokens(*positionals, *verbs, flags=flags)
         spelled = spell(mode, positionals[1:], tokens)
         if spelled:
             return spelled
-    return cli_common.retry_command(mode, *positionals, verb, flags=flags)
+    return cli_common.retry_command(mode, *positionals, *verbs, flags=flags)
+
+
+def _manual_gate_answers(
+    mode: str, plan_path: Path, workflow: Optional[Dict[str, Any]],
+) -> List[str]:
+    """``--human-task <id>=done …`` an implement's resume carries while every
+    code task it left waits on a manual task the user can do now
+    (``next_phase._resume_flags``, fix round 28), else ``[]``."""
+    if mode != _IMPLEMENT_PHASE:
+        return []
+    try:
+        if workflow is None:
+            workflow = _workflow_payload(plan_path)
+        from . import next_phase
+
+        return next_phase._resume_flags(workflow.get("phases") or {}, _IMPLEMENT_PHASE)[1:]
+    except Exception:  # noqa: BLE001 - advisory: the plain resume stands
+        return []
 
 
 def _stale_review_of(phase_name: str, workflow: Dict[str, Any]) -> Optional[str]:
@@ -3911,7 +3972,9 @@ def _resume_lines(
     lines: List[str] = []
     if shape == cli_common.SHAPE_REPAIR:
         lines.append(f"      repair first: {repair}")
-    lines.append(f"      resume with: {_resume_command(view, plan_path, spell)}")
+    resume = _resume_command(
+        view, plan_path, spell, extra=_manual_gate_answers(mode, plan_path, workflow))
+    lines.append(f"      resume with: {resume}")
     # Fix round 22 (live run 9): a write run's stop says what its plain
     # resume does on an unchanged tree; that replaces the cost line, which
     # read "re-dispatches the 1 failed batch(es)" of a task the write policy
@@ -4626,7 +4689,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if implement_tasks is not None:
             native.append((_IMPLEMENT_PHASE, render_state_implement_lines(
                 implement_tasks,
-                resume=native_resume_command(_IMPLEMENT_PHASE, plan_path, spell),
+                resume=native_resume_command(
+                    _IMPLEMENT_PHASE, plan_path, spell,
+                    flags=implement_tasks.get("resume_flags") or ()),
                 answers=native_stop_answer_commands(implement_tasks, plan_path, spell))))
         for _phase, block in sorted(
                 native, key=lambda item: NATIVE_PHASE_ORDER.index(item[0])):

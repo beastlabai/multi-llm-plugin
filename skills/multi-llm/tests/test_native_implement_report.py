@@ -71,11 +71,18 @@ def _close_command(plan_arg: str, ids) -> str:
     return np_.close_command(template, plan_arg, ids)
 
 
-def _close_note(plan_arg: str, ids) -> str:
-    """The note for *ids*, its command spelled the way Claude Code types it."""
+def _close_note(plan_arg: str, ids, waiting: int = 0) -> str:
+    """The note for *ids*, its command spelled the way Claude Code types it;
+    *waiting* code tasks wait on them (fix round 28)."""
     template = host_capabilities.next_command_template(
         "claude-code", np_.resolve_route("claude-code", stderr=io.StringIO()))
-    return np_.manual_close_note(np_.close_command(template, plan_arg, ids), len(ids))
+    return np_.manual_close_note(
+        np_.close_command(template, plan_arg, ids), len(ids), waiting=waiting)
+
+
+#: T006 waits on T005 (fix round 28: the note says so, never "No later phase
+#: waits for this manual task").
+LEAD = np_.manual_close_lead(1, waiting=1)
 
 
 def _emit(capsys, *flags: str, yes: bool = True):
@@ -118,7 +125,8 @@ class TestTheEmitCarriesTheNote:
     def test_the_deferred_list_ends_with_the_note(self, repo, capsys):
         handoff, out = _emit(capsys)
         assert sorted(handoff["skipped_tasks"]) == ["T005", "T006"]
-        note = _close_note(PLAN_ARG, ["T005"])
+        note = _close_note(PLAN_ARG, ["T005"], waiting=1)
+        assert "No later phase waits" not in note
         assert handoff["manual_tasks_note"] == note
         lines = out.splitlines()
         heading = next(i for i, line in enumerate(lines)
@@ -164,23 +172,31 @@ class TestTheReportLookupCarriesIt:
         # The marker lines, above the section printed below them (fix round 24).
         block = out.split(np_.NEXT_STEP_MARKDOWN_MARKER)[0]
         lines = [line for line in block.splitlines() if line.startswith("[")]
-        assert lines[0].startswith("[NEXT_COMMAND] ")
-        assert lines[0].endswith(f"--review-code {PLAN_ARG}")
-        assert lines[-4:] == [
+        # Fix round 28: T006 waits on T005, so the section leads with the
+        # resume that records T005 done and runs it; review-code of what
+        # ran so far is the other way on, and the close command is not
+        # printed a second time below the tasks.
+        assert lines[0].startswith("[NEXT_COMMAND_WHY] Implement has not run "
+                                   "the code task that waits on manual task T005")
+        assert lines[1] == f"[NEXT_COMMAND] {command}"
+        assert lines[2] == (
+            "[NEXT_COMMAND_OPTIONAL_WHY] Or review the code implement has run so far:")
+        assert lines[3].startswith("[NEXT_COMMAND_OPTIONAL] ")
+        assert lines[3].endswith(f"--review-code {PLAN_ARG}")
+        assert lines[-2:] == [
             f"[MANUAL_TASK] T005 {MANUAL_TITLE}",
             f"[MANUAL_TASK] T006 {DEPENDENT_TITLE} {WAITS}",
-            f"[MANUAL_TASK_NOTE] {np_.manual_close_lead(1)}",
-            f"[MANUAL_TASK_COMMAND] {command}",
         ]
         step = cli_common.parse_result_line(out)["user_next_step"]
         assert step["complete"] is False
-        assert step["command"] == lines[0].split(" ", 1)[1]
+        assert step["phase"] == "implement"
+        assert step["command"] == command
         assert step["manual_tasks"] == [
             {"id": "T005", "title": MANUAL_TITLE},
             {"id": "T006", "title": DEPENDENT_TITLE, "waits_on": "T005"},
         ]
-        assert step["manual_tasks_note"] == np_.manual_close_lead(1)
-        assert step["manual_tasks_command"] == command
+        assert "manual_tasks_note" not in step
+        assert "manual_tasks_command" not in step
 
     def test_after_another_phase_it_names_them_too(self, repo, capsys):
         """Fix round 17: the two packages of round 16 disagreed here. Every
@@ -201,7 +217,7 @@ class TestTheReportLookupCarriesIt:
         assert lines[-4:] == [
             f"[MANUAL_TASK] T005 {MANUAL_TITLE}",
             f"[MANUAL_TASK] T006 {DEPENDENT_TITLE} {WAITS}",
-            f"[MANUAL_TASK_NOTE] {np_.manual_close_lead(1)}",
+            f"[MANUAL_TASK_NOTE] {LEAD}",
             f"[MANUAL_TASK_COMMAND] {command}",
         ]
         step = cli_common.parse_result_line(out)["user_next_step"]
@@ -242,7 +258,8 @@ class TestTheExecutorSummaryCarriesItToo:
         summary = Path(report["summary_file"]).read_text(encoding="utf-8")
         section = summary.split("## Manual Tasks (Deferred)", 1)[1].split("\n## ", 1)[0]
         assert "| T005 |" in section and "| T006 |" in section
-        assert _close_note(PLAN_ARG, ["T005"]) in section
+        assert _close_note(PLAN_ARG, ["T005"], waiting=1) in section
+        assert "No later phase waits" not in section
 
 
 class TestATaskSkippedWithAManualOneIsNamedApart:
