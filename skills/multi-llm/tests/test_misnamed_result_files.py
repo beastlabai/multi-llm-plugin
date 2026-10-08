@@ -578,6 +578,39 @@ class TestTheAggregateReadsOnlyTheModelsThePhaseRecords:
         progress = read_status(str(phase_dir))["progress"]
         assert sorted(progress["models"]) == sorted([PI, CODEX])
 
+    def test_a_rename_that_failed_says_the_file_is_left_in_place(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """Review 24 (records #5): when the rename failed, the note said
+        "renamed it to <its own name>" on every surface; only stderr said the
+        rename failed."""
+        import os as _os
+        real_replace = _os.replace
+
+        def refuse_set_aside(src, dst, *args, **kwargs):
+            if str(dst).endswith(f".{result_files.SET_ASIDE_SUFFIX}"):
+                raise PermissionError(13, "Permission denied", str(src))
+            return real_replace(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr(_os, "replace", refuse_set_aside)
+        plan, phase_dir = _live_code_review_dir(tmp_path)
+
+        _run_cro_reaggregate(plan, phase_dir, render_report=True)
+        out = capsys.readouterr().out
+
+        assert (phase_dir / MISNAMED).exists()
+        (line,) = [ln for ln in out.splitlines() if ln.startswith("[RESULT_SET_ASIDE]")]
+        status = read_status(str(phase_dir))
+        report = _cro_report_md(plan)
+        (report_line,) = [ln for ln in report.splitlines() if ln.startswith("**Result files:**")]
+        for text in (line, status["result_notes"][0], status["progress"]["notes"][0],
+                     report_line):
+            assert "renamed it to" not in text, text
+            assert "left in place (rename failed: Permission denied)" in text, text
+            assert text.count("\n") == 0
+        # Still never read as a model's result.
+        assert MISNAMED[: -len(".json")] not in status["models_completed"]
+
     def test_the_report_names_the_file_it_left_out(self, tmp_path, capsys):
         plan, phase_dir = _live_code_review_dir(tmp_path)
 
