@@ -4082,6 +4082,14 @@ def with_result_contract(
         "(measured 2026-09-16). Do not start background servers, watchers, "
         "browsers or any other background process, and leave no process "
         "running when you finish.\n\n"
+        # Fix round 28 (live run 12, OpenCode racing T012): a task that made
+        # a vendored file trackable then ran `git add` on it; the implement
+        # template forbade commit and push only, the apply batches nothing.
+        "## Git (required)\n\n"
+        "Do not stage, commit, stash or push anything (no `git add`, `git "
+        "commit`, `git stash` or `git push`), even when your task makes a file "
+        "trackable: leave the git index and history as you found them. The "
+        "user reviews and stages the changes.\n\n"
         "## Scratch files (advisory)\n\n"
         "Keep scratch work (an extracted script to syntax-check, a probe) "
         "out of the repository and out of fixed, shared names such as a "
