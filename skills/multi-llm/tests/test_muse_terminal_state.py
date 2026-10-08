@@ -216,17 +216,20 @@ class TestTheOtherTwoTerminalCasesDidNotMove:
     def test_an_empty_completed_run_is_still_the_no_output_failure(self):
         """``ephemeral-only``: exit 0, ``completed``, and an empty answer.
 
-        It must keep landing on the "no output events" branch with muse's
-        background-task diagnosis attached, rather than being swept into the new
-        terminal-state refusal — its terminal really is ``completed``.
+        It must keep landing on the "no output events" branch rather than being
+        swept into the new terminal-state refusal — its terminal really is
+        ``completed``. The 0.1.0 capture carried one failed background reminder,
+        whose reason that branch attached ("Muse reported an error: … did not
+        reach a terminal state …"); the 1.4.3 capture (2026-10-08) has no failed
+        task at all, so the branch reports its own sentence.
         """
         stdout, stderr = _capture("ephemeral-only")
 
         parsed = MuseProvider().parse_output(stdout, stderr)
 
         assert parsed["success"] is False
-        assert "Muse reported an error" in parsed["error"]
-        assert "did not reach a terminal state" in parsed["error"]
+        assert parsed["error"] == "No output events found in output"
+        assert "Muse run" not in parsed["error"]
 
 
 class TestTheFixIsInTheAdapterAndNotInTheExecutor:

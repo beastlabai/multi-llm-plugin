@@ -1,2 +1,3 @@
 muse: workspace root: /work/sample-project (cwd default)
-run ended with Failed
+muse: Agent delegation: auto unavailable: workspace is untrusted.
+run ended with Failed: API error 429: Rate limit reached for stub-model in organization org-stub on requests per min (RPM): Limit 3, Used 3. Please try again in 20s. (rate_limit_exceeded) (after 10 provider attempts)

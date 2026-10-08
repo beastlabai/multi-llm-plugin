@@ -1,2 +1,3 @@
 muse: workspace root: /work/sample-project (cwd default)
-run ended with Failed
+muse: Agent delegation: auto unavailable: workspace is untrusted.
+run ended with Failed: API error 500: The server had an error while processing your request. Sorry about that! (server_error) (after 10 provider attempts)

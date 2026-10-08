@@ -2,11 +2,16 @@
 
 Every `*.stdout.txt` / `*.stderr.txt` here is a **real capture** of
 `muse exec --json`'s streams under the argv `MuseProvider.build_command` emits,
-taken against a stub in the containerized §6 probe (Muse Code `0.1.0-R708.1`,
+taken against a stub in the containerized §6 probe (Muse Code `1.4.3-R5018.1`,
 `--network none`, **no credential** — the PATH wrapper's own fake `META_API_KEY`,
 `mllm-stub-<exec_id>`, which is meaningful only on `127.0.0.1:8099`). They are
 raw bytes as muse wrote them, and **there is no synthesized row** — including
-`multi-assistant`, which every other fixture set in this tree had to fake.
+`multi-assistant`, which every other fixture set in this tree had to fake. The
+set was first captured on `0.1.0-R708.1` (2026-08-19) and re-captured on
+`1.4.3-R5018.1` (2026-10-08) by the same rig in the pinned image built at
+`tests/container/cli-versions.lock`'s pins, with today's argv (which gained
+`--disable-sandbox` on 2026-09-11); where a fact below moved between the two,
+it says so.
 
 They are graded by `tests/test_provider_fixture_rows.py` through
 `manifest.yaml` — the generic §6.2 harness. The manifest is the authority on
@@ -14,44 +19,51 @@ what each row asserts; this file says *why* each one is here.
 
 ## Five facts that hold across every row
 
-1. **Seventeen requests for one generate call, and they are not retries.** Two
-   catalog GETs on `/muse-code/models`, then fifteen POSTs on `/responses` — of
-   which exactly **one** is the real `model.meta.response`. The other fourteen
-   are four background `reminder.agent.plugin:tbh-reminders:*` observers (scope
-   reminder, goal reminder, verification watcher), each with a one-tool
-   `submit_reminder_decision` namespace, versus the main task's twenty-tool
-   `muse` namespace. Every scenario here answers by **fallback** rather than by
-   anchored pattern, because all fifteen prompts quote ours.
-2. **One reminder always fails against a stub — including in the green run.**
-   `success.stdout.txt` and `ephemeral-only.stdout.txt` have byte-identical
-   record-type histograms: 36 records, sixteen payload types, same counts,
-   including exactly one `task.lifecycle.failed` reading *"model did not reach a
-   terminal state within 2 step(s)"*. This is why muse declares no
-   `exit_zero_failure_markers` and must never grow one keyed on a task failure.
+1. **Eighteen requests for one generate call, and they are not retries.** One
+   catalog GET on `/muse-code/models`, then seventeen POSTs on `/responses` — of
+   which exactly **one** is the real `model.meta.response`. The other sixteen
+   are four background reminder observers (`reminder.agent.skill-reminder`,
+   `scope-reminder`, `goal-reminder`, `verify-reminder`; 0.1.0 named them
+   `reminder.agent.plugin:tbh-reminders:*`), four calls each, each with a
+   one-tool `submit_reminder_decision` namespace, versus the main task's
+   26-tool `muse` namespace. Every scenario here answers by **fallback** rather
+   than by anchored pattern, because all seventeen prompts quote ours. (0.1.0:
+   two GETs and fifteen POSTs, a 20-tool namespace.)
+2. **No reminder fails in the green run any more.** `success.stdout.txt` and
+   `ephemeral-only.stdout.txt` have byte-identical record-type histograms: 44
+   records, fifteen payload types, same counts, and no `task.lifecycle.failed`.
+   At 0.1.0 both held exactly one, reading *"model did not reach a terminal
+   state within 2 step(s)"* — a reminder that always failed against a stub,
+   green run included — which is why muse declares no
+   `exit_zero_failure_markers` and must never grow one keyed on a task failure:
+   a build whose observer fails would fail green runs.
 3. **The session prefix is partial**, exactly as `redirect.yaml` records: the
    POSTs arrive at `/s/<exec_id>/v1/responses`, the catalog GET at
    `/muse-code/models` with the prefix dropped, because muse rebuilds that URL
    from the origin.
-4. **stderr is not the diagnosis channel, and is never empty.** 57 bytes on a
-   run that reaches a terminal (`muse: workspace root: … (cwd default)`), 79 on
-   a failed one — the same banner plus the content-free `run ended with Failed`.
-   Every actual cause is on stdout in `run.terminal.failed`'s `reason`, which is
-   what `describe_failure` exists to recover.
+4. **stderr is never empty, and at 1.4.3 it carries the cause too.** 123 bytes
+   on a run that reaches `completed` (`muse: workspace root: … (cwd default)`
+   plus `muse: Agent delegation: auto unavailable: workspace is untrusted.`),
+   203–642 on a failed one — the same two lines plus `run ended with Failed:
+   <reason>`, the `run.terminal.failed` record's `reason` verbatim. At 0.1.0
+   that line was the content-free `run ended with Failed` and the cause was on
+   stdout alone, which is what `describe_failure` exists to recover; it still
+   reads stdout.
 5. **Exit 1 on every real failure.** All nine failure rows exit 1.
 
 | Fixture | What it pins |
 | --- | --- |
-| `success` | the baseline and the envelope's floor: 17 requests, no retries, 5.1 s. One `run.output.delta` carries the whole answer, so `tail` and `full` coincide — the single-turn case |
+| `success` | the baseline and the envelope's floor: 18 requests, no retries, 5.5 s. One `run.output.delta` carries the whole answer, so `tail` and `full` coincide — the single-turn case |
 | `multi-assistant` | **the muse trap, captured rather than synthesized** — see below |
-| `ephemeral-only` | an all-noise run is a **failure**, not an empty-string success. Same 36 records as `success`, same failure record, `"text":""` — muse exits **0** and reports `completed`, so only the parser says this produced nothing |
-| `auth-error` | 401 → **terminal, one attempt**. And a **defect**: muse swallows the vendor text and the run classifies as `None` — see below |
-| `invalid-model` | 404 **naming the model**, vendor sentence verbatim — the best of the six failure shapes. And it classifies `server_error`, not `invalid_model` — see below |
+| `ephemeral-only` | an all-noise run is a **failure**, not an empty-string success. Same 44 records as `success`, `"text":""` — muse exits **0** and reports `completed`, so only the parser says this produced nothing |
+| `auth-error` | 401 → **terminal, one attempt**. muse swallows the vendor text; once a **defect** (classified `None`), now `auth_failed` — see below |
+| `invalid-model` | 404 **naming the model** — the best of the six failure shapes. At 0.1.0 the vendor sentence came through verbatim and classified `server_error`; at 1.4.3 muse glosses it (``model `…` does not exist or you lack access``) and it classifies `invalid_model` — see below |
 | `context-overflow` | 400 context-length, **passed through**: `maximum context length` survives, `CONTEXT_OVERFLOW_MARKERS` matches, the verdict is terminal and correct. The positive control for the two rows above |
 | `error-envelope` | a 200 carrying a provider error object is **never read**: muse requires `text/event-stream` and rejects it as `non-SSE response`. An error object can never be served as an answer here — and can never be classified either |
-| `stdout-error` | §6 step 3's opencode trap in the one provider of this batch that really has it, plus the §6.1.1 envelope in one capture: exit 1, 30 POSTs, **248 s**, `opening meta model stream attempt N/10` ten times, the whole diagnosis on stdout while stderr says only `run ended with Failed` |
-| `rate-limit` | 429-forever → **the same envelope as the 5xx to two decimals**: 10 attempts, 30 POSTs, 248 s. muse's ladder does not distinguish a rate limit from a server error, so an executor-level re-dispatch repeats a chain that already ran for four minutes |
-| `truncated` | the **default** `--trunc-bytes 60` cut of the Responses **SSE** stream: four rounds of the ten-attempt ladder, 120 POSTs, **984 s**, ended by a **12-minute wall-clock ceiling** muse enforces itself. The richest diagnosis muse produces — and it classifies as `None`. See "Three cuts, three behaviours" |
-| `truncated-after-deltas` | **not one of the twelve** — the same fault cut one frame later (inside `response.completed`): terminal in **one** attempt, 5.1 s. Partial text recovered, **not** served as the answer, terminal reason carried through `parse_output`'s residual branch — the only row that reaches it |
+| `stdout-error` | §6 step 3's opencode trap as 0.1.0 had it, plus the §6.1.1 envelope in one capture: exit 1, 30 POSTs, **251 s**, `opening meta model stream attempt N/10` ten times, the whole diagnosis on stdout. At 0.1.0 stderr said only `run ended with Failed`; at 1.4.3 that line ends with the reason |
+| `rate-limit` | 429-forever → **the same envelope as the 5xx**: 10 attempts, 30 POSTs, 249 s (to two decimals at 0.1.0). muse's ladder does not distinguish a rate limit from a server error, so an executor-level re-dispatch repeats a chain that already ran for four minutes |
+| `truncated` | the **default** `--trunc-bytes 60` cut of the Responses **SSE** stream: four rounds of the ten-attempt ladder, 120 POSTs, **985 s**, ended by a **12-minute wall-clock ceiling** muse enforces itself. The richest diagnosis muse produces — and it classifies as `None`. See "Three cuts, three behaviours" |
+| `truncated-after-deltas` | **not one of the twelve** — the same fault cut one frame later (inside `response.completed`): terminal in **one** attempt, 5.3 s. Partial text recovered, **not** served as the answer; since C8 it fails at `parse_output`'s first branch with muse's own reason |
 | `truncated-json-answer` | **not one of the twelve** — the one shape in this set where the parser gets it wrong. A cut one frame earlier again, with a complete JSON array already delivered, so `parse_output` returns **success** for a run that exited 1 after ten failed attempts |
 
 ## `multi-assistant`: the row this whole set exists for
@@ -103,24 +115,27 @@ starting at 1873.
 
 | Row | Cut lands in | Attempts | Wall | Outcome |
 | --- | --- | --- | --- | --- |
-| `truncated` | `response.created` (60 B, the default) | 4 × 10 | **984 s** | terminal, no text, the 12-minute-ceiling diagnosis — and `classify_failure` is `None` |
+| `truncated` | `response.created` (60 B, the default) | 4 × 10 | **985 s** | terminal, no text, the 12-minute-ceiling diagnosis — and `classify_failure` is `None` |
 | `truncated-json-answer` | `response.output_item.done` (2100 B) | 10 | 70 s | terminal, and the salvaged text used to be served as a **success** — refused since C8 (defect 4 below) |
-| `truncated-after-deltas` | `response.completed` (2000 B) | 1 | 5.1 s | terminal, partial text recovered and correctly refused |
+| `truncated-after-deltas` | `response.completed` (2000 B) | 1 | 5.3 s | terminal, partial text recovered and correctly refused |
 
 The canonical row's own words are the most useful thing in this directory:
 
 > model call chain exceeded the **12m wall-clock ceiling** measured from its
-> first failed attempt: 4 failed attempts (40 provider requests) over 12m16s,
-> all `[transport_eof_before_terminal_event]`. dominant failure
+> first failed attempt: 4 failed attempts (40 provider requests) over 16m19s
+> since the first counted provider request, all
+> `[transport_eof_before_terminal_event]`. dominant failure
 > `[transport_eof_before_terminal_event]` — next step: check network
 > connectivity (VPN/proxy) and retry; if it persists, re-authenticate with the
 > provider — a very large context can also repeatedly break streams, so consider
 > compacting the session
 
-So the ladder is bounded, but by **wall clock, not by attempts**: ten provider
+(That is 1.4.3's wording; 0.1.0 wrote "over 12m16s" for the same four rounds,
+timed from a later point.) So the ladder is bounded, but by **wall clock, not
+by attempts**: ten provider
 attempts per round, rounds repeated until twelve minutes have passed since the
 first failure. Two operational consequences follow, and both are in the
-manifest: 984 s is past muse's own `default_timeout` of **600** and far past
+manifest: 985 s is past muse's own `default_timeout` of **600** and far past
 `redirect.yaml`'s `row_timeout_s: 300`, so **in production this shape is a
 harness timeout and that diagnosis is never seen**; and it classifies as
 `None`, because nothing in any base table matches
@@ -129,7 +144,7 @@ sentence after it.
 
 `failserver --mode empty` (accept, write zero bytes, close) is the same event —
 identical request counts through the 900 s mark, where an earlier probe's outer
-bound cut it. That is aider's *"a truncated body and a zero-byte response are
+bound cut it (measured at 0.1.0 and not re-run). That is aider's *"a truncated body and a zero-byte response are
 the same event at this CLI's output"* result reached from the other side, which
 is why it is not a fourth file.
 
@@ -145,7 +160,7 @@ and still pinned.
    deliberately adds `api error 401` and `api error 403` to
    `auth_error_patterns`, and **neither fires**: on a real 401 muse swallows the
    vendor text completely — the strings `401`, `API error` and `Incorrect API key
-   provided` appear *nowhere* in the 17 KB capture — and writes its own gloss,
+   provided` appear *nowhere* in the 17 KB capture (nor in 1.4.3's) — and writes its own gloss,
    *"your API key from META_API_KEY was rejected — update or unset it"*. That
    matched none of the twelve patterns, so `classify_failure` returned `None`,
    the failure was transport-shaped, and the executor spent its whole bounded
@@ -167,9 +182,13 @@ and still pinned.
    (C2) in the base ladder rather than here**: `INVALID_MODEL_MARKERS` is now
    consulted before `SERVER_ERROR_MARKERS` — a model-named 404 is strictly more
    specific than "api error" — and the `invalid-model` row's cell reads
-   `invalid_model`.
+   `invalid_model`. At 1.4.3 the point is moot for this row: muse glosses the
+   404 too (``model `…` does not exist or you lack access``), no `API error`
+   prefix survives, and the base `\bmodel .{0,40}does not exist` marker
+   classifies it on its own.
 3. **A 5xx or a 429 costs four minutes before the harness sees a byte.** Ten
-   internal provider attempts, 30 POSTs, 248 s, measured identically for both.
+   internal provider attempts, 30 POSTs, 248 s, measured identically for both
+   at 0.1.0 (250.7 s and 249.0 s at 1.4.3, the same ladder).
    muse narrates its own ladder, so the envelope is readable straight out of the
    capture's `task.lifecycle.status` messages: `opening meta model stream
    attempt N/10` with `retrying meta model stream in 1000ms, 2000ms, 4000ms,
@@ -181,7 +200,9 @@ and still pinned.
    `InternalRetryEnvelope(max_requests=40, max_wall_s=736.0,
    retries_rate_limit=True)` — 40 because the canonical `truncated` row's own
    sentence is *"4 failed attempts (40 provider requests)"*, and 736 s because
-   that is muse's own 12-minute ceiling, overshot to 12m16s. Read the budget
+   that is muse's own 12-minute ceiling, overshot to 12m16s (0.1.0's figure;
+   1.4.3 reports the same four rounds as 16m19s since the first counted
+   provider request, and the declaration was left as it is). Read the budget
    consequence the right way round: declaring `retries_rate_limit` **removes**
    the harness's own rate-limit backoff for muse (rule 6(b),
    `STOP_VENDOR_ALREADY_RETRIED`). It is a smaller retry budget, not a larger
@@ -217,7 +238,7 @@ and still pinned.
    `classify_failure` returns `None`, because no member of
    `CONNECTION_ERROR_MARKERS`, `TIMEOUT_MARKERS` or any other base table matches
    either string. So the ladder treats it as generic transport noise and spends
-   its whole budget on top of the 984 s muse already spent. In practice the
+   its whole budget on top of the 985 s muse already spent. In practice the
    600 s `default_timeout` fires first and the run is reported as a timeout
    instead, which is the right *category* by accident and loses the diagnosis
    entirely.
@@ -228,14 +249,15 @@ Both carry their measurement in `manifest.yaml` rather than being absent (§6.3)
 
 - **`exit-zero-failure`** — muse exits **1** on every failure mode the rig can
   produce (401, 404, 400 context-length, a 200 error object, 500-forever,
-  429-forever, and both terminating truncations), so the "still exiting 0" half has no producer. The one exit-0 run with
+  429-forever, and both terminating truncations), at 0.1.0 and at 1.4.3, so the "still exiting 0" half has no producer. The one exit-0 run with
   no answer is `ephemeral-only`, and it is not a failure of the CLI: muse reached
   `run.terminal.completed` legitimately and the model returned `""`. The
-  tempting marker (`task.lifecycle.failed`) is **disqualified by measurement** —
-  `success.stdout.txt` contains one too.
-- **`empty`** — muse writes its 57-byte workspace banner to stderr before the
+  tempting marker (`task.lifecycle.failed`) was **disqualified by measurement**
+  at 0.1.0 — `success.stdout.txt` contained one too — and is not needed at
+  1.4.3, where every failure exits 1.
+- **`empty`** — muse writes its workspace banner (123 bytes at 1.4.3, 57 at 0.1.0) to stderr before the
   first HTTP request and `runtime.command.accepted` to stdout immediately after,
-  so the smallest capture here is **17,057 bytes**. Zero bytes on both channels
+  so the smallest capture here is **16,215 bytes**. Zero bytes on both channels
   would mean killing the process, which is the `timeout(1)` zero-byte-hang
   artifact §6 step 3 forbids manufacturing.
 
@@ -255,7 +277,7 @@ docker run --rm --network none \
   -e MLLM_STUB_PORT=8099 -e MLLM_REDIRECT_YAML=/rig/redirect.yaml \
   -e MLLM_REAL_DIR=/opt/mllm/real -e MLLM_HOMES_ROOT=/work/homes \
   -e MLLM_CALL_LOG=/work/out/calls.jsonl \
-  --entrypoint /usr/bin/python3 mllm-e2e:local /work/out/capture.py '<rows>'
+  --entrypoint /usr/bin/python3 <pinned image> /work/out/capture.py '<rows>'
 ```
 
 Per row the driver: copies `/opt/mllm/rig/home_seed/muse/.` into
@@ -282,13 +304,13 @@ Three things are not optional:
   `failserver.py` delegates to it; do not "simplify" either.
 - **Never wrap the child in `timeout(1)`** inside the container. The outer bound
   is a host-side `timeout --signal=KILL`, and it has to be generous: the 5xx and
-  429 rows take **248 s each** and the default `truncated` row takes **984 s**,
+  429 rows take **~250 s each** and the default `truncated` row takes **985 s**,
   because muse's ceiling on that shape is twelve minutes of wall clock measured
   from its first failure. An earlier probe bounded at 900 s recorded it as a
   kill; the committed capture is the one that was allowed to finish.
 
 `truncated` needs no extra flags at all — it is `--mode trunc` at the default
-`--trunc-bytes 60`, and it takes **984 s**. The two extra truncation rows do:
+`--trunc-bytes 60`, and it takes **985 s**. The two extra truncation rows do:
 `--trunc-bytes 2000` for `truncated-after-deltas`, and `--trunc-bytes 2100` plus
 a `--trunc-answer` holding a complete JSON array for `truncated-json-answer`.
 Recompute those offsets from `failserver.success_frames('responses', …)` if the
