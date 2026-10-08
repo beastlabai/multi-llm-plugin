@@ -918,14 +918,18 @@ def set_aside_by_plan(
     #6: "task 10/10 done … ALL TASKS COMPLETE" while the manual T011 and
     T012 were left): a deferred manual task (*manual_ids*), a task skipped
     with one, a task the user skipped (:meth:`HumanTaskPlan.declined`'s
-    seeds) and a task skipped with that one. Both implement legs hand it to
-    the line that reaches N/N, which names them instead of claiming every
-    task is complete."""
+    seeds) and a task skipped with that one; and a manual task still
+    waiting for its answer (``pending``: the native leg's pause-and-ask
+    host asks at that task, so a trailing one is unanswered at N/N). Both
+    implement legs hand it to the line that reaches N/N, which names them
+    instead of claiming every task is complete."""
     if plan is None:
         return {}
     manual = {str(task_id) for task_id in manual_ids}
     declined = plan.declined()
-    aside: Dict[str, str] = {}
+    aside: Dict[str, str] = {
+        str(task_id): _metrics.SET_ASIDE_MANUAL for task_id in plan.pending
+    }
     for task_id, reason in plan.skipped.items():
         if task_id in declined:
             seed = str(reason).startswith((USER_DECLINED_REASON, ANSWERED_SKIP_PREFIX))

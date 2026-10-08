@@ -465,6 +465,49 @@ class TestManualTasksAreNotComplete:
         assert code == 0, e
         assert _eta_lines(e)[0].startswith("[ETA] implement: phase complete in "), e
 
+    def test_a_manual_task_still_waiting_for_its_answer_is_named_too(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        """Native pause-and-ask: the host asks at the manual task, so a
+        trailing one with no dependents is still unanswered at N/N."""
+        import implement_orchestrator
+
+        obj = make_repo(tmp_path, monkeypatch, WITH_MANUAL.split("### T004")[0])
+        try:
+            assert implement_orchestrator.main([
+                "--plan-file", str(obj.plan), "--force-strategy", "pause-and-ask",
+            ]) == 0
+            out = capsys.readouterr().out
+            path = next(
+                line.split(": ", 1)[1] for line in out.splitlines()
+                if line.startswith("Output file: ")
+            )
+            handoff = json.loads(open(path, encoding="utf-8").read())
+            state_file = handoff["state_file"]
+            total = str(handoff["tasks_to_dispatch"])
+            assert total == "2", out
+            assert _util(capsys, "metrics", "start", "--state-file", state_file,
+                         "--phase", "implement", "--total-batches", total)[0] == 0
+            err = ""
+            for index, task_id in enumerate(("T001", "T002"), 1):
+                code, _o, e = _util(
+                    capsys, "batch-done", "--phase-dir", str(obj.phase_dir),
+                    "--task-id", task_id, "--status", "completed")
+                assert code == 0, e
+                code, _o, e = _util(
+                    capsys, "metrics", "record", "--state-file", state_file,
+                    "--phase", "implement", "--label", f"{task_id}: task",
+                    "--duration-ms", "1000",
+                    "--total-batches", total, "--batch-index", str(index))
+                assert code == 0, e
+                err += e
+            assert _eta_lines(err)[-1].endswith(
+                "· ALL DISPATCHED TASKS COMPLETE · T003 left for you (manual)"
+            ), err
+        finally:
+            registry._config = None
+            registry._config_key = None
+
     def test_a_run_with_nothing_set_aside_still_says_all_tasks_complete(self):
         state = {"metrics": {}}
         metrics.start_phase_in_state(state, "implement", 1)
