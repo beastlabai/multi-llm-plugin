@@ -4196,14 +4196,15 @@ WRITE_CHECK_CONTRACT = (
 #: A run of another task's check that reports only that task's finding is
 #: recorded as repeating it (``repeated_findings_for``), never as this
 #: task's failure; the paragraph says so, so the task need not argue it in
-#: the finding.
+#: the finding. It never tells a task to skip a check: a code task's run
+#: of the repository's tests is its own check's best evidence (live run
+#: 12's racing tasks all ran `npm test`).
 IMPLEMENT_WHICH_CHECKS = (
     "\nWhich checks to run: the ones this task or its acceptance criteria "
-    "name, and the tests that cover the files you edited. A check the plan "
-    "gives to a task of its own (a task that only runs that check) is that "
-    "task's job: you do not need to run it here. If you do run it, report it "
-    "as asked; a finding that is the same one that task reports is recorded "
-    "as that task's finding, not as this task's failure.\n"
+    "name, and the tests that cover the files you edited. When one of them "
+    "is also a check another task of the plan exists to run, report it as "
+    "asked: a finding that is the same one that task reports is recorded as "
+    "that task's finding, not as this task's failure.\n"
 )
 
 

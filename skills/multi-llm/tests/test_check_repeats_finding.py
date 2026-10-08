@@ -137,8 +137,10 @@ class TestThePromptSaysWhichChecks:
                 "files_to_modify": ["src/config.json"], "files": ["src/config.json"]}
         prompt = with_result_contract("implement", task, "Do the task.")
         assert WHICH in prompt
-        assert "A check the plan gives to a task of its own" in prompt
+        assert "also a check another task of the plan exists to run" in prompt
         assert "recorded as that task's finding, not as this task's failure" in prompt
+        # It never tells a task to leave a check out.
+        assert "do not need to run" not in prompt
 
     def test_a_check_task_and_an_apply_batch_are_not(self):
         check = {"task_id": "T002", "expected_ids": ["T002"]}
