@@ -2645,34 +2645,53 @@ def state_apply_views(
 
 
 #: The not-applied items a write mirror (and a native apply view) names, in
-#: the order and words the progress line prints them (fix round 18).
-_NOT_APPLIED_ITEM_WORDS: Tuple[Tuple[str, str], ...] = (
-    ("declined_items", "not applied, declined by its batch"),
-    ("skipped_items", "not applied, skipped at your request"),
+#: the order and words the progress line prints them (fix round 18): the
+#: key, the words for one item and for several, and the words a recorded
+#: reason may open with that the clause has already said (fix round 26).
+_NOT_APPLIED_ITEM_WORDS: Tuple[Tuple[str, str, str, str], ...] = (
+    ("declined_items", "declined by its batch (not applied)",
+     "declined by their batch (not applied)", ""),
+    ("skipped_items", "skipped at your request (not applied)",
+     "skipped at your request (not applied)", "skipped at your request: "),
 )
 
 
 def not_applied_item_clauses(source: Mapping[str, Any]) -> List[str]:
-    """``not applied, declined by its batch: <id8> in <batch> (<reason>)``
+    """``1 declined by its batch (not applied): <id8> in <batch> (<reason>)``
     and its skipped twin, one clause per kind *source* carries
     (``declined_items`` / ``skipped_items``: ``[{task_id, id, reason}]``, a
-    write mirror's keys). The executor's progress line joins them into its
-    line; the native apply view prints each on its own (fix round 22), so
-    the two legs name a declined item in the same words."""
+    write mirror's keys). The executor's progress line puts them after its
+    ``items applied`` count; the native apply view prints each on its own
+    (fix round 22), so the two legs name a declined item in the same words.
+
+    Fix round 26 (live run 11 #7): the clause read "not applied, declined by
+    its batch: …" after "2/3 items applied, ", two clauses run together by
+    commas; it now counts the items and says "not applied" once, in
+    parentheses."""
     clauses: List[str] = []
-    for key, words in _NOT_APPLIED_ITEM_WORDS:
+    for key, one, several, said in _NOT_APPLIED_ITEM_WORDS:
         raw = source.get(key)
         entries = [
             entry for entry in raw
             if isinstance(entry, dict) and entry.get("id")
         ] if isinstance(raw, list) else []
         if entries:
-            clauses.append(f"{words}: " + "; ".join(
+            words = one if len(entries) == 1 else several
+            clauses.append(f"{len(entries)} {words}: " + "; ".join(
                 f"{str(entry['id'])[:8]} in {entry.get('task_id')} "
-                f"({clip(entry.get('reason') or '', 120)})"
+                f"({clip(_reason_after(entry.get('reason') or '', said), 120)})"
                 for entry in entries[:5]
             ) + (f" (+{len(entries) - 5} more)" if len(entries) > 5 else ""))
     return clauses
+
+
+def _reason_after(reason: str, said: str) -> str:
+    """*reason* without the opening words *said* the clause already printed
+    (``skipped at your request: …``), when more remains."""
+    text = str(reason)
+    if said and text.lower().startswith(said.lower()) and text[len(said):].strip():
+        return text[len(said):].strip()
+    return text
 
 
 def accepted_rerun_clauses(by_task: Mapping[str, Sequence[str]]) -> List[str]:
@@ -2984,6 +3003,7 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     folded = [str(t) for t in accepted if t] if kind == "implement" else []
     items_total = mirror.get("items_total")
     items_applied = mirror.get("items_applied")
+    counted_items = False
     if isinstance(items_total, int) and isinstance(items_applied, int):
         # F9: `ok`/`total` count batches, not the items inside them — a
         # write mirror that recorded both (`write_batch_scheduler`) says so
@@ -3023,6 +3043,9 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
                 f"{kind} {ok}/{total} batches ok{kept_note}, "
                 f"{items_applied}/{items_total} items applied"
             ]
+            # Fix round 26 (live run 11 #7): the items not applied follow
+            # the count they are left out of, after a semicolon.
+            counted_items = True
     else:
         parts = [f"{kind} {ok}/{total} ok"]
     # F10: `in_flight` (`write_batch_scheduler._mirror_status`/`_begin_sweep`)
@@ -3109,7 +3132,11 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
         })
     # Fix round 18: an item a finished batch declined (or one skipped at the
     # user's request) is named, never only left out of `items applied`.
-    parts += not_applied_item_clauses(mirror)
+    not_applied = not_applied_item_clauses(mirror)
+    if not_applied and counted_items:
+        parts[0] = "; ".join([parts[0], *not_applied])
+    else:
+        parts += not_applied
     # Racing re-run 3 (2026-10-05): the tasks a stop left undispatched were
     # on no surface at all; a failed task the user accepted is named too.
     not_run = mirror.get("not_run_task_ids") if isinstance(mirror.get("not_run_task_ids"), list) else []
