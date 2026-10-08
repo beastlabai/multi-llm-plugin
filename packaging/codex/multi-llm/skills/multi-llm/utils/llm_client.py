@@ -3411,6 +3411,26 @@ def argv_prompt_bytes(
     return len(prompt.encode("utf-8"))
 
 
+def misnamed_result_baseline(
+    output_dir: Union[str, Path],
+    phase: str,
+    model_spec: str,
+) -> Dict[str, Tuple[int, int]]:
+    """The candidate files of the phase dir :func:`invoke_with_file_output` writes into, now.
+
+    A review slot takes this once, before its first attempt, and hands it to
+    every attempt as ``misnamed_baseline``: a misnamed file is this slot's only
+    when it appeared (or changed) after the slot started. Taken per attempt, an
+    attempt killed after writing it under the wrong name left it in the next
+    attempt's baseline, and the slot was recorded failed beside its own answer
+    (review of fix round 24).
+    """
+    from .json_extractor import generate_output_path
+
+    phase_dir = generate_output_path(Path(output_dir), "output", phase, model_spec).parent
+    return _result_files.snapshot_candidates(phase_dir)
+
+
 def _adopt_misnamed_result(
     output_json_path: Path,
     before: Dict[str, Tuple[int, int]],
@@ -3426,20 +3446,32 @@ def _adopt_misnamed_result(
     asks for), or a rename that failed. The rename puts the file at the
     requested name, so it is this model's file from here on and no glob can
     read it a second time as somebody else's.
+
+    The candidate is read through one descriptor that never follows a link
+    (:func:`utils.result_files.read_regular_text`), and what the rename left
+    at the requested name must be that same regular file: a link swapped in
+    after the directory scan, or before the rename, is never adopted (review
+    of fix round 24).
     """
-    from .json_extractor import read_json_from_file
+    from .json_extractor import parse_file_content
 
     found = _result_files.find_misnamed_result(
         output_json_path.parent, before, model_spec, run_model_specs
     )
     if found is None:
         return None
-    read = read_json_from_file(found, prefer_arrays=prefer_arrays)
+    opened = _result_files.read_regular_text(found)
+    if opened is None:
+        return None
+    content, identity = opened
+    read = parse_file_content(content, prefer_arrays=prefer_arrays)
     if not read.get("success") or not isinstance(read.get("data"), list):
         return None
     try:
         os.replace(found, output_json_path)
     except OSError:
+        return None
+    if not _result_files.is_same_regular_file(output_json_path, identity):
         return None
     return read["data"], found.name
 
@@ -3457,6 +3489,7 @@ def invoke_with_file_output(
     anchor: Optional[Union[str, Path]] = None,
     sandbox_fallback: Optional[str] = None,
     run_model_specs: Optional[Sequence[str]] = None,
+    misnamed_baseline: Optional[Dict[str, Tuple[int, int]]] = None,
 ) -> Dict[str, Any]:
     """Invoke LLM with file-based JSON output.
 
@@ -3500,6 +3533,11 @@ def invoke_with_file_output(
             its three findings were recorded as a failed model. ``None`` (the
             default) never looks, which is every caller that does not know
             which other models write into the same dir.
+        misnamed_baseline: Step 1b's baseline, from
+            :func:`misnamed_result_baseline` taken once at the slot's start, so
+            a file an earlier attempt of the same slot wrote under the wrong
+            name is still this slot's on a retry. ``None`` takes it here, at the
+            start of this call (a slot of one attempt).
 
     Returns:
         Dict with keys:
@@ -3520,11 +3558,14 @@ def invoke_with_file_output(
         model_spec, prompt_context, output_dir, phase, timeout, anchor
     )
     # Step 1b's baseline, taken before the child can write anything: a file
-    # this call adopts must have appeared (or changed) during it.
-    phase_files_before = (
-        _result_files.snapshot_candidates(output_json_path.parent)
-        if run_model_specs is not None else None
-    )
+    # this call adopts must have appeared (or changed) since the slot started —
+    # the caller's baseline when it took one before its first attempt, else now.
+    if run_model_specs is None:
+        phase_files_before = None
+    elif misnamed_baseline is not None:
+        phase_files_before = misnamed_baseline
+    else:
+        phase_files_before = _result_files.snapshot_candidates(output_json_path.parent)
 
     # Format prompt
     try:

@@ -17,10 +17,12 @@ from typing import Any, Collection, Iterable, List, Optional, Sequence, Tuple
 
 try:
     from .stream_bootstrap import bootstrap_streams
+    from .text_clip import plain_line
 except ImportError:
     # Direct script invocation (`python utils/prior_changes.py`): sys.path[0]
     # is the utils/ directory, so import the sibling module directly.
     from stream_bootstrap import bootstrap_streams
+    from text_clip import plain_line
 
 FILENAME = "prior_changes.jsonl"
 DEFAULT_TAIL = 15
@@ -235,6 +237,24 @@ def plain_task_id(value: Any) -> str:
     return text if _PLAIN_TASK_ID.match(text) else ""
 
 
+#: An entry id a line may show: the same guard as a batch id's, widened to
+#: what the batchers' ids are made of (:func:`entry_id`'s
+#: ``<file or section key>#<digest>``: ``.github/workflows/test.yml#f7ee6a5d``,
+#: ``file:src/api.ts#…``) and to the ``<file> (batch 28)`` an older native
+#: host chose. Every id in the live runs' logs passes it; the batch id's own
+#: class would have shown ``?`` for 391 of their 1613. Never a newline, a
+#: control character or markup (``*``, a backtick, a bracket).
+_PLAIN_ENTRY_ID = re.compile(r"[A-Za-z0-9._][A-Za-z0-9._#:/@+=,() -]{0,199}\Z")
+
+
+def plain_entry_id(value: Any) -> str:
+    """*value* as an entry id a line may show, else ``"?"`` (review of fix
+    round 24: the log is batch-writable, and the id a line falls back to
+    was printed raw, so a planted one forged a prompt line)."""
+    text = str(value or "").strip()
+    return text if _PLAIN_ENTRY_ID.match(text) else "?"
+
+
 #: What may follow a leading id for :func:`summary_without_ids` to read it as
 #: a label: a colon or a dash, spaced or not (a hyphen only after a space,
 #: so ``T002-fix`` stays whole).
@@ -271,7 +291,15 @@ def summary_without_ids(summary: str, ids: Iterable[Any]) -> str:
 def entry_task_id(entry: dict) -> str:
     """The id of the batch that wrote *entry* — what summary.md, ``status``
     and ``--human-task <id>=…`` call it — else the entry's own id."""
-    return plain_task_id(entry.get("task_id")) or str(entry.get("id") or "?")
+    return plain_task_id(entry.get("task_id")) or plain_entry_id(entry.get("id"))
+
+
+def entry_summary(entry: dict, ids: Iterable[Any]) -> str:
+    """*entry*'s summary as one plain line (:func:`plain_line`), without a
+    leading copy of one of *ids* (:func:`summary_without_ids`): the log is
+    batch-writable, and a newline in a summary forged a prompt line (review of
+    fix round 24)."""
+    return summary_without_ids(plain_line(entry.get("summary", "")), ids)
 
 
 def entry_line(entry: dict) -> str:
@@ -279,20 +307,20 @@ def entry_line(entry: dict) -> str:
     run 10 #6): named by its batch id, with the entry id beside it when the
     two differ (an apply batch's ``index.html#a4d7fa43``), never by a list
     position — "Batch 1" read as the second of ``apply-fix-batch-0/1/2`` —
-    and never an id twice."""
-    eid = str(entry.get("id") or "?")
+    and never an id twice. One plain line (fix round 25): an id that is not
+    a plain one shows as ``?`` and the summary is :func:`entry_summary`."""
+    eid = plain_entry_id(entry.get("id"))
     task_id = entry_task_id(entry)
     label = f"**{task_id}**" if task_id == eid else f"**{task_id}** ({eid})"
-    summary = summary_without_ids(entry.get("summary", ""), [task_id, eid])
-    return f"- {label}: {summary}"
+    return f"- {label}: {entry_summary(entry, [task_id, eid])}"
 
 
 def record_line(entry: dict) -> str:
     """``- (<id>): <summary>``: an implement entry as apply-code-fixes'
     ``## Implementation record`` quotes it (``code_fix_batcher``), and the
-    shape :func:`quoted_in` looks for."""
-    eid = str(entry.get("id") or "?")
-    return f"- ({eid}): {summary_without_ids(entry.get('summary', ''), [eid])}"
+    shape :func:`quoted_in` looks for. One plain line, as :func:`entry_line`."""
+    eid = plain_entry_id(entry.get("id"))
+    return f"- ({eid}): {entry_summary(entry, [eid])}"
 
 
 def render(

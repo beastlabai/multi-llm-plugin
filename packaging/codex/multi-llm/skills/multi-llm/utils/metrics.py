@@ -16,7 +16,8 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import (
-    Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple,
+    Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence,
+    Tuple,
 )
 
 try:
@@ -375,6 +376,46 @@ def label_task_id(label: str) -> Optional[str]:
     (an apply batch's ``Batch 2 (index.html)``)."""
     match = re.match(r"\s*([A-Za-z][\w.-]*):\s", str(label or ""))
     return match.group(1) if match else None
+
+
+#: Fix round 25 (review of round 24, stops #2): a native record that names
+#: no task (no ``--task-id``, a label not starting with ``<id>: ``) while
+#: two or more failed tasks of this run have no record yet is marked
+#: ``"no_task_id": true``: which task it measured is never guessed, so it is
+#: no progress — no estimate averages it in or counts it (:func:`_compute_eta`)
+#: — and ``[METRICS_NO_TASK_ID]`` asks for ``--task-id``.
+NO_TASK_ID_ENTRY_KEY = "no_task_id"
+NO_TASK_ID_MARKER = "[METRICS_NO_TASK_ID]"
+
+
+def unrecorded_failures(
+    state: dict, phase: str, entries: Sequence[Any],
+) -> List[str]:
+    """The tasks this run's ``util batch-done`` recorded ``failed``
+    (:data:`FAILED_KEY`) that no metric entry of this run measures yet, by
+    its ``task_id`` or the id its label starts with (fix round 25)."""
+    progress = (state.get("metrics_progress") or {}).get(phase)
+    if not isinstance(progress, dict):
+        return []
+    run_id = progress.get("run_id")
+    measured = {
+        str(e.get("task_id") or label_task_id(str(e.get("label") or "")) or "")
+        for e in entries
+        if isinstance(e, dict) and run_id and e.get("run_id") == run_id
+    }
+    return [
+        str(t) for t in (progress.get(FAILED_KEY) or []) if str(t) not in measured
+    ]
+
+
+def _named_ids(ids: Sequence[str]) -> str:
+    """``T002``, ``T002 and T003``, ``T002, T003 and T004``; past
+    :data:`LEFT_OUT_IDS_SHOWN` ids the rest counted."""
+    ids = sorted((str(i) for i in ids), key=_id_key)
+    shown = ids[:LEFT_OUT_IDS_SHOWN]
+    if len(ids) > len(shown):
+        return ", ".join(shown) + f" and {len(ids) - len(shown)} more"
+    return shown[0] if len(shown) == 1 else ", ".join(shown[:-1]) + f" and {shown[-1]}"
 
 
 def native_failure(
@@ -871,7 +912,10 @@ def _compute_eta(
     remaining = max(total - done, 0) if total > 0 else 0
 
     def failed(entry: Any) -> bool:
-        return isinstance(entry, dict) and bool(entry.get(FAILED_ENTRY_KEY))
+        # Fix round 25: a record that named no task among several failed
+        # ones (:data:`NO_TASK_ID_ENTRY_KEY`) is no progress either.
+        return isinstance(entry, dict) and bool(
+            entry.get(FAILED_ENTRY_KEY) or entry.get(NO_TASK_ID_ENTRY_KEY))
 
     # Fix round 24 (live run 10 #5): a failed task is no progress. Its
     # duration (a 20-minute timeout) is not how long a task takes, so it is
@@ -1235,8 +1279,26 @@ def record_metric_in_state(
         entry["batch_index"] = batch_index
     if task_id:
         entry["task_id"] = str(task_id)
+    no_task_id: List[str] = []
     if failed is None:
-        found = native_failure(state, phase, task_id or label_task_id(label))
+        named = task_id or label_task_id(label)
+        statuses = state.get("task_status")
+        if not task_id and named and not re.fullmatch(r"T\d+", named) and not (
+                isinstance(statuses, dict) and named in statuses):
+            # ``Retry: …`` starts with a word, not a task of this state.
+            named = None
+        if not named:
+            # Fix round 25 (review of round 24, stops #2): a record naming
+            # no task is the one failed task of this run still unrecorded;
+            # among two or more it is never guessed.
+            candidates = unrecorded_failures(state, phase, entries)
+            if len(candidates) == 1:
+                named = candidates[0]
+                entry["task_id"] = named
+            elif candidates:
+                no_task_id = candidates
+                entry[NO_TASK_ID_ENTRY_KEY] = True
+        found = native_failure(state, phase, named)
         failed = found is not None
         if found is not None:
             failure, half_applied = found
@@ -1271,6 +1333,16 @@ def record_metric_in_state(
     else:
         entries.append(entry)
 
+    if no_task_id:
+        print(
+            f"{NO_TASK_ID_MARKER} {_describe_event(phase, clip(label, 80), batch_index)} "
+            f"names no task, and {_named_ids(no_task_id)} failed in this run "
+            f"with no record yet, so it is not counted as progress: pass "
+            f"--task-id <id> (the task it measures) on every util metrics "
+            f"record call of a task.",
+            file=sys.stderr,
+        )
+        return None
     if total_batches is None or batch_index is None:
         return None
     progress = (state.get("metrics_progress") or {}).get(phase)
