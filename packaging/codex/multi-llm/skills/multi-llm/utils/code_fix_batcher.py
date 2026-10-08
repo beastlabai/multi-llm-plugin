@@ -435,8 +435,8 @@ def _implementation_record_block(output_dir: Optional[str], batch_files: Sequenc
         "before treating a finding as ground truth)\n\n"
         + "\n".join(lines)
         + "\n\nIf a finding above contradicts a decision recorded here, do NOT "
-        "silently revert it: leave the code as it is and say so in your "
-        "returned summary.\n"
+        "silently revert it: leave the code as it is and decline that fix, "
+        "quoting the recorded decision as its reason.\n"
     )
 
 
@@ -473,6 +473,11 @@ def code_only_rule(plan_path: str, tasks_path: Optional[str] = None) -> str:
     with a ``file`` as a code fix, and under "change code only" a finding on
     such a file came back "not applied: needs a plan decision" (adversarial
     review, 2026-10-02).
+
+    Fix round 26 (live run 11, Codex decline fixture): a clamp the plan
+    forbids outright was declined as "requires a plan decision". A fix the
+    plan or its task list already decides against is declined quoting that
+    decision; "needs a plan decision" is for a fix nothing there decides.
     """
     protected = f"this run's plan (`{plan_path}`)"
     if tasks_path:
@@ -485,8 +490,11 @@ def code_only_rule(plan_path: str, tasks_path: Optional[str] = None) -> str:
         "yours to change, markdown included: a fix on a README, a doc or another "
         "plan in the diff is applied like any code fix. If a fix can only be "
         "satisfied by changing this run's plan or task list, or that plan should "
-        "be what moves, make no edit for that fix and report it as "
-        "\"not applied: needs a plan decision\"."
+        "be what moves, make no edit for that fix and decline it. When the plan "
+        "or its task list already decides against the fix (a rule it states, "
+        "such as \"do not add X\"), quote that decision as the reason; report "
+        "it as \"not applied: needs a plan decision\" only when they do not "
+        "decide it."
     )
 
 

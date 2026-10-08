@@ -196,3 +196,22 @@ def was_clipped(text: Any, shown: str, *, flatten: bool = True) -> bool:
     """Whether *shown* (a :func:`clip` of *text*) is shorter than *text*."""
     flat = plain_line(text) if flatten else ("" if text is None else str(text))
     return shown != flat
+
+
+def without_closing_mark(text: Any) -> str:
+    """*text* without one closing full stop or semicolon, for a line that
+    puts its own punctuation right after it (``— <reason>. List it …``).
+
+    Fix round 26 (live run 11 #10): a batch's declined reason is recorded as
+    the batch wrote it, closing stop included, as its reply and the host's
+    summary.md carry it; only a line that adds its own mark after the reason
+    drops the reason's one (the decline fixture, 2026-10-07, printed "…
+    MAX_SPEED.."). One mark at most, and only while text remains, so a
+    reason of ``...`` or ``.`` still reads as one (fix round 21).
+    """
+    stripped = str(text or "").strip()
+    if stripped[-1:] in (".", ";"):
+        trimmed = stripped[:-1].rstrip()
+        if trimmed:
+            return trimmed
+    return stripped

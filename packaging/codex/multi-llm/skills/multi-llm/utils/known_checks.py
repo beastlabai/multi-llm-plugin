@@ -596,9 +596,10 @@ def known_checks_section(
         "finding. A failing one is also one of the `findings`, and `passed` is "
         "then `false`.",
         "- Send `check` with `listed` even when you could run none of them. "
-        "When none of them failed (each one passed or was not run, or you ran "
-        "none), `passed` is `true` and `findings` is `[]`, unless another check "
-        "you ran failed.",
+        "When none of them failed (each one passed or was not run), `passed` "
+        "is `true` and `findings` is `[]`, unless another check you ran "
+        "failed. When you ran no check at all, send `listed` beside the empty "
+        "`ran` and the `not_run` reason, as above.",
         "- Report a listed check that fails even when your fixes did not cause "
         "it. If it fails because of a change you made, put it right as part of "
         "your fixes. Never make a check pass by weakening it (deleting or "

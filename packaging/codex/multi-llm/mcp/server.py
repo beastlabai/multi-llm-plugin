@@ -926,6 +926,44 @@ def hand_back_typed(outcome, values) -> None:
             outcome[key] = dict(call_args, plan=typed_plan(call_args["plan"], values))
 
 
+def repository_root_plan(anchor, relative):
+    """*relative* under the root of the repository *anchor* sits in, else ``None``.
+
+    The dispatcher runs a command whose relative paths name nothing from its
+    cwd (the anchor, here) from the root of the repository that cwd is in, when
+    each names something inside it (fix round 26, live run 11:
+    ``multi_llm._run_from_repository_root``). So a plan spelled from that root
+    names the root's file for this server's polls and abort too, never a path
+    under the anchor that does not exist. The root is the nearest directory at
+    or above the anchor holding a ``.git`` entry, the anchor itself excluded;
+    the file must exist there and stay inside it, as spelled and resolved. The
+    port of ``repositoryRootPlan``.
+    """
+    try:
+        start = os.path.realpath(anchor)
+    except (OSError, ValueError):
+        return None
+    root = start
+    while not os.path.lexists(os.path.join(root, ".git")):
+        parent = os.path.dirname(root)
+        if parent == root:
+            return None
+        root = parent
+    if root == start:
+        return None
+    candidate = os.path.normpath(os.path.join(root, relative))
+    try:
+        if not os.path.exists(candidate):
+            return None
+        real = os.path.realpath(candidate)
+    except (OSError, ValueError):
+        return None
+    prefix = root.rstrip(os.sep) + os.sep
+    if all(path == root or path.startswith(prefix) for path in (candidate, real)):
+        return candidate
+    return None
+
+
 def same_plan_file(left, right) -> bool:
     """Whether two plan paths name one file, symlinks followed on both sides.
 
@@ -1054,20 +1092,27 @@ def pinned_run_id(tokens, surface):
 
 
 def lift_user_next_step(outcome: dict) -> None:
-    """Copy the redacted payload's ``user_next_step`` to the result's top level.
+    """Move the redacted payload's ``user_next_step`` to the result's top level.
 
     Exit 0 and exit 2 only (plans/next-phase-command.md §2.4): a finished phase
-    or a terminal poll, and a phase already complete. The copy is taken from
+    or a terminal poll, and a phase already complete. The value is taken from
     ``result`` after ``redact``, byte for byte, the completed form
     (``command: null``, ``complete: true``) included, under the same key name.
     A payload without the key lifts nothing, so an absent top-level key keeps
     meaning "no answer", never "workflow complete". A still-running poll's
     exit 2 carries no key (the dispatcher never sets one there), so nothing is
     lifted mid-run.
+
+    Moved, not copied (fix round 26, live run 11): the section the host
+    copies was in the result twice, and the hosts wrote its sentences twice
+    ("Workflow complete." plain and then fenced on OpenCode's decline run).
+    One copy, in the field that owns it, as the result line itself is
+    dropped from ``output`` once it parsed. ``result`` is ``redact``'s own
+    copy, so the child's parsed payload is untouched.
     """
     payload = outcome.get("result")
     if isinstance(payload, dict) and payload.get(USER_NEXT_STEP_KEY) is not None:
-        outcome[USER_NEXT_STEP_KEY] = payload[USER_NEXT_STEP_KEY]
+        outcome[USER_NEXT_STEP_KEY] = payload.pop(USER_NEXT_STEP_KEY)
 
 
 def is_mechanical(next_args, surface) -> bool:
@@ -1854,13 +1899,18 @@ class Server:
         return expand_home(plan, self.layer1) if plan else ""
 
     def normalize_plan(self, plan: str, call: Call) -> str:
-        """A relative plan resolved against the anchor, ``~`` expanded."""
+        """A relative plan resolved against the anchor, ``~`` expanded; one that
+        names nothing there resolves from the repository root the dispatcher
+        runs it from (:func:`repository_root_plan`)."""
         if not plan:
             return ""
         expanded = self.plan_spelling(plan)
         if os.path.isabs(expanded):
             return expanded
-        return os.path.normpath(os.path.join(call.anchor, expanded))
+        joined = os.path.normpath(os.path.join(call.anchor, expanded))
+        if os.path.lexists(joined):
+            return joined
+        return repository_root_plan(call.anchor, expanded) or joined
 
     # -- argv composition (D3 rule 3) ---------------------------------------------
 

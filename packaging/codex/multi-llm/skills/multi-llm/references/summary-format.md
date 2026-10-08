@@ -92,7 +92,11 @@ Every mode ends with this report. Four rules, and a fifth for `ask`:
   - *What to write under `### Next Steps`.* `user_next_step.markdown`, copied
     as it is (on Claude Code the lookup prints it between `[NEXT_STEP_MARKDOWN]`
     and `[NEXT_STEP_MARKDOWN_END]`): it is this section already written, as the
-    rest of this rule describes it. Without it, `user_next_step.command` alone in a
+    rest of this rule describes it. Copy it word for word, never wrapped in a
+    fenced block of your own (its commands are fenced already), and say none of
+    it twice: its whys, notes, manual tasks and "Workflow complete." appear only
+    in it, never above it. A notice you report goes above it and repeats none
+    of it. Without it, `user_next_step.command` alone in a
     fenced block, copied character for character, and never "Workflow
     complete." beside it, however much of the work is done: while there is a
     command, the workflow goes on (its `why`, the `[NEXT_COMMAND_WHY]` line,

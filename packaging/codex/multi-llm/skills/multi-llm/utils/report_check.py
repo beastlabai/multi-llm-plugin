@@ -26,13 +26,23 @@ The model is told to end its report with each command in a fenced block,
 copied character for character, or with "Workflow complete.", and then those
 tasks listed. This checks the copy, and only the copy:
 
-* It reads the transcript entries since the last **real** user prompt: a user
-  entry whose content is a string or carries a text block. A user entry that
-  only carries ``tool_result`` blocks is part of the turn, and an ``isMeta``
-  entry (a loaded skill body, a local-command caveat) or a compaction summary
-  is not a prompt. ``isSidechain`` entries belong to a subagent, not the turn.
-* Among that turn's tool results it takes the **last** block. A block printed
-  only in an earlier turn is not this turn's to copy, so it is never checked.
+* It reads the transcript entries since the last prompt the user **typed**: a
+  user entry whose content is a string or carries a text block. A user entry
+  that only carries ``tool_result`` blocks is part of the run, and so is an
+  ``isMeta`` entry (a loaded skill body, a local-command caveat, a scheduled
+  wakeup's prompt), a compaction summary and, since fix round 26, an entry
+  the harness sent (``origin.kind`` other than ``human``: a background task's
+  ``task-notification``). Claude Code runs a phase's subagents in the
+  background, so one headless phase spans several turns, and live run 11's
+  Claude Code 04 printed the ready section in one and ended on another.
+  ``isSidechain`` entries belong to a subagent, not the run.
+* Among that run's tool results it takes the **last** block. A block printed
+  only before the user's last typed prompt is not this run's to copy, so it
+  is never checked.
+* A block's ready section (``util next-command``'s ``[NEXT_STEP_MARKDOWN]``
+  … ``[NEXT_STEP_MARKDOWN_END]``, a success's or a stop's) holds the report
+  to every command it fences too, beside the marker lines' (fix round 26),
+  and a block reason asks for the section printed as given.
 * A marker counts only at the start of a line, which is where the emitter puts
   it. An indented example of the block (a plan or a doc quoting it, read by a
   tool) is not a phase result.
@@ -49,7 +59,9 @@ tasks listed. This checks the copy, and only the copy:
   rule says always names them, while a check of the note's wording would
   block a report that put its command in backticks. A why line is never a
   command.
-* The final message is the text of the turn's trailing assistant entries. The
+* The final message is the text of the run's trailing assistant entries, the
+  ones after its last user entry of any kind (fix round 26: a wakeup's
+  ``isMeta`` prompt ends the reply before it too). The
   ``Stop`` hook input's ``last_assistant_message`` is read too, when present,
   and the turn passes when either carries the copy: a stale transcript must
   never produce a block. It is stale in practice. Observed on a live headless
@@ -201,20 +213,41 @@ class Block:
         self.note: Optional[str] = None
         #: The ``[MANUAL_TASK_COMMAND]`` after the note, when printed.
         self.manual_command: Optional[str] = None
+        #: The ready section ``util next-command`` printed below the block,
+        #: between ``[NEXT_STEP_MARKDOWN]`` and ``[NEXT_STEP_MARKDOWN_END]``
+        #: (fix round 26), when it printed one.
+        self.section: Optional[str] = None
+
+    def section_commands(self) -> List[str]:
+        """Every command the ready section fences, in its order: each
+        non-blank line inside one of its fenced blocks (``fenced_command``
+        puts each command alone in its own)."""
+        if not self.section:
+            return []
+        return [line for line in _fenced_line_list(self.section) if line]
 
     def commands(self) -> List[str]:
         """Every command the report has to carry: the primary one first, the
-        manual tasks' close command last. A complete block's only command is
-        that last one (its primary is the sentence)."""
+        manual tasks' close command after the block's others, then any
+        command the ready section fences that no marker line printed (fix
+        round 26: the section is what the report copies, so every command it
+        fences is held to the report). A complete block's marker command is
+        the manual one alone (its primary is the sentence)."""
         manual = [self.manual_command] if self.manual_command else []
         if self.complete or self.command is None:
-            return manual
-        return (
-            [self.command]
-            + [command for _why, command in self.optional]
-            + [command for _why, command in self.answers]
-            + manual
-        )
+            listed = manual
+        else:
+            listed = (
+                [self.command]
+                + [command for _why, command in self.optional]
+                + [command for _why, command in self.answers]
+                + manual
+            )
+        extra: List[str] = []
+        for command in self.section_commands():
+            if command not in listed and command not in extra:
+                extra.append(command)
+        return listed + extra
 
 
 def find_blocks(text: str) -> List[Block]:
@@ -224,23 +257,30 @@ def find_blocks(text: str) -> List[Block]:
     each ``[NEXT_COMMAND_OPTIONAL]`` line joins the block started before it in
     the same text, with the why line printed directly above it. An optional
     line with no primary above it is ignored: it is not a block the emitter
-    prints.
+    prints. A ready section (``[NEXT_STEP_MARKDOWN]`` …
+    ``[NEXT_STEP_MARKDOWN_END]``) belongs to the block printed above it, as
+    :attr:`Block.section`; one that never closes is not kept.
     """
     blocks: List[Block] = []
     current: Optional[Block] = None
     pending_why: Optional[str] = None
     in_section = False
+    section_lines: List[str] = []
     for raw in text.splitlines():
         line = raw.rstrip("\r")
         # The section printed below the block (fix round 24) is the
         # block's own rendering: none of its lines is a marker line.
         if line.rstrip() == NEXT_STEP_MARKDOWN:
             in_section = True
+            section_lines = []
             continue
         if line.rstrip() == NEXT_STEP_MARKDOWN_END:
+            if in_section and current is not None:
+                current.section = "\n".join(section_lines).strip("\n") or None
             in_section = False
             continue
         if in_section:
+            section_lines.append(line)
             continue
         if line.startswith(NEXT_COMMAND):
             command = line[len(NEXT_COMMAND):].strip()
@@ -294,7 +334,12 @@ def fenced_lines(text: str) -> Set[str]:
     backtick is not a fence (CommonMark again), which keeps an inline
     ```` ```code``` ```` span from opening one.
     """
-    lines: Set[str] = set()
+    return set(_fenced_line_list(text))
+
+
+def _fenced_line_list(text: str) -> List[str]:
+    """:func:`fenced_lines` in the order the lines appear, repeats kept."""
+    lines: List[str] = []
     fence: Optional[str] = None
     for raw in text.splitlines():
         if fence is None:
@@ -314,7 +359,7 @@ def fenced_lines(text: str) -> Set[str]:
         ):
             fence = None
             continue
-        lines.add(stripped)
+        lines.append(stripped)
     return lines
 
 
@@ -384,12 +429,34 @@ def _tasks_noun(ids: Sequence[str]) -> str:
     return ("task " if len(ids) == 1 else "tasks ") + ", ".join(ids)
 
 
+#: What a block reason adds when the lookup printed a ready section (fix round
+#: 26, live run 11, Claude Code 04: the reply the run ended on carried none of
+#: the section's commands). The section follows it verbatim.
+SECTION_REQUEST = (
+    "End it with the ready section the lookup printed between its "
+    f"{NEXT_STEP_MARKDOWN} and {NEXT_STEP_MARKDOWN_END} lines, printed as "
+    "given: its words and order, each command alone in its fenced block, each "
+    "why and note as plain text, no caption of your own. The section is:"
+)
+
+
+def _with_section(reason: str, block: Block) -> str:
+    """*reason*, then the ready section to print, when the block has one."""
+    if not block.section:
+        return reason
+    return f"{reason}\n\n{SECTION_REQUEST}\n\n{block.section}"
+
+
 def block_reason(block: Block, missing: Sequence[str]) -> str:
     """The text the model reads when the hook blocks its stop."""
+    return _with_section(_block_reason(block, missing), block)
+
+
+def _block_reason(block: Block, missing: Sequence[str]) -> str:
     if block.complete:
         if not block.manual:
             return (
-                "multi-llm report check: the last phase result in this turn printed "
+                "multi-llm report check: the last phase result in this run printed "
                 f"{WORKFLOW_COMPLETE}, and your final message does not say "
                 f'"{COMPLETE_SENTENCE}". {WHOLE_REPORT} its '
                 f'`### Next Steps` section saying "{COMPLETE_SENTENCE}" and '
@@ -400,16 +467,16 @@ def block_reason(block: Block, missing: Sequence[str]) -> str:
         lacks = []
         if COMPLETE_SENTENCE in missing:
             lacks.append(f'does not say "{COMPLETE_SENTENCE}"')
-        dropped = [item for item in missing
-                   if item not in (COMPLETE_SENTENCE, block.manual_command)]
+        manual_ids = {task_id for task_id, _title in block.manual}
+        dropped = [item for item in missing if item in manual_ids]
         if dropped:
             lacks.append(f"does not name the {_tasks_noun(dropped)}")
-        if block.manual_command and block.manual_command in missing:
+        if any(item in block.commands() for item in missing):
             lacks.append(
                 "does not carry the command that records them done alone in a "
                 "fenced block")
         return (
-            "multi-llm report check: the last phase result in this turn printed "
+            "multi-llm report check: the last phase result in this run printed "
             f"{WORKFLOW_COMPLETE} with the tasks implement deferred to the "
             f"user, and your final message {' and '.join(lacks)}. {WHOLE_REPORT} "
             f"its `### Next Steps` section saying "
@@ -432,7 +499,7 @@ def block_reason(block: Block, missing: Sequence[str]) -> str:
         # not. The reply replaces the final message, so it carries the
         # commands again too.
         parts = [
-            "multi-llm report check: the last phase result in this turn printed "
+            "multi-llm report check: the last phase result in this run printed "
             "the next step and, after it, the tasks implement deferred to the "
             f"user, and your final message does not name the {_tasks_noun(dropped)}. "
             f"{WHOLE_REPORT} its `### Next Steps` section, with each command "
@@ -445,7 +512,7 @@ def block_reason(block: Block, missing: Sequence[str]) -> str:
         return "\n\n".join(parts)
     noun = "command" if len(lost) == 1 else "commands"
     parts = [
-        "multi-llm report check: the last phase result in this turn printed "
+        "multi-llm report check: the last phase result in this run printed "
         f"the next step, and your final message does not carry the {noun} "
         f"below exactly. {WHOLE_REPORT} its `### Next Steps` "
         "section, with each command in its own fenced code block, "
@@ -489,11 +556,32 @@ def _content(entry: Dict[str, Any]) -> Any:
     return message.get("content")
 
 
+#: The ``origin.kind`` of a prompt the user typed in an interactive session
+#: (a headless ``claude -p`` prompt carries no ``origin`` at all). Every other
+#: kind is the harness speaking: ``task-notification`` (a background task's
+#: completion, a plain string entry that is not ``isMeta``), ``peer``,
+#: ``coordinator``, ``auto-continuation`` (those three ``isMeta``). Read off
+#: Claude Code 2.1.293 transcripts, 2026-10-08.
+TYPED_ORIGIN_KIND = "human"
+
+
 def _is_real_prompt(entry: Dict[str, Any]) -> bool:
-    """A user entry that starts a turn: typed text, not a tool-result carrier."""
+    """A user entry the user typed: it starts a run of the conversation.
+
+    Not a tool-result carrier, not an ``isMeta`` entry (a loaded skill body, a
+    hook's feedback, a scheduled wakeup's prompt), and not one the harness
+    sent: an entry whose ``origin.kind`` is anything but
+    :data:`TYPED_ORIGIN_KIND` (fix round 26, live run 11: Claude Code runs a
+    phase's subagents in the background, so one phase spans several turns,
+    each opened by a ``task-notification`` entry, and the ready section is
+    printed in one of them while the run ends on another).
+    """
     if entry.get("type") != "user":
         return False
     if entry.get("isMeta") or entry.get("isCompactSummary"):
+        return False
+    origin = entry.get("origin")
+    if isinstance(origin, dict) and origin.get("kind") not in (None, TYPED_ORIGIN_KIND):
         return False
     content = _content(entry)
     if isinstance(content, str):
@@ -542,20 +630,27 @@ def _assistant_text(entry: Dict[str, Any]) -> List[str]:
     ]
 
 
-def read_turn(path: Path) -> List[Dict[str, Any]]:
-    """The transcript entries since the last real user prompt, in file order.
+def read_turn(path: Path, partial_tail: bool = False) -> List[Dict[str, Any]]:
+    """The transcript entries since the last prompt the user typed, in file
+    order (:func:`_is_real_prompt`): the whole of a headless ``claude -p``
+    session, task-notification turns and wakeup turns included.
 
-    Read from the end, so a long session parses only its last turn. A line
+    Read from the end, so a long session parses only its last run. A line
     inside that stretch that is not a JSON object makes the whole transcript
     unreadable (:class:`_Unreadable`): the check does not guess at a turn it
-    cannot see in full.
+    cannot see in full. With *partial_tail* (``util wakeup-check``, which
+    reads the transcript while the session is writing it), a last line with
+    no newline after it is a write in progress and is left out.
     """
     try:
         data = path.read_bytes()
     except OSError as exc:
         raise _Unreadable(str(exc)) from exc
+    lines = data.splitlines()
+    if partial_tail and lines and not data.endswith((b"\n", b"\r")):
+        lines.pop()
     turn: List[Dict[str, Any]] = []
-    for raw in reversed(data.splitlines()):
+    for raw in reversed(lines):
         if not raw.strip():
             continue
         try:
@@ -587,17 +682,21 @@ def last_block(turn: Sequence[Dict[str, Any]]) -> Optional[Block]:
 
 
 def _trailing_assistant(turn: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """The assistant entries after the turn's last user entry, newest first.
+    """The assistant entries after the turn's last user entry, newest first:
+    the reply the run ends on.
 
-    An ``isMeta`` user entry (a hook's feedback, a loaded skill body) does not
-    end the run: it is not a turn of the conversation.
+    Every user entry ends the stretch, an ``isMeta`` one included (fix round
+    26). A scheduled wakeup's prompt is ``isMeta``, and live run 11's Claude
+    Code 04 ended on the reply to one, which carried none of the ready
+    section's commands: read together with the report before the wakeup, the
+    two passed as one message. The other ``isMeta`` entries end nothing a
+    reply spans: a loaded skill body comes before the reply, and the reply
+    after a hook's feedback is the message that replaces the one it blocked.
     """
     trailing: List[Dict[str, Any]] = []
     for entry in reversed(turn):
         kind = entry.get("type")
         if kind == "user":
-            if entry.get("isMeta"):
-                continue
             break
         if kind == "assistant":
             trailing.append(entry)

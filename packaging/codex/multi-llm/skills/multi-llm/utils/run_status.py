@@ -44,6 +44,7 @@ say so.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import math
 import os
@@ -61,6 +62,7 @@ from . import (
     status_file,
 )
 from .cli_common import (
+    ERROR_MAX_CHARS,
     EXIT_ERROR,
     EXIT_NEEDS_HUMAN,
     EXIT_NOTHING_TO_DO,
@@ -108,7 +110,7 @@ from .output_handler import (
     slugify_question,
 )
 from .stream_bootstrap import bootstrap_streams
-from .text_clip import clip
+from .text_clip import clip, plain_line, without_closing_mark
 from .validation_context import (
     pick_worst,
     validation_context_notice,
@@ -576,7 +578,7 @@ def manual_close_note(
     except Exception:  # noqa: BLE001 - advisory: the list still stands
         return None
     return next_phase.manual_close_note(
-        next_phase.close_command(template, plan_spelling, ids)
+        next_phase.close_command(template, plan_spelling, ids), len(ids),
     )
 
 
@@ -584,6 +586,7 @@ def _workflow_trailer_lines(
     payload: Dict[str, Any], *, prefix: str = "  ",
     close_note: Optional[str] = None,
     suggested: bool = True,
+    carried: Optional[Any] = None,
 ) -> List[str]:
     """The workflow view's ``suggested next``/``notice`` lines, alone
     (without the ``suggested next`` line when *suggested* is false).
@@ -592,7 +595,19 @@ def _workflow_trailer_lines(
     over (F7, 2026-09-16, below) renders the identical text instead of a second
     hand-typed copy that could drift from it — the whole point is that the two
     channels can never say something different about the same ``state.json``.
+
+    *carried* is the ``user_next_step`` answer (``next_phase.NextPhase``) the
+    same result carries: a line its ``markdown`` already says is left out —
+    a notice that is one of its optional entries' ``why`` and, when it lists
+    manual tasks, the manual-tasks line (fix round 26, live run 11: Codex
+    04/06/08 and OpenCode 03-08 relayed the notice above the copied section,
+    so the user read the same sentence twice).
     """
+    said_whys = {
+        plain_line(getattr(step, "why", "") or "")
+        for step in (getattr(carried, "optional_before", None) or ())
+    } - {""}
+    manual_said = bool(getattr(carried, "manual_tasks", None))
     lines: List[str] = []
     if suggested and payload.get("suggested_next"):
         # `suggested_next` already skips every optional phase in its way
@@ -617,6 +632,8 @@ def _workflow_trailer_lines(
         )
         lines.append(f"{prefix}suggested next: {payload['suggested_next']}{suffix}")
     for notice in payload.get("notices", []) or []:
+        if plain_line(notice) in said_whys:
+            continue
         lines.append(f"{prefix}notice: {notice}")
     # The implement tasks the run deferred (`phases.implement.manual_tasks`,
     # read from state.json). A workflow with nothing left to suggest printed
@@ -700,7 +717,7 @@ def _workflow_trailer_lines(
             f"{prefix}{clause} — not counted as a failure (see implement/summary.md)"
             for clause in accepted_rerun_clauses(accepted_reruns)
         ]
-    if manual_line:
+    if manual_line and not manual_said:
         lines.append(manual_line)
     return lines
 
@@ -975,11 +992,17 @@ def _run_state_text(view: Dict[str, Any]) -> str:
     result = _result_state(view)
     if result is None:
         if _stopped_for_the_user(view):
-            # Fix round 22: the record's word stays; what it means is said.
-            # Fix round 23 (review of round 22, #4): "nothing crashed" only
-            # when nothing it ran failed.
+            # Fix round 22: what the record means is said. Fix round 23
+            # (review of round 22, #4): "nothing crashed" only when nothing
+            # it ran failed. Fix round 26 (live run 11 #6): the text no
+            # longer says "failed" under the "stopped and needs you" head.
+            # Only the text: the stored word stays `failed`, because
+            # `TERMINAL_RUN_STATES`, `classify_run`'s verdict, `exit_code_for`,
+            # the run registry's sweep, the close-out's retirement of a
+            # non-`done` run's slots and `--json`'s `runs[].run.state` all key
+            # on it, and the records already on disk say it.
             crashed = "" if _a_dispatch_failed(view) else f"; {NOTHING_CRASHED}"
-            return f"{word} ({STOPPED_FOR_THE_USER_GLOSS}{crashed})"
+            return f"{STOPPED_RUN_STATE_WORD} ({STOPPED_FOR_THE_USER_GLOSS}{crashed})"
         return str(word)
     failed = _failed_model_specs(view)
     detail = f" — failed: {', '.join(failed)}" if failed else ""
@@ -991,7 +1014,10 @@ def _run_state_text(view: Dict[str, Any]) -> str:
 #: "run … failed" for a resume that stopped where the first run had, needing
 #: the user's answer, as the stop's own text said).
 STOPPED_FOR_THE_USER_VERDICT = "stopped and needs you (exit 3)"
-STOPPED_FOR_THE_USER_GLOSS = "exit 3: the run stopped and needs you"
+#: The ``run.state:`` line of such a run (fix round 26, live run 11 #6:
+#: "failed (exit 3: …)" under the head above). The record keeps ``failed``.
+STOPPED_RUN_STATE_WORD = "stopped"
+STOPPED_FOR_THE_USER_GLOSS = "exit 3: the run needs you"
 #: Added to the gloss only when no runner and no model of the run failed
 #: (:func:`_a_dispatch_failed`, fix round 23): a stop on a refusal, a check's
 #: findings or an unanswered manual task.
@@ -1160,6 +1186,12 @@ def _write_result_notice(views: Sequence[Dict[str, Any]]) -> Optional[str]:
     what the worker recorded on its own result line, which a detached caller
     never sees. Read from the run's own mirror, so it describes that run.
     """
+    return clip("; ".join(_write_result_notice_parts(views)), 1200) or None
+
+
+def _write_result_notice_parts(views: Sequence[Dict[str, Any]]) -> List[str]:
+    """:func:`_write_result_notice`'s parts, unjoined (fix round 26: a stop's
+    poll leaves out a part its `error` already says)."""
     try:
         from .write_batch_scheduler import batch_check_summary
     except ImportError:  # pragma: no cover - direct script runs
@@ -1180,7 +1212,7 @@ def _write_result_notice(views: Sequence[Dict[str, Any]]) -> Optional[str]:
         unverified = mirror.get("unverified")
         if isinstance(unverified, str) and unverified and unverified not in parts:
             parts.append(unverified)
-    return clip("; ".join(parts), 1200) or None
+    return parts
 
 
 def _high_priority_text(high_priority: Any) -> Optional[str]:
@@ -2131,7 +2163,10 @@ def state_implement_view(
     """
     from .state_manager import StateManager
 
-    if (phase_dir_path(plan_path, _IMPLEMENT_PHASE) / _WRITE_REPORT).exists():
+    implement_dir = phase_dir_path(plan_path, _IMPLEMENT_PHASE)
+    if (implement_dir / _WRITE_REPORT).exists() and native_leg_stamp(implement_dir) is None:
+        # Fix round 26: an executor report beside a native emit's newer
+        # `write_tasks.json` is an earlier run's (`superseded_by_native`).
         return None
     for view in views:
         if (view.get("phase") or os.path.basename(str(view.get("phase_dir") or ""))) \
@@ -2493,6 +2528,7 @@ def render_state_implement_lines(
         unit="tasks", changed=view.get("state_changed_at"),
         stopped=bool(view.get("stopped")),
     )]
+    lines += _earlier_run_lines(view.get("earlier_run"))
     lines.append(
         f"      all tasks:      {implement_tally_text(view['tally'], live=bool(since))}"
     )
@@ -2527,6 +2563,146 @@ def render_state_implement_lines(
     if not since and view.get("resumable"):
         lines += _native_stop_lines(resume, answers, view.get("stop_resume_why"))
     return lines
+
+
+def native_leg_stamp(directory: Path) -> Optional[Dict[str, str]]:
+    """``{leg, host}`` when *directory*'s ``write_tasks.json`` was written by
+    the native emit, else ``None`` (fix round 26).
+
+    Every run of a write phase rewrites that file, on either leg, and only
+    the native emit stamps it (``write_phase_bridge.NATIVE_LEG``), so the
+    stamp says the phase's newest run is the host's own. Advisory: an
+    unreadable file is no stamp."""
+    try:
+        document = json.loads((Path(directory) / _WRITE_TASKS).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - advisory
+        return None
+    if not isinstance(document, dict) or document.get("leg") != "native":
+        return None
+    return {"leg": "native", "host": str(document.get("host") or "")}
+
+
+def _write_phase_of(plan_path: Path, view: Mapping[str, Any]) -> Optional[str]:
+    """The write phase (implement or an apply phase) whose folder *view* is
+    the run record of, else ``None``."""
+    where = os.path.realpath(str(view.get("phase_dir") or ""))
+    for phase in NATIVE_PHASE_ORDER:
+        if os.path.realpath(str(phase_dir_path(plan_path, phase))) == where:
+            return phase
+    return None
+
+
+def superseded_by_native(
+    plan_path: Path, view: Mapping[str, Any],
+) -> Optional[Dict[str, str]]:
+    """The native stamp that makes *view* an earlier run, else ``None``.
+
+    The commit review of 2026-10-08 ("stale executor status after switching
+    to native execution", reproduced, its guards older than 4ca1f34): an
+    executor run of a write phase (a tool route or ``--exec-subagents``)
+    leaves ``{phase}/.status.json`` and ``write_batch_report.json`` behind,
+    and when the user went on with the same phase on the Claude Code native
+    leg, ``status`` kept heading the phase with that run ("stopped in
+    foreground (needs you; …)" over a native run that had finished) because
+    ``state_implement_view`` and ``state_apply_views`` stood back for any
+    executor record. A record whose phase folder the native emit wrote last
+    (:func:`native_leg_stamp`) is that earlier run, unless it is a detached
+    run still going, which is never set aside."""
+    if _write_phase_of(plan_path, view) is None or _run_is_live(view):
+        return None
+    return native_leg_stamp(Path(str(view.get("phase_dir") or "")))
+
+
+def set_aside_superseded_runs(
+    plan_path: Path, views: Sequence[Dict[str, Any]], *,
+    host_id: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    """``(views, {phase: earlier_run})``: *views* without the executor runs a
+    newer native run of their phase went on from (:func:`superseded_by_native`),
+    and each one's :func:`earlier_run_record` for that native block to name.
+
+    Set aside only when the native view of that phase is there to show in its
+    place; otherwise the record stays as it is (fix round 26)."""
+    kept: List[Dict[str, Any]] = []
+    candidates: Dict[str, Tuple[Dict[str, Any], Dict[str, str]]] = {}
+    for view in views:
+        stamp = superseded_by_native(plan_path, view)
+        phase = _write_phase_of(plan_path, view) if stamp else None
+        if stamp is None or phase is None or phase in candidates:
+            kept.append(view)
+            continue
+        candidates[phase] = (view, stamp)
+    if not candidates:
+        return list(views), {}
+    shown: set = set()
+    if _IMPLEMENT_PHASE in candidates and state_implement_view(plan_path, kept) is not None:
+        shown.add(_IMPLEMENT_PHASE)
+    if any(phase != _IMPLEMENT_PHASE for phase in candidates):
+        shown.update(
+            entry.get("phase") for entry in state_apply_views(
+                plan_path, kept, None, host_id=host_id)
+        )
+    superseded: Dict[str, Dict[str, Any]] = {}
+    for phase, (view, stamp) in candidates.items():
+        if phase in shown:
+            superseded[phase] = earlier_run_record(view, stamp)
+        else:
+            kept.append(view)
+    # The caller's order, which sorts the blocks.
+    order = {id(view): index for index, view in enumerate(views)}
+    kept.sort(key=lambda view: order.get(id(view), len(order)))
+    return kept, superseded
+
+
+def earlier_run_record(view: Mapping[str, Any], stamp: Mapping[str, str]) -> Dict[str, Any]:
+    """What a native block says of the executor run it superseded:
+    ``{leg, phase_dir, run_id, verdict, host, ended, native_host}``."""
+    run = view.get("run") if isinstance(view.get("run"), dict) else {}
+    progress = view.get("progress") if isinstance(view.get("progress"), dict) else {}
+    verdict = view.get("verdict")
+    if run.get("run_id"):
+        if verdict == detach.VERDICT_DONE:
+            ended = "finished"
+        elif _stopped_for_the_user(dict(view)):
+            ended = "stopped and needed you (exit 3)"
+        elif verdict == detach.VERDICT_ABORTED:
+            ended = "was aborted"
+        elif verdict == detach.VERDICT_FAILED:
+            ended = f"failed (exit {run.get('exit_code')})"
+        else:
+            ended = "ended without a recorded outcome"
+    else:
+        step = progress.get("step")
+        ended = {
+            STOPPED_STEP: "stopped and needed you",
+            "complete": "finished",
+        }.get(step, "did not finish")
+    return {
+        "leg": "executor",
+        "phase_dir": os.path.basename(str(view.get("phase_dir") or "")),
+        "run_id": run.get("run_id"),
+        "verdict": verdict,
+        "host": run.get("host"),
+        "ended": ended,
+        "native_host": stamp.get("host") or None,
+    }
+
+
+def _earlier_run_lines(record: Any) -> List[str]:
+    """The native block's line naming the executor run it superseded."""
+    if not isinstance(record, Mapping):
+        return []
+    ref = (
+        f"run {str(record['run_id'])[:8]}" if record.get("run_id")
+        else "a foreground run"
+    )
+    launched = f", launched on {record['host']}" if record.get("host") else ""
+    host = f" ({record['native_host']})" if record.get("native_host") else ""
+    return [
+        f"      earlier run:    {ref} (its subagents dispatched by the "
+        f"plugin{launched}) {record.get('ended')}; this run, on the "
+        f"host{host}, is newer"
+    ]
 
 
 #: The apply phases a native host drives itself, in workflow order: no run
@@ -2575,7 +2751,9 @@ def state_apply_views(
                 str(phase_dir_path(plan_path, phase)))):
             continue
         directory = phase_dir_path(plan_path, phase)
-        if (directory.name in listed or (directory / _WRITE_REPORT).exists()
+        if (directory.name in listed
+                or ((directory / _WRITE_REPORT).exists()
+                    and native_leg_stamp(directory) is None)
                 or not (directory / _WRITE_TASKS).is_file()):
             continue
         candidates.append((phase, directory))
@@ -2636,34 +2814,53 @@ def state_apply_views(
 
 
 #: The not-applied items a write mirror (and a native apply view) names, in
-#: the order and words the progress line prints them (fix round 18).
-_NOT_APPLIED_ITEM_WORDS: Tuple[Tuple[str, str], ...] = (
-    ("declined_items", "not applied, declined by its batch"),
-    ("skipped_items", "not applied, skipped at your request"),
+#: the order and words the progress line prints them (fix round 18): the
+#: key, the words for one item and for several, and the words a recorded
+#: reason may open with that the clause has already said (fix round 26).
+_NOT_APPLIED_ITEM_WORDS: Tuple[Tuple[str, str, str, str], ...] = (
+    ("declined_items", "declined by its batch (not applied)",
+     "declined by their batch (not applied)", ""),
+    ("skipped_items", "skipped at your request (not applied)",
+     "skipped at your request (not applied)", "skipped at your request: "),
 )
 
 
 def not_applied_item_clauses(source: Mapping[str, Any]) -> List[str]:
-    """``not applied, declined by its batch: <id8> in <batch> (<reason>)``
+    """``1 declined by its batch (not applied): <id8> in <batch> (<reason>)``
     and its skipped twin, one clause per kind *source* carries
     (``declined_items`` / ``skipped_items``: ``[{task_id, id, reason}]``, a
-    write mirror's keys). The executor's progress line joins them into its
-    line; the native apply view prints each on its own (fix round 22), so
-    the two legs name a declined item in the same words."""
+    write mirror's keys). The executor's progress line puts them after its
+    ``items applied`` count; the native apply view prints each on its own
+    (fix round 22), so the two legs name a declined item in the same words.
+
+    Fix round 26 (live run 11 #7): the clause read "not applied, declined by
+    its batch: …" after "2/3 items applied, ", two clauses run together by
+    commas; it now counts the items and says "not applied" once, in
+    parentheses."""
     clauses: List[str] = []
-    for key, words in _NOT_APPLIED_ITEM_WORDS:
+    for key, one, several, said in _NOT_APPLIED_ITEM_WORDS:
         raw = source.get(key)
         entries = [
             entry for entry in raw
             if isinstance(entry, dict) and entry.get("id")
         ] if isinstance(raw, list) else []
         if entries:
-            clauses.append(f"{words}: " + "; ".join(
+            words = one if len(entries) == 1 else several
+            clauses.append(f"{len(entries)} {words}: " + "; ".join(
                 f"{str(entry['id'])[:8]} in {entry.get('task_id')} "
-                f"({clip(entry.get('reason') or '', 120)})"
+                f"({clip(without_closing_mark(_reason_after(entry.get('reason') or '', said)), 120)})"
                 for entry in entries[:5]
             ) + (f" (+{len(entries) - 5} more)" if len(entries) > 5 else ""))
     return clauses
+
+
+def _reason_after(reason: str, said: str) -> str:
+    """*reason* without the opening words *said* the clause already printed
+    (``skipped at your request: …``), when more remains."""
+    text = str(reason)
+    if said and text.lower().startswith(said.lower()) and text[len(said):].strip():
+        return text[len(said):].strip()
+    return text
 
 
 def accepted_rerun_clauses(by_task: Mapping[str, Sequence[str]]) -> List[str]:
@@ -2772,6 +2969,7 @@ def render_state_apply_lines(
         view["phase_dir"], completed=bool(view.get("completed")),
         since=since, unit="batches", changed=view.get("state_changed_at"),
     )]
+    lines += _earlier_run_lines(view.get("earlier_run"))
     recorded, total = view.get("batches_recorded"), view.get("batches_total")
     if isinstance(recorded, int) and isinstance(total, int):
         lines.append(f"      batches:        {recorded}/{total} recorded by this run")
@@ -2975,6 +3173,7 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     folded = [str(t) for t in accepted if t] if kind == "implement" else []
     items_total = mirror.get("items_total")
     items_applied = mirror.get("items_applied")
+    counted_items = False
     if isinstance(items_total, int) and isinstance(items_applied, int):
         # F9: `ok`/`total` count batches, not the items inside them — a
         # write mirror that recorded both (`write_batch_scheduler`) says so
@@ -3010,10 +3209,21 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
             # say which applied an edit.
             parts = [f"{kind} {ok}/{total} tasks ok{kept_note}"]
         else:
+            # Fix round 26 (live run 11, OpenCode 05 said the task
+            # suggestions went "to plans/racing-game.md"): a single-target
+            # phase's line names the file its items were applied to.
+            applied_to = mirror.get("applied_to")
+            target = (
+                f" to {clip(plain_line(applied_to), 200)}"
+                if isinstance(applied_to, str) and plain_line(applied_to) else ""
+            )
             parts = [
                 f"{kind} {ok}/{total} batches ok{kept_note}, "
-                f"{items_applied}/{items_total} items applied"
+                f"{items_applied}/{items_total} items applied{target}"
             ]
+            # Fix round 26 (live run 11 #7): the items not applied follow
+            # the count they are left out of, after a semicolon.
+            counted_items = True
     else:
         parts = [f"{kind} {ok}/{total} ok"]
     # F10: `in_flight` (`write_batch_scheduler._mirror_status`/`_begin_sweep`)
@@ -3100,7 +3310,11 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
         })
     # Fix round 18: an item a finished batch declined (or one skipped at the
     # user's request) is named, never only left out of `items applied`.
-    parts += not_applied_item_clauses(mirror)
+    not_applied = not_applied_item_clauses(mirror)
+    if not_applied and counted_items:
+        parts[0] = "; ".join([parts[0], *not_applied])
+    else:
+        parts += not_applied
     # Racing re-run 3 (2026-10-05): the tasks a stop left undispatched were
     # on no surface at all; a failed task the user accepted is named too.
     not_run = mirror.get("not_run_task_ids") if isinstance(mirror.get("not_run_task_ids"), list) else []
@@ -4061,6 +4275,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return EXIT_NEEDS_HUMAN
         views = _wait_for_terminal(plan_path, args, views)
 
+    # Fix round 26 (the commit review of 2026-10-08, "stale executor status
+    # after switching to native execution"): an executor run a native run of
+    # the same phase went on from is not this phase's run any more.
+    superseded: Dict[str, Dict[str, Any]] = {}
+    if not args.run_id and not args.question:
+        try:
+            views, superseded = set_aside_superseded_runs(
+                plan_path, views, host_id=_reader_host(args))
+        except Exception:  # noqa: BLE001 - advisory: the run view is not
+            superseded = {}
+
     # Fix round 16 (run 6): an executor implement run's own counts are that
     # run's; every task of the phase is tallied from state.json beside them.
     implement_tally = None
@@ -4093,6 +4318,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # exactly one run as the one mode whose result line carried no `progress`.
     # The rule the test below is written to is "did the caller name one run?",
     # and all three selectors answer it.
+    # The stop's own line as the result carries it, when this poll records
+    # one: a notice part it already says is left out below (fix round 26).
+    stop_error: Optional[str] = None
     if len(views) == 1 and (args.phase or args.question or args.run_id):
         watched = views[0]
         watched_run = watched.get("run") or {}
@@ -4135,6 +4363,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             and watched.get("verdict") in (detach.VERDICT_FAILED,)
         ):
             record_error(recorded_error.strip())
+            stop_error = recorded_error.strip()
 
     exit_code = exit_code_for(views)
 
@@ -4183,6 +4412,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     terminal_workflow, _plan_spelling(args, views, plan_path),
                     _reader_host(args), _recorded_route(args, views, plan_path),
                 ),
+                # Fix round 26 (live run 11, Codex stop 01b): a run that
+                # stopped or failed has no next phase, and the hosts relayed
+                # "suggested next: implement (review-tasks /
+                # apply-task-suggestions optional, not run)" beside the
+                # stop's own ways forward. The line is left out of a
+                # non-zero poll's text and notice alike.
+                suggested=exit_code == EXIT_OK,
             )
             if trailer:
                 workflow_trailer = [f"workflow {line}" for line in trailer]
@@ -4208,6 +4444,50 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
         except Exception:  # noqa: BLE001 - advisory: the run view is not
             apply_tasks = []
+    for phase, record in superseded.items():
+        entry = implement_tasks if phase == _IMPLEMENT_PHASE else next(
+            (item for item in apply_tasks if item.get("phase") == phase), None)
+        if isinstance(entry, dict):
+            entry["earlier_run"] = record
+
+    # plans/next-phase-command.md §2.2(1): a TERMINAL poll pinned to exactly one
+    # run that exits 0 — a worker that ended 0 or 2 — carries the next phase as
+    # `user_next_step`, beside F7's notice but without F7's view guard: the key
+    # is machine-readable, and `--view all`'s result line carries no parsed
+    # workflow step either (`--view workflow` returned above). The block follows
+    # the text on stdout, or goes to stderr under `--json`, whose payload stays
+    # exactly what it was. Never on exit 2 (still moving, or nothing recorded)
+    # or 3 (failed/aborted). Advisory: a failed read or builder costs one
+    # stderr line and nothing else. Built before the text and printed after
+    # it (fix round 26), so the text can leave out what the step says.
+    step = None
+    step_block = io.StringIO()
+    if (
+        exit_code == EXIT_OK
+        and terminal_run
+        and len(views) == 1
+        and (args.phase or args.question or args.run_id)
+    ):
+        step = _emit_user_next_step(
+            plan_path, args, views[0], workflow=terminal_workflow,
+            stream=step_block,
+        )
+        if (step is not None and terminal_workflow and workflow_trailer
+                and _read_by_a_tool_route(args)):
+            # Fix round 26 (live run 11, Codex 08: "No later phase waits for
+            # it" beside the copied section): a tool route hands this text to
+            # its model as `output`, beside `user_next_step`, so the trailer
+            # there leaves out what the step's markdown says, as the notice
+            # does. A shell's text view keeps every line.
+            workflow_trailer = [
+                f"workflow {line}" for line in _workflow_trailer_lines(
+                    terminal_workflow, prefix="", suggested=False, carried=step,
+                    close_note=manual_close_note(
+                        terminal_workflow, _plan_spelling(args, views, plan_path),
+                        _reader_host(args), _recorded_route(args, views, plan_path),
+                    ),
+                )
+            ]
 
     if args.json:
         payload: Dict[str, Any] = {"runs": views}
@@ -4275,35 +4555,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             lines += workflow_trailer
         print("\n".join(lines))
 
-    # plans/next-phase-command.md §2.2(1): a TERMINAL poll pinned to exactly one
-    # run that exits 0 — a worker that ended 0 or 2 — carries the next phase as
-    # `user_next_step`, beside F7's notice but without F7's view guard: the key
-    # is machine-readable, and `--view all`'s result line carries no parsed
-    # workflow step either (`--view workflow` returned above). The block follows
-    # the text on stdout, or goes to stderr under `--json`, whose payload stays
-    # exactly what it was. Never on exit 2 (still moving, or nothing recorded)
-    # or 3 (failed/aborted). Advisory: a failed read or builder costs one
-    # stderr line and nothing else.
-    if (
-        exit_code == EXIT_OK
-        and terminal_run
-        and len(views) == 1
-        and (args.phase or args.question or args.run_id)
-    ):
-        step = _emit_user_next_step(
-            plan_path, args, views[0], workflow=terminal_workflow,
-        )
-        if step is not None and terminal_workflow:
-            # Fix round 22 (live run 9, Codex 07, OpenCode 06-08): the
-            # notice said how to close the manual tasks, command and all,
-            # beside `user_next_step`, which says it with the command fenced;
-            # the hosts relayed both, the command folded into prose. The
-            # notice keeps naming the tasks and leaves the rest to the step.
-            # Fix round 24 (live run 10, OpenCode 03, Codex 01): so with the
-            # `suggested next` line, which the hosts relayed beside the
-            # step's markdown and reordered the step after.
-            terminal_notice = "; ".join(_workflow_trailer_lines(
-                terminal_workflow, prefix="", suggested=False)) or None
+    if step_block.getvalue():
+        block_stream = sys.stderr if args.json else sys.stdout
+        block_stream.write(step_block.getvalue())
+        block_stream.flush()
+    if step is not None and terminal_workflow:
+        # Fix round 22 (live run 9, Codex 07, OpenCode 06-08): the
+        # notice said how to close the manual tasks, command and all,
+        # beside `user_next_step`, which says it with the command fenced;
+        # the hosts relayed both, the command folded into prose. The
+        # notice keeps naming the tasks and leaves the rest to the step.
+        # Fix round 24 (live run 10, OpenCode 03, Codex 01): so with the
+        # `suggested next` line, which the hosts relayed beside the
+        # step's markdown and reordered the step after.
+        # Fix round 26 (live run 11: Codex 04/06/08, OpenCode 03-08):
+        # and with what the step's `markdown` says itself, the optional
+        # entry's why and the manual tasks, which the hosts pasted above
+        # the copied section. The text view a person reads keeps them.
+        terminal_notice = "; ".join(_workflow_trailer_lines(
+            terminal_workflow, prefix="", suggested=False,
+            carried=step)) or None
 
     # Plan §2.4: a `mode: truncated` validation source sets the notice on any
     # terminal poll (every view, not only `--view run`); it qualifies the
@@ -4317,10 +4588,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # the workflow's, since they qualify the run the poll is about; then a
     # finished run's own notes (a consistency warning, the items left
     # unapplied) — the log was the only place that carried them.
-    write_notice = _write_result_notice(views) if terminal_run else None
-    notes_notice = "; ".join(
+    write_parts = _write_result_notice_parts(views) if terminal_run else []
+    note_parts = [
         note for view in views for note in _run_notes(view)
-    ) if terminal_run else ""
+    ] if terminal_run else []
+    if stop_error:
+        # Fix round 26 (live run 11, Codex stop 01b): a stop's own line, the
+        # result's `error` the hosts relay whole, already ends with what ran
+        # the repository's tests; the notice said it again and the host
+        # restated it. A part the error carries word for word is left out.
+        said = plain_line(clip(stop_error, ERROR_MAX_CHARS))
+        write_parts = [part for part in write_parts if plain_line(part) not in said]
+        note_parts = [part for part in note_parts if plain_line(part) not in said]
+    write_notice = clip("; ".join(write_parts), 1200) or None
+    notes_notice = "; ".join(note_parts)
     combined_notice = "; ".join(
         part for part in (truncation_notice, write_notice, notes_notice, terminal_notice) if part
     )
@@ -4455,6 +4736,7 @@ def _emit_user_next_step(
     view: Dict[str, Any],
     *,
     workflow: Optional[Dict[str, Any]] = None,
+    stream=None,
 ) -> Optional[Any]:
     """The terminal poll's ``user_next_step`` and block (next-phase-command §2.2(1)).
 
@@ -4493,10 +4775,28 @@ def _emit_user_next_step(
         finished_mode,
         plan_path=plan_path,
         workflow=workflow,
-        stream=sys.stderr if args.json else sys.stdout,
+        stream=stream if stream is not None else (
+            sys.stderr if args.json else sys.stdout),
         # Fix round 24: the route the pinned run was started on.
         recorded_route=_run_route(view, _reader_host(args)),
     )
+
+
+def _read_by_a_tool_route(args: argparse.Namespace) -> bool:
+    """Whether a tool server is the reader of this poll's text: the route
+    this process spells commands for (``next_phase.resolve_route``, its one
+    reader, from the environment the servers set; never a run's recorded
+    route, which a shell reads too) is a tool route (fix round 26)."""
+    import io
+
+    from . import next_phase
+    from .cli_common import _modes
+
+    try:
+        route = next_phase.resolve_route(_reader_host(args), stderr=io.StringIO())
+    except Exception:  # noqa: BLE001 - advisory: the text stays whole
+        return False
+    return route in _modes().TOOL_ROUTES
 
 
 def _wait_clamp_ceiling(host_id: Optional[str]) -> Optional[Tuple[str, int]]:
@@ -4739,6 +5039,10 @@ def _wait_for_terminal(
                 and verdict != detach.VERDICT_NO_RUN):
             return True
         if _names_this_run(view, getattr(args, "run_id", None)):
+            return False
+        if superseded_by_native(plan_path, view) is not None:
+            # Fix round 26: an executor checkpoint the native leg went on
+            # from is not a run anyone is waiting for.
             return False
         return _checkpoint_in_flight(view)
 
