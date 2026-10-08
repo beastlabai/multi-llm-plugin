@@ -123,6 +123,11 @@ class TestTheExecutorReadsIt:
     @pytest.mark.parametrize("ran", [
         {"<each check command you ran>": "passed"},
         ["<each check command you ran>: passed"],
+        # Fix round 27 (review of round 26, relay #3): an object whose command
+        # is the placeholder named nothing too, and read as a clean pass.
+        [{"command": "<each check command you ran>", "outcome": "passed"}],
+        [{"command": "<each check command you ran>", "outcome": "passed"},
+         {"command": "npm test", "outcome": "not run"}],
     ])
     def test_the_shape_copied_as_it_is_is_no_check(self, ran):
         """A reply that pasted the result shape without running anything
