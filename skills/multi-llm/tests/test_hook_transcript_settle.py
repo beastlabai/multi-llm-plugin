@@ -18,6 +18,10 @@ need to be on file: the ``Stop`` check for the reply its input names
 (``last_assistant_message``), the ``PreToolUse`` check for the call it decides
 and the results of the phase calls its message made before it. These tests
 write the missing entries from a background thread while the hook waits.
+
+The same round tightens what ends ``util wakeup-check``'s hold: a subagent's
+report quoting the block ends nothing, and a background phase that failed or
+was stopped ends it on Claude Code's ``task-notification``.
 """
 
 from __future__ import annotations
@@ -42,6 +46,7 @@ sys.path.insert(0, str(SKILL_ROOT))
 
 from tests.test_report_check import (  # noqa: E402
     COMMAND,
+    OPTIONAL,
     Transcript,
     _fake_uv,
     block_output,
@@ -360,6 +365,20 @@ class TestTheWakeupCheckWaitsForTheCall:
                         + line(own), encoding="utf-8")
         assert "implement phase" in denied(run_wakeup_check(capsys, tmp_path, wakeup_input(path)))
 
+    def test_the_refusal_says_what_it_knows(self, tmp_path, capsys):
+        """It knows no next step was printed, not that the process runs."""
+        path = tmp_path / "t.jsonl"
+        transcript = Transcript().prompt("go")
+        path.write_text("".join(line(entry) for entry in transcript.entries)
+                        + line(tool_use("toolu_1", BACKGROUND_PHASE, "msg_1",
+                                        run_in_background=True))
+                        + line(tool_result("toolu_1", LAUNCHED))
+                        + line(own_call_entry()), encoding="utf-8")
+        reason = denied(run_wakeup_check(capsys, tmp_path, wakeup_input(path)))
+        assert ("ScheduleWakeup is refused while the review-tasks phase you started "
+                "has not printed its next step in this session.") in reason
+        assert "still running" not in reason
+
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell script")
 class TestTheWakeupScriptWaitsForTheCall:
@@ -376,3 +395,104 @@ class TestTheWakeupScriptWaitsForTheCall:
         completed = run_script(WAKEUP_CHECK_SH, tmp_path, wakeup_input(path))
         assert completed.returncode == 0, completed.stderr
         assert "review-tasks phase" in denied(completed.stdout)
+
+
+# ---------------------------------------------------------------------------
+# What ends the hold, and what does not
+# ---------------------------------------------------------------------------
+
+def background_notification(tool_id: str, status: str, summary: str) -> Dict[str, Any]:
+    """A background command's end, as Claude Code 2.1.293 writes it (read off
+    a stub session, 2026-10-08)."""
+    return {
+        "type": "user", "promptSource": "system", "turnOrigin": "task_notification",
+        "origin": {"kind": "task-notification", "producer": "session-task", "runId": "r1"},
+        "message": {"role": "user", "content": (
+            f"<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>{tool_id}</tool-use-id>\n"
+            "<output-file>/tmp/claude-1000/tasks/b1.output</output-file>\n"
+            f"<status>{status}</status>\n<summary>{summary}</summary>\n</task-notification>")},
+    }
+
+
+def launched(path: Path, *after: Dict[str, Any]) -> Path:
+    """A background review-tasks launch, *after* it, then the wakeup call."""
+    transcript = Transcript().prompt("/multi-llm:multi-llm --review-tasks plans/racing-game.md")
+    body = "".join(line(entry) for entry in transcript.entries)
+    body += line(tool_use("toolu_1", BACKGROUND_PHASE, "msg_1", run_in_background=True))
+    body += line(tool_result("toolu_1", LAUNCHED)) + line(reply("Launched."))
+    body += "".join(line(entry) for entry in after)
+    path.write_text(body + line(own_call_entry()), encoding="utf-8")
+    return path
+
+
+class TestABackgroundPhaseThatEnded:
+
+    def test_one_that_failed_ends_the_hold(self, tmp_path, capsys):
+        """Finding 3b: its exit 1 reached the session only as a notification,
+        and every later wakeup of the session was refused."""
+        path = launched(tmp_path / "t.jsonl", background_notification(
+            "toolu_1", "failed", 'Background command "review-tasks" failed with exit code 1'))
+        assert run_wakeup_check(capsys, tmp_path, wakeup_input(path)) == ""
+
+    @pytest.mark.parametrize("status,summary", [
+        ("killed", 'Background command "review-tasks" was stopped'),
+        ("failed", 'Background command "review-tasks" failed with exit code 3'),
+        ("completed", 'Background command "review-tasks" completed (exit code 2)'),
+    ])
+    def test_one_stopped_or_that_exited_non_zero_ends_it(self, tmp_path, capsys,
+                                                         status, summary):
+        path = launched(tmp_path / "t.jsonl", background_notification("toolu_1", status, summary))
+        assert run_wakeup_check(capsys, tmp_path, wakeup_input(path)) == ""
+
+    @pytest.mark.parametrize("summary", [
+        'Background command "review-tasks" completed (exit code 0)',
+        'Background command "retry on exit code 5" completed (exit code 0)',
+    ])
+    def test_one_that_exited_0_has_not_printed_its_next_step(self, tmp_path, capsys, summary):
+        """A phase whose first call exits 0 hands its subagents to the host;
+        the command's own description does not speak for its exit."""
+        path = launched(tmp_path / "t.jsonl",
+                        background_notification("toolu_1", "completed", summary))
+        assert "review-tasks phase" in denied(run_wakeup_check(capsys, tmp_path, wakeup_input(path)))
+
+    def test_another_call_s_failure_ends_nothing(self, tmp_path, capsys):
+        path = launched(tmp_path / "t.jsonl", background_notification(
+            "toolu_9", "failed", 'Background command "npm test" failed with exit code 1'))
+        assert "review-tasks phase" in denied(run_wakeup_check(capsys, tmp_path, wakeup_input(path)))
+
+    def test_a_notification_quoted_by_a_tool_ends_nothing(self, tmp_path, capsys):
+        """Only an entry the harness sent says a call ended."""
+        quoted = background_notification(
+            "toolu_1", "failed", 'Background command "review-tasks" failed with exit code 1')
+        text = quoted["message"]["content"]
+        path = launched(tmp_path / "t.jsonl",
+                        tool_use("toolu_2", "cat notes.txt", "msg_2"),
+                        tool_result("toolu_2", text))
+        assert "review-tasks phase" in denied(run_wakeup_check(capsys, tmp_path, wakeup_input(path)))
+
+
+class TestWhatPrintsThePhasesNextStep:
+
+    @pytest.mark.parametrize("tool", ["Agent", "Task", "SendMessage"])
+    def test_a_subagent_s_report_quoting_the_block_ends_nothing(self, tmp_path, capsys, tool):
+        """Finding 3a: the subagent's words, not the phase's output."""
+        path = launched(tmp_path / "t.jsonl",
+                        tool_use("toolu_2", "", "msg_2", name=tool,
+                                 prompt="Validate batch 0", description="batch 0"),
+                        tool_result("toolu_2", "Done. The next command is:\n"
+                                    f"[NEXT_COMMAND] {COMMAND}\n"))
+        assert "review-tasks phase" in denied(run_wakeup_check(capsys, tmp_path, wakeup_input(path)))
+
+    def test_a_read_of_the_phase_s_log_ends_it(self, tmp_path, capsys):
+        path = launched(tmp_path / "t.jsonl",
+                        tool_use("toolu_2", "", "msg_2", name="Read",
+                                 file_path="plans/racing-game/review-tasks/orchestrator-run.log"),
+                        tool_result("toolu_2", block_output()))
+        assert run_wakeup_check(capsys, tmp_path, wakeup_input(path)) == ""
+
+    def test_a_tail_of_the_phase_s_log_ends_it(self, tmp_path, capsys):
+        path = launched(tmp_path / "t.jsonl",
+                        tool_use("toolu_2", "tail -n 20 plans/racing-game/review-tasks/"
+                                 "orchestrator-run.log", "msg_2"),
+                        tool_result("toolu_2", block_output(OPTIONAL)))
+        assert run_wakeup_check(capsys, tmp_path, wakeup_input(path)) == ""
