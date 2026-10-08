@@ -42,7 +42,7 @@
   "manifest": {
     "axis": "reviewer",
     "bundle_version": 1,
-    "captured_at": "2026-10-08T10:41:21Z",
+    "captured_at": "2026-10-08T19:29:04Z",
     "cli": "qwen-code",
     "host": {
       "host_id": "sha256:e9ce53674803",
@@ -58,10 +58,10 @@
         "verdict": "permitted"
       }
     },
-    "image": "mllm-e2e:r25",
+    "image": "mllm-e2e:r27",
     "reviewer": "qwen-code",
     "row_id": "chain-qwen-code",
-    "run_bundle": "20261008T101725Z"
+    "run_bundle": "20261008T190619Z"
   },
   "markers": [
     "[PROGRESS]",
@@ -544,7 +544,7 @@
               ],
               "prior_changes_id": "src/security.py#b17808f6",
               "priority_score": 5.0,
-              "prompt": "<text:sha256:9fb4b380be9f:3311>",
+              "prompt": "<text:sha256:62448afacc12:3527>",
               "subagent_type": "general-purpose",
               "total_chars": 550
             },
@@ -584,7 +584,7 @@
               ],
               "prior_changes_id": "src/auth.py#fd43b6fc",
               "priority_score": 2.0,
-              "prompt": "<text:sha256:0796c28f03f1:2317>",
+              "prompt": "<text:sha256:ff4f845c6bd3:2533>",
               "subagent_type": "general-purpose",
               "total_chars": 207
             },
@@ -624,7 +624,7 @@
               ],
               "prior_changes_id": "src/security.py#22cf58a5",
               "priority_score": 1.0,
-              "prompt": "<text:sha256:4603166cf964:2273>",
+              "prompt": "<text:sha256:c038e7d71c37:2489>",
               "subagent_type": "general-purpose",
               "total_chars": 165
             }
@@ -1194,7 +1194,7 @@
               "output_name": "apply_fix_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/apply-fixes/apply_fix_batch_0.json",
               "prior_changes_id": "src/security.py#b17808f6",
-              "prompt": "<text:sha256:9fb4b380be9f:3311>",
+              "prompt": "<text:sha256:62448afacc12:3527>",
               "result_channel": "file",
               "subagent_type": "general-purpose",
               "task_id": "apply-fix-batch-0",
@@ -1223,7 +1223,7 @@
               "output_name": "apply_fix_batch_1.json",
               "output_path": "<run-root>/plans/auth-feature/apply-fixes/apply_fix_batch_1.json",
               "prior_changes_id": "src/auth.py#fd43b6fc",
-              "prompt": "<text:sha256:0796c28f03f1:2317>",
+              "prompt": "<text:sha256:ff4f845c6bd3:2533>",
               "result_channel": "file",
               "subagent_type": "general-purpose",
               "task_id": "apply-fix-batch-1",
@@ -1252,7 +1252,7 @@
               "output_name": "apply_fix_batch_2.json",
               "output_path": "<run-root>/plans/auth-feature/apply-fixes/apply_fix_batch_2.json",
               "prior_changes_id": "src/security.py#22cf58a5",
-              "prompt": "<text:sha256:4603166cf964:2273>",
+              "prompt": "<text:sha256:c038e7d71c37:2489>",
               "result_channel": "file",
               "subagent_type": "general-purpose",
               "task_id": "apply-fix-batch-2",
@@ -3213,8 +3213,8 @@
               "output_name": "validation_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/code-review/validation_batch_0.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:ad49f7f76562:14040>",
-              "prompt_lines": 406,
+              "prompt": "<text:sha256:422156909b2d:14349>",
+              "prompt_lines": 410,
               "prompt_path": "<run-root>/plans/auth-feature/code-review/validation_batch_0.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -3246,8 +3246,8 @@
               "output_name": "validation_batch_1.json",
               "output_path": "<run-root>/plans/auth-feature/code-review/validation_batch_1.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:99d1162fae3e:11960>",
-              "prompt_lines": 341,
+              "prompt": "<text:sha256:54c0f70c948c:12269>",
+              "prompt_lines": 345,
               "prompt_path": "<run-root>/plans/auth-feature/code-review/validation_batch_1.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -4259,8 +4259,8 @@
               "output_name": "validation_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_0.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:73c5f1772fdb:8280>",
-              "prompt_lines": 233,
+              "prompt": "<text:sha256:fd7cd6dca3e6:8589>",
+              "prompt_lines": 237,
               "prompt_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_0.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -4290,8 +4290,8 @@
               "output_name": "validation_batch_1.json",
               "output_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_1.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:7dce8dc81c16:8236>",
-              "prompt_lines": 233,
+              "prompt": "<text:sha256:af0257aadbe4:8545>",
+              "prompt_lines": 237,
               "prompt_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_1.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -4323,8 +4323,8 @@
               "output_name": "validation_batch_2.json",
               "output_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_2.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:c3722ee93214:8877>",
-              "prompt_lines": 251,
+              "prompt": "<text:sha256:279eb0a741dd:9186>",
+              "prompt_lines": 255,
               "prompt_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_2.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -4639,8 +4639,8 @@
               "output_name": "validation_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/review-tasks/validation_batch_0.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:de38115a1399:9936>",
-              "prompt_lines": 304,
+              "prompt": "<text:sha256:5541eb6a4efc:10245>",
+              "prompt_lines": 308,
               "prompt_path": "<run-root>/plans/auth-feature/review-tasks/validation_batch_0.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -4673,8 +4673,8 @@
               "output_name": "validation_batch_1.json",
               "output_path": "<run-root>/plans/auth-feature/review-tasks/validation_batch_1.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:5f0f26fdfd2d:10613>",
-              "prompt_lines": 322,
+              "prompt": "<text:sha256:d3e5d2ba7083:10922>",
+              "prompt_lines": 326,
               "prompt_path": "<run-root>/plans/auth-feature/review-tasks/validation_batch_1.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -5639,6 +5639,7 @@
               "<items>": [],
               "<list>": 0
             },
+            "applied_to": "<str>",
             "batches_dispatched": {
               "<item-types>": [
                 "<int>"
@@ -5769,6 +5770,7 @@
               "<items>": [],
               "<list>": 0
             },
+            "applied_to": "<str>",
             "batches_dispatched": {
               "<item-types>": [
                 "<int>"
