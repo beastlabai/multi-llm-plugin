@@ -231,6 +231,8 @@ Prerequisites are met. If `[TASK_SUGGESTIONS_ADVISORY]` was present, handle it a
 
    When step 2 ended with `Nothing is left to run: implement stays completed`, the run only recorded answers for an implement that already completed (a `--resume --human-task {id}=done` closing a deferred manual task, say): report the answers it recorded (`[HUMAN_TASK_ANSWERED]`) and end the report with the command `util next-command` prints, as step 11 does. Skip steps 4 to 10: dispatch nothing, write no summary (the completed run's `summary.md` stays as it is) and run no `util finalize-tracking`.
 
+   When step 2 ended with a `[MANUAL_GATE]` line (exit 3), every code task left waits on a manual task not recorded done, so this run hands out nothing and implement is not finished: report that line and the deferred tasks, and end the report with the section `util next-command` prints, as step 11 does (the resume that records only that manual task done, which runs the code tasks waiting on it). Skip steps 4 to 10: spawn no subagent, write no summary and run no `util metrics` or `util finalize-tracking`.
+
 4. **Read the task JSON file:**
    ```
    Read the absolute path printed on the orchestrator's `Output file:` line in step 2

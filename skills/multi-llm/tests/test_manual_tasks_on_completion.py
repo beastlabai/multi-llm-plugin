@@ -72,10 +72,11 @@ def close_command(prefix: str, plan: str, ids) -> str:
     return f"{prefix}--implement {plan} --resume {answers}"
 
 
-def close_keys(prefix: str, plan: str, ids) -> dict:
+def close_keys(prefix: str, plan: str, ids, waiting: int = 0) -> dict:
     """`user_next_step`'s note and its command for *ids* (fix round 22: the
-    command apart from the sentence leading into it)."""
-    return {"manual_tasks_note": np_.manual_close_lead(len(ids)),
+    command apart from the sentence leading into it); *waiting* code tasks
+    wait on them (fix round 28)."""
+    return {"manual_tasks_note": np_.manual_close_lead(len(ids), waiting=waiting),
             "manual_tasks_command": close_command(prefix, plan, ids)}
 
 
@@ -624,15 +625,18 @@ class TestImplementRecordsTheTitles:
         ]) == 0
         step = cli_common.parse_result_line(capsys.readouterr().out)["user_next_step"]
         assert step["complete"] is False
-        assert "--review-code" in step["command"]
         assert [task["id"] for task in step["manual_tasks"]] == ["T002", "T003"]
-        # One task is closed (T003 runs on that resume): the singular note.
-        assert step["manual_tasks_note"] == np_.manual_close_lead(1)
+        # Fix round 28: T003 waits on T002, so the section leads with the
+        # resume that records T002 done and runs it; review-code of what ran
+        # so far stays the other way on, and the same command is not given a
+        # second time under the tasks.
         assert (
-            "--implement " in step["manual_tasks_command"]
-            and step["manual_tasks_command"].endswith("--resume --human-task T002=done")
+            "--implement " in step["command"]
+            and step["command"].endswith("--resume --human-task T002=done")
         ), step
-        assert "T003=done" not in step["manual_tasks_command"], step
+        assert "T003=done" not in step["command"], step
+        assert "--review-code" in step["instead"][0]["command"]
+        assert "manual_tasks_note" not in step and "manual_tasks_command" not in step
 
 
 def test_the_tool_routes_are_told_to_list_them():
@@ -820,8 +824,9 @@ class TestTheNativeLegRecordsItsDeferrals:
             "manual_tasks": OWED_T002_T003,
             # Fix round 16: T003, skipped with the manual T002, is listed as
             # owed but never answered `done` (implement refuses a code task
-            # that did not fail); it runs on that resume.
-            **close_keys(PLUGIN, plan_arg, ["T002"]),
+            # that did not fail); it runs on that resume. Fix round 28: and
+            # the note says it waits.
+            **close_keys(PLUGIN, plan_arg, ["T002"], waiting=1),
         }
         complete = with_markdown(complete)
         block = [
