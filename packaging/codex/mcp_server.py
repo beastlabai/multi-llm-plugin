@@ -1092,20 +1092,27 @@ def pinned_run_id(tokens, surface):
 
 
 def lift_user_next_step(outcome: dict) -> None:
-    """Copy the redacted payload's ``user_next_step`` to the result's top level.
+    """Move the redacted payload's ``user_next_step`` to the result's top level.
 
     Exit 0 and exit 2 only (plans/next-phase-command.md §2.4): a finished phase
-    or a terminal poll, and a phase already complete. The copy is taken from
+    or a terminal poll, and a phase already complete. The value is taken from
     ``result`` after ``redact``, byte for byte, the completed form
     (``command: null``, ``complete: true``) included, under the same key name.
     A payload without the key lifts nothing, so an absent top-level key keeps
     meaning "no answer", never "workflow complete". A still-running poll's
     exit 2 carries no key (the dispatcher never sets one there), so nothing is
     lifted mid-run.
+
+    Moved, not copied (fix round 26, live run 11): the section the host
+    copies was in the result twice, and the hosts wrote its sentences twice
+    ("Workflow complete." plain and then fenced on OpenCode's decline run).
+    One copy, in the field that owns it, as the result line itself is
+    dropped from ``output`` once it parsed. ``result`` is ``redact``'s own
+    copy, so the child's parsed payload is untouched.
     """
     payload = outcome.get("result")
     if isinstance(payload, dict) and payload.get(USER_NEXT_STEP_KEY) is not None:
-        outcome[USER_NEXT_STEP_KEY] = payload[USER_NEXT_STEP_KEY]
+        outcome[USER_NEXT_STEP_KEY] = payload.pop(USER_NEXT_STEP_KEY)
 
 
 def is_mechanical(next_args, surface) -> bool:
