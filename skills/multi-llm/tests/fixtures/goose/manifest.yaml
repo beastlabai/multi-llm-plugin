@@ -7,10 +7,15 @@
 # than a real model, the bytes on disk are still goose's own JSON envelope.
 schema_version: 1
 provider: goose
-cli_version: "1.41.0"
-captured: "2026-08-19"
+cli_version: "1.53.0"
+captured: "2026-10-08"
 method: >-
-  §6 step 5, in the committed image mllm-e2e:local with `--network none`, the rig
+  Re-run on goose 1.53.0 on 2026-10-08 by the same rig (the probe's
+  `incontainer.py`, one container per row, the same two prompts, scenarios and
+  failserver modes) in the pinned image built from tests/container/Dockerfile at
+  the cli-versions.lock pins; the set was first captured on 1.41.0 on 2026-08-19
+  in mllm-e2e:local, and `GooseProvider.build_command`'s argv has not changed
+  since. §6 step 5, with `--network none`, the rig
   mounted read-only at /rig, and NO credential — the only key is the wrapper's
   per-exec `mllm-stub-<id>` string in `OPENAI_API_KEY`, meaningful on 127.0.0.1
   and nowhere else. The probe drove the PATH wrapper (`/opt/mllm/bin/goose` IS
@@ -36,23 +41,28 @@ method: >-
   goose; the `prompt-echo` row at the bottom is the product-shaped prompt,
   committed so the defect is pinned by a test rather than by prose.
 notes: >-
-  Three facts hold across EVERY row here. (1) goose exits **0** on all nine
-  measured failures — 401, 404, 400 context-length, 500-forever, 429-forever, a
+  Three facts hold across the rows here. (1) goose exits **0** on eight of the
+  nine measured failures — 404, 400 context-length, 500-forever, 429-forever, a
   truncated body, a zero-byte response, a 200 carrying an error object, and an
-  empty completion — so the exit code carries no verdict at all and only a
-  stream marker does. (2) stderr is **0 bytes** on all eleven captures: the whole
-  envelope, and the whole diagnosis, ride stdout. (3) Every run makes at least
-  THREE requests — `GET /v1/models`, then a SESSION-TITLE completion that goose
-  fires even under `--no-session`, then the real turn — and under a
-  fail-forever server both completions are retried to four attempts apiece
-  (7 completions, ~6.7 s), which is the internal-retry envelope for this CLI.
+  empty completion — so on those the exit code carries no verdict and only a
+  stream marker does. The ninth is new at 1.53.0: a 401 exits **1**, with
+  `metadata.status: "error"` and the diagnosis in a `type: "error"` content
+  part (1.41.0 exited 0 on all nine). (2) stderr is **0 bytes** on every
+  capture but that 401, which repeats its diagnosis there (355 bytes); the
+  whole envelope rides stdout. (3) Every run makes at least THREE requests —
+  `GET /v1/models`, then a SESSION-TITLE completion that goose fires even under
+  `--no-session`, then the real turn — and under a fail-forever server the turn
+  is retried to four attempts and the title call to three or four (7–8
+  completions, ~7.0–7.5 s), which is the internal-retry envelope for this CLI.
+  At 1.53.0 a cut stream, an empty completion and a 200 error object are
+  retried too (the turn to four attempts), where 1.41.0 gave up on each at once.
 
 rows:
   success:
     stdout: success.stdout.txt
     stderr: success.stderr.txt
     exit_code: 0
-    wall_s: 0.16
+    wall_s: 0.25
     requests: 3
     notes: >-
       The whole shape: a pretty-printed `{"messages": [...], "metadata": {...}}`
@@ -77,14 +87,17 @@ rows:
     stdout: truncated.stdout.txt
     stderr: truncated.stderr.txt
     exit_code: 0
-    wall_s: 0.15
-    requests: 3
+    wall_s: 8.28
+    requests: 6
     notes: >-
       failserver `--mode trunc`: 200 headers promising a full Content-Length, a
-      60-byte prefix, then the socket closes. goose does NOT retry a cut stream —
-      three requests, the baseline, in 0.15 s — and reports it as
-      `Network error: Stream decode error: … EOF while parsing a string at line 1
-      column 54` with the partial frame quoted. Two things break on that text:
+      60-byte prefix, then the socket closes. At 1.53.0 goose retries the cut
+      turn to four attempts (at ~0.1, 1.2, 3.5 and 8.1 s: 6 requests, 8.3 s;
+      1.41.0 did not retry it at all, 3 requests in 0.15 s) and reports it as
+      `Network error: Stream decode error: Failed to parse streaming chunk: EOF
+      while parsing a string at line 1 column 54` with the partial frame quoted,
+      then `Please resend your message to try again.` Two things break on that
+      text:
       it says `Network error:` rather than `Ran into this error:`, so
       `parse_output`'s explicit-failure branch does not fire and the run is
       reported as an extraction failure; and `Network error` matches no member of
@@ -103,35 +116,43 @@ rows:
     stdout: ephemeral-only.stdout.txt
     stderr: ephemeral-only.stderr.txt
     exit_code: 0
-    wall_s: 0.17
-    requests: 3
+    wall_s: 0.25
+    requests: 6
     notes: >-
       An all-noise run, produced by a stub scenario whose answer is the EMPTY
-      string. goose writes a complete, well-formed envelope with
-      `"status": "completed"` — and NO assistant message in it at all. Every
-      message on disk is one `parse_output` filters (it reads only
-      `role == "assistant"`), so the run must be a failure rather than an
-      empty-string success, and it is: `No assistant message in output`. The
-      envelope is byte-shape identical to `error-envelope` below, which is itself
-      the finding recorded there.
+      string. At 1.53.0 goose retries the empty turn to four attempts (6
+      requests in 0.25 s) and then writes a complete, well-formed envelope with
+      `"status": "completed"` whose assistant message is goose's OWN text, `The
+      model returned an empty response. Please resend your message to continue.`
+      (1.41.0 wrote no assistant message at all, after one attempt). The parser
+      finds no JSON in that sentence, so the run is a failure rather than an
+      answer: `No valid JSON found in text`. **The sentence is not an answer
+      either**: `salvage_text` used to return it — and the ask lane reads that
+      hook as the model's prose answer — so it now drops text starting with
+      `GooseProvider`'s `EMPTY_RESPONSE_NOTICE`
+      (`test_salvage_text.py::TestGooseDropsItsOwnErrorProse`). The envelope is
+      byte-shape identical to `error-envelope` below, which is itself the
+      finding recorded there.
     expect:
       salvage: none
       success: false
-      error_contains: ["No assistant message in output"]
+      error_contains: ["No valid JSON found in text"]
       raw_contains:
         - '"role": "user"'
         - '"status": "completed"'
+        - "The model returned an empty response. Please resend your message to continue."
       classify_failure: null
 
   multi-assistant:
     stdout: multi-assistant.stdout.txt
     stderr: multi-assistant.stderr.txt
     exit_code: 0
-    wall_s: 0.16
+    wall_s: 0.25
     requests: 3
     synthesized: true
     provenance: >-
-      Derived from `success.stdout.txt` by inserting a SECOND assistant message
+      Derived from `success.stdout.txt` (re-derived from the 1.53.0 capture on
+      2026-10-08 by the same recipe) by inserting a SECOND assistant message
       ahead of the real one: goose's own message block was json.loads-ed, its
       single text part replaced with a decoy array, re-rendered with
       `json.dumps(indent=2)` and re-indented to goose's 4-space base so the bytes
@@ -156,31 +177,34 @@ rows:
     stdout: error-envelope.stdout.txt
     stderr: error-envelope.stderr.txt
     exit_code: 0
-    wall_s: 0.17
-    requests: 3
+    wall_s: 0.34
+    requests: 6
     notes: >-
       failserver `--mode errbody`: HTTP **200** whose body is a provider error
       object carrying the 401 wording. The measured result is worse than "the
       error text is served as the answer" — the text is LOST, and so is any sign
-      that something went wrong. goose writes an envelope with no assistant
-      message and `"status": "completed"`, byte-shape identical to the
-      empty-completion run above (5236 bytes each, differing only in the `created`
-      timestamp). Nothing distinguishes a 200-carrying-an-error from a model that
-      said nothing, and no vendor text reaches any pattern table.
+      that something went wrong. goose retries the turn to four attempts and
+      writes an envelope with `"status": "completed"` whose only assistant text
+      is its own `The model returned an empty response. …`, byte-shape identical
+      to the empty-completion run above (5732 bytes each, differing only in ids
+      and timestamps; 1.41.0 wrote no assistant message for either, 5236 bytes).
+      Nothing distinguishes a 200-carrying-an-error from a model that said
+      nothing, and no vendor text reaches any pattern table.
     expect:
       salvage: none
       success: false
-      error_contains: ["No assistant message in output"]
+      error_contains: ["No valid JSON found in text"]
       raw_contains:
         - '"role": "user"'
         - '"status": "completed"'
+        - "The model returned an empty response. Please resend your message to continue."
       classify_failure: null
 
   exit-zero-failure:
     stdout: exit-zero-failure.stdout.txt
     stderr: exit-zero-failure.stderr.txt
     exit_code: 0
-    wall_s: 6.67
+    wall_s: 7.26
     requests: 8
     notes: >-
       failserver `--mode 500`, fail-forever. Exit **0** on a run that produced no
@@ -188,8 +212,9 @@ rows:
       `exit_zero_failure_markers` phrase `Ran into this error:` present, and
       §6.1.1's envelope in one capture: 8 requests (1 catalog GET + 7
       completions: FOUR attempts at the real turn and THREE at the session-title
-      call goose fires even under `--no-session`), backoff ~0.1/1.1/2.8/6.6 s,
-      6.7 s wall. It classifies `server_error` rather than `runner_error`, and
+      call goose fires even under `--no-session`), the turn's attempts at
+      ~0.1/1.0/3.2/7.1 s, 7.3 s wall (1.41.0: the same 8, ~0.1/1.1/2.8/6.6 s,
+      6.7 s). It classifies `server_error` rather than `runner_error`, and
       that is correct rather than surprising: goose quotes the status line
       (`500 Internal Server Error`), which base.SERVER_ERROR_MARKERS matches, and
       the exit-0 marker is consulted last by construction (§7.2 step 6).
@@ -209,18 +234,21 @@ rows:
       500-forever, 429-forever, a truncated body, a zero-byte response, a 200
       carrying an error object and an empty completion (nine modes, nine
       captures, all `exit_code: 0`; the per-row meta is in
-      plans/harness-expansion/probe-out/goose/*.meta.json). The other half of the
-      row is true of every capture here and is pinned by all of them: the
-      diagnosis is on stdout with stderr at exactly **0 bytes**, which is why
-      every `*.stderr.txt` in this directory is committed empty rather than
-      omitted.
+      plans/harness-expansion/probe-out/goose/*.meta.json). Still none at 1.53.0,
+      for the other half: its one nonzero exit (the 401, `auth-error`, exit 1)
+      writes its diagnosis to stderr as well as stdout, so the trap — a nonzero
+      exit whose whole diagnosis is on stdout under an empty stderr — is not
+      there. Every other capture keeps the diagnosis on stdout with stderr at
+      exactly **0 bytes**, which is why those `*.stderr.txt` files are committed
+      empty rather than omitted.
 
   empty:
     not_applicable: >-
       Unreachable while goose runs at all: the envelope is written
       unconditionally at the end of the run and always contains at least the
-      echoed user message, so the smallest capture in this set is **5236 bytes**
-      on stdout and none is smaller. Zero bytes on both channels would mean the
+      echoed user message, so the smallest capture in this set is **5732 bytes**
+      on stdout (5236 at 1.41.0) and none is smaller. Zero bytes on both
+      channels would mean the
       process was killed before it printed, which is a harness artifact rather
       than a CLI behaviour — and manufacturing one with `timeout(1)` is the known
       zero-byte-hang trap §6 step 3 forbids. The nearest real shape, an envelope
@@ -229,8 +257,8 @@ rows:
   auth-error:
     stdout: auth-error.stdout.txt
     stderr: auth-error.stderr.txt
-    exit_code: 0
-    wall_s: 0.17
+    exit_code: 1
+    wall_s: 0.27
     requests: 3
     notes: >-
       failserver `--mode 401`. **No retry** — the baseline three requests — and
@@ -239,7 +267,15 @@ rows:
       <url>. Status: 401 Unauthorized.` gloss. What classifies it is goose's own
       word `Unauthorized`, a member of base.auth_error_patterns; OpenAI's
       "Incorrect API key provided: …" matches nothing there, which is exactly the
-      hole that leaves cline's identical 401 classified as `runner_error`.
+      hole that left cline's identical 401 classified as `runner_error` until C3.
+      **1.53.0 changed the shape** (1.41.0: exit 0, a text part): goose now
+      exits **1**, sets `metadata.status: "error"`, carries the gloss in a
+      `{"type": "error", "kind": "authentication", "message": …}` content part
+      with no text part beside it, and repeats it on stderr (`Error: Ran into
+      this error: …`, 355 bytes). The parser read text parts only and reported
+      `Empty text response`; it now reads the last assistant message's error
+      parts first (`goose.last_assistant_error`), which is what the
+      `error_contains` cell below checks.
     expect:
       salvage: none
       success: false
@@ -253,11 +289,13 @@ rows:
     stdout: rate-limit.stdout.txt
     stderr: rate-limit.stderr.txt
     exit_code: 0
-    wall_s: 7.22
-    requests: 8
+    wall_s: 7.49
+    requests: 9
     notes: >-
       failserver `--mode 429`, fail-forever. goose **does** retry a 429
-      internally — 8 requests over 7.2 s, the same envelope as the 5xx row — so
+      internally — 9 requests over 7.5 s at 1.53.0 (1 catalog GET + 8
+      completions, four at the turn and four at the title call; 1.41.0: 8 over
+      7.2 s), the 5xx row's envelope — so
       an executor-level re-dispatch of a rate-limited goose slot doubles a wait
       the CLI already served (§7.6(b)'s rule 6b).
     expect:
@@ -273,15 +311,16 @@ rows:
     stdout: invalid-model.stdout.txt
     stderr: invalid-model.stderr.txt
     exit_code: 0
-    wall_s: 6.87
-    requests: 9
+    wall_s: 7.24
+    requests: 10
     notes: >-
-      failserver `--mode 404`. goose treats a 404 as RETRYABLE — 7 completions
-      over 6.9 s on a condition no retry can fix — and then fires a SECOND
+      failserver `--mode 404`. goose treats a 404 as RETRYABLE — 8 completions
+      over 7.2 s on a condition no retry can fix (7 over 6.9 s at 1.41.0) — and
+      then fires a SECOND
       `GET /v1/models` to render `Available models for this provider: …` into the
       message. The failure does NAME the model (`stub-model`), which is what
       makes a stray `:effort` suffix findable; the retry ladder above it is the
-      cost, and it is recorded in `requests: 9`.
+      cost, and it is recorded in `requests: 10`.
     expect:
       salvage: none
       success: false
@@ -294,30 +333,33 @@ rows:
     stdout: context-overflow.stdout.txt
     stderr: context-overflow.stderr.txt
     exit_code: 0
-    wall_s: 0.39
-    requests: 8
+    wall_s: 0.29
+    requests: 4
     notes: >-
       failserver `--mode ctx` (400, `context_length_exceeded`, the verbatim
       OpenAI wording). goose SWALLOWS the upstream text and substitutes its own
-      compaction report: two `systemNotification` parts, then
-      `Ran into this error trying to compact: Failed to compact: context limit
-      exceeded even after removing all tool responses.` Two separate misses
-      follow. `context limit exceeded` matches no member of
-      base.CONTEXT_OVERFLOW_MARKERS (every entry wants "length", "window",
-      "conversation context" or a token count), and `Ran into this error TRYING
-      TO COMPACT:` does not match the adapter's own
-      `re.compile(r"ran into this error:")` either — the colon moved. So the
-      measured classification is **None**, i.e. transport-shaped, i.e. the
-      executor spends its whole bounded-retry budget on the one condition §7.2
-      declares terminal. Five compaction retries in 0.26 s are inside the capture
-      (requests 4-8), so goose burned its own budget on it first.
+      compaction report: two `systemNotification` parts, then, at 1.53.0,
+      `Ran into this error trying to compact: Failed to compact: the base prompt
+      (system prompt, tool schemas, and conversation) exceeds the model's
+      effective context window, and there are no tool responses to remove. …`
+      (1.41.0: `… Failed to compact: context limit exceeded even after removing
+      all tool responses.`). Two separate misses follow. That sentence matches
+      no member of base.CONTEXT_OVERFLOW_MARKERS — the nearest, `exceeds the
+      (?:model'?s )?(?:maximum )?context (?:window|length)`, is one word short
+      (`effective`) — and `Ran into this error TRYING TO COMPACT:` does not
+      match the adapter's own `re.compile(r"ran into this error:")` either — the
+      colon moved. So the measured classification is **None**, i.e.
+      transport-shaped, i.e. the executor spends its whole bounded-retry budget
+      on the one condition §7.2 declares terminal. One compaction attempt is
+      inside the capture (request 4; 1.41.0 made five in 0.26 s).
     expect:
       salvage: none
       success: false
       error_contains: ["No valid JSON found in text"]
       raw_contains:
         - "Ran into this error trying to compact:"
-        - "Failed to compact: context limit exceeded"
+        - "Failed to compact: the base prompt"
+        - "effective context window"
         - "systemNotification"
       classify_failure: null
 
@@ -327,14 +369,15 @@ rows:
     stdout: zero-body.stdout.txt
     stderr: zero-body.stderr.txt
     exit_code: 0
-    wall_s: 6.80
+    wall_s: 6.98
     requests: 8
     notes: >-
       failserver `--mode empty`: the request is accepted and the socket closed
       after **zero** body bytes. goose separates it from a truncated body — it
-      says `Network error — check your network connection and try again.` rather
-      than naming a decode error — and retries it to the full 8 requests / 6.8 s,
-      unlike the cut stream, which it gives up on immediately. Both land on the
+      says `Network error: Network error — check your network connection and try
+      again.` rather than naming a decode error — and retries it to the full 8
+      requests / 7.0 s (both completions; 1.53.0 retries the cut stream's turn
+      too, which 1.41.0 gave up on immediately). Both land on the
       same two misses: no `Ran into this error:` prefix, so `parse_output` reports
       an extraction failure, and `Network error` matches nothing in
       base.CONNECTION_ERROR_MARKERS, so the classification is None.
@@ -349,7 +392,7 @@ rows:
     stdout: prompt-echo.stdout.txt
     stderr: prompt-echo.stderr.txt
     exit_code: 0
-    wall_s: 0.15
+    wall_s: 0.25
     requests: 3
     notes: >-
       THE SAME SUCCESSFUL RUN AS `success`, captured with the product's own
@@ -365,9 +408,9 @@ rows:
       `classify_streams` sees them — so `classify_failure` now reads goose's
       answer and not our prompt, and this cell reads null. It is the one cell of
       the fourteen in this manifest that moved; `success: true` did not, because
-      the run always did succeed. The bytes are unchanged and still carry the
-      product's own prompt, so a regression that puts the echo back in the
-      haystack fails here.
+      the run always did succeed. The bytes (re-captured on 1.53.0 with the same
+      probe-time copy of the product's prompt) still carry that prompt, so a
+      regression that puts the echo back in the haystack fails here.
     expect:
       salvage: answer
       success: true

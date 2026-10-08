@@ -3,7 +3,7 @@
     {
       "id": null,
       "role": "user",
-      "created": 1787156651,
+      "created": 1791416400,
       "content": [
         {
           "type": "text",
@@ -16,23 +16,28 @@
       }
     },
     {
-      "id": null,
+      "id": "msg_4b530409-1427-4078-b63d-3ff552c92e82",
       "role": "assistant",
-      "created": 1787156651,
+      "created": 1791416400,
       "content": [
         {
-          "type": "text",
-          "text": "Ran into this error: Authentication error: Authentication failed for http://127.0.0.1:8099/s/d5cf9359396f/v1/chat/completions. Status: 401 Unauthorized. Response: Incorrect API key provided: sk-stub***. You can find your API key at https://platform.openai.com/account/api-keys..\n\nPlease retry if you think this is a transient or recoverable error."
+          "type": "error",
+          "kind": "authentication",
+          "message": "Ran into this error: Authentication error: Authentication failed for http://127.0.0.1:8099/s/f2b8674b6768/v1/chat/completions. Status: 401 Unauthorized. Response: Incorrect API key provided: sk-stub***. You can find your API key at https://platform.openai.com/account/api-keys..\n\nPlease retry if you think this is a transient or recoverable error."
         }
       ],
       "metadata": {
         "userVisible": true,
-        "agentVisible": true
+        "agentVisible": false
       }
     }
   ],
   "metadata": {
-    "total_tokens": null,
-    "status": "completed"
+    "total_tokens": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "cache_write_input_tokens": 0,
+    "status": "error"
   }
 }

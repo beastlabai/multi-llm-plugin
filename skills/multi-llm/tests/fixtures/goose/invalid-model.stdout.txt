@@ -3,7 +3,7 @@
     {
       "id": null,
       "role": "user",
-      "created": 1787156660,
+      "created": 1791416409,
       "content": [
         {
           "type": "text",
@@ -16,13 +16,13 @@
       }
     },
     {
-      "id": null,
+      "id": "msg_6b265760-8f95-4cfd-9243-6a5bad59b57f",
       "role": "assistant",
-      "created": 1787156667,
+      "created": 1791416416,
       "content": [
         {
           "type": "text",
-          "text": "Ran into this error: Request failed: Resource not found (404) at http://127.0.0.1:8099/s/b11d267cc7d4/v1/chat/completions: The model `stub-model` does not exist or you do not have access to it.. Available models for this provider: claude-sonnet-5, deepseek/deepseek-v4-flash-0731, gpt-5.5, gemini-2.5-flash, o3, gpt-4o-mini, gpt-4o.\n\nPlease retry if you think this is a transient or recoverable error."
+          "text": "Ran into this error: Request failed: Resource not found (404) at http://127.0.0.1:8099/s/bff1923c19e2/v1/chat/completions: The model `stub-model` does not exist or you do not have access to it.. Available models for this provider: deepseek/deepseek-v4-flash-0731, claude-sonnet-5, gpt-5.5, gemini-2.5-flash, o3, gpt-4o-mini, gpt-4o, claude-3-5-haiku-20241022, claude-haiku-5, gemini-3-flash, openai/stub-model, stub-model, stub/stub-model.\n\nPlease retry if you think this is a transient or recoverable error."
         }
       ],
       "metadata": {
@@ -32,7 +32,11 @@
     }
   ],
   "metadata": {
-    "total_tokens": null,
+    "total_tokens": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "cache_write_input_tokens": 0,
     "status": "completed"
   }
 }

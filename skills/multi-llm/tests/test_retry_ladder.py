@@ -267,7 +267,8 @@ class TestRule6bNoIdenticalRateLimitRedispatch:
         [
             ("utils.providers.muse", "MuseProvider", 40),
             ("utils.providers.gemini", "GeminiProvider", 10),
-            ("utils.providers.goose", "GooseProvider", 8),
+            # goose 1.53.0: 9 requests of 429 over 7.5 s (8 at 1.41.0).
+            ("utils.providers.goose", "GooseProvider", 9),
             # T7.14: pi 0.87.1, 4 requests of 429 over 14.4 s
             # (tests/fixtures/pi/'s ``rate-limit`` row, three auto_retry_start
             # events). omp declared its envelope before this table grew it a
@@ -287,8 +288,9 @@ class TestRule6bNoIdenticalRateLimitRedispatch:
         ``rate-limit`` row, the 5xx row's envelope to two decimals), gemini ten
         requests over 243 s (``tests/fixtures/gemini/``'s ``rate-limit`` row:
         nine ``Attempt N failed with status 429`` lines and a tenth that gives
-        up), goose four attempts at the real turn inside 8 requests / 7.2 s
-        (``tests/fixtures/goose/``'s ``rate-limit`` row). Declaring that removes
+        up), goose four attempts at the real turn inside 9 requests / 7.5 s
+        (``tests/fixtures/goose/``'s ``rate-limit`` row, 1.53.0; 8 / 7.2 s at
+        1.41.0). Declaring that removes
         the harness's own rate-limit backoff for them: a **smaller** retry
         budget, not a larger one. Before the declaration a rate-limited slot got
         up to ``MAX_RATE_LIMIT_BACKOFFS`` further identical dispatches of a

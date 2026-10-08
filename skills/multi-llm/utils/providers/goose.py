@@ -55,20 +55,28 @@ class GooseProvider(LLMProvider):
     anything else passes through verbatim as the model name (keeping
     ``:free``-style ids intact).
 
-    Gotcha: goose exits 0 EVEN ON PROVIDER ERRORS (401, rate limit).
+    Gotcha: goose exits 0 EVEN ON PROVIDER ERRORS (rate limit; a 401 too
+    before 1.53.0).
     Failure manifests as the final assistant text containing
     "Ran into this error:" — parse_output detects this and returns an
     explicit failure result.
 
     Two measured limits on that marker, both from the 1.41.0 fixture
-    capture (tests/fixtures/goose/manifest.yaml). (1) It does not cover
-    every failure vocabulary: a context overflow reads "Ran into this error
-    TRYING TO COMPACT:" and both stream failures read "Network error:", so
-    on those three the branch below never fires and the run is reported as
-    an extraction failure instead. (2) A failed run can carry no assistant
-    message at all — an empty completion and a 200 whose body is a provider
-    error object both produce a well-formed envelope with status
-    "completed" and only the echoed user message in it.
+    capture and still true at 1.53.0 (tests/fixtures/goose/manifest.yaml).
+    (1) It does not cover every failure vocabulary: a context overflow reads
+    "Ran into this error TRYING TO COMPACT:" and both stream failures read
+    "Network error:", so on those three the branch below never fires and the
+    run is reported as an extraction failure instead. (2) A failed run can
+    carry no assistant message at all — an empty completion and a 200 whose
+    body is a provider error object both produce a well-formed envelope with
+    status "completed" and only the echoed user message in it (1.41.0) — or, at
+    1.53.0, goose's own ``The model returned an empty response.`` as the
+    assistant text, which ``salvage_text`` drops.
+
+    1.53.0 also moved one failure out of the text parts: a 401 now exits 1
+    with ``metadata.status: "error"`` and the ``Ran into this error:`` gloss in
+    a ``{"type": "error", "kind": "authentication", "message": …}`` content
+    part, which ``parse_output`` reads (:func:`last_assistant_error`).
 
     Gotcha 2, and it is the parser's own: the envelope ECHOES the user
     prompt, so anything reading raw stdout is reading our prompt too.
@@ -78,20 +86,23 @@ class GooseProvider(LLMProvider):
     """
 
     version_cmd = ("goose", "--version")
-    #: 1.41.0 is where every fixture in ``tests/fixtures/goose/`` was captured —
+    #: 1.41.0 is where every fixture in ``tests/fixtures/goose/`` was first
+    #: captured —
     #: the §6 step-5 probe, ``--network none``, the stub and the failserver both
     #: running inside the container, no credential — the release
     #: ``REASONING_EFFORTS`` and the exit-0 measurement below were both verified
-    #: on, and the one ``tests/container/cli-versions.lock`` pins. It is a pin to
+    #: on; the set was re-captured on 1.53.0 (below), the release
+    #: ``tests/container/cli-versions.lock`` now pins. It is a pin to
     #: re-confirm rather than a range to trust: the parser depends on three
     #: goose-internal shapes upstream is free to restyle — the
     #: ``{"messages": [...]}`` envelope, the ``content[].type == "text"`` part
     #: names, and the ``Ran into this error:`` prefix that is the ONLY signal a
-    #: run failed (goose exits 0 on all nine measured failure modes).
+    #: run failed (goose 1.41.0 exits 0 on all nine measured failure modes;
+    #: 1.53.0 on eight, and puts the ninth, a 401, in an ``error`` part).
     #:
-    #: That prefix is already known not to cover everything at 1.41.0: goose
-    #: writes ``Ran into this error trying to compact:`` on a context overflow and
-    #: ``Network error:`` on both stream failures, so three of the committed rows
+    #: That prefix is already known not to cover everything at 1.41.0 (and
+    #: still at 1.53.0): goose writes ``Ran into this error trying to compact:``
+    #: on a context overflow and ``Network error:`` on both stream failures, so three of the committed rows
     #: fall through to an extraction failure instead
     #: (``tests/fixtures/goose/manifest.yaml``).
     #:
@@ -117,7 +128,19 @@ class GooseProvider(LLMProvider):
     #: the base :meth:`parse_version` still reads — its ``\b``-anchored search is
     #: not line-anchored, unlike ``cli-versions.lock``'s own verify pattern,
     #: which has to spell the ``\s*`` out.
-    verified_version = "1.41.0"
+    #:
+    #: **Moved 1.41.0 -> 1.53.0 on 2026-10-08** (`` 1.53.0`` from the pinned
+    #: image): all eleven captured rows re-run on 1.53.0 by the same rig, the
+    #: synthesized ``multi-assistant`` re-derived from the new ``success``. Two
+    #: parser changes came with it, each pinned by a fixture row: the 401 now
+    #: arrives as an ``error`` content part at exit 1 (``parse_output`` reported
+    #: ``Empty text response``), and an empty completion or a 200 error object
+    #: now yields goose's own ``The model returned an empty response.`` as the
+    #: assistant text (``salvage_text`` served it as an answer). Also moved: a
+    #: cut stream, an empty completion and a 200 error object are retried (the
+    #: turn to four attempts), a 429 makes 9 requests (was 8), and the
+    #: context-overflow sentence was reworded (still unclassified).
+    verified_version = "1.53.0"
 
     #: §7.2 — the exit-0 sniff, folded out of ``parse_output`` and into the
     #: classifier so the D3k ladder sees it too. goose exits **0** on a provider
@@ -130,17 +153,17 @@ class GooseProvider(LLMProvider):
     # §7.6(b), declared 2026-08-20 (C12). Measured against the committed
     # fail-forever captures in `tests/fixtures/goose/`, never inferred:
     #
-    # * `max_requests = 8` — `GET /v1/models`, then SEVEN completions: FOUR
-    #   attempts at the real turn and THREE at the session-title completion
-    #   goose fires even under `--no-session`. Two independent rows measure the
-    #   same eight — `exit-zero-failure` (500-forever, `requests: 8`,
-    #   `wall_s: 6.67`, backoff ~0.1/1.1/2.8/6.6 s) and `rate-limit`
-    #   (429-forever, `requests: 8`, `wall_s: 7.22`) — and the set's own header
-    #   states it as the envelope for this CLI (`README.md:24-28`, `:54`;
-    #   `manifest.yaml`'s notes on both rows).
+    # * `max_requests = 9` — `GET /v1/models`, then up to EIGHT completions:
+    #   FOUR attempts at the real turn and three or four at the session-title
+    #   completion goose fires even under `--no-session`. Re-measured on 1.53.0
+    #   (2026-10-08): `rate-limit` (429-forever) makes 9 requests over 7.49 s
+    #   (four and four) and `exit-zero-failure` (500-forever) 8 over 7.26 s (four
+    #   and three). At 1.41.0 both rows made 8 (6.67 s / 7.22 s) and this field
+    #   was 8. The set's own header states it as the envelope for this CLI
+    #   (`README.md`'s three facts; `manifest.yaml`'s notes on both rows).
     #
     # * `max_wall_s = None`, and this is a JUDGEMENT recorded rather than a gap.
-    #   The ~6.7–7.2 s those rows measure is ROUND-TRIP TIME against a localhost
+    #   The ~6.7–7.5 s those rows measure is ROUND-TRIP TIME against a localhost
     #   failserver — transport, not a ceiling goose imposes on itself — so it
     #   says nothing about what the same eight requests cost against a real
     #   provider, and a bound taken from it would be a bound on the stub. The
@@ -152,19 +175,20 @@ class GooseProvider(LLMProvider):
     #   goose's is the wire.
     #
     # * `retries_rate_limit = True` — the `rate-limit` row is the 5xx row's
-    #   envelope: goose retries a 429 itself, four attempts at the real turn,
-    #   8 requests over 7.2 s. **The budget consequence runs the way that
-    #   surprises people**: declaring this REMOVES the harness's own rate-limit
-    #   backoff for goose (§7.5 rule 6(b), `STOP_VENDOR_ALREADY_RETRIED`). A
-    #   rate-limited goose slot used to get up to `MAX_RATE_LIMIT_BACKOFFS`
-    #   further identical dispatches — 8 requests turned into 32 — and now gets
-    #   none. It is a smaller retry budget, not a larger one.
+    #   envelope: goose retries a 429 itself, four attempts at the real turn, 9
+    #   requests over 7.5 s at 1.53.0 (8 over 7.2 s at 1.41.0). **The budget
+    #   consequence runs the way that surprises people**: declaring this
+    #   REMOVES the harness's own rate-limit backoff for goose (§7.5 rule 6(b),
+    #   `STOP_VENDOR_ALREADY_RETRIED`). A rate-limited goose slot used to get
+    #   up to `MAX_RATE_LIMIT_BACKOFFS` further identical dispatches — 8
+    #   requests turned into 32 — and now gets none. It is a smaller retry
+    #   budget, not a larger one.
     #
     # `configurable_by` is empty: `get_env` below sets only
     # `GOOSE_THINKING_EFFORT`, which changes how the model thinks and not how
     # many times the CLI retries, and `build_command` passes no retry knob.
     internal_retries = InternalRetryEnvelope(
-        max_requests=8,
+        max_requests=9,
         max_wall_s=None,
         retries_rate_limit=True,
         configurable_by=(),
@@ -250,8 +274,9 @@ class GooseProvider(LLMProvider):
         prints one on no measured path, but a killed process leaves a partial
         envelope), a non-list ``messages``, or an envelope with no user turn in
         it at all. stderr is returned unchanged — goose writes 0 bytes there on
-        all eleven captures, and a reduction of a stream that carries no echo
-        could only lose a diagnosis.
+        every capture but the 1.53.0 401, which carries only goose's own
+        diagnosis there, and a reduction of a stream that carries no echo could
+        only lose a diagnosis.
         """
         try:
             envelope = json.loads(stdout)
@@ -294,6 +319,14 @@ class GooseProvider(LLMProvider):
         if text is None:
             return {"success": False, "error": "No assistant message in output", "raw": stdout, "data": None}
 
+        # goose 1.53.0 puts a credential failure in a `type: "error"` part
+        # (`kind: "authentication"`), not in text, and exits 1 with
+        # `metadata.status: "error"` (tests/fixtures/goose/auth-error). Read
+        # without this branch, the run reported "Empty text response".
+        error = last_assistant_error(envelope)
+        if error:
+            return {"success": False, "error": error, "raw": stdout, "data": None}
+
         text = text.strip()
 
         if "Ran into this error:" in text:
@@ -324,7 +357,12 @@ class GooseProvider(LLMProvider):
           which the parser's colon-anchored test misses;
         * text that starts with ``Network error`` — the un-prefixed stream
           failure prose of ``truncated`` and ``zero-body``, which would
-          otherwise be saved as an answer.
+          otherwise be saved as an answer;
+        * text that starts with :data:`EMPTY_RESPONSE_NOTICE` — what goose
+          1.53.0 writes as the assistant's text, at exit 0 and status
+          ``completed``, for an empty completion (``ephemeral-only``) and a 200
+          carrying an error object (``error-envelope``); 1.41.0 wrote no
+          assistant message for either.
 
         Also ``""`` when stdout is not one whole envelope (a killed process's
         partial one) or holds no assistant message (an empty completion echoes
@@ -341,11 +379,49 @@ class GooseProvider(LLMProvider):
             if text is None:
                 return ""
             text = text.strip()
-            if "Ran into this error" in text or text.startswith("Network error"):
+            if (
+                "Ran into this error" in text
+                or text.startswith("Network error")
+                or text.startswith(EMPTY_RESPONSE_NOTICE)
+            ):
                 return ""
             return text
         except Exception:  # noqa: BLE001 - the hook must never raise
             return ""
+
+
+#: The assistant text goose 1.53.0 writes in place of an answer when the model
+#: returned nothing (measured: an empty completion, and a 200 whose body is an
+#: error object), after retrying the turn four times. goose's own words, never
+#: the model's — the full sentence ends "Please resend your message to
+#: continue." — so :meth:`GooseProvider.salvage_text` drops it.
+EMPTY_RESPONSE_NOTICE = "The model returned an empty response."
+
+
+def last_assistant_error(envelope: Any) -> Optional[str]:
+    """The last assistant message's ``type: "error"`` parts' ``message``s, joined.
+
+    goose 1.53.0 writes a credential failure this way — ``{"type": "error",
+    "kind": "authentication", "message": "Ran into this error: …"}`` — where
+    1.41.0 wrote the same sentence as a text part. ``None`` when that message
+    carries no such part (or there is no assistant message). Never raises.
+    """
+    messages = envelope.get("messages") if isinstance(envelope, dict) else None
+    if not isinstance(messages, list):
+        return None
+    errors: Optional[List[str]] = None
+    for message in messages:
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            content = message.get("content")
+            errors = [
+                part["message"].strip()
+                for part in (content if isinstance(content, list) else [])
+                if isinstance(part, dict)
+                and part.get("type") == "error"
+                and isinstance(part.get("message"), str)
+                and part["message"].strip()
+            ]
+    return "\n".join(errors) if errors else None
 
 
 def last_assistant_text(envelope: Any) -> Optional[str]:

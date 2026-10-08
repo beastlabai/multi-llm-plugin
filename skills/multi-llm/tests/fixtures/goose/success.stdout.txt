@@ -3,7 +3,7 @@
     {
       "id": null,
       "role": "user",
-      "created": 1787156638,
+      "created": 1791416379,
       "content": [
         {
           "type": "text",
@@ -18,7 +18,7 @@
     {
       "id": "chatcmpl-stub",
       "role": "assistant",
-      "created": 1787156638,
+      "created": 1791416379,
       "content": [
         {
           "type": "text",
@@ -27,12 +27,20 @@
       ],
       "metadata": {
         "userVisible": true,
-        "agentVisible": true
+        "agentVisible": true,
+        "inference": {
+          "provider": "openai",
+          "requestedModel": "stub-model"
+        }
       }
     }
   ],
   "metadata": {
-    "total_tokens": null,
+    "total_tokens": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "cache_write_input_tokens": 0,
     "status": "completed"
   }
 }

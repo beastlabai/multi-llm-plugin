@@ -3,7 +3,7 @@
     {
       "id": null,
       "role": "user",
-      "created": 1787156643,
+      "created": 1791416391,
       "content": [
         {
           "type": "text",
@@ -16,13 +16,13 @@
       }
     },
     {
-      "id": null,
+      "id": "msg_87c4bbaf-f9d6-438a-b271-f3d4b9dc4629",
       "role": "assistant",
-      "created": 1787156650,
+      "created": 1791416399,
       "content": [
         {
           "type": "text",
-          "text": "Ran into this error: Server error: Server error (500 Internal Server Error) at http://127.0.0.1:8099/s/2fc7f19119f4/v1/chat/completions: The server had an error while processing your request. Sorry about that!.\n\nPlease retry if you think this is a transient or recoverable error."
+          "text": "Ran into this error: Server error: Server error (500 Internal Server Error) at http://127.0.0.1:8099/s/b6f7db177621/v1/chat/completions: The server had an error while processing your request. Sorry about that!.\n\nPlease retry if you think this is a transient or recoverable error."
         }
       ],
       "metadata": {
@@ -32,7 +32,11 @@
     }
   ],
   "metadata": {
-    "total_tokens": null,
+    "total_tokens": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "cache_write_input_tokens": 0,
     "status": "completed"
   }
 }
