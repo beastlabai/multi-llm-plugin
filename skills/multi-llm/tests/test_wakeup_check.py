@@ -246,6 +246,18 @@ class TestEveryOtherUsePasses:
         path = transcript.write(tmp_path / "t.jsonl")
         assert decide(capsys, tmp_path, hook_input(path)) == ""
 
+    @pytest.mark.parametrize("flags", [" --help", " -h", " --dry-run", " --dry-run-subagents"])
+    def test_a_preview_of_a_phase_starts_nothing(self, tmp_path, capsys, flags):
+        transcript = Transcript().prompt("what would implement do?")
+        phase(transcript, "implement", "usage: …\n", flags)
+        path = transcript.write(tmp_path / "t.jsonl")
+        assert decide(capsys, tmp_path, hook_input(path)) == ""
+
+    def test_a_preview_chained_before_a_real_call_does_not_hide_it(self):
+        command = (f"{DISPATCH} implement {PLAN} --help; "
+                   f"{DISPATCH} generate-tasks {PLAN} --yes")
+        assert wakeup_check.phase_mode(command) == "generate-tasks"
+
     @pytest.mark.parametrize("tool", ["Bash", "CronDelete", "Agent"])
     def test_a_tool_this_does_not_watch(self, tmp_path, capsys, tool):
         path = racing_03(Transcript()).write(tmp_path / "t.jsonl")

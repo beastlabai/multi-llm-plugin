@@ -81,11 +81,19 @@ _RESULT_RE = re.compile(r"^MULTI_LLM_RESULT:\s*(\{.*\})\s*$", re.MULTILINE)
 #: The mode whose phase prints no next-step block: its result line ends it.
 _NO_BLOCK_MODES = ("ask",)
 
+#: Flags that make a phase call a preview that starts nothing (help, or a dry
+#: run that dispatches no subagent), read in the call's own command.
+_PREVIEW_FLAGS = ("--help", "-h", "--dry-run", "--dry-run-subagents")
+
+#: Where one chained shell command ends and the next begins.
+_COMMAND_END_RE = re.compile(r"&&|\|\||[;|\n]")
+
 
 def phase_mode(command: str) -> Optional[str]:
     """The long-running mode a Bash *command* runs the dispatcher with, else
-    ``None`` (a ``util`` or ``status`` call, or no dispatcher at all). With
-    several calls chained, the last long-running one."""
+    ``None`` (a ``util`` or ``status`` call, a ``--help`` or dry-run preview,
+    or no dispatcher at all). With several calls chained, the last
+    long-running one."""
     try:
         from .cli_common import modes_table
     except ImportError:  # direct script invocation
@@ -94,8 +102,12 @@ def phase_mode(command: str) -> Optional[str]:
     found: Optional[str] = None
     for match in _DISPATCH_RE.finditer(command):
         mode = modes.resolve(match.group(1))
-        if mode is not None and mode.name in modes.DETACH_MODES:
-            found = mode.name
+        if mode is None or mode.name not in modes.DETACH_MODES:
+            continue
+        rest = _COMMAND_END_RE.split(command[match.end():], 1)[0]
+        if any(token.strip("\"'") in _PREVIEW_FLAGS for token in rest.split()):
+            continue
+        found = mode.name
     return found
 
 
