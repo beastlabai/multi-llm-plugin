@@ -54,12 +54,13 @@ def test_the_executor_records_a_reason_as_written(given, recorded):
 
 @pytest.mark.parametrize("given, shown", [
     (REASON + ".", REASON), (REASON + ";", REASON), (REASON + " .", REASON),
-    (REASON, REASON), ("...", ".."), (".", "."), (" . ", "."), (";", ";"),
-    (REASON + "..", REASON + "."),
+    (REASON, REASON), ("...", "..."), (".", "."), (" . ", "."), (";", ";"),
+    (REASON + "..", REASON + "."), (REASON + "...", REASON + "..."),
 ])
 def test_a_line_drops_one_closing_mark_and_only_when_text_remains(given, shown):
     """Review of fix round 20, #2: stripping every closing mark read a
-    reason of "..." or "." as no reason; at most one goes, at render."""
+    reason of "..." or "." as no reason; at most one goes, at render. Fix
+    round 27: a closing "..." is an ellipsis and stays whole."""
     assert without_closing_mark(given) == shown
 
 
@@ -132,3 +133,103 @@ def test_the_executors_declined_words_have_one_full_stop():
     words = scheduler.declined_words(
         "apply_code_fixes", {"c8": ("apply-fix-batch-0", 1)}, {"c8": REASON + "."})
     assert words == f"fix 1 (`c8`) — {REASON}"
+
+
+# ---------------------------------------------------------------------------
+# Fix round 27 (the Fable review of round 26, records #2): a line that ends
+# the sentence after a reason adds its full stop only where none is, so a
+# reason ending in "?", "!", "…" (every reason the record's clip cut) or in a
+# mark inside a closing quote or bracket is not printed "?.", "….", '."."'.
+# ---------------------------------------------------------------------------
+
+from utils.subagent_executor import DECLINED_REASON_MAX_CHARS, declined_reason  # noqa: E402
+from utils.text_clip import ELLIPSIS, with_closing_mark  # noqa: E402
+
+#: A reason the record's clip cut: it ends in the clip's mark.
+CLIPPED = declined_reason(("the plan forbids it " * 30).strip() + ".")
+ENDED = [
+    REASON + "?", REASON + "!", CLIPPED, REASON + "...",
+    f'the plan says "never raise MAX_SPEED."', "T011 removed it (on purpose.)",
+]
+DOUBLED = ("?.", "!.", ELLIPSIS + ".", "....", '.".', ".).")
+
+
+def test_the_clipped_reason_ends_in_the_clip_mark():
+    assert len(CLIPPED) <= DECLINED_REASON_MAX_CHARS
+    assert CLIPPED.endswith(ELLIPSIS)
+
+
+@pytest.mark.parametrize("given, shown", [
+    (REASON + ".", REASON + "."), (REASON, REASON + "."), (REASON + " ", REASON + "."),
+    (REASON + "?", REASON + "?"), (REASON + "!", REASON + "!"),
+    (REASON + ELLIPSIS, REASON + ELLIPSIS), (REASON + "...", REASON + "..."),
+    ('"' + REASON + '."', '"' + REASON + '."'), ("(" + REASON + ".)", "(" + REASON + ".)"),
+    ("say “stop.”", "say “stop.”"), ("run `npm test`", "run `npm test`."),
+    ('say "stop"', 'say "stop".'), (REASON + ";", REASON + "."),
+    (REASON + ",", REASON + "."), (REASON + " :", REASON + "."),
+    (".", "."), ("...", "..."), (" . ", "."),
+])
+def test_a_line_that_ends_the_sentence_adds_a_stop_only_where_none_is(given, shown):
+    assert with_closing_mark(given) == shown
+
+
+@pytest.mark.parametrize("reason", ENDED)
+def test_the_native_marker_line_adds_no_second_mark(plan_dir, capsys, reason):
+    plan, out = plan_dir
+    StateManager(plan).save()
+    phase_dir, _tasks = _materialize(
+        plan, out, "apply_suggestions", _suggestion_batches(), "apply-suggestions")
+    code, stdout, err, _result = _run([
+        "util", "batch-done", "--phase-dir", str(phase_dir),
+        "--task-id", "apply-batch-1", "--status", "completed",
+        "--declined", f"g-rate={reason}",
+    ], capsys)
+    assert code == 0, err
+    line = next(line for line in stdout.splitlines()
+                if line.startswith(batch_done.BATCH_DECLINED_MARKER))
+    assert f"the batch declined it — {reason} List it in" in line, line
+    assert not any(mark in line for mark in DOUBLED), line
+    # The record keeps the reason as the batch wrote it.
+    processed = _state(out)["processed_apply-suggestions"]
+    assert processed["g-rate"]["details"]["reason"] == reason
+
+
+@pytest.mark.parametrize("reason", ENDED)
+def test_the_executors_sentences_add_no_second_mark(reason):
+    words = scheduler.declined_words(
+        "apply_code_fixes", {"c8": ("apply-fix-batch-0", 1)}, {"c8": reason})
+    assert with_closing_mark(words) == f"fix 1 (`c8`) — {reason}"
+
+
+from tests.test_write_batch_declined import _respond_with, _two_item_task  # noqa: E402
+from tests.test_write_executor import env  # noqa: E402,F401 - the fixture
+from utils import subagent_executor as _executor  # noqa: E402
+
+
+@pytest.mark.parametrize("reason", ["needs a plan decision?", CLIPPED])
+def test_an_applied_batchs_reason_adds_no_second_mark(env, reason):
+    respond = _respond_with(env, {
+        "status": "applied", "ids": ["s1"], "declined": [{"id": "s0", "reason": reason}],
+        "files_touched": ["plans/p.md"], "summary": "applied s1",
+    })
+    result = env.scheduler([_two_item_task(env)], respond=respond).run()
+    outcome = result.outcomes[0]
+    assert outcome.ok, outcome.reason
+    assert outcome.reason.endswith(f"suggestion 1 (`s0`) — {reason}"), outcome.reason
+
+
+def test_a_failed_batchs_declines_add_no_second_mark(env):
+    from tests.test_write_executor import _install_crashing_launcher
+
+    _install_crashing_launcher(env.bin_dir, "codex")
+    _executor.reset_version_cache()
+    env.edits([], result={
+        "status": "no-op", "ids": [],
+        "declined": [{"id": "s0", "reason": REASON + "."},
+                     {"id": "s1", "reason": "needs a plan decision?"}],
+        "files_touched": [], "summary": "declined both",
+    })
+    result = env.scheduler([_two_item_task(env)]).run()
+    outcome = result.outcomes[0]
+    assert (f"It declined suggestion 1 (`s0`) — {REASON}; suggestion 2 "
+            f"(`s1`) — needs a plan decision? Nothing to restore") in outcome.reason

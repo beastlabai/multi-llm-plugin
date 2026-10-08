@@ -131,7 +131,7 @@ try:
         DECLINED_SECTION_HEADING, SKIPPED_SECTION_HEADING, check_findings_from,
         declined_reason,
     )
-    from .text_clip import clip, without_closing_mark
+    from .text_clip import clip, with_closing_mark
     from .subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set
     from .write_phase_bridge import WRITE_TASK_FILENAME
     from .write_batch_scheduler import (
@@ -180,7 +180,7 @@ except ImportError:  # pragma: no cover - direct script invocation
         DECLINED_SECTION_HEADING, SKIPPED_SECTION_HEADING, check_findings_from,
         declined_reason,
     )
-    from utils.text_clip import clip, without_closing_mark  # type: ignore
+    from utils.text_clip import clip, with_closing_mark  # type: ignore
     from utils.subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set  # type: ignore
     from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
     from utils.write_batch_scheduler import (  # type: ignore
@@ -1316,10 +1316,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     for item, why in (written.get("declined") or {}).items():
         # Fix round 18: never applied, and never silent. Fix round 22: in its
         # own summary.md section, never under an applied heading. Fix round
-        # 26: the record keeps the reason's closing stop; this line adds one.
+        # 26: the record keeps the reason's closing stop; fix round 27: this
+        # line adds one only where the reason has no mark of its own.
         print(
             f"{BATCH_DECLINED_MARKER} {written['task_id']} {item}: not applied, "
-            f"the batch declined it — {without_closing_mark(why)}. List it in "
+            f"the batch declined it — {with_closing_mark(why)} List it in "
             f"the phase's summary.md "
             f"under \"## {DECLINED_SECTION_HEADING}\", with its id and this "
             f"reason, never under the applied ones, and name it in your report; "
@@ -1328,7 +1329,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     for item, why in (written.get("skipped") or {}).items():
         print(
             f"{BATCH_SKIPPED_MARKER} {written['task_id']} {item}: not applied, "
-            f"{without_closing_mark(why)}. List it in the phase's summary.md under \"## "
+            f"{with_closing_mark(why)} List it in the phase's summary.md under \"## "
             f"{SKIPPED_SECTION_HEADING}\", with its id, never under the applied "
             f"ones, and name it in your report."
         )
