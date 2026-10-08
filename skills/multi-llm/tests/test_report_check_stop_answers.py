@@ -47,6 +47,16 @@ from utils.state_manager import get_or_create_state  # noqa: E402
 RESUME = "/multi-llm:multi-llm --implement plans/checked.md --resume"
 
 
+def _missing_list(reason: str) -> str:
+    """The reason's "Missing command(s):" list alone: a reason with a ready
+    section asks for the commands through the section after it (fix round
+    28), one without names them under "Carry the block's other …"."""
+    listed = reason.split("Missing ", 1)[1]
+    for end in ("Carry the block's other", report_check.WHOLE_REPORT):
+        listed = listed.split(end, 1)[0]
+    return listed
+
+
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
     obj = make_repo(tmp_path, monkeypatch, PLAN)
@@ -123,7 +133,7 @@ class TestOneWaitingTask:
         reason = decision_of(_check(
             tmp_path, capsys, out, report(RESUME, f"{RESUME} --human-task T005=skip"),
         ))["reason"]
-        missing = reason.split("Carry the block's other", 1)[0]
+        missing = _missing_list(reason)
         assert f"```\n{RESUME} --human-task T005=done\n```" in missing
         assert "--human-task T005=skip" not in missing
         assert "carrying every answer" not in reason
@@ -154,6 +164,6 @@ class TestSixAnswers:
         reason = decision_of(_check(
             tmp_path, capsys, out, report(*self._answers(out)),
         ))["reason"]
-        missing = reason.split("Carry the block's other", 1)[0]
+        missing = _missing_list(reason)
         assert f"```\n{RESUME}\n```" in missing
         assert "--human-task" not in missing
