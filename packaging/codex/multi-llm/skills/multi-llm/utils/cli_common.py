@@ -594,6 +594,15 @@ def build_parent_parser(
 # The MULTI_LLM_RESULT line
 # ---------------------------------------------------------------------------
 
+#: The result-line key naming the repository root a command typed in a
+#: subdirectory ran from (fix round 27). The tool servers read it off a
+#: launch's line to name a plan typed from that root for their polls, their
+#: abort and the resume lookup, instead of walking to a ``.git`` themselves
+#: (the walk named the root's plan where the dispatcher refused to move:
+#: ``GIT_DIR`` set, a planted ``core.worktree``, a planted nested ``.git``).
+RAN_FROM_ROOT_KEY = "ran_from_root"
+
+
 class ResultContext:
     """Collects the one machine-readable line an invocation ends with.
 
@@ -625,6 +634,11 @@ class ResultContext:
         #: poll carries it too (racing re-run 3, 2026-10-05: a stopped
         #: implement's result line named no error and the host said so).
         self.error: Optional[str] = None
+        #: The repository root a command typed in a subdirectory ran from
+        #: (``multi_llm._run_from_repository_root``, fix round 27), so a tool
+        #: server names the plan the way the dispatcher read it; ``None`` when
+        #: the command ran where it was typed.
+        self.ran_from_root: Optional[str] = None
         self._emitted = False
 
     # -- recording ------------------------------------------------------
@@ -891,6 +905,10 @@ class ResultContext:
             _STATE_BY_EXIT[EXIT_ERROR], _STATE_BY_EXIT[EXIT_NEEDS_HUMAN],
         ):
             payload["error"] = self.error
+        # Present only when the command moved, so every other line is
+        # byte-for-byte what it was.
+        if self.ran_from_root:
+            payload[RAN_FROM_ROOT_KEY] = self.ran_from_root
         return payload
 
     def emit(self, exit_code: int, stream=None) -> None:
@@ -939,6 +957,12 @@ def record_artifact(path: Union[str, Path]) -> None:
 def record_artifacts(paths: Iterable[Union[str, Path]]) -> None:
     for path in paths:
         record_artifact(path)
+
+
+def record_ran_from_root(root: str) -> None:
+    """The active result's :data:`RAN_FROM_ROOT_KEY` (fix round 27)."""
+    if _ACTIVE is not None:
+        _ACTIVE.ran_from_root = root
 
 
 def record_next(command: Optional[str]) -> None:

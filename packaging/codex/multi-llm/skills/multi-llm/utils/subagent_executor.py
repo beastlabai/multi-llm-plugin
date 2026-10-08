@@ -902,7 +902,8 @@ def batch_check_findings(result: Any) -> Optional[List[str]]:
     ``None`` when the reply reports no usable check — no ``check`` key, one
     that says neither whether it passed nor what failed (``{}``, ``null``), or
     (fix round 26) one whose ``ran`` is empty, the contract's way of saying no
-    check ran (:func:`ran_no_check`): saying nothing is not a finding here, as
+    check ran (:func:`ran_no_check`), and that names no finding and does not
+    say it failed (fix round 27): saying nothing is not a finding here, as
     it is for a check task, whose whole answer it is. A command ``ran`` maps
     to ``failed`` is a failing check whatever ``passed`` says
     (:func:`ran_check_outcomes`). ``[]`` for a clear pass; else the failing checks, bounded. Codex
@@ -919,40 +920,81 @@ def batch_check_findings(result: Any) -> Optional[List[str]]:
     (read as leniently as ``passed``) is one finding,
     :data:`BATCH_CHECK_COULD_NOT_RUN` with whatever the reply listed after
     it, so it reads "its check could not run", never "fails".
+
+    Fix round 27 (review of round 26): one rule on both legs, the one
+    ``references/own-check.md`` states for the native host's ``util
+    batch-done --own-check``, first match wins: no ``check`` object is no
+    check; ``could_not_run`` is that; a reply that ran nothing
+    (:func:`ran_no_check`) is failing when it names a finding, whatever
+    ``passed`` says (a pass of nothing is no verdict), or says ``passed:
+    false`` (:data:`CHECK_FAILED_WITHOUT_FINDINGS` kept), and no check
+    otherwise (a ``not_run`` reason with no ``ran`` ran nothing too); any other reply is a pass on ``passed: true`` (fix round 15,
+    a command ``ran`` maps to ``failed`` aside), failing on ``passed:
+    false`` or a finding, a pass when only ``ran`` says what passed, and no
+    check when it says nothing at all.
     """
     check = result.get("check") if isinstance(result, dict) else None
-    ran: Dict[str, str] = {}
-    if isinstance(check, dict):
-        if _check_passed(check.get("could_not_run")) is True:
-            listed = _stated_findings(check)
-            text = BATCH_CHECK_COULD_NOT_RUN + (
-                f": {'; '.join(listed)}" if listed else ""
-            )
-            return [clip(text, CHECK_FINDING_MAX_CHARS)]
-        passed = _check_passed(check.get("passed"))
-        if ran_no_check(result):
-            # Fix round 26: an empty `ran` says no check ran. That is not a
-            # pass whatever `passed` says (a pass of nothing would put the
-            # task on the tests line as a check that passed); a failure it
-            # names anyway still counts.
-            return (_stated_findings(check) or None) if passed is not True else None
-        ran = ran_check_outcomes(result)
-        if passed is True:
-            return _with_ran_failures([], ran)
-    findings = check_findings_from(result)
-    if findings is None:
+    if not isinstance(check, dict):
+        # No `check` key, `null`, or not an object: no usable report.
         return None
-    if findings and findings[0].startswith(CHECK_RESULT_UNKNOWN):
-        return _with_ran_failures(None, ran)
-    return _with_ran_failures(findings, ran)
+    stated = _stated_findings(check)
+    if _check_passed(check.get("could_not_run")) is True:
+        text = BATCH_CHECK_COULD_NOT_RUN + (
+            f": {'; '.join(stated)}" if stated else ""
+        )
+        return [clip(text, CHECK_FINDING_MAX_CHARS)]
+    passed = _check_passed(check.get("passed"))
+    if ran_no_check(result):
+        # It ran nothing (an empty `ran`, every entry "not run", or only the
+        # result shape's placeholder): its `passed: true` is a pass of
+        # nothing, so a failure it names counts and nothing else is a pass;
+        # a `passed: false` is a failing check (fix round 27: round 26 made
+        # it "no check", where it had been CHECK_FAILED_WITHOUT_FINDINGS).
+        if stated:
+            return stated
+        return [CHECK_FAILED_WITHOUT_FINDINGS] if passed is False else None
+    ran = ran_check_outcomes(result)
+    if passed is True:
+        # Fix round 15: what it lists beside a pass is informational.
+        return _with_ran_failures([], ran)
+    if passed is False:
+        return _with_ran_failures(stated or [CHECK_FAILED_WITHOUT_FINDINGS], ran)
+    if stated:
+        return _with_ran_failures(stated, ran)
+    # It says neither: `ran` alone says how its checks ended, if anything.
+    if any(word == _ran_word("failed") for word in ran.values()):
+        return _with_ran_failures([], ran)
+    if any(word == _ran_word("passed") for word in ran.values()):
+        return []
+    return None
+
+
+def _ran_word(which: str) -> str:
+    """``known_checks``' ``passed`` / ``failed`` outcome word."""
+    try:
+        from .known_checks import LISTED_FAILED, LISTED_PASSED
+    except ImportError:  # pragma: no cover - direct script import shim
+        from utils.known_checks import LISTED_FAILED, LISTED_PASSED
+    return LISTED_FAILED if which == "failed" else LISTED_PASSED
 
 
 def _stated_findings(check: Dict[str, Any]) -> List[str]:
     """The findings a ``check`` object names itself, bounded, without the
-    placeholders :func:`check_findings_from` puts in for none."""
+    placeholders :func:`check_findings_from` puts in for none. Beside a
+    ``passed`` that reads true, an entry that only says nothing was found
+    (``"none"``, ``"n/a"``, ``0``) is no finding either (fix round 12's
+    reading of a bare one, which fix round 27 extends to a list entry, so
+    ``["n/a"]`` beside a ``passed: true`` that ran nothing is no check, not
+    a failing one); beside any other ``passed`` it stays one, as before."""
+    raw = check.get("findings")
+    if _check_passed(check.get("passed")) is True:
+        if isinstance(raw, list):
+            raw = [item for item in raw if not _says_nothing_found(item)]
+        elif _says_nothing_found(raw):
+            raw = None
     return [
         text for text in (check_findings_from(
-            {"check": {"passed": False, "findings": check.get("findings")}}
+            {"check": {"passed": False, "findings": raw}}
         ) or [])
         if text not in (CHECK_FAILED_WITHOUT_FINDINGS, CHECK_RESULT_UNKNOWN)
     ]
@@ -1007,24 +1049,43 @@ def _is_placeholder(command: str) -> bool:
     return len(text) > 1 and text[0] == "<" and text[-1] == ">"
 
 
+def _names_a_command(entry: Any) -> bool:
+    """Whether one entry of a ``ran`` list may name a command it ran: not the
+    contract's placeholder, whether written as a ``"<command>: <outcome>"``
+    string or (fix round 27, review of round 26: it read as a clean pass) as
+    an object whose command is the placeholder. An entry that cannot be read
+    counts, so what ran stays unknown rather than nothing."""
+    if isinstance(entry, str):
+        return not _is_placeholder(entry.rpartition(":")[0] or entry)
+    if isinstance(entry, dict):
+        command = next((entry[k] for k in _RAN_COMMAND_KEYS if k in entry), None)
+        return not (isinstance(command, str) and _is_placeholder(command))
+    return True
+
+
 def ran_no_check(result: Any) -> bool:
     """Whether a code batch's ``check`` says it ran no check (fix round 26):
     its ``ran`` is present and empty, holds only the contract's placeholder,
-    or every entry in it reads ``not run``.
+    or every entry in it reads ``not run`` — or (fix round 27) it has no
+    ``ran`` at all but gives a ``not_run`` reason, the contract's other half
+    of "I ran no check", so ``{"passed": true, "not_run": "…"}`` is never a
+    pass of nothing.
 
-    A missing ``ran`` is not this (an older reply, read as before), and
-    neither is a ``ran`` holding an entry that cannot be read: what it ran
-    is then unknown, and ``passed``/``findings`` decide.
+    A missing ``ran`` with no ``not_run`` reason is not this (an older reply,
+    read as before), and neither is a ``ran`` holding an entry that cannot be
+    read: what it ran is then unknown, and ``passed``/``findings`` decide.
     """
     check = result.get("check") if isinstance(result, dict) else None
     ran = check.get("ran") if isinstance(check, dict) else None
+    if ran is None and isinstance(check, dict):
+        reason = check.get("not_run")
+        return isinstance(reason, str) and bool(reason.strip())
     if not isinstance(ran, (dict, list)):
         return False
     # The contract's placeholder copied as it is names no command (a reply
     # that pasted the shape without running anything).
     named = [
-        entry for entry in ran
-        if not (isinstance(entry, str) and _is_placeholder(entry.rpartition(":")[0] or entry))
+        entry for entry in ran if _names_a_command(entry)
     ] if isinstance(ran, list) else [key for key in ran if not _is_placeholder(str(key))]
     if not named:
         return True
@@ -1043,14 +1104,28 @@ def _with_ran_failures(
 ) -> Optional[List[str]]:
     """*findings* with one added for each command ``ran`` says failed that no
     finding names (``known_checks.with_listed_failures``): a reply whose
-    ``passed`` says true beside a failed command is never a clean pass."""
-    if not ran:
+    ``passed`` says true beside a failed command is never a clean pass.
+
+    Fix round 27: it only adds. A ``ran`` naming no failure leaves a
+    ``passed: false`` that named nothing a failing check
+    (:data:`CHECK_FAILED_WITHOUT_FINDINGS`), as the native leg records it;
+    round 26 read it as a pass through ``with_listed_failures``' rule for an
+    apply-code-fixes batch's ``listed`` (fix round 21), which stays
+    ``listed``'s alone. A failed command added stands in for that bare
+    placeholder, as the native host names the command instead."""
+    failed = {
+        command: word for command, word in ran.items() if word == _ran_word("failed")
+    }
+    if not failed:
         return findings
     try:
         from .known_checks import with_listed_failures
     except ImportError:  # pragma: no cover - direct script import shim
         from utils.known_checks import with_listed_failures
-    return with_listed_failures(findings, ran)
+    current = with_listed_failures(findings, failed) or []
+    if len(current) > 1 and current[0] == CHECK_FAILED_WITHOUT_FINDINGS:
+        current = current[1:]
+    return current
 
 
 def _report_check_evidence(result: Any) -> Optional[Dict[str, Any]]:

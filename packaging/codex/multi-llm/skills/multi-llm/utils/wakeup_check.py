@@ -19,23 +19,45 @@ one): a Bash call that ran the dispatcher with a long-running mode
 (``modes.DETACH_MODES``, an alias resolved) started a phase, and the phase is
 over once a later tool result printed the next-step block (``[NEXT_COMMAND]``
 or ``[WORKFLOW_COMPLETE]`` at a line start, ``report_check.find_blocks``: the
-finished phase's own result, or ``util next-command``'s at a stop as on a
-success), or that phase call's own result line ended it (exit ``1`` or ``3``,
-a failure or a stop before anything ran; ``ask``, which prints no block, on any
-result line). The native write leg's first call exits ``0`` with ``next`` null
-and hands its batches to the host, so a result line alone never says a phase
-is over. The plugin's ``state.json`` is not read: which plan the session
-works on, and whether its phase was started by this session or is left over
-from another, only the transcript says.
+finished phase's own result, ``util next-command``'s at a stop as on a
+success, or a read of the phase's log), or that phase call's own result line
+ended it (exit ``1`` or ``3``, a failure or a stop before anything ran;
+``ask``, which prints no block, on any result line), or, for a call run in the
+background, the ``task-notification`` Claude Code sends when that call ended
+says it failed or was stopped (fix round 27: a background phase that failed
+held every later wakeup of the session). The native write leg's first call
+exits ``0`` with ``next`` null and hands its batches to the host, so a result
+line or a notification of exit ``0`` alone never says a phase is over. A
+subagent's report (an ``Agent``, ``Task`` or ``SendMessage`` result) quoting
+the block is the subagent's words, not the phase's output, and ends nothing
+(fix round 27). Nor does ``status``: on this host a poll's terminal word can
+belong to an earlier run of the same phase folder (SKILL.md's poll loop says
+so), and its next-step block, when it prints one, already counts. The
+plugin's ``state.json`` is not read: which plan the session works on, and
+whether its phase was started by this session or is left over from another,
+only the transcript says.
+
+**The transcript is read once it holds the call being decided** (fix round
+27). Claude Code writes it in batches, so when the hook starts, the
+``ScheduleWakeup`` or ``CronCreate`` call itself, a phase call made in the
+same message, and the result of a phase call that just finished can all be
+unwritten (measured on 2.1.293 against a localhost stub: on file 0.1 s
+later). So :func:`check` waits until the call's own ``tool_use_id`` is on
+file and every phase call its message made before it has its result on file
+(``report_check.settled_turn``, at most ``report_check.SETTLE_BUDGET_S``):
+everything an earlier message did is on file once the call is. A phase call
+whose result is still missing then is running, which is what it is when the
+two run side by side.
 
 **The user's own wakeups are never refused.** A session that never ran the
 dispatcher, a phase that finished, failed or stopped, and anything after a
-prompt the user typed all pass. Only a session whose phase is still running
-is refused, and the refusal says what to do instead.
+prompt the user typed all pass. Only a session whose phase has not printed
+its next step is refused, and the refusal says what to do instead.
 
 **Advisory, so every error passes.** An unreadable transcript, a bad
-argument, a tool this does not watch: exit 0, no output, and the tool runs.
-Nothing here touches the network or writes anything.
+argument, a tool this does not watch, a transcript still missing once the
+wait ran out: exit 0, no output, and the tool runs. Nothing here touches the
+network or writes anything.
 
 **Stdout is the hook's decision channel**, as for ``util report-check``: the
 decision is one line starting with :data:`DECISION_PREFIX`, which the hook
@@ -51,7 +73,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
     from . import report_check
@@ -88,6 +110,21 @@ _PREVIEW_FLAGS = ("--help", "-h", "--dry-run", "--dry-run-subagents")
 #: Where one chained shell command ends and the next begins.
 _COMMAND_END_RE = re.compile(r"&&|\|\||[;|\n]")
 
+#: The ``origin.kind`` of the entry Claude Code sends when a background task
+#: ends (``report_check``'s docstring lists the kinds).
+_NOTIFICATION_KIND = "task-notification"
+
+#: What a background command's notification says, read off Claude Code
+#: 2.1.293 (2026-10-08, a localhost stub): ``<tool-use-id>toolu_…</tool-use-id>``
+#: names the call, ``<status>failed</status>`` (``completed`` on exit 0) and
+#: ``<summary>Background command "…" failed with exit code 1</summary>``.
+_NOTIFIED_CALL_RE = re.compile(r"<tool-use-id>\s*([^<\s]+)\s*</tool-use-id>")
+_NOTIFIED_STATUS_RE = re.compile(r"<status>\s*([^<\s]+)\s*</status>")
+_NOTIFIED_SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
+_NOTIFIED_EXIT_RE = re.compile(r"exit code (\d+)")
+#: The one status that says a call ended well; any other ends its phase.
+_NOTIFIED_OK = "completed"
+
 
 def phase_mode(command: str) -> Optional[str]:
     """The long-running mode a Bash *command* runs the dispatcher with, else
@@ -111,20 +148,68 @@ def phase_mode(command: str) -> Optional[str]:
     return found
 
 
-def _bash_calls(entry: Dict[str, Any]) -> Iterable[Tuple[str, str]]:
-    """``(tool_use_id, command)`` for each Bash call an assistant entry makes."""
+def _tool_calls(entry: Dict[str, Any]) -> Iterable[Tuple[str, str, Optional[str]]]:
+    """``(tool_use_id, tool name, command)`` for each call an assistant entry
+    makes; the command is a Bash call's, else ``None``."""
     content = report_check._content(entry)
     if not isinstance(content, list):
         return
     for block in content:
         if not isinstance(block, dict) or block.get("type") != "tool_use":
             continue
-        if block.get("name") != "Bash":
-            continue
+        name = str(block.get("name") or "")
         tool_input = block.get("input")
         command = tool_input.get("command") if isinstance(tool_input, dict) else None
-        if isinstance(command, str):
-            yield str(block.get("id") or ""), command
+        yield (str(block.get("id") or ""), name,
+               command if name == "Bash" and isinstance(command, str) else None)
+
+
+def _bash_calls(entry: Dict[str, Any]) -> Iterable[Tuple[str, str]]:
+    """``(tool_use_id, command)`` for each Bash call an assistant entry makes."""
+    for tool_use_id, _name, command in _tool_calls(entry):
+        if command is not None:
+            yield tool_use_id, command
+
+
+def _message_id(entry: Dict[str, Any]) -> Optional[str]:
+    """The API message an assistant entry belongs to: Claude Code writes one
+    entry per content block, each carrying its message's ``id``."""
+    message = entry.get("message")
+    found = message.get("id") if isinstance(message, dict) else None
+    return found if isinstance(found, str) and found else None
+
+
+def _notified_end(entry: Dict[str, Any]) -> Optional[str]:
+    """The call a ``task-notification`` entry says ended badly, else ``None``.
+
+    Only an entry the harness sent (``origin.kind``), never a tool result or a
+    prompt quoting one, and only a status other than ``completed`` or an exit
+    code other than ``0``: a failed or stopped background phase.
+    """
+    if entry.get("type") != "user":
+        return None
+    origin = entry.get("origin")
+    if not isinstance(origin, dict) or origin.get("kind") != _NOTIFICATION_KIND:
+        return None
+    content = report_check._content(entry)
+    if isinstance(content, list):
+        content = "\n".join(
+            part.get("text", "") for part in content
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        )
+    if not isinstance(content, str):
+        return None
+    call = _NOTIFIED_CALL_RE.search(content)
+    if call is None:
+        return None
+    status = _NOTIFIED_STATUS_RE.search(content)
+    # The summary's last "exit code N": the command's own description, quoted
+    # before it, may hold the words too.
+    summary = _NOTIFIED_SUMMARY_RE.search(content)
+    codes = _NOTIFIED_EXIT_RE.findall(summary.group(1)) if summary else []
+    failed = (status is not None and status.group(1) != _NOTIFIED_OK) or (
+        bool(codes) and int(codes[-1]) != 0)
+    return call.group(1) if failed else None
 
 
 def _results(entry: Dict[str, Any]) -> Iterable[Tuple[str, str]]:
@@ -162,38 +247,85 @@ def _result_exit(text: str) -> Optional[int]:
 
 
 def phase_in_flight(turn: Sequence[Dict[str, Any]]) -> Optional[str]:
-    """The mode of the phase still running in *turn*, else ``None``."""
-    running: Optional[str] = None
-    calls: Dict[str, str] = {}
+    """The mode of the phase still running in *turn*, else ``None``: the
+    newest phase call nothing has ended yet."""
+    running: Dict[str, str] = {}
+    names: Dict[str, str] = {}
     for entry in turn:
         kind = entry.get("type")
         if kind == "assistant":
-            for tool_use_id, command in _bash_calls(entry):
-                mode = phase_mode(command)
+            for tool_use_id, name, command in _tool_calls(entry):
+                names[tool_use_id] = name
+                mode = phase_mode(command) if command is not None else None
                 if mode is not None:
-                    calls[tool_use_id] = mode
-                    running = mode
+                    running.pop(tool_use_id, None)
+                    running[tool_use_id] = mode
         elif kind == "user":
+            ended = _notified_end(entry)
+            if ended is not None:
+                running.pop(ended, None)
             for tool_use_id, text in _results(entry):
-                if report_check.find_blocks(text):
-                    running = None
+                if names.get(tool_use_id) in report_check.SUBAGENT_TOOLS:
                     continue
-                mode = calls.get(tool_use_id)
+                if report_check.find_blocks(text):
+                    running.clear()
+                    continue
+                mode = running.get(tool_use_id)
                 if mode is None:
                     continue
                 code = _result_exit(text)
                 if code in (1, 3) or (code is not None and mode in _NO_BLOCK_MODES):
-                    running = None
-    return running
+                    running.pop(tool_use_id)
+    return next(reversed(running.values()), None) if running else None
+
+
+def call_on_file(tool_use_id: str) -> Callable[[List[Dict[str, Any]]], bool]:
+    """A ``report_check.settled_turn`` test: the call *tool_use_id* is on
+    file, and so is the result of every phase call its message made before
+    it (fix round 27)."""
+
+    def settled(turn: List[Dict[str, Any]]) -> bool:
+        # The phase calls made before the call, by message: Claude Code
+        # writes one entry per content block, each carrying its message's id.
+        earlier: List[Tuple[Optional[str], str]] = []
+        message: Optional[str] = None
+        found = False
+        for entry in turn:
+            if entry.get("type") != "assistant":
+                continue
+            for call_id, _name, command in _tool_calls(entry):
+                if call_id == tool_use_id:
+                    found = True
+                    message = _message_id(entry)
+                    break
+                if command is not None and phase_mode(command) is not None:
+                    earlier.append((_message_id(entry), call_id))
+            if found:
+                break
+        if not found:
+            return False
+        siblings = [call_id for owner, call_id in earlier
+                    if message is not None and owner == message]
+        if not siblings:
+            return True
+        answered = {
+            call_id
+            for entry in turn if entry.get("type") == "user"
+            for call_id, _text in _results(entry)
+        }
+        return all(call_id in answered for call_id in siblings)
+
+    return settled
 
 
 def deny_reason(tool: str, mode: str) -> str:
     """What the model reads when its scheduling call is refused."""
     return (
-        f"multi-llm: {tool} is refused while the {mode} phase you started in "
-        "this session is still running. Do not schedule a wakeup, a cron job "
-        "or a loop to come back to it, and never schedule a phase command to "
-        "run again: a scheduled prompt keeps a headless session open after its "
+        f"multi-llm: {tool} is refused while the {mode} phase you started "
+        "has not printed its next step in this session. Do not schedule a "
+        "wakeup, a cron job or a loop to come back to it, and never schedule "
+        "a phase command to run again: a scheduled prompt keeps a headless "
+        "session open after its "
         "last reply, and when it fires the phase runs a second time. Keep "
         "waiting for the phase's subagents (or the dispatcher command you ran "
         "in the background) in this session: each one's completion "
@@ -215,8 +347,17 @@ def check(hook: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
     path = Path(transcript)
     if not path.is_file():
+        # hooks/wakeup-check.sh already waited for the file to be written.
         return None
-    mode = phase_in_flight(report_check.read_turn(path, partial_tail=True))
+    tool_use_id = hook.get("tool_use_id")
+    # Read once the call being decided is on file, or, when the input names
+    # no call, once the file stopped growing.
+    turn = report_check.settled_turn(
+        path,
+        call_on_file(tool_use_id)
+        if isinstance(tool_use_id, str) and tool_use_id else None,
+    )
+    mode = phase_in_flight(turn)
     if mode is None:
         return None
     return {"hookSpecificOutput": {
