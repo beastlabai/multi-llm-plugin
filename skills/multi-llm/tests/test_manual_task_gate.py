@@ -281,6 +281,58 @@ class TestTheExecutorLegStops:
         resume = lookup["user_resume"]
         assert "error_line" not in resume and "error_beside_section" not in resume
 
+    def _detached_poll(self, repo, capsys, route=None):
+        """The gate's stop as a detached run records it, then the terminal
+        `status --view run` poll a tool route (or a shell) makes of it."""
+        from utils import run_status, status_file
+
+        _code, _out, _err, result = self._stop(repo, capsys)
+        phase_dir = output_dir_path(repo.plan) / "implement"
+        progress = json.loads((phase_dir / ".status.json").read_text())["progress"]
+        status_file.claim_run(str(phase_dir), {
+            "run_id": "run-gate-0028", "state": "failed", "exit_code": 3,
+            "error": result["error"], "detached": True, "mode": "implement",
+            "started_at": "2026-10-09T10:00:00", "host": "codex"})
+        status_file.update_status(str(phase_dir), {"progress": progress})
+        capsys.readouterr()
+        if route:
+            repo.monkeypatch.setenv("MULTI_LLM_ROUTE", route)
+        ctx = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            code = run_status.main([
+                "--plan-file", str(repo.plan), "--view", "run", "--phase",
+                "implement", "--host", "codex"])
+            payload = ctx.payload(code)
+        finally:
+            cli_common.deactivate_result()
+        return code, payload, capsys.readouterr().out
+
+    def test_a_tool_routes_poll_leaves_the_gates_resume_to_the_section(
+            self, repo, capsys):
+        """The merge of fix round 28: the terminal poll's notice (and the
+        text a tool route reads) ended the manual-tasks line with "this
+        command records it done and runs them: … --resume --human-task
+        T001=done", the very resume the stop's section gives (`--blocked`):
+        the way on twice, run 12's #5 again. It names the tasks and leaves
+        the command to the section."""
+        code, payload, out = self._detached_poll(repo, capsys, route="package")
+        assert code == 3, out
+        notice = payload.get("notice") or ""
+        assert "manual tasks left for you: T001 Create the module" in notice, notice
+        assert "--human-task T001=done" not in notice, notice
+        assert "this command records it done" not in notice, notice
+        trailer = [line for line in out.splitlines()
+                   if line.startswith("workflow manual tasks left for you")]
+        assert trailer and "--human-task T001=done" not in trailer[0], trailer
+
+    def test_a_shells_text_keeps_the_command(self, repo, capsys):
+        code, payload, out = self._detached_poll(repo, capsys)
+        assert code == 3, out
+        trailer = next(line for line in out.splitlines()
+                       if line.startswith("workflow manual tasks left for you"))
+        assert trailer.endswith("--resume --human-task T001=done"), trailer
+        assert "--human-task T001=done" not in (payload.get("notice") or "")
+
     def test_status_offers_that_resume(self, repo, capsys):
         """`status --view run`'s resume block of the (detached) run, built
         from its own mirror, as `test_resume_why` reads it."""

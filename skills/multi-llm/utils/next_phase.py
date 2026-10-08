@@ -466,6 +466,18 @@ def manual_gate_flags(implement: Mapping[str, Any]) -> List[str]:
     return flags
 
 
+def gate_resume_closes_the_manual_tasks(implement: Mapping[str, Any]) -> bool:
+    """Whether the resume a stopped implement's section leads with
+    (:func:`_resume_flags` under ``manual_gate``) is the very command that
+    records the deferred manual tasks done: the gate's ids are every one
+    :func:`manual_close_ids` names (the merge of fix round 28). A stop's
+    notice then names the tasks and leaves that command to the section."""
+    if not implement.get("manual_gate"):
+        return False
+    ids = manual_gate_ids(implement)
+    return bool(ids) and ids == manual_close_ids(implement)
+
+
 def _manual_gate_names(implement: Mapping[str, Any], ids: Sequence[str]) -> str:
     """``T010 (Provision the checker fixture)``, the ids joined, at most
     :data:`GATE_IDS_SHOWN`, each with its recorded title cut."""
