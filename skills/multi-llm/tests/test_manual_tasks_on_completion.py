@@ -75,7 +75,7 @@ def close_command(prefix: str, plan: str, ids) -> str:
 def close_keys(prefix: str, plan: str, ids) -> dict:
     """`user_next_step`'s note and its command for *ids* (fix round 22: the
     command apart from the sentence leading into it)."""
-    return {"manual_tasks_note": np_.manual_close_lead(),
+    return {"manual_tasks_note": np_.manual_close_lead(len(ids)),
             "manual_tasks_command": close_command(prefix, plan, ids)}
 
 
@@ -84,8 +84,8 @@ def close_note(prefix: str, plan: str, ids) -> str:
     (fix round 14: how a deferred manual task is recorded done)."""
     answers = " ".join(f"--human-task {task_id}=done" for task_id in ids)
     command = f"{prefix}--implement {plan} --resume {answers}"
-    assert np_.manual_close_note(command).count(command) == 1
-    return np_.manual_close_note(command)
+    assert np_.manual_close_note(command, len(ids)).count(command) == 1
+    return np_.manual_close_note(command, len(ids))
 
 
 def _complete_plan(root: Path, *, titles=True, tasks=None) -> Path:
@@ -626,7 +626,8 @@ class TestImplementRecordsTheTitles:
         assert step["complete"] is False
         assert "--review-code" in step["command"]
         assert [task["id"] for task in step["manual_tasks"]] == ["T002", "T003"]
-        assert step["manual_tasks_note"] == np_.manual_close_lead()
+        # One task is closed (T003 runs on that resume): the singular note.
+        assert step["manual_tasks_note"] == np_.manual_close_lead(1)
         assert (
             "--implement " in step["manual_tasks_command"]
             and step["manual_tasks_command"].endswith("--resume --human-task T002=done")
