@@ -804,9 +804,15 @@ class TestABatchThatRanNothingThatFailedHasNoFailingCheck:
             [("npm test", "package.json defines scripts.test")]).split())
         assert (
             "Send `check` with `listed` even when you could run none of them. "
-            "When none of them failed (each one passed or was not run, or you "
-            "ran none), `passed` is `true` and `findings` is `[]`, unless "
-            "another check you ran failed." in flat
+            "When none of them failed (each one passed or was not run), "
+            "`passed` is `true` and `findings` is `[]`, unless another check "
+            "you ran failed." in flat
+        )
+        # Fix round 26: a batch that ran no check at all says so with an
+        # empty `ran` (read as no check, never a pass), `listed` beside it.
+        assert (
+            "When you ran no check at all, send `listed` beside the empty "
+            "`ran` and the `not_run` reason, as above." in flat
         )
         assert "chose not to run is `\"not run\"`: say why in `summary`; it is never a finding." in flat
 
