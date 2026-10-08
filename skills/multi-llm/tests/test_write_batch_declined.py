@@ -57,7 +57,8 @@ class TestTheContract:
         text = with_result_contract(kind, {"expected_ids": ["aa", "bb"]}, "P")
         assert '"declined": [{"id": "<id>", "reason": "<why you did not apply it>"}]' in text
         assert f"- `declined`: each {item} from that list you deliberately left unapplied" in text
-        assert "one the implementation record says was a deliberate decision" in text
+        # Fix round 26: the reason quotes what already decides the item.
+        assert "already decides against the" in text and "quote that decision" in text
         assert f"Every {item} goes in exactly one of `ids` and `declined`" in text
         assert "the run stops for a human to inspect it" in text
         # `no-op` covers a batch that declined everything and edited nothing.

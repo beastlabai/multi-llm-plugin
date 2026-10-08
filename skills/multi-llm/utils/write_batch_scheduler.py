@@ -3494,15 +3494,27 @@ def with_result_contract(
         # Fix round 18 (Codex racing run 7, apply-code-fixes 08): a batch
         # left a fix out on purpose, said so in `notes`, could not say so in
         # the contract, and stopped as a partial application on every resume.
+        # Fix round 26 (live run 11, Codex decline fixture): a fix the plan
+        # forbids outright ("Do not add a clamp …") was declined as "requires
+        # a plan decision". The reason now names and quotes the decision
+        # that already decides it, and says "needs a plan decision" only
+        # when nothing does.
+        sources = (
+            "the plan, its task list or the implementation record"
+            if item == "fix" else "the plan or its task list"
+        )
         id_lines = (
             f"- `ids`: the ids of the {plural} you applied **or found already "
             f"applied by a prior batch**, from this list (numbered in the "
             f"order they appear above): {listed}.\n"
             f"- `declined`: each {item} from that list you deliberately left "
-            f"unapplied — one the implementation record says was a deliberate "
-            f"decision, one that needs a plan decision, one you judge wrong "
-            f"for this code — as `{{\"id\": \"<its id>\", \"reason\": "
+            f"unapplied, as `{{\"id\": \"<its id>\", \"reason\": "
             f"\"<why, in one sentence>\"}}`; `[]` when you applied every one. "
+            f"The reason says what decides it: when {sources} already decides "
+            f"against the {item} (a rule it states, a decision it records), "
+            f"name which one and quote that decision; when you judge the "
+            f"{item} wrong for this code, say why; say it needs a plan "
+            f"decision only when nothing there decides it. "
             f"Every {item} goes in exactly one of `ids` and `declined`: one "
             f"left out of both reads as a {item} you meant to apply and did "
             f"not finish, and the run stops for a human to inspect it."
