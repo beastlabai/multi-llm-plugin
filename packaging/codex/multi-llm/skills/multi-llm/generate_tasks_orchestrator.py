@@ -363,7 +363,7 @@ def stale_result_problems(result_path: str) -> List[str]:
     """
     import copy
 
-    from utils.subagent_executor import normalize_result
+    from utils.subagent_executor import normalize_result, supply_result_version
 
     try:
         data = json.loads(Path(result_path).read_text(encoding="utf-8"))
@@ -371,6 +371,7 @@ def stale_result_problems(result_path: str) -> List[str]:
         return [f"it could not be read as JSON ({exc})"]
     data = copy.deepcopy(data)
     normalize_result(TASK_KIND, data)
+    supply_result_version(TASK_KIND, data)
     return validate_document(data)
 
 
@@ -473,15 +474,27 @@ def consume_document(plan_path: Path, result_path: str) -> int:
     # here, and the completed document goes back to disk before validation:
     # `update_plan_tasks` reads the *file*, and a later `task_is_complete`
     # re-validates the file, so what was validated is what is on disk.
-    from utils.subagent_executor import normalize_result
+    from utils.schema_validator import schema_version_supplied
+    from utils.subagent_executor import normalize_result, supply_result_version
 
     notes = normalize_result(TASK_KIND, data)
+    # Fix round 28 (live run 12, Claude Code racing 03): the host's copy of
+    # the subagent's reply left out "schema_version", which has one value,
+    # and this run failed schema validation on it.
+    version = supply_result_version(TASK_KIND, data)
+    if version:
+        print(
+            "[generate-tasks] "
+            + schema_version_supplied(RESULT_NAME, version)
+            + ", and the key was written into the file before validating."
+        )
     if notes:
         print(
             f"[generate-tasks] {RESULT_NAME} omitted {', '.join(notes)}; "
             f"supplied [] before validating (absent and empty mean the same "
             f"thing to every consumer of this document)."
         )
+    if notes or version:
         try:
             Path(result_path).write_text(
                 json.dumps(data, indent=2) + "\n", encoding="utf-8"

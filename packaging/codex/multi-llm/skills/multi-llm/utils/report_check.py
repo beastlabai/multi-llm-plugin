@@ -109,7 +109,12 @@ tasks listed. This checks the copy, and only the copy:
   (:data:`WHOLE_REPORT`), since the reply becomes the final message: racing
   run 5's block got back the `### Next Steps` section alone, and the run's
   result lost its report. The model gets one more turn: the hook script exits
-  at once when ``stop_hook_active`` is true, and so does this.
+  at once when ``stop_hook_active`` is true, and so does this. A block with a
+  ready section says once how the report ends: with that section, in
+  SKILL.md's words (:data:`SECTION_REQUEST`); the commands it holds are not
+  listed again, and no reason asks for a ``### Next Steps`` section (fix round
+  28, live run 12, Claude Code 03: it asked for both, and the resent report
+  added a heading of its own above the section).
 * The interactive UI labels a block "Stop hook error occurred" (a
   ``stop-hook-error`` notification in a ``stream-json`` stream). Measured on
   racing run 5 (Claude Code 2.1.289): it fired only in the round this hook
@@ -464,27 +469,83 @@ def _tasks_noun(ids: Sequence[str]) -> str:
     return ("task " if len(ids) == 1 else "tasks ") + ", ".join(ids)
 
 
-#: What a block reason adds when the lookup printed a ready section (fix round
-#: 26, live run 11, Claude Code 04: the reply the run ended on carried none of
-#: the section's commands). The section follows it verbatim.
-SECTION_REQUEST = (
-    "End it with the ready section the lookup printed between its "
-    f"{NEXT_STEP_MARKDOWN} and {NEXT_STEP_MARKDOWN_END} lines, printed as "
-    "given: its words and order, each command alone in its fenced block, each "
-    "why and note as plain text, no caption of your own. The section is:"
+#: How a ready section is printed (``modes.READY_SECTION_RULE``, word for
+#: word: the rule every route and SKILL.md carry, held to that constant by
+#: ``tests/test_block_reason_says_one_thing.py``; this module imports nothing
+#: of the skill's own).
+READY_SECTION_RULE = (
+    "Copy it word for word, never wrapped in a fenced block of your own (its "
+    "commands are fenced already), and say none of it twice: its whys, notes, "
+    "manual tasks and \"Workflow complete.\" appear only in it, never above it."
 )
 
-
-def _with_section(reason: str, block: Block) -> str:
-    """*reason*, then the ready section to print, when the block has one."""
-    if not block.section:
-        return reason
-    return f"{reason}\n\n{SECTION_REQUEST}\n\n{block.section}"
+#: How a block reason asks for the section the lookup printed (fix round 26,
+#: live run 11, Claude Code 04: the reply the run ended on carried none of
+#: the section's commands). It finishes :data:`WHOLE_REPORT`'s sentence and
+#: the section follows it verbatim. Fix round 28 (live run 12, Claude Code
+#: 03): the reason asked for "its `### Next Steps` section, with each
+#: command in its own fenced code block …" and then for the section "printed
+#: as given …, no caption of your own", and the resent report put a
+#: `### Next Steps` heading of its own above the section. A reason with a
+#: section now says how the report ends once, in SKILL.md's words.
+SECTION_REQUEST = (
+    "the ready section the lookup printed between its "
+    f"{NEXT_STEP_MARKDOWN} and {NEXT_STEP_MARKDOWN_END} lines, copied as it is "
+    "(its words and order, each command alone in its fenced block, each why "
+    "and note plain text, the manual tasks it lists included, no caption of "
+    "your own), in place of any next step your last message gave. "
+    f"{READY_SECTION_RULE} Do not rebuild, shorten, re-quote or "
+    "rephrase a command, and do not run one: each is for the user to type. "
+    "The section is:"
+)
 
 
 def block_reason(block: Block, missing: Sequence[str]) -> str:
     """The text the model reads when the hook blocks its stop."""
-    return _with_section(_block_reason(block, missing), block)
+    if block.section:
+        return _section_reason(block, missing)
+    return _block_reason(block, missing)
+
+
+def _section_reason(block: Block, missing: Sequence[str]) -> str:
+    """A block with a ready section: what the report lacks, then the section
+    to end the whole report with (:data:`SECTION_REQUEST`), and no other
+    description of the report's end. The section already holds every command,
+    why, manual task and note in their order, so nothing of it is said twice."""
+    commands = block.commands()
+    lost = [item for item in missing if item in commands]
+    manual_ids = {task_id for task_id, _title in block.manual}
+    dropped = [item for item in missing if item in manual_ids]
+    noun = "command" if len(lost) == 1 else "commands"
+    if block.complete:
+        printed = WORKFLOW_COMPLETE
+    else:
+        printed = "the next step"
+    if block.manual:
+        printed += (
+            " with the tasks implement deferred to the user" if block.complete
+            else " and, after it, the tasks implement deferred to the user")
+    lacks = []
+    if block.complete and COMPLETE_SENTENCE in missing:
+        lacks.append(f'does not say "{COMPLETE_SENTENCE}"')
+    if lost:
+        lacks.append(f"does not carry the {noun} below exactly")
+    if dropped:
+        lacks.append(f"does not name the {_tasks_noun(dropped)}")
+    if not lacks:  # pragma: no cover - every missing item is one of the three
+        lacks.append("does not carry it")
+    parts = [
+        "multi-llm report check: the last phase result in this run printed "
+        f"{printed}, and your final message "
+        + (", ".join(lacks[:-1]) + " and " if len(lacks) > 1 else "")
+        + f"{lacks[-1]}."
+    ]
+    if lost:
+        parts.append(f"Missing {noun}:")
+        parts.extend(f"```\n{command}\n```" for command in lost)
+    parts.append(f"{WHOLE_REPORT} {SECTION_REQUEST}")
+    parts.append(block.section or "")
+    return "\n\n".join(parts)
 
 
 def _block_reason(block: Block, missing: Sequence[str]) -> str:
@@ -493,9 +554,8 @@ def _block_reason(block: Block, missing: Sequence[str]) -> str:
             return (
                 "multi-llm report check: the last phase result in this run printed "
                 f"{WORKFLOW_COMPLETE}, and your final message does not say "
-                f'"{COMPLETE_SENTENCE}". {WHOLE_REPORT} its '
-                f'`### Next Steps` section saying "{COMPLETE_SENTENCE}" and '
-                "carrying no multi-llm command."
+                f'"{COMPLETE_SENTENCE}". {WHOLE_REPORT} the words '
+                f'"{COMPLETE_SENTENCE}" and no multi-llm command.'
             )
         # The reply replaces the final message, so it is told the whole
         # section again, the tasks it already named included.
@@ -514,9 +574,8 @@ def _block_reason(block: Block, missing: Sequence[str]) -> str:
             "multi-llm report check: the last phase result in this run printed "
             f"{WORKFLOW_COMPLETE} with the tasks implement deferred to the "
             f"user, and your final message {' and '.join(lacks)}. {WHOLE_REPORT} "
-            f"its `### Next Steps` section saying "
-            f'"{COMPLETE_SENTENCE}" and then listing each of these '
-            "tasks, its id and title, as the user's to do, carrying no "
+            f'the words "{COMPLETE_SENTENCE}" and then each of these '
+            "tasks, its id and title, as the user's to do, with no "
             + ("other " if block.note else "")
             + "multi-llm command:\n\n" + _manual_list(block)
         )
@@ -537,7 +596,7 @@ def _block_reason(block: Block, missing: Sequence[str]) -> str:
             "multi-llm report check: the last phase result in this run printed "
             "the next step and, after it, the tasks implement deferred to the "
             f"user, and your final message does not name the {_tasks_noun(dropped)}. "
-            f"{WHOLE_REPORT} its `### Next Steps` section, with each command "
+            f"{WHOLE_REPORT} the next step: each command "
             "below in its own fenced code block, copied character for character "
             "as before. " + tasks_after,
         ]
@@ -549,8 +608,8 @@ def _block_reason(block: Block, missing: Sequence[str]) -> str:
     parts = [
         "multi-llm report check: the last phase result in this run printed "
         f"the next step, and your final message does not carry the {noun} "
-        f"below exactly. {WHOLE_REPORT} its `### Next Steps` "
-        "section, with each command in its own fenced code block, "
+        f"below exactly. {WHOLE_REPORT} the next step: "
+        "each command in its own fenced code block, "
         "copied character for character from its [NEXT_COMMAND], "
         "[NEXT_COMMAND_OPTIONAL], [NEXT_COMMAND_ANSWERS] or "
         "[MANUAL_TASK_COMMAND] line (optional "

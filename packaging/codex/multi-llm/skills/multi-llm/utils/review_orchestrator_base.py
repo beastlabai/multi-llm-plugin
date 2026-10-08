@@ -7310,6 +7310,37 @@ def _ensure_state_file(state) -> None:
         state.save()
 
 
+def already_completed_lines(mode_word: str, phase_dir: Union[str, Path]) -> List[str]:
+    """What a re-run of a review phase the plan already completed says: that
+    it is done and nothing ran, where its results are, and the two ways to
+    run it again (fix round 28, live run 12 #11: OpenCode 01f retried a
+    review-plan its killed first attempt had finished and got "ERROR: Phase
+    'review-plan' has already been completed … Use --force", which the host
+    relayed as an error block). Nothing failed: the exit is 2, "nothing to
+    do / phase already complete", which every route reads as a success, and
+    the next phase is the result's ``user_next_step`` as on any exit 2."""
+    shown = os.path.relpath(str(phase_dir))
+    if shown == os.pardir or shown.startswith(os.pardir + os.sep):
+        shown = str(phase_dir)
+    return [
+        f"{mode_word} has already been completed for this plan, so nothing "
+        f"ran this time; its results are in {shown}.",
+        "To run it again from the start, add --force to the command; to "
+        "rebuild its report from the results already there, add --reaggregate.",
+    ]
+
+
+def report_already_completed(mode_word: str, phase_dir: Union[str, Path]) -> int:
+    """Print :func:`already_completed_lines`, carry them as the result's
+    ``notice`` (the line every route relays as plain text above the next
+    step) and return exit 2."""
+    lines = already_completed_lines(mode_word, phase_dir)
+    for line in lines:
+        print(line)
+    cli_common.add_notice(" ".join(lines))
+    return cli_common.EXIT_NOTHING_TO_DO
+
+
 async def run_review_orchestration(
     args: argparse.Namespace,
     phase_name: str,
@@ -7474,10 +7505,7 @@ async def run_review_orchestration(
     # model runs, so the record of the run exists as soon as the run does.
     _ensure_state_file(state_guard)
     if state_guard.is_phase_completed(phase_name) and not args.force:
-        print(f"ERROR: Phase '{phase_name}' has already been completed for this plan.")
-        print(f"Output directory: {phase_dir}")
-        print("Use --force to re-run, or --reaggregate to reprocess existing results.")
-        sys.exit(2)
+        sys.exit(report_already_completed(phase_name, phase_dir))
     elif args.force and state_guard.is_phase_completed(phase_name):
         state_guard.state.get("phases_completed", {}).pop(phase_name, None)
         state_guard.save()

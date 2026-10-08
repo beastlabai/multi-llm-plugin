@@ -182,20 +182,46 @@ class ManualTask:
     id: str
     title: Optional[str] = None
     waits_on: Optional[str] = None
+    #: A manual task that comes after code tasks implement has not run yet
+    #: (fix round 28, live run 12, Codex racing 06: T008 and T009 depend on
+    #: code the manual T010 held back): those code tasks, by id. Such a task is not in
+    #: the command that records manual tasks done until they have run.
+    after: Tuple[str, ...] = ()
 
     def to_dict(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"id": self.id, "title": self.title}
         if self.waits_on:
             payload["waits_on"] = self.waits_on
+        if self.after:
+            payload["after"] = list(self.after)
         return payload
 
     def line(self) -> str:
         """``<id> <title>``, or the id alone when no title was recorded; a
-        task that waits on another says so after it."""
+        task that waits on another says so after it, and a manual task that
+        comes after code not run yet says that."""
         text = f"{self.id} {self.title}" if self.title else self.id
         if self.waits_on:
             text += f" {waits_on_note(self.waits_on)}"
+        elif self.after:
+            text += f" {after_code_note(self.after)}"
         return text
+
+
+#: How many code task ids :func:`after_code_note` names before "and N more".
+AFTER_IDS_SHOWN = 5
+
+
+def after_code_note(task_ids: Sequence[str]) -> str:
+    """What a manual task that comes after code not run yet says after its
+    title (fix round 28): ``(after T001: do it once implement has run that
+    task)``."""
+    ids = [str(task_id) for task_id in task_ids]
+    shown = ids[:AFTER_IDS_SHOWN]
+    named = ", ".join(shown) + (
+        f" and {len(ids) - len(shown)} more" if len(ids) > len(shown) else "")
+    which = "that task" if len(ids) == 1 else "those tasks"
+    return f"(after {named}: do it once implement has run {which})"
 
 
 def waits_on_note(task_id: str) -> str:
@@ -276,6 +302,13 @@ class NextPhase:
     #: On a resume of a stopped phase (fix round 24): the line the section
     #: opens with (:func:`resume_lead`), in ``markdown`` only.
     lead: Optional[str] = None
+    #: Another way on instead of the primary, each with its why above its
+    #: command, rendered after the primary and its optional entries (fix
+    #: round 28, live run 12, Codex racing 06: implement left code tasks
+    #: waiting on a manual task, and review-code of what ran so far is the
+    #: other way on beside the resume that runs them). Carried as
+    #: ``user_next_step.instead``; the block prints each as an optional pair.
+    instead: Tuple[OptionalStep, ...] = ()
 
     def to_dict(self) -> Dict[str, Any]:
         """The ``user_next_step`` value (§2.1's outcome table).
@@ -299,6 +332,8 @@ class NextPhase:
             payload["why"] = self.why
         if self.optional_before:
             payload["optional_before"] = [step.to_dict() for step in self.optional_before]
+        if self.instead:
+            payload["instead"] = [step.to_dict() for step in self.instead]
         if self.answers:
             payload["answers"] = [step.to_dict() for step in self.answers]
         if self.manual_tasks:
@@ -356,10 +391,15 @@ def _manual_tasks(
     def task_id(value: Any) -> Optional[str]:
         return str(value) if value and _TASK_ID.fullmatch(str(value)) else None
 
+    def after_ids(value: Any) -> Tuple[str, ...]:
+        if not isinstance(value, (list, tuple)):
+            return ()
+        return tuple(str(item) for item in value if task_id(item))
+
     manual = tuple(
         ManualTask(
             str(entry.get("id")), entry.get("title") or None,
-            task_id(entry.get("waits_on")),
+            task_id(entry.get("waits_on")), after_ids(entry.get("after")),
         )
         for entry in entries
         if isinstance(entry, Mapping) and task_id(entry.get("id"))
@@ -367,8 +407,130 @@ def _manual_tasks(
     note = command = None
     ids = manual_close_ids(implement)
     if manual and ids and template is not None and plan_arg is not None:
-        note, command = manual_close_lead(len(ids)), close_command(template, plan_arg, ids)
+        note = manual_close_lead(len(ids), waiting=manual_waiting_count(implement, ids))
+        command = close_command(template, plan_arg, ids)
     return manual, note, command
+
+
+def manual_waiting_count(
+    implement: Mapping[str, Any], ids: Optional[Sequence[str]] = None,
+) -> int:
+    """How many code tasks wait on the manual tasks *ids* (every one the
+    workflow payload's ``implement`` entry names, by default): the
+    ``manual_waiting`` map ``check_workflow_prerequisites`` records (fix
+    round 28), each code task once."""
+    waiting = implement.get("manual_waiting")
+    if not isinstance(waiting, Mapping):
+        return 0
+    wanted = None if ids is None else {str(item) for item in ids}
+    codes = set()
+    for manual, tasks in waiting.items():
+        if wanted is not None and str(manual) not in wanted:
+            continue
+        if isinstance(tasks, (list, tuple)):
+            codes.update(str(item) for item in tasks if _TASK_ID.fullmatch(str(item)))
+    return len(codes)
+
+
+#: How many manual tasks a gate's why names before "and N more".
+GATE_IDS_SHOWN = 3
+#: A manual task's title, cut to this many characters in a gate's why.
+GATE_TITLE_CHARS = 80
+
+
+def manual_gate_ids(implement: Mapping[str, Any]) -> List[str]:
+    """The manual tasks code tasks wait on that the user can do now: the
+    workflow payload's ``manual_close_ids`` that its ``manual_waiting`` map
+    names (fix round 28). Recording them done is what lets implement run
+    the code tasks they hold."""
+    waiting = implement.get("manual_waiting")
+    if not isinstance(waiting, Mapping):
+        return []
+    return [
+        task_id for task_id in manual_close_ids(implement)
+        if isinstance(waiting.get(task_id), (list, tuple)) and waiting.get(task_id)
+    ]
+
+
+def manual_gate_flags(implement: Mapping[str, Any]) -> List[str]:
+    """``--resume --human-task <id>=done …`` for :func:`manual_gate_ids`,
+    or ``[]`` when no code task waits on a manual task the user can do now
+    (fix round 28): the one resume that runs them, recording only those
+    manual tasks done, never a later one that comes after code not run."""
+    ids = manual_gate_ids(implement)
+    if not ids:
+        return []
+    flags = [RESUME_FLAG]
+    for task_id in ids:
+        flags += ["--human-task", f"{task_id}=done"]
+    return flags
+
+
+def _manual_gate_names(implement: Mapping[str, Any], ids: Sequence[str]) -> str:
+    """``T010 (Provision the checker fixture)``, the ids joined, at most
+    :data:`GATE_IDS_SHOWN`, each with its recorded title cut."""
+    from .text_clip import clip
+
+    titles = {
+        str(entry.get("id")): entry.get("title")
+        for entry in implement.get("manual_tasks") or ()
+        if isinstance(entry, Mapping)
+    }
+    named = []
+    for task_id in ids[:GATE_IDS_SHOWN]:
+        title = titles.get(task_id)
+        named.append(
+            f"{task_id} ({clip(plain_line(title), GATE_TITLE_CHARS)})"
+            if title else task_id)
+    rest = len(ids) - len(named)
+    return ", ".join(named) + (f" and {rest} more" if rest > 0 else "")
+
+
+def manual_gate_why(implement: Mapping[str, Any], *, stopped: bool = True) -> Optional[str]:
+    """What the resume :func:`manual_gate_flags` spells does (fix round 28,
+    live run 12, Codex racing 06), one plain line, or ``None``.
+
+    *stopped*: implement is not finished and a plain resume runs nothing
+    (``manual_gate`` on the payload); else it finished with these code tasks
+    left waiting."""
+    ids = manual_gate_ids(implement)
+    if not ids:
+        return None
+    count = manual_waiting_count(implement, ids)
+    tasks = "the code task" if count == 1 else f"the {count} code tasks"
+    that_wait = f"{tasks} that {'waits' if count == 1 else 'wait'}"
+    names = _manual_gate_names(implement, ids)
+    if len(ids) == 1:
+        task_id = ids[0]
+        held = (
+            f"Implement can run no code task until manual task {names} is "
+            f"recorded done, so a plain resume runs nothing."
+            if stopped else
+            f"Implement has not run {that_wait} on manual task {names}."
+        )
+        return (
+            f"{held} Once you have done {task_id} by hand, this command records "
+            f"it done and runs {that_wait} on it."
+        )
+    held = (
+        f"Implement can run no code task until a manual task is recorded done "
+        f"({names}), so a plain resume runs nothing."
+        if stopped else
+        f"Implement has not run {that_wait} on manual tasks {names}."
+    )
+    return (
+        f"{held} Once you have done them by hand, this command records them "
+        f"done and runs {that_wait} on them; leave out the --human-task "
+        f"answer of any you have not done."
+    )
+
+
+def instead_why(phase: str) -> str:
+    """The why above the way on that stays beside the resume running code
+    tasks left waiting on a manual task (fix round 28)."""
+    if phase == "code-review":
+        return "Or review the code implement has run so far:"
+    return "Or go on with the workflow on the code implement has run so far:"
 
 
 def manual_close_ids(implement: Mapping[str, Any]) -> List[str]:
@@ -419,7 +581,7 @@ def close_command(template: str, plan_arg: str, task_ids: Sequence[str]) -> str:
     return template.replace(ARGS_SLOT, args)
 
 
-def manual_close_lead(count: Optional[int] = None) -> str:
+def manual_close_lead(count: Optional[int] = None, *, waiting: int = 0) -> str:
     """The sentence that leads into the command closing deferred manual
     tasks (:func:`close_command`), ending with a colon: what
     ``user_next_step.manual_tasks_note`` and ``[MANUAL_TASK_NOTE]`` say, the
@@ -430,7 +592,30 @@ def manual_close_lead(count: Optional[int] = None) -> str:
     tasks … keeping a --human-task answer only for each task you did") read
     wrong, and the host rewrote it, dropping the clause; one task gets the
     singular sentence, which has nothing to keep or drop.
+
+    *waiting* is how many code tasks wait on them (fix round 28, live run
+    12, Codex racing 06: "No later phase waits for these manual tasks" beside
+    nine code tasks waiting on T010): implement has not run those, and the
+    command that records the manual task done runs them, so the sentence
+    says that instead.
     """
+    if waiting:
+        tasks = (
+            "the code task that waits" if waiting == 1
+            else f"the {waiting} code tasks that wait"
+        )
+        if count == 1:
+            return (
+                f"Implement has not run {tasks} on this manual task. Once you "
+                f"have done it by hand, this command records it done and runs "
+                f"{'it' if waiting == 1 else 'them'}:"
+            )
+        return (
+            f"Implement has not run {tasks} on these manual tasks. Once you "
+            "have done one by hand, this command records it done and runs what "
+            "no longer waits; keep a --human-task answer only for each task you "
+            "did:"
+        )
     if count == 1:
         return (
             "No later phase waits for this manual task. Once you have done it "
@@ -443,16 +628,18 @@ def manual_close_lead(count: Optional[int] = None) -> str:
     )
 
 
-def manual_close_note(command: str, count: Optional[int] = None) -> str:
+def manual_close_note(
+    command: str, count: Optional[int] = None, *, waiting: int = 0,
+) -> str:
     """The one plain line that says how to close deferred manual tasks, for a
     surface that is one line of text (a summary, ``status``'s trailer).
 
     The command ends the line, with nothing after it (live run 8, Codex
     racing 08: the advice used to follow it in parentheses, and the host
-    copied that into the command's fence). *count* as in
+    copied that into the command's fence). *count* and *waiting* as in
     :func:`manual_close_lead`.
     """
-    return f"{manual_close_lead(count)} {command}"
+    return f"{manual_close_lead(count, waiting=waiting)} {command}"
 
 
 # ---------------------------------------------------------------------------
@@ -802,19 +989,41 @@ def next_phase_commands(
     def warning_of(phase: str) -> Optional[str]:
         return (phases.get(phase) or {}).get("warning") or None
 
+    implement_entry: Mapping[str, Any] = phases.get("implement") or {}
+    # Fix round 28 (live run 12, Codex racing 06): while every code task
+    # implement has left waits on a manual task not recorded done, its plain
+    # resume runs nothing; the resume records the manual tasks the user can
+    # do now done, and only those.
+    gate_flags = (
+        manual_gate_flags(implement_entry)
+        if implement_entry.get("manual_gate") else []
+    )
+
     def command_answer(answer: NextPhase) -> NextPhase:
         # Fix round 16: a command answer names the deferred manual tasks
         # and how to record them done, as the complete answer does. The one
         # place a command answer gets them (fix round 17: `emit_answer` had a
         # second writer for `--after implement`, and the two packages that
         # wrote them disagreed on what the answer carries).
-        return _with_manual_tasks(answer, phases, template=template, plan_arg=plan_arg)
+        from dataclasses import replace as _replace
+
+        if (answer.phase == "implement" and gate_flags and not answer.why
+                and status_of("implement") == "in_progress"):
+            answer = _replace(answer, why=manual_gate_why(implement_entry))
+        answer = _with_manual_tasks(answer, phases, template=template, plan_arg=plan_arg)
+        if (answer.manual_tasks_command
+                and answer.manual_tasks_command == answer.command):
+            # Fix round 28: the command already leads the section.
+            answer = _replace(answer, manual_tasks_note=None, manual_tasks_command=None)
+        return answer
 
     def command_for(phase: str) -> str:
         mode_word = _mode_word(modes, phase)
         args = f"--{mode_word} {quote_plan_arg(plan_arg)}"
         if status_of(phase) == "in_progress":
             args += f" {RESUME_FLAG}"
+            if phase == "implement" and gate_flags:
+                args += " " + " ".join(gate_flags[1:])
         return template.replace(ARGS_SLOT, args)
 
     def optional_steps(span: List[str]) -> Tuple[OptionalStep, ...]:
@@ -928,6 +1137,25 @@ def next_phase_commands(
         # An optional phase never keeps a workflow open, and one the walk did
         # not reach is never suggested: no `optional_before` on completion.
         return _complete(phases, template=template, plan_arg=plan_arg)
+    waiting_flags = manual_gate_flags(implement_entry) if start == "implement" else []
+    if waiting_flags:
+        # Fix round 28 (live run 12, Codex racing 06): implement finished
+        # with code tasks still waiting on a manual task the user can do
+        # now. The section leads with that resume, which runs them; the
+        # next phase stays the other way on, over what ran so far.
+        return command_answer(NextPhase(
+            phase="implement",
+            command=template.replace(
+                ARGS_SLOT,
+                f"--{_mode_word(modes, 'implement')} {quote_plan_arg(plan_arg)} "
+                + " ".join(waiting_flags)),
+            why=manual_gate_why(implement_entry, stopped=False),
+            instead=(OptionalStep(
+                phase=primary, command=command_for(primary),
+                why=instead_why(primary),
+            ),),
+            warning=warning_of("implement"),
+        ))
     return command_answer(NextPhase(
         phase=primary,
         command=command_for(primary),
@@ -1120,8 +1348,23 @@ def resume_command(
     phases: Dict[str, Dict[str, Any]] = workflow.get("phases") or {}
     if (phases.get(mode.phase) or {}).get("status") != "in_progress":
         return None
-    args = f"--{mode.name} {quote_plan_arg(plan_arg)} {RESUME_FLAG}"
+    args = " ".join(
+        [f"--{mode.name}", quote_plan_arg(plan_arg)] + _resume_flags(phases, mode.phase))
     return template.replace(ARGS_SLOT, args)
+
+
+def _resume_flags(phases: Mapping[str, Mapping[str, Any]], phase: str) -> List[str]:
+    """The flags after the plan in *phase*'s resume: ``--resume``, and for an
+    implement whose every code task left waits on a manual task the user can
+    do now, that task's ``--human-task <id>=done`` too (fix round 28, live run
+    12, Codex racing 06: a plain resume of it runs nothing)."""
+    if phase == "implement":
+        implement = phases.get("implement") or {}
+        if implement.get("manual_gate"):
+            flags = manual_gate_flags(implement)
+            if flags:
+                return flags
+    return [RESUME_FLAG]
 
 
 # ---------------------------------------------------------------------------
@@ -1162,7 +1405,7 @@ def render_next_phase_lines(answer: NextPhase) -> List[str]:
     if answer.why:
         lines.append(f"{NEXT_COMMAND_WHY_MARKER} {plain_line(answer.why)}")
     lines.append(f"{NEXT_COMMAND_MARKER} {answer.command}")
-    for step in answer.optional_before:
+    for step in answer.optional_before + answer.instead:
         lines.append(f"{NEXT_COMMAND_OPTIONAL_WHY_MARKER} {plain_line(step.why)}")
         lines.append(f"{NEXT_COMMAND_OPTIONAL_MARKER} {step.command}")
     for step in answer.answers:
@@ -1250,6 +1493,8 @@ def render_next_step_markdown(answer: "NextPhase") -> str:
             blocks.append(OPTIONAL_LEAD)
             for step in answer.optional_before:
                 blocks.extend([markdown_text(step.why), fenced_command(step.command)])
+        for step in answer.instead:
+            blocks.extend([markdown_text(step.why), fenced_command(step.command)])
         if answer.answers:
             blocks.append(ANSWERS_LEAD)
         for step in answer.answers:
@@ -1447,24 +1692,33 @@ def emit_answer(
         )
         if answer is None:
             return None
+        plain_resume = str(answer.command or "").endswith(f" {RESUME_FLAG}")
+        # Fix round 28: the resume of an implement every code task of which
+        # waits on a manual task carries that task's `=done` answer, and its
+        # why is the answer's own (`next_phase_commands`).
+        gated_resume = (
+            not plain_resume and answer.why is not None and not answer.instead
+            and f" {RESUME_FLAG} --human-task " in str(answer.command or "")
+        )
         if (
             with_answers and not answer.complete and answer.phase == "implement"
-            and str(answer.command or "").endswith(f" {RESUME_FLAG}")
+            and (plain_resume or gated_resume)
         ):
             # `util next-command` only (with_answers): a stopped implement's
             # answers, beside its resume (fix round 14; each alone too since
             # fix round 20).
             from dataclasses import replace as _replace
 
-            answers = implement_answers(
-                plan_arg, host_id, route, plan_path=plan_path,
-            )
-            if answers:
-                answer = _replace(answer, answers=answers)
-            # Fix round 22: and what the plain resume does.
-            why = implement_resume_why(plan_arg, plan_path=plan_path)
-            if why:
-                answer = _replace(answer, why=why)
+            if plain_resume:
+                answers = implement_answers(
+                    plan_arg, host_id, route, plan_path=plan_path,
+                )
+                if answers:
+                    answer = _replace(answer, answers=answers)
+                # Fix round 22: and what the plain resume does.
+                why = implement_resume_why(plan_arg, plan_path=plan_path)
+                if why:
+                    answer = _replace(answer, why=why)
             # Fix round 24: under the line the tool routes' section opens with.
             answer = _replace(answer, lead=resume_lead(answer.phase))
             # Fix round 18 (live run 7, Claude Code stop 01): the native
@@ -1527,8 +1781,20 @@ def emit_resume(
         if not _state_file(os.path.abspath(str(source))).is_file():
             return None
         route = resolve_route(host_id, stderr=err, recorded=recorded_route)
+        # Read once here only for a phase whose resume reads it (fix round
+        # 28: an implement's resume also carries a manual task's answer);
+        # generate-tasks' plain re-invoke reads its own status file.
+        from .subagent_tasks import PHASE_BY_WRITE_KIND
+
+        resumed = _skill_module("modes").resolve(mode_word)
+        workflow = (
+            _workflow_payload(Path(os.path.abspath(str(source))), host_id)
+            if resumed is not None and resumed.phase in PHASE_BY_WRITE_KIND.values()
+            else None
+        )
         command = resume_command(
             plan_arg, host_id, route, mode_word, plan_path=plan_path,
+            workflow=workflow,
         )
         if command is None:
             return None
@@ -1545,14 +1811,23 @@ def emit_resume(
         return None
     modes = _skill_module("modes")
     mode = modes.resolve(mode_word)
+    phases = (workflow or {}).get("phases") or {}
     resume: Dict[str, Any] = {
         "phase": mode.phase,
         "command": command,
         # The flags the command carries after the plan, so a tool route
         # offers this very command as its first `options` entry (fix round
         # 14: the first option and `resume_command` must be one command).
-        "flags": [] if mode.phase in RERUN_RESUME_PHASES else [RESUME_FLAG],
+        "flags": (
+            [] if mode.phase in RERUN_RESUME_PHASES
+            else _resume_flags(phases, mode.phase)
+        ),
     }
+    # Fix round 28: a resume that records a manual task done says why.
+    gate_why = (
+        manual_gate_why(phases.get("implement") or {})
+        if len(resume["flags"]) > 1 else None
+    )
     try:
         answers = resume_answers(
             plan_arg, host_id, route, mode_word, plan_path=plan_path,
@@ -1564,12 +1839,24 @@ def emit_resume(
         resume["answers"] = answers
         resume["answers_text"] = render_resume_answers(answers)
     # Fix round 22: what the plain resume does, as each answer says.
-    why = stop_resume_why_on_record(plan_arg if plan_path is None else plan_path, mode_word)
+    why = gate_why or stop_resume_why_on_record(
+        plan_arg if plan_path is None else plan_path, mode_word)
     if why:
         resume["why"] = why
     # Fix round 24: all of it as the report's closing section, ready to copy.
     resume["markdown"] = render_resume_markdown(
         mode.name if mode is not None else mode_word, command, why, answers or [])
+    # Fix round 28 (live run 12 #5): the stop's own line as recorded, and the
+    # same line without the ways forward this section carries, which the
+    # servers relay in its place beside the section.
+    try:
+        lines = stop_headlines_on_record(
+            plan_arg if plan_path is None else plan_path, mode_word)
+    except Exception as exc:  # noqa: BLE001 - advisory: the resume still stands
+        print(lookup_failure_line(exc), file=err)
+        lines = None
+    if lines is not None:
+        resume["error_line"], resume["error_beside_section"] = lines
     cli_common.record_user_resume(resume)
     return command
 
@@ -1611,6 +1898,60 @@ def stop_answers_on_record(
         if flags is not None and why is not None:
             answers.append({"flags": flags, "why": why})
     return answers
+
+
+def stop_headlines_on_record(
+    plan_path: Union[str, Path], mode_word: str,
+) -> Optional[Tuple[str, str]]:
+    """``(headline, beside_section)`` of the phase's last stop, as it
+    recorded them (``progress.write_subagents.stop``: ``headline`` and
+    ``write_batch_scheduler.HEADLINE_BESIDE_SECTION_KEY``), or ``None``
+    (fix round 28, live run 12 #5).
+
+    The second is the first without the ways forward the stop's resume
+    section carries: what stopped, what it reported, what did not run, the
+    fixes only the user can make and the tests line. ``util next-command
+    --blocked`` hands both to the tool routes, which relay the second in the
+    result's ``error`` while that ``error`` is still the first, word for
+    word, so a stop the record does not describe is never re-worded. Each
+    must be one plain line within ``cli_common.ERROR_MAX_CHARS``, and every
+    answer the stop recorded must have passed :func:`stop_answers_on_record`
+    (the section lists all of them), else ``None``: the folder is writable
+    by every jailed batch.
+    """
+    from . import cli_common
+    from .output_handler import phase_dir_path
+    from .status_file import read_status
+    from .write_batch_scheduler import HEADLINE_BESIDE_SECTION_KEY
+
+    modes = _skill_module("modes")
+    mode = modes.resolve(mode_word)
+    if mode is None or not mode.phase:
+        return None
+    source = Path(os.path.abspath(str(plan_path)))
+    status = read_status(str(phase_dir_path(source, mode.phase)))
+    progress = status.get("progress") if isinstance(status, dict) else None
+    mirror = progress.get("write_subagents") if isinstance(progress, dict) else None
+    stop = mirror.get("stop") if isinstance(mirror, dict) else None
+    if not isinstance(stop, dict):
+        return None
+
+    def plain(value: Any) -> Optional[str]:
+        if (not isinstance(value, str) or not value.strip()
+                or len(value) > cli_common.ERROR_MAX_CHARS
+                or plain_line(value) != value):
+            return None
+        return value
+
+    headline = plain(stop.get("headline"))
+    beside = plain(stop.get(HEADLINE_BESIDE_SECTION_KEY))
+    if headline is None or beside is None or beside == headline:
+        return None
+    raw = stop.get("answers")
+    recorded = raw if isinstance(raw, list) else []
+    if len(stop_answers_on_record(source, mode_word)) != len(recorded):
+        return None
+    return headline, beside
 
 
 def recorded_answer_flags(flags: Any) -> Optional[List[str]]:

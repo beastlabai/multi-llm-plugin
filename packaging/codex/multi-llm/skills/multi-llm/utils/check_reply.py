@@ -15,10 +15,16 @@ costs one re-ask of the same subagent instead of a repair::
 
     util check-reply --tasks-file <phase>/validation_tasks.json [--task-id ID]
 
-For every task it prints one ``[REPLY_OK]`` or ``[REPLY_INVALID]`` line and exits
-1 when any is invalid. What it checks, per task:
+For every task it prints one ``[REPLY_OK]``, ``[REPLY_INVALID]`` or
+``[REPLY_MISSING]`` line and exits 1 when any is invalid. What it checks, per task:
 
-* the ``output_path`` file exists, is not empty and parses as JSON;
+* the ``output_path`` file exists, is not empty and parses as JSON. No file
+  at all is ``[REPLY_MISSING]``: a reply not written yet, which is what a
+  batch whose subagent is still running looks like, and never a bad reply to
+  re-ask, so on its own it leaves the exit 0 (fix round 28, live run 12,
+  Claude Code racing 01: the host checked every batch while wave 2's
+  subagents were still running and got three ``[REPLY_INVALID] … no reply
+  file`` lines and exit 1);
 * for a ``validation``/``revalidation`` task: the document is ``{"groups": [...]}``
   (a bare list is tolerated, as the merge tolerates it), every entry carries a
   ``status`` that is one of the three verdicts, and the entries cover the task's
@@ -97,10 +103,34 @@ def _objects_in(text: str) -> int:
             return count
 
 
+#: What a task with no reply on disk prints (fix round 28): the reply is not
+#: there yet, which is no failure and nothing to re-ask.
+MISSING_MARKER = "[REPLY_MISSING]"
+
+
+def _reply_path(task: Dict[str, Any], phase_dir: str) -> str:
+    return os.path.join(phase_dir, task["output_name"]) if task.get("output_name") \
+        else str(task.get("output_path") or "")
+
+
+def missing_reply_line(task: Dict[str, Any], phase_dir: str) -> Optional[str]:
+    """The ``[REPLY_MISSING]`` line for a task with nothing at its reply path,
+    or ``None`` when something is there (or the task names no path, which is
+    the task file's problem and stays ``[REPLY_INVALID]``)."""
+    path = _reply_path(task, phase_dir)
+    if not path or os.path.lexists(path):
+        return None
+    return (
+        f"{MISSING_MARKER} {task.get('task_id')}: no reply at {path} yet, as "
+        f"for a batch whose subagent has not returned. Once it returns, write "
+        f"its reply there and check it then. This is not a bad reply, so there "
+        f"is nothing to re-ask."
+    )
+
+
 def check_task_reply(task: Dict[str, Any], phase_dir: str) -> List[str]:
     """Return the problems with one task's persisted reply; empty means fine."""
-    path = os.path.join(phase_dir, task["output_name"]) if task.get("output_name") \
-        else str(task.get("output_path") or "")
+    path = _reply_path(task, phase_dir)
     if not path or not os.path.isfile(path):
         return [f"no reply file at {path or '(no output_path)'}"]
     try:
@@ -188,6 +218,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     bad = 0
     for task in tasks:
+        missing = missing_reply_line(task, phase_dir)
+        if missing:
+            print(missing)
+            continue
         problems = check_task_reply(task, phase_dir)
         if problems:
             bad += 1

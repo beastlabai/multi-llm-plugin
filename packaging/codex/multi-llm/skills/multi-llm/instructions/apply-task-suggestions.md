@@ -344,7 +344,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
    log every write phase of this plan shares, the one `util write-prompt` binds the next
    batch's prompt from, and the one the `--exec-subagents` executor appends to — scoped
    per phase by `--phase`, never a per-phase file.
-   The `--id` is `batch.prior_changes_id` — read it off the batch (it is the same value in `write_tasks.json`), never construct one.
+   The `--id` is `batch.prior_changes_id` — read it off the batch (it is the same value in `write_tasks.json`), never construct one. An empty `--id` writes nothing and exits 3 naming the ids there: run the append again with the batch's id.
    The batcher emits **many** batches for the same `section_key`, and the log keeps one
    entry per `(id, phase)`, the newest: an id two batches share leaves only the last
    one's summary (exit 0), so every later batch reads a prior-changes context missing
