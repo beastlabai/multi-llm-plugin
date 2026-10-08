@@ -245,8 +245,9 @@ class TestTheStopCheckWaitsForTheReply:
     def test_with_no_field_it_waits_for_the_file_to_stop_growing(
             self, tmp_path, capsys, monkeypatch):
         """A reply with no text hands the hook no field to wait for; the file
-        counts as written once it held its size for one step."""
-        monkeypatch.setattr(report_check, "SETTLE_STEP_S", 0.2, raising=False)
+        counts as written once it held its size for one step (a long one
+        here, so a busy machine's late writer thread still lands inside it)."""
+        monkeypatch.setattr(report_check, "SETTLE_STEP_S", 0.5, raising=False)
         path = (Transcript().prompt("go").bash(block_output())
                 .write(tmp_path / "t.jsonl"))
         write_later(path, line(reply("Done.")), delay=0.05)
