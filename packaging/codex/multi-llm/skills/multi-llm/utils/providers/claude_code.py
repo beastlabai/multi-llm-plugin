@@ -668,7 +668,9 @@ class ClaudeCodeProvider(LLMProvider):
 
     Everything below was **measured** by the §6 step-5 probe on 2026-08-19
     against ``claude 2.1.232`` driven offline at a localhost Anthropic stub
-    (``--network none``, no credential); the raw captures are
+    (``--network none``, no credential), and re-measured by the same rig on
+    2026-10-08 against ``claude 2.1.293`` (one API call per exec now, no
+    session-title call; every verdict below unchanged); the raw captures are
     ``tests/fixtures/claude-code/`` and its README carries the full record.
 
     **The whole diagnosis rides stdout and stderr is 0 bytes** — on all eleven
@@ -780,7 +782,13 @@ class ClaudeCodeProvider(LLMProvider):
     #: is a substring of. Both are moved together; that test names no version
     #: itself, so it is the pair that has to stay coherent, not a third
     #: expectation.
-    verified_version = "2.1.232"
+    #:
+    #: 2.1.293 since 2026-10-08 (run 10, #10): every row re-captured on it by the
+    #: same rig in the pinned image (cli-versions.lock moved to 2.1.293 the same
+    #: day); the parser's verdict on every row is unchanged, and the envelope
+    #: only gained keys (``queued_turn_count``, ``result_index``,
+    #: ``safety_stops``, ``subagent_stats``, ``first_content_frame_ms``).
+    verified_version = "2.1.293"
 
     #: §7.2 — the base auth set, EXTENDED by this CLI's own measured 401 gloss
     #: (C3). ``tests/fixtures/claude-code/auth-error.stdout.txt`` is failserver

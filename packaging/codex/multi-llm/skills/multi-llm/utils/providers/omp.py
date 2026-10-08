@@ -173,8 +173,10 @@ REASONING_EFFORTS = EFFORT_LADDER.accepted
 #: ``glob``.
 #:
 #: **``--tools`` is validated before model resolution, at zero spend**, so an
-#: unknown name is exit 1 / 0 B stdout / zero requests with the ``CliUsageError``
-#: on stderr — ``spawn_failed`` (D3k rung 1: fails the whole batch, never
+#: unknown name is 0 B stdout / zero requests with the refusal on stderr — exit 1
+#: and a ``CliUsageError`` Bun trace at 18.2.2, exit 2 and a plain ``Error:
+#: Unknown tool in --tools: <name>.`` at 18.8.3 (both on
+#: ``LAUNCH_FAILURE_MARKERS``' ``spawn_failed`` row) — ``spawn_failed`` (D3k rung 1: fails the whole batch, never
 #: retried), the right disposition for a property of the *install*, but one that
 #: reads like a containment breach when it is an argv fault and the run never
 #: started. ``tests/test_omp_containment.py``'s
@@ -226,7 +228,7 @@ _KNOWN_STOP_REASONS = ("stop", "toolUse", "error", "aborted")
 #: summarizes carries no ``usage`` in ``result`` — see :meth:`OmpProvider.parse_usage`.
 OMP_DIALECT = StreamDialect(
     product="omp",
-    verified_version="18.2.2",
+    verified_version="18.8.3",
     stream_version=OMP_STREAM_VERSION,
     stop_reasons=_KNOWN_STOP_REASONS,
     compaction_event="auto_compaction_end",
@@ -766,10 +768,22 @@ class OmpProvider(LLMProvider):
     # ── identity ─────────────────────────────────────────────────────────
     version_cmd = ("omp", "--version")
 
-    #: 18.2.2 is where every fixture in ``tests/fixtures/omp/`` was captured and
-    #: what ``tests/container/cli-versions.lock`` pins. ``omp --version`` prints
-    #: a bare ``omp/18.2.2`` on stdout, which the base :meth:`parse_version`
-    #: reads without an override.
+    #: 18.8.3 is where every captured fixture in ``tests/fixtures/omp/`` was last
+    #: captured (first on 18.2.2) and what ``tests/container/cli-versions.lock``
+    #: pins. ``omp --version`` prints a bare ``omp/18.8.3`` on stdout, which the
+    #: base :meth:`parse_version` reads without an override.
+    #:
+    #: **Moved 18.2.2 -> 18.8.3 on 2026-10-08**: every captured row re-run on the
+    #: host (and ``compaction-summarized`` in the pinned image) by the same three
+    #: vehicles, the five composed rows re-derived from the new ``success``. The
+    #: JSONL shape held (``agent_end`` gained ``yielded``, nothing the parser
+    #: reads moved) and every class held. What moved: ``invalid-tool`` is exit 2
+    #: with a plain ``Error: Unknown tool in --tools: …`` and no ``CliUsageError``
+    #: word, which the shared launch-failure table now names
+    #: (``base.LAUNCH_FAILURE_MARKERS``); ``invalid-model``'s hint names no path;
+    #: and the completions client's retry counts (``rate-limit`` 16 → 12,
+    #: ``empty`` 21 → 12, ``truncated`` 20 → 12). The Responses chain production
+    #: dispatches on is still 6 requests, so :attr:`internal_retries` holds.
     #:
     #: **There is deliberately no ``min_version``.** A measured-at version is an
     #: upper bound on the true floor, never the floor, and the upstream release
@@ -779,7 +793,7 @@ class OmpProvider(LLMProvider):
     #: refuses by the name of the one a build lacks. ``flags_verified_at_floor``
     #: stays empty for the same reason: an exemption requires a declared floor to
     #: have been verified at.
-    verified_version = "18.2.2"
+    verified_version = "18.8.3"
 
     #: The release cadence is roughly daily (18.1.21 → 18.2.2 took three days),
     #: so no ceiling is declared: the drift signals are ``cli-surface.yaml``'s
@@ -881,12 +895,13 @@ class OmpProvider(LLMProvider):
     #: ``models.yml`` provider with ``api: openai-completions`` doubles that
     #: chain, because the provider's ``withReplaySafeStreamRetry``
     #: (``maxProviderErrorRetries: 1``) wraps the completions client and does not
-    #: wrap the Responses one: a 500 runs **12** in ~32 s, and a 429 runs **16**
-    #: in 201 s — five 20 s body-parsed sleeps and then the ``500·2ⁿ`` ladder,
-    #: gaps 20, 20, 20, 20, 20, 0.5, 20, 8.5, 11.5, 8.5, 11.5, 8.5, 11.5, 8.5,
-    #: 11.5. Those are the numbers the ``rate-limit`` and ``stdout-error`` fixture
-    #: rows carry, and 16 is what this field declared before the production path
-    #: was measured. They describe a client nothing this adapter dispatches on;
+    #: wrap the Responses one: a 500 runs **12** in ~32 s, and a 429 ran **16**
+    #: in 201 s at 18.2.2 — five 20 s body-parsed sleeps and then the ``500·2ⁿ``
+    #: ladder, gaps 20, 20, 20, 20, 20, 0.5, 20, 8.5, 11.5, 8.5, 11.5, 8.5, 11.5,
+    #: 8.5, 11.5 — and runs **12** in 201 s at 18.8.3 (the body's 20 s on both
+    #: legs, gaps 20 ×5, 0.5, 20 ×5). Those are the numbers the ``rate-limit`` and
+    #: ``stdout-error`` fixture rows carry, and 16 is what this field declared
+    #: before the production path was measured. They describe a client nothing this adapter dispatches on;
     #: they are kept here because a model spec pointed at a user's own
     #: ``openai-completions`` provider would run them.
     #:
@@ -915,7 +930,8 @@ class OmpProvider(LLMProvider):
     #: real chain be killed mid-way — the exact outcome rule 4 exists to prevent.
     #:
     #: ``retries_rate_limit`` is ``True`` because omp already makes six attempts
-    #: against a 429 on its own (sixteen on the completions client), so rule 6(b)
+    #: against a 429 on its own (twelve on the completions client at 18.8.3,
+    #: sixteen at 18.2.2), so rule 6(b)
     #: withholds the harness's identical re-dispatch; ``configurable_by`` is empty
     #: because those attempts are hard-coded and nothing reachable from here
     #: changes them — the overlay's ``retry.enabled: false`` removes only the
@@ -1374,8 +1390,8 @@ class OmpProvider(LLMProvider):
 
         stderr is passed through untouched: the pre-flight failures are plain
         text there over a 0-byte stdout, and ``Model "…" not found``, ``No API
-        key found for`` and ``CliUsageError`` reach their tables exactly as
-        before.
+        key found for`` and ``CliUsageError`` (18.2.2) / ``Unknown tool in
+        --tools`` (18.8.3) reach their tables exactly as before.
 
         Tool results and earlier assistant turns are **retained for diagnostics,
         not classification**: ``_attach_stdout_excerpt`` puts the raw stdout on

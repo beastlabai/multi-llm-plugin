@@ -43,6 +43,22 @@ _STACK_FRAME = re.compile(r"^[ \t]+at\s.*$", re.MULTILINE)
 #: captures the remainder of the line rather than only matching the path.
 _FULL_REPORT = re.compile(r"Full report available at:[ \t]*\S+[ \t]*(.*)$", re.MULTILINE)
 
+#: Start-up chatter gemini 0.63.0 writes to stderr on EVERY run, an answered one
+#: included (measured 2026-10-08 in the pinned image: 189-266 bytes on
+#: `success`, `multi-assistant` and `ephemeral-only`, each 0 bytes at 0.25.2).
+#: None of it is about the run's outcome — a terminal without 256 colours, no
+#: `rg` on PATH, the CLI's own start-up profiler — so it is **dropped before
+#: any tier reads the text**: left in, tier (iii) reported "Warning: 256-color
+#: support not detected" as the diagnosis of `exit-zero-failure`, and an
+#: all-noise stderr stopped being rung 5's ``None``. Whole lines only, each
+#: matched by its own measured opening words.
+_STARTUP_NOISE = re.compile(
+    r"^(?:Warning: 256-color support not detected\b"
+    r"|Ripgrep is not available\b"
+    r"|\[STARTUP\] )[^\n]*(?:\n|\Z)",
+    re.MULTILINE,
+)
+
 #: The head of one ``ApiError: {…}`` blob. The payload is brace-nested, so the
 #: object itself is read with :data:`_DECODER` rather than by regex.
 _API_ERROR = re.compile(r"ApiError:[ \t]*(?=\{)")
@@ -56,7 +72,9 @@ _DECODER = json.JSONDecoder()
 #: gemini's `error.message` is ALWAYS this literal string at 0.25.2 — an
 #: upstream stringification bug that destroys the diagnosis in the only
 #: structured field the CLI offers. It is never reported as a reason; the
-#: envelope contributes its ``code`` and nothing else.
+#: envelope contributes its ``code`` and nothing else. (0.63.0 fills the field
+#: with the real text; the tiers below still answer every capture without it,
+#: so it stays unread rather than becoming a fourth source.)
 _DESTROYED_MESSAGE = "[object Object]"
 
 #: One short line. ``rate-limit.stderr.txt`` is **15,013 bytes** and
@@ -106,6 +124,12 @@ class GeminiProvider(LLMProvider):
     #: tests/test_provider_housekeeping.py could not see it; that file now carries
     #: NO_WRITE_TOOL_AT_ALL for exactly this shape. Probe:
     #: plans/harness-expansion/probe-out/gemini/gap5_probe.py.
+    #:
+    #: RE-MEASURED 2026-10-08 on 0.63.0, same probe, same argv: eight tools now
+    #: (``enter_plan_mode``, ``glob``, ``google_web_search``, ``grep_search``,
+    #: ``invoke_agent``, ``list_directory``, ``read_file``, ``update_topic``),
+    #: still none that writes, and the same exit-0 confirmation — only the error
+    #: wording moved (``Tool "write_file" not found. Did you mean one of: …``).
     supports_file_output = False
     """Provider for Gemini CLI tool.
 
@@ -116,7 +140,9 @@ class GeminiProvider(LLMProvider):
 
     Everything below was **measured** by the §6 step-5 probe on 2026-08-19
     against ``gemini 0.25.2`` driven offline at a localhost stub
-    (``--network none``, no credential); the raw captures are
+    (``--network none``, no credential), and re-measured by the same rig on
+    2026-10-08 against ``gemini 0.63.0`` (what moved is listed at
+    :attr:`verified_version`); the raw captures are
     ``tests/fixtures/gemini/`` and its README carries the full record.
 
     **stdout is empty on every failure.** 401, 429, 404, 400 context-length,
@@ -178,22 +204,24 @@ class GeminiProvider(LLMProvider):
     #: write tool (``plans/harness-expansion/probe-out/gemini/gap5_probe.py``;
     #: ``NO_WRITE_TOOL_AT_ALL`` in ``tests/test_provider_housekeeping.py``):
     #: under this argv gemini-cli 0.25.2 advertises nine tools and
-    #: ``run_shell_command`` is not among them. A default rather than a flag, so
-    #: an argv that later adds ``--yolo`` or ``--approval-mode`` must re-measure
-    #: this. ``generate_read_scope`` keeps the ``"cwd"`` default: ``read_file``
-    #: is advertised, but nothing measured its reach outside cwd.
+    #: ``run_shell_command`` is not among them (0.63.0: eight, still without
+    #: it). A default rather than a flag, so an argv that later adds ``--yolo``
+    #: or ``--approval-mode`` must re-measure this. ``generate_read_scope``
+    #: keeps the ``"cwd"`` default: ``read_file`` is advertised, but nothing
+    #: measured its reach outside cwd.
     runs_shell_in_generate = False
 
     version_cmd = ("gemini", "--version")
-    #: 0.25.2 is where every fixture in ``tests/fixtures/gemini/`` was captured —
-    #: the §6 step-5 probe, ``--network none``, the stub and the failserver both
-    #: running inside the container, no credential — and the only release this
-    #: parser has been run against. A pin to re-confirm rather than a range to
+    #: 0.25.2 is where every fixture in ``tests/fixtures/gemini/`` was first
+    #: captured — the §6 step-5 probe, ``--network none``, the stub and the
+    #: failserver both running inside the container, no credential — and, until
+    #: the 0.63.0 re-capture below, the only release this parser had been run
+    #: against. A pin to re-confirm rather than a range to
     #: trust: nothing older has been measured, and the field the parser reads
     #: (``response``) sits beside a ``stats`` block upstream reshapes freely.
     #: ``tests/container/cli-versions.lock`` pins the same string.
     #:
-    #: ``gemini --version`` prints a bare ``0.25.2`` on stdout, which the base
+    #: ``gemini --version`` prints a bare version (``0.63.0``) on stdout, which the base
     #: :meth:`parse_version` reads without an override.
     #: NO FLOOR, deliberately. `min_version` was set to 0.25.2 on 2026-08-19 — the
     #: version the §16 fixtures were captured against — and removed the same day
@@ -206,7 +234,16 @@ class GeminiProvider(LLMProvider):
     #: with* their probes; muse, cursor-agent and agy leave it empty for this
     #: same reason.) `verified_version` below is warning-only and carries the
     #: measurement instead.
-    verified_version = "0.25.2"
+    #:
+    #: 0.63.0 since 2026-10-08 (run 10, #10): every row re-captured on it by the
+    #: same rig in the pinned image (cli-versions.lock moved to 0.63.0 the same
+    #: day). Every parser verdict and classification is unchanged. What moved:
+    #: start-up chatter on stderr on every run (dropped by
+    #: :data:`_STARTUP_NOISE`, the one parser change), the envelope's
+    #: ``message`` now real text, a 429 exiting 173 (``code`` 429, was 1), a cut
+    #: stream / error-on-200 / empty answer retried to 4 requests and a zero-byte
+    #: response to 10 (each 1 at 0.25.2), and the tool-registry wording.
+    verified_version = "0.63.0"
 
     # C3 — gemini's measured 401 wording matched NONE of the ten base patterns,
     # so a logged-out gemini classified as `None`, was read as transport-shaped
@@ -254,6 +291,10 @@ class GeminiProvider(LLMProvider):
     #: four-minute chain the CLI had already run — now ends after one. That is a
     #: **smaller** retry budget, and it is the point: the multiplication is what
     #: rule 6(b) exists to prevent.
+    #:
+    #: Re-measured 2026-10-08 on 0.63.0: 429 10 / 232 s, 500 10 / 202 s, and a
+    #: zero-byte response, now on the same ladder, 10 / 233 s — every chain
+    #: inside the declared 10 / 243 s, so the envelope stands.
     #:
     #: ``configurable_by`` is empty because nothing this adapter sets (it passes
     #: only ``--output-format``, ``--model`` and the prompt) reaches gemini's
@@ -304,11 +345,12 @@ class GeminiProvider(LLMProvider):
            is accepted and deliberately unread. Eight of gemini's nine failure
            captures are 0 bytes on stdout, so the rung decides nothing for them;
            the ninth is what makes it load-bearing. ``exit-zero-failure`` carries
-           **1,174 bytes of stdout** whose ``response`` is the model repeating
-           the prompt's own confirmation sentence *"JSON written to …"* for a
-           file that does not exist, and **193 bytes of stderr** carrying the
-           real reason — *Error executing tool write_file: Tool "write_file" not
-           found in registry*. Reading stdout here would report the lie.
+           **1,590 bytes of stdout** (1,174 at 0.25.2) whose ``response`` is the
+           model repeating the prompt's own confirmation sentence *"JSON written
+           to …"* for a file that does not exist, and **393 bytes of stderr**
+           (193) carrying the real reason — *Error executing tool write_file:
+           Tool "write_file" not found* (``… in registry`` at 0.25.2). Reading
+           stdout here would report the lie.
         3. **Three tiers within stderr**, which between them cover all nine:
 
            i.   the **last** ``ApiError: {…}`` blob's ``error.message`` and
@@ -331,17 +373,21 @@ class GeminiProvider(LLMProvider):
            ``error.code`` only when a tier produced a sentence carrying no status
            of its own; **never** its ``error.message``, which is the literal
            string ``[object Object]`` at 0.25.2.
-        4. **Two things are dropped before the message is built**, because both
-           are per-invocation noise that would make any assertion on the message
-           unstable: the Node stack (:data:`_STACK_FRAME`) and the
-           ``/tmp/mllm-inv/…`` report path (:data:`_FULL_REPORT`). What is left
-           is capped to one short line.
-        5. **Both channels empty is ``None``.** No gemini capture is, but the
-           rung is the same one pi's three silent rows land on: nothing is
+        4. **Three things are dropped before the message is built**, because all
+           are noise that would make any assertion on the message unstable or
+           wrong: 0.63.0's start-up chatter (:data:`_STARTUP_NOISE`, dropped
+           first, before anything else reads the text), the Node stack
+           (:data:`_STACK_FRAME`) and the ``/tmp/mllm-inv/…`` report path
+           (:data:`_FULL_REPORT`). What is left is capped to one short line.
+        5. **Both channels empty is ``None``**, and so is a stderr holding only
+           start-up chatter (``ephemeral-only`` at 0.63.0): the rung is the same
+           one pi's three silent rows land on: nothing is
            invented from an exit code — which for this CLI is a status truncated
            to 8 bits (401 → 145) and not a category at all.
         """
-        text = stderr or ""
+        # Start-up chatter is not a diagnosis (0.63.0 writes it on every run),
+        # so it goes before rung 5 decides whether stderr said anything at all.
+        text = _STARTUP_NOISE.sub("", stderr or "")
         if not text.strip():
             return None
 

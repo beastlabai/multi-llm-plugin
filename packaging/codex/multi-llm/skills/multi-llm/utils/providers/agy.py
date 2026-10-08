@@ -169,7 +169,15 @@ class AgyProvider(LLMProvider):
     #: string `true`), so a numeric floor would rot faster than it could
     #: protect anything. ``tests/container/cli-versions.lock`` pins the same
     #: build for the image.
-    verified_version = "1.1.15"
+    #:
+    #: **Moved 1.1.15 -> 1.3.1 on 2026-10-08**: the one row re-captured on 1.3.1
+    #: in the pinned image by the same probe, at today's argv (``--print-timeout
+    #: 20m``), with no parser change. stdout is byte-identical to the 1.1.15
+    #: capture (md5 dc30d77eed870733053e445f556afa14, exit 1, ~60 s), and so are
+    #: the invalid-model and stub-eligibility runs, which again sent zero
+    #: requests; stderr only gained a closing ``error: authentication failed or
+    #: timed out`` line (939 bytes, was 897).
+    verified_version = "1.3.1"
 
     @property
     def name(self) -> str:

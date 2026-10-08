@@ -1830,8 +1830,8 @@ class OpenCodeProvider(LLMProvider):
     # `auth_list.<v>.json`, `debug_config.<v>.json`), and the tests then grade
     # the parser on the new captures. `make opencode-latest-check` says when
     # npm has a newer release than this one.
-    min_version = "1.18.34"
-    verified_version = "1.18.34"
+    min_version = "1.18.35"
+    verified_version = "1.18.35"
     #: What the below-floor refusal tells the user to run (never executed).
     upgrade_hint = "opencode upgrade {version}"
     #: T4.2 — the inclusive (floor, ceiling) opencode range in which
@@ -1841,7 +1841,7 @@ class OpenCodeProvider(LLMProvider):
     #: `t40_cont_*`) measures the key on every bump, and
     #: `test_opencode_permission_block.py` reads that capture, so the key is
     #: emitted exactly on the release it was measured on. It was measured on
-    #: every release from 1.17.15 to 1.18.34 (accepted silently; a rejected
+    #: every release from 1.17.15 to 1.18.35 (accepted silently; a rejected
     #: permission no longer ends the turn) while the floor was lower; a newer,
     #: unmeasured build omits it with one WARN until the next bump.
     CONTINUE_LOOP_ON_DENY_RANGE = (min_version, verified_version)

@@ -362,11 +362,11 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
    ```bash
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
      --state-file "$STATE_FILE" --phase "apply-task-suggestions" \
-     --label "Batch {N} ({section_key})" --subagent-type "general-purpose" \
+     --label "Batch {N} ({section_key})" --task-id "{task.task_id}" --subagent-type "general-purpose" \
      --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
      --total-batches {total_batches} --batch-index {N}
    ```
-   Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports. Omit any flag it does not report. Never pass `0` for an unknown value; omit the flag — a made-up zero is averaged into the phase totals as a real measurement. The script prints an `[ETA]` line to stderr after each call.
+   Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports, and `{task.task_id}` is the id you gave `util batch-done`. Omit any flag it does not report. Never pass `0` for an unknown value; omit the flag — a made-up zero is averaged into the phase totals as a real measurement. The script prints an `[ETA]` line to stderr after each call; for a batch `util batch-done` recorded `failed` it says the batch failed and why, never "done".
 
 **CRITICAL**: Process batches ONE AT A TIME. Never spawn multiple subagents simultaneously.
 

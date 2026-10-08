@@ -29,6 +29,14 @@ That is why :attr:`QwenCodeProvider.exit_zero_failure_markers` is mandatory here
 rather than optional, and why :meth:`QwenCodeProvider.parse_output` classifies
 *before* it unwraps.
 
+**0.25.0 fixed the defect upstream** (re-captured 2026-10-08): the same
+500-forever run now exits **1**, its ``result`` record is ``subtype:
+"error_during_execution"``, ``is_error: true`` with the ``[API Error: …]`` text
+under ``error.message`` and no ``result`` key, and stderr carries the same text
+in an ``AlreadyReportedError`` JSON envelope — 401, 404, 400 and the truncated
+streams alike. Rule 1 catches that shape; the marker stays for the 0.21.13 floor,
+whose exit-0 bytes remain committed as ``*.0.21.13.stdout.json``.
+
 **Output mode: ``-o json``, not ``stream-json``.** Both were captured.
 ``-o json`` emits **one JSON array** of records terminating in a ``result``
 record that carries everything classification needs in a single object —
@@ -266,6 +274,20 @@ _STRIPPED_VENDOR_VARS: Tuple[str, ...] = (
 #: this is a constraint on how the marker is written rather than new machinery.
 _API_ERROR_MARKER = re.compile(r"\[API Error:")
 
+#: qwen's startup ripgrep check, printed to stderr on EVERY run when the
+#: bundled ``rg`` cannot be executed — an advisory, never a diagnosis.
+#: Measured at 0.25.0 (2026-10-08): qwen restores a missing exec bit on its
+#: vendored ``rg`` itself, so a user-owned install never prints it, but a
+#: root-owned one (``sudo npm i -g``, a distro package, an image layer) cannot
+#: and prints ``Ripgrep not available: spawn …/rg EACCES. Falling back to
+#: built-in grep.``. That ``EACCES`` classified every run ``permission_denied``
+#: — a 401, a 404 and a successful run alike — so :meth:`QwenCodeProvider.vendor_text`
+#: drops exactly this line, both of its upstream wordings, and nothing else.
+_RIPGREP_ADVISORY = re.compile(
+    r"^Ripgrep not available: .*Falling back to built-in grep\.[ \t]*\r?\n?",
+    re.MULTILINE,
+)
+
 
 def max_wall_time_value(timeout_s: Optional[int]) -> Optional[str]:
     """Render ``--max-wall-time`` for an outer deadline of ``timeout_s``.
@@ -396,12 +418,21 @@ class QwenCodeProvider(LLMProvider):
     generate_read_scope = "none"
 
     version_cmd = ("qwen", "--version")
-    #: 0.21.13 is where every fixture in ``tests/fixtures/qwen-code/`` was
-    #: captured and the floor this parser is known to handle. qwen publishes
-    #: fast (592 versions, with 0.21.12 → 0.21.13 plus a nightly inside the probe
+    #: 0.21.13 is where the fixtures were first captured and the floor this
+    #: parser is known to handle (its exit-0 API-error shape stays graded by
+    #: ``tests/fixtures/qwen-code/*.0.21.13.stdout.json``). qwen publishes fast
+    #: (592 versions, with 0.21.12 → 0.21.13 plus a nightly inside the probe
     #: window), so this is a pin to re-confirm rather than a range to trust.
+    #:
+    #: 2026-10-08: every fixture re-captured on 0.25.0 in the pinned image. An
+    #: API error is now an error record (exit 1, ``is_error: true``, the
+    #: ``[API Error: …]`` text under ``error.message``, an
+    #: ``AlreadyReportedError`` envelope on stderr) instead of an exit-0 success;
+    #: retries no longer concatenate partial text; stderr gained retry lines.
+    #: Retry counts (28 on 5xx, 44 in 180 s on 429) are unchanged. The floor
+    #: stays: nothing here stopped handling 0.21.13.
     min_version = "0.21.13"
-    verified_version = "0.21.13"
+    verified_version = "0.25.0"
 
     #: OQ2, measured (see the module docstring). ``"inline"`` because the flag
     #: takes a JSON literal, exactly as claude-code's does — so the caller
@@ -413,7 +444,10 @@ class QwenCodeProvider(LLMProvider):
     #: envelope: qwen's own ``stats.totalRequests`` reported 7 for a run the stub
     #: logged 28 completion POSTs for — a 4× understatement, because the retry
     #: structure is 4 wire requests per logical attempt (three fast inner retries
-    #: at ~0.5/1/2 s) with a growing outer backoff between attempts.
+    #: at ~0.5/1/2 s) with a growing outer backoff between attempts. Re-measured
+    #: at 0.25.0 (2026-10-08): 28 POSTs on 5xx again (88-107 s, now exit 1), and
+    #: 429-forever still running at 180 s after 44 POSTs (12 with
+    #: ``Retry-After: 60``). 0.25.0's error envelope carries no ``stats`` block.
     #:
     #: ``max_wall_s`` is ``None`` and that is the **honest** declaration rather
     #: than an unmeasured one. Only the 5xx path self-terminates (93 s); the 429
@@ -447,6 +481,16 @@ class QwenCodeProvider(LLMProvider):
     #: matching still works **provided the classifier is given
     #: ``result.result``** rather than raw stdout.
     exit_zero_failure_markers = (_API_ERROR_MARKER,)
+
+    #: qwen prefixes every upstream failure with the HTTP status:
+    #: ``[API Error: 401 <upstream text>]``. The base patterns match none of the
+    #: 401 sentences measured or documented for this lane (the stub's OpenAI
+    #: "Incorrect API key provided", OpenRouter's "No auth credentials found" /
+    #: "User not found."), so until 2026-10-08 a 401 classified ``server_error``
+    #: off the ``api error`` rung and entered the retry ladder as retryable, on
+    #: 0.21.13 and 0.25.0 alike. qwen's own status prefix names it whatever the
+    #: backend wrote.
+    auth_error_patterns = LLMProvider.auth_error_patterns + ("[api error: 401",)
 
     @property
     def name(self) -> str:
@@ -625,13 +669,15 @@ class QwenCodeProvider(LLMProvider):
             }
         record = result_records[-1]
 
-        # Rule 1 -- the envelope's own verdict, where it has one.
+        # Rule 1 -- the envelope's own verdict, where it has one. Since 0.25.0
+        # this is where EVERY API error lands (`is_error: true`, the
+        # `[API Error: …]` text under `error.message`), so the message is
+        # read out of the object rather than reported as its Python repr.
         subtype = record.get("subtype")
         if record.get("is_error") or (subtype is not None and subtype != "success"):
-            message = record.get("error") or subtype or "qwen reported a failure"
             return {
                 "success": False,
-                "error": str(message),
+                "error": self._record_error_text(record),
                 "raw": stdout,
                 "data": None,
             }
@@ -649,7 +695,8 @@ class QwenCodeProvider(LLMProvider):
             }
 
         # Rule 2 -- the marker, which is the ONLY signal on seven of the eight
-        # measured failure shapes.
+        # failure shapes measured at 0.21.13 (the floor). 0.25.0 sends those
+        # shapes through rule 1 instead.
         if _API_ERROR_MARKER.search(answer):
             return {
                 "success": False,
@@ -721,6 +768,57 @@ class QwenCodeProvider(LLMProvider):
             return ""
 
     @staticmethod
+    def _record_error_text(record: Dict[str, Any]) -> str:
+        """The failure text of an error-shaped ``result`` record.
+
+        qwen writes ``"error": {"message": "…"}``; the message is what a user
+        should read, not the object's repr. Any other shape keeps the old
+        rendering.
+        """
+        error = record.get("error")
+        if isinstance(error, dict):
+            message = error.get("message")
+            if isinstance(message, str) and message.strip():
+                return message.strip()
+        return str(error or record.get("subtype") or "qwen reported a failure")
+
+    def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
+        """Drop qwen's ripgrep advisory line from stderr; nothing else.
+
+        The one stderr reduction a shipped adapter makes, and the narrowest one
+        possible: :data:`_RIPGREP_ADVISORY` matches only the startup line qwen
+        prints when its bundled ``rg`` cannot run, whose ``EACCES`` otherwise
+        decides the class of every run on a root-owned install. Removal-only,
+        and any failure returns the capture unchanged.
+        """
+        try:
+            return stdout, _RIPGREP_ADVISORY.sub("", stderr or "")
+        except Exception:  # noqa: BLE001 - the hook must never raise
+            return stdout, stderr
+
+    @staticmethod
+    def _stderr_error_envelope(raw: str) -> Optional[Dict[str, Any]]:
+        """qwen's ``{"error": {...}}`` envelope, wherever stderr's last block is.
+
+        At 0.21.13 the envelope was the whole of stderr. At 0.25.0 it follows
+        whatever qwen printed first — one ``Retrying provider attempt …`` line
+        per retry, the ripgrep advisory — so the parse starts at each line that
+        opens with ``{`` instead of at byte 0.
+        """
+        starts = [0] + [i + 1 for i, ch in enumerate(raw) if ch == "\n"]
+        for start in starts:
+            if not raw.startswith("{", start):
+                continue
+            try:
+                envelope = json.loads(raw[start:])
+            except ValueError:
+                continue
+            error = envelope.get("error") if isinstance(envelope, dict) else None
+            if isinstance(error, dict) and error.get("message"):
+                return error
+        return None
+
+    @staticmethod
     def _empty_stdout_reason(stderr: str) -> str:
         """Name the cause of a zero-byte stdout, rather than restating the symptom.
 
@@ -745,14 +843,10 @@ class QwenCodeProvider(LLMProvider):
         """
         raw = (stderr or "").strip()
         if raw:
-            try:
-                envelope = json.loads(raw)
-                error = envelope.get("error") if isinstance(envelope, dict) else None
-                if isinstance(error, dict) and error.get("message"):
-                    kind = error.get("type") or "error"
-                    return f"qwen aborted with no output — {kind}: {error['message']}"
-            except ValueError:
-                pass
+            error = QwenCodeProvider._stderr_error_envelope(raw)
+            if error is not None:
+                kind = error.get("type") or "error"
+                return f"qwen aborted with no output — {kind}: {error['message']}"
             return f"qwen produced no output on stdout; stderr said: {raw[:300]}"
         return "Empty output from qwen (no JSON records on stdout)"
 
