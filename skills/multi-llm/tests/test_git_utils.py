@@ -2111,6 +2111,108 @@ class TestIntentToAddUntracked:
         assert _porcelain_status(temp_git_repo, "seed.txt") == " M"
 
 
+class TestThePrivateIndexKeepsGitsRacyCheck:
+    """The private index copy carries the real index's timestamps.
+
+    git re-reads a tracked file whose cached entry is not older than the index
+    file (a "racily clean" entry); otherwise matching size and mtime mean
+    "unchanged". ``shutil.copyfile`` stamped the copy "now", newer than every
+    entry, so an equal-size edit made within the cached entry's second
+    vanished from every diff run on the copy (commit review of
+    4ca1f34..3e8ff80, 2026-10-08: review-code's fixture rewrote ``return 1``
+    as ``return 2`` at once). Deterministic: the times are set explicitly and
+    ``core.trustctime`` is off, since a ctime cannot be set from Python.
+    """
+
+    STAMP_NS = 1_700_000_000 * 1_000_000_000
+
+    def _racy_edit(self, repo):
+        import os
+
+        stamp = (self.STAMP_NS, self.STAMP_NS)
+        _run(["git", "config", "core.trustctime", "false"], repo)
+        app = repo / "app.py"
+        app.write_text("return 1\n", encoding="utf-8")
+        os.utime(app, ns=stamp)
+        _run(["git", "add", "app.py"], repo)
+        _run(["git", "commit", "--quiet", "-m", "app"], repo)
+        # The cached entry and the index now share one second ...
+        os.utime(repo / ".git" / "index", ns=stamp)
+        # ... and the edit lands inside it: same size, same inode, same mtime.
+        app.write_text("return 2\n", encoding="utf-8")
+        os.utime(app, ns=stamp)
+        (repo / "new.py").write_text("x = 1\n", encoding="utf-8")
+
+    def _changed(self, repo):
+        return _run(["git", "diff", "--name-only"], repo).stdout.split()
+
+    def test_the_copy_in_the_git_dir_has_the_index_time(self, temp_git_repo, monkeypatch):
+        import os
+
+        from utils import git_utils
+
+        monkeypatch.delenv("GIT_INDEX_FILE", raising=False)
+        index = temp_git_repo / ".git" / "index"
+        os.utime(index, ns=(self.STAMP_NS, self.STAMP_NS))
+        copy = git_utils._private_index_copy(str(temp_git_repo))
+        try:
+            assert Path(copy).parent == temp_git_repo / ".git"
+            assert os.stat(copy).st_mtime_ns == self.STAMP_NS
+            assert Path(copy).read_bytes() == index.read_bytes()
+        finally:
+            git_utils._discard_private_index(copy)
+
+    def test_an_equal_size_edit_in_the_entry_s_second_reaches_the_diff(
+        self, temp_git_repo, monkeypatch
+    ):
+        monkeypatch.delenv("GIT_INDEX_FILE", raising=False)
+        self._racy_edit(temp_git_repo)
+
+        with intent_to_add_untracked(["new.py"]) as touched:
+            assert touched == ["new.py"]
+            assert "app.py" in self._changed(temp_git_repo)
+            assert "new.py" in self._changed(temp_git_repo)
+
+        # The user's own index, never written, sees the edit too.
+        assert "app.py" in self._changed(temp_git_repo)
+
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root writes into a read-only directory",
+    )
+    def test_the_temp_dir_fallback_keeps_the_index_time_too(
+        self, temp_git_repo, monkeypatch, tmp_path
+    ):
+        """A git dir that refuses the copy sends it to the temp dir: the second
+        copy site, with the same timestamp rule."""
+        import os
+        import tempfile
+
+        from utils import git_utils
+
+        monkeypatch.delenv("GIT_INDEX_FILE", raising=False)
+        temp_base = tmp_path / "temp-base"
+        temp_base.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(temp_base))
+        self._racy_edit(temp_git_repo)
+        git_dir = temp_git_repo / ".git"
+        git_dir.chmod(0o555)
+        try:
+            copy = git_utils._private_index_copy(str(temp_git_repo))
+            assert Path(copy).parent == temp_base
+            assert os.stat(copy).st_mtime_ns == self.STAMP_NS
+            git_utils._discard_private_index(copy)
+
+            with intent_to_add_untracked(["new.py"]) as touched:
+                assert touched == ["new.py"]
+                assert Path(os.environ["GIT_INDEX_FILE"]).parent == temp_base
+                assert "app.py" in self._changed(temp_git_repo)
+        finally:
+            git_dir.chmod(0o755)
+        assert list(temp_base.iterdir()) == []
+        assert not [p for p in git_dir.iterdir() if p.name.startswith("multi-llm-index.")]
+
+
 class TestRunGitDecoding:
     """Tests for UTF-8 + errors='replace' decoding of git output (task 2)."""
 
