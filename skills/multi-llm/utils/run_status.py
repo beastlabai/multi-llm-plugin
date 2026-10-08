@@ -975,11 +975,17 @@ def _run_state_text(view: Dict[str, Any]) -> str:
     result = _result_state(view)
     if result is None:
         if _stopped_for_the_user(view):
-            # Fix round 22: the record's word stays; what it means is said.
-            # Fix round 23 (review of round 22, #4): "nothing crashed" only
-            # when nothing it ran failed.
+            # Fix round 22: what the record means is said. Fix round 23
+            # (review of round 22, #4): "nothing crashed" only when nothing
+            # it ran failed. Fix round 26 (live run 11 #6): the text no
+            # longer says "failed" under the "stopped and needs you" head.
+            # Only the text: the stored word stays `failed`, because
+            # `TERMINAL_RUN_STATES`, `classify_run`'s verdict, `exit_code_for`,
+            # the run registry's sweep, the close-out's retirement of a
+            # non-`done` run's slots and `--json`'s `runs[].run.state` all key
+            # on it, and the records already on disk say it.
             crashed = "" if _a_dispatch_failed(view) else f"; {NOTHING_CRASHED}"
-            return f"{word} ({STOPPED_FOR_THE_USER_GLOSS}{crashed})"
+            return f"{STOPPED_RUN_STATE_WORD} ({STOPPED_FOR_THE_USER_GLOSS}{crashed})"
         return str(word)
     failed = _failed_model_specs(view)
     detail = f" — failed: {', '.join(failed)}" if failed else ""
@@ -991,7 +997,10 @@ def _run_state_text(view: Dict[str, Any]) -> str:
 #: "run … failed" for a resume that stopped where the first run had, needing
 #: the user's answer, as the stop's own text said).
 STOPPED_FOR_THE_USER_VERDICT = "stopped and needs you (exit 3)"
-STOPPED_FOR_THE_USER_GLOSS = "exit 3: the run stopped and needs you"
+#: The ``run.state:`` line of such a run (fix round 26, live run 11 #6:
+#: "failed (exit 3: …)" under the head above). The record keeps ``failed``.
+STOPPED_RUN_STATE_WORD = "stopped"
+STOPPED_FOR_THE_USER_GLOSS = "exit 3: the run needs you"
 #: Added to the gloss only when no runner and no model of the run failed
 #: (:func:`_a_dispatch_failed`, fix round 23): a stop on a refusal, a check's
 #: findings or an unanswered manual task.
