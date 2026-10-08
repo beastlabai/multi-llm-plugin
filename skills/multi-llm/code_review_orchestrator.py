@@ -87,6 +87,7 @@ from utils.review_orchestrator_base import (
     merge_validation_batches,
     record_high_priority_groups,
     record_validation_counts,
+    report_already_completed,
     report_misnamed_result,
     validation_counts,
     VALIDATION_COUNT_KEYS,
@@ -4415,11 +4416,9 @@ async def main(argv: Optional[List[str]] = None) -> int:
               "re-running it (as --force)")
         args.force = True
     if state_guard.is_phase_completed("code-review") and not args.force:
-        phase_dir_check = get_phase_dir(plan_path, 'code-review')
-        print("ERROR: Phase 'code-review' has already been completed for this plan.")
-        print(f"Output directory: {phase_dir_check}")
-        print("Use --force to re-run, or --reaggregate to reprocess existing results.")
-        sys.exit(2)
+        # Fix round 28 (live run 12 #11): said as done, never as an error.
+        sys.exit(report_already_completed(
+            "review-code", get_phase_dir(plan_path, 'code-review')))
     elif args.force and state_guard.is_phase_completed("code-review"):
         state_guard.state.get("phases_completed", {}).pop("code-review", None)
         state_guard.save()
