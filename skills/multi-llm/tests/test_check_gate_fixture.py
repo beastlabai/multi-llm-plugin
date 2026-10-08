@@ -852,10 +852,11 @@ class TestTheNativeLeg:
         # Fix round 22: the resume's own why below it (test_resume_why.py).
         resume_why = next(line.split(" ", 1)[1] for line in out.splitlines()
                           if line.startswith("[NEXT_COMMAND_WHY] "))
-        expected = [f"      resume with: {resume}", f"        ({resume_why})"]
+        # Fix round 28: each why under its command, unbracketed.
+        expected = [f"      resume with: {resume}", f"        {resume_why}"]
         for why, command in pairs:
             expected += [f"      or answer the stop with: {command}",
-                         f"        ({why})"]
+                         f"        {why}"]
         for argv in (
             ["--plan-file", "plans/checked.md", "--view", "run", "--host", "claude-code"],
             ["--plan-file", "plans/checked.md", "--host", "claude-code"],

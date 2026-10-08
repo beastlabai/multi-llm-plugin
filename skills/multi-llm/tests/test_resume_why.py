@@ -205,11 +205,12 @@ class TestTheExecutorLeg:
             view, Path("plans/checked.md"),
             workflow={"phases": {"implement": {"status": "in_progress"}}})
         assert lines[0].strip().startswith("resume with:"), lines
-        assert lines[1] == f"      ({RECORDED})", lines
+        # Fix round 28: under the command, unbracketed (`why_line`).
+        assert lines[1] == f"        {RECORDED}", lines
         assert not any("re-dispatches" in line for line in lines), lines
         # Word for word what the tool routes relay (fix round 23).
         why = status["progress"]["write_subagents"]["stop"]["resume_why"]
-        assert lines[1] == f"      ({why})", lines
+        assert lines[1] == f"        {why}", lines
 
     def test_a_half_applied_stop_says_so_on_every_route(
         self, repo, capsys, monkeypatch,
@@ -241,7 +242,7 @@ class TestTheExecutorLeg:
         lines = run_status._resume_lines(
             view, Path("plans/checked.md"),
             workflow={"phases": {"implement": {"status": "in_progress"}}})
-        assert lines[1] == f"      ({why})", lines
+        assert lines[1] == f"        {why}", lines
         record = {}
         monkeypatch.setattr(cli_common, "record_user_resume",
                             lambda obj: record.setdefault("v", obj))
@@ -410,7 +411,7 @@ class TestTheNativeLeg:
         at = next(i for i, line in enumerate(status)
                   if line.strip().startswith("resume with: ")
                   and line.endswith("plans/checked.md --resume"))
-        assert status[at + 1].strip() == f"({RECORDED})", "\n".join(status)
+        assert status[at + 1] == f"        {RECORDED}", "\n".join(status)
         assert status[at + 2].strip().startswith("or answer the stop with:")
 
 
