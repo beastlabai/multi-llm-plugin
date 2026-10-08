@@ -181,6 +181,37 @@ class TestAnApplyCodeFixesBatch:
             "processed_apply-fixes"]
         assert processed[task["expected_ids"][1]]["status"] == "declined"
 
+    def test_a_listed_failure_is_never_answered_with_a_pass(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        """Review of fix round 24 (records #3): recorded with
+        `--listed-check 'npm test=failed'` and no `--own-check`, the same call
+        printed `[BATCH_CHECK_FAILED]` (the failure IS on record) and then said
+        the checks its subagent ran were not on record, suggesting a re-record
+        with `--own-check passed` beside the failure."""
+        phase_dir, _task = self._phase(tmp_path, monkeypatch)
+        out = _record(capsys, phase_dir, "apply-fix-batch-0",
+                      "--listed-check", "npm test=failed")
+        assert _marker_lines(out, "[BATCH_CHECK_FAILED]")
+        (line,) = _marker_lines(out, batch_done.OWN_CHECK_NOT_RECORDED_MARKER)
+        assert "--own-check passed" not in line, line
+        assert "--own-check findings" in line and "--finding" in line
+        # What is on record is said as such, and only the rest is asked for.
+        assert "the checks its subagent ran on its own edits are not on record" not in line
+        assert "npm test failed" in line, line
+        assert '"findings"' in line, line
+
+    def test_listed_passes_ask_only_for_the_rest_of_its_check(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        phase_dir, _task = self._phase(tmp_path, monkeypatch)
+        out = _record(capsys, phase_dir, "apply-fix-batch-0",
+                      "--listed-check", "npm test=passed")
+        (line,) = _marker_lines(out, batch_done.OWN_CHECK_NOT_RECORDED_MARKER)
+        assert "the checks its subagent ran on its own edits are not on record" not in line
+        assert "npm test passed" in line, line
+        assert "--own-check passed" in line and "--own-check findings" in line
+
 
 # -- the runbooks ------------------------------------------------------------
 
