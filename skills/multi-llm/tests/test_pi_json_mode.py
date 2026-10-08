@@ -386,7 +386,10 @@ class TestTheCaptureArgvIsTheShippedArgv:
         0.87.1 captures predated it; the 1.1.0 re-capture (2026-10-08) ran under
         it, so the recorded argv is the shipped one exactly, and a pi *without*
         the flag gets that argv minus the one ``--tools`` pair right after
-        ``--mode json`` and nothing else.
+        ``--mode json`` and nothing else. ``--no-mcp`` joined it the same day
+        (pi 1.1.0's ``--tools`` keeps MCP tools), and the rows were captured
+        again under it; a pi whose help documents neither flag gets the argv
+        minus both.
         """
         from unittest.mock import patch
 
@@ -402,7 +405,8 @@ class TestTheCaptureArgvIsTheShippedArgv:
         assert shipped == recorded
         tools = ["--tools", ",".join(pi_module.PI_TOOLS)]
         assert recorded[5:7] == tools
-        assert declined == recorded[:5] + recorded[7:]
+        assert recorded[7] == pi_module.PI_NO_MCP_FLAG
+        assert declined == recorded[:5] + recorded[8:]
 
     def test_the_manifest_names_the_version_the_adapter_verifies(self):
         import yaml

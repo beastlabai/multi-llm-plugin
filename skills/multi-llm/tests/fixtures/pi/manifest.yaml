@@ -39,7 +39,9 @@ method: >-
   verbatim in `capture/argv.json` and asserted equal to the landed
   `build_command` by tests/test_pi_json_mode.py; since the 1.1.0 re-run it
   carries the `--tools read,grep,find,bash,write` allow-list the 0.87.1 captures
-  predated, so pi's echoed system prompt names those tools — over the 4844-byte
+  predated, so pi's echoed system prompt names those tools, and `--no-mcp` (pi
+  1.1.0's `--tools` keeps MCP tools; the rows were run a second time under it the
+  same day, and the two runs differ only in ids and timings) — over the 4844-byte
   stdout-demanding review prompt (`capture/prompt.txt`) the 0.80.6 set used.
   `wall_s` is spawn-to-exit; `requests` counts the server log's POSTs (pi fetches
   no catalog). The whole rig is `capture/` (`batch.sh` reproduces the session in
@@ -84,7 +86,7 @@ rows:
     stdout: success.stdout.txt
     stderr: success.stderr.txt
     exit_code: 0
-    wall_s: 0.36
+    wall_s: 0.4
     requests: 1
     notes: >-
       stub_server with the 0.80.6 success row's answer. The answer is the text of
@@ -104,7 +106,7 @@ rows:
     stdout: truncated.stdout.txt
     stderr: truncated.stderr.txt
     exit_code: 0
-    wall_s: 0.38
+    wall_s: 0.39
     requests: 1
     notes: >-
       failserver `--mode trunc` (the default 60-byte cut, inside the first
@@ -137,7 +139,7 @@ rows:
     stdout: multi-assistant.stdout.txt
     stderr: multi-assistant.stderr.txt
     exit_code: 0
-    wall_s: 0.38
+    wall_s: 0.42
     requests: 2
     notes: >-
       stub_server with a `scripted_tool_call` on the chat surface (T4.10): the
@@ -158,7 +160,7 @@ rows:
     stdout: error-envelope.stdout.txt
     stderr: error-envelope.stderr.txt
     exit_code: 0
-    wall_s: 14.43
+    wall_s: 14.39
     requests: 4
     notes: >-
       failserver `--mode errbody` (HTTP 200 whose body is an error object). pi
@@ -176,7 +178,7 @@ rows:
     stdout: exit-zero-failure.stdout.txt
     stderr: exit-zero-failure.stderr.txt
     exit_code: 0
-    wall_s: 14.61
+    wall_s: 14.4
     requests: 4
     notes: >-
       failserver `--mode 500`. Under `--mode json` EVERY in-stream failure is an
@@ -206,7 +208,7 @@ rows:
     stdout: empty.stdout.txt
     stderr: empty.stderr.txt
     exit_code: 0
-    wall_s: 0.36
+    wall_s: 0.41
     requests: 1
     notes: >-
       stub_server answering the EMPTY string. A real empty completion now
@@ -226,7 +228,7 @@ rows:
     stdout: auth-error.stdout.txt
     stderr: auth-error.stderr.txt
     exit_code: 0
-    wall_s: 0.78
+    wall_s: 0.37
     requests: 1
     notes: >-
       failserver `--mode 401`. One request, terminal. `errorMessage` is 0.80.6's
@@ -243,7 +245,7 @@ rows:
     stdout: rate-limit.stdout.txt
     stderr: rate-limit.stderr.txt
     exit_code: 0
-    wall_s: 14.57
+    wall_s: 14.41
     requests: 4
     notes: >-
       failserver `--mode 429`, fail-forever. pi retries a 429 itself: 4 requests
@@ -260,7 +262,7 @@ rows:
     stdout: invalid-model.stdout.txt
     stderr: invalid-model.stderr.txt
     exit_code: 0
-    wall_s: 0.37
+    wall_s: 0.36
     requests: 1
     notes: >-
       failserver `--mode 404`. One request, terminal, the model named. A 404 is
@@ -276,7 +278,7 @@ rows:
     stdout: context-overflow.stdout.txt
     stderr: context-overflow.stderr.txt
     exit_code: 0
-    wall_s: 0.37
+    wall_s: 0.59
     requests: 1
     notes: >-
       failserver `--mode ctx` (400, `context_length_exceeded`). THE ROW THAT
@@ -300,7 +302,7 @@ rows:
     stdout: zero-body.stdout.txt
     stderr: zero-body.stderr.txt
     exit_code: 0
-    wall_s: 14.40
+    wall_s: 14.37
     requests: 4
     notes: >-
       failserver `--mode empty` (socket closed after zero body bytes).
@@ -316,7 +318,7 @@ rows:
     stdout: server-error.stdout.txt
     stderr: server-error.stderr.txt
     exit_code: 0
-    wall_s: 14.41
+    wall_s: 14.38
     requests: 4
     notes: >-
       failserver `--mode 500`, fail-forever: 4 requests over 14.4 s. Classified
@@ -333,7 +335,7 @@ rows:
     stdout: preflight-no-key.stdout.txt
     stderr: preflight-no-key.stderr.txt
     exit_code: 1
-    wall_s: 0.38
+    wall_s: 0.33
     requests: 0
     notes: >-
       stub_server, with `apiKey` DROPPED from the seeded models.json. Zero
@@ -355,7 +357,7 @@ rows:
     stdout: length.stdout.txt
     stderr: length.stderr.txt
     exit_code: 0
-    wall_s: 0.38
+    wall_s: 0.36
     requests: 1
     notes: >-
       scriptserver `--mode length-full`: a cut answer, `finish_reason: length`,
@@ -373,7 +375,7 @@ rows:
     stdout: length-recovery.stdout.txt
     stderr: length-recovery.stderr.txt
     exit_code: 0
-    wall_s: 0.38
+    wall_s: 0.37
     requests: 1
     notes: >-
       scriptserver `--mode length-short`: the same cut with 7 output tokens,
@@ -393,7 +395,7 @@ rows:
     stdout: markers-in-tool-result.stdout.txt
     stderr: markers-in-tool-result.stderr.txt
     exit_code: 0
-    wall_s: 0.37
+    wall_s: 0.45
     requests: 2
     notes: >-
       stub_server `scripted_tool_call` (chat): pi `read`s notes/incident.md, which
@@ -415,7 +417,7 @@ rows:
     stdout: context-overflow-compacted.stdout.txt
     stderr: context-overflow-compacted.stderr.txt
     exit_code: 0
-    wall_s: 0.44
+    wall_s: 0.45
     requests: 7
     notes: >-
       scriptserver `--mode overflow-compact`, with `PART_BYTES=2000` and a

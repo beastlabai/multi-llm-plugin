@@ -1132,9 +1132,10 @@ read_only_modes:
   pi:
     # NOT a read-only mode, and deliberately still `null`. Every `generate`
     # dispatch pins `--tools read,grep,find,bash,write` (utils/providers/pi.py
-    # PI_TOOLS, decision 11.6): the allow-list keeps `edit` out and stops the
-    # user's settings or a trusted project's `.pi/settings.json` from choosing
-    # which tool NAMES are active, but `bash` stays (the code-review prompt runs
+    # PI_TOOLS, decision 11.6) plus `--no-mcp` (pi 1.1.0's `--tools` keeps MCP
+    # tools, so pi's MCP client is switched off): the allow-list keeps `edit`
+    # out and stops the user's settings or a trusted project's
+    # `.pi/settings.json` from choosing which tool NAMES are active, but `bash` stays (the code-review prompt runs
     # `git diff`), so the model can still run any command and write through it.
     # It also pins names, not implementations: an extension that registers one
     # of those names replaces the built-in (extension isolation is deferred,
