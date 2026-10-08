@@ -191,6 +191,7 @@ from utils.llm_client import (
     describe_usage,
     invoke_with_file_output,
     invoke_with_provider,
+    misnamed_result_baseline,
     render_diff_access,
     sandbox_record_word,
 )
@@ -2484,6 +2485,15 @@ async def run_single_review(
     if tracker is not None:
         tracker.running(model_spec, attempt=1, timeout_s=effective_timeout)
 
+    # The misnamed-result baseline is the slot's, taken before its dispatch and
+    # handed down, as the review base's ladder does for every attempt.
+    misnamed_baseline = (
+        await asyncio.to_thread(
+            misnamed_result_baseline, out_dir, "code_review", model_spec
+        )
+        if run_model_specs is not None else None
+    )
+
     # Use asyncio.to_thread to run the synchronous invoke_with_file_output
     # in a thread pool, allowing concurrent execution
     result = await asyncio.to_thread(
@@ -2501,6 +2511,7 @@ async def run_single_review(
         # Every model of the fan-out, so a result written under the wrong name
         # is read from where the model put it (live run 10, pi).
         run_model_specs=run_model_specs,
+        misnamed_baseline=misnamed_baseline,
         **sandbox_fallback_kwargs(sandbox),
     )
 
