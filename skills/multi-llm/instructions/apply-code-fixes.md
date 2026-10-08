@@ -400,8 +400,8 @@ stderr): it leads with the checks the batches ran and what each reported, says t
 itself ran none of the repository's tests, and names the setting to add. Give the whole text
 after its tag, word for word, as plain text: never a shorter line of your own in its place or
 beside it. Only when step 10 printed no such line, write one plain line yourself: the plugin
-ran none of the repository's tests, and the setting to add is `verify_command` under
-`driver:` in `.multi-llm/providers.yaml` — name the repository's own test command as its
+ran none of the repository's tests, and the setting to add is
+`verify_command` under `driver:` in `.multi-llm/providers.yaml` — name the repository's own test command as its
 value when it has an obvious one (`package.json`'s `scripts.test`, a `Makefile` `test`
 target), without running it or writing the config.
 
