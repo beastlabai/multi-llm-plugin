@@ -4614,10 +4614,12 @@ class TestTheEtaLineUsesThisRunsOwnBatchCount:
         for position, line in enumerate(eta_lines, start=1):
             assert f"task {position}/5" in line, line
             if position < 5:
-                assert "ALL TASKS COMPLETE" not in line, line
+                assert "TASKS COMPLETE" not in line, line
             else:
-                # The deferred manual task does not stop the run short.
-                assert "ALL TASKS COMPLETE" in line, line
+                # The deferred manual task does not stop the run short; the
+                # N/N line names it as left for the user (fix round 24).
+                assert "ALL DISPATCHED TASKS COMPLETE" in line, line
+                assert "T014 left for you (manual)" in line, line
             assert "WARNING" not in line, line
 
         on_disk = json.loads(Path(state.state_file).read_text(encoding="utf-8"))
