@@ -311,11 +311,15 @@ class TestTheHostIsToldToCarryIt:
             "ending with the text of step 2's `[MANUAL_TASK_NOTE]` line (the task "
             "JSON's `manual_tasks_note`), verbatim: it says how to record them done"
         ) == 2
+        # Fix round 26: in the section that ends the report, and only there
+        # (live run 11: the hosts named the manual tasks above it too).
         assert (
-            "Each manual task step 2 deferred, as the user's to do, then the "
-            "next-step lookup's `[MANUAL_TASK_NOTE]` text verbatim and its "
+            "Each manual task step 2 deferred, as the user's to do: the "
+            "next-step lookup's section that ends the report lists them, then "
+            "the `[MANUAL_TASK_NOTE]` text verbatim and its "
             "`[MANUAL_TASK_COMMAND]` alone in a fenced block"
         ) in core
+        assert "give them there only, never a second time above it" in core
         skill = " ".join((SKILL_DIR / "SKILL.md").read_text(encoding="utf-8").split())
         # Fix round 17: after any phase, not only implement (the merged
         # renderer lists them after every command block while owed). Fix

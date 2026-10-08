@@ -396,9 +396,9 @@ PINNED_SHIM_VERSION = 4
 
 PINNED_TEMPLATE_SHA256 = {
     "codex":
-        "a4cdb21929646d27fa92fed004e61bc9c1c10a2b488bc03ec5006911059c827d",
+        "5bc7587dd0e9ba35ef14e9b66f137ac9f8ed36cc16c2a4e74d7bdc5abaa96f4b",
     "opencode":
-        "c5790145d86f61d0ed3bcc82ceca30008a09c44e233f2771ac44a53175a45d5c",
+        "531a7bb722d3494c22a73aff6a3e0ba05ade9fa94cea22783edfd4c71ab025a2",
 }
 
 
