@@ -34,7 +34,7 @@ class TestSectionSixSaysHowToRunACall:
     def test_from_the_starting_directory_and_never_cd(self):
         lead = _section_six_lead()
         assert "every `util` command a core names starts the same way" in lead
-        assert "from the directory this session started in (the repository root)" in lead
+        assert "from the directory this session started in (normally the repository root)" in lead
         assert "never `cd` in a Bash call" in lead
         assert "keeps the new directory for every later call" in lead
 
