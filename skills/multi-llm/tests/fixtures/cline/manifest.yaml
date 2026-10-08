@@ -8,10 +8,15 @@
 # it.
 schema_version: 1
 provider: cline
-cli_version: "3.0.55"
-captured: "2026-08-19"
+cli_version: "3.0.69"
+captured: "2026-10-08"
 method: >-
-  §6 step 5, in the committed image mllm-e2e:local with `--network none`, the rig
+  Re-run on cline 3.0.69 on 2026-10-08 by the same rig (the probe's
+  `incontainer.py`, one container per row, the same prompt, scenarios and
+  failserver modes) in the pinned image built from tests/container/Dockerfile at
+  the cli-versions.lock pins; the set was first captured on 3.0.55 on 2026-08-19
+  in mllm-e2e:local, and `ClineProvider.build_command`'s argv has not changed
+  since. §6 step 5, with `--network none`, the rig
   mounted read-only at /rig, and NO credential — the only key in the child's
   environment is the wrapper's per-exec `mllm-stub-<id>` string, which is
   meaningful on 127.0.0.1 and nowhere else. The probe drove the PATH wrapper
@@ -31,22 +36,24 @@ notes: >-
   Three facts hold across EVERY row here and are load-bearing rather than
   incidental. (1) cline exits **1** on all nine measured failures — 401, 404,
   400 context-length, 500-forever, 429-forever, a truncated body, a zero-byte
-  response, a 200 carrying an error object, and an empty completion. That is a
+  response, a 200 carrying an error object, and an empty completion — at 3.0.55
+  and again at 3.0.69. That is a
   CHANGE from the 3.0.39 measurement the adapter's own comment records ("cline
   **exits 0**", 2026-08-16), and it is why `exit-zero-failure` is
   not-applicable below. (2) The diagnosis rides BOTH channels: stdout carries
   the JSONL `run_result` with `finishReason: "error"`, and stderr carries a
-  one-line `{"type":"error","message":…}` copy of the same text. (3) stderr is
-  never empty on a run that reached the model — three AI SDK deprecation
-  warnings (938–1029 bytes) precede everything — but it is never the only
-  carrier either, so a parser reading stdout alone loses nothing.
+  one-line `{"type":"error","message":…}` copy of the same text. (3) At 3.0.69
+  that one line is ALL stderr carries (91–465 bytes on a failure) and the green
+  run's stderr is EMPTY: the three AI SDK deprecation warnings 3.0.55 wrote ahead
+  of everything (938–1029 bytes) are gone. stderr is still never the only
+  carrier, so a parser reading stdout alone loses nothing.
 
 rows:
   success:
     stdout: success.stdout.txt
     stderr: success.stderr.txt
     exit_code: 0
-    wall_s: 2.02
+    wall_s: 0.99
     requests: 1
     notes: >-
       Nine JSONL lines: `hook_event` agent_start, `agent_event` iteration_start /
@@ -70,23 +77,24 @@ rows:
     stdout: truncated.stdout.txt
     stderr: truncated.stderr.txt
     exit_code: 1
-    wall_s: 2.40
-    requests: 3
+    wall_s: 0.95
+    requests: 1
     notes: >-
       failserver `--mode trunc`: 200 headers promising a full Content-Length, a
-      60-byte prefix of the body, then the socket closes. cline retries the
-      completion **three** times inside 2.4 s and then reports it as
-      `Model returned empty response` — the wire condition is ERASED, and the
-      three lines the parser would otherwise have (a decode error, a byte count,
-      the partial frame) are not written at all. Byte-shape identical to
-      `error-envelope` and `ephemeral-only`; see the README.
+      60-byte prefix of the body, then the socket closes. At 3.0.69 cline makes
+      **one** request, does not retry, and reports `Response stream ended
+      without a finish reason.` (`errorClass: "unknown"`) in 1.0 s. 3.0.55 retried
+      it three times inside 2.4 s and reported `Model returned empty response`,
+      the same words as an empty completion; 3.0.69 tells the two apart (see the
+      README), though the wire condition is still not named — no decode error, no
+      byte count, no partial frame. Byte-shape identical to `error-envelope`.
     expect:
       salvage: none
       success: false
-      error_contains: ["Model returned empty response"]
+      error_contains: ["Response stream ended without a finish reason."]
       raw_contains:
         - '"finishReason":"error"'
-        - "Model returned empty response"
+        - "Response stream ended without a finish reason."
       # Not connection_error and not server_error: nothing in the capture names
       # either condition. `"finishReason":"error"` — the adapter's own declared
       # marker, consulted LAST — is the only thing that says this run failed.
@@ -96,7 +104,7 @@ rows:
     stdout: ephemeral-only.stdout.txt
     stderr: ephemeral-only.stderr.txt
     exit_code: 1
-    wall_s: 2.31
+    wall_s: 1.50
     requests: 3
     notes: >-
       An all-noise run, produced by a stub scenario whose answer is the EMPTY
@@ -104,8 +112,10 @@ rows:
       filters — `hook_event`, `agent_event` iteration_start/usage, `agent_event`
       error — and the run must therefore be a failure rather than an
       empty-string success. cline itself refuses to treat an empty completion as
-      an answer: it retries three times and then classifies it exactly as it
-      classifies a truncated body.
+      an answer: it retries three times (0.0 s, 0.26 s, 0.54 s) and then reports
+      `Model returned empty response`. 3.0.55 said the same of a truncated body
+      and a 200 error object; 3.0.69 says it of this row alone, and this is now
+      the one failure row with no `"errorClass":` key.
     expect:
       salvage: none
       success: false
@@ -119,18 +129,20 @@ rows:
     stdout: multi-assistant.stdout.txt
     stderr: multi-assistant.stderr.txt
     exit_code: 0
-    wall_s: 2.02
+    wall_s: 0.99
     requests: 1
     synthesized: true
     provenance: >-
-      Derived from `success.stdout.txt` by inserting a SECOND `run_result` line
+      Derived from `success.stdout.txt` (re-derived from the 3.0.69 capture on
+      2026-10-08 by the same recipe) by inserting a SECOND `run_result` line
       ahead of the real one, built by json.loads-ing cline's own line, replacing
       only its `text` value with a decoy array, and re-serialising with
       `separators=(',',':')` — verified byte-identical to the original line
       before the substitution, so the shape is cline's and only the answer text
       is ours. Synthesis is necessary because cline emits exactly ONE
       `run_result` per invocation and a second requires a tool loop the
-      committed stub deliberately never drives (the copilot `multi-assistant.jsonl`
+      committed stub deliberately never drives (the copilot
+      `multi-assistant.jsonl`
       precedent).
     notes: >-
       LAST-wins, not first-wins and not concatenation. The first `run_result`
@@ -149,23 +161,25 @@ rows:
     stdout: error-envelope.stdout.txt
     stderr: error-envelope.stderr.txt
     exit_code: 1
-    wall_s: 2.43
-    requests: 3
+    wall_s: 0.87
+    requests: 1
     notes: >-
       failserver `--mode errbody`: HTTP **200** whose body is a provider error
       object carrying the 401 wording. The measured result is worse than "the
-      error text is served as the answer" — the text is LOST. cline's
-      openai-compatible transport sees a completion with no choices, calls it
-      `Model returned empty response`, retries three times and gives up, so not
-      one byte of the provider's message reaches any pattern table. The only
-      thing that says this run failed is the adapter's own `finishReason` marker.
+      error text is served as the answer" — the text is LOST. At 3.0.69 cline's
+      openai-compatible transport reads the JSON body as a stream that never
+      finished and reports `Response stream ended without a finish reason.` after
+      ONE request (3.0.55 called it `Model returned empty response` and retried
+      three times), so not one byte of the provider's message reaches any
+      pattern table. The only thing that says this run failed is the adapter's
+      own `finishReason` marker.
     expect:
       salvage: none
       success: false
-      error_contains: ["Model returned empty response"]
+      error_contains: ["Response stream ended without a finish reason."]
       raw_contains:
         - '"finishReason":"error"'
-        - "Model returned empty response"
+        - "Response stream ended without a finish reason."
       classify_failure: "runner_error"
 
   exit-zero-failure:
@@ -175,22 +189,25 @@ rows:
       rig can produce — 401, 404, 400 context-length, 500-forever, 429-forever,
       a truncated body, a zero-byte response, a 200 carrying an error object and
       an empty completion (nine modes, nine captures, all `exit_code: 1`; the
-      per-row meta is in plans/harness-expansion/probe-out/cline/*.meta.json).
+      per-row meta is in plans/harness-expansion/probe-out/cline/*.meta.json) —
+      and again at 3.0.69 (the 2026-10-08 re-capture, nine for nine).
       `ClineProvider`'s comment records exit **0** at 3.0.39 with an invalid
       OPENROUTER_API_KEY, so the exit-0 shape existed and no longer does. The
       declared `exit_zero_failure_markers` are NOT dead: classify_streams
-      consults them regardless of exit code, and they are what classifies five
-      of the rows here — they simply have no exit-0 producer left to pin.
+      consults them regardless of exit code, and they are what classifies four
+      of the rows here (`truncated`, `ephemeral-only`, `error-envelope`,
+      `server-error`) — they simply have no exit-0 producer left to pin.
 
   stdout-error:
     not_applicable: >-
       Half-satisfied by construction, and the missing half was measured: cline
       does exit non-zero with its whole diagnosis on stdout (that is every
-      failure row above), but stderr is NEVER empty. It carries a one-line
-      `{"type":"error","message":…}` copy of the same text on all nine failure
-      modes, preceded on any run that reached the model by three AI SDK
-      deprecation warnings; the smallest stderr measured is 132 bytes and the
-      largest 1029. The half that IS the trap — a nonzero exit whose diagnosis is
+      failure row above), but stderr is NEVER empty on a failure. It carries a
+      one-line `{"type":"error","message":…}` copy of the same text on all nine
+      failure modes — at 3.0.69 nothing else (3.0.55 put three AI SDK
+      deprecation warnings ahead of it); the smallest failure stderr measured at
+      3.0.69 is 91 bytes and the largest 465. The half that IS the trap — a
+      nonzero exit whose diagnosis is
       on stdout must not be read as an answer — is pinned by all eight failure
       rows here, each asserting `success: false`.
 
@@ -198,7 +215,7 @@ rows:
     not_applicable: >-
       Unreachable while cline runs at all: the `hook_event` agent_start and
       `agent_event` iteration_start lines are written before the first HTTP
-      request, so the smallest capture in this set is **1360 bytes** on stdout
+      request, so the smallest capture in this set is **1319 bytes** on stdout
       and none is smaller. Zero bytes on both channels would mean the process was
       killed before it wrote a line, which is a harness artifact rather than a
       CLI behaviour — and manufacturing one with `timeout(1)` is the known
@@ -209,7 +226,7 @@ rows:
     stdout: auth-error.stdout.txt
     stderr: auth-error.stderr.txt
     exit_code: 1
-    wall_s: 2.03
+    wall_s: 1.00
     requests: 1
     notes: >-
       failserver `--mode 401`. **One** request — no retry, terminal — and the
@@ -229,7 +246,8 @@ rows:
       sentence passed through, which is why the pattern set needs one entry per
       upstream rather than one per CLI. Checked against every capture in this
       directory — the phrase occurs here and nowhere else, so no other cell
-      moves.
+      moves. At 3.0.69 cline also tags this error `errorClass: "auth"` (3.0.55:
+      `"unknown"`); the adapter reads the key's presence, never its value.
     expect:
       salvage: none
       success: false
@@ -243,12 +261,14 @@ rows:
     stdout: rate-limit.stdout.txt
     stderr: rate-limit.stderr.txt
     exit_code: 1
-    wall_s: 7.82
-    requests: 3
+    wall_s: 63.11
+    requests: 6
     notes: >-
       failserver `--mode 429`, fail-forever. cline **does** retry a 429
-      internally — three requests over 7.8 s — so an executor-level re-dispatch
-      of a rate-limited cline slot doubles a wait the CLI already served
+      internally — six requests over 63.1 s at 3.0.69 (0, 2, 6, 14, 30, 62 s:
+      backoff doubling from 2 s), where 3.0.55 made three over 7.8 s — so an
+      executor-level re-dispatch of a rate-limited cline slot doubles a wait the
+      CLI already served
       (§7.6(b)'s rule 6b). The upstream text survives, so `rate limit` in
       base.rate_limit_patterns matches before the exit-0 marker gets its turn.
     expect:
@@ -264,7 +284,7 @@ rows:
     stdout: invalid-model.stdout.txt
     stderr: invalid-model.stderr.txt
     exit_code: 1
-    wall_s: 1.93
+    wall_s: 0.91
     requests: 1
     notes: >-
       failserver `--mode 404`. One request, terminal. The failure NAMES the
@@ -283,7 +303,7 @@ rows:
     stdout: context-overflow.stdout.txt
     stderr: context-overflow.stderr.txt
     exit_code: 1
-    wall_s: 1.86
+    wall_s: 0.96
     requests: 1
     notes: >-
       failserver `--mode ctx` (400, `context_length_exceeded`, the verbatim
@@ -293,7 +313,7 @@ rows:
       `ContextWindowOverflowError` whose message QUOTES the provider's sentence
       in full (`provider reported: …`). Because that quote survives,
       CONTEXT_OVERFLOW_MARKERS matches and the terminal classification is
-      reached with no retry budget spent — one request, 1.9 s.
+      reached with no retry budget spent — one request, 1.0 s.
     expect:
       salvage: none
       success: false
@@ -310,8 +330,8 @@ rows:
     stdout: zero-body.stdout.txt
     stderr: zero-body.stderr.txt
     exit_code: 1
-    wall_s: 7.85
-    requests: 3
+    wall_s: 62.95
+    requests: 6
     notes: >-
       failserver `--mode empty`: the request is accepted and the socket closed
       after **zero** body bytes. Unlike aider, cline distinguishes this from a
@@ -327,7 +347,9 @@ rows:
       verdict, not a reading of the cause. The row is now
       `connection (?:was )?(?:refused|reset|closed|…)`, which is a better
       reading of the same bytes: a socket dropped after zero body bytes is
-      precisely what `connection_error` means. (`ECONNRESET` itself is still not
+      precisely what `connection_error` means. Re-captured on 3.0.69
+      (2026-10-08): the same sentence, now after six requests over 63 s where
+      3.0.55 made three over 7.9 s. (`ECONNRESET` itself is still not
       in the table — `ECONNREFUSED` is — but it no longer has to be, because the
       sentence in front of it now matches.) omp's `empty` row carries the
       identical Bun/undici sentence and was re-pinned `null` →
@@ -351,12 +373,16 @@ rows:
     stdout: server-error.stdout.txt
     stderr: server-error.stderr.txt
     exit_code: 1
-    wall_s: 8.02
-    requests: 3
+    wall_s: 62.98
+    requests: 6
     notes: >-
       failserver `--mode 500`, fail-forever — §6.1.1's experiment 2, and the
-      whole internal-retry envelope in one capture: **3 requests over 8.0 s**
-      (0.0 s, ~1 s, ~6 s), then exit 1. The row is here rather than under
+      whole internal-retry envelope in one capture: at 3.0.69 **6 requests over
+      63.0 s** (0, 2, 6, 14, 30, 62 s — a 2 s backoff doubling four times), then
+      exit 1; 3.0.55 made 3 requests over 8.0 s (0.0 s, ~1 s, ~6 s).
+      `ClineProvider` declares no `internal_retries` envelope, so the ladder still
+      assumes one request per dispatch (§7.5 rule 6(c)). The row is here rather
+      than under
       `exit-zero-failure` because cline's exit code is 1; it classifies
       `runner_error` because OpenAI's 500 sentence ("The server had an error
       while processing your request") matches no member of

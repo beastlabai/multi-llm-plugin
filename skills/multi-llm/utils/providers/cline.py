@@ -173,9 +173,10 @@ class ClineProvider(LLMProvider):
     """
 
     version_cmd = ("cline", "--version")
-    #: 3.0.55 is where every fixture in ``tests/fixtures/cline/`` was captured —
-    #: the §6 step-5 probe, ``--network none``, the stub and the failserver both
-    #: running inside the container, no credential — and it is the version
+    #: 3.0.55 is where every fixture in ``tests/fixtures/cline/`` was first
+    #: captured — the §6 step-5 probe, ``--network none``, the stub and the
+    #: failserver both running inside the container, no credential — and 3.0.69
+    #: is where they were re-captured (below) and the version
     #: ``tests/container/cli-versions.lock`` pins.
     #:
     #: 3.0.39 is the *other* release this parser has been run against (the ``user
@@ -215,7 +216,17 @@ class ClineProvider(LLMProvider):
     #: ``--version`` alone and takes 8.7 s when egress is blackholed — but that
     #: is well inside ``_run_probe``'s 30 s timeout, and it runs at most once per
     #: process.
-    verified_version = "3.0.55"
+    #:
+    #: **Moved 3.0.55 -> 3.0.69 on 2026-10-08**: all ten captured rows were
+    #: re-run on 3.0.69 by the same rig in the pinned image (the synthesized
+    #: ``multi-assistant`` row re-derived from the new ``success``), with no
+    #: parser change. Still exit 1 on every failure. What moved: the internal
+    #: retry ladder (a 500, a 429 and a zero-byte body now take 6 requests over
+    #: 63 s, was 3 over ~8 s); a truncated body and a 200 error object now fail
+    #: in one request as ``Response stream ended without a finish reason.``
+    #: (was ``Model returned empty response`` after three); and stderr lost its
+    #: AI SDK deprecation warnings, so a green run's stderr is empty.
+    verified_version = "3.0.69"
 
     # §7.2 — per-adapter pattern overrides, EXTENDING the base sets.
     #
