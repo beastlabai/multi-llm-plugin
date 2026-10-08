@@ -7893,7 +7893,8 @@ class TestTheNextStepIsLiftedAndNeverFollowed:
         children = []
         for command in commands:
             child = _child(0, "done", user_next_step=_next_step(command))
-            child["stdout"] = f"[NEXT_COMMAND] {command}\n" + child["stdout"]
+            child["stdout"] = (f"re-run it with: {command}\n[NEXT_COMMAND] {command}\n"
+                               + child["stdout"])
             children.append({
                 "code": 0, "argv": ["uv", "run"], "stderr": "", "resultRaw": None,
                 "truncated": False, "banner": {}, "aborted": False,
@@ -7917,7 +7918,116 @@ class TestTheNextStepIsLiftedAndNeverFollowed:
         for command, result in zip(commands, out["lifted"]):
             assert result["user_next_step"]["command"] == command
             assert "user_next_step" not in result["result"]
-            assert f"[NEXT_COMMAND] {command}" in result["output"].split("\n")
+            lines = result["output"].split("\n")
+            assert f"re-run it with: {command}" in lines
+            # Fix round 27: the block line the lifted step carries is left to it.
+            assert f"[NEXT_COMMAND] {command}" not in lines
+
+
+class TestTheOutputLeavesTheBlockToTheStep:
+    """The Fable review of fix round 26 (relay #1): the block printed after
+    a terminal poll's text handed the model the manual note and the optional
+    whys in `output` beside `user_next_step.markdown`. A result that carries
+    the step leaves the block's lines to it; the text above stays."""
+
+    MARKERS = tuple(pkg_build.cli_surface()["dispatcher"]["next_step_markers"])
+
+    def _carried(self, output):
+        return [line for line in (output or "").split("\n")
+                if any(line == marker or line.startswith(marker + " ")
+                       for marker in self.MARKERS)]
+
+    def _real(self, argv, monkeypatch, capsys):
+        """The dispatcher's own stdout and result for *argv*, on this route."""
+        import multi_llm
+        from utils import detach as _detach
+
+        for name in ("MULTI_LLM_HOST", _detach.PLAN_ARG_ENV, _detach.WORKER_ENV):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv(ROUTE_ENV["name"], ROUTE_ENV["value"])
+        capsys.readouterr()
+        code = multi_llm.main(list(argv))
+        out = capsys.readouterr().out
+        assert code == 0, out
+        return {"code": 0, "stdout": out,
+                "result": cli_common.parse_result_line(out)}
+
+    def test_the_markers_are_the_ones_the_step_carries(self):
+        from utils import next_phase as _np
+
+        assert set(self.MARKERS) == set(_np.CARRIED_BLOCK_MARKERS)
+        assert _np.RUNNER_WARNING_MARKER not in self.MARKERS
+
+    def test_a_real_complete_poll_says_the_manual_note_once(
+        self, built_package, tmp_path, monkeypatch, capsys,
+    ):
+        from tests.test_manual_tasks_on_completion import _complete_plan
+        from tests.test_next_command_emitters import _terminal_record
+
+        plan = _complete_plan(tmp_path / "project")
+        _terminal_record(plan, "apply-fixes", mode="apply-code-fixes",
+                         plan_file=str(plan))
+        child = self._real(["status", str(plan), "--view", "run", "--phase",
+                            "apply-code-fixes", "--host", "opencode"], monkeypatch, capsys)
+        assert "[MANUAL_TASK_NOTE] " in child["stdout"]
+        out = _terminal(built_package, child, dict(NEXT_STEP_VALUES, plan=str(plan)))
+        step = out["user_next_step"]
+        assert step["complete"] is True and step["manual_tasks"]
+        assert self._carried(out["output"]) == [], out["output"]
+        assert step["manual_tasks_note"] not in out["output"]
+        assert "runs ({phase}/.status.json)" in out["output"]
+
+    def test_a_real_poll_says_the_optional_why_once(
+        self, built_package, tmp_path, monkeypatch, capsys,
+    ):
+        from tests.test_next_command_emitters import _terminal_record, build
+        from tests.test_next_phase import P, UP_TO_TASKS, WHY_REVIEW_TASKS, S
+
+        root = tmp_path / "project"
+        root.mkdir()
+        monkeypatch.chdir(root)
+        plan = build(root, S(UP_TO_TASKS))
+        _terminal_record(plan, "generate-tasks", mode="generate-tasks",
+                         plan_file=str(plan), plan_arg=P)
+        child = self._real(["status", P, "--view", "run", "--phase",
+                            "generate-tasks", "--host", "opencode"], monkeypatch, capsys)
+        assert "[NEXT_COMMAND_OPTIONAL_WHY] " + WHY_REVIEW_TASKS in child["stdout"]
+        out = _terminal(built_package, child, dict(NEXT_STEP_VALUES, plan=str(plan)))
+        assert out["user_next_step"]["optional_before"][0]["why"] == WHY_REVIEW_TASKS
+        assert self._carried(out["output"]) == [], out["output"]
+        assert WHY_REVIEW_TASKS not in out["output"]
+
+    def test_an_exit_2_rerun_leaves_it_too(self, built_package):
+        step = _next_step("/multi-llm --implement /w/p.md")
+        child = _child(2, "nothing-to-do", user_next_step=step)
+        child["stdout"] = ("review-plan is already complete for this plan.\n"
+                           f"[NEXT_COMMAND] {step['command']}\n" + child["stdout"])
+        out = _terminal(built_package, child, NEXT_STEP_VALUES)
+        assert out["user_next_step"] == step
+        assert out["output"] == "review-plan is already complete for this plan."
+
+    def test_a_result_without_the_step_keeps_every_line(self, built_package):
+        child = _child(0, "done")
+        child["stdout"] = ("[WORKFLOW_COMPLETE]\n[MANUAL_TASK] T011 Manual playthrough\n"
+                           + child["stdout"])
+        out = _terminal(built_package, child, NEXT_STEP_VALUES)
+        assert "user_next_step" not in out
+        assert out["output"].split("\n") == [
+            "[WORKFLOW_COMPLETE]", "[MANUAL_TASK] T011 Manual playthrough"]
+
+    def test_what_the_step_does_not_carry_stays(self, built_package):
+        step = _next_step("/multi-llm --implement /w/p.md")
+        child = _child(0, "done", user_next_step=step)
+        kept = [
+            "[RUNNER_WARNING] implement on this host is refused: say so first",
+            "  [NEXT_COMMAND] an indented quote is not the block",
+            "[NEXT_COMMAND]x not a marker line either",
+        ]
+        child["stdout"] = "\n".join(
+            kept[:1] + [f"[NEXT_COMMAND] {step['command']}"] + kept[1:]
+        ) + "\n" + child["stdout"]
+        out = _terminal(built_package, child, NEXT_STEP_VALUES)
+        assert out["output"].split("\n") == kept
 
     def test_the_continuation_loop_never_follows_it(self, built_package, uv_stub):
         """Zero follows for a result carrying only ``user_next_step`` — even one

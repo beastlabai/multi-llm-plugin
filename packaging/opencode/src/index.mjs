@@ -2132,7 +2132,7 @@ function terminalResult(child, context) {
       result,
       artifacts: child.result.artifacts ?? [],
       next: nextAsToolCall(rawNext, surface),
-      output: humanOutput(child, rawNext, surface),
+      output: humanOutput(child, rawNext, surface, null, carriesNextStep(child)),
       ...liftedUserNextStep(result),
     }
   }
@@ -2171,7 +2171,7 @@ function terminalResult(child, context) {
     result,
     artifacts: child.result.artifacts ?? [],
     next: nextAsToolCall(raw, surface),
-    output: humanOutput(child, raw, surface),
+    output: humanOutput(child, raw, surface, null, carriesNextStep(child)),
     ...liftedUserNextStep(result),
   }
 }
@@ -2342,18 +2342,37 @@ function commandForms(command) {
  * rather than duplication: the parse failed, so nothing else in the result
  * carries it, and dropping it would delete the only evidence of what the child
  * actually printed.
+ *
+ * With `carried` (the result carries the lifted `user_next_step`), the block's
+ * lines that step says itself are dropped too (fix round 27, the Fable review
+ * of round 26: the manual note and the optional whys reached the model twice,
+ * in `output` and in the step's `markdown`): a line that is one of the
+ * surface's `dispatcher.next_step_markers`, or starts with one and a space. A
+ * `[RUNNER_WARNING]` line, which the step does not carry, stays. The codex
+ * server's `human_output` is its port.
  */
-function humanOutput(child, command, surface, respell = null) {
+function humanOutput(child, command, surface, respell = null, carried = false) {
   const text = redactCommand(child?.stdout, command, surface, respell)
   const marker = surface?.dispatcher?.result_marker
   if (typeof text !== "string" || !text || !marker || !child?.result) {
     return text
   }
+  const said = carried ? surface?.dispatcher?.next_step_markers ?? [] : []
   return text
     .split("\n")
     .filter((line) => !line.trim().startsWith(marker))
+    .filter(
+      (line) =>
+        !said.some((block) => line === block || line.startsWith(block + " ")),
+    )
     .join("\n")
     .trimEnd()
+}
+
+/** Whether `liftedUserNextStep` lifts a step off this child's parsed result. */
+function carriesNextStep(child) {
+  const step = child?.result?.user_next_step
+  return step !== undefined && step !== null
 }
 
 function scrubValue(value, commands, pattern, respell = null) {

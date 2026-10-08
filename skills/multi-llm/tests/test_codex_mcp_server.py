@@ -2207,12 +2207,137 @@ class TestUserNextStep:
         command = _caps.next_command_template(host_id, route).replace(
             "{args}", PHASE_ARGS)
         done = poll_step(0, user_next_step=next_step(command))
-        done["stdout"].insert(0, "[NEXT_COMMAND] " + command)
+        done["stdout"][:0] = ["re-run it with: " + command, "[NEXT_COMMAND] " + command]
         envelope, _, _, _ = harness.run(REVIEW, [launch_step(), done])
         assert envelope["user_next_step"]["command"] == command
         assert "user_next_step" not in envelope["result"]
-        assert "[NEXT_COMMAND] " + command in envelope["output"].split("\n")
+        lines = envelope["output"].split("\n")
+        assert "re-run it with: " + command in lines
+        # Fix round 27: the block line the lifted step carries is left to it.
+        assert "[NEXT_COMMAND] " + command not in lines
         assert RUNNABLE_MARKER not in json.dumps(envelope)
+
+
+# ===========================================================================
+# The output leaves the block to the lifted step (fix round 27)
+# ===========================================================================
+
+NEXT_STEP_MARKERS = tuple(DISPATCHER["next_step_markers"])
+
+
+def _carried_lines(output):
+    return [line for line in (output or "").split("\n")
+            if any(line == marker or line.startswith(marker + " ")
+                   for marker in NEXT_STEP_MARKERS)]
+
+
+def _real_poll(argv, monkeypatch, capsys):
+    """The dispatcher's own stdout for *argv*, run in-process on this route."""
+    import multi_llm
+    from utils import detach as _detach
+
+    for name in ("MULTI_LLM_HOST", _detach.PLAN_ARG_ENV, _detach.WORKER_ENV):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(ROUTE_ENV["name"], ROUTE_ENV["value"])
+    capsys.readouterr()
+    code = multi_llm.main(list(argv))
+    out = capsys.readouterr().out
+    assert code == 0, out
+    return out.splitlines()
+
+
+class TestTheOutputLeavesTheBlockToTheStep:
+    """The Fable review of fix round 26 (relay #1): round 26 left the
+    workflow trailer out of a tool route's poll text, but the block printed
+    after it still handed the model the manual note and the optional whys in
+    `output` beside `user_next_step.markdown`. A result that carries the step
+    leaves the block's lines to it; the text above stays."""
+
+    def test_a_real_complete_poll_says_the_manual_note_once(
+        self, harness, tmp_path, monkeypatch, capsys,
+    ):
+        from tests.test_manual_tasks_on_completion import _complete_plan
+        from tests.test_next_command_emitters import _terminal_record
+
+        plan = _complete_plan(tmp_path / "project")
+        _terminal_record(plan, "apply-fixes", mode="apply-code-fixes",
+                         plan_file=str(plan))
+        stdout = _real_poll(["status", str(plan), "--view", "run", "--phase",
+                             "apply-code-fixes", "--host", "codex"], monkeypatch, capsys)
+        assert any(line.startswith("[MANUAL_TASK_NOTE] ") for line in stdout)
+        envelope, _, _, _ = harness.run(
+            dict(REVIEW, plan=str(plan)), [launch_step(), {"exit": 0, "stdout": stdout}])
+        step = envelope["user_next_step"]
+        assert step["complete"] is True and step["manual_tasks"]
+        output = envelope["output"]
+        assert _carried_lines(output) == [], output
+        assert step["manual_tasks_note"] not in output
+        assert "Workflow complete" not in output
+        assert "runs ({phase}/.status.json)" in output  # the text stays
+
+    def test_a_real_poll_says_the_optional_why_once(
+        self, harness, tmp_path, monkeypatch, capsys,
+    ):
+        from tests.test_next_command_emitters import _terminal_record, build
+        from tests.test_next_phase import P, UP_TO_TASKS, WHY_REVIEW_TASKS, S
+
+        root = tmp_path / "project"
+        root.mkdir()
+        monkeypatch.chdir(root)
+        plan = build(root, S(UP_TO_TASKS))
+        _terminal_record(plan, "generate-tasks", mode="generate-tasks",
+                         plan_file=str(plan), plan_arg=P)
+        stdout = _real_poll(["status", P, "--view", "run", "--phase",
+                             "generate-tasks", "--host", "codex"], monkeypatch, capsys)
+        assert "[NEXT_COMMAND_OPTIONAL_WHY] " + WHY_REVIEW_TASKS in stdout
+        envelope, _, _, _ = harness.run(
+            dict(REVIEW, plan=str(plan)), [launch_step(), {"exit": 0, "stdout": stdout}])
+        step = envelope["user_next_step"]
+        assert step["optional_before"][0]["why"] == WHY_REVIEW_TASKS
+        assert _carried_lines(envelope["output"]) == [], envelope["output"]
+        assert WHY_REVIEW_TASKS not in envelope["output"]
+
+    def test_an_exit_2_rerun_leaves_it_too(self, harness):
+        step = next_step("/multi-llm --generate-tasks /w/plans/p.md")
+        already = {"exit": CODES["nothing_to_do"], "stdout": [
+            "review-plan is already complete for this plan.",
+            "[NEXT_COMMAND] " + step["command"],
+            result_line(mode="review-plan", state=STATES["nothing_to_do"],
+                        exit=CODES["nothing_to_do"], user_next_step=step)]}
+        envelope, _, _, _ = harness.run(REVIEW, [already])
+        assert envelope["user_next_step"] == step
+        assert envelope["output"] == "review-plan is already complete for this plan."
+
+    def test_a_result_without_the_step_keeps_every_line(self, harness):
+        block = ["[WORKFLOW_COMPLETE]", "[MANUAL_TASK] T011 Manual playthrough"]
+        done = poll_step(0)
+        done["stdout"][:0] = block
+        envelope, _, _, _ = harness.run(REVIEW, [launch_step(), done])
+        assert "user_next_step" not in envelope
+        assert envelope["output"].split("\n") == block
+
+    def test_what_the_step_does_not_carry_stays(self, harness):
+        step = next_step("/multi-llm --implement /w/plans/p.md")
+        done = poll_step(0, user_next_step=step)
+        done["stdout"][:0] = [
+            "[RUNNER_WARNING] implement on this host is refused: say so first",
+            "[NEXT_COMMAND] " + step["command"],
+            "  [NEXT_COMMAND] an indented quote is not the block",
+            "[NEXT_COMMAND]x not a marker line either",
+        ]
+        envelope, _, _, _ = harness.run(REVIEW, [launch_step(), done])
+        assert envelope["output"].split("\n") == [
+            "[RUNNER_WARNING] implement on this host is refused: say so first",
+            "  [NEXT_COMMAND] an indented quote is not the block",
+            "[NEXT_COMMAND]x not a marker line either",
+        ]
+
+    def test_the_markers_are_the_ones_the_step_carries(self):
+        from utils import next_phase as _np
+
+        assert set(NEXT_STEP_MARKERS) == set(_np.CARRIED_BLOCK_MARKERS)
+        assert _np.RUNNER_WARNING_MARKER not in NEXT_STEP_MARKERS
+        assert _np.TESTS_NOT_RUN_MARKER not in NEXT_STEP_MARKERS
 
 
 # ===========================================================================

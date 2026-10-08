@@ -108,6 +108,28 @@ TESTS_NOT_RUN_MARKER = "[TESTS_NOT_RUN]"
 NEXT_STEP_MARKDOWN_MARKER = "[NEXT_STEP_MARKDOWN]"
 NEXT_STEP_MARKDOWN_END_MARKER = "[NEXT_STEP_MARKDOWN_END]"
 
+#: The block's markers whose lines say what ``user_next_step`` carries itself
+#: (its ``complete``, ``command``, ``why``, ``optional_before``, ``answers``
+#: and ``manual_tasks`` keys, all in its ``markdown``). A tool server drops
+#: these lines from the ``output`` of a result that carries the key (fix
+#: round 27, the Fable review of round 26: the model was handed the manual
+#: note and the optional whys in both), shipped as the surface's
+#: ``dispatcher.next_step_markers``. ``[RUNNER_WARNING]`` and
+#: ``[TESTS_NOT_RUN]`` are not among them: the key does not carry them. A
+#: shell and the Claude Code leg read every line (its Stop hook does).
+CARRIED_BLOCK_MARKERS: Tuple[str, ...] = (
+    WORKFLOW_COMPLETE_MARKER,
+    NEXT_COMMAND_WHY_MARKER,
+    NEXT_COMMAND_MARKER,
+    NEXT_COMMAND_OPTIONAL_WHY_MARKER,
+    NEXT_COMMAND_OPTIONAL_MARKER,
+    NEXT_COMMAND_ANSWERS_WHY_MARKER,
+    NEXT_COMMAND_ANSWERS_MARKER,
+    MANUAL_TASK_MARKER,
+    MANUAL_TASK_NOTE_MARKER,
+    MANUAL_TASK_COMMAND_MARKER,
+)
+
 #: The one slot every ``next_command`` template ends with (schema pattern
 #: ``^[^{}]+\{args\}$``). Filled with ``str.replace``, never ``str.format``.
 ARGS_SLOT = "{args}"
