@@ -329,7 +329,10 @@ class TestRecords:
         captured = capsys.readouterr()
         line = next(item for item in captured.out.splitlines()
                     if item.startswith("[BATCH_DECLINED]"))
-        shown = line.split(" — ", 1)[1].split(". List it")[0]
+        # Fix round 27: the cut ends in its own mark, so the line adds no
+        # full stop after it ("…. List it" before).
+        shown = line.split(" — ", 1)[1].split(" List it")[0]
+        assert not shown.endswith(".")
         assert len(shown) <= DECLINED_REASON_MAX_CHARS
         assert_clean_cut(shown, reason)
         ignored = next(item for item in captured.err.splitlines()
