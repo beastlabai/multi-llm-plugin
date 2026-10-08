@@ -38,6 +38,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from . import progress_tracker as _progress
 from . import status_file as _status_file
 from .json_extractor import sanitize_model_name
+from .text_clip import plain_line
 
 #: Basenames that are never a per-model result file: every artifact a phase dir
 #: holds that is also a ``*.json``. The union of what the two reaggregate globs
@@ -139,13 +140,24 @@ def misnamed_result_note(model_spec: str, wrote: str, expected: str) -> str:
     )
 
 
-def set_aside_note(name: str, target: str, recorded_specs: Sequence[str]) -> str:
-    """The one sentence the aggregate says about a result file it left out."""
-    return (
+def set_aside_note(
+    name: str, target: str, recorded_specs: Sequence[str],
+    *, rename_failed: Optional[str] = None,
+) -> str:
+    """The one sentence the aggregate says about a result file it left out.
+
+    *rename_failed* is why the rename to *target* failed: the file is then
+    left where it is, and the sentence says so (review of fix round 24: it
+    said "renamed it to <its own name>" on every surface).
+    """
+    head = (
         f"{name} is not the result file of any model this review ran "
         f"({', '.join(recorded_specs)}), so its findings are left out of the "
-        f"report; renamed it to {target} (nothing was deleted)"
+        f"report; "
     )
+    if rename_failed is not None:
+        return f"{head}left in place (rename failed: {plain_line(rename_failed)})"
+    return f"{head}renamed it to {target} (nothing was deleted)"
 
 
 def append_result_note(phase_dir: os.PathLike | str, note: str) -> None:
@@ -287,6 +299,7 @@ def set_aside_unrecorded_results(
         target = f"{path}.{SET_ASIDE_SUFFIX}"
         if os.path.exists(target):
             target = f"{target}.{datetime.now().strftime('%Y%m%dT%H%M%S%f')}"
+        rename_failed: Optional[str] = None
         try:
             os.replace(path, target)
         except OSError as exc:
@@ -295,8 +308,10 @@ def set_aside_unrecorded_results(
                 f"{phase_dir} but is not read as a model's result",
                 file=sys.stderr,
             )
-            target = path
-        note = set_aside_note(name, os.path.basename(target), recorded)
+            rename_failed = exc.strerror or str(exc) or type(exc).__name__
+        note = set_aside_note(
+            name, os.path.basename(target), recorded, rename_failed=rename_failed,
+        )
         print(f"[RESULT_SET_ASIDE] {note}")
         append_result_note(phase_dir, note)
         set_aside_stems.append(stem)
