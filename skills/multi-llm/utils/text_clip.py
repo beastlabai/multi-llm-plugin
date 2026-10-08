@@ -259,3 +259,31 @@ def with_closing_mark(text: Any) -> str:
     if stripped[-1:] in _REPLACED_BY_A_STOP and stripped[:-1].rstrip():
         stripped = stripped[:-1].rstrip()
     return stripped + "."
+
+
+#: How a notice joins its clauses (:func:`join_clauses`).
+CLAUSE_SEPARATOR = "; "
+
+
+def join_clauses(parts: Any, separator: str = CLAUSE_SEPARATOR) -> str:
+    """*parts* as one line, joined by *separator*: each part but the last
+    without its one closing full stop or semicolon
+    (:func:`without_closing_mark`), the last kept as written.
+
+    Fix round 28 (live run 12 #7): a result's ``notice`` joins clauses that
+    are often whole sentences — the tests line, a quoted check finding, a
+    declined reason — and a bare ``"; ".join`` printed ``… scripts.test).;
+    Opponent speed …`` (Codex decline and accept 02, OpenCode 08), while the
+    line that dropped a declined reason's stop to make room for the join
+    lost it where nothing followed (OpenCode decline). Every notice join
+    goes through here, so a part keeps its own mark when it ends the line
+    and gives it up only to the separator. Empty parts are left out.
+    """
+    if parts is None:
+        return ""
+    kept = [str(part).strip() for part in parts
+            if part is not None and str(part).strip()]
+    if not kept:
+        return ""
+    return separator.join(
+        [without_closing_mark(part) for part in kept[:-1]] + [kept[-1]])

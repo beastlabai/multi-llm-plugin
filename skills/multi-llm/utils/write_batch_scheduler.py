@@ -57,7 +57,9 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import prior_changes as _prior_changes
     from . import process_control as _process_control
     from . import subagent_executor as _executor
-    from .text_clip import clip, plain_line, with_closing_mark, without_closing_mark
+    from .text_clip import (
+        clip, join_clauses, plain_line, with_closing_mark, without_closing_mark,
+    )
     from .providers.base import (
         SANDBOX_RUNG_PLUGIN_LANDLOCK,
         host_write_posture_consent,
@@ -161,7 +163,9 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         safety_dir,
     )
 except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.text_clip import clip, plain_line, with_closing_mark, without_closing_mark  # type: ignore
+    from utils.text_clip import (  # type: ignore
+        clip, join_clauses, plain_line, with_closing_mark, without_closing_mark,
+    )
     from utils import git_utils as _git_utils
     from utils import known_checks as _known_checks
     from utils import landlock_dispatch as _landlock
@@ -511,7 +515,7 @@ def write_result_notice(result: Any) -> Optional[str]:
     unverified = getattr(result, "unverified", None)
     if unverified:
         parts.append(str(unverified))
-    return clip("; ".join(parts), 1200) or None
+    return clip(join_clauses(parts), 1200) or None
 
 
 def item_word(kind: str) -> str:

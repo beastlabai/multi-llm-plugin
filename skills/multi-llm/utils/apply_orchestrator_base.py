@@ -71,7 +71,7 @@ from .state_manager import (
     generate_group_id,
     processed_record_counts,
 )
-from .text_clip import without_closing_mark
+from .text_clip import join_clauses
 from .suggestion_batcher import (
     SuggestionBatch,
     estimate_batch_processing_stats,
@@ -2776,12 +2776,15 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 if member
             }
             for member in item_ids:
-                # Fix round 26: the record keeps the reason's closing stop;
-                # the notice joins these lines with "; ".
+                # Fix round 26: the record keeps the reason's closing stop.
+                # Fix round 28 (live run 12 #7): so does this line, which
+                # ends with it; the notice's join (`join_clauses`) drops it
+                # only where another clause follows (OpenCode decline's
+                # notice lost it as its last clause).
                 if member in declined:
-                    why = f"the batch declined it — {without_closing_mark(declined[member])}"
+                    why = f"the batch declined it — {str(declined[member] or '').strip()}"
                 elif member in skipped:
-                    why = f"skipped at your request — {without_closing_mark(skipped[member])}"
+                    why = f"skipped at your request — {str(skipped[member] or '').strip()}"
                 else:
                     continue
                 title = titles.get(member) or "Untitled"
@@ -3020,7 +3023,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         _detach.report_progress(
             os.path.join(self.out_dir, self.phase_name), notes=notes,
         )
-        _cli.add_notice("; ".join(notes))
+        _cli.add_notice(join_clauses(notes))
 
     def consistency_warnings(self) -> List[str]:
         """Problems the finished edits left in the file they edited (advisory).

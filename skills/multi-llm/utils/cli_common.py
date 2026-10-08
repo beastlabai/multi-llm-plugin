@@ -74,9 +74,9 @@ RESULT_MARKER = "MULTI_LLM_RESULT:"
 # 22), beside the one rule for cutting a preview short; re-exported here, the
 # name every caller has always imported.
 try:
-    from .text_clip import _CONTROL_CHARACTERS, clip, plain_line  # noqa: E402,F401
+    from .text_clip import _CONTROL_CHARACTERS, clip, join_clauses, plain_line  # noqa: E402,F401
 except ImportError:  # pragma: no cover - direct script runs with utils/ on path
-    from text_clip import _CONTROL_CHARACTERS, clip, plain_line  # type: ignore # noqa: E402,F401
+    from text_clip import _CONTROL_CHARACTERS, clip, join_clauses, plain_line  # type: ignore # noqa: E402,F401
 
 #: Uniform exit codes across every mode. The dispatcher never remaps a target's
 #: code and invents one of its own only for an unknown mode or a rejected flag
@@ -1061,11 +1061,13 @@ def add_notice(text: Optional[str]) -> None:
 
     For a phase's own notes (fix round 14: a consistency warning, the items
     a judge skipped), which must not replace a notice another site set.
+    Joined by ``text_clip.join_clauses`` (fix round 28), so the notice
+    before it gives up its closing stop to the separator.
     """
     if _ACTIVE is None or not text:
         return
     current = _ACTIVE.notice
-    _ACTIVE.set_notice(f"{current}; {text}" if current else text)
+    _ACTIVE.set_notice(join_clauses([current, text]) if current else text)
 
 
 def record_progress(progress: Optional[Dict[str, Any]]) -> None:
