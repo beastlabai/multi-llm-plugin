@@ -9178,13 +9178,25 @@ class WriteBatchScheduler:
                 # Plan step 3: a failed batch whose write outcome reads
                 # "clean-failure" says which failure it was.
                 verdict = f"{verdict} ({outcome.status})"
-            self.log(
-                f"[write-subagents] batch {batch_index}: {task_id} "
-                f"{verdict} in "
-                f"{outcome.duration_seconds:.1f}s — "
-                f"{', '.join(outcome.files_touched) or 'no files changed'}"
-                f"{rung_text}"
-            )
+            if dispatched and not outcome.not_rerun:
+                self.log(
+                    f"[write-subagents] batch {batch_index}: {task_id} "
+                    f"{verdict} in "
+                    f"{outcome.duration_seconds:.1f}s — "
+                    f"{', '.join(outcome.files_touched) or 'no files changed'}"
+                    f"{rung_text}"
+                )
+            else:
+                # Fix round 28 (live run 12, stop fixture on OpenCode and
+                # Codex): a task no runner started was named as "batch 3"
+                # beside "Organized into 3 execution batches", which counts
+                # the batches the run dispatches (0 to 2), so the log read as
+                # four. It names no batch: none was dispatched for it.
+                self.log(
+                    f"[write-subagents] {task_id} {verdict} — "
+                    f"{', '.join(outcome.files_touched) or 'no files changed'}"
+                    f"{rung_text}"
+                )
 
             if outcome.output_path and outcome.ok:
                 # A result file only counts as this task's on resume when it was
