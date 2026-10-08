@@ -4602,12 +4602,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except Exception:
             terminal_workflow = None
         if terminal_workflow:
+            close_note = manual_close_note(
+                terminal_workflow, _plan_spelling(args, views, plan_path),
+                _reader_host(args), _recorded_route(args, views, plan_path),
+            )
             trailer = _workflow_trailer_lines(
                 terminal_workflow, prefix="",
-                close_note=manual_close_note(
-                    terminal_workflow, _plan_spelling(args, views, plan_path),
-                    _reader_host(args), _recorded_route(args, views, plan_path),
-                ),
+                close_note=close_note,
                 # Fix round 26 (live run 11, Codex stop 01b): a run that
                 # stopped or failed has no next phase, and the hosts relayed
                 # "suggested next: implement (review-tasks /
@@ -4616,9 +4617,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 # non-zero poll's text and notice alike.
                 suggested=exit_code == EXIT_OK,
             )
+            # The merge of fix round 28: a stop whose section leads with
+            # the resume recording the manual tasks done (implement's
+            # manual-task gate) gives that command once, there; the notice,
+            # and the text a tool route reads beside the section, name the
+            # tasks and leave it out. A shell's text keeps every line.
+            from .next_phase import gate_resume_closes_the_manual_tasks
+
+            told = trailer
+            if (close_note and exit_code != EXIT_OK
+                    and gate_resume_closes_the_manual_tasks(
+                        (terminal_workflow.get("phases") or {}).get("implement") or {})):
+                told = _workflow_trailer_lines(
+                    terminal_workflow, prefix="", suggested=False)
             if trailer:
-                workflow_trailer = [f"workflow {line}" for line in trailer]
-                terminal_notice = join_clauses(trailer)
+                workflow_trailer = [
+                    f"workflow {line}" for line in (
+                        told if _read_by_a_tool_route(args) else trailer)]
+                terminal_notice = join_clauses(told)
 
     # Fix round 14: a native-leg implement leaves no run record and no
     # report, so its tasks are read back from state.json (`--run-id` and
