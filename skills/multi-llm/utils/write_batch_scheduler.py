@@ -121,6 +121,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         row_batch_check_accepted,
         row_batch_check_findings,
         row_batch_check_note,
+        row_batch_check_repeats,
         row_check_findings,
         row_declined,
         validate_result,
@@ -238,6 +239,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         row_batch_check_accepted,
         row_batch_check_findings,
         row_batch_check_note,
+        row_batch_check_repeats,
         row_check_findings,
         row_declined,
         validate_result,
@@ -303,6 +305,12 @@ __all__ = [
     "accepted_upstream_checks",
     "BATCH_CHECK_ACCEPTED_MARKER",
     "accepted_findings_with_words_added",
+    "BATCH_CHECK_REPEATED_MARKER",
+    "batch_check_repeated_line",
+    "repeated_findings_for",
+    "reported_checks_on_record",
+    "split_repeated_findings",
+    "move_check_repeats_in_state",
     "batch_check_accepted_line",
     "check_note_clause",
     "restate_findings_problem",
@@ -1907,6 +1915,143 @@ def accepted_findings_for(
     }
 
 
+def reported_checks_on_record(state: Any) -> Dict[str, List[str]]:
+    """``{check id: findings}`` for every implement check task whose check
+    reported problems, as recorded: ``task_check_findings`` beside a
+    ``completed`` status, the user's answer either way (fix round 28; the
+    accepted ones are :func:`accepted_checks_on_record`'s subset)."""
+    if state is None or not hasattr(state, "get"):
+        return {}
+    try:
+        recorded = state.get("task_check_findings") or {}
+        statuses = dict(state.get("task_status") or {})
+    except Exception:  # noqa: BLE001 - a read for a record, never fatal
+        return {}
+    if not isinstance(recorded, dict):
+        return {}
+    return {
+        str(task_id): [str(item) for item in findings if str(item).strip()]
+        for task_id, findings in sorted(recorded.items())
+        if isinstance(findings, list) and findings
+        and statuses.get(task_id) == "completed"
+    }
+
+
+def repeated_findings_for(
+    tasks: Sequence[Dict[str, Any]], task: Mapping[str, Any], state: Any,
+) -> Dict[str, List[str]]:
+    """``{check id: findings}`` a code task's own failing check may be the
+    same finding as: each check task of the run with findings on record
+    (:func:`reported_checks_on_record`), wherever it sits in the graph,
+    except the accepted checks upstream of the task (those are
+    :func:`accepted_findings_for`'s, read first) and any check whose
+    failure the task's own text makes its job (:func:`task_owns_the_check`).
+
+    Fix round 28 (live run 12, OpenCode stop accept 01): T001's runner ran
+    T002's release check unprompted, and the failure T002 exists to report
+    was recorded as ``[BATCH_CHECK_FAILED] T001``, "own check fails T001" and
+    "T001: a check it ran fails". Split with :func:`split_repeated_findings`
+    — the same strict comparison, nothing looser — what matches is recorded
+    as repeating that check's finding (``batch_check_repeats``), never as the
+    task's own failure, whichever of the two finished first."""
+    task_id = str(task.get("task_id") or "")
+    upstream_accepted = {
+        check_id for check_id, _title, _findings
+        in accepted_upstream_checks(tasks, task_id, state)
+    }
+    return {
+        check_id: findings
+        for check_id, findings in reported_checks_on_record(state).items()
+        if check_id != task_id and check_id not in upstream_accepted
+        and not task_owns_the_check(task, check_id, findings)
+    }
+
+
+def move_check_repeats_in_state(
+    state: Dict[str, Any], tasks: Sequence[Dict[str, Any]], check_id: str,
+) -> Dict[str, Tuple[List[str], Dict[str, List[str]]]]:
+    """A check task's findings recorded after a code task's own check (fix
+    round 28, the check recording second): each implement task recorded
+    ``completed`` whose failing own check (``task_batch_check``) holds, by
+    :func:`repeated_findings_for`'s strict comparison, the finding
+    *check_id* now has on record has that finding moved into
+    ``task_batch_check_repeats`` in *state* (a ``state.json`` dict; *tasks*
+    the phase's materialized tasks, read for each task's own text, else its
+    recorded title). Returns ``{task_id: (own findings left, repeats by
+    check)}`` for every task moved, for the caller's own records and lines.
+    Both legs: the scheduler's :meth:`WriteBatchScheduler._move_repeats_of`
+    and ``util batch-done --check findings``."""
+    try:
+        from .state_manager import (
+            set_task_batch_check_in_state, set_task_batch_check_repeats_in_state,
+        )
+    except ImportError:  # pragma: no cover - direct script runs
+        from utils.state_manager import (  # type: ignore
+            set_task_batch_check_in_state, set_task_batch_check_repeats_in_state,
+        )
+    recorded = state.get("task_batch_check")
+    if not isinstance(recorded, dict) or not recorded:
+        return {}
+    statuses = state.get("task_status") or {}
+    scope = state.get("implement_task_ids")
+    titles = state.get("task_titles") or {}
+    materialized = {
+        str(task.get("task_id", "")): task for task in tasks if isinstance(task, dict)
+    }
+    graph = decomposition_graph(list(tasks), state)
+    moved: Dict[str, Tuple[List[str], Dict[str, List[str]]]] = {}
+    for task_id, own_findings in sorted(recorded.items()):
+        task_id = str(task_id)
+        if (
+            task_id == str(check_id) or statuses.get(task_id) != "completed"
+            or not isinstance(own_findings, list) or not own_findings
+            or (isinstance(scope, list) and task_id not in scope)
+        ):
+            continue
+        task = materialized.get(task_id) or {
+            "task_id": task_id, "task_title": str(titles.get(task_id) or ""),
+        }
+        repeats = {
+            cid: items for cid, items in repeated_findings_for(graph, task, state).items()
+            if cid == str(check_id)
+        }
+        if not repeats:
+            continue
+        own, matched = split_repeated_findings([str(item) for item in own_findings], repeats)
+        if not matched:
+            continue
+        earlier = state.get("task_batch_check_repeats") or {}
+        merged = {**dict(earlier.get(task_id) or {}), **matched}
+        set_task_batch_check_in_state(state, task_id, own)
+        set_task_batch_check_repeats_in_state(state, task_id, merged)
+        moved[task_id] = (own, merged)
+    return moved
+
+
+#: The line a code task prints when its own check reported only the same
+#: findings a check task of the run reported (fix round 28): both legs, in
+#: place of :data:`BATCH_CHECK_MARKER` for those findings.
+BATCH_CHECK_REPEATED_MARKER = "[BATCH_CHECK_REPEATED]"
+
+
+def batch_check_repeated_line(
+    task_id: str, matched: Mapping[str, Sequence[str]], *, note: Optional[str] = None,
+) -> str:
+    """The :data:`BATCH_CHECK_REPEATED_MARKER` line for a code task whose
+    own check reported only what a check task of the run reported
+    (:func:`repeated_findings_for`): both legs print it, never as the task's
+    own failure (fix round 28)."""
+    checks = list(matched)
+    named = checks[0] if len(checks) == 1 else ", ".join(checks[:-1]) + f" and {checks[-1]}"
+    found = [item for items in matched.values() for item in items]
+    return (
+        f"{BATCH_CHECK_REPEATED_MARKER} {task_id}: its own report says a check "
+        f"it ran fails, but only with what check task {named} reported: "
+        f"{quoted_findings(found, 400)} — it repeats the finding of {named}, "
+        f"not counted as {task_id}'s own failure{check_note_clause(note)}"
+    )
+
+
 def split_accepted_findings(
     findings: Sequence[str], accepted: Mapping[str, Sequence[str]],
 ) -> Tuple[List[str], Dict[str, List[str]]]:
@@ -2051,6 +2196,45 @@ def restate_findings_problem(
         f"accepted finding, keep the finding exactly as it is: it is then "
         f"recorded as {task_id}'s own failure, which is right."
     )
+
+
+def split_repeated_findings(
+    findings: Sequence[str], reported: Mapping[str, Sequence[str]],
+) -> Tuple[List[str], Dict[str, List[str]]]:
+    """``(own, matched)``: a code task's own check *findings*, split into its
+    own and, by check id, the ones that are the same finding a check task of
+    the run reported (*reported*: :func:`repeated_findings_for`; fix round
+    28).
+
+    The strict comparison of :func:`split_accepted_findings` — the same
+    command, and words one reported finding already says, all of it or its
+    first words, in order (:func:`_finding_parts`, :func:`_says_only`) —
+    without its reading of a trailing acceptance annotation, which stays
+    tied to an accepted check upstream of the task (the user's F3 in
+    ``eb93ee3``): a finding annotated "(the problem the user accepted from
+    T002)" by a task T002's acceptance never released stays its own."""
+    pools: Dict[str, Dict[str, List[List[str]]]] = {}
+    for check_id, items in reported.items():
+        for item in items or ():
+            parts = _finding_parts(item)
+            if parts is not None:
+                pools.setdefault(parts[0], {}).setdefault(str(check_id), []).append(parts[1])
+    own: List[str] = []
+    matched: Dict[str, List[str]] = {}
+    for finding in findings:
+        parts = None if batch_check_could_not_run([finding]) else _finding_parts(finding)
+        check_id = None
+        if parts is not None:
+            command, words = parts
+            check_id = next((
+                cid for cid, said in (pools.get(command) or {}).items()
+                if _says_only(words, said)
+            ), None)
+        if check_id is None:
+            own.append(finding)
+        else:
+            matched.setdefault(check_id, []).append(finding)
+    return own, matched
 
 
 def batch_check_accepted_line(
@@ -2816,13 +3000,17 @@ def implement_checks_ran(
     never "reported problems" — the ``[BATCH_CHECK_ACCEPTED]`` line beside
     it says it is not the task's own failure. It has its own clause:
     ``repeated the accepted findings of T002 in T007``, the checks named
-    once for all such tasks, each list cut at :data:`CHECKS_RAN_MAX_IDS`."""
+    once for all such tasks, each list cut at :data:`CHECKS_RAN_MAX_IDS`.
+    Fix round 28: one whose own check reported only what a check task of
+    the run reported (``task_batch_check_repeats``) has its own clause too,
+    ``repeated the findings of T002 in T001``."""
     if not hasattr(state, "get"):
         return None
     try:
         from .state_manager import (
             TASK_BATCH_CHECK_ACCEPTED_KEY,
             TASK_BATCH_CHECK_KEY,
+            TASK_BATCH_CHECK_REPEATS_KEY,
             TASK_CHECK_FINDINGS_KEY,
             TASK_OWN_CHECK_RAN_KEY,
         )
@@ -2830,6 +3018,7 @@ def implement_checks_ran(
         from utils.state_manager import (  # type: ignore
             TASK_BATCH_CHECK_ACCEPTED_KEY,
             TASK_BATCH_CHECK_KEY,
+            TASK_BATCH_CHECK_REPEATS_KEY,
             TASK_CHECK_FINDINGS_KEY,
             TASK_OWN_CHECK_RAN_KEY,
         )
@@ -2856,11 +3045,16 @@ def implement_checks_ran(
     own_ids = {str(t) for t in own} if isinstance(own, list) else set()
     failing_own = mapping(TASK_BATCH_CHECK_KEY)
     accepted = mapping(TASK_BATCH_CHECK_ACCEPTED_KEY)
+    repeats = mapping(TASK_BATCH_CHECK_REPEATS_KEY)
     check_findings = mapping(TASK_CHECK_FINDINGS_KEY)
     passed: List[str] = []
     problems: List[str] = []
     repeated: List[str] = []
     repeated_of: Set[str] = set()
+    # Fix round 28: a code task whose own check reported only what a check
+    # task of the run reported, never "reported problems" or "passed".
+    echoed: List[str] = []
+    echoed_of: Set[str] = set()
     for task_id in sorted(own_ids | {str(t) for t in check_ids}):
         if not counted(task_id):
             continue
@@ -2877,11 +3071,19 @@ def implement_checks_ran(
                         str(check) for check in again
                         if _IMPLEMENT_TASK_ID.match(str(check)))
                 continue
+            same = repeats.get(task_id)
+            if not findings and same:
+                echoed.append(task_id)
+                if isinstance(same, dict):
+                    echoed_of.update(
+                        str(check) for check in same
+                        if _IMPLEMENT_TASK_ID.match(str(check)))
+                continue
             failed = bool(findings)
         else:
             failed = bool(check_findings.get(task_id))
         (problems if failed else passed).append(task_id)
-    if not passed and not problems and not repeated:
+    if not passed and not problems and not repeated and not echoed:
         return None
 
     def named(ids: List[str]) -> str:
@@ -2899,6 +3101,9 @@ def implement_checks_ran(
     if repeated:
         of = f" of {named(sorted(repeated_of))}" if repeated_of else ""
         said.append(f"repeated the accepted findings{of} in {named(repeated)}")
+    if echoed:
+        of = f" of {named(sorted(echoed_of))}" if echoed_of else ""
+        said.append(f"repeated the findings{of} in {named(echoed)}")
     return "The tasks ran checks: " + "; ".join(said) + "."
 
 
@@ -3438,6 +3643,17 @@ class SchedulerResult:
                 found[str(row.get("task_id"))] = matched
         return found
 
+    def batch_check_repeats(self) -> Dict[str, Dict[str, List[str]]]:
+        """``{task_id: {check id: findings}}`` for every code task that
+        finished ``ok`` while its own check reported only what a check task
+        of the run reported (fix round 28), in row order."""
+        found: Dict[str, Dict[str, List[str]]] = {}
+        for row in self.report_rows():
+            matched = row_batch_check_repeats(row)
+            if row.get("status") == STATUS_OK and matched:
+                found[str(row.get("task_id"))] = matched
+        return found
+
     def batch_check_notes(self) -> Dict[str, str]:
         """``{task_id: note}`` for every code task that finished ``ok`` with
         an own-check note (its ``check.note``, fix round 28), in row order."""
@@ -3899,6 +4115,7 @@ def with_result_contract(
         "nothing needed changing.\n"
         + (CHECK_RESULT_CONTRACT if is_check_task(kind, task) else "")
         + (WRITE_CHECK_CONTRACT + (checks_section or "") if own_checks else "")
+        + (IMPLEMENT_WHICH_CHECKS if own_checks and kind == "implement" else "")
     )
 
 
@@ -3960,6 +4177,24 @@ WRITE_CHECK_CONTRACT = (
     "Report a failing check here even when you think your change did not "
     "cause it: the batch is then recorded as applied with a failing check, "
     "and the user is told, instead of the run reporting a clean success.\n"
+)
+
+
+#: Appended after :data:`WRITE_CHECK_CONTRACT` for an implement task that
+#: edits files (fix round 28, live run 12 OpenCode accept 01: T001's runner
+#: ran T002's release check unprompted, and the failure T002 exists to
+#: report was recorded as T001's own): which checks are the task's to run.
+#: A run of another task's check that reports only that task's finding is
+#: recorded as repeating it (``repeated_findings_for``), never as this
+#: task's failure; the paragraph says so, so the task need not argue it in
+#: the finding.
+IMPLEMENT_WHICH_CHECKS = (
+    "\nWhich checks to run: the ones this task or its acceptance criteria "
+    "name, and the tests that cover the files you edited. A check the plan "
+    "gives to a task of its own (a task that only runs that check) is that "
+    "task's job: you do not need to run it here. If you do run it, report it "
+    "as asked; a finding that is the same one that task reports is recorded "
+    "as that task's finding, not as this task's failure.\n"
 )
 
 
@@ -5842,6 +6077,11 @@ class WriteBatchScheduler:
             batch_check_accepted_line(task_id, matched, note=notes.get(task_id))
             for task_id, matched in result.batch_check_accepted().items()
         ]
+        # Fix round 28: what only repeats a check task's finding.
+        lines += [
+            batch_check_repeated_line(task_id, matched, note=notes.get(task_id))
+            for task_id, matched in result.batch_check_repeats().items()
+        ]
         found = result.batch_check_findings()
         if not found:
             return lines
@@ -6057,6 +6297,7 @@ class WriteBatchScheduler:
             # Fix round 22: and what its check reported again of findings
             # the user accepted, still named beside that check.
             outcome.batch_check_accepted = row_batch_check_accepted(verdict)
+            outcome.batch_check_repeats = row_batch_check_repeats(verdict)
             outcome.batch_check_note = row_batch_check_note(verdict)
             if self.kind in APPLY_WRITE_KINDS:
                 # Fix round 18: and an apply batch the items it declined, or
@@ -6109,6 +6350,7 @@ class WriteBatchScheduler:
             # earlier run's to measure, and a fabricated one would average in.
             if self.state is not None:
                 with self._effects_lock:
+                    self._remember_outcome(outcome)
                     self.state.update_task_status(
                         task_id, "completed",
                         reason=(
@@ -6505,6 +6747,7 @@ class WriteBatchScheduler:
         if isinstance(verdict.get("batch_check"), dict):
             outcome.batch_check = row_batch_check_findings(verdict)
         outcome.batch_check_accepted = row_batch_check_accepted(verdict)
+        outcome.batch_check_repeats = row_batch_check_repeats(verdict)
         outcome.batch_check_note = row_batch_check_note(verdict)
         snapshot = os.path.join(self.safety_dir, "pre_batch", task_id)
         if os.path.isdir(snapshot):
@@ -9036,6 +9279,112 @@ class WriteBatchScheduler:
             expected_ids=[str(i) for i in expected_ids],
         )
 
+    def _remember_outcome(self, outcome: TaskOutcome) -> None:
+        """Keep *outcome* by task id for :meth:`_move_repeats_of`, which may
+        run before the outcome's batch joins ``result.outcomes`` (a check
+        and a code task in one batch). Caller holds the effects lock."""
+        recorded = getattr(self, "_recorded_outcomes", None)
+        if recorded is None:
+            recorded = self._recorded_outcomes = {}
+        recorded.setdefault(outcome.task_id, []).append(outcome)
+
+    def _split_check_repeats(self, task: Dict[str, Any], outcome: TaskOutcome) -> None:
+        """Move out of a finished code task's own failing check what is the
+        same finding a check task of the run already reported
+        (:func:`repeated_findings_for`, the strict comparison), into
+        ``batch_check_repeats``, and re-stamp its verdict (fix round 28, the
+        code task recording second). Caller holds the effects lock."""
+        if not outcome.ok or outcome.verification_only or not outcome.batch_check:
+            return
+        repeats = repeated_findings_for(
+            getattr(self, "tasks", None) or [], task, self.state,
+        )
+        if not repeats:
+            return
+        own, matched = split_repeated_findings(outcome.batch_check, repeats)
+        if not matched:
+            return
+        outcome.batch_check = own or None
+        outcome.batch_check_repeats = {**outcome.batch_check_repeats, **matched}
+        self._restamp_own_check(outcome.output_path, outcome.batch_check,
+                                outcome.batch_check_repeats)
+
+    def _move_repeats_of(
+        self, check_id: str, findings: Sequence[str], result: SchedulerResult,
+    ) -> None:
+        """The check task recording second (fix round 28): what
+        :func:`move_check_repeats_in_state` moved in ``state.json`` is moved
+        on the code task's outcome, its earlier run's row in *result* and its
+        verdict stamp too, with one log line. Caller holds the effects lock."""
+        try:
+            from .subagent_tasks import implement_output_name
+        except ImportError:  # pragma: no cover - direct script runs
+            from utils.subagent_tasks import implement_output_name  # type: ignore
+        moved = move_check_repeats_in_state(
+            self.state.state, getattr(self, "tasks", None) or [], check_id,
+        )
+        seen = getattr(self, "_recorded_outcomes", None) or {}
+        for task_id, (own, merged) in moved.items():
+            path: Optional[str] = None
+            for outcome in [*result.outcomes, *seen.get(task_id, [])]:
+                if outcome.task_id == task_id and outcome.ok:
+                    outcome.batch_check = own or None
+                    outcome.batch_check_repeats = dict(merged)
+                    path = outcome.output_path or path
+            for row in result.earlier_rows:
+                if isinstance(row, dict) and str(row.get("task_id")) == task_id:
+                    if own:
+                        row["batch_check"] = check_record(own)
+                    else:
+                        row.pop("batch_check", None)
+                    row["batch_check_repeats"] = {k: list(v) for k, v in merged.items()}
+            self._restamp_own_check(
+                path or os.path.join(self.phase_dir, implement_output_name(task_id)),
+                own or None, merged,
+            )
+            self.log(
+                f"[write-subagents] {task_id}'s own check reported only what check "
+                f"task {check_id} reported: recorded as repeating {check_id}'s "
+                f"finding, not as {task_id}'s own failure"
+            )
+
+    def _restamp_own_check(
+        self, output_path: Optional[str], batch_check: Optional[List[str]],
+        repeats: Mapping[str, Sequence[str]],
+    ) -> None:
+        """Re-write a result file's verdict ``batch_check`` and
+        ``batch_check_repeats`` keys after :meth:`_split_check_repeats` or
+        :meth:`_move_repeats_of` moved findings (fix round 28), so a resume
+        skip reads what the records say; every other key is left alone."""
+        if not output_path:
+            return
+        path = Path(output_path)
+        if not path.is_file():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            verdict = data.get("verdict") if isinstance(data, dict) else None
+            if not isinstance(verdict, dict):
+                return
+            if batch_check is not None:
+                verdict["batch_check"] = check_record(batch_check)
+            else:
+                verdict.pop("batch_check", None)
+            if repeats:
+                verdict["batch_check_repeats"] = {
+                    str(check_id): list(found) for check_id, found in repeats.items()
+                }
+            else:
+                verdict.pop("batch_check_repeats", None)
+            temp = path.with_name(path.name + ".tmp")
+            temp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            os.replace(str(temp), str(path))
+        except (OSError, ValueError) as exc:  # noqa: BLE001 - bookkeeping
+            self.log(
+                f"[write-subagents] warning: could not re-record the own check "
+                f"on {path.name}: {exc}"
+            )
+
     def _stamp_verdict(self, outcome: TaskOutcome) -> None:
         """Write the classified verdict back onto the batch's result file (F1).
 
@@ -9104,6 +9453,12 @@ class WriteBatchScheduler:
                 data["verdict"]["batch_check_accepted"] = {
                     check_id: list(found)
                     for check_id, found in outcome.batch_check_accepted.items()
+                }
+            if outcome.batch_check_repeats:
+                # Fix round 28: what it reported that a check task reported.
+                data["verdict"]["batch_check_repeats"] = {
+                    check_id: list(found)
+                    for check_id, found in outcome.batch_check_repeats.items()
                 }
             if outcome.batch_check_note:
                 # Fix round 28: its own words about its checks.
@@ -9282,7 +9637,14 @@ class WriteBatchScheduler:
             if ran:
                 self._record_metrics(task, outcome, result)
 
+            self._remember_outcome(outcome)
             if self.state is not None:
+                if self.kind == "implement" and isinstance(
+                    getattr(self.state, "state", None), dict
+                ):
+                    # Fix round 28: under this lock, so whichever of a code
+                    # task and a check task records second sees the other.
+                    self._split_check_repeats(task, outcome)
                 status = "completed" if outcome.ok else "failed"
                 reason = None if outcome.ok else (outcome.reason or outcome.status)
                 if kept:
@@ -9300,12 +9662,17 @@ class WriteBatchScheduler:
                         self.state.state, task_id,
                         outcome.check_findings if outcome.ok else None,
                     )
+                    if outcome.ok and outcome.check_findings:
+                        # Fix round 28: a code task recorded earlier whose
+                        # own check reported this same finding.
+                        self._move_repeats_of(task_id, outcome.check_findings, result)
                     # A code task's own failing check, beside (never among)
                     # them, as `util batch-done` records it (fix round 15).
                     try:
                         from .state_manager import (
                             set_task_batch_check_accepted_in_state,
                             set_task_batch_check_in_state,
+                            set_task_batch_check_repeats_in_state,
                             set_task_own_check_note_in_state,
                             set_task_own_check_ran_in_state,
                         )
@@ -9313,6 +9680,7 @@ class WriteBatchScheduler:
                         from utils.state_manager import (  # type: ignore
                             set_task_batch_check_accepted_in_state,
                             set_task_batch_check_in_state,
+                            set_task_batch_check_repeats_in_state,
                             set_task_own_check_note_in_state,
                             set_task_own_check_ran_in_state,
                         )
@@ -9331,13 +9699,19 @@ class WriteBatchScheduler:
                     set_task_own_check_ran_in_state(
                         self.state.state, task_id,
                         outcome.ok and (outcome.batch_check is not None
-                                        or bool(outcome.batch_check_accepted)),
+                                        or bool(outcome.batch_check_accepted)
+                                        or bool(outcome.batch_check_repeats)),
                     )
                     # Fix round 23: what it reported again of the accepted
                     # findings, by check, as `util batch-done` records it.
                     set_task_batch_check_accepted_in_state(
                         self.state.state, task_id,
                         outcome.batch_check_accepted if outcome.ok else None,
+                    )
+                    # Fix round 28: what only repeats a check task's finding.
+                    set_task_batch_check_repeats_in_state(
+                        self.state.state, task_id,
+                        outcome.batch_check_repeats if outcome.ok else None,
                     )
                 elif self.kind == "apply_code_fixes" and isinstance(
                     getattr(self.state, "state", None), dict
@@ -9397,6 +9771,12 @@ class WriteBatchScheduler:
                 verdict = (
                     f"{verdict}; its own check reported again only what you "
                     f"accepted for {', '.join(outcome.batch_check_accepted)}"
+                )
+            if outcome.ok and outcome.batch_check_repeats:
+                # Fix round 28: a check task's finding, never its own.
+                verdict = (
+                    f"{verdict}; its own check reported only what check task "
+                    f"{', '.join(outcome.batch_check_repeats)} reported"
                 )
             if outcome.ok and outcome.declined:
                 # Fix round 18: what it left out on purpose, and why.
@@ -13004,6 +13384,12 @@ class WriteBatchScheduler:
                 for check_id in matched:
                     again.setdefault(check_id, []).append(task_id)
             notes = result.batch_check_notes()
+            # Fix round 28: a code task whose own check reported only what a
+            # check task reported is named under that check too.
+            repeated: Dict[str, List[str]] = {}
+            for task_id, matched in result.batch_check_repeats().items():
+                for check_id in matched:
+                    repeated.setdefault(check_id, []).append(task_id)
             for task_id, findings in findings_by_task.items():
                 lines.append(f"### {task_id}")
                 lines.append("")
@@ -13014,6 +13400,13 @@ class WriteBatchScheduler:
                         f"{rerun} ran this check again, and its own report says "
                         f"only what you accepted: not counted as {rerun}'s own "
                         f"failure.{_note_sentence(notes.get(rerun))}", "",
+                    ]
+                for rerun in repeated.get(task_id, []):
+                    lines += [
+                        f"{rerun} ran this check too, and its own report says "
+                        f"only what {task_id} reported: it repeats {task_id}'s "
+                        f"finding, not counted as {rerun}'s own failure."
+                        f"{_note_sentence(notes.get(rerun))}", "",
                     ]
             lines.pop()
         lines += batch_check_section(rows, heading=not findings_by_task)
@@ -13428,6 +13821,13 @@ class WriteBatchScheduler:
                             o.task_id: sorted(o.batch_check_accepted)
                             for o in outcomes if o.ok and o.batch_check_accepted
                         }} if any(o.ok and o.batch_check_accepted for o in outcomes)
+                           else {}),
+                        # Fix round 28: one whose own check repeated only a
+                        # check task's finding, by the checks.
+                        **({"batch_check_repeats": {
+                            o.task_id: sorted(o.batch_check_repeats)
+                            for o in outcomes if o.ok and o.batch_check_repeats
+                        }} if any(o.ok and o.batch_check_repeats for o in outcomes)
                            else {}),
                         # Fix round 14: nothing ran the repository's tests.
                         **({"unverified": result.unverified}

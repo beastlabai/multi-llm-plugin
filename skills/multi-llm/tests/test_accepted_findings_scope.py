@@ -47,6 +47,7 @@ from utils.state_manager import get_or_create_state  # noqa: E402
 from utils.write_batch_scheduler import (  # noqa: E402
     BATCH_CHECK_ACCEPTED_MARKER,
     BATCH_CHECK_MARKER,
+    BATCH_CHECK_REPEATED_MARKER,
     accepted_findings_for,
     split_accepted_findings,
 )
@@ -346,10 +347,14 @@ class TestTheExecutorLeg:
         # T007 was told the findings were accepted; T005 and T006 were not
         # (they do not depend on T002), and T008's job is T002's check.
         assert set(_lines(text, BATCH_CHECK_ACCEPTED_MARKER)) == {"T007"}, text[-3000:]
-        assert set(_lines(text, BATCH_CHECK_MARKER)) == {"T005", "T006", "T008"}, text[-3000:]
+        # Fix round 28 (live run 12 #3): T005 and T006 repeat T002's finding
+        # (the strict comparison), recorded so, never as their own failure.
+        assert set(_lines(text, BATCH_CHECK_REPEATED_MARKER)) == {"T005", "T006"}, text[-3000:]
+        assert set(_lines(text, BATCH_CHECK_MARKER)) == {"T008"}, text[-3000:]
         state = get_or_create_state(repo.plan).state
-        assert state["task_batch_check"] == {
-            "T005": [RERUN], "T006": [RERUN], "T008": [RERUN]}
+        assert state["task_batch_check"] == {"T008": [RERUN]}
+        assert state["task_batch_check_repeats"] == {
+            "T005": {"T002": [RERUN]}, "T006": {"T002": [RERUN]}}
         # #6: the accepted re-run is on record beside the check findings.
         assert state["task_batch_check_accepted"] == {"T007": {"T002": [RERUN]}}
     def test_status_names_the_accepted_rerun(self, scope_repo, capsys):
@@ -409,19 +414,36 @@ class TestTheNativeLeg:
     def test_batch_done_splits_only_the_released_tasks_check(self, scope_repo, capsys, finding):
         repo = scope_repo
         phase = self._accept(repo, capsys)
+        # Fix round 28 (live run 12 #3): T005 and T006, which T002's
+        # acceptance never released, repeat T002's finding by the strict
+        # comparison and are recorded so (`[BATCH_CHECK_REPEATED]`), never
+        # as accepted and never as their own failure; the annotated finding
+        # (F3) stays their own, its annotation read only for an accepted
+        # check upstream of the task. T008's job is T002's check.
+        repeats = finding != ANNOTATED
         for task_id in ("T005", "T006", "T008"):
             code, out, err = self._own_check(capsys, phase, task_id, finding)
             assert code == 0, err
             assert BATCH_CHECK_ACCEPTED_MARKER not in out, (task_id, out)
-            assert any(line.startswith(f"{BATCH_CHECK_MARKER} {task_id}:")
+            marker = (
+                BATCH_CHECK_REPEATED_MARKER if repeats and task_id != "T008"
+                else BATCH_CHECK_MARKER
+            )
+            assert any(line.startswith(f"{marker} {task_id}:")
                        for line in out.splitlines()), (task_id, out)
         code, out, err = self._own_check(capsys, phase, "T007", finding)
         assert code == 0, err
         assert any(line.startswith(f"{BATCH_CHECK_ACCEPTED_MARKER} T007:")
                    for line in out.splitlines()), out
         state = json.loads((repo.phase_dir.parent / "state.json").read_text())
-        assert state["task_batch_check"] == {
-            "T005": [finding], "T006": [finding], "T008": [finding]}
+        if repeats:
+            assert state["task_batch_check"] == {"T008": [finding]}
+            assert state["task_batch_check_repeats"] == {
+                "T005": {"T002": [finding]}, "T006": {"T002": [finding]}}
+        else:
+            assert state["task_batch_check"] == {
+                "T005": [finding], "T006": [finding], "T008": [finding]}
+            assert "task_batch_check_repeats" not in state
         assert state["task_batch_check_accepted"] == {"T007": {"T002": [finding]}}
 
     def test_status_names_the_accepted_rerun(self, scope_repo, capsys):

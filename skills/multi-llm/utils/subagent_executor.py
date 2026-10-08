@@ -1331,6 +1331,20 @@ def row_batch_check_accepted(row: Dict[str, Any]) -> Dict[str, List[str]]:
     }
 
 
+def row_batch_check_repeats(row: Dict[str, Any]) -> Dict[str, List[str]]:
+    """A serialized row's own-check findings that are the same findings a
+    check task of the run reported, by that check's id (its
+    ``batch_check_repeats``, fix round 28), else ``{}``."""
+    found = row.get("batch_check_repeats") if isinstance(row, dict) else None
+    if not isinstance(found, dict):
+        return {}
+    return {
+        str(check_id): [str(item) for item in items if str(item)]
+        for check_id, items in found.items()
+        if isinstance(items, list) and any(str(item) for item in items)
+    }
+
+
 def row_batch_check_note(row: Dict[str, Any]) -> Optional[str]:
     """A serialized row's own-check note (its ``batch_check_note``, fix round
     28), else ``None``."""
@@ -1633,6 +1647,14 @@ class TaskOutcome:
     #: out of ``batch_check``, so they never make the task's own failure, and
     #: named beside that check's accepted findings instead. Empty otherwise.
     batch_check_accepted: Dict[str, List[str]] = field(default_factory=dict)
+    #: The own-check findings of an implement task that are the same
+    #: findings a check task of the run reported (the strict comparison of
+    #: ``write_batch_scheduler.split_accepted_findings``), by that check's id
+    #: (``write_batch_scheduler.repeated_findings_for``, fix round 28, live
+    #: run 12 OpenCode accept 01: T001 ran T002's release check and was
+    #: blamed for T002's finding). Taken out of ``batch_check`` whichever of
+    #: the two finished first, and named beside that check's findings.
+    batch_check_repeats: Dict[str, List[str]] = field(default_factory=dict)
     #: The code batch's own words about its checks (its ``check.note``,
     #: :func:`batch_check_note`, fix round 28): recorded and shown beside
     #: the check, never a finding. ``None`` when it gave none.
@@ -1753,6 +1775,12 @@ class TaskOutcome:
                 out["batch_check_accepted"] = {
                     str(check_id): list(found)
                     for check_id, found in self.batch_check_accepted.items()
+                }
+            if self.batch_check_repeats:
+                # Additive and only here (fix round 28).
+                out["batch_check_repeats"] = {
+                    str(check_id): list(found)
+                    for check_id, found in self.batch_check_repeats.items()
                 }
             if self.batch_check_note:
                 # Additive and only here (fix round 28).

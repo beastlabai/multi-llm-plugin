@@ -1192,6 +1192,11 @@ def get_workflow_status(
     accepted_reruns = state.implementation_batch_check_accepted()
     if accepted_reruns:
         phases["implement"]["batch_check_accepted"] = accepted_reruns
+    # And those whose own check reported only what a check task of the run
+    # reported (`task_batch_check_repeats`, fix round 28).
+    repeats = state.implementation_batch_check_repeats()
+    if repeats:
+        phases["implement"]["batch_check_repeats"] = repeats
 
     notices = []
 

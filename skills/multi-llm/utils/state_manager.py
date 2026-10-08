@@ -464,7 +464,40 @@ def set_task_batch_check_accepted_in_state(
     """Record (or, with nothing matched, clear) what *task_id*'s own check
     reported again of the accepted findings, by check id; the key is dropped
     when the map empties."""
-    recorded = state.get(TASK_BATCH_CHECK_ACCEPTED_KEY)
+    _set_by_check_in_state(state, TASK_BATCH_CHECK_ACCEPTED_KEY, task_id, matched)
+
+
+#: ``state.json``'s map of what an implement task's own check reported that
+#: is the same finding a check task of the run reported (the strict
+#: comparison of ``write_batch_scheduler.split_accepted_findings``), by that
+#: check: ``{task_id: {check_id: [finding, ...]}}``, present only while some
+#: task has one (fix round 28, live run 12 OpenCode accept 01: T001 ran
+#: T002's release check and was recorded as failing it). Beside
+#: :data:`TASK_BATCH_CHECK_KEY`, never in it: T002's own record covers the
+#: finding. Written by both legs (``write_batch_scheduler.repeated_findings_for``:
+#: the scheduler and ``util batch-done``, when the code task's record comes
+#: second and when the check's does); every other record of the task clears
+#: it; ``status`` reads it through
+#: :meth:`StateManager.implementation_batch_check_repeats`.
+TASK_BATCH_CHECK_REPEATS_KEY = "task_batch_check_repeats"
+
+
+def set_task_batch_check_repeats_in_state(
+    state: Dict[str, Any], task_id: str,
+    matched: Optional[Mapping[str, Iterable[str]]],
+) -> None:
+    """Record (or, with nothing matched, clear) what *task_id*'s own check
+    reported that a check task of the run reported too, by check id; the
+    key is dropped when the map empties."""
+    _set_by_check_in_state(state, TASK_BATCH_CHECK_REPEATS_KEY, task_id, matched)
+
+
+def _set_by_check_in_state(
+    state: Dict[str, Any], key: str, task_id: str,
+    matched: Optional[Mapping[str, Iterable[str]]],
+) -> None:
+    """One ``{task_id: {check_id: [finding, ...]}}`` map's writer."""
+    recorded = state.get(key)
     current = dict(recorded) if isinstance(recorded, dict) else {}
     kept = {
         str(check_id): [str(item) for item in (findings or []) if str(item).strip()]
@@ -476,9 +509,9 @@ def set_task_batch_check_accepted_in_state(
     else:
         current.pop(str(task_id), None)
     if current:
-        state[TASK_BATCH_CHECK_ACCEPTED_KEY] = current
+        state[key] = current
     else:
-        state.pop(TASK_BATCH_CHECK_ACCEPTED_KEY, None)
+        state.pop(key, None)
 
 
 #: ``task id -> tree fingerprint`` for each check with findings on the native
@@ -1689,7 +1722,20 @@ class StateManager:
         ``completed`` and scoped to the decomposition implement ran last, as
         :meth:`implementation_batch_check_findings` is.
         """
-        recorded = self.state.get(TASK_BATCH_CHECK_ACCEPTED_KEY)
+        return self._implementation_batch_check_by_check(TASK_BATCH_CHECK_ACCEPTED_KEY)
+
+    def implementation_batch_check_repeats(self) -> List[Dict[str, Any]]:
+        """The implement tasks whose own check reported only what a check
+        task of the run reported (fix round 28): ``[{id, title, checks:
+        {check_id: findings}}]`` from :data:`TASK_BATCH_CHECK_REPEATS_KEY`,
+        by :meth:`implementation_batch_check_accepted`'s rule."""
+        return self._implementation_batch_check_by_check(TASK_BATCH_CHECK_REPEATS_KEY)
+
+    def _implementation_batch_check_by_check(self, key: str) -> List[Dict[str, Any]]:
+        """``[{id, title, checks}]`` from a ``{task: {check: findings}}`` map
+        of state.json, for tasks recorded ``completed`` and scoped to the
+        decomposition implement ran last."""
+        recorded = self.state.get(key)
         if not isinstance(recorded, dict) or not recorded:
             return []
         titles = self.state.get("task_titles") or {}

@@ -917,6 +917,7 @@ def _prepare_selected_task(
     # selected attempt's verdict, including after a host dies mid-handoff.
     from utils.state_manager import (
         set_task_batch_check_accepted_in_state, set_task_batch_check_in_state,
+        set_task_batch_check_repeats_in_state,
         set_task_check_findings_in_state, set_task_check_tree_in_state,
         set_task_own_check_note_in_state, set_task_own_check_ran_in_state,
     )
@@ -925,6 +926,7 @@ def _prepare_selected_task(
     set_task_check_tree_in_state(state.state, task.id, None)
     set_task_batch_check_in_state(state.state, task.id, None)
     set_task_batch_check_accepted_in_state(state.state, task.id, None)
+    set_task_batch_check_repeats_in_state(state.state, task.id, None)
     set_task_own_check_ran_in_state(state.state, task.id, False)
     set_task_own_check_note_in_state(state.state, task.id, None)
     # Fix round 17: the log line its earlier run wrote is not this rerun's
@@ -976,6 +978,7 @@ def _start_over(
     """
     from utils.state_manager import (
         set_task_batch_check_accepted_in_state, set_task_batch_check_in_state,
+        set_task_batch_check_repeats_in_state,
         set_task_check_findings_in_state, set_task_check_tree_in_state,
         set_task_own_check_note_in_state, set_task_own_check_ran_in_state,
     )
@@ -1029,6 +1032,7 @@ def _start_over(
         set_task_check_tree_in_state(state.state, task_id, None)
         set_task_batch_check_in_state(state.state, task_id, None)
         set_task_batch_check_accepted_in_state(state.state, task_id, None)
+        set_task_batch_check_repeats_in_state(state.state, task_id, None)
         set_task_own_check_ran_in_state(state.state, task_id, False)
         set_task_own_check_note_in_state(state.state, task_id, None)
         if touched:
