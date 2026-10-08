@@ -199,19 +199,63 @@ def was_clipped(text: Any, shown: str, *, flatten: bool = True) -> bool:
 
 
 def without_closing_mark(text: Any) -> str:
-    """*text* without one closing full stop or semicolon, for a line that
-    puts its own punctuation right after it (``— <reason>. List it …``).
+    """*text* without one closing full stop or semicolon, for a place that
+    puts a separator or a bracket right after it (``<reason>; <reason>``,
+    ``(<reason>)``). A line that ends the sentence after it uses
+    :func:`with_closing_mark` instead.
 
     Fix round 26 (live run 11 #10): a batch's declined reason is recorded as
     the batch wrote it, closing stop included, as its reply and the host's
     summary.md carry it; only a line that adds its own mark after the reason
     drops the reason's one (the decline fixture, 2026-10-07, printed "…
     MAX_SPEED.."). One mark at most, and only while text remains, so a
-    reason of ``...`` or ``.`` still reads as one (fix round 21).
+    reason of ``...`` or ``.`` still reads as one (fix round 21). A closing
+    ``...`` is an ellipsis, not a stop, and stays whole (fix round 27: the
+    executor's sentences read "… MAX_SPEED.." once their own stop no longer
+    made it three again).
     """
     stripped = str(text or "").strip()
+    if stripped.endswith("..."):
+        return stripped
     if stripped[-1:] in (".", ";"):
         trimmed = stripped[:-1].rstrip()
         if trimmed:
             return trimmed
     return stripped
+
+
+#: The marks that already end a sentence: a line that puts a full stop after
+#: a reason adds none after one of these (:func:`with_closing_mark`).
+SENTENCE_ENDS: Tuple[str, ...] = (".", "?", "!", ELLIPSIS)
+
+#: What may follow a sentence's own mark and still close it: a closing quote,
+#: bracket or code span (``… MAX_SPEED."``, ``… on purpose.)``).
+_AFTER_A_SENTENCE_END = "\"'”’»)]}`"
+
+#: A closing mark the line's own full stop takes the place of (``… it;``
+#: reads ``… it.``), while text remains before it.
+_REPLACED_BY_A_STOP = (";", ",", ":")
+
+
+def with_closing_mark(text: Any) -> str:
+    """*text* ending a sentence, for a line that goes on after it (``—
+    <reason> List it …``): one full stop added unless it already ends in
+    one of :data:`SENTENCE_ENDS`, after any closing quotes or brackets.
+
+    Fix round 27 (the Fable review of round 26): :func:`without_closing_mark`
+    dropped only a closing ``.`` or ``;`` before the line added its own stop,
+    so a reason that ended in ``?``, ``!`` or ``…`` (every reason the
+    record's 300-character clip cuts ends in ``…``), or in a mark inside a
+    closing quote or bracket, printed ``?.``, ``….``, ``."."``. The reason
+    keeps its own mark now and the line adds one only where none is: a
+    closing ``;``, ``,`` or ``:`` gives way to it, and a reason of ``.`` or
+    ``...`` stays as it is. The records keep the reason as written.
+    """
+    stripped = str(text or "").strip()
+    if not stripped:
+        return stripped
+    if stripped.rstrip(_AFTER_A_SENTENCE_END).endswith(SENTENCE_ENDS):
+        return stripped
+    if stripped[-1:] in _REPLACED_BY_A_STOP and stripped[:-1].rstrip():
+        stripped = stripped[:-1].rstrip()
+    return stripped + "."
