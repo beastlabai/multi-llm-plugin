@@ -515,3 +515,93 @@ class TestManualTasksAreNotComplete:
             state, "implement", "T001: t", duration_ms=10,
             total_batches=1, batch_index=1)
         assert line.endswith("· ALL TASKS COMPLETE"), line
+
+
+class TestARecordThatNamesNoTask:
+    """Fix round 25 (review of round 24, stops #2): a native ``util metrics
+    record`` with no ``--task-id`` whose label does not start with ``<id>:
+    `` read "done" for a task ``util batch-done`` had just recorded failed,
+    and the next estimate averaged its duration in. With exactly one failed
+    task of this run still unrecorded, the record is that task's; with two
+    or more, it is never guessed: a ``[METRICS_NO_TASK_ID]`` line asks for
+    ``--task-id``, and the record counts as no progress."""
+
+    def test_the_one_failed_task_without_a_record_is_the_one_measured(self):
+        state = _native_state(5, 200)
+        metrics.record_metric_in_state(
+            state, "implement", "T001: a", duration_ms=60_000,
+            total_batches=5, batch_index=1, task_id="T001")
+        _fail(state, "T004", "crash")
+        line = metrics.record_metric_in_state(
+            state, "implement", "fourth task", duration_ms=30_000,
+            total_batches=5, batch_index=2)
+        assert line == "[ETA] implement: task 2/5 failed (crash) after 0m 30s", line
+        entry = state["metrics"]["implement"][-1]
+        assert entry["task_id"] == "T004" and entry["failed"] is True
+
+    def test_a_label_word_that_is_no_task_names_no_task(self):
+        """``Retry: the fourth task`` starts with a word and a colon, not a
+        task id of this run."""
+        state = _native_state(5, 200)
+        state["task_status"]["T001"] = "completed"
+        _fail(state, "T004", "crash")
+        line = metrics.record_metric_in_state(
+            state, "implement", "Retry: the fourth task", duration_ms=30_000,
+            total_batches=5, batch_index=2)
+        assert line == "[ETA] implement: task 2/5 failed (crash) after 0m 30s", line
+
+    def test_a_failed_task_already_measured_is_not_a_candidate(self):
+        """T002's record carried its id; the next id-less record is a task
+        that did not fail."""
+        state = _native_state(5, 200)
+        _fail(state, "T002", "timeout")
+        metrics.record_metric_in_state(
+            state, "implement", "T002: b", duration_ms=60_000,
+            total_batches=5, batch_index=1)
+        line = metrics.record_metric_in_state(
+            state, "implement", "third task", duration_ms=60_000,
+            total_batches=5, batch_index=2)
+        assert line.startswith("[ETA] implement: task 2/5 done in 1m 0s"), line
+        assert "failed" not in state["metrics"]["implement"][-1]
+
+    def test_two_candidates_are_never_guessed_between(self, capsys):
+        state = _native_state(5, 1500)
+        metrics.record_metric_in_state(
+            state, "implement", "T001: a", duration_ms=60_000,
+            total_batches=5, batch_index=1, task_id="T001")
+        _fail(state, "T002", "timeout")
+        _fail(state, "T003", "crash")
+        capsys.readouterr()
+        line = metrics.record_metric_in_state(
+            state, "implement", "a task", duration_ms=1_200_000,
+            total_batches=5, batch_index=2)
+        assert line is None
+        err = capsys.readouterr().err
+        notes = [l for l in err.splitlines() if l.startswith("[METRICS_NO_TASK_ID] ")]
+        assert notes == [
+            '[METRICS_NO_TASK_ID] implement: "a task" (batch 2) names no task, '
+            "and T002 and T003 failed in this run with no record yet, so it is "
+            "not counted as progress: pass --task-id <id> (the task it "
+            "measures) on every util metrics record call of a task."], err
+        entry = state["metrics"]["implement"][-1]
+        assert "task_id" not in entry and "failed" not in entry
+        # Its 20 minutes are averaged in nowhere: T004's estimate is T001's
+        # and T004's minute each over the one task left.
+        line = metrics.record_metric_in_state(
+            state, "implement", "T004: d", duration_ms=60_000,
+            total_batches=5, batch_index=4, task_id="T004")
+        assert line == "[ETA] implement: task 4/5 done in 1m 0s · ~1m 0s remaining", line
+
+    def test_through_the_cli(self, tmp_path, capsys):
+        state = _native_state(3, 100)
+        _fail(state, "T001", "timeout")
+        _fail(state, "T002", "timeout")
+        state_file = tmp_path / "state.json"
+        state_file.write_text(json.dumps(state), encoding="utf-8")
+        code, _out, err = _util(
+            capsys, "metrics", "record", "--state-file", str(state_file),
+            "--phase", "implement", "--label", "the first task",
+            "--duration-ms", "4000", "--total-batches", "3", "--batch-index", "1")
+        assert code == 0, err
+        assert "[METRICS_NO_TASK_ID] " in err and "pass --task-id <id>" in err, err
+        assert _eta_lines(err) == [], err
