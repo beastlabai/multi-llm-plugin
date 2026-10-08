@@ -7321,7 +7321,8 @@ class WriteBatchScheduler:
                     outcome.write_outcome = WRITE_SCHEMA_REJECTED
                     outcome.reason = extracted.get("error") or "no JSON in the reply"
                     return outcome
-                data = extracted["data"]
+                # Fix round 28: the report object, as the executor reads it.
+                data = _executor.the_reply_object(self.kind, extracted["data"], extracted)
             errors = validate_result(self.kind, data)
             if errors:
                 outcome.status = STATUS_SCHEMA_INVALID
