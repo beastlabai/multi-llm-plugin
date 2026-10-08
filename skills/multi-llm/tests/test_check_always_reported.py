@@ -112,13 +112,26 @@ class TestTheExecutorReadsIt:
     @pytest.mark.parametrize("check", [
         NONE_RAN,
         {**NONE_RAN, "passed": True, "findings": []},
-        {"passed": True, "findings": ["npm test: 3 passed"], "ran": []},
-        {"passed": False, "findings": [], "ran": {}},
         {"passed": True, "findings": [], "ran": {"npm test": "not run"}},
     ])
     def test_an_empty_ran_is_no_check_never_a_pass(self, check):
         assert executor.batch_check_findings({"check": check}) is None
         assert executor.ran_no_check({"check": check})
+
+    @pytest.mark.parametrize("check, found", [
+        ({"passed": True, "findings": ["npm test: 3 passed"], "ran": []},
+         ["npm test: 3 passed"]),
+        ({"passed": False, "findings": [], "ran": {}},
+         [executor.CHECK_FAILED_WITHOUT_FINDINGS]),
+    ])
+    def test_beside_an_empty_ran_a_finding_or_a_failure_still_fails(self, check, found):
+        """Fix round 27 (review of round 26): a pass of nothing is no verdict,
+        so a finding it names counts whatever `passed` says (the reader
+        cannot tell "3 passed" from "2 failing"), and `passed: false` stays
+        the failing check it was before round 26 — on both legs
+        (`references/own-check.md`, tests/test_one_own_check_rule.py)."""
+        assert executor.ran_no_check({"check": check})
+        assert executor.batch_check_findings({"check": check}) == found
 
     @pytest.mark.parametrize("ran", [
         {"<each check command you ran>": "passed"},
@@ -237,4 +250,7 @@ class TestTheNativeLegRecordsIt:
         out = _record(capsys, repo.phase_dir, "T001")
         (line,) = [l for l in out.splitlines()
                    if l.startswith(batch_done.OWN_CHECK_NOT_RECORDED_MARKER)]
-        assert "--own-check none when its `ran` is empty" in line
+        # Fix round 27: the one rule, named where it is stated.
+        assert ("--own-check none when it names no finding, does not say it "
+                "failed and ran nothing") in line
+        assert "references/own-check.md" in line

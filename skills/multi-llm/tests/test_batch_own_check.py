@@ -669,9 +669,13 @@ def test_the_native_instructions_record_and_report_a_batch_s_own_check(core):
 @pytest.mark.parametrize("core", ["implement.md", "apply-code-fixes.md"])
 def test_the_native_host_reads_a_clear_pass_as_a_pass(core):
     """Fix round 15: the executor reads `passed: true` as a pass whatever is
-    listed beside it, so the native host is told the same."""
-    text = (Path(__file__).parent.parent / "instructions" / core).read_text(
-        encoding="utf-8")
-    assert ('add `--own-check passed` when it says `"passed": true` (what it lists '
-            'beside a pass, such as `npm test: 12 passed`, is not a failing '
-            'check)') in text
+    listed beside it, so the native host is told the same — since fix round
+    27 by the one rule both runbooks point to, which keeps it for a reply
+    that ran something."""
+    root = Path(__file__).parent.parent
+    text = (root / "instructions" / core).read_text(encoding="utf-8")
+    assert "the rules in `references/own-check.md`" in text
+    rules = " ".join((root / "references" / "own-check.md").read_text(
+        encoding="utf-8").split())
+    assert ('`passed` is true: `--own-check passed` (what it lists beside a pass, '
+            'such as `npm test: 12 passed`, is not a failing check)') in rules
