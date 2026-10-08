@@ -16,6 +16,7 @@ git. ``main`` moves back to the caller's cwd on its way out.
 """
 
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -370,3 +371,158 @@ def test_run_11_the_reaggregate_typed_in_the_phase_folder_finishes_the_phase(aut
     assert f"{NOTICE} {os.path.realpath(repo_dir)}, where {TYPED} is" in finished.stderr
     assert (repo_dir / "plans" / "auth" / "tasks" / "tasks.md").is_file()
     assert result["user_next_step"]["command"] == f"/multi-llm:multi-llm --implement {TYPED}"
+
+
+# ---------------------------------------------------------------------------
+# Fix round 27 (the Fable review of round 26, claude #4): an output path
+# ---------------------------------------------------------------------------
+
+class TestAnOutputPathIsReadToo:
+    """review-plan's `--out-dir`, implement's `--output` and `util
+    write-prompt`'s `--output` name a path the command creates, so it need
+    not exist yet; but one that names something from the cwd (the path, or
+    the first folder it names) is a mixed spelling, and a `..` out of the
+    root or a link out of the repository is never followed there."""
+
+    def _assert_stayed(self, seen, err, here):
+        assert [call["cwd"] for call in seen] == [str(here)]
+        assert NOTICE not in err
+
+    @pytest.mark.parametrize("spelling", [
+        ["--out-dir", "out"], ["--out-dir=out"], ["--out-dir", "out/new"],
+        ["--out-dir", "./out"],
+    ])
+    def test_an_out_dir_that_names_a_folder_from_the_cwd(
+        self, repo, monkeypatch, capsys, spelling,
+    ):
+        """The review's repro: `sub/out` exists, the plan only at the root."""
+        _root, here = repo
+        (here / "out").mkdir()
+        seen = _stub_targets(monkeypatch)
+        _code, _out, err = _run(_mode_argv("review-plan") + spelling, capsys)
+        self._assert_stayed(seen, err, here)
+
+    def test_an_out_dir_that_climbs_out_of_the_cwd(self, repo, monkeypatch, capsys):
+        """`..` is spelled from here: from the root it leaves the repository."""
+        _root, here = repo
+        seen = _stub_targets(monkeypatch)
+        _code, _out, err = _run(_mode_argv("review-plan") + ["--out-dir", "../out"], capsys)
+        self._assert_stayed(seen, err, here)
+
+    def test_an_out_dir_under_a_link_out_of_the_repository(
+        self, repo, monkeypatch, capsys,
+    ):
+        root, here = repo
+        outside = root.parent / "elsewhere"
+        outside.mkdir()
+        (root / "link").symlink_to(outside, target_is_directory=True)
+        seen = _stub_targets(monkeypatch)
+        _code, _out, err = _run(
+            _mode_argv("review-plan") + ["--out-dir", "link/new"], capsys)
+        self._assert_stayed(seen, err, here)
+
+    def test_a_new_out_dir_spelled_from_the_root_moves_with_the_plan(
+        self, repo, monkeypatch, capsys,
+    ):
+        root, _here = repo
+        seen = _stub_targets(monkeypatch)
+        code, _out, err = _run(
+            _mode_argv("review-plan") + ["--out-dir", "plans/x/reviews"], capsys)
+        assert code == 0, err
+        assert [call["cwd"] for call in seen] == [str(root)]
+        assert f"{NOTICE} {root}, where {PLAN} is" in err
+
+    def test_an_output_alone_never_moves_a_command(self, repo, monkeypatch, capsys):
+        """Nothing it reads says the command is spelled from the root."""
+        root, here = repo
+        seen = _stub_targets(monkeypatch)
+        _code, _out, err = _run(_mode_argv("review-plan", str(root / PLAN)) + [
+            "--out-dir", "plans/x/reviews"], capsys)
+        self._assert_stayed(seen, err, here)
+
+    def test_implements_tasks_output_from_the_cwd(self, repo, monkeypatch, capsys):
+        _root, here = repo
+        (here / "tasks.json").write_text("{}\n", encoding="utf-8")
+        seen = _stub_targets(monkeypatch)
+        _code, _out, err = _run(
+            _mode_argv("implement") + ["--output", "tasks.json"], capsys)
+        self._assert_stayed(seen, err, here)
+
+    def test_write_prompts_output_from_the_cwd(self, repo, monkeypatch, capsys):
+        _root, here = repo
+        (here / "prompt.txt").write_text("x\n", encoding="utf-8")
+        seen = _stub_targets(monkeypatch)
+        _code, _out, err = _run(
+            ["util", "write-prompt", *UTIL_CALLS["write-prompt"], "--output",
+             "prompt.txt"], capsys)
+        self._assert_stayed(seen, err, here)
+
+    def test_write_prompts_new_output_moves_with_its_phase_dir(
+        self, repo, monkeypatch, capsys,
+    ):
+        root, _here = repo
+        seen = _stub_targets(monkeypatch)
+        code, _out, err = _run(
+            ["util", "write-prompt", *UTIL_CALLS["write-prompt"], "--output",
+             "plans/x/implement/T001.txt"], capsys)
+        assert code == 0, err
+        assert [call["cwd"] for call in seen] == [str(root)]
+
+
+#: Every option of a mode's or a `util` command's parser whose value can be a
+#: path, and how the move reads it (fix round 27: review-plan's `--out-dir`
+#: was missing, so a mixed spelling moved anyway). A new path option fails
+#: `test_every_path_option_is_classified` until it is put here.
+NOT_READ_BY_THE_MOVE = {
+    # Repository-relative by definition: the same file from any cwd.
+    "--files": "review-code's files, repository-relative",
+    "--touched": "finalize-tracking's files, repository-relative",
+    # Relative to something other than the cwd.
+    "--summary-file-relative": "relative to the plan's folder",
+    # init's target directory, which defaults to the root itself.
+    "--dir": "init's target, as typed",
+    # A Claude Code hook's input and transcript, outside the repository.
+    "--hook-input": "a hook's input file",
+    "--transcript": "a Claude Code transcript",
+}
+PATHISH = re.compile(r"file|dir|output|root|from|input|transcript|touched|^--files$")
+NOT_A_PATH = {"--output-format", "--only-touched"}
+
+
+def _parser_options(module_name: str):
+    """The long options a module's parsers declare (``add_argument`` calls)."""
+    import ast
+    import importlib.util
+
+    spec = importlib.util.find_spec(module_name)
+    tree = ast.parse(Path(spec.origin).read_text(encoding="utf-8"))
+    found = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "add_argument"):
+            for arg in node.args:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str) \
+                        and arg.value.startswith("--"):
+                    found.add(arg.value)
+    return found
+
+
+def test_every_path_option_is_classified():
+    modules = {mode.target_module for mode in modes.MODES if mode.target_module}
+    modules |= {module for module, _attr, _summary in multi_llm.UTIL_COMMANDS.values()
+                if module}
+    modules |= {"utils.cli_common"}
+    options = set()
+    for module in sorted(modules):
+        options |= _parser_options(module)
+    pathish = {opt for opt in options if PATHISH.search(opt)} - NOT_A_PATH
+    classified = (set(multi_llm._MODE_INPUT_PATH_OPTIONS)
+                  | set(multi_llm._MODE_OUTPUT_PATH_OPTIONS)
+                  | set(multi_llm._UTIL_INPUT_PATH_OPTIONS)
+                  | set(multi_llm._UTIL_OUTPUT_PATH_OPTIONS)
+                  | set(NOT_READ_BY_THE_MOVE))
+    assert pathish <= classified, sorted(pathish - classified)
+    assert "--out-dir" in multi_llm._MODE_OUTPUT_PATH_OPTIONS
+    # Every path a detached worker is handed absolute is one the move reads.
+    assert set(detach._PATH_FLAGS) <= (set(multi_llm._MODE_INPUT_PATH_OPTIONS)
+                                       | set(multi_llm._MODE_OUTPUT_PATH_OPTIONS))
