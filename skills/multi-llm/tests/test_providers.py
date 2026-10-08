@@ -10365,7 +10365,8 @@ C1_GOOSE_CORPUS = (
     ("auth-error",        "auth-error.stdout.txt",        "auth_failed",   "auth_failed"),
     ("rate-limit",        "rate-limit.stdout.txt",        "rate_limited",  "rate_limited"),
     ("invalid-model",     "invalid-model.stdout.txt",     "invalid_model", "invalid_model"),
-    ("context-overflow",  "context-overflow.stdout.txt",  None,            None),
+    # Review 24 pins #4: the shared table learned goose 1.53.0's `effective`.
+    ("context-overflow",  "context-overflow.stdout.txt",  "context_length_exceeded", "context_length_exceeded"),
     ("zero-body",         "zero-body.stdout.txt",         None,            None),
     ("prompt-echo",       "prompt-echo.stdout.txt",       "timeout",       None),
 )
@@ -10554,7 +10555,14 @@ class TestVendorTextContract:
             def vendor_text(self, stdout, stderr):
                 return "", ""
 
-        genuine_401 = _c1_capture("goose", "auth-error.stdout.txt")
+        # goose 1.53.0 also tags this 401 with its error `kind`, which
+        # `GooseProvider.classify_failure` reads off stdout before any table
+        # (review 24, pins #4); `other` takes that away, so the verdict below
+        # is the tables' alone, as it was when this test was written.
+        genuine_401 = _c1_capture("goose", "auth-error.stdout.txt").replace(
+            '"kind": "authentication"', '"kind": "other"'
+        )
+        assert '"kind": "other"' in genuine_401
         assert GooseProvider().classify_failure(genuine_401, "", 0) == \
             STATUS_AUTH_FAILED
         assert _Launderer().classify_failure(genuine_401, "", 0) is None

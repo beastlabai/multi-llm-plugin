@@ -177,6 +177,14 @@ CONTEXT_OVERFLOW_STREAMS = {
     "openai_code": (
         '{"error":{"code":"context_length_exceeded","message":"too many tokens"}}'
     ),
+    # goose 1.53.0's own compaction report (tests/fixtures/goose/
+    # context-overflow): it swallows the upstream 400 and says "effective".
+    "goose_compaction": (
+        "Ran into this error trying to compact: Failed to compact: the base "
+        "prompt (system prompt, tool schemas, and conversation) exceeds the "
+        "model's effective context window, and there are no tool responses to "
+        "remove."
+    ),
 }
 
 #: The prose §7.1.a:653 misread as a context overflow. `'context' in error`
@@ -185,6 +193,7 @@ CONTEXT_FALSE_POSITIVES = (
     "the task declares context_mode: workspace-read, which this runner lacks",
     "in this context the reviewer means the caller, not the callee",
     "Failed to parse JSON: the plan's Context section is 40 lines long",
+    "this step exceeds the effective context of the plan's Phase 2 section",
 )
 
 
