@@ -602,6 +602,43 @@ REFUSED_SKIP_WAY_FORWARD = (
     "first (util restore-batch) and then resume."
 )
 
+#: The stop record's key for its headline without the ways forward a resume
+#: section carries (fix round 28, live run 12 #5;
+#: :meth:`WriteBatchScheduler._set_stop_headline`), which ``util next-command
+#: --blocked`` hands the tool routes beside that section.
+HEADLINE_BESIDE_SECTION_KEY = "headline_beside_section"
+
+#: A ``--human-task`` answer a stop headline names: ``T005=skip``,
+#: ``apply-batch-0=skip``, or the generic ``<check id>=done``.
+_HEADLINE_ANSWER = re.compile(r"--human-task (<check id>|[A-Za-z0-9][\w.-]*)=(done|skip|retry)")
+
+
+def answers_cover(full: str, beside: str, stop: Mapping[str, Any]) -> bool:
+    """Whether every ``--human-task`` answer *full* names and *beside* leaves
+    out is one of *stop*'s own ``answers`` — the ones its resume section
+    lists as commands (fix round 28). The generic ``<check id>=done`` stands
+    for ``=done`` on each of the stop's ``check_task_ids``."""
+    wanted = set()
+    left_out = set(_HEADLINE_ANSWER.findall(full)) - set(_HEADLINE_ANSWER.findall(beside))
+    for task_id, word in left_out:
+        if task_id == "<check id>":
+            checks = [str(check) for check in stop.get("check_task_ids") or []]
+            if not checks:
+                return False
+            wanted.update((check, word) for check in checks)
+        else:
+            wanted.add((task_id, word))
+    offered = set()
+    for entry in stop.get("answers") or []:
+        flags = entry.get("flags") if isinstance(entry, Mapping) else None
+        if not isinstance(flags, list):
+            continue
+        for name, value in zip(flags, flags[1:]):
+            if name == "--human-task" and isinstance(value, str) and "=" in value:
+                offered.add(tuple(value.rsplit("=", 1)))
+    return wanted <= offered
+
+
 #: The task-title lengths a stop headline tries, in order, once the model's
 #: quoted words and the not-run list no longer make it fit
 #: (:meth:`WriteBatchScheduler._stop_headline`; ``0`` leaves the title out).
@@ -6065,7 +6102,7 @@ class WriteBatchScheduler:
             "not_rerun": False,
             **({"answers": kept} if kept else {}),
         }
-        result.stop["headline"] = self._stop_headline(result.stop)
+        self._set_stop_headline(result.stop)
         if not earlier:
             # No earlier run left a mirror to patch: this run's own.
             self._mirror_status(result)
@@ -10465,7 +10502,7 @@ class WriteBatchScheduler:
         why = self._stop_resume_why(result, failed)
         if why:
             result.stop["resume_why"] = why
-        result.stop["headline"] = self._stop_headline(result.stop)
+        self._set_stop_headline(result.stop)
 
     def _stop_answers(
         self, result: SchedulerResult, failed: Sequence[TaskOutcome] = (),
@@ -10768,7 +10805,7 @@ class WriteBatchScheduler:
         why = self._stop_resume_why(result)
         if why:
             result.stop["resume_why"] = why
-        result.stop["headline"] = self._stop_headline(result.stop)
+        self._set_stop_headline(result.stop)
 
     def _check_block_message(self, result: SchedulerResult) -> List[str]:
         """The exit-3 block after a run whose checks kept tasks from running.
@@ -10835,8 +10872,37 @@ class WriteBatchScheduler:
             )
         return lines
 
+    def _set_stop_headline(
+        self, stop: Dict[str, Any], *, tail: Optional[str] = None,
+    ) -> None:
+        """Record *stop*'s ``headline`` and, beside it, the same line
+        without the ways forward its resume section carries
+        (``headline_beside_section``, :data:`HEADLINE_BESIDE_SECTION_KEY`).
+
+        Fix round 28 (live run 12 #5): at a stop the Codex host relayed the
+        whole ``error`` line, whose "To go on (your call): … add --human-task
+        T005=skip … --human-task T002=done …" restated every answer the
+        ready section then gave as commands. ``util next-command --blocked``
+        hands the tool routes this second line beside the section, and the
+        servers relay it in the ``error``'s place: what stopped, what it
+        reported, what did not run, the fixes only the user can make (a
+        ``driver.write_paths`` change, fixing what a check reported), and
+        the tests line, never an answer. Recorded only when it differs and
+        every ``--human-task`` answer it leaves out is one of the stop's own
+        ``answers``, which the section lists; else the key is dropped, and
+        the full line stays the only one.
+        """
+        stop["headline"] = self._stop_headline(stop, tail=tail)
+        beside = self._stop_headline(stop, tail=tail, beside_section=True)
+        if beside != stop["headline"] and answers_cover(
+                stop["headline"], beside, stop):
+            stop[HEADLINE_BESIDE_SECTION_KEY] = beside
+        else:
+            stop.pop(HEADLINE_BESIDE_SECTION_KEY, None)
+
     def _stop_headline(
         self, stop: Dict[str, Any], *, tail: Optional[str] = None,
+        beside_section: bool = False,
     ) -> str:
         """One plain line for the result line's ``error``: what the hosts relay
         as "the last line it left", ending with *tail* (the line saying nothing
@@ -10854,7 +10920,8 @@ class WriteBatchScheduler:
         """
         caps = (None,) + STOP_HEADLINE_LABEL_CAPS
         for cap in caps:
-            parts = self._stop_headline_parts(stop, label_cap=cap)
+            parts = self._stop_headline_parts(
+                stop, label_cap=cap, beside_section=beside_section)
             fitted = fit_stop_headline(
                 *parts, tail=tail, last_resort=cap == caps[-1],
             )
@@ -10864,13 +10931,17 @@ class WriteBatchScheduler:
 
     def _stop_headline_parts(
         self, stop: Dict[str, Any], *, label_cap: Optional[int] = None,
+        beside_section: bool = False,
     ) -> Tuple[str, Optional[str], List[str], List[str], str]:
         """``(head, reported, not_run, body, terminator)`` of a stop's
         headline (:meth:`_stop_headline`): *head* says what stopped and
         names the task, *reported* is the model's own words, *not_run* the
         tasks the stop left, *body* the remedy and the answers, in order.
         A task title in *head* is cut to *label_cap* characters (``0``: left
-        out)."""
+        out). *beside_section* (fix round 28): *body* without the ways
+        forward a resume section carries — every ``--human-task`` answer
+        and a bare "resume this phase" — keeping each fix only the user can
+        make before the resume (:meth:`_set_stop_headline`)."""
 
         def label(task_id: str) -> str:
             text = self._task_label(task_id)
@@ -10904,10 +10975,14 @@ class WriteBatchScheduler:
                 f"--human-task {task_id}=done" if len(checks) == 1
                 else "--human-task <check id>=done for each check"
             )
-            return head, reported, [], [
+            fix = (
                 "To go on: fix what the check reported (by hand, or "
                 "review-code then apply-code-fixes), then resume this phase — "
-                f"the check runs again; or accept its findings by adding "
+                "the check runs again"
+            )
+            return head, reported, [], [
+                f"{fix}." if beside_section else
+                f"{fix}; or accept its findings by adding "
                 f"{answer} to the resume command (the tasks after it then run, "
                 f"told that you accepted the findings)."
             ], "."
@@ -10920,9 +10995,13 @@ class WriteBatchScheduler:
         head = f"{self.phase} stopped at {task_id}{label(task_id)}: {stop.get('what')}"
         body: List[str] = []
         if stop.get("kind") == "check" and stop.get("acceptable"):
-            body.append(
+            fix = (
                 "To go on: fix what the check reported (by hand, or review-code "
-                "then apply-code-fixes), then resume this phase; or accept the "
+                "then apply-code-fixes), then resume this phase"
+            )
+            body.append(
+                f"{fix}." if beside_section else
+                f"{fix}; or accept the "
                 f"failure by adding --human-task {task_id}=done to the resume "
                 f"command (the tasks after it then run)."
             )
@@ -10934,6 +11013,10 @@ class WriteBatchScheduler:
                 "(restore the batch, or keep them), then resume this phase "
                 "and it is dispatched again."
             )
+        elif stop.get("applied_without_changes") and beside_section:
+            # Its only way forward is the section's: the resume (which
+            # dispatches it again) and the answers.
+            body.append("Nothing changed, so there is nothing to restore.")
         elif stop.get("applied_without_changes"):
             body.append(
                 "Nothing changed, so there is nothing to restore. To go on: "
@@ -10954,7 +11037,7 @@ class WriteBatchScheduler:
                 + (
                     f"; or accept the failure by adding --human-task "
                     f"{task_id}=done to the resume command."
-                    if self.kind == "implement" else "."
+                    if self.kind == "implement" and not beside_section else "."
                 )
             )
         elif stop.get("refused_before_dispatch") and stop.get("policy"):
@@ -10971,8 +11054,12 @@ class WriteBatchScheduler:
                 body.append(
                     "To go on (your call): " + clause + ", then resume this phase"
                     + (f"; {policy_skip_clause(task_id)}."
-                       if self.kind == "implement" else ".")
+                       if self.kind == "implement" and not beside_section else ".")
                 )
+            elif self.kind == "implement" and beside_section:
+                # Its one way forward, the skip, is the section's.
+                note = policy_outside_note(refused_rules)
+                body.append(f"{note[0].upper()}{note[1:]}.")
             else:
                 note = policy_outside_note(refused_rules)
                 body.append(
@@ -10988,7 +11075,8 @@ class WriteBatchScheduler:
                     ", then resume this phase; or leave it and the tasks after "
                     f"it undone by adding --human-task {task_id}=skip to the "
                     "resume command."
-                    if self.kind == "implement" else ", then resume this phase."
+                    if self.kind == "implement" and not beside_section
+                    else ", then resume this phase."
                 )
             )
         elif stop.get("bytes_moved", True) and stop.get("timed_out"):
@@ -11017,7 +11105,7 @@ class WriteBatchScheduler:
                 "Nothing changed, so there is nothing to restore. To go on: "
                 "fix the cause, then resume this phase."
             )
-        if stop.get("unapplied_ids"):
+        if stop.get("unapplied_ids") and not beside_section:
             # Fix round 18: the way out of a stop a resume only repeats.
             body.append(
                 f"Or keep what it applied and go on without "
@@ -11029,10 +11117,14 @@ class WriteBatchScheduler:
         blocked = stop.get("blocked") or {}
         for check_id in stop.get("check_task_ids") or []:
             waiting = sorted(t for t, c in blocked.items() if c == check_id)
-            body.append(
+            held = (
                 f"{check_id}'s check reported problems and holds back "
                 f"{', '.join(waiting)}: fix them and resume (a resume runs it "
-                f"again only once the files changed), or accept its findings "
+                f"again only once the files changed)"
+            )
+            body.append(
+                f"{held}." if beside_section else
+                f"{held}, or accept its findings "
                 f"by adding --human-task {check_id}=done to the resume command "
                 f"({', '.join(waiting)} then run, told that you accepted them)."
             )
@@ -11171,9 +11263,7 @@ class WriteBatchScheduler:
             # The result line's `error` is bounded: the headline is fitted
             # again with this line as its whole end (fix round 19: the
             # model's quoted words give way first, never the remedy).
-            result.stop["headline"] = self._stop_headline(
-                result.stop, tail=result.unverified,
-            )
+            self._set_stop_headline(result.stop, tail=result.unverified)
         return [result.unverified]
 
     def _run_verification(self, result: SchedulerResult) -> bool:

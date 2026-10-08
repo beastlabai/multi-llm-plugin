@@ -637,7 +637,7 @@ your host.
 
 11. **Report results** following `references/summary-format.md`, including:
    - Number of tasks completed/failed
-   - Each check task that reported problems, with its findings (the code review is told about them), and the tasks it held back with the way forward (fix and `--resume`, or `--resume --human-task {id}=done`)
+   - Each check task that reported problems, with its findings (the code review is told about them), and the tasks it held back (the closing section gives the resume and each `--human-task` answer: write none of them here)
    - Each task whose own check failed after its edits (`[BATCH_CHECK_FAILED]`), with what failed: the phase applied it but is not a clean finish
    - Each task recorded with `--partial`: it failed with its edits half-applied; name the files its subagent changed and say the user inspects them (keeps or undoes them) and fixes the cause before the resume, which dispatches it again
    - At a stop after a code task completed, with no `driver.verify_command` configured: the `[TESTS_NOT_RUN]` line the next-step lookup prints, the text after its tag verbatim, as plain text — it says what checks the tasks ran, that the plugin itself ran none, and names the setting to add (step 8 itself does not run at a stop); never write a line of your own in its place

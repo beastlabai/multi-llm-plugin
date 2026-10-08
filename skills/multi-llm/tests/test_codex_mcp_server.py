@@ -2969,6 +2969,81 @@ class TestTheStopsAnswersLeadTheOptions:
         assert calls == [dict(IMPLEMENT_CALL, extra_flags=["--resume"])]
 
 
+#: A stop's line as the run recorded it, and the same line without the ways
+#: forward its resume section carries (fix round 28, live run 12 #5).
+STOP_LINE = (
+    "implement stopped at T005: refused before it was dispatched. Not run: "
+    "T006, T007. To go on (your call): remove or narrow the deny rule "
+    "`src/vendor/**` in driver.write_paths, then resume this phase; if not, "
+    "skip T005: add --human-task T005=skip to the resume command. T002's "
+    "check reported problems and holds back T007: fix them and resume, or "
+    "accept its findings by adding --human-task T002=done to the resume "
+    "command (T007 then run, told that you accepted them).")
+STOP_LINE_BESIDE_SECTION = (
+    "implement stopped at T005: refused before it was dispatched. Not run: "
+    "T006, T007. To go on (your call): remove or narrow the deny rule "
+    "`src/vendor/**` in driver.write_paths, then resume this phase. T002's "
+    "check reported problems and holds back T007: fix them and resume.")
+
+
+class TestTheStopLineBesideTheSection:
+    """Fix round 28 (live run 12 #5, Codex stop 01): the host relayed the
+    whole `error` line, whose "To go on (your call): … --human-task T005=skip
+    … --human-task T002=done …" restated the ready section's answers, then
+    the section. With the section lifted, the result's `error` (and
+    `result.error`, and the line the message quotes) is the stop's line
+    without the ways forward the section carries, the lookup's
+    `error_beside_section`, while the error is still the line it recorded."""
+
+    def _run(self, harness, step, error=STOP_LINE):
+        sys.path.insert(0, str(SKILL_ROOT))
+        from utils import next_phase
+
+        why = "runs the tasks that can run; keeps the 4 tasks already done"
+        step = dict(stop_answers_step(), why=why, **step)
+        step.setdefault("markdown", next_phase.render_resume_markdown(
+            "implement", SPELLED_RESUME, why, step["answers"]))
+        return harness.run(
+            IMPLEMENT_CALL, [launch_step(), failed_implement_status(harness, error=error)],
+            meta=turn_meta(sandbox_mode="workspace-write"),
+            extra_env={"STUB_RESUME_COMMAND": SPELLED_RESUME,
+                       "STUB_RESUME_EXTRA": json.dumps(step)})[0]
+
+    def test_the_error_beside_the_section_names_no_answer(self, harness):
+        envelope = self._run(harness, {
+            "error_line": STOP_LINE, "error_beside_section": STOP_LINE_BESIDE_SECTION})
+        assert envelope["error"] == STOP_LINE_BESIDE_SECTION
+        assert envelope["result"]["error"] == STOP_LINE_BESIDE_SECTION
+        message = envelope["message"]
+        assert '"{}"'.format(STOP_LINE_BESIDE_SECTION) in message
+        assert "--human-task" not in message.split("`resume_markdown`")[0]
+        assert STOP_LINE not in message
+        assert message.endswith(SURFACE["needs_human_message"]["resume_markdown"])
+        assert envelope["resume_markdown"].count("--human-task T005=skip") == 2
+
+    def test_an_error_the_record_does_not_describe_keeps_its_own_line(self, harness):
+        other = "implement stopped at T009: the batch was refused."
+        envelope = self._run(harness, {
+            "error_line": STOP_LINE, "error_beside_section": STOP_LINE_BESIDE_SECTION},
+            error=other)
+        assert envelope["error"] == other
+        assert envelope["result"]["error"] == other
+        assert '"{}"'.format(other) in envelope["message"]
+
+    def test_without_a_section_the_error_stays_whole(self, harness):
+        envelope = self._run(harness, {
+            "markdown": ["not text"], "error_line": STOP_LINE,
+            "error_beside_section": STOP_LINE_BESIDE_SECTION})
+        assert "resume_markdown" not in envelope
+        assert envelope["error"] == STOP_LINE
+        assert '"{}"'.format(STOP_LINE) in envelope["message"]
+
+    def test_a_lookup_without_the_lines_changes_nothing(self, harness):
+        envelope = self._run(harness, {})
+        assert envelope["error"] == STOP_LINE
+        assert envelope["result"]["error"] == STOP_LINE
+
+
 class TestAReportCallOnAFailedRun:
     """Adversarial review 2026-10-05: a direct `status` (or `abort`) call on a
     failed write run re-spelled status's `resume with:` line into the host's
