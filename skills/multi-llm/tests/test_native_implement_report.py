@@ -75,7 +75,7 @@ def _close_note(plan_arg: str, ids) -> str:
     """The note for *ids*, its command spelled the way Claude Code types it."""
     template = host_capabilities.next_command_template(
         "claude-code", np_.resolve_route("claude-code", stderr=io.StringIO()))
-    return np_.manual_close_note(np_.close_command(template, plan_arg, ids))
+    return np_.manual_close_note(np_.close_command(template, plan_arg, ids), len(ids))
 
 
 def _emit(capsys, *flags: str, yes: bool = True):
@@ -169,7 +169,7 @@ class TestTheReportLookupCarriesIt:
         assert lines[-4:] == [
             f"[MANUAL_TASK] T005 {MANUAL_TITLE}",
             f"[MANUAL_TASK] T006 {DEPENDENT_TITLE} {WAITS}",
-            f"[MANUAL_TASK_NOTE] {np_.manual_close_lead()}",
+            f"[MANUAL_TASK_NOTE] {np_.manual_close_lead(1)}",
             f"[MANUAL_TASK_COMMAND] {command}",
         ]
         step = cli_common.parse_result_line(out)["user_next_step"]
@@ -179,7 +179,7 @@ class TestTheReportLookupCarriesIt:
             {"id": "T005", "title": MANUAL_TITLE},
             {"id": "T006", "title": DEPENDENT_TITLE, "waits_on": "T005"},
         ]
-        assert step["manual_tasks_note"] == np_.manual_close_lead()
+        assert step["manual_tasks_note"] == np_.manual_close_lead(1)
         assert step["manual_tasks_command"] == command
 
     def test_after_another_phase_it_names_them_too(self, repo, capsys):
@@ -201,7 +201,7 @@ class TestTheReportLookupCarriesIt:
         assert lines[-4:] == [
             f"[MANUAL_TASK] T005 {MANUAL_TITLE}",
             f"[MANUAL_TASK] T006 {DEPENDENT_TITLE} {WAITS}",
-            f"[MANUAL_TASK_NOTE] {np_.manual_close_lead()}",
+            f"[MANUAL_TASK_NOTE] {np_.manual_close_lead(1)}",
             f"[MANUAL_TASK_COMMAND] {command}",
         ]
         step = cli_common.parse_result_line(out)["user_next_step"]

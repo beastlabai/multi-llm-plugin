@@ -91,3 +91,52 @@ class TestAStopCarriesNoSuggestedNext:
             "error": headline.replace(tests_line, "").strip()}})
         _code, payload, _out = _poll(repo, capsys)
         assert tests_line in (payload.get("notice") or ""), payload.get("notice")
+
+
+class TestTheManualSectionReadsWellEnoughToCopy:
+    """Live run 11, Codex 06: one manual task (T009), and the section said
+    "these manual tasks … Once you have done one by hand … keeping a
+    --human-task answer only for each task you did"; the host rewrote it in
+    the singular and dropped the clause. One task reads in the singular, and
+    has no clause to drop."""
+
+    SINGULAR = ("No later phase waits for this manual task. Once you have done "
+                "it by hand, record it done with this command:")
+
+    def test_one_task_is_named_in_the_singular(self):
+        from utils import next_phase as np_
+
+        command = "$multi-llm:multi-llm --implement plans/r.md --resume --human-task T009=done"
+        answer = np_.NextPhase(
+            phase=None, command=None, complete=True,
+            manual_tasks=(np_.ManualTask("T009", "Verify the game in desktop browsers"),),
+            manual_tasks_note=np_.manual_close_lead(1), manual_tasks_command=command,
+        )
+        markdown = answer.to_dict()["markdown"]
+        assert markdown == "\n\n".join([
+            "Workflow complete.",
+            "Manual task left for you:\n- T009 Verify the game in desktop browsers",
+            self.SINGULAR,
+            f"```\n{command}\n```",
+        ])
+        assert np_.manual_close_note(command, 1) == f"{self.SINGULAR} {command}"
+
+    def test_several_keep_the_plural_and_its_clause(self):
+        from utils import next_phase as np_
+
+        assert "keeping a --human-task answer only for each task you did" in (
+            np_.manual_close_lead(2))
+        assert np_.manual_close_lead() == np_.manual_close_lead(2)
+
+    def test_the_builder_counts_the_tasks_its_command_records(self, tmp_path):
+        from tests.test_manual_tasks_on_completion import P, TITLES, _complete_plan
+        from utils import next_phase as np_
+
+        plan = _complete_plan(tmp_path, tasks={
+            "T001": "completed", "T010": "completed", "T011": "skipped"})
+        answer = np_.next_phase_commands(
+            P, "claude-code", None, "apply-code-fixes", plan_path=plan)
+        payload = answer.to_dict()
+        assert payload["manual_tasks_note"] == self.SINGULAR
+        assert f"Manual task left for you:\n- T011 {TITLES['T011']}" in payload["markdown"]
+        assert "keeping a --human-task" not in payload["markdown"]

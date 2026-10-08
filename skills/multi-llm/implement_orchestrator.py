@@ -1189,7 +1189,8 @@ def _manual_close_note(
         host_id = _hosts.resolve_host_id(explicit=getattr(args, "host", None))
         template = _hosts.next_command_template(
             host_id, _next.resolve_route(host_id, stderr=io.StringIO()))
-        return _next.manual_close_note(_next.close_command(template, plan_arg, task_ids))
+        return _next.manual_close_note(
+            _next.close_command(template, plan_arg, task_ids), len(task_ids))
     except Exception:  # noqa: BLE001 - advisory: the deferred list still stands
         return None
 

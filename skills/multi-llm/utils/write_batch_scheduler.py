@@ -12137,7 +12137,8 @@ class WriteBatchScheduler:
         from .next_phase import manual_close_note
 
         return manual_close_note(template.replace(
-            "{answers}", " ".join(f"--human-task {task_id}=done" for task_id in manual)))
+            "{answers}", " ".join(f"--human-task {task_id}=done" for task_id in manual)),
+            len(manual))
 
     def _dispatched_sentence(self, result: SchedulerResult) -> str:
         """summary.md's count of what this run dispatched: the tasks a

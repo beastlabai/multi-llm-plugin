@@ -69,7 +69,7 @@ class TestTheMarkdown:
             "Optional, before that:",
             "review-tasks left 9 valid task suggestion groups unapplied.",
             _fenced("$multi-llm:multi-llm --apply-task-suggestions plans/r.md"),
-            "Manual tasks left for you:\n- T008 Manual playthrough",
+            "Manual task left for you:\n- T008 Manual playthrough",
             LEAD,
             _fenced(CLOSE),
         ])
@@ -85,7 +85,7 @@ class TestTheMarkdown:
         )
         assert complete.to_dict()["markdown"] == "\n\n".join([
             "Workflow complete.",
-            "Manual tasks left for you:\n- T008 Manual playthrough",
+            "Manual task left for you:\n- T008 Manual playthrough",
             LEAD,
             _fenced(CLOSE),
         ])

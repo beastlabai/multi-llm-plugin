@@ -577,7 +577,7 @@ def manual_close_note(
     except Exception:  # noqa: BLE001 - advisory: the list still stands
         return None
     return next_phase.manual_close_note(
-        next_phase.close_command(template, plan_spelling, ids)
+        next_phase.close_command(template, plan_spelling, ids), len(ids),
     )
 
 

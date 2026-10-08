@@ -345,7 +345,7 @@ def _manual_tasks(
     note = command = None
     ids = manual_close_ids(implement)
     if manual and ids and template is not None and plan_arg is not None:
-        note, command = manual_close_lead(), close_command(template, plan_arg, ids)
+        note, command = manual_close_lead(len(ids)), close_command(template, plan_arg, ids)
     return manual, note, command
 
 
@@ -397,11 +397,23 @@ def close_command(template: str, plan_arg: str, task_ids: Sequence[str]) -> str:
     return template.replace(ARGS_SLOT, args)
 
 
-def manual_close_lead() -> str:
+def manual_close_lead(count: Optional[int] = None) -> str:
     """The sentence that leads into the command closing deferred manual
     tasks (:func:`close_command`), ending with a colon: what
     ``user_next_step.manual_tasks_note`` and ``[MANUAL_TASK_NOTE]`` say, the
-    command beside it on its own (fix round 22)."""
+    command beside it on its own (fix round 22).
+
+    *count* is how many tasks the command records done. Fix round 26 (live
+    run 11, Codex 06): for one task the plural sentence ("these manual
+    tasks … keeping a --human-task answer only for each task you did") read
+    wrong, and the host rewrote it, dropping the clause; one task gets the
+    singular sentence, which has nothing to keep or drop.
+    """
+    if count == 1:
+        return (
+            "No later phase waits for this manual task. Once you have done it "
+            "by hand, record it done with this command:"
+        )
     return (
         "No later phase waits for these manual tasks. Once you have done one "
         "by hand, record it done with this command, keeping a --human-task "
@@ -409,15 +421,16 @@ def manual_close_lead() -> str:
     )
 
 
-def manual_close_note(command: str) -> str:
+def manual_close_note(command: str, count: Optional[int] = None) -> str:
     """The one plain line that says how to close deferred manual tasks, for a
     surface that is one line of text (a summary, ``status``'s trailer).
 
     The command ends the line, with nothing after it (live run 8, Codex
     racing 08: the advice used to follow it in parentheses, and the host
-    copied that into the command's fence).
+    copied that into the command's fence). *count* as in
+    :func:`manual_close_lead`.
     """
-    return f"{manual_close_lead()} {command}"
+    return f"{manual_close_lead(count)} {command}"
 
 
 # ---------------------------------------------------------------------------
@@ -1144,6 +1157,9 @@ def render_next_phase_lines(answer: NextPhase) -> List[str]:
 RESUME_LEAD = "To go on with {phase}:"
 OPTIONAL_LEAD = "Optional, before that:"
 MANUAL_TASKS_LEAD = "Manual tasks left for you:"
+#: The same lead over one task (fix round 26, live run 11: Codex 06 wrote
+#: "Manual task left for you:" over the one task the section listed).
+MANUAL_TASK_LEAD = "Manual task left for you:"
 #: Above a stopped implement's answers (status says "or answer the stop
 #: with:"): what the user types instead of the resume.
 ANSWERS_LEAD = "Or answer the stop with one of these:"
@@ -1217,8 +1233,9 @@ def render_next_step_markdown(answer: "NextPhase") -> str:
         for step in answer.answers:
             blocks.extend([markdown_text(step.why), fenced_command(step.command)])
     if answer.manual_tasks:
+        lead = MANUAL_TASK_LEAD if len(answer.manual_tasks) == 1 else MANUAL_TASKS_LEAD
         blocks.append("\n".join(
-            [MANUAL_TASKS_LEAD]
+            [lead]
             + [f"- {plain_line(task.line())}" for task in answer.manual_tasks]))
         if answer.manual_tasks_note and answer.manual_tasks_command:
             blocks.extend([
