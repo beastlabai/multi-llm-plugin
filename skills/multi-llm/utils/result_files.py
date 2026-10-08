@@ -253,14 +253,81 @@ def _claimed_stems(specs: Iterable[str]) -> set:
     return stems
 
 
+#: How a candidate result file is opened: never through a link (a link
+#: swapped in after the ``lstat`` fails the open with ``ELOOP``), and never
+#: blocking on a FIFO. ``getattr`` because Windows has neither flag; the
+#: identity check in :func:`read_regular_text` covers it there.
+_NO_FOLLOW_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_BINARY", 0)
+)
+
+#: ``(st_dev, st_ino)`` of a file :func:`read_regular_text` read.
+FileIdentity = Tuple[int, int]
+
+
+def read_regular_text(path: os.PathLike | str) -> Optional[Tuple[str, FileIdentity]]:
+    """*path*'s UTF-8 text and identity, when it is a regular file; else ``None``.
+
+    Checked and read through one descriptor (review of fix round 24): the
+    ``lstat`` says a regular file, the open never follows a link, and the
+    opened descriptor is ``fstat``-ed as a regular file with the ``lstat``'s
+    identity, so a link or a FIFO swapped in between the check and the open is
+    never read. A file that is not UTF-8 is ``None`` too.
+    """
+    try:
+        before = os.lstat(path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(before.st_mode):
+        return None
+    try:
+        fd = os.open(path, _NO_FOLLOW_OPEN_FLAGS)
+    except OSError:
+        return None
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or (
+            (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            return None
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    try:
+        text = b"".join(chunks).decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return text, (opened.st_dev, opened.st_ino)
+
+
+def is_same_regular_file(path: os.PathLike | str, identity: FileIdentity) -> bool:
+    """Whether *path* is, now, the regular file :func:`read_regular_text` read."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and (st.st_dev, st.st_ino) == tuple(identity)
+
+
 def _is_result_list(path: str) -> bool:
     """A regular file (not a link, not a FIFO) holding one JSON array."""
+    read = read_regular_text(path)
+    if read is None:
+        return False
     try:
-        if not stat.S_ISREG(os.lstat(path).st_mode):
-            return False
-        with open(path, "r", encoding="utf-8") as handle:
-            return isinstance(json.load(handle), list)
-    except (OSError, ValueError):
+        return isinstance(json.loads(read[0]), list)
+    except ValueError:
         return False
 
 

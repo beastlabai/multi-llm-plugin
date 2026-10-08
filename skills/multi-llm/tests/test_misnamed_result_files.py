@@ -229,6 +229,48 @@ class TestAMisnamedResultIsReadFromWhereTheModelWroteIt:
         assert result["success"] is False
         assert (phase_dir / MISNAMED).is_symlink()
 
+    def test_a_swap_to_a_link_after_the_check_is_never_followed(self, tmp_path, monkeypatch):
+        """Review 24 (records #6): the candidate was checked with `scandir` and
+        then opened by path, so a link swapped in between was followed."""
+        target = tmp_path / "elsewhere.json"
+        target.write_text(json.dumps(_issues(["Planted"])), encoding="utf-8")
+        real_find = result_files.find_misnamed_result
+
+        def find_then_swap(*args, **kwargs):
+            found = real_find(*args, **kwargs)
+            if found is not None:
+                found.unlink()
+                found.symlink_to(target)
+            return found
+
+        monkeypatch.setattr(result_files, "find_misnamed_result", find_then_swap)
+        result, phase_dir = _invoke(tmp_path, {MISNAMED: _issues(["Mine"])})
+
+        assert result["success"] is False
+        assert "misnamed_from" not in result
+        assert not (phase_dir / f"{PI_STEM}.json").exists()
+        assert (phase_dir / MISNAMED).is_symlink()
+
+    def test_a_swap_to_a_link_before_the_rename_is_not_adopted(self, tmp_path, monkeypatch):
+        """What is left at the requested name after the rename must be the
+        regular file that was read."""
+        import os as _os
+        target = tmp_path / "elsewhere.json"
+        target.write_text(json.dumps(_issues(["Planted"])), encoding="utf-8")
+        real_replace = _os.replace
+
+        def swap_then_replace(src, dst, *args, **kwargs):
+            if str(dst).endswith(f"{PI_STEM}.json") and str(src).endswith(MISNAMED):
+                _os.unlink(src)
+                _os.symlink(target, src)
+            return real_replace(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr(_os, "replace", swap_then_replace)
+        result, _phase_dir = _invoke(tmp_path, {MISNAMED: _issues(["Mine"])})
+
+        assert result["success"] is False
+        assert "misnamed_from" not in result
+
     def test_the_requested_file_still_wins_when_both_exist(self, tmp_path):
         mine = _issues(["Mine"])
         result, phase_dir = _invoke(tmp_path, {
@@ -693,6 +735,32 @@ class TestTheAggregateReadsOnlyTheModelsThePhaseRecords:
         spy = resolved
         assert "[RESULT_NOT_READ] pi_stray.json" in out
         assert [p for p in spy.call_args.args[1] if p.endswith("pi_stray.json")] == []
+
+    def test_a_swap_to_a_link_after_the_lstat_is_never_followed(self, tmp_path, monkeypatch):
+        """Review 24 (records #6): the set-aside check lstat()ed the stray and
+        then opened it by path, so a link swapped in between was followed and
+        an outside JSON array read as the stray's content."""
+        import os as _os
+        phase_dir = tmp_path / "phase"
+        phase_dir.mkdir()
+        stray = phase_dir / "pi_stray.json"
+        stray.write_text(json.dumps({"not": "a list"}), encoding="utf-8")
+        target = tmp_path / "elsewhere.json"
+        target.write_text(json.dumps(_issues(["Planted"])), encoding="utf-8")
+        real_lstat = _os.lstat
+        swapped = []
+
+        def lstat_then_swap(path, *args, **kwargs):
+            st = real_lstat(path, *args, **kwargs)
+            if str(path) == str(stray) and not swapped:
+                swapped.append(True)
+                _os.unlink(stray)
+                _os.symlink(target, stray)
+            return st
+
+        monkeypatch.setattr(_os, "lstat", lstat_then_swap)
+        assert result_files._is_result_list(str(stray)) is False
+        assert swapped
 
     def test_a_dir_with_no_checkpoint_still_reads_every_file_by_stem(self, tmp_path, capsys):
         """No `.status.json`: nothing says which models ran, so nothing is a stray
