@@ -5562,6 +5562,35 @@ def persist_result(task: Dict[str, Any], phase_dir: str, data: Any) -> str:
 # Extraction and per-kind result validation
 # ---------------------------------------------------------------------------
 
+#: The kinds whose result is one JSON object (their schema's root is an
+#: object): the write report, the task list, a consolidation batch and the
+#: judge's verdicts. Validation's reply may be a bare array, a salvage's is
+#: one.
+OBJECT_RESULT_KINDS = frozenset({
+    "task_generation", "consolidation", "human_decision_judge", *WRITE_KINDS,
+})
+
+
+def the_reply_object(kind: str, data: Any, extracted: Mapping[str, Any]) -> Any:
+    """*data*, or the reply's one JSON object when *kind*'s result is an
+    object and the extraction served an array (fix round 28, live run 12 #6).
+
+    Codex decline batch 0 opened its reply with two prose lines, then the
+    report object; the adapter's array-preferring extraction served the
+    report's own ``declined`` array (an array holding an object ranks as an
+    answer), the batch read "<root>: expected type object, got list", and a
+    repair re-ask restated the same report. The extractor names the reply's
+    one object outside every other document (``only_object``,
+    :func:`utils.json_extractor._only_object`); a reply holding two such
+    objects names none and keeps its re-ask, as a validation reply holding
+    two does. Both invokers read a reply through this."""
+    if kind in OBJECT_RESULT_KINDS and isinstance(data, list):
+        whole = extracted.get("only_object") if isinstance(extracted, Mapping) else None
+        if isinstance(whole, dict):
+            return whole
+    return data
+
+
 def extract_result(provider: Any, stdout: str, stderr: str, *, prefer_arrays: bool) -> Any:
     """Recover the subagent's answer: ``parse_output`` first, then extraction.
 
@@ -5573,7 +5602,8 @@ def extract_result(provider: Any, stdout: str, stderr: str, *, prefer_arrays: bo
 
 
 def _extract_result_and_syntax(
-    provider: Any, stdout: str, stderr: str, *, prefer_arrays: bool
+    provider: Any, stdout: str, stderr: str, *, prefer_arrays: bool,
+    kind: str = "",
 ) -> Tuple[Any, Optional[Dict[str, Any]]]:
     """Recover the subagent's answer: ``parse_output`` first, then extraction.
 
@@ -5637,6 +5667,7 @@ def _extract_result_and_syntax(
 
     data = parsed.get("data")
     syntax = parsed.get("enclosing_syntax_error")
+    served: Mapping[str, Any] = parsed
     if isinstance(data, str):
         extracted = extract_json_from_text(data, prefer_arrays=prefer_arrays)
         if not extracted.get("success"):
@@ -5646,6 +5677,11 @@ def _extract_result_and_syntax(
             )
         data = extracted.get("data")
         syntax = extracted.get("enclosing_syntax_error")
+        served = extracted
+    whole = the_reply_object(kind, data, served)
+    if whole is not data:
+        # The object parsed whole: the array's syntax note was about it.
+        data, syntax = whole, None
     if data is None or (isinstance(data, dict) and set(data.keys()) == {"raw"}):
         raise ResultRejected(
             "the adapter recovered no result object from the stream",
@@ -8599,7 +8635,8 @@ def _parse_and_validate(
     """
     try:
         data, fragment = _extract_result_and_syntax(
-            provider, capture.stdout, capture.stderr, prefer_arrays=prefer_arrays
+            provider, capture.stdout, capture.stderr, prefer_arrays=prefer_arrays,
+            kind=kind,
         )
     except ResultRejected as exc:
         return exc.status, exc.message, None
@@ -10263,7 +10300,7 @@ def simulate_native_invoker(
                 outcome.reason = extracted.get("error") or "no JSON in the reply"
                 report.outcomes.append(outcome)
                 continue
-            data = extracted["data"]
+            data = the_reply_object(task_kind, extracted["data"], extracted)
         gave_up = _salvage_gave_up(
             task_kind, data, salvage_failure_of(task, phase_dir)
         )

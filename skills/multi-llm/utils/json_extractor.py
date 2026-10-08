@@ -409,6 +409,12 @@ def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, A
         describe the fragment, and this says what was wrong with the reply.
         Adapters hand this dict back from ``parse_output`` as it is, which is
         how the executor learns it without scanning the reply a second time.
+        A success that served something other than the reply's one JSON
+        object also carries ``only_object`` (:func:`_only_object`): that
+        object, when the reply holds exactly one outside every other
+        document. Shape preference serves an array first, and an object
+        holding one (a write report's ``declined``) would otherwise give the
+        executor a piece of the object its contract asks for (fix round 28).
     """
     text = text.strip()
 
@@ -432,10 +438,11 @@ def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, A
             continue
         rank = _answer_rank(fence_data)
         if rank == _RANK_ANSWER:
-            return {"success": True, "data": fence_data}
+            return _with_only_object({"success": True, "data": fence_data}, text)
         fence_fallbacks.setdefault(rank, fence_data)
     if _RANK_EMPTY in fence_fallbacks:
-        return {"success": True, "data": fence_fallbacks[_RANK_EMPTY]}
+        return _with_only_object(
+            {"success": True, "data": fence_fallbacks[_RANK_EMPTY]}, text)
 
     # Strategy 2: Balanced bracket extraction.
     # Clause 2: shape before position - every array is tried before every
@@ -482,7 +489,7 @@ def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, A
             error = _enclosing_document_error(span, every_span)
             if error is not None:
                 result["enclosing_syntax_error"] = error
-        return result
+        return _with_only_object(result, text, every_span)
 
     # Strategy 3: Try parsing each candidate in rank order.
     # Clauses 3 and 5: the highest-ranked candidate that parses to a document
@@ -510,6 +517,58 @@ def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, A
         "raw": text,
         "data": None,
     }
+
+
+def _only_object(
+    text: str, spans: Optional[List[Tuple[int, int, str]]] = None,
+) -> Optional[Dict[str, Any]]:
+    """The one JSON object *text* holds outside every other document, or
+    ``None`` when it holds none or several.
+
+    A document here is a balanced span that opens like one
+    (:data:`_DOCUMENT_OPENING`) and parses; the outermost documents are those
+    no other document encloses (a stray brace in the prose around one does
+    not count, since it does not parse). Exactly one of them must be a
+    non-empty object: two report objects (a draft and its correction) are
+    two candidates and name none, which leaves the reply to its re-ask, as
+    the validation reply's contract does. Never raises.
+    """
+    try:
+        spans = spans if spans is not None else _candidate_spans(text, "both")
+        outermost: List[Any] = []
+        covered = -1
+        # Position order: a document starts before anything inside it, so
+        # once one parses, every span ending inside it is a piece of it.
+        for start, end, candidate in sorted(spans):
+            if end <= covered or not _DOCUMENT_OPENING.match(candidate):
+                continue
+            try:
+                value = _loads_reply(candidate)
+            except json.JSONDecodeError:
+                continue
+            outermost.append(value)
+            covered = end
+        objects = [value for value in outermost if isinstance(value, dict) and value]
+        return objects[0] if len(objects) == 1 else None
+    except Exception:  # noqa: BLE001 - an extra reading must never fail one
+        return None
+
+
+def _with_only_object(
+    result: Dict[str, Any], text: str,
+    spans: Optional[List[Tuple[int, int, str]]] = None,
+) -> Dict[str, Any]:
+    """*result* with ``only_object`` when it served something other than the
+    reply's one object (fix round 28, live run 12 #6: a Codex apply batch's
+    reply opened with two prose lines, the array-preferring extraction served
+    the report's own ``declined`` array, and the batch read "<root>: expected
+    type object, got list" and cost a repair re-ask)."""
+    if isinstance(result.get("data"), dict):
+        return result
+    whole = _only_object(text, spans)
+    if whole is not None:
+        result["only_object"] = whole
+    return result
 
 
 #: How much of the reply a syntax diagnosis quotes on each side of the error.
