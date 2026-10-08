@@ -417,7 +417,10 @@ class TestTheEmittersCarryThem:
             cli_common.deactivate_result()
         out = capsys.readouterr().out
         assert "workflow manual tasks left for you: T011" in out
-        assert "manual tasks left for you: T011" in payload["notice"]
+        # Fix round 26: the poll's `user_next_step` lists them (its markdown
+        # is what the hosts copy), so its notice no longer does.
+        assert "T011" in payload["user_next_step"]["markdown"]
+        assert "manual tasks left for you" not in (payload.get("notice") or "")
 
 
 # ---------------------------------------------------------------------------

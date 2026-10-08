@@ -161,14 +161,14 @@ class TestTheTerminalPoll:
         )
 
         assert code == 0
-        notice = payload["notice"]
-        assert notice.startswith(TASKS_SENTENCE + "; ")
-        trailer = notice[len(TASKS_SENTENCE) + 2:]
-        assert "review-tasks left 1 valid task suggestion group unapplied" in trailer
         # Fix round 24: the next step is the poll's `user_next_step`, not a
-        # second "suggested next:" line in the notice.
-        assert "suggested next:" not in trailer
+        # second "suggested next:" line in the notice. Fix round 26: nor the
+        # unapplied groups, the optional entry's why that step's markdown
+        # carries, so the truncation sentence is the whole notice here.
+        assert payload["notice"] == TASKS_SENTENCE
         assert payload["user_next_step"]["phase"] == "implement"
+        assert ("review-tasks left 1 valid task suggestion group unapplied"
+                in payload["user_next_step"]["markdown"])
         assert "workflow notice: review-tasks left 1 valid" in out
         assert payload["next"] is None
 
@@ -180,8 +180,10 @@ class TestTheTerminalPoll:
 
         _, payload, _ = _poll(plan, capsys, "--view", "run", "--phase", "review-tasks")
 
-        assert "Validation saw" not in payload["notice"]
-        assert payload["notice"].startswith("notice: ") or "suggested next:" in payload["notice"]
+        # Fix round 26: the trailer's one line is the optional entry's why,
+        # which `user_next_step.markdown` says, so no notice is set.
+        assert "notice" not in payload, payload.get("notice")
+        assert "review-tasks left" in payload["user_next_step"]["markdown"]
         assert "validation_context" not in payload
 
     def test_the_truncation_notice_is_set_off_view_run_too(self, tmp_path, capsys):

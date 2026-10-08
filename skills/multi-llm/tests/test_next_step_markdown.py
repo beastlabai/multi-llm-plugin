@@ -162,10 +162,14 @@ class TestTheNoticeDoesNotRepeatTheNote:
         out = capsys.readouterr().out
         step = payload["user_next_step"]
         assert step["manual_tasks_command"] in step["markdown"]
-        # The tasks are still named; the sentence and its command are not.
-        assert "manual tasks left for you: T011" in payload["notice"]
-        assert "--human-task" not in payload["notice"], payload["notice"]
-        assert "No later phase waits" not in payload["notice"]
+        # Fix round 26 (live run 11, Codex 06/08 and OpenCode 06-08): the
+        # step's markdown lists the tasks, so the notice no longer names them
+        # either; round 22 kept the names, and the hosts relayed them above
+        # the copied section.
+        notice = payload.get("notice") or ""
+        assert "manual tasks left for you" not in notice, notice
+        assert "--human-task" not in notice, notice
+        assert "No later phase waits" not in notice
         # The status text a person reads still says how to close them.
         assert "--human-task T011=done" in out
 
@@ -207,8 +211,10 @@ class TestTheNoticeDoesNotRepeatTheStep:
         assert step["command"].endswith("plans/foo.md"), step
         assert "--implement" in step["command"], step
         assert "suggested next" not in (payload.get("notice") or ""), payload
-        # The other notice lines stay: what the review left unapplied.
-        assert "review-tasks left 1 valid task suggestion group" in payload["notice"]
+        # Fix round 26: what the review left unapplied is the optional
+        # entry's why, which the step's markdown says; the notice does not.
+        assert "review-tasks left 1 valid task suggestion group" in step["markdown"]
+        assert "review-tasks left" not in (payload.get("notice") or ""), payload
         assert "workflow suggested next: implement" in out
 
 
