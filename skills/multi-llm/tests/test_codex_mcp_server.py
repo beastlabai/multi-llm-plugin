@@ -2419,20 +2419,28 @@ class TestResumeCommand:
         polls = [c for c in calls if dispatcher_argv(c)[0] == DISPATCHER["poll"][0]]
         assert all(dispatcher_argv(c)[1] == absolute for c in polls)
 
-    @pytest.mark.parametrize("typed, where", [
-        ("plans/p.md", "root"),        # names nothing under the anchor
-        ("plans/own.md", "anchor"),    # a file under the anchor wins
-        ("plans/nope.md", "anchor"),   # missing from the root too
-        ("../outside.md", "anchor"),   # from the root, a file outside the repository
+    @pytest.mark.parametrize("typed, ran_from, where", [
+        # The dispatcher moved: its line names the root it ran from.
+        ("plans/p.md", "repo", "repo"),
+        # It stayed (GIT_DIR set, a planted core.worktree or nested .git, a
+        # mixed spelling): the anchor's spelling, though the root holds one.
+        ("plans/p.md", None, "sub"),
+        ("plans/own.md", None, "sub"),
+        # A line naming a directory the anchor is not in is not followed.
+        ("plans/p.md", "elsewhere", "sub"),
+        ("plans/p.md", "relative", "sub"),
     ])
     def test_a_plan_spelled_from_the_repository_root_is_polled_there(
-        self, harness, tmp_path, typed, where,
+        self, harness, tmp_path, typed, ran_from, where,
     ):
         """Fix round 26 (live run 11): the dispatcher runs a plan that names
         nothing from the anchor from the root of the repository the anchor is
         in (``multi_llm._run_from_repository_root``), so the polls name that
-        root's file, never a path under the anchor that does not exist; the
-        launch still carries the plan as typed."""
+        root's file; the launch still carries the plan as typed. Fix round 27
+        (the Fable review of round 26, claude #5): the server read the root
+        from a `.git` walk of its own, which named the root's plan where the
+        dispatcher refused to move; it now takes the root the launch's result
+        line says the command ran from (``ran_from_root``), and nothing else."""
         repo = Path(os.path.realpath(tmp_path)) / "repo"
         sub = repo / "sub"
         (sub / "plans").mkdir(parents=True)
@@ -2441,14 +2449,21 @@ class TestResumeCommand:
         for name in ("p.md", "own.md"):
             (repo / "plans" / name).write_text("# Plan\n", encoding="utf-8")
         (sub / "plans" / "own.md").write_text("# Plan\n", encoding="utf-8")
-        (repo.parent / "outside.md").write_text("# outside\n", encoding="utf-8")
+        elsewhere = Path(os.path.realpath(tmp_path)) / "another-repo"
+        elsewhere.mkdir()
+        named = {"repo": str(repo), "elsewhere": str(elsewhere), "relative": "repo",
+                 None: None}[ran_from]
+        launch = launch_step()
+        if named is not None:
+            launch["stdout"][-1] = result_line(mode="review-plan", next=None,
+                                               ran_from_root=named)
         _, _, calls, _ = harness.run(
-            dict(REVIEW, plan=typed), [launch_step(), poll_step(0)], roots=[str(sub)])
+            dict(REVIEW, plan=typed), [launch, poll_step(0)], roots=[str(sub)])
         launches = [c for c in calls if dispatcher_argv(c)[0] != DISPATCHER["poll"][0]]
         assert [dispatcher_argv(c)[1] for c in launches] == [typed]
         assert launches[0]["cwd"] == str(sub)
         polls = [c for c in calls if dispatcher_argv(c)[0] == DISPATCHER["poll"][0]]
-        base = repo if where == "root" else sub
+        base = repo if where == "repo" else sub
         assert polls and all(
             dispatcher_argv(c)[1] == os.path.normpath(os.path.join(base, typed))
             for c in polls)

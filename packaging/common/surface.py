@@ -789,6 +789,13 @@ def cli_surface(host_id: str) -> Dict[str, Any]:
             # Additive within v5: a server whose surface lacks it keeps every
             # line.
             "next_step_markers": list(next_phase.CARRIED_BLOCK_MARKERS),
+            # The result-line key naming the repository root a command typed
+            # in a subdirectory ran from (fix round 27): a server names a plan
+            # typed from that root by the root's file for its polls, its abort
+            # and its options, only when a launch's line says so. Additive
+            # within v5: a server whose surface lacks it names the plan from
+            # its anchor.
+            "ran_from_root_key": cli_common.RAN_FROM_ROOT_KEY,
             # A `next` carrying one of these is a *mechanical* continuation —
             # the same phase finishing itself off — so `execute` follows it
             # internally under its own cap rather than handing it back for a

@@ -756,56 +756,46 @@ function normalizePlan(plan, anchor) {
   const spelled = planSpelling(plan)
   if (!spelled) return ""
   if (path.isAbsolute(spelled)) return spelled
-  const joined = path.resolve(anchor, spelled)
-  if (pathExists(joined)) return joined
-  return repositoryRootPlan(anchor, spelled) || joined
-}
-
-function pathExists(target) {
-  try {
-    fs.lstatSync(target)
-    return true
-  } catch {
-    return false
-  }
+  return path.resolve(anchor, spelled)
 }
 
 /**
- * `relative` under the root of the repository `anchor` sits in, else null.
+ * Name a plan typed from the repository root by the root's file, when the
+ * dispatcher's result line says it ran from there.
  *
  * The dispatcher runs a command whose relative paths name nothing from its cwd
- * (the anchor, here) from the root of the repository that cwd is in, when each
- * names something inside it (fix round 26, live run 11). So a plan spelled from
- * that root names the root's file for this server's polls and abort too, never
- * a path under the anchor that does not exist. The root is the nearest
- * directory at or above the anchor holding a `.git` entry, the anchor itself
- * excluded; the file must exist there and stay inside it, as spelled and
- * resolved. The codex server's `repository_root_plan` is its port.
+ * (the anchor, here) from the root of the repository that cwd is in (fix round
+ * 26, live run 11), and its result line names that root (the surface's
+ * `dispatcher.ran_from_root_key`). So the polls, the abort and the options this
+ * server composes name the file that run reads, never a path under the anchor
+ * that does not exist. Fix round 27 (the Fable review of round 26): this server
+ * walked to the nearest `.git` itself, which named the root's plan where the
+ * dispatcher refused to move (`GIT_DIR` set, a planted `core.worktree`, a
+ * planted nested `.git`); it now takes the dispatcher's own answer, off a line
+ * it reads anyway, and nothing else. A root that is not absolute or that the
+ * anchor is not inside is ignored, as is a plan typed absolute. The codex
+ * server's `plan_from_root` is its port.
  */
-function repositoryRootPlan(anchor, relative) {
-  let start
+function planFromRoot(result, values, anchor, surface) {
+  const key = surface?.dispatcher?.ran_from_root_key
+  const root = key && result && typeof result === "object" ? result[key] : null
+  const typed = values?.planArg
+  if (
+    typeof root !== "string" || !path.isAbsolute(root) ||
+    typeof typed !== "string" || !typed || path.isAbsolute(typed)
+  ) {
+    return
+  }
+  let here
   try {
-    start = fs.realpathSync(anchor)
+    here = fs.realpathSync(anchor)
   } catch {
-    return null
+    return
   }
-  let root = start
-  while (!pathExists(path.join(root, ".git"))) {
-    const parent = path.dirname(root)
-    if (parent === root) return null
-    root = parent
-  }
-  if (root === start) return null
-  const candidate = path.resolve(root, relative)
-  let real
-  try {
-    real = fs.realpathSync(candidate)
-  } catch {
-    return null
-  }
-  const prefix = root.endsWith(path.sep) ? root : root + path.sep
-  const inside = (target) => target === root || target.startsWith(prefix)
-  return inside(candidate) && inside(real) ? candidate : null
+  const base = path.resolve(root)
+  const prefix = base.endsWith(path.sep) ? base : base + path.sep
+  if (here !== base && !here.startsWith(prefix)) return
+  values.plan = path.resolve(base, typed)
 }
 
 /**
@@ -1568,6 +1558,9 @@ async function runWorkflow({
         ),
       }
     }
+    // Fix round 27: the plan the dispatcher read, before any poll, abort or
+    // option names it.
+    planFromRoot(launch.result, cycleValues, anchor, surface)
     // The run in view when this cycle began, which is what a launch that
     // claimed nothing still has to report: on the first cycle that is no run at
     // all, and on a continuation it is the finished run that spawned it.
@@ -3649,8 +3642,8 @@ const __testing = {
   loadSurface,
   nextAsToolCall,
   normalizePlan,
+  planFromRoot,
   planSpelling,
-  repositoryRootPlan,
   fetchResumeCommand,
   finishOutcome,
   parseDispatcherCommand,

@@ -782,6 +782,11 @@ def _run_from_repository_root(
             return
     os.chdir(root)
     _CWD_BEFORE_ROOT.append(cwd)
+    # Fix round 27: on the result line too, so a tool server names the plan
+    # the way this command reads it, never by a `.git` walk of its own.
+    from utils.cli_common import record_ran_from_root
+
+    record_ran_from_root(root)
     print(
         f"multi-llm: running from the repository root {root}, where "
         f"{relative[0]} is (it is not under the current directory {cwd}).",
