@@ -28,14 +28,27 @@ is over. The plugin's ``state.json`` is not read: which plan the session
 works on, and whether its phase was started by this session or is left over
 from another, only the transcript says.
 
+**The transcript is read once it holds the call being decided** (fix round
+27). Claude Code writes it in batches, so when the hook starts, the
+``ScheduleWakeup`` or ``CronCreate`` call itself, a phase call made in the
+same message, and the result of a phase call that just finished can all be
+unwritten (measured on 2.1.293 against a localhost stub: on file 0.1 s
+later). So :func:`check` waits until the call's own ``tool_use_id`` is on
+file and every phase call its message made before it has its result on file
+(``report_check.settled_turn``, at most ``report_check.SETTLE_BUDGET_S``):
+everything an earlier message did is on file once the call is. A phase call
+whose result is still missing then is running, which is what it is when the
+two run side by side.
+
 **The user's own wakeups are never refused.** A session that never ran the
 dispatcher, a phase that finished, failed or stopped, and anything after a
 prompt the user typed all pass. Only a session whose phase is still running
 is refused, and the refusal says what to do instead.
 
 **Advisory, so every error passes.** An unreadable transcript, a bad
-argument, a tool this does not watch: exit 0, no output, and the tool runs.
-Nothing here touches the network or writes anything.
+argument, a tool this does not watch, a transcript still missing once the
+wait ran out: exit 0, no output, and the tool runs. Nothing here touches the
+network or writes anything.
 
 **Stdout is the hook's decision channel**, as for ``util report-check``: the
 decision is one line starting with :data:`DECISION_PREFIX`, which the hook
@@ -51,7 +64,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
     from . import report_check
@@ -111,20 +124,35 @@ def phase_mode(command: str) -> Optional[str]:
     return found
 
 
-def _bash_calls(entry: Dict[str, Any]) -> Iterable[Tuple[str, str]]:
-    """``(tool_use_id, command)`` for each Bash call an assistant entry makes."""
+def _tool_calls(entry: Dict[str, Any]) -> Iterable[Tuple[str, str, Optional[str]]]:
+    """``(tool_use_id, tool name, command)`` for each call an assistant entry
+    makes; the command is a Bash call's, else ``None``."""
     content = report_check._content(entry)
     if not isinstance(content, list):
         return
     for block in content:
         if not isinstance(block, dict) or block.get("type") != "tool_use":
             continue
-        if block.get("name") != "Bash":
-            continue
+        name = str(block.get("name") or "")
         tool_input = block.get("input")
         command = tool_input.get("command") if isinstance(tool_input, dict) else None
-        if isinstance(command, str):
-            yield str(block.get("id") or ""), command
+        yield (str(block.get("id") or ""), name,
+               command if name == "Bash" and isinstance(command, str) else None)
+
+
+def _bash_calls(entry: Dict[str, Any]) -> Iterable[Tuple[str, str]]:
+    """``(tool_use_id, command)`` for each Bash call an assistant entry makes."""
+    for tool_use_id, _name, command in _tool_calls(entry):
+        if command is not None:
+            yield tool_use_id, command
+
+
+def _message_id(entry: Dict[str, Any]) -> Optional[str]:
+    """The API message an assistant entry belongs to: Claude Code writes one
+    entry per content block, each carrying its message's ``id``."""
+    message = entry.get("message")
+    found = message.get("id") if isinstance(message, dict) else None
+    return found if isinstance(found, str) and found else None
 
 
 def _results(entry: Dict[str, Any]) -> Iterable[Tuple[str, str]]:
@@ -187,6 +215,45 @@ def phase_in_flight(turn: Sequence[Dict[str, Any]]) -> Optional[str]:
     return running
 
 
+def call_on_file(tool_use_id: str) -> Callable[[List[Dict[str, Any]]], bool]:
+    """A ``report_check.settled_turn`` test: the call *tool_use_id* is on
+    file, and so is the result of every phase call its message made before
+    it (fix round 27)."""
+
+    def settled(turn: List[Dict[str, Any]]) -> bool:
+        # The phase calls made before the call, by message: Claude Code
+        # writes one entry per content block, each carrying its message's id.
+        earlier: List[Tuple[Optional[str], str]] = []
+        message: Optional[str] = None
+        found = False
+        for entry in turn:
+            if entry.get("type") != "assistant":
+                continue
+            for call_id, _name, command in _tool_calls(entry):
+                if call_id == tool_use_id:
+                    found = True
+                    message = _message_id(entry)
+                    break
+                if command is not None and phase_mode(command) is not None:
+                    earlier.append((_message_id(entry), call_id))
+            if found:
+                break
+        if not found:
+            return False
+        siblings = [call_id for owner, call_id in earlier
+                    if message is not None and owner == message]
+        if not siblings:
+            return True
+        answered = {
+            call_id
+            for entry in turn if entry.get("type") == "user"
+            for call_id, _text in _results(entry)
+        }
+        return all(call_id in answered for call_id in siblings)
+
+    return settled
+
+
 def deny_reason(tool: str, mode: str) -> str:
     """What the model reads when its scheduling call is refused."""
     return (
@@ -215,8 +282,17 @@ def check(hook: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
     path = Path(transcript)
     if not path.is_file():
+        # hooks/wakeup-check.sh already waited for the file to be written.
         return None
-    mode = phase_in_flight(report_check.read_turn(path, partial_tail=True))
+    tool_use_id = hook.get("tool_use_id")
+    # Read once the call being decided is on file, or, when the input names
+    # no call, once the file stopped growing.
+    turn = report_check.settled_turn(
+        path,
+        call_on_file(tool_use_id)
+        if isinstance(tool_use_id, str) and tool_use_id else None,
+    )
+    mode = phase_in_flight(turn)
     if mode is None:
         return None
     return {"hookSpecificOutput": {

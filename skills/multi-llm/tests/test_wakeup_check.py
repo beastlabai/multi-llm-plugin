@@ -34,7 +34,7 @@ sys.path.insert(0, str(SKILL_ROOT))
 import multi_llm  # noqa: E402
 from tests.test_report_check import Transcript, block_output  # noqa: E402
 from tests.test_report_check_session import notification, typed  # noqa: E402
-from utils import cli_common, unattended, wakeup_check  # noqa: E402
+from utils import cli_common, report_check, unattended, wakeup_check  # noqa: E402
 
 DISPATCH = ('uv run --frozen --no-dev --project "/p/skills/multi-llm" -- python '
             '"/p/skills/multi-llm/multi_llm.py"')
@@ -82,12 +82,37 @@ def racing_03(transcript: Transcript) -> Transcript:
     return transcript.say("I've started a subagent to write the task list.")
 
 
+#: The id of the scheduling call each test's hook input asks about.
+OWN_CALL = "toolu_x"
+
+
+def own_call_entry(tool: str = "ScheduleWakeup",
+                   tool_input: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """The scheduling call itself, as the transcript holds it once written."""
+    return {"type": "assistant", "message": {"id": "msg_own", "role": "assistant", "content": [
+        {"type": "tool_use", "id": OWN_CALL, "name": tool,
+         "input": tool_input if tool_input is not None else WAKEUP_INPUT}]}}
+
+
 def hook_input(path: Path, tool: str = "ScheduleWakeup", **extra: Any) -> Dict[str, Any]:
+    """The hook input for a scheduling call, which is appended to the
+    transcript at *path* first when it is not on file: Claude Code writes the
+    call before the hook decides (fix round 27: the hook waits for it)."""
     payload = {"session_id": "s1", "transcript_path": str(path), "cwd": str(path.parent),
                "permission_mode": "bypassPermissions", "hook_event_name": "PreToolUse",
-               "tool_name": tool, "tool_input": WAKEUP_INPUT, "tool_use_id": "toolu_x"}
+               "tool_name": tool, "tool_input": WAKEUP_INPUT, "tool_use_id": OWN_CALL}
     payload.update(extra)
+    if path.is_file() and f'"{OWN_CALL}"' not in path.read_text(encoding="utf-8"):
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(own_call_entry(tool, payload["tool_input"])) + "\n")
     return payload
+
+
+@pytest.fixture(autouse=True)
+def _short_settle(monkeypatch):
+    """A transcript that never gets what the hook waits for costs this long
+    here, not the hooks' 2 s."""
+    monkeypatch.setattr(report_check, "SETTLE_BUDGET_S", 0.3, raising=False)
 
 
 def decide(capsys, tmp_path: Path, payload: Dict[str, Any]) -> str:
@@ -282,9 +307,10 @@ class TestEveryErrorAllows:
         """The hook reads the transcript while the session appends to it: a
         last line with no newline yet is not an unreadable transcript."""
         path = racing_03(Transcript()).write(tmp_path / "t.jsonl")
+        payload = hook_input(path)
         with path.open("a", encoding="utf-8") as stream:
             stream.write('{"type": "assistant", "message": {"content": [{"type": "tool_')
-        denial(decide(capsys, tmp_path, hook_input(path)))
+        denial(decide(capsys, tmp_path, payload))
 
     @pytest.mark.parametrize("hook_text", ["not json", "[1]", "{}",
                                            '{"tool_name": "ScheduleWakeup"}',
