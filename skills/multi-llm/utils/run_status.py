@@ -108,7 +108,7 @@ from .output_handler import (
     slugify_question,
 )
 from .stream_bootstrap import bootstrap_streams
-from .text_clip import clip
+from .text_clip import clip, without_closing_mark
 from .validation_context import (
     pick_worst,
     validation_context_notice,
@@ -2679,7 +2679,7 @@ def not_applied_item_clauses(source: Mapping[str, Any]) -> List[str]:
             words = one if len(entries) == 1 else several
             clauses.append(f"{len(entries)} {words}: " + "; ".join(
                 f"{str(entry['id'])[:8]} in {entry.get('task_id')} "
-                f"({clip(_reason_after(entry.get('reason') or '', said), 120)})"
+                f"({clip(without_closing_mark(_reason_after(entry.get('reason') or '', said)), 120)})"
                 for entry in entries[:5]
             ) + (f" (+{len(entries) - 5} more)" if len(entries) > 5 else ""))
     return clauses

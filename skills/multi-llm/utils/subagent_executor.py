@@ -1086,28 +1086,26 @@ DECLINED_REASON_MAX_CHARS = 300
 
 
 def declined_reason(text: Any) -> str:
-    """One declined item's reason as every surface carries it: whitespace
-    collapsed, one closing full stop or semicolon dropped, bounded; ``""``
-    for no text.
+    """One declined item's reason as every record carries it: the batch's
+    own words, whitespace collapsed and bounded; ``""`` for no text.
 
-    Every line that quotes a reason puts its own punctuation after it, so a
-    reason that ended in one printed it twice (the decline fixture,
-    2026-10-07: "… MAX_SPEED.."). Both legs read a reason through here: the
-    executor's :func:`declined_items` and ``util batch-done --declined``.
+    Both legs read a reason through here: the executor's
+    :func:`declined_items` and ``util batch-done --declined``, and
+    :func:`row_declined` reads a record back through it.
 
-    Fix round 21 (review of round 20, #2): at most one mark, and only when
-    text remains. Stripping every closing mark turned a reason of ``...`` or
-    ``.`` into no reason, so the executor stopped on the decline as a
-    partial application and the native leg refused ``--declined f2=...``;
-    such a reason is the batch's own words, kept.
+    Fix round 26 (live run 11 #10): the closing full stop is kept.
+    ``processed_<phase>``, the write mirror, the verdict stamp and the report
+    dropped it while the reply, the log and the host's summary.md kept it.
+    A line that puts its own punctuation right after a reason drops the
+    reason's one there (``text_clip.without_closing_mark``: the
+    ``[BATCH_DECLINED]`` line, the stop and log text, the notes, ``status``),
+    so a reason is still printed with one full stop (the decline fixture,
+    2026-10-07: "… MAX_SPEED.."); a reason of ``...`` or ``.`` stays a
+    reason (fix round 21).
     """
     if not isinstance(text, str):
         return ""
     reason = " ".join(text.split())
-    if reason[-1:] in (".", ";"):
-        trimmed = reason[:-1].rstrip()
-        if trimmed:
-            reason = trimmed
     # Fix round 22: cut at a word and marked, never mid-word.
     return clip(reason, DECLINED_REASON_MAX_CHARS)
 
@@ -1188,7 +1186,8 @@ def row_declined(row: Any) -> Dict[str, str]:
     out: Dict[str, str] = {}
     for entry in raw if isinstance(raw, list) else []:
         if isinstance(entry, dict) and entry.get("id") and entry.get("reason"):
-            # A record written before `declined_reason` reads the same way.
+            # As recorded (a record from before fix round 26 has no closing
+            # stop; one from before `declined_reason` reads the same way).
             reason = declined_reason(str(entry["reason"])) or str(entry["reason"])
             out.setdefault(str(entry["id"]), reason)
     return out

@@ -71,6 +71,7 @@ from .state_manager import (
     generate_group_id,
     processed_record_counts,
 )
+from .text_clip import without_closing_mark
 from .suggestion_batcher import (
     SuggestionBatch,
     estimate_batch_processing_stats,
@@ -2769,10 +2770,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 if member
             }
             for member in item_ids:
+                # Fix round 26: the record keeps the reason's closing stop;
+                # the notice joins these lines with "; ".
                 if member in declined:
-                    why = f"the batch declined it — {declined[member]}"
+                    why = f"the batch declined it — {without_closing_mark(declined[member])}"
                 elif member in skipped:
-                    why = f"skipped at your request — {skipped[member]}"
+                    why = f"skipped at your request — {without_closing_mark(skipped[member])}"
                 else:
                     continue
                 title = titles.get(member) or "Untitled"
