@@ -57,7 +57,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import prior_changes as _prior_changes
     from . import process_control as _process_control
     from . import subagent_executor as _executor
-    from .text_clip import clip, plain_line, without_closing_mark
+    from .text_clip import clip, plain_line, with_closing_mark, without_closing_mark
     from .providers.base import (
         SANDBOX_RUNG_PLUGIN_LANDLOCK,
         host_write_posture_consent,
@@ -161,7 +161,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         safety_dir,
     )
 except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.text_clip import clip, plain_line, without_closing_mark  # type: ignore
+    from utils.text_clip import clip, plain_line, with_closing_mark, without_closing_mark  # type: ignore
     from utils import git_utils as _git_utils
     from utils import known_checks as _known_checks
     from utils import landlock_dispatch as _landlock
@@ -527,7 +527,8 @@ def declined_words(
         where = positions.get(str(member))
         label = f"{item} {where[1]} (`{member}`)" if where else f"`{member}`"
         # Fix round 26: the record keeps the reason's closing stop; every
-        # caller puts a mark after these words.
+        # caller puts a mark after these words (a separator, a bracket, or the
+        # stop `with_closing_mark` adds only where none is, fix round 27).
         parts.append(f"{label} — {without_closing_mark(reason)}")
     return "; ".join(parts)
 
@@ -6196,7 +6197,9 @@ class WriteBatchScheduler:
         snapshot = os.path.join(self.safety_dir, "pre_batch", task_id)
         if os.path.isdir(snapshot):
             outcome.snapshot_dir = snapshot
-        outcome.reason = (
+        # Fix round 27: the stop after the last reason only where it has no
+        # mark of its own (`with_closing_mark`).
+        outcome.reason = with_closing_mark(
             f"KEPT AT YOUR REQUEST (--human-task {task_id}=skip): what it "
             f"applied stays as it left it"
             + (f" ({', '.join(outcome.files_touched)})" if outcome.files_touched else "")
@@ -6207,8 +6210,7 @@ class WriteBatchScheduler:
                 f"{self._declined_words(outcome.declined)}"
                 if outcome.declined else ""
             )
-            + ". It was not dispatched again."
-        )
+        ) + " It was not dispatched again."
         recorded = self.audit.completion_for(task_id, expected_ids=expected) or {}
         self.audit.completed(
             task_id=task_id, kind=self.kind, attempt=0, runner=self.invoker,
@@ -7882,7 +7884,8 @@ class WriteBatchScheduler:
                     f"FAILED: {what} and the pre-batch snapshot comparison "
                     f"confirms no byte changes in {declared_names}. "
                     + (
-                        f"It declined {self._declined_words(outcome.declined)}. "
+                        f"It declined "
+                        f"{with_closing_mark(self._declined_words(outcome.declined))} "
                         if outcome.declined else ""
                     )
                     + (
@@ -8047,7 +8050,7 @@ class WriteBatchScheduler:
             outcome.reason = (
                 f"APPLIED {applied} of {len(expected_ids)} item(s); the batch "
                 f"declined the rest, so they are not applied: "
-                f"{self._declined_words(outcome.declined)}."
+                f"{with_closing_mark(self._declined_words(outcome.declined))}"
             )
         self._audit_completion(outcome, runner, profile, attempt, exit_code,
                                observed, duration)

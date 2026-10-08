@@ -926,42 +926,37 @@ def hand_back_typed(outcome, values) -> None:
             outcome[key] = dict(call_args, plan=typed_plan(call_args["plan"], values))
 
 
-def repository_root_plan(anchor, relative):
-    """*relative* under the root of the repository *anchor* sits in, else ``None``.
+def plan_from_root(result, values, anchor, key) -> None:
+    """Name a plan typed from the repository root by the root's file, when the
+    dispatcher's result line says it ran from there.
 
     The dispatcher runs a command whose relative paths name nothing from its
-    cwd (the anchor, here) from the root of the repository that cwd is in, when
-    each names something inside it (fix round 26, live run 11:
-    ``multi_llm._run_from_repository_root``). So a plan spelled from that root
-    names the root's file for this server's polls and abort too, never a path
-    under the anchor that does not exist. The root is the nearest directory at
-    or above the anchor holding a ``.git`` entry, the anchor itself excluded;
-    the file must exist there and stay inside it, as spelled and resolved. The
-    port of ``repositoryRootPlan``.
+    cwd (the anchor, here) from the root of the repository that cwd is in
+    (fix round 26, live run 11: ``multi_llm._run_from_repository_root``), and
+    its result line names that root (*key*, the surface's
+    ``dispatcher.ran_from_root_key``). So the polls, the abort and the
+    options this server composes name the file that run reads, never a path
+    under the anchor that does not exist. Fix round 27 (the Fable review of
+    round 26): this server walked to the nearest ``.git`` itself, which named
+    the root's plan where the dispatcher refused to move (``GIT_DIR`` set, a
+    planted ``core.worktree``, a planted nested ``.git``); it now takes the
+    dispatcher's own answer, off a line it reads anyway, and nothing else. A
+    root that is not absolute or that the anchor is not inside is ignored, as
+    is a plan typed absolute. The port of ``planFromRoot``.
     """
+    root = result.get(key) if key and isinstance(result, dict) else None
+    typed = values.get("plan_arg")
+    if (not isinstance(root, str) or not os.path.isabs(root)
+            or not isinstance(typed, str) or not typed or os.path.isabs(typed)):
+        return
     try:
-        start = os.path.realpath(anchor)
-    except (OSError, ValueError):
-        return None
-    root = start
-    while not os.path.lexists(os.path.join(root, ".git")):
-        parent = os.path.dirname(root)
-        if parent == root:
-            return None
-        root = parent
-    if root == start:
-        return None
-    candidate = os.path.normpath(os.path.join(root, relative))
-    try:
-        if not os.path.exists(candidate):
-            return None
-        real = os.path.realpath(candidate)
-    except (OSError, ValueError):
-        return None
-    prefix = root.rstrip(os.sep) + os.sep
-    if all(path == root or path.startswith(prefix) for path in (candidate, real)):
-        return candidate
-    return None
+        here = os.path.realpath(anchor)
+    except (OSError, ValueError, TypeError):
+        return
+    root = os.path.normpath(root)
+    if here != root and not here.startswith(root.rstrip(os.sep) + os.sep):
+        return
+    values["plan"] = os.path.normpath(os.path.join(root, typed))
 
 
 def same_plan_file(left, right) -> bool:
@@ -1113,6 +1108,13 @@ def lift_user_next_step(outcome: dict) -> None:
     payload = outcome.get("result")
     if isinstance(payload, dict) and payload.get(USER_NEXT_STEP_KEY) is not None:
         outcome[USER_NEXT_STEP_KEY] = payload.pop(USER_NEXT_STEP_KEY)
+
+
+def carries_next_step(child) -> bool:
+    """Whether :func:`lift_user_next_step` lifts a step off this child's
+    result: its parsed payload holds a non-null ``user_next_step``."""
+    payload = getattr(child, "result", None)
+    return isinstance(payload, dict) and payload.get(USER_NEXT_STEP_KEY) is not None
 
 
 def is_mechanical(next_args, surface) -> bool:
@@ -1899,18 +1901,15 @@ class Server:
         return expand_home(plan, self.layer1) if plan else ""
 
     def normalize_plan(self, plan: str, call: Call) -> str:
-        """A relative plan resolved against the anchor, ``~`` expanded; one that
-        names nothing there resolves from the repository root the dispatcher
-        runs it from (:func:`repository_root_plan`)."""
+        """A relative plan resolved against the anchor, ``~`` expanded. One the
+        dispatcher runs from the repository root is renamed by the root's file
+        once its result line says so (:func:`plan_from_root`)."""
         if not plan:
             return ""
         expanded = self.plan_spelling(plan)
         if os.path.isabs(expanded):
             return expanded
-        joined = os.path.normpath(os.path.join(call.anchor, expanded))
-        if os.path.lexists(joined):
-            return joined
-        return repository_root_plan(call.anchor, expanded) or joined
+        return os.path.normpath(os.path.join(call.anchor, expanded))
 
     # -- argv composition (D3 rule 3) ---------------------------------------------
 
@@ -2069,6 +2068,10 @@ class Server:
                 return "spawn-error", self.error_result(
                     call, launch, "could not start the dispatcher: {}".format(
                         launch.spawn_error))
+            # Fix round 27: the plan the dispatcher read, before any poll,
+            # abort or option names it.
+            plan_from_root(launch.result, cycle_values, call.anchor,
+                           dispatcher.get("ran_from_root_key"))
             if cycle_row.get("supports_detach"):
                 # S2 — the run id, off the banner and nothing else (rule f).
                 launched = launch.banner.get(banner["run_id_field"])
@@ -2294,14 +2297,28 @@ class Server:
 
     # -- S4/S5: results -------------------------------------------------------------------
 
-    def human_output(self, child: ChildRun, command, respell=None):
-        """Redacted stdout, the result line dropped only when it parsed."""
+    def human_output(self, child: ChildRun, command, respell=None, carried=False):
+        """Redacted stdout, the result line dropped only when it parsed.
+
+        With *carried* (the result carries the lifted ``user_next_step``), the
+        block's lines that step says itself are dropped too (fix round 27, the
+        Fable review of round 26: the manual note and the optional whys
+        reached the model twice, in ``output`` and in the step's
+        ``markdown``): a line that is one of the surface's
+        ``dispatcher.next_step_markers``, or starts with one and a space. A
+        ``[RUNNER_WARNING]`` line, which the step does not carry, stays.
+        """
         text = redact(child.stdout, command, self.surface, respell)
         if not text or child.result is None:
             return text.rstrip() if text else text
-        marker = self.surface["dispatcher"]["result_marker"]
-        return "\n".join(line for line in text.split("\n")
-                         if not line.strip().startswith(marker)).rstrip()
+        dispatcher = self.surface["dispatcher"]
+        marker = dispatcher["result_marker"]
+        said = tuple(dispatcher.get("next_step_markers") or ()) if carried else ()
+        return "\n".join(
+            line for line in text.split("\n")
+            if not line.strip().startswith(marker)
+            and not any(line == block or line.startswith(block + " ") for block in said)
+        ).rstrip()
 
     def tool_calls_for(self, child: ChildRun, values=None) -> list:
         """Every runnable command the child printed, as tool-call args, once each.
@@ -2405,7 +2422,7 @@ class Server:
                 "result": redact(child.result, raw, surface),
                 "artifacts": redact(child.result.get("artifacts") or [], raw, surface),
                 "next": next_as_tool_call(raw, surface),
-                "output": self.human_output(child, raw),
+                "output": self.human_output(child, raw, carried=carries_next_step(child)),
                 "stderr": redact(child.stderr, raw, surface) or None})
             lift_user_next_step(base)
             return base
@@ -2435,7 +2452,7 @@ class Server:
             "result": redact(child.result, raw, surface),
             "artifacts": redact(child.result.get("artifacts") or [], raw, surface),
             "next": next_as_tool_call(raw, surface),
-            "output": self.human_output(child, raw),
+            "output": self.human_output(child, raw, carried=carries_next_step(child)),
             "stderr": redact(child.stderr, raw, surface) or None})
         lift_user_next_step(base)
         return base

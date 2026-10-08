@@ -337,6 +337,19 @@
       "name": "MULTI_LLM_ROUTE",
       "value": "package"
     },
+    "next_step_markers": [
+      "[WORKFLOW_COMPLETE]",
+      "[NEXT_COMMAND_WHY]",
+      "[NEXT_COMMAND]",
+      "[NEXT_COMMAND_OPTIONAL_WHY]",
+      "[NEXT_COMMAND_OPTIONAL]",
+      "[NEXT_COMMAND_ANSWERS_WHY]",
+      "[NEXT_COMMAND_ANSWERS]",
+      "[MANUAL_TASK]",
+      "[MANUAL_TASK_NOTE]",
+      "[MANUAL_TASK_COMMAND]"
+    ],
+    "ran_from_root_key": "ran_from_root",
     "mechanical_continuations": [
       "--reaggregate",
       "--consolidate"

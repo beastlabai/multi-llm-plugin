@@ -38,7 +38,10 @@ tasks listed. This checks the copy, and only the copy:
   ``isSidechain`` entries belong to a subagent, not the run.
 * Among that run's tool results it takes the **last** block. A block printed
   only before the user's last typed prompt is not this run's to copy, so it
-  is never checked.
+  is never checked. Nor is a block a subagent's report quotes (an ``Agent``,
+  ``Task`` or ``SendMessage`` result, :data:`SUBAGENT_TOOLS`, fix round 27):
+  those are the subagent's words, not a phase's output, while a ``Read``, a
+  ``tail`` or a ``grep`` of the phase's own output still counts.
 * A block's ready section (``util next-command``'s ``[NEXT_STEP_MARKDOWN]``
   … ``[NEXT_STEP_MARKDOWN_END]``, a success's or a stop's) holds the report
   to every command it fences too, beside the marker lines' (fix round 26),
@@ -64,23 +67,37 @@ tasks listed. This checks the copy, and only the copy:
   ``isMeta`` prompt ends the reply before it too). The
   ``Stop`` hook input's ``last_assistant_message`` is read too, when present,
   and the turn passes when either carries the copy: a stale transcript must
-  never produce a block. It is stale in practice. Observed on a live headless
-  ``claude -p`` hook (2.1.289, 2026-10-05), the input carries ``session_id``,
-  ``transcript_path``, ``cwd``, ``prompt_id``, ``permission_mode``,
-  ``effort``, ``hook_event_name``, ``stop_hook_active``,
-  ``last_assistant_message``, ``background_tasks`` and ``session_crons``, and
-  the transcript still ends at the turn's last tool result: the reply is
-  written after the hook returns. So the field is what gets checked, and a
-  transcript with no reply text yet, with no field beside it, passes.
+  never produce a block. The input (2.1.289 and 2.1.293, headless
+  ``claude -p``) carries ``session_id``, ``transcript_path``, ``cwd``,
+  ``prompt_id``, ``permission_mode``, ``effort``, ``hook_event_name``,
+  ``stop_hook_active``, ``last_assistant_message``, ``background_tasks`` and
+  ``session_crons``.
+* **The hook waits for the transcript to settle before reading it** (fix
+  round 27). Claude Code writes the transcript in batches, so the entries of
+  the last moments before ``Stop`` are not on file when the hook starts.
+  Measured on 2.1.293 against a localhost stub (2026-10-08): the reply was
+  never on file at ``Stop`` and appeared 0.1-0.2 s later; with a reply sent
+  2.5 s after the last tool result, that result was on file at ``Stop``; with
+  a reply sent at once, it was not (the whole file was missing at ``Stop``
+  in a session that young), so a block printed by the turn's last call was
+  not seen and the turn passed (``hooks/report-check.sh`` exited at its
+  marker grep in 3 ms). So the check reads the transcript only once the reply
+  ``last_assistant_message`` names is on file after the run's last user
+  entry, with no ``stop_hook_summary`` after it (that reply is an earlier
+  ``Stop``'s), or, with no such field, once the file stopped growing for one
+  step: :func:`settled_turn`, every :data:`SETTLE_STEP_S`, at most
+  :data:`SETTLE_BUDGET_S`. Everything before the reply is on file once the
+  reply is. Past the budget it decides on what is on file, a last line still
+  being written left out. A transcript already settled costs one read.
 * ``last_assistant_message`` is the text of the **last** assistant message
   Claude Code holds in memory, not the whole reply (hooks review of fix round
   10, read from the harness, not measured live). A reply split into several
   text blocks hands the hook only the last one, so a command copied into an
-  earlier block reads as missing. That costs at most one needless block: the
-  model's extra turn ends with ``stop_hook_active`` set, and the hook passes
-  at once then. The transcript's own trailing assistant entries are checked
-  beside the field and would carry the earlier blocks, but at ``Stop`` time
-  they are not written yet, so they cannot prevent that one block.
+  earlier block reads as missing. Once the transcript has settled, its own
+  trailing assistant entries carry the earlier blocks and are checked beside
+  the field; a block that still happens (the budget ran out first) costs at
+  most one needless turn: the model's extra turn ends with
+  ``stop_hook_active`` set, and the hook passes at once then.
 * A turn that ends on an API error fires Claude Code's ``StopFailure`` event,
   not ``Stop``, so this check never runs on it (``hooks/hooks.json`` runs it
   on ``Stop`` alone). :func:`ended_on_api_error` still passes such a turn, for
@@ -102,7 +119,8 @@ tasks listed. This checks the copy, and only the copy:
   output field turns it off.
 
 **Advisory, so every error passes silently.** An unreadable or malformed
-transcript, a bad argument, a missing file: exit 0 and no output. A check that
+transcript (a malformed line before the one still being written), a bad
+argument, a missing file: exit 0 and no output. A check that
 could break a session, or block on data it could not read, is worse than the
 miss it exists to catch.
 
@@ -122,8 +140,9 @@ import argparse
 import json
 import re
 import sys
+import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set
 
 try:
     from .stream_bootstrap import bootstrap_streams
@@ -170,6 +189,22 @@ DECISION_PREFIX = '{"decision"'
 #: A fence opener: three or more backticks or tildes. Any indentation, so a
 #: fence nested in a list item counts; the info string (```bash) is ignored.
 _FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
+
+#: How long a hook waits for Claude Code to write a turn's last entries to the
+#: transcript, and how often it looks (fix round 27, :func:`settled_turn`).
+#: Claude Code 2.1.293 wrote them 0.1-0.2 s after the hook started, measured
+#: against a localhost stub; the hook scripts' own timeout is 30 s.
+SETTLE_BUDGET_S = 2.0
+SETTLE_STEP_S = 0.1
+
+#: The ``system`` entry Claude Code writes after a ``Stop`` hook ran: a reply
+#: it follows was an earlier ``Stop``'s, never the one being checked.
+STOP_HOOK_SUMMARY = "stop_hook_summary"
+
+#: The tools whose result is a subagent's own words, never a phase's output
+#: (fix round 27): a block quoted in one is not a block the report owes, nor
+#: does it end ``util wakeup-check``'s hold.
+SUBAGENT_TOOLS = ("Agent", "Task", "SendMessage")
 
 
 class _Unreadable(Exception):
@@ -594,13 +629,19 @@ def _is_real_prompt(entry: Dict[str, Any]) -> bool:
     return False
 
 
-def _tool_result_texts(entry: Dict[str, Any]) -> Iterable[str]:
-    """The text of every ``tool_result`` block a user entry carries, in order."""
+def _tool_result_texts(
+    entry: Dict[str, Any], skip: Iterable[str] = (),
+) -> Iterable[str]:
+    """The text of every ``tool_result`` block a user entry carries, in order,
+    but those answering a call whose id is in *skip*."""
     content = _content(entry)
     if not isinstance(content, list):
         return
+    skipped = set(skip)
     for block in content:
         if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        if str(block.get("tool_use_id") or "") in skipped:
             continue
         inner = block.get("content")
         if isinstance(inner, str):
@@ -638,9 +679,10 @@ def read_turn(path: Path, partial_tail: bool = False) -> List[Dict[str, Any]]:
     Read from the end, so a long session parses only its last run. A line
     inside that stretch that is not a JSON object makes the whole transcript
     unreadable (:class:`_Unreadable`): the check does not guess at a turn it
-    cannot see in full. With *partial_tail* (``util wakeup-check``, which
-    reads the transcript while the session is writing it), a last line with
-    no newline after it is a write in progress and is left out.
+    cannot see in full. With *partial_tail* (:func:`settled_turn` once its
+    wait ran out: both hooks read the transcript while the session is writing
+    it), a last line with no newline after it is a write in progress and is
+    left out.
     """
     try:
         data = path.read_bytes()
@@ -668,13 +710,108 @@ def read_turn(path: Path, partial_tail: bool = False) -> List[Dict[str, Any]]:
     return turn
 
 
+def settled_turn(
+    path: Path,
+    settled: Optional[Callable[[List[Dict[str, Any]]], bool]],
+    budget: Optional[float] = None,
+    step: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """:func:`read_turn` once Claude Code has written what the hook waits for
+    (fix round 27).
+
+    *settled* says whether a turn read off the file holds it; ``None`` means
+    the hook input names nothing to wait for, and the file then counts as
+    settled once its size held for one *step* with its last line complete.
+    The file is read every *step* seconds (:data:`SETTLE_STEP_S`) for at most
+    *budget* seconds (:data:`SETTLE_BUDGET_S`), a missing file and a last
+    line still being written included; the first read that is settled
+    returns at once. Past the budget the turn is read as it stands, a last
+    line with no newline after it left out. A malformed line before that one
+    still raises :class:`_Unreadable`: the caller passes.
+    """
+    budget = SETTLE_BUDGET_S if budget is None else budget
+    step = SETTLE_STEP_S if step is None else step
+    deadline = time.monotonic() + max(budget, 0.0)
+    last_size: Optional[int] = None
+    while True:
+        try:
+            size: Optional[int] = path.stat().st_size
+        except OSError:
+            size = None
+        # A file that has not grown since the last look cannot have become
+        # settled; it is parsed again only once it changed.
+        if size is not None and (settled is None or size != last_size):
+            try:
+                turn = read_turn(path)
+            except _Unreadable:
+                size = None
+            else:
+                if settled is not None:
+                    if settled(turn):
+                        return turn
+                elif size == last_size:
+                    return turn
+        last_size = size
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(step)
+    return read_turn(path, partial_tail=True)
+
+
+def reply_on_file(last_assistant_message: str) -> Callable[[List[Dict[str, Any]]], bool]:
+    """A :func:`settled_turn` test: the reply the ``Stop`` hook input names
+    is the transcript's newest one.
+
+    True when the newest assistant entry with text after the run's last user
+    entry ends on that text (whitespace around it aside), with no
+    ``stop_hook_summary`` after it: Claude Code writes one after every
+    ``Stop`` hook, so a reply it follows is an earlier ``Stop``'s, even one
+    worded the same.
+    """
+    wanted = last_assistant_message.strip()
+
+    def settled(turn: List[Dict[str, Any]]) -> bool:
+        for entry in reversed(turn):
+            kind = entry.get("type")
+            if kind == "system" and entry.get("subtype") == STOP_HOOK_SUMMARY:
+                return False
+            if kind == "user":
+                return False
+            if kind == "assistant":
+                texts = _assistant_text(entry)
+                if texts:
+                    return texts[-1].strip() == wanted
+        return False
+
+    return settled
+
+
+def subagent_call_ids(turn: Sequence[Dict[str, Any]]) -> Set[str]:
+    """The ids of the turn's calls whose result is a subagent's own words
+    (:data:`SUBAGENT_TOOLS`)."""
+    found: Set[str] = set()
+    for entry in turn:
+        if entry.get("type") != "assistant":
+            continue
+        content = _content(entry)
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if (isinstance(block, dict) and block.get("type") == "tool_use"
+                    and block.get("name") in SUBAGENT_TOOLS):
+                found.add(str(block.get("id") or ""))
+    return found
+
+
 def last_block(turn: Sequence[Dict[str, Any]]) -> Optional[Block]:
-    """The last block printed in the turn's tool results, if any."""
+    """The last block printed in the turn's tool results, if any, a block a
+    subagent's report quotes left out."""
     found: Optional[Block] = None
+    quoted = subagent_call_ids(turn)
     for entry in turn:
         if entry.get("type") != "user":
             continue
-        for text in _tool_result_texts(entry):
+        for text in _tool_result_texts(entry, skip=quoted):
             blocks = find_blocks(text)
             if blocks:
                 found = blocks[-1]
@@ -724,8 +861,9 @@ def final_message(turn: Sequence[Dict[str, Any]]) -> Optional[str]:
     can span several entries (thinking, then text). The final message is every
     assistant entry after the turn's last user entry. ``None`` when those
     entries carry no text: the transcript has not written the reply yet, which
-    is how it stands when the ``Stop`` hook runs (measured on 2.1.289,
-    2026-10-05: it ends at the turn's last tool result).
+    is how it stands when the ``Stop`` hook starts (it is written 0.1-0.2 s
+    later on 2.1.293, which is why the hook waits for it, :func:`settled_turn`)
+    and how it can still stand once that wait ran out.
     """
     texts: List[str] = []
     for entry in reversed(_trailing_assistant(turn)):
@@ -742,6 +880,7 @@ def final_message(turn: Sequence[Dict[str, Any]]) -> Optional[str]:
 def check(
     transcript: Path,
     last_assistant_message: Optional[str] = None,
+    settle: bool = False,
 ) -> Optional[Dict[str, str]]:
     """The hook decision for one turn: ``None`` to pass, else the block object.
 
@@ -751,10 +890,21 @@ def check(
     earlier block of a split reply is a miss here, once: the hook's next run
     sees ``stop_hook_active`` and passes.
 
+    With *settle* (the hook, reading a live session's transcript), the
+    transcript is read once the reply *last_assistant_message* names is on
+    file (:func:`settled_turn`); without it, as it stands.
+
     Raises :class:`_Unreadable` for a transcript it cannot read; the caller
     turns that into a silent pass.
     """
-    turn = read_turn(transcript)
+    if settle:
+        wanted = (last_assistant_message
+                  if isinstance(last_assistant_message, str)
+                  and last_assistant_message.strip() else None)
+        turn = settled_turn(
+            transcript, reply_on_file(wanted) if wanted is not None else None)
+    else:
+        turn = read_turn(transcript)
     block = last_block(turn)
     if block is None or ended_on_api_error(turn):
         return None
@@ -840,7 +990,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 0
         last_message = hook.get("last_assistant_message")
         decision = check(
-            path, last_message if isinstance(last_message, str) else None
+            path, last_message if isinstance(last_message, str) else None,
+            # The hook reads a live session's transcript; a transcript named
+            # on the command line alone is read as it stands.
+            settle=bool(args.hook_input) and not args.transcript,
         )
     except Exception:  # noqa: BLE001 - advisory: every failure passes silently
         return 0

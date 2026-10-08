@@ -596,7 +596,8 @@ def _run_mode(word: str, rest: Sequence[str], ctx: ResultContext) -> int:
         # it (live run 11): the whole command runs from the root, before
         # anything reads a path or records the invocation.
         _run_from_repository_root(
-            [flag_value(argv, option) for option in _MODE_INPUT_PATH_OPTIONS]
+            [flag_value(argv, option) for option in _MODE_INPUT_PATH_OPTIONS],
+            [flag_value(argv, option) for option in _MODE_OUTPUT_PATH_OPTIONS],
         )
         # What a detached child re-executes: the mode word plus this normalized
         # argv, never a remembered sys.argv (see utils/detach.build_child_command).
@@ -633,7 +634,10 @@ def _run_util(rest: Sequence[str], ctx: ResultContext) -> int:
     module_path, attr, _summary = UTIL_COMMANDS[name]
     assert module_path is not None
     if not flag_present(args, "--help", "-h"):
-        _run_from_repository_root(_util_input_paths(name, args))
+        _run_from_repository_root(
+            _util_input_paths(name, args),
+            [flag_value(args, option) for option in _UTIL_OUTPUT_PATH_OPTIONS],
+        )
     return _call_target(_load_target(module_path, attr), args)
 
 
@@ -656,12 +660,27 @@ _MODE_INPUT_PATH_OPTIONS: Tuple[str, ...] = (
     "--plan-file", "--question-file", "--tasks-file", "--files-from",
 )
 
+#: A mode's options whose value is a path the command creates, so it need not
+#: exist yet (fix round 27, the Fable review of round 26: review-plan's
+#: ``--out-dir`` was read by nothing, so ``--out-dir out`` beside a ``sub/out``
+#: moved with the plan and wrote ``<root>/out``): review-plan's output folder
+#: and implement's task JSON. ``--files`` and ``--touched`` are
+#: repository-relative wherever they are typed, and init's ``--dir`` is its
+#: target as typed; none of them is read here.
+_MODE_OUTPUT_PATH_OPTIONS: Tuple[str, ...] = ("--out-dir", "--output")
+
 #: A ``util`` command's options whose value names something the workflow keeps
-#: in the repository.
+#: in the repository (``--output-file`` is the orchestrator output
+#: ``util decisions`` reads, and ``--output-dir`` the plan folder
+#: ``prior-changes`` reads and appends to).
 _UTIL_INPUT_PATH_OPTIONS: Tuple[str, ...] = (
     "--plan-file", "--state-file", "--phase-dir", "--output-dir", "--tasks-file",
     "--output-file", "--project-root",
 )
+
+#: A ``util`` command's options whose value is a path it creates:
+#: ``write-prompt``'s prompt file (fix round 27).
+_UTIL_OUTPUT_PATH_OPTIONS: Tuple[str, ...] = ("--output",)
 
 #: The ``util`` commands whose first positional is such a path, with their
 #: options that take a value (whose value is not that positional).
@@ -702,7 +721,23 @@ def _inside(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
 
 
-def _run_from_repository_root(paths: Sequence[Optional[str]]) -> None:
+def _relative(paths: Sequence[Optional[str]]) -> List[str]:
+    return [
+        path for path in paths
+        if path and path != "-" and not path.startswith("~") and not os.path.isabs(path)
+    ]
+
+
+def _names_something_here(output: str) -> bool:
+    """Whether an output path, or the first folder it names, exists from the
+    cwd: then it is spelled from here (``out/new`` beside an ``out``, ``..``)."""
+    first = os.path.normpath(output).split(os.sep, 1)[0]
+    return os.path.lexists(output) or os.path.lexists(first)
+
+
+def _run_from_repository_root(
+    paths: Sequence[Optional[str]], outputs: Sequence[Optional[str]] = (),
+) -> None:
     """Move to the repository root when the command's relative paths name
     nothing from here and each names something inside that root.
 
@@ -713,12 +748,20 @@ def _run_from_repository_root(paths: Sequence[Optional[str]]) -> None:
     spelling that works here keeps working, and a mixed one is not guessed at),
     when the cwd is the root already, or when a path is missing from the root
     too or resolves outside it (a ``..`` or a link out of the repository).
+
+    *outputs* are paths the command creates (fix round 27): one need not
+    exist at the root, but it keeps the command here when it, or the first
+    folder it names, exists from the cwd, and it must stay inside the root as
+    spelled and resolved. Outputs alone never move a command: only a path it
+    reads says it was spelled from the root.
     """
-    relative = [
-        path for path in paths
-        if path and path != "-" and not path.startswith("~") and not os.path.isabs(path)
-    ]
-    if not relative or any(os.path.lexists(path) for path in relative):
+    relative = _relative(paths)
+    made = _relative(outputs)
+    if (
+        not relative
+        or any(os.path.lexists(path) for path in relative)
+        or any(_names_something_here(path) for path in made)
+    ):
         return
     try:
         cwd = os.getcwd()
@@ -729,16 +772,21 @@ def _run_from_repository_root(paths: Sequence[Optional[str]]) -> None:
         return
     if root is None or problem or os.path.realpath(cwd) == root:
         return
-    for path in relative:
+    for path in relative + made:
         candidate = os.path.join(root, path)
         if not (
-            os.path.exists(candidate)
+            (path in made or os.path.exists(candidate))
             and _inside(os.path.normpath(candidate), root)
             and _inside(os.path.realpath(candidate), root)
         ):
             return
     os.chdir(root)
     _CWD_BEFORE_ROOT.append(cwd)
+    # Fix round 27: on the result line too, so a tool server names the plan
+    # the way this command reads it, never by a `.git` walk of its own.
+    from utils.cli_common import record_ran_from_root
+
+    record_ran_from_root(root)
     print(
         f"multi-llm: running from the repository root {root}, where "
         f"{relative[0]} is (it is not under the current directory {cwd}).",
