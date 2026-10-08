@@ -636,7 +636,7 @@ class TestInternalRetryEnvelopeDeclarations:
         [
             n for n in _envelope_sweep_names()
             if n not in ("claude-code", "codex", "copilot", "gemini",
-                         "goose", "kimi",
+                         "goose", "grok", "kimi",
                          "muse", "omp", "pi", "qwen-code", "vibe")
         ],
     )
