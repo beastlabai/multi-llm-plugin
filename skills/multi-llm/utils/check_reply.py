@@ -68,10 +68,14 @@ def _objects_in(text: str) -> int:
     prose between them skipped: the count a "not one object" diagnosis names.
 
     A diagnosis only, for a reply that already failed to parse: nothing is
-    ever kept from it. The first object must open the reply and parse; each
-    later ``{`` must start an object that parses, else the count stops there
-    (a broken object is never counted by the pieces inside it). A reply
-    whose first object does not parse counts 0.
+    ever kept from it. The first object must open the reply and parse; a
+    later ``{`` counts when it starts an object that parses. One that does
+    not (a brace in the prose between them, such as "{group_hash}", or a
+    broken object) is skipped and the search goes on from where it stopped
+    parsing, so a broken object is never counted by the pieces before that
+    point (fix round 27: the count stopped at the first such ``{``, and a
+    correction whose prose held a brace read as one object). A reply whose
+    first object does not parse counts 0.
     """
     decoder = json.JSONDecoder()
     start = len(text) - len(text.lstrip())
@@ -79,11 +83,15 @@ def _objects_in(text: str) -> int:
     while True:
         try:
             value, end = decoder.raw_decode(text, index)
-        except json.JSONDecodeError:
-            return count
-        if not isinstance(value, dict):
-            return count
-        count += 1
+        except json.JSONDecodeError as exc:
+            if count == 0:
+                return count
+            # Past the point it stopped parsing, and always forward.
+            end = max(index + 1, exc.pos)
+        else:
+            if not isinstance(value, dict):
+                return count
+            count += 1
         index = text.find("{", end)
         if index < 0:
             return count

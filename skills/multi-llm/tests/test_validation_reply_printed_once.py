@@ -96,3 +96,32 @@ class TestCheckReplyNamesIt:
 
     def test_the_corrected_reply_alone_is_ok(self, tmp_path):
         assert _problems(tmp_path, _object(GROUP_10, GROUP_11)) == []
+
+    # Fix round 27 (review of round 26, relay #4): the scan stopped at the
+    # first `{` that did not parse, so a correction whose prose holds a brace
+    # read as one object and drew the plain "not valid JSON" message.
+
+    def test_a_brace_in_the_correction_s_prose_does_not_hide_the_second_object(
+        self, tmp_path,
+    ):
+        text = (
+            _object(GROUP_11, GROUP_10)
+            + "\n\nWait, I used {group_hash} values from the wrong groups; "
+            "corrected reply:\n\n" + _object(GROUP_10, GROUP_11) + "\n"
+        )
+        (problem,) = _problems(tmp_path, text)
+        assert problem.startswith("reply holds 2 JSON objects, not one (Extra data")
+        assert (tmp_path / "validation_batch_5.json").read_text() == text
+
+    def test_a_broken_second_object_is_not_counted_by_the_pieces_inside_it(
+        self, tmp_path,
+    ):
+        """Only an object that parses counts; the search goes on from where a
+        broken one stopped parsing, never from inside it."""
+        text = (
+            _object(GROUP_10, GROUP_11)
+            + '\ncorrected: {"groups": [{"group_hash": "' + GROUP_10 + '"}], oops\n'
+        )
+        assert check_reply._objects_in(text) == 1
+        (problem,) = _problems(tmp_path, text)
+        assert problem.startswith("reply is not valid JSON (Extra data")
