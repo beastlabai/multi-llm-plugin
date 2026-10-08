@@ -1033,7 +1033,7 @@ def normalize_recorded_executor(value: str) -> str:
 #: tool reports no usage) or a zero was fabricated for a value nobody had.
 _MEASURED_FIELDS = ("token_count", "tool_uses", "duration_ms")
 
-#: Every field two records of one event are compared on.
+#: The runner and measurement fields compared separately from task identity.
 _PAYLOAD_FIELDS = ("subagent_type",) + _MEASURED_FIELDS
 
 _EMPTY_NONE = "no numbers"
@@ -1079,6 +1079,32 @@ def _describe_event(phase: str, label: str, batch_index: Optional[int]) -> str:
     return f'{phase}: "{label}"{where}'
 
 
+def _metric_task_id(entry: dict) -> Optional[str]:
+    """The recorded identity, including an implement label that names it."""
+    if entry.get("task_id"):
+        return str(entry["task_id"])
+    named = label_task_id(str(entry.get("label") or ""))
+    return named if named and re.fullmatch(r"T\d+", named) else None
+
+
+def _enrich_metric_identity(existing: dict, new: dict) -> dict:
+    """Keep a measurement, adding its identity/failure without erasing either.
+
+    A previously ambiguous record becomes usable once its task is named.
+    The caller checks conflicting identities and measurements first.
+    """
+    merged = dict(existing)
+    if new.get("task_id"):
+        merged["task_id"] = str(new["task_id"])
+    if new.get(FAILED_ENTRY_KEY):
+        merged[FAILED_ENTRY_KEY] = True
+    if merged.get("task_id"):
+        merged.pop(NO_TASK_ID_ENTRY_KEY, None)
+    elif new.get(NO_TASK_ID_ENTRY_KEY):
+        merged[NO_TASK_ID_ENTRY_KEY] = True
+    return merged
+
+
 def _replacement(existing: dict, new: dict, keep_measured: bool) -> dict:
     """``new``, keeping any field of ``existing`` it does not carry itself.
 
@@ -1086,7 +1112,7 @@ def _replacement(existing: dict, new: dict, keep_measured: bool) -> dict:
     non-empty entry (``keep_measured``): carrying an empty entry's zeros into
     the replacement would re-fabricate exactly what the replacement removes.
     """
-    merged = dict(new)
+    merged = _enrich_metric_identity(new, existing)
     for key in _PAYLOAD_FIELDS:
         if key in merged or existing.get(key) is None:
             continue
@@ -1100,14 +1126,34 @@ def _collapse_duplicate(
 ) -> bool:
     """Settle a second record of the event ``entries[index]`` already holds.
 
-    Returns True when ``entries[index]`` now holds the new record's numbers
-    (so the caller's ``[ETA]`` line reflects them), False when the new record
-    was dropped. Either way nothing is appended: two entries for one batch
-    would count it twice in every per-phase total and average.
+    Returns True when ``entries[index]`` gained numbers, task identity or a
+    failure classification (so the caller's ``[ETA]`` line reflects them),
+    False when the new record was dropped. Nothing is appended: two entries
+    for one batch would count it twice in every per-phase total and average.
     """
     existing = entries[index]
     old_empty = _emptiness(existing)
     new_empty = _emptiness(new)
+    old_id, new_id = _metric_task_id(existing), _metric_task_id(new)
+    if old_id and new_id and old_id != new_id:
+        print(
+            f"[METRICS_CONFLICT] {event} recorded twice in this run with "
+            f"different task_id: kept {old_id}, dropped {new_id}",
+            file=sys.stderr,
+        )
+        return False
+    enriched = _enrich_metric_identity(existing, new)
+
+    def keep_enrichment() -> bool:
+        if enriched == existing:
+            return False
+        entries[index] = enriched
+        print(
+            f"[METRICS_DUPLICATE] {event} recorded twice in this run; "
+            "kept the measurement and added its task identity or failure",
+            file=sys.stderr,
+        )
+        return True
 
     if new_empty is not None:
         # An empty record never displaces a measured one. Of two empty ones,
@@ -1122,6 +1168,8 @@ def _collapse_duplicate(
                 f"the record with no numbers over the one with only zeros",
                 file=sys.stderr,
             )
+            return True
+        if keep_enrichment():
             return True
         print(
             f"[METRICS_DUPLICATE] {event} already recorded in this run; skipped "
@@ -1155,6 +1203,8 @@ def _collapse_duplicate(
         )
         return False
     if new_payload.keys() <= old_payload.keys():
+        if keep_enrichment():
+            return True
         print(
             f"[METRICS_DUPLICATE] {event} already recorded in this run; skipped "
             f"the second record (it repeats the recorded values)",
@@ -1222,8 +1272,13 @@ def record_metric_in_state(
       no numbers is kept over the all-zero one), or repeats the first, or is a
       subset agreeing on every field it carries;
     - replaces the first when it agrees on every shared field and adds more;
+    - enriches a compatible measurement with its missing task identity or
+      failure classification, clearing ambiguity once the task is named;
     - is dropped with ``[METRICS_CONFLICT]`` when a shared field differs,
       because appending would count one batch twice in the phase averages.
+
+    An established task identity cannot change, and a recorded failure
+    survives an incomplete duplicate, including one that adds measurements.
 
     Every one of those prints a line on stderr (``[METRICS_DUPLICATE]`` or
     ``[METRICS_CONFLICT]``): it reports a caller's mistake, the way
@@ -1317,6 +1372,16 @@ def record_metric_in_state(
             if recorded.get("label") == label and recorded.get("batch_index") == batch_index:
                 if not _collapse_duplicate(entries, i, entry, event):
                     return None
+                # An identity-only correction keeps the original numbers.
+                # Render the record that survived, including a failure that
+                # an incomplete duplicate must not turn into a success.
+                entry = entries[i]
+                duration_ms = entry.get("duration_ms")
+                no_task_id = no_task_id if entry.get(NO_TASK_ID_ENTRY_KEY) else []
+                failed = bool(entry.get(FAILED_ENTRY_KEY))
+                found = native_failure(state, phase, _metric_task_id(entry))
+                if failed and found is not None:
+                    failure, half_applied = found
                 break
         else:
             marks = [e["batch_index"] for _, e in this_run if _is_index(e.get("batch_index"))]

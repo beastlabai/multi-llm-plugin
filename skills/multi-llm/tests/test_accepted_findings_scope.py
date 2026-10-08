@@ -61,6 +61,11 @@ NATIVE = (
     "3 (found 2)'. src/config.json has retries=2 (set by T001), but the check "
     "requires 3."
 )
+#: The native host's run-11 report: same diagnostic, with its attribution.
+ANNOTATED = (
+    "node scripts/check.mjs exited 1: 'check failed: retries must be 3 (found 2)' "
+    "(the problem the user accepted from T002)"
+)
 
 
 # -- #1: numbers are words ----------------------------------------------------
@@ -130,6 +135,47 @@ class TestOneAcceptedFinding:
         found = ["npm test: test greets the user failed (exit 1)",
                  "npm test: test parses the config failed"]
         assert split_accepted_findings(found, accepted) == ([], {"T002": found})
+
+
+class TestAcceptedFindingAnnotations:
+
+    @pytest.mark.parametrize("finding", [
+        ANNOTATED,
+        ANNOTATED.replace("the problem", "the findings") + ".",
+    ])
+    def test_the_attribution_keeps_the_original_report(self, finding):
+        assert split_accepted_findings([finding], {"T002": [NATIVE]}) == (
+            [], {"T002": [finding]})
+
+    @pytest.mark.parametrize("finding", [
+        ANNOTATED.replace("found 2", "found 4"),
+        ANNOTATED.replace("must be 3", "must be 9"),
+        ANNOTATED.replace("scripts/check.mjs", "scripts/other.mjs"),
+        ANNOTATED.replace("retries must be 3", "retries must not be 3"),
+        ANNOTATED.replace("from T002", "from T003"),
+        ANNOTATED + "; also found a missing token",
+        ANNOTATED.replace(" (the problem", "; missing token (the problem"),
+        ANNOTATED.replace("from T002)", "from T002; missing token)"),
+        ANNOTATED.replace("the user accepted", "the user has not accepted"),
+    ])
+    def test_new_or_unattributed_failures_remain_the_tasks_own(self, finding):
+        assert split_accepted_findings([finding], {"T002": [NATIVE]}) == (
+            [finding], {})
+
+    def test_citing_another_accepted_check_cannot_match_the_first(self):
+        finding = ANNOTATED.replace("from T002", "from T003")
+        accepted = {"T002": [NATIVE], "T003": ["npm test: missing token"]}
+        assert split_accepted_findings([finding], accepted) == ([finding], {})
+
+    def test_matching_shared_diagnostics_are_attributed_to_the_cited_check(self):
+        finding = ANNOTATED.replace("from T002", "from T003")
+        accepted = {"T002": [NATIVE], "T003": [NATIVE]}
+        assert split_accepted_findings([finding], accepted) == ([], {"T003": [finding]})
+
+    def test_each_new_finding_is_still_reported(self):
+        extra = "npm test: missing token"
+        assert split_accepted_findings([ANNOTATED, extra], {"T002": [NATIVE]}) == (
+            [extra], {"T002": [ANNOTATED]})
 
 
 # -- #2: which task's check may repeat the accepted findings ------------------
@@ -354,28 +400,29 @@ class TestTheNativeLeg:
         capsys.readouterr()
         return phase
 
-    def _own_check(self, capsys, phase, task_id):
+    def _own_check(self, capsys, phase, task_id, finding=RERUN):
         return self._util(
             capsys, "batch-done", "--phase-dir", phase, "--task-id", task_id,
-            "--status", "completed", "--own-check", "findings", "--finding", RERUN)
+            "--status", "completed", "--own-check", "findings", "--finding", finding)
 
-    def test_batch_done_splits_only_the_released_tasks_check(self, scope_repo, capsys):
+    @pytest.mark.parametrize("finding", [RERUN, ANNOTATED])
+    def test_batch_done_splits_only_the_released_tasks_check(self, scope_repo, capsys, finding):
         repo = scope_repo
         phase = self._accept(repo, capsys)
         for task_id in ("T005", "T006", "T008"):
-            code, out, err = self._own_check(capsys, phase, task_id)
+            code, out, err = self._own_check(capsys, phase, task_id, finding)
             assert code == 0, err
             assert BATCH_CHECK_ACCEPTED_MARKER not in out, (task_id, out)
             assert any(line.startswith(f"{BATCH_CHECK_MARKER} {task_id}:")
                        for line in out.splitlines()), (task_id, out)
-        code, out, err = self._own_check(capsys, phase, "T007")
+        code, out, err = self._own_check(capsys, phase, "T007", finding)
         assert code == 0, err
         assert any(line.startswith(f"{BATCH_CHECK_ACCEPTED_MARKER} T007:")
                    for line in out.splitlines()), out
         state = json.loads((repo.phase_dir.parent / "state.json").read_text())
         assert state["task_batch_check"] == {
-            "T005": [RERUN], "T006": [RERUN], "T008": [RERUN]}
-        assert state["task_batch_check_accepted"] == {"T007": {"T002": [RERUN]}}
+            "T005": [finding], "T006": [finding], "T008": [finding]}
+        assert state["task_batch_check_accepted"] == {"T007": {"T002": [finding]}}
 
     def test_status_names_the_accepted_rerun(self, scope_repo, capsys):
         repo = scope_repo

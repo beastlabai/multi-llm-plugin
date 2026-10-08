@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import hashlib
 import inspect
 import json
@@ -938,6 +939,31 @@ def batch_check_findings(result: Any) -> Optional[List[str]]:
     if findings and findings[0].startswith(CHECK_RESULT_UNKNOWN):
         return None
     return findings
+
+
+def _report_check_evidence(result: Any) -> Optional[Dict[str, Any]]:
+    """A readable check object to retain across a report-only re-ask.
+
+    A restatement runs no check, so it cannot retract the original turn's
+    evidence. Keep the whole object, including ``listed`` and any extra
+    detail, when the existing lenient readers can use it. A missing or
+    unreadable check remains repairable rather than pinning an unknown
+    result over a useful correction.
+    """
+    check = result.get("check") if isinstance(result, dict) else None
+    if not isinstance(check, dict):
+        return None
+    try:
+        from .known_checks import listed_check_outcomes
+    except ImportError:  # pragma: no cover - direct script import shim
+        from utils.known_checks import listed_check_outcomes
+
+    if (
+        batch_check_findings(result) is not None
+        or listed_check_outcomes(check.get("listed"))
+    ):
+        return copy.deepcopy(check)
+    return None
 
 
 #: How much of one declined item's reason a row, a stamp or a notice carries.
@@ -7248,6 +7274,10 @@ def dispatch_task(
     # A write kind's report re-ask: the files' state when it was granted, which
     # the re-ask must leave exactly as it found it (`tree_fingerprint`).
     repair_baseline: Any = None
+    # A report-only turn cannot change what the original turn observed when
+    # it ran its checks. Apply this before persisting the restated report so
+    # the result file and the scheduler's verdict read the same evidence.
+    repair_check: Optional[Dict[str, Any]] = None
     # Fix round 18: the `after_result` context of a readable report that left
     # items out, kept while its re-ask runs, so a re-ask that cannot restate
     # it leaves this one to be classified.
@@ -7416,6 +7446,8 @@ def dispatch_task(
             if marker is not None:
                 outcome.structured_output = marker
             if status == STATUS_OK:
+                if repair_check is not None and isinstance(data, dict):
+                    data = {**data, "check": copy.deepcopy(repair_check)}
                 try:
                     written = persist_result(task, phase_dir, data)
                 except ResultRejected as exc:
@@ -7487,6 +7519,7 @@ def dispatch_task(
                             attempt_resend = RESEND_NOTHING_CHANGED
                             attempt_repair = None
                             repair_baseline = None
+                            repair_check = None
                             print(
                                 f"[exec-subagents] {task_id}: the reply says the "
                                 f"batch was applied, but "
@@ -7523,6 +7556,7 @@ def dispatch_task(
                         # Rule 7, second form (fix round 18): the report read
                         # but left items out; the runner restates it once.
                         reask_prompt, repair_baseline = reask
+                        repair_check = _report_check_evidence(data)
                         # Fix round 19: a readable report, so its own status
                         # and no failure capture (the re-ask's prompt file
                         # quotes the reply).
@@ -7809,6 +7843,7 @@ def dispatch_task(
                         f"could not be recorded, {type(exc).__name__})"
                     )
                     break
+                repair_check = _report_check_evidence(data)
             attempt_prompt = repair_prompt
             attempt_repair = REPAIR_SCHEMA_INVALID
             if kind in WRITE_KINDS:

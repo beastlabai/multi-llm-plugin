@@ -946,7 +946,7 @@ class TestSchemaRepairPrompt:
     def test_the_implement_form_restates_a_check_and_never_reruns_it(self):
         """Fix round 14: implement gets the report re-ask; a check task's
         result rides in `check`, which the verdict reads, so the re-ask asks
-        for it as given — and only implement's re-ask says so."""
+        for it as given. Apply batches now preserve their own checks too."""
         prompt = subagent_prompts.build_schema_repair_prompt(
             "implement", "Run node --check on index.html", ["x"],
             previous_reply="The check ran: index.html parses.",
@@ -954,12 +954,13 @@ class TestSchemaRepairPrompt:
         )
         assert "Run node --check" not in prompt
         assert "- task 1 = `T014`" in prompt
-        assert "restate that object as\nit gave it; do not run the check again" in prompt
+        assert "include that entire object unchanged" in " ".join(prompt.split())
+        assert "Do not run any check again" in " ".join(prompt.split())
         other = subagent_prompts.build_schema_repair_prompt(
             "apply_suggestions", "Q", ["x"], previous_reply="done",
             expected_ids=["a"],
         )
-        assert "`check` object" not in other
+        assert "`check` object" in other
 
     def test_the_write_form_without_ids_lists_none(self):
         prompt = subagent_prompts.build_schema_repair_prompt(

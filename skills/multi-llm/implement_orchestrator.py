@@ -950,8 +950,8 @@ def _start_over(
     implement had finished. For every code task of the decomposition (a
     manual task's answer stands):
 
-    * its status, unless ``skipped`` (the human-task plan decides that
-      again), goes back to ``pending`` without a reason — a recorded
+    * its status, including a code task skipped at the user's request or
+      with another task, goes back to ``pending`` without a reason — a recorded
       ``--human-task`` answer for it goes with it
       (``state_manager._consume_answer``) — and its check findings, check
       tree stamp and own-check findings are dropped;
@@ -1017,7 +1017,7 @@ def _start_over(
                     file=sys.stderr,
                 )
         status = state.get_task_status(task_id)
-        if status not in (None, TaskStatus.SKIPPED.value, TaskStatus.PENDING.value):
+        if status not in (None, TaskStatus.PENDING.value):
             touched = True
             state.update_task_status(task_id, TaskStatus.PENDING.value)
         elif status == TaskStatus.PENDING.value and state.get_task_status_reason(task_id):
@@ -2764,6 +2764,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if start_over and executor_backed:
         _start_over(state, plan_path, decomposer.tasks.values())
+        # The reset consumes earlier code-task answers, including skips.
+        # Resolve from that state, as the native leg does after its reset;
+        # the pre-detach copy otherwise skips the tasks just made pending.
+        applicable_decisions = _applicable_task_decisions(
+            state, human_task_ids, human_task_decisions,
+        )
 
     # --- the write executor (D3n): schedule the batches in this process --------
     # Strictly additive: with neither flag set this returns None and everything

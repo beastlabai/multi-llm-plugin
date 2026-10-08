@@ -1535,6 +1535,14 @@ _FINDING_COMMAND_END = re.compile(
 
 _FINDING_WORD = re.compile(r"[a-z0-9]+(?:[._/\-][a-z0-9]+)*")
 
+#: A trailing attribution the native host appended in live run 11. Only
+#: this annotation may be set aside, and only for the accepted check it
+#: names; arbitrary parenthetical diagnostics and suffixes stay findings.
+_FINDING_ACCEPTANCE_NOTE = re.compile(
+    r"\s+\((?:the )?(?:problems?|findings?) the user accepted from "
+    r"(?P<check_id>T\d+)\)\.?\s*$"
+)
+
 #: A finding that says fewer words than this about what failed matches only
 #: an accepted finding that says exactly those words.
 ACCEPTED_MATCH_MIN_WORDS = 3
@@ -1722,7 +1730,9 @@ def split_accepted_findings(
     kept — are one accepted finding's, all of it or its first words, in its
     order and with nothing between them (:func:`_says_only`). Another
     command, another number, one more problem, no command, or no words about
-    what failed: the task's own, as before.
+    what failed: the task's own, as before. A trailing acceptance attribution
+    (:data:`_FINDING_ACCEPTANCE_NOTE`) is set aside only when it names an
+    accepted check, and the diagnostic must match that check's findings.
     """
     pools: Dict[str, Dict[str, List[List[str]]]] = {}
     for check_id, items in accepted.items():
@@ -1733,13 +1743,18 @@ def split_accepted_findings(
     own: List[str] = []
     matched: Dict[str, List[str]] = {}
     for finding in findings:
-        parts = None if batch_check_could_not_run([finding]) else _finding_parts(finding)
+        note = _FINDING_ACCEPTANCE_NOTE.search(str(finding))
+        cited = note.group("check_id") if note else None
+        diagnostic = (
+            str(finding)[:note.start()] if note and cited in accepted else finding
+        )
+        parts = None if batch_check_could_not_run([finding]) else _finding_parts(diagnostic)
         check_id = None
         if parts is not None:
             command, words = parts
             check_id = next((
                 cid for cid, said in (pools.get(command) or {}).items()
-                if _says_only(words, said)
+                if (cited is None or cid == cited) and _says_only(words, said)
             ), None)
         if check_id is None:
             own.append(finding)
@@ -6014,11 +6029,9 @@ class WriteBatchScheduler:
         verdict = data.get("verdict") if isinstance(data, dict) else None
         if not isinstance(verdict, dict):
             return f"{task_id}'s result ({path.name}) carries no verdict"
-        if verdict.get("ok") is True and verdict.get("skipped_items"):
-            # An earlier answer kept it: the resume reads it as done.
-            return None
+        already_kept = verdict.get("ok") is True and bool(verdict.get("skipped_items"))
         expected = sorted(str(i) for i in (task.get("expected_ids") or []))
-        if (
+        if not already_kept and (
             verdict.get("write_outcome") != WRITE_PARTIAL
             or not verdict.get("unapplied_ids")
         ):
@@ -6043,6 +6056,20 @@ class WriteBatchScheduler:
             return (
                 f"the plan, the review or the batching {task_id} was made from "
                 f"changed since it stopped"
+            )
+        if already_kept:
+            # A repeated answer belongs to the same batch, not merely the
+            # same positional result file. It is idempotent only when the
+            # dispatch loop will actually keep this completion. Do not
+            # compare its old file hashes: later completed batches may
+            # legitimately have edited the shared plan or task list.
+            if self._result_counts_as_done(
+                task, path, task_id, int(task.get("batch_index", 0)), sibling=False,
+            ):
+                return None
+            return (
+                f"{task_id}'s earlier kept result no longer counts as completed; "
+                f"this answer cannot keep a batch that would be dispatched again"
             )
         after = verdict.get("sha256_after")
         moved = sorted(
