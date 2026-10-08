@@ -389,6 +389,65 @@ class TestLaunchFailureMarkers:
         property of the install, identical for every sibling slot: rung 1."""
         assert pbase.classify_streams("", stream, exit_code=2) == STATUS_SPAWN_FAILED
 
+    @pytest.mark.parametrize("quoted", [
+        # A reviewer reading this repo's omp fixtures, quoting the refusal in
+        # its JSON answer (the newline escaped inside a string) ...
+        '[{"title": "omp prints `Error: Unknown tool in --tools: bogus.` '
+        'on stderr", "severity": "low"}]',
+        # ... and in plain text, the line on its own in a fenced block.
+        "omp rejects an unknown name before it resolves a model:\n```\n"
+        "Error: Unknown tool in --tools: bogus.\n```\nso the run is dead at "
+        "launch.",
+    ])
+    def test_a_reviewer_quoting_the_omp_refusal_on_stdout_is_no_launch_failure(
+        self, quoted
+    ):
+        """Review 24, pins #5: rung 1 fails the whole batch, so the omp row is
+        read where omp writes it — stderr, at a line start — and never off a
+        model's answer on stdout that quotes the same words."""
+        assert pbase.classify_streams(quoted, "", exit_code=1) != (
+            STATUS_SPAWN_FAILED
+        )
+        match = pbase.match_streams(quoted, "", 1)
+        assert match is None or match.status != STATUS_SPAWN_FAILED
+
+    def test_omps_refusal_mid_line_on_stderr_is_no_launch_failure_either(self):
+        """The measured shape opens its line; prose quoting it on stderr does not."""
+        stream = "warning: the plan says Error: Unknown tool in --tools: bogus."
+        assert pbase.classify_streams("", stream, exit_code=1) != (
+            STATUS_SPAWN_FAILED
+        )
+
+    def test_lane_as_composed_sentence_still_reads_the_omp_refusal(self):
+        """Lane A classifies its own ``"<cli> exited with code N: <describe_failure>"``
+        string, handed over as stdout (``review_orchestrator_base``); omp's
+        ``describe_failure`` quotes the stderr line into it, so the refusal is
+        read there too, right after that prefix and nowhere else."""
+        from utils.providers.omp import OmpProvider
+
+        fixtures = Path(__file__).parent / "fixtures" / "omp"
+        stdout = (fixtures / "invalid-tool.stdout.txt").read_text(encoding="utf-8")
+        stderr = (fixtures / "invalid-tool.stderr.txt").read_text(encoding="utf-8")
+        reason = OmpProvider().describe_failure(stdout, stderr)
+        composed = f"omp exited with code 2: {reason}"
+        assert pbase.classify_streams(composed, "") == STATUS_SPAWN_FAILED
+        assert pbase.match_streams(composed, "").status == STATUS_SPAWN_FAILED
+        # The prefix is llm_client's own composition, pinned so the two move
+        # together.
+        client = (
+            Path(__file__).parent.parent / "utils" / "llm_client.py"
+        ).read_text(encoding="utf-8")
+        assert (
+            'error_message = f"{provider_name} exited with code '
+            '{result.returncode}"' in client
+        )
+        # Another runner's sentence that only quotes it later is not omp's.
+        quoted = (
+            "claude-code exited with code 1: the reviewer wrote that omp says "
+            "Error: Unknown tool in --tools: bogus."
+        )
+        assert pbase.classify_streams(quoted, "") != STATUS_SPAWN_FAILED
+
     def test_a_root_refusal_is_read_as_the_root_cause_not_as_auth(self):
         """§7.2's ordering rule: a root refusal reads like a permission problem.
 
