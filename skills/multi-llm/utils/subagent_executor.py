@@ -1007,6 +1007,20 @@ def _is_placeholder(command: str) -> bool:
     return len(text) > 1 and text[0] == "<" and text[-1] == ">"
 
 
+def _names_a_command(entry: Any) -> bool:
+    """Whether one entry of a ``ran`` list may name a command it ran: not the
+    contract's placeholder, whether written as a ``"<command>: <outcome>"``
+    string or (fix round 27, review of round 26: it read as a clean pass) as
+    an object whose command is the placeholder. An entry that cannot be read
+    counts, so what ran stays unknown rather than nothing."""
+    if isinstance(entry, str):
+        return not _is_placeholder(entry.rpartition(":")[0] or entry)
+    if isinstance(entry, dict):
+        command = next((entry[k] for k in _RAN_COMMAND_KEYS if k in entry), None)
+        return not (isinstance(command, str) and _is_placeholder(command))
+    return True
+
+
 def ran_no_check(result: Any) -> bool:
     """Whether a code batch's ``check`` says it ran no check (fix round 26):
     its ``ran`` is present and empty, holds only the contract's placeholder,
@@ -1023,8 +1037,7 @@ def ran_no_check(result: Any) -> bool:
     # The contract's placeholder copied as it is names no command (a reply
     # that pasted the shape without running anything).
     named = [
-        entry for entry in ran
-        if not (isinstance(entry, str) and _is_placeholder(entry.rpartition(":")[0] or entry))
+        entry for entry in ran if _names_a_command(entry)
     ] if isinstance(ran, list) else [key for key in ran if not _is_placeholder(str(key))]
     if not named:
         return True
