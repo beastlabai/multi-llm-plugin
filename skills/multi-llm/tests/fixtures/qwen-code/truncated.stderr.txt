@@ -1,0 +1,15 @@
+Retrying provider attempt (0 buffered tool call(s) discarded).
+Retrying provider attempt (0 buffered tool call(s) discarded).
+Retrying provider attempt (0 buffered tool call(s) discarded).
+Retrying provider attempt (0 buffered tool call(s) discarded).
+Retrying provider attempt (0 buffered tool call(s) discarded).
+Retrying provider attempt (0 buffered tool call(s) discarded).
+Retrying provider attempt (0 buffered tool call(s) discarded).
+Retrying provider attempt (0 buffered tool call(s) discarded).
+{
+  "error": {
+    "type": "AlreadyReportedError",
+    "message": "[API Error: Model stream ended without a finish reason.]",
+    "code": 1
+  }
+}

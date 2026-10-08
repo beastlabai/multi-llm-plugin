@@ -370,6 +370,10 @@ QWEN_CODE_LABELS: Dict[str, str] = {
     "truncated.stdout.json": "none",
     "stdout-error.stdout.json": "none",
     "wall-time-exceeded.stdout.txt": "none",
+    "rate-limit-wall-time.stdout.txt": "none",
+    # 0.21.13 (the floor) marked its API-error record clean; kept graded.
+    "exit-zero-failure.0.21.13.stdout.json": "none",
+    "truncated.0.21.13.stdout.json": "none",
 }
 
 
@@ -895,8 +899,12 @@ class TestVibeRefusesItsPlainTextDiagnostic:
 
 
 class TestQwenCodeReadsOnlyCleanRecords:
-    #: Every capture whose `result` carries qwen's `[API Error:` marker.
-    API_ERROR_ROWS = (
+    #: The 0.21.13 captures whose `result` carries qwen's `[API Error:` marker
+    #: inside a record marked clean (the floor release's shape).
+    API_ERROR_ROWS = ("exit-zero-failure.0.21.13", "truncated.0.21.13")
+    #: The same failures at 0.25.0: an error record, the marker under
+    #: `error.message`, no `result` key.
+    ERROR_RECORD_ROWS = (
         "auth-error", "context-overflow", "empty-stream", "exit-zero-failure",
         "invalid-model", "no-finish-reason", "truncated",
     )
@@ -915,6 +923,13 @@ class TestQwenCodeReadsOnlyCleanRecords:
         # The pin is live: qwen marked the record clean around its error.
         assert not record.get("is_error") and record.get("subtype") == "success"
         assert "[API Error:" in record["result"]
+        assert QwenCodeProvider().salvage_text(_read(f"qwen-code/{row}.stdout.json")) == ""
+
+    @pytest.mark.parametrize("row", ERROR_RECORD_ROWS)
+    def test_an_error_record_row_gives_nothing(self, row: str) -> None:
+        record = self._result(row)
+        assert record.get("is_error") is True and "result" not in record
+        assert "[API Error:" in record["error"]["message"]
         assert QwenCodeProvider().salvage_text(_read(f"qwen-code/{row}.stdout.json")) == ""
 
     @pytest.mark.parametrize("row", ANSWER_ROWS)

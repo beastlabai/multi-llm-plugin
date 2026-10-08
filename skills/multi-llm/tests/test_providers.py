@@ -3283,8 +3283,10 @@ class TestQwenCodeProvider:
     """Tests for QwenCodeProvider (harness-expansion.md §3.3, H4·qwen).
 
     Every assertion is anchored to a capture in `tests/fixtures/qwen-code/`,
-    taken from the real binary at 0.21.13 inside the §6 probe container — the
-    `tests/fixtures/kilocode/` precedent.
+    taken from the real binary at 0.25.0 in the pinned container image
+    (re-captured 2026-10-08; first captured at 0.21.13 in the §6 probe) — the
+    `tests/fixtures/kilocode/` precedent. The two `*.0.21.13.stdout.json` files
+    keep the floor release's exit-0 API-error shape graded.
     """
 
     FIXTURES = Path(__file__).parent / "fixtures" / "qwen-code"
@@ -3495,8 +3497,11 @@ class TestQwenCodeProvider:
     # -- parse_output: the exit-0 defect ----------------------------------
 
     def test_exit_zero_failure_is_classified_despite_three_green_signals(self, provider):
-        """rc=0, subtype=success, is_error=false — and it is still a failure."""
-        raw = self._fixture("exit-zero-failure.stdout.json")
+        """rc=0, subtype=success, is_error=false — and it is still a failure.
+
+        Captured on 0.21.13, the adapter's `min_version`: 0.25.0 no longer
+        writes this shape (see the next test), but the floor still does."""
+        raw = self._fixture("exit-zero-failure.0.21.13.stdout.json")
         record = [r for r in json.loads(raw) if r["type"] == "result"][-1]
         assert record["subtype"] == "success" and record["is_error"] is False
 
@@ -3505,6 +3510,107 @@ class TestQwenCodeProvider:
         assert result["success"] is False
         assert "[API Error: 500" in result["error"]
         assert result["data"] is None
+
+    def test_since_0_25_0_an_api_error_is_an_error_record(self, provider):
+        """0.25.0 marks the same 500-forever run as an error: exit 1,
+        `is_error: true`, no `result` key, the text under `error.message`, and
+        the same text in an `AlreadyReportedError` envelope on stderr. The
+        failure must read as that text, not as the error object's repr."""
+        raw = self._fixture("exit-zero-failure.stdout.json")
+        record = [r for r in json.loads(raw) if r["type"] == "result"][-1]
+        assert record["is_error"] is True and "result" not in record
+        assert record["error"] == {"message": "[API Error: 500 internal server error]"}
+        stderr = self._fixture("exit-zero-failure.stderr.txt")
+        assert json.loads(stderr)["error"]["type"] == "AlreadyReportedError"
+
+        result = provider.parse_output(raw, stderr)
+
+        assert result["success"] is False
+        assert result["error"] == "[API Error: 500 internal server error]"
+        assert result["data"] is None
+
+    @pytest.mark.parametrize("row,expected", [
+        ("auth-error", "[API Error: 401 Incorrect API key provided.]"),
+        ("invalid-model", "[API Error: 404 The model `stub-model` does not exist]"),
+        ("truncated", "[API Error: Model stream ended without a finish reason.]"),
+        ("empty-stream", "[API Error: Model stream ended with empty response text.]"),
+    ])
+    def test_the_error_text_is_the_message_not_the_object(self, provider, row, expected):
+        result = provider.parse_output(
+            self._fixture(f"{row}.stdout.json"), self._fixture(f"{row}.stderr.txt")
+        )
+        assert result["success"] is False
+        assert result["error"] == expected
+
+    @pytest.mark.parametrize("row,expected", [
+        ("auth-error", "auth_failed"),
+        ("invalid-model", "invalid_model"),
+        ("context-overflow", "context_length_exceeded"),
+    ])
+    def test_the_0_25_0_streams_classify_with_their_stderr(self, provider, row, expected):
+        """Both channels as captured: stdout's error record and stderr's
+        `AlreadyReportedError` envelope carry the same upstream sentence."""
+        assert provider.classify_failure(
+            self._fixture(f"{row}.stdout.json"), self._fixture(f"{row}.stderr.txt"), 1
+        ) == expected
+
+    @pytest.mark.parametrize("message", [
+        "[API Error: 401 Incorrect API key provided.]",  # the captured stub wording
+        "[API Error: 401 No auth credentials found]",    # OpenRouter's missing-key wording
+        "[API Error: 401 User not found.]",              # OpenRouter's revoked-key wording
+    ])
+    def test_a_401_is_an_auth_failure_whatever_the_upstream_wording(self, provider, message):
+        """qwen renders every upstream failure as `[API Error: <status> <text>]`.
+        The base auth patterns match none of these sentences, so a 401 used to
+        classify `server_error` (the `api error` rung) and enter the retry
+        ladder as retryable — on 0.21.13 and 0.25.0 alike. The status in qwen's
+        own prefix is what names it."""
+        assert provider.classify_failure(message, "", 1) == "auth_failed"
+
+    def test_the_ripgrep_advisory_does_not_decide_the_class(self, provider):
+        """ADAPTER CHANGE (0.25.0). A root-owned install cannot restore the exec
+        bit on qwen's bundled `rg`, so every run's stderr opens with
+        `Ripgrep not available: spawn …/rg EACCES. Falling back to built-in
+        grep.` Captured that way in the pinned image: a 429-forever run ended by
+        `--max-wall-time`. The `EACCES` classified it `permission_denied`,
+        hiding the rate limit the next line reports."""
+        stderr = self._fixture("rate-limit-wall-time.root-owned-install.stderr.txt")
+        first, rest = stderr.split("\n", 1)
+        assert first.startswith("Ripgrep not available: ") and "EACCES" in first
+        assert "[API Error: 429 rate limit exceeded]" in rest
+
+        assert provider.vendor_text("", stderr) == ("", rest)
+        assert provider.classify_failure("", stderr, 55) == "rate_limited"
+        assert provider.classify_failure("", stderr, 55) == provider.classify_failure(
+            "", self._fixture("rate-limit-wall-time.stderr.txt"), 55
+        )
+
+    def test_the_ripgrep_advisory_alone_classifies_nothing(self, provider):
+        """The same line ahead of a successful run's empty stderr."""
+        line = ("Ripgrep not available: spawn /opt/qwen/vendor/ripgrep/x64-linux/rg "
+                "EACCES. Falling back to built-in grep.\n")
+        success = self._fixture("success.stdout.json")
+        assert provider.classify_failure(success, line, 0) is None
+
+    def test_the_budget_envelope_is_found_after_retry_lines(self, provider):
+        """ADAPTER CHANGE (0.25.0). The exit-55 envelope used to be the whole
+        of stderr; 0.25.0 prints a `Retrying in …` line per backoff first, so
+        a parse from byte 0 failed and the report quoted the retry line instead
+        of the abort reason."""
+        stderr = self._fixture("rate-limit-wall-time.stderr.txt")
+        assert stderr.startswith("Retrying in 60s")
+
+        result = provider.parse_output(self._fixture("rate-limit-wall-time.stdout.txt"), stderr)
+
+        assert result["success"] is False
+        assert result["error"] == (
+            "qwen aborted with no output — FatalBudgetExceededError: Run aborted: "
+            "wall-clock budget of 100s exceeded (--max-wall-time)."
+        )
+        rooted = provider.parse_output(
+            "", self._fixture("rate-limit-wall-time.root-owned-install.stderr.txt")
+        )
+        assert "FatalBudgetExceededError" in rooted["error"]
 
     @pytest.mark.parametrize("fixture,needle", [
         ("auth-error.stdout.json", "401"),
@@ -3525,8 +3631,10 @@ class TestQwenCodeProvider:
 
     def test_concatenated_partial_text_across_retries_is_still_a_failure(self, provider):
         """The muse trap by a different route: the marker is a SUFFIX here, so a
-        prefix test would serve `OKOKOKOKOK` as the answer."""
-        raw = self._fixture("truncated.stdout.json")
+        prefix test would serve `OKOKOKOKOK` as the answer. Captured on 0.21.13
+        (`min_version`); 0.25.0 discards each retry's partial text — see
+        `test_0_25_0_keeps_only_the_last_attempts_partial_text`."""
+        raw = self._fixture("truncated.0.21.13.stdout.json")
         record = [r for r in json.loads(raw) if r["type"] == "result"][-1]
         assert record["result"].startswith("OK")
         assert record["stats"]["models"]["stub-model"]["api"]["totalErrors"] == 0
@@ -3535,6 +3643,25 @@ class TestQwenCodeProvider:
 
         assert result["success"] is False
         assert "OKOKOKOKOK" not in str(result.get("data"))
+
+    def test_0_25_0_keeps_only_the_last_attempts_partial_text(self, provider):
+        """0.25.0 writes one `system`/`retry` record per retry (with
+        `preserveText: false`), the assistant record holds only the last
+        attempt's `OK` ahead of the marker, and the `result` record is an error
+        record — so the parser reads the verdict, not the text."""
+        raw = self._fixture("truncated.stdout.json")
+        records = json.loads(raw)
+        retries = [r for r in records if r["type"] == "system" and r.get("subtype") == "retry"]
+        assert retries and all(r["data"]["preserveText"] is False for r in retries)
+        texts = [c["text"] for r in records if r["type"] == "assistant"
+                 for c in r["message"]["content"] if c["type"] == "text"]
+        assert texts == ["OK[API Error: Model stream ended without a finish reason.]"]
+        assert records[-1]["is_error"] is True and "result" not in records[-1]
+
+        result = provider.parse_output(raw, "")
+
+        assert result["success"] is False
+        assert result["data"] is None
 
     def test_no_finish_reason_takes_the_same_path(self, provider):
         result = provider.parse_output(self._fixture("no-finish-reason.stdout.json"), "")
