@@ -91,7 +91,7 @@ While a phase runs, wait in this session for what it started: each subagent's, a
 
 ## 6. The one dispatcher command
 
-Every mode is this single command, with `--host claude-code` baked in:
+Every mode is this single command, with `--host claude-code` baked in, and every `util` command a core names starts the same way. Run each one from the directory this session started in (the repository root), and never `cd` in a Bash call: this host's Bash keeps the new directory for every later call, so a relative plan path then names a file that is not there. Run each one alone in its Bash call and spelled exactly as written here, the skill directory as printed: nothing chained before or after it (no probe, no `cd`, no other command) and no shell variable standing in for it, since a call that does not start with `uv` loses this skill's allow rule:
 
 ```bash
 uv run --frozen --no-dev --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/multi_llm.py" <mode> "<plan-path>" --host claude-code [flags…]
