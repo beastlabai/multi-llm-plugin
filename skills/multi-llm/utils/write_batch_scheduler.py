@@ -12198,6 +12198,28 @@ class WriteBatchScheduler:
             or outcome.task_id in self._refused_before_dispatch
         )
 
+    @staticmethod
+    def _answered_this_run(result: SchedulerResult) -> Dict[str, Tuple[str, str]]:
+        """``{task_id: (label, reason)}`` for the tasks this run's answers
+        settled without a runner: accepted (``=done`` on a failed task or a
+        check), completed by hand (``=done`` on a manual task), and skipped
+        at the user's request with the tasks skipped with them — in the
+        accounting line's words (fix round 26)."""
+        plan = result.human_plan
+        out: Dict[str, Tuple[str, str]] = {}
+        for task_id, reason in (plan.declined() or {}).items():
+            seed = str(reason).startswith((USER_DECLINED_REASON, ANSWERED_SKIP_PREFIX))
+            out[str(task_id)] = (
+                "skipped at your request" if seed else "skipped with a skipped task",
+                str(reason),
+            )
+        for task_id, reason in (plan.accepted or {}).items():
+            out[str(task_id)] = (answered_done_label(plan, task_id), str(reason))
+        for task_id in plan.completed or ():
+            out[str(task_id)] = (
+                COMPLETED_BY_HAND_LABEL, f"answered --human-task {task_id}=done")
+        return out
+
     def _write_summary(self, result: SchedulerResult) -> str:
         """The implementation summary, with the three conditional sections (D3n)."""
         plan_name = Path(self.plan_file).name if self.plan_file else "(plan)"
@@ -12216,7 +12238,11 @@ class WriteBatchScheduler:
         if self.kind in CODE_WRITE_KINDS:
             lines.append(f"**Verification**: {verification_line(result)}")
         rows = result.report_rows()
-        earlier = [row for row in rows if row.get("from_earlier_run")]
+        answered = self._answered_this_run(result)
+        earlier = [
+            row for row in rows
+            if row.get("from_earlier_run") and str(row.get("task_id")) not in answered
+        ]
         account = self._accounting(result)
         lines += [
             "",
@@ -12237,6 +12263,7 @@ class WriteBatchScheduler:
             "| Task | Outcome | Files touched | Notes |",
             "|------|---------|---------------|-------|",
         ]
+        folded: Set[str] = set()
         for row in rows:
             # `reason` first: it is `_classify`'s own diagnostic (why a
             # partial/clean-failure/no-op-with-bytes-moved outcome landed
@@ -12257,15 +12284,35 @@ class WriteBatchScheduler:
                     if batch_check_could_not_run(row_batch_check_findings(row))
                     else "its check fails"
                 )
+            notes = (row.get("reason") or row.get("summary") or "").replace("|", "/")
+            answer = answered.get(str(row.get("task_id")))
+            if answer is not None and row.get("from_earlier_run"):
+                # Fix round 26 (live run 11 #9, OpenCode fix 02): a task you
+                # answered on this run reads as your answer, its earlier
+                # run's outcome named as what the answer was about; it read
+                # "(earlier run) policy-violation" here beside "## Skipped
+                # at your request" below.
+                label, why = answer
+                folded.add(str(row["task_id"]))
+                lines.append(
+                    f"| {row['task_id']} | {label} | — | "
+                    f"{clip(why.replace('|', '/'), 120)} (earlier run: "
+                    f"{outcome_cell}: {clip(notes, 160)}) |"
+                )
+                continue
             lines.append(
                 f"| {task_cell} | {outcome_cell} | "
                 f"{', '.join(row.get('files_touched') or []) or '—'} | "
-                f"{clip((row.get('reason') or row.get('summary') or '').replace('|', '/'), 160)} |"
+                f"{clip(notes, 160)} |"
             )
         for task_id, reason in sorted(result.human_plan.accepted.items()):
+            if task_id in folded:
+                continue
             label = answered_done_label(result.human_plan, task_id)
             lines.append(f"| {task_id} | {label} | — | {clip(reason.replace('|', '/'), 160)} |")
         for task_id in sorted(result.human_plan.completed):
+            if task_id in folded:
+                continue
             lines.append(f"| {task_id} | completed by hand | — | answered --human-task {task_id}=done |")
         for task_id, reason in sorted(result.not_run.items()):
             lines.append(f"| {task_id} | not run | — | {clip(reason.replace('|', '/'), 160)} |")
