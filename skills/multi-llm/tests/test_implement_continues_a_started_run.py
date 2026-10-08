@@ -19,6 +19,8 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -686,3 +688,93 @@ class TestAFirstImplementSetsNothingAside:
         state = get_or_create_state(repo.plan)
         assert sorted(state.state[TASK_RESET_AT_KEY]) == ["T001", "T002", "T003"]
         assert state.is_phase_started("implement")
+
+
+class TestAStartOverRetiresCodeTaskSkips:
+    """Commit review F1: code-task answers belong to the run being reset.
+
+    A genuine manual task's answer persists; a skipped code task and its
+    dependents are runnable again on either leg of a start-over.
+    """
+
+    def _skip_failed_t002(self, repo):
+        from utils.state_manager import get_or_create_state
+
+        _stop_after_t001(repo)
+        assert implement_orchestrator.main([
+            "--plan-file", str(repo.plan), "--yes", "--exec-subagents",
+            "--resume", "--human-task", "T002=skip",
+        ]) == 0
+        state = get_or_create_state(repo.plan)
+        assert state.get_all_task_statuses() == {
+            "T001": "completed", "T002": "skipped", "T003": "skipped",
+        }
+        assert state.get("human_task_decisions") == {"T002": "skip"}
+
+    def _run(self, repo, capsys, executor, *flags):
+        if executor:
+            code, text, log = _second_run(repo, capsys, *flags)
+            handed = _ids_in(log.read_text()) if log.exists() else set()
+        else:
+            code, text, tasks = TestTheNativeEmit._emit(None, repo, capsys, *flags)
+            handed = set(tasks)
+        assert code == 0, text
+        return handed
+
+    @pytest.mark.parametrize("executor", [False, True], ids=["native", "executor"])
+    @pytest.mark.parametrize("flags", [("--fresh",), ()], ids=["fresh", "finished-run"])
+    def test_start_over_dispatches_the_skipped_code_and_its_dependents(
+        self, repo, capsys, executor, flags,
+    ):
+        from utils.state_manager import get_or_create_state
+
+        self._skip_failed_t002(repo)
+        assert self._run(repo, capsys, executor, *flags) == {"T001", "T002", "T003"}
+        state = get_or_create_state(repo.plan)
+        assert "T002" not in (state.get("human_task_decisions") or {})
+        assert all(status != "skipped" for status in state.get_all_task_statuses().values())
+
+    @pytest.mark.parametrize("executor", [False, True], ids=["native", "executor"])
+    def test_an_ordinary_resume_keeps_the_code_skip(self, repo, capsys, executor):
+        from utils.state_manager import get_or_create_state
+
+        self._skip_failed_t002(repo)
+        assert self._run(repo, capsys, executor, "--resume") == set()
+        state = get_or_create_state(repo.plan)
+        assert state.get_all_task_statuses() == {
+            "T001": "completed", "T002": "skipped", "T003": "skipped",
+        }
+        assert state.get("human_task_decisions") == {"T002": "skip"}
+
+    @pytest.mark.parametrize("executor", [False, True], ids=["native", "executor"])
+    @pytest.mark.parametrize("answer", ["done", "skip"])
+    def test_fresh_preserves_actual_manual_task_answers(
+        self, repo, capsys, executor, answer,
+    ):
+        from utils.state_manager import get_or_create_state
+
+        original = implement_orchestrator.TaskDecomposer
+
+        class WithManualTask(original):
+            def parse_plan(self, content):
+                tasks = super().parse_plan(content)
+                self.tasks["T002"].executor_role = "human"
+                self.tasks["T002"].subagent_type = "human"
+                return tasks
+
+        repo.monkeypatch.setattr(implement_orchestrator, "TaskDecomposer", WithManualTask)
+        _seed_generate_tasks(repo)
+        repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
+            {"path": "src/main.py", "mode": "patch", "content": "# edited\n"}
+        ]))
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", IMPLEMENT_WRITE_IDS)
+        assert implement_orchestrator.main([
+            "--plan-file", str(repo.plan), "--yes", "--exec-subagents",
+            "--human-task", f"T002={answer}",
+        ]) == 0
+        expected = {"T001", "T003"} if answer == "done" else {"T001"}
+        assert self._run(repo, capsys, executor, "--fresh") == expected
+        state = get_or_create_state(repo.plan)
+        assert state.get("human_task_decisions") == {"T002": answer}
+        assert state.get_task_status("T002") == (
+            "completed" if answer == "done" else "skipped")

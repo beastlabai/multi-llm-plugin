@@ -1283,14 +1283,15 @@ def build_schema_repair_prompt(
                 "`declined`, with the\nreason it gave; every item goes in "
                 "exactly one of `ids` and `declined`."
             )
-        if kind == "implement":
-            # A check task's result rides in `check`, which the verdict reads
-            # (``subagent_executor.check_findings_from``): restated as given,
-            # never re-run and never invented.
-            take += (
-                "\nIf it gave a `check` object (a check task's result), restate "
-                "that object as\nit gave it; do not run the check again."
-            )
+        # Every write kind may report checks. A report-only turn cannot
+        # change their results or lose apply-code-fixes' per-command evidence.
+        take += (
+            "\nIf it gave a readable `check` object, include that entire object "
+            "unchanged,\nincluding `passed`, `findings`, `could_not_run` and "
+            "every `listed` command\nand outcome it supplied. Do not omit a "
+            "check or turn a failure into a pass.\nDo not run any check again "
+            "or invent one the previous reply never reported."
+        )
         why = (
             "does not say what\nhappened to every item of the batch"
             if incomplete else "could not\nbe read"

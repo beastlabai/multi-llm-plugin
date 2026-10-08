@@ -619,6 +619,91 @@ class TestThePartialApplicationOffersAWayForward:
         assert "--human-task apply-batch-0=skip: plans/p.md changed since apply-batch-0 stopped" in text
         assert "nothing was dispatched and no file was changed" in text
 
+    @pytest.mark.parametrize("changed", ["items", "prompt", "recorded_id"])
+    def test_a_repeated_skip_cannot_accept_a_different_batch(self, env, changed):
+        """Commit review F2: an already kept result still belongs to its
+        own items and inputs, not every later batch under its numeric id."""
+        calls = []
+        state = FakeState(env.tmp_path / "state.json")
+        tasks = [_two_item_task(env)]
+        respond = _codex_08_respond(env, calls)
+        assert env.scheduler(tasks, respond=respond, state=state).run().exit_code == 3
+        assert env.scheduler(
+            tasks, respond=respond, state=state, resume=True,
+            partial_skips=["apply-batch-0"],
+        ).run().exit_code == 0
+        if changed == "items":
+            tasks = [_two_item_task(env, ids=("new-a", "new-b"))]
+        elif changed == "prompt":
+            tasks = [{**tasks[0], "prompt": tasks[0]["prompt"] + "\nNew review instructions."}]
+        else:
+            target = env.phase_dir / "apply_batch_0.json"
+            data = json.loads(target.read_text())
+            data["verdict"]["task_id"] = "apply-batch-9"
+            target.write_text(json.dumps(data))
+        before = env.plan.read_text()
+
+        refused = env.scheduler(
+            tasks, respond=respond, state=state, resume=True,
+            partial_skips=["apply-batch-0"],
+        ).run()
+
+        assert refused.exit_code == 3
+        assert calls == ["apply-batch-0"], "the stale answer dispatches nothing"
+        assert env.plan.read_text() == before
+        assert refused.stop["kind"] == "answer-refused"
+        why = "changed since it stopped" if changed == "prompt" else "now holds other items"
+        assert why in "\n".join(refused.messages)
+
+    def test_a_repeated_skip_keeps_the_same_batch_after_a_later_shared_edit(self, env):
+        """Later completed batches edit the same plan: their bytes must not
+        make an idempotent answer to the earlier completed batch fail."""
+        calls = []
+        state = FakeState(env.tmp_path / "state.json")
+        tasks = _codex_08_tasks(env)
+        respond = _codex_08_respond(env, calls)
+        assert env.scheduler(tasks, respond=respond, state=state).run().exit_code == 3
+        assert env.scheduler(
+            tasks, respond=respond, state=state, resume=True,
+            partial_skips=["apply-batch-0"],
+        ).run().exit_code == 0
+        assert calls == ["apply-batch-0", "apply-batch-1"]
+        before = env.plan.read_text()
+
+        again = env.scheduler(
+            tasks, respond=respond, state=state, resume=True,
+            partial_skips=["apply-batch-0"],
+        ).run()
+
+        assert again.exit_code == 0, again.messages
+        assert calls == ["apply-batch-0", "apply-batch-1"]
+        assert env.plan.read_text() == before
+        assert list(again.outcomes[0].skipped_items) == ["s0"]
+
+    def test_a_repeated_skip_cannot_trigger_a_new_attempt_of_the_same_batch(self, env):
+        """Matching inputs alone do not suffice if completion evidence has
+        been superseded: an accepted skip never dispatches its own batch."""
+        calls = []
+        state = FakeState(env.tmp_path / "state.json")
+        tasks = [_two_item_task(env)]
+        respond = _codex_08_respond(env, calls)
+        assert env.scheduler(tasks, respond=respond, state=state).run().exit_code == 3
+        assert env.scheduler(
+            tasks, respond=respond, state=state, resume=True,
+            partial_skips=["apply-batch-0"],
+        ).run().exit_code == 0
+        state.update_task_status("apply-batch-0", "failed")
+        state.save()
+
+        refused = env.scheduler(
+            tasks, respond=respond, state=state, resume=True,
+            partial_skips=["apply-batch-0"],
+        ).run()
+
+        assert refused.exit_code == 3
+        assert calls == ["apply-batch-0"]
+        assert "no longer counts as completed" in "\n".join(refused.messages)
+
     @pytest.mark.parametrize("answer,why", [
         ("apply-batch-1", "apply-batch-1 has no result on disk"),
         ("apply-batch-7", "this run holds no batch apply-batch-7"),

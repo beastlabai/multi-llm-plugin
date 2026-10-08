@@ -605,3 +605,89 @@ class TestARecordThatNamesNoTask:
         assert code == 0, err
         assert "[METRICS_NO_TASK_ID] " in err and "pass --task-id <id>" in err, err
         assert _eta_lines(err) == [], err
+        first = json.loads(state_file.read_text())["metrics"]["implement"][0]
+        code, _out, err = _util(
+            capsys, "metrics", "record", "--state-file", str(state_file),
+            "--phase", "implement", "--label", "the first task",
+            "--duration-ms", "4000", "--total-batches", "3", "--batch-index", "1",
+            "--task-id", "T001")
+        assert code == 0, err
+        assert _eta_lines(err) == [
+            "[ETA] implement: task 1/3 failed (timeout) after 0m 4s"]
+        entries = json.loads(state_file.read_text())["metrics"]["implement"]
+        assert len(entries) == 1
+        assert entries[0] == {
+            **{k: v for k, v in first.items() if k != "no_task_id"},
+            "task_id": "T001", "failed": True,
+        }
+
+    @pytest.mark.parametrize("duration", [None, 4000])
+    @pytest.mark.parametrize("task_id", ["T001", "T003"])
+    def test_identity_correction_keeps_one_measurement(self, duration, task_id):
+        state = _native_state(3, 100)
+        _fail(state, "T001", "timeout")
+        _fail(state, "T002", "crash")
+        metrics.record_metric_in_state(
+            state, "implement", "a task", duration_ms=4000,
+            total_batches=3, batch_index=1)
+        line = metrics.record_metric_in_state(
+            state, "implement", "a task", duration_ms=duration,
+            total_batches=3, batch_index=1, task_id=task_id)
+        entries = state["metrics"]["implement"]
+        assert len(entries) == 1
+        assert entries[0]["task_id"] == task_id
+        assert entries[0]["duration_ms"] == 4000
+        assert "no_task_id" not in entries[0]
+        if task_id == "T001":
+            assert entries[0]["failed"] is True
+            assert line == "[ETA] implement: task 1/3 failed (timeout) after 0m 4s"
+        else:
+            assert "failed" not in entries[0]
+            assert "task 1/3 done in 0m 4s" in line
+
+    def test_changed_numbers_do_not_correct_an_ambiguous_measurement(self, capsys):
+        state = _native_state(3, 100)
+        _fail(state, "T001", "timeout")
+        _fail(state, "T002", "crash")
+        metrics.record_metric_in_state(
+            state, "implement", "a task", duration_ms=4000,
+            total_batches=3, batch_index=1)
+        before = dict(state["metrics"]["implement"][0])
+        capsys.readouterr()
+        assert metrics.record_metric_in_state(
+            state, "implement", "a task", duration_ms=5000,
+            total_batches=3, batch_index=1, task_id="T001") is None
+        assert "[METRICS_CONFLICT]" in capsys.readouterr().err
+        assert state["metrics"]["implement"] == [before]
+
+    @pytest.mark.parametrize("label, first_id", [("a task", "T001"), ("T001: task", None)])
+    def test_established_identity_cannot_be_reassigned(self, label, first_id, capsys):
+        state = _native_state(3, 100)
+        _fail(state, "T001", "timeout")
+        _fail(state, "T002", "crash")
+        metrics.record_metric_in_state(
+            state, "implement", label, duration_ms=4000,
+            total_batches=3, batch_index=1, task_id=first_id)
+        before = dict(state["metrics"]["implement"][0])
+        capsys.readouterr()
+        assert metrics.record_metric_in_state(
+            state, "implement", label, duration_ms=4000,
+            total_batches=3, batch_index=1, task_id="T002") is None
+        assert "[METRICS_CONFLICT]" in capsys.readouterr().err
+        assert state["metrics"]["implement"] == [before]
+
+    def test_enriching_measurements_does_not_clear_a_recorded_failure(self):
+        state = _native_state(3, 100)
+        _fail(state, "T001", "timeout")
+        metrics.record_metric_in_state(
+            state, "implement", "a task", duration_ms=4000,
+            total_batches=3, batch_index=1, task_id="T001")
+        line = metrics.record_metric_in_state(
+            state, "implement", "a task", duration_ms=4000, token_count=40,
+            total_batches=3, batch_index=1, failed=False)
+        entries = state["metrics"]["implement"]
+        assert len(entries) == 1
+        assert entries[0]["task_id"] == "T001"
+        assert entries[0]["token_count"] == 40
+        assert entries[0]["failed"] is True
+        assert line == "[ETA] implement: task 1/3 failed (timeout) after 0m 4s"
