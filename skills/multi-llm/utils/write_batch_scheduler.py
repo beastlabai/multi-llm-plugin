@@ -461,6 +461,15 @@ def batch_check_section(
     return lines
 
 
+def findings_clause(findings: Sequence[Any]) -> str:
+    """*findings* as one clause, joined with "; ", each without its own
+    closing stop (``…found 2).; src/…`` read as two marks, fix round 28)."""
+    return "; ".join(
+        without_closing_mark(" ".join(str(item).split())) for item in findings
+        if str(item).strip()
+    )
+
+
 def quoted_findings(findings: Sequence[str], limit: int = 600) -> str:
     """A batch's own check findings, each in double quotes and joined with
     "; ", bounded at *limit* characters: the batch's words, shown as its words
@@ -2057,13 +2066,19 @@ def compose_stop_answers(
     for check_id in checks:
         waiting = sorted(t for t, c in blocked.items() if c == check_id)
         reported = list(findings.get(check_id) or [])
+        # Fix round 28 (live run 12 #7, Claude Code status): the findings
+        # closed the why in brackets, "… review-code (… requires 3.)", which
+        # status's own brackets made "3.))"; they follow a semicolon now,
+        # without their closing stop, as no why ends in one.
         each.append({
             "flags": answer(check_id, "done"),
             "why": (f"accept {check_id}'s check findings: "
                     f"{', '.join(waiting)} then run, told that you accepted "
                     "the findings, and the findings stay listed for "
                     "review-code"
-                    + (f" ({clip('; '.join(reported), 200)})" if reported else "")),
+                    + (f"; {check_id} reported: "
+                       f"{without_closing_mark(clip(findings_clause(reported), 200))}"
+                       if reported else "")),
         })
         each.append({
             "flags": answer(check_id, "skip"),
@@ -8359,13 +8374,17 @@ class WriteBatchScheduler:
             outcome.write_outcome = WRITE_NO_OP
             outcome.status = STATUS_OK
             outcome.check_findings = list(check)
-            shown = "; ".join(check[:3]) + (
+            # Fix round 28 (live run 12 #7, Codex accept 02): a finding that
+            # ends its own sentence read "… `src/config.json`.. No file
+            # changed" here and in summary.md's row; each keeps its words
+            # without its closing stop, and the sentence gets one stop.
+            shown = findings_clause(check[:3]) + (
                 f"; +{len(check) - 3} more" if len(check) > 3 else ""
             )
             outcome.reason = (
                 f"CHECK FINDINGS: {outcome.task_id}'s check ran and reported "
-                f"{len(check)} problem(s): {shown}. No file changed, so the "
-                f"loop continues; the findings are listed in the "
+                f"{len(check)} problem(s): {with_closing_mark(shown)} No file "
+                f"changed, so the loop continues; the findings are listed in the "
                 f"implementation summary and go to review-code."
                 + (
                     " Its reply said `failed`, but it listed what the check "

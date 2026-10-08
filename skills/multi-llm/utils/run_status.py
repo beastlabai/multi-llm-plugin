@@ -2483,11 +2483,20 @@ def _native_stop_lines(
     lines = [f"      resume with: {resume}"]
     if why:
         # Fix round 22: what the plain resume does, like each answer below.
-        lines.append(f"        ({why})")
+        lines.append(why_line(why))
     for command, answer_why in answers:
         lines.append(f"      or answer the stop with: {command}")
-        lines.append(f"        ({answer_why})")
+        lines.append(why_line(answer_why))
     return lines
+
+
+def why_line(why: str) -> str:
+    """A command's why on the line under it, as plain text two columns in,
+    as the ready section prints it above its command. Fix round 28 (live
+    run 12 #7, Claude Code status): it was bracketed, and a why that ends
+    in a bracket of its own ("… depend on it (T006)", a quoted finding)
+    read "(T006))"."""
+    return f"        {why}"
 
 
 #: How many task ids the still-runnable line names before "and N more".
@@ -3913,7 +3922,8 @@ def _resume_lines(
     # `resume_why` and `util next-command --blocked` relay it.
     why = _stop_resume_why(view) if mode in _WRITE_MODES else None
     if why:
-        lines.append(f"      ({why})")
+        # Fix round 28: under the command, unbracketed (`why_line`).
+        lines.append(why_line(why))
     elif redispatch:
         mode = str(view["run"].get("mode") or view.get("phase") or "")
         if mode in _WRITE_MODES:
