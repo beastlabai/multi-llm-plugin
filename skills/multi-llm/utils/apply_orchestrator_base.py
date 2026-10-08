@@ -997,11 +997,17 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 tests = native_apply_fixes_unverified_line(self.plan_path)
                 if tests:
                     print(f"[TESTS_NOT_RUN] {tests}", file=sys.stderr)
+            # Fix round 26 (live run 11, OpenCode 05: "applied to
+            # plans/racing-game.md" for edits to tasks/tasks.md): the native
+            # leg's closing line names the file its batches edited, as the
+            # executor's progress line does.
+            target = self._completed_target_label()
             print(
                 json.dumps(
                     {
                         "status": "completed",
-                        "message": f"{self.phase_name} phase marked as completed",
+                        "message": f"{self.phase_name} phase marked as completed"
+                        + (f"; its batches edited {target}" if target else ""),
                     }
                 )
             )
@@ -2960,11 +2966,39 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 + (f" (+{len(titles) - 5} more)" if len(titles) > 5 else "")
                 for label, titles in by_label.items()
             )
+            # Fix round 26 (live run 11, OpenCode 05: the host said the task
+            # suggestions went "to plans/racing-game.md"): the file they went to.
+            target = self._applied_to_label()
             notes.append(
                 f"{len(skipped)} {noun} not applied, beside the {applied} "
-                f"applied — {shown} (reasons in summary.md)"
+                f"applied{f' to {target}' if target else ''} — {shown} "
+                "(reasons in summary.md)"
             )
         return notes
+
+    def _completed_target_label(self) -> Optional[str]:
+        """:meth:`_applied_to_label` for the native ``--mark-completed``
+        call, which runs before any setup hook (fix round 26)."""
+        return self._applied_to_label()
+
+    def _applied_to_label(self) -> Optional[str]:
+        """The single file this phase edits, relative to the repository
+        root (``write_target_file``), or ``None`` without one."""
+        target = self.write_target_file()
+        if not target:
+            return None
+        try:
+            from .git_utils import find_git_entry_root
+        except ImportError:  # pragma: no cover - direct script runs
+            from git_utils import find_git_entry_root  # type: ignore
+        try:
+            # The `.git` holder above the plan, walked (no git runs here).
+            start = os.path.dirname(os.path.realpath(self.plan_path))
+            root = os.path.realpath(find_git_entry_root(start) or start)
+            relative = os.path.relpath(os.path.realpath(target), root)
+        except (OSError, ValueError):
+            return target
+        return target if relative.startswith(os.pardir) else relative
 
     def _publish_run_notes(self) -> None:
         """Hand :meth:`run_notes` to the result line and to ``status``.

@@ -170,10 +170,13 @@ class TestAnApplyPhasesNotesReachTheResult:
         orch = self._orchestrator(tmp_path)
         notes = orch.run_notes()
         assert notes[0] == f"consistency warning: {WARNING}"
+        # Fix round 26: the count names the file the items were applied to.
+        target = orch._applied_to_label()
+        assert target and Path(orch.plan_path).name in target
         assert notes[1].startswith(
-            f"1 {orch.item_noun} not applied, beside the 2 applied — skipped by "
-            "judge: T002 combines scene, track generation, validation, and "
-            "helpers [934916bf]")
+            f"1 {orch.item_noun} not applied, beside the 2 applied to {target} "
+            "— skipped by judge: T002 combines scene, track generation, "
+            "validation, and helpers [934916bf]")
 
     def test_they_reach_the_notice_and_the_status_file(self, tmp_path):
         from utils import cli_common
