@@ -245,8 +245,39 @@ def wrapper(tmp_path, monkeypatch):
     return FakeWrapper(tmp_path / "wrapper", monkeypatch)
 
 
+#: The temp dir every process on the machine shares. :func:`_slot_dirs` never
+#: scans it: another pytest worker's, or another run's, live slots are there,
+#: and the cleanup assertions read them as this test's leftovers (the user's
+#: commit review of 4ca1f34..3e8ff80, 2026-10-08).
+_SHARED_TEMP = os.path.realpath(tempfile.gettempdir())
+
+
+def use_own_temp_base(tmp_path: Path, monkeypatch) -> Path:
+    """Point ``gettempdir()`` at a directory of this test's own, where every
+    slot ``TMPDIR``, probe directory and seed the code under test makes lands,
+    with a fresh first-call sweep memo. For other test files too."""
+    base = Path(os.path.realpath(tmp_path)) / "own-temp"
+    base.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(base))
+    monkeypatch.setattr(landlock_dispatch, "_SWEPT_BASES", set())
+    return base
+
+
+@pytest.fixture(autouse=True)
+def own_temp_base(tmp_path, monkeypatch):
+    return use_own_temp_base(tmp_path, monkeypatch)
+
+
 def _slot_dirs():
+    """The slot directories in this test's own temp dir (:func:`use_own_temp_base`).
+
+    A test that saw a slot also asserts it was made in that directory, so an
+    empty answer here is never a scan of the wrong place."""
     base = os.path.realpath(tempfile.gettempdir())
+    assert base != _SHARED_TEMP, (
+        "_slot_dirs() would scan the shared temp dir, which holds other "
+        "processes' slots; give the test its own with use_own_temp_base()"
+    )
     return {name for name in os.listdir(base) if name.startswith(landlock_dispatch.SLOT_PREFIX)}
 
 
@@ -320,8 +351,32 @@ def _walk(repo, **kwargs):
     return rung, walk, dict(tails)
 
 
+class TestTheSlotScanIsTheTestsOwn:
+    def test_another_process_s_live_slot_is_not_this_test_s_leftover(self, own_temp_base):
+        """The cleanup assertions compare ``_slot_dirs()`` before and after the
+        code under test. Scanning the shared temp dir, they read a slot another
+        pytest worker or another run made meanwhile as this test's leftover
+        (the user's commit review, 2026-10-08: three cleanup assertions failed
+        that way under ``-n 4``). Stands in for that process: a slot-named
+        directory the sweep never touches, made in the shared temp dir."""
+        before = _slot_dirs()
+        elsewhere = tempfile.mkdtemp(
+            prefix=f"{landlock_dispatch.SLOT_PREFIX}elsewhere-", dir=_SHARED_TEMP,
+        )
+        try:
+            assert os.path.basename(elsewhere) not in _slot_dirs()
+            assert _slot_dirs() <= before
+        finally:
+            os.rmdir(elsewhere)
+        # The test's own slot is still seen.
+        with landlock_dispatch.slot_tmpdir() as mine:
+            assert Path(mine).parent == own_temp_base
+            assert _slot_dirs() == before | {os.path.basename(mine)}
+        assert _slot_dirs() == before
+
+
 class TestTheWalk:
-    def test_a_passing_probe_takes_the_rung_and_cleans_up(self, repo, wrapper):
+    def test_a_passing_probe_takes_the_rung_and_cleans_up(self, repo, wrapper, own_temp_base):
         before = _slot_dirs()
         rung, walk, tails = _walk(repo)
         assert (rung, walk) == ("plugin-landlock", (("plugin-landlock", "taken"),))
@@ -336,6 +391,7 @@ class TestTheWalk:
         # The seed, the probe's TMPDIR and the walk's own scratch dir are gone.
         assert not os.path.exists(probe["env"]["MULTI_LLM_CANARY_SEEDED"])
         assert not os.path.exists(probe["env"]["TMPDIR"])
+        assert Path(probe["env"]["TMPDIR"]).parent == own_temp_base
         assert not (repo / ".multi-llm").exists()
         assert _slot_dirs() <= before
 
@@ -760,7 +816,9 @@ def _spawn_on_rung(repo, kind, *, timeout=30, profile=PROFILE_AGENT_READONLY, re
 
 class TestTheWrappedSpawn:
     @pytest.mark.parametrize("kind", sorted(READ_KINDS))
-    def test_every_read_kind_spawns_the_wrapped_codex(self, repo, wrapper, runner_env, jail_home, kind):
+    def test_every_read_kind_spawns_the_wrapped_codex(
+        self, repo, wrapper, runner_env, jail_home, kind, own_temp_base,
+    ):
         runner_env.use("codex:gpt-5.5")
         before = _slot_dirs()
         capture = _spawn_on_rung(repo, kind)
@@ -780,6 +838,7 @@ class TestTheWrappedSpawn:
         assert capture.argv[:4] == [sys.executable, "-I", "-S", str(wrapper.path)]
         assert capture.sandbox_rung == "plugin-landlock"
         assert not os.path.exists(row["env"]["TMPDIR"])
+        assert Path(row["env"]["TMPDIR"]).parent == own_temp_base
         assert _slot_dirs() <= before
         assert os.environ.get("TMPDIR") != row["env"]["TMPDIR"]
 
