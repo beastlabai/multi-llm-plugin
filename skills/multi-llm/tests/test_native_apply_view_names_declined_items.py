@@ -101,7 +101,8 @@ def _status(capsys, *flags) -> str:
     return capsys.readouterr().out
 
 
-DECLINED_LINE = f"      not applied, declined by its batch: g1 in apply-batch-0 ({REASON})"
+DECLINED_LINE = (
+    f"      1 declined by its batch (not applied): g1 in apply-batch-0 ({REASON})")
 
 
 class TestTheNativeApplyBlockNamesWhatItsBatchesDidNotApply:
@@ -129,9 +130,10 @@ class TestTheNativeApplyBlockNamesWhatItsBatchesDidNotApply:
                 "--skipped", "g1b")
         out = _status(capsys, "--view", "run")
         assert DECLINED_LINE in out.splitlines(), out
+        # Fix round 26: the clause says "skipped at your request" once.
         assert any(line.startswith(
-            "      not applied, skipped at your request: g1b in apply-batch-0 "
-            "(skipped at your request: ") for line in out.splitlines()), out
+            "      1 skipped at your request (not applied): g1b in apply-batch-0 "
+            "(the batch did not report it applied") for line in out.splitlines()), out
 
     def test_json_carries_them(self, plan, capsys):
         phase_dir = _native_apply(plan)

@@ -60,7 +60,9 @@ class TestStatusProgressLine:
                                 "id": "c8fe719158c8d2be", "reason": reason}],
         }
         text = " ".join(run_status._mirror_text("write_subagents", mirror))
-        assert "declined by its batch: c8fe7191 in apply-fix-batch-0 (" in text
+        assert (
+            "2/3 items applied; 1 declined by its batch (not applied): c8fe7191 "
+            "in apply-fix-batch-0 (") in text
         return text[text.index("declined by its batch"):]
 
     def test_codex_run_9_declined_reason(self):
