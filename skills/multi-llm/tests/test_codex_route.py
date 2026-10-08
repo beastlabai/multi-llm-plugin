@@ -596,15 +596,35 @@ _EDIT_VERB = re.compile(r"\b(edit|open|modify|change)\b", re.I)
 _PACKAGED_PLACES = ("plugins/cache", "$CODEX_HOME", "skill directory", "installed inside")
 
 
+#: The lowest codex the plugin route was measured working on: T10's container
+#: rows `codex-next-command` / `codex-package-next-command` (2026-10-01,
+#: capabilities.yaml's `next_command` promotion) ran it on codex-cli 0.159.2.
+#: It is what `min_host_version` and every doc publish. A container pin bump
+#: does not move it — the ingestion stamp follows the pin, the floor does not
+#: (review 24, pins #6: 5efbcca raised it to 0.161.0 with nothing measured to
+#: break on 0.159.2-0.160.1); a measured break does.
+MEASURED_CODEX_FLOOR = "0.159.2"
+
+
+def _version_key(version: str):
+    return tuple(int(part) for part in re.findall(r"\d+", version)[:3])
+
+
 def _floors():
-    """(codex floor, python floor) — from ingestion_rules when it exists."""
+    """(codex floor, python floor): the published floor and the server's own.
+
+    The codex half is ``min_host_version``, never ingestion_rules'
+    ``SOURCE_CODEX_VERSION``: that stamp records which codex the validator rules
+    were re-checked against and follows the container pin, which is not what a
+    user needs to install.
+    """
     if INGESTION_RULES.is_file():
         spec = importlib.util.spec_from_file_location(
             "_codex_ingestion_rules", INGESTION_RULES
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        return module.SOURCE_CODEX_VERSION, tuple(module.MIN_PYTHON)
+        return PACKAGE["min_host_version"], tuple(module.MIN_PYTHON)
     return PACKAGE["min_host_version"], host_install.CODEX_SERVER_MIN_PYTHON
 
 
@@ -668,7 +688,29 @@ class TestDocs:
         )
         # The host layer's copy of the python floor agrees with its owner.
         assert host_install.CODEX_SERVER_MIN_PYTHON == python_floor
-        assert PACKAGE["min_host_version"] == codex_floor
+
+    def test_the_published_codex_floor_is_measured_and_never_above_the_pins(self):
+        """The floor a user reads is the lowest codex measured to work, and it
+        is never newer than the codex the container or the ingestion rules
+        were checked on (floor <= pin, not floor == pin)."""
+        floor = PACKAGE["min_host_version"]
+        assert floor == MEASURED_CODEX_FLOOR
+        pins = json.loads(
+            (SKILL_ROOT / "tests" / "container" / "package.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        pinned = pins["dependencies"]["@openai/codex"]
+        assert _version_key(floor) <= _version_key(pinned), (floor, pinned)
+        if INGESTION_RULES.is_file():
+            spec = importlib.util.spec_from_file_location(
+                "_codex_ingestion_rules_stamp", INGESTION_RULES
+            )
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            assert _version_key(floor) <= _version_key(
+                module.SOURCE_CODEX_VERSION
+            )
 
     def test_the_docs_publish_the_disclaimer_and_the_file_route(self):
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
