@@ -7280,6 +7280,9 @@ def dispatch_task(
     tree_fingerprint: Optional[Callable[[Dict[str, Any]], Any]] = None,
     nothing_changed: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None,
     incomplete_report: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None,
+    restate_findings: Optional[
+        Callable[[Dict[str, Any]], Optional[Tuple[str, Sequence[str]]]]
+    ] = None,
 ) -> TaskOutcome:
     """Dispatch one task and return its :class:`TaskOutcome` (D3k classified).
 
@@ -7397,6 +7400,20 @@ def dispatch_task(
             like any; a re-ask that cannot restate it (prose, a timeout)
             leaves the original reply to be classified, and one that moved a
             file is a partial application. A hook that raises is "no re-ask".
+        restate_findings: The implement lane's third question before
+            ``after_result`` (fix round 28), with the same context:
+            ``(problem, accepted findings)`` when the reply's own check holds
+            an accepted finding verbatim with words added (live run 12: "…
+            (known problem the user accepted in T002)"), or ``None``. It
+            sends the same one report re-ask, the problem as its one problem
+            and the check's findings open to restating
+            (``restate_findings=True``), and nothing is recorded as accepted
+            by it: the restated report is classified like any, and only its
+            ``findings`` and ``note`` are taken, through
+            :func:`merge_restated_check`, which keeps the first report's
+            whole ``check`` unless every finding it changed was cut down to
+            one of the accepted findings, word for word. A hook that raises
+            is "no re-ask".
     """
     task_id = str(task.get("task_id", ""))
     kind = str(task.get("kind", ""))
@@ -7590,6 +7607,9 @@ def dispatch_task(
     # it ran its checks. Apply this before persisting the restated report so
     # the result file and the scheduler's verdict read the same evidence.
     repair_check: Optional[Dict[str, Any]] = None
+    # Fix round 28: a restatement of a check's findings, the first report's
+    # check and the accepted findings a changed finding may be cut down to.
+    restate_check: Optional[Tuple[Dict[str, Any], List[str]]] = None
     # Fix round 18: the `after_result` context of a readable report that left
     # items out, kept while its re-ask runs, so a re-ask that cannot restate
     # it leaves this one to be classified.
@@ -7760,6 +7780,10 @@ def dispatch_task(
             if status == STATUS_OK:
                 if repair_check is not None and isinstance(data, dict):
                     data = {**data, "check": copy.deepcopy(repair_check)}
+                elif restate_check is not None and isinstance(data, dict):
+                    data = {**data, "check": merge_restated_check(
+                        restate_check[0], data.get("check"), restate_check[1],
+                    )}
                 try:
                     written = persist_result(task, phase_dir, data)
                 except ResultRejected as exc:
@@ -7832,6 +7856,7 @@ def dispatch_task(
                             attempt_repair = None
                             repair_baseline = None
                             repair_check = None
+                            restate_check = None
                             print(
                                 f"[exec-subagents] {task_id}: the reply says the "
                                 f"batch was applied, but "
@@ -7849,6 +7874,16 @@ def dispatch_task(
                         and attempt_repair is None
                         and ladder.schema_repairs_left > 0 else None
                     )
+                    # Fix round 28: or its own check holds an accepted
+                    # finding with words added; the same one re-ask.
+                    restate = (
+                        _ask_restate_findings(restate_findings, result_context)
+                        if restate_findings is not None and not reask_why
+                        and not resend_why and attempt_repair is None
+                        and ladder.schema_repairs_left > 0 else None
+                    )
+                    if restate is not None:
+                        reask_why = restate[0]
                     reask = (
                         _incomplete_report_reask(
                             kind=kind, prompt=prompt, task=task,
@@ -7862,13 +7897,24 @@ def dispatch_task(
                                  "jail_request": jail_request}
                                 if wrapping is not None else {}
                             ),
+                            restate_findings=restate is not None,
                         ) if reask_why else None
                     )
                     if reask is not None:
                         # Rule 7, second form (fix round 18): the report read
                         # but left items out; the runner restates it once.
                         reask_prompt, repair_baseline = reask
-                        repair_check = _report_check_evidence(data)
+                        if restate is not None:
+                            # Fix round 28: only its findings and note may
+                            # change, and only as `merge_restated_check` lets.
+                            original = data.get("check") if isinstance(data, dict) else None
+                            restate_check = (
+                                (copy.deepcopy(original), [str(a) for a in restate[1]])
+                                if isinstance(original, dict) else None
+                            )
+                            repair_check = None
+                        else:
+                            repair_check = _report_check_evidence(data)
                         # Fix round 19: a readable report, so its own status
                         # and no failure capture (the re-ask's prompt file
                         # quotes the reply).
@@ -7903,6 +7949,17 @@ def dispatch_task(
                         attempt_prompt = reask_prompt
                         attempt_repair = REPAIR_INCOMPLETE_REPORT
                         attempt_resend = None
+                        if restate is not None:
+                            print(
+                                f"[exec-subagents] {task_id}: its own check "
+                                f"reports a finding the user accepted with "
+                                f"words added; asking {runner} once to restate "
+                                f"its report without touching any file (report "
+                                f"re-ask, attempt {attempt_index + 1}). Nothing "
+                                f"is recorded as accepted unless the restated "
+                                f"finding is the accepted one, word for word."
+                            )
+                            continue
                         print(
                             f"[exec-subagents] {task_id}: the batch's report "
                             f"leaves some of its items out of both `ids` and "
@@ -8323,6 +8380,78 @@ def _ask_incomplete_report(
     return str(answer) if answer else None
 
 
+def _ask_restate_findings(
+    hook: Optional[Callable[[Dict[str, Any]], Optional[Tuple[str, Sequence[str]]]]],
+    context: Dict[str, Any],
+) -> Optional[Tuple[str, List[str]]]:
+    """The ``restate_findings`` hook's answer (fix round 28): ``(problem,
+    accepted findings)``, or ``None`` (no hook, no answer, a malformed one,
+    or it raised — a re-ask is never sent on "could not tell")."""
+    if hook is None:
+        return None
+    try:
+        answer = hook(context)
+    except Exception as exc:  # noqa: BLE001 - no re-ask without an answer
+        print(
+            f"[exec-subagents] warning: could not tell whether "
+            f"{context.get('task_id')}'s check findings need restating "
+            f"({type(exc).__name__}); its reply is classified as it stands.",
+            file=sys.stderr,
+        )
+        return None
+    if not answer or len(answer) != 2 or not str(answer[0] or "").strip():
+        return None
+    allowed = [str(item) for item in (answer[1] or []) if str(item).strip()]
+    return (str(answer[0]), allowed) if allowed else None
+
+
+def merge_restated_check(
+    original: Dict[str, Any], restated: Any, allowed: Sequence[str],
+) -> Dict[str, Any]:
+    """The ``check`` a restated report is classified with (fix round 28):
+    the first report's whole ``check`` — ``passed``, ``ran``, ``listed``,
+    everything its checks observed, as :func:`_report_check_evidence` keeps
+    it across any report-only turn — with only two things taken from the
+    restatement:
+
+    * its ``findings``, when every finding of the first report it changed
+      was cut down to one of *allowed* (the accepted findings the re-ask
+      named), whitespace aside, that the changed finding held word for word.
+      A restatement that drops a finding, rewords one or turns the check
+      into a pass keeps the first report's findings: a report-only turn ran
+      no check, so it can say less about one only by cutting the words the
+      re-ask said were not the check's. A finding it adds is kept.
+    * its ``note``, when it is a non-blank string.
+
+    Never a classification: what is accepted is still decided by
+    ``write_batch_scheduler.split_accepted_findings`` on what this returns.
+    """
+    merged = copy.deepcopy(original)
+    if not isinstance(restated, dict):
+        return merged
+
+    def plain(text: Any) -> str:
+        return " ".join(str(text or "").split())
+
+    before = batch_check_findings({"check": original}) or []
+    candidate = copy.deepcopy(original)
+    candidate["findings"] = copy.deepcopy(restated.get("findings"))
+    after = batch_check_findings({"check": candidate}) or []
+    accepted = {plain(item) for item in allowed if plain(item)}
+    changed = [finding for finding in before if finding not in after]
+    added = [finding for finding in after if finding not in before]
+    cut_down = all(
+        any(plain(new) in accepted and plain(new) in plain(old) for new in added)
+        for old in changed
+    )
+    if after and cut_down:
+        merged["findings"] = candidate["findings"]
+    note = restated.get("note")
+    if isinstance(note, str) and note.strip():
+        merged["note"] = note
+    return merged
+
+
 def _incomplete_report_reask(
     *,
     kind: str,
@@ -8338,6 +8467,7 @@ def _incomplete_report_reask(
     tree_fingerprint: Optional[Callable[[Dict[str, Any]], Any]],
     fingerprint_context: Dict[str, Any],
     budget_kwargs: Dict[str, Any],
+    restate_findings: bool = False,
 ) -> Optional[Tuple[str, Any]]:
     """``(re-ask prompt, files' state)`` when the report re-ask for an
     incomplete report may go out, else ``None`` (fix round 18).
@@ -8347,6 +8477,9 @@ def _incomplete_report_reask(
     the attempt's stream, a prompt the transport carries — and then the
     ladder's grant, which spends the schema-repair allowance. Any guard that
     does not hold leaves the reply to be classified as it stands.
+    *restate_findings* (fix round 28) asks for the restatement of a check
+    finding instead of the items' account (the re-ask prompt's
+    ``restate_findings`` form); the guards and the grant are the same.
     """
     reply_text = _reply_text(provider, capture.stdout)
     if not _write_report_repairable(capture, reply_text, tree_fingerprint):
@@ -8354,7 +8487,7 @@ def _incomplete_report_reask(
     reask_prompt = build_schema_repair_prompt(
         kind, prompt, [why], previous_reply=reply_text,
         expected_ids=[str(item) for item in task.get("expected_ids") or []],
-        incomplete=True,
+        incomplete=not restate_findings, restate_findings=restate_findings,
     )
     if _prompt_over_budget(
         provider, model, reask_prompt, transport, profile, **budget_kwargs,

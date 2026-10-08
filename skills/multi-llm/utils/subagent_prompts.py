@@ -1222,6 +1222,7 @@ def build_schema_repair_prompt(
     previous_reply: Optional[str] = None,
     expected_ids: Optional[Sequence[str]] = None,
     incomplete: bool = False,
+    restate_findings: bool = False,
 ) -> str:
     """The one schema-repair re-ask: why the reply was rejected and what to send.
 
@@ -1256,6 +1257,13 @@ def build_schema_repair_prompt(
     (Codex racing run 7: a fix left alone on purpose was mentioned only in
     ``notes``). The re-ask says so instead of "could not be read"; *errors*
     name the items.
+
+    *restate_findings* (``implement``, fix round 28): the report was read,
+    but a finding of its own ``check`` holds a finding the user accepted
+    with words of the runner's added (live run 12). The re-ask says so, and
+    its ``check`` paragraph lets that finding be cut down to the accepted
+    finding, with the words cut moved to ``note``, and nothing else in the
+    ``check`` change; *errors* name the finding and the accepted one.
 
     Raises:
         KeyError: ``kind`` has no entry in :data:`SCHEMA_REPAIR_SHAPES`.
@@ -1299,15 +1307,31 @@ def build_schema_repair_prompt(
             )
         # Every write kind may report checks. A report-only turn cannot
         # change their results or lose apply-code-fixes' per-command evidence.
-        take += (
-            "\nIf it gave a readable `check` object, include that entire object "
-            "unchanged,\nincluding `passed`, `findings`, `ran`, `not_run`, "
-            "`could_not_run` and every `listed` command\nand outcome it supplied. "
-            "Do not omit a check or turn a failure into a pass.\nDo not run any "
-            "check again or invent one the previous reply never reported."
-        )
+        if restate_findings:
+            # Fix round 28: only the finding the problem names may change,
+            # and only by cutting it down to the accepted one.
+            take += (
+                "\nInclude its `check` object as it gave it: `passed`, `ran`, "
+                "`not_run`,\n`could_not_run` and every `listed` command and "
+                "outcome unchanged. In `findings`,\nchange only what the "
+                "problem above asks: a finding may be cut down to the\n"
+                "accepted finding it names, never reworded and never given "
+                "words of yours, and\nthe words you cut go in the `check` "
+                "object's `note`. Do not omit a finding or\nturn a failure "
+                "into a pass. Do not run any check again or invent one the\n"
+                "previous reply never reported."
+            )
+        else:
+            take += (
+                "\nIf it gave a readable `check` object, include that entire object "
+                "unchanged,\nincluding `passed`, `findings`, `ran`, `not_run`, "
+                "`could_not_run` and every `listed` command\nand outcome it supplied. "
+                "Do not omit a check or turn a failure into a pass.\nDo not run any "
+                "check again or invent one the previous reply never reported."
+            )
         why = (
-            "does not say what\nhappened to every item of the batch"
+            "has a check finding\nthat needs restating" if restate_findings
+            else "does not say what\nhappened to every item of the batch"
             if incomplete else "could not\nbe read"
         )
         return f'''You are re-sending the report of a batch of edits. A previous turn

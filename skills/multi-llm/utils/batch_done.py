@@ -140,6 +140,7 @@ try:
         check_findings_line,
         HALF_APPLIED_PREFIX,
         accepted_findings_for,
+        accepted_findings_with_words_added,
         batch_check_accepted_line,
         batch_check_line,
         BLOCKED_BY_CHECK_PREFIX,
@@ -151,6 +152,7 @@ try:
         split_accepted_findings,
         transitive_dependents,
         upstream_held_check,
+        words_added_to,
     )
     from .write_prompt import (
         WritePromptError, changed_since_bound, check_tree_fingerprint,
@@ -190,6 +192,7 @@ except ImportError:  # pragma: no cover - direct script invocation
         check_findings_line,
         HALF_APPLIED_PREFIX,
         accepted_findings_for,
+        accepted_findings_with_words_added,
         batch_check_accepted_line,
         batch_check_line,
         BLOCKED_BY_CHECK_PREFIX,
@@ -201,6 +204,7 @@ except ImportError:  # pragma: no cover - direct script invocation
         split_accepted_findings,
         transitive_dependents,
         upstream_held_check,
+        words_added_to,
     )
     from utils.write_prompt import (  # type: ignore
         WritePromptError, changed_since_bound, check_tree_fingerprint,
@@ -209,6 +213,7 @@ except ImportError:  # pragma: no cover - direct script invocation
 
 
 __all__ = [
+    "FINDING_RESTATE_MARKER",
     "BATCH_DECLINED_MARKER",
     "BATCH_SKIPPED_MARKER",
     "CHECK_BLOCKED_MARKER",
@@ -576,21 +581,36 @@ def record_batch(
         update_task_status_in_state(state, task_id, status, reason)
         blocked: List[str] = []
         accepted_again: Dict[str, List[str]] = {}
+        restate: Optional[Dict[str, Any]] = None
         if kind == "implement" and batch_check:
             # Fix round 22: what only repeats findings the user accepted for
             # a check is that check's, never this task's own failure (the
             # executor's reading, `split_accepted_findings`). Fix round 23:
             # only the checks this task was told were accepted, and none
             # whose failure is its own job (`accepted_findings_for`).
-            own, accepted_again = split_accepted_findings(
-                batch_check, accepted_findings_for(
-                    [t for t in (document.get("batches") or document.get("tasks") or [])
-                     if isinstance(t, dict)],
-                    task, state,
-                ),
+            accepted = accepted_findings_for(
+                [t for t in (document.get("batches") or document.get("tasks") or [])
+                 if isinstance(t, dict)],
+                task, state,
             )
+            reported = list(batch_check)
+            own, accepted_again = split_accepted_findings(batch_check, accepted)
             if accepted_again:
                 batch_check = own
+            # Fix round 28: a finding that holds an accepted one word for
+            # word with words added stays the task's own; the host is told
+            # how to record it again restated (`main`), never told it is
+            # accepted.
+            flagged = accepted_findings_with_words_added(own, accepted)
+            if flagged:
+                swap = {finding: accepted_text for finding, _c, accepted_text in flagged}
+                added = [words_added_to(finding, text) for finding, _c, text in flagged]
+                restate = {
+                    "flagged": flagged,
+                    "findings": [swap.get(finding, finding) for finding in reported],
+                    "note": clip("; ".join(
+                        part for part in [note or "", *added] if part), CHECK_NOTE_MAX_CHARS),
+                }
         if kind == "implement":
             set_task_check_findings_in_state(state, task_id, check_findings)
             set_task_check_tree_in_state(state, task_id, tree)
@@ -677,6 +697,7 @@ def record_batch(
         "partial": bool(partial),
         "check_not_recorded": result_left_out,
         "note": note,
+        "restate": restate,
     }
 
 
@@ -720,6 +741,46 @@ def _record_again_call(args: argparse.Namespace, result_flag: str) -> str:
         parts.extend(f"{flag} {shlex.quote(str(value))}" for value in values or [])
     parts.append(result_flag)
     return " ".join(parts)
+
+
+#: The line ``util batch-done`` prints for a finding that holds a finding
+#: the user accepted, word for word, with words added (fix round 28).
+FINDING_RESTATE_MARKER = "[FINDING_RESTATE]"
+
+
+def finding_restate_line(
+    args: argparse.Namespace, task_id: str, restate: Dict[str, Any],
+) -> str:
+    """The :data:`FINDING_RESTATE_MARKER` line (fix round 28, live run 12:
+    Claude Code's host recorded T007's "… (known problem the user accepted
+    in T002)" as written, and the strict match read it as T007's own
+    failure). It names each such finding and the accepted finding it holds,
+    says it is recorded as the task's own failure, and gives the one call
+    that records the task again with the accepted finding alone and the
+    added words as its ``--note`` — for the host to run only when those
+    words are its subagent's comment. The plugin never records it as
+    accepted itself (``write_batch_scheduler.accepted_findings_with_words_added``)."""
+    flagged = list(restate.get("flagged") or [])
+    named = "; ".join(
+        f"its finding \"{clip(finding, 160)}\" holds the finding the user "
+        f"accepted for {check_id} word for word, with words added"
+        for finding, check_id, _accepted in flagged
+    )
+    flags = "--own-check findings " + " ".join(
+        f"--finding {shlex.quote(str(finding))}"
+        for finding in restate.get("findings") or []
+    )
+    if restate.get("note"):
+        flags += f" --note {shlex.quote(str(restate['note']))}"
+    return (
+        f"{FINDING_RESTATE_MARKER} {task_id}: {named}, so it is recorded as "
+        f"{task_id}'s own failure. If those added words are its subagent's "
+        f"comment, record {task_id} again with the accepted finding alone and "
+        f"the words as its note: {_record_again_call(args, flags)} (that "
+        f"record replaces this one, and the line it prints is the one to "
+        f"follow). If they report something the check printed beyond the "
+        f"accepted finding, leave the record as it is."
+    )
 
 
 def check_not_recorded_line(
@@ -1326,6 +1387,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"is not a check of {task_id}'s that fails."
         )
     failing = written.get("batch_check") or []
+    restate = written.get("restate")
     if failing:
         # Fix round 14: the native leg's counterpart of the executor's line.
         print(
@@ -1335,6 +1397,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"final report that this check fails: never report the phase as a "
             f"clean success."
         )
+    if restate:
+        # Fix round 28: what to run when the added words are a comment;
+        # the plugin never records such a finding as accepted itself.
+        print(finding_restate_line(args, written["task_id"], restate))
     ignored = written.get("listed_ignored") or []
     if ignored:
         print(
