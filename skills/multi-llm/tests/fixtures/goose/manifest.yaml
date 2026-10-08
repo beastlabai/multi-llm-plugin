@@ -343,15 +343,17 @@ rows:
       (system prompt, tool schemas, and conversation) exceeds the model's
       effective context window, and there are no tool responses to remove. …`
       (1.41.0: `… Failed to compact: context limit exceeded even after removing
-      all tool responses.`). Two separate misses follow. That sentence matches
-      no member of base.CONTEXT_OVERFLOW_MARKERS — the nearest, `exceeds the
-      (?:model'?s )?(?:maximum )?context (?:window|length)`, is one word short
-      (`effective`) — and `Ran into this error TRYING TO COMPACT:` does not
-      match the adapter's own `re.compile(r"ran into this error:")` either — the
-      colon moved. So the measured classification is **None**, i.e.
-      transport-shaped, i.e. the executor spends its whole bounded-retry budget
-      on the one condition §7.2 declares terminal. One compaction attempt is
-      inside the capture (request 4; 1.41.0 made five in 0.26 s).
+      all tool responses.`). It is a TEXT part, so it carries no error `kind`
+      for `GooseProvider.classify_failure` to read, and `Ran into this error
+      TRYING TO COMPACT:` does not match the adapter's own
+      `re.compile(r"ran into this error:")` — the colon moved. It classified
+      **None** (transport-shaped: the executor spent its bounded-retry budget on
+      the one condition §7.2 declares terminal) until base
+      CONTEXT_OVERFLOW_MARKERS' `exceeds the (?:model'?s )?(?:maximum
+      |effective )?context (?:window|length)` row learned `effective`
+      (2026-10-08, review 24 pins #4); it is now `context_length_exceeded`. One
+      compaction attempt is inside the capture (request 4; 1.41.0 made five in
+      0.26 s).
     expect:
       salvage: none
       success: false
@@ -361,7 +363,7 @@ rows:
         - "Failed to compact: the base prompt"
         - "effective context window"
         - "systemNotification"
-      classify_failure: null
+      classify_failure: "context_length_exceeded"
 
   # ----- beyond §6.2's twelve, graded the same way -------------------------- #
 

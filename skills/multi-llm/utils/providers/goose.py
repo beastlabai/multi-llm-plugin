@@ -6,6 +6,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
 from .base import (
+    STATUS_AUTH_FAILED,
+    STATUS_CONTEXT_LENGTH_EXCEEDED,
+    STATUS_RATE_LIMITED,
     InternalRetryEnvelope,
     LLMProvider,
     ReasoningLadder,
@@ -294,6 +297,38 @@ class GooseProvider(LLMProvider):
         except (AttributeError, KeyError, TypeError, ValueError):
             return stdout, stderr
 
+    def classify_failure(
+        self, stdout: str, stderr: str, exit_code: int = 0
+    ) -> Optional[str]:
+        """goose's own error ``kind`` first, the declared tables second.
+
+        goose 1.53.0 writes a provider failure as a ``{"type": "error",
+        "kind": …}`` part of the last assistant message, and ``kind`` is an
+        enum in goose's source (:data:`ERROR_KIND_CATEGORIES`), so it is the
+        verdict where the message beside it is prose a release can reword —
+        the 1.53.0 re-capture reworded the context-overflow sentence and it
+        matched no marker, so the run was retried as transport (review 24,
+        pins #4). Only the last assistant message's error parts are read, and
+        only goose builds those (``Message::from_provider_error``), so a
+        model's answer cannot supply a kind. ``other``, a kind this table
+        does not know, or no error part at all falls through to the tables
+        over :meth:`vendor_text`, which still decide goose's text-part
+        failures (the compaction report a context overflow produces is a text
+        part, not an error part). The kind is read off ``stdout`` itself, not a
+        second application of :meth:`vendor_text` (the base keeps exactly one):
+        only ``role: "assistant"`` messages are read, which is every message
+        that reduction keeps.
+        """
+        try:
+            envelope = json.loads(stdout)
+        except (TypeError, ValueError):
+            envelope = None
+        for kind in last_assistant_error_kinds(envelope):
+            category = ERROR_KIND_CATEGORIES.get(kind)
+            if category is not None:
+                return category
+        return super().classify_failure(stdout, stderr, exit_code)
+
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
         """Parse the single JSON envelope emitted by goose --output-format json.
 
@@ -398,6 +433,36 @@ class GooseProvider(LLMProvider):
 EMPTY_RESPONSE_NOTICE = "The model returned an empty response."
 
 
+#: goose's ``MessageErrorKind`` (``crates/goose-provider-types/src/conversation/
+#: message.rs`` at v1.53.0: ``Authentication``, ``ContextLengthExceeded``,
+#: ``CreditsExhausted``, ``#[serde(other)] Other``, serialized camelCase) →
+#: the category it is. Out of credits is the codebase's quota category, the
+#: one ``insufficient_quota`` and muse's ``api error 402`` land on; ``other``
+#: is left to the tables.
+ERROR_KIND_CATEGORIES = {
+    "authentication": STATUS_AUTH_FAILED,
+    "contextLengthExceeded": STATUS_CONTEXT_LENGTH_EXCEEDED,
+    "creditsExhausted": STATUS_RATE_LIMITED,
+}
+
+
+def _last_assistant_error_parts(envelope: Any) -> List[Dict[str, Any]]:
+    """The last assistant message's ``type: "error"`` parts. Never raises."""
+    messages = envelope.get("messages") if isinstance(envelope, dict) else None
+    if not isinstance(messages, list):
+        return []
+    parts: List[Dict[str, Any]] = []
+    for message in messages:
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            content = message.get("content")
+            parts = [
+                part
+                for part in (content if isinstance(content, list) else [])
+                if isinstance(part, dict) and part.get("type") == "error"
+            ]
+    return parts
+
+
 def last_assistant_error(envelope: Any) -> Optional[str]:
     """The last assistant message's ``type: "error"`` parts' ``message``s, joined.
 
@@ -406,22 +471,21 @@ def last_assistant_error(envelope: Any) -> Optional[str]:
     1.41.0 wrote the same sentence as a text part. ``None`` when that message
     carries no such part (or there is no assistant message). Never raises.
     """
-    messages = envelope.get("messages") if isinstance(envelope, dict) else None
-    if not isinstance(messages, list):
-        return None
-    errors: Optional[List[str]] = None
-    for message in messages:
-        if isinstance(message, dict) and message.get("role") == "assistant":
-            content = message.get("content")
-            errors = [
-                part["message"].strip()
-                for part in (content if isinstance(content, list) else [])
-                if isinstance(part, dict)
-                and part.get("type") == "error"
-                and isinstance(part.get("message"), str)
-                and part["message"].strip()
-            ]
+    errors = [
+        part["message"].strip()
+        for part in _last_assistant_error_parts(envelope)
+        if isinstance(part.get("message"), str) and part["message"].strip()
+    ]
     return "\n".join(errors) if errors else None
+
+
+def last_assistant_error_kinds(envelope: Any) -> List[str]:
+    """The ``kind`` of each of the last assistant message's error parts, in order."""
+    return [
+        part["kind"]
+        for part in _last_assistant_error_parts(envelope)
+        if isinstance(part.get("kind"), str)
+    ]
 
 
 def last_assistant_text(envelope: Any) -> Optional[str]:

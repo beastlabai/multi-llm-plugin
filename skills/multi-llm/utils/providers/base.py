@@ -2555,8 +2555,13 @@ CONTEXT_OVERFLOW_MARKERS = _markers(
     # Gemini: "The input token count (1093122) exceeds the maximum number of
     # tokens allowed (1048576)."
     r"input token count\s*\(?\d+\)?\s*exceeds",
-    # The shapes several gateways normalise the three above onto.
-    r"exceeds the (?:model'?s )?(?:maximum )?context (?:window|length)",
+    # The shapes several gateways normalise the three above onto. `effective`
+    # is goose 1.53.0's own compaction report (tests/fixtures/goose/
+    # context-overflow, measured 2026-10-08): "Failed to compact: the base
+    # prompt … exceeds the model's effective context window …", which goose
+    # writes as a text part with no error `kind`, so this row is what reaches
+    # it. One optional word, so no new prose shape matches.
+    r"exceeds the (?:model'?s )?(?:maximum |effective )?context (?:window|length)",
     r"context window (?:of \d+ tokens )?exceeded",
     r"\btoo many tokens\b",
     # Mistral Vibe, measured at 2.24.1: "The conversation context exceeds the

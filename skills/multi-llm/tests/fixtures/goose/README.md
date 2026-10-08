@@ -60,7 +60,7 @@ it flipped that cell to `null` (`GooseProvider.vendor_text`, 2026-08-20).
 | `auth-error` | 401 → **no retry**. At 1.53.0 goose exits **1**, sets `metadata.status: "error"` and puts its gloss in a `type: "error"` content part (no text part), repeated on stderr; the parser reads that part (`last_assistant_error`). Classified from goose's own word `Unauthorized`; OpenAI's *"Incorrect API key provided: …"* matches nothing in `base.auth_error_patterns`, which is the same hole that left cline's identical 401 classified `runner_error` until C3 |
 | `rate-limit` | 429-forever → goose **does** retry rate limits internally: 9 requests over 7.5 s at 1.53.0 (8 over 7.2 s at 1.41.0), so an executor-level re-dispatch doubles a wait the CLI already served |
 | `invalid-model` | 404 **naming the model** — and a **retry ladder on a 404**: 8 completions over 7.2 s (7 over 6.9 s at 1.41.0) on a condition no retry can fix, plus a second `GET /v1/models` to render `Available models for this provider: …` |
-| `context-overflow` | 400 context-length, **swallowed**: goose substitutes its own compaction report and classifies as **nothing** — two separate misses, below |
+| `context-overflow` | 400 context-length, **swallowed**: goose substitutes its own compaction report, a text part with no error `kind`; it classified as **nothing** until the shared table learned its word `effective` (defect 3, fixed) |
 | `zero-body` (extra) | a zero-byte response, which goose *does* retry to the full 8 requests / 7.0 s (1.41.0 gave up on the cut stream at once; 1.53.0 retries that too), reported as `Network error: Network error — check your network connection and try again.` |
 | `prompt-echo` (extra) | the classifier reading our own prompt: a **successful** run whose `classify_failure` was `timeout` because the prompt says "timeout" — `null` since `vendor_text` drops the echoed user turn |
 
@@ -118,6 +118,12 @@ Four measured defects, recorded here rather than silently fixed.
    `None` — transport-shaped — so the executor spends its whole bounded-retry
    budget on the one condition §7.2 declares terminal, after goose already spent
    its own compaction attempts on it (five at 1.41.0, one at 1.53.0).
+   **Fixed 2026-10-08 for 1.53.0** (review 24, pins #4): the shared row reads
+   `exceeds the (?:model'?s )?(?:maximum |effective )?context (?:window|length)`,
+   so the row classifies `context_length_exceeded`. And when goose reports a
+   provider failure as an error part, `GooseProvider.classify_failure` reads its
+   `kind` first — `contextLengthExceeded`, `authentication`, `creditsExhausted`
+   (goose's own enum) — and leaves only `other` to the wording.
 4. **Both stream failures classify as nothing.** `Network error: …` matches no
    member of `base.CONNECTION_ERROR_MARKERS`, whose entries want
    `connection refused/reset/closed`, `getaddrinfo`, `ECONNREFUSED` and friends.
