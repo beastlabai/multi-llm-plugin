@@ -35,6 +35,7 @@ import glob
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -378,6 +379,22 @@ class VerdictIngest:
         return not self.errors and not self.conflicts
 
 
+def _supply_verdict_version(document: Any) -> Optional[str]:
+    try:
+        from .schema_validator import supply_schema_version
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.schema_validator import supply_schema_version
+    return supply_schema_version(document, "human_decision_verdicts.schema.json")
+
+
+def _schema_version_supplied(subject: str, version: str) -> str:
+    try:
+        from .schema_validator import schema_version_supplied
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.schema_validator import schema_version_supplied
+    return schema_version_supplied(subject, version)
+
+
 def read_verdict_files(phase_dir: str) -> List[Tuple[str, Any, List[str]]]:
     """Read and schema-validate every verdict file in ``phase_dir``.
 
@@ -393,6 +410,17 @@ def read_verdict_files(phase_dir: str) -> List[Tuple[str, Any, List[str]]]:
         except (OSError, json.JSONDecodeError) as exc:
             results.append((path, None, [f"{path}: could not be read as JSON ({exc})"]))
             continue
+        # Fix round 28: a host's copy of the judge's reply that left out
+        # "schema_version" is read as the one version there is, said once
+        # per read, never rewritten here.
+        version = _supply_verdict_version(document)
+        if version:
+            print(
+                "[human-decision] "
+                + _schema_version_supplied(os.path.basename(path), version)
+                + ".",
+                file=sys.stderr,
+            )
         errors = [
             f"{path}: {message}"
             for message in validate_human_decision_verdicts(document)

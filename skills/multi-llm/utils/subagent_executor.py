@@ -5950,8 +5950,17 @@ def normalize_result(kind: str, data: Any) -> List[str]:
     return [f"{key!r} on {count} task(s)" for key, count in supplied.items()]
 
 
-def _report_normalized(kind: str, notes: List[str]) -> None:
-    """One stdout line per reply the executor had to complete, or nothing."""
+def _report_normalized(
+    kind: str, notes: List[str], version: Optional[str] = None,
+) -> None:
+    """One stdout line per reply the executor had to complete, or nothing;
+    one more when it read an absent ``schema_version`` as *version*."""
+    if version:
+        print(
+            f"[exec-subagents] {kind}: "
+            + _schema_version_supplied("the reply", version)
+            + ", before validating."
+        )
     if notes:
         print(
             f"[exec-subagents] {kind}: the reply omitted {', '.join(notes)}; "
@@ -5959,6 +5968,39 @@ def _report_normalized(kind: str, notes: List[str]) -> None:
             f"before validating (absent and empty mean the same thing to every "
             f"consumer of this document)."
         )
+
+
+#: The read kinds whose result names a ``schema_version`` its schema pins to
+#: one value (fix round 28, live run 12: a host's copy of a task-generation
+#: reply left the key out and the first ``--reaggregate`` failed on it). A
+#: result without the key is read as that version, on every lane that reads
+#: one: the executor's parse, :func:`task_is_complete`, generate-tasks'
+#: consume and the judge verdicts' ingest.
+VERSIONED_RESULT_SCHEMAS = {
+    "task_generation": "generated_tasks.schema.json",
+    "human_decision_judge": "human_decision_verdicts.schema.json",
+}
+
+
+def supply_result_version(kind: str, data: Any) -> Optional[str]:
+    """Supply a *kind* result's absent ``schema_version`` in place
+    (``schema_validator.supply_schema_version``); the version, or ``None``."""
+    schema = VERSIONED_RESULT_SCHEMAS.get(kind)
+    if schema is None:
+        return None
+    try:
+        from .schema_validator import supply_schema_version
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.schema_validator import supply_schema_version
+    return supply_schema_version(data, schema)
+
+
+def _schema_version_supplied(subject: str, version: str) -> str:
+    try:
+        from .schema_validator import schema_version_supplied
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.schema_validator import schema_version_supplied
+    return schema_version_supplied(subject, version)
 
 
 def validate_result(kind: str, data: Any) -> List[str]:
@@ -6028,6 +6070,9 @@ def task_is_complete(task: Dict[str, Any], phase_dir: str) -> bool:
         data = json.loads(target.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return False
+    # Read as every lane reads it: an absent schema_version is the one
+    # version there is (fix round 28), in memory only.
+    supply_result_version(str(task.get("kind", "")), data)
     if validate_result(str(task.get("kind", "")), data):
         return False
     return not _result_names_foreign_groups(task, data)
@@ -8561,7 +8606,8 @@ def _parse_and_validate(
     gave_up = _salvage_gave_up(kind, data, failure)
     if gave_up is not None:
         return STATUS_SALVAGE_UNRECOVERABLE, gave_up, data
-    _report_normalized(kind, normalize_result(kind, data))
+    _report_normalized(
+        kind, normalize_result(kind, data), supply_result_version(kind, data))
     errors = validate_result(kind, data)
     if errors:
         syntax = _redact(describe_syntax_error(fragment)) if fragment else None

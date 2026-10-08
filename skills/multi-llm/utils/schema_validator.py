@@ -571,6 +571,46 @@ def validate_generated_tasks_document(data: Any) -> List[str]:
     return validate_with_schema_file(data, GENERATED_TASKS_SCHEMA)
 
 
+def supply_schema_version(data: Any, schema_name: str) -> Optional[str]:
+    """Read a document that left out its ``schema_version`` as the one
+    version its schema allows, and return that version; ``None`` when
+    nothing was supplied.
+
+    Fix round 28 (live run 12, Claude Code racing 03): the host copied the
+    task-generation subagent's JSON into ``task_generation_result.json``
+    without its ``"schema_version": "1.0"``, and the first ``--reaggregate``
+    failed schema validation over a key that has one value. A schema that
+    requires the key and pins it with ``const`` has one reading of an absent
+    key, so the key is supplied (first, in place) before the document is
+    validated. Only an absent key: a present one, whatever its value, is the
+    schema's to judge, and a document that is not an object, or a schema with
+    no such ``const``, is left alone.
+    """
+    if not isinstance(data, dict) or "schema_version" in data:
+        return None
+    schema = load_schema(schema_name)
+    if "schema_version" not in (schema.get("required") or []):
+        return None
+    version = ((schema.get("properties") or {}).get("schema_version") or {}).get("const")
+    if not isinstance(version, str):
+        return None
+    rest = list(data.items())
+    data.clear()
+    data["schema_version"] = version
+    data.update(rest)
+    return version
+
+
+def schema_version_supplied(subject: str, version: str) -> str:
+    """The plain words that say *subject* (a file, or "the reply") had no
+    ``schema_version`` and was read as *version*; each caller adds what it
+    then did."""
+    return (
+        f'{subject} has no "schema_version"; it was read as version '
+        f'"{version}", the only version of this document'
+    )
+
+
 def validate_state_file(state: Dict[str, Any]) -> Tuple[bool, List[str]]:
     """
     Validate state file format.
