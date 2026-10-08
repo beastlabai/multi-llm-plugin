@@ -315,6 +315,42 @@ class TestThroughTheDispatcher:
 
 
 # ---------------------------------------------------------------------------
+# The host is told first
+# ---------------------------------------------------------------------------
+
+class TestTheShimSaysSo:
+    """SKILL.md is what the Claude Code host reads on every phase: it says to
+    wait for the subagents in the session and never to schedule a way back,
+    naming the tools the hook refuses."""
+
+    @staticmethod
+    def _paragraph() -> str:
+        text = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        paragraphs = [p for p in text.split("\n\n") if "ScheduleWakeup" in p]
+        assert len(paragraphs) == 1, "one SKILL.md paragraph names the scheduling tools"
+        return " ".join(paragraphs[0].split())
+
+    def test_it_names_every_tool_the_hook_refuses_and_the_loop(self):
+        paragraph = self._paragraph()
+        for tool in wakeup_check.SCHEDULING_TOOLS:
+            assert f"`{tool}`" in paragraph
+        assert "`/loop`" in paragraph
+        assert "never schedule a phase command to run again" in paragraph
+
+    def test_it_says_how_to_wait(self):
+        paragraph = self._paragraph()
+        assert "wait in this session for what it started" in paragraph
+        assert "completion notification arrives on its own" in paragraph
+
+    def test_it_sends_a_batch_back_rather_than_editing_it(self):
+        """Racing 08's host sent a batch back with `SendMessage` when its
+        diff broke the game; the shim makes that the rule."""
+        paragraph = self._paragraph()
+        assert "send the batch back to the subagent that ran it (`SendMessage`)" in paragraph
+        assert "never edit a batch's files yourself" in paragraph
+
+
+# ---------------------------------------------------------------------------
 # The hook wiring
 # ---------------------------------------------------------------------------
 
