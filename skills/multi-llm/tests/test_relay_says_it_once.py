@@ -20,9 +20,23 @@ and a stopped run's result carries no suggested-next prose on any surface.
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
 
+import pytest
+
+import modes
 from tests.test_check_gate_fixture import _first_run, repo  # noqa: F401 - the fixture
+from tests.test_next_step_relay_rules import RELAY_SURFACES, _flat
 from utils import cli_common, run_status, status_file
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(REPO_ROOT / "packaging") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "packaging"))
+
+
+def _collapsed(text: str) -> str:
+    return " ".join(text.split())
 
 
 def _poll(repo, capsys):
@@ -140,3 +154,73 @@ class TestTheManualSectionReadsWellEnoughToCopy:
         assert payload["manual_tasks_note"] == self.SINGULAR
         assert f"Manual task left for you:\n- T011 {TITLES['T011']}" in payload["markdown"]
         assert "keeping a --human-task" not in payload["markdown"]
+
+
+class TestEveryRouteSaysToCopyTheSectionOnce:
+    """Live run 11: Codex 04/06/08 and OpenCode 03-08 wrote the notice or
+    the manual note above the copied section, OpenCode 08 wrapped the
+    section in a fence of its own, the OpenCode decline run printed
+    "Workflow complete." twice and Codex 06 reworded the manual note. Every
+    route that relays a ready section says, in the same words: copy it word
+    for word, in no fence of your own, and say none of it twice."""
+
+    RULE = _collapsed(modes.READY_SECTION_RULE)
+
+    @pytest.mark.parametrize("path", RELAY_SURFACES + ("references/summary-format.md",))
+    def test_every_relay_surface_carries_the_rule(self, path):
+        assert self.RULE in _flat(path), path
+
+    @pytest.mark.parametrize("host", ["codex", "opencode"])
+    def test_the_tool_description_carries_it_and_where_the_notice_goes(self, host):
+        from common import surface
+
+        description = _collapsed(surface.cli_surface(host)["tool_description"])
+        assert self.RULE in description
+        assert "word for word" in description
+        assert _collapsed(modes.NOTICE_PLACEMENT) in description
+
+    @pytest.mark.parametrize("path", [
+        "hosts/codex/plugin-skill.md.tmpl", "hosts/opencode/plugin-command.md.tmpl",
+        "hosts/codex/shim.md.tmpl", "hosts/opencode/shim.md.tmpl", "SKILL.md",
+    ])
+    def test_every_route_puts_the_notice_above_the_section(self, path):
+        assert _collapsed(modes.NOTICE_PLACEMENT) in _flat(path), path
+
+
+class TestAStopsSectionStandsInPlaceOfAnyList:
+    """Live run 11: OpenCode stop 01 (fix and accept) added a recap and an
+    "Options named in output (resume choices)" list before
+    `resume_markdown`, and Claude Code 01b paraphrased the whys of
+    `[NEXT_STEP_MARKDOWN]`."""
+
+    def test_the_needs_human_message_says_the_section_is_the_options_report(self):
+        clause = _collapsed(modes.NEEDS_HUMAN_MESSAGE["resume_markdown"])
+        assert "It is the report of the `options` asked above" in clause
+        assert "write no list, recap or summary of the options or answers" in clause
+        assert _collapsed(modes.READY_SECTION_RULE) in clause
+
+    def test_the_tool_description_says_so(self):
+        line = _collapsed(modes.TOOL_USER_NEXT_STEP_LINE)
+        assert ("`resume_markdown` is the same kind of thing: copy it the same "
+                "way, in place of any list, recap or summary of the options or "
+                "ways forward of your own") in line
+
+    @pytest.mark.parametrize("path", [
+        "hosts/codex/plugin-skill.md.tmpl", "hosts/opencode/plugin-command.md.tmpl",
+    ])
+    def test_the_plugin_instructions_say_so(self, path):
+        assert ("At a stop, `resume_markdown` is the stop's options, already "
+                "written: end your report with it the same way, in place of any "
+                "list, recap or summary of the options or ways forward of your "
+                "own.") in _flat(path), path
+
+    def test_claude_codes_native_stop_says_so(self):
+        skill = _flat("SKILL.md")
+        assert ("its section is the resume and each answer the stop offers, each "
+                "with its why: copy it as given, whys included, in place of any "
+                "list, recap or summary of the ways forward of your own") in skill
+        core = _flat("instructions/implement.md")
+        assert ("End the report with that section, copied as it is, whys "
+                "included; never write a resume or `--human-task` command of your "
+                "own, nor a list, recap or summary of the ways forward in its "
+                "place or above it") in core

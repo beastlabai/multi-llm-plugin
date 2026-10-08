@@ -418,6 +418,18 @@ TOOL_OUTCOMES_LINE = (
     "report its `error` line whole, do not do the phase's work."
 )
 
+#: How a host prints a ready section (``user_next_step.markdown``, a stop's
+#: ``resume_markdown``, Claude Code's ``[NEXT_STEP_MARKDOWN]`` section), said
+#: once here and word for word on every route (fix round 26, live run 11:
+#: hosts wrote its sentences above it a second time, wrapped it in a fence of
+#: their own and reworded its manual note). The relay surfaces carry it as a
+#: literal, held to this constant by ``tests/test_relay_says_it_once.py``.
+READY_SECTION_RULE = (
+    "Copy it word for word, never wrapped in a fenced block of your own (its "
+    "commands are fenced already), and say none of it twice: its whys, notes, "
+    "manual tasks and \"Workflow complete.\" appear only in it, never above it."
+)
+
 #: The outcomes line's second sibling (plans/next-phase-command.md §2.4): what
 #: ``user_next_step`` in a result is, said in the tool description a model reads
 #: before any result. Lifting that key to a tool result's top level puts it next
@@ -445,16 +457,33 @@ TOOL_OUTCOMES_LINE = (
 #: of its own, 08 wrote "Workflow complete." beside the markdown that says
 #: it): its words and order, no caption, and the words never the host's own;
 #: a stop's `resume_markdown` is copied the same way.
+#: Fix round 26 (live run 11): Codex 04/06/08 and OpenCode 03-08 wrote the
+#: notice or the manual note above the copied section, OpenCode 08 opened a
+#: fence of its own around it, the OpenCode decline run printed "Workflow
+#: complete." twice (plain, then fenced), Codex 06 reworded the manual
+#: note and OpenCode's stops added a recap and their own list of options
+#: before `resume_markdown`: :data:`READY_SECTION_RULE`, and the stop's
+#: section stands in place of any list of the host's own.
 TOOL_USER_NEXT_STEP_LINE = (
     "`user_next_step` in a result is a command for the user to type, never a "
     "call to make: end your report with its `markdown`, copied as it is (its "
     "words and order, each command alone in its fenced block, each why and "
     "note plain text, the manual tasks it lists included, no caption of your "
-    "own), then stop. It says \"Workflow complete.\" only when it is "
-    "`complete`: never write those words yourself, even when a notice lists "
-    "manual tasks left for the user. Only `next` is a call. At a stop, "
-    "`resume_markdown` is the same kind of thing: copy it the same way, its "
-    "commands (`resume_command` among them) the user's to type, never a call."
+    "own), then stop. " + READY_SECTION_RULE + " It says \"Workflow complete.\" only "
+    "when it is `complete`: never write those words yourself, even when a "
+    "notice lists manual tasks left for the user. Only `next` is a call. At a "
+    "stop, `resume_markdown` is the same kind of thing: copy it the same way, "
+    "in place of any list, recap or summary of the options or ways forward of "
+    "your own, its commands (`resume_command` among them) the user's to type, "
+    "never a call."
+)
+
+#: Where a finished run's notice goes (fix round 26, live run 11: the hosts
+#: wrote it above the ready section, which said the same sentences again).
+#: The notice no longer carries what that section says (``run_status``); the
+#: relay surfaces say so too, word for word.
+NOTICE_PLACEMENT = (
+    "Put it above the closing section, and repeat nothing that section says."
 )
 
 #: The finished run's relay (live run 8, OpenCode racing 08): a completed
@@ -467,7 +496,7 @@ TOOL_NOTICE_LINE = (
     "A finished run's `result` can carry a `notice`: what the run left out or "
     "could not check, such as items it did not apply or that nothing ran this "
     "repository's tests. Report what it says, every part of it, as plain text "
-    "outside any fenced block."
+    "outside any fenced block. " + NOTICE_PLACEMENT
 )
 
 #: What every host does with the write policy at a stop (fix round 20, live
@@ -717,15 +746,21 @@ NEEDS_HUMAN_MESSAGE = {
     # the result's `resume_markdown`; fix round 24, live run 10: the hosts
     # composed their own blocks, reworded the whys, added "what ran" lists
     # and printed `options` entries as "Call multi_llm with …").
+    # Fix round 26 (live run 11, OpenCode stop 01): the host added a recap
+    # and an "Options named in output (resume choices)" list before the
+    # section, following the template's "report … the `options`": the
+    # section IS that report.
     "resume_markdown": (
         "`resume_markdown` is the stop's ways forward, already written for "
         "the user: `resume_command` with what it does and, when the stop "
         "offers them, the answers they can type instead (each also in "
-        "`resume_answers` and an `options` entry). End your report with it, "
-        "copied as it is, in place of any list of options or ways forward of "
-        "your own: each command stays alone in its fenced block, each why "
-        "stays plain text. None of its commands is a tool call or a shell "
-        "command for you to run, and do not offer to run one."
+        "`resume_answers` and an `options` entry). It is the report of the "
+        "`options` asked above: end your report with it, copied as it is, in "
+        "place of any list of options or ways forward of your own, and write "
+        "no list, recap or summary of the options or answers anywhere else. "
+        + READY_SECTION_RULE + " Each command stays alone in its fenced "
+        "block, each why stays plain text. None of its commands is a tool "
+        "call or a shell command for you to run, and do not offer to run one."
     ),
     # Appended instead of `resume` when the result carries no
     # `resume_command` (racing re-run 2026-10-04: a result with neither command
