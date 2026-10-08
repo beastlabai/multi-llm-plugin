@@ -512,6 +512,72 @@ class TestTheAggregateReadsOnlyTheModelsThePhaseRecords:
         assert status["progress"]["notes"] == [note]
         assert MISNAMED[: -len(".json")] not in status["models_completed"]
 
+    @pytest.mark.parametrize("stray_row", [True, False])
+    def test_a_forgotten_stem_leaves_status_agreeing_with_the_report(
+        self, tmp_path, capsys, stray_row
+    ):
+        """Review 24 (records #2): a foreground reaggregate of a dir a
+        pre-round-24 reaggregate had touched dropped the stray stem from
+        ``models_completed`` but kept its ``progress.models`` row and the
+        ``models_succeeded`` that counted it, so ``status`` read "3 ok" beside a
+        report of two models."""
+        from utils.run_status import _progress_text
+
+        plan, phase_dir = _live_code_review_dir(tmp_path, polluted=True)
+        stem = MISNAMED[: -len(".json")]
+        rows = {
+            PI: {"state": "done", "source": "file"},
+            CODEX: {"state": "done", "source": "file"},
+        }
+        if stray_row:
+            rows[stem] = {"state": "done", "source": "existing_file"}
+        status = read_status(str(phase_dir))
+        status["progress"] = {
+            "models_total": 2, "models_done": 3 if stray_row else 2,
+            "models_succeeded": 3, "models": rows,
+        }
+        write_status(str(phase_dir), status)
+
+        _run_cro_reaggregate(plan, phase_dir)
+        capsys.readouterr()
+
+        progress = read_status(str(phase_dir))["progress"]
+        assert sorted(progress["models"]) == sorted([PI, CODEX])
+        assert progress["models_succeeded"] == 2
+        assert progress["models_done"] == 2
+        assert "models 2/2 done, 2 ok, 0 failed" in _progress_text(progress)
+
+    def test_a_forgotten_stem_without_a_map_recounts_the_completed_models(self, tmp_path):
+        """No per-model map: ``models_succeeded`` is what the pre-24
+        ``record_models_present`` wrote it as, the length of ``models_completed``."""
+        _plan, phase_dir = _live_code_review_dir(tmp_path, polluted=True)
+        status = read_status(str(phase_dir))
+        status["progress"] = {"models_total": 2, "models_done": 2, "models_succeeded": 3}
+        write_status(str(phase_dir), status)
+
+        result_files._forget_completed(
+            str(phase_dir), [MISNAMED[: -len(".json")]], [PI, CODEX]
+        )
+
+        progress = read_status(str(phase_dir))["progress"]
+        assert progress["models_succeeded"] == 2
+        assert progress["models_done"] == 2
+
+    def test_a_set_aside_that_was_never_recorded_leaves_progress_alone(self, tmp_path, capsys):
+        plan, phase_dir = _live_code_review_dir(tmp_path)
+        status = read_status(str(phase_dir))
+        status["progress"] = {
+            "models_total": 2, "models_done": 2, "models_succeeded": 1,
+            "models": {PI: {"state": "failed"}, CODEX: {"state": "done"}},
+        }
+        write_status(str(phase_dir), status)
+
+        _run_cro_reaggregate(plan, phase_dir)
+        capsys.readouterr()
+
+        progress = read_status(str(phase_dir))["progress"]
+        assert sorted(progress["models"]) == sorted([PI, CODEX])
+
     def test_the_report_names_the_file_it_left_out(self, tmp_path, capsys):
         plan, phase_dir = _live_code_review_dir(tmp_path)
 
