@@ -277,6 +277,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
 __all__ = [
     "BATCH_CHECK_MARKER",
     "CHECK_FINDINGS_MARKER",
+    "check_findings_line",
     "STRATEGIES",
     "STRATEGY_PAUSE",
     "STRATEGY_SKIP_CONTINUE",
@@ -404,6 +405,18 @@ CODE_WRITE_KINDS = frozenset({"apply_code_fixes", "implement"})
 #: The line an implement run prints per check task that reported problems
 #: (``WriteBatchScheduler._check_findings_lines``, racing re-run 4).
 CHECK_FINDINGS_MARKER = "[CHECK_FINDINGS]"
+
+
+def check_findings_line(task_id: str, findings: Sequence[str]) -> str:
+    """One ``[CHECK_FINDINGS]`` line: a check task that ran and reported
+    *findings*. The executor prints it at the end of a run (or a stop); the
+    native leg's ``util batch-done --check findings`` prints the same line
+    when it records them (fix round 26, live run 11 #11: that leg keeps no
+    run log, so the line was on the executor's leg alone)."""
+    return (
+        f"{CHECK_FINDINGS_MARKER} {task_id} {len(findings)} problem(s): "
+        f"{'; '.join(findings)}"
+    )
 
 #: The line a code phase prints per batch whose own check failed after its
 #: edits (``WriteBatchScheduler._batch_check_lines``, ``util batch-done
@@ -5428,8 +5441,7 @@ class WriteBatchScheduler:
         if not found:
             return []
         lines = [
-            f"{CHECK_FINDINGS_MARKER} {task_id} {len(findings)} problem(s): "
-            f"{'; '.join(findings)}"
+            check_findings_line(task_id, findings)
             for task_id, findings in found.items()
         ]
         where = (

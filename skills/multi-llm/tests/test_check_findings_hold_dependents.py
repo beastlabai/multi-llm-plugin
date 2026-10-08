@@ -44,6 +44,8 @@ FINDINGS = [
     "npx html-validate index.html: index.html:1 doctype must be lowercase",
     "npx html-validate index.html: index.html:9 aria-label misused",
 ]
+#: The `[CHECK_FINDINGS]` line both legs print for T002 (fix round 26).
+NATIVE_AND_EXECUTOR_LINE = f"[CHECK_FINDINGS] T002 2 problem(s): {'; '.join(FINDINGS)}"
 
 
 @pytest.fixture
@@ -471,6 +473,29 @@ class TestTheNativeLegHoldsTheDependents:
         assert "=done (the held tasks then run, told that the findings were accepted)" in err
         assert not get_or_create_state(repo.plan).is_phase_completed("implement")
         assert self._util(capsys, "finalize-tracking", "--state-file", state_file)[0] == 0
+
+    def test_batch_done_prints_the_executors_check_findings_line(self, repo, capsys):
+        """Fix round 26 (live run 11 #11): the executor leg writes a
+        `[CHECK_FINDINGS]` line per check that reported problems
+        (`TestTheDependentsAreNotRun` and `test_the_executor_line_is_the_same`
+        below); the native leg keeps no run log, so `util batch-done --check
+        findings` prints the same line for the host, and a pass prints none."""
+        self._emit(repo, capsys)
+        assert self._done(repo, capsys, "T001")[0] == 0
+        code, out, err = self._done(
+            repo, capsys, "T002", "--check", "findings", *self._findings(),
+        )
+        assert code == 0, err
+        lines = out.splitlines()
+        assert NATIVE_AND_EXECUTOR_LINE in lines, out
+        assert lines.index(NATIVE_AND_EXECUTOR_LINE) == lines.index(
+            "[BATCH_DONE] T002 completed (2 check finding(s) recorded)") + 1, out
+        code, out, _err = self._done(repo, capsys, "T002", "--check", "passed")
+        assert code == 0 and "[CHECK_FINDINGS]" not in out, out
+
+    def test_the_executor_line_is_the_same(self, repo, capsys):
+        text = _run_one_with_findings(repo, capsys)
+        assert NATIVE_AND_EXECUTOR_LINE in text.splitlines(), text
 
     def test_a_passed_recheck_releases_the_dependents(self, repo, capsys):
         self._emit(repo, capsys)

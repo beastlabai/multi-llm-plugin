@@ -134,6 +134,7 @@ try:
     from .write_phase_bridge import WRITE_TASK_FILENAME
     from .write_batch_scheduler import (
         BATCH_CHECK_MARKER,
+        check_findings_line,
         HALF_APPLIED_PREFIX,
         accepted_findings_for,
         batch_check_accepted_line,
@@ -182,6 +183,7 @@ except ImportError:  # pragma: no cover - direct script invocation
     from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
     from utils.write_batch_scheduler import (  # type: ignore
         BATCH_CHECK_MARKER,
+        check_findings_line,
         HALF_APPLIED_PREFIX,
         accepted_findings_for,
         batch_check_accepted_line,
@@ -1253,6 +1255,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     if found:
         suffix += f" ({len(found)} check finding(s) recorded)"
     print(f"{MARKER} {written['task_id']} {written['status']}{suffix}")
+    if found:
+        # Fix round 26 (live run 11 #11): the executor's own line, which
+        # this leg's host would otherwise never see (no run log here).
+        print(check_findings_line(written["task_id"], found))
     if written.get("partial"):
         # Fix round 21: the executor's partial-application stop, in words.
         task_id = written["task_id"]
