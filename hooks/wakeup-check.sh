@@ -15,8 +15,15 @@
 # exits 0 on every path and prints nothing unless the check refuses.
 #
 # - A tool other than the two exits at once (the matcher already says so).
-# - A transcript with no `multi_llm.py` in it exits at once too, before uv is
-#   looked up: a session that never ran the dispatcher pays one grep.
+# - Claude Code writes the transcript in batches, so when this hook starts the
+#   call it asks about, and a phase call made in the same message, may not be
+#   on file yet (fix round 27). The script first waits for the call's own
+#   `tool_use_id` to be on file, at most 2 s (20 steps of 0.1 s; at once
+#   where `sleep` takes no fraction), and the util waits the same way for the
+#   results of the phase calls that message made before it.
+# - A transcript with no `multi_llm.py` in it then exits at once too, before
+#   uv is looked up: a session that never ran the dispatcher pays that wait
+#   (0.1-0.2 s measured on 2.1.293) and one grep.
 # - The util's stdout also carries the dispatcher's `MULTI_LLM_RESULT` line,
 #   and Claude Code parses hook stdout as JSON only when the whole of it is
 #   JSON, so only the decision line (`{"hookSpecificOutput"...`) is passed on.
@@ -36,7 +43,21 @@ printf '%s\n' "$input" \
 transcript="$(printf '%s\n' "$input" \
   | sed -n 's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
   | sed -e 's/\\\\/\\/g' -e 's#\\/#/#g' | head -n 1)"
-[ -n "$transcript" ] && [ -f "$transcript" ] || exit 0
+[ -n "$transcript" ] || exit 0
+# The call's own id, quoted as the transcript writes it; with none, the wait
+# is for the file alone.
+tool_use_id="$(printf '%s\n' "$input" \
+  | sed -n 's/.*"tool_use_id"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9_-]*\)".*/\1/p' | head -n 1)"
+i=0
+while [ "$i" -lt 20 ]; do
+  if [ -f "$transcript" ]; then
+    [ -z "$tool_use_id" ] && break
+    grep -q -F "\"$tool_use_id\"" "$transcript" 2>/dev/null && break
+  fi
+  sleep 0.1 2>/dev/null || break
+  i=$((i + 1))
+done
+[ -f "$transcript" ] || exit 0
 grep -q -F 'multi_llm.py' "$transcript" 2>/dev/null || exit 0
 
 root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)}"
