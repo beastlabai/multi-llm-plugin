@@ -296,6 +296,9 @@ PLACEHOLDER_MANIFEST = {
     # skill-dir placeholder of either spelling.
     "references/host-capabilities.md": (0, 0),
     "references/human-decision-batch.md": (0, 0),
+    # Fix round 27: the one rule both write runbooks point to for a code
+    # batch's own check; it names flags, never a command, so no token.
+    "references/own-check.md": (0, 0),
     "references/resume-detection.md": (0, 0),
     "references/salvage-handling.md": (0, 0),
     # Moved out of the Claude Code shim in the D5c cutover: what a run reports is
