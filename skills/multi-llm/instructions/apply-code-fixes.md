@@ -394,14 +394,16 @@ guessed `pnpm typecheck` in a repo with no `package.json` reports a failure the 
 not cause.
 
 If no `verify_command` is configured, say so in the summary — "not configured" is the
-honest verification status, and it is not the same as "passed". Say it in your report
-too, in one plain line: the plugin ran none of the repository's tests, and the setting to add is
-`verify_command` under `driver:` in `.multi-llm/providers.yaml` — name the repository's
-own test command as its value when it has an obvious one (`package.json`'s
-`scripts.test`, a `Makefile` `test` target), without running it or writing the config.
-Step 10's `--mark-completed` prints that line as `[TESTS_NOT_RUN] …` (on stderr): it
-also names the checks the batches were asked to run and what each batch reported, so
-give the text after its tag in your report verbatim instead of writing your own.
+honest verification status, and it is not the same as "passed". In your report, the line
+that says so is the one step 10's `--mark-completed` prints as `[TESTS_NOT_RUN] …` (on
+stderr): it leads with the checks the batches ran and what each reported, says the plugin
+itself ran none of the repository's tests, and names the setting to add. Give the whole text
+after its tag, word for word, as plain text: never a shorter line of your own in its place or
+beside it. Only when step 10 printed no such line, write one plain line yourself: the plugin
+ran none of the repository's tests, and the setting to add is `verify_command` under
+`driver:` in `.multi-llm/providers.yaml` — name the repository's own test command as its
+value when it has an obvious one (`package.json`'s `scripts.test`, a `Makefile` `test`
+target), without running it or writing the config.
 
 If the command fails:
 - Report which fix may have caused the issue
