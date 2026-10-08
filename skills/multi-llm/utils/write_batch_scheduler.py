@@ -3507,6 +3507,11 @@ def with_result_contract(
             f"left out of both reads as a {item} you meant to apply and did "
             f"not finish, and the run stops for a human to inspect it."
         )
+    # Fix round 26 (live run 11): a batch that edits code carries `check` in
+    # the shape itself. Asked for in a section of its own below the shape,
+    # "required when you ran any", it was left out by replies that ran
+    # `npm test` (Claude Code racing T005, OpenCode stop T001).
+    own_checks = kind in CODE_WRITE_KINDS and not is_check_task(kind, task)
     shape = (
         '{"status": "applied", "ids": ["<id>", "..."], '
         + (
@@ -3515,7 +3520,12 @@ def with_result_contract(
         )
         + '"files_touched": ["<repo-relative path>"], '
         '"summary": "<one line, at most 200 characters>", '
-        '"notes": "<the per-item summary requested above>"}\n'
+        '"notes": "<the per-item summary requested above>"'
+        + (
+            ', "check": {"passed": true, "findings": [], "ran": '
+            '{"<each check command you ran>": "passed"}}' if own_checks else ""
+        )
+        + '}\n'
     )
     status_line = (
         "- `status`: `applied` if you edited any file; `no-op` if you edited "
@@ -3555,15 +3565,19 @@ def with_result_contract(
         "`no-op` and `failed`).\n"
         "- `summary`: one line; it is recorded verbatim as this batch's "
         "entry in the prior-changes log the next batch reads.\n"
-        "- `notes`: the per-item summary the return format above asks for.\n\n"
+        "- `notes`: the per-item summary the return format above asks for.\n"
+        + (
+            "- `check`: required in every reply, also when you ran no check — "
+            "which checks you ran on your edits and how each one ended "
+            "(see below).\n"
+            if own_checks else ""
+        )
+        + "\n"
         "A reply without this JSON object is recorded as a FAILED batch even "
         "when the edits landed, so send it in every case — including when "
         "nothing needed changing.\n"
         + (CHECK_RESULT_CONTRACT if is_check_task(kind, task) else "")
-        + (
-            WRITE_CHECK_CONTRACT + (checks_section or "")
-            if kind in CODE_WRITE_KINDS and not is_check_task(kind, task) else ""
-        )
+        + (WRITE_CHECK_CONTRACT + (checks_section or "") if own_checks else "")
     )
 
 
@@ -3577,18 +3591,37 @@ def with_result_contract(
 #: the corrected run that replaces a failing one is pinned to the same check
 #: over the same scope, as :data:`CHECK_RESULT_CONTRACT` pins it to the task's
 #: own command; a narrower re-run passing never launders the failure.
+#: Fix round 26 (live run 11): required in every reply, with ``ran`` naming
+#: each command and how it ended, or an empty ``ran`` and a ``not_run``
+#: reason. "Required when you ran any" and "leave `check` out when you ran no
+#: check" let replies that had run ``npm test`` omit it (Claude Code racing
+#: T005, OpenCode stop T001); an empty ``ran`` is read as no check, never as
+#: a pass (``subagent_executor.batch_check_findings``; ``util batch-done
+#: --own-check none`` on the native leg).
 WRITE_CHECK_CONTRACT = (
-    "\n## Checks you ran (required when you ran any)\n\n"
-    "If you ran any check on your edits — a test, a build, a type check, a "
-    "linter, a syntax check — add a `check` object to the JSON above:\n\n"
-    "```json\n"
-    '{"check": {"passed": false, "findings": ["<one failing check: the '
-    'command and what it reported>"]}}\n'
-    "```\n\n"
+    "\n## Checks you ran (required in every reply)\n\n"
+    "Always send the `check` object in the JSON above, also when you ran no "
+    "check: it is the only record of what was checked after your edits, and "
+    "a reply without it leaves the checks you ran off the record.\n\n"
+    "- `ran`: every check you ran on your edits — a test, a build, a type "
+    "check, a linter, a syntax check — as its command mapped to how its last "
+    "run ended, `\"passed\"` or `\"failed\"`.\n"
     "- `passed`: the JSON boolean `true` only when the last run of every "
     "check you ran passed, else `false`.\n"
-    "- `findings`: one string per check whose last run failed; `[]` when "
-    "`passed` is `true`.\n\n"
+    "- `findings`: one string per check whose last run failed (the command "
+    "and what it reported); `[]` when `passed` is `true`.\n\n"
+    "A batch whose check failed answers:\n\n"
+    "```json\n"
+    '{"check": {"passed": false, "findings": ["<one failing check: the '
+    'command and what it reported>"], "ran": {"<that command>": "failed", '
+    '"<another command you ran>": "passed"}}}\n'
+    "```\n\n"
+    "If you ran no check, say so and why: `ran` empty, no `passed`, and the "
+    "reason in `not_run`:\n\n"
+    "```json\n"
+    '{"check": {"ran": {}, "not_run": "<why no check could run on these '
+    'edits>"}}\n'
+    "```\n\n"
     "Report the last run of each check. A run that failed because of how you "
     "ran it (a wrong flag, mode or path) and that you then ran correctly is "
     "reported by the corrected run, and so is a check you ran again after "
@@ -3601,8 +3634,7 @@ WRITE_CHECK_CONTRACT = (
     "check: report it. Never describe a passing run as a finding.\n\n"
     "Report a failing check here even when you think your change did not "
     "cause it: the batch is then recorded as applied with a failing check, "
-    "and the user is told, instead of the run reporting a clean success. "
-    "Leave `check` out when you ran no check.\n"
+    "and the user is told, instead of the run reporting a clean success.\n"
 )
 
 

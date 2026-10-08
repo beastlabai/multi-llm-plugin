@@ -1287,10 +1287,10 @@ def build_schema_repair_prompt(
         # change their results or lose apply-code-fixes' per-command evidence.
         take += (
             "\nIf it gave a readable `check` object, include that entire object "
-            "unchanged,\nincluding `passed`, `findings`, `could_not_run` and "
-            "every `listed` command\nand outcome it supplied. Do not omit a "
-            "check or turn a failure into a pass.\nDo not run any check again "
-            "or invent one the previous reply never reported."
+            "unchanged,\nincluding `passed`, `findings`, `ran`, `not_run`, "
+            "`could_not_run` and every `listed` command\nand outcome it supplied. "
+            "Do not omit a check or turn a failure into a pass.\nDo not run any "
+            "check again or invent one the previous reply never reported."
         )
         why = (
             "does not say what\nhappened to every item of the batch"

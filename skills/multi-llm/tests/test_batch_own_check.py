@@ -66,7 +66,8 @@ class TestTheContractAsksABatchForTheChecksItRan:
     def test_a_code_batch_is_asked(self, kind):
         text = with_result_contract(kind, self._task(kind, ["src/a.py"]), "Do it.")
         assert WRITE_CHECK_CONTRACT in text
-        assert "## Checks you ran (required when you ran any)" in text
+        # Fix round 26: required in every reply, not only when one ran.
+        assert "## Checks you ran (required in every reply)" in text
         assert CHECK_RESULT_CONTRACT not in text
 
     @pytest.mark.parametrize("kind", ["apply_suggestions", "apply_task_suggestions"])
