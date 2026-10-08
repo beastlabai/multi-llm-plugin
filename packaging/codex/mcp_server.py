@@ -1115,6 +1115,13 @@ def lift_user_next_step(outcome: dict) -> None:
         outcome[USER_NEXT_STEP_KEY] = payload.pop(USER_NEXT_STEP_KEY)
 
 
+def carries_next_step(child) -> bool:
+    """Whether :func:`lift_user_next_step` lifts a step off this child's
+    result: its parsed payload holds a non-null ``user_next_step``."""
+    payload = getattr(child, "result", None)
+    return isinstance(payload, dict) and payload.get(USER_NEXT_STEP_KEY) is not None
+
+
 def is_mechanical(next_args, surface) -> bool:
     if not isinstance(next_args, dict) or next_args.get("unparseable"):
         return False
@@ -2294,14 +2301,28 @@ class Server:
 
     # -- S4/S5: results -------------------------------------------------------------------
 
-    def human_output(self, child: ChildRun, command, respell=None):
-        """Redacted stdout, the result line dropped only when it parsed."""
+    def human_output(self, child: ChildRun, command, respell=None, carried=False):
+        """Redacted stdout, the result line dropped only when it parsed.
+
+        With *carried* (the result carries the lifted ``user_next_step``), the
+        block's lines that step says itself are dropped too (fix round 27, the
+        Fable review of round 26: the manual note and the optional whys
+        reached the model twice, in ``output`` and in the step's
+        ``markdown``): a line that is one of the surface's
+        ``dispatcher.next_step_markers``, or starts with one and a space. A
+        ``[RUNNER_WARNING]`` line, which the step does not carry, stays.
+        """
         text = redact(child.stdout, command, self.surface, respell)
         if not text or child.result is None:
             return text.rstrip() if text else text
-        marker = self.surface["dispatcher"]["result_marker"]
-        return "\n".join(line for line in text.split("\n")
-                         if not line.strip().startswith(marker)).rstrip()
+        dispatcher = self.surface["dispatcher"]
+        marker = dispatcher["result_marker"]
+        said = tuple(dispatcher.get("next_step_markers") or ()) if carried else ()
+        return "\n".join(
+            line for line in text.split("\n")
+            if not line.strip().startswith(marker)
+            and not any(line == block or line.startswith(block + " ") for block in said)
+        ).rstrip()
 
     def tool_calls_for(self, child: ChildRun, values=None) -> list:
         """Every runnable command the child printed, as tool-call args, once each.
@@ -2405,7 +2426,7 @@ class Server:
                 "result": redact(child.result, raw, surface),
                 "artifacts": redact(child.result.get("artifacts") or [], raw, surface),
                 "next": next_as_tool_call(raw, surface),
-                "output": self.human_output(child, raw),
+                "output": self.human_output(child, raw, carried=carries_next_step(child)),
                 "stderr": redact(child.stderr, raw, surface) or None})
             lift_user_next_step(base)
             return base
@@ -2435,7 +2456,7 @@ class Server:
             "result": redact(child.result, raw, surface),
             "artifacts": redact(child.result.get("artifacts") or [], raw, surface),
             "next": next_as_tool_call(raw, surface),
-            "output": self.human_output(child, raw),
+            "output": self.human_output(child, raw, carried=carries_next_step(child)),
             "stderr": redact(child.stderr, raw, surface) or None})
         lift_user_next_step(base)
         return base

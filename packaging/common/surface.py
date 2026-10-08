@@ -782,6 +782,13 @@ def cli_surface(host_id: str) -> Dict[str, Any]:
             # which is picked from `modes.TOOL_ROUTES` by the host's
             # `next_command` cell. It picks a spelling, never what runs.
             "route_env": _route_env(host_id),
+            # The block lines a result's `user_next_step` already says (fix
+            # round 27): a server drops a line that is one of these markers,
+            # or starts with one and a space, from the `output` of a result
+            # that carries the key, so the model reads each sentence once.
+            # Additive within v5: a server whose surface lacks it keeps every
+            # line.
+            "next_step_markers": list(next_phase.CARRIED_BLOCK_MARKERS),
             # A `next` carrying one of these is a *mechanical* continuation —
             # the same phase finishing itself off — so `execute` follows it
             # internally under its own cap rather than handing it back for a
