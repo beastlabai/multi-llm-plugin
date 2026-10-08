@@ -11484,6 +11484,8 @@ class TestTheNestedProbePromptIsCleanByConstruction:
             assert not base_module._matches_marker(table, haystack)
         for _category, markers in base_module.LAUNCH_FAILURE_MARKERS:
             assert not base_module._matches_marker(markers, haystack)
+        for markers in base_module.STDERR_LAUNCH_FAILURE_MARKERS.values():
+            assert not base_module._matches_marker(markers, haystack)
 
 
 class TestTheAuthProbeHaystackIsUntouched:

@@ -95,8 +95,8 @@ notes: >-
   are kept as they were measured: every stream gained `agent_end.yielded` and nothing
   else moved in any event's shape; `invalid-tool` is exit 2 with a plain three-line
   `Error: Unknown tool in --tools: …` and no Bun trace and no `CliUsageError` word
-  (`base.LAUNCH_FAILURE_MARKERS` learned the sentence, so it still classifies
-  `spawn_failed`); `invalid-model`'s stderr hint now points at `omp models` instead of
+  (`base.STDERR_LAUNCH_FAILURE_MARKERS` reads the sentence at a stderr line start, so it
+  still classifies `spawn_failed`); `invalid-model`'s stderr hint now points at `omp models` instead of
   a `models.yml` path; and the completions client's retry counts moved —
   `rate-limit` 16 → 12 (the body-parsed 20 s honoured on BOTH legs of the doubled
   chain), `empty` 21 → 12 (the plain `500·2ⁿ` ladder twice, like `stdout-error`),
@@ -773,8 +773,9 @@ rows:
       row: the shape a mis-shipped adapter produces, distinguishable from a provider
       failure by the zero requests and the refusal sentence — §2.7's
       `LAUNCH_FAILURE_MARKERS += "CliUsageError"` made that distinction a verdict at
-      18.2.2, and the 18.8.3 shape needed the sentence itself on the same row
-      (`unknown tools? in --tools`), without which this capture classified `None`. It lands on `spawn_failed` (D3k rung 1,
+      18.2.2, and the 18.8.3 shape needed the sentence itself, read on stderr at a line
+      start only (`STDERR_LAUNCH_FAILURE_MARKERS`, so a model quoting it on stdout is not a
+      launch failure), without which this capture classified `None`. It lands on `spawn_failed` (D3k rung 1,
       never retried, fails the whole batch), which is the right disposition for
       something that is a property of the INSTALL and identical for every sibling
       slot on this runner; `None` would have offered a transport retry of a run that
