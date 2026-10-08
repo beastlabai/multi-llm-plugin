@@ -226,6 +226,61 @@ class TestTheExecutorLegStops:
         assert resume["command"] in markdown
         assert "--review-code" not in markdown
 
+    def test_the_line_beside_the_section_names_the_gate_and_no_answer(
+            self, repo, capsys):
+        """Merge of fix round 28 (relay's #5 on implement's #1): the gate's
+        stop set its headline itself, recorded no line beside the section,
+        and `--blocked` handed the servers none, so a tool route relayed
+        "To go on: … --human-task T001=done" beside a section giving the
+        same command. The beside line says what stopped and why, and the
+        lookup hands both lines back."""
+        from utils.write_batch_scheduler import (
+            HEADLINE_BESIDE_SECTION_KEY, answers_cover,
+        )
+
+        code, out, err, result = self._stop(repo, capsys)
+        assert code == 3, err
+        phase_dir = output_dir_path(repo.plan) / "implement"
+        stop = json.loads((phase_dir / "write_batch_report.json").read_text())["stop"]
+        beside = stop[HEADLINE_BESIDE_SECTION_KEY]
+        assert beside == (
+            "implement ran nothing: 2 code tasks wait on manual task T001 "
+            "(Create the module), which is not recorded done, and no other "
+            "code task can run. Not run: T002, T003."), beside
+        assert answers_cover(stop["headline"], beside, stop)
+        mirror = json.loads((phase_dir / ".status.json").read_text())
+        assert mirror["progress"]["write_subagents"]["stop"][
+            HEADLINE_BESIDE_SECTION_KEY] == beside
+        code, out, err, lookup = _run([
+            "util", "next-command", str(repo.plan), "--blocked", "implement",
+            "--host", "codex",
+        ], capsys)
+        assert code == 0, err
+        resume = lookup["user_resume"]
+        assert resume["error_line"] == result["error"] == stop["headline"]
+        assert resume["error_beside_section"] == beside
+        assert "--human-task T001=done" in resume["markdown"]
+
+    def test_a_recorded_resume_the_section_does_not_carry_withholds_both_lines(
+            self, repo, capsys):
+        """The beside line drops the gate's answer only while the section's
+        own command carries it: a record whose `resume_flags` name another
+        manual task (the folder is writable by every jailed batch) keeps
+        the full line."""
+        self._stop(repo, capsys)
+        status = output_dir_path(repo.plan) / "implement" / ".status.json"
+        data = json.loads(status.read_text())
+        data["progress"]["write_subagents"]["stop"]["resume_flags"] = [
+            "--resume", "--human-task", "T002=done"]
+        status.write_text(json.dumps(data))
+        code, out, err, lookup = _run([
+            "util", "next-command", str(repo.plan), "--blocked", "implement",
+            "--host", "codex",
+        ], capsys)
+        assert code == 0, err
+        resume = lookup["user_resume"]
+        assert "error_line" not in resume and "error_beside_section" not in resume
+
     def test_status_offers_that_resume(self, repo, capsys):
         """`status --view run`'s resume block of the (detached) run, built
         from its own mirror, as `test_resume_why` reads it."""
@@ -307,7 +362,15 @@ class TestTheNativeLegStops:
             "implement ran nothing: 2 code tasks wait on manual task T001 "
             "(Create the module)"), result["error"]
         assert "--human-task T001=done" in result["error"]
-        assert f"[MANUAL_GATE] {result['error']}" in out
+        # Merge of fix round 28: the line the report relays says what
+        # stopped and why; the way on is the section's alone.
+        gate = next(line for line in out.splitlines()
+                    if line.startswith("[MANUAL_GATE] "))
+        assert gate == (
+            "[MANUAL_GATE] implement ran nothing: 2 code tasks wait on manual "
+            "task T001 (Create the module), which is not recorded done, and no "
+            "other code task can run."), gate
+        assert result["error"].startswith(gate[len("[MANUAL_GATE] "):])
         assert "T001 (Create the module): 2 code task(s) wait on it (T002, T003)" in out
         assert ("[ETA] implement: run stopped with nothing dispatched · T001 left "
                 "for you (manual); 2 code task(s) wait on it") in out
@@ -343,6 +406,37 @@ class TestTheNativeLegStops:
                 "task T001") in out
         # The same command is not given twice.
         assert "manual_tasks_command" not in step
+
+    def test_the_report_the_runbook_asks_for_passes_the_stop_hook_and_says_the_way_on_once(
+            self, repo, capsys):
+        """Runbook step 3: report the `[MANUAL_GATE]` line and the deferred
+        tasks, then end with the section `util next-command` prints. The
+        Stop hook passes that report, and the resume command is in it once,
+        in the section."""
+        from tests.test_report_check import Transcript, run_check
+        from utils import report_check
+
+        _code, emit, _err, _result = self._emit(repo, capsys)
+        code, lookup, err, _result = _run([
+            "util", "next-command", str(repo.plan), "--after", "implement",
+            "--host", "claude-code",
+        ], capsys)
+        assert code == 0, err
+        gate = next(line for line in emit.splitlines()
+                    if line.startswith("[MANUAL_GATE] "))[len("[MANUAL_GATE] "):]
+        section = lookup.split(f"{report_check.NEXT_STEP_MARKDOWN}\n", 1)[1].split(
+            f"\n{report_check.NEXT_STEP_MARKDOWN_END}", 1)[0]
+        message = "\n\n".join([
+            "## Implement stopped", gate,
+            "Deferred: T001 Create the module; T002 and T003 wait on it.",
+            section,
+        ])
+        assert message.count("--human-task T001=done") == 1, message
+        transcript = (
+            Transcript().prompt("/multi-llm:multi-llm --implement plans/sample.md")
+            .bash(emit).bash(lookup).say(message)
+            .write(repo.root.parent / "transcript.jsonl"))
+        assert run_check(capsys, transcript) == ""
 
     def test_recording_it_done_runs_the_waiting_tasks(self, repo, capsys):
         """The way on works: the next emit hands out T002 and T003."""

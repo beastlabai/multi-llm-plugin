@@ -3044,6 +3044,59 @@ class TestTheStopLineBesideTheSection:
         assert envelope["result"]["error"] == STOP_LINE
 
 
+from tests.test_write_executor_orchestrators import repo  # noqa: E402,F401
+
+
+class TestAManualGateStopBesideItsSection:
+    """The merge of fix round 28: implement's manual-task gate (live run 12,
+    Codex racing 06) recorded no line beside its section, so this server
+    relayed "To go on: … --human-task T001=done" beside a `resume_markdown`
+    giving the same command, run 12's #5 on its #1's new stop. Driven on the
+    real path: the executor's stop and the real `util next-command
+    --blocked` lookup, handed to the server as the lookup answered."""
+
+    def test_the_error_names_the_gate_and_the_section_the_way_on(
+            self, harness, repo, capsys):
+        sys.path.insert(0, str(SKILL_ROOT))
+        from tests.test_manual_task_gate import (
+            IMPLEMENT_WRITE_IDS, _clean_env, _manual, _run, _seed_generate_tasks,
+        )
+
+        _clean_env(repo.monkeypatch)
+        _seed_generate_tasks(repo)
+        _manual(repo, "T001")
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", IMPLEMENT_WRITE_IDS)
+        code, _out, err, result = _run([
+            "implement", str(repo.plan), "--yes", "--exec-subagents",
+            "--host", "codex"], capsys)
+        assert code == 3, err
+        code, _out, err, lookup = _run([
+            "util", "next-command", str(repo.plan), "--blocked", "implement",
+            "--host", "codex"], capsys)
+        assert code == 0, err
+        step = dict(lookup["user_resume"])
+        command = step.pop("command")
+        step.pop("phase")
+        envelope = harness.run(
+            IMPLEMENT_CALL,
+            [launch_step(), failed_implement_status(harness, error=result["error"])],
+            meta=turn_meta(sandbox_mode="workspace-write"),
+            extra_env={"STUB_RESUME_COMMAND": command,
+                       "STUB_RESUME_EXTRA": json.dumps(step)})[0]
+        beside = envelope["error"]
+        assert "--human-task" not in beside, beside
+        assert beside.startswith(
+            "implement ran nothing: 2 code tasks wait on manual task T001"), beside
+        assert beside == step.get("error_beside_section")
+        assert envelope["result"]["error"] == beside
+        message = envelope["message"]
+        assert '"{}"'.format(beside) in message
+        assert "--human-task" not in message.split("`resume_markdown`")[0], message
+        assert envelope["resume_markdown"].count("--human-task T001=done") == 1
+        assert envelope["options"][0]["extra_flags"] == [
+            "--resume", "--human-task", "T001=done"]
+
+
 class TestAReportCallOnAFailedRun:
     """Adversarial review 2026-10-05: a direct `status` (or `abort`) call on a
     failed write run re-spelled status's `resume with:` line into the host's

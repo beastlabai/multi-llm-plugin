@@ -1267,12 +1267,13 @@ def _native_manual_gate_stop(
         return f" ({clip(str(title), 80)})" if title else ""
 
     it = "it" if len(gating) == 1 else "them"
-    headline = (
-        manual_gate_head("implement", {t: label(t) for t in gating}, waiting)
-        + ". " + manual_gate_way_on(gating)
-    )
+    head = manual_gate_head("implement", {t: label(t) for t in gating}, waiting)
+    headline = f"{head}. {manual_gate_way_on(gating)}"
+    # The merge of fix round 28: the line the report relays says what stopped
+    # and why, as the tool routes' line beside the section does; the way on
+    # is the section's resume alone (the result line's `error` keeps it).
     lines = [
-        f"[MANUAL_GATE] {headline}",
+        f"[MANUAL_GATE] {head}.",
     ]
     for task_id in gating:
         codes = waiting[task_id]

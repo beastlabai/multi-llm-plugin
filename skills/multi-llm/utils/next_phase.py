@@ -1851,7 +1851,8 @@ def emit_resume(
     # servers relay in its place beside the section.
     try:
         lines = stop_headlines_on_record(
-            plan_arg if plan_path is None else plan_path, mode_word)
+            plan_arg if plan_path is None else plan_path, mode_word,
+            section_flags=resume["flags"])
     except Exception as exc:  # noqa: BLE001 - advisory: the resume still stands
         print(lookup_failure_line(exc), file=err)
         lines = None
@@ -1902,6 +1903,7 @@ def stop_answers_on_record(
 
 def stop_headlines_on_record(
     plan_path: Union[str, Path], mode_word: str,
+    *, section_flags: Optional[Sequence[str]] = None,
 ) -> Optional[Tuple[str, str]]:
     """``(headline, beside_section)`` of the phase's last stop, as it
     recorded them (``progress.write_subagents.stop``: ``headline`` and
@@ -1917,7 +1919,10 @@ def stop_headlines_on_record(
     must be one plain line within ``cli_common.ERROR_MAX_CHARS``, and every
     answer the stop recorded must have passed :func:`stop_answers_on_record`
     (the section lists all of them), else ``None``: the folder is writable
-    by every jailed batch.
+    by every jailed batch. A stop whose own resume carries answers (a
+    manual-task gate's ``resume_flags``, the merge of fix round 28) hands
+    the lines back only while those flags are the plugin's shape and the
+    section's resume, *section_flags*, is that very resume.
     """
     from . import cli_common
     from .output_handler import phase_dir_path
@@ -1951,6 +1956,10 @@ def stop_headlines_on_record(
     recorded = raw if isinstance(raw, list) else []
     if len(stop_answers_on_record(source, mode_word)) != len(recorded):
         return None
+    if "resume_flags" in stop:
+        flags = recorded_answer_flags(stop.get("resume_flags"))
+        if flags is None or flags != list(section_flags or ()):
+            return None
     return headline, beside
 
 

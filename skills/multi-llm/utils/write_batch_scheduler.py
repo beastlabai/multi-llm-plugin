@@ -664,8 +664,11 @@ _HEADLINE_ANSWER = re.compile(r"--human-task (<check id>|[A-Za-z0-9][\w.-]*)=(do
 def answers_cover(full: str, beside: str, stop: Mapping[str, Any]) -> bool:
     """Whether every ``--human-task`` answer *full* names and *beside* leaves
     out is one of *stop*'s own ``answers`` — the ones its resume section
-    lists as commands (fix round 28). The generic ``<check id>=done`` stands
-    for ``=done`` on each of the stop's ``check_task_ids``."""
+    lists as commands (fix round 28) — or of its ``resume_flags``, the
+    resume the section leads with when that resume carries answers itself
+    (a manual-task gate's ``--resume --human-task T010=done``; the merge of
+    fix round 28). The generic ``<check id>=done`` stands for ``=done`` on
+    each of the stop's ``check_task_ids``."""
     wanted = set()
     left_out = set(_HEADLINE_ANSWER.findall(full)) - set(_HEADLINE_ANSWER.findall(beside))
     for task_id, word in left_out:
@@ -677,7 +680,8 @@ def answers_cover(full: str, beside: str, stop: Mapping[str, Any]) -> bool:
         else:
             wanted.add((task_id, word))
     offered = set()
-    for entry in stop.get("answers") or []:
+    for entry in list(stop.get("answers") or []) + [
+            {"flags": stop.get("resume_flags")}]:
         flags = entry.get("flags") if isinstance(entry, Mapping) else None
         if not isinstance(flags, list):
             continue
@@ -11618,7 +11622,10 @@ class WriteBatchScheduler:
         why = self._manual_gate_why(gating, waiting)
         if why:
             result.stop["resume_why"] = why
-        result.stop["headline"] = self._stop_headline(result.stop)
+        # The merge of fix round 28: and beside it the line without the way
+        # on the section carries (its resume records the gate done), which
+        # the tool routes relay in the `error`'s place.
+        self._set_stop_headline(result.stop)
 
     def _manual_gate_why(
         self, gating: Sequence[str], waiting: Mapping[str, Sequence[str]],
@@ -11854,7 +11861,10 @@ class WriteBatchScheduler:
                 key=_metrics._id_key)
             head = manual_gate_head(
                 self.phase, {mid: label(mid) for mid in gating}, waiting)
-            return head, None, held, [manual_gate_way_on(gating)], "."
+            # Beside the section, what stopped and why: its one way on is
+            # the section's resume.
+            return head, None, held, (
+                [] if beside_section else [manual_gate_way_on(gating)]), "."
         if stop.get("kind") == "check-findings":
             checks = stop.get("check_task_ids") or [task_id]
             named = ", ".join(f"{cid}{label(cid)}" for cid in checks)
