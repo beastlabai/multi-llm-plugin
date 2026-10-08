@@ -1,10 +1,10 @@
-{"role":"meta","type":"system.version","version":"0.36.1"}
-{"role":"meta","type":"turn.step.retrying","failed_attempt":1,"next_attempt":2,"max_attempts":10,"delay_ms":534.7137509515361,"error_name":"APIStatusError","error_message":"500 upstream is on fire","status_code":500}
-{"role":"meta","type":"turn.step.retrying","failed_attempt":2,"next_attempt":3,"max_attempts":10,"delay_ms":1033.4800030061574,"error_name":"APIStatusError","error_message":"500 upstream is on fire","status_code":500}
-{"role":"meta","type":"turn.step.retrying","failed_attempt":3,"next_attempt":4,"max_attempts":10,"delay_ms":2368.460175029196,"error_name":"APIStatusError","error_message":"500 upstream is on fire","status_code":500}
-{"role":"meta","type":"turn.step.retrying","failed_attempt":4,"next_attempt":5,"max_attempts":10,"delay_ms":4332.039747236606,"error_name":"APIStatusError","error_message":"500 upstream is on fire","status_code":500}
-{"role":"meta","type":"turn.step.retrying","failed_attempt":5,"next_attempt":6,"max_attempts":10,"delay_ms":8616.863606737237,"error_name":"APIStatusError","error_message":"500 upstream is on fire","status_code":500}
-{"role":"meta","type":"turn.step.retrying","failed_attempt":6,"next_attempt":7,"max_attempts":10,"delay_ms":17550.18553078448,"error_name":"APIStatusError","error_message":"500 upstream is on fire","status_code":500}
-{"role":"meta","type":"turn.step.retrying","failed_attempt":7,"next_attempt":8,"max_attempts":10,"delay_ms":33459.43933728077,"error_name":"APIStatusError","error_message":"500 upstream is on fire","status_code":500}
-{"role":"meta","type":"turn.step.retrying","failed_attempt":8,"next_attempt":9,"max_attempts":10,"delay_ms":38004.21336476045,"error_name":"APIStatusError","error_message":"500 upstream is on fire","status_code":500}
-{"role":"meta","type":"turn.step.retrying","failed_attempt":9,"next_attempt":10,"max_attempts":10,"delay_ms":35596.843841438116,"error_name":"APIStatusError","error_message":"500 upstream is on fire","status_code":500}
+{"role":"meta","type":"system.version","version":"2.1.1"}
+{"role":"meta","type":"turn.step.retrying","failed_attempt":1,"next_attempt":2,"max_attempts":10,"delay_ms":551.4057267535139,"error_name":"APIStatusError","error_message":"500 upstream is on fire","status_code":500}
+{"role":"meta","type":"turn.step.retrying","failed_attempt":2,"next_attempt":3,"max_attempts":10,"delay_ms":1126.1604382549347,"error_name":"APIStatusError","error_message":"500 upstream is on fire","status_code":500}
+{"role":"meta","type":"turn.step.retrying","failed_attempt":3,"next_attempt":4,"max_attempts":10,"delay_ms":2091.9337050817585,"error_name":"APIStatusError","error_message":"500 upstream is on fire","status_code":500}
+{"role":"meta","type":"turn.step.retrying","failed_attempt":4,"next_attempt":5,"max_attempts":10,"delay_ms":4267.2950360914,"error_name":"APIStatusError","error_message":"500 upstream is on fire","status_code":500}
+{"role":"meta","type":"turn.step.retrying","failed_attempt":5,"next_attempt":6,"max_attempts":10,"delay_ms":9691.916334315272,"error_name":"APIStatusError","error_message":"500 upstream is on fire","status_code":500}
+{"role":"meta","type":"turn.step.retrying","failed_attempt":6,"next_attempt":7,"max_attempts":10,"delay_ms":17879.18836957451,"error_name":"APIStatusError","error_message":"500 upstream is on fire","status_code":500}
+{"role":"meta","type":"turn.step.retrying","failed_attempt":7,"next_attempt":8,"max_attempts":10,"delay_ms":38090.29286778128,"error_name":"APIStatusError","error_message":"500 upstream is on fire","status_code":500}
+{"role":"meta","type":"turn.step.retrying","failed_attempt":8,"next_attempt":9,"max_attempts":10,"delay_ms":34990.59070892612,"error_name":"APIStatusError","error_message":"500 upstream is on fire","status_code":500}
+{"role":"meta","type":"turn.step.retrying","failed_attempt":9,"next_attempt":10,"max_attempts":10,"delay_ms":35048.005293015216,"error_name":"APIStatusError","error_message":"500 upstream is on fire","status_code":500}

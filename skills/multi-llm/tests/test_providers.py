@@ -2909,7 +2909,9 @@ class TestKimiProvider:
 
     Every assertion here is anchored to a capture in `tests/fixtures/kimi/`,
     taken from the real binary at 0.36.1 inside the §6 probe container against
-    the committed stub — the `tests/fixtures/kilocode/` precedent.
+    the committed stub — the `tests/fixtures/kilocode/` precedent — and
+    re-captured on 2.1.1 (2026-10-08) in the pinned image, through the wrapper,
+    by the same probe servers.
     """
 
     FIXTURES = Path(__file__).parent / "fixtures" / "kimi"

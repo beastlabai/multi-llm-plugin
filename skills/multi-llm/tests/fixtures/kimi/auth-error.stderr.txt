@@ -1,2 +1,2 @@
 error: failed to run prompt: provider.auth_error: 401 Invalid API key provided
-See log: /home/e2e/.kimi-code/logs/kimi-code.log
+See log: /tmp/mllm-inv/kimi-5bbe744cb21b/.kimi-code/logs/kimi-code.log

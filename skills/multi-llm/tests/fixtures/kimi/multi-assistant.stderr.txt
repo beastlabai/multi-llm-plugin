@@ -1,2 +1,2 @@
 error: failed to run prompt: provider.api_error: The API returned an empty response (no content, no tool calls). Provider: openai, model: stub-model
-See log: /home/e2e/.kimi-code/logs/kimi-code.log
+See log: /tmp/mllm-inv/kimi-29a96be94e8e/.kimi-code/logs/kimi-code.log
