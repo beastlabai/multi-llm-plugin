@@ -967,6 +967,17 @@ def read_json_from_file(
             "data": None,
         }
 
+    return parse_file_content(content, prefer_arrays=prefer_arrays)
+
+
+def parse_file_content(content: str, prefer_arrays: bool = True) -> Dict[str, Any]:
+    """:func:`read_json_from_file`'s reading of a file's text, once it is read.
+
+    Its own function so a caller that must open the file itself — the
+    misnamed-result adoption, which never follows a link
+    (``utils/result_files.read_regular_text``) — reads it the same way.
+    """
+    content = content.strip()
     if not content:
         return {
             "success": False,

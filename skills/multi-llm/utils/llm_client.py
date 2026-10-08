@@ -3446,20 +3446,32 @@ def _adopt_misnamed_result(
     asks for), or a rename that failed. The rename puts the file at the
     requested name, so it is this model's file from here on and no glob can
     read it a second time as somebody else's.
+
+    The candidate is read through one descriptor that never follows a link
+    (:func:`utils.result_files.read_regular_text`), and what the rename left
+    at the requested name must be that same regular file: a link swapped in
+    after the directory scan, or before the rename, is never adopted (review
+    of fix round 24).
     """
-    from .json_extractor import read_json_from_file
+    from .json_extractor import parse_file_content
 
     found = _result_files.find_misnamed_result(
         output_json_path.parent, before, model_spec, run_model_specs
     )
     if found is None:
         return None
-    read = read_json_from_file(found, prefer_arrays=prefer_arrays)
+    opened = _result_files.read_regular_text(found)
+    if opened is None:
+        return None
+    content, identity = opened
+    read = parse_file_content(content, prefer_arrays=prefer_arrays)
     if not read.get("success") or not isinstance(read.get("data"), list):
         return None
     try:
         os.replace(found, output_json_path)
     except OSError:
+        return None
+    if not _result_files.is_same_regular_file(output_json_path, identity):
         return None
     return read["data"], found.name
 
