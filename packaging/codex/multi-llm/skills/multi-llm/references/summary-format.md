@@ -90,8 +90,9 @@ Every mode ends with this report. Four rules, and a fifth for `ask`:
     `ask`, `init` and `status` are not workflow phases: on every host they run
     no lookup and end with no command.
   - *What to write under `### Next Steps`.* `user_next_step.markdown`, copied
-    as it is: it is this section already written, as the rest of this rule
-    describes it. Without it, `user_next_step.command` alone in a
+    as it is (on Claude Code the lookup prints it between `[NEXT_STEP_MARKDOWN]`
+    and `[NEXT_STEP_MARKDOWN_END]`): it is this section already written, as the
+    rest of this rule describes it. Without it, `user_next_step.command` alone in a
     fenced block, copied character for character, and never "Workflow
     complete." beside it, however much of the work is done: while there is a
     command, the workflow goes on (its `why`, the `[NEXT_COMMAND_WHY]` line,
@@ -106,8 +107,8 @@ Every mode ends with this report. Four rules, and a fifth for `ask`:
     pair, in the order printed,
     last: its why as plain text, then its command alone in its own fenced
     block. A stopped implement's lookup can also print a `[TESTS_NOT_RUN]`
-    line above them, saying nothing ran the repository's tests: give its text
-    verbatim in the report, above `### Next Steps`; it is never a command. When
+    line above them, saying what ran the repository's tests: give the text
+    after its tag verbatim in the report, above `### Next Steps`; it is never a command. When
     `complete` is `true` (its `command` is then `null`), write
     "Workflow complete." instead, and when it carries `manual_tasks`, list
     each one under it, its `id` and `title`, as the user's to do: implement

@@ -99,6 +99,15 @@ RESUME_COMMAND_MARKER = "[RESUME_COMMAND]"
 #: after it is a sentence that names a setting, never a command to copy.
 TESTS_NOT_RUN_MARKER = "[TESTS_NOT_RUN]"
 
+#: The lines ``util next-command`` prints around its answer's ``markdown``
+#: (fix round 24, live run 10: Claude Code racing 06 put the manual tasks
+#: before the next-step fence, and its stops captioned the resume three ways):
+#: the report's closing section already written, below the marker lines, for
+#: the report to copy as it is. Every line between the two is the section's;
+#: the Stop hook reads no marker line there (``report_check.find_blocks``).
+NEXT_STEP_MARKDOWN_MARKER = "[NEXT_STEP_MARKDOWN]"
+NEXT_STEP_MARKDOWN_END_MARKER = "[NEXT_STEP_MARKDOWN_END]"
+
 #: The one slot every ``next_command`` template ends with (schema pattern
 #: ``^[^{}]+\{args\}$``). Filled with ``str.replace``, never ``str.format``.
 ARGS_SLOT = "{args}"
@@ -242,6 +251,9 @@ class NextPhase:
     #: ``[NEXT_COMMAND_WHY]`` above the command and carried as
     #: ``user_next_step.why``.
     why: Optional[str] = None
+    #: On a resume of a stopped phase (fix round 24): the line the section
+    #: opens with (:func:`resume_lead`), in ``markdown`` only.
+    lead: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """The ``user_next_step`` value (§2.1's outcome table).
@@ -537,6 +549,7 @@ def resolve_route(
     environ: Optional[Mapping[str, str]] = None,
     skill_root: Optional[Union[str, Path]] = None,
     stderr=None,
+    recorded: Optional[str] = None,
 ) -> Optional[str]:
     """The ``next_command`` route key for this process, or ``None`` for ``default``.
 
@@ -555,6 +568,12 @@ def resolve_route(
       cell; any other value (empty, a typo, ``skill``, a product name, a tool
       route this host has no cell for) is ``None`` plus one stderr line naming
       the ignored value.
+    * *recorded* is the route the run whose commands are printed was started
+      on (:func:`recorded_route`, fix round 24): when the environment names
+      none, it is honoured under the same test, silently. Live run 10: a
+      shell's ``status --host codex`` spelled a run the Codex plugin's tool
+      had started in the file shim's words. The environment still wins, and
+      a host that reads its route from the skill root ignores it.
 
     *environ* defaults to ``os.environ`` and *stderr* to ``sys.stderr``.
     """
@@ -580,6 +599,8 @@ def resolve_route(
         return SKILL_ROUTE if _is_skill_install(host_id, skill_root) else None
 
     if value is None:
+        if recorded in modes.TOOL_ROUTES and recorded in routes:
+            return recorded
         return None
     if value in modes.TOOL_ROUTES and value in routes:
         return value
@@ -591,6 +612,62 @@ def resolve_route(
         file=stream,
     )
     return None
+
+
+def recorded_route(
+    plan_path: Union[str, Path],
+    host_id: str,
+    mode_word: Optional[str] = None,
+) -> Optional[str]:
+    """The tool route a run of *plan_path* on *host_id* was started on, or
+    ``None`` (fix round 24).
+
+    The detached worker records its route as ``run.route`` in its phase's
+    ``.status.json`` (``detach.RunHandle``): the tool servers set
+    ``modes.ROUTE_ENV`` on every child, and a file shim sets nothing. Read
+    here for a reader whose environment names no route (:func:`resolve_route`'s
+    *recorded*): with *mode_word*, that phase's run when one of this host is
+    on record, else the newest run of this host under the plan (by
+    ``started_at``). Only a member of ``modes.TOOL_ROUTES`` is returned: the
+    folder is writable by every jailed batch. Read-only; ``None`` when
+    nothing is on record or it cannot be read.
+    """
+    from .output_handler import PHASE_DIR_NAMES, output_dir_path, phase_dir_path
+    from .status_file import read_status
+
+    modes = _skill_module("modes")
+
+    def run_of(directory: Path) -> Optional[Dict[str, Any]]:
+        run = read_status(str(directory)).get("run")
+        if not isinstance(run, dict) or run.get("host") != host_id:
+            return None
+        return run
+
+    def route_of(run: Mapping[str, Any]) -> Optional[str]:
+        value = run.get("route")
+        return value if isinstance(value, str) and value in modes.TOOL_ROUTES else None
+
+    try:
+        source = Path(os.path.abspath(str(plan_path)))
+        mode = modes.resolve(mode_word) if mode_word else None
+        if mode is not None and mode.phase:
+            run = run_of(phase_dir_path(source, mode.phase))
+            if run is not None:
+                return route_of(run)
+        plan_dir = output_dir_path(source)
+        newest: Optional[Tuple[str, Dict[str, Any]]] = None
+        for child in sorted(plan_dir.iterdir()) if plan_dir.is_dir() else []:
+            if not child.is_dir() or child.name not in PHASE_DIR_NAMES:
+                continue
+            run = run_of(child)
+            if run is None:
+                continue
+            started = str(run.get("started_at") or "")
+            if newest is None or started > newest[0]:
+                newest = (started, run)
+    except Exception:  # noqa: BLE001 - advisory: the default route stands
+        return None
+    return route_of(newest[1]) if newest else None
 
 
 # ---------------------------------------------------------------------------
@@ -1063,12 +1140,37 @@ def render_next_phase_lines(answer: NextPhase) -> List[str]:
 
 
 #: The labels :func:`render_next_step_markdown` writes.
+#: Above a stopped phase's resume (fix round 24); ``{phase}`` is its mode word.
+RESUME_LEAD = "To go on with {phase}:"
 OPTIONAL_LEAD = "Optional, before that:"
 MANUAL_TASKS_LEAD = "Manual tasks left for you:"
 #: Above a stopped implement's answers (status says "or answer the stop
 #: with:"): what the user types instead of the resume.
 ANSWERS_LEAD = "Or answer the stop with one of these:"
 WORKFLOW_COMPLETE_SENTENCE = "Workflow complete."
+
+
+def resume_lead(phase: str) -> str:
+    """:data:`RESUME_LEAD` for *phase* (fix round 24)."""
+    return RESUME_LEAD.replace("{phase}", str(phase))
+
+
+#: A first character that could open a fence, a heading, a quote, a list, an
+#: HTML block or a marker line when a text line of the section starts with it.
+_MARKDOWN_OPENERS = frozenset("`~#>[<-*+_|=")
+
+
+def markdown_text(text: Any) -> str:
+    """*text* as one plain text line of the section (:func:`plain_line`),
+    its first character escaped (CommonMark's backslash) when it could open
+    a block of its own (fix round 24): a why or a note is read back from a
+    run's records, which a jailed batch can write, and one starting with
+    ``` would fence the commands after it, one starting with ``[`` would
+    read as a marker line where the native lookup prints the section."""
+    line = plain_line(text)
+    if line and line[0] in _MARKDOWN_OPENERS:
+        return "\\" + line
+    return line
 
 
 def fenced_command(command: str) -> str:
@@ -1101,26 +1203,49 @@ def render_next_step_markdown(answer: "NextPhase") -> str:
     if answer.complete:
         blocks.append(WORKFLOW_COMPLETE_SENTENCE)
     else:
+        if answer.lead:
+            blocks.append(markdown_text(answer.lead))
         if answer.why:
-            blocks.append(plain_line(answer.why))
+            blocks.append(markdown_text(answer.why))
         blocks.append(fenced_command(str(answer.command)))
         if answer.optional_before:
             blocks.append(OPTIONAL_LEAD)
             for step in answer.optional_before:
-                blocks.extend([plain_line(step.why), fenced_command(step.command)])
+                blocks.extend([markdown_text(step.why), fenced_command(step.command)])
         if answer.answers:
             blocks.append(ANSWERS_LEAD)
         for step in answer.answers:
-            blocks.extend([plain_line(step.why), fenced_command(step.command)])
+            blocks.extend([markdown_text(step.why), fenced_command(step.command)])
     if answer.manual_tasks:
         blocks.append("\n".join(
             [MANUAL_TASKS_LEAD]
             + [f"- {plain_line(task.line())}" for task in answer.manual_tasks]))
         if answer.manual_tasks_note and answer.manual_tasks_command:
             blocks.extend([
-                plain_line(answer.manual_tasks_note),
+                markdown_text(answer.manual_tasks_note),
                 fenced_command(answer.manual_tasks_command)])
     return "\n\n".join(block for block in blocks if block)
+
+
+def render_resume_markdown(
+    phase: str, command: str, why: Optional[str],
+    answers: Sequence[Mapping[str, Any]],
+) -> str:
+    """A stopped phase's ways forward as the report's closing section, by
+    :func:`render_next_step_markdown`'s rules (fix round 24, live run 10:
+    with ``user_next_step`` null at a stop, the hosts composed their own
+    blocks, reworded the whys and listed tool calls as options): the lead
+    line naming *phase*, the resume's *why* and *command*, then
+    :data:`ANSWERS_LEAD` and each answer's why and command. Carried as
+    ``user_resume.markdown`` (the tool routes' ``resume_markdown``)."""
+    return render_next_step_markdown(NextPhase(
+        phase=phase, command=command, why=why or None,
+        answers=tuple(
+            AnswersStep(str(entry["command"]), str(entry["why"]))
+            for entry in answers
+        ),
+        lead=resume_lead(phase),
+    ))
 
 
 def implement_answers(
@@ -1235,6 +1360,8 @@ def emit_answer(
     stderr=None,
     strict: bool = False,
     with_answers: bool = False,
+    recorded_route: Optional[str] = None,
+    with_markdown: bool = False,
 ) -> Optional[NextPhase]:
     """Build the answer, print its block and set ``user_next_step``: all or nothing.
 
@@ -1252,6 +1379,13 @@ def emit_answer(
     either: one stderr line (:func:`lookup_failure_line`) names it and this
     returns ``None``, or raises :class:`LookupFailed` under *strict*. The block
     is written before the key is recorded, so a failed write leaves no key.
+    *recorded_route* is the route the run being answered for was started on
+    (:func:`recorded_route`), used when this process names none (fix round
+    24).
+    With *with_markdown* (``util next-command``, fix round 24) the block is
+    followed by the answer's ``markdown`` between
+    :data:`NEXT_STEP_MARKDOWN_MARKER` and :data:`NEXT_STEP_MARKDOWN_END_MARKER`,
+    the section the Claude Code report copies as it is.
 
     With *finished_mode* given and no *workflow* handed in, a plan whose
     ``state.json`` does not exist answers ``None`` without reading anything:
@@ -1267,7 +1401,7 @@ def emit_answer(
             source = plan_arg if plan_path is None else plan_path
             if not _state_file(os.path.abspath(str(source))).is_file():
                 return None
-        route = resolve_route(host_id, stderr=err)
+        route = resolve_route(host_id, stderr=err, recorded=recorded_route)
         answer = next_phase_commands(
             plan_arg, host_id, route, finished_mode,
             after_mode=after_mode, plan_path=plan_path, workflow=workflow,
@@ -1292,6 +1426,8 @@ def emit_answer(
             why = implement_resume_why(plan_arg, plan_path=plan_path)
             if why:
                 answer = _replace(answer, why=why)
+            # Fix round 24: under the line the tool routes' section opens with.
+            answer = _replace(answer, lead=resume_lead(answer.phase))
             # Fix round 18 (live run 7, Claude Code stop 01): the native
             # stop's line saying nothing ran the repository's tests, which
             # the executor stop prints itself.
@@ -1306,6 +1442,10 @@ def emit_answer(
         out = sys.stdout if stream is None else stream
         for line in render_next_phase_lines(answer):
             print(line, file=out)
+        if with_markdown:
+            print(NEXT_STEP_MARKDOWN_MARKER, file=out)
+            print(payload["markdown"], file=out)
+            print(NEXT_STEP_MARKDOWN_END_MARKER, file=out)
         try:
             out.flush()
         except (AttributeError, ValueError):  # pragma: no cover - closed stream
@@ -1328,11 +1468,13 @@ def emit_resume(
     stream=None,
     stderr=None,
     strict: bool = False,
+    recorded_route: Optional[str] = None,
 ) -> Optional[str]:
     """Print the ``[RESUME_COMMAND]`` line and set ``user_resume``: all or nothing.
 
     :func:`emit_answer`'s sibling for ``util next-command --blocked``; the
-    same failure rule (one stderr line, ``None`` or :class:`LookupFailed`).
+    same failure rule (one stderr line, ``None`` or :class:`LookupFailed`)
+    and the same *recorded_route*.
     Nothing is printed for a mode that has no resume command, or for a plan
     whose ``state.json`` does not exist: nothing can be in progress there, and
     the workflow read would create the plan's output dir (as in
@@ -1345,7 +1487,7 @@ def emit_resume(
         source = plan_arg if plan_path is None else plan_path
         if not _state_file(os.path.abspath(str(source))).is_file():
             return None
-        route = resolve_route(host_id, stderr=err)
+        route = resolve_route(host_id, stderr=err, recorded=recorded_route)
         command = resume_command(
             plan_arg, host_id, route, mode_word, plan_path=plan_path,
         )
@@ -1386,6 +1528,9 @@ def emit_resume(
     why = stop_resume_why_on_record(plan_arg if plan_path is None else plan_path, mode_word)
     if why:
         resume["why"] = why
+    # Fix round 24: all of it as the report's closing section, ready to copy.
+    resume["markdown"] = render_resume_markdown(
+        mode.name if mode is not None else mode_word, command, why, answers or [])
     cli_common.record_user_resume(resume)
     return command
 
@@ -1596,11 +1741,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"ERROR: plan file not found: {plan_path}", file=sys.stderr)
         return 3
     host_id = _host_capabilities().resolve_host_id(explicit=args.host)
+    # Fix round 24: from a shell, the route the plan's run was started on.
+    recorded = recorded_route(plan_path, host_id, args.blocked or args.after)
 
     if args.blocked is not None:
         try:
             emit_resume(
                 args.plan, host_id, args.blocked, plan_path=plan_path, strict=True,
+                recorded_route=recorded,
             )
         except LookupFailed:
             return 3
@@ -1610,7 +1758,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         emit_answer(
             args.plan, host_id, None,
             after_mode=args.after, plan_path=plan_path, strict=True,
-            with_answers=True,
+            with_answers=True, recorded_route=recorded, with_markdown=True,
         )
     except LookupFailed:
         return 3

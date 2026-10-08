@@ -314,8 +314,9 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 6. **Record the batch outcome (only after verification)** — This step runs **only** after step 4 has classified the batch as a success or a clean failure. It must **never** run for a partially-applied batch (the loop stops there). Run:
    ```bash
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util batch-done \
-     --phase-dir "{plan}/apply-fixes" --task-id "{task.task_id}" --status {batch_status}
+     --phase-dir "{plan}/apply-fixes" --task-id "{task.task_id}" --status {batch_status} {check_flags}
    ```
+   `{check_flags}` is the result the batch's reply's `check` object reports, never left out when the reply carries one: `--own-check passed` (or `--own-check findings` with one `--finding` per failing check) and one `--listed-check` per entry of its `listed`, each explained below; empty only when the reply carries no `check`. A `completed` record without `--own-check` prints `[OWN_CHECK_NOT_RECORDED]` naming the call that records it, the same flags plus the result: run that call before step 7's append.
    `{batch_status}` is `completed` for a success (a verified no-op included) and `failed` for a clean failure — add `--reason "{compact reason}"` to a `failed` one. It prints one `[BATCH_DONE] {task.task_id} {batch_status} (N item(s) recorded)` line and writes the batch's record into `state.json`: the same `task_status` entry the `--exec-subagents` executor writes for this batch, plus every fix in it as processed. That record is what a later `--resume` reads to skip this batch (a `failed` record keeps it eligible for another try) and what makes `status` read the phase `in_progress`. Run it **before** step 7's append: a run that dies between the two leaves a record `--resume` honours, never a log entry `--resume` would re-apply. An exit 3 names the problem (no `write_tasks.json`, an unknown task id); treat it as a stop, not a warning.
    When the reply's `declined` lists fixes (each `{"id", "reason"}`), add `--declined "{id}={reason}"` for each, with `--status completed`: each prints a `[BATCH_DECLINED]` line — list that fix in the summary under `## Declined by their batch (not applied)`, with its id and reason (never under `## Applied Fixes`, not even marked "Not applied"), and name it in your report; it is never counted as applied. `--skipped {id}` records a fix the user chose to skip (above) the same way, as `[BATCH_SKIPPED]`, listed under `## Skipped at your request (not applied)`.
    When the batch's reply carries a `check` object — the checks its subagent ran on its own edits (a test, a build, a syntax check) — add `--own-check passed` when it says `"passed": true` (what it lists beside a pass, such as `npm test: 12 passed`, is not a failing check), else `--own-check findings` and one `--finding "{finding}"` per entry, with `--status completed`; never `--check`, which records only an implement check task's verdict (`batch-done` refuses it here). `batch-done` then prints a `[BATCH_CHECK_FAILED]` line: the fixes stay applied and the loop goes on, but the phase is not a clean success — list the batch in the summary's `## Check Findings` (step 8) and say in your report that its check fails.
@@ -356,11 +357,11 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
    ```bash
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
      --state-file "$STATE_FILE" --phase "apply-code-fixes" \
-     --label "Batch {N} ({file_key})" --subagent-type "{executor_role}" \
+     --label "Batch {N} ({file_key})" --task-id "{task.task_id}" --subagent-type "{executor_role}" \
      --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
      --total-batches {total_batches} --batch-index {N}
    ```
-   Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports. Omit any flag it does not report. Never pass `0` for an unknown value; omit the flag — a made-up zero is averaged into the phase totals as a real measurement. The script prints an `[ETA]` line to stderr after each call.
+   Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports, and `{task.task_id}` is the id you gave `util batch-done`. Omit any flag it does not report. Never pass `0` for an unknown value; omit the flag — a made-up zero is averaged into the phase totals as a real measurement. The script prints an `[ETA]` line to stderr after each call; for a batch `util batch-done` recorded `failed` it says the batch failed and why, never "done".
 
 **CRITICAL**: Process batches ONE AT A TIME. Never spawn multiple subagents simultaneously.
 
@@ -394,13 +395,13 @@ not cause.
 
 If no `verify_command` is configured, say so in the summary — "not configured" is the
 honest verification status, and it is not the same as "passed". Say it in your report
-too, in one plain line: nothing ran the repository's tests, and the setting to add is
+too, in one plain line: the plugin ran none of the repository's tests, and the setting to add is
 `verify_command` under `driver:` in `.multi-llm/providers.yaml` — name the repository's
 own test command as its value when it has an obvious one (`package.json`'s
 `scripts.test`, a `Makefile` `test` target), without running it or writing the config.
 Step 10's `--mark-completed` prints that line as `[TESTS_NOT_RUN] …` (on stderr): it
 also names the checks the batches were asked to run and what each batch reported, so
-give its text in your report verbatim instead of writing your own.
+give the text after its tag in your report verbatim instead of writing your own.
 
 If the command fails:
 - Report which fix may have caused the issue

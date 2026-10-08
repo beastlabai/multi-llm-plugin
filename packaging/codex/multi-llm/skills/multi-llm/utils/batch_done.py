@@ -74,7 +74,11 @@ findings``. A batch that edits code (implement's tasks that declare files,
 apply-code-fixes' batches; fix round 14) records the checks it ran on its
 own edits with ``--own-check passed|findings``: a failing one prints a
 ``[BATCH_CHECK_FAILED]`` line telling the host to list it in summary.md and
-report it, and holds nothing back. ``--check`` on such a batch is refused,
+report it, and holds nothing back. A ``completed`` record of such a batch
+given no ``--own-check`` (of a check task, no ``--check``) prints
+``[OWN_CHECK_NOT_RECORDED]`` (``[CHECK_NOT_RECORDED]``) naming the call that
+records the result with the same flags (fix round 24); advisory, and nothing
+is recorded in its place. ``--check`` on such a batch is refused,
 naming the ``--own-check`` call (fix round 18, live run 7: Claude Code
 recorded ``--check passed`` for T008, a "check" task that declares
 ``index.html``, and its summary then called the code task ``Verified``), and
@@ -91,6 +95,7 @@ Import is side-effect free: argparse and all I/O live inside :func:`main`.
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -111,6 +116,7 @@ try:
         record_batch_items_in_state,
         set_task_batch_check_accepted_in_state,
         set_task_batch_check_in_state,
+        set_task_own_check_ran_in_state,
         set_task_check_findings_in_state,
         set_task_check_tree_in_state,
         update_task_status_in_state,
@@ -158,6 +164,7 @@ except ImportError:  # pragma: no cover - direct script invocation
         record_batch_items_in_state,
         set_task_batch_check_accepted_in_state,
         set_task_batch_check_in_state,
+        set_task_own_check_ran_in_state,
         set_task_check_findings_in_state,
         set_task_check_tree_in_state,
         update_task_status_in_state,
@@ -196,8 +203,10 @@ __all__ = [
     "BATCH_DECLINED_MARKER",
     "BATCH_SKIPPED_MARKER",
     "CHECK_BLOCKED_MARKER",
+    "CHECK_NOT_RECORDED_MARKER",
     "CHECK_RESULTS",
     "MARKER",
+    "OWN_CHECK_NOT_RECORDED_MARKER",
     "RESUME_REFUSED_MARKER",
     "STATUSES",
     "record_batch",
@@ -211,6 +220,15 @@ MARKER = "[BATCH_DONE]"
 
 #: The line naming the tasks a check with findings holds back (stdout).
 CHECK_BLOCKED_MARKER = "[CHECK_BLOCKED]"
+
+#: Fix round 24 (live run 10, Claude Code racing 06: all ten implement
+#: records lacked ``--own-check passed`` while every reply said its check
+#: passed): a ``completed`` record of a task that edits files given no
+#: ``--own-check``, and of a check task given no ``--check``, draws one line
+#: naming the call to record the result with. Advisory: the record stands,
+#: and no result the host did not pass is recorded.
+OWN_CHECK_NOT_RECORDED_MARKER = "[OWN_CHECK_NOT_RECORDED]"
+CHECK_NOT_RECORDED_MARKER = "[CHECK_NOT_RECORDED]"
 
 #: Fix round 18: one line per item an apply batch declined with a reason
 #: (``--declined``), and per item the user chose to skip when the batch was
@@ -349,7 +367,10 @@ def record_batch(
     that task's entry. *own_check* / *findings* are a code batch's report of
     the checks it ran on its own edits (fix round 14; its own flag since fix
     round 18): a failing one is recorded beside the status
-    (``task_batch_check``) and holds nothing back.
+    (``task_batch_check``) and holds nothing back. A ``completed`` record of
+    either kind given neither is returned as ``check_not_recorded``
+    (``"own-check"`` / ``"check"``, fix round 24), which :func:`main` names
+    with the call to make; nothing is recorded in its place.
 
     Raises :class:`WritePromptError` (exit 3) for a missing task file, an
     unknown id, a human task, a status outside :data:`STATUSES`, or a check
@@ -537,6 +558,11 @@ def record_batch(
             # findings and never among them (fix round 15): it holds
             # nothing back, and every other record of the task clears it.
             set_task_batch_check_in_state(state, task_id, batch_check)
+            # Fix round 24: that its own check reported at all, a pass
+            # included, for the tests line (`implement_checks_ran`).
+            set_task_own_check_ran_in_state(
+                state, task_id,
+                own_check is not None and status == "completed")
             # Fix round 23: what it reported again of the accepted findings,
             # by check, beside it (and cleared by any other record).
             set_task_batch_check_accepted_in_state(state, task_id, accepted_again)
@@ -580,6 +606,14 @@ def record_batch(
         # One record verifies one dispatch: a later record of this check
         # without a new `util write-prompt` has nothing to compare against.
         discard_check_tree(phase_dir, task_id)
+    # Fix round 24: a code kind's `completed` record given no check result
+    # at all. Named by `main`; never filled in here.
+    result_left_out = (
+        ("check" if checking else "own-check")
+        if status == "completed" and kind in CODE_WRITE_KINDS
+        and check is None and own_check is None
+        else None
+    )
     return {
         "task_id": task_id, "status": status, "items": items,
         "state_file": str(target), "check_findings": check_findings or [],
@@ -597,6 +631,7 @@ def record_batch(
         "listed": listed_outcomes,
         "listed_ignored": listed_ignored,
         "partial": bool(partial),
+        "check_not_recorded": result_left_out,
     }
 
 
@@ -618,6 +653,57 @@ def _listed_checks(values: Optional[List[str]]) -> Tuple[Dict[str, str], List[st
         if _known_checks.normalized(command) not in outcomes:
             ignored.append(f"{command}={word}")
     return outcomes, ignored
+
+
+def _record_again_call(args: argparse.Namespace, result_flag: str) -> str:
+    """The ``util batch-done`` call that records *args*' task again with
+    *result_flag* added, every other flag as it was given: a record without
+    its ``--declined`` would record the declined item applied."""
+    parts = [
+        f"util batch-done --phase-dir \"{Path(args.phase_dir).resolve()}\"",
+        f"--task-id {shlex.quote(str(args.task_id))}",
+        f"--status {args.status}",
+    ]
+    if args.reason:
+        parts.append(f"--reason {shlex.quote(args.reason)}")
+    if args.state_file:
+        parts.append(f"--state-file {shlex.quote(args.state_file)}")
+    for flag, values in (
+        ("--declined", args.declined), ("--skipped", args.skipped),
+        ("--listed-check", args.listed_check),
+    ):
+        parts.extend(f"{flag} {shlex.quote(str(value))}" for value in values or [])
+    parts.append(result_flag)
+    return " ".join(parts)
+
+
+def check_not_recorded_line(args: argparse.Namespace, which: str) -> str:
+    """The line a ``completed`` record given no check result prints (fix
+    round 24): ``[OWN_CHECK_NOT_RECORDED]`` for a task that edits files,
+    ``[CHECK_NOT_RECORDED]`` for a check task, each naming the call that
+    records the result its reply reported."""
+    task_id = args.task_id
+    if which == "check":
+        return (
+            f"{CHECK_NOT_RECORDED_MARKER} {task_id} is a check task (it "
+            f"declares no files) and was recorded completed without --check, "
+            f"so its verdict is not on record. Record it again now from its "
+            f"reply's `check`: {_record_again_call(args, '--check passed')} "
+            f"when it says \"passed\": true with no findings, or the same call "
+            f"with --check findings and one --finding per problem; a `check` "
+            f"that says \"could_not_run\": true is recorded --status failed "
+            f"--check could-not-run instead."
+        )
+    return (
+        f"{OWN_CHECK_NOT_RECORDED_MARKER} {task_id} edits files and was "
+        f"recorded completed without --own-check, so the checks its subagent "
+        f"ran on its own edits are not on record. If its reply carries a "
+        f"`check` object, record it again now with its result: "
+        f"{_record_again_call(args, '--own-check passed')} when it says "
+        f"\"passed\": true, or the same call with --own-check findings and one "
+        f"--finding per failing check. Leave the record as it is only when "
+        f"the reply carries no `check`."
+    )
 
 
 def _not_a_check_task_message(
@@ -1195,6 +1281,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"the findings were accepted), or leave it and them "
             f"undone with --resume --human-task {task_id}=skip."
         )
+    which = written.get("check_not_recorded")
+    if which:
+        # Fix round 24: advisory, so the host records it in the same turn.
+        print(check_not_recorded_line(args, which))
     return 0
 
 

@@ -441,16 +441,20 @@ TOOL_OUTCOMES_LINE = (
 #: close command, which the note carried at its end, reached the user as
 #: prose): the key carries the section already written, each command fenced
 #: (`next_phase.render_next_step_markdown`), and the line says to copy it.
+#: Fix round 24 (live run 10: OpenCode 03 reordered the step under captions
+#: of its own, 08 wrote "Workflow complete." beside the markdown that says
+#: it): its words and order, no caption, and the words never the host's own;
+#: a stop's `resume_markdown` is copied the same way.
 TOOL_USER_NEXT_STEP_LINE = (
     "`user_next_step` in a result is a command for the user to type, never a "
-    "call to make: end your report with its `markdown`, copied as it is (each "
-    "command stays alone in its fenced block, each why and note stays plain "
-    "text, the manual tasks it lists included), then stop. It says "
-    "\"Workflow complete.\" only when it is `complete`: never say that "
-    "otherwise, even when a notice lists manual tasks left for the user; while "
-    "`user_next_step` names a `command`, the workflow goes on. Only `next` is "
-    "a call. A needs-human result's `resume_command` is the same kind of "
-    "thing: the user's to type, never a call."
+    "call to make: end your report with its `markdown`, copied as it is (its "
+    "words and order, each command alone in its fenced block, each why and "
+    "note plain text, the manual tasks it lists included, no caption of your "
+    "own), then stop. It says \"Workflow complete.\" only when it is "
+    "`complete`: never write those words yourself, even when a notice lists "
+    "manual tasks left for the user. Only `next` is a call. At a stop, "
+    "`resume_markdown` is the same kind of thing: copy it the same way, its "
+    "commands (`resume_command` among them) the user's to type, never a call."
 )
 
 #: The finished run's relay (live run 8, OpenCode racing 08): a completed
@@ -707,6 +711,21 @@ NEEDS_HUMAN_MESSAGE = {
         "fenced block, its why as plain text above it, and no list or summary "
         "of them of your own: they are the stop's ways forward. Like "
         "`resume_command`, none is a tool call or a shell command for you to run."
+    ),
+    # Appended instead of `resume`/`resume_why` and `answers` when the lookup
+    # wrote the stop's ways forward as one section (`user_resume.markdown`,
+    # the result's `resume_markdown`; fix round 24, live run 10: the hosts
+    # composed their own blocks, reworded the whys, added "what ran" lists
+    # and printed `options` entries as "Call multi_llm with …").
+    "resume_markdown": (
+        "`resume_markdown` is the stop's ways forward, already written for "
+        "the user: `resume_command` with what it does and, when the stop "
+        "offers them, the answers they can type instead (each also in "
+        "`resume_answers` and an `options` entry). End your report with it, "
+        "copied as it is, in place of any list of options or ways forward of "
+        "your own: each command stays alone in its fenced block, each why "
+        "stays plain text. None of its commands is a tool call or a shell "
+        "command for you to run, and do not offer to run one."
     ),
     # Appended instead of `resume` when the result carries no
     # `resume_command` (racing re-run 2026-10-04: a result with neither command

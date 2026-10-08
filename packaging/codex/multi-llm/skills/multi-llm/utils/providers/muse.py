@@ -158,22 +158,27 @@ class MuseProvider(LLMProvider):
     #   ten provider attempts per round (`opening meta model stream attempt
     #   N/10`), rounds repeated until a wall-clock ceiling. The single-round
     #   chain alone is 10 attempts / 30 POSTs / 248 s, identical to two decimals
-    #   on the 5xx and the 429 (`stdout-error` and `rate-limit`, `wall_s:
-    #   248.16` / `248.18`, `requests: 32`), with backoff `1s, 2s, 4s, 8s, 16s,
+    #   on the 5xx and the 429 at 0.1.0 (`stdout-error` and `rate-limit`,
+    #   `wall_s: 248.16` / `248.18`, `requests: 32`; 250.69 / 249.04 and 31 at
+    #   1.4.3, the same ten attempts), with backoff `1s, 2s, 4s, 8s, 16s,
     #   32s, 60s, 60s, 60s` — exponential, capped at 60 s, 243 s of it sleeping
     #   (`README.md`'s "What this set found" item 3).
     #
     # * `max_wall_s = 736.0` — 12m16s, muse's OWN ceiling and the number that
-    #   generalises: it states a *12-minute wall-clock ceiling measured from its
-    #   first failed attempt* and overshot it to 12m16s. This is a policy the
-    #   CLI enforces on itself, not a round trip against a stub, which is what
-    #   makes it declarable at all (contrast goose, which declares `None`). The
-    #   `truncated` row's total `wall_s` is **984.33** — the ceiling clock does
-    #   not start until the first failure, so the opening round sits outside it;
-    #   736 s is deliberately the stated bound rather than the observed total,
-    #   and in production neither is ever reached, because `default_timeout` is
-    #   600 and redirect.yaml's `row_timeout_s` is 300, so this shape is a
-    #   harness timeout and the rich diagnosis is never seen.
+    #   generalises: it states a *12-minute wall-clock ceiling measured from
+    #   its first failed attempt* and overshot it to 12m16s. (That is 0.1.0's
+    #   sentence. The 1.4.3 re-capture, 2026-10-08, runs the same four rounds
+    #   in 985 s and words the span as "over 16m19s since the first counted
+    #   provider request"; this number was left as declared.) This is a policy
+    #   the CLI enforces on itself, not a round trip against a stub, which is
+    #   what makes it declarable at all (contrast goose, which declares
+    #   `None`). The `truncated` row's total `wall_s` is **984.33** (985.32 at
+    #   1.4.3) — the ceiling clock does not start until the first failure, so
+    #   the opening round sits outside it; 736 s is deliberately the stated
+    #   bound rather than the observed total, and in production neither is ever
+    #   reached, because `default_timeout` is 600 and redirect.yaml's
+    #   `row_timeout_s` is 300, so this shape is a harness timeout and the rich
+    #   diagnosis is never seen.
     #
     # * `retries_rate_limit = True` — the `rate-limit` row IS the 5xx row's
     #   envelope to two decimal places: muse's ladder does not distinguish a 429
@@ -213,7 +218,19 @@ class MuseProvider(LLMProvider):
     #: prints ``Muse Code 0.1.0 (0.1.0-R708.1)``, two version strings on one
     #: line, and the base parser reads neither of them the way this field
     #: spells it. ``tests/container/cli-versions.lock`` pins the same build.
-    verified_version = "0.1.0-R708.1"
+    #:
+    #: **Moved 0.1.0-R708.1 -> 1.4.3-R5018.1 on 2026-10-08**: all twelve rows
+    #: re-captured on 1.4.3 by the same rig in the pinned image (``--version``
+    #: prints ``Muse Code 1.4.3 (1.4.3-R5018.1)``), with no parser change. The
+    #: three payload types this parser reads, the terminal record, the
+    #: ``tool.result`` boundary and the 4 x 10 truncation ladder are unchanged.
+    #: What moved: 18 requests per call (1 catalog GET, 17 POSTs), no
+    #: background reminder fails in a green run any more, stderr now ends a
+    #: failure with ``run ended with Failed: <reason>``, a 404 is glossed (``model
+    #: `…` does not exist or you lack access``) like the 401 already was, and
+    #: the ceiling sentence reports ``over 16m19s since the first counted provider
+    #: request`` where 0.1.0 wrote ``over 12m16s``.
+    verified_version = "1.4.3-R5018.1"
 
     #: D6 — muse's shell sandbox is bubblewrap with ``--unshare-net``, and
     #: `build_command` turns it off on every dispatch (``--disable-sandbox``,

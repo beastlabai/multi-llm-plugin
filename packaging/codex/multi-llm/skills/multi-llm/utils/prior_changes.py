@@ -8,11 +8,12 @@ Storage: {output-dir}/prior_changes.jsonl
 import argparse
 import hashlib
 import json
+import re
 import sys
 import warnings
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Collection, List, Optional, Sequence, Tuple
+from typing import Any, Collection, Iterable, List, Optional, Sequence, Tuple
 
 try:
     from .stream_bootstrap import bootstrap_streams
@@ -25,6 +26,11 @@ FILENAME = "prior_changes.jsonl"
 DEFAULT_TAIL = 15
 MAX_CHARS = 2000
 DEFAULT_TEXT = "(none — this is the first batch)"
+
+#: The phase's materialized write task file, ``utils.write_phase_bridge``'s
+#: ``WRITE_TASK_FILENAME`` (spelled here: the bridge imports this module).
+#: :func:`append` reads it to name the batch an entry came from.
+WRITE_TASK_FILENAME = "write_tasks.json"
 
 #: Distinct spellings that name the *same* phase for this file's purposes
 #: (F6, 2026-09-16). ``apply-code-fixes`` is the write executor's own phase
@@ -213,6 +219,82 @@ def run_entries(
     return out
 
 
+#: A batch id a prompt line may show (``T003``, ``apply-fix-batch-0``): the
+#: log and the phase's task file sit where a batch can write, so a recorded
+#: ``task_id`` of any other shape (a newline forging a prompt line, markup) is
+#: never shown, and the entry is named by its own id.
+_PLAIN_TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._#:-]{0,79}\Z")
+
+#: A phase folder name :func:`append` may read a task file from.
+_PHASE_DIR_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
+
+
+def plain_task_id(value: Any) -> str:
+    """*value* as a batch id a line may show, or ``""``."""
+    text = str(value or "").strip()
+    return text if _PLAIN_TASK_ID.match(text) else ""
+
+
+#: What may follow a leading id for :func:`summary_without_ids` to read it as
+#: a label: a colon or a dash, spaced or not (a hyphen only after a space,
+#: so ``T002-fix`` stays whole).
+_LABEL_SEPARATOR = r"\s*(?::|—|–|\s-)\s*"
+
+
+def summary_without_ids(summary: str, ids: Iterable[Any]) -> str:
+    """*summary* without a leading copy of one of *ids* used as its label.
+
+    Live run 10 (OpenCode racing 08): a subagent opened its summary with its
+    own task id, and the line that names the entry read
+    ``- (T002): T002: 8-point closed CatmullRom track…``. A line names its id
+    once: ``T002: …``, ``T002 — …``, ``(T002) …`` and ``[T002]: …`` lose
+    the id; one that only mentions it (``T002 and T003 share…``,
+    ``Fixed T002: …``) is kept word for word, and so is a summary that would
+    be left empty.
+    """
+    text = str(summary or "")
+    for ident in ids:
+        ident = str(ident or "").strip()
+        if not ident:
+            continue
+        name = re.escape(ident)
+        match = re.match(
+            rf"\s*(?:\(\s*{name}\s*\)|\[\s*{name}\s*\])(?:{_LABEL_SEPARATOR}|\s+)"
+            rf"|\s*{name}{_LABEL_SEPARATOR}",
+            text,
+        )
+        if match and text[match.end():].strip():
+            return text[match.end():]
+    return text
+
+
+def entry_task_id(entry: dict) -> str:
+    """The id of the batch that wrote *entry* — what summary.md, ``status``
+    and ``--human-task <id>=…`` call it — else the entry's own id."""
+    return plain_task_id(entry.get("task_id")) or str(entry.get("id") or "?")
+
+
+def entry_line(entry: dict) -> str:
+    """One earlier batch, as every list of them shows it (fix round 24, live
+    run 10 #6): named by its batch id, with the entry id beside it when the
+    two differ (an apply batch's ``index.html#a4d7fa43``), never by a list
+    position — "Batch 1" read as the second of ``apply-fix-batch-0/1/2`` —
+    and never an id twice."""
+    eid = str(entry.get("id") or "?")
+    task_id = entry_task_id(entry)
+    label = f"**{task_id}**" if task_id == eid else f"**{task_id}** ({eid})"
+    summary = summary_without_ids(entry.get("summary", ""), [task_id, eid])
+    return f"- {label}: {summary}"
+
+
+def record_line(entry: dict) -> str:
+    """``- (<id>): <summary>``: an implement entry as apply-code-fixes'
+    ``## Implementation record`` quotes it (``code_fix_batcher``), and the
+    shape :func:`quoted_in` looks for."""
+    eid = str(entry.get("id") or "?")
+    return f"- ({eid}): {summary_without_ids(entry.get('summary', ''), [eid])}"
+
+
 def render(
     output_dir: str,
     phase: Optional[str] = None,
@@ -266,6 +348,9 @@ def render(
     of its own run (implement's record has its own section, and the
     plan-edit batches of the planning phases are not code changes); Codex
     racing 08's first fix batch listed nine of them.
+
+    Each entry is one :func:`entry_line` (fix round 24): named by the id of
+    the batch that wrote it, never numbered.
     """
     if own_run_only:
         entries = run_entries(output_dir, phase, since)
@@ -314,10 +399,7 @@ def render(
         if skipped > 0:
             lines.append(f"... and {skipped} earlier batches applied miscellaneous changes")
 
-        for i, entry in enumerate(visible, start=skipped + 1):
-            eid = entry.get("id", "?")
-            summary = entry.get("summary", "")
-            lines.append(f"{i}. **Batch {i}** ({eid}): {summary}")
+        lines.extend(entry_line(entry) for entry in visible)
 
         if other_count > 0:
             lines.append(f"... and {other_count} earlier batches from other phases")
@@ -347,13 +429,45 @@ def quoted_in(text: str, output_dir: str) -> List[Tuple[str, Optional[str]]]:
     out: List[Tuple[str, Optional[str]]] = []
     for entry in latest_entries(_load_entries(_jsonl_path(output_dir))):
         eid, summary = entry.get("id"), entry.get("summary")
-        if eid and summary and f"- ({eid}): {summary}" in text:
+        if eid and summary and (
+            record_line(entry) in text or f"- ({eid}): {summary}" in text
+        ):
             out.append((str(eid), entry.get("phase")))
     return out
 
 
-def append(output_dir: str, entry_id: str, phase: str, summary: str) -> bool:
+def _task_id_in_task_file(output_dir: str, entry_id: str, phase: Optional[str]) -> str:
+    """The ``task_id`` of the batch whose ``prior_changes_id`` is *entry_id*
+    in the phase's ``write_tasks.json`` (``<output_dir>/<phase dir>/``), or
+    ``""``. Best-effort: a missing or unreadable file names nothing."""
+    if not phase or not _PHASE_DIR_WORD.match(phase):
+        return ""
+    try:
+        document = json.loads(
+            (Path(output_dir) / phase / WRITE_TASK_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(document, dict):
+        return ""
+    for task in document.get("batches") or document.get("tasks") or []:
+        if isinstance(task, dict) and str(task.get("prior_changes_id") or "") == entry_id:
+            return plain_task_id(task.get("task_id"))
+    return ""
+
+
+def append(
+    output_dir: str, entry_id: str, phase: str, summary: str,
+    *, task_id: Optional[str] = None,
+) -> bool:
     """Record one entry for ``(id, phase)``. True when a line was written.
+
+    *task_id* is the batch the entry comes from (``apply-fix-batch-0``,
+    ``T003``): what every list of earlier batches names it by
+    (:func:`entry_line`, fix round 24). The executor passes its own; with
+    none given (the native ``append`` command) it is read off the phase's
+    ``write_tasks.json``, the file the host dispatched the batch from. It is
+    recorded only when it differs from *entry_id* (an implement task's entry
+    id is its task id), and only as a plain id (:func:`plain_task_id`).
 
     The in-process half of ``append``, for the same reason :func:`render` exists.
     Idempotent on ``(id, phase)`` **and summary**: a re-dispatched batch that
@@ -374,8 +488,11 @@ def append(output_dir: str, entry_id: str, phase: str, summary: str) -> bool:
     latest = _latest_for(_load_entries(path), entry_id, phase)
     if latest is not None and latest.get("summary") == summary:
         return False
-    record = {
-        "id": entry_id,
+    named = plain_task_id(task_id) or _task_id_in_task_file(output_dir, entry_id, phase)
+    record = {"id": entry_id}
+    if named and named != entry_id:
+        record["task_id"] = named
+    record.update({
         "phase": phase,
         "summary": summary,
         # Local naive clock, matching `state_manager.py`'s `updated_at` — a
@@ -383,7 +500,7 @@ def append(output_dir: str, entry_id: str, phase: str, summary: str) -> bool:
         # `state.json` and `subagent_audit.jsonl` for the same instant, both
         # of which use `datetime.now()`.
         "timestamp": datetime.now().isoformat(),
-    }
+    })
     path.parent.mkdir(parents=True, exist_ok=True)
     # Append-only, one write per line: concurrent appends (a native host
     # recording same-batch tasks in parallel) never lose each other's line,
@@ -405,36 +522,9 @@ def history(output_dir: str) -> list[dict]:
 
 
 def cmd_read(args: argparse.Namespace) -> None:
-    entries = latest_entries(_load_entries(_jsonl_path(args.output_dir)))
-    if not entries:
-        print(DEFAULT_TEXT)
-        return
-
-    total = len(entries)
-    tail = min(DEFAULT_TAIL, total)
-
-    # Build output by reducing visible entries until it fits within MAX_CHARS.
-    # This ensures we never cut mid-line or truncate the most recent entries.
-    while tail > 0:
-        skipped = total - tail
-        visible = entries[total - tail :]
-
-        lines: list[str] = []
-        if skipped > 0:
-            lines.append(f"... and {skipped} earlier batches applied miscellaneous changes")
-
-        for i, entry in enumerate(visible, start=skipped + 1):
-            eid = entry.get("id", "?")
-            summary = entry.get("summary", "")
-            lines.append(f"{i}. **Batch {i}** ({eid}): {summary}")
-
-        output = "\n".join(lines)
-        if len(output) <= MAX_CHARS:
-            break
-        # Reduce visible entries to fit within budget
-        tail -= 1
-
-    print(output)
+    # The block a batch's prompt binds, unscoped (fix round 24: one
+    # formatter, so this command and the prompts never name a batch two ways).
+    print(render(args.output_dir))
 
 
 def cmd_append(args: argparse.Namespace) -> None:

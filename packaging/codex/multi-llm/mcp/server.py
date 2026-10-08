@@ -207,8 +207,8 @@ USER_NEXT_STEP_KEY = "user_next_step"
 #: and a needs-human result's ``options`` trailed ``result``, ``output`` and
 #: ``stderr`` into the dropped middle.
 WAY_FORWARD_KEYS = (USER_NEXT_STEP_KEY, "resume_command", "resume_why",
-                    "resume_answers", "no_command_reason", "next",
-                    "abort_command", "options")
+                    "resume_answers", "resume_markdown", "no_command_reason",
+                    "next", "abort_command", "options")
 
 #: The keys placed last: the long runbook (Open question 20 of
 #: plans/codex-native-plugin.md: a cut must lose runbook text, never the
@@ -2466,6 +2466,13 @@ class Server:
                 # Fix round 22: what the plain resume does, from the stop.
                 outcome["resume_why"] = why.strip()
                 clause = fill(text["resume_why"], {"why": why.strip()})
+            markdown = step.get("markdown")
+            if (isinstance(markdown, str) and markdown.strip()
+                    and isinstance(text.get("resume_markdown"), str)):
+                # Fix round 24: the ways forward as one written section,
+                # whose clause stands for the resume's and the answers'.
+                outcome["resume_markdown"] = markdown
+                clause = text["resume_markdown"]
             outcome["message"] = "{} {}".format(outcome.get("message") or "", clause)
             self.attach_answers(step, word, plan, outcome)
 
@@ -2513,7 +2520,8 @@ class Server:
             outcome["resume_answers"] = answers
             clause = (self.surface.get("needs_human_message") or {}).get("answers")
             text = step.get("answers_text")
-            if isinstance(clause, str) and isinstance(text, str) and text.strip():
+            if (isinstance(clause, str) and isinstance(text, str) and text.strip()
+                    and "resume_markdown" not in outcome):
                 outcome["message"] = "{} {}".format(
                     outcome.get("message") or "", fill(clause, {"answers": text}))
         if not lead:

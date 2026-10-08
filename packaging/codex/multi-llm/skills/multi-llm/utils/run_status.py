@@ -528,8 +528,24 @@ def _plan_spelling(
     return str(args.plan_file)
 
 
+def _recorded_route(
+    args: argparse.Namespace, views: Sequence[Dict[str, Any]], plan_path: Path,
+) -> Optional[str]:
+    """The route the commands of this view's plan were started on (fix round
+    24): a poll pinned to one run takes that run's record (:func:`_run_route`),
+    anything else the newest run of the reader's host under the plan
+    (``next_phase.recorded_route``). ``None`` when none is on record."""
+    from . import next_phase
+
+    host = _reader_host(args)
+    if len(views) == 1 and (args.phase or args.question or args.run_id):
+        return _run_route(views[0], host)
+    return next_phase.recorded_route(plan_path, host)
+
+
 def manual_close_note(
     payload: Dict[str, Any], plan_spelling: str, host_id: Optional[str],
+    recorded_route: Optional[str] = None,
 ) -> Optional[str]:
     """How to record the deferred manual tasks done, in *host_id*'s spelling.
 
@@ -537,6 +553,8 @@ def manual_close_note(
     ``phases.implement.manual_tasks`` (fix round 14: Codex racing 06/08
     listed T007 and never said how to close it). ``None`` when nothing is
     owed or the host has no command template for this route.
+    *recorded_route* is the route the plan's run was started on
+    (:func:`_recorded_route`), for a reader that names none (fix round 24).
     """
     import io
 
@@ -552,7 +570,8 @@ def manual_close_note(
         host = host_capabilities.resolve_host_id(explicit=host_id)
         # The route's one stderr line, if any, is the emitter's to print.
         template = host_capabilities.next_command_template(
-            host, next_phase.resolve_route(host, stderr=io.StringIO()),
+            host, next_phase.resolve_route(
+                host, stderr=io.StringIO(), recorded=recorded_route),
         )
     except Exception:  # noqa: BLE001 - advisory: the list still stands
         return None
@@ -564,8 +583,10 @@ def manual_close_note(
 def _workflow_trailer_lines(
     payload: Dict[str, Any], *, prefix: str = "  ",
     close_note: Optional[str] = None,
+    suggested: bool = True,
 ) -> List[str]:
-    """The workflow view's ``suggested next``/``notice`` lines, alone.
+    """The workflow view's ``suggested next``/``notice`` lines, alone
+    (without the ``suggested next`` line when *suggested* is false).
 
     Split out of ``render_workflow_text`` so the terminal ``--view run`` carry-
     over (F7, 2026-09-16, below) renders the identical text instead of a second
@@ -573,7 +594,7 @@ def _workflow_trailer_lines(
     channels can never say something different about the same ``state.json``.
     """
     lines: List[str] = []
-    if payload.get("suggested_next"):
+    if suggested and payload.get("suggested_next"):
         # `suggested_next` already skips every optional phase in its way
         # (`check_workflow_prerequisites.get_workflow_status`'s own
         # `OPTIONAL_PHASES` walk), so the bare word reads as "nothing else is
@@ -728,8 +749,11 @@ def render_run_text(
             # (`render_state_implement_lines`, fix round 16).
             lines.append(f"  no run recorded for {scope or 'this plan'}")
         return lines
+    outer_spell = spell
     for view in views:
         run = view["run"]
+        # Fix round 24: each run's commands in the route that started it.
+        spell = _view_speller(outer_spell, view)
         name = os.path.basename(view["phase_dir"])
         head = f"  {name}"
         if run.get("run_id"):
@@ -2146,6 +2170,8 @@ def state_implement_view(
         state.is_phase_started(_IMPLEMENT_PHASE)
         or any(statuses.get(str(t)) == "completed" for t in decomposition)
     )
+    in_progress_since = None if completed else _host_run_started_at(
+        record, _IMPLEMENT_PHASE)
     stop_answers: List[Dict[str, Any]] = []
     stop_resume_why: Optional[str] = None
     if resumable:
@@ -2164,10 +2190,14 @@ def state_implement_view(
         "resumable": resumable,
         "stop_answers": stop_answers,
         "stop_resume_why": stop_resume_why,
+        # Fix round 24 (live run 10, Claude Code stop 01/01b): whether the
+        # run ended short and waits for the user, as the executor routes'
+        # "stopped and needs you" head says (:func:`native_run_stopped`).
+        "stopped": resumable and not in_progress_since
+        and native_run_stopped(record, statuses),
         # Fix round 18 (Claude Code racing 06, mid-run): when the host's loop
         # is between `util metrics start` and `finish`.
-        "in_progress_since": None if completed else _host_run_started_at(
-            record, _IMPLEMENT_PHASE),
+        "in_progress_since": in_progress_since,
         # Fix round 19: when state.json last changed, so a loop that ended
         # without `util metrics finish` can be told from a live one.
         "state_changed_at": _state_changed_at(state.state_file),
@@ -2196,6 +2226,59 @@ def state_implement_view(
         "batch_check_accepted": [] if settled else state.implementation_batch_check_accepted(),
         "answers": dict(answers) if isinstance(answers, dict) else {},
     }
+
+
+def native_run_stopped(
+    record: Mapping[str, Any], statuses: Mapping[str, Any],
+) -> bool:
+    """Whether a native implement the host ran ended short and waits for the
+    user: the run the executor routes head "stopped and needs you".
+
+    Fix round 24 (live run 10, Claude Code stop 01/01b): the native head read
+    "not finished on the host" for a stop, since that leg leaves no run
+    record and "not finished" also covers a host still working. The caller
+    has already ruled out a completed phase and an open loop (``util metrics
+    start`` without its ``finish``, the "in progress on the host" head).
+    *record* is ``state.json``'s dict and *statuses* its implement task
+    statuses (``StateManager.implementation_task_statuses``). True when:
+
+    * no task is recorded ``in_progress``;
+    * something waits for an answer: a task of the decomposition recorded
+      ``failed`` (a refusal before dispatch included, which the emit records
+      itself) or a check whose findings hold tasks back — what the stop's
+      answers are composed from
+      (``write_batch_scheduler.native_stop_answers``);
+    * no task is left that the host could still run without that answer:
+      every task not completed, skipped or failed is a manual one, held by a
+      check, or after a failed task. A task the emit handed out and the host
+      has not recorded yet can still run, so the moments between the emit
+      and the host's records never read as a stop.
+
+    The emit's left-out record (``metrics_left_out``) is not needed: each
+    task it names is refused (recorded failed), after a refused task, or
+    held by a check, and ``util metrics finish`` removes it. Advisory: an
+    unreadable record is not a stop.
+    """
+    from .write_batch_scheduler import _native_stop_facts
+
+    try:
+        scope = [str(t) for t in record.get("implement_task_ids") or []]
+        if any(statuses.get(task_id) == "in_progress" for task_id in scope):
+            return False
+        facts = _native_stop_facts(record)
+        if facts is None:
+            return False
+        manual = {str(t) for t in (record.get("implement_human_task_ids") or [])}
+        kept_out = set(facts["failed_ids"]) | set(facts["blocked"])
+        for task_id in facts["failed_ids"]:
+            kept_out.update(facts["undone_with"](task_id))
+    except Exception:  # noqa: BLE001 - advisory: the run view is not
+        return False
+    return not any(
+        statuses.get(task_id) not in ("completed", "skipped", "failed")
+        and task_id not in manual and task_id not in kept_out
+        for task_id in scope
+    )
 
 
 def _host_run_started_at(record: Mapping[str, Any], phase: str) -> Optional[str]:
@@ -2227,15 +2310,24 @@ def _state_changed_at(state_file: Path) -> Optional[str]:
     return datetime.fromtimestamp(stamp).isoformat(timespec="seconds")
 
 
+#: A native implement that stopped and waits for the user's answer
+#: (:func:`native_run_stopped`, fix round 24): the executor routes' words
+#: (:data:`STOPPED_FOR_THE_USER_VERDICT`), with no exit code to name, since
+#: the native leg's phase exits 0 and the host closed it.
+NATIVE_STOPPED_VERDICT = "stopped and needs you (not marked completed)"
+
+
 def _native_head(
     dir_name: str, *, completed: bool, since: Optional[str], unit: str,
-    changed: Optional[str] = None,
+    changed: Optional[str] = None, stopped: bool = False,
 ) -> str:
     """A native write phase's head line: what state.json says it is doing.
 
     Fix round 18 (Claude Code racing 06): a running native implement read
     "no run record — the host ran these tasks itself" exactly as a stopped
-    one did, so the view could not say whether anything was going on.
+    one did, so the view could not say whether anything was going on. Fix
+    round 24: one that stopped needing the user (*stopped*) reads
+    :data:`NATIVE_STOPPED_VERDICT`.
     """
     if completed:
         verdict = "done on the host (marked completed)"
@@ -2244,6 +2336,9 @@ def _native_head(
         last = f"; state.json last changed {changed}" if changed else ""
         verdict = f"in progress on the host (started {since}{last})"
         tense = "runs"
+    elif stopped:
+        verdict = NATIVE_STOPPED_VERDICT
+        tense = "ran"
     else:
         verdict = "not finished on the host (not marked completed)"
         tense = "ran"
@@ -2346,6 +2441,7 @@ def render_state_implement_lines(
     lines = [_native_head(
         _IMPLEMENT_PHASE, completed=bool(view.get("completed")), since=since,
         unit="tasks", changed=view.get("state_changed_at"),
+        stopped=bool(view.get("stopped")),
     )]
     lines.append(
         f"      all tasks:      {implement_tally_text(view['tally'], live=bool(since))}"
@@ -2852,11 +2948,16 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
             # dispatched nothing read "implement 0/0 batches ok (1 kept …),
             # 0/0 items applied" under "failed".
             parts = [f"{kind}: nothing dispatched{kept_note}"]
+        elif kind == "implement":
+            # Implement counts tasks, as its `[ETA]` lines say (fix round
+            # 22). An implement task is its own one item, so "3/4 items
+            # applied" beside "4/4 tasks ok" counted the same tasks a second
+            # way (fix round 24, live run 10 #7); the outcome clauses below
+            # say which applied an edit.
+            parts = [f"{kind} {ok}/{total} tasks ok{kept_note}"]
         else:
-            # Implement counts tasks, as its `[ETA]` lines say (fix round 22).
-            unit = "tasks" if kind == "implement" else "batches"
             parts = [
-                f"{kind} {ok}/{total} {unit} ok{kept_note}, "
+                f"{kind} {ok}/{total} batches ok{kept_note}, "
                 f"{items_applied}/{items_total} items applied"
             ]
     else:
@@ -3097,6 +3198,13 @@ def user_speller(
     back as a tool call in ``options``, which it can only do from the
     dispatcher command. ``None`` too when the host has no template for its
     route; the dispatcher command stands then.
+
+    Fix round 24 (live run 10, Codex): a reader whose environment names no
+    route — a shell's ``status`` — spells a run in the route that run was
+    started on, passed per call as *route* (its record's ``run.route``,
+    :func:`_view_speller`): that route's template and the flags it composes
+    (the tool routes' reserved set). A shell's ``status --host codex`` used
+    to print the file shim's sentence for a run the plugin's tool started.
     """
     import io
 
@@ -3105,17 +3213,30 @@ def user_speller(
     try:
         modes = next_phase._skill_module("modes")
         host = host_capabilities.resolve_host_id(explicit=host_id)
-        route = next_phase.resolve_route(host, stderr=io.StringIO())
-        if route in modes.TOOL_ROUTES:
+        if next_phase.resolve_route(host, stderr=io.StringIO()) in modes.TOOL_ROUTES:
             return None
-        template = host_capabilities.next_command_template(host, route)
-        composed = cli_common.file_route_composed_flags(host)
     except Exception:  # noqa: BLE001 - advisory: the dispatcher command stands
         return None
 
-    def spell(mode: str, extra: Sequence[str], tokens: Sequence[str]) -> Optional[str]:
+    def spell(
+        mode: str, extra: Sequence[str], tokens: Sequence[str],
+        route: Optional[str] = None,
+    ) -> Optional[str]:
         resolved = modes.resolve(mode)
         if resolved is None:
+            return None
+        try:
+            chosen = next_phase.resolve_route(
+                host, stderr=io.StringIO(), recorded=route)
+            template = host_capabilities.next_command_template(host, chosen)
+            # A tool route composes the reserved set the servers refuse in
+            # a call's flags (`cli_common._HOST_COMPOSED`); a file route its
+            # skill's or shim's own.
+            composed = (
+                cli_common._HOST_COMPOSED if chosen in modes.TOOL_ROUTES
+                else cli_common.file_route_composed_flags(host)
+            )
+        except Exception:  # noqa: BLE001 - advisory: the dispatcher command stands
             return None
         # What the run's own host composed too, when another host reads it
         # (its `--host` is in the replay): never something the user typed.
@@ -3139,7 +3260,30 @@ def user_speller(
         words += [next_phase.quote_plan_arg(token) for token in kept]
         return template.replace(next_phase.ARGS_SLOT, " ".join(words))
 
+    spell.host = host  # type: ignore[attr-defined]
     return spell
+
+
+def _run_route(view: Mapping[str, Any], host: Optional[str]) -> Optional[str]:
+    """The route *view*'s run recorded (``run.route``, fix round 24) when
+    that run is *host*'s, else ``None``: another host's route says nothing
+    of how this host's user types a command."""
+    run = view.get("run") if isinstance(view.get("run"), Mapping) else {}
+    route = run.get("route")
+    if not isinstance(route, str) or not host or run.get("host") != host:
+        return None
+    return route
+
+
+def _view_speller(spell: Optional[Speller], view: Mapping[str, Any]) -> Optional[Speller]:
+    """*spell* for one run view: its commands in the route that run was
+    started on (:func:`_run_route`), else *spell* as it is."""
+    route = _run_route(view, getattr(spell, "host", None)) if spell else None
+    if route is None:
+        return spell
+    import functools
+
+    return functools.partial(spell, route=route)
 
 
 def _resume_command(
@@ -3983,7 +4127,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 terminal_workflow, prefix="",
                 close_note=manual_close_note(
                     terminal_workflow, _plan_spelling(args, views, plan_path),
-                    _reader_host(args),
+                    _reader_host(args), _recorded_route(args, views, plan_path),
                 ),
             )
             if trailer:
@@ -4035,7 +4179,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 workflow,
                 close_note=manual_close_note(
                     workflow, _plan_spelling(args, views, plan_path),
-                    _reader_host(args),
+                    _reader_host(args), _recorded_route(args, views, plan_path),
                 ),
             )
             lines.append("")
@@ -4095,14 +4239,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         step = _emit_user_next_step(
             plan_path, args, views[0], workflow=terminal_workflow,
         )
-        if step is not None and step.manual_tasks_command and terminal_workflow:
+        if step is not None and terminal_workflow:
             # Fix round 22 (live run 9, Codex 07, OpenCode 06-08): the
             # notice said how to close the manual tasks, command and all,
             # beside `user_next_step`, which says it with the command fenced;
             # the hosts relayed both, the command folded into prose. The
             # notice keeps naming the tasks and leaves the rest to the step.
-            terminal_notice = "; ".join(
-                _workflow_trailer_lines(terminal_workflow, prefix="")) or None
+            # Fix round 24 (live run 10, OpenCode 03, Codex 01): so with the
+            # `suggested next` line, which the hosts relayed beside the
+            # step's markdown and reordered the step after.
+            terminal_notice = "; ".join(_workflow_trailer_lines(
+                terminal_workflow, prefix="", suggested=False)) or None
 
     # Plan §2.4: a `mode: truncated` validation source sets the notice on any
     # terminal poll (every view, not only `--view run`); it qualifies the
@@ -4293,6 +4440,8 @@ def _emit_user_next_step(
         plan_path=plan_path,
         workflow=workflow,
         stream=sys.stderr if args.json else sys.stdout,
+        # Fix round 24: the route the pinned run was started on.
+        recorded_route=_run_route(view, _reader_host(args)),
     )
 
 

@@ -63,6 +63,9 @@ a stall costs ``3 × api_timeout``. The default ``api_timeout`` is **720 s**, so
 an unpinned worst case is ``3 × 720 + 1.6 ≈ 2162 s`` — about **36 minutes inside
 a single slot**. Pinning the knob and declaring the pinned number is the
 ``claude_code.py`` precedent, and it is what keeps the declared envelope honest.
+That is 2.24.1's chain. 2.26.0 retries for a wall-clock budget instead
+(``api_retry_max_elapsed_time``, default 300 s), so ``VIBE_API_RETRY_MAX_ELAPSED_TIME``
+is pinned beside it (2026-10-08; see ``API_RETRY_BUDGET_S``).
 
 **``--max-price`` ships, and its role is narrower than §7.4 assumed.** §4.2 feared
 vibe enforces the cap against a priced catalog the stub cannot serve; measured,
@@ -154,9 +157,27 @@ MAX_TURNS = "4"
 #: inner bound.
 API_TIMEOUT_S = 90
 
-#: ``max_wall_s`` for the declaration below: three attempts at the pinned
-#: timeout, plus the measured ~1.6 s of backoff between them, rounded up.
-_MAX_WALL_S = 3 * API_TIMEOUT_S + 2
+#: The pinned retry budget, in seconds: 2.26.0's ``api_retry_max_elapsed_time``.
+#: 2.26.0 (the Unified Harness) retries a retryable failure while less than this
+#: much time has passed since the first request, with a 0.5 s backoff doubling
+#: to a 30 s cap and ``Retry-After`` honoured up to that cap. The vendor default
+#: is 300 s, which measured 16 requests over ~305 s on a fail-forever row and
+#: 367 s on a stall, past 2.24.1's declared 272 s. 150 s keeps the worst case at
+#: that same 272 s (below). 2.24.1 has no such setting and ignores the variable.
+API_RETRY_BUDGET_S = 150
+
+#: 2.26.0's backoff cap, read off the harness source (``_MAX_RETRY_DELAY_S``).
+_MAX_RETRY_DELAY_S = 30
+
+#: ``max_wall_s`` for the declaration below, the larger of the two supported
+#: releases' bounds: 2.24.1's three attempts at the pinned timeout plus its
+#: measured ~1.6 s of backoff, and 2.26.0's last retry granted just inside the
+#: budget, one capped delay, then one attempt at the pinned timeout. Both are
+#: 272 s at these pins.
+_MAX_WALL_S = max(
+    3 * API_TIMEOUT_S + 2,
+    API_RETRY_BUDGET_S + _MAX_RETRY_DELAY_S + API_TIMEOUT_S + 2,
+)
 
 #: Prefix under ``TMPDIR``, so a directory leaked by a SIGKILL is sweepable by
 #: name — the rule ``cursor_agent``, ``kimi``, ``qwen-code`` and ``copilot`` all
@@ -291,27 +312,44 @@ class VibeProvider(LLMProvider):
     supports_file_output = False
 
     version_cmd = ("vibe", "--version")
-    #: 2.24.1 is where every fixture in ``tests/fixtures/vibe/`` was captured and
-    #: the floor this parser is known to handle.
+    #: 2.24.1 is where the fixtures in ``tests/fixtures/vibe/`` were first
+    #: captured and the floor this parser is known to handle; it stays the floor.
+    #:
+    #: 2026-10-08: every row re-captured on 2.26.0 (the image's pin) except
+    #: ``empty``, whose zero bytes no 2.26.0 run produces. 2.26.0 runs the new
+    #: Unified Harness by default; the parser needed no change (new
+    #: ``inputEntryId`` key, renamed ids, httpx-worded HTTP errors, vendor text
+    #: forwarded). Its retry chain did change: a 300 s budget
+    #: (``api_retry_max_elapsed_time``) instead of 3 tries, 16 requests on a
+    #: fail-forever row, ``Retry-After`` honoured to 30 s, and cut or
+    #: finish-less streams retried. :meth:`get_env` now pins that budget
+    #: (:data:`API_RETRY_BUDGET_S`) and ``internal_retries`` below covers both
+    #: releases.
     min_version = "2.24.1"
-    verified_version = "2.24.1"
+    verified_version = "2.26.0"
 
     #: Measured at 2.24.1 (§6.1.1), every field, including the one experiment the
-    #: other adapters do not run.
+    #: other adapters do not run, and re-measured at 2.26.0 on 2026-10-08 with
+    #: the retry budget pinned (2.26.0 retries for a budget, not three times).
     #:
-    #: ``max_requests`` is **3** — ``async_retry(tries=3, delay_seconds=0.5,
+    #: ``max_requests`` is **11**, 2.26.0's: at the pinned 150 s budget a
+    #: 500-forever stub logged 11 requests over 155 s (0, 0.5, 1.5, … 121.5,
+    #: 151.5 s). 2.24.1's was 3 — ``async_retry(tries=3, delay_seconds=0.5,
     #: backoff_factor=2.0)`` in the installed source, confirmed against the
     #: stub's request log for 5xx and 429 alike.
     #:
     #: ``retries_rate_limit`` is **True** (429 is in the retryable set), so §7.5
     #: rule 6(b) suppresses an identical harness-side re-dispatch. ``Retry-After``
-    #: is **not** honoured — a 30 s header produced no sleep at all — so the
-    #: bound below does not have to account for a server-chosen delay, which is
-    #: what lets this adapter state a real ``max_wall_s`` where copilot and
-    #: qwen-code cannot.
+    #: was **not** honoured at 2.24.1 (a 30 s header produced no sleep at all);
+    #: 2.26.0 honours it up to a 30 s cap, so a server-chosen delay is still
+    #: bounded, which is what lets this adapter state a real ``max_wall_s`` where
+    #: copilot and qwen-code cannot.
     #:
-    #: ``max_wall_s`` is computed from the **pinned** ``VIBE_API_TIMEOUT``, not
-    #: from the vendor default, which is the whole reason the pin exists.
+    #: ``max_wall_s`` is computed from the **pinned** ``VIBE_API_TIMEOUT`` and
+    #: retry budget, not from the vendor defaults, which is the whole reason the
+    #: pins exist (see :data:`_MAX_WALL_S`). Measured at 2.26.0: six 429s with
+    #: ``Retry-After: 29`` then a stalled request ended at 267 s, 7 requests,
+    #: under the declared 272 s; a plain stall ended at 184 s, 2 requests.
     #:
     #: **Experiment 6 is why this row is trustworthy.** §4.2 predicted that a 200
     #: whose stream carries no ``finish_reason`` makes vibe "treat the stream as
@@ -324,10 +362,10 @@ class VibeProvider(LLMProvider):
     #: showed ``emits_finish_reason = false`` in the seed turns that hard error
     #: into a clean exit 0 against an endpoint that omits the field.
     internal_retries = InternalRetryEnvelope(
-        max_requests=3,
+        max_requests=11,
         max_wall_s=_MAX_WALL_S,
         retries_rate_limit=True,
-        configurable_by=("VIBE_API_TIMEOUT",),
+        configurable_by=("VIBE_API_TIMEOUT", "VIBE_API_RETRY_MAX_ELAPSED_TIME"),
     )
 
     #: vibe's own wording, added to the base set. The measured 401 message is
@@ -665,8 +703,10 @@ class VibeProvider(LLMProvider):
 
         ``VIBE_API_TIMEOUT`` is pinned because the vendor default is 720 s and
         vibe retries three times: an unpinned stall is ~36 minutes inside one
-        slot. The declared :attr:`internal_retries` envelope is computed from the
-        pinned value, so the two cannot drift.
+        slot. ``VIBE_API_RETRY_MAX_ELAPSED_TIME`` is pinned because 2.26.0
+        retries for that budget (default 300 s) rather than three times. The
+        declared :attr:`internal_retries` envelope is computed from the pinned
+        values, so they cannot drift.
 
         Note the endpoint and the key **variable name** are not here: they live
         in the committed ``home_seed/vibe/`` tree, because
@@ -683,6 +723,9 @@ class VibeProvider(LLMProvider):
             "VIBE_ACTIVE_MODEL": alias,
             # The pinned inner bound the declared envelope is computed from.
             "VIBE_API_TIMEOUT": str(API_TIMEOUT_S),
+            # 2.26.0's retry budget (vendor default 300 s), the envelope's other
+            # input; 2.24.1 has no such setting and ignores it.
+            "VIBE_API_RETRY_MAX_ELAPSED_TIME": str(API_RETRY_BUDGET_S),
             # Both default TRUE, and the dependency tree carries sentry-sdk and
             # opentelemetry-*. `enable_otel` needs `enable_telemetry` too, so
             # turning the latter off is the load-bearing one; the third is
