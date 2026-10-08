@@ -1,13 +1,16 @@
 {
-  "session_id": "65b7ac5c-403e-4b76-a7ec-a99f5e3d5794",
+  "session_id": "02b904fb-c75c-4d5d-a1fd-1dabfc6b02a7",
   "response": "",
   "stats": {
     "models": {
       "gemini-2.5-flash": {
         "api": {
           "totalRequests": 4,
-          "totalErrors": 0,
-          "totalLatencyMs": 23
+          "totalErrors": 1,
+          "totalLatencyMs": 56,
+          "errorsByType": {
+            "NO_RESPONSE_TEXT": 1
+          }
         },
         "tokens": {
           "input": 0,
@@ -17,6 +20,22 @@
           "cached": 0,
           "thoughts": 0,
           "tool": 0
+        },
+        "roles": {
+          "main": {
+            "totalRequests": 4,
+            "totalErrors": 0,
+            "totalLatencyMs": 56,
+            "tokens": {
+              "input": 0,
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0,
+              "tool": 0
+            }
+          }
         }
       }
     },
@@ -37,5 +56,9 @@
       "totalLinesAdded": 0,
       "totalLinesRemoved": 0
     }
+  },
+  "error": {
+    "type": "INVALID_STREAM",
+    "message": "The model returned an empty response with no text or thoughts. This may be a transient API issue; please try again."
   }
 }

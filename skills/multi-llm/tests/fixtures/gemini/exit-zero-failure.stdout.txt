@@ -1,5 +1,5 @@
 {
-  "session_id": "ac85309c-a385-423d-ad4b-c84fa074c5b8",
+  "session_id": "37cbf4dd-6e4f-472b-91ee-06581e224b4d",
   "response": "JSON written to /work/sample-project/plans/auth-feature/review-plan/gemini_gemini-2_5-flash.json",
   "stats": {
     "models": {
@@ -7,7 +7,8 @@
         "api": {
           "totalRequests": 2,
           "totalErrors": 0,
-          "totalLatencyMs": 15
+          "totalLatencyMs": 33,
+          "errorsByType": {}
         },
         "tokens": {
           "input": 2,
@@ -17,6 +18,22 @@
           "cached": 0,
           "thoughts": 0,
           "tool": 0
+        },
+        "roles": {
+          "main": {
+            "totalRequests": 2,
+            "totalErrors": 0,
+            "totalLatencyMs": 33,
+            "tokens": {
+              "input": 2,
+              "prompt": 2,
+              "candidates": 2,
+              "total": 4,
+              "cached": 0,
+              "thoughts": 0,
+              "tool": 0
+            }
+          }
         }
       }
     },

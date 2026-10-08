@@ -8,17 +8,22 @@
 # still gemini's own envelope around it, and `notes:` says so.
 schema_version: 1
 provider: gemini
-cli_version: "0.25.2"
-captured: "2026-08-19"
+cli_version: "0.63.0"
+captured: "2026-10-08"
 method: >-
-  §6 step 5, in the committed image mllm-e2e:local with `--network none`, the rig
+  §6 step 5, re-run 2026-10-08 on 0.63.0 (first captured 2026-08-19 on 0.25.2
+  by the same rig): in the pinned image built from tests/container/Dockerfile at
+  the cli-versions.lock pins, with `--network none`, the rig
   mounted read-only at /rig, and NO credential — GEMINI_API_KEY is the PATH
   wrapper's fake per-exec session key `mllm-stub-<id>`, meaningful only on
   127.0.0.1. The CLI is driven through the wrapper (`/opt/mllm/bin/gemini` IS
   `wrapper.py`), so redirect.yaml's gemini row applies verbatim:
   GOOGLE_GEMINI_BASE_URL — read by the bundled `@google/genai` SDK, NOT by
   gemini-cli — at the stub's origin, plus a per-exec `/s/<id>` session prefix and
-  a fresh $HOME (gemini crashes outright if $HOME does not exist). argv is
+  a fresh $HOME (gemini crashes outright if $HOME does not exist) seeded with
+  `tests/container/home_seed/gemini/.gemini/settings.json` plus
+  `GEMINI_CLI_TRUST_WORKSPACE=true` — the two start-up gates 0.60.0 added, which
+  0.25.2 needed neither of; both are the redirect row's own. argv is
   `GeminiProvider.build_command`'s output verbatim
   (`gemini --output-format json --model gemini-2.5-flash <5,030-byte review-plan
   prompt>`). Servers: `python3 /rig/stub_server.py --port 8099 --scenario <inline
@@ -27,9 +32,12 @@ method: >-
   whose server is the throwaway §14.7-gap-5 probe under
   `plans/harness-expansion/probe-out/gemini/gap5_probe.py` — stub_server never
   emits a tool call by design, so it cannot produce a tool-execution failure; the
-  bytes are still gemini's own. Never wrapped in `timeout(1)`.
+  bytes are still gemini's own; on 2026-10-08 that probe was re-run unchanged
+  (same functionCall, same confirmation text) by a throwaway driver that hands it
+  the adapter's argv through the PATH wrapper, as the first run did. Never
+  wrapped in `timeout(1)`.
 notes: >-
-  Four measured facts govern every row, and the first is the important one.
+  Five measured facts govern every row, and the first is the important one.
   (1) **On EVERY failure gemini writes ZERO bytes to stdout and puts the whole
   diagnosis on stderr** — the exact inverse of the opencode/aider/claude-code
   trap. `GeminiProvider.parse_output` used to read only `stdout`, so the
@@ -43,28 +51,42 @@ notes: >-
   classification — with the single exception of `auth-error`, which is C3's
   pattern widening and is marked as such on its own row.
   (2) stderr carries TWO things: free-form JS prose (message + a Node stack into
-  `@google/genai` and `@google/gemini-cli-core`), and then a machine-readable
-  envelope `{"session_id", "error": {"type", "message", "code"}}` whose
-  **`message` is always the literal string `[object Object]`** — an upstream
-  stringification bug that destroys the diagnosis in the only structured field
-  gemini offers.
+  the CLI's bundle), and then a machine-readable envelope `{"session_id",
+  "error": {"type", "message", "code"}}`. At 0.25.2 its **`message` was always
+  the literal string `[object Object]`** — an upstream stringification bug; at
+  0.63.0 it carries the real text (the vendor's JSON body for an HTTP error, the
+  sentence otherwise). The parser still never reads it: the tiers in
+  `GeminiProvider._diagnose` answer every row without it.
   (3) **The exit code is the envelope's `code`, truncated to 8 bits**: 401 → 145,
-  400 → 144, 500 → 244, and `code: 1` → 1. Measured on four statuses; it means an
-  exit code from this CLI is a status, not a category, and `!= 0` is the only
-  safe reading of it.
-  (4) One request per exec — no session-title side call — except on the two
-  fail-forever rows, where gemini's own backoff runs 10 requests over ~3.5-4 minutes.
+  400 → 144, 429 → 173, 500 → 244, and `code: 1` → 1 (0.25.2 put `code: 1` on a
+  429, so it exited 1). Measured on five statuses; it means an exit code from
+  this CLI is a status, not a category, and `!= 0` is the only safe reading of it.
+  (4) No session-title side call, and three retry tiers: 401, 404 and 400 are one
+  request; a cut stream, a 200 carrying an error object and an empty answer get
+  **4 requests over ~7 s** (1 / 2 / 4 s apart; one request each for the first
+  two at 0.25.2); and a fail-forever 429, 500 or zero-byte response gets gemini's
+  own backoff, **10 requests over ~3.5-4 minutes** (the zero-byte response was one
+  request at 0.25.2).
+  (5) **NEW at 0.63.0: start-up chatter on stderr on every run**, an answered one
+  included — `Warning: 256-color support not detected…`, `Ripgrep is not
+  available…` and one or two `[STARTUP] …` profiler lines (189-266 bytes). None of
+  it is about the run; `GeminiProvider._diagnose` drops it before any tier reads
+  stderr, which is what keeps it from becoming `exit-zero-failure`'s diagnosis
+  and keeps the answered rows' `describe_failure` at `None`. The first two lines
+  depend on the environment (a terminal without 256 colours, no `rg` on PATH),
+  so a host may print fewer.
 
 rows:
   success:
     stdout: success.stdout.txt
     stderr: success.stderr.txt
     exit_code: 0
-    wall_s: 2.11
+    wall_s: 1.14
     requests: 1
     notes: >-
       Pretty-printed `{"session_id", "response", "stats"}`; `parse_output`
-      unwraps `response` and `json.loads`es it. stderr is 0 bytes. `stats.tools`
+      unwraps `response` and `json.loads`es it. stderr is 266 bytes of start-up
+      chatter and nothing else (0 bytes at 0.25.2; fact 5). `stats.tools`
       records `totalCalls: 0` and `files.totalLinesAdded: 0` — the run answered
       on stdout and wrote nothing, which is the shape every successful gemini run
       has here and the first half of the `supports_file_output` finding in the
@@ -81,8 +103,8 @@ rows:
     stdout: truncated.stdout.txt
     stderr: truncated.stderr.txt
     exit_code: 1
-    wall_s: 2.16
-    requests: 1
+    wall_s: 8.74
+    requests: 4
     notes: >-
       failserver `--mode trunc --trunc-bytes 150`, against the **gemini** surface
       — the fix that made this row mean what it claims. gemini asks for its
@@ -90,8 +112,9 @@ rows:
       and its whole answer is ONE SSE frame of 291 bytes, so a 150-byte cut lands
       squarely inside the single record. `@google/genai` reports it as
       `Incomplete JSON segment at the end` and gemini exits **1** with zero bytes
-      on stdout. **One request**: a cut stream is not retried, unlike the 429 and
-      500 rows.
+      on stdout. **Four requests**, 1 / 2 / 4 s apart: 0.63.0 retries a cut
+      stream on its short ladder (0.25.2 sent one request and stopped), not on
+      the 429 / 500 rows' ten-request one.
     expect:
       success: false
       # C4 tier (ii): the prose after the `Full report available at:` path. The
@@ -101,38 +124,43 @@ rows:
       raw_contains:
         - "Error when talking to Gemini API"
         - "Incomplete JSON segment at the end"
-        - "[object Object]"
+        # The envelope's `message`, which read `[object Object]` at 0.25.2.
+        - '"message": "Incomplete JSON segment at the end"'
       classify_failure: null
 
   ephemeral-only:
     stdout: ephemeral-only.stdout.txt
     stderr: ephemeral-only.stderr.txt
     exit_code: 0
-    wall_s: 3.23
+    wall_s: 9.86
     requests: 4
     notes: >-
       An all-noise run. The stub answered with an empty assistant message; gemini
-      retried it **four times** and then printed a complete, successful-looking
-      envelope with `"response": ""` — exit 0, stderr 0 bytes, and 802 bytes of
-      `stats` bookkeeping that `parse_output` discards entirely. Everything on
-      disk is what the parser filters, so the run must be a failure rather than
-      an empty-string success. Note `totalRequests: 4` inside the stats: gemini
-      reports its own retry count in the same envelope, which is the only place
-      it is visible without the server log. **stderr is 0 bytes**, so this is
-      the one gemini failure row C4's rung 5 covers: `describe_failure` returns
-      `None` and the parser's error is unembellished. That is the measurement —
-      gemini wrote no diagnosis — not a gap in the hook.
+      sent it **four times** (1 / 2 / 4 s apart) and then printed a complete,
+      successful-looking envelope with `"response": ""` — exit 0, and 1,444 bytes
+      of envelope (802 at 0.25.2) that `parse_output` discards entirely.
+      Everything on disk is what the parser filters, so the run must be a failure
+      rather than an empty-string success. Note `totalRequests: 4` inside the
+      stats: gemini reports its own retry count in the same envelope, which is
+      the only place it is visible without the server log — and since 0.63.0 it
+      also counts the empty answer as `totalErrors: 1` under `errorsByType`
+      (`NO_RESPONSE_TEXT`), where 0.25.2 reported `totalErrors: 0`, while still
+      exiting 0. **stderr holds only start-up chatter** (189 bytes; 0 at 0.25.2),
+      which the parser drops, so this is still the one gemini failure row C4's
+      rung 5 covers: `describe_failure` returns `None` and the parser's error is
+      unembellished. That is the measurement — gemini wrote no diagnosis — not a
+      gap in the hook.
     expect:
       success: false
       error_contains: ["No valid JSON found in text"]
-      raw_contains: ['"response": ""', '"totalRequests": 4', '"totalErrors": 0']
+      raw_contains: ['"response": ""', '"totalRequests": 4', '"NO_RESPONSE_TEXT": 1']
       classify_failure: null
 
   multi-assistant:
     stdout: multi-assistant.stdout.txt
     stderr: multi-assistant.stderr.txt
     exit_code: 0
-    wall_s: 2.26
+    wall_s: 3.79
     requests: 1
     notes: >-
       **LAST-wins, and it selects the answer.** Two JSON documents in one
@@ -158,14 +186,14 @@ rows:
     stdout: error-envelope.stdout.txt
     stderr: error-envelope.stderr.txt
     exit_code: 1
-    wall_s: 2.11
-    requests: 1
+    wall_s: 9.56
+    requests: 4
     notes: >-
       failserver `--mode errbody`: HTTP **200** whose body is a provider error
       object. gemini never sees it as an error at all — it asked for
       `text/event-stream` and got one JSON object, so `@google/genai` fails at the
       SSE framing layer with the SAME `Incomplete JSON segment at the end` the
-      truncated row produces. The provider's text is therefore LOST, not
+      truncated row produces, after the same four requests (one at 0.25.2). The provider's text is therefore LOST, not
       mis-served: nothing from the error object reaches any pattern table, and
       the two rows are distinguishable only by the server that produced them.
     expect:
@@ -185,14 +213,15 @@ rows:
     stdout: exit-zero-failure.stdout.txt
     stderr: exit-zero-failure.stderr.txt
     exit_code: 0
-    wall_s: 2.18
+    wall_s: 1.3
     requests: 2
     notes: >-
       **The one gemini failure that exits 0 — and it reports success while doing
       it.** Produced by the §14.7-gap-5 probe (see `method:`): the server answered
       turn 1 with a `functionCall` for `write_file`, the tool the review prompt's
       `{output_location}` block requires. gemini's registry does not contain it
-      (see README, defect 1), so the call fails, gemini feeds the failure back to
+      (see README, defect 1; at 0.63.0 the request declares eight tools, none of
+      them a write), so the call fails, gemini feeds the failure back to
       the model, the model's turn-2 text is the prompt's own confirmation
       sentence `JSON written to …`, and gemini prints THAT as `response` with
       **exit 0** and `"totalFail": 1` in the same envelope. The file does not
@@ -200,24 +229,28 @@ rows:
       a model that answered with the array *and* claimed the write would be
       reported as a success that wrote nothing. gemini still declares no
       `exit_zero_failure_markers`; the measured candidates are on stderr
-      (`Error executing tool`, `not found in registry`) and declaring them would
+      (`Error executing tool`, `not found` — `not found in registry` at 0.25.2,
+      which 0.63.0 shortened to `Tool "write_file" not found. Did you mean one
+      of: …`, a reason not to pin either) and declaring them would
       move this row's `classify_failure` cell, which is out of C4's scope by its
       own rule — C4 makes the sentence visible, classifying on it is a separate
       change with its own row.
-      **This is the one capture with bytes on BOTH channels, so it is where C4's
-      rung 1 decides something.** stdout is the (false) answer and stays on
-      `raw`; stderr is the diagnosis and reaches only `error`. The row asserts
-      both halves: `error_contains` names the tool-registry sentence from stderr,
-      and `raw_contains` still names the stdout `response`. It is also the only
-      row that reaches tier (iii) — the first stderr line, verbatim — since it
-      has no `ApiError` blob, no `Full report` path and no trailing envelope.
+      **This is the one capture whose stderr says something beside an answer on
+      stdout, so it is where C4's rung 1 decides something.** stdout is the
+      (false) answer and stays on `raw`; stderr is the diagnosis and reaches only
+      `error`. The row asserts both halves: `error_contains` names the
+      tool-registry sentence from stderr, and `raw_contains` still names the
+      stdout `response`. It is also the only row that reaches tier (iii) — the
+      first stderr line, verbatim — since it has no `ApiError` blob, no `Full
+      report` path and no trailing envelope; at 0.63.0 that line follows three
+      lines of start-up chatter (fact 5), which the parser drops first.
     expect:
       success: false
       error_contains:
         - "No valid JSON found in text"
-        - 'Tool "write_file" not found in registry'
+        - 'Tool "write_file" not found'
       raw_contains:
-        - 'Error executing tool write_file: Tool "write_file" not found in registry'
+        - 'Error executing tool write_file: Tool "write_file" not found'
         - '"totalFail": 1'
         - '"totalLinesAdded": 0'
         - "JSON written to"
@@ -230,8 +263,8 @@ rows:
       context-length, 500-forever, a truncated stream, a zero-byte response and a
       200 carrying an error object, eight modes, eight captures of 0 bytes — and
       puts the entire diagnosis on stderr. So "error text on stdout with stderr
-      empty" has no producer at 0.25.2. What the row exists to catch is real here
-      in mirror image and is worse, because `parse_output` reads only stdout: see
+      empty" has no producer at 0.63.0, as at 0.25.2. What the row exists to
+      catch is real here in mirror image and is worse, because `parse_output` reads only stdout: see
       README defect 2, and the `server-error` / `zero-byte-response` rows below
       for the two captures that would have filled this cell.
 
@@ -239,10 +272,11 @@ rows:
     not_applicable: >-
       Zero bytes on **both** channels never happened: the closest the rig gets is
       failserver `--mode empty` (accept the request, write zero bytes, close),
-      which still leaves 1,582 bytes on stderr — committed as the extra
-      `zero-byte-response` row below. Every gemini failure is 0 bytes on stdout
-      and non-empty on stderr, and every gemini success is the reverse, so one
-      channel is always empty and neither run type leaves both empty.
+      which still leaves 13,669 bytes on stderr (1,582 at 0.25.2) — committed as
+      the extra `zero-byte-response` row below. Every gemini failure is 0 bytes
+      on stdout and non-empty on stderr, and every gemini success puts its answer
+      on stdout (with, since 0.63.0, start-up chatter on stderr), so neither run
+      type leaves both channels empty.
       Manufacturing the shape would mean killing the process, which is the
       `timeout(1)` zero-byte-hang artifact §6 step 3 forbids.
 
@@ -250,7 +284,7 @@ rows:
     stdout: auth-error.stdout.txt
     stderr: auth-error.stderr.txt
     exit_code: 145
-    wall_s: 2.16
+    wall_s: 1.19
     requests: 1
     notes: >-
       failserver `--mode 401`. **One** request — terminal, no retry, which is
@@ -268,7 +302,8 @@ rows:
     expect:
       success: false
       # C4 tier (i): the LAST `ApiError: {…}` blob's message and code. Never the
-      # trailing envelope's `error.message`, which is `[object Object]` at 0.25.2.
+      # trailing envelope's `error.message`, which was `[object Object]` at 0.25.2
+      # (0.63.0 puts the vendor's JSON body there as a string).
       error_contains: ["JSON parse error", "401: Incorrect API key provided"]
       raw_contains:
         - "Incorrect API key provided"
@@ -279,14 +314,18 @@ rows:
   rate-limit:
     stdout: rate-limit.stdout.txt
     stderr: rate-limit.stderr.txt
-    exit_code: 1
-    wall_s: 196.53
+    exit_code: 173
+    wall_s: 231.93
     requests: 10
     notes: >-
       failserver `--mode 429`, fail-forever, no `Retry-After`. gemini **does**
-      retry rate limits internally, and expensively: **10 requests over 243 s**
-      inside one awaited subprocess, each attempt announced on stderr as
-      `Attempt N failed with status 429. Retrying with backoff...`. That is the
+      retry rate limits internally, and expensively: **10 requests over 232 s**
+      inside one awaited subprocess (10 requests over 243 s at 0.25.2, the
+      figure `GeminiProvider.internal_retries` declares), each attempt announced on
+      stderr as `Attempt N failed with status 429. Retrying with backoff...` and
+      the tenth as `Attempt 10 failed: <vendor sentence>`. Exit **173** = 429 &
+      0xFF: 0.63.0's envelope carries `"code": 429` where 0.25.2's carried `1`
+      and exited 1. That is the
       §6.1.1 measurement for this CLI and it is what §7.5 rule 6(b) reads — an
       executor-level re-dispatch would add four more minutes to a wait that
       already ran four. The classification works here only because the vendor's
@@ -295,7 +334,7 @@ rows:
       success: false
       # C4 tier (i), and the row that shows why "the LAST blob" is the rule:
       # NINE identical `ApiError` blobs, one per backoff attempt, collapse to
-      # one line. 15,013 bytes of stderr become a single capped sentence.
+      # one line. 15,317 bytes of stderr become a single capped sentence.
       error_contains: ["JSON parse error", "429: Rate limit reached for stub-model"]
       raw_contains:
         - "Attempt 1 failed with status 429. Retrying with backoff..."
@@ -307,7 +346,7 @@ rows:
     stdout: invalid-model.stdout.txt
     stderr: invalid-model.stderr.txt
     exit_code: 1
-    wall_s: 2.06
+    wall_s: 1.19
     requests: 1
     notes: >-
       failserver `--mode 404`. The failure NAMES the model — `gemini-2.5-flash`,
@@ -329,23 +368,25 @@ rows:
         - "ModelNotFoundError: The model `gemini-2.5-flash` does not exist"
       raw_contains:
         - "ModelNotFoundError: The model `gemini-2.5-flash` does not exist"
-        - "googleQuotaErrors"
+        # The stack frame that raised it. 0.25.2 named its module
+        # (`googleQuotaErrors.js`); 0.63.0 ships one bundle, so the function.
+        - "classifyGoogleError"
       classify_failure: "invalid_model"
 
   context-overflow:
     stdout: context-overflow.stdout.txt
     stderr: context-overflow.stderr.txt
     exit_code: 144
-    wall_s: 2.11
+    wall_s: 1.14
     requests: 1
     notes: >-
       failserver `--mode ctx` (400, `context_length_exceeded`, the verbatim
       OpenAI wording). gemini passes the vendor sentence through unedited, so
       `maximum context length` — a literal member of
       base.CONTEXT_OVERFLOW_MARKERS — survives to the classifier and the terminal
-      category wins. Exit **144** = 400 & 0xFF, and this is also the one row whose
-      machine-readable envelope carries a real status (`"code": 400`) rather than
-      the generic `1`.
+      category wins. Exit **144** = 400 & 0xFF, and the machine-readable envelope
+      carries the real status (`"code": 400`) rather than the generic `1`, as the
+      401, 429 and 500 rows' do at 0.63.0.
     expect:
       success: false
       # C4 tier (i). The vendor's own sentence, with the 400 from the blob.
@@ -360,20 +401,21 @@ rows:
     stdout: server-error.stdout.txt
     stderr: server-error.stderr.txt
     exit_code: 244
-    wall_s: 220.91
+    wall_s: 202.19
     requests: 10
     notes: >-
       Beyond §6.2's twelve, and the capture that would have filled `stdout-error`
       on any other CLI: failserver `--mode 500`, fail-forever. **10 requests over
-      232 s** — gemini retries a 5xx on the same ladder as a 429 — exit **244**
-      (500 & 0xFF), 14,191 bytes on stderr and **0 bytes on stdout**. The measured
+      202 s** (232 s at 0.25.2) — gemini retries a 5xx on the same ladder as a 429
+      — exit **244** (500 & 0xFF), 14,484 bytes on stderr and **0 bytes on
+      stdout**. The measured
       classification is **`None`**: the vendor line is *"The server had an error
       while processing your request"*, and no SERVER_ERROR_MARKERS entry matches
       that phrasing (`server error` as a phrase never appears, and the `5\d{2}`
       pattern needs the status adjacent to the word). See README, defect 5.
     expect:
       success: false
-      # C4 tier (i). 14,191 bytes of stderr and ten identical blobs, capped to
+      # C4 tier (i). 14,484 bytes of stderr and ten identical blobs, capped to
       # one line. The classification cell is unchanged and still `null` — C4
       # makes the sentence visible without touching a pattern table.
       error_contains:
@@ -389,15 +431,18 @@ rows:
     stdout: zero-byte-response.stdout.txt
     stderr: zero-byte-response.stderr.txt
     exit_code: 1
-    wall_s: 2.06
-    requests: 1
+    wall_s: 233.12
+    requests: 10
     notes: >-
       Beyond §6.2's twelve, and the measurement behind the `empty` cell above:
       failserver `--mode empty` accepts the request and closes writing **zero
-      bytes**, and gemini still leaves 1,582 bytes on stderr. Its own words are
+      bytes**, and gemini still leaves 13,669 bytes on stderr. Its own words are
       `exception TypeError: fetch failed sending request` — undici's generic
       failure, which matches nothing in CONNECTION_ERROR_MARKERS, so this too
-      classifies as `None`. One request: not retried.
+      classifies as `None`. **Retried since 0.63.0**: 10 requests over 233 s on
+      the 429 / 500 ladder, each attempt announced as `Attempt N failed.
+      Retrying with backoff...`, where 0.25.2 sent one request and gave up in 2 s
+      (1,582 bytes of stderr).
     expect:
       success: false
       # C4 tier (ii): undici's generic failure, which still matches nothing in

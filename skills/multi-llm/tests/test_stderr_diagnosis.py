@@ -101,6 +101,7 @@ from utils.providers.cline import ClineProvider  # noqa: E402
 from utils.providers.gemini import GeminiProvider  # noqa: E402
 from utils.providers.muse import MuseProvider  # noqa: E402
 from utils.providers.gemini import _MAX_DIAGNOSIS_CHARS as GEMINI_CAP  # noqa: E402
+from utils.providers.gemini import _STARTUP_NOISE as GEMINI_STARTUP_NOISE  # noqa: E402
 from utils.providers.kilocode import KiloCodeProvider  # noqa: E402
 from utils.providers.kilocode import _MAX_DIAGNOSIS_CHARS as KILOCODE_CAP  # noqa: E402
 from utils.providers.omp import OmpProvider  # noqa: E402
@@ -244,7 +245,9 @@ GEMINI_WORDS = {
     "truncated": ("Error: Incomplete JSON segment at the end", "(code 1)"),
     "invalid-model": ("ModelNotFoundError: The model `gemini-2.5-flash` does not exist",),
     "zero-byte-response": ("Error: exception TypeError: fetch failed sending request",),
-    "exit-zero-failure": ('Tool "write_file" not found in registry',),
+    # 0.25.2 said `… not found in registry`; 0.63.0 says `… not found. Did you
+    # mean one of: …`. The shared head is the vendor's words on both.
+    "exit-zero-failure": ('Tool "write_file" not found',),
 }
 
 #: Rung 5 under ``--mode json``: the one failure row that names no failure on
@@ -801,6 +804,34 @@ class TestRungFourDropsTheNoiseAndCaps:
             assert "/tmp/mllm-inv/" not in error
             assert "\n" not in error
 
+    def test_geminis_start_up_chatter_is_never_the_diagnosis(self):
+        """0.63.0 writes three or four start-up lines to stderr on EVERY run.
+
+        Measured 2026-10-08: a terminal-colour warning, ``Ripgrep is not
+        available``, and the CLI's own ``[STARTUP]`` profiler lines, on the
+        answered rows as on the failed ones. Read as text, they became tier
+        (iii)'s "first stderr line" — ``exit-zero-failure`` reported the colour
+        warning instead of the tool-registry sentence — and an all-chatter
+        stderr stopped being rung 5's ``None``.
+        """
+        chatter = ("256-color", "Ripgrep is not available", "[STARTUP]")
+        noisy_rows = 0
+        for row in _capture_rows("gemini"):
+            stdout, stderr = _streams("gemini", row)
+            noisy_rows += any(word in stderr for word in chatter)
+            reason = GEMINI.describe_failure(stdout, stderr) or ""
+            error = str(GEMINI.parse_output(stdout, stderr).get("error") or "")
+
+            for word in chatter:
+                assert word not in reason, f"gemini/{row}: start-up chatter as the diagnosis"
+                assert word not in error, f"gemini/{row}: start-up chatter in the error"
+        assert noisy_rows, "no committed gemini capture carries the start-up chatter any more"
+
+        # An answered run's stderr is chatter and nothing else: rung 5 again.
+        only_chatter = _streams("gemini", "success")[1]
+        assert only_chatter.strip(), "success.stderr.txt is expected to hold the chatter"
+        assert GEMINI.describe_failure("", only_chatter) is None
+
     def test_a_15kb_stderr_is_capped_rather_than_copied(self):
         """The caller keeps the full text; this hook is the summary."""
         _, stderr = _streams("gemini", "rate-limit")
@@ -819,10 +850,11 @@ class TestRungOneChannel:
     def test_geminis_exit_zero_failure_splits_the_two_channels(self):
         """The single capture with bytes on BOTH channels.
 
-        1,174 bytes of stdout whose ``response`` is the model repeating the
-        prompt's own confirmation sentence *"JSON written to …"* for a file that
-        does not exist, and 193 bytes of stderr carrying the real reason. Rung 1
-        is what stops the lie being reported as the diagnosis.
+        1,590 bytes of stdout (1,174 at 0.25.2) whose ``response`` is the model
+        repeating the prompt's own confirmation sentence *"JSON written to …"*
+        for a file that does not exist, and 393 bytes of stderr (193) carrying
+        the real reason after 0.63.0's start-up chatter. Rung 1 is what stops the
+        lie being reported as the diagnosis.
         """
         stdout, stderr = _streams("gemini", "exit-zero-failure")
         assert len(stdout) > 1000 and len(stderr) > 100
@@ -833,7 +865,7 @@ class TestRungOneChannel:
         # The answer channel: still on `raw`, untouched.
         assert "JSON written to" in result["raw"]
         # The diagnosis channel: reaches `error`, and only `error`.
-        assert 'Tool "write_file" not found in registry' in result["error"]
+        assert 'Tool "write_file" not found' in result["error"]
         assert "JSON written to" not in result["error"]
         assert result["data"] is None
 
@@ -932,9 +964,10 @@ class TestRungFiveKeepsTodaysString:
         assert "measurement" in notes.lower()
 
     def test_gemini_has_one_such_row_and_it_behaves_the_same(self):
-        """``ephemeral-only`` is gemini's only 0-byte-stderr failure capture."""
+        """``ephemeral-only`` is gemini's only failure capture whose stderr names
+        nothing: 0 bytes at 0.25.2, 0.63.0's start-up chatter alone since."""
         stdout, stderr = _streams("gemini", "ephemeral-only")
-        assert stderr == ""
+        assert GEMINI_STARTUP_NOISE.sub("", stderr) == ""
 
         assert GEMINI.describe_failure(stdout, stderr) is None
         assert GEMINI.parse_output(stdout, stderr)["error"] == "No valid JSON found in text"
@@ -1020,6 +1053,9 @@ class TestParseOutputNamesTheStderr:
             if "not_applicable" in row:
                 continue
             _, stderr = _streams(provider, name)
+            if provider == "gemini":
+                # 0.63.0's start-up chatter is on every run and names no failure.
+                stderr = GEMINI_STARTUP_NOISE.sub("", stderr)
             expect = row["expect"]
             if expect["success"] or not stderr.strip():
                 continue
@@ -1035,7 +1071,7 @@ class TestParseOutputNamesTheStderr:
         """The Done-when cell: stderr in ``error_contains``, stdout in ``raw``."""
         row = _manifest("gemini")["rows"]["exit-zero-failure"]
 
-        assert 'Tool "write_file" not found in registry' in row["expect"]["error_contains"]
+        assert 'Tool "write_file" not found' in row["expect"]["error_contains"]
         assert any("JSON written to" in n for n in row["expect"]["raw_contains"])
 
 
@@ -1121,7 +1157,7 @@ class TestNoClassifyCellMoved:
 
         stdout, stderr = _streams("gemini", "exit-zero-failure")
 
-        assert 'not found in registry' in GEMINI.describe_failure(stdout, stderr)
+        assert 'Tool "write_file" not found' in GEMINI.describe_failure(stdout, stderr)
         assert GEMINI.classify_failure(stdout, stderr, 0) is None
 
 
@@ -1333,10 +1369,12 @@ class TestGeminiInternalRetryEnvelope:
         assert envelope.configurable_by == ()
 
     def test_the_capture_that_produced_them_is_committed(self):
-        """10 requests / 243 s is ``rate-limit``, and the manifest says so."""
+        """10 requests / 243 s was ``rate-limit`` at 0.25.2, and the manifest says
+        so; the committed 0.63.0 re-capture (10 / 232 s) sits inside it."""
         row = _manifest("gemini")["rows"]["rate-limit"]
 
         assert row["requests"] == GeminiProvider.internal_retries.max_requests
+        assert row["wall_s"] <= GeminiProvider.internal_retries.max_wall_s
         assert "10 requests over 243 s" in row["notes"]
 
     def test_declaring_it_removes_the_harnesss_own_rate_limit_backoff(self):

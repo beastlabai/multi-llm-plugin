@@ -1,5 +1,5 @@
 {
-  "session_id": "947edd69-5bab-45cc-ae61-233c162301bd",
+  "session_id": "f51f5eb7-b061-40cf-8d1f-b7c6ba95aed8",
   "response": "[\n  {\"id\": \"S000\", \"title\": \"FIRST ANSWER (must NOT be selected)\", \"severity\": \"low\"}\n]\n\n[\n  {\"id\": \"S001\", \"title\": \"Bound the retry ladder\", \"severity\": \"high\"},\n  {\"id\": \"S002\", \"title\": \"Strip the vendor token\", \"severity\": \"medium\"}\n]\n",
   "stats": {
     "models": {
@@ -7,7 +7,8 @@
         "api": {
           "totalRequests": 1,
           "totalErrors": 0,
-          "totalLatencyMs": 11
+          "totalLatencyMs": 48,
+          "errorsByType": {}
         },
         "tokens": {
           "input": 0,
@@ -17,6 +18,22 @@
           "cached": 0,
           "thoughts": 0,
           "tool": 0
+        },
+        "roles": {
+          "main": {
+            "totalRequests": 1,
+            "totalErrors": 0,
+            "totalLatencyMs": 48,
+            "tokens": {
+              "input": 0,
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0,
+              "tool": 0
+            }
+          }
         }
       }
     },
