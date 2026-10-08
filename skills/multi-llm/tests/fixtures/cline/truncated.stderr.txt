@@ -1,16 +1,1 @@
-Warning: AI SDK Warning System: To turn off warning logging, set the AI_SDK_LOG_WARNINGS global to false.
-      at a$ (/$bunfs/root/chunk-2vkkf8jj.js:24:49198)
-      at kZ (/$bunfs/root/chunk-2vkkf8jj.js:24:49384)
-      at transform (/$bunfs/root/chunk-2vkkf8jj.js:42:42881)
-
-DeprecationWarning: AI SDK Warning (openai-compatible.chat / stub-model): Deprecated: "providerOptions key 'openai-compatible'". Use 'openaiCompatible' instead.
-      at a$ (/$bunfs/root/chunk-2vkkf8jj.js:24:49198)
-      at kZ (/$bunfs/root/chunk-2vkkf8jj.js:24:49497)
-      at transform (/$bunfs/root/chunk-2vkkf8jj.js:42:42881)
-
-DeprecationWarning: AI SDK Warning (openai-compatible.chat / stub-model): Deprecated: "providerOptions key 'openai-compatible'". Use 'openaiCompatible' instead.
-      at a$ (/$bunfs/root/chunk-2vkkf8jj.js:24:49198)
-      at kZ (/$bunfs/root/chunk-2vkkf8jj.js:24:49497)
-      at transform (/$bunfs/root/chunk-2vkkf8jj.js:42:42881)
-
-{"ts":"2026-08-19T16:17:39.676Z","type":"error","message":"Model returned empty response"}
+{"ts":"2026-10-07T23:29:45.249Z","type":"error","message":"Response stream ended without a finish reason."}
