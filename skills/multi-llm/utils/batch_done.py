@@ -121,6 +121,7 @@ try:
         record_batch_items_in_state,
         set_task_batch_check_accepted_in_state,
         set_task_batch_check_in_state,
+        set_task_batch_check_repeats_in_state,
         set_task_own_check_note_in_state,
         set_task_own_check_ran_in_state,
         set_task_check_findings_in_state,
@@ -143,6 +144,9 @@ try:
         accepted_findings_with_words_added,
         batch_check_accepted_line,
         batch_check_line,
+        batch_check_repeated_line,
+        move_check_repeats_in_state,
+        repeated_findings_for,
         BLOCKED_BY_CHECK_PREFIX,
         CODE_WRITE_KINDS,
         blocked_by_check_reason,
@@ -150,6 +154,7 @@ try:
         is_check_task,
         rerunnable_checks,
         split_accepted_findings,
+        split_repeated_findings,
         transitive_dependents,
         upstream_held_check,
         words_added_to,
@@ -173,6 +178,7 @@ except ImportError:  # pragma: no cover - direct script invocation
         record_batch_items_in_state,
         set_task_batch_check_accepted_in_state,
         set_task_batch_check_in_state,
+        set_task_batch_check_repeats_in_state,
         set_task_own_check_note_in_state,
         set_task_own_check_ran_in_state,
         set_task_check_findings_in_state,
@@ -195,6 +201,9 @@ except ImportError:  # pragma: no cover - direct script invocation
         accepted_findings_with_words_added,
         batch_check_accepted_line,
         batch_check_line,
+        batch_check_repeated_line,
+        move_check_repeats_in_state,
+        repeated_findings_for,
         BLOCKED_BY_CHECK_PREFIX,
         CODE_WRITE_KINDS,
         blocked_by_check_reason,
@@ -202,6 +211,7 @@ except ImportError:  # pragma: no cover - direct script invocation
         is_check_task,
         rerunnable_checks,
         split_accepted_findings,
+        split_repeated_findings,
         transitive_dependents,
         upstream_held_check,
         words_added_to,
@@ -581,21 +591,29 @@ def record_batch(
         update_task_status_in_state(state, task_id, status, reason)
         blocked: List[str] = []
         accepted_again: Dict[str, List[str]] = {}
+        echoed: Dict[str, List[str]] = {}
+        echoes_moved: Dict[str, Any] = {}
         restate: Optional[Dict[str, Any]] = None
+        phase_tasks = [
+            t for t in (document.get("batches") or document.get("tasks") or [])
+            if isinstance(t, dict)
+        ]
         if kind == "implement" and batch_check:
             # Fix round 22: what only repeats findings the user accepted for
             # a check is that check's, never this task's own failure (the
             # executor's reading, `split_accepted_findings`). Fix round 23:
             # only the checks this task was told were accepted, and none
             # whose failure is its own job (`accepted_findings_for`).
-            accepted = accepted_findings_for(
-                [t for t in (document.get("batches") or document.get("tasks") or [])
-                 if isinstance(t, dict)],
-                task, state,
-            )
+            accepted = accepted_findings_for(phase_tasks, task, state)
             reported = list(batch_check)
             own, accepted_again = split_accepted_findings(batch_check, accepted)
             if accepted_again:
+                batch_check = own
+            # Fix round 28: and what is the same finding a check task of the
+            # run already reported is that check's (`repeated_findings_for`).
+            own, echoed = split_repeated_findings(
+                own, repeated_findings_for(phase_tasks, task, state))
+            if echoed:
                 batch_check = own
             # Fix round 28: a finding that holds an accepted one word for
             # word with words added stays the task's own; the host is told
@@ -626,6 +644,12 @@ def record_batch(
             # Fix round 23: what it reported again of the accepted findings,
             # by check, beside it (and cleared by any other record).
             set_task_batch_check_accepted_in_state(state, task_id, accepted_again)
+            # Fix round 28: what it reported of a check task's findings.
+            set_task_batch_check_repeats_in_state(state, task_id, echoed)
+            if check_findings and status == "completed":
+                # Fix round 28: a code task recorded earlier whose own check
+                # reported the finding this check now has on record.
+                echoes_moved = move_check_repeats_in_state(state, phase_tasks, task_id)
             # Fix round 28: its own words about its checks, never a finding.
             set_task_own_check_note_in_state(
                 state, task_id, note if status == "completed" else None)
@@ -698,6 +722,10 @@ def record_batch(
         "check_not_recorded": result_left_out,
         "note": note,
         "restate": restate,
+        "batch_check_repeats": echoed,
+        "repeats_moved": {
+            moved_id: merged for moved_id, (_own, merged) in echoes_moved.items()
+        },
     }
 
 
@@ -1385,6 +1413,25 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"{', '.join(accepted_again)}'s accepted findings, as {task_id} "
             f"running that check again: it does not make the phase unclean and "
             f"is not a check of {task_id}'s that fails."
+        )
+    echoed = written.get("batch_check_repeats") or {}
+    if echoed:
+        # Fix round 28: a check task's finding, never this task's own.
+        task_id = written["task_id"]
+        print(
+            f"{batch_check_repeated_line(task_id, echoed, note=written.get('note'))}. "
+            f"List it in the phase's summary.md under ## Check Findings, beside "
+            f"{', '.join(echoed)}'s findings, as {task_id} running that check "
+            f"too: it is not a check of {task_id}'s that fails."
+        )
+    for moved_id, merged in (written.get("repeats_moved") or {}).items():
+        # Fix round 28: the code task recorded first; this check now owns it.
+        print(
+            f"{batch_check_repeated_line(moved_id, merged)}. Recorded again now "
+            f"that {written['task_id']} reported it: the [BATCH_CHECK_FAILED] "
+            f"line {moved_id}'s record printed for it no longer stands. List "
+            f"{moved_id} in summary.md under {written['task_id']}'s findings, "
+            f"not as a check of {moved_id}'s that fails."
         )
     failing = written.get("batch_check") or []
     restate = written.get("restate")

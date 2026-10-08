@@ -723,6 +723,15 @@ def _workflow_trailer_lines(
             f"{prefix}{clause} — not counted as a failure (see implement/summary.md)"
             for clause in accepted_rerun_clauses(accepted_reruns)
         ]
+    # Fix round 28: and those whose own check reported only what a check
+    # task of the run reported (`phases.implement.batch_check_repeats`).
+    repeats = _accepted_reruns_by_task(
+        (phases.get("implement") or {}).get("batch_check_repeats"))
+    if repeats and not (implement_done and review_settled):
+        lines += [
+            f"{prefix}{clause} — not counted as its own failure (see implement/summary.md)"
+            for clause in repeated_check_clauses(repeats)
+        ]
     if manual_line and not manual_said:
         lines.append(manual_line)
     return lines
@@ -2279,6 +2288,8 @@ def state_implement_view(
         "batch_checks": [] if settled else state.implementation_batch_check_findings(),
         # And one whose own check repeated the accepted findings (round 23).
         "batch_check_accepted": [] if settled else state.implementation_batch_check_accepted(),
+        # And one whose own check repeated a check task's finding (round 28).
+        "batch_check_repeats": [] if settled else state.implementation_batch_check_repeats(),
         "answers": dict(answers) if isinstance(answers, dict) else {},
     }
 
@@ -2601,6 +2612,10 @@ def render_state_implement_lines(
     lines += [
         f"      {clause}" for clause in accepted_rerun_clauses(
             _accepted_reruns_by_task(view.get("batch_check_accepted")))
+    ]
+    lines += [
+        f"      {clause}" for clause in repeated_check_clauses(
+            _accepted_reruns_by_task(view.get("batch_check_repeats")))
     ]
     if view["answers"]:
         lines.append(
@@ -2928,6 +2943,26 @@ def accepted_rerun_clauses(by_task: Mapping[str, Sequence[str]]) -> List[str]:
         groups.setdefault(named, []).append(str(task_id))
     return [
         f"completed, its check repeated {named} accepted findings: {', '.join(ids)}"
+        for named, ids in groups.items()
+    ]
+
+
+def repeated_check_clauses(by_task: Mapping[str, Sequence[str]]) -> List[str]:
+    """``completed, its check repeated T002's findings: T001`` per set of
+    checks, from ``{task_id: [check ids]}`` (fix round 28): the code tasks
+    whose own check reported only what a check task of the run reported
+    (``task_batch_check_repeats``), named on the ``status`` surfaces
+    :func:`accepted_rerun_clauses` names its tasks on, never as a failure
+    of their own."""
+    groups: Dict[str, List[str]] = {}
+    for task_id, checks in sorted(by_task.items()):
+        names = sorted({str(check) for check in (checks or []) if str(check)})
+        if not names:
+            continue
+        named = " and ".join(f"{check}'s" for check in names)
+        groups.setdefault(named, []).append(str(task_id))
+    return [
+        f"completed, its check repeated {named} findings: {', '.join(ids)}"
         for named, ids in groups.items()
     ]
 
@@ -3435,6 +3470,13 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     if isinstance(repeated, dict) and repeated:
         parts += accepted_rerun_clauses({
             str(task_id): checks for task_id, checks in repeated.items()
+            if isinstance(checks, list)
+        })
+    # Fix round 28: and one whose own check repeated a check task's finding.
+    echoed = mirror.get("batch_check_repeats")
+    if isinstance(echoed, dict) and echoed:
+        parts += repeated_check_clauses({
+            str(task_id): checks for task_id, checks in echoed.items()
             if isinstance(checks, list)
         })
     # Fix round 18: an item a finished batch declined (or one skipped at the

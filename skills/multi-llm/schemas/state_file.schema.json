@@ -78,6 +78,14 @@
         "additionalProperties": { "type": "array", "items": { "type": "string" } }
       }
     },
+    "task_batch_check_repeats": {
+      "type": "object",
+      "description": "Per implement task that edits files whose own check reported findings that are the same findings (the strict comparison) a check task of the run reported: those findings, by that check's id (fix round 28). Not the task's own failure (never in task_batch_check), recorded whichever of the two was recorded first; every other record of the task clears it. Present only while some task has one; read by status and the tests line",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": { "type": "array", "items": { "type": "string" } }
+      }
+    },
     "task_own_check_note": {
       "type": "object",
       "description": "Per implement task that edits files and whose reply's check carried a note: its own words about the checks it ran (fix round 28). Recorded and shown beside its check, never read as a finding or matched on; every other record of the task clears it. Present only while some task has one",
