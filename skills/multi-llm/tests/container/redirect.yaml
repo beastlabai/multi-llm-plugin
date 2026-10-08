@@ -997,7 +997,10 @@ clis:
     # rather than tolerated by a loose count — and it is a drift signal worth
     # having: when Anthropic moves the alias, this row fails naming both ids
     # instead of silently testing a different model than the one it pinned.
-    side_model_ids: ["claude-haiku-4-5-20251001"]
+    # It did on the 2.1.285 -> 2.1.293 pin move (2026-10-08): `haiku` resolved to
+    # claude-haiku-4-5-20251001 through 2.1.285 and resolves to claude-haiku-5-5
+    # on 2.1.293 (the same id the re-captured parser fixtures carry).
+    side_model_ids: ["claude-haiku-5-5"]
     session_prefix: true
     base_url_vars:
       ANTHROPIC_BASE_URL: "{base_url_root}"
