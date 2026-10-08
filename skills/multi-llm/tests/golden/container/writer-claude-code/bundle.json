@@ -42,7 +42,7 @@
   "manifest": {
     "axis": "writer",
     "bundle_version": 1,
-    "captured_at": "2026-10-07T17:38:20Z",
+    "captured_at": "2026-10-08T10:41:21Z",
     "cli": "claude-code",
     "host": {
       "host_id": "sha256:e9ce53674803",
@@ -58,10 +58,10 @@
         "verdict": "permitted"
       }
     },
-    "image": "mllm-e2e:r23",
+    "image": "mllm-e2e:r25",
     "reviewer": "pi",
     "row_id": "chain-writer-claude-code",
-    "run_bundle": "20261007T171524Z"
+    "run_bundle": "20261008T101725Z"
   },
   "markers": [
     "[PROGRESS]",
@@ -860,7 +860,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -910,7 +910,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -958,7 +958,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -1039,7 +1039,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -1089,7 +1089,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -1137,7 +1137,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -1569,7 +1569,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -1617,7 +1617,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -1665,7 +1665,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -1713,7 +1713,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -1795,7 +1795,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -1843,7 +1843,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -1891,7 +1891,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -1939,7 +1939,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -2360,7 +2360,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -2408,7 +2408,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -2456,7 +2456,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -2537,7 +2537,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -2585,7 +2585,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -2633,7 +2633,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -3064,7 +3064,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -3097,7 +3097,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -3237,8 +3237,8 @@
               "output_name": "validation_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/code-review/validation_batch_0.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:1ffaeb06f1ff:13909>",
-              "prompt_lines": 404,
+              "prompt": "<text:sha256:3520e3b3fbdb:14032>",
+              "prompt_lines": 406,
               "prompt_path": "<run-root>/plans/auth-feature/code-review/validation_batch_0.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -3270,8 +3270,8 @@
               "output_name": "validation_batch_1.json",
               "output_path": "<run-root>/plans/auth-feature/code-review/validation_batch_1.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:990f17eaa86a:11835>",
-              "prompt_lines": 339,
+              "prompt": "<text:sha256:cab01a47eabe:11958>",
+              "prompt_lines": 341,
               "prompt_path": "<run-root>/plans/auth-feature/code-review/validation_batch_1.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -3353,7 +3353,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -3516,7 +3516,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -3564,7 +3564,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -3612,7 +3612,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -3693,7 +3693,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -3741,7 +3741,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -3789,7 +3789,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -4103,7 +4103,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -4136,7 +4136,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -4169,7 +4169,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -4293,8 +4293,8 @@
               "output_name": "validation_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_0.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:da2b0b34822d:8122>",
-              "prompt_lines": 231,
+              "prompt": "<text:sha256:baf1b3319627:8278>",
+              "prompt_lines": 233,
               "prompt_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_0.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -4324,8 +4324,8 @@
               "output_name": "validation_batch_1.json",
               "output_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_1.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:799f146a2694:8078>",
-              "prompt_lines": 231,
+              "prompt": "<text:sha256:0a6abf092b3a:8234>",
+              "prompt_lines": 233,
               "prompt_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_1.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -4357,8 +4357,8 @@
               "output_name": "validation_batch_2.json",
               "output_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_2.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:dad9d60da4c2:8717>",
-              "prompt_lines": 249,
+              "prompt": "<text:sha256:3149c53a1373:8873>",
+              "prompt_lines": 251,
               "prompt_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_2.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -4529,7 +4529,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -4562,7 +4562,7 @@
                     "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
-                    "served_model": "claude-haiku-4-5-20251001",
+                    "served_model": "claude-haiku-5-5",
                     "total_tokens": "<int>"
                   }
                 }
@@ -4675,8 +4675,8 @@
               "output_name": "validation_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/review-tasks/validation_batch_0.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:f9606d0f185a:9778>",
-              "prompt_lines": 302,
+              "prompt": "<text:sha256:84704c692081:9934>",
+              "prompt_lines": 304,
               "prompt_path": "<run-root>/plans/auth-feature/review-tasks/validation_batch_0.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -4709,8 +4709,8 @@
               "output_name": "validation_batch_1.json",
               "output_path": "<run-root>/plans/auth-feature/review-tasks/validation_batch_1.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:8a7a3c538d9d:10453>",
-              "prompt_lines": 320,
+              "prompt": "<text:sha256:479cf0ac993a:10609>",
+              "prompt_lines": 322,
               "prompt_path": "<run-root>/plans/auth-feature/review-tasks/validation_batch_1.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
