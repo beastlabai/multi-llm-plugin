@@ -129,6 +129,15 @@ TABLE = [
     pytest.param(
         {"findings": ["npm test: 1 failing"], "ran": {"npm test": "passed"}},
         _findings("npm test: 1 failing"), "findings", id="no-passed-key-a-finding"),
+    # A bare "none" is no finding beside a pass only (fix round 12); beside
+    # anything else it stays the finding it always read as, so no reply that
+    # failed before reads as a pass or no check now.
+    pytest.param(
+        {"findings": "none"},
+        _findings("none"), "findings", id="a-bare-none-without-passed"),
+    pytest.param(
+        {"passed": False, "findings": ["none"], "ran": {}},
+        _findings("none"), "findings", id="a-none-entry-beside-a-failure"),
     pytest.param({}, NONE, "none", id="an-empty-object"),
     pytest.param({"passed": None, "findings": []}, NONE, "none", id="passed-null"),
     # -- a check that could not run ---------------------------------------
