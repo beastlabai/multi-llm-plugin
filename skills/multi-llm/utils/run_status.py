@@ -61,6 +61,7 @@ from . import (
     status_file,
 )
 from .cli_common import (
+    ERROR_MAX_CHARS,
     EXIT_ERROR,
     EXIT_NEEDS_HUMAN,
     EXIT_NOTHING_TO_DO,
@@ -108,7 +109,7 @@ from .output_handler import (
     slugify_question,
 )
 from .stream_bootstrap import bootstrap_streams
-from .text_clip import clip, without_closing_mark
+from .text_clip import clip, plain_line, without_closing_mark
 from .validation_context import (
     pick_worst,
     validation_context_notice,
@@ -584,6 +585,7 @@ def _workflow_trailer_lines(
     payload: Dict[str, Any], *, prefix: str = "  ",
     close_note: Optional[str] = None,
     suggested: bool = True,
+    carried: Optional[Any] = None,
 ) -> List[str]:
     """The workflow view's ``suggested next``/``notice`` lines, alone
     (without the ``suggested next`` line when *suggested* is false).
@@ -592,7 +594,19 @@ def _workflow_trailer_lines(
     over (F7, 2026-09-16, below) renders the identical text instead of a second
     hand-typed copy that could drift from it — the whole point is that the two
     channels can never say something different about the same ``state.json``.
+
+    *carried* is the ``user_next_step`` answer (``next_phase.NextPhase``) the
+    same result carries: a line its ``markdown`` already says is left out —
+    a notice that is one of its optional entries' ``why`` and, when it lists
+    manual tasks, the manual-tasks line (fix round 26, live run 11: Codex
+    04/06/08 and OpenCode 03-08 relayed the notice above the copied section,
+    so the user read the same sentence twice).
     """
+    said_whys = {
+        plain_line(getattr(step, "why", "") or "")
+        for step in (getattr(carried, "optional_before", None) or ())
+    } - {""}
+    manual_said = bool(getattr(carried, "manual_tasks", None))
     lines: List[str] = []
     if suggested and payload.get("suggested_next"):
         # `suggested_next` already skips every optional phase in its way
@@ -617,6 +631,8 @@ def _workflow_trailer_lines(
         )
         lines.append(f"{prefix}suggested next: {payload['suggested_next']}{suffix}")
     for notice in payload.get("notices", []) or []:
+        if plain_line(notice) in said_whys:
+            continue
         lines.append(f"{prefix}notice: {notice}")
     # The implement tasks the run deferred (`phases.implement.manual_tasks`,
     # read from state.json). A workflow with nothing left to suggest printed
@@ -700,7 +716,7 @@ def _workflow_trailer_lines(
             f"{prefix}{clause} — not counted as a failure (see implement/summary.md)"
             for clause in accepted_rerun_clauses(accepted_reruns)
         ]
-    if manual_line:
+    if manual_line and not manual_said:
         lines.append(manual_line)
     return lines
 
@@ -1169,6 +1185,12 @@ def _write_result_notice(views: Sequence[Dict[str, Any]]) -> Optional[str]:
     what the worker recorded on its own result line, which a detached caller
     never sees. Read from the run's own mirror, so it describes that run.
     """
+    return clip("; ".join(_write_result_notice_parts(views)), 1200) or None
+
+
+def _write_result_notice_parts(views: Sequence[Dict[str, Any]]) -> List[str]:
+    """:func:`_write_result_notice`'s parts, unjoined (fix round 26: a stop's
+    poll leaves out a part its `error` already says)."""
     try:
         from .write_batch_scheduler import batch_check_summary
     except ImportError:  # pragma: no cover - direct script runs
@@ -1189,7 +1211,7 @@ def _write_result_notice(views: Sequence[Dict[str, Any]]) -> Optional[str]:
         unverified = mirror.get("unverified")
         if isinstance(unverified, str) and unverified and unverified not in parts:
             parts.append(unverified)
-    return clip("; ".join(parts), 1200) or None
+    return parts
 
 
 def _high_priority_text(high_priority: Any) -> Optional[str]:
@@ -4287,6 +4309,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # exactly one run as the one mode whose result line carried no `progress`.
     # The rule the test below is written to is "did the caller name one run?",
     # and all three selectors answer it.
+    # The stop's own line as the result carries it, when this poll records
+    # one: a notice part it already says is left out below (fix round 26).
+    stop_error: Optional[str] = None
     if len(views) == 1 and (args.phase or args.question or args.run_id):
         watched = views[0]
         watched_run = watched.get("run") or {}
@@ -4329,6 +4354,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             and watched.get("verdict") in (detach.VERDICT_FAILED,)
         ):
             record_error(recorded_error.strip())
+            stop_error = recorded_error.strip()
 
     exit_code = exit_code_for(views)
 
@@ -4377,6 +4403,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     terminal_workflow, _plan_spelling(args, views, plan_path),
                     _reader_host(args), _recorded_route(args, views, plan_path),
                 ),
+                # Fix round 26 (live run 11, Codex stop 01b): a run that
+                # stopped or failed has no next phase, and the hosts relayed
+                # "suggested next: implement (review-tasks /
+                # apply-task-suggestions optional, not run)" beside the
+                # stop's own ways forward. The line is left out of a
+                # non-zero poll's text and notice alike.
+                suggested=exit_code == EXIT_OK,
             )
             if trailer:
                 workflow_trailer = [f"workflow {line}" for line in trailer]
@@ -4501,8 +4534,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             # Fix round 24 (live run 10, OpenCode 03, Codex 01): so with the
             # `suggested next` line, which the hosts relayed beside the
             # step's markdown and reordered the step after.
+            # Fix round 26 (live run 11: Codex 04/06/08, OpenCode 03-08):
+            # and with what the step's `markdown` says itself, the optional
+            # entry's why and the manual tasks, which the hosts pasted above
+            # the copied section. The text view a person reads keeps them.
             terminal_notice = "; ".join(_workflow_trailer_lines(
-                terminal_workflow, prefix="", suggested=False)) or None
+                terminal_workflow, prefix="", suggested=False,
+                carried=step)) or None
 
     # Plan §2.4: a `mode: truncated` validation source sets the notice on any
     # terminal poll (every view, not only `--view run`); it qualifies the
@@ -4516,10 +4554,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # the workflow's, since they qualify the run the poll is about; then a
     # finished run's own notes (a consistency warning, the items left
     # unapplied) — the log was the only place that carried them.
-    write_notice = _write_result_notice(views) if terminal_run else None
-    notes_notice = "; ".join(
+    write_parts = _write_result_notice_parts(views) if terminal_run else []
+    note_parts = [
         note for view in views for note in _run_notes(view)
-    ) if terminal_run else ""
+    ] if terminal_run else []
+    if stop_error:
+        # Fix round 26 (live run 11, Codex stop 01b): a stop's own line, the
+        # result's `error` the hosts relay whole, already ends with what ran
+        # the repository's tests; the notice said it again and the host
+        # restated it. A part the error carries word for word is left out.
+        said = plain_line(clip(stop_error, ERROR_MAX_CHARS))
+        write_parts = [part for part in write_parts if plain_line(part) not in said]
+        note_parts = [part for part in note_parts if plain_line(part) not in said]
+    write_notice = clip("; ".join(write_parts), 1200) or None
+    notes_notice = "; ".join(note_parts)
     combined_notice = "; ".join(
         part for part in (truncation_notice, write_notice, notes_notice, terminal_notice) if part
     )
