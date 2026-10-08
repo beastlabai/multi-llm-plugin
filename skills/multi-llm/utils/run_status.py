@@ -2736,7 +2736,8 @@ def state_apply_views(
     host's loop is going. ``{phase, phase_dir, completed,
     in_progress_since, batches_recorded, batches_total}`` (plus
     ``declined_items`` / ``skipped_items`` when a batch's record names one,
-    fix round 22) in workflow order;
+    fix round 22, and ``items_applied`` / ``items_total`` / ``applied_to``
+    once a record names one of its items, fix round 28) in workflow order;
     *only* limits it to one phase (``--phase``). Read-only.
     """
     from .metrics import _current_run_id
@@ -2807,8 +2808,9 @@ def state_apply_views(
             checks = _native_apply_batch_checks(record, directory)
             if checks:
                 entry["batch_checks"] = checks
-        # Fix round 22: the items a batch declined or the user skipped.
-        entry.update(_native_apply_not_applied(record, directory))
+        # Fix round 22: the items a batch declined or the user skipped;
+        # fix round 28: and the items count they are left out of.
+        entry.update(_native_apply_not_applied(record, directory, phase))
         out.append(entry)
     return out
 
@@ -2893,16 +2895,32 @@ def _accepted_reruns_by_task(entries: Any) -> Dict[str, List[str]]:
     }
 
 
+#: The native apply phases with one write target, which the items count
+#: names as the executor's progress line does (``applied_to``).
+_SINGLE_TARGET_APPLY_PHASES = ("apply-suggestions", "apply-task-suggestions")
+
+
 def _native_apply_not_applied(
-    record: Dict[str, Any], directory: Path,
-) -> Dict[str, List[Dict[str, str]]]:
-    """``{declined_items, skipped_items}`` for a native apply phase, in the
-    write mirror's shape (fix round 22, live run 9: the decline the host
-    recorded with ``util batch-done --declined`` was on no ``status``
-    surface). Read from ``processed_<phase dir>``: a record of the review
-    the phase's ``write_tasks.json`` applies (its ``grouped_sha256``), or,
-    for a record or a task without that stamp, one whose item a current
-    batch holds. ``{}`` when nothing applies or either cannot be read."""
+    record: Dict[str, Any], directory: Path, phase: str = "",
+) -> Dict[str, Any]:
+    """``{declined_items, skipped_items, items_applied, items_total,
+    applied_to}`` for a native apply phase, in the write mirror's shape
+    (fix round 22, live run 9: the decline the host recorded with ``util
+    batch-done --declined`` was on no ``status`` surface). Read from
+    ``processed_<phase dir>``: a record of the review the phase's
+    ``write_tasks.json`` applies (its ``grouped_sha256``), or, for a record
+    or a task without that stamp, one whose item a current batch holds.
+    ``{}`` when nothing applies or either cannot be read.
+
+    Fix round 28 (live run 12 #4, Claude Code decline): the block printed
+    "1 declined by its batch (not applied): …" with no "2/3 items applied;"
+    before it, which the executor's line has. ``items_total`` is every item
+    the batches of ``write_tasks.json`` hold, ``items_applied`` those a
+    record of this run says ``applied`` (as the executor counts an applied
+    batch's items less the ones it declined or skipped); both are left out
+    until a record of this run names one of them. ``applied_to`` is the one
+    file a single-target phase's batches all declare, from the repository
+    root, as the executor names it."""
     try:
         document = json.loads((directory / _WRITE_TASKS).read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001 - advisory
@@ -2921,11 +2939,11 @@ def _native_apply_not_applied(
         stamp = stamp or str(inputs.get("grouped_sha256") or "")
         for item in task.get("expected_ids") or []:
             holder.setdefault(str(item), str(task.get("task_id") or ""))
-    out: Dict[str, List[Dict[str, str]]] = {}
+    out: Dict[str, Any] = {}
+    applied = 0
+    on_record = False
     for item, entry in processed.items():
-        key = {"declined": "declined_items", "skipped": "skipped_items"}.get(
-            entry.get("status") if isinstance(entry, dict) else None)
-        if key is None:
+        if not isinstance(entry, dict):
             continue
         details = entry.get("details") if isinstance(entry.get("details"), dict) else {}
         recorded = str(details.get("grouped_sha256") or "")
@@ -2934,12 +2952,52 @@ def _native_apply_not_applied(
                 continue
         elif str(item) not in holder:
             continue
+        if str(item) in holder:
+            on_record = True
+            applied += entry.get("status") == "applied"
+        key = {"declined": "declined_items", "skipped": "skipped_items"}.get(
+            entry.get("status"))
+        if key is None:
+            continue
         out.setdefault(key, []).append({
             "task_id": str(details.get("task_id") or holder.get(str(item)) or ""),
             "id": str(item),
             "reason": str(details.get("reason") or ""),
         })
+    if on_record:
+        out["items_applied"] = applied
+        out["items_total"] = len(holder)
+        target = _native_single_target(tasks, directory) if (
+            phase in _SINGLE_TARGET_APPLY_PHASES) else None
+        if target:
+            out["applied_to"] = target
     return out
+
+
+def _native_single_target(tasks: Sequence[Any], directory: Path) -> Optional[str]:
+    """The one file every batch of *tasks* declares, from the root of the
+    repository holding *directory* (the ``.git`` holder above it, walked;
+    as given when it lies outside), else ``None``."""
+    from .git_utils import find_git_entry_root
+    from .subagent_tasks import declared_file_set
+
+    declared = {
+        tuple(declared_file_set(task)) for task in tasks if isinstance(task, dict)
+    }
+    if len(declared) != 1:
+        return None
+    (files,) = declared
+    if len(files) != 1:
+        return None
+    target = files[0]
+    try:
+        start = os.path.realpath(str(directory))
+        root = os.path.realpath(find_git_entry_root(start) or start)
+        resolved = target if os.path.isabs(target) else os.path.join(root, target)
+        relative = os.path.relpath(os.path.realpath(resolved), root)
+    except (OSError, ValueError):
+        return target
+    return target if relative.startswith(os.pardir) else relative
 
 
 def _native_apply_batch_checks(record: Dict[str, Any], directory: Path) -> List[Dict[str, Any]]:
@@ -2957,6 +3015,22 @@ def _native_apply_batch_checks(record: Dict[str, Any], directory: Path) -> List[
         ]
     except Exception:  # noqa: BLE001 - advisory
         return []
+
+
+def native_items_count(view: Mapping[str, Any]) -> str:
+    """``2/3 items applied`` (``… applied to plans/p.md`` for a single-target
+    phase) for a native apply view that counted its items, else ``""``:
+    the executor's progress-line words (fix round 28)."""
+    applied, total = view.get("items_applied"), view.get("items_total")
+    if not (isinstance(applied, int) and isinstance(total, int)
+            and not isinstance(applied, bool) and total > 0):
+        return ""
+    target = view.get("applied_to")
+    to = (
+        f" to {clip(plain_line(target), 200)}"
+        if isinstance(target, str) and plain_line(target) else ""
+    )
+    return f"{applied}/{total} items applied{to}"
 
 
 def render_state_apply_lines(
@@ -2978,8 +3052,15 @@ def render_state_apply_lines(
         lines.append(
             f"      own check fails {entry['id']}: {clip('; '.join(findings), 300)}"
         )
-    # Fix round 22: in the executor's progress-line words.
-    lines += [f"      {clause}" for clause in not_applied_item_clauses(view)]
+    # Fix round 22: in the executor's progress-line words. Fix round 28
+    # (live run 12 #4): after the items count they are left out of, as the
+    # executor's line puts them, "2/3 items applied; 1 declined by …".
+    not_applied = not_applied_item_clauses(view)
+    count = native_items_count(view)
+    if count:
+        lines.append("      " + "; ".join([count, *not_applied]))
+    else:
+        lines += [f"      {clause}" for clause in not_applied]
     if since:
         lines += _native_resume_line(resume)
     elif not view.get("completed"):
