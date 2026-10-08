@@ -2890,6 +2890,51 @@ async function fetchResumeCommand({
 }
 
 /**
+ * The stop's line without the ways forward its section carries, in the
+ * `error`'s place (fix round 28, live run 12 #5: the hosts relayed the whole
+ * `error` line, whose "To go on (your call): … add --human-task …" restated
+ * every answer the section then gave as commands).
+ *
+ * `util next-command --blocked` hands back the line it read off the stop's
+ * record (`error_line`) and that line without the section's ways forward
+ * (`error_beside_section`). Swapped only while the result's `error` is the
+ * recorded line word for word, so a stop the record does not describe keeps
+ * its own line; `result.error` follows (the stop title reads it) and
+ * `message` is composed again around it. The port of the codex server's
+ * `relay_stop_beside_section`.
+ */
+function relayStopBesideSection(values, outcome, step, surface) {
+  const line = step?.error_line
+  const beside = step?.error_beside_section
+  const payload = outcome?.result
+  if (
+    typeof line !== "string" || typeof beside !== "string" || !beside.trim() ||
+    !payload || typeof payload !== "object"
+  ) {
+    return
+  }
+  const respell = respellerFor(surface, values)
+  const current = outcome.error
+  const recorded = redactCommand(line, null, surface, respell)
+  if (
+    typeof current !== "string" || typeof recorded !== "string" ||
+    current.trim() !== recorded.trim()
+  ) {
+    return
+  }
+  const shown = redactCommand(beside, null, surface, respell)
+  outcome.error = shown
+  payload.error = shown
+  outcome.message = needsHumanMessage({
+    payload,
+    output: outcome.output,
+    stderr: outcome.stderr,
+    values,
+    surface,
+  })
+}
+
+/**
  * Lead `options` with the resume and every answer the stop offers.
  *
  * Fix round 14 (live run 5): `resume_command` was a plain `--resume` while the
@@ -3465,6 +3510,7 @@ async function execute(args, ctx, surface, client) {
           // clause stands for the resume's and the answers'.
           outcome.resume_markdown = resume.markdown
           clause = text.resume_markdown
+          relayStopBesideSection(values, outcome, resume, surface)
         }
         outcome.message = `${outcome.message} ${clause}`
         attachAnswers(resume, outcome, surface)

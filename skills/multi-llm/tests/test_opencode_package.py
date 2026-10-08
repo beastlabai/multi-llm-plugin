@@ -5105,6 +5105,85 @@ class TestResumeCommand:
             "ok", "state", "user_next_step", "resume_command", "resume_why",
             "resume_answers", "resume_markdown"]
 
+    #: A stop's line as recorded, and without the section's ways forward.
+    STOP_LINE = (
+        "implement stopped at T005: refused before it was dispatched. Not "
+        "run: T006. To go on (your call): remove or narrow the deny rule "
+        "`src/vendor/**` in driver.write_paths, then resume this phase; if "
+        "not, skip T005: add --human-task T005=skip to the resume command.")
+    STOP_LINE_BESIDE = (
+        "implement stopped at T005: refused before it was dispatched. Not "
+        "run: T006. To go on (your call): remove or narrow the deny rule "
+        "`src/vendor/**` in driver.write_paths, then resume this phase.")
+
+    def _stop_with_section(self, built_package, uv_stub, error, **extra):
+        sys.path.insert(0, str(SKILL_ROOT))
+        from utils import next_phase
+
+        why = "runs the tasks that can run; keeps the 4 tasks already done"
+        step = dict(self._answers_step(), why=why, **extra)
+        step.setdefault("markdown", next_phase.render_resume_markdown(
+            "implement", "/multi-llm --implement plans/x.md --resume", why,
+            step["answers"]))
+        resume_line = {"exit": 3, "stdout": [
+            "      resume with: uv run -- python multi_llm.py implement "
+            "plans/x.md --host opencode --detach --resume",
+            "MULTI_LLM_RESULT: " + json.dumps({
+                "state": "needs-human", "exit": 3, "artifacts": [],
+                "next": None, "error": error})]}
+        result, _ = uv_stub.run(
+            built_package, self.IMPLEMENT, [self.LAUNCH, resume_line],
+            extra_env={"STUB_RESUME_EXTRA": json.dumps(step)})
+        return result
+
+    def test_the_error_beside_the_section_names_no_answer(
+        self, built_package, uv_stub,
+    ):
+        """Fix round 28 (live run 12 #5): the hosts relayed the whole `error`
+        line, whose "To go on (your call): … --human-task T005=skip …"
+        restated the section's answers. With the section lifted, `error`,
+        `result.error`, the line the message quotes and the stop title are
+        the lookup's `error_beside_section`, while the error is the line the
+        lookup read off the stop's record."""
+        result = self._stop_with_section(
+            built_package, uv_stub, self.STOP_LINE,
+            error_line=self.STOP_LINE, error_beside_section=self.STOP_LINE_BESIDE)
+        assert result["error"] == self.STOP_LINE_BESIDE
+        assert result["result"]["error"] == self.STOP_LINE_BESIDE
+        assert f'"{self.STOP_LINE_BESIDE}"' in result["message"]
+        assert self.STOP_LINE not in result["message"]
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        assert result["message"].endswith(
+            surface["needs_human_message"]["resume_markdown"])
+        # The tool's own line, which shows without the model, says it too.
+        got = node_json(f"""
+        const hooks = await MultiLlmPlugin({{}})
+        const output = {{ title: "", output: {json.dumps(json.dumps(result))}, metadata: {{}} }}
+        await hooks["tool.execute.after"](
+          {{ tool: surface.tool_name, sessionID: "s", callID: "c", args: {{}} }},
+          output,
+        )
+        emit(output.title)
+        """, built_package)
+        assert "src/vendor/**" in got and "--human-task" not in got, got
+
+    def test_an_error_the_record_does_not_describe_keeps_its_own_line(
+        self, built_package, uv_stub,
+    ):
+        other = "implement stopped at T009: the batch was refused."
+        result = self._stop_with_section(
+            built_package, uv_stub, other,
+            error_line=self.STOP_LINE, error_beside_section=self.STOP_LINE_BESIDE)
+        assert result["error"] == other
+        assert result["result"]["error"] == other
+
+    def test_without_a_section_the_error_stays_whole(self, built_package, uv_stub):
+        result = self._stop_with_section(
+            built_package, uv_stub, self.STOP_LINE, markdown=["not text"],
+            error_line=self.STOP_LINE, error_beside_section=self.STOP_LINE_BESIDE)
+        assert "resume_markdown" not in result
+        assert result["error"] == self.STOP_LINE
+
     def test_the_plugin_spells_none_of_the_lookup(self, built_package):
         surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
         resume = surface["dispatcher"]["resume"]

@@ -2551,8 +2551,37 @@ class Server:
                 # whose clause stands for the resume's and the answers'.
                 outcome["resume_markdown"] = markdown
                 clause = text["resume_markdown"]
+                self.relay_stop_beside_section(values, outcome, step)
             outcome["message"] = "{} {}".format(outcome.get("message") or "", clause)
             self.attach_answers(step, word, plan, outcome)
+
+    def relay_stop_beside_section(self, values, outcome: dict, step: dict) -> None:
+        """The stop's line without the ways forward its section carries, in
+        the ``error``'s place (fix round 28, live run 12 #5: the host relayed
+        the whole ``error`` line, whose "To go on (your call): … add
+        --human-task …" restated every answer the section gave as commands).
+
+        ``util next-command --blocked`` hands back the line it read off the
+        stop's record (``error_line``) and that line without the section's
+        ways forward (``error_beside_section``). Swapped only while the
+        result's ``error`` is the recorded line word for word, so a stop the
+        record does not describe keeps its own line; ``result.error`` follows
+        and ``message`` is composed again around it."""
+        line, beside = step.get("error_line"), step.get("error_beside_section")
+        payload = outcome.get("result")
+        if (not isinstance(line, str) or not isinstance(beside, str)
+                or not beside.strip() or not isinstance(payload, dict)):
+            return
+        respell = respeller_for(self.surface, values)
+        current = outcome.get("error")
+        if (not isinstance(current, str) or current.strip()
+                != (redact(line, None, self.surface, respell) or "").strip()):
+            return
+        shown = redact(beside, None, self.surface, respell)
+        outcome["error"] = shown
+        payload["error"] = shown
+        outcome["message"] = self.needs_human_message(
+            payload, outcome.get("output"), outcome.get("stderr"), values)
 
     def attach_answers(self, step: dict, word: str, plan: str, outcome: dict) -> None:
         """Lead ``options`` with the resume and every answer the stop offers.

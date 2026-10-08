@@ -1570,6 +1570,17 @@ def emit_resume(
     # Fix round 24: all of it as the report's closing section, ready to copy.
     resume["markdown"] = render_resume_markdown(
         mode.name if mode is not None else mode_word, command, why, answers or [])
+    # Fix round 28 (live run 12 #5): the stop's own line as recorded, and the
+    # same line without the ways forward this section carries, which the
+    # servers relay in its place beside the section.
+    try:
+        lines = stop_headlines_on_record(
+            plan_arg if plan_path is None else plan_path, mode_word)
+    except Exception as exc:  # noqa: BLE001 - advisory: the resume still stands
+        print(lookup_failure_line(exc), file=err)
+        lines = None
+    if lines is not None:
+        resume["error_line"], resume["error_beside_section"] = lines
     cli_common.record_user_resume(resume)
     return command
 
@@ -1611,6 +1622,60 @@ def stop_answers_on_record(
         if flags is not None and why is not None:
             answers.append({"flags": flags, "why": why})
     return answers
+
+
+def stop_headlines_on_record(
+    plan_path: Union[str, Path], mode_word: str,
+) -> Optional[Tuple[str, str]]:
+    """``(headline, beside_section)`` of the phase's last stop, as it
+    recorded them (``progress.write_subagents.stop``: ``headline`` and
+    ``write_batch_scheduler.HEADLINE_BESIDE_SECTION_KEY``), or ``None``
+    (fix round 28, live run 12 #5).
+
+    The second is the first without the ways forward the stop's resume
+    section carries: what stopped, what it reported, what did not run, the
+    fixes only the user can make and the tests line. ``util next-command
+    --blocked`` hands both to the tool routes, which relay the second in the
+    result's ``error`` while that ``error`` is still the first, word for
+    word, so a stop the record does not describe is never re-worded. Each
+    must be one plain line within ``cli_common.ERROR_MAX_CHARS``, and every
+    answer the stop recorded must have passed :func:`stop_answers_on_record`
+    (the section lists all of them), else ``None``: the folder is writable
+    by every jailed batch.
+    """
+    from . import cli_common
+    from .output_handler import phase_dir_path
+    from .status_file import read_status
+    from .write_batch_scheduler import HEADLINE_BESIDE_SECTION_KEY
+
+    modes = _skill_module("modes")
+    mode = modes.resolve(mode_word)
+    if mode is None or not mode.phase:
+        return None
+    source = Path(os.path.abspath(str(plan_path)))
+    status = read_status(str(phase_dir_path(source, mode.phase)))
+    progress = status.get("progress") if isinstance(status, dict) else None
+    mirror = progress.get("write_subagents") if isinstance(progress, dict) else None
+    stop = mirror.get("stop") if isinstance(mirror, dict) else None
+    if not isinstance(stop, dict):
+        return None
+
+    def plain(value: Any) -> Optional[str]:
+        if (not isinstance(value, str) or not value.strip()
+                or len(value) > cli_common.ERROR_MAX_CHARS
+                or plain_line(value) != value):
+            return None
+        return value
+
+    headline = plain(stop.get("headline"))
+    beside = plain(stop.get(HEADLINE_BESIDE_SECTION_KEY))
+    if headline is None or beside is None or beside == headline:
+        return None
+    raw = stop.get("answers")
+    recorded = raw if isinstance(raw, list) else []
+    if len(stop_answers_on_record(source, mode_word)) != len(recorded):
+        return None
+    return headline, beside
 
 
 def recorded_answer_flags(flags: Any) -> Optional[List[str]]:
