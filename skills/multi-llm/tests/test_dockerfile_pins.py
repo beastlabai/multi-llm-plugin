@@ -374,6 +374,21 @@ def test_package_lock_carries_integrity_hashes():
     )
 
 
+def test_the_npm_layer_makes_qwens_vendored_ripgrep_executable(instructions):
+    """qwen-code ships vendor/ripgrep/<platform>/rg mode 0644 and chmods it on
+    first use, which fails in this root-owned read-only install: every qwen run
+    as uid 10001 printed `Ripgrep not available: spawn .../rg EACCES` on stderr
+    (2026-10-08, qwen-code 0.25.0). The chmod must sit in the same RUN as
+    `npm ci`, the layer that writes the file, or it is a second copy of 4 MB."""
+    [layer] = [line for line in instructions
+               if line.startswith("RUN ") and "npm ci" in line]
+    target = "@qwen-code/qwen-code/vendor/ripgrep/x64-linux/rg"
+    assert target in layer and re.search(r"chmod 0755 \S*qwen_rg", layer), (
+        "the npm layer no longer makes qwen's vendored x64-linux ripgrep "
+        "executable"
+    )
+
+
 def test_pypi_rows_are_hash_pinned(lock):
     for row in lock["clis"]:
         if row["install"] != "pypi":
