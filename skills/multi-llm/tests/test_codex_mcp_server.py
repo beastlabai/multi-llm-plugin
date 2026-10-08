@@ -1943,8 +1943,33 @@ class TestProgressRelay:
         assert {entry["logger"] for entry in logs} == {SURFACE["tool_name"]}
         assert envelope["relays"] == {"attempted": 3, "delivered": 3, "rejected": 0,
                                       "unavailable": 0, "logged": 3}
-        assert envelope["progress_lines"] == ["ROSTER", "just finished: b"]
+        # Fix round 28 (live run 12 #10): the finished result shows the
+        # terminal poll's own lines, never the last relayed snapshot.
+        assert envelope["progress_lines"] == ["ROSTER", "TERMINAL"]
         assert client.close() == 0
+
+    def test_a_finished_result_shows_the_final_progress_not_the_last_relay(
+            self, harness):
+        """Live run 12 #10 (Codex racing 02-08): a `done` result's
+        `progress_lines` read "3/8 batches ok … in flight: apply-batch-3",
+        the last mid-run poll's lines, while `result.progress_lines` said
+        8/8. The terminal poll's lines replace them; a terminal poll with
+        none leaves none, never the stale snapshot."""
+        launch = launch_step()
+        launch["stdout"][-1] = result_line(mode="review-plan", progress_lines=["ROSTER"])
+        envelope, _, _, _ = harness.run(REVIEW, [
+            launch,
+            poll_step(2, progress_lines=["3/8 batches ok, in flight: apply-batch-3"]),
+            poll_step(0, progress_lines=["complete, 8/8 batches ok"])])
+        assert envelope["state"] == STATES["ok"]
+        assert envelope["progress_lines"] == ["complete, 8/8 batches ok"]
+        assert envelope["progress_lines"] == envelope["result"]["progress_lines"]
+        envelope, _, _, _ = harness.run(REVIEW, [
+            launch_step(),
+            poll_step(2, progress_lines=["3/8 batches ok, in flight: apply-batch-3"]),
+            poll_step(0)])
+        assert envelope["state"] == STATES["ok"]
+        assert envelope["progress_lines"] is None
 
     def test_no_token_is_counted_as_unavailable(self, harness):
         client = harness.client(self._script())
