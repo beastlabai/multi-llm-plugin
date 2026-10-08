@@ -487,8 +487,9 @@ class TestADeclinedItemIsNamedOnEverySurface(_PairRig):
         multi_llm.main(["status", str(plan), "--view", "run", "--phase",
                         "apply-suggestions"])
         view = capsys.readouterr().out
-        # Fix round 26 (live run 11 #7): one plain clause after the count.
-        assert (f"2/3 items applied; 1 declined by its batch (not applied): "
+        # Fix round 26 (live run 11 #7): one plain clause after the count,
+        # which names the file the batches edited (relay, run 11 #13).
+        assert (f"2/3 items applied to plans/apply.md; 1 declined by its batch (not applied): "
                 f"{declined_id[:8]} in apply-batch-0 ({REASON})") in view
         assert "not applied, declined" not in view
         assert f"note: {expected}" in view
