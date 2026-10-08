@@ -110,7 +110,7 @@ from .output_handler import (
     slugify_question,
 )
 from .stream_bootstrap import bootstrap_streams
-from .text_clip import clip, plain_line, without_closing_mark
+from .text_clip import clip, join_clauses, plain_line, without_closing_mark
 from .validation_context import (
     pick_worst,
     validation_context_notice,
@@ -1174,7 +1174,7 @@ def _validation_context_notice(views: Sequence[Dict[str, Any]]) -> Optional[str]
         notice = validation_context_notice(view.get("validation_context"))
         if notice and notice not in sentences:
             sentences.append(notice)
-    return "; ".join(sentences) or None
+    return join_clauses(sentences) or None
 
 
 def _write_result_notice(views: Sequence[Dict[str, Any]]) -> Optional[str]:
@@ -1186,7 +1186,7 @@ def _write_result_notice(views: Sequence[Dict[str, Any]]) -> Optional[str]:
     what the worker recorded on its own result line, which a detached caller
     never sees. Read from the run's own mirror, so it describes that run.
     """
-    return clip("; ".join(_write_result_notice_parts(views)), 1200) or None
+    return clip(join_clauses(_write_result_notice_parts(views)), 1200) or None
 
 
 def _write_result_notice_parts(views: Sequence[Dict[str, Any]]) -> List[str]:
@@ -4513,7 +4513,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
             if trailer:
                 workflow_trailer = [f"workflow {line}" for line in trailer]
-                terminal_notice = "; ".join(trailer)
+                terminal_notice = join_clauses(trailer)
 
     # Fix round 14: a native-leg implement leaves no run record and no
     # report, so its tasks are read back from state.json (`--run-id` and
@@ -4663,7 +4663,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # and with what the step's `markdown` says itself, the optional
         # entry's why and the manual tasks, which the hosts pasted above
         # the copied section. The text view a person reads keeps them.
-        terminal_notice = "; ".join(_workflow_trailer_lines(
+        terminal_notice = join_clauses(_workflow_trailer_lines(
             terminal_workflow, prefix="", suggested=False,
             carried=step)) or None
 
@@ -4691,11 +4691,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         said = plain_line(clip(stop_error, ERROR_MAX_CHARS))
         write_parts = [part for part in write_parts if plain_line(part) not in said]
         note_parts = [part for part in note_parts if plain_line(part) not in said]
-    write_notice = clip("; ".join(write_parts), 1200) or None
-    notes_notice = "; ".join(note_parts)
-    combined_notice = "; ".join(
-        part for part in (truncation_notice, write_notice, notes_notice, terminal_notice) if part
-    )
+    # Fix round 28 (live run 12 #7): one join for every clause, so a part
+    # gives up its closing stop to the separator ("….; …" no more) and keeps
+    # it where it ends the notice.
+    write_notice = clip(join_clauses(write_parts), 1200) or None
+    notes_notice = join_clauses(note_parts)
+    combined_notice = join_clauses(
+        (truncation_notice, write_notice, notes_notice, terminal_notice))
     if combined_notice:
         record_notice(combined_notice)
 

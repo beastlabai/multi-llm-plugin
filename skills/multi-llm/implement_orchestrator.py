@@ -40,7 +40,7 @@ from utils import (
 )
 from utils import metrics as metrics_mod
 from utils.stream_bootstrap import bootstrap_streams
-from utils.text_clip import clip
+from utils.text_clip import clip, join_clauses
 from utils.cli_common import (
     EXIT_NEEDS_HUMAN,
     build_parent_parser,
@@ -1355,7 +1355,7 @@ def check_findings_notice(found: Dict[str, List[str]]) -> str:
     return clip(
         "check findings (review-code is told about them; all listed in "
         "implement/summary.md): "
-        + "; ".join(parts), 900)
+        + join_clauses(parts), 900)
 
 
 def run_implement_write_phase(
@@ -1470,7 +1470,9 @@ def run_implement_write_phase(
         # Racing re-run 4 (2026-10-05): a check task's problems were on no
         # surface a host reads. The result line's `notice` carries them,
         # beside the `[CHECK_FINDINGS]` lines above.
-        record_notice("; ".join(notice))
+        # Fix round 28 (live run 12 #7): joined so a clause gives up its
+        # closing stop to the separator, never ".;".
+        record_notice(join_clauses(notice))
     if result.report_path:
         print(f"[write-subagents] report: {result.report_path}")
     if result.summary_file:

@@ -29,6 +29,7 @@ import modes
 from tests.test_check_gate_fixture import _first_run, repo  # noqa: F401 - the fixture
 from tests.test_next_step_relay_rules import RELAY_SURFACES, _flat
 from utils import cli_common, run_status, status_file
+from utils.text_clip import without_closing_mark
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT / "packaging") not in sys.path:
@@ -104,7 +105,10 @@ class TestAStopCarriesNoSuggestedNext:
         status_file.update_status(str(repo.phase_dir), {"run": {
             "error": headline.replace(tests_line, "").strip()}})
         _code, payload, _out = _poll(repo, capsys)
-        assert tests_line in (payload.get("notice") or ""), payload.get("notice")
+        # Fix round 28: a clause another follows gives up its closing stop
+        # to the separator (`text_clip.join_clauses`).
+        assert without_closing_mark(tests_line) in (payload.get("notice") or ""), \
+            payload.get("notice")
 
 
 class TestTheManualSectionReadsWellEnoughToCopy:
