@@ -2390,9 +2390,20 @@ class Server:
             if line else text["error_unknown"]
         return fill(text["template"], {"phase": phase, "error": error_clause})
 
+    def settle_progress_lines(self, call: Call, child: ChildRun) -> None:
+        """The terminal child's own ``progress_lines``, in place of the last
+        relayed ones, or none (fix round 28, live run 12 #10: a finished Codex
+        result showed "3/8 batches ok … in flight", the last mid-run poll's
+        lines, beside its ``done`` state). Redacted as a relay is."""
+        lines = redact((child.result or {}).get("progress_lines"), None, self.surface)
+        kept = ([line for line in lines if isinstance(line, str) and line]
+                if isinstance(lines, list) else [])
+        call.progress_lines = kept or None
+
     def terminal_result(self, call: Call, child: ChildRun, values) -> dict:
         surface = self.surface
         codes = surface["dispatcher"]["exit_codes"]
+        self.settle_progress_lines(call, child)
         states = surface["dispatcher"]["states"]
         base = {"exit": child.code, "argv": child.argv, "run_id": call.run_id,
                 "log": call.log, "polls": call.polls,
