@@ -3411,6 +3411,26 @@ def argv_prompt_bytes(
     return len(prompt.encode("utf-8"))
 
 
+def misnamed_result_baseline(
+    output_dir: Union[str, Path],
+    phase: str,
+    model_spec: str,
+) -> Dict[str, Tuple[int, int]]:
+    """The candidate files of the phase dir :func:`invoke_with_file_output` writes into, now.
+
+    A review slot takes this once, before its first attempt, and hands it to
+    every attempt as ``misnamed_baseline``: a misnamed file is this slot's only
+    when it appeared (or changed) after the slot started. Taken per attempt, an
+    attempt killed after writing it under the wrong name left it in the next
+    attempt's baseline, and the slot was recorded failed beside its own answer
+    (review of fix round 24).
+    """
+    from .json_extractor import generate_output_path
+
+    phase_dir = generate_output_path(Path(output_dir), "output", phase, model_spec).parent
+    return _result_files.snapshot_candidates(phase_dir)
+
+
 def _adopt_misnamed_result(
     output_json_path: Path,
     before: Dict[str, Tuple[int, int]],
@@ -3457,6 +3477,7 @@ def invoke_with_file_output(
     anchor: Optional[Union[str, Path]] = None,
     sandbox_fallback: Optional[str] = None,
     run_model_specs: Optional[Sequence[str]] = None,
+    misnamed_baseline: Optional[Dict[str, Tuple[int, int]]] = None,
 ) -> Dict[str, Any]:
     """Invoke LLM with file-based JSON output.
 
@@ -3500,6 +3521,11 @@ def invoke_with_file_output(
             its three findings were recorded as a failed model. ``None`` (the
             default) never looks, which is every caller that does not know
             which other models write into the same dir.
+        misnamed_baseline: Step 1b's baseline, from
+            :func:`misnamed_result_baseline` taken once at the slot's start, so
+            a file an earlier attempt of the same slot wrote under the wrong
+            name is still this slot's on a retry. ``None`` takes it here, at the
+            start of this call (a slot of one attempt).
 
     Returns:
         Dict with keys:
@@ -3520,11 +3546,14 @@ def invoke_with_file_output(
         model_spec, prompt_context, output_dir, phase, timeout, anchor
     )
     # Step 1b's baseline, taken before the child can write anything: a file
-    # this call adopts must have appeared (or changed) during it.
-    phase_files_before = (
-        _result_files.snapshot_candidates(output_json_path.parent)
-        if run_model_specs is not None else None
-    )
+    # this call adopts must have appeared (or changed) since the slot started —
+    # the caller's baseline when it took one before its first attempt, else now.
+    if run_model_specs is None:
+        phase_files_before = None
+    elif misnamed_baseline is not None:
+        phase_files_before = misnamed_baseline
+    else:
+        phase_files_before = _result_files.snapshot_candidates(output_json_path.parent)
 
     # Format prompt
     try:

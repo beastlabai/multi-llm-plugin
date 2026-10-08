@@ -34,7 +34,7 @@ sys.path.insert(0, str(SKILL_ROOT))
 import code_review_orchestrator as cro  # noqa: E402
 from utils import result_files  # noqa: E402
 from utils import review_orchestrator_base as rob  # noqa: E402
-from utils.llm_client import ERROR_PARSE_ERROR, invoke_with_file_output  # noqa: E402
+from utils.llm_client import ERROR_PARSE_ERROR, ERROR_TIMEOUT, invoke_with_file_output  # noqa: E402
 from utils.status_file import read_status, write_status  # noqa: E402
 
 from tests.test_reaggregate_identity import (  # noqa: E402
@@ -239,6 +239,145 @@ class TestAMisnamedResultIsReadFromWhereTheModelWroteIt:
         assert result["data"] == mine
         assert "misnamed_from" not in result
         assert (phase_dir / MISNAMED).exists()
+
+
+def _no_sleep(_delay):
+    async def _noop():
+        return None
+    return _noop()
+
+
+class TestAnEarlierAttemptsMisnamedFileIsStillThisSlots:
+    """Review 24 (records #1): the baseline a misnamed file must be fresh against
+    was taken inside each ``invoke_with_file_output`` call, so once per ladder
+    attempt. Attempt 1 wrote the misnamed array and was killed at its timeout;
+    attempt 2's own baseline already held the file, the slot was recorded failed,
+    and the next ``--reaggregate`` set the findings aside as "not the result file
+    of any model this review ran". The baseline is the slot's now: taken once,
+    before the first attempt, and handed to every attempt."""
+
+    def test_a_retry_reads_the_file_the_first_attempt_wrote(self, tmp_path):
+        plan = tmp_path / "plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        phase_dir = rob.get_phase_dir(plan, "review-plan")
+        findings = _issues(["Curvature", "Lane offset"])
+        attempts = []
+
+        def provider(*_args, **_kwargs):
+            attempts.append(1)
+            if len(attempts) == 1:
+                # Writes the array under the wrong name, then is killed.
+                (phase_dir / MISNAMED).write_text(json.dumps(findings), encoding="utf-8")
+                return {
+                    "success": False,
+                    "error": "pi timed out after 600s",
+                    "error_code": ERROR_TIMEOUT,
+                    "details": {"provider": "pi"},
+                }
+            # The retry writes nothing and answers in prose.
+            return _parse_failure()
+
+        with patch("utils.llm_client.invoke_with_provider", side_effect=provider), \
+                patch.object(rob, "get_subagent_retries", return_value=1), \
+                patch.object(rob.asyncio, "sleep", _no_sleep):
+            result = asyncio.run(rob.run_single_model(
+                PI, str(plan), "review {output_json_path}", {},
+                "review-plan", "plan_review",
+                timeout=1800, out_dir=str(phase_dir.parent), prefix="plan",
+                run_model_specs=[PI, CODEX],
+            ))
+
+        assert len(attempts) == 2
+        assert result["success"] is True, result.get("error")
+        assert json.loads(result["output"]) == findings
+        assert json.loads((phase_dir / f"{PI_STEM}.json").read_text(encoding="utf-8")) == findings
+        assert not (phase_dir / MISNAMED).exists()
+
+    def test_a_file_older_than_the_slot_is_still_not_this_slots(self, tmp_path):
+        """The slot-wide baseline keeps the freshness guard: a file that was in
+        the dir before the first attempt is never adopted on any attempt."""
+        plan = tmp_path / "plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        phase_dir = rob.get_phase_dir(plan, "review-plan")
+        (phase_dir / MISNAMED).write_text(json.dumps(_issues(["Old"])), encoding="utf-8")
+        attempts = []
+
+        def provider(*_args, **_kwargs):
+            attempts.append(1)
+            if len(attempts) == 1:
+                return {"success": False, "error": "pi timed out after 600s",
+                        "error_code": ERROR_TIMEOUT, "details": {"provider": "pi"}}
+            return _parse_failure()
+
+        with patch("utils.llm_client.invoke_with_provider", side_effect=provider), \
+                patch.object(rob, "get_subagent_retries", return_value=1), \
+                patch.object(rob.asyncio, "sleep", _no_sleep):
+            result = asyncio.run(rob.run_single_model(
+                PI, str(plan), "review {output_json_path}", {},
+                "review-plan", "plan_review",
+                timeout=1800, out_dir=str(phase_dir.parent), prefix="plan",
+                run_model_specs=[PI, CODEX],
+            ))
+
+        assert len(attempts) == 2
+        assert result["success"] is False
+        assert (phase_dir / MISNAMED).exists()
+
+    def test_every_attempt_is_handed_the_one_baseline(self, tmp_path):
+        plan = tmp_path / "plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        phase_dir = rob.get_phase_dir(plan, "review-plan")
+        (phase_dir / "pi_old.json").write_text("[]", encoding="utf-8")
+        seen = []
+
+        def fake_invoke(**kwargs):
+            seen.append(kwargs.get("misnamed_baseline"))
+            # Each attempt leaves a new file: a per-attempt baseline would grow.
+            (phase_dir / f"pi_attempt{len(seen)}.json").write_text("[]", encoding="utf-8")
+            return {"success": False, "error": "pi timed out after 600s",
+                    "error_code": ERROR_TIMEOUT, "details": {}}
+
+        with patch.object(rob, "invoke_with_file_output", fake_invoke), \
+                patch.object(rob, "get_subagent_retries", return_value=1), \
+                patch.object(rob.asyncio, "sleep", _no_sleep):
+            asyncio.run(rob.run_single_model(
+                PI, str(plan), "review {output_json_path}", {},
+                "review-plan", "plan_review",
+                timeout=1800, out_dir=str(phase_dir.parent), prefix="plan",
+                run_model_specs=[PI, CODEX],
+            ))
+
+        assert len(seen) == 2
+        assert seen[0] is not None and set(seen[0]) == {"pi_old.json"}
+        assert seen[1] == seen[0]
+
+    def test_the_code_review_slot_takes_its_baseline_before_the_dispatch(self, tmp_path):
+        """One dispatch per slot on this lane, but the same rule: the slot takes
+        the baseline and hands it to ``invoke_with_file_output``."""
+        plan = tmp_path / "plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        phase_dir = cro.get_phase_dir(plan, "code-review")
+        (phase_dir / "pi_old.json").write_text("[]", encoding="utf-8")
+        spy_result = {"success": False, "error": "x", "error_code": ERROR_PARSE_ERROR,
+                      "details": {}}
+
+        with patch.object(cro, "invoke_with_file_output", return_value=spy_result) as spy:
+            asyncio.run(cro.run_single_review(
+                PI, plan, phase_dir.parent, run_model_specs=[PI, CODEX],
+            ))
+
+        baseline = spy.call_args.kwargs["misnamed_baseline"]
+        assert set(baseline) == {"pi_old.json"}
+
+    def test_without_the_runs_model_list_no_baseline_is_taken(self, tmp_path):
+        plan = tmp_path / "plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        phase_dir = cro.get_phase_dir(plan, "code-review")
+        spy_result = {"success": False, "error": "x", "error_code": ERROR_PARSE_ERROR,
+                      "details": {}}
+        with patch.object(cro, "invoke_with_file_output", return_value=spy_result) as spy:
+            asyncio.run(cro.run_single_review(PI, plan, phase_dir.parent))
+        assert spy.call_args.kwargs.get("misnamed_baseline") is None
 
 
 class TestTheReviewLanesSayWhatTheyRead:

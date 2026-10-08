@@ -83,6 +83,7 @@ from .llm_client import (
     describe_output_file,
     invoke_with_provider,
     invoke_with_file_output,
+    misnamed_result_baseline,
     render_output_location,
     render_working_limits,
 )
@@ -4776,6 +4777,18 @@ async def run_single_model(
             ),
         )
 
+        # The misnamed-result baseline is the slot's, not an attempt's: taken
+        # once, here, and handed to every attempt, so a file attempt 1 wrote
+        # under the wrong name before it was killed is still this slot's when
+        # attempt 2 writes nothing (review of fix round 24). `None` without the
+        # run's model list, which never looks.
+        misnamed_baseline = (
+            await asyncio.to_thread(
+                misnamed_result_baseline, out_dir, invoke_phase, model_spec
+            )
+            if run_model_specs is not None else None
+        )
+
         while (slice_s := ladder.next_attempt()) is not None:
             # Never a fresh copy of `effective_timeout`: `next_attempt()` returns
             # what is left of the one deadline, and rule 3 guarantees it is at
@@ -4818,6 +4831,7 @@ async def run_single_model(
                 cwd=project_root,
                 anchor=plan_path,
                 run_model_specs=run_model_specs,
+                misnamed_baseline=misnamed_baseline,
                 **sandbox_fallback_kwargs(sandbox),
             )
 
