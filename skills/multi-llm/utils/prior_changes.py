@@ -555,27 +555,86 @@ def cmd_read(args: argparse.Namespace) -> None:
     print(render(args.output_dir))
 
 
-def cmd_append(args: argparse.Namespace) -> None:
-    summary = args.summary if args.summary is not None else sys.stdin.read().strip()
+#: ``util prior-changes append``'s exit code when it writes nothing because
+#: its ``--id`` is empty: the dispatcher's "needs a human" code, which an
+#: unknown mode or a stray positional gets too.
+EXIT_REFUSED = 3
+
+
+def _batch_ids_in_task_file(output_dir: str, phase: Optional[str]) -> List[Tuple[str, str]]:
+    """``(task_id, prior_changes_id)`` of every batch in the phase's
+    ``write_tasks.json`` (``<output_dir>/<phase dir>/``), both plain ids;
+    ``[]`` when the file is missing or unreadable."""
+    if not phase or not _PHASE_DIR_WORD.match(phase):
+        return []
+    try:
+        document = json.loads(
+            (Path(output_dir) / phase / WRITE_TASK_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    tasks = (document.get("batches") or document.get("tasks") or []) if isinstance(
+        document, dict) else []
+    out: List[Tuple[str, str]] = []
+    for task in tasks if isinstance(tasks, list) else []:
+        if not isinstance(task, dict):
+            continue
+        task_id = plain_task_id(task.get("task_id"))
+        eid = plain_entry_id(task.get("prior_changes_id"))
+        if task_id and eid != "?":
+            out.append((task_id, eid))
+    return out
+
+
+#: How many batches the empty-id refusal lists before "and N more".
+_IDS_SHOWN = 12
+
+
+def empty_id_refusal(output_dir: str, phase: Optional[str]) -> str:
+    """Why ``util prior-changes append`` wrote nothing for an empty ``--id``,
+    and where the id comes from (fix round 28, live run 12 #9: a Claude Code
+    host built the id with ``$(python3 …)``, got nothing, and the append wrote
+    a row with ``"id": ""``)."""
+    task_file = Path(output_dir) / str(phase or "<phase>") / WRITE_TASK_FILENAME
+    listed = _batch_ids_in_task_file(output_dir, phase)
+    shown = "; ".join(
+        task_id if task_id == eid else f"{task_id}: {eid}"
+        for task_id, eid in listed[:_IDS_SHOWN]
+    ) + (f"; and {len(listed) - _IDS_SHOWN} more" if len(listed) > _IDS_SHOWN else "")
+    return (
+        f"ERROR: util prior-changes append: --id is empty, so nothing was "
+        f"written to {_jsonl_path(output_dir)}. The id is the batch's "
+        f"prior_changes_id in {task_file} (for implement, the task id, such "
+        f"as T003): copy it from there as it is written and run the append "
+        f"again with the same summary."
+        + (f" The batches there: {shown}." if shown else "")
+    )
+
+
+def cmd_append(args: argparse.Namespace) -> int:
     # Canonicalize whatever spelling was passed — apply-code-fixes's native
     # leg and its --exec-subagents executor otherwise write this same file
     # under two different `phase` values for the same phase (F6).
     phase = canonical_phase(args.phase)
+    if not str(args.id or "").strip():
+        print(empty_id_refusal(args.output_dir, phase), file=sys.stderr)
+        return EXIT_REFUSED
+    summary = args.summary if args.summary is not None else sys.stdin.read().strip()
     earlier = _latest_for(_load_entries(_jsonl_path(args.output_dir)), args.id, phase)
     if not append(args.output_dir, args.id, phase, summary):
         print(
             f"Notice: entry {args.id}/{phase} already says this, skipping",
             file=sys.stderr,
         )
-        return
+        return 0
     if earlier is not None:
         print(
             f"Replaced entry {args.id}/{phase}: later tasks now read this "
             f"summary instead of the earlier one",
             file=sys.stderr,
         )
-        return
+        return 0
     print(f"Appended entry {args.id}/{phase}", file=sys.stderr)
+    return 0
 
 
 def cmd_clear(args: argparse.Namespace) -> None:
@@ -604,8 +663,8 @@ def main(argv=None) -> int:
     clear_p.add_argument("--output-dir", required=True)
 
     args = parser.parse_args(argv)
-    {"read": cmd_read, "append": cmd_append, "clear": cmd_clear}[args.command](args)
-    return 0
+    code = {"read": cmd_read, "append": cmd_append, "clear": cmd_clear}[args.command](args)
+    return code if isinstance(code, int) else 0
 
 
 if __name__ == "__main__":
