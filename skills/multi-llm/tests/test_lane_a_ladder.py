@@ -247,15 +247,14 @@ class TestBudgetExhaustedRefusesTheSpawn:
         assert result["success"] is False
         assert "budget_exhausted" in str(result["error"])
 
-    def test_lane_a_refuses_a_muse_slot_shorter_than_its_declared_736_s_wall(self):
+    def test_lane_a_refuses_a_muse_slot_shorter_than_its_declared_985_s_wall(self):
         """The same rule against muse's **real** envelope (C12).
 
-        muse declares ``max_wall_s = 736.0`` — its own 12-minute wall-clock
-        ceiling, measured at 12m16s across four rounds of a ten-attempt provider
-        ladder (40 requests) in ``tests/fixtures/muse/``'s ``truncated`` row.
-        A 600 s slot — muse's own ``default_timeout`` — cannot hold one
-        worst-case attempt, so nothing is spawned at all rather than a child
-        being killed part-way through the chain.
+        muse declares ``max_wall_s = 985.0`` — four rounds of a ten-attempt
+        provider ladder (40 provider requests) measured at 985 s on 1.4.3 in
+        ``tests/fixtures/muse/``'s ``truncated`` row. A 600 s slot cannot hold
+        one worst-case attempt, so nothing is spawned at all rather than a
+        child being killed part-way through the chain.
         """
         result, calls = _run_lane_a(
             error="anything at all",
@@ -272,7 +271,7 @@ class TestBudgetExhaustedRefusesTheSpawn:
         muse declares no ``agent-readonly`` profile, and ``dispatch_task``
         refuses an undeclared profile before it builds the ladder at all — a
         read/analyze task is never downgraded to a write-capable invocation. So
-        muse's 736 s envelope cannot produce ``budget_exhausted`` on this lane:
+        muse's 985 s envelope cannot produce ``budget_exhausted`` on this lane:
         the slot is ``rejected`` first, with nothing spawned either way. Pinned
         rather than assumed, because "the Lane B rule-4 test uses codex" would
         otherwise read like an oversight instead of the capability fact it is.
@@ -293,7 +292,7 @@ class TestBudgetExhaustedRefusesTheSpawn:
         assert outcome.attempts == []
         assert "agent-readonly" in str(outcome.reason)
 
-    def test_lane_bs_rule_4_refusal_names_muses_declared_736_s(self):
+    def test_lane_bs_rule_4_refusal_names_muses_declared_985_s(self):
         """So the real envelope still meets **this lane's** admission test.
 
         ``dispatch_task`` builds its ladder as
@@ -328,7 +327,7 @@ class TestBudgetExhaustedRefusesTheSpawn:
             ladder, target="muse:muse-spark-1.2", timeout=600.0
         )
         assert reason.startswith(STATUS_BUDGET_EXHAUSTED)
-        assert "736" in reason, "the declared envelope is named"
+        assert "985" in reason, "the declared envelope is named"
 
     def test_lane_a_names_the_envelope_when_it_refuses_a_retry(self, monkeypatch):
         """Fix round 6: the ladder refuses a retry the envelope cannot hold at
@@ -445,7 +444,7 @@ class TestRule6bNoIdenticalRateLimitRedispatch:
         result, calls = _run_lane_a(
             error="HTTP 429 Too Many Requests",
             model_spec="muse:muse-spark-1.2",
-            timeout=1800,  # comfortably above the declared 736 s wall
+            timeout=1800,  # above the declared 985 s wall
         )
         assert len(calls) == 1, "rule 6(b): no identical rate-limit re-dispatch"
         assert result["success"] is False

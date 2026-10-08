@@ -923,7 +923,7 @@ class OmpProvider(LLMProvider):
     #: against one that takes 20 s to answer each 429 — identical request count,
     #: a wall that is just ``backoff + requests × latency`` and therefore a
     #: property of the upstream, not of omp. Nothing was found that omp enforces
-    #: on *itself* (muse's 736.0 is that kind of number); the only ceiling is
+    #: on *itself* (muse's 12-minute ceiling is that kind of number); the only ceiling is
     #: ``--max-time``, which this adapter renders from ``timeout_s`` and which is
     #: therefore the slot's number, not the envelope's. Declaring an observed
     #: total would let rule 4 admit an attempt with 101 s left and then watch a
