@@ -1,54 +1,96 @@
 # The §6.2 fixture manifest for vibe. Graded by tests/test_provider_fixture_rows.py,
 # which owns the format (its module docstring is the spec).
 #
-# As with copilot, the BYTES here are older than this file: they were captured
-# by the 2026-08-18 §6 probe and consumed only by the hand-written
+# As with copilot, the FIRST bytes here were older than this file: they were
+# captured by the 2026-08-18 §6 probe and consumed only by the hand-written
 # `TestVibeProvider` in tests/test_providers.py, so vibe sat in that module's
 # `MANIFEST_PENDING` table and nothing pinned its CLASSIFICATION. That is how a
 # successful vibe run came to classify **`rate_limited`** without any test
 # seeing it: the `--output json` transcript opens with a `role: "user"` entry
 # holding our prompt verbatim, and the plan under review says "Unify auth
 # errors, rate limits, context overflow and exit-zero failures behind one
-# class" (plans/harness-residual-work.md C1). The rows below are the same
-# captures, now graded by the rig.
+# class" (plans/harness-residual-work.md C1). The rows below were re-captured on
+# 2.26.0 on 2026-10-08 (see `method`) and are graded by the rig.
 schema_version: 1
 provider: vibe
-cli_version: "2.24.1"
-captured: "2026-08-18"
+cli_version: "2.26.0"
+captured: "2026-10-08"
 method: >-
-  §6 step 5, vibe 2.24.1, `--network none`, against the committed
-  `stub_server.py` or a probe-local fail-forever server, with no credential.
-  argv is `VibeProvider.build_command`'s output — `--agent plan` (upstream's
-  read-only profile), `--output json`, `--max-price`, `-p <prompt>` — and the
-  prompt is the product's own review prompt, which is what the `success` row
-  below exists to measure. The full probe transcript is
-  plans/harness-expansion/probe-out/vibe/RESULTS.md; its §6.2 fixture inventory
-  is the source for which file pins which row, and its `cases/*/exit_code.txt`
-  files are the source for the exit codes.
-  ONE CAVEAT, the same one copilot's manifest carries: the probe committed these
-  captures without per-row `*.meta.json`, so each `exit_code` below is
-  RESULTS.md's measured class rule — **exit 1 on every failure mode measured**
-  (401, 404, 400 context, 429, 500, stall, truncated stream, error envelope and
-  bad config), exit 0 on an answering run — rather than a number read back off
-  that row's own run. Nothing any row asserts turns on the value: only exit
-  **127** changes `classify_streams`' answer.
+  §6 step 5, re-run 2026-10-08 on vibe 2.26.0 (first captured 2026-08-18 on
+  2.24.1 by the §6 probe in a throwaway python:3.12-slim image, against its own
+  seeded config.toml naming the provider `stubprov` and the alias `stub`): in
+  the pinned image built from tests/container/Dockerfile at the
+  cli-versions.lock pins, `--network none`, UID 10001, read-only root, NO
+  credential. The CLI is driven through the PATH wrapper (`/opt/mllm/bin/vibe`
+  IS `wrapper.py`), so redirect.yaml's vibe row applies verbatim: `VIBE_HOME`
+  seeded from `tests/container/home_seed/vibe/` (provider `openrouter`, alias
+  `openai/gpt-5.6-luna`, wire name `stub-model`), the per-exec `/s/<id>/v1`
+  api_base, `STUB_API_KEY` set to the wrapper's fake session key, and the row's
+  `env_extra` (`VIBE_API_TIMEOUT=90`, `VIBE_THINKING=off`, `VIBE_DEFAULT_AGENT=plan`
+  and the three opt-outs). That seed is why every message below names the
+  provider `openrouter` where the 2.24.1 bytes said `stubprov`. argv is
+  `VibeProvider.build_command`'s output verbatim, built inside the container by
+  the in-image adapter (`vibe --output json --max-price 0.25 --max-turns 4
+  --agent plan -p <prompt>`); `success-streaming` and `success-text` swap only
+  the `--output` value. Answering rows: `python3 /rig/stub_server.py` with the
+  probe's own `scenario-json-array.yaml`; failure rows: the 2.24.1 probe's own
+  error-injection server (scratch/vibe-probe/failserver.py, copied verbatim, so
+  the vendor bodies such as `upstream boom` are the ones the first capture
+  saw); `zero-byte-response` alone uses `/rig/failserver.py --mode empty`.
+  Prompts: the probe's 8,408-byte review prompt (`prompt-multikb.txt`) for
+  `success`, `Say READY.` for the streaming and text rows, and exp.sh's
+  `Summarise the project in one sentence.` for every failure row. Never wrapped
+  in `timeout(1)`. Each `exit_code`, `wall_s` and `requests` below is read back
+  off THAT row's own run (the driver's per-row result and the server's request
+  log); the 2.24.1 manifest could state only RESULTS.md's class rule, because
+  that probe kept no per-row record. 2.26.0 RUNS A NEW ENGINE BY DEFAULT: its
+  `--help` says the "Unified Harness backend ... is now the default runtime"
+  (`--legacy-harness` forces the old Python one). The capture used the adapter's
+  argv unchanged, so these bytes are the Unified Harness's.
 notes: >-
-  Three facts hold across every row. (1) vibe's error channel is **stderr** with
-  exit 1, which is why most rows here name a stderr file and no stdout at all —
-  and it is the exact inverse of copilot, whose whole diagnosis rides stdout.
-  (2) The ONE exception is a *config validation* error, which prints on
-  **stdout** with stderr empty and still exits 1 (`stdout-error` below) — the
-  opencode trap, and why `parse_output` handles unparseable stdout as a failure
-  carrying that text rather than handing it to the extractor. (3) The stdout
-  transcript echoes our prompt in a `role: "user"` entry whose `content[].text`
-  is the same field the answer uses; `_last_assistant_text` already filtered it
-  by role, and since 2026-08-20 `VibeProvider.vendor_text` does the same for the
-  classifier.
+  Five facts hold across every row. (1) vibe's error channel is still
+  **stderr** with exit 1, which is why most rows here name a stderr file and no
+  stdout at all — the exact inverse of copilot, whose whole diagnosis rides
+  stdout. (2) The ONE exception is still a *config validation* error, which
+  prints on **stdout** with stderr empty and exits 1 (`stdout-error` below) —
+  the opencode trap, and why `parse_output` handles unparseable stdout as a
+  failure carrying that text rather than handing it to the extractor. (3) The
+  stdout transcript still echoes our prompt in a `role: "user"` entry whose
+  `content[].text` is the same field the answer uses; `_last_assistant_text`
+  filters it by role, and `VibeProvider.vendor_text` does the same for the
+  classifier. (4) **The retry chain changed shape at 2.26.0.** 2.24.1
+  made 3 attempts over ~2.4 s and failed a cut or finish-less stream FAST (one
+  request); 2.26.0 retries every retryable failure for a wall-clock BUDGET
+  (`api_retry_max_elapsed_time`, default 300 s, no count), backing off 0.5 s
+  doubling to a 30 s cap, so every fail-forever row below shows **16 requests
+  over ~305 s** — and that now includes the cut stream, the finish-less stream,
+  the 200 carrying an error object and a zero-byte response. `Retry-After` is
+  now HONOURED up to the 30 s cap (a `Retry-After: 30` 429 gave 11 requests 30 s
+  apart, 303.8 s), and a stalled request at the pinned 90 s timeout gave 4
+  requests over 367 s (`stall`). Setting `api_retry_max_elapsed_time = 5` in the
+  seed cut a 500-forever chain to 5 requests / 11.1 s, so the budget is the knob.
+  These rows ran at the vendor's 300 s default. AFTER this capture the adapter
+  pins it (`VIBE_API_RETRY_MAX_ELAPSED_TIME=150` in `get_env` and in the redirect
+  row's `env_extra`, 2026-10-08) and declares `internal_retries` as 11 requests /
+  272 s, measured at that pin through the same wrapper: a 500-forever stub 11
+  requests over 155.0 s, a stall 2 requests over 183.9 s, and six `Retry-After:
+  29` 429s then a stall 7 requests over 267.3 s (the worst case: the budget, one
+  capped 30 s delay, one 90 s attempt). So a shipped run's chain is shorter than
+  the `requests`/`wall_s` recorded below; the error wording is the same.
+  (5) The HTTP-error wording is httpx's, not vibe's: a 404, 400, 429 or 500 now
+  reads `Error: Client error '<status>' for url '<url>'` (`Server error` for
+  5xx), a MDN link, then the vendor's own message verbatim. vibe's 2.24.1
+  glosses — the `API error from <provider>` block with its `status:` /
+  `body_excerpt:` lines, `Rate limits exceeded. Please wait …` and `The
+  conversation context exceeds …` — appear in no 2.26.0 capture. Every row still
+  classifies as it did, through the shared tables.
 
 rows:
   success:
     stdout: success-json.json
     exit_code: 0
+    wall_s: 3.59
+    requests: 1
     notes: >-
       THE ROW THIS MANIFEST WAS WRITTEN FOR. `--output json` returns a JSON array
       of transcript entries; the last `role: "assistant"`, `type: "message"`
@@ -59,7 +101,11 @@ rows:
       `subagent_executor._classify_failed_run` forwards to the retry ladder, so
       on a *failed* run the echo decides the slot's fate. The `null` below is
       `VibeProvider.vendor_text`; the bytes still carry the whole prompt, so a
-      regression fails here.
+      regression fails here. 2.26.0 changed the entries without touching what
+      the parser reads: a new `inputEntryId` key, ids now spelled
+      `user-turn-<hex>-1` / `assistant-<uuid>`, and the assistant entry's
+      `source` is `"harness"` where 2.24.1 wrote `null`. The wall went from
+      0.96 s to 3.6 s (the new runtime's start-up), still one request.
     expect:
       salvage: answer
       success: true
@@ -84,15 +130,21 @@ rows:
   truncated:
     stderr: truncated.stderr.txt
     exit_code: 1
+    wall_s: 305.26
+    requests: 16
     notes: >-
-      A cut stream. vibe writes nothing at all to stdout and reports `Model
-      stream from stubprov (stub-model) ended without a finish reason.` on
-      stderr, exit 1, with no traceback. Two things follow. `parse_output` takes
-      the empty-stdout branch and QUOTES the stderr sentence rather than
-      restating the symptom — which is the whole reason that branch reads stderr
-      — and the classification is `None`, because "ended without a finish
-      reason" matches no member of `base.CONNECTION_ERROR_MARKERS`. Recorded,
-      not fixed: the run falls to the executor's bounded transport retry.
+      A cut stream (the probe server's `truncate`: two chunks, no finish reason,
+      no `[DONE]`, connection closed). vibe writes nothing at all to stdout and
+      reports `Model stream from openrouter (stub-model) ended without a finish
+      reason.` on stderr, exit 1, with no traceback — the 2.24.1 sentence with
+      the seed's provider name. What changed is the cost: 2.24.1 failed this on
+      the first request (0.8 s); 2.26.0 retries it for the whole 300 s budget,
+      16 requests. `parse_output` takes the empty-stdout branch and QUOTES the
+      stderr sentence rather than restating the symptom — which is the whole
+      reason that branch reads stderr — and the classification is `None`,
+      because "ended without a finish reason" matches no member of
+      `base.CONNECTION_ERROR_MARKERS`. Recorded, not fixed: the run falls to the
+      executor's bounded transport retry.
     expect:
       salvage: none
       success: false
@@ -104,12 +156,13 @@ rows:
     exit_code: 0
     synthesized: true
     provenance: >-
-      Synthesized from the real capture: a well-formed transcript array with the
-      assistant entry removed, so nothing `_last_assistant_text` can select
-      remains. Necessary because the stub always answers and drives no tool
-      calls, so an all-noise transcript cannot be produced end to end. The
-      surviving entries — including the echoed `role: "user"` one — are the real
-      capture's.
+      Synthesized from the real 2026-10-08 `success-json.json` capture: a
+      well-formed transcript array with the assistant entry removed, so nothing
+      `_last_assistant_text` can select remains, rendered at the CLI's own
+      2-space indent with its trailing newline — the surviving `role: "user"`
+      entry is byte-for-byte the one in that capture. Necessary because the stub
+      always answers and drives no tool calls, so an all-noise transcript cannot
+      be produced end to end.
     notes: >-
       An all-noise run is a **failure**, not an empty-string success. Note that
       this row also carried the echoed prompt, so its classification moved from
@@ -128,12 +181,14 @@ rows:
     exit_code: 0
     synthesized: true
     provenance: >-
-      Synthesized from the real capture by inserting a SECOND assistant entry
-      ahead of the real one, reading `Preliminary thought: I should look at the
-      plan first.` A second assistant turn requires a tool loop the committed
-      stub deliberately never drives (the copilot `multi-assistant.jsonl`
-      precedent). The rule it pins is real and this repo has paid for it: muse's
-      silent concatenation.
+      Synthesized from the real 2026-10-08 `success-json.json` capture by
+      inserting a SECOND assistant entry ahead of the real one: a copy of the
+      real entry with its id set to `assistant-aaaaaaaa-0000-0000-0000-000000000001`
+      and its text replaced by `Preliminary thought: I should look at the plan
+      first.` A second assistant turn requires a tool loop the committed stub
+      deliberately never drives (the copilot `multi-assistant.jsonl` precedent).
+      The rule it pins is real and this repo has paid for it: muse's silent
+      concatenation.
     notes: >-
       LAST-wins, not first-wins and not concatenation. A first-wins parser
       returns the preliminary sentence and a concatenating one returns neither.
@@ -161,43 +216,55 @@ rows:
   error-envelope:
     stderr: error-envelope.stderr.txt
     exit_code: 1
+    wall_s: 305.24
+    requests: 16
     notes: >-
       HTTP 200 whose body is a provider error object. vibe does NOT serve it as
-      the answer — stdout is empty and the run exits 1 — but it does not forward
-      the vendor's text either: what reaches stderr is vibe's own generic
-      `Model stream from stubprov (stub-model) ended without a finish reason.`,
-      byte-identical to the `truncated` and `incomplete-stream` rows. So the
-      right half is pinned (the error never becomes an answer) and the cost is
-      pinned with it: three distinct upstream conditions are indistinguishable
-      here, and all three classify `None`.
+      the answer — stdout is empty and the run exits 1 — and it still does not
+      forward the vendor's text: what reaches stderr is vibe's own `Model stream
+      from openrouter (stub-model) produced no chunks.` That sentence is NEW at
+      2.26.0: 2.24.1 printed the `ended without a finish reason` sentence here,
+      byte-identical to the `truncated` and `incomplete-stream` rows, so this
+      condition is now told apart from a cut stream. It is retried like them
+      (16 requests over the 300 s budget; 2.24.1: one request). The right half
+      is still pinned (the error never becomes an answer), and so is the cost:
+      the vendor's own message is lost, and the row classifies `None`.
     expect:
       salvage: none
       success: false
-      error_contains: ["ended without a finish reason"]
+      error_contains: ["produced no chunks"]
       classify_failure: null
 
   exit-zero-failure:
     not_applicable: >-
-      No producer at vibe 2.24.1: every failure mode the rig could drive exits
-      **1** — 401, 404, 400 context-length, 429, 500, a stalled request, a cut
-      stream, a 200 carrying a provider error object and an invalid config
-      (nine modes, RESULTS.md §1's "Exit-0 failures? **No.**" row). That is also
-      why `VibeProvider` declares no `exit_zero_failure_markers`: the exit code
-      is authoritative for this adapter, so there is nothing for the ladder's
-      last step to consult.
+      No producer at vibe 2.26.0, as at 2.24.1: every failure mode the rig could
+      drive exits **1**, each read off its own run — 401, 404, 400
+      context-length, 429, 429 with `Retry-After`, 500, a stalled request, a cut
+      stream, a finish-less stream, a 200 carrying a provider error object, a
+      zero-byte response and an invalid config (twelve modes). That is also why
+      `VibeProvider` declares no `exit_zero_failure_markers`: the exit code is
+      authoritative for this adapter, so there is nothing for the ladder's last
+      step to consult.
 
   stdout-error:
     stdout: stdout-error.stdout.txt
     exit_code: 1
+    wall_s: 0.94
+    requests: 0
     notes: >-
       §6.2's `stdout-error` row exactly, and for vibe it is a real and separate
       condition rather than a restatement of the others: a *config validation*
-      error prints on **stdout** with stderr empty and still exits 1. This is the
-      opencode trap, and it is why `parse_output` reports unparseable stdout as a
-      failure CARRYING that text — handing these bytes to the extractor would
-      find nothing and report an empty answer instead of the reason, which is the
-      one place the reason exists. The classification is `None`: a rejected
-      `thinking` level is not a transport condition and matches no table.
+      error prints on **stdout** with stderr empty and still exits 1, before any
+      request. Produced by giving the seeded `[[models]]` entry `thinking =
+      "bogus"` for this one run, so the message names the committed seed's
+      alias (`models.openai/gpt-5.6-luna.thinking`) where the 2.24.1 bytes named
+      the probe's (`models.stub.thinking`); the validator's level set is
+      unchanged. This is the opencode trap, and it is why `parse_output` reports
+      unparseable stdout as a failure CARRYING that text — handing these bytes to
+      the extractor would find nothing and report an empty answer instead of the
+      reason, which is the one place the reason exists. The classification is
+      `None`: a rejected `thinking` level is not a transport condition and
+      matches no table.
     expect:
       salvage: none
       success: false
@@ -211,13 +278,20 @@ rows:
     stderr: empty.stderr.txt
     exit_code: 1
     notes: >-
-      Zero bytes on **both** channels, committed as two empty files rather than
+      CAPTURED ON 2.24.1 AND NOT RE-CAPTURED: these two zero-byte files are the
+      2026-08-18 probe's (its inventory lists them as captured; it kept no
+      per-run record, so `exit_code` is that probe's class rule). On 2.26.0 the
+      nearest condition the rig can drive — a server that accepts and closes
+      writing zero bytes — does NOT leave both channels empty: vibe retries it
+      for the 300 s budget and prints `Error: Server disconnected without
+      sending a response.` on stderr (the `zero-byte-response` row). Kept
+      because what it pins is the adapter's branch, not a CLI behaviour: zero
+      bytes on **both** channels, committed as two empty files rather than
       omitted, because "the CLI wrote nothing anywhere" is a different fact from
-      "the CLI wrote nothing on this one channel" and only committed bytes
-      distinguish them. `parse_output` names the cause rather than restating the
-      symptom, and falls back to the no-stderr wording because there is no stderr
-      text to quote. The classifier answers `None` on an empty haystack by
-      construction.
+      "the CLI wrote nothing on this one channel". `parse_output` names the
+      cause rather than restating the symptom, and falls back to the no-stderr
+      wording because there is no stderr text to quote. The classifier answers
+      `None` on an empty haystack by construction.
     expect:
       salvage: none
       success: false
@@ -227,12 +301,16 @@ rows:
   auth-error:
     stderr: auth-error.stderr.txt
     exit_code: 1
+    wall_s: 3.86
+    requests: 1
     notes: >-
-      A real 401. vibe forwards the vendor sentence verbatim — `Invalid API key.
-      Please check your API key and try again.` — inside its own `API error from
-      stubprov (model: stub-model):` gloss, and `invalid api key` is a member of
-      `base.auth_error_patterns`, so the credential failure lands on rung 1 where
-      it belongs. Nothing adapter-specific is needed for it.
+      A real 401, not retried. vibe prints its own sentence, which 2.26.0 extends
+      with the key's variable NAME (never its value): `Error: Invalid API key
+      (from env var STUB_API_KEY). Please check your API key and try again.` —
+      2.24.1 wrapped the same sentence in `API error from stubprov (model:
+      stub-model):`. `invalid api key` is a member of the adapter's
+      `auth_error_patterns`, so the credential failure lands on rung 1 where it
+      belongs.
     expect:
       salvage: none
       success: false
@@ -243,60 +321,72 @@ rows:
   rate-limit:
     stderr: rate-limit.stderr.txt
     exit_code: 1
+    wall_s: 305.37
+    requests: 16
     notes: >-
-      A real 429, reported as `Rate limits exceeded. Please wait a moment before
-      trying again.` — vibe's own wording, not the vendor's, and it matches
-      because `rate limit` is matched through `stream_pattern` rather than as a
-      bare substring, so the plural survives.
+      A real 429, forever. 2.26.0 forwards httpx's status line and the vendor's
+      own message — `Client error '429 Too Many Requests' for url '…'` then `:
+      rate limit exceeded` — where 2.24.1 printed its own `Rate limits exceeded.
+      Please wait a moment before trying again.` after 3 requests in 2.3 s. The
+      chain is now the 300 s budget, 16 requests. It still classifies
+      `rate_limited`, through the shared table rather than the adapter's own
+      `rate limits exceeded` pattern, which no 2.26.0 capture carries. The same
+      429 with `Retry-After: 30` (not committed: identical bytes but the exec id)
+      gave 11 requests exactly 30 s apart — the header is honoured now, capped
+      at 30 s.
     expect:
       salvage: none
       success: false
-      error_contains: ["Rate limits exceeded"]
+      error_contains: ["429 Too Many Requests"]
+      raw_contains: ["rate limit exceeded"]
       classify_failure: "rate_limited"
 
   invalid-model:
     stderr: invalid-model.stderr.txt
     exit_code: 1
+    wall_s: 3.64
+    requests: 1
     notes: >-
-      A real 404, and the ideal shape wasted. vibe keeps the whole upstream
-      record — status line, endpoint, `provider_message: The model `stub-model`
-      does not exist`, and a `body_excerpt` carrying `"code":
-      "model_not_found"` — so it NAMES the model, which is what makes a stray
-      `:effort` suffix findable. It still classifies **`server_error`**, a
-      retryable transport category, because vibe prefixes the whole thing with
-      `API error from stubprov`, `\bapi error\b` is a member of
-      `base.SERVER_ERROR_MARKERS`, and `classify_streams` consulted that table
-      BEFORE `INVALID_MODEL_MARKERS`. Both tables match these bytes; the order
-      decided. This row was captured as the **fourth** instance of the
-      ladder-order defect — §16.4 named only claude-code, grok and muse — and
-      **C2 has now swapped that pair**, so the cell reads `invalid_model`. It is
-      one of the three that moved; claude-code's own invalid-model row matches
-      neither table and is C5's `api_error_status` map to fix, not C2's.
+      A real 404, not retried, and it still NAMES the model — the vendor's
+      `The model `stub-model` does not exist` survives verbatim after httpx's
+      `Client error '404 Not Found' for url '…'` — which is what makes a stray
+      `:effort` suffix findable. The shape is new: 2.24.1 kept the whole
+      upstream record under an `API error from stubprov` prefix (`status:`,
+      `provider_message:`, a `body_excerpt` carrying `"code":
+      "model_not_found"`), and that prefix's `\bapi error\b` is what once sent
+      this row to `server_error` before C2 put `INVALID_MODEL_MARKERS` first.
+      2.26.0 carries no `api error` token and no error code at all; the row
+      classifies `invalid_model` either way.
     expect:
       salvage: none
       success: false
       error_contains: ["The model `stub-model` does not exist"]
       raw_contains:
-        - "status: 404 Not Found"
-        - "model_not_found"
+        - "Client error '404 Not Found'"
+        - "does not exist"
       classify_failure: "invalid_model"
 
   context-overflow:
     stderr: context-overflow.stderr.txt
     exit_code: 1
+    wall_s: 3.08
+    requests: 1
     notes: >-
-      A real 400. vibe substitutes its own sentence — `The conversation context
-      exceeds the model's maximum limit. Use /rewind to undo recent actions,
-      then /compact to summarize the conversation.` — rather than forwarding the
-      upstream text, and it classifies correctly because `conversation context
-      exceeds` was added to `base.CONTEXT_OVERFLOW_MARKERS` for exactly this
-      wording. Worth holding beside goose's context row, where the same upstream
+      A real 400, one request (2.24.1 made two). 2.26.0 forwards the upstream
+      sentence verbatim — `This model's maximum context length is 8192 tokens,
+      however you requested 99999 tokens.` after httpx's `Client error '400 Bad
+      Request'` line — where 2.24.1 substituted its own `The conversation context
+      exceeds the model's maximum limit. Use /rewind …`. It classifies
+      `context_length_exceeded` through the shared `maximum context length`
+      marker; `conversation context exceeds`, added to
+      `base.CONTEXT_OVERFLOW_MARKERS` for 2.24.1's wording, stays for that
+      release. Worth holding beside goose's context row, where the same upstream
       400 is swallowed into a compaction report that matches nothing and burns
       the whole retry budget on the one condition §7.2 calls terminal.
     expect:
       salvage: none
       success: false
-      error_contains: ["The conversation context exceeds the model's maximum limit."]
+      error_contains: ["maximum context length is 8192 tokens"]
       classify_failure: "context_length_exceeded"
 
   # ----- beyond §6.2's twelve, graded the same way -------------------------- #
@@ -304,47 +394,99 @@ rows:
   server-error:
     stderr: server-error.stderr.txt
     exit_code: 1
+    wall_s: 305.42
+    requests: 16
     notes: >-
-      A 500 served three times, kept as the retry-exhausted shape. Same envelope
-      as `invalid-model` down to the field names — which is what makes that row's
-      misclassification a pure ordering fact rather than a wording one: here
-      `server_error` is the correct answer and the same `API error` prefix
+      A 500 served forever, kept as the retry-exhausted shape: `Server error
+      '500 Internal Server Error' for url '…'` then the vendor's `upstream boom`.
+      2.24.1 gave up after 3 requests in 2.4 s; 2.26.0 spends the 300 s budget,
+      16 requests. `server_error` is the correct answer and the status line
       produces it.
     expect:
       salvage: none
       success: false
       error_contains: ["500 Internal Server Error"]
-      raw_contains: ["provider_message: upstream boom"]
+      raw_contains: ["upstream boom"]
       classify_failure: "server_error"
 
   incomplete-stream:
     stderr: incomplete-stream.stderr.txt
     exit_code: 1
+    wall_s: 305.23
+    requests: 16
     notes: >-
-      A third capture of the `ended without a finish reason` sentence, from a
-      stream that stopped between records rather than mid-record. Committed
-      because it is the evidence for the claim the `error-envelope` row makes:
-      vibe collapses three distinct upstream conditions onto one message, so no
-      classifier reading stderr can tell them apart, and all three answer `None`.
+      The probe server's `nofinish`: well-formed chunks and a `[DONE]`, but no
+      `finish_reason` ever — §6.1.1 experiment 6. 2.24.1 failed it on the first
+      request (0.77 s), which is what voided §4.2's "stream-retry loop" hazard;
+      **2.26.0 retries it for the whole 300 s budget**, 16 requests, so that
+      hazard is real again on this release (re-measured on 2.26.0: the seed's
+      `emits_finish_reason = false` still turns it into a clean exit 0 with one
+      request). The sentence is the
+      `truncated` row's, byte for byte, so those two conditions still cannot be
+      told apart from stderr and both answer `None`; the `error-envelope` row is
+      no longer a third member of that set.
     expect:
       salvage: none
       success: false
       error_contains: ["ended without a finish reason"]
       classify_failure: null
 
+  zero-byte-response:
+    stderr: zero-byte-response.stderr.txt
+    exit_code: 1
+    wall_s: 305.27
+    requests: 16
+    notes: >-
+      `/rig/failserver.py --mode empty`: the server accepts every request and
+      closes writing zero bytes. 2.26.0 retries it for the 300 s budget and
+      reports `Error: Server disconnected without sending a response.` on
+      stderr — which is why the `empty` row above (nothing on either channel)
+      could not be re-captured. The sentence matches no
+      `base.CONNECTION_ERROR_MARKERS` member, so the classification is `None`
+      and the run falls to the executor's bounded transport retry, as the
+      `truncated` row does.
+    expect:
+      salvage: none
+      success: false
+      error_contains: ["Server disconnected without sending a response"]
+      classify_failure: null
+
+  stall:
+    stderr: stall.stderr.txt
+    exit_code: 1
+    wall_s: 367.07
+    requests: 4
+    notes: >-
+      The probe server's `stall`: accept, never answer, under the pinned
+      `VIBE_API_TIMEOUT=90`. Requests at 0, 90.5, 181.5 and 273.5 s (each
+      attempt runs out the 90 s timeout, then the 0.5/1/2 s backoff), and the
+      chain stops once the 300 s budget is spent, at 367 s — over the 272 s the
+      adapter declares, which is why it now pins the budget to 150 s (a stall
+      there: 2 requests, 183.9 s). The diagnosis is EMPTY:
+      stderr is `Error: ` and a newline, 8 bytes, so the parser can quote
+      nothing but the word and the classification is `None`.
+    expect:
+      salvage: none
+      success: false
+      error_contains: ["stderr said: Error:"]
+      classify_failure: null
+
   success-streaming:
     stdout: success-streaming.jsonl
     exit_code: 0
+    wall_s: 4.35
+    requests: 1
     notes: >-
-      `--output streaming`: the SAME entry objects as NDJSON, one per line. The
-      shipped adapter renders `--output json`, so through `parse_output` these
-      bytes are a failure — correctly, since the array parse is the documented
-      contract and a line-per-entry stream is not what this argv asks for. The
-      row is here for the other half: `VibeProvider.vendor_text` handles this
-      shape too, dropping `role: "user"` LINES, so the reduction is not
-      accidentally coupled to the array form. The classification is `None`
-      before and after, because this capture's echoed prompt is a two-word test
-      prompt rather than a plan.
+      `--output streaming`: the SAME entry objects as NDJSON, one per line,
+      carrying 2.26.0's new `inputEntryId` key like the array form. The shipped
+      adapter renders `--output json`, so through `parse_output` these bytes are
+      a failure — correctly, since the array parse is the documented contract
+      and a line-per-entry stream is not what this argv asks for. The row is
+      here for the other half: `VibeProvider.vendor_text` handles this shape
+      too, dropping `role: "user"` LINES, so the reduction is not accidentally
+      coupled to the array form. The classification is `None` before and after,
+      because this capture's echoed prompt is a two-word test prompt rather than
+      a plan.
     expect:
       salvage: none
       success: false
@@ -357,11 +499,14 @@ rows:
   success-text:
     stdout: success-text.txt
     exit_code: 0
+    wall_s: 3.33
+    requests: 1
     notes: >-
-      `--output text`: three bytes, `OK\n`, and no envelope at all — no role, no
-      entry type, no way to tell an answer from an error. Committed as the record
-      of why `--output json` is what ships, and graded as the failure it is
-      through the shipped adapter rather than left as an untested cell.
+      `--output text`: three bytes, `OK\n` (byte-identical at 2.24.1 and
+      2.26.0), and no envelope at all — no role, no entry type, no way to tell
+      an answer from an error. Committed as the record of why `--output json` is
+      what ships, and graded as the failure it is through the shipped adapter
+      rather than left as an untested cell.
     expect:
       salvage: none
       success: false

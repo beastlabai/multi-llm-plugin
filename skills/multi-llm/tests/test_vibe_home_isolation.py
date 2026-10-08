@@ -208,8 +208,20 @@ class TestVibeEnvSurface:
         assert env["VIBE_API_TIMEOUT"] == str(vibe_module.API_TIMEOUT_S)
         envelope = provider.internal_retries
         assert envelope is not None
-        assert envelope.max_wall_s == 3 * vibe_module.API_TIMEOUT_S + 2
+        assert envelope.max_wall_s == max(
+            3 * vibe_module.API_TIMEOUT_S + 2,
+            vibe_module.API_RETRY_BUDGET_S + 30 + vibe_module.API_TIMEOUT_S + 2,
+        )
         assert envelope.max_wall_s < provider.default_timeout
+
+    def test_the_retry_budget_is_pinned(self, sentinel_home):
+        """2.26.0 retries for a wall-clock budget (vendor default 300 s), not
+        three times: unpinned, a fail-forever chain was 16 requests over ~305 s
+        and a stall 367 s, past the declared bound. The pin is what keeps the
+        declaration true; 2.24.1, which has no such setting, ignores it."""
+        env = VibeProvider().resolve_env(MODEL)
+
+        assert env["VIBE_API_RETRY_MAX_ELAPSED_TIME"] == str(vibe_module.API_RETRY_BUDGET_S)
 
     def test_the_safe_agent_is_pinned_in_env_as_well_as_argv(self, sentinel_home):
         """§6.5's rung, belt-and-braces against an argv regression.

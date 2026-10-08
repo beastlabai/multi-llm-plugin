@@ -1,1 +1,1 @@
-Error: API error from stubprov (model: stub-model): Invalid API key. Please check your API key and try again.
+Error: Invalid API key (from env var STUB_API_KEY). Please check your API key and try again.
