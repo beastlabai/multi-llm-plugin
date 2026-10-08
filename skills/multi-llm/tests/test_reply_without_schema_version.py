@@ -111,6 +111,22 @@ class TestTheExecutorLanes:
                 '"schema_version"; it was read as version "1.0", the only '
                 "version of this document, before validating.") in capsys.readouterr().out
 
+    @pytest.mark.parametrize("document", [
+        {"verdict": "looks good"},
+        # A fragment the extractor served from inside a broken reply: one task.
+        {"id": "T001", "title": "Countdown", "depends_on": []},
+    ])
+    def test_a_reply_that_lacks_more_than_the_version_keeps_its_errors(
+        self, capsys, document,
+    ):
+        before = json.dumps(document)
+        assert executor.supply_result_version("task_generation", document) is None
+        assert json.dumps(document) == before
+        assert any("schema_version" in error
+                   for error in executor.validate_result("task_generation", document))
+        executor._report_normalized("task_generation", [], None)
+        assert capsys.readouterr().out == ""
+
     def test_a_file_without_it_counts_as_done(self, tmp_path):
         (tmp_path / RESULT_NAME).write_text(json.dumps(_without_version()), encoding="utf-8")
         task = {"task_id": "task_generation", "kind": "task_generation",
@@ -146,6 +162,15 @@ class TestJudgeVerdictFiles:
                 '"schema_version"; it was read as version "1.0", the only '
                 "version of this document.") in capsys.readouterr().err
 
+    def test_a_verdict_file_that_lacks_more_says_nothing_of_a_version(
+        self, tmp_path, capsys,
+    ):
+        self._write(tmp_path, {"verdicts": [{"group_id": GROUP, "decision": "approve"}]})
+        result = ingest_verdicts(phase_dir=str(tmp_path), expected_group_ids=[GROUP])
+        assert not result.ok
+        assert any("schema_version" in error for error in result.errors)
+        assert "[human-decision]" not in capsys.readouterr().err
+
     def test_another_version_is_still_rejected(self, tmp_path):
         self._write(tmp_path, {"schema_version": "9.9", "verdicts": self._verdicts()})
         result = ingest_verdicts(phase_dir=str(tmp_path), expected_group_ids=[GROUP])
@@ -161,7 +186,10 @@ class TestJudgeVerdictFiles:
 class TestSupplySchemaVersion:
 
     def test_supplied_first_and_nothing_else_moves(self):
-        document = {"plan_preamble": "p", "tasks": []}
+        document = {"verdicts": []}
+        assert supply_schema_version(document, "human_decision_verdicts.schema.json") == "1.0"
+        assert list(document) == ["schema_version", "verdicts"]
+        document = _without_version()
         assert supply_schema_version(document, "generated_tasks.schema.json") == "1.0"
         assert list(document) == ["schema_version", "plan_preamble", "tasks"]
 

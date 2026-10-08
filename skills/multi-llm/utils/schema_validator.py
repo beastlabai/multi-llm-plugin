@@ -582,9 +582,12 @@ def supply_schema_version(data: Any, schema_name: str) -> Optional[str]:
     failed schema validation over a key that has one value. A schema that
     requires the key and pins it with ``const`` has one reading of an absent
     key, so the key is supplied (first, in place) before the document is
-    validated. Only an absent key: a present one, whatever its value, is the
-    schema's to judge, and a document that is not an object, or a schema with
-    no such ``const``, is left alone.
+    validated, when it is all the document lacks: one that the schema still
+    refuses with the key is left as it is, so its errors (and no line about a
+    version) are what its reader reports, as for a fragment the extractor cut
+    out of a broken reply. Only an absent key: a present one, whatever its
+    value, is the schema's to judge, and a document that is not an object, or
+    a schema with no such ``const``, is left alone.
     """
     if not isinstance(data, dict) or "schema_version" in data:
         return None
@@ -594,10 +597,11 @@ def supply_schema_version(data: Any, schema_name: str) -> Optional[str]:
     version = ((schema.get("properties") or {}).get("schema_version") or {}).get("const")
     if not isinstance(version, str):
         return None
-    rest = list(data.items())
+    candidate = {"schema_version": version, **data}
+    if validate_document(candidate, schema, "<root>", schema):
+        return None
     data.clear()
-    data["schema_version"] = version
-    data.update(rest)
+    data.update(candidate)
     return version
 
 
