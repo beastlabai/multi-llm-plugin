@@ -164,13 +164,15 @@ class TestNoPrivateCopies:
 # --------------------------------------------------------------------------- #
 
 class TestOmpDialectSentences:
-    """The literals omp.py built before the lift, copied from its old source."""
+    """The literals omp.py built before the lift, copied from its old source
+    (the version moved 18.2.2 -> 18.8.3 with ``OMP_DIALECT.verified_version``,
+    2026-10-08)."""
 
     @pytest.mark.parametrize("version", [None, 3, 4])
     def test_version_clause(self, version):
         seen = 3 if version is None else version
         assert omp_module._version_clause(version) == (
-            f"stream version {seen}; the parser was written against omp 18.2.2's "
+            f"stream version {seen}; the parser was written against omp 18.8.3's "
             f"version 3 stream"
         )
 
@@ -178,8 +180,8 @@ class TestOmpDialectSentences:
         final = {"stopReason": "deferred", "errorMessage": "  some\n detail "}
         assert pfs.unrecognized_stop_reason(final, 3, OMP_DIALECT) == (
             "unrecognized stopReason 'deferred' on the last assistant message "
-            "(omp 18.2.2 emits stop/toolUse/error/aborted; stream version 3; the "
-            "parser was written against omp 18.2.2's version 3 stream); some detail"
+            "(omp 18.8.3 emits stop/toolUse/error/aborted; stream version 3; the "
+            "parser was written against omp 18.8.3's version 3 stream); some detail"
         )
 
     def test_stream_version_warning(self, capsys):
@@ -188,7 +190,7 @@ class TestOmpDialectSentences:
         err = capsys.readouterr().err
         assert err == (
             "WARNING: omp stream version 9731; the parser was written against "
-            "3 (omp 18.2.2).\n"
+            "3 (omp 18.8.3).\n"
         )
 
     def test_the_compaction_leg_is_off_for_omp(self):

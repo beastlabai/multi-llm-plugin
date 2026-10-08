@@ -2523,6 +2523,11 @@ LAUNCH_FAILURE_MARKERS: Tuple[Tuple[str, Tuple["Pattern[str]", ...]], ...] = (
         # Lowercase, like every other row here: `_markers` compiles without
         # re.I and `classify_streams` lowercases the haystack first.
         r"\bcliusageerror\b",
+        # omp 18.8.3 (measured 2026-10-08, tests/fixtures/omp/invalid-tool):
+        # the same refusal, exit 2, as `Error: Unknown tool in --tools: bogus.`
+        # (`Unknown tools in --tools: a, b.` for two) with no Bun trace and no
+        # `CliUsageError` word, so the row above no longer reaches it.
+        r"\bunknown tools? in --tools\b",
         r"config overlay not found",
     )),
     (CATEGORY_PERMISSION_DENIED, _markers(

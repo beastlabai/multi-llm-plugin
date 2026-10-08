@@ -1,14 +1,3 @@
-19530 |   if (!e)
-19531 |     return;
-19532 |   const s = new Set(t);
-19533 |   const o = e.filter((n) => !s.has(n));
-19534 |   if (o.length === 0)
-19535 |   throw new Op(`Unknown tool${o.length === 1 ? "" : "s"} in --tools: ${o.join(", ")}. Valid tools: ${t.join(", ")}.`);
-                ^
-CliUsageError: Unknown tool in --tools: bogus. Valid tools: read, write, goal, init_experiment, run_experiment, log_experiment, update_notes.
-      at s8e (/$bunfs/root/omp-linux-x64:19535:9)
-      at VU (/$bunfs/root/omp-linux-x64:603636:12)
-      at async run (/$bunfs/root/omp-linux-x64:603870:14)
-      at async ZCr (/$bunfs/root/omp-linux-x64:1773:16)
-      at async K1t (/$bunfs/root/omp-linux-x64:606499:12)
-
+Error: Unknown tool in --tools: bogus.
+Built-in tools: read, bash, edit, ast_grep, ast_edit, ask, debug, ida, eval, github, glob, grep, find, lsp, checkpoint, rewind, context_notes, new_context, security_scan, task, wait, todo, web_search, write, memory_edit, retain, recall, reflect, learn, manage_skill. Other registered tools: goal, init_experiment, run_experiment, log_experiment, update_notes.
+Run `omp --help` for available flags.

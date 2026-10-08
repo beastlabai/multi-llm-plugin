@@ -5,6 +5,8 @@
     "-p",
     "--mode",
     "json",
+    "--tools",
+    "read,grep,find,bash,write",
     "--model",
     "stub/stub-model",
     "PROMPT_PLACEHOLDER"

@@ -151,7 +151,10 @@ class TestOmpStreamReading:
         stdout, stderr = self._row("invalid-tool")
         assert stdout.strip() == "", "this row is the 0-B-stdout shape"
         answer = provider.describe_failure(stdout, stderr)
-        assert "CliUsageError: Unknown tool in --tools: bogus." in answer
+        # omp 18.8.3's plain refusal (18.2.2 wrote `CliUsageError: …` under a Bun
+        # source-context prelude, which `stderr_diagnosis` strips; the literal
+        # rows in tests/test_stderr_diagnosis.py keep grading that strip).
+        assert "Error: Unknown tool in --tools: bogus." in answer
         # The Bun source-context prelude comes BEFORE the diagnosis, so without
         # the strip the 300-char cap spends its whole budget on minified source.
         assert "19530 |" not in answer

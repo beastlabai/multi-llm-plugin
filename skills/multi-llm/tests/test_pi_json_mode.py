@@ -361,7 +361,7 @@ class TestTheTextModeLegIsGraded:
         assert first["success"] is True and first["data"] == expected
         assert second == first
         assert warned.count("WARNING") == 1
-        assert "0.87.1" in warned and "--mode json" in warned
+        assert PI_DIALECT.verified_version in warned and "--mode json" in warned
         assert again == ""
 
     def test_vendor_text_is_identity_on_it(self):
@@ -381,15 +381,12 @@ class TestTheCaptureArgvIsTheShippedArgv:
         hand. If this fails, the captures are redone against the landed code —
         the argv is never edited to match.
 
-        **One known, pinned delta since the captures:** the ``--tools``
-        allow-list (review-run-scope-salvage-and-failure-visibility T3.1) is
-        rendered only when the installed pi's help documents it, so the argv
-        the captures were made under is the one a pi *without* the flag gets.
-        That is compared exactly; the shipped argv must then equal it plus the
-        one ``--tools`` pair right after ``--mode json`` and nothing else. The
-        captures are owed a re-run under the new argv (pi's echoed system prompt
-        names its active tools); until then this keeps the difference to that
-        one pair rather than letting either side drift further.
+        The ``--tools`` allow-list (review-run-scope-salvage-and-failure-visibility
+        T3.1) is rendered only when the installed pi's help documents it. The
+        0.87.1 captures predated it; the 1.1.0 re-capture (2026-10-08) ran under
+        it, so the recorded argv is the shipped one exactly, and a pi *without*
+        the flag gets that argv minus the one ``--tools`` pair right after
+        ``--mode json`` and nothing else.
         """
         from unittest.mock import patch
 
@@ -402,17 +399,18 @@ class TestTheCaptureArgvIsTheShippedArgv:
         with patch.object(PiProvider, "supports_flag", lambda self, flag: True):
             shipped = PI.build_command("PROMPT_PLACEHOLDER", "stub/stub-model")
 
-        assert declined == recorded
+        assert shipped == recorded
         tools = ["--tools", ",".join(pi_module.PI_TOOLS)]
-        assert shipped == recorded[:5] + tools + recorded[5:]
+        assert recorded[5:7] == tools
+        assert declined == recorded[:5] + recorded[7:]
 
     def test_the_manifest_names_the_version_the_adapter_verifies(self):
         import yaml
 
         manifest = yaml.safe_load((PI_FIXTURES / "manifest.yaml").read_text(encoding="utf-8"))
 
-        assert manifest["cli_version"] == PiProvider.verified_version == "0.87.1"
-        assert PI_DIALECT.verified_version == "0.87.1"
+        assert manifest["cli_version"] == PiProvider.verified_version == "1.1.0"
+        assert PI_DIALECT.verified_version == "1.1.0"
 
 
 # --------------------------------------------------------------------------- #

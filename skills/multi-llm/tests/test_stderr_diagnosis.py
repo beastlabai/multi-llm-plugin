@@ -229,7 +229,10 @@ PI_WORDS = {
     "context-overflow": ("400: This model's maximum context length is 8192 tokens",
                          "(context_length_exceeded)"),
     "error-envelope": ("Stream ended without finish_reason",),
-    "truncated": ("Stream ended without finish_reason",),
+    # pi 1.1.0 (re-captured 2026-10-08): the 60-byte cut now fails as malformed
+    # SSE JSON after ONE request; 0.87.1 said "Stream ended without
+    # finish_reason" after four, the words `error-envelope` still carries.
+    "truncated": ("Error reading response: malformed server-sent event JSON.",),
     "zero-body": ("Connection error.",),
     "preflight-no-key": ("No API key found for stub.",),
     "length": ("Truncated output (stopReason length",),
@@ -257,7 +260,8 @@ GEMINI_WORDS = {
 #: 5xx carry the vendor's words (:class:`TestRungFiveKeepsTodaysString`).
 PI_SILENT_ROWS = ("empty",)
 
-#: Every graded json-mode row's ``classify_failure`` (0.87.1), as a literal so a
+#: Every graded json-mode row's ``classify_failure`` (0.87.1; every cell held at
+#: 1.1.0, re-captured 2026-10-08), as a literal so a
 #: future edit to the adapter's *prose* that moved a *category* fails here by
 #: name, which is the one thing C4 was not allowed to do.
 PI_CLASSIFY = {
@@ -723,12 +727,14 @@ class TestTheMessageCarriesTheVendorsWords:
     def test_every_pi_failure_row_gets_a_distinct_message(self):
         """The point of C4 for pi: rows that used to be one string.
 
-        Three pairs stay identical, each for a measured reason and none a
-        parser could fix: ``truncated``/``error-envelope`` (pi never writes the
-        200-with-error-object's text anywhere), ``server-error``/
-        ``exit-zero-failure`` (the same failserver ``500``, two containers) and
-        ``length``/``length-recovery`` (a recoverable length with nothing to
-        compact ends exactly like a full one).
+        Two pairs stay identical, each for a measured reason and neither a
+        parser could fix: ``server-error``/``exit-zero-failure`` (the same
+        failserver ``500``, two containers) and ``length``/``length-recovery``
+        (a recoverable length with nothing to compact ends exactly like a full
+        one). ``truncated``/``error-envelope`` were a third pair at 0.87.1 (both
+        "Stream ended without finish_reason"); at 1.1.0 the 60-byte cut fails as
+        malformed SSE JSON instead, so the pair split. ``error-envelope`` still
+        carries no word of the 200-with-error-object's text.
         """
         messages = {
             row: PI.describe_failure(*_streams("pi", row))
@@ -736,8 +742,8 @@ class TestTheMessageCarriesTheVendorsWords:
             if PI_TIERS[row] is not None
         }
 
-        assert len(set(messages.values())) == 9
-        assert messages["truncated"] == messages["error-envelope"]
+        assert len(set(messages.values())) == 10
+        assert messages["truncated"] != messages["error-envelope"]
         assert messages["server-error"] == messages["exit-zero-failure"]
         assert messages["length"] == messages["length-recovery"]
 
