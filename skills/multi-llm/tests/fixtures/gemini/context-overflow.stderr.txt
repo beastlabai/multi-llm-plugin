@@ -1,21 +1,24 @@
-Error when talking to Gemini API Full report available at: /tmp/mllm-inv/gemini-2cdac75aa765/tmp/gemini-client-error-Turn.run-sendMessageStream-2026-08-19T17-05-41-625Z.json ApiError: {"error":{"code":400,"message":"This model's maximum context length is 8192 tokens. However, your messages resulted in 214537 tokens. Please reduce the length of the messages.","status":"INVALID_ARGUMENT"}}
-    at throwErrorIfNotOK (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11716:30)
+Warning: 256-color support not detected. Using a terminal with at least 256-color support is recommended for a better visual experience.
+Ripgrep is not available. Falling back to GrepTool.
+[STARTUP] Phase 'cleanup_ops' was started but never ended. Skipping metrics.
+Error when talking to Gemini API Full report available at: /tmp/mllm-inv/gemini-36891b7ef353/tmp/gemini-client-error-Turn.run-sendMessageStream-2026-10-07T23-28-47-864Z.json _ApiError: {"error":{"code":400,"message":"This model's maximum context length is 8192 tokens. However, your messages resulted in 214537 tokens. Please reduce the length of the messages.","status":"INVALID_ARGUMENT"}}
+    at throwErrorIfNotOK (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:267903:24)
     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
-    at async file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11469:13
-    at async Models.generateContentStream (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:12859:24)
-    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/loggingContentGenerator.js:132:26
-    at async retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/utils/retry.js:108:28)
-    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:429:32)
-    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:254:40)
-    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/turn.js:64:30)
-    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/client.js:457:26) {
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:267666:7
+    at async Models.generateContentStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:268762:16)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:311662:19
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:288223:23
+    at async retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:308244:23)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332881:28)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332634:29)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:333556:24) {
   status: 400
 }
 {
-  "session_id": "546a742a-72c0-4bfc-a113-3db61e365bf6",
+  "session_id": "cf65d4d7-2078-4635-8e9e-b8f06f0998b9",
   "error": {
     "type": "Error",
-    "message": "[object Object]",
+    "message": "{\"error\":{\"code\":400,\"message\":\"This model's maximum context length is 8192 tokens. However, your messages resulted in 214537 tokens. Please reduce the length of the messages.\",\"status\":\"INVALID_ARGUMENT\"}}",
     "code": 400
   }
 }

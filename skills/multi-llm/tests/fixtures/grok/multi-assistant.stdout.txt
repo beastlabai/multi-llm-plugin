@@ -1,6 +1,6 @@
 {
   "text": "[\n  {\"id\": \"S000\", \"title\": \"FIRST ANSWER (must NOT be selected)\", \"severity\": \"low\"}\n]\n\n[\n  {\"id\": \"S001\", \"title\": \"Bound the retry ladder\", \"severity\": \"high\"},\n  {\"id\": \"S002\", \"title\": \"Strip the vendor token\", \"severity\": \"medium\"}\n]\n",
-  "stopReason": "EndTurn",
-  "sessionId": "01a01afb-642f-7bc0-9558-3034dbdf6275",
-  "requestId": "d665b11f-3f5d-4f43-ad6c-7014efa789ba"
+  "stopReason": "end_turn",
+  "sessionId": "01a118b2-3abf-79b2-9f64-7b58c4db1064",
+  "requestId": "69c311ff-3f17-45d3-ad14-010b1603a226"
 }

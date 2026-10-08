@@ -12,10 +12,12 @@
 # not a weakened assertion — it is the measurement. See `notes:` and the README.
 schema_version: 1
 provider: grok
-cli_version: "0.2.93"
-captured: "2026-08-19"
+cli_version: "1.0.46"
+captured: "2026-10-08"
 method: >-
-  §6 step 5, in the committed image mllm-e2e:local with `--network none`, the rig
+  §6 step 5, re-run 2026-10-08 on 1.0.46 (first captured 2026-08-19 on 0.2.93
+  by the same rig): in the pinned image built from tests/container/Dockerfile at
+  the cli-versions.lock pins, with `--network none`, the rig
   mounted read-only at /rig, and NO credential — XAI_API_KEY is the PATH
   wrapper's fake per-exec session key `mllm-stub-<id>`, meaningful only on
   127.0.0.1 (it must be non-empty or grok opens an interactive OAuth device flow
@@ -33,7 +35,12 @@ method: >-
   Never wrapped in `timeout(1)` — and that mattered here more than anywhere else:
   at a 300 s bound five of these rows are zero bytes on both channels, which is
   the manufactured hang artifact §6 step 3 forbids. They terminate on their own
-  at **335 s**.
+  at **326 s** (335 s at 0.2.93) — and at 1.0.46 two of them, the 5xx and the
+  zero-byte response, at **~1,340 s**. The 2026-10-08 re-run ran each of the
+  five in its own container, in parallel, under a 900 s driver bound; it held
+  for three and fired on those two at 900 s with zero bytes on both channels;
+  those bounded attempts were discarded and the two rows re-run under a
+  3,600 s bound that did not fire.
 notes: >-
   Five measured facts, and the first is the one everything else is read through.
   (1) **`parse_output` reports SUCCESS on every failure.** grok's failure output
@@ -47,19 +54,29 @@ notes: >-
   (2) The failure text lands on **both** channels: the JSON envelope on stdout
   and an `Error: <message>` line on stderr, byte-for-byte the same message.
   stderr is 0 bytes on the two answering rows.
-  (3) **Three requests per exec, not one**: `GET /v1/models` (the catalog grok
-  validates `-m` against), a concurrent `POST /v1/responses` session-title call
-  with the **hardcoded** model `grok-build` that also carries tools — so
-  `has_tools` cannot separate it, only the model id can — and then the real
-  `POST /v1/chat/completions`.
+  (3) **Five requests per answered exec at 1.0.46, not one** (three at 0.2.93):
+  `GET /v1/models` (the catalog grok validates `-m` against), `GET /` (a
+  reachability probe of the base URL, new in 1.0.x), a concurrent `POST
+  /v1/responses` session-title call with the **hardcoded** model `grok-4.6`
+  (`grok-build` at 0.2.93) that also carries tools — so `has_tools` cannot
+  separate it, only the model id can — then the real `POST
+  /v1/chat/completions`, and, NEW, a second tool-less `POST
+  /v1/chat/completions` **on the `-m` model** whose system prompt asks for "an
+  ultra-short dashboard line that captures the AGENT'S REPLY" (read off the
+  request body by a one-off body-dumping copy of the stub). A failed turn makes
+  no such summary call, so the failure rows count four plus their retries.
   (4) The internal-retry envelope is **two-tiered and measured**: 401, 404 and
-  400 are terminal at one chat request; 429 gets exactly one retry (2 requests,
-  2.2 s); and every transport-shaped failure — a cut stream, a zero-byte
-  response, a 200 carrying an error object, a 5xx, and an empty assistant
-  message — gets **15 chat requests over 335 s**, backing off to a ~30 s cap.
-  (5) During those 335 s grok writes **zero bytes to both channels**. A harness
-  slot shorter than that produces the opencode silent-hang shape from a CLI that
-  would have answered.
+  400 are terminal at one chat request; 429 gets exactly one retry (2 chat
+  requests, 5.2 s); a cut stream, a 200 carrying an error object and an empty
+  assistant message get **15 chat requests over 326 s** (335 s at 0.2.93),
+  backing off to a ~30 s cap; and a 5xx or a zero-byte response — 15 / 335 s at
+  0.2.93 too — now gets **four such ladders back to back: 60 chat requests over
+  ~1,340 s**.
+  (5) During those windows grok writes **zero bytes to both channels**. A
+  harness slot shorter than that produces the opencode silent-hang shape from a
+  CLI that would have answered — and at 1.0.46 the 5xx window (~22 minutes) is
+  longer than `GrokProvider.default_timeout` (600 s), so a fail-forever 5xx is
+  killed silently by the harness's own default.
 
 rows:
   # EXPECTATIONS MOVED 2026-08-19, AND THE BYTES DID NOT. Every failure row below
@@ -74,35 +91,37 @@ rows:
     stdout: success.stdout.txt
     stderr: success.stderr.txt
     exit_code: 0
-    wall_s: 0.38
-    requests: 3
+    wall_s: 2.87
+    requests: 5
     notes: >-
       Pretty-printed `{"text", "stopReason", "sessionId", "requestId"}`;
       `parse_output` unwraps `text` and `json.loads`es it. stderr is 0 bytes.
-      The 3 requests are the catalog GET, the `grok-build` title call and the
-      real completion — all three are in the committed server log beside these
-      bytes.
+      The 5 requests are the catalog GET, the root probe, the `grok-4.6` title
+      call, the real completion and the reply-summary call (fact 3); 0.2.93 made
+      the first, third and fourth only. `stopReason` reads `end_turn` (`EndTurn`
+      at 0.2.93); the parser never reads it.
     expect:
       salvage: answer
       success: true
       data:
         - {id: "S001", title: "Bound the retry ladder", severity: "high"}
         - {id: "S002", title: "Strip the vendor token", severity: "medium"}
-      raw_contains: ['"stopReason": "EndTurn"', '"requestId"']
+      raw_contains: ['"stopReason": "end_turn"', '"requestId"']
       classify_failure: null
 
   truncated:
     stdout: truncated.stdout.txt
     stderr: truncated.stderr.txt
     exit_code: 1
-    wall_s: 335.32
-    requests: 17
+    wall_s: 326.22
+    requests: 18
     notes: >-
       failserver `--mode trunc --trunc-bytes 200`, against the **chat** surface,
       cutting the second SSE frame (the one carrying the answer text). grok
-      retries 15 times over 335 s and then reduces the whole thing to `empty
-      response from model (no_visible_content)` — **bytes identical to
-      `ephemeral-only` and `error-envelope`** (md5 07923ec7…). Three genuinely
+      sends 15 chat requests over 326 s and then reduces the whole thing to
+      `empty response from model (no_visible_content)` — **bytes identical to
+      `ephemeral-only` and `error-envelope`** (md5 07923ec7…), and identical to
+      the 0.2.93 capture: 1.0.46 moved none of the three files. Three genuinely
       different upstream failures collapse to one indistinguishable message; all
       three files are committed anyway, because "these rows are the same bytes"
       is itself the measurement and a future divergence should show up as a
@@ -119,11 +138,11 @@ rows:
     stdout: ephemeral-only.stdout.txt
     stderr: ephemeral-only.stderr.txt
     exit_code: 1
-    wall_s: 335.33
-    requests: 17
+    wall_s: 326.24
+    requests: 18
     notes: >-
       An all-noise run: the stub answered with an empty assistant message. grok
-      does not accept it — it retries 15 times over 335 s and then fails with
+      does not accept it — 15 chat requests over 326 s, then it fails with
       `empty response from model (no_visible_content)`, which is the right
       verdict arrived at through the wrong channel, since `parse_output` then
       reports that verdict as a successful answer. Byte-identical to `truncated`
@@ -140,8 +159,8 @@ rows:
     stdout: multi-assistant.stdout.txt
     stderr: multi-assistant.stderr.txt
     exit_code: 0
-    wall_s: 0.38
-    requests: 3
+    wall_s: 2.98
+    requests: 5
     notes: >-
       **LAST-wins, and it selects the answer.** Two JSON documents in one `text`,
       the first reading `FIRST ANSWER (must NOT be selected)`; `json.loads` on
@@ -165,13 +184,13 @@ rows:
     stdout: error-envelope.stdout.txt
     stderr: error-envelope.stderr.txt
     exit_code: 1
-    wall_s: 335.34
-    requests: 17
+    wall_s: 326.01
+    requests: 18
     notes: >-
       failserver `--mode errbody`: HTTP **200** whose body is a provider error
       object. grok asked for a stream, got one JSON object, found no assistant
-      content in it and treated the whole thing as an empty response — 15 retries
-      over 335 s, then the same `no_visible_content` message as `truncated` and
+      content in it and treated the whole thing as an empty response — 15 chat
+      requests over 326 s, then the same `no_visible_content` message as `truncated` and
       `ephemeral-only`. The provider's error text is therefore LOST, not
       mis-served: nothing from the error object reaches any pattern table, which
       is why `classify_failure` is `null` here.
@@ -184,8 +203,8 @@ rows:
 
   exit-zero-failure:
     not_applicable: >-
-      Measured, not assumed: at 0.2.93 every failure the rig can inject exits
-      **1** — 401, 429, 404, 400 context-length, 500-forever, a truncated stream,
+      Measured, not assumed: at 1.0.46, as at 0.2.93, every failure the rig can
+      inject exits **1** — 401, 429, 404, 400 context-length, 500-forever, a truncated stream,
       a zero-byte response, a 200 carrying an error object, an empty assistant
       message, and grok's own pre-flight model rejection: ten shapes, ten exits
       of 1. So there is no producer for "an error the CLI prints while still
@@ -200,8 +219,8 @@ rows:
     stdout: stdout-error.stdout.txt
     stderr: stdout-error.stderr.txt
     exit_code: 1
-    wall_s: 335.34
-    requests: 17
+    wall_s: 1341.45
+    requests: 63
     notes: >-
       failserver `--mode 500`, fail-forever — §6 step 3's opencode trap, and grok
       falls into the worse half of it: a **nonzero exit whose diagnosis is on
@@ -209,9 +228,12 @@ rows:
       from §6.2's wording is worth recording rather than hiding: stderr is not
       empty here, it carries the same message as an `Error: …` line. The half
       that is the trap — a diagnosis on stdout that must not be read as an
-      answer — is fully present. 15 chat requests over 335 s is also the
-      §6.1.1 measurement for a 5xx, and the capture happens to record the
-      response headers grok echoes back, which name the failserver.
+      answer — is fully present. **60 chat requests over 1,341 s** is also the
+      §6.1.1 measurement for a 5xx at 1.0.46: four 15-request ladders back to
+      back, each restarting at a 2 s backoff, with zero bytes on both channels
+      the whole time (0.2.93: one ladder, 15 / 335 s). The message lost two
+      things 0.2.93 carried: the `Request URL:` line and the response headers
+      grok echoed back, which named the failserver.
     expect:
       salvage: none
       success: false
@@ -223,27 +245,30 @@ rows:
 
   empty:
     not_applicable: >-
-      Zero bytes on both channels is real for **335 seconds** and then stops
+      Zero bytes on both channels is real for **326 seconds** (335 at 0.2.93), or
+      ~1,340 s on a 5xx or a zero-byte response at 1.0.46, and then stops
       being true: on every transport-shaped failure grok writes nothing at all
-      while it retries 15 times, and only then prints its error envelope on both
+      while it retries, and only then prints its error envelope on both
       channels. A capture of the silent window is therefore a measurement of the
       harness's patience rather than of the CLI — the first pass of this probe
       bounded five rows at 300 s and got exactly the manufactured zero-byte hang
       §6 step 3 forbids, which is why those rows were re-run unbounded. The
       server-side half is captured as the extra `zero-byte-response` row below.
-      The 335 s window is itself the finding: any slot shorter than it turns a
+      That window is itself the finding: any slot shorter than it turns a
       CLI that would have reported into one that reports nothing.
 
   auth-error:
     stdout: auth-error.stdout.txt
     stderr: auth-error.stderr.txt
     exit_code: 1
-    wall_s: 0.38
-    requests: 3
+    wall_s: 3.33
+    requests: 4
     notes: >-
       failserver `--mode 401`. **One** chat request — terminal, no retry, which
-      is right. grok quotes the vendor body verbatim inside its own message and
-      adds a diagnostic block (`Model:`, `Auth: ApiKey`, `Version:`, and the
+      is right (4 requests with the catalog GET, the root probe and the title
+      call). grok quotes the vendor's error inside its own message — at 1.0.46 as
+      `invalid_request_error: <message>`, where 0.2.93 pasted the whole JSON body
+      — and adds a diagnostic block (`Model:`, `Auth: ApiKey`, `Version:`, and the
       whole `Available:` catalog it fetched), so `Unauthorized (401)` reaches the
       classifier and `auth_failed` is correct. That is one of only four
       categories this CLI's failures land on, and it is the one that matters
@@ -261,30 +286,32 @@ rows:
     stdout: rate-limit.stdout.txt
     stderr: rate-limit.stderr.txt
     exit_code: 1
-    wall_s: 2.21
-    requests: 4
+    wall_s: 5.22
+    requests: 5
     notes: >-
       failserver `--mode 429`, fail-forever. grok retries a rate limit **once**
-      (2 chat requests, 2.2 s) and then gives up with its own sentence — it does
-      NOT quote the vendor's `Retry again in 20s`, so the harness learns nothing
-      about the wait from the capture. One retry is short enough that §7.5 rule
-      6(b) does not bite the way it does for claude-code (7 requests) or gemini
+      (2 chat requests, 5.2 s) and then gives up. **The words moved at 1.0.46**:
+      0.2.93 replaced the vendor's text with its own sentence (`You’ve hit the
+      rate limit for your plan. Upgrade your account or try again later.`) and
+      so dropped the wait; 1.0.46 passes the vendor's own through as
+      `rate_limit_exceeded: Rate limit reached for stub-model … Please try again
+      in 20s.`, so the wait now reaches the capture. One retry is short enough
+      that §7.5 rule 6(b) does not bite the way it does for claude-code or gemini
       (10): an executor-level re-dispatch here doubles two requests, not ten.
-      Note the apostrophe in `You’ve` is U+2019, not ASCII.
     expect:
       salvage: none
       success: false
       raw_contains:
-        - "hit the rate limit for your plan"
-        - "Upgrade your account or try again later"
+        - "rate_limit_exceeded: Rate limit reached for stub-model"
+        - "Please try again in 20s."
       classify_failure: "rate_limited"
 
   invalid-model:
     stdout: invalid-model.stdout.txt
     stderr: invalid-model.stderr.txt
     exit_code: 1
-    wall_s: 0.38
-    requests: 3
+    wall_s: 3.87
+    requests: 4
     notes: >-
       The FIRST of grok's two invalid-model shapes: an **upstream 404** for a
       model that IS in the catalog (failserver `--mode 404`). It names the model
@@ -310,14 +337,16 @@ rows:
     stdout: invalid-model-preflight.stdout.txt
     stderr: invalid-model-preflight.stderr.txt
     exit_code: 1
-    wall_s: 0.38
-    requests: 1
+    wall_s: 3.03
+    requests: 2
     notes: >-
       Beyond §6.2's twelve, and the SECOND of grok's two invalid-model shapes —
       the one a stray `:effort` suffix would really produce. `-m
       no-such-model-9999` against the stub's ordinary catalog: grok validates the
       model against `GET /v1/models` **before dispatching anything**, so this row
-      is **one request**, no completion, no server error mode needed. It names the
+      is the catalog GET and nothing else that reaches a completion (2 requests
+      at 1.0.46 with the root probe; 1 at 0.2.93) — no completion, no server error
+      mode needed, and byte-identical to the 0.2.93 capture. It names the
       model and it classifies correctly (`unknown model` is an
       INVALID_MODEL_MARKERS entry) — which is the opposite of the upstream-404
       row above, and the reason both are committed.
@@ -332,8 +361,8 @@ rows:
     stdout: context-overflow.stdout.txt
     stderr: context-overflow.stderr.txt
     exit_code: 1
-    wall_s: 0.38
-    requests: 3
+    wall_s: 3.16
+    requests: 4
     notes: >-
       failserver `--mode ctx` (400, `context_length_exceeded`, the verbatim
       OpenAI wording). grok passes the vendor sentence through unedited, so
@@ -355,13 +384,13 @@ rows:
     stdout: zero-byte-response.stdout.txt
     stderr: zero-byte-response.stderr.txt
     exit_code: 1
-    wall_s: 335.34
-    requests: 17
+    wall_s: 1333.88
+    requests: 63
     notes: >-
       Beyond §6.2's twelve, and the measurement behind the `empty` cell above:
       failserver `--mode empty` accepts the request and closes writing **zero
-      bytes**. grok retries it on the same 15-request / 335 s ladder as the 5xx
-      and then reports rust's own transport words, `reqwest error stream: error
+      bytes**. grok retries it on the same ladders as the 5xx — 60 chat requests
+      over 1,334 s at 1.0.46 (15 / 335 s at 0.2.93) — and then reports rust's own transport words, `reqwest error stream: error
       sending request for url (…)`. This is the ONE failure whose message
       differs from `no_visible_content`, i.e. the only transport failure grok
       distinguishes at all — and it still classifies as `null`, because

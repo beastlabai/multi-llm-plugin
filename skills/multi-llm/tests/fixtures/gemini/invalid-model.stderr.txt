@@ -1,21 +1,24 @@
-Error when talking to Gemini API Full report available at: /tmp/mllm-inv/gemini-08eea7bf77b0/tmp/gemini-client-error-Turn.run-sendMessageStream-2026-08-19T17-05-39-430Z.json ModelNotFoundError: The model `gemini-2.5-flash` does not exist or you do not have access to it.
-    at classifyGoogleError (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/utils/googleQuotaErrors.js:74:16)
-    at retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/utils/retry.js:130:37)
+Warning: 256-color support not detected. Using a terminal with at least 256-color support is recommended for a better visual experience.
+Ripgrep is not available. Falling back to GrepTool.
+[STARTUP] Phase 'cleanup_ops' was started but never ended. Skipping metrics.
+Error when talking to Gemini API Full report available at: /tmp/mllm-inv/gemini-401eaca580f6/tmp/gemini-client-error-Turn.run-sendMessageStream-2026-10-07T23-28-46-586Z.json ModelNotFoundError: The model `gemini-2.5-flash` does not exist or you do not have access to it.
+    at classifyGoogleError (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:307497:12)
+    at retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:308267:29)
     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
-    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:429:32)
-    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:254:40)
-    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/turn.js:64:30)
-    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/client.js:457:26)
-    at async GeminiClient.sendMessageStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/client.js:553:20)
-    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/dist/src/nonInteractiveCli.js:192:34
-    at async main (file:///opt/mllm/npm/node_modules/@google/gemini-cli/dist/src/gemini.js:462:9) {
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332881:28)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332634:29)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:333556:24)
+    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:347470:22)
+    at async GeminiClient.sendMessageStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:347567:14)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/gemini-6YZTUGIX.js:12198:26
+    at async main (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/gemini-6YZTUGIX.js:17726:5) {
   code: 404
 }
 {
-  "session_id": "6a5f3c0b-eb0b-4628-b108-9eb565869b43",
+  "session_id": "8c225254-9e13-4084-8e6e-503c35cd8e8f",
   "error": {
     "type": "Error",
-    "message": "[object Object]",
+    "message": "The model `gemini-2.5-flash` does not exist or you do not have access to it.",
     "code": 1
   }
 }

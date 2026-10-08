@@ -1,14 +1,18 @@
-Error when talking to Gemini API Full report available at: /tmp/mllm-inv/gemini-00d41f0d09da/tmp/gemini-client-error-Turn.run-sendMessageStream-2026-08-19T17-05-32-748Z.json Error: Incomplete JSON segment at the end
-    at ApiClient.processStreamResponse_1 (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11495:35)
+Warning: 256-color support not detected. Using a terminal with at least 256-color support is recommended for a better visual experience.
+Ripgrep is not available. Falling back to GrepTool.
+[STARTUP] Phase 'cleanup_ops' was started but never ended. Skipping metrics.
+[STARTUP] Cannot measure phase 'cleanup_ops': start mark 'startup:cleanup_ops:start' not found (likely cleared by reset).
+Error when talking to Gemini API Full report available at: /tmp/mllm-inv/gemini-c578b63545e6/tmp/gemini-client-error-Turn.run-sendMessageStream-2026-10-07T23-28-20-374Z.json Error: Incomplete JSON segment at the end
+    at ApiClient.processStreamResponse_1 (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:267690:21)
     at processStreamResponse_1.next (<anonymous>)
-    at resume (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:6276:44)
-    at fulfill (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:6278:31)
+    at resume (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:262629:17)
+    at fulfill (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:262638:5)
     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
 {
-  "session_id": "ff773774-0aae-4538-820e-beab45e61eae",
+  "session_id": "4cd95291-cd63-4889-8292-b1edff1d5cc0",
   "error": {
     "type": "Error",
-    "message": "[object Object]",
+    "message": "Incomplete JSON segment at the end",
     "code": 1
   }
 }

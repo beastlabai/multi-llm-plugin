@@ -1,19 +1,122 @@
-Error when talking to Gemini API Full report available at: /tmp/mllm-inv/gemini-eb480d99f24e/tmp/gemini-client-error-Turn.run-sendMessageStream-2026-08-19T17-05-43-805Z.json Error: exception TypeError: fetch failed sending request
-    at file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:11550:19
-    at async Models.generateContentStream (file:///opt/mllm/npm/node_modules/@google/genai/dist/node/index.mjs:12859:24)
-    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/loggingContentGenerator.js:132:26
-    at async retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/utils/retry.js:108:28)
-    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:429:32)
-    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/geminiChat.js:254:40)
-    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/turn.js:64:30)
-    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/client.js:457:26)
-    at async GeminiClient.sendMessageStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli-core/dist/src/core/client.js:553:20)
-    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/dist/src/nonInteractiveCli.js:192:34
+Warning: 256-color support not detected. Using a terminal with at least 256-color support is recommended for a better visual experience.
+Ripgrep is not available. Falling back to GrepTool.
+[STARTUP] Phase 'cleanup_ops' was started but never ended. Skipping metrics.
+Attempt 1 failed. Retrying with backoff... Error: exception TypeError: fetch failed sending request
+    at file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:267741:13
+    at async Models.generateContentStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:268762:16)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:311662:19
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:288223:23
+    at async retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:308244:23)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332881:28)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332634:29)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:333556:24)
+    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:347470:22)
+    at async GeminiClient.sendMessageStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:347567:14)
+[STARTUP] Cannot measure phase 'cleanup_ops': start mark 'startup:cleanup_ops:start' not found (likely cleared by reset).
+Attempt 2 failed. Retrying with backoff... Error: exception TypeError: fetch failed sending request
+    at file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:267741:13
+    at async Models.generateContentStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:268762:16)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:311662:19
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:288223:23
+    at async retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:308244:23)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332881:28)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332634:29)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:333556:24)
+    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:347470:22)
+    at async GeminiClient.sendMessageStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:347567:14)
+Attempt 3 failed. Retrying with backoff... Error: exception TypeError: fetch failed sending request
+    at file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:267741:13
+    at async Models.generateContentStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:268762:16)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:311662:19
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:288223:23
+    at async retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:308244:23)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332881:28)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332634:29)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:333556:24)
+    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:347470:22)
+    at async GeminiClient.sendMessageStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:347567:14)
+Attempt 4 failed. Retrying with backoff... Error: exception TypeError: fetch failed sending request
+    at file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:267741:13
+    at async Models.generateContentStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:268762:16)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:311662:19
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:288223:23
+    at async retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:308244:23)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332881:28)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332634:29)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:333556:24)
+    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:347470:22)
+    at async GeminiClient.sendMessageStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:347567:14)
+Attempt 5 failed. Retrying with backoff... Error: exception TypeError: fetch failed sending request
+    at file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:267741:13
+    at async Models.generateContentStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:268762:16)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:311662:19
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:288223:23
+    at async retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:308244:23)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332881:28)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332634:29)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:333556:24)
+    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:347470:22)
+    at async GeminiClient.sendMessageStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:347567:14)
+Attempt 6 failed. Retrying with backoff... Error: exception TypeError: fetch failed sending request
+    at file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:267741:13
+    at async Models.generateContentStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:268762:16)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:311662:19
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:288223:23
+    at async retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:308244:23)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332881:28)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332634:29)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:333556:24)
+    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:347470:22)
+    at async GeminiClient.sendMessageStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:347567:14)
+Attempt 7 failed. Retrying with backoff... Error: exception TypeError: fetch failed sending request
+    at file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:267741:13
+    at async Models.generateContentStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:268762:16)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:311662:19
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:288223:23
+    at async retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:308244:23)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332881:28)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332634:29)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:333556:24)
+    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:347470:22)
+    at async GeminiClient.sendMessageStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:347567:14)
+Attempt 8 failed. Retrying with backoff... Error: exception TypeError: fetch failed sending request
+    at file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:267741:13
+    at async Models.generateContentStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:268762:16)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:311662:19
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:288223:23
+    at async retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:308244:23)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332881:28)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332634:29)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:333556:24)
+    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:347470:22)
+    at async GeminiClient.sendMessageStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:347567:14)
+Attempt 9 failed. Retrying with backoff... Error: exception TypeError: fetch failed sending request
+    at file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:267741:13
+    at async Models.generateContentStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:268762:16)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:311662:19
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:288223:23
+    at async retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:308244:23)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332881:28)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332634:29)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:333556:24)
+    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:347470:22)
+    at async GeminiClient.sendMessageStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:347567:14)
+Error when talking to Gemini API Full report available at: /tmp/mllm-inv/gemini-2b763b931144/tmp/gemini-client-error-Turn.run-sendMessageStream-2026-10-07T23-32-41-074Z.json Error: exception TypeError: fetch failed sending request
+    at file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:267741:13
+    at async Models.generateContentStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:268762:16)
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:311662:19
+    at async file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:288223:23
+    at async retryWithBackoff (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:308244:23)
+    at async GeminiChat.makeApiCallAndProcessStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332881:28)
+    at async GeminiChat.streamWithRetries (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:332634:29)
+    at async Turn.run (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:333556:24)
+    at async GeminiClient.processTurn (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:347470:22)
+    at async GeminiClient.sendMessageStream (file:///opt/mllm/npm/node_modules/@google/gemini-cli/bundle/chunk-RWBXO4OP.js:347567:14)
 {
-  "session_id": "709dfa64-1744-4480-abe5-834dda5b9875",
+  "session_id": "a701e16c-24a7-4544-bf4b-7f5c15103a0e",
   "error": {
     "type": "Error",
-    "message": "[object Object]",
+    "message": "exception TypeError: fetch failed sending request",
     "code": 1
   }
 }

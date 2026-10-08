@@ -609,7 +609,12 @@ NO_WRITE_TOOL_AT_ALL = {
         "answer. That is worse than the four argv-restricted adapters, which "
         "refuse in words: this one reports success for a write that never "
         "happened, so the fan-out would record the confirmation sentence as the "
-        "review. Closes harness-expansion.md §14.7 gap 5."
+        "review. Closes harness-expansion.md §14.7 gap 5. RE-MEASURED 2026-10-08 "
+        "on gemini-cli 0.63.0 by the same probe: eight tools (enter_plan_mode, "
+        "glob, google_web_search, grep_search, invoke_agent, list_directory, "
+        "read_file, update_topic), still no write tool, the same exit-0 "
+        "confirmation; the error now reads `Tool \"write_file\" not found. Did "
+        "you mean one of: ...`."
     ),
 }
 
@@ -834,7 +839,8 @@ SHELL_EVIDENCE = {
         False,
         "MEASURED 2026-08-19 (plans/harness-expansion/probe-out/gemini/"
         "gap5_probe.py): under this argv gemini-cli 0.25.2 advertises nine tools "
-        "and `run_shell_command` is not among them (NO_WRITE_TOOL_AT_ALL above).",
+        "and `run_shell_command` is not among them (NO_WRITE_TOOL_AT_ALL above); "
+        "re-measured 2026-10-08 on 0.63.0: eight tools, still without it.",
     ),
 }
 

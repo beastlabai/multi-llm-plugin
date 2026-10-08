@@ -38,7 +38,9 @@ class GrokProvider(LLMProvider):
 
     Everything below was **measured** by the §6 step-5 probe on 2026-08-19
     against ``grok 0.2.93`` driven offline at a localhost stub
-    (``--network none``, no credential); the raw captures are
+    (``--network none``, no credential), and re-measured by the same rig on
+    2026-10-08 against ``grok 1.0.46`` (what moved is listed at
+    :attr:`verified_version`); the raw captures are
     ``tests/fixtures/grok/`` and its README carries the full record.
 
     **Every failed run parses as a SUCCESS.** grok reports a failure as a
@@ -55,20 +57,30 @@ class GrokProvider(LLMProvider):
     ``text`` is a failure — and it is recorded here rather than applied, because
     it flips every failure row in the committed manifest.
 
-    **Three requests per exec, not one.** ``GET /v1/models`` (the catalog grok
-    validates ``-m`` against, before dispatching anything), a concurrent
-    ``POST /v1/responses`` session-title call with the **hardcoded** model
-    ``grok-build`` — which also carries tools, so only the model id separates it
-    — and then the real ``POST /v1/chat/completions``.
+    **Three requests per exec at 0.2.93, five per answered exec at 1.0.46.**
+    ``GET /v1/models`` (the catalog grok validates ``-m`` against, before
+    dispatching anything), ``GET /`` (a base-URL reachability probe, new in
+    1.0.x), a concurrent ``POST /v1/responses`` session-title call with the
+    **hardcoded** model ``grok-4.6`` (``grok-build`` at 0.2.93) — which also
+    carries tools, so only the model id separates it — the real ``POST
+    /v1/chat/completions``, and since 1.0.x a tool-less second ``POST
+    /v1/chat/completions`` on the ``-m`` model asking for a one-line summary of
+    the reply (a failed turn makes none).
 
     **The internal-retry envelope is two-tiered, and the second tier is a silent
     hang.** 401, 404 and 400 are terminal at one chat request; a 429 gets exactly
-    one retry (2 requests, 2.2 s); every transport-shaped failure gets **15 chat
-    requests over 335 s** with a ~30 s backoff cap, writing **zero bytes to both
-    channels** for the whole of it. :attr:`default_timeout` (600 s) is above that
-    window, but any shorter slot turns a CLI that would have reported into the
-    ``opencode-run-silent-hangs`` shape. No :attr:`internal_retries` envelope is
-    declared yet; the measurement for one is in the fixture directory.
+    one retry (2 requests, 2.2 s at 0.2.93, 5.2 s at 1.0.46); at 0.2.93 every
+    transport-shaped failure gets **15 chat requests over 335 s** with a ~30 s
+    backoff cap, writing **zero bytes to both channels** for the whole of it. At
+    1.0.46 a cut stream, an error object on a 200 and an empty answer still do
+    (326 s), but a 5xx and a zero-byte response run **four such ladders back to
+    back: 60 chat requests over ~1,340 s**, silent throughout. So
+    :attr:`default_timeout` (600 s) covered the 0.2.93 window and does **not**
+    cover the 1.0.46 5xx one: a fail-forever 5xx is now killed by the harness at
+    600 s with zero bytes on both channels — the ``opencode-run-silent-hangs``
+    shape, which any shorter slot already produced. No :attr:`internal_retries`
+    envelope is declared yet; the measurement for one is in the fixture
+    directory.
 
     **An upstream 404 classifies as ``server_error``, not ``invalid_model``**:
     grok wraps every HTTP failure in ``API error (status <n> <reason>)`` and the
@@ -93,16 +105,17 @@ class GrokProvider(LLMProvider):
     #: headless write is unmeasured. `multi_llm.py doctor` prints this verbatim
     #: until a measurement either way lands under Phase 5.
     trust_status = "untested"
-    #: 0.2.93 is where every fixture in ``tests/fixtures/grok/`` was captured —
-    #: the §6 step-5 probe, ``--network none``, the stub and the failserver both
-    #: running inside the container, no credential — and the only release this
-    #: parser has been run against. A pin to re-confirm rather than a range to
+    #: 0.2.93 is where every fixture in ``tests/fixtures/grok/`` was first
+    #: captured — the §6 step-5 probe, ``--network none``, the stub and the
+    #: failserver both running inside the container, no credential — and, until
+    #: the 1.0.46 re-capture below, the only release this parser had been run
+    #: against. A pin to re-confirm rather than a range to
     #: trust: nothing older has been measured, and the two shapes the parser
     #: depends on (``{"text": …}`` for an answer, ``{"type": "error", …}`` for a
     #: failure) are both vendor-internal envelopes.
     #: ``tests/container/cli-versions.lock`` pins the same string.
     #:
-    #: ``grok --version`` prints ``grok 0.2.93 (<commit>)`` on stdout, whose
+    #: ``grok --version`` prints ``grok 1.0.46 (<commit>)`` on stdout, whose
     #: first dotted token the base :meth:`parse_version` reads without an
     #: override.
     #: NO FLOOR, deliberately. `min_version` was set to 0.2.93 on 2026-08-19 — the
@@ -116,7 +129,17 @@ class GrokProvider(LLMProvider):
     #: with* their probes; muse, cursor-agent and agy leave it empty for this
     #: same reason.) `verified_version` below is warning-only and carries the
     #: measurement instead.
-    verified_version = "0.2.93"
+    #:
+    #: 1.0.46 since 2026-10-08 (run 10, #10): every row re-captured on it by the
+    #: same rig in the pinned image (cli-versions.lock moved to 1.0.46 the same
+    #: day). Every parser verdict and classification is unchanged and the parser
+    #: needed no change; the three ``no_visible_content`` rows and the pre-flight
+    #: row are byte-identical. What moved: five requests per answered exec (a
+    #: root probe and a reply-summary call on the ``-m`` model), the title model
+    #: ``grok-4.6``, ``stopReason`` ``end_turn``, a 429 passing the vendor's own
+    #: words (with the wait), no ``Request URL`` / response-header lines, and a
+    #: 5xx or zero-byte response retried for ~1,340 s instead of 335 s.
+    verified_version = "1.0.46"
 
     @property
     def name(self) -> str:

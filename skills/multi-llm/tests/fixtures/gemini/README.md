@@ -2,7 +2,8 @@
 
 Every `*.stdout.txt` / `*.stderr.txt` here is a **real capture** of `gemini`'s
 streams under the argv `GeminiProvider.build_command` emits, taken against a stub
-in the containerized §6 probe (`@google/gemini-cli 0.25.2`, `--network none`,
+in the containerized §6 probe (`@google/gemini-cli 0.63.0`, re-captured
+2026-10-08 by the same rig that first captured them on 0.25.2; `--network none`,
 **no credential** — `GEMINI_API_KEY` was the PATH wrapper's fake per-exec session
 key, meaningful only on 127.0.0.1). They are raw bytes as gemini wrote them;
 nothing here is hand-authored, and there is no synthesized row.
@@ -11,39 +12,51 @@ They are graded by `tests/test_provider_fixture_rows.py` through `manifest.yaml`
 The manifest is the authority on what each row asserts; this file says *why* each
 one is here, and what the set found.
 
-Four facts govern every row:
+Five facts govern every row:
 
 - **On every failure gemini writes ZERO bytes to stdout** and puts the whole
   diagnosis on stderr — the exact inverse of the opencode trap, and the reason
   the operator-facing error is identical (`JSON parse error: Expecting value:
   line 1 column 1 (char 0)`) for a 401, a 429, a 404 and a 400 alike:
   `parse_output` never reads stderr.
-- **stderr carries two things**: free-form JS prose with a Node stack into
-  `@google/genai` / `@google/gemini-cli-core`, then a machine-readable envelope
-  `{"session_id", "error": {"type", "message", "code"}}` whose **`message` is
-  always the literal `[object Object]`**. The only structured field gemini offers
-  is destroyed by an upstream stringification bug.
+- **stderr carries two things**: free-form JS prose with a Node stack into the
+  CLI's bundle, then a machine-readable envelope `{"session_id", "error":
+  {"type", "message", "code"}}`. At 0.25.2 its **`message` was always the
+  literal `[object Object]`**, an upstream stringification bug; at 0.63.0 it
+  carries the real text. The parser does not need it either way.
 - **The exit code is the envelope's `code` truncated to 8 bits**: 401 → **145**,
-  400 → **144**, 500 → **244**, `code: 1` → 1. An exit code from this CLI is a
-  status, not a category; `!= 0` is the only safe reading.
-- **One request per exec** — gemini fires no session-title side call — except on
-  the two fail-forever rows, where its own backoff runs **10 requests over ~4
-  minutes** inside the one awaited subprocess.
+  400 → **144**, 429 → **173** (0.25.2 put `code: 1` on a 429 and exited 1),
+  500 → **244**, `code: 1` → 1. An exit code from this CLI is a status, not a
+  category; `!= 0` is the only safe reading.
+- **No session-title side call, and three retry tiers**: a 401, 404 or 400 is
+  one request; a cut stream, a 200 carrying an error object or an empty answer
+  is **4 requests over ~7 s** (1 / 2 / 4 s apart); a fail-forever 429, 500 or
+  zero-byte response is **10 requests over ~3.5-4 minutes** of gemini's own
+  backoff inside the one awaited subprocess. At 0.25.2 the cut stream, the
+  error object and the zero-byte response were each one request.
+- **Start-up chatter on stderr on every run (new at 0.63.0)**, an answered one
+  included: `Warning: 256-color support not detected…`, `Ripgrep is not
+  available…` and one or two `[STARTUP] …` profiler lines, 189-266 bytes. The
+  first two depend on the environment (no 256-colour terminal and no `rg` in the
+  image), so a host may see fewer. `GeminiProvider._diagnose` drops all of it
+  before reading stderr — left in, it became `exit-zero-failure`'s diagnosis and
+  turned the answered rows' `describe_failure` from `None` into a colour
+  warning (fix and test landed with this re-capture).
 
 | Fixture | What it pins |
 | --- | --- |
-| `success` | the pretty-printed `{"session_id", "response", "stats"}` envelope, unwrapped by `parse_output`. The test asserts the unwrapped `data` **is** the suggestion-list document. `stats` records `totalCalls: 0` and `totalLinesAdded: 0` — answered on stdout, wrote nothing |
-| `ephemeral-only` | an all-noise run is a **failure**, not an empty-string success: `"response": ""` inside 802 bytes of `stats` the parser discards, exit 0, stderr empty. `totalRequests: 4` — gemini retried the empty answer four times and still called it a success |
+| `success` | the pretty-printed `{"session_id", "response", "stats"}` envelope, unwrapped by `parse_output`. The test asserts the unwrapped `data` **is** the suggestion-list document. `stats` records `totalCalls: 0` and `totalLinesAdded: 0` — answered on stdout, wrote nothing. stderr is start-up chatter only |
+| `ephemeral-only` | an all-noise run is a **failure**, not an empty-string success: `"response": ""` inside a 1,444-byte envelope the parser discards, exit 0, stderr start-up chatter only. `totalRequests: 4` — gemini sent the empty answer four times, counted it as `NO_RESPONSE_TEXT` (`totalErrors: 1`, new at 0.63.0) and still exited 0 |
 | `multi-assistant` | **last**-wins, and the last document is the answer; the first is the decoy (`FIRST ANSWER (must NOT be selected)`), still in the bytes so the row tests selection — see defect 4 |
-| `truncated` | a **real** cut mid-record on the *gemini* surface: the whole answer is ONE 291-byte SSE frame and the cut lands inside it, so `@google/genai` reports `Incomplete JSON segment at the end`. **One request** — a cut stream is not retried |
+| `truncated` | a **real** cut mid-record on the *gemini* surface: the whole answer is ONE 291-byte SSE frame and the cut lands inside it, so `@google/genai` reports `Incomplete JSON segment at the end`. **Four requests** over ~7 s at 0.63.0 (one at 0.25.2) |
 | `error-envelope` | a provider error object on a **200**, which gemini never sees as an error at all: it asked for `text/event-stream`, got one JSON object, and failed at the SSE framing layer with the same `Incomplete JSON segment` as `truncated`. The provider's text is lost, not mis-served |
 | `exit-zero-failure` | the one gemini failure that **exits 0 while reporting success** — a `write_file` tool call that the registry rejects, after which the model's confirmation sentence is printed as the answer. See defect 1 |
 | `auth-error` | 401 → one request, terminal, exit **145**. Measured classification **`None`**: *Incorrect API key provided* is not `invalid api key`, and `UNAUTHENTICATED` is not `unauthorized` |
-| `rate-limit` | 429-forever → **10 requests over ~200 s**, each announced as `Attempt N failed with status 429. Retrying with backoff...`. The §6.1.1 measurement for this CLI, and the reason §7.5 rule 6(b) forbids an identical re-dispatch |
+| `rate-limit` | 429-forever → **10 requests over ~230 s**, each announced as `Attempt N failed with status 429. Retrying with backoff...`, exit **173**. The §6.1.1 measurement for this CLI, and the reason §7.5 rule 6(b) forbids an identical re-dispatch |
 | `invalid-model` | 404 **naming the model** — `gemini-2.5-flash`, correct only because failserver now reads the model from the PATH (see "A second rig fix" below). One of only four categories this CLI's failures reach |
 | `context-overflow` | 400 context-length, passed through unedited, so `maximum context length` reaches the classifier. Exit **144**, and the one envelope carrying a real status rather than `code: 1` |
-| `server-error` | beyond §6.2's twelve: 5xx-forever, **10 requests / ~225 s**, exit **244**, 14 KB on stderr and 0 on stdout — and classified as **nothing** (defect 5) |
-| `zero-byte-response` | beyond §6.2's twelve, and the measurement behind the `empty` cell: a server writing zero bytes still leaves 1,582 bytes of stderr, whose words are undici's generic `exception TypeError: fetch failed sending request` |
+| `server-error` | beyond §6.2's twelve: 5xx-forever, **10 requests / ~200 s**, exit **244**, 14 KB on stderr and 0 on stdout — and classified as **nothing** (defect 5) |
+| `zero-byte-response` | beyond §6.2's twelve, and the measurement behind the `empty` cell: a server writing zero bytes leaves 13,669 bytes of stderr, whose words are undici's generic `exception TypeError: fetch failed sending request`. Retried on the 10-request ladder since 0.63.0 (~233 s; one request and 1,582 bytes at 0.25.2) |
 
 ## Two rows that are "not applicable, because …"
 
@@ -54,9 +67,10 @@ Both carry their measurement in `manifest.yaml` rather than being absent (§6.3)
   **0 bytes on stdout**, everything on stderr. What the row exists to catch is
   real here and worse; see defect 2.
 - **`empty`** — zero bytes on *both* channels never happened. Every failure is
-  0 bytes on stdout and non-empty on stderr; every success is the reverse. One
-  channel is always empty and neither run type leaves both empty. The nearest
-  producer, `failserver --mode empty`, is committed as `zero-byte-response`.
+  0 bytes on stdout and non-empty on stderr; every success answers on stdout
+  (with start-up chatter on stderr since 0.63.0). Neither run type leaves both
+  channels empty. The nearest producer, `failserver --mode empty`, is committed
+  as `zero-byte-response`.
 
 ## §14.7 gap 5, closed: `supports_file_output = True` is **wrong** for gemini
 
@@ -75,9 +89,13 @@ CLI. The other half is a throwaway probe kept beside the captures at
    `glob`, `activate_skill`, `save_memory`, `google_web_search`, `write_todos`,
    `delegate_to_agent`. There is **no `write_file`**, no `replace`, no
    `run_shell_command`. The saved body is
-   `probe-out/gemini/gap5-observe/req-1.json`.
+   `probe-out/gemini/gap5-observe/req-1.json`. **Re-measured 2026-10-08 on
+   0.63.0**, same argv: **eight** tools, `enter_plan_mode`, `glob`,
+   `google_web_search`, `grep_search`, `invoke_agent`, `list_directory`,
+   `read_file`, `update_topic` — renamed and regrouped, and still no
+   `write_file`, no `replace`, no `run_shell_command`.
 2. **call** — answer turn 1 with a `functionCall` for `write_file` anyway. The
-   result is the committed `exit-zero-failure` row:
+   result is the committed `exit-zero-failure` row. 0.25.2 said:
 
    ```
    Error executing tool write_file: Tool "write_file" not found in registry.
@@ -85,10 +103,18 @@ CLI. The other half is a throwaway probe kept beside the captures at
    "read_file", "write_todos", "activate_skill"?
    ```
 
+   and 0.63.0 (the bytes committed now, after three lines of start-up chatter)
+   says:
+
+   ```
+   Error executing tool write_file: Tool "write_file" not found. Did you mean
+   one of: "read_file", "update_topic", "grep_search"?
+   ```
+
    `stats.tools.byName.write_file` = `{count: 1, success: 0, fail: 1}`,
    `files.totalLinesAdded: 0`, the target file does not exist — and gemini
    **exits 0** printing the model's `JSON written to …` confirmation as its
-   answer.
+   answer, on both releases.
 
 So gemini belongs in the same class as `cursor-agent --mode ask`, `aider /ask`,
 `qwen-code --max-tool-calls 0` and `vibe --agent plan`: a CLI whose shipped
@@ -134,12 +160,14 @@ been fixed in the shared extractor, and its entry records what changed.
    reads stderr through a three-tier precedence — the last `ApiError` blob's
    `error.message`/`error.code` (4 rows), else the prose sentence following the
    `Full report available at:` path (4 rows), else the first stderr line with
-   the stack stripped (1 row: `exit-zero-failure`, the only capture with bytes
-   on both channels) — and `parse_output`'s error branch names the same text.
+   the stack stripped (1 row: `exit-zero-failure`, the only capture whose
+   stderr says something beside an answer on stdout) — and `parse_output`'s
+   error branch names the same text. Since 0.63.0 the start-up chatter is
+   dropped before any tier reads stderr.
    The Node stack and the per-run `/tmp/mllm-inv/` path are dropped and the
    result is capped to one line, so a 15 KB stderr cannot become the error
    string. `error.message` is never reported: at 0.25.2 it is the literal
-   `[object Object]`. `classify_failure` already read both streams, which is
+   `[object Object]` (0.63.0 fills it, and the tiers still do not need it). `classify_failure` already read both streams, which is
    why four of the nine landed on a category even before this — the parser was
    the half that was blind.
 3. **A 401 classified as `None`.** **FIXED (C3).** Google's status word is
@@ -175,8 +203,16 @@ docker run --rm --network none --user 10001:10001 --read-only \
   -v "$PWD/plans/harness-expansion/probe-out/gemini:/work/out:rw" \
   -e MLLM_STUB_PORT=8099 -e MLLM_REDIRECT_YAML=/rig/redirect.yaml \
   -e MLLM_REAL_DIR=/opt/mllm/real -e MLLM_HOMES_ROOT=/work/homes \
-  --entrypoint /bin/bash mllm-e2e:local -lc 'python3 /work/out/capture.py'
+  -e CAP_CLI=gemini -e CAP_BIN=gemini -e CAP_MODEL=gemini-2.5-flash \
+  -e CAP_ROWS=<rows> -e CAP_BOUND_S=900 \
+  --entrypoint /bin/bash <image built from tests/container/Dockerfile> -lc \
+  'python3 /rig/seed_workspace.py --spec gemini:gemini-2.5-flash --runner opencode:stub-model && python3 /work/out/capture.py'
 ```
+
+(the 2026-08-19 capture ran in `mllm-e2e:local` on 0.25.2; the 2026-10-08
+re-run in the image built at the cli-versions.lock pins, 0.63.0, with the out
+dir a fresh copy of the probe's `capture.py`, `rows.json`, `prompt.txt` and
+scenarios.)
 
 Per row the driver starts one server on 127.0.0.1:8099 — `stub_server.py
 --scenario …` for the three answering rows, `failserver.py --mode
@@ -185,6 +221,9 @@ Per row the driver starts one server on 127.0.0.1:8099 — `stub_server.py
 `GeminiProvider.build_command`'s argv through the PATH wrapper
 `/opt/mllm/bin/gemini`, which applies redirect.yaml's gemini row itself. `$HOME`
 must exist or gemini crashes before its first request. Do **not** wrap the run in
-`timeout`. Total wall time ≈ 8 minutes, of which 7 are the two fail-forever rows. The `exit-zero-failure` row uses `gap5_probe.py` instead, twice
+`timeout`. Total wall time at 0.63.0 ≈ 13 minutes in sequence, of which 12 are
+the three fail-forever rows (429, 500, zero-byte); the re-run gave each of those
+its own container, in parallel, sharing the out dir. The `exit-zero-failure` row
+uses `gap5_probe.py` instead, twice
 (`--mode observe`, then `--mode call`); the `requests:` counts come from each
 server's own `--log`, with the driver's `/__health` poll excluded.
