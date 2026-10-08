@@ -1,13 +1,13 @@
-466349 | ` + `Use /login, set an API key environment variable, or create ${Vn()}
-466350 | 
-466351 | ` + "Then use /model to select a model.");
-466352 |       }
-466353 |       const n = await this.#ge.getApiKey(this.model, this.sessionId);
-466354 |         throw new Error(`No API key found for ${this.model.provider}.
+500866 | ` + `Use /login, set an API key environment variable, or create ${Ur()}
+500867 | 
+500868 | ` + "Then use /model to select a model.");
+500869 |       }
+500870 |       const r = await this.#we.getApiKey(this.model, this.sessionId);
+500871 |         throw new Error(`No API key found for ${this.model.provider}.
                        ^
 error: No API key found for openrouter.
 
 Use /login, set an API key environment variable, or create /home/e2e/.omp/agent/agent.db
-      at #xo (/$bunfs/root/omp-linux-x64:466354:15)
-      at async #in (/$bunfs/root/omp-linux-x64:466139:25)
+      at #nn (/$bunfs/root/omp-linux-x64:500871:15)
+      at async #tr (/$bunfs/root/omp-linux-x64:500629:25)
 

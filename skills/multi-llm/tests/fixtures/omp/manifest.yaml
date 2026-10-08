@@ -2,18 +2,40 @@
 # which owns the format (its module docstring is the spec).
 #
 # Captured 2026-09-17 by P10/P12 of plans/add-omp-provider.md §5, on the HOST rather
-# than in the §5 probe image (that image is Stage E's and does not exist yet). Every
-# byte is omp's own stdout/stderr; nothing here is hand-composed. What the host costs
-# is the §3 scrub gate: every row but `invalid-tool` carries `synthesized: true` and a
-# `provenance:` beginning `SCRUB ONLY:` naming the path replacements applied. No event
+# than in the §5 probe image (that image is Stage E's and does not exist yet), and
+# re-captured 2026-10-08 on omp 18.8.3 by the same three vehicles (see `method`).
+# Every byte of a captured row is omp's own stdout/stderr; the five rows marked
+# `COMPOSED` are derived from `success.stdout.txt` by a fixed edit. What the host costs
+# is the §3 scrub gate: every captured row but `invalid-tool` and `invalid-model`
+# carries `synthesized: true` and a `provenance:` beginning `SCRUB ONLY:` naming the
+# path replacements applied. No event
 # was added, dropped or reordered in any row, every line is still valid JSON, and the
 # replacement table is path-only — there is no credential and no OpenRouter generation
 # id anywhere in this set because nothing here ever touched the live service.
 schema_version: 1
 provider: omp
-cli_version: "18.2.2"
-captured: "2026-09-17"
+cli_version: "18.8.3"
+captured: "2026-10-08"
 method: >-
+  RE-RUN 2026-10-08 on omp 18.8.3 (the host's and the cli-versions.lock pin), every
+  captured row, by the vehicles below; first captured 2026-09-17 on 18.2.2. Five
+  things differ from the first capture, none of them in what omp is asked to do:
+  (i) the spawn cwd and every probe HOME live under a scratch dir outside the
+  user's home, one fresh HOME per row (omp's natives pre-extracted into it), because
+  omp walks EVERY ancestor of its cwd for `.omp/`, `.claude/`, `.agents/` and
+  `.agent/` config dirs (read off an strace of the run), so a cwd under a home
+  directory reaches that home's own config; (ii) the child env is built from
+  nothing (`HOME`, `PATH`, `LANG`, `USER`, `LOGNAME` only) plus
+  `HTTPS_PROXY`/`HTTP_PROXY` at a dead loopback port with
+  `NO_PROXY=127.0.0.1,localhost`, so omp's start-up catalog fetch and built-in
+  provider discovery fail at once instead of leaving the machine — an strace of
+  every connect() on every row shows 127.0.0.1 and nothing else, and the streams are
+  the same shape as an unproxied run's; (iii) the `p13` key is the literal
+  `omp-probe-key` as the `apiKey` of the probe `models.yml`'s `openrouter` override,
+  not `OPENROUTER_API_KEY` in the env; (iv) the `p12` prompt carries the
+  `{working_limits}` block `prompts/plan_review.txt` gained since; (v) the `rig` and
+  `p13` argv carry today's six-name `--tools`. The first capture's method, which the
+  rest of this paragraph keeps, is:
   All rows under the §2.2 argv — `--mode json`, the shipped
   `assets/omp/overlay.yml` (`retry.enabled: false`, `mcp.enableProjectConfig: false`),
   `--approval-mode yolo`, `--tools read,grep,glob,find,bash,edit,write` (at 18.2.2
@@ -32,7 +54,9 @@ method: >-
   the production protocol: the same kind of probe `models.yml`, but overriding the
   **built-in** `openrouter` provider's `baseUrl` (§1.10) with `PI_OPENROUTER_RESPONSES`
   unset and `--model openrouter/openai/gpt-5.6-luna`, so the wire is
-  `GET /api/v1/models` then `POST /api/v1/responses`. That was checked in the server's
+  `GET /api/v1/models` then `POST /api/v1/responses` (at 18.8.3 six catalog GETs —
+  `models` three times, `images/models`, `videos/models`, `embeddings/models` — all
+  to the loopback `baseUrl`, then the POSTs). That was checked in the server's
   own request log on every run, and it is legible in the committed bytes: those rows
   carry `"api":"openrouter"` on every assistant message where the completions rows
   carry `"api":"openai-completions"`.
@@ -67,8 +91,20 @@ method: >-
   probe logs ARRIVAL, before its delay, so its gaps are request gaps; `requests` is the
   completion-request count in the log either way.
 notes: >-
+  WHAT 18.8.3 CHANGED (re-captured 2026-10-08), before the 18.2.2 findings below, which
+  are kept as they were measured: every stream gained `agent_end.yielded` and nothing
+  else moved in any event's shape; `invalid-tool` is exit 2 with a plain three-line
+  `Error: Unknown tool in --tools: …` and no Bun trace and no `CliUsageError` word
+  (`base.LAUNCH_FAILURE_MARKERS` learned the sentence, so it still classifies
+  `spawn_failed`); `invalid-model`'s stderr hint now points at `omp models` instead of
+  a `models.yml` path; and the completions client's retry counts moved —
+  `rate-limit` 16 → 12 (the body-parsed 20 s honoured on BOTH legs of the doubled
+  chain), `empty` 21 → 12 (the plain `500·2ⁿ` ladder twice, like `stdout-error`),
+  `truncated` 20 → 12 (four empty-stop cycles of three fetch attempts). The
+  production Responses chain (`p13`) is unchanged: 6 requests for 429 and 500 alike.
   SEVEN THINGS THIS SET MEASURED THAT §1 PREDICTED DIFFERENTLY, each recorded in its row:
-  (1) **`rate-limit` is 16 requests over 201 s, not 12 over 32 s.** omp parses the
+  (1) **`rate-limit` is 16 requests over 201 s, not 12 over 32 s** (18.2.2; 12 over
+  201 s at 18.8.3). omp parses the
   vendor's own "Please try again in 20s." out of the 429 BODY (failserver sends no
   `Retry-After` header) and sleeps 20 s five times before falling back to the
   `500·2ⁿ` ladder. §1.9's "12 requests / ~32 s is the floor" holds only for the 500
@@ -78,8 +114,8 @@ notes: >-
   (2) **A pre-flight failure is not always 0 B on stdout.** §1.1 says pre-flight
   failures write plain text to stderr with an empty stdout; that is true of
   `invalid-model` and `invalid-tool` (validated before the session opens) but NOT of
-  `auth-error-preflight`, which flushes the `session` event first and then dies — 178
-  bytes of stdout under a Bun trace on stderr. This is precisely why the adapter's
+  `auth-error-preflight`, which flushes the `session` event first and then dies — one
+  JSON line of stdout (128 bytes as committed) under a Bun trace on stderr. This is precisely why the adapter's
   `describe_failure` channel is `STDOUT_ELSE_STDERR` and not `STDOUT_THEN_STDERR`.
   (3) **The empty-stop retry cap is visible, is four cycles, and emits an event type
   §1.2 does not list.** `truncated` (default 60-byte cut) and `error-envelope` both
@@ -89,7 +125,7 @@ notes: >-
   cycles and 0 B of stdout; in json mode the stream is fully written. The two rows are
   the same shape, as §3 anticipated — and both reach the parser as `Empty output`.
   (4) **failserver `--mode empty` is a connection error at omp, not an empty answer.**
-  Exit 1, 21 requests, 31.9 s, a terminal `stopReason: "error"` with NO `errorStatus`
+  Exit 1, 21 requests (12 at 18.8.3), 31.9 s, a terminal `stopReason: "error"` with NO `errorStatus`
   and `errorMessage: "The socket connection was closed unexpectedly…"`. The canonical
   `empty` cell therefore records what that vehicle produces; the shapes that really do
   degenerate to "nothing to parse" are `truncated`/`error-envelope` (exit 0, `Empty
@@ -97,7 +133,8 @@ notes: >-
   (5) **SIGTERM does not produce the all-noise stream.** §3 expected `--mode stall`
   + SIGTERM at 2 s to leave the user-message prefix and no assistant event; measured,
   omp catches SIGTERM and flushes a full `aborted` assistant `message_end`
-  (`errorMessage: "Request was aborted"`) plus `turn_end` before exiting 143. The real
+  (`errorMessage: "Request was aborted"`) plus `turn_end` before exiting 143 (re-measured
+  at 18.8.3: the same, a 1293-byte stream as scrubbed). The real
   all-noise prefix needs SIGKILL, which is what `ephemeral-only` is — exit 137, five
   events, no assistant message, real bytes. No hand-composed fallback was needed.
   (6) **`invalid-model` needed the shared table to grow a row, which §2.7
@@ -116,8 +153,8 @@ notes: >-
   The 12 and the 16 above are the `openai-completions` client. On the Responses API —
   the built-in `openrouter` provider, which is what every shipped model spec runs — the
   chain of one failing model call is **6** for every status measured: a 500 is 6
-  requests over 16.0 s on the plain `500·2ⁿ` ladder (gaps 0.5, 1, 2, 4, 8) and a 429 is
-  6 over 100.5 s, still sleeping the 20 s it reads out of the BODY before each retry.
+  requests over 16.0 s on the plain `500·2ⁿ` ladder (gaps 0.5, 1, 2, 4, 8; 16.5 s at
+  18.8.3) and a 429 is 6 over 100.5 s (101.0 s at 18.8.3), still sleeping the 20 s it reads out of the BODY before each retry.
   The doubling is the completions-only `withReplaySafeStreamRetry`
   (`maxProviderErrorRetries: 1`), which does not wrap the Responses client; what is
   left is the fetch wrapper's `maxAttempts: 6`. So §1.9's "12 requests / ~32 s is the
@@ -143,16 +180,17 @@ rows:
     stdout: success.stdout.txt
     stderr: success.stderr.txt
     exit_code: 0
-    wall_s: 0.34
+    wall_s: 0.69
     requests: 2
     synthesized: true
     provenance: >-
-      SCRUB ONLY: two path replacements, nothing else. The spawn cwd
-      /<user>/…/skills/multi-llm → /work (4 occurrences: the `session` event's `cwd`
+      SCRUB ONLY: two path replacements, nothing else. The spawn cwd (a scratch copy
+      holding tests/fixtures/sample_plan.md; /<user>/…/skills/multi-llm at 18.2.2) →
+      /work (4 occurrences: the `session` event's `cwd`
       and the echoed prompt's `{plan_path}`), and the capture dir holding the rendered
       `{output_json_path}` → /work (36 occurrences: the write tool's `args.path`, its
       result text and every repetition of that message inside `turn_end` and
-      `agent_end`). No event added, dropped or reordered; 244 lines in, 244 out; every
+      `agent_end`). No event added, dropped or reordered; 34 lines in, 34 out; every
       line still valid JSON. No credential and no generation id was present to remove.
     notes: >-
       **P12, the product path's own stream** (§1.11): the §2.2 argv through the
@@ -194,8 +232,8 @@ rows:
     stdout: truncated.stdout.txt
     stderr: truncated.stderr.txt
     exit_code: 0
-    wall_s: 6.50
-    requests: 20
+    wall_s: 7.02
+    requests: 12
     synthesized: true
     provenance: >-
       SCRUB ONLY: one path replacement — the scratch spawn cwd → /work, once, in the
@@ -210,8 +248,8 @@ rows:
       reaches omp — so this vehicle cannot produce the "`stop` carrying the cut
       prefix" shape §3 wanted the row to catch. What it produces instead is the
       empty-stop retry cap: FOUR assistant `message_end`s, all `stopReason: "stop"`
-      with `content: []`, 20 requests in 6.5 s (four agent-level cycles × five fetch
-      attempts), then `auto_retry_end` with `finalError: "Assistant returned empty
+      with `content: []`, 12 requests in 7.0 s at 18.8.3 (four agent-level cycles ×
+      three fetch attempts; 20 in 6.5 s at 18.2.2, five per cycle), then `auto_retry_end` with `finalError: "Assistant returned empty
       stop after retry cap…"` and **exit 0**. Byte-shape-identical to
       `error-envelope`, which is the measurement §3 anticipated. The cut-prefix shape
       IS reachable — cut after a content frame instead — and is committed as the extra
@@ -237,7 +275,7 @@ rows:
     stdout: ephemeral-only.stdout.txt
     stderr: ephemeral-only.stderr.txt
     exit_code: 137
-    wall_s: 1.02
+    wall_s: 1.03
     requests: 1
     synthesized: true
     provenance: >-
@@ -247,12 +285,13 @@ rows:
     notes: >-
       `rig`, failserver `--mode stall` (accept and never answer) with **SIGKILL** at
       1.0 s. Real bytes, no composition: five events — `session`, `agent_start`,
-      `turn_start`, and the user `message_start`/`message_end` — 545 bytes, and **no
-      assistant event at all**, which is exactly the all-noise stream §6.2 asks for.
+      `turn_start`, and the user `message_start`/`message_end` — 495 bytes as
+      committed, and **no assistant event at all**, which is exactly the all-noise stream §6.2 asks for.
       SIGTERM was tried first and does NOT produce it (§3 assumed it would): omp traps
       it, flushes a complete `aborted` assistant message with `errorMessage: "Request
-      was aborted"` and a `turn_end`, and exits 143 with 1741 bytes. So the exit code
-      here is 137 rather than the predicted 143, and the fallback §4 held in reserve —
+      was aborted"` and a `turn_end`, and exits 143 (1741 bytes raw at 18.2.2; 1293 as
+      scrubbed at 18.8.3). So the exit code here is 137 — SIGKILL, as a shell reports
+      it; the 18.8.3 rig's Python parent saw -9 — rather than the predicted 143, and the fallback §4 held in reserve —
       a hand-composed prefix of `success.stdout.txt` — was not needed.
     expect:
       success: false
@@ -264,11 +303,12 @@ rows:
     stdout: multi-assistant.stdout.txt
     stderr: multi-assistant.stderr.txt
     exit_code: 0
-    wall_s: 0.43
+    wall_s: 0.70
     requests: 3
     synthesized: true
     provenance: >-
-      SCRUB ONLY: two path replacements — the spawn cwd /<user>/…/skills/multi-llm →
+      SCRUB ONLY: two path replacements — the spawn cwd (a scratch copy holding the
+      sample plan; /<user>/…/skills/multi-llm at 18.2.2) →
       /work (21 occurrences: the `session` event's `cwd`, the echoed `{plan_path}`,
       and the `read` tool's `args.path` and result in every repetition of those
       messages) and the capture dir holding the rendered `{output_json_path}` → /work
@@ -316,7 +356,7 @@ rows:
     stdout: error-envelope.stdout.txt
     stderr: error-envelope.stderr.txt
     exit_code: 0
-    wall_s: 6.63
+    wall_s: 6.88
     requests: 12
     synthesized: true
     provenance: >-
@@ -328,12 +368,12 @@ rows:
       object carrying the 401 wording. omp's completions client cannot parse it as a
       completion, so the run takes the same empty-stop path as `truncated` — four
       assistant `message_end`s with `stopReason: "stop"` and `content: []`, 12
-      requests in 6.6 s, `auto_retry_end` with the retry-cap sentence, **exit 0** —
+      requests in 6.9 s, `auto_retry_end` with the retry-cap sentence, **exit 0** —
       and the provider's own sentence ("Incorrect API key provided…") reaches NO
       channel and no pattern table. §3 predicted this collapse and said to commit both
-      rows anyway; the two differ only in ids, timestamps and the request count (12
-      here versus 20, because a 200-with-JSON is not retried by the fetch wrapper the
-      way a cut stream is).
+      rows anyway; at 18.2.2 the two differed only in ids, timestamps and the request
+      count (12 here versus 20, because a 200-with-JSON was not retried by the fetch
+      wrapper the way a cut stream was); at 18.8.3 both are 12.
     expect:
       success: false
       # Byte-shape-identical to `truncated`, and graded the same way: the parser's
@@ -352,11 +392,12 @@ rows:
     stdout: exit-zero-failure.stdout.txt
     stderr: exit-zero-failure.stderr.txt
     exit_code: 0
-    wall_s: 3.20
+    wall_s: 3.28
     requests: 1
     synthesized: true
     provenance: >-
-      SCRUB ONLY: two path replacements — the spawn cwd /<user>/…/skills/multi-llm →
+      SCRUB ONLY: two path replacements — the spawn cwd (a scratch copy holding the
+      sample plan; /<user>/…/skills/multi-llm at 18.2.2) →
       /work (4 occurrences) and the capture dir holding the rendered
       `{output_json_path}` → /work (6 occurrences), both inside the `session` event
       and the echoed prompt. No event added, dropped or reordered; every line still
@@ -364,7 +405,7 @@ rows:
     notes: >-
       `p12` with `timeout_s=8`, which `max_time_value` renders as **`--max-time 3`**;
       the stub scripts a `bash` call running `sleep 20`. §1.5's second shape, exactly
-      as predicted: **exit 0**, one request, 3.2 s; the last assistant `message_end`
+      as predicted: **exit 0**, one request, 3.3 s; the last assistant `message_end`
       is a `toolUse`; the `tool_execution_end` is `isError: true` with `Command
       aborted`; a `tool_execution_update` carries `[Command cancelled]`; `turn_end`
       and `agent_end` follow with no further assistant message; stderr 0 B. In TEXT
@@ -385,7 +426,7 @@ rows:
     stdout: stdout-error.stdout.txt
     stderr: stdout-error.stderr.txt
     exit_code: 1
-    wall_s: 31.96
+    wall_s: 32.48
     requests: 12
     synthesized: true
     provenance: >-
@@ -394,7 +435,8 @@ rows:
       valid JSON. No credential or generation id was present.
     notes: >-
       `rig`, failserver `--mode 500`, fail-forever — and the one row that confirms
-      §1.9's floor exactly: **12 requests in 31.96 s**, at +0, 0.5, 1.5, 3.5, 7.5,
+      §1.9's floor exactly: **12 requests in 31.96 s** (32.48 s at 18.8.3, the same
+      gaps), at +0, 0.5, 1.5, 3.5, 7.5,
       15.5 s and then the same ladder again, i.e. the fetch wrapper's `maxAttempts: 6`
       × `withReplaySafeStreamRetry`'s ×2, with the overlay's `retry.enabled: false`
       holding the agent layer off. Then exit 1 with the terminal assistant
@@ -414,8 +456,8 @@ rows:
     stdout: empty.stdout.txt
     stderr: empty.stderr.txt
     exit_code: 1
-    wall_s: 31.94
-    requests: 21
+    wall_s: 32.45
+    requests: 12
     synthesized: true
     provenance: >-
       SCRUB ONLY: one path replacement — the scratch spawn cwd → /work, once, in the
@@ -425,7 +467,8 @@ rows:
       `rig`, failserver `--mode empty`: the request is accepted and the socket closed
       after ZERO body bytes. §1.9 predicted the empty-completion path (exit 0, 0 B
       stdout); measured, omp treats a zero-byte response as a TRANSPORT failure
-      instead — 21 requests over 31.9 s, **exit 1**, and a terminal `stopReason:
+      instead — 21 requests over 31.9 s at 18.2.2 (12 over 32.5 s at 18.8.3, the
+      `500·2ⁿ` ladder twice, exactly `stdout-error`'s gaps), **exit 1**, and a terminal `stopReason:
       "error"` with **no `errorStatus`** and `errorMessage: "The socket connection was
       closed unexpectedly. For more information, pass `verbose: true` in the second
       argument to fetch()"` — Bun's fetch wording, forwarded verbatim. So the row's
@@ -460,7 +503,7 @@ rows:
     stdout: auth-error.stdout.txt
     stderr: auth-error.stderr.txt
     exit_code: 1
-    wall_s: 0.38
+    wall_s: 0.59
     requests: 1
     synthesized: true
     provenance: >-
@@ -472,7 +515,7 @@ rows:
     notes: >-
       `rig`, failserver `--mode 401`. **One request, terminal, no retry** — §3's
       prediction confirmed: the fetch wrapper retries ≥500/408/429 only, so a 401 is
-      one shot and 0.38 s. The terminal assistant `message_end` is `stopReason:
+      one shot (0.38 s at 18.2.2, 0.59 s at 18.8.3). The terminal assistant `message_end` is `stopReason:
       "error"`, `errorStatus: 401`, `content: []`, usage all zero, and
       `errorMessage` is the status, the vendor sentence, the sentence AGAIN and then
       `(type=invalid_request_error param=invalid_api_key)` — omp's own composition,
@@ -493,8 +536,8 @@ rows:
     stdout: rate-limit.stdout.txt
     stderr: rate-limit.stderr.txt
     exit_code: 1
-    wall_s: 200.97
-    requests: 16
+    wall_s: 201.45
+    requests: 12
     synthesized: true
     provenance: >-
       SCRUB ONLY: one path replacement — the scratch spawn cwd → /work, once, in the
@@ -502,17 +545,20 @@ rows:
       valid JSON. No credential or generation id was present.
     notes: >-
       `rig`, failserver `--mode 429`, fail-forever, **no `Retry-After` header** — and
-      the row that breaks §1.9's envelope. Measured: **16 requests over 200.97 s**,
-      not 12 over 32. The request log's gaps are 20.0, 20.0, 20.0, 20.0, 20.0, 0.5,
-      20.0, 8.5, 11.5, 8.5, 11.5, 8.5, 11.5, 8.5, 11.5 — omp reads the delay out of
-      the vendor's own SENTENCE ("Please try again in 20s.", failserver's verbatim
-      OpenAI 429 wording) and honours it, five times, before the `500·2ⁿ` ladder takes
-      over. §2.8/criterion 6's "≤ 40 s" is therefore false for any 429 whose body
+      the row that breaks §1.9's envelope. Measured at 18.2.2: **16 requests over
+      200.97 s**, not 12 over 32. The request log's gaps were 20.0, 20.0, 20.0, 20.0,
+      20.0, 0.5, 20.0, 8.5, 11.5, 8.5, 11.5, 8.5, 11.5, 8.5, 11.5 — omp reads the
+      delay out of the vendor's own SENTENCE ("Please try again in 20s.", failserver's
+      verbatim OpenAI 429 wording) and honoured it five times before the `500·2ⁿ`
+      ladder took over. At 18.8.3: **12 requests over 201.45 s**, gaps 20.0 ×5, 0.5,
+      20.0 ×5 — the body's 20 s is honoured on both legs of the doubled chain, and the
+      ladder never gets a turn. §2.8/criterion 6's "≤ 40 s" is therefore false for any 429 whose body
       names a delay, and §1.9's "12 requests / ~32 s is the floor of one failing model
       call" holds only for statuses with no delay hint (the `stdout-error` row).
-      Note this capture ran WITHOUT `--max-time`: the adapter renders `--max-time 115`
-      at `timeout_s=120`, which would have cut this run at 115 s with an `aborted`
-      terminal message instead of the `error` one committed here. Exit 1, stderr 0 B,
+      Note this capture ran WITHOUT `--max-time` (both times): the adapter renders
+      `--max-time 115` at `timeout_s=120`, which would have cut this run at 115 s with
+      an `aborted` terminal message instead of the `error` one committed here. Exit 1,
+      stderr 0 B,
       terminal `stopReason: "error"`, `errorStatus: 429`.
     expect:
       success: false
@@ -527,19 +573,19 @@ rows:
     stdout: invalid-model.stdout.txt
     stderr: invalid-model.stderr.txt
     exit_code: 1
-    wall_s: 0.64
+    wall_s: 0.65
     requests: 0
-    synthesized: true
-    provenance: >-
-      SCRUB ONLY: one path replacement — the probe HOME → /home/e2e, once, in the
-      stderr hint's `…/.omp/agent/models.yml` path. stdout is zero bytes and was not
-      touched. No credential or generation id was present.
     notes: >-
+      **Needed no scrub at 18.8.3**, so it carries neither `synthesized` nor
+      `provenance` (at 18.2.2 the stderr hint named the probe HOME's
+      `…/.omp/agent/models.yml`, rewritten to /home/e2e; 18.8.3's hint is
+      "Run `omp models find <pattern>` to search, or `omp models` to list all."
+      and names no path).
       `rig` with `--model stub/nonexistent` and no server contacted: omp resolves the
       spec against the LOCAL catalog before dispatch, so this is a pre-flight failure
       — exit 1, **0 B stdout**, **zero requests** (the loopback stub was running and
-      its log stayed empty), 0.64 s. stderr names the model and then offers the
-      env-var / `models.yml` hint. The capture measured `classify_failure: None` —
+      its log stayed empty), 0.65 s. stderr names the model and then offers a hint
+      (the env-var / `models.yml` one at 18.2.2, `omp models` at 18.8.3). The capture measured `classify_failure: None` —
       no row of the shared `INVALID_MODEL_MARKERS` table matched `Model "…" not
       found`, because the existing `model not found` row cannot span the quoted
       selector between the two words. §2.7 anticipated exactly that ("add the omp
@@ -553,7 +599,8 @@ rows:
       error_contains: ["Empty output", 'Model "stub/nonexistent" not found']
       raw_contains:
         - 'Model "stub/nonexistent" not found'
-        - "/home/e2e/.omp/agent/models.yml"
+        # 18.8.3's hint; 18.2.2 named `/home/e2e/.omp/agent/models.yml` here.
+        - "omp models find <pattern>"
       classify_failure: invalid_model
       salvage: none
 
@@ -561,7 +608,7 @@ rows:
     stdout: context-overflow.stdout.txt
     stderr: context-overflow.stderr.txt
     exit_code: 1
-    wall_s: 0.39
+    wall_s: 0.61
     requests: 1
     synthesized: true
     provenance: >-
@@ -574,7 +621,7 @@ rows:
     notes: >-
       `rig`, failserver `--mode ctx` (HTTP 400, the verbatim OpenAI context-length
       body). Exactly as §3 predicted: **one request** — 400 is outside the fetch
-      wrapper's retry set — exit 1 in 0.39 s, stderr 0 B, terminal `stopReason:
+      wrapper's retry set — exit 1 in 0.39 s (0.61 s at 18.8.3), stderr 0 B, terminal `stopReason:
       "error"` with `errorStatus: 400` and the vendor sentence in `errorMessage`. This
       is the one omp row the SHARED `CONTEXT_OVERFLOW_MARKERS` table classifies, and
       it is terminal rather than retryable. One thing to know before anyone reformats
@@ -598,7 +645,7 @@ rows:
     stdout: truncated-partial.stdout.txt
     stderr: truncated-partial.stderr.txt
     exit_code: 1
-    wall_s: 0.40
+    wall_s: 0.67
     requests: 1
     synthesized: true
     provenance: >-
@@ -610,7 +657,8 @@ rows:
       60-byte cut cannot produce.** `rig`, failserver `--mode trunc
       --trunc-bytes 435 --trunc-answer '[{"title": "Cut in the middle", "desc": "the
       stream stops here"'` — a cut placed AFTER the content frame and before the
-      `finish_reason` frame. Then omp does not retry at all: **one request**, 0.40 s,
+      `finish_reason` frame. Then omp does not retry at all: **one request**, 0.40 s
+      (0.67 s at 18.8.3),
       exit 1, and the terminal assistant `message_end` is `stopReason: "error"` with
       no `errorStatus`, `errorMessage: "OpenAI completions stream closed before a
       finish_reason was received"` — and its `content` HOLDS THE HALF-PARSED ARRAY as
@@ -632,7 +680,7 @@ rows:
     stdout: aborted.stdout.txt
     stderr: aborted.stderr.txt
     exit_code: 1
-    wall_s: 1.17
+    wall_s: 1.29
     requests: 1
     synthesized: true
     provenance: >-
@@ -642,7 +690,8 @@ rows:
     notes: >-
       `rig`, failserver `--mode stall` with `--max-time 1` — §1.5's FIRST shape, the
       clean one, and the other half of criterion 7. The deadline fires mid-generation
-      rather than inside a tool call: exit **1**, one request, 1.17 s, terminal
+      rather than inside a tool call: exit **1**, one request, 1.17 s (1.29 s at
+      18.8.3), terminal
       assistant `message_end` with `stopReason: "aborted"`, `errorMessage: "Deadline
       exceeded"`, `content: []`, then `turn_end` and `agent_end`. stderr 0 B. Compare
       `exit-zero-failure`, which is the same deadline landing one layer lower and
@@ -660,7 +709,7 @@ rows:
     stdout: auth-error-preflight.stdout.txt
     stderr: auth-error-preflight.stderr.txt
     exit_code: 1
-    wall_s: 0.34
+    wall_s: 0.62
     requests: 0
     synthesized: true
     provenance: >-
@@ -672,11 +721,13 @@ rows:
     notes: >-
       `rig` with `--model openrouter/openai/gpt-5.6-luna` and **no key anywhere** —
       not in the process env, not in a cwd `.env`, not in `$HOME/.omp/agent/.env`.
-      Exit 1, zero requests, 0.34 s, and the diagnosis is a Bun source-context dump on
+      Exit 1, zero requests, 0.34 s (0.62 s at 18.8.3, the same shape at other source
+      offsets), and the diagnosis is a Bun source-context dump on
       stderr whose payload line is `error: No API key found for openrouter.` followed
       by the `/login … or create <HOME>/.omp/agent/agent.db` hint.
       **The fact this row exists to pin**: stdout is NOT empty. omp flushes the
-      `session` event (178 bytes, one JSON line) before the key lookup fails, so a
+      `session` event (one JSON line, 128 bytes as committed) before the key lookup
+      fails, so a
       `STDOUT_THEN_STDERR` diagnosis channel would report a one-event stream and never
       reach the sentence that names the problem. `STDOUT_ELSE_STDERR` is what makes
       this row legible, and this is the capture that says why.
@@ -702,24 +753,28 @@ rows:
   invalid-tool:
     stdout: invalid-tool.stdout.txt
     stderr: invalid-tool.stderr.txt
-    exit_code: 1
-    wall_s: 0.35
+    exit_code: 2
+    wall_s: 0.50
     requests: 0
     notes: >-
       **The one row in this set that needed no scrub at all** — it carries neither
       `synthesized` nor `provenance`, because omp's bytes here name no path of ours.
       `rig` with `--tools read,bogus`: `--tools` is validated BEFORE model resolution
-      and before the session opens, so this is exit 1, **0 B stdout**, zero requests,
-      0.35 s, at zero spend. stderr is a Bun source-context dump ending
-      `CliUsageError: Unknown tool in --tools: bogus. Valid tools: read, write, goal,
-      init_experiment, run_experiment, log_experiment, update_notes.` — note that the
-      "Valid tools:" list is INCOMPLETE and changes between runs (it names seven here
-      and omits `bash`, `grep`, `glob` and `find`, all of which the adapter passes and
-      all of which work), so nothing may parse it. This is the `LAUNCH_FAILURE_MARKERS`
+      and before the session opens, so this is **0 B stdout**, zero requests, at zero
+      spend. RE-CAPTURED ON 18.8.3 IN A NEW SHAPE: **exit 2** in 0.50 s and three plain
+      lines on stderr — `Error: Unknown tool in --tools: bogus.`, a `Built-in tools:
+      …` / `Other registered tools: …` list, and "Run `omp --help` for available
+      flags." — with no Bun trace and no `CliUsageError` word (two unknown names read
+      `Unknown tools in --tools: a, b.`). At 18.2.2 it was exit 1 in 0.35 s and a Bun
+      source-context dump ending `CliUsageError: Unknown tool in --tools: bogus. Valid
+      tools: read, write, goal, init_experiment, run_experiment, log_experiment,
+      update_notes.`, whose "Valid tools:" list was INCOMPLETE and changed between
+      runs. Nothing may parse either list. This is the `LAUNCH_FAILURE_MARKERS`
       row: the shape a mis-shipped adapter produces, distinguishable from a provider
-      failure by the zero requests and the `CliUsageError` word — and §2.7's
-      `LAUNCH_FAILURE_MARKERS += "CliUsageError"` is what makes that distinction a
-      verdict rather than an observation. It lands on `spawn_failed` (D3k rung 1,
+      failure by the zero requests and the refusal sentence — §2.7's
+      `LAUNCH_FAILURE_MARKERS += "CliUsageError"` made that distinction a verdict at
+      18.2.2, and the 18.8.3 shape needed the sentence itself on the same row
+      (`unknown tools? in --tools`), without which this capture classified `None`. It lands on `spawn_failed` (D3k rung 1,
       never retried, fails the whole batch), which is the right disposition for
       something that is a property of the INSTALL and identical for every sibling
       slot on this runner; `None` would have offered a transport retry of a run that
@@ -728,14 +783,13 @@ rows:
       a packaged install — joined the same row for the same reason.
     expect:
       success: false
-      # The parser's error is `Empty output (stderr: …)`. The tool name survives the
-      # 300-char cap now that `stderr_diagnosis` drops Bun's SOURCE-CONTEXT PRELUDE
-      # (six numbered lines and a caret) as well as the stack frames that follow —
-      # the prelude comes FIRST, so before that fix the cap was spent on minified
-      # source and the diagnosis was ellipsed away entirely.
-      error_contains: ["Empty output", "CliUsageError: Unknown tool in --tools: bogus."]
+      # The parser's error is `Empty output (stderr: …)`. At 18.2.2 the tool name
+      # survived the 300-char cap only because `stderr_diagnosis` drops Bun's
+      # SOURCE-CONTEXT PRELUDE (six numbered lines and a caret) and the stack frames
+      # after it; 18.8.3 prints no trace, so the sentence leads the stderr.
+      error_contains: ["Empty output", "Error: Unknown tool in --tools: bogus."]
       raw_contains:
-        - "CliUsageError: Unknown tool in --tools: bogus."
+        - "Error: Unknown tool in --tools: bogus."
       classify_failure: spawn_failed
       salvage: none
 
@@ -743,7 +797,7 @@ rows:
     stdout: invalid-model-api.stdout.txt
     stderr: invalid-model-api.stderr.txt
     exit_code: 1
-    wall_s: 0.39
+    wall_s: 0.63
     requests: 1
     synthesized: true
     provenance: >-
@@ -753,7 +807,8 @@ rows:
     notes: >-
       `rig`, failserver `--mode 404` — the model the local catalog knows and the API
       rejects. §3 made this row conditional on omp forwarding the 404 in-stream; it
-      does. One request, terminal, no retry, exit 1 in 0.39 s, stderr 0 B, terminal
+      does. One request, terminal, no retry, exit 1 in 0.39 s (0.63 s at 18.8.3),
+      stderr 0 B, terminal
       `stopReason: "error"` with `errorStatus: 404` (and `errorId: 404`, the one
       `errorId` in this set that is not a large opaque integer) and an `errorMessage`
       that NAMES THE MODEL. It classifies where the pre-flight `invalid-model` row
@@ -772,11 +827,12 @@ rows:
     stdout: tool-error-recovered.stdout.txt
     stderr: tool-error-recovered.stderr.txt
     exit_code: 0
-    wall_s: 0.41
+    wall_s: 0.73
     requests: 2
     synthesized: true
     provenance: >-
-      SCRUB ONLY: two path replacements — the spawn cwd /<user>/…/skills/multi-llm →
+      SCRUB ONLY: two path replacements — the spawn cwd (a scratch copy holding the
+      sample plan; /<user>/…/skills/multi-llm at 18.2.2) →
       /work (4 occurrences) and the capture dir holding the rendered
       `{output_json_path}` → /work (6 occurrences). The denied write target
       (`/omp-denied-findings.json`) is already root-relative and was NOT touched. No
@@ -805,7 +861,9 @@ rows:
   # ------------------------------------------------------------------------ #
   # The five SYNTHESIZED rows. Every other row above is omp's own bytes; these
   # five are derived from `success.stdout.txt` by editing named fields of events
-  # that were already in it — no event added, dropped or reordered, every line
+  # that were already in it (re-derived 2026-10-08 from the 18.8.3 capture by the
+  # same fixed edit, which reproduces the 18.2.2 rows byte for byte from the 18.2.2
+  # capture) — no event added, dropped or reordered, every line
   # still valid JSON — because each grades a shape a stub cannot drive. Three of
   # them need a release that does not exist (a renamed enum, a dropped key); one
   # needs an approval denial, which this adapter's argv is specifically built to
@@ -975,7 +1033,7 @@ rows:
     stdout: rate-limit-responses.stdout.txt
     stderr: rate-limit-responses.stderr.txt
     exit_code: 1
-    wall_s: 100.50
+    wall_s: 101.01
     requests: 6
     synthesized: true
     provenance: >-
@@ -984,20 +1042,21 @@ rows:
       HOME never appears in these bytes, so nothing was replaced for it. No event
       added, dropped or reordered; 9 lines in, 9 out; every line still valid JSON. No
       credential and no generation id was present — nothing here ever touched the live
-      service, and the `OPENROUTER_API_KEY` in force was the literal `omp-probe-key`,
-      which omp does not echo.
+      service, and the key in force was the literal `omp-probe-key` (in the env at
+      18.2.2, in the probe `models.yml` at 18.8.3), which omp does not echo.
     notes: >-
       `p13`, `failserver.py --mode 429` verbatim, fail-forever, **no `Retry-After`
       header**, instant failures, single turn, no `--max-time`. **6 requests over
-      100.50 s**, exit 1 — the production-protocol twin of the `rate-limit` row above,
+      100.50 s** (101.01 s at 18.8.3, the same gaps), exit 1 — the production-protocol twin of the `rate-limit` row above,
       and the row that moved `internal_retries.max_requests` from 16 to 6. The request
       log's gaps are 20.0, 20.0, 20.0, 20.0, 20.0: omp still reads the delay out of the
       vendor's own SENTENCE ("Please try again in 20s.") on this client, but the chain
       that consumes it is only the fetch wrapper's `maxAttempts: 6` — the completions
       client's `withReplaySafeStreamRetry` doubling is absent, so the ladder never gets
       a turn and every gap is the body's 20 s. Contrast on the same server and the same
-      HOME: `--mode 500` runs 6 requests over 15.98 s with gaps 0.5, 1.0, 2.0, 4.0,
-      8.0 — the `500·2ⁿ` ladder alone, and half the completions path's 12/32 s.
+      HOME: `--mode 500` runs 6 requests over 15.98 s (16.53 s at 18.8.3) with gaps
+      0.5, 1.0, 2.0, 4.0, 8.0 — the `500·2ⁿ` ladder alone, and half the completions
+      path's 12/32 s.
       Stderr is 0 B and the terminal `stopReason` is `error` with `errorStatus: 429`,
       exactly as on the completions client; only the count and the wall differ.
     expect:
@@ -1018,7 +1077,7 @@ rows:
     stdout: rate-limit-delayed.stdout.txt
     stderr: rate-limit-delayed.stderr.txt
     exit_code: 1
-    wall_s: 220.49
+    wall_s: 221.01
     requests: 6
     synthesized: true
     provenance: >-
@@ -1032,7 +1091,8 @@ rows:
       `Retry-After` as the row above, answered slowly. This is §1.9's second open
       question ("a request that takes 20 s to come back 429 adds its own latency to
       every attempt — no client-side request timeout was found") and the answer is
-      yes, exactly and only that: **6 requests over 220.49 s**, exit 1, arrival gaps
+      yes, exactly and only that: **6 requests over 220.49 s** (221.01 s at 18.8.3),
+      exit 1, arrival gaps
       40.0, 40.0, 40.0, 40.0, 40.0 — 20 s of latency plus the 20 s body-parsed sleep,
       every time. The COUNT is unchanged, which is the load-bearing half: omp does not
       time a slow request out and does not spend an extra attempt on it, so
@@ -1056,7 +1116,7 @@ rows:
     stdout: rate-limit-multi-turn.stdout.txt
     stderr: rate-limit-multi-turn.stderr.txt
     exit_code: 1
-    wall_s: 100.52
+    wall_s: 101.07
     requests: 7
     synthesized: true
     provenance: >-
@@ -1072,7 +1132,8 @@ rows:
       failserver's own bytes. §1.9's third open question — "a run with tool calls is
       one model call per turn, each with its own chain; a 429 on the fifth call sits
       behind four successful calls" — measured: **7 requests over 100.52 s**, exit 1,
-      gaps 0.03, 20.0, 20.0, 20.0, 20.0, 20.0. One successful call, then the SAME
+      gaps 0.03, 20.0, 20.0, 20.0, 20.0, 20.0 (18.8.3: 101.07 s, gaps 0.04 then the
+      same five). One successful call, then the SAME
       six-request chain as `rate-limit-responses` on the call that fails, and the
       wall is that chain's 100.5 s plus 0.03 s of tool turn. So a dispatch's own total
       is `6 + (successful calls before it)` and nothing this adapter sets bounds the
@@ -1098,12 +1159,14 @@ rows:
     stdout: compaction-summarized.stdout.txt
     stderr: compaction-summarized.stderr.txt
     exit_code: 0
-    wall_s: 0.89
+    wall_s: 1.26
     requests: 8
     notes: >-
       T7.15 step 1 of plans/opencode-validator-false-rate-limit-and-denied-turn.md,
       captured 2026-09-25 in the CONTAINER (omp **18.2.11**, the
-      cli-versions.lock pin — not the host 18.2.2 the rest of this set came from),
+      cli-versions.lock pin then) and re-run 2026-10-08 on 18.8.3 by the same rig in
+      the pinned image built from tests/container/Dockerfile (the same 69 events, the
+      same 8 requests, 1.26 s; `agent_end` gained `yielded`),
       `--network none`, no credential, in the same session as pi's json-mode set
       and by its rig (tests/fixtures/pi/capture/: `PART_BYTES=2000 run_row.sh omp
       compaction-summarized script overflow-compact`). The argv is

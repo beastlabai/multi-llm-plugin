@@ -460,8 +460,10 @@ class TestTheAllowListIsWhatTheInstalledBinaryAccepts:
 
     omp auto-updates and its tool registry moves with it. `--tools` is validated
     before model resolution and before the session opens, so a name the
-    installed build does not know is exit 1, **0 B on stdout, zero requests**
-    and a `CliUsageError` on stderr — which is to say *every* omp dispatch on
+    installed build does not know is **0 B on stdout, zero requests** and a
+    refusal on stderr (exit 1 and a `CliUsageError` at 18.2.2, exit 2 and
+    `Error: Unknown tool in --tools: …` at 18.8.3, measured 2026-10-08) — which
+    is to say *every* omp dispatch on
     that machine is dead at launch, at zero spend, recorded as `spawn_failed`
     (D3k rung 1: fails the whole batch, never retried). That is the right
     disposition and the wrong-looking failure: the run never started, so nothing

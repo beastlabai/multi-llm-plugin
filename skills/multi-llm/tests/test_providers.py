@@ -7250,7 +7250,7 @@ class TestOmpProvider:
         assert provider.name == "omp"
         assert provider.default_timeout == 600
         assert provider.version_cmd == ("omp", "--version")
-        assert provider.verified_version == "18.2.2"
+        assert provider.verified_version == "18.8.3"
         assert provider.usage_support == base_module.USAGE_FULL
 
     def test_availability_is_the_binarys_own_name_on_path(self, provider):

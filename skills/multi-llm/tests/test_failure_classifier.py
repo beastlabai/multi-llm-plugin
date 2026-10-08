@@ -363,6 +363,23 @@ class TestLaunchFailureMarkers:
     def test_the_launch_markers_are_recognized(self, stream):
         assert pbase.classify_streams("", stream, exit_code=1) == STATUS_SPAWN_FAILED
 
+    @pytest.mark.parametrize("stream", [
+        # omp 18.2.2: a Bun trace naming the error class.
+        "CliUsageError: Unknown tool in --tools: bogus. Valid tools: read, write.",
+        # omp 18.8.3 (tests/fixtures/omp/invalid-tool, exit 2): no class name,
+        # no trace, and the plural for two names.
+        "Error: Unknown tool in --tools: bogus.\n"
+        "Built-in tools: read, bash, edit, grep, glob, write.\n"
+        "Run `omp --help` for available flags.\n",
+        "Error: Unknown tools in --tools: bogus1, bogus2.\n",
+        # Both releases, unchanged wording (exit 1).
+        "error: Config overlay not found: /work/assets/omp/overlay.yml",
+    ])
+    def test_an_omp_argv_refusal_is_a_launch_failure(self, stream):
+        """A rejected ``--tools`` name or a missing ``--config`` overlay is a
+        property of the install, identical for every sibling slot: rung 1."""
+        assert pbase.classify_streams("", stream, exit_code=2) == STATUS_SPAWN_FAILED
+
     def test_a_root_refusal_is_read_as_the_root_cause_not_as_auth(self):
         """§7.2's ordering rule: a root refusal reads like a permission problem.
 

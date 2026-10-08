@@ -90,7 +90,7 @@ _KNOWN_STOP_REASONS = ("stop", "length", "toolUse", "error", "aborted")
 #: **on** (measured: ``tests/fixtures/pi/context-overflow-compacted``).
 PI_DIALECT = StreamDialect(
     product="pi",
-    verified_version="0.87.1",
+    verified_version="1.1.0",
     stream_version=PI_STREAM_VERSION,
     stop_reasons=_KNOWN_STOP_REASONS,
     compaction_event="compaction_end",
@@ -508,10 +508,10 @@ class PiProvider(LLMProvider):
     """
 
     version_cmd = ("pi", "--version")
-    #: 0.87.1 is where the json-mode fixture set in ``tests/fixtures/pi/`` was
-    #: captured (the container pin, ``tests/container/cli-versions.lock``), and
-    #: it is the version :data:`PI_DIALECT` names in every shape error. It is
-    #: not 0.80.6: no json-mode byte was captured there (that text-mode set is
+    #: 1.1.0 is where the json-mode fixture set in ``tests/fixtures/pi/`` was
+    #: last captured (the container pin, ``tests/container/cli-versions.lock``;
+    #: first captured on 0.87.1), and it is the version :data:`PI_DIALECT` names
+    #: in every shape error. It is not 0.80.6: no json-mode byte was captured there (that text-mode set is
     #: kept, ungraded, in ``tests/fixtures/pi/text-mode-0.80.6/``).
     #:
     #: **There is deliberately no ``min_version``.** A measured-at version is an
@@ -528,8 +528,19 @@ class PiProvider(LLMProvider):
     #: ``verified_version`` speak. Confirmed against the pinned binary 2026-09-25
     #: (``docker run --rm --network none --entrypoint /opt/mllm/real/pi
     #: mllm-e2e:local --version``): pi prints a bare ``0.87.1`` on stdout, which
-    #: the base :meth:`parse_version` reads without an override.
-    verified_version = "0.87.1"
+    #: the base :meth:`parse_version` reads without an override (1.1.0 prints a
+    #: bare ``1.1.0`` the same way).
+    #:
+    #: **Moved 0.87.1 -> 1.1.0 on 2026-10-08**: every captured row of
+    #: ``tests/fixtures/pi/`` was re-captured on 1.1.0 by the same rig, now under
+    #: the shipped ``--tools`` argv. Every row's class, exit code and request
+    #: count held but ``truncated``'s: the 60-byte cut is one request ending
+    #: ``Error reading response: malformed server-sent event JSON.`` (four
+    #: ending "Stream ended without finish_reason" at 0.87.1), still classified
+    #: as nothing. The stream gained ``durationMs``/``thinkingLevel`` on
+    #: assistant messages and lost ``responseId`` on the assistant
+    #: ``message_start``, none of which the parser reads; no parser change.
+    verified_version = "1.1.0"
 
     #: USAGE_FULL: ``--mode json`` carries omp's usage shape on every assistant
     #: ``message_end`` (probe: ``tests/fixtures/pi/json-mode/``; recaptured in
@@ -545,12 +556,15 @@ class PiProvider(LLMProvider):
     #: row reads ``bash`` out of the rendered ``--tools`` value.
     runs_shell_in_generate = True
 
-    #: pi's own retry chain (decision 12.7). MEASURED at 0.87.1
-    #: (``tests/fixtures/pi/manifest.yaml``: ``rate-limit``, ``server-error``,
-    #: ``truncated``, ``error-envelope``, ``zero-body``): **4 requests over
-    #: ~14.4 s**, three ``auto_retry_start`` events at 2/4/8 s and one
-    #: ``auto_retry_end{success: false}``. 401 and 404 are one request, and a
-    #: context overflow goes to compaction instead of the retry chain.
+    #: pi's own retry chain (decision 12.7). MEASURED at 0.87.1 and again at
+    #: 1.1.0 (``tests/fixtures/pi/manifest.yaml``: ``rate-limit``,
+    #: ``server-error``, ``error-envelope``, ``zero-body``; ``truncated`` too at
+    #: 0.87.1): **4 requests over ~14.4 s**, three ``auto_retry_start`` events
+    #: at 2/4/8 s and one ``auto_retry_end{success: false}``. 401 and 404 are
+    #: one request, and a context overflow goes to compaction instead of the
+    #: retry chain. At 1.1.0 a stream cut inside its first ``data:`` frame is
+    #: one request too: the SDK's ``malformed server-sent event JSON`` matches
+    #: none of pi's retry words.
     #:
     #: * ``max_requests=4`` is 1 + ``retry.maxRetries`` (default 3) **per failing
     #:   model call** — the counter resets on every non-error assistant message

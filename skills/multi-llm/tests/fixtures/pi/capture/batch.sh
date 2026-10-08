@@ -1,5 +1,6 @@
 #!/bin/bash
-# The whole 2026-09-25 capture session, in order. ~2.5 min wall, $0.
+# The whole capture session, in order (first run 2026-09-25 on pi 0.87.1, re-run
+# 2026-10-08 on 1.1.0). ~2.5 min wall, $0.
 HERE=$(cd "$(dirname "$0")" && pwd)
 run() { echo "=== $*"; "$HERE/run_row.sh" "$@" 2>&1 | tail -2; }
 run pi success stub
