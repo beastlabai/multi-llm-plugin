@@ -47,6 +47,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 from unittest.mock import patch
@@ -156,27 +157,49 @@ def _pure_help(monkeypatch, *, supported: bool = True) -> None:
     )
 
 
+#: The temp dir every process on the machine shares.
+_SHARED_TEMP = os.path.realpath(tempfile.gettempdir())
+
+
 def _hermetic_dirs_on_disk() -> set:
-    root = Path(os.environ.get("TMPDIR", "/tmp"))
+    root = Path(tempfile.gettempdir())
     return {str(p) for p in root.glob(f"{oc.HERMETIC_DIR_PREFIX}*")}
 
 
 @pytest.fixture
-def new_hermetic_dirs():
+def new_hermetic_dirs(tmp_path, monkeypatch):
     """Directories *this test* created, ignoring any other process's.
 
-    The prefix sweep is deliberately over the shared ``TMPDIR``, so a concurrent
-    orchestrator (or another pytest process) legitimately has its own directory
-    there. Only the difference from this test's own baseline is this test's
-    business — counting the raw glob would make the assertion depend on what
-    else is running on the machine.
+    A concurrent orchestrator (or another pytest process) legitimately has its
+    own directory in the shared temp dir, and one it made between this test's
+    baseline and its check read as this test's leak. So the test gets a temp
+    dir of its own (``gettempdir()``, where ``mkdtemp`` puts the config home),
+    and only the difference from its own baseline is its business.
     """
+    own = Path(os.path.realpath(tmp_path)) / "own-temp"
+    own.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(own))
     baseline = _hermetic_dirs_on_disk()
 
     def _new() -> list:
         return sorted(_hermetic_dirs_on_disk() - baseline)
 
     return _new
+
+
+def test_another_process_s_config_home_is_not_this_test_s(provider, user_xdg, new_hermetic_dirs):
+    """Stands in for a concurrent run: a config home made in the shared temp
+    dir after the baseline is never counted as one this test created (it was,
+    when the scan read the shared temp dir), and the test's own still is."""
+    elsewhere = tempfile.mkdtemp(prefix=oc.HERMETIC_DIR_PREFIX, dir=_SHARED_TEMP)
+    try:
+        assert new_hermetic_dirs() == []
+        with provider.hermetic_dispatch(PROFILE_AGENT_READONLY, "opencode/sonnet"):
+            [mine] = new_hermetic_dirs()
+            assert Path(mine).parent == Path(tempfile.gettempdir())
+    finally:
+        os.rmdir(elsewhere)
+    assert new_hermetic_dirs() == []
 
 
 # --------------------------------------------------------------------------- #

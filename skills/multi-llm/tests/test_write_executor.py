@@ -3603,6 +3603,13 @@ class TestReadDryRun:
         monkeypatch.setenv("XDG_CONFIG_HOME", str(env.tmp_path / "xdg-config"))
         oc.sweep_config_home()
         oc.reset_hermetic_state()
+        # A temp dir of the test's own: another process's config home, made
+        # meanwhile in the shared one, is not this dry run's leak.
+        import tempfile
+
+        own_temp = env.tmp_path / "own-temp"
+        own_temp.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(own_temp))
         hermetic_before = _hermetic_dirs()
         task = self._renderer_task(env, kind)
 
