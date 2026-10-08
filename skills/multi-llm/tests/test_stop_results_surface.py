@@ -141,7 +141,48 @@ class TestTheStopRecordsItsAnswers:
         assert all(a["why"] for a in resume["answers"])
         text = resume["answers_text"]
         for answer in resume["answers"]:
-            assert f"`{answer['command']}` ({answer['why']})" in text
+            assert f"`{answer['command']}` — {answer['why']}" in text
+
+    def test_the_answers_text_says_each_why_once_with_no_doubled_mark(
+        self, repo, capsys, monkeypatch,
+    ):
+        """The merge of fix round 28: records unbracketed `status`'s whys
+        (`run_status.why_line`), but the tool routes' message still put each
+        in brackets, so a why ending in a bracket of its own read
+        "(… depend on it (T006))", and the clause's own stop after the last
+        doubled one that ends in "…". Each why now follows its command
+        after a dash and ends its sentence once; the clause adds no mark."""
+        import modes
+        from utils import cli_common, next_phase
+
+        _first_run(repo, capsys)
+        record = {}
+        monkeypatch.setattr(cli_common, "record_user_resume",
+                            lambda obj: record.setdefault("v", obj))
+        monkeypatch.setenv(modes.ROUTE_ENV, "package")
+        assert next_phase.main(
+            ["plans/checked.md", "--blocked", "implement", "--host", "codex"]) == 0
+        capsys.readouterr()
+        resume = record["v"]
+        text = resume["answers_text"]
+        assert any(a["why"].endswith(")") for a in resume["answers"])
+        for doubled in ("))", ".)", ".;", "..", "…."):
+            assert doubled not in text, (doubled, text)
+        for answer in resume["answers"]:
+            said = f"`{answer['command']}` — {answer['why']}"
+            assert text.count(said) == 1, said
+        clause = modes.NEEDS_HUMAN_MESSAGE["answers"]
+        filled = clause.replace("{answers}", text)
+        assert ".. After" not in filled and ".. after" not in filled
+        assert filled.count(text) == 1
+        assert text.endswith(".")
+        # A why the record cut ends in "…", and the clause adds no stop after it.
+        cut = next_phase.render_resume_answers(
+            [{"command": "c", "why": "leave T005 undone (T006)"},
+             {"command": "d", "why": "accept T002's findings; T002 reported: x …"}])
+        assert cut == ("`c` — leave T005 undone (T006). "
+                       "`d` — accept T002's findings; T002 reported: x …")
+        assert "…." not in clause.replace("{answers}", cut)
 
 
 WARNING = ("T003 depends on T004, listed after it: a task added by an edit "

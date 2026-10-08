@@ -2045,13 +2045,25 @@ def resume_answers(
 
 
 def render_resume_answers(answers: Sequence[Mapping[str, Any]]) -> str:
-    """The answers as one run of text: `` `<command>` (<why>)`` joined by ``; ``.
+    """The answers as one run of text: `` `<command>` — <why>.`` each, one
+    sentence apiece, the last ending the text.
 
     What the tool routes put in their needs-human ``message`` through the
     surface's ``needs_human_message.answers`` clause, so a host that relays
     only the message relays every way forward. Python owns the wording.
+    The merge of fix round 28: each why was bracketed and the answers
+    ``; ``-joined, so a why that ends in a bracket of its own ("… depend on
+    it (T006)", a quoted finding "… (found 2)") read "(T006))", and the
+    clause's stop after the last doubled one that ends in "…"; ``status``
+    prints each unbracketed (``run_status.why_line``). Each why now follows
+    its command and ends its sentence once (``text_clip.with_closing_mark``),
+    and the clause adds no mark of its own after the text.
     """
-    return "; ".join(f"`{entry['command']}` ({entry['why']})" for entry in answers)
+    from .text_clip import with_closing_mark
+
+    return " ".join(
+        f"`{entry['command']}` — {with_closing_mark(entry['why'])}"
+        for entry in answers)
 
 
 # ---------------------------------------------------------------------------
