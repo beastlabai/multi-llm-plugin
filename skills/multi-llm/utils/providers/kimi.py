@@ -5,7 +5,10 @@ Python ``kimi-cli``). Everything below is measured against **0.36.1** in the
 containerized probe of `plans/harness-expansion.md` §6 — stub-only,
 ``--network none``, no credential — and several measurements contradict the
 plan's researched contract. Where they do, the measurement is what shipped and
-the contradiction is recorded on the member it affects.
+the contradiction is recorded on the member it affects. The parser fixtures, the
+retry chains, the effort inertness and the ``KIMI_MODEL_*`` family were
+re-measured at **2.1.1** on 2026-10-08 (see ``verified_version``); the telemetry
+DNS finding below was not.
 
 **Output.** ``--output-format stream-json`` (valid only with ``-p``) emits JSONL
 on stdout, one object per line. Assistant text is on **stdout**; thinking, tool
@@ -88,6 +91,9 @@ from .base import (
 #: body with and without it — so a ``:effort`` suffix would be a control that
 #: reports success and changes nothing. No ``REASONING_EFFORTS`` is declared
 #: here, which is what keeps a third ``:``-segment part of the model id.
+#: Re-confirmed at 2.1.1 (2026-10-08): with and without
+#: ``KIMI_MODEL_THINKING_EFFORT=high`` the request body differs only in the
+#: session id and the working-directory listing kimi puts in its system prompt.
 EFFORT_LADDER = ReasoningLadder(
     provider="kimi",
     declined=(
@@ -102,8 +108,10 @@ EFFORT_LADDER = ReasoningLadder(
 #: Measured at 0.36.1 against a fail-forever stub: **10** attempts with
 #: exponential backoff capped near 38 s (0.55, 1.05, 2.38, 4.35, 8.63, 17.56,
 #: 33.47, 38.02, 35.61 s), 145 s for one whole dispatch, and a 429 chain that
-#: behaves identically. `claude_code.py` is the committed precedent for pinning
-#: the knob and declaring the pinned number rather than the out-of-the-box one:
+#: behaves identically. Re-measured at 2.1.1 (2026-10-08): the same 10
+#: attempts, 145.4 s for the 5xx dispatch, 134.7 s for the 429 one.
+#: `claude_code.py` is the committed precedent for pinning the knob and
+#: declaring the pinned number rather than the out-of-the-box one:
 #: budgeting for 10 requests would reserve a slot's whole deadline for a
 #: configuration this harness never runs.
 #:
@@ -223,6 +231,11 @@ _STRIPPED_VENDOR_VARS: Tuple[str, ...] = (
     "KIMI_CODE_CACHE_DIR",
     "KIMI_CODE_PASSWORD",
     "KIMI_LOOP_MAX_RETRIES_PER_STEP",
+    # Read by the 2.1.1 bundle (2026-10-08): when true, EVERY failed request is
+    # retried without end, past the pinned KIMI_LOOP_MAX_ATTEMPTS_PER_STEP.
+    # Measured against a 401 stub: one request and exit 1 in 0.9 s without it,
+    # seven requests, no stderr and no exit after 40 s with it exported.
+    "KIMI_CODE_INFINITE_RETRY",
 )
 
 
@@ -318,24 +331,40 @@ class KimiProvider(LLMProvider):
     prompt_argv_index = -1
 
     version_cmd = ("kimi", "--version")
-    #: 0.36.1 is where every fixture in ``tests/fixtures/kimi/`` was captured and
-    #: the floor this parser is known to handle. kimi moved 0.33.0 → 0.36.1 in
-    #: three days, so this is a pin to re-confirm rather than a range to trust.
+    #: 0.36.1 is where every fixture in ``tests/fixtures/kimi/`` was first
+    #: captured and the floor this parser is known to handle. kimi moved 0.33.0 →
+    #: 0.36.1 in three days, so this is a pin to re-confirm rather than a range
+    #: to trust.
+    #:
+    #: 2026-10-08: every captured row re-run on 2.1.1 (the image's pin) by the
+    #: same probe servers through the container wrapper. The stream-json grammar
+    #: and every stderr line are unchanged apart from the ``system.version``
+    #: value, the session ids and the ``See log:`` path; the one measured move is
+    #: a 400 context overflow costing 4 POSTs instead of 3. ``min_version`` stays
+    #: at 0.36.1: nothing the parser reads changed, so the older capture is
+    #: still the floor it is known to handle.
     min_version = "0.36.1"
-    verified_version = "0.36.1"
+    verified_version = "2.1.1"
 
-    #: Measured at 0.36.1, every field (§6.1.1). ``max_wall_s`` is ``None`` and
-    #: that is forced twice over rather than unmeasured: a stalled request has
-    #: **no** client-side timeout (no output within 420 s, and no ``KIMI_*``
-    #: request-timeout knob exists — the ``KIMI_*TIMEOUT*`` names are MCP and
-    #: subagent only), and a honoured ``Retry-After`` is server-chosen (a 20 s
-    #: header produced gaps of exactly 20.02 s). Neither is bounded by anything
-    #: this adapter can set, so the plugin's outer timeout is the only real
-    #: bound and rule 4 correctly performs no admission test.
+    #: Measured at 0.36.1, every field (§6.1.1), and re-measured at 2.1.1 on
+    #: 2026-10-08. ``max_wall_s`` is ``None`` because no bound here is one this
+    #: adapter can set: a honoured ``Retry-After`` is server-chosen (a 20 s
+    #: header produced gaps of exactly 20.02 s at 0.36.1, 20.01-20.03 s at
+    #: 2.1.1), and no ``KIMI_*`` request-timeout knob exists (the
+    #: ``KIMI_*TIMEOUT*`` names are MCP and subagent only). CORRECTION, 2026-10-08:
+    #: an earlier note here said a stalled request has **no** client-side
+    #: timeout. It has one, fixed at ~300 s: at 2.1.1 a stall ends the request
+    #: with ``APITimeoutError`` / ``provider.connection_error: Request timed
+    #: out.`` after 301.6 s (exit 1 at 302 s with the pinned single attempt), and
+    #: the probe's own 0.36.1 evidence shows the same ~301 s per attempt (ten of
+    #: them, 3,155 s). The "no output within 420 s" reading was the probe
+    #: buffering stdout until exit. The value is kimi's, not a knob, so this
+    #: declaration stays ``None`` and the plugin's outer timeout stays the
+    #: bound rule 4 relies on.
     #:
     #: ``retries_rate_limit`` is ``True``: a 429-forever stub produced the same
-    #: 10-attempt chain, so §7.5 rule 6(b) must suppress an identical
-    #: harness-side rate-limit re-dispatch.
+    #: 10-attempt chain (0.36.1 and 2.1.1 alike), so §7.5 rule 6(b) must
+    #: suppress an identical harness-side rate-limit re-dispatch.
     internal_retries = InternalRetryEnvelope(
         max_requests=KIMI_LOOP_MAX_ATTEMPTS_PER_STEP,
         max_wall_s=None,
@@ -368,9 +397,10 @@ class KimiProvider(LLMProvider):
     def default_timeout(self) -> int:
         # 1200 s, matching the providers.yaml block. Generous on purpose: with
         # the retry knob pinned to a single attempt a dispatch is one request,
-        # but a *stalled* upstream is unbounded inside the child (see
-        # internal_retries), so this outer timeout is the only thing that ends
-        # it.
+        # and a *stalled* upstream ends inside the child only at kimi's own
+        # ~300 s request timeout (measured at 2.1.1, see internal_retries) --
+        # a value no knob sets, so this outer timeout is the bound the plugin
+        # owns.
         return 1200
 
     def is_available(self) -> bool:

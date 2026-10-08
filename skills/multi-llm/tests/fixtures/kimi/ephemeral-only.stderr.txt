@@ -1,2 +1,2 @@
 error: failed to run prompt: provider.api_error: 500 upstream is on fire
-See log: /home/e2e/.kimi-code/logs/kimi-code.log
+See log: /tmp/multi-llm-kimi-o9jpbgw5/logs/kimi-code.log

@@ -166,6 +166,14 @@ class TestKimiStrippedNames:
         for name in kimi_module._STRIPPED_VENDOR_VARS:
             assert name in stripped, name
 
+    def test_the_infinite_retry_switch_is_stripped(self):
+        """kimi 2.1.1 reads KIMI_CODE_INFINITE_RETRY and, when it is true,
+        retries EVERY failure without end, past the pinned
+        KIMI_LOOP_MAX_ATTEMPTS_PER_STEP. Measured 2026-10-08 against a 401
+        stub: one request and exit 1 in 0.9 s without it, seven requests, no
+        stderr and no exit after 40 s with it exported."""
+        assert "KIMI_CODE_INFINITE_RETRY" in set(KimiProvider().get_remove_env())
+
     def test_nothing_the_adapter_injects_is_also_stripped(self):
         """A value we strip must never also be a value we set — that is a
         contradiction the composition order would resolve silently."""
