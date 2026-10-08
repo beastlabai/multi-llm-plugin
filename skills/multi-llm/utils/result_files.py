@@ -35,6 +35,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+from . import progress_tracker as _progress
 from . import status_file as _status_file
 from .json_extractor import sanitize_model_name
 
@@ -305,12 +306,47 @@ def set_aside_unrecorded_results(
 
 
 def _forget_completed(phase_dir: str, stems: Sequence[str], recorded: Sequence[str]) -> None:
-    """Drop set-aside stems an earlier reaggregate recorded as completed models."""
+    """Drop set-aside stems an earlier reaggregate recorded as completed models.
+
+    Everywhere ``status`` reads a model from: ``models_completed``, the stem's
+    ``progress.models`` row, and the two counters derived from them. A
+    pre-round-24 ``--reaggregate`` wrote ``models_succeeded`` as the length of
+    ``models_completed`` with the stem in it, and a foreground reaggregate keeps
+    ``progress`` (only a detached one's claim drops it), so ``status`` read
+    "3 ok" beside a report of two models (review of fix round 24). With the
+    per-model map, both counters are re-derived from it as the fan-out derives
+    them (a terminal row is done, a ``done`` row succeeded); without one,
+    ``models_succeeded`` is recounted by the rule that wrote it.
+    """
+    forget = {stem for stem in stems if stem not in recorded}
     with _status_file.checkpoint_lock(phase_dir):
         status = _status_file.read_status(phase_dir)
         completed = status.get("models_completed")
-        if not isinstance(completed, list):
+        dropped = False
+        if isinstance(completed, list):
+            kept = [m for m in completed if m not in forget]
+            if kept != completed:
+                _status_file.update_status(phase_dir, {"models_completed": kept})
+                dropped = True
+        progress = status.get("progress")
+        if not isinstance(progress, dict):
             return
-        kept = [m for m in completed if m in recorded or m not in stems]
-        if kept != completed:
-            _status_file.update_status(phase_dir, {"models_completed": kept})
+        models_map = progress.get("models")
+        if isinstance(models_map, dict):
+            rows = {k: v for k, v in models_map.items() if k not in forget}
+            if len(rows) == len(models_map) and not dropped:
+                return
+            entries = [e for e in rows.values() if isinstance(e, dict)]
+            _status_file.update_progress(phase_dir, {
+                "models": rows,
+                "models_done": sum(
+                    1 for e in entries if e.get("state") in _progress.TERMINAL_STATES
+                ),
+                "models_succeeded": sum(
+                    1 for e in entries if e.get("state") == _progress.STATE_DONE
+                ),
+            })
+        elif dropped and progress.get("models_total") and isinstance(
+            progress.get("models_succeeded"), int
+        ):
+            _status_file.update_progress(phase_dir, {"models_succeeded": len(kept)})
