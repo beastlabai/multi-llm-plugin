@@ -1,1 +1,1 @@
-Error: Internal error: "reqwest error stream: error sending request for url (http://127.0.0.1:8099/s/bcaa900699c3/v1/chat/completions)"
+Error: Internal error: "reqwest error stream: error sending request for url (http://127.0.0.1:8099/s/6570c40d6608/v1/chat/completions)"
