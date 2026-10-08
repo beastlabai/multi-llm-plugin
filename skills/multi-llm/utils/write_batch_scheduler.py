@@ -302,7 +302,11 @@ __all__ = [
     "accepted_checks_section",
     "accepted_upstream_checks",
     "BATCH_CHECK_ACCEPTED_MARKER",
+    "accepted_findings_with_words_added",
     "batch_check_accepted_line",
+    "check_note_clause",
+    "restate_findings_problem",
+    "words_added_to",
     "split_accepted_findings",
     "accepted_findings_for",
     "task_owns_the_check",
@@ -1956,6 +1960,97 @@ def split_accepted_findings(
         else:
             matched.setdefault(check_id, []).append(finding)
     return own, matched
+
+
+def accepted_findings_with_words_added(
+    findings: Sequence[str], accepted: Mapping[str, Sequence[str]],
+) -> List[Tuple[str, str, str]]:
+    """``[(finding, check id, accepted finding)]`` for each of *findings*
+    that holds one of the *accepted* findings word for word (whitespace
+    aside) with more words before or after it (fix round 28).
+
+    Live run 12 (stop accept 02): the released T007 reported its re-run of
+    T002's check with its own comment written into the finding, "…
+    (known problem the user accepted in T002)", and the strict match of
+    :func:`split_accepted_findings` — unchanged, the user's decision: "No
+    general fuzzy or semantic matching is needed" — read it as T007's own
+    failure. Asked of the findings that match left the task's own, this is
+    the backstop's trigger, and only its trigger: both legs ask the task (or
+    the host) once to restate such a finding as the accepted one with the
+    added words in the check's ``note`` (the executor's report re-ask, the
+    native ``[FINDING_RESTATE]`` line); neither ever records it as accepted
+    itself. A check that could not run is never one."""
+    out: List[Tuple[str, str, str]] = []
+    for finding in findings:
+        if batch_check_could_not_run([finding]):
+            continue
+        plain = " ".join(str(finding or "").split())
+        hit = next((
+            (str(check_id), str(item))
+            for check_id, items in accepted.items()
+            for item in (items or ())
+            if " ".join(str(item).split())
+            and " ".join(str(item).split()) != plain
+            and " ".join(str(item).split()) in plain
+        ), None)
+        if hit is not None:
+            out.append((str(finding), hit[0], hit[1]))
+    return out
+
+
+def words_added_to(finding: str, accepted: str) -> str:
+    """The words *finding* adds around *accepted*, which it holds word for
+    word (:func:`accepted_findings_with_words_added`): what the native
+    restate line offers as the ``--note``, one plain line, the separators
+    and one pair of brackets around them dropped."""
+    plain = " ".join(str(finding or "").split())
+    inner = " ".join(str(accepted or "").split())
+    before, _, after = plain.partition(inner)
+    def balanced(text: str, opener: str, closer: str) -> bool:
+        depth = 0
+        for char in text:
+            depth += (char == opener) - (char == closer)
+            if depth < 0:
+                return False
+        return depth == 0
+
+    parts = []
+    for part in (before, after):
+        text = part.strip(" \t—–-:;,.")
+        while (
+            len(text) > 1 and text[0] + text[-1] in ("()", "[]")
+            and balanced(text[1:-1], text[0], text[-1])
+        ):
+            text = text[1:-1].strip(" \t—–-:;,.")
+        if text:
+            parts.append(text)
+    return "; ".join(parts)
+
+
+def restate_findings_problem(
+    task_id: str, flagged: Sequence[Tuple[str, str, str]],
+) -> str:
+    """The one problem the executor's report re-ask names for *flagged*
+    (:func:`accepted_findings_with_words_added`; fix round 28): each finding
+    and the accepted finding it holds, as JSON strings, and the two ways to
+    answer — cut it down to the accepted one with the words in ``note``, or
+    keep it whole when those words report more than the accepted finding."""
+    shown = []
+    for finding, check_id, accepted in list(flagged)[:ACCEPTED_NOTE_MAX_FINDINGS]:
+        shown.append(
+            f"its finding {_quoted_finding(finding)} holds the finding the user "
+            f"accepted for {check_id}, {_quoted_finding(accepted)}, word for "
+            f"word, with words added"
+        )
+    return (
+        f"In {task_id}'s `check`, " + "; and ".join(shown) + ". If the added "
+        f"words are your own comment, restate that finding as the accepted "
+        f"finding alone, character for character, and put the comment in the "
+        f"`check` object's `note`: it is then recorded as the problem the user "
+        f"accepted. If they report something the check printed beyond the "
+        f"accepted finding, keep the finding exactly as it is: it is then "
+        f"recorded as {task_id}'s own failure, which is right."
+    )
 
 
 def batch_check_accepted_line(
@@ -7441,6 +7536,12 @@ class WriteBatchScheduler:
             # 9's question; a reason sends the one report re-ask.
             return self._incomplete_report(task, snapshot, context)
 
+        def restate_findings(
+            context: Dict[str, Any],
+        ) -> Optional[Tuple[str, List[str]]]:
+            # Fix round 28: asked the same way; never a classification.
+            return self._restate_findings(task, context)
+
         def changed_files(context: Dict[str, Any]) -> List[str]:
             # T4.8 (plan opencode-validator-false-rate-limit-and-denied-turn
             # §4.4 step 4): a turn a denial ended has no result, so `_classify`
@@ -7473,6 +7574,10 @@ class WriteBatchScheduler:
             dispatch_task, "incomplete_report"
         ):
             extra["incomplete_report"] = incomplete_report
+        if self.kind == "implement" and _accepts_keyword(
+            dispatch_task, "restate_findings"
+        ):
+            extra["restate_findings"] = restate_findings
         return dispatch_task(
             task,
             phase_dir=self.phase_dir,
@@ -8436,6 +8541,48 @@ class WriteBatchScheduler:
                 f" Also: {'; '.join(declined.problems[:5])}."
                 if declined.problems else ""
             )
+        )
+
+    def _restate_findings(
+        self, task: Dict[str, Any], context: Dict[str, Any],
+    ) -> Optional[Tuple[str, List[str]]]:
+        """``(problem, accepted findings)`` when an implement task's readable
+        report has an own-check finding that holds a finding the user
+        accepted, word for word, with words added
+        (:func:`accepted_findings_with_words_added`) — the one problem its
+        report re-ask names and what such a finding may be cut down to — or
+        ``None`` (fix round 28, live run 12 stop accept 02).
+
+        Read-only, asked before ``_classify``, and never a classification:
+        the re-ask's restated report is classified like any. ``None`` for a
+        check task, a ``failed`` claim, a non-zero exit, a jail denial, a
+        task released by no accepted check, or no such finding."""
+        if self.kind != "implement" or is_check_task(self.kind, task):
+            return None
+        result = context.get("result")
+        if not isinstance(result, dict) or str(result.get("status") or "") == "failed":
+            return None
+        if context.get("exit_code") not in (0, None):
+            return None
+        denials = _as_jail_denials(context.get("jail_denials"))
+        if denials is not None and denials.total:
+            return None
+        findings = batch_check_findings(result)
+        if not findings:
+            return None
+        accepted = accepted_findings_for(
+            getattr(self, "tasks", None) or [], task, getattr(self, "state", None),
+        )
+        if not accepted:
+            return None
+        own, _matched = split_accepted_findings(findings, accepted)
+        flagged = accepted_findings_with_words_added(own, accepted)
+        if not flagged:
+            return None
+        task_id = str(task.get("task_id", ""))
+        return (
+            restate_findings_problem(task_id, flagged),
+            [accepted_text for _finding, _check, accepted_text in flagged],
         )
 
     def _verification_only(self, snapshot: TaskSnapshot) -> bool:
