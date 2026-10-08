@@ -3682,9 +3682,14 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             grouped_file=grouped,
         )
         self._native_write_tasks = list(tasks)
+        # Fix round 26: stamped native, so `status` shows this run rather
+        # than an earlier executor run's `.status.json`.
+        from .host_capabilities import resolve_host_id
+
         return write_task_file_for_phase(
             kind=self.write_kind, tasks=tasks, phase_dir=phase_dir,
             plan_file=self.plan_path, tasks_file=tasks_file, grouped_file=grouped,
+            native_host=resolve_host_id(explicit=self._host_id()),
         )
 
     def _refuse_unrecorded_native_resume(self) -> None:

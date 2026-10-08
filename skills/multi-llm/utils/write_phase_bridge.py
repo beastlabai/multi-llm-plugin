@@ -69,6 +69,11 @@ __all__ = [
 #: Named for the phase's kind so a phase dir shared by a resumed run cannot mix two.
 WRITE_TASK_FILENAME = "write_tasks.json"
 
+#: ``write_tasks.json``'s ``leg`` on a file the native emit wrote (fix round
+#: 26): the phase's newest run is the host's own, whatever an earlier
+#: executor run left in ``{phase}/.status.json``.
+NATIVE_LEG = "native"
+
 
 #: The first non-empty candidate, else the fallback. Never the loop index.
 #: Owned by :mod:`utils.prior_changes` (with :func:`entry_id`, which is built on
@@ -273,6 +278,7 @@ def write_task_file_for_phase(
     plan_file: str,
     grouped_file: Optional[str] = None,
     tasks_file: Optional[str] = None,
+    native_host: Optional[str] = None,
 ) -> str:
     """Persist the phase's materialized write tasks. Returns the path written.
 
@@ -284,7 +290,22 @@ def write_task_file_for_phase(
     :func:`materialize_write_tasks`) stamps ``inputs.tasks_sha256`` on the
     document too, so a hand-edited ``tasks/tasks.md`` invalidates a stored
     ``write_tasks.json`` on ``--resume`` the way an edited plan already does.
+
+    *native_host* (the native emit's, fix round 26): the file is stamped
+    ``leg: native`` with that host, because every run of the phase rewrites
+    it, on either leg, and an executor run's ``{phase}/.status.json`` stays
+    behind when the phase goes on natively; ``status`` reads the stamp to
+    show the native run as the current one (:data:`NATIVE_LEG`). The
+    executor leg passes none, so its rewrite drops the stamp.
     """
+    extra: Dict[str, Any] = {
+        "total_batches": len(tasks),
+        "phase": PHASE_BY_WRITE_KIND[kind],
+        "phase_dir": str(phase_dir),
+    }
+    if native_host is not None:
+        extra["leg"] = NATIVE_LEG
+        extra["host"] = str(native_host)
     document = make_task_file(
         kind=kind,
         tasks=list(tasks),
@@ -292,11 +313,7 @@ def write_task_file_for_phase(
             plan_file=plan_file, grouped_file=grouped_file, tasks_file=tasks_file
         ),
         task_list_key="batches",
-        extra={
-            "total_batches": len(tasks),
-            "phase": PHASE_BY_WRITE_KIND[kind],
-            "phase_dir": str(phase_dir),
-        },
+        extra=extra,
     )
     os.makedirs(phase_dir, exist_ok=True)
     path = os.path.join(phase_dir, WRITE_TASK_FILENAME)

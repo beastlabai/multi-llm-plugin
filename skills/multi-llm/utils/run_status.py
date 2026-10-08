@@ -2140,7 +2140,10 @@ def state_implement_view(
     """
     from .state_manager import StateManager
 
-    if (phase_dir_path(plan_path, _IMPLEMENT_PHASE) / _WRITE_REPORT).exists():
+    implement_dir = phase_dir_path(plan_path, _IMPLEMENT_PHASE)
+    if (implement_dir / _WRITE_REPORT).exists() and native_leg_stamp(implement_dir) is None:
+        # Fix round 26: an executor report beside a native emit's newer
+        # `write_tasks.json` is an earlier run's (`superseded_by_native`).
         return None
     for view in views:
         if (view.get("phase") or os.path.basename(str(view.get("phase_dir") or ""))) \
@@ -2502,6 +2505,7 @@ def render_state_implement_lines(
         unit="tasks", changed=view.get("state_changed_at"),
         stopped=bool(view.get("stopped")),
     )]
+    lines += _earlier_run_lines(view.get("earlier_run"))
     lines.append(
         f"      all tasks:      {implement_tally_text(view['tally'], live=bool(since))}"
     )
@@ -2536,6 +2540,146 @@ def render_state_implement_lines(
     if not since and view.get("resumable"):
         lines += _native_stop_lines(resume, answers, view.get("stop_resume_why"))
     return lines
+
+
+def native_leg_stamp(directory: Path) -> Optional[Dict[str, str]]:
+    """``{leg, host}`` when *directory*'s ``write_tasks.json`` was written by
+    the native emit, else ``None`` (fix round 26).
+
+    Every run of a write phase rewrites that file, on either leg, and only
+    the native emit stamps it (``write_phase_bridge.NATIVE_LEG``), so the
+    stamp says the phase's newest run is the host's own. Advisory: an
+    unreadable file is no stamp."""
+    try:
+        document = json.loads((Path(directory) / _WRITE_TASKS).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - advisory
+        return None
+    if not isinstance(document, dict) or document.get("leg") != "native":
+        return None
+    return {"leg": "native", "host": str(document.get("host") or "")}
+
+
+def _write_phase_of(plan_path: Path, view: Mapping[str, Any]) -> Optional[str]:
+    """The write phase (implement or an apply phase) whose folder *view* is
+    the run record of, else ``None``."""
+    where = os.path.realpath(str(view.get("phase_dir") or ""))
+    for phase in NATIVE_PHASE_ORDER:
+        if os.path.realpath(str(phase_dir_path(plan_path, phase))) == where:
+            return phase
+    return None
+
+
+def superseded_by_native(
+    plan_path: Path, view: Mapping[str, Any],
+) -> Optional[Dict[str, str]]:
+    """The native stamp that makes *view* an earlier run, else ``None``.
+
+    The commit review of 2026-10-08 ("stale executor status after switching
+    to native execution", reproduced, its guards older than 4ca1f34): an
+    executor run of a write phase (a tool route or ``--exec-subagents``)
+    leaves ``{phase}/.status.json`` and ``write_batch_report.json`` behind,
+    and when the user went on with the same phase on the Claude Code native
+    leg, ``status`` kept heading the phase with that run ("stopped in
+    foreground (needs you; …)" over a native run that had finished) because
+    ``state_implement_view`` and ``state_apply_views`` stood back for any
+    executor record. A record whose phase folder the native emit wrote last
+    (:func:`native_leg_stamp`) is that earlier run, unless it is a detached
+    run still going, which is never set aside."""
+    if _write_phase_of(plan_path, view) is None or _run_is_live(view):
+        return None
+    return native_leg_stamp(Path(str(view.get("phase_dir") or "")))
+
+
+def set_aside_superseded_runs(
+    plan_path: Path, views: Sequence[Dict[str, Any]], *,
+    host_id: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    """``(views, {phase: earlier_run})``: *views* without the executor runs a
+    newer native run of their phase went on from (:func:`superseded_by_native`),
+    and each one's :func:`earlier_run_record` for that native block to name.
+
+    Set aside only when the native view of that phase is there to show in its
+    place; otherwise the record stays as it is (fix round 26)."""
+    kept: List[Dict[str, Any]] = []
+    candidates: Dict[str, Tuple[Dict[str, Any], Dict[str, str]]] = {}
+    for view in views:
+        stamp = superseded_by_native(plan_path, view)
+        phase = _write_phase_of(plan_path, view) if stamp else None
+        if stamp is None or phase is None or phase in candidates:
+            kept.append(view)
+            continue
+        candidates[phase] = (view, stamp)
+    if not candidates:
+        return list(views), {}
+    shown: set = set()
+    if _IMPLEMENT_PHASE in candidates and state_implement_view(plan_path, kept) is not None:
+        shown.add(_IMPLEMENT_PHASE)
+    if any(phase != _IMPLEMENT_PHASE for phase in candidates):
+        shown.update(
+            entry.get("phase") for entry in state_apply_views(
+                plan_path, kept, None, host_id=host_id)
+        )
+    superseded: Dict[str, Dict[str, Any]] = {}
+    for phase, (view, stamp) in candidates.items():
+        if phase in shown:
+            superseded[phase] = earlier_run_record(view, stamp)
+        else:
+            kept.append(view)
+    # The caller's order, which sorts the blocks.
+    order = {id(view): index for index, view in enumerate(views)}
+    kept.sort(key=lambda view: order.get(id(view), len(order)))
+    return kept, superseded
+
+
+def earlier_run_record(view: Mapping[str, Any], stamp: Mapping[str, str]) -> Dict[str, Any]:
+    """What a native block says of the executor run it superseded:
+    ``{leg, phase_dir, run_id, verdict, host, ended, native_host}``."""
+    run = view.get("run") if isinstance(view.get("run"), dict) else {}
+    progress = view.get("progress") if isinstance(view.get("progress"), dict) else {}
+    verdict = view.get("verdict")
+    if run.get("run_id"):
+        if verdict == detach.VERDICT_DONE:
+            ended = "finished"
+        elif _stopped_for_the_user(dict(view)):
+            ended = "stopped and needed you (exit 3)"
+        elif verdict == detach.VERDICT_ABORTED:
+            ended = "was aborted"
+        elif verdict == detach.VERDICT_FAILED:
+            ended = f"failed (exit {run.get('exit_code')})"
+        else:
+            ended = "ended without a recorded outcome"
+    else:
+        step = progress.get("step")
+        ended = {
+            STOPPED_STEP: "stopped and needed you",
+            "complete": "finished",
+        }.get(step, "did not finish")
+    return {
+        "leg": "executor",
+        "phase_dir": os.path.basename(str(view.get("phase_dir") or "")),
+        "run_id": run.get("run_id"),
+        "verdict": verdict,
+        "host": run.get("host"),
+        "ended": ended,
+        "native_host": stamp.get("host") or None,
+    }
+
+
+def _earlier_run_lines(record: Any) -> List[str]:
+    """The native block's line naming the executor run it superseded."""
+    if not isinstance(record, Mapping):
+        return []
+    ref = (
+        f"run {str(record['run_id'])[:8]}" if record.get("run_id")
+        else "a foreground run"
+    )
+    launched = f", launched on {record['host']}" if record.get("host") else ""
+    host = f" ({record['native_host']})" if record.get("native_host") else ""
+    return [
+        f"      earlier run:    {ref} (its subagents dispatched by the "
+        f"plugin{launched}) {record.get('ended')}; this run, on the "
+        f"host{host}, is newer"
+    ]
 
 
 #: The apply phases a native host drives itself, in workflow order: no run
@@ -2584,7 +2728,9 @@ def state_apply_views(
                 str(phase_dir_path(plan_path, phase)))):
             continue
         directory = phase_dir_path(plan_path, phase)
-        if (directory.name in listed or (directory / _WRITE_REPORT).exists()
+        if (directory.name in listed
+                or ((directory / _WRITE_REPORT).exists()
+                    and native_leg_stamp(directory) is None)
                 or not (directory / _WRITE_TASKS).is_file()):
             continue
         candidates.append((phase, directory))
@@ -2800,6 +2946,7 @@ def render_state_apply_lines(
         view["phase_dir"], completed=bool(view.get("completed")),
         since=since, unit="batches", changed=view.get("state_changed_at"),
     )]
+    lines += _earlier_run_lines(view.get("earlier_run"))
     recorded, total = view.get("batches_recorded"), view.get("batches_total")
     if isinstance(recorded, int) and isinstance(total, int):
         lines.append(f"      batches:        {recorded}/{total} recorded by this run")
@@ -4097,6 +4244,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return EXIT_NEEDS_HUMAN
         views = _wait_for_terminal(plan_path, args, views)
 
+    # Fix round 26 (the commit review of 2026-10-08, "stale executor status
+    # after switching to native execution"): an executor run a native run of
+    # the same phase went on from is not this phase's run any more.
+    superseded: Dict[str, Dict[str, Any]] = {}
+    if not args.run_id and not args.question:
+        try:
+            views, superseded = set_aside_superseded_runs(
+                plan_path, views, host_id=_reader_host(args))
+        except Exception:  # noqa: BLE001 - advisory: the run view is not
+            superseded = {}
+
     # Fix round 16 (run 6): an executor implement run's own counts are that
     # run's; every task of the phase is tallied from state.json beside them.
     implement_tally = None
@@ -4244,6 +4402,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
         except Exception:  # noqa: BLE001 - advisory: the run view is not
             apply_tasks = []
+    for phase, record in superseded.items():
+        entry = implement_tasks if phase == _IMPLEMENT_PHASE else next(
+            (item for item in apply_tasks if item.get("phase") == phase), None)
+        if isinstance(entry, dict):
+            entry["earlier_run"] = record
 
     if args.json:
         payload: Dict[str, Any] = {"runs": views}
@@ -4775,6 +4938,10 @@ def _wait_for_terminal(
                 and verdict != detach.VERDICT_NO_RUN):
             return True
         if _names_this_run(view, getattr(args, "run_id", None)):
+            return False
+        if superseded_by_native(plan_path, view) is not None:
+            # Fix round 26: an executor checkpoint the native leg went on
+            # from is not a run anyone is waiting for.
             return False
         return _checkpoint_in_flight(view)
 

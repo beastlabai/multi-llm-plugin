@@ -540,6 +540,25 @@ class TestADeclinedReasonIsRecordedAsWritten(_PairRig):
             assert f"{REASON}. ." not in text, text
 
 
+class TestTheNativeApplyEmitStampsItsBatchList(_PairRig):
+    """Fix round 26 (`status` after a switch to the native leg): the native
+    emit stamps `write_tasks.json` with its leg and host, and an executor
+    run's rewrite of the same file drops the stamp."""
+
+    def test_native_then_executor(self, repo, capsys):
+        import apply_suggestions_orchestrator as orchestrator
+
+        plan = self._review_pair(repo)
+        tasks = self._phase_dir(plan) / "write_tasks.json"
+        assert orchestrator.main(
+            ["--plan-file", str(plan), "--yes", "--host", "claude-code"]) == 0
+        document = json.loads(tasks.read_text())
+        assert (document.get("leg"), document.get("host")) == ("native", "claude-code")
+        self._ids(plan)  # the executor leg (`--dry-run-subagents`)
+        assert "leg" not in json.loads(tasks.read_text())
+        capsys.readouterr()
+
+
 # ===========================================================================
 # The way forward from a partial application a resume would only repeat
 # ===========================================================================
