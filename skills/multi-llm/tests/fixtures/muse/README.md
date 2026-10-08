@@ -135,9 +135,10 @@ timed from a later point.) So the ladder is bounded, but by **wall clock, not
 by attempts**: ten provider
 attempts per round, rounds repeated until twelve minutes have passed since the
 first failure. Two operational consequences follow, and both are in the
-manifest: 985 s is past muse's own `default_timeout` of **600** and far past
-`redirect.yaml`'s `row_timeout_s: 300`, so **in production this shape is a
-harness timeout and that diagnosis is never seen**; and it classifies as
+manifest: 985 s fits the 1800 s slot providers.yaml gives muse (the class's
+own `default_timeout` of 600 is only the fallback for a config without the row),
+so the diagnosis is seen, and the declared envelope (985 s) refuses a second
+attempt the 815 s left could not hold; and it classifies as
 `None`, because nothing in any base table matches
 `transport_eof_before_terminal_event` or the "check network connectivity"
 sentence after it.
@@ -197,12 +198,13 @@ and still pinned.
    envelope and it means `retries_rate_limit` is true for this CLI:
    re-dispatching a rate-limited muse slot at the executor level doubles a wait
    that already ran for four minutes (§7.6(b) rule 6b). **Declared (C12)**:
-   `InternalRetryEnvelope(max_requests=40, max_wall_s=736.0,
+   `InternalRetryEnvelope(max_requests=40, max_wall_s=985.0,
    retries_rate_limit=True)` — 40 because the canonical `truncated` row's own
-   sentence is *"4 failed attempts (40 provider requests)"*, and 736 s because
-   that is muse's own 12-minute ceiling, overshot to 12m16s (0.1.0's figure;
-   1.4.3 reports the same four rounds as 16m19s since the first counted
-   provider request, and the declaration was left as it is). Read the budget
+   sentence is *"4 failed attempts (40 provider requests)"*, and 985 s because
+   that is the row's whole measured wall at 1.4.3 (985.32 s). It was 736 s
+   until 2026-10-08 — muse's own 12-minute ceiling overshot to 12m16s, 0.1.0's
+   figure, a span inside the chain rather than what one dispatch costs — and at
+   736 rule 4 admitted a second attempt it could not finish. Read the budget
    consequence the right way round: declaring `retries_rate_limit` **removes**
    the harness's own rate-limit backoff for muse (rule 6(b),
    `STOP_VENDOR_ALREADY_RETRIED`). It is a smaller retry budget, not a larger
@@ -239,9 +241,9 @@ and still pinned.
    `CONNECTION_ERROR_MARKERS`, `TIMEOUT_MARKERS` or any other base table matches
    either string. So the ladder treats it as generic transport noise and spends
    its whole budget on top of the 985 s muse already spent. In practice the
-   600 s `default_timeout` fires first and the run is reported as a timeout
-   instead, which is the right *category* by accident and loses the diagnosis
-   entirely.
+   1800 s slot cannot hold a second 985 s chain, so rule 4 refuses that retry
+   with the declared envelope as its reason (the class's 600 s fallback
+   `default_timeout` would have fired first and lost the diagnosis).
 
 ## Two rows that are "not applicable, because …"
 

@@ -149,45 +149,72 @@ class TestBudgetExhaustedRefusesToSpawn:
         assert ladder.stop_reason == STOP_BUDGET
         assert ladder.spawns == 0, "rule 4 is a pre-dispatch admission test"
 
-    def test_muses_real_736_s_envelope_refuses_a_slot_that_cannot_hold_it(self):
+    def test_muses_real_985_s_envelope_refuses_a_slot_that_cannot_hold_it(self):
         """Rule 4 re-run against the **shipped** envelope, not the synthetic one.
 
         ``_envelope`` above is structural on purpose — the ladder must stay free
         of provider imports — but that makes it the wrong witness for one
         question: does the number an adapter really declares compose with this
-        rule? muse's does. It declares ``max_wall_s = 736.0``, its own
-        12-minute wall-clock ceiling measured at 12m16s over four rounds of a
-        ten-attempt provider ladder (``tests/fixtures/muse/``'s ``truncated``
-        row, 40 provider requests), and that is larger than the 600 s slot
-        muse's own ``default_timeout`` hands out. So the admission test refuses
-        before anything is spawned, rather than a child being killed part-way
-        through a twelve-minute chain the harness cannot see.
+        rule? muse's does. It declares ``max_wall_s = 985.0``, the measured
+        wall of four rounds of its ten-attempt provider ladder at 1.4.3
+        (``tests/fixtures/muse/``'s ``truncated`` row, 40 provider requests,
+        985.32 s), and that is larger than a 900 s slot. So the admission test
+        refuses before anything is spawned, rather than a child being killed
+        part-way through a sixteen-minute chain the harness cannot see.
         """
         from utils.providers.muse import MuseProvider
 
         envelope = MuseProvider().internal_retries
-        assert envelope is not None and envelope.max_wall_s == 736.0
+        assert envelope is not None and envelope.max_wall_s == 985.0
 
         clock = Clock()
-        ladder = _ladder(clock, timeout=600.0, retries=1, envelope=envelope)
+        ladder = _ladder(clock, timeout=900.0, retries=1, envelope=envelope)
 
         assert ladder.next_attempt() is None
         assert ladder.stop_reason == STOP_BUDGET
         assert ladder.spawns == 0, "rule 4 is a pre-dispatch admission test"
 
+    def test_muses_second_attempt_after_a_985_s_chain_is_refused_with_a_reason(self):
+        """The review-24 repro: providers.yaml's 1800 s muse slot, two retries.
+
+        Attempt 1 runs muse's whole measured chain (985 s at 1.4.3) and comes
+        back a timeout. 815 s are left. With the stale 736 s envelope the ladder
+        admitted attempt 2 into those 815 s — a child certain to be killed
+        part-way through the same 985 s chain, which is exactly what rule 4
+        exists to refuse. Declared at the measured 985 s, the retry is refused
+        and the reason says why.
+        """
+        from utils.providers.muse import MuseProvider
+
+        clock = Clock()
+        ladder = _ladder(
+            clock, timeout=1800.0, retries=2,
+            envelope=MuseProvider().internal_retries,
+        )
+        assert ladder.next_attempt() == pytest.approx(1800.0)
+        clock.advance(985.0)
+        action = ladder.record(STATUS_TIMEOUT)
+
+        assert action.retry is False
+        assert ladder.stop_reason == STOP_BUDGET
+        assert "985s one dispatch of this runner declares" in action.reason
+        assert "2 retries unused" in action.reason
+        assert ladder.next_attempt() is None
+        assert ladder.spawns == 1
+
     def test_muses_real_envelope_still_admits_a_slot_that_can_hold_it(self):
-        """The other direction, so 736 is a bound and not a blanket refusal."""
+        """The other direction, so 985 is a bound and not a blanket refusal."""
         from utils.providers.muse import MuseProvider
 
         clock = Clock()
         ladder = _ladder(
             clock,
-            timeout=900.0,
+            timeout=1800.0,
             retries=1,
             envelope=MuseProvider().internal_retries,
         )
 
-        assert ladder.next_attempt() == pytest.approx(900.0)
+        assert ladder.next_attempt() == pytest.approx(1800.0)
         assert ladder.spawns == 1
 
     def test_gooses_real_envelope_declares_no_wall_and_restricts_nothing(self):

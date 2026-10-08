@@ -383,10 +383,11 @@ rows:
       an attempt count but by a **12-minute wall-clock ceiling** muse measures
       from its first failure. `opening meta model stream attempt 1/10` appears
       four times and so does `10/10`.
-      TWO CONSEQUENCES, both operational. (a) 985 s is past muse's own
-      `default_timeout` of **600** and far past redirect.yaml's
-      `row_timeout_s: 300`, so in production this shape is a harness TIMEOUT and
-      the rich diagnosis above is never seen. (b) It classifies as **None**: not
+      TWO CONSEQUENCES, both operational. (a) 985 s fits the 1800 s slot
+      providers.yaml gives muse (the class's `default_timeout` of 600 is only the
+      fallback), so the diagnosis above is seen, and `internal_retries` declares
+      `max_wall_s` 985 so rule 4 refuses a second chain the 815 s left cannot
+      hold. (b) It classifies as **None**: not
       one member of `CONNECTION_ERROR_MARKERS`, `TIMEOUT_MARKERS` or any other
       base table matches `transport_eof_before_terminal_event` — or the
       sentence "check network connectivity (VPN/proxy) and retry" that follows

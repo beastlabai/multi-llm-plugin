@@ -1876,7 +1876,7 @@ class TestTheRecordedPromptNamesTheAttemptsMinutes:
     def test_a_slot_refused_before_dispatch_records_the_slot_timeouts_minutes(
         self, tmp_path
     ):
-        """muse declares a 736 s worst-case wall, so rule 4 refuses a shorter
+        """muse declares a 985 s worst-case wall, so rule 4 refuses a shorter
         slot with nothing spawned, and the placeholder is the recorded prompt.
 
         719.6 s pins the rounding: the placeholder uses `attempt_timeout`'s

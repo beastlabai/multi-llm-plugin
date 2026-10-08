@@ -164,21 +164,24 @@ class MuseProvider(LLMProvider):
     #   32s, 60s, 60s, 60s` — exponential, capped at 60 s, 243 s of it sleeping
     #   (`README.md`'s "What this set found" item 3).
     #
-    # * `max_wall_s = 736.0` — 12m16s, muse's OWN ceiling and the number that
-    #   generalises: it states a *12-minute wall-clock ceiling measured from
-    #   its first failed attempt* and overshot it to 12m16s. (That is 0.1.0's
-    #   sentence. The 1.4.3 re-capture, 2026-10-08, runs the same four rounds
-    #   in 985 s and words the span as "over 16m19s since the first counted
-    #   provider request"; this number was left as declared.) This is a policy
-    #   the CLI enforces on itself, not a round trip against a stub, which is
-    #   what makes it declarable at all (contrast goose, which declares
-    #   `None`). The `truncated` row's total `wall_s` is **984.33** (985.32 at
-    #   1.4.3) — the ceiling clock does not start until the first failure, so
-    #   the opening round sits outside it; 736 s is deliberately the stated
-    #   bound rather than the observed total, and in production neither is ever
-    #   reached, because `default_timeout` is 600 and redirect.yaml's
-    #   `row_timeout_s` is 300, so this shape is a harness timeout and the rich
-    #   diagnosis is never seen.
+    # * `max_wall_s = 985.0` — the `truncated` row's whole measured wall at
+    #   1.4.3 (985.32 s; 984.33 at 0.1.0). muse states a *12-minute wall-clock
+    #   ceiling measured from its first failed attempt*, and at 1.4.3 it words
+    #   the same four rounds as "over 16m19s since the first counted provider
+    #   request" (0.1.0: "over 12m16s"). This is a policy the CLI enforces on
+    #   itself, not a round trip against a stub, which is what makes it
+    #   declarable at all (contrast goose, which declares `None`). It was 736
+    #   (the 0.1.0 sentence's 12m16s) until 2026-10-08, and that number is a
+    #   span *inside* the chain — the ceiling clock does not start until the
+    #   first failure, so the opening round sits outside it — not what one
+    #   dispatch costs. Declared at 736, rule 4 admitted a second attempt into
+    #   the 815 s an 1800 s slot has left after a 985 s chain, a child certain
+    #   to be killed part-way through the same chain (review 24, pins #3); at
+    #   985 the ladder refuses that retry and says why. The slot that runs is
+    #   providers.yaml's `muse.default_timeout`, 1800 s, which holds one whole
+    #   chain, so the rich diagnosis is seen; the class's own
+    #   `default_timeout` (600) is only the fallback for a config without the
+    #   row, and a 600 s slot is refused before the spawn.
     #
     # * `retries_rate_limit = True` — the `rate-limit` row IS the 5xx row's
     #   envelope to two decimal places: muse's ladder does not distinguish a 429
@@ -197,7 +200,7 @@ class MuseProvider(LLMProvider):
     # configuration this harness actually runs.
     internal_retries = InternalRetryEnvelope(
         max_requests=40,
-        max_wall_s=736.0,
+        max_wall_s=985.0,
         retries_rate_limit=True,
         configurable_by=(),
     )
