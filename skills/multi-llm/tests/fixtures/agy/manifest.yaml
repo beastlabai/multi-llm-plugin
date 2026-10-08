@@ -7,14 +7,20 @@
 # effort — see `notes:`.
 schema_version: 1
 provider: agy
-cli_version: "1.1.15"
-captured: "2026-08-19"
+cli_version: "1.3.1"
+captured: "2026-10-08"
 method: >-
-  §6 step 5, in the committed image mllm-e2e:local with `--network none`, the rig
+  Re-run on agy 1.3.1 on 2026-10-08 by the same probe scripts (the print-mode
+  row, the invalid-model and stub-eligibility runs, and the non-print probes) in
+  the pinned image built from tests/container/Dockerfile at the cli-versions.lock
+  pins; the set was first captured on 1.1.15 on 2026-08-19 in mllm-e2e:local.
+  One argv change since: `AgyProvider.build_command` now emits `--print-timeout
+  20m` where the first capture ran `90s`, and the re-capture runs today's argv.
+  §6 step 5, with `--network none`, the rig
   mounted read-only at /rig, NO credential and NO server — none is needed,
   because agy never gets far enough to make a request. argv is
   `AgyProvider.build_command`'s output verbatim (`--new-project
-  --dangerously-skip-permissions --output-format json --print-timeout 90s
+  --dangerously-skip-permissions --output-format json --print-timeout 20m
   --model "Gemini 3.6 Flash (High)" -p "<prompt>"`), dispatched through the PATH
   wrapper `/opt/mllm/bin/agy` so the row's `env_extra`
   (`AGY_CLI_DISABLE_AUTO_UPDATE=true`) is applied and the config root is a fresh
@@ -32,23 +38,28 @@ notes: >-
   failed or timed out","duration_seconds":0,"num_turns":0,"usage":{…}}`. So the
   machine-readable failure channel is stdout, as documented.
   WHAT THE DOCSTRING DOES NOT SAY, and what makes ten of the eleven empty cells
-  below permanent: agy ALSO writes 897 bytes to stderr (an interactive Google
-  OAuth URL, `Waiting for authentication (timeout 60s)...`, and
-  `Error: authentication timed out.`), and it blocks for the full 60 s first.
+  below permanent: agy ALSO writes 939 bytes to stderr (an interactive Google
+  OAuth URL, `Waiting for authentication (timeout 60s)...`,
+  `Error: authentication timed out.` and, new at 1.3.1, `error: authentication
+  failed or timed out`; 897 bytes without that last line at 1.1.15), and it
+  blocks for the full 60 s first.
   Every offline dispatch ends there. Re-measured here rather than quoted: the
   SAME argv with `--model definitely-not-a-model-xyz` produced BYTE-IDENTICAL
   stdout (md5 dc30d77eed870733053e445f556afa14), and so did a run of the real
   binary with `CLOUD_CODE_URL`, `GEMINI_API_KEY`, `GOOGLE_API_KEY` and
   `GOOGLE_GEMINI_BASE_URL` all pointed at a live `stub_server.py` on
   127.0.0.1:8099 — whose request log recorded ZERO agy requests (the only lines
-  in it are the probe's own /__health polls). That reproduces redirect.yaml's
+  in it are the probe's own /__health polls). All three were re-run on 1.3.1
+  with the same result: the same md5 on stdout from every run, exit 1, ~60.2 s,
+  and a stub log holding one health poll. That reproduces redirect.yaml's
   agy row independently: "it fails at the ELIGIBILITY gate on :loadCodeAssist …
   and its AUTH RESOLVES BEFORE THE FIRST RPC — so the failure happens with zero
   requests leaving the process."
   Also measured, and it is why every non-print failure is stderr-only: `agy
   --help` (rc 0), an unknown flag (rc 2), and `--print-timeout 1170` — Go's
   `missing unit in duration` (rc 2) — each write 0 bytes to stdout and
-  everything to stderr. `agy models` (rc 1) likewise: 0 stdout, 122 stderr,
+  everything to stderr (re-measured on 1.3.1: `--help` 2901 bytes, was 2510).
+  `agy models` (rc 1) likewise: 0 stdout, 122 stderr,
   `Error: Please sign in to view available models.`
 
 rows:
@@ -56,7 +67,7 @@ rows:
     stdout: auth-error.stdout.txt
     stderr: auth-error.stderr.txt
     exit_code: 1
-    wall_s: 60.17
+    wall_s: 60.22
     requests: 0
     notes: >-
       The whole of agy's offline behaviour in one capture, and the only §6.2 row
@@ -74,7 +85,8 @@ rows:
       and `state` are per-run PKCE nonces for a login that never completed; the
       `client_id` is the public installed-app id compiled into the binary.
       Nothing in them is a credential, and they are the reason a re-capture is
-      NOT byte-identical on stderr (stdout is).
+      NOT byte-identical on stderr (stdout is: the 1.3.1 re-capture's stdout
+      has the 1.1.15 md5, dc30d77eed870733053e445f556afa14).
     expect:
       success: false
       error_contains: ["authentication failed or timed out"]
@@ -88,7 +100,8 @@ rows:
   success:
     not_applicable: >-
       agy never reaches a model surface offline, so there is no answer to
-      capture. Measured 2026-08-19 on agy 1.1.15 in the committed image: with
+      capture. Measured 2026-08-19 on agy 1.1.15 in the committed image, and
+      again 2026-10-08 on 1.3.1 in the pinned image: with
       `CLOUD_CODE_URL`, `GEMINI_API_KEY`, `GOOGLE_API_KEY` and
       `GOOGLE_GEMINI_BASE_URL` all pointed at a running `stub_server.py`, the
       run still ended in the `auth-error` envelope after 60 s with ZERO requests
@@ -134,7 +147,8 @@ rows:
       failure exits **1** (with the ERROR envelope on stdout), an unknown flag
       and a bad `--print-timeout` duration exit **2**, and `agy models` exits
       **1**. No agy failure was observed exiting 0, so `exit_zero_failure_markers`
-      has nothing to declare and this conditional row has no producer at 1.1.15.
+      has nothing to declare and this conditional row has no producer at 1.1.15
+      or 1.3.1.
 
   stdout-error:
     not_applicable: >-
@@ -142,7 +156,8 @@ rows:
       DOES put its real diagnosis on stdout on a nonzero exit — that is exactly
       the `auth-error` row above, exit 1 with the ERROR envelope on stdout — but
       the row's other half is "stderr empty", and agy never leaves it empty on
-      that path: it always writes the 897-byte interactive OAuth block first.
+      that path: it always writes the interactive OAuth block first (939 bytes
+      at 1.3.1, 897 at 1.1.15).
       The inverse shape (stdout empty, everything on stderr) is what every
       non-print failure produces, measured on `--help`, an unknown flag,
       `--print-timeout 1170` and `agy models`. So the trap this row names is
@@ -171,7 +186,8 @@ rows:
       MEASURED, not assumed, and the measurement is that the auth gate wins.
       `--model definitely-not-a-model-xyz` through the wrapper produced stdout
       BYTE-IDENTICAL to `auth-error.stdout.txt` (md5
-      dc30d77eed870733053e445f556afa14), exit 1, 60.15 s — the model string is
+      dc30d77eed870733053e445f556afa14), exit 1, 60.15 s (60.22 s on 1.3.1,
+      same md5) — the model string is
       never validated because the run never gets past authentication. Note that
       the tree disagrees with itself about what a credentialed agy does here:
       the adapter docstring says an invalid `--model` is "SILENTLY ignored"

@@ -3,8 +3,12 @@
 One row on disk, eleven written reasons, and the eleven all reduce to one
 measured fact: **agy's auth resolves before its first RPC**, so no dispatch of
 any kind reaches a model surface a stub could answer. The bytes here are raw
-`agy` output as the CLI wrote them (agy 1.1.15, `--network none`, no credential,
-no server — none was needed). Nothing is synthesized.
+`agy` output as the CLI wrote them (agy 1.3.1, `--network none`, no credential,
+no server — none was needed). Nothing is synthesized. First captured on 1.1.15
+(2026-08-19) and re-captured on 1.3.1 (2026-10-08) in the pinned image built at
+`tests/container/cli-versions.lock`'s pins, with today's argv (`--print-timeout
+20m`, where the first capture ran `90s`): stdout is byte-identical across the
+two releases; stderr gained one closing line.
 
 `manifest.yaml` is the authority on what the row asserts —
 `tests/test_provider_fixture_rows.py` grades it. This file says why there is
@@ -27,9 +31,11 @@ channel really is stdout.
 
 What the docstring does **not** say, and what the capture adds:
 
-- agy also writes **897 bytes to stderr** on the same path: an interactive
-  Google OAuth consent URL, `Waiting for authentication (timeout 60s)...`, and
-  `Error: authentication timed out.` — and it **blocks for the full 60 s** first.
+- agy also writes **939 bytes to stderr** on the same path: an interactive
+  Google OAuth consent URL, `Waiting for authentication (timeout 60s)...`,
+  `Error: authentication timed out.` and `error: authentication failed or timed
+  out` (new at 1.3.1; 897 bytes without it at 1.1.15) — and it **blocks for the
+  full 60 s** first.
   This is not a CLI that fails fast when logged out.
 - **The useful diagnosis and the classifiable string are on different
   channels.** `classify_failure` returns `auth_failed`, but not from the
@@ -39,9 +45,10 @@ What the docstring does **not** say, and what the capture adds:
   reads only stdout; `classify_failure` reads both. Drop stderr anywhere in the
   chain and a logged-out agy classifies as nothing at all.
 - Every **non-print** failure is the mirror image — 0 bytes on stdout,
-  everything on stderr: `agy --help` (rc 0, 2510 bytes on stderr), an unknown
-  flag (rc 2), `--print-timeout 1170` → Go's `missing unit in duration` (rc 2),
-  and `agy models` (rc 1, `Error: Please sign in to view available models.`).
+  everything on stderr: `agy --help` (rc 0, 2901 bytes on stderr at 1.3.1,
+  2510 at 1.1.15), an unknown flag (rc 2), `--print-timeout 1170` → Go's
+  `missing unit in duration` (rc 2), and `agy models` (rc 1, `Error: Please
+  sign in to view available models.`).
 
 The stderr bytes carry a Google OAuth URL. Its `code_challenge` and `state` are
 per-run PKCE nonces for a login that never completed, and the `client_id` is the
