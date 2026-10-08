@@ -45,6 +45,13 @@ OPTIONAL = "/multi-llm:multi-llm --review-plan 'plans/my plan.md'"
 WHY = "Have the models review the plan again; skipping this keeps the plan as it stands."
 
 
+@pytest.fixture(autouse=True)
+def _short_settle(monkeypatch):
+    """A reply the hook input names that the transcript never gets costs this
+    long here, not the hook's 2 s (fix round 27, ``settled_turn``)."""
+    monkeypatch.setattr(report_check, "SETTLE_BUDGET_S", 0.3, raising=False)
+
+
 # ---------------------------------------------------------------------------
 # Fixture transcripts
 # ---------------------------------------------------------------------------
@@ -295,7 +302,8 @@ class TestTheHookInput:
         decision_of(run_check(capsys, path, hook=hook, tmp_path=tmp_path))
 
     def test_last_assistant_message_covers_a_stale_transcript(self, tmp_path, capsys):
-        """The hook can fire before the transcript's last line is written."""
+        """The hook can fire before the transcript's last line is written, and
+        the line may still be missing once the wait for it ran out."""
         path = (Transcript().prompt("go").bash(block_output())
                 .write(tmp_path / "t.jsonl"))
         hook = {"transcript_path": str(path), "stop_hook_active": False,
@@ -311,10 +319,10 @@ class TestTheHookInput:
 
     def test_a_transcript_that_has_not_written_the_reply_passes_without_the_field(
             self, tmp_path, capsys):
-        """Measured live on 2.1.289 (2026-10-05): when the Stop hook runs, the
-        transcript still ends at the turn's last tool result. With no
-        ``last_assistant_message`` the check cannot see the reply at all, and a
-        reply it cannot see is never a miss."""
+        """When the Stop hook starts, the transcript does not hold the reply
+        yet (2.1.289 and 2.1.293). With no ``last_assistant_message`` and no
+        reply once the file stopped growing, the check cannot see the reply at
+        all, and a reply it cannot see is never a miss."""
         path = (Transcript().prompt("go").bash(block_output())
                 .write(tmp_path / "t.jsonl"))
         hook = {"transcript_path": str(path), "stop_hook_active": False}

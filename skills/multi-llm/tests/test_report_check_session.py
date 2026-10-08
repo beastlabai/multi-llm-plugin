@@ -21,6 +21,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 SKILL_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(SKILL_ROOT))
 
@@ -35,6 +37,15 @@ from tests.test_report_check import (  # noqa: E402
     run_check,
 )
 from utils import report_check  # noqa: E402
+
+
+
+@pytest.fixture(autouse=True)
+def _short_settle(monkeypatch):
+    """A reply the hook input names that the transcript never gets costs this
+    long here, not the hook's 2 s (fix round 27, ``settled_turn``)."""
+    monkeypatch.setattr(report_check, "SETTLE_BUDGET_S", 0.3, raising=False)
+
 
 IMPLEMENT = "/multi-llm:multi-llm --implement plans/racing-game.md"
 APPLY = "/multi-llm:multi-llm --apply-task-suggestions plans/racing-game.md"
