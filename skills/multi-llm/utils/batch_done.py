@@ -121,6 +121,7 @@ try:
         record_batch_items_in_state,
         set_task_batch_check_accepted_in_state,
         set_task_batch_check_in_state,
+        set_task_own_check_note_in_state,
         set_task_own_check_ran_in_state,
         set_task_check_findings_in_state,
         set_task_check_tree_in_state,
@@ -128,8 +129,8 @@ try:
     )
     from .stream_bootstrap import bootstrap_streams
     from .subagent_executor import (
-        DECLINED_SECTION_HEADING, SKIPPED_SECTION_HEADING, check_findings_from,
-        declined_reason,
+        CHECK_NOTE_MAX_CHARS, DECLINED_SECTION_HEADING, SKIPPED_SECTION_HEADING,
+        check_findings_from, declined_reason,
     )
     from .text_clip import clip, with_closing_mark
     from .subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set
@@ -170,6 +171,7 @@ except ImportError:  # pragma: no cover - direct script invocation
         record_batch_items_in_state,
         set_task_batch_check_accepted_in_state,
         set_task_batch_check_in_state,
+        set_task_own_check_note_in_state,
         set_task_own_check_ran_in_state,
         set_task_check_findings_in_state,
         set_task_check_tree_in_state,
@@ -177,8 +179,8 @@ except ImportError:  # pragma: no cover - direct script invocation
     )
     from utils.stream_bootstrap import bootstrap_streams  # type: ignore
     from utils.subagent_executor import (  # type: ignore
-        DECLINED_SECTION_HEADING, SKIPPED_SECTION_HEADING, check_findings_from,
-        declined_reason,
+        CHECK_NOTE_MAX_CHARS, DECLINED_SECTION_HEADING, SKIPPED_SECTION_HEADING,
+        check_findings_from, declined_reason,
     )
     from utils.text_clip import clip, with_closing_mark  # type: ignore
     from utils.subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set  # type: ignore
@@ -352,9 +354,17 @@ def record_batch(
     skipped: Optional[List[str]] = None,
     listed: Optional[List[str]] = None,
     partial: bool = False,
+    note: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Record *task_id*'s outcome; the ``{task_id, status, items, state_file,
     check_findings}`` written.
+
+    *note* (``--note``, fix round 28) is a code batch's own words about the
+    checks it ran (its reply's ``check.note``): recorded beside its own
+    check (``task_own_check_note`` for an implement task, the
+    ``apply_fix_batch_checks`` entry for an apply-code-fixes batch) and
+    shown on its ``[BATCH_CHECK_*]`` line, never read as a finding. Only
+    with ``--own-check``.
 
     *partial* (``--partial``, fix round 21) is a ``failed`` task whose
     subagent changed files before it failed: the executor's partial
@@ -427,6 +437,14 @@ def record_batch(
             "--own-check the checks a task that edits files ran on its own "
             "edits. Nothing was recorded."
         )
+    if str(note or "").strip() and own_check is None:
+        raise WritePromptError(
+            "--note is recorded only with --own-check (a task that edits "
+            "files): it is that task's own words about the checks it ran, "
+            "from its reply's check.note. Pass it beside --own-check, or "
+            "leave it out. Nothing was recorded."
+        )
+    note = clip(note, CHECK_NOTE_MAX_CHARS) if str(note or "").strip() else None
     if findings and check != "findings" and own_check != "findings":
         raise WritePromptError(
             "--finding is recorded only with --check findings (a check task) "
@@ -588,6 +606,9 @@ def record_batch(
             # Fix round 23: what it reported again of the accepted findings,
             # by check, beside it (and cleared by any other record).
             set_task_batch_check_accepted_in_state(state, task_id, accepted_again)
+            # Fix round 28: its own words about its checks, never a finding.
+            set_task_own_check_note_in_state(
+                state, task_id, note if status == "completed" else None)
             blocked = _hold_or_release_dependents(
                 state, document, task_id, held=bool(check_findings),
             )
@@ -607,6 +628,7 @@ def record_batch(
                 grouped_sha256=_known_checks.review_stamp(task),
                 findings=batch_check if completed else None,
                 listed=listed_outcomes if completed else None,
+                note=note if completed else None,
             )
         tracked = _tracked_after_batch(state, target, kind)
         if tracked is not None:
@@ -654,6 +676,7 @@ def record_batch(
         "listed_ignored": listed_ignored,
         "partial": bool(partial),
         "check_not_recorded": result_left_out,
+        "note": note,
     }
 
 
@@ -1208,7 +1231,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--finding", action="append", default=None, metavar="TEXT",
         help="One problem a check reported (repeatable; with --check findings "
-             "or --own-check findings).",
+             "or --own-check findings), exactly as the reply wrote it.",
+    )
+    parser.add_argument(
+        "--note", default=None, metavar="TEXT",
+        help="With --own-check: the reply's check.note, its own words about "
+             "the checks it ran. Recorded and shown beside them, never read "
+             "as a finding.",
     )
     parser.add_argument(
         "--declined", action="append", default=None, metavar="ID=REASON",
@@ -1255,6 +1284,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             skipped=args.skipped,
             listed=args.listed_check,
             partial=args.partial,
+            note=args.note,
         )
     except WritePromptError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -1289,7 +1319,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         # Fix round 22: reported again, never the task's own failure.
         task_id = written["task_id"]
         print(
-            f"{batch_check_accepted_line(task_id, accepted_again)}. List it in "
+            f"{batch_check_accepted_line(task_id, accepted_again, note=written.get('note'))}. List it in "
             f"the phase's summary.md under ## Check Findings, beside "
             f"{', '.join(accepted_again)}'s accepted findings, as {task_id} "
             f"running that check again: it does not make the phase unclean and "
@@ -1299,7 +1329,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if failing:
         # Fix round 14: the native leg's counterpart of the executor's line.
         print(
-            f"{batch_check_line(written['task_id'], failing)}. The edits are "
+            f"{batch_check_line(written['task_id'], failing, note=written.get('note'))}. The edits are "
             f"kept. List it under "
             f"## Check Findings in the phase's summary.md, and say in your "
             f"final report that this check fails: never report the phase as a "

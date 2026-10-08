@@ -969,6 +969,32 @@ def batch_check_findings(result: Any) -> Optional[List[str]]:
     return None
 
 
+#: How much of a code batch's ``check.note`` the records carry (fix round 28).
+CHECK_NOTE_MAX_CHARS = 300
+
+
+def batch_check_note(result: Any) -> Optional[str]:
+    """A code batch's ``check.note``: its own words about the checks it ran,
+    one plain line bounded at :data:`CHECK_NOTE_MAX_CHARS`, or ``None``.
+
+    Fix round 28 (live run 12, stop accept 02 on Claude Code and OpenCode):
+    T007 re-ran the check the user accepted and wrote its comment into the
+    finding ("… (known problem the user accepted in T002)", "… — the
+    accepted T002 problem (…), not caused by this note"), and the strict
+    match read the finding as T007's own failure. The contract asks for
+    each finding as the check reported it and for any comment here instead
+    (:data:`write_batch_scheduler.WRITE_CHECK_CONTRACT`). Recorded and shown
+    beside the check on both legs (``util batch-done --note``); never read
+    as a finding and never matched on."""
+    check = result.get("check") if isinstance(result, dict) else None
+    if not isinstance(check, dict):
+        return None
+    note = check.get("note")
+    if not isinstance(note, str):
+        return None
+    return clip(note, CHECK_NOTE_MAX_CHARS) or None
+
+
 def _ran_word(which: str) -> str:
     """``known_checks``' ``passed`` / ``failed`` outcome word."""
     try:
@@ -1305,6 +1331,15 @@ def row_batch_check_accepted(row: Dict[str, Any]) -> Dict[str, List[str]]:
     }
 
 
+def row_batch_check_note(row: Dict[str, Any]) -> Optional[str]:
+    """A serialized row's own-check note (its ``batch_check_note``, fix round
+    28), else ``None``."""
+    note = row.get("batch_check_note") if isinstance(row, dict) else None
+    if not isinstance(note, str):
+        return None
+    return clip(note, CHECK_NOTE_MAX_CHARS) or None
+
+
 def row_outcome_label(row: Dict[str, Any]) -> Optional[str]:
     """A serialized row's label: ``outcome_label`` when present, else ``write_outcome``.
 
@@ -1598,6 +1633,10 @@ class TaskOutcome:
     #: out of ``batch_check``, so they never make the task's own failure, and
     #: named beside that check's accepted findings instead. Empty otherwise.
     batch_check_accepted: Dict[str, List[str]] = field(default_factory=dict)
+    #: The code batch's own words about its checks (its ``check.note``,
+    #: :func:`batch_check_note`, fix round 28): recorded and shown beside
+    #: the check, never a finding. ``None`` when it gave none.
+    batch_check_note: Optional[str] = None
     #: A write batch whose reply said ``applied`` while no byte moved, after
     #: its one re-send (the ladder's rule 9): a ``clean-failure`` that is
     #: never ``ok``, worded on the stop as a change that did not land (fix
@@ -1715,6 +1754,9 @@ class TaskOutcome:
                     str(check_id): list(found)
                     for check_id, found in self.batch_check_accepted.items()
                 }
+            if self.batch_check_note:
+                # Additive and only here (fix round 28).
+                out["batch_check_note"] = self.batch_check_note
             if self.runner_notes:
                 out["runner_notes"] = self.runner_notes
             if self.not_rerun:

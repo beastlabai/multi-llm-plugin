@@ -128,7 +128,8 @@ def test_the_released_task_is_told_the_failure_is_accepted_and_not_its_own():
     section = accepted_checks_section([("T002", "Run the release check", [ACCEPTED])])
     assert "They are known and accepted: they are not yours to fix" in section
     assert "not a failure of this task's own check" in section
-    assert "you may cite them" in section
+    # Fix round 28: one exact way to report a repeat, a note beside it.
+    assert "copied exactly as it is quoted below" in section
     assert "You do not need to run that check again" in section
     two = accepted_checks_section([
         ("T002", "", [ACCEPTED]), ("T003", "", ["npm test: 1 failing"]),
