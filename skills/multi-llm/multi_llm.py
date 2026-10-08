@@ -133,6 +133,9 @@ UTIL_COMMANDS: Dict[str, Tuple[Optional[str], str, str]] = {
     "report-check": ("utils.report_check", "main",
                      "Check a turn's final message copies the printed next "
                      "command (Claude Code Stop hook)."),
+    "wakeup-check": ("utils.wakeup_check", "main",
+                     "Refuse a scheduled wakeup or cron job while a phase "
+                     "runs (Claude Code PreToolUse hook)."),
     "next-command": ("utils.next_phase", "main",
                      "Print a plan's next workflow command (read-only; "
                      "--after <mode>, --host <id>)."),

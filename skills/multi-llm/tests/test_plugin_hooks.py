@@ -41,8 +41,10 @@ class TestTheHookFile:
         data = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
         assert list(data) == ["hooks"]
         # `Stop` is the report check (plans/next-phase-command.md T11), pinned
-        # in tests/test_report_check.py.
-        assert list(data["hooks"]) == ["SessionStart", "Stop"]
+        # in tests/test_report_check.py; `PreToolUse` refuses a scheduled
+        # wakeup while a phase runs (fix round 26), pinned in
+        # tests/test_wakeup_check.py.
+        assert list(data["hooks"]) == ["SessionStart", "Stop", "PreToolUse"]
 
     def test_the_one_hook_is_a_command_running_the_doctor_script(self):
         entries = _hook_entries()
