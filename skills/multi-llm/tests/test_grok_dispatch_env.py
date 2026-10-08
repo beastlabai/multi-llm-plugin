@@ -130,6 +130,14 @@ def test_a_malformed_grok_config_falls_through_to_the_path(monkeypatch, tmp_path
     assert overlay["features"] == {"web_fetch": False}
 
 
+def test_a_relative_overlay_path_is_left_in_force(monkeypatch, tmp_path):
+    """grok resolves it against the child's cwd, not the dispatcher's."""
+    (tmp_path / "overlay.json").write_text('{"features": {}}', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GROK_CONFIG_PATH", "overlay.json")
+    assert "GROK_CONFIG" not in GrokProvider().get_env("grok-4.5")
+
+
 def test_an_overlay_file_the_adapter_cannot_read_is_left_in_force(
     monkeypatch, tmp_path
 ):
