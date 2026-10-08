@@ -2952,7 +2952,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"Total tasks: {output_data['total_tasks']}")
     print(f"Pending tasks: {output_data.get('pending_tasks', output_data['total_tasks'])}")
     print(f"Batches: {len(output_data['batches'])}")
-    if "tasks_to_dispatch" in output_data:
+    if "tasks_to_dispatch" in output_data and native_gate is None:
         # The one number the host passes to `util metrics` (fix round 16:
         # the host counted "5 execution batches" and passed that). Fix round
         # 18 (run 7 #2): it is in the [ETA] line's unit, one record per task

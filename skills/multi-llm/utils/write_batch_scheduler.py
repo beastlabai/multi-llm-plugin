@@ -991,11 +991,10 @@ def manual_gate_head(
         task_id = gating[0]
         count = len(held)
         return (
-            f"{phase} ran nothing: "
-            + ("the 1 code task left waits" if count == 1
-               else f"all {count} code tasks left wait")
+            f"{phase} ran nothing: {count} code "
+            + ("task waits" if count == 1 else "tasks wait")
             + f" on manual task {task_id}{labels.get(task_id, '')}, which is "
-            f"not recorded done"
+            f"not recorded done, and no other code task can run"
         )
     named = ", ".join(
         f"{task_id}{labels.get(task_id, '')} holds {len(waiting[task_id])}"
