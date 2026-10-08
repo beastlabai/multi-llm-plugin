@@ -276,6 +276,14 @@ RUN /opt/mllm/real/uv pip install \
 #    tmpfs mode strings. The copilot row's `env_extra` pins XDG_CACHE_HOME here.
 #    Set inline rather than as an image-wide ENV: every other CLI wants its own
 #    per-invocation cache.
+#
+# QWEN'S VENDORED RIPGREP IS MADE EXECUTABLE HERE TOO. qwen-code 0.25.0 ships
+# vendor/ripgrep/<platform>/rg mode 0644 and chmods it itself on first use,
+# which works in a user-owned install and fails in this root-owned, read-only
+# one: every qwen run as uid 10001 then printed `Ripgrep not available: spawn
+# .../rg EACCES. Falling back to built-in grep.` on stderr (measured in the
+# 2026-10-08 fixture capture). Only the x64-linux binary this image runs is
+# touched; if a later release stops vendoring it, the step does nothing.
 COPY skills/multi-llm/tests/container/package.json      /opt/mllm/npm/package.json
 COPY skills/multi-llm/tests/container/package-lock.json /opt/mllm/npm/package-lock.json
 COPY skills/multi-llm/tests/container/link_cli_bins.mjs /opt/mllm/npm/link_cli_bins.mjs
@@ -291,6 +299,8 @@ RUN cd /opt/mllm/npm \
  && node /opt/mllm/npm/link_cli_bins.mjs /opt/mllm/npm /opt/mllm/real \
         codex claude gemini opencode cline kilocode kimi pi qwen copilot \
  && rm -rf /opt/mllm/npm/node_modules/@github/copilot-linuxmusl-x64 \
+ && qwen_rg=/opt/mllm/npm/node_modules/@qwen-code/qwen-code/vendor/ripgrep/x64-linux/rg \
+ && if [ -f "$qwen_rg" ]; then chmod 0755 "$qwen_rg"; fi \
  && mkdir -p /opt/mllm/copilot-cache \
  && XDG_CACHE_HOME=/opt/mllm/copilot-cache \
     COPILOT_OFFLINE=true COPILOT_AUTO_UPDATE=false \
