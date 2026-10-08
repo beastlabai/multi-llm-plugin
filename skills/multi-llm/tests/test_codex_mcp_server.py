@@ -2291,6 +2291,40 @@ class TestResumeCommand:
         polls = [c for c in calls if dispatcher_argv(c)[0] == DISPATCHER["poll"][0]]
         assert all(dispatcher_argv(c)[1] == absolute for c in polls)
 
+    @pytest.mark.parametrize("typed, where", [
+        ("plans/p.md", "root"),        # names nothing under the anchor
+        ("plans/own.md", "anchor"),    # a file under the anchor wins
+        ("plans/nope.md", "anchor"),   # missing from the root too
+        ("../outside.md", "anchor"),   # from the root, a file outside the repository
+    ])
+    def test_a_plan_spelled_from_the_repository_root_is_polled_there(
+        self, harness, tmp_path, typed, where,
+    ):
+        """Fix round 26 (live run 11): the dispatcher runs a plan that names
+        nothing from the anchor from the root of the repository the anchor is
+        in (``multi_llm._run_from_repository_root``), so the polls name that
+        root's file, never a path under the anchor that does not exist; the
+        launch still carries the plan as typed."""
+        repo = Path(os.path.realpath(tmp_path)) / "repo"
+        sub = repo / "sub"
+        (sub / "plans").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "plans").mkdir()
+        for name in ("p.md", "own.md"):
+            (repo / "plans" / name).write_text("# Plan\n", encoding="utf-8")
+        (sub / "plans" / "own.md").write_text("# Plan\n", encoding="utf-8")
+        (repo.parent / "outside.md").write_text("# outside\n", encoding="utf-8")
+        _, _, calls, _ = harness.run(
+            dict(REVIEW, plan=typed), [launch_step(), poll_step(0)], roots=[str(sub)])
+        launches = [c for c in calls if dispatcher_argv(c)[0] != DISPATCHER["poll"][0]]
+        assert [dispatcher_argv(c)[1] for c in launches] == [typed]
+        assert launches[0]["cwd"] == str(sub)
+        polls = [c for c in calls if dispatcher_argv(c)[0] == DISPATCHER["poll"][0]]
+        base = repo if where == "root" else sub
+        assert polls and all(
+            dispatcher_argv(c)[1] == os.path.normpath(os.path.join(base, typed))
+            for c in polls)
+
 
 # ===========================================================================
 # Every phase, both ways a failure reaches the user: the plan as typed

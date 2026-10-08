@@ -3379,6 +3379,52 @@ class TestExecuteStateMachine:
         assert argv["fallback"] is True
         assert argv["directoryOnly"] == str(other)
 
+    def test_a_plan_spelled_from_the_repository_root(self, built_package, tmp_path):
+        """Fix round 26 (live run 11): the dispatcher runs a plan that names
+        nothing from the anchor from the root of the repository the anchor is
+        in, so this server names that root's file for its polls and abort too.
+        A file under the anchor still wins, and nothing resolves outside the
+        repository or outside one."""
+        repo = Path(os.path.realpath(tmp_path)) / "repo"
+        sub = repo / "sub"
+        sub.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "plans").mkdir()
+        (repo / "plans" / "x.md").write_text("# Plan\n", encoding="utf-8")
+        (tmp_path / "outside.md").write_text("# outside\n", encoding="utf-8")
+        (repo / "plans" / "link.md").symlink_to(tmp_path / "outside.md")
+        (sub / "plans").mkdir()
+        (sub / "plans" / "own.md").write_text("# Plan\n", encoding="utf-8")
+        (repo / "plans" / "own.md").write_text("# Plan\n", encoding="utf-8")
+        loose = tmp_path / "loose"
+        loose.mkdir()
+        resolved = node_json(
+            f"""
+            const sub = {json.dumps(str(sub))}
+            emit({{
+              root: T.normalizePlan("plans/x.md", sub),
+              sigil: T.normalizePlan("@plans/x.md", sub),
+              own: T.normalizePlan("plans/own.md", sub),
+              missing: T.normalizePlan("plans/nope.md", sub),
+              escape: T.normalizePlan("../outside.md", sub),
+              link: T.normalizePlan("plans/link.md", sub),
+              atRoot: T.normalizePlan("plans/x.md", {json.dumps(str(repo))}),
+              loose: T.normalizePlan("plans/x.md", {json.dumps(str(loose))}),
+            }})
+            """,
+            built_package,
+            cwd=Path("/"),
+        )
+        assert resolved["root"] == str(repo / "plans" / "x.md")
+        assert resolved["sigil"] == str(repo / "plans" / "x.md")
+        assert resolved["own"] == str(sub / "plans" / "own.md")
+        assert resolved["missing"] == str(sub / "plans" / "nope.md")
+        # From the root, ../outside.md is a file outside the repository.
+        assert resolved["escape"] == str(repo / "outside.md")
+        assert resolved["link"] == str(sub / "plans" / "link.md")
+        assert resolved["atRoot"] == str(repo / "plans" / "x.md")
+        assert resolved["loose"] == str(loose / "plans" / "x.md")
+
     def test_init_scaffolds_in_the_workspace_not_the_package(
         self, built_package, tmp_path
     ):
