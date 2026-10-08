@@ -845,6 +845,14 @@ clis:
     # what caught it — a count would have stayed green through the rename.
     side_model_ids: ["grok-4.6"]
     credential_vars: [XAI_API_KEY]
+    # GrokProvider.get_env's two switches (review 24, pins #1/#2), repeated
+    # here because the wrapper rebuilds the child env from scratch: the billed
+    # turn-summary call off (an answered exec is 4 requests, not 5) and grok's
+    # retry ladder bounded (a fail-forever 5xx is 8 chat requests over 54 s, not
+    # 60 over ~1,341 s). tests/test_grok_dispatch_env.py holds the values equal.
+    env_extra:
+      GROK_TURN_SUMMARY: "0"
+      GROK_CONFIG: '{"models":{"max_retries":2}}'
     seed_files: []
     http_log:
       # NEW IN 1.0.x, measured 2026-09-19 on the 0.2.93 -> 1.0.34 bump: the CLI

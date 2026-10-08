@@ -303,6 +303,9 @@ class TestRule6bNoIdenticalRateLimitRedispatch:
             # ``rate-limit-responses``).
             ("utils.providers.pi", "PiProvider", 4),
             ("utils.providers.omp", "OmpProvider", 6),
+            # grok 1.0.46 with `models.max_retries` = 2 pinned (review 24): one
+            # 429 retry, 11 requests on its worst (5xx) chain.
+            ("utils.providers.grok", "GrokProvider", 11),
         ],
     )
     def test_the_real_declared_envelopes_get_no_second_dispatch(
