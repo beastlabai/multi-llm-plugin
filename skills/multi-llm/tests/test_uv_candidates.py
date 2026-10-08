@@ -82,6 +82,10 @@ READERS = {
     # same way, after the grep that lets a session with no phase result skip
     # it; it sits beside doctor.sh, the second reader outside the skill tree.
     "hooks/report-check.sh": "ls",
+    # The plugin's PreToolUse hook (fix round 26) resolves uv the same way,
+    # after the greps that let any other tool call, and a session that never
+    # ran the dispatcher, skip it.
+    "hooks/wakeup-check.sh": "ls",
     # The codex plugin's generated surface (plans/codex-native-plugin.md, D3e),
     # committed because the Git route serves the checked-in tree: the list the
     # server's uv preflight reads, emitted from `unattended.UV_CANDIDATES`.
@@ -92,6 +96,7 @@ READERS = {
 _ROOTS = {name: SKILL_ROOT for name in READERS}
 _ROOTS["hooks/doctor.sh"] = REPO_ROOT
 _ROOTS["hooks/report-check.sh"] = REPO_ROOT
+_ROOTS["hooks/wakeup-check.sh"] = REPO_ROOT
 _ROOTS["packaging/codex/multi-llm/dist/cli-surface.json"] = REPO_ROOT
 
 #: The codex plugin's committed copy of the skill tree. A hit under it is the

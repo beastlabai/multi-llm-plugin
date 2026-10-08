@@ -630,7 +630,7 @@ def _assistant_text(entry: Dict[str, Any]) -> List[str]:
     ]
 
 
-def read_turn(path: Path) -> List[Dict[str, Any]]:
+def read_turn(path: Path, partial_tail: bool = False) -> List[Dict[str, Any]]:
     """The transcript entries since the last prompt the user typed, in file
     order (:func:`_is_real_prompt`): the whole of a headless ``claude -p``
     session, task-notification turns and wakeup turns included.
@@ -638,14 +638,19 @@ def read_turn(path: Path) -> List[Dict[str, Any]]:
     Read from the end, so a long session parses only its last run. A line
     inside that stretch that is not a JSON object makes the whole transcript
     unreadable (:class:`_Unreadable`): the check does not guess at a turn it
-    cannot see in full.
+    cannot see in full. With *partial_tail* (``util wakeup-check``, which
+    reads the transcript while the session is writing it), a last line with
+    no newline after it is a write in progress and is left out.
     """
     try:
         data = path.read_bytes()
     except OSError as exc:
         raise _Unreadable(str(exc)) from exc
+    lines = data.splitlines()
+    if partial_tail and lines and not data.endswith((b"\n", b"\r")):
+        lines.pop()
     turn: List[Dict[str, Any]] = []
-    for raw in reversed(data.splitlines()):
+    for raw in reversed(lines):
         if not raw.strip():
             continue
         try:

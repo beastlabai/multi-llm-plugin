@@ -465,7 +465,7 @@ class TestTheHookFile:
 
     def test_it_parses_with_session_start_unchanged_and_a_stop_entry(self):
         data = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
-        assert list(data["hooks"]) == ["SessionStart", "Stop"]
+        assert list(data["hooks"]) == ["SessionStart", "Stop", "PreToolUse"]
         assert data["hooks"]["SessionStart"] == SESSION_START
 
     def test_the_session_start_text_is_byte_identical(self):
