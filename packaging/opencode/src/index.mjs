@@ -755,7 +755,57 @@ async function resolveSessionModel(client, ctx, budgetMs = SESSION_MODEL_BUDGET_
 function normalizePlan(plan, anchor) {
   const spelled = planSpelling(plan)
   if (!spelled) return ""
-  return path.isAbsolute(spelled) ? spelled : path.resolve(anchor, spelled)
+  if (path.isAbsolute(spelled)) return spelled
+  const joined = path.resolve(anchor, spelled)
+  if (pathExists(joined)) return joined
+  return repositoryRootPlan(anchor, spelled) || joined
+}
+
+function pathExists(target) {
+  try {
+    fs.lstatSync(target)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * `relative` under the root of the repository `anchor` sits in, else null.
+ *
+ * The dispatcher runs a command whose relative paths name nothing from its cwd
+ * (the anchor, here) from the root of the repository that cwd is in, when each
+ * names something inside it (fix round 26, live run 11). So a plan spelled from
+ * that root names the root's file for this server's polls and abort too, never
+ * a path under the anchor that does not exist. The root is the nearest
+ * directory at or above the anchor holding a `.git` entry, the anchor itself
+ * excluded; the file must exist there and stay inside it, as spelled and
+ * resolved. The codex server's `repository_root_plan` is its port.
+ */
+function repositoryRootPlan(anchor, relative) {
+  let start
+  try {
+    start = fs.realpathSync(anchor)
+  } catch {
+    return null
+  }
+  let root = start
+  while (!pathExists(path.join(root, ".git"))) {
+    const parent = path.dirname(root)
+    if (parent === root) return null
+    root = parent
+  }
+  if (root === start) return null
+  const candidate = path.resolve(root, relative)
+  let real
+  try {
+    real = fs.realpathSync(candidate)
+  } catch {
+    return null
+  }
+  const prefix = root.endsWith(path.sep) ? root : root + path.sep
+  const inside = (target) => target === root || target.startsWith(prefix)
+  return inside(candidate) && inside(real) ? candidate : null
 }
 
 /**
@@ -3573,6 +3623,7 @@ const __testing = {
   nextAsToolCall,
   normalizePlan,
   planSpelling,
+  repositoryRootPlan,
   fetchResumeCommand,
   finishOutcome,
   parseDispatcherCommand,

@@ -926,6 +926,44 @@ def hand_back_typed(outcome, values) -> None:
             outcome[key] = dict(call_args, plan=typed_plan(call_args["plan"], values))
 
 
+def repository_root_plan(anchor, relative):
+    """*relative* under the root of the repository *anchor* sits in, else ``None``.
+
+    The dispatcher runs a command whose relative paths name nothing from its
+    cwd (the anchor, here) from the root of the repository that cwd is in, when
+    each names something inside it (fix round 26, live run 11:
+    ``multi_llm._run_from_repository_root``). So a plan spelled from that root
+    names the root's file for this server's polls and abort too, never a path
+    under the anchor that does not exist. The root is the nearest directory at
+    or above the anchor holding a ``.git`` entry, the anchor itself excluded;
+    the file must exist there and stay inside it, as spelled and resolved. The
+    port of ``repositoryRootPlan``.
+    """
+    try:
+        start = os.path.realpath(anchor)
+    except (OSError, ValueError):
+        return None
+    root = start
+    while not os.path.lexists(os.path.join(root, ".git")):
+        parent = os.path.dirname(root)
+        if parent == root:
+            return None
+        root = parent
+    if root == start:
+        return None
+    candidate = os.path.normpath(os.path.join(root, relative))
+    try:
+        if not os.path.exists(candidate):
+            return None
+        real = os.path.realpath(candidate)
+    except (OSError, ValueError):
+        return None
+    prefix = root.rstrip(os.sep) + os.sep
+    if all(path == root or path.startswith(prefix) for path in (candidate, real)):
+        return candidate
+    return None
+
+
 def same_plan_file(left, right) -> bool:
     """Whether two plan paths name one file, symlinks followed on both sides.
 
@@ -1854,13 +1892,18 @@ class Server:
         return expand_home(plan, self.layer1) if plan else ""
 
     def normalize_plan(self, plan: str, call: Call) -> str:
-        """A relative plan resolved against the anchor, ``~`` expanded."""
+        """A relative plan resolved against the anchor, ``~`` expanded; one that
+        names nothing there resolves from the repository root the dispatcher
+        runs it from (:func:`repository_root_plan`)."""
         if not plan:
             return ""
         expanded = self.plan_spelling(plan)
         if os.path.isabs(expanded):
             return expanded
-        return os.path.normpath(os.path.join(call.anchor, expanded))
+        joined = os.path.normpath(os.path.join(call.anchor, expanded))
+        if os.path.lexists(joined):
+            return joined
+        return repository_root_plan(call.anchor, expanded) or joined
 
     # -- argv composition (D3 rule 3) ---------------------------------------------
 
