@@ -13,9 +13,16 @@
 #
 # - `stop_hook_active` true means this turn was already blocked once, so the
 #   script exits at once: it blocks at most once per turn and cannot loop.
-# - A transcript with no `[NEXT_COMMAND` and no `[WORKFLOW_COMPLETE]` text
-#   exits at once too, before uv is looked up: a session that never ran a
-#   phase pays one grep.
+# - A transcript with no `[NEXT_COMMAND` and no `[WORKFLOW_COMPLETE]` text,
+#   and no Bash call that ran `multi_llm.py`, exits at once too, before uv is
+#   looked up: a session that never ran the dispatcher pays two greps.
+#   The dispatcher call is enough (fix round 27): Claude Code writes the
+#   transcript in batches, so when this hook starts the turn's newest entries
+#   are not on file yet, and the block the turn's last call printed can be one
+#   of them. The call itself was on file before it ran. The util waits for
+#   the reply to be written before it reads the turn (`report_check.settled_turn`),
+#   and this script waits, at most 2 s, only for a transcript file that does
+#   not exist yet.
 # - The util's stdout also carries the dispatcher's `MULTI_LLM_RESULT` line,
 #   and Claude Code parses hook stdout as JSON only when the whole of it is
 #   JSON. So only the decision line (`{"decision"...`) is passed through.
@@ -37,8 +44,18 @@ fi
 transcript="$(printf '%s\n' "$input" \
   | sed -n 's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
   | sed -e 's/\\\\/\\/g' -e 's#\\/#/#g' | head -n 1)"
-[ -n "$transcript" ] && [ -f "$transcript" ] || exit 0
-grep -q -F -e '[NEXT_COMMAND' -e '[WORKFLOW_COMPLETE]' "$transcript" 2>/dev/null || exit 0
+[ -n "$transcript" ] || exit 0
+# A session's first entries can still be unwritten, the file with them: wait
+# for it, 20 steps of 0.1 s, giving up at once where `sleep` takes no fraction.
+i=0
+while [ ! -f "$transcript" ] && [ "$i" -lt 20 ]; do
+  sleep 0.1 2>/dev/null || break
+  i=$((i + 1))
+done
+[ -f "$transcript" ] || exit 0
+grep -q -F -e '[NEXT_COMMAND' -e '[WORKFLOW_COMPLETE]' "$transcript" 2>/dev/null \
+  || grep -q -E '"name"[[:space:]]*:[[:space:]]*"Bash".*multi_llm\.py' "$transcript" 2>/dev/null \
+  || exit 0
 
 root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)}"
 skill="$root/skills/multi-llm"
