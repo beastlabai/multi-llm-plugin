@@ -344,3 +344,58 @@ def test_the_native_runbook_says_where_the_suggestions_went():
     core = _flat("instructions/apply-task-suggestions.md")
     assert ("The suggestions went to the task list, which that call's message "
             "names (`its batches edited …`), never to the plan") in core
+
+
+class TestAToolRoutesOutputLeavesTheSectionToTheStep:
+    """The tool servers hand a terminal poll's text to their model as
+    `output`, beside `user_next_step` (live run 11, Codex 08: "Manual task
+    left: T009 … No later phase waits for it." above the copied section).
+    On a tool route the trailer leaves out what the step says; a shell's
+    text keeps every line, and the block still follows the text."""
+
+    def _poll_complete(self, tmp_path, capsys, monkeypatch, route):
+        import modes as mode_table
+        from tests.test_manual_tasks_on_completion import _complete_plan
+        from utils.output_handler import output_dir_path
+
+        if route:
+            monkeypatch.setenv(mode_table.ROUTE_ENV, route)
+        else:
+            monkeypatch.delenv(mode_table.ROUTE_ENV, raising=False)
+        plan = _complete_plan(tmp_path)
+        phase_dir = output_dir_path(plan) / "apply-fixes"
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        status_file.write_status(str(phase_dir), {
+            "phase": "apply-code-fixes", "state": "complete"})
+        status_file.claim_run(str(phase_dir), {
+            "run_id": "run-r26-0001", "state": "done", "exit_code": 0,
+            "detached": True, "mode": "apply-code-fixes"})
+        capsys.readouterr()
+        ctx = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            assert run_status.main([
+                "--plan-file", str(plan), "--view", "run", "--host", "codex",
+                "--phase", "apply-code-fixes"]) == 0
+            payload = ctx.payload(0)
+        finally:
+            cli_common.deactivate_result()
+        return payload, capsys.readouterr().out
+
+    def test_on_the_tool_route_the_trailer_leaves_the_manual_note_to_the_step(
+        self, tmp_path, capsys, monkeypatch,
+    ):
+        payload, out = self._poll_complete(tmp_path, capsys, monkeypatch, "package")
+        assert payload["user_next_step"]["complete"] is True
+        assert "workflow manual tasks left for you" not in out, out
+        assert "No later phase waits" not in out.split("[WORKFLOW_COMPLETE]")[0]
+        # The block still follows the text, the marker lines intact.
+        lines = out.splitlines()
+        assert lines.index("[WORKFLOW_COMPLETE]") > lines.index(
+            "driver.subagent_runner — what a dispatched subagent would run:")
+        assert any(line.startswith("[MANUAL_TASK_COMMAND] ") for line in lines)
+
+    def test_a_shells_text_keeps_every_line(self, tmp_path, capsys, monkeypatch):
+        _payload, out = self._poll_complete(tmp_path, capsys, monkeypatch, None)
+        assert "workflow manual tasks left for you: T011" in out
+        assert out.index("workflow manual tasks left for you") < out.index(
+            "[WORKFLOW_COMPLETE]")

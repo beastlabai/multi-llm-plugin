@@ -44,6 +44,7 @@ say so.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import math
 import os
@@ -4449,6 +4450,45 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if isinstance(entry, dict):
             entry["earlier_run"] = record
 
+    # plans/next-phase-command.md §2.2(1): a TERMINAL poll pinned to exactly one
+    # run that exits 0 — a worker that ended 0 or 2 — carries the next phase as
+    # `user_next_step`, beside F7's notice but without F7's view guard: the key
+    # is machine-readable, and `--view all`'s result line carries no parsed
+    # workflow step either (`--view workflow` returned above). The block follows
+    # the text on stdout, or goes to stderr under `--json`, whose payload stays
+    # exactly what it was. Never on exit 2 (still moving, or nothing recorded)
+    # or 3 (failed/aborted). Advisory: a failed read or builder costs one
+    # stderr line and nothing else. Built before the text and printed after
+    # it (fix round 26), so the text can leave out what the step says.
+    step = None
+    step_block = io.StringIO()
+    if (
+        exit_code == EXIT_OK
+        and terminal_run
+        and len(views) == 1
+        and (args.phase or args.question or args.run_id)
+    ):
+        step = _emit_user_next_step(
+            plan_path, args, views[0], workflow=terminal_workflow,
+            stream=step_block,
+        )
+        if (step is not None and terminal_workflow and workflow_trailer
+                and _read_by_a_tool_route(args)):
+            # Fix round 26 (live run 11, Codex 08: "No later phase waits for
+            # it" beside the copied section): a tool route hands this text to
+            # its model as `output`, beside `user_next_step`, so the trailer
+            # there leaves out what the step's markdown says, as the notice
+            # does. A shell's text view keeps every line.
+            workflow_trailer = [
+                f"workflow {line}" for line in _workflow_trailer_lines(
+                    terminal_workflow, prefix="", suggested=False, carried=step,
+                    close_note=manual_close_note(
+                        terminal_workflow, _plan_spelling(args, views, plan_path),
+                        _reader_host(args), _recorded_route(args, views, plan_path),
+                    ),
+                )
+            ]
+
     if args.json:
         payload: Dict[str, Any] = {"runs": views}
         if args.view == VIEW_ALL:
@@ -4515,40 +4555,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             lines += workflow_trailer
         print("\n".join(lines))
 
-    # plans/next-phase-command.md §2.2(1): a TERMINAL poll pinned to exactly one
-    # run that exits 0 — a worker that ended 0 or 2 — carries the next phase as
-    # `user_next_step`, beside F7's notice but without F7's view guard: the key
-    # is machine-readable, and `--view all`'s result line carries no parsed
-    # workflow step either (`--view workflow` returned above). The block follows
-    # the text on stdout, or goes to stderr under `--json`, whose payload stays
-    # exactly what it was. Never on exit 2 (still moving, or nothing recorded)
-    # or 3 (failed/aborted). Advisory: a failed read or builder costs one
-    # stderr line and nothing else.
-    if (
-        exit_code == EXIT_OK
-        and terminal_run
-        and len(views) == 1
-        and (args.phase or args.question or args.run_id)
-    ):
-        step = _emit_user_next_step(
-            plan_path, args, views[0], workflow=terminal_workflow,
-        )
-        if step is not None and terminal_workflow:
-            # Fix round 22 (live run 9, Codex 07, OpenCode 06-08): the
-            # notice said how to close the manual tasks, command and all,
-            # beside `user_next_step`, which says it with the command fenced;
-            # the hosts relayed both, the command folded into prose. The
-            # notice keeps naming the tasks and leaves the rest to the step.
-            # Fix round 24 (live run 10, OpenCode 03, Codex 01): so with the
-            # `suggested next` line, which the hosts relayed beside the
-            # step's markdown and reordered the step after.
-            # Fix round 26 (live run 11: Codex 04/06/08, OpenCode 03-08):
-            # and with what the step's `markdown` says itself, the optional
-            # entry's why and the manual tasks, which the hosts pasted above
-            # the copied section. The text view a person reads keeps them.
-            terminal_notice = "; ".join(_workflow_trailer_lines(
-                terminal_workflow, prefix="", suggested=False,
-                carried=step)) or None
+    if step_block.getvalue():
+        block_stream = sys.stderr if args.json else sys.stdout
+        block_stream.write(step_block.getvalue())
+        block_stream.flush()
+    if step is not None and terminal_workflow:
+        # Fix round 22 (live run 9, Codex 07, OpenCode 06-08): the
+        # notice said how to close the manual tasks, command and all,
+        # beside `user_next_step`, which says it with the command fenced;
+        # the hosts relayed both, the command folded into prose. The
+        # notice keeps naming the tasks and leaves the rest to the step.
+        # Fix round 24 (live run 10, OpenCode 03, Codex 01): so with the
+        # `suggested next` line, which the hosts relayed beside the
+        # step's markdown and reordered the step after.
+        # Fix round 26 (live run 11: Codex 04/06/08, OpenCode 03-08):
+        # and with what the step's `markdown` says itself, the optional
+        # entry's why and the manual tasks, which the hosts pasted above
+        # the copied section. The text view a person reads keeps them.
+        terminal_notice = "; ".join(_workflow_trailer_lines(
+            terminal_workflow, prefix="", suggested=False,
+            carried=step)) or None
 
     # Plan §2.4: a `mode: truncated` validation source sets the notice on any
     # terminal poll (every view, not only `--view run`); it qualifies the
@@ -4710,6 +4736,7 @@ def _emit_user_next_step(
     view: Dict[str, Any],
     *,
     workflow: Optional[Dict[str, Any]] = None,
+    stream=None,
 ) -> Optional[Any]:
     """The terminal poll's ``user_next_step`` and block (next-phase-command §2.2(1)).
 
@@ -4748,10 +4775,28 @@ def _emit_user_next_step(
         finished_mode,
         plan_path=plan_path,
         workflow=workflow,
-        stream=sys.stderr if args.json else sys.stdout,
+        stream=stream if stream is not None else (
+            sys.stderr if args.json else sys.stdout),
         # Fix round 24: the route the pinned run was started on.
         recorded_route=_run_route(view, _reader_host(args)),
     )
+
+
+def _read_by_a_tool_route(args: argparse.Namespace) -> bool:
+    """Whether a tool server is the reader of this poll's text: the route
+    this process spells commands for (``next_phase.resolve_route``, its one
+    reader, from the environment the servers set; never a run's recorded
+    route, which a shell reads too) is a tool route (fix round 26)."""
+    import io
+
+    from . import next_phase
+    from .cli_common import _modes
+
+    try:
+        route = next_phase.resolve_route(_reader_host(args), stderr=io.StringIO())
+    except Exception:  # noqa: BLE001 - advisory: the text stays whole
+        return False
+    return route in _modes().TOOL_ROUTES
 
 
 def _wait_clamp_ceiling(host_id: Optional[str]) -> Optional[Tuple[str, int]]:
