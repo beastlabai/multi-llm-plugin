@@ -64,6 +64,7 @@ from tests.test_plugin_landlock_executor import (  # noqa: E402
     F6_LEAD,
     FakeWrapper,
     _slot_dirs,
+    use_own_temp_base,
 )
 
 MOCK_LLM = Path(__file__).parent / "mocks" / "mock_llm.py"
@@ -579,6 +580,13 @@ class Scratch:
         return {row["name"]: row["rc"] for row in rows}
 
 
+@pytest.fixture(autouse=True)
+def own_temp_base(tmp_path, monkeypatch):
+    """Every slot a test's run makes lands in a temp dir of its own, so
+    ``_slot_dirs()`` never reads another process's live slots."""
+    return use_own_temp_base(tmp_path, monkeypatch)
+
+
 @pytest.fixture
 def scratch(tmp_path, monkeypatch):
     yield Scratch(tmp_path, monkeypatch)
@@ -653,7 +661,9 @@ def _no_uncontained_rung(scratch: Scratch, text: str) -> None:
 
 class TestTheEnabledKindsTakeTheRung:
     @pytest.mark.parametrize("mode, scope", ENABLED)
-    def test_each_batch_runs_on_the_rung_and_its_edit_lands(self, scratch, capsys, mode, scope):
+    def test_each_batch_runs_on_the_rung_and_its_edit_lands(
+        self, scratch, capsys, mode, scope, own_temp_base,
+    ):
         target = scratch.target(mode)
         # implement's finalization writes the summary back-reference into
         # the plan: the phase's own write, so the plan is not "another" file.
@@ -750,6 +760,7 @@ class TestTheEnabledKindsTakeTheRung:
         # Each attempt's TMPDIR existed for the child and is gone after it.
         assert all(row["tmpdir_exists"] for row in rows)
         assert not any(os.path.exists(row["env"]["TMPDIR"]) for row in rows)
+        assert {Path(row["env"]["TMPDIR"]).parent for row in rows} == {own_temp_base}
         assert _slot_dirs() <= slots_before
 
 

@@ -58,6 +58,10 @@ from utils.subagent_tasks import (  # noqa: E402
     make_write_task,
 )
 from utils.write_batch_scheduler import WriteBatchScheduler  # noqa: E402
+from tests.test_plugin_landlock_executor import (  # noqa: E402
+    _slot_dirs,
+    use_own_temp_base,
+)
 
 RUNG = SANDBOX_RUNG_PLUGIN_LANDLOCK
 NOTICE_STEM = "[SANDBOX_INCIDENTAL]"
@@ -181,6 +185,13 @@ class Repo:
         if not path.exists():
             return []
         return [json.loads(line)["summary"] for line in path.read_text().splitlines() if line]
+
+
+@pytest.fixture(autouse=True)
+def own_temp_base(tmp_path, monkeypatch):
+    """A temp dir of the test's own, so ``_slot_dirs()`` never reads another
+    process's live slots (and no slot of these tests lands in the shared one)."""
+    return use_own_temp_base(tmp_path, monkeypatch)
 
 
 @pytest.fixture
@@ -466,9 +477,7 @@ class TestTheGrantReachesTheExecutor:
     def test_the_audited_argv_is_the_wrapped_preview_and_creates_nothing(
         self, repo, monkeypatch, tmp_path
     ):
-        import tempfile
-
-        before = set(Path(tempfile.gettempdir()).glob("multi-llm-slot-*"))
+        before = _slot_dirs()
         FakeExecutor(repo, monkeypatch).script(edit_in_place())
         repo.scheduler([repo.task(0)]).run()
         dispatched = [
@@ -482,7 +491,7 @@ class TestTheGrantReachesTheExecutor:
         assert f"dir:{landlock_dispatch.PLACEHOLDER_TMPDIR}" in argv
         assert f"dir:{landlock_dispatch.PLACEHOLDER_CODEX_HOME}" in argv
         assert "danger-full-access" in argv
-        assert set(Path(tempfile.gettempdir()).glob("multi-llm-slot-*")) == before
+        assert _slot_dirs() == before
 
     def test_codex_own_sandbox_gets_no_line_and_no_rung_record(
         self, repo, monkeypatch
