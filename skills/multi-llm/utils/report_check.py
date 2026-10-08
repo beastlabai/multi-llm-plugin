@@ -38,7 +38,10 @@ tasks listed. This checks the copy, and only the copy:
   ``isSidechain`` entries belong to a subagent, not the run.
 * Among that run's tool results it takes the **last** block. A block printed
   only before the user's last typed prompt is not this run's to copy, so it
-  is never checked.
+  is never checked. Nor is a block a subagent's report quotes (an ``Agent``,
+  ``Task`` or ``SendMessage`` result, :data:`SUBAGENT_TOOLS`, fix round 27):
+  those are the subagent's words, not a phase's output, while a ``Read``, a
+  ``tail`` or a ``grep`` of the phase's own output still counts.
 * A block's ready section (``util next-command``'s ``[NEXT_STEP_MARKDOWN]``
   … ``[NEXT_STEP_MARKDOWN_END]``, a success's or a stop's) holds the report
   to every command it fences too, beside the marker lines' (fix round 26),
@@ -197,6 +200,11 @@ SETTLE_STEP_S = 0.1
 #: The ``system`` entry Claude Code writes after a ``Stop`` hook ran: a reply
 #: it follows was an earlier ``Stop``'s, never the one being checked.
 STOP_HOOK_SUMMARY = "stop_hook_summary"
+
+#: The tools whose result is a subagent's own words, never a phase's output
+#: (fix round 27): a block quoted in one is not a block the report owes, nor
+#: does it end ``util wakeup-check``'s hold.
+SUBAGENT_TOOLS = ("Agent", "Task", "SendMessage")
 
 
 class _Unreadable(Exception):
@@ -621,13 +629,19 @@ def _is_real_prompt(entry: Dict[str, Any]) -> bool:
     return False
 
 
-def _tool_result_texts(entry: Dict[str, Any]) -> Iterable[str]:
-    """The text of every ``tool_result`` block a user entry carries, in order."""
+def _tool_result_texts(
+    entry: Dict[str, Any], skip: Iterable[str] = (),
+) -> Iterable[str]:
+    """The text of every ``tool_result`` block a user entry carries, in order,
+    but those answering a call whose id is in *skip*."""
     content = _content(entry)
     if not isinstance(content, list):
         return
+    skipped = set(skip)
     for block in content:
         if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        if str(block.get("tool_use_id") or "") in skipped:
             continue
         inner = block.get("content")
         if isinstance(inner, str):
@@ -772,13 +786,32 @@ def reply_on_file(last_assistant_message: str) -> Callable[[List[Dict[str, Any]]
     return settled
 
 
+def subagent_call_ids(turn: Sequence[Dict[str, Any]]) -> Set[str]:
+    """The ids of the turn's calls whose result is a subagent's own words
+    (:data:`SUBAGENT_TOOLS`)."""
+    found: Set[str] = set()
+    for entry in turn:
+        if entry.get("type") != "assistant":
+            continue
+        content = _content(entry)
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if (isinstance(block, dict) and block.get("type") == "tool_use"
+                    and block.get("name") in SUBAGENT_TOOLS):
+                found.add(str(block.get("id") or ""))
+    return found
+
+
 def last_block(turn: Sequence[Dict[str, Any]]) -> Optional[Block]:
-    """The last block printed in the turn's tool results, if any."""
+    """The last block printed in the turn's tool results, if any, a block a
+    subagent's report quotes left out."""
     found: Optional[Block] = None
+    quoted = subagent_call_ids(turn)
     for entry in turn:
         if entry.get("type") != "user":
             continue
-        for text in _tool_result_texts(entry):
+        for text in _tool_result_texts(entry, skip=quoted):
             blocks = find_blocks(text)
             if blocks:
                 found = blocks[-1]

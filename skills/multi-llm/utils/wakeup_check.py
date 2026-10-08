@@ -110,10 +110,6 @@ _PREVIEW_FLAGS = ("--help", "-h", "--dry-run", "--dry-run-subagents")
 #: Where one chained shell command ends and the next begins.
 _COMMAND_END_RE = re.compile(r"&&|\|\||[;|\n]")
 
-#: The tools whose result is a subagent's own words (fix round 27): a block
-#: quoted in one ends no phase.
-_SUBAGENT_TOOLS = ("Agent", "Task", "SendMessage")
-
 #: The ``origin.kind`` of the entry Claude Code sends when a background task
 #: ends (``report_check``'s docstring lists the kinds).
 _NOTIFICATION_KIND = "task-notification"
@@ -269,7 +265,7 @@ def phase_in_flight(turn: Sequence[Dict[str, Any]]) -> Optional[str]:
             if ended is not None:
                 running.pop(ended, None)
             for tool_use_id, text in _results(entry):
-                if names.get(tool_use_id) in _SUBAGENT_TOOLS:
+                if names.get(tool_use_id) in report_check.SUBAGENT_TOOLS:
                     continue
                 if report_check.find_blocks(text):
                     running.clear()

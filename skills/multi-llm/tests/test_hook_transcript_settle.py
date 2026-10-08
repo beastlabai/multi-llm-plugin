@@ -52,6 +52,7 @@ from tests.test_report_check import (  # noqa: E402
     block_output,
     decision_of,
     report,
+    run_check,
 )
 from tests.test_report_check_session import notification  # noqa: E402
 from tests.test_wakeup_check import DISPATCH, PLAN, OWN_CALL, own_call_entry  # noqa: E402
@@ -497,3 +498,64 @@ class TestWhatPrintsThePhasesNextStep:
                                  "orchestrator-run.log", "msg_2"),
                         tool_result("toolu_2", block_output(OPTIONAL)))
         assert run_wakeup_check(capsys, tmp_path, wakeup_input(path)) == ""
+
+
+# ---------------------------------------------------------------------------
+# The Stop check follows the same rule
+# ---------------------------------------------------------------------------
+
+def calls_and_results(path: Path, *pairs: Any, final: str) -> Path:
+    """A typed prompt, each ``(call, result)`` pair, then the reply."""
+    body = line(Transcript().prompt("go").entries[0])
+    for call, result in pairs:
+        body += line(call) + line(result)
+    path.write_text(body + line(reply(final)), encoding="utf-8")
+    return path
+
+
+class TestTheStopCheckReadsThePhasesOwnOutput:
+    """A block quoted in a subagent's report is the subagent's words: the
+    report owes it no command. The phase's own output, read back by any other
+    tool, is still the block it owes."""
+
+    @pytest.mark.parametrize("tool", ["Agent", "Task", "SendMessage"])
+    def test_a_block_quoted_by_a_subagent_is_not_held_to(self, tmp_path, capsys, tool):
+        path = calls_and_results(
+            tmp_path / "t.jsonl",
+            (tool_use("toolu_1", "", "msg_1", name=tool, prompt="Validate batch 0",
+                      description="batch 0"),
+             tool_result("toolu_1", f"Done. The next command is:\n{block_output()}")),
+            final="The batch is validated.")
+        assert run_check(capsys, path) == ""
+
+    def test_the_phase_s_own_block_before_a_subagent_s_quote_is_the_one_held_to(
+            self, tmp_path, capsys):
+        stale = "/multi-llm:multi-llm --review-plan 'plans/my plan.md'"
+        path = calls_and_results(
+            tmp_path / "t.jsonl",
+            (tool_use("toolu_1", LOOKUP, "msg_1"), tool_result("toolu_1", block_output())),
+            (tool_use("toolu_2", "", "msg_2", name="Agent", prompt="Summarize the run"),
+             tool_result("toolu_2", f"Summary.\n[NEXT_COMMAND] {stale}\n")),
+            final=report(COMMAND))
+        assert run_check(capsys, path) == ""
+        path = calls_and_results(
+            tmp_path / "t.jsonl",
+            (tool_use("toolu_1", LOOKUP, "msg_1"), tool_result("toolu_1", block_output())),
+            (tool_use("toolu_2", "", "msg_2", name="Agent", prompt="Summarize the run"),
+             tool_result("toolu_2", f"Summary.\n[NEXT_COMMAND] {stale}\n")),
+            final=report(stale))
+        assert f"```\n{COMMAND}\n```" in decision_of(run_check(capsys, path))["reason"]
+
+    @pytest.mark.parametrize("call", [
+        tool_use("toolu_1", "", "msg_1", name="Read",
+                 file_path="plans/my plan/generate-tasks/orchestrator-run.log"),
+        tool_use("toolu_1", "tail -n 20 'plans/my plan/generate-tasks/orchestrator-run.log'",
+                 "msg_1"),
+        tool_use("toolu_1", "grep NEXT_COMMAND 'plans/my plan/generate-tasks/orchestrator-run.log'",
+                 "msg_1"),
+    ], ids=["Read", "tail", "grep"])
+    def test_a_read_of_the_phase_s_own_output_is_held_to(self, tmp_path, capsys, call):
+        path = calls_and_results(tmp_path / "t.jsonl",
+                                 (call, tool_result("toolu_1", block_output())),
+                                 final="Tasks generated.")
+        assert f"```\n{COMMAND}\n```" in decision_of(run_check(capsys, path))["reason"]
