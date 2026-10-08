@@ -2523,11 +2523,14 @@ LAUNCH_FAILURE_MARKERS: Tuple[Tuple[str, Tuple["Pattern[str]", ...]], ...] = (
         # Lowercase, like every other row here: `_markers` compiles without
         # re.I and `classify_streams` lowercases the haystack first.
         r"\bcliusageerror\b",
-        # omp 18.8.3 (measured 2026-10-08, tests/fixtures/omp/invalid-tool):
-        # the same refusal, exit 2, as `Error: Unknown tool in --tools: bogus.`
-        # (`Unknown tools in --tools: a, b.` for two) with no Bun trace and no
-        # `CliUsageError` word, so the row above no longer reaches it.
-        r"\bunknown tools? in --tools\b",
+        # omp 18.8.3's plain refusal (below, STDERR_LAUNCH_FAILURE_MARKERS) as
+        # Lane A hands it over: that lane classifies its own
+        # `"<cli> exited with code N: <describe_failure>"` sentence as stdout
+        # (`llm_client`'s `error_message`), and omp's `describe_failure` puts
+        # the stderr line first, so the refusal sits right after that prefix
+        # at the very start of the haystack — where no CLI's own stdout, and
+        # no model's answer, starts.
+        r"\A[\w.-]+ exited with code -?\d+: error: unknown tools? in --tools\b",
         r"config overlay not found",
     )),
     (CATEGORY_PERMISSION_DENIED, _markers(
@@ -2537,6 +2540,22 @@ LAUNCH_FAILURE_MARKERS: Tuple[Tuple[str, Tuple["Pattern[str]", ...]], ...] = (
         r"\beperm\b",
     )),
 )
+
+#: Launch-failure rows read on **stderr only**, each at the start of a line,
+#: consulted beside :data:`LAUNCH_FAILURE_MARKERS`' row of the same category.
+#: A phrase a model's answer can quote does not belong in the shared haystack:
+#: rung 1 fails the whole batch, and a failed run's stdout is often that answer
+#: (a reviewer reading this repo's own omp fixtures quotes this one). omp
+#: 18.8.3 (measured 2026-10-08, tests/fixtures/omp/invalid-tool) refuses a bad
+#: ``--tools`` name, exit 2, with ``Error: Unknown tool in --tools: bogus.``
+#: (``Unknown tools in --tools: a, b.`` for two) opening its stderr, no Bun
+#: trace and no ``CliUsageError`` word, so ``\bcliusageerror\b`` no longer
+#: reaches it (review 24, pins #5).
+STDERR_LAUNCH_FAILURE_MARKERS: Dict[str, Tuple["Pattern[str]", ...]] = {
+    STATUS_SPAWN_FAILED: _markers(
+        r"(?m)^error: unknown tools? in --tools\b",
+    ),
+}
 
 #: Per-vendor context-overflow shapes (§7.2). These are the *only* thing that
 #: may produce :data:`STATUS_CONTEXT_LENGTH_EXCEEDED`, because that status is
@@ -2555,8 +2574,13 @@ CONTEXT_OVERFLOW_MARKERS = _markers(
     # Gemini: "The input token count (1093122) exceeds the maximum number of
     # tokens allowed (1048576)."
     r"input token count\s*\(?\d+\)?\s*exceeds",
-    # The shapes several gateways normalise the three above onto.
-    r"exceeds the (?:model'?s )?(?:maximum )?context (?:window|length)",
+    # The shapes several gateways normalise the three above onto. `effective`
+    # is goose 1.53.0's own compaction report (tests/fixtures/goose/
+    # context-overflow, measured 2026-10-08): "Failed to compact: the base
+    # prompt … exceeds the model's effective context window …", which goose
+    # writes as a text part with no error `kind`, so this row is what reaches
+    # it. One optional word, so no new prose shape matches.
+    r"exceeds the (?:model'?s )?(?:maximum |effective )?context (?:window|length)",
     r"context window (?:of \d+ tokens )?exceeded",
     r"\btoo many tokens\b",
     # Mistral Vibe, measured at 2.24.1: "The conversation context exceeds the
@@ -2754,8 +2778,11 @@ def classify_streams(
     if not haystack.strip():
         return None
 
+    stderr_lower = (stderr or "").lower()
     for category, markers in LAUNCH_FAILURE_MARKERS:
-        if _matches_marker(markers, haystack):
+        if _matches_marker(markers, haystack) or _matches_marker(
+            STDERR_LAUNCH_FAILURE_MARKERS.get(category, ()), stderr_lower
+        ):
             return category
 
     if _matches_marker(CONTEXT_OVERFLOW_MARKERS, haystack):
@@ -2900,10 +2927,16 @@ def match_streams(
             status, pattern, "stderr", max(0, offset - len(out_lower) - 1)
         )
 
+    err_lower = (stderr or "").lower()
     for category, markers in LAUNCH_FAILURE_MARKERS:
         hit = _first_marker_match(markers, haystack)
         if hit is not None:
             return _found(category, hit)
+        hit = _first_marker_match(
+            STDERR_LAUNCH_FAILURE_MARKERS.get(category, ()), err_lower
+        )
+        if hit is not None:
+            return StreamMatch(category, hit[0], "stderr", hit[1])
 
     hit = _first_marker_match(CONTEXT_OVERFLOW_MARKERS, haystack)
     if hit is not None:

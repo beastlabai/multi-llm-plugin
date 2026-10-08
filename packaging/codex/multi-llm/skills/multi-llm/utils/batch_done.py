@@ -77,8 +77,10 @@ own edits with ``--own-check passed|findings``: a failing one prints a
 report it, and holds nothing back. A ``completed`` record of such a batch
 given no ``--own-check`` (of a check task, no ``--check``) prints
 ``[OWN_CHECK_NOT_RECORDED]`` (``[CHECK_NOT_RECORDED]``) naming the call that
-records the result with the same flags (fix round 24); advisory, and nothing
-is recorded in its place. ``--check`` on such a batch is refused,
+records the result with the same flags (fix round 24); beside a recorded
+``--listed-check`` it asks only for the reply's ``passed``/``findings`` and
+never offers a pass beside a listed failure (fix round 25); advisory, and
+nothing is recorded in its place. ``--check`` on such a batch is refused,
 naming the ``--own-check`` call (fix round 18, live run 7: Claude Code
 recorded ``--check passed`` for T008, a "check" task that declares
 ``index.html``, and its summary then called the code task ``Verified``), and
@@ -677,11 +679,23 @@ def _record_again_call(args: argparse.Namespace, result_flag: str) -> str:
     return " ".join(parts)
 
 
-def check_not_recorded_line(args: argparse.Namespace, which: str) -> str:
+def check_not_recorded_line(
+    args: argparse.Namespace, which: str, listed: Optional[Dict[str, str]] = None,
+) -> str:
     """The line a ``completed`` record given no check result prints (fix
     round 24): ``[OWN_CHECK_NOT_RECORDED]`` for a task that edits files,
     ``[CHECK_NOT_RECORDED]`` for a check task, each naming the call that
-    records the result its reply reported."""
+    records the result its reply reported.
+
+    *listed* is what the record did carry of an apply-code-fixes batch's
+    ``check.listed`` (``{command: outcome}``). Those are on record, so the line
+    asks only for the rest of the reply's ``check``, its ``passed`` and
+    ``findings``, and never offers ``--own-check passed`` beside a listed
+    failure (review of fix round 24: the same call printed
+    ``[BATCH_CHECK_FAILED]`` and then suggested recording a pass). The line is
+    kept rather than dropped there, because the runbook records both and a
+    failing check outside the known list is named only in ``findings``.
+    """
     task_id = args.task_id
     if which == "check":
         return (
@@ -693,6 +707,29 @@ def check_not_recorded_line(args: argparse.Namespace, which: str) -> str:
             f"with --check findings and one --finding per problem; a `check` "
             f"that says \"could_not_run\": true is recorded --status failed "
             f"--check could-not-run instead."
+        )
+    if listed:
+        on_record = clip("; ".join(f"{command} {word}" for command, word in listed.items()), 300)
+        head = (
+            f"{OWN_CHECK_NOT_RECORDED_MARKER} {task_id} edits files and was "
+            f"recorded completed with its listed checks ({on_record}) but "
+            f"without --own-check, so the rest of its reply's `check`, its "
+            f"\"passed\" and \"findings\", is not on record."
+        )
+        if _known_checks.LISTED_FAILED in listed.values():
+            return (
+                f"{head} A listed check failed, so its check fails whatever "
+                f"\"passed\" says: if its \"findings\" name a failing check, "
+                f"record it again now with them: "
+                f"{_record_again_call(args, '--own-check findings')} and one "
+                f"--finding per entry. Leave the record as it is when they "
+                f"name none."
+            )
+        return (
+            f"{head} Record it again now: "
+            f"{_record_again_call(args, '--own-check passed')} when it says "
+            f"\"passed\": true, or the same call with --own-check findings "
+            f"and one --finding per failing check."
         )
     return (
         f"{OWN_CHECK_NOT_RECORDED_MARKER} {task_id} edits files and was "
@@ -1284,7 +1321,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     which = written.get("check_not_recorded")
     if which:
         # Fix round 24: advisory, so the host records it in the same turn.
-        print(check_not_recorded_line(args, which))
+        print(check_not_recorded_line(args, which, written.get("listed")))
     return 0
 
 

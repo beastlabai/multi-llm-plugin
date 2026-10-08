@@ -354,9 +354,11 @@ hosts:
                                       # `danger-full-access` allow them. The renderer reads this cell into
                                       # the generated install paragraph, so a user meets it
                                       # before installing, not after.
-      min_host_version: "0.161.0"     # the pin; replaced by the version the first green plugin row
-                                      # reports, since the schema's own wording is "the lowest actually RUN"
-                                      # — and not bisected (Open question 5)
+      min_host_version: "0.159.2"     # the lowest codex the plugin route was RUN on (T10's container
+                                      # rows, 2026-10-01, below), the schema's own wording — never the
+                                      # container pin or packaging/codex/ingestion_rules.py's stamp, which
+                                      # follow each pin bump; it moves on a measured break, and test_codex_route
+                                      # holds it at or below both. Not bisected (Open question 5)
       invocation: >-
         with a `$` mention of the namespaced skill — `$multi-llm:multi-llm <the same
         arguments the Claude Code skill takes>`; plugins add no slash command, so

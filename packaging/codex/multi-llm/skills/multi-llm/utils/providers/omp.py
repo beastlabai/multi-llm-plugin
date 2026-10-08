@@ -175,8 +175,9 @@ REASONING_EFFORTS = EFFORT_LADDER.accepted
 #: **``--tools`` is validated before model resolution, at zero spend**, so an
 #: unknown name is 0 B stdout / zero requests with the refusal on stderr — exit 1
 #: and a ``CliUsageError`` Bun trace at 18.2.2, exit 2 and a plain ``Error:
-#: Unknown tool in --tools: <name>.`` at 18.8.3 (both on
-#: ``LAUNCH_FAILURE_MARKERS``' ``spawn_failed`` row) — ``spawn_failed`` (D3k rung 1: fails the whole batch, never
+#: Unknown tool in --tools: <name>.`` at 18.8.3 (the first on
+#: ``LAUNCH_FAILURE_MARKERS``' ``spawn_failed`` row, the second on
+#: ``STDERR_LAUNCH_FAILURE_MARKERS``', read on stderr only) — ``spawn_failed`` (D3k rung 1: fails the whole batch, never
 #: retried), the right disposition for a property of the *install*, but one that
 #: reads like a containment breach when it is an argv fault and the run never
 #: started. ``tests/test_omp_containment.py``'s
@@ -923,7 +924,7 @@ class OmpProvider(LLMProvider):
     #: against one that takes 20 s to answer each 429 — identical request count,
     #: a wall that is just ``backoff + requests × latency`` and therefore a
     #: property of the upstream, not of omp. Nothing was found that omp enforces
-    #: on *itself* (muse's 736.0 is that kind of number); the only ceiling is
+    #: on *itself* (muse's 12-minute ceiling is that kind of number); the only ceiling is
     #: ``--max-time``, which this adapter renders from ``timeout_s`` and which is
     #: therefore the slot's number, not the envelope's. Declaring an observed
     #: total would let rule 4 admit an attempt with 101 s left and then watch a

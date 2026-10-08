@@ -35,8 +35,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+from . import progress_tracker as _progress
 from . import status_file as _status_file
 from .json_extractor import sanitize_model_name
+from .text_clip import plain_line
 
 #: Basenames that are never a per-model result file: every artifact a phase dir
 #: holds that is also a ``*.json``. The union of what the two reaggregate globs
@@ -138,13 +140,24 @@ def misnamed_result_note(model_spec: str, wrote: str, expected: str) -> str:
     )
 
 
-def set_aside_note(name: str, target: str, recorded_specs: Sequence[str]) -> str:
-    """The one sentence the aggregate says about a result file it left out."""
-    return (
+def set_aside_note(
+    name: str, target: str, recorded_specs: Sequence[str],
+    *, rename_failed: Optional[str] = None,
+) -> str:
+    """The one sentence the aggregate says about a result file it left out.
+
+    *rename_failed* is why the rename to *target* failed: the file is then
+    left where it is, and the sentence says so (review of fix round 24: it
+    said "renamed it to <its own name>" on every surface).
+    """
+    head = (
         f"{name} is not the result file of any model this review ran "
         f"({', '.join(recorded_specs)}), so its findings are left out of the "
-        f"report; renamed it to {target} (nothing was deleted)"
+        f"report; "
     )
+    if rename_failed is not None:
+        return f"{head}left in place (rename failed: {plain_line(rename_failed)})"
+    return f"{head}renamed it to {target} (nothing was deleted)"
 
 
 def append_result_note(phase_dir: os.PathLike | str, note: str) -> None:
@@ -240,14 +253,81 @@ def _claimed_stems(specs: Iterable[str]) -> set:
     return stems
 
 
+#: How a candidate result file is opened: never through a link (a link
+#: swapped in after the ``lstat`` fails the open with ``ELOOP``), and never
+#: blocking on a FIFO. ``getattr`` because Windows has neither flag; the
+#: identity check in :func:`read_regular_text` covers it there.
+_NO_FOLLOW_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_BINARY", 0)
+)
+
+#: ``(st_dev, st_ino)`` of a file :func:`read_regular_text` read.
+FileIdentity = Tuple[int, int]
+
+
+def read_regular_text(path: os.PathLike | str) -> Optional[Tuple[str, FileIdentity]]:
+    """*path*'s UTF-8 text and identity, when it is a regular file; else ``None``.
+
+    Checked and read through one descriptor (review of fix round 24): the
+    ``lstat`` says a regular file, the open never follows a link, and the
+    opened descriptor is ``fstat``-ed as a regular file with the ``lstat``'s
+    identity, so a link or a FIFO swapped in between the check and the open is
+    never read. A file that is not UTF-8 is ``None`` too.
+    """
+    try:
+        before = os.lstat(path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(before.st_mode):
+        return None
+    try:
+        fd = os.open(path, _NO_FOLLOW_OPEN_FLAGS)
+    except OSError:
+        return None
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or (
+            (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            return None
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    try:
+        text = b"".join(chunks).decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return text, (opened.st_dev, opened.st_ino)
+
+
+def is_same_regular_file(path: os.PathLike | str, identity: FileIdentity) -> bool:
+    """Whether *path* is, now, the regular file :func:`read_regular_text` read."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and (st.st_dev, st.st_ino) == tuple(identity)
+
+
 def _is_result_list(path: str) -> bool:
     """A regular file (not a link, not a FIFO) holding one JSON array."""
+    read = read_regular_text(path)
+    if read is None:
+        return False
     try:
-        if not stat.S_ISREG(os.lstat(path).st_mode):
-            return False
-        with open(path, "r", encoding="utf-8") as handle:
-            return isinstance(json.load(handle), list)
-    except (OSError, ValueError):
+        return isinstance(json.loads(read[0]), list)
+    except ValueError:
         return False
 
 
@@ -286,6 +366,7 @@ def set_aside_unrecorded_results(
         target = f"{path}.{SET_ASIDE_SUFFIX}"
         if os.path.exists(target):
             target = f"{target}.{datetime.now().strftime('%Y%m%dT%H%M%S%f')}"
+        rename_failed: Optional[str] = None
         try:
             os.replace(path, target)
         except OSError as exc:
@@ -294,8 +375,10 @@ def set_aside_unrecorded_results(
                 f"{phase_dir} but is not read as a model's result",
                 file=sys.stderr,
             )
-            target = path
-        note = set_aside_note(name, os.path.basename(target), recorded)
+            rename_failed = exc.strerror or str(exc) or type(exc).__name__
+        note = set_aside_note(
+            name, os.path.basename(target), recorded, rename_failed=rename_failed,
+        )
         print(f"[RESULT_SET_ASIDE] {note}")
         append_result_note(phase_dir, note)
         set_aside_stems.append(stem)
@@ -305,12 +388,47 @@ def set_aside_unrecorded_results(
 
 
 def _forget_completed(phase_dir: str, stems: Sequence[str], recorded: Sequence[str]) -> None:
-    """Drop set-aside stems an earlier reaggregate recorded as completed models."""
+    """Drop set-aside stems an earlier reaggregate recorded as completed models.
+
+    Everywhere ``status`` reads a model from: ``models_completed``, the stem's
+    ``progress.models`` row, and the two counters derived from them. A
+    pre-round-24 ``--reaggregate`` wrote ``models_succeeded`` as the length of
+    ``models_completed`` with the stem in it, and a foreground reaggregate keeps
+    ``progress`` (only a detached one's claim drops it), so ``status`` read
+    "3 ok" beside a report of two models (review of fix round 24). With the
+    per-model map, both counters are re-derived from it as the fan-out derives
+    them (a terminal row is done, a ``done`` row succeeded); without one,
+    ``models_succeeded`` is recounted by the rule that wrote it.
+    """
+    forget = {stem for stem in stems if stem not in recorded}
     with _status_file.checkpoint_lock(phase_dir):
         status = _status_file.read_status(phase_dir)
         completed = status.get("models_completed")
-        if not isinstance(completed, list):
+        dropped = False
+        if isinstance(completed, list):
+            kept = [m for m in completed if m not in forget]
+            if kept != completed:
+                _status_file.update_status(phase_dir, {"models_completed": kept})
+                dropped = True
+        progress = status.get("progress")
+        if not isinstance(progress, dict):
             return
-        kept = [m for m in completed if m in recorded or m not in stems]
-        if kept != completed:
-            _status_file.update_status(phase_dir, {"models_completed": kept})
+        models_map = progress.get("models")
+        if isinstance(models_map, dict):
+            rows = {k: v for k, v in models_map.items() if k not in forget}
+            if len(rows) == len(models_map) and not dropped:
+                return
+            entries = [e for e in rows.values() if isinstance(e, dict)]
+            _status_file.update_progress(phase_dir, {
+                "models": rows,
+                "models_done": sum(
+                    1 for e in entries if e.get("state") in _progress.TERMINAL_STATES
+                ),
+                "models_succeeded": sum(
+                    1 for e in entries if e.get("state") == _progress.STATE_DONE
+                ),
+            })
+        elif dropped and progress.get("models_total") and isinstance(
+            progress.get("models_succeeded"), int
+        ):
+            _status_file.update_progress(phase_dir, {"models_succeeded": len(kept)})

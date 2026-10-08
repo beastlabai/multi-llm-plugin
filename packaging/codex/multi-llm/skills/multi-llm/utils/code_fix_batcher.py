@@ -19,12 +19,12 @@ from typing import Any, Dict, List, Optional, Sequence
 try:
     from .plan_updater import get_tasks_file_path
     from .prior_changes import entries as prior_changes_entries
-    from .prior_changes import entry_id, record_line, stable_key
+    from .prior_changes import entry_id, plain_entry_id, record_line, stable_key
     from .subagent_tasks import subagent_type_for_role
 except ImportError:
     from utils.plan_updater import get_tasks_file_path
     from utils.prior_changes import entries as prior_changes_entries
-    from utils.prior_changes import entry_id, record_line, stable_key
+    from utils.prior_changes import entry_id, plain_entry_id, record_line, stable_key
     from utils.subagent_tasks import subagent_type_for_role
 
 
@@ -405,7 +405,7 @@ def _implementation_record_lines(
     # budget are named here by task id, once, and never listed again under
     # the prior-batches section ("Batch 15-18" named no batch of anything).
     left_out = [
-        str(entry.get("id") or "?") for index, entry in enumerate(implement_entries)
+        plain_entry_id(entry.get("id")) for index, entry in enumerate(implement_entries)
         if index not in shown
     ]
     if left_out:
