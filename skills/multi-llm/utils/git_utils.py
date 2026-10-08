@@ -772,17 +772,46 @@ def _private_index_copy(cwd: Optional[str]) -> str:
     target = os.path.join(os.path.dirname(source), name)
     try:
         if os.path.exists(source):
-            shutil.copyfile(source, target)
+            _copy_index_keeping_its_time(source, target)
     except OSError:
         import tempfile
 
         descriptor, target = tempfile.mkstemp(prefix="multi-llm-index.")
         os.close(descriptor)
         if os.path.exists(source):
-            shutil.copyfile(source, target)
+            _copy_index_keeping_its_time(source, target)
         else:
             os.unlink(target)
     return target
+
+
+def _copy_index_keeping_its_time(source: str, target: str) -> None:
+    """Copy the index at *source* to *target*, with *source*'s timestamps.
+
+    git trusts an entry's cached stat data (size, mtime, inode) to say a
+    tracked file is unchanged, except when the entry is not older than the
+    index file itself: such a "racily clean" entry may have been edited in the
+    same second it was cached, so git compares its contents instead. A copy
+    stamped with the time it was made is newer than every entry, which turns
+    that check off: an edit of the same size made within the cached entry's
+    second (review-code's fixture rewrites ``return 1`` as ``return 2`` at
+    once) matched its stale stat data and dropped out of every diff the review
+    ran on the copy (commit review of 4ca1f34..3e8ff80, 2026-10-08). The copy
+    is read from one open file, so the time it carries is that file's even
+    if git replaces the index meanwhile. A copy that fails halfway is removed.
+    """
+    try:
+        with open(source, "rb") as reader:
+            stamp = os.fstat(reader.fileno())
+            with open(target, "wb") as writer:
+                shutil.copyfileobj(reader, writer)
+        os.utime(target, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    except OSError:
+        try:
+            os.unlink(target)
+        except OSError:
+            pass
+        raise
 
 
 #: The private index copies, as :func:`_private_index_copy` names them:
