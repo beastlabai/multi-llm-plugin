@@ -1,9 +1,2 @@
-Error: API error from stubprov (model: stub-model): LLM backend error [stubprov]
-  status: 404 Not Found
-  reason: Not Found
-  request_id: N/A
-  endpoint: http://127.0.0.1:8420/v1/chat/completions
-  model: stub-model
-  provider_message: The model `stub-model` does not exist
-  body_excerpt: {"error": {"message": "The model `stub-model` does not exist", "type": "invalid_request_error", "code": "model_not_found"}}
-  payload_summary: {"model":"stub-model","message_count":2,"approx_chars":12715,"temperature":0.2,"has_tools":true,"tool_choice":"auto"}
+Error: Client error '404 Not Found' for url 'http://127.0.0.1:8099/s/dbf2efd7b312/v1/chat/completions'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404: The model `stub-model` does not exist

@@ -519,8 +519,9 @@ class TestClaudeCodeRetryEnvelope:
             # retry-shaped env REQUIRES a declaration -- so the exemption is the
             # declaration, not the name. vibe is the case that forced this:
             # `VIBE_API_TIMEOUT` is retry-shaped by construction (the declared
-            # `max_wall_s` is literally 3x it) and pinning it is what makes the
-            # envelope true, exactly as `CLAUDE_CODE_MAX_RETRIES` does.
+            # `max_wall_s` is computed from it and from the pinned 2.26.0 retry
+            # budget) and pinning it is what makes the envelope true, exactly as
+            # `CLAUDE_CODE_MAX_RETRIES` does.
             if provider.internal_retries is not None:
                 continue
             try:
@@ -4421,7 +4422,8 @@ class TestVibeProvider:
     """Tests for VibeProvider (harness-expansion.md §4.2, H6·vibe).
 
     Every assertion is anchored to a capture in `tests/fixtures/vibe/`, taken
-    from the real binary at 2.24.1 inside the §6 probe container — the
+    from the real binary at 2.24.1 inside the §6 probe container and re-taken
+    at 2.26.0 in the pinned image on 2026-10-08 (manifest.yaml) — the
     `tests/fixtures/kilocode/` precedent.
 
     vibe is the row where the plan was most wrong, so several tests here exist
@@ -4671,11 +4673,21 @@ class TestVibeProvider:
         vibe's wording puts the noun first and calls the bound a "limit"
         ("The conversation context exceeds the model's maximum limit"), which the
         pre-existing gateway pattern does not reach — so this is the assertion
-        behind the one shared-table marker this adapter added.
+        behind the one shared-table marker this adapter added. That sentence is
+        2.24.1's (the floor) and is quoted here from the first capture; 2.26.0
+        forwards the upstream sentence instead, which the committed fixture
+        carries.
         """
+        floor_stderr = (
+            "Error: The conversation context exceeds the model's maximum limit. "
+            "Use /rewind to undo recent actions, then /compact to summarize the "
+            "conversation.\n"
+        )
+        assert provider.classify_failure("", floor_stderr, 1) == "context_length_exceeded"
+
         stderr = self._fixture("context-overflow.stderr.txt")
 
-        assert "conversation context exceeds" in stderr.lower()
+        assert "maximum context length" in stderr.lower()
         assert provider.classify_failure("", stderr, 1) == "context_length_exceeded"
 
     def test_the_invalid_model_failure_names_the_model(self, provider):
@@ -4701,16 +4713,29 @@ class TestVibeProvider:
         abort criterion 1 on the hazard. Measured, it is one POST and a hard
         error — so the envelope's 3 attempts come from the retryable HTTP set,
         and `max_wall_s` is real (rather than `None`, as copilot's and
-        qwen-code's are) precisely because `Retry-After` is NOT honoured, so no
-        server-chosen sleep can extend it.
+        qwen-code's are) precisely because `Retry-After` was NOT honoured at
+        2.24.1, so no server-chosen sleep could extend it.
+
+        2.26.0 (2026-10-08) replaced the three tries with a wall-clock retry
+        budget and honours `Retry-After` up to a 30 s cap, so the declaration
+        now covers both supported releases from the two pins: measured at the
+        pinned 150 s budget, a 500-forever chain is 11 requests over 155 s and
+        six `Retry-After: 29` 429s followed by a stall end at 267 s, under
+        budget + 30 + timeout + 2 = 272 s, the same bound 2.24.1's 3 x 90 + 2
+        gives.
         """
         envelope = provider.internal_retries
 
         assert envelope is not None
-        assert envelope.max_requests == 3
+        assert envelope.max_requests == 11
         assert envelope.retries_rate_limit is True
-        assert envelope.configurable_by == ("VIBE_API_TIMEOUT",)
-        assert envelope.max_wall_s == 3 * vibe_module.API_TIMEOUT_S + 2
+        assert envelope.configurable_by == (
+            "VIBE_API_TIMEOUT", "VIBE_API_RETRY_MAX_ELAPSED_TIME",
+        )
+        assert envelope.max_wall_s == max(
+            3 * vibe_module.API_TIMEOUT_S + 2,
+            vibe_module.API_RETRY_BUDGET_S + 30 + vibe_module.API_TIMEOUT_S + 2,
+        ) == 272
 
     def test_the_declared_bound_sits_under_the_slot_timeout(self, provider):
         """§3.3's invariant for any inner bound."""
@@ -4731,7 +4756,9 @@ class TestVibeProvider:
         assert provider.structured_output_support is False
 
     def test_the_verified_version_is_the_capture_version(self, provider):
-        assert provider.verified_version == "2.24.1"
+        # Re-captured on 2.26.0 on 2026-10-08; 2.24.1 (the first capture)
+        # stays the floor.
+        assert provider.verified_version == "2.26.0"
         assert provider.min_version == "2.24.1"
 
 

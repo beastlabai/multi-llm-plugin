@@ -1314,6 +1314,10 @@ clis:
       # a ~36-minute worst case in one slot -- and the adapter's declared
       # `max_wall_s` is computed from this number, so the two cannot drift.
       VIBE_API_TIMEOUT: "90"
+      # 2.26.0's retry budget (vendor default 300 s, which measured 16 requests
+      # over ~305 s on a fail-forever row). Pinned beside the timeout for the
+      # same reason; the declared `max_wall_s` is computed from both.
+      VIBE_API_RETRY_MAX_ELAPSED_TIME: "150"
       # §6.5's rung, pinned in env as well as argv: `default_agent` is
       # `accept-edits`, whose AgentSafety is DESTRUCTIVE.
       VIBE_DEFAULT_AGENT: "plan"
@@ -1329,7 +1333,9 @@ clis:
     terminates_on_text: true
     # vibe's own chain is 3 attempts x the pinned 90 s api_timeout plus ~1.6 s of
     # backoff, and `Retry-After` is NOT honoured -- so unlike copilot's, this
-    # inner bound is real and the outer one only has to clear it.
+    # inner bound is real and the outer one only has to clear it. At 2.26.0 it
+    # is the pinned 150 s retry budget + one capped 30 s delay + one 90 s
+    # attempt: 272 s, measured 267 s at worst.
     row_timeout_s: 300
     chain_row_timeout_s: 600
     version_measured: "2.24.1"
