@@ -980,15 +980,18 @@ def _ran_word(which: str) -> str:
 
 def _stated_findings(check: Dict[str, Any]) -> List[str]:
     """The findings a ``check`` object names itself, bounded, without the
-    placeholders :func:`check_findings_from` puts in for none, nor an entry
-    that only says nothing was found (``"none"``, ``"n/a"``, ``0``: fix
-    round 27, so ``"findings": "none"`` beside a ``passed: true`` that ran
-    nothing is no finding, as fix round 12 reads it beside any pass)."""
+    placeholders :func:`check_findings_from` puts in for none. Beside a
+    ``passed`` that reads true, an entry that only says nothing was found
+    (``"none"``, ``"n/a"``, ``0``) is no finding either (fix round 12's
+    reading of a bare one, which fix round 27 extends to a list entry, so
+    ``["n/a"]`` beside a ``passed: true`` that ran nothing is no check, not
+    a failing one); beside any other ``passed`` it stays one, as before."""
     raw = check.get("findings")
-    if isinstance(raw, list):
-        raw = [item for item in raw if not _says_nothing_found(item)]
-    elif _says_nothing_found(raw):
-        raw = None
+    if _check_passed(check.get("passed")) is True:
+        if isinstance(raw, list):
+            raw = [item for item in raw if not _says_nothing_found(item)]
+        elif _says_nothing_found(raw):
+            raw = None
     return [
         text for text in (check_findings_from(
             {"check": {"passed": False, "findings": raw}}

@@ -4,7 +4,7 @@ A subagent that edited code — an implement task that declares files, or an app
 
 ## Words the rules use
 
-- **A finding**: an entry of its `findings` (a bare string or object is one entry), unless it is empty or only says nothing was found (`"none"`, `"n/a"`, `"no problems found"`, `0`).
+- **A finding**: an entry of its `findings` (a bare string or object is one entry) that is not empty. Beside a `passed` that is true, an entry that only says nothing was found (`"none"`, `"n/a"`, `"no problems found"`, `0`) is no finding either.
 - **`passed` is true** when it reads `true`, `"true"`, `"yes"`, `"pass"`, `"passed"` or `1`; **false** when it reads `false`, `"false"`, `"no"`, `"fail"`, `"failed"` or `0`; anything else (missing, `null`, `"maybe"`) is **neither**.
 - **`ran` maps a command to failed** when that command's outcome reads `"failed"`, `"fail"`, `"fails"`, `"failing"` or `false`; to **passed** for `"passed"`, `"pass"`, `"ok"`, `"success"` or `true`; to **not run** for `"not run"`, `"skipped"` or `"could not run"`. A list of `"<command>: <outcome>"` strings, or of `{"command": …, "outcome": …}` objects, is read the same way.
 - **It ran nothing** when its `ran` is there and names no command it ran: `ran` is empty (`{}` or `[]`), or each entry is not run or the result shape's placeholder `<each check command you ran>` copied as it is (as a key, a string, or an object's `command`).
