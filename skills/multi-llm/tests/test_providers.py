@@ -3727,7 +3727,8 @@ class TestCopilotProvider:
 
     Every assertion is anchored to a capture in `tests/fixtures/copilot/`, taken
     from the real binary at 1.0.80 inside the §6 probe container — the
-    `tests/fixtures/kilocode/` precedent.
+    `tests/fixtures/kilocode/` precedent — and re-captured at 1.0.93 on
+    2026-10-08, except `exit-zero-failure.jsonl`, which only 1.0.80 produces.
     """
 
     FIXTURES = Path(__file__).parent / "fixtures" / "copilot"

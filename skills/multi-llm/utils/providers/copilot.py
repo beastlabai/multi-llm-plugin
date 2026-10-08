@@ -38,7 +38,11 @@ empty body yields process exit 0, ``result.exitCode: 0``, and an
 anywhere**. There is no text to match, so
 :attr:`CopilotProvider.exit_zero_failure_markers` is empty *by measurement* and
 detection is **structural**, in ``parse_output``: an assistant message that
-carries no content is a failure however cheerful the envelope is.
+carries no content is a failure however cheerful the envelope is. That is
+1.0.80's behaviour, and the check stays because 1.0.80 is still the floor: at
+1.0.93 the CLI reports the same empty 200 itself, as a ``session.error``
+(``errorType: query``, *"No response was returned…"*, no ``statusCode``) with
+exit 1, which the ``session.error`` branch already handles.
 
 **``session.error`` is the real error channel** and §3.1 does not mention it. It
 arrives **on stdout with stderr empty** — §6.2's ``stdout-error`` trap in its
@@ -111,7 +115,8 @@ from .base import (
     split_reasoning_effort,
 )
 
-#: Levels accepted by ``copilot --effort`` at 1.0.80, measured one at a time.
+#: Levels accepted by ``copilot --effort`` at 1.0.80, measured one at a time
+#: (1.0.93's invalid-level error names the same seven, 2026-10-08).
 #: All seven are accepted by the CLI; which of them a given backend honours is
 #: server-side and model-dependent, which is why this is a parse-time whitelist
 #: rather than a promise about behaviour — and why the declaration is the whole
@@ -205,6 +210,11 @@ _STRIPPED_VENDOR_VARS: Tuple[str, ...] = (
     # Documented to take PRECEDENCE OVER COPILOT_PROVIDER_API_KEY, so a stale
     # one overrides the key this adapter injects. Also a §3.1 miss.
     "COPILOT_PROVIDER_BEARER_TOKEN",
+    # New since 1.0.80 (`copilot help environment` at 1.0.93, 2026-10-08): "shell
+    # command that prints a fresh API key for each provider request. Takes
+    # precedence over COPILOT_PROVIDER_API_KEY." An ambient one would both
+    # outrank the key we inject and run a shell command on every request.
+    "COPILOT_PROVIDER_API_KEY_COMMAND",
     # "Setting this automatically enables OTel." A user's exported endpoint
     # would turn on telemetry from our spawn, on their behalf, unasked.
     "OTEL_EXPORTER_OTLP_ENDPOINT",
@@ -485,16 +495,28 @@ class CopilotProvider(LLMProvider):
     supports_file_output = False
 
     version_cmd = ("copilot", "--version")
-    #: 1.0.80 is where every fixture in ``tests/fixtures/copilot/`` was captured
-    #: and the floor this parser is known to handle. The JSONL schema is
-    #: explicitly **unversioned** upstream (copilot-cli#3551), so this is a pin
-    #: to re-confirm rather than a range to trust.
+    #: 1.0.80 is where the fixtures in ``tests/fixtures/copilot/`` were first
+    #: captured and the floor this parser is known to handle; ``exit-zero-failure.jsonl``
+    #: is still that release's bytes, because only 1.0.80 produces that shape.
+    #: The JSONL schema is explicitly **unversioned** upstream (copilot-cli#3551),
+    #: so this is a pin to re-confirm rather than a range to trust.
     #:
     #: A ``verify.pattern`` for this CLI must not anchor to end-of-output:
     #: ``copilot --version`` prints ``GitHub Copilot CLI 1.0.80.`` — trailing
     #: period included — **plus** a second "Run 'copilot update'…" line.
     min_version = "1.0.80"
-    verified_version = "1.0.80"
+    #: 2026-10-08: every other fixture re-captured on 1.0.93 offline, in the
+    #: pinned image through the PATH wrapper (tests/fixtures/copilot/manifest.yaml).
+    #: The parser needed no change. What moved: an empty provider 200 is now a
+    #: `session.error` (`errorType: query`, "No response was returned…") with
+    #: exit 1 (the `empty-response` row), two new ephemeral records
+    #: (`model.call_finished`, `model.call_final_result`), no more
+    #: `assistant.turn_retry`/`session.info` records on a retry, and shorter
+    #: retry waits (5xx chain 17 s, 429 chain 57 s; still 6 requests each,
+    #: `Retry-After` still honoured, a stall still unretried and untimed at
+    #: 180 s), so `internal_retries` below holds as declared. One env change:
+    #: COPILOT_PROVIDER_API_KEY_COMMAND (new since 1.0.80) is now stripped.
+    verified_version = "1.0.93"
 
     #: Measured at 1.0.80, every field (§6.1.1). **All four of §3.1's
     #: placeholders were wrong and none of them shipped.**
@@ -541,7 +563,8 @@ class CopilotProvider(LLMProvider):
     #: **Empty by measurement, not by omission** — and §6.1's column still reads
     #: YES for this CLI.
     #:
-    #: copilot's one exit-0 failure shape is an empty provider 200: exit 0,
+    #: copilot's one exit-0 failure shape is an empty provider 200 at 1.0.80
+    #: (1.0.93 turns it into a ``session.error`` with exit 1): exit 0,
     #: ``result.exitCode: 0``, an ``assistant.message`` whose content is ``""``,
     #: and **no error record and no error text anywhere**. There is nothing for a
     #: regex to match, so the detection lives in :meth:`parse_output` as a

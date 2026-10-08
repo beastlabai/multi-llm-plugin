@@ -11,28 +11,39 @@
 # C1). The rows below are the same captures, now graded by the rig.
 schema_version: 1
 provider: copilot
-cli_version: "1.0.80"
-captured: "2026-08-17"
+cli_version: "1.0.93"
+captured: "2026-10-08"
 method: >-
-  §6 step 5, `@github/copilot@1.0.80` in a throwaway container built FROM
-  mllm-e2e:local, every run `--network none`, UID 10001, against the committed
-  `stub_server.py` or a probe-local fail-forever server. **No GitHub token, no
-  credential, no network.** argv is `CopilotProvider.build_command`'s output
-  (`copilot --output-format json --stream off --log-level none
-  --no-custom-instructions --no-ask-user --no-auto-update
-  --disable-builtin-mcps --model <model> -p <prompt>`), and the prompt is the
-  product's own `prompts/plan_review.txt`-shaped review prompt — 30 412 bytes of
-  it, which is the whole point of the `success` row below. The full probe
-  transcript is plans/harness-expansion/probe-out/copilot/RESULTS.md and the
-  per-fixture table is §9 there.
-  ONE THING IN THIS MANIFEST IS NOT A PER-ROW MEASUREMENT: the probe committed
-  the captures without a per-row `*.meta.json` (unlike goose's), so each
-  `exit_code` below is RESULTS.md's measured *class* rule — "error on stdout,
-  **stderr 0 bytes**, exit 1", exit 0 for the answering rows and for the
-  empty-200 exit-0 failure — rather than a number read back off that row's run.
-  Where a row's exit code is neither (the killed stall run), the row says so in
-  its own notes. Nothing any row asserts turns on the value: only exit **127**
-  changes `classify_streams`' answer.
+  §6 step 5, re-run 2026-10-08 on 1.0.93 (first captured 2026-08-17 on
+  `@github/copilot@1.0.80` in a throwaway container built FROM mllm-e2e:local,
+  against the same servers, with plans/harness-expansion/probe-out/copilot/RESULTS.md
+  its transcript and §9 there its per-fixture table): in the pinned image built
+  from tests/container/Dockerfile at the cli-versions.lock pins, every run
+  `--network none`, UID 10001, read-only root. **No GitHub token, no
+  credential, no network.** The CLI is driven through the PATH wrapper
+  (`/opt/mllm/bin/copilot` IS `wrapper.py`), so redirect.yaml's copilot row
+  applies verbatim: COPILOT_PROVIDER_BASE_URL at the server's origin with a
+  per-exec `/s/<id>/v1` session prefix (which is why every error message names
+  `127.0.0.1:8099/s/<id>/v1`), COPILOT_PROVIDER_MAX_PROMPT_TOKENS 32000 /
+  _OUTPUT_TOKENS 8000 (so `maxPromptTokens` in the failure records reads 32000
+  where 1.0.80's read 128000) and the pre-warmed XDG_CACHE_HOME. argv is
+  `CopilotProvider.build_command`'s output verbatim, built inside the container
+  by the in-image adapter (`copilot --output-format json --stream off
+  --log-level none --no-custom-instructions --no-ask-user --no-auto-update
+  --disable-builtin-mcps --model gpt-5.5 -p <prompt>`); 1.0.80's runs set
+  COPILOT_MODEL=gpt-5.5 and passed no `--model`. Two rows swap one argv span and
+  say so. The prompt is the probe's own `mkprompt.py` review-plan prompt —
+  30 412 bytes of it, which is the whole point of the `success` row below — on
+  the three answering rows, and `Say OK` on every failure row, as in 2026-08.
+  Servers, as in 2026-08: the committed `stub_server.py` with the probe's
+  `probe-scenario.yaml` for the answering rows, and the probe's own throwaway
+  fail-forever server (scratch/copilot-probe/failserver.py, untracked, copied
+  verbatim) for the failure rows — same bodies byte for byte; the committed
+  `tests/container/failserver.py` has every one of its modes except the empty
+  200. Each row's `exit_code`, `wall_s` and `requests` below is read back off
+  that row's own run (the driver's result record and the server's request log);
+  1.0.80's `exit-zero-failure` row keeps the numbers 2026-08's retry/summary.txt
+  recorded for it. Only exit **127** changes `classify_streams`' answer.
 notes: >-
   Three facts hold across every row. (1) copilot's ONLY error channel is a
   `session.error` JSONL record on **stdout**; stderr is 0 bytes on every
@@ -41,15 +52,33 @@ notes: >-
   record whose `data.content` is the same field an `assistant.message` uses —
   30 412 of `success.jsonl`'s 65 KB. `parse_output` already filtered it by
   record type; `classify_failure` did not, until `CopilotProvider.vendor_text`.
-  (3) copilot has a genuine exit-0 failure mode (an empty provider 200 ⇒ exit 0,
-  `result.exitCode: 0`, empty assistant content, no error record) that no marker
-  can catch, so it is detected structurally in `parse_output` rather than by a
-  pattern.
+  (3) At 1.0.80 copilot had a genuine exit-0 failure mode (an empty provider
+  200 ⇒ exit 0, `result.exitCode: 0`, empty assistant content, no error record)
+  that no marker can catch, so it is detected structurally in `parse_output`
+  rather than by a pattern; 1.0.93 reports the same 200 itself, as a
+  `session.error` with exit 1 (`empty-response` below), and the structural
+  check stays because 1.0.80 is still the adapter's floor.
+  What moved between 1.0.80 and 1.0.93, read off these bytes: two new ephemeral
+  records around every model call (`model.call_finished`,
+  `model.call_final_result`); `session.skills_loaded` now precedes
+  `session.mcp_servers_loaded`; a retry no longer emits
+  `assistant.turn_retry`/`session.info` records (each attempt is a
+  `model.call_start`/`model.call_failure`/`model.call_finished` triple); the
+  `assistant.message` under `--stream off` lost `outputTokens` and gained
+  `originatingMessageId`; the 401 gloss names a new variable,
+  COPILOT_PROVIDER_API_KEY_COMMAND (documented to outrank the API key, so
+  `get_remove_env` strips it since this capture); and the retry waits are
+  shorter (5xx chain 17.4 s and 429 chain 57.2 s, against 33.0 s and 86.4 s),
+  still 6 requests each, with a `Retry-After: 60` still honoured (gaps of
+  69/68/65/70 s, 5 requests when killed at 300 s, as at 1.0.80) and a stalled
+  request still never retried nor timed out under 180 s. The parser needed no change.
 
 rows:
   success:
     stdout: success.jsonl
     exit_code: 0
+    wall_s: 1.04
+    requests: 1
     notes: >-
       THE ROW THIS MANIFEST WAS WRITTEN FOR. A completely successful tier-1 run:
       exit 0, a `result` record, one `assistant.message` whose fenced JSON array
@@ -78,15 +107,19 @@ rows:
   truncated:
     stdout: truncated.jsonl
     exit_code: 137
+    wall_s: 180.0
+    requests: 1
     notes: >-
-      A REAL kill mid-flight — the stall probe (server accepts, never answers;
-      RESULTS.md §6 row 4 measured no client-side timeout under 180 s and ended
-      it with SIGKILL). The stream stops at `model.call_start` with **no
-      `result` record at all**, which is what this row pins: the parser must not
-      assume one exists. The `exit_code` is the shell's 128+SIGKILL encoding of
-      the probe's own kill rather than a copilot verdict — see this manifest's
-      `method` note; the classification is `None` either way, because a
-      half-written event stream says nothing about *why* it stopped.
+      A REAL kill mid-flight — the stall probe (server accepts, never answers).
+      As at 1.0.80 (RESULTS.md §6 row 4), 1.0.93 sent one request, never retried
+      it and had no client-side timeout under 180 s, where the driver SIGKILLed
+      the CLI's whole process group (the PATH wrapper forks the real binary, so
+      killing the wrapper alone leaves copilot running and writing). The stream
+      stops at `model.call_start` with **no `result` record at all**, which is
+      what this row pins: the parser must not assume one exists. The
+      `exit_code` is the shell's 128+SIGKILL encoding of the driver's own kill
+      rather than a copilot verdict; the classification is `None` either way,
+      because a half-written event stream says nothing about *why* it stopped.
     expect:
       success: false
       error_contains: ["no assistant.message record in copilot output"]
@@ -99,21 +132,24 @@ rows:
     exit_code: 137
     synthesized: true
     provenance: >-
-      The first 2 750 bytes of the real `success.jsonl`, and nothing else: a
+      The first 2 890 bytes of the real `success.jsonl`, and nothing else: a
       byte PREFIX, so every byte here is copilot's own and appears at the same
-      offset in that capture. The cut lands 1 129 bytes into the 61 751-byte
-      `user.message` line — mid-word, in the middle of the echoed prompt — which
-      is the one shape `truncated.jsonl` cannot carry: that capture is a real
-      kill that happened to land on a record boundary, and no committed byte
-      sequence puts a cut inside the echo. Truncating a capture is what a real
-      kill does, so nothing is fabricated; the offset is chosen rather than
-      measured, which is why the row is marked synthesized.
+      offset in that capture. The cut lands 1 129 bytes into the 61 696-byte
+      `user.message` line (which starts at byte 1 761 at 1.0.93; the 1.0.80
+      prefix was 2 750 bytes, the line starting at 1 621) — mid-word, in the
+      middle of the echoed prompt — which is the one shape `truncated.jsonl`
+      cannot carry: that capture is a real kill that happened to land on a
+      record boundary, and no committed byte sequence puts a cut inside the
+      echo. Truncating a capture is what a real kill does, so nothing is
+      fabricated; the offset is chosen rather than measured, which is why the
+      row is marked synthesized. Re-derived from the 1.0.93 `success.jsonl` by
+      the same recipe.
     notes: >-
       THE RESIDUAL `vendor_text` WOULD HAVE LEFT. The echo is one record of
-      61 751 bytes — the largest in the stream by two orders of magnitude — so a
+      61 696 bytes — the largest in the stream by two orders of magnitude — so a
       random cut lands inside it more often than anywhere else, and a line
       filter that only drops what `json.loads` ACCEPTS passes the fragment
-      through: these 2 750 bytes carry three `rate-limit` occurrences of our own
+      through: these 2 890 bytes carry two `rate-limit` occurrences of our own
       plan text and **classified `rate_limited`** on exactly the failed-run path
       (`_classify_failed_run` forwards that class) the hook exists to fix.
       `CopilotProvider.vendor_text` therefore drops an unparseable line too when
@@ -133,9 +169,11 @@ rows:
     synthesized: true
     provenance: >-
       The real `success.jsonl` capture with every non-ephemeral record removed.
-      The five lines that remain are byte-identical to their originals (asserted:
-      each appears verbatim in `success.jsonl`); no content was edited and
-      nothing was written by hand. Necessary because the stub always answers, so
+      The seven lines that remain (five at 1.0.80; 1.0.93 adds
+      `model.call_finished` and `model.call_final_result`) are byte-identical to
+      their originals (asserted: each appears verbatim in `success.jsonl`); no
+      content was edited and nothing was written by hand. Re-derived from the
+      1.0.93 capture by the same recipe. Necessary because the stub always answers, so
       an all-noise run cannot be produced end to end.
     notes: >-
       An all-noise run is a **failure**, not an empty-string success: every
@@ -155,6 +193,10 @@ rows:
     provenance: >-
       Synthesized from the real record by inserting a SECOND `assistant.message`
       ahead of the real one, carrying `FIRST ANSWER (must NOT be selected)`.
+      Re-derived from the 1.0.93 `success.jsonl` by the same recipe, which also
+      re-serializes every line with `json.dumps`'s spaced separators — so this
+      file is also the committed `{"type": "user.message"` spelling
+      `_CUT_USER_MESSAGE` matches.
       copilot emits one `assistant.message` per turn and a second requires a
       tool loop the committed stub deliberately never drives. The rule it pins is
       real and this repo has paid for it: muse's silent concatenation.
@@ -185,18 +227,45 @@ rows:
   exit-zero-failure:
     stdout: exit-zero-failure.jsonl
     exit_code: 0
+    wall_s: 0.56
+    requests: 1
     notes: >-
-      REAL, and the shape §6.2 names: a provider 200 with an empty body yields
-      process exit **0**, `result.exitCode: 0`, an `assistant.message` whose
-      `data.content` is `""`, and **no error record anywhere**. There is no text
-      for a marker to match, which is why `exit_zero_failure_markers` is empty
-      for this adapter and the detection is structural in `parse_output`. The
-      classification is therefore `None`, correctly: nothing in the capture says
-      what went wrong.
+      CAPTURED ON 1.0.80 (2026-08-17) AND KEPT, because 1.0.93 no longer
+      produces this shape and 1.0.80 is still the adapter's floor: re-run on
+      1.0.93 against the same server, the same empty 200 is a `session.error`
+      with exit 1 (`empty-response` below). REAL, and the shape §6.2 names: a
+      provider 200 with an empty body yields process exit **0**,
+      `result.exitCode: 0`, an `assistant.message` whose `data.content` is `""`,
+      and **no error record anywhere**. There is no text for a marker to match,
+      which is why `exit_zero_failure_markers` is empty for this adapter and the
+      detection is structural in `parse_output`. The classification is therefore
+      `None`, correctly: nothing in the capture says what went wrong.
     expect:
       success: false
       error_contains: ["copilot returned an empty assistant message"]
       raw_contains: ['"exitCode":0']
+      classify_failure: null
+      salvage: none  # the one assistant message is empty
+
+  empty-response:
+    stdout: empty-response.jsonl
+    exit_code: 1
+    wall_s: 0.73
+    requests: 1
+    notes: >-
+      The 1.0.93 capture of `exit-zero-failure`'s server (a 200 whose body is
+      `{}`): copilot now reports it itself. The `assistant.message` with empty
+      content is still there, and after it a `session.error` with
+      `errorType: query`, the message "No response was returned. Send your
+      message again to retry." and no `statusCode`; `result.exitCode` and the
+      process exit are **1**. `parse_output`'s `session.error` branch reports it,
+      ahead of the structural empty-answer check, and nothing in the wording
+      names a cause, so the classification is `None` — the same transport-shaped
+      verdict the 1.0.80 row gets.
+    expect:
+      success: false
+      error_contains: ["query: No response was returned"]
+      raw_contains: ['"exitCode":1', '"content":""']
       classify_failure: null
       salvage: none  # the one assistant message is empty
 
@@ -212,14 +281,25 @@ rows:
   empty:
     stdout: empty.jsonl
     exit_code: 1
+    synthesized: true
+    provenance: >-
+      A zero-byte file that no recorded run wrote (2026-08's RESULTS.md §9 lists
+      it as "zero bytes", not as a capture): every copilot run on a model path
+      prints records before it can fail. At 1.0.93 the
+      committed failserver's zero-byte `empty` mode (a connection closed with
+      nothing written) gave a 6-request, exit-1 `session.error` stream
+      ("connection closed before message completed"), and a stall gives the
+      records written before the kill. The bytes stand for a launch that dies
+      before its first record, are release-independent, and were not
+      re-captured; `exit_code` is the error class's exit, not a number read off
+      a run, and nothing here depends on it.
     notes: >-
       Zero bytes on stdout, and stderr empty too — distinguishable from a valid
       empty answer, which is the point: `parse_output` names the cause rather
       than restating the symptom, and reports the stderr text when there is any
       (there is none here, so an argument-parse error is ruled out by the same
       branch). The classifier answers `None` on an empty haystack by
-      construction. `exit_code` is the class rule from this manifest's `method`
-      note; nothing here depends on it.
+      construction.
     expect:
       success: false
       error_contains: ["Empty output from copilot"]
@@ -229,12 +309,14 @@ rows:
   auth-error:
     stdout: auth-error.jsonl
     exit_code: 1
+    wall_s: 2.77
     requests: 3
     notes: >-
       A real 401 → `session.error` with `errorType: authentication` and
       `statusCode: 401`, on **stdout** with stderr at 0 bytes. What classifies it
       is the vendor's own `(HTTP 401)` wording carried through verbatim; the
-      adapter adds no pattern of its own for it.
+      adapter adds no pattern of its own for it. At 1.0.93 the gloss's second
+      line also names COPILOT_PROVIDER_API_KEY_COMMAND.
     expect:
       success: false
       error_contains: ["authentication (HTTP 401)"]
@@ -246,9 +328,12 @@ rows:
   rate-limit:
     stdout: rate-limit.jsonl
     exit_code: 1
+    wall_s: 57.21
+    requests: 6
     notes: >-
       A real 429 → `errorType: rate_limit`. The message self-reports "retried 5
-      times (total retry wait time: 85.66 seconds)", which is the independent
+      times (total retry wait time: 56.31 seconds)" (85.66 s at 1.0.80), and the
+      server logged 6 requests with gaps of 7.2/8.2/8.8/13.8/18.3 s, which is the independent
       cross-check on this adapter's declared `max_requests=6` /
       `retries_rate_limit=True` envelope — an executor-level re-dispatch of a
       rate-limited copilot slot repeats a chain the CLI already ran.
@@ -264,6 +349,8 @@ rows:
   invalid-model:
     stdout: invalid-model.jsonl
     exit_code: 1
+    wall_s: 0.89
+    requests: 1
     notes: >-
       A real 404 that NAMES the model — `Model 'gpt-5.5' not found on provider
       …` — which is what makes a stray `:effort` suffix findable. It classifies
@@ -281,6 +368,7 @@ rows:
   context-overflow:
     stdout: context-overflow.jsonl
     exit_code: 1
+    wall_s: 0.78
     requests: 1
     notes: >-
       A real 400. copilot preserves the upstream sentence verbatim — "This
@@ -301,8 +389,11 @@ rows:
   success-streamed:
     stdout: success-streamed.jsonl
     exit_code: 0
+    wall_s: 0.70
+    requests: 1
     notes: >-
-      The same successful run under `--stream on`: two extra ephemeral records,
+      The adapter's argv with `--stream off` swapped for `--stream on`, nothing
+      else changed. The same successful run under `--stream on`: two extra ephemeral records,
       and the SAME terminal `assistant.message`, so one parser serves both stream
       modes and the adapter needs no mode branch. It carries the echoed
       `user.message` too, so this is the third row whose classification moved
@@ -320,8 +411,11 @@ rows:
   success-silent:
     stdout: success-silent.txt
     exit_code: 0
+    wall_s: 0.68
+    requests: 1
     notes: >-
-      The `-s` bare-text shape, committed as the record of why `--output-format
+      The adapter's argv with `--output-format json --stream off` swapped for
+      `-s`, nothing else changed; byte-identical to the 1.0.80 capture. The `-s` bare-text shape, committed as the record of why `--output-format
       json` is what ships: 200 bytes against 65 KB, and it loses `exitCode`, the
       model echo and the whole structured error channel. Through the shipped
       adapter it is a FAILURE, and correctly so — there are no JSON records to

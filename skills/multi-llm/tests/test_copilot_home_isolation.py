@@ -170,6 +170,8 @@ class TestCopilotStrippedNames:
             ("GH_TOKEN", "the seat path, second in precedence order"),
             ("GITHUB_TOKEN", "the seat path, third in precedence order"),
             ("COPILOT_PROVIDER_BEARER_TOKEN", "outranks the API key we inject"),
+            ("COPILOT_PROVIDER_API_KEY_COMMAND",
+             "new at 1.0.93: a shell command that outranks the API key we inject"),
             ("OTEL_EXPORTER_OTLP_ENDPOINT", "setting it auto-enables telemetry"),
             ("COPILOT_OTEL_ENABLED", "the explicit telemetry switch"),
             ("COPILOT_MODEL", "we pass --model; a stale one confuses a bug report"),
