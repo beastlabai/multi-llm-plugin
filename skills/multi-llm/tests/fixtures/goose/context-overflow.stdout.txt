@@ -3,7 +3,7 @@
     {
       "id": null,
       "role": "user",
-      "created": 1787156668,
+      "created": 1791416417,
       "content": [
         {
           "type": "text",
@@ -16,9 +16,9 @@
       }
     },
     {
-      "id": null,
+      "id": "msg_19b5ee59-ad4e-4563-a6d2-a362780f99ef",
       "role": "assistant",
-      "created": 1787156668,
+      "created": 1791416417,
       "content": [
         {
           "type": "systemNotification",
@@ -32,13 +32,13 @@
       }
     },
     {
-      "id": null,
+      "id": "msg_d93dc966-455d-4dff-a135-6807b6900297",
       "role": "assistant",
-      "created": 1787156668,
+      "created": 1791416417,
       "content": [
         {
           "type": "systemNotification",
-          "notificationType": "thinkingMessage",
+          "notificationType": "progressMessage",
           "msg": "goose is compacting the conversation..."
         }
       ],
@@ -48,13 +48,13 @@
       }
     },
     {
-      "id": null,
+      "id": "msg_22cd3bde-d85e-46ba-8fc3-6ea31452e651",
       "role": "assistant",
-      "created": 1787156668,
+      "created": 1791416417,
       "content": [
         {
           "type": "text",
-          "text": "Ran into this error trying to compact: Failed to compact: context limit exceeded even after removing all tool responses.\n\nPlease try again or create a new session"
+          "text": "Ran into this error trying to compact: Failed to compact: the base prompt (system prompt, tool schemas, and conversation) exceeds the model's effective context window, and there are no tool responses to remove. Use a model or configuration with a larger usable context, disable some extensions to reduce the tool-schema payload, or start a new session..\n\nPlease try again or create a new session"
         }
       ],
       "metadata": {
@@ -64,7 +64,11 @@
     }
   ],
   "metadata": {
-    "total_tokens": null,
+    "total_tokens": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "cache_write_input_tokens": 0,
     "status": "completed"
   }
 }

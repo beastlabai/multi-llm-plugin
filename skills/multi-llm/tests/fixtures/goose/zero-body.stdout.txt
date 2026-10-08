@@ -3,7 +3,7 @@
     {
       "id": null,
       "role": "user",
-      "created": 1787156669,
+      "created": 1791416418,
       "content": [
         {
           "type": "text",
@@ -16,9 +16,9 @@
       }
     },
     {
-      "id": null,
+      "id": "msg_ce3093f5-70fe-4c24-9f29-635c39d9d12e",
       "role": "assistant",
-      "created": 1787156676,
+      "created": 1791416425,
       "content": [
         {
           "type": "text",
@@ -32,7 +32,11 @@
     }
   ],
   "metadata": {
-    "total_tokens": null,
+    "total_tokens": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "cache_write_input_tokens": 0,
     "status": "completed"
   }
 }

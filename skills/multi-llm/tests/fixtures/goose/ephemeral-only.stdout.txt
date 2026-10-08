@@ -3,7 +3,7 @@
     {
       "id": null,
       "role": "user",
-      "created": 1787156640,
+      "created": 1791416380,
       "content": [
         {
           "type": "text",
@@ -14,10 +14,29 @@
         "userVisible": true,
         "agentVisible": true
       }
+    },
+    {
+      "id": "msg_f8735e34-46d9-4ab2-b620-12ff68d14589",
+      "role": "assistant",
+      "created": 1791416380,
+      "content": [
+        {
+          "type": "text",
+          "text": "The model returned an empty response. Please resend your message to continue."
+        }
+      ],
+      "metadata": {
+        "userVisible": true,
+        "agentVisible": true
+      }
     }
   ],
   "metadata": {
-    "total_tokens": null,
+    "total_tokens": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "cache_write_input_tokens": 0,
     "status": "completed"
   }
 }

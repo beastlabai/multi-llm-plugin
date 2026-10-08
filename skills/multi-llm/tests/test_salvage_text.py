@@ -850,6 +850,18 @@ class TestGooseDropsItsOwnErrorProse:
         assert "Ran into this error trying to compact" in stdout
         assert GooseProvider().salvage_text(stdout) == ""
 
+    @pytest.mark.parametrize("row", ["ephemeral-only", "error-envelope"])
+    def test_the_empty_response_notice_is_not_an_answer(self, row: str) -> None:
+        # goose 1.53.0 answers an empty completion (and a 200 error object) with
+        # an assistant text part of its own, at exit 0 and status "completed".
+        stdout = _read(f"goose/{row}.stdout.txt")
+        from utils.providers.goose import last_assistant_text
+
+        assert last_assistant_text(json.loads(stdout)).startswith(
+            "The model returned an empty response"
+        )
+        assert GooseProvider().salvage_text(stdout) == ""
+
     def test_the_echoed_prompt_is_never_the_answer(self) -> None:
         text = GooseProvider().salvage_text(_read("goose/prompt-echo.stdout.txt"))
         assert extract_json_from_text(text, prefer_arrays=True)["success"]
