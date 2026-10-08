@@ -969,6 +969,32 @@ def batch_check_findings(result: Any) -> Optional[List[str]]:
     return None
 
 
+#: How much of a code batch's ``check.note`` the records carry (fix round 28).
+CHECK_NOTE_MAX_CHARS = 300
+
+
+def batch_check_note(result: Any) -> Optional[str]:
+    """A code batch's ``check.note``: its own words about the checks it ran,
+    one plain line bounded at :data:`CHECK_NOTE_MAX_CHARS`, or ``None``.
+
+    Fix round 28 (live run 12, stop accept 02 on Claude Code and OpenCode):
+    T007 re-ran the check the user accepted and wrote its comment into the
+    finding ("… (known problem the user accepted in T002)", "… — the
+    accepted T002 problem (…), not caused by this note"), and the strict
+    match read the finding as T007's own failure. The contract asks for
+    each finding as the check reported it and for any comment here instead
+    (:data:`write_batch_scheduler.WRITE_CHECK_CONTRACT`). Recorded and shown
+    beside the check on both legs (``util batch-done --note``); never read
+    as a finding and never matched on."""
+    check = result.get("check") if isinstance(result, dict) else None
+    if not isinstance(check, dict):
+        return None
+    note = check.get("note")
+    if not isinstance(note, str):
+        return None
+    return clip(note, CHECK_NOTE_MAX_CHARS) or None
+
+
 def _ran_word(which: str) -> str:
     """``known_checks``' ``passed`` / ``failed`` outcome word."""
     try:
@@ -1305,6 +1331,29 @@ def row_batch_check_accepted(row: Dict[str, Any]) -> Dict[str, List[str]]:
     }
 
 
+def row_batch_check_repeats(row: Dict[str, Any]) -> Dict[str, List[str]]:
+    """A serialized row's own-check findings that are the same findings a
+    check task of the run reported, by that check's id (its
+    ``batch_check_repeats``, fix round 28), else ``{}``."""
+    found = row.get("batch_check_repeats") if isinstance(row, dict) else None
+    if not isinstance(found, dict):
+        return {}
+    return {
+        str(check_id): [str(item) for item in items if str(item)]
+        for check_id, items in found.items()
+        if isinstance(items, list) and any(str(item) for item in items)
+    }
+
+
+def row_batch_check_note(row: Dict[str, Any]) -> Optional[str]:
+    """A serialized row's own-check note (its ``batch_check_note``, fix round
+    28), else ``None``."""
+    note = row.get("batch_check_note") if isinstance(row, dict) else None
+    if not isinstance(note, str):
+        return None
+    return clip(note, CHECK_NOTE_MAX_CHARS) or None
+
+
 def row_outcome_label(row: Dict[str, Any]) -> Optional[str]:
     """A serialized row's label: ``outcome_label`` when present, else ``write_outcome``.
 
@@ -1598,6 +1647,18 @@ class TaskOutcome:
     #: out of ``batch_check``, so they never make the task's own failure, and
     #: named beside that check's accepted findings instead. Empty otherwise.
     batch_check_accepted: Dict[str, List[str]] = field(default_factory=dict)
+    #: The own-check findings of an implement task that are the same
+    #: findings a check task of the run reported (the strict comparison of
+    #: ``write_batch_scheduler.split_repeated_findings``), by that check's id
+    #: (``write_batch_scheduler.repeated_findings_for``, fix round 28, live
+    #: run 12 OpenCode accept 01: T001 ran T002's release check and was
+    #: blamed for T002's finding). Taken out of ``batch_check`` whichever of
+    #: the two finished first, and named beside that check's findings.
+    batch_check_repeats: Dict[str, List[str]] = field(default_factory=dict)
+    #: The code batch's own words about its checks (its ``check.note``,
+    #: :func:`batch_check_note`, fix round 28): recorded and shown beside
+    #: the check, never a finding. ``None`` when it gave none.
+    batch_check_note: Optional[str] = None
     #: A write batch whose reply said ``applied`` while no byte moved, after
     #: its one re-send (the ladder's rule 9): a ``clean-failure`` that is
     #: never ``ok``, worded on the stop as a change that did not land (fix
@@ -1715,6 +1776,15 @@ class TaskOutcome:
                     str(check_id): list(found)
                     for check_id, found in self.batch_check_accepted.items()
                 }
+            if self.batch_check_repeats:
+                # Additive and only here (fix round 28).
+                out["batch_check_repeats"] = {
+                    str(check_id): list(found)
+                    for check_id, found in self.batch_check_repeats.items()
+                }
+            if self.batch_check_note:
+                # Additive and only here (fix round 28).
+                out["batch_check_note"] = self.batch_check_note
             if self.runner_notes:
                 out["runner_notes"] = self.runner_notes
             if self.not_rerun:
@@ -5562,6 +5632,35 @@ def persist_result(task: Dict[str, Any], phase_dir: str, data: Any) -> str:
 # Extraction and per-kind result validation
 # ---------------------------------------------------------------------------
 
+#: The kinds whose result is one JSON object (their schema's root is an
+#: object): the write report, the task list, a consolidation batch and the
+#: judge's verdicts. Validation's reply may be a bare array, a salvage's is
+#: one.
+OBJECT_RESULT_KINDS = frozenset({
+    "task_generation", "consolidation", "human_decision_judge", *WRITE_KINDS,
+})
+
+
+def the_reply_object(kind: str, data: Any, extracted: Mapping[str, Any]) -> Any:
+    """*data*, or the reply's one JSON object when *kind*'s result is an
+    object and the extraction served an array (fix round 28, live run 12 #6).
+
+    Codex decline batch 0 opened its reply with two prose lines, then the
+    report object; the adapter's array-preferring extraction served the
+    report's own ``declined`` array (an array holding an object ranks as an
+    answer), the batch read "<root>: expected type object, got list", and a
+    repair re-ask restated the same report. The extractor names the reply's
+    one object outside every other document (``only_object``,
+    :func:`utils.json_extractor._only_object`); a reply holding two such
+    objects names none and keeps its re-ask, as a validation reply holding
+    two does. Both invokers read a reply through this."""
+    if kind in OBJECT_RESULT_KINDS and isinstance(data, list):
+        whole = extracted.get("only_object") if isinstance(extracted, Mapping) else None
+        if isinstance(whole, dict):
+            return whole
+    return data
+
+
 def extract_result(provider: Any, stdout: str, stderr: str, *, prefer_arrays: bool) -> Any:
     """Recover the subagent's answer: ``parse_output`` first, then extraction.
 
@@ -5573,7 +5672,8 @@ def extract_result(provider: Any, stdout: str, stderr: str, *, prefer_arrays: bo
 
 
 def _extract_result_and_syntax(
-    provider: Any, stdout: str, stderr: str, *, prefer_arrays: bool
+    provider: Any, stdout: str, stderr: str, *, prefer_arrays: bool,
+    kind: str = "",
 ) -> Tuple[Any, Optional[Dict[str, Any]]]:
     """Recover the subagent's answer: ``parse_output`` first, then extraction.
 
@@ -5637,6 +5737,7 @@ def _extract_result_and_syntax(
 
     data = parsed.get("data")
     syntax = parsed.get("enclosing_syntax_error")
+    served: Mapping[str, Any] = parsed
     if isinstance(data, str):
         extracted = extract_json_from_text(data, prefer_arrays=prefer_arrays)
         if not extracted.get("success"):
@@ -5646,6 +5747,11 @@ def _extract_result_and_syntax(
             )
         data = extracted.get("data")
         syntax = extracted.get("enclosing_syntax_error")
+        served = extracted
+    whole = the_reply_object(kind, data, served)
+    if whole is not data:
+        # The object parsed whole: the array's syntax note was about it.
+        data, syntax = whole, None
     if data is None or (isinstance(data, dict) and set(data.keys()) == {"raw"}):
         raise ResultRejected(
             "the adapter recovered no result object from the stream",
@@ -5950,8 +6056,17 @@ def normalize_result(kind: str, data: Any) -> List[str]:
     return [f"{key!r} on {count} task(s)" for key, count in supplied.items()]
 
 
-def _report_normalized(kind: str, notes: List[str]) -> None:
-    """One stdout line per reply the executor had to complete, or nothing."""
+def _report_normalized(
+    kind: str, notes: List[str], version: Optional[str] = None,
+) -> None:
+    """One stdout line per reply the executor had to complete, or nothing;
+    one more when it read an absent ``schema_version`` as *version*."""
+    if version:
+        print(
+            f"[exec-subagents] {kind}: "
+            + _schema_version_supplied("the reply", version)
+            + ", before validating."
+        )
     if notes:
         print(
             f"[exec-subagents] {kind}: the reply omitted {', '.join(notes)}; "
@@ -5959,6 +6074,39 @@ def _report_normalized(kind: str, notes: List[str]) -> None:
             f"before validating (absent and empty mean the same thing to every "
             f"consumer of this document)."
         )
+
+
+#: The read kinds whose result names a ``schema_version`` its schema pins to
+#: one value (fix round 28, live run 12: a host's copy of a task-generation
+#: reply left the key out and the first ``--reaggregate`` failed on it). A
+#: result without the key is read as that version, on every lane that reads
+#: one: the executor's parse, :func:`task_is_complete`, generate-tasks'
+#: consume and the judge verdicts' ingest.
+VERSIONED_RESULT_SCHEMAS = {
+    "task_generation": "generated_tasks.schema.json",
+    "human_decision_judge": "human_decision_verdicts.schema.json",
+}
+
+
+def supply_result_version(kind: str, data: Any) -> Optional[str]:
+    """Supply a *kind* result's absent ``schema_version`` in place
+    (``schema_validator.supply_schema_version``); the version, or ``None``."""
+    schema = VERSIONED_RESULT_SCHEMAS.get(kind)
+    if schema is None:
+        return None
+    try:
+        from .schema_validator import supply_schema_version
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.schema_validator import supply_schema_version
+    return supply_schema_version(data, schema)
+
+
+def _schema_version_supplied(subject: str, version: str) -> str:
+    try:
+        from .schema_validator import schema_version_supplied
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.schema_validator import schema_version_supplied
+    return schema_version_supplied(subject, version)
 
 
 def validate_result(kind: str, data: Any) -> List[str]:
@@ -6028,6 +6176,9 @@ def task_is_complete(task: Dict[str, Any], phase_dir: str) -> bool:
         data = json.loads(target.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return False
+    # Read as every lane reads it: an absent schema_version is the one
+    # version there is (fix round 28), in memory only.
+    supply_result_version(str(task.get("kind", "")), data)
     if validate_result(str(task.get("kind", "")), data):
         return False
     return not _result_names_foreign_groups(task, data)
@@ -7157,6 +7308,9 @@ def dispatch_task(
     tree_fingerprint: Optional[Callable[[Dict[str, Any]], Any]] = None,
     nothing_changed: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None,
     incomplete_report: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None,
+    restate_findings: Optional[
+        Callable[[Dict[str, Any]], Optional[Tuple[str, Sequence[str]]]]
+    ] = None,
 ) -> TaskOutcome:
     """Dispatch one task and return its :class:`TaskOutcome` (D3k classified).
 
@@ -7274,6 +7428,20 @@ def dispatch_task(
             like any; a re-ask that cannot restate it (prose, a timeout)
             leaves the original reply to be classified, and one that moved a
             file is a partial application. A hook that raises is "no re-ask".
+        restate_findings: The implement lane's third question before
+            ``after_result`` (fix round 28), with the same context:
+            ``(problem, accepted findings)`` when the reply's own check holds
+            an accepted finding verbatim with words added (live run 12: "…
+            (known problem the user accepted in T002)"), or ``None``. It
+            sends the same one report re-ask, the problem as its one problem
+            and the check's findings open to restating
+            (``restate_findings=True``), and nothing is recorded as accepted
+            by it: the restated report is classified like any, and only its
+            ``findings`` and ``note`` are taken, through
+            :func:`merge_restated_check`, which keeps the first report's
+            whole ``check`` unless every finding it changed was cut down to
+            one of the accepted findings, word for word. A hook that raises
+            is "no re-ask".
     """
     task_id = str(task.get("task_id", ""))
     kind = str(task.get("kind", ""))
@@ -7467,6 +7635,9 @@ def dispatch_task(
     # it ran its checks. Apply this before persisting the restated report so
     # the result file and the scheduler's verdict read the same evidence.
     repair_check: Optional[Dict[str, Any]] = None
+    # Fix round 28: a restatement of a check's findings, the first report's
+    # check and the accepted findings a changed finding may be cut down to.
+    restate_check: Optional[Tuple[Dict[str, Any], List[str]]] = None
     # Fix round 18: the `after_result` context of a readable report that left
     # items out, kept while its re-ask runs, so a re-ask that cannot restate
     # it leaves this one to be classified.
@@ -7637,6 +7808,10 @@ def dispatch_task(
             if status == STATUS_OK:
                 if repair_check is not None and isinstance(data, dict):
                     data = {**data, "check": copy.deepcopy(repair_check)}
+                elif restate_check is not None and isinstance(data, dict):
+                    data = {**data, "check": merge_restated_check(
+                        restate_check[0], data.get("check"), restate_check[1],
+                    )}
                 try:
                     written = persist_result(task, phase_dir, data)
                 except ResultRejected as exc:
@@ -7709,6 +7884,7 @@ def dispatch_task(
                             attempt_repair = None
                             repair_baseline = None
                             repair_check = None
+                            restate_check = None
                             print(
                                 f"[exec-subagents] {task_id}: the reply says the "
                                 f"batch was applied, but "
@@ -7726,6 +7902,16 @@ def dispatch_task(
                         and attempt_repair is None
                         and ladder.schema_repairs_left > 0 else None
                     )
+                    # Fix round 28: or its own check holds an accepted
+                    # finding with words added; the same one re-ask.
+                    restate = (
+                        _ask_restate_findings(restate_findings, result_context)
+                        if restate_findings is not None and not reask_why
+                        and not resend_why and attempt_repair is None
+                        and ladder.schema_repairs_left > 0 else None
+                    )
+                    if restate is not None:
+                        reask_why = restate[0]
                     reask = (
                         _incomplete_report_reask(
                             kind=kind, prompt=prompt, task=task,
@@ -7739,13 +7925,24 @@ def dispatch_task(
                                  "jail_request": jail_request}
                                 if wrapping is not None else {}
                             ),
+                            restate_findings=restate is not None,
                         ) if reask_why else None
                     )
                     if reask is not None:
                         # Rule 7, second form (fix round 18): the report read
                         # but left items out; the runner restates it once.
                         reask_prompt, repair_baseline = reask
-                        repair_check = _report_check_evidence(data)
+                        if restate is not None:
+                            # Fix round 28: only its findings and note may
+                            # change, and only as `merge_restated_check` lets.
+                            original = data.get("check") if isinstance(data, dict) else None
+                            restate_check = (
+                                (copy.deepcopy(original), [str(a) for a in restate[1]])
+                                if isinstance(original, dict) else None
+                            )
+                            repair_check = None
+                        else:
+                            repair_check = _report_check_evidence(data)
                         # Fix round 19: a readable report, so its own status
                         # and no failure capture (the re-ask's prompt file
                         # quotes the reply).
@@ -7780,6 +7977,17 @@ def dispatch_task(
                         attempt_prompt = reask_prompt
                         attempt_repair = REPAIR_INCOMPLETE_REPORT
                         attempt_resend = None
+                        if restate is not None:
+                            print(
+                                f"[exec-subagents] {task_id}: its own check "
+                                f"reports a finding the user accepted with "
+                                f"words added; asking {runner} once to restate "
+                                f"its report without touching any file (report "
+                                f"re-ask, attempt {attempt_index + 1}). Nothing "
+                                f"is recorded as accepted unless the restated "
+                                f"finding is the accepted one, word for word."
+                            )
+                            continue
                         print(
                             f"[exec-subagents] {task_id}: the batch's report "
                             f"leaves some of its items out of both `ids` and "
@@ -8200,6 +8408,94 @@ def _ask_incomplete_report(
     return str(answer) if answer else None
 
 
+def _ask_restate_findings(
+    hook: Optional[Callable[[Dict[str, Any]], Optional[Tuple[str, Sequence[str]]]]],
+    context: Dict[str, Any],
+) -> Optional[Tuple[str, List[str]]]:
+    """The ``restate_findings`` hook's answer (fix round 28): ``(problem,
+    accepted findings)``, or ``None`` (no hook, no answer, a malformed one,
+    or it raised — a re-ask is never sent on "could not tell")."""
+    if hook is None:
+        return None
+    try:
+        answer = hook(context)
+    except Exception as exc:  # noqa: BLE001 - no re-ask without an answer
+        print(
+            f"[exec-subagents] warning: could not tell whether "
+            f"{context.get('task_id')}'s check findings need restating "
+            f"({type(exc).__name__}); its reply is classified as it stands.",
+            file=sys.stderr,
+        )
+        return None
+    if not answer or len(answer) != 2 or not str(answer[0] or "").strip():
+        return None
+    allowed = [str(item) for item in (answer[1] or []) if str(item).strip()]
+    return (str(answer[0]), allowed) if allowed else None
+
+
+def merge_restated_check(
+    original: Dict[str, Any], restated: Any, allowed: Sequence[str],
+) -> Dict[str, Any]:
+    """The ``check`` a restated report is classified with (fix round 28):
+    the first report's whole ``check`` — ``passed``, ``ran``, ``listed``,
+    everything its checks observed, as :func:`_report_check_evidence` keeps
+    it across any report-only turn — with only two things taken from the
+    restatement:
+
+    * its ``findings``, when every finding of the first report it changed
+      was cut down to one of *allowed* (the accepted findings the re-ask
+      named), whitespace aside, that the changed finding held word for word,
+      and the words cut are in its ``note`` (case and punctuation aside), so
+      nothing a finding said leaves the record. A restatement that drops a
+      finding, rewords one, turns the check into a pass or cuts words it
+      does not move to its note keeps the first report's findings: a
+      report-only turn ran no check, so it can say less about one only by
+      moving the words the re-ask named to the note. A finding it adds is
+      kept.
+    * its ``note``, when it is a non-blank string.
+
+    Never a classification: what is accepted is still decided by
+    ``write_batch_scheduler.split_accepted_findings`` on what this returns.
+    """
+    merged = copy.deepcopy(original)
+    if not isinstance(restated, dict):
+        return merged
+
+    def plain(text: Any) -> str:
+        return " ".join(str(text or "").split())
+
+    def words(text: Any) -> str:
+        return " ".join(re.findall(r"[a-z0-9]+", str(text or "").lower()))
+
+    note = restated.get("note")
+    note_words = words(note) if isinstance(note, str) else ""
+
+    def moved_to_note(old: str, new: str) -> bool:
+        head, _, tail = plain(old).partition(plain(new))
+        return all(words(part) in note_words for part in (head, tail) if words(part))
+
+    before = batch_check_findings({"check": original}) or []
+    candidate = copy.deepcopy(original)
+    candidate["findings"] = copy.deepcopy(restated.get("findings"))
+    after = batch_check_findings({"check": candidate}) or []
+    accepted = {plain(item) for item in allowed if plain(item)}
+    changed = [finding for finding in before if finding not in after]
+    added = [finding for finding in after if finding not in before]
+    cut_down = all(
+        any(
+            plain(new) in accepted and plain(new) in plain(old)
+            and moved_to_note(old, new)
+            for new in added
+        )
+        for old in changed
+    )
+    if after and cut_down:
+        merged["findings"] = candidate["findings"]
+    if isinstance(note, str) and note.strip():
+        merged["note"] = note
+    return merged
+
+
 def _incomplete_report_reask(
     *,
     kind: str,
@@ -8215,6 +8511,7 @@ def _incomplete_report_reask(
     tree_fingerprint: Optional[Callable[[Dict[str, Any]], Any]],
     fingerprint_context: Dict[str, Any],
     budget_kwargs: Dict[str, Any],
+    restate_findings: bool = False,
 ) -> Optional[Tuple[str, Any]]:
     """``(re-ask prompt, files' state)`` when the report re-ask for an
     incomplete report may go out, else ``None`` (fix round 18).
@@ -8224,6 +8521,9 @@ def _incomplete_report_reask(
     the attempt's stream, a prompt the transport carries — and then the
     ladder's grant, which spends the schema-repair allowance. Any guard that
     does not hold leaves the reply to be classified as it stands.
+    *restate_findings* (fix round 28) asks for the restatement of a check
+    finding instead of the items' account (the re-ask prompt's
+    ``restate_findings`` form); the guards and the grant are the same.
     """
     reply_text = _reply_text(provider, capture.stdout)
     if not _write_report_repairable(capture, reply_text, tree_fingerprint):
@@ -8231,7 +8531,7 @@ def _incomplete_report_reask(
     reask_prompt = build_schema_repair_prompt(
         kind, prompt, [why], previous_reply=reply_text,
         expected_ids=[str(item) for item in task.get("expected_ids") or []],
-        incomplete=True,
+        incomplete=not restate_findings, restate_findings=restate_findings,
     )
     if _prompt_over_budget(
         provider, model, reask_prompt, transport, profile, **budget_kwargs,
@@ -8554,14 +8854,16 @@ def _parse_and_validate(
     """
     try:
         data, fragment = _extract_result_and_syntax(
-            provider, capture.stdout, capture.stderr, prefer_arrays=prefer_arrays
+            provider, capture.stdout, capture.stderr, prefer_arrays=prefer_arrays,
+            kind=kind,
         )
     except ResultRejected as exc:
         return exc.status, exc.message, None
     gave_up = _salvage_gave_up(kind, data, failure)
     if gave_up is not None:
         return STATUS_SALVAGE_UNRECOVERABLE, gave_up, data
-    _report_normalized(kind, normalize_result(kind, data))
+    _report_normalized(
+        kind, normalize_result(kind, data), supply_result_version(kind, data))
     errors = validate_result(kind, data)
     if errors:
         syntax = _redact(describe_syntax_error(fragment)) if fragment else None
@@ -10217,7 +10519,7 @@ def simulate_native_invoker(
                 outcome.reason = extracted.get("error") or "no JSON in the reply"
                 report.outcomes.append(outcome)
                 continue
-            data = extracted["data"]
+            data = the_reply_object(task_kind, extracted["data"], extracted)
         gave_up = _salvage_gave_up(
             task_kind, data, salvage_failure_of(task, phase_dir)
         )

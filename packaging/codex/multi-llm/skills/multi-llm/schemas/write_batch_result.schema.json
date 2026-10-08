@@ -66,6 +66,9 @@
         },
         "not_run": {
           "description": "Beside an empty `ran` (fix round 26): why the batch could run no check on its edits. A `not_run` reason with no `ran` at all says it ran nothing too (fix round 27, references/own-check.md)."
+        },
+        "note": {
+          "description": "A code batch's own words about the checks it ran (fix round 28, live run 12: a released task wrote \"(known problem the user accepted in T002)\" into its finding, which the strict match then read as its own failure). Recorded and shown beside the check (`subagent_executor.batch_check_note`; `util batch-done --note`), never read as a finding or matched on; a string, anything else is ignored."
         }
       }
     }

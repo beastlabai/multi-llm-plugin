@@ -745,11 +745,13 @@ def review_stamp(task: Any) -> str:
 def set_batch_check_report_in_state(
     state: Dict[str, Any], task_id: str, *, prior_changes_id: Optional[str],
     findings: Optional[Sequence[str]], listed: Optional[Mapping[str, str]],
-    grouped_sha256: Optional[str] = None,
+    grouped_sha256: Optional[str] = None, note: Optional[str] = None,
 ) -> None:
     """Record *task_id*'s own-check report (or clear it: no findings record
     and nothing listed); the key is dropped when the map empties.
-    *grouped_sha256* is the batch's :func:`review_stamp`."""
+    *grouped_sha256* is the batch's :func:`review_stamp`; *note* the
+    batch's own words about its checks (its ``check.note``, fix round 28),
+    kept beside the report and never read as a finding."""
     recorded = state.get(APPLY_FIX_BATCH_CHECKS_KEY)
     current = dict(recorded) if isinstance(recorded, dict) else {}
     if findings is None and not listed:
@@ -760,6 +762,7 @@ def set_batch_check_report_in_state(
             "grouped_sha256": str(grouped_sha256 or ""),
             "findings": [str(item) for item in (findings or []) if str(item).strip()],
             "listed": {normalized(k): str(v) for k, v in (listed or {}).items()},
+            **({"note": str(note).strip()} if str(note or "").strip() else {}),
         }
     if current:
         state[APPLY_FIX_BATCH_CHECKS_KEY] = current

@@ -78,6 +78,19 @@
         "additionalProperties": { "type": "array", "items": { "type": "string" } }
       }
     },
+    "task_batch_check_repeats": {
+      "type": "object",
+      "description": "Per implement task that edits files whose own check reported findings that are the same findings (the strict comparison) a check task of the run reported: those findings, by that check's id (fix round 28). Not the task's own failure (never in task_batch_check), recorded whichever of the two was recorded first; every other record of the task clears it. Present only while some task has one; read by status and the tests line",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "task_own_check_note": {
+      "type": "object",
+      "description": "Per implement task that edits files and whose reply's check carried a note: its own words about the checks it ran (fix round 28). Recorded and shown beside its check, never read as a finding or matched on; every other record of the task clears it. Present only while some task has one",
+      "additionalProperties": { "type": "string" }
+    },
     "task_own_check_ran": {
       "type": "array",
       "description": "The implement tasks that edit files whose last record carried a report of their own checks (passed, failing, or repeating only accepted findings), sorted. Every other record of the task clears it. Present only while some task has one; read by the line saying what ran the repository's tests",
@@ -92,7 +105,8 @@
           "prior_changes_id": { "type": "string" },
           "grouped_sha256": { "type": "string" },
           "findings": { "type": "array", "items": { "type": "string" } },
-          "listed": { "type": "object", "additionalProperties": { "type": "string" } }
+          "listed": { "type": "object", "additionalProperties": { "type": "string" } },
+          "note": { "type": "string", "description": "The batch's own words about its checks (its reply's check.note, fix round 28): shown, never read as a finding" }
         }
       }
     },

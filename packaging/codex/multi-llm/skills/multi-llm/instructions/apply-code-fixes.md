@@ -316,7 +316,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util batch-done \
      --phase-dir "{plan}/apply-fixes" --task-id "{task.task_id}" --status {batch_status} {check_flags}
    ```
-   `{check_flags}` is the result the batch's reply's `check` object reports, never left out when the reply carries one: `--own-check passed`, `--own-check findings` (with one `--finding` per failing check) or `--own-check none`, read off its `check` by the rules in `references/own-check.md`, and one `--listed-check` per entry of its `listed`, each explained below; empty only when the reply carries no `check`. A `completed` record without `--own-check` prints `[OWN_CHECK_NOT_RECORDED]` naming the call that records it, the same flags plus the result: run that call before step 7's append.
+   `{check_flags}` is the result the batch's reply's `check` object reports, never left out when the reply carries one: `--own-check passed`, `--own-check findings` (with one `--finding` per failing check) or `--own-check none`, read off its `check` by the rules in `references/own-check.md`, plus `--note "{note}"` when that `check` carries a `note` (never a `--finding`), and one `--listed-check` per entry of its `listed`, each explained below; empty only when the reply carries no `check`. A `completed` record without `--own-check` prints `[OWN_CHECK_NOT_RECORDED]` naming the call that records it, the same flags plus the result: run that call before step 7's append.
    `{batch_status}` is `completed` for a success (a verified no-op included) and `failed` for a clean failure — add `--reason "{compact reason}"` to a `failed` one. It prints one `[BATCH_DONE] {task.task_id} {batch_status} (N item(s) recorded)` line and writes the batch's record into `state.json`: the same `task_status` entry the `--exec-subagents` executor writes for this batch, plus every fix in it as processed. That record is what a later `--resume` reads to skip this batch (a `failed` record keeps it eligible for another try) and what makes `status` read the phase `in_progress`. Run it **before** step 7's append: a run that dies between the two leaves a record `--resume` honours, never a log entry `--resume` would re-apply. An exit 3 names the problem (no `write_tasks.json`, an unknown task id); treat it as a stop, not a warning.
    When the reply's `declined` lists fixes (each `{"id", "reason"}`), add `--declined "{id}={reason}"` for each, with `--status completed`: each prints a `[BATCH_DECLINED]` line — list that fix in the summary under `## Declined by their batch (not applied)`, with its id and reason (never under `## Applied Fixes`, not even marked "Not applied"), and name it in your report; it is never counted as applied. `--skipped {id}` records a fix the user chose to skip (above) the same way, as `[BATCH_SKIPPED]`, listed under `## Skipped at your request (not applied)`.
    When the batch's reply carries a `check` object — naming in `ran` the checks its subagent ran on its own edits (a test, a build, a syntax check) — record it with the `--own-check` flags the rules in `references/own-check.md` give for that object, the reading the `--exec-subagents` leg applies to the same reply, with `--status completed`: `--own-check passed`, `--own-check findings` and one `--finding "{finding}"` per entry they list, or `--own-check none` (it ran no check, which is not a pass); never `--check`, which records only an implement check task's verdict (`batch-done` refuses it here). A recorded `--own-check findings` prints a `[BATCH_CHECK_FAILED]` line: the fixes stay applied and the loop goes on, but the phase is not a clean success — list the batch in the summary's `## Check Findings` (step 8) and say in your report that its check fails.
@@ -334,7 +334,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
    log every write phase of this plan shares, the one `util write-prompt` binds the next
    batch's prompt from, and the one the `--exec-subagents` executor appends to — scoped
    per phase by `--phase`, never a per-phase file.
-   The `--id` is `batch.prior_changes_id` — read it off the batch (it is the same value in `write_tasks.json`), never construct one.
+   The `--id` is `batch.prior_changes_id` — read it off the batch (it is the same value in `write_tasks.json`), never construct one. An empty `--id` writes nothing and exits 3 naming the ids there: run the append again with the batch's id.
    The batcher emits **many** batches for the same `file_key`, and the log keeps one
    entry per `(id, phase)`, the newest: an id two batches share leaves only the last
    one's summary (exit 0), so every later batch reads a prior-changes context missing
@@ -394,14 +394,16 @@ guessed `pnpm typecheck` in a repo with no `package.json` reports a failure the 
 not cause.
 
 If no `verify_command` is configured, say so in the summary — "not configured" is the
-honest verification status, and it is not the same as "passed". Say it in your report
-too, in one plain line: the plugin ran none of the repository's tests, and the setting to add is
-`verify_command` under `driver:` in `.multi-llm/providers.yaml` — name the repository's
-own test command as its value when it has an obvious one (`package.json`'s
-`scripts.test`, a `Makefile` `test` target), without running it or writing the config.
-Step 10's `--mark-completed` prints that line as `[TESTS_NOT_RUN] …` (on stderr): it
-also names the checks the batches were asked to run and what each batch reported, so
-give the text after its tag in your report verbatim instead of writing your own.
+honest verification status, and it is not the same as "passed". In your report, the line
+that says so is the one step 10's `--mark-completed` prints as `[TESTS_NOT_RUN] …` (on
+stderr): it leads with the checks the batches ran and what each reported, says the plugin
+itself ran none of the repository's tests, and names the setting to add. Give the whole text
+after its tag, word for word, as plain text: never a shorter line of your own in its place or
+beside it. Only when step 10 printed no such line, write one plain line yourself: the plugin
+ran none of the repository's tests, and the setting to add is
+`verify_command` under `driver:` in `.multi-llm/providers.yaml` — name the repository's own test command as its
+value when it has an obvious one (`package.json`'s `scripts.test`, a `Makefile` `test`
+target), without running it or writing the config.
 
 If the command fails:
 - Report which fix may have caused the issue
@@ -877,7 +879,9 @@ phase with `--force` to re-materialize it.
 
 **Check each reply right after you write it.** Run
 `uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util check-reply --tasks-file "{plan}/code-review/revalidation_tasks.json" --task-id <task_id>`
-(omit `--task-id` to check every batch). `[REPLY_INVALID]` means the subagent's reply
+(omit `--task-id` to check every batch, and only once every batch's subagent has
+returned: a reply not written yet prints `[REPLY_MISSING]`, which is no bad reply and
+no re-ask). `[REPLY_INVALID]` means the subagent's reply
 did not parse or did not cover its groups — Sonnet subagents lost a closing `]` on 3 of
 14 batches in the 2026-10-01 Claude Code run. Re-ask the same subagent once for the
 whole reply and write the new reply over the file. Never edit, trim or complete a reply

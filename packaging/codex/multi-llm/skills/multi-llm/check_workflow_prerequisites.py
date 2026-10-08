@@ -1155,8 +1155,25 @@ def get_workflow_status(
     if deferred:
         phases["implement"]["manual_tasks"] = deferred
         # The ones `--human-task <id>=done` answers (fix round 16): not a code
-        # task skipped with a manual one, which the resume then runs.
+        # task skipped with a manual one, which the resume then runs. Fix
+        # round 28: and only the ones the user can do now.
         phases["implement"]["manual_close_ids"] = state.manual_tasks_to_close(deferred)
+        gates = state.manual_task_gates(deferred)
+        if gates is not None:
+            # Fix round 28 (live run 12, Codex racing 06): the code tasks
+            # each of those waits on, so no note says that nothing waits;
+            # a later manual task names the code it comes after; and, while
+            # implement is not finished, whether a resume can run nothing
+            # until one is recorded done (`manual_gate`).
+            if gates["waiting"]:
+                phases["implement"]["manual_waiting"] = gates["waiting"]
+            for entry in deferred:
+                after = gates["after"].get(str(entry.get("id")))
+                if after:
+                    entry["after"] = list(after)
+            if (gates["gated"] and gates["waiting"]
+                    and phases["implement"]["status"] not in DONE_STATUSES):
+                phases["implement"]["manual_gate"] = True
     # The implement check tasks whose check ran and reported problems
     # (`task_check_findings`, written by both write legs from the reply's
     # structured `check`): racing re-run 4 recorded T007 VERIFIED with two
@@ -1175,6 +1192,11 @@ def get_workflow_status(
     accepted_reruns = state.implementation_batch_check_accepted()
     if accepted_reruns:
         phases["implement"]["batch_check_accepted"] = accepted_reruns
+    # And those whose own check reported only what a check task of the run
+    # reported (`task_batch_check_repeats`, fix round 28).
+    repeats = state.implementation_batch_check_repeats()
+    if repeats:
+        phases["implement"]["batch_check_repeats"] = repeats
 
     notices = []
 

@@ -40,7 +40,7 @@ from utils import (
 )
 from utils import metrics as metrics_mod
 from utils.stream_bootstrap import bootstrap_streams
-from utils.text_clip import clip
+from utils.text_clip import clip, join_clauses
 from utils.cli_common import (
     EXIT_NEEDS_HUMAN,
     build_parent_parser,
@@ -917,15 +917,18 @@ def _prepare_selected_task(
     # selected attempt's verdict, including after a host dies mid-handoff.
     from utils.state_manager import (
         set_task_batch_check_accepted_in_state, set_task_batch_check_in_state,
+        set_task_batch_check_repeats_in_state,
         set_task_check_findings_in_state, set_task_check_tree_in_state,
-        set_task_own_check_ran_in_state,
+        set_task_own_check_note_in_state, set_task_own_check_ran_in_state,
     )
 
     set_task_check_findings_in_state(state.state, task.id, None)
     set_task_check_tree_in_state(state.state, task.id, None)
     set_task_batch_check_in_state(state.state, task.id, None)
     set_task_batch_check_accepted_in_state(state.state, task.id, None)
+    set_task_batch_check_repeats_in_state(state.state, task.id, None)
     set_task_own_check_ran_in_state(state.state, task.id, False)
+    set_task_own_check_note_in_state(state.state, task.id, None)
     # Fix round 17: the log line its earlier run wrote is not this rerun's
     # (`batch_done.unrecorded_logged_batches`): a host gone before its
     # `batch-done` left T001 refused on the next plain emit.
@@ -975,8 +978,9 @@ def _start_over(
     """
     from utils.state_manager import (
         set_task_batch_check_accepted_in_state, set_task_batch_check_in_state,
+        set_task_batch_check_repeats_in_state,
         set_task_check_findings_in_state, set_task_check_tree_in_state,
-        set_task_own_check_ran_in_state,
+        set_task_own_check_note_in_state, set_task_own_check_ran_in_state,
     )
     from utils.subagent_tasks import implement_output_name
     from utils.write_safety import TaskSnapshot, WriteSafetyError, resolve_repo_root
@@ -1028,7 +1032,9 @@ def _start_over(
         set_task_check_tree_in_state(state.state, task_id, None)
         set_task_batch_check_in_state(state.state, task_id, None)
         set_task_batch_check_accepted_in_state(state.state, task_id, None)
+        set_task_batch_check_repeats_in_state(state.state, task_id, None)
         set_task_own_check_ran_in_state(state.state, task_id, False)
+        set_task_own_check_note_in_state(state.state, task_id, None)
         if touched:
             set_aside.append(task_id)
     mark_tasks_reset_in_state(state.state, code_ids)
@@ -1176,10 +1182,12 @@ def _remove_kept_prompts(phase_dir: Path) -> int:
 
 def _manual_close_note(
     args: argparse.Namespace, plan_arg: str, task_ids: Sequence[str],
+    *, waiting: int = 0,
 ) -> Optional[str]:
     """``next_phase.manual_close_note`` for *task_ids*, in this host's own
     command spelling (the template the result line's ``user_next_step``
-    uses); ``None`` when nothing can be spelled."""
+    uses); ``None`` when nothing can be spelled. *waiting*: how many code
+    tasks wait on them (fix round 28)."""
     import io
 
     try:
@@ -1190,9 +1198,99 @@ def _manual_close_note(
         template = _hosts.next_command_template(
             host_id, _next.resolve_route(host_id, stderr=io.StringIO()))
         return _next.manual_close_note(
-            _next.close_command(template, plan_arg, task_ids), len(task_ids))
+            _next.close_command(template, plan_arg, task_ids), len(task_ids),
+            waiting=waiting)
     except Exception:  # noqa: BLE001 - advisory: the deferred list still stands
         return None
+
+
+def _native_manual_gates(
+    plan: Any, output_data: Dict[str, Any], state: StateManager,
+) -> Optional[Dict[str, Any]]:
+    """``write_batch_scheduler.plan_manual_gates`` over the native handoff's
+    tasks, the recorded decomposition and ``state.json`` as it stands (the
+    emit has not persisted *plan* yet); ``None`` when it cannot be read
+    (fix round 28).
+
+    The note it words is read once the host ran the batches (its summary,
+    its report), so a code task this emit hands out counts as done: a manual
+    task after it is one the user can do by then."""
+    try:
+        from utils.write_batch_scheduler import decomposition_graph, plan_manual_gates
+
+        entries = [
+            task for batch in output_data.get("batches") or []
+            for task in batch.get("tasks") or []
+        ]
+        nodes = [
+            {
+                "task_id": str(task.get("id") or ""),
+                "depends_on": list(task.get("depends_on") or []),
+                "executor_role": task.get("executor_role"),
+                "is_human": task.get("is_human"),
+            }
+            for task in entries
+        ]
+        statuses = dict(state.get_all_task_statuses())
+        for task in entries:
+            task_id = str(task.get("id") or "")
+            if (task_id and not (task.get("is_human") or task.get("executor_role") == "human")
+                    and not plan.is_skipped(task_id)):
+                statuses[task_id] = "completed"
+        return plan_manual_gates(
+            plan, decomposition_graph(nodes, state.state), statuses)
+    except Exception:  # noqa: BLE001 - advisory wording, never fatal
+        return None
+
+
+def _native_manual_gate_stop(
+    plan: Any, output_data: Dict[str, Any], state: StateManager,
+) -> Optional[Tuple[List[str], str, str]]:
+    """``(lines, headline, closing [ETA] line)`` of a native emit that hands
+    out nothing because every code task left waits on a manual task not
+    recorded done, one the user can do now among them; ``None`` otherwise
+    (fix round 28, live run 12, Codex racing 06: implement reported done
+    having run nothing, next step review-code on an empty tree). The words
+    are the executor stop's."""
+    gates = _native_manual_gates(plan, output_data, state)
+    if not gates or not gates.get("gated") or not gates.get("waiting"):
+        return None
+    from utils.write_batch_scheduler import manual_gate_head, manual_gate_way_on
+
+    titles = dict(state.get("task_titles") or {})
+    waiting = {k: list(v) for k, v in sorted(gates["waiting"].items()) if v}
+    gating = sorted(waiting)
+    held = sorted({code for codes in waiting.values() for code in codes})
+
+    def label(task_id: str) -> str:
+        title = titles.get(task_id)
+        return f" ({clip(str(title), 80)})" if title else ""
+
+    it = "it" if len(gating) == 1 else "them"
+    headline = (
+        manual_gate_head("implement", {t: label(t) for t in gating}, waiting)
+        + ". " + manual_gate_way_on(gating)
+    )
+    lines = [
+        f"[MANUAL_GATE] {headline}",
+    ]
+    for task_id in gating:
+        codes = waiting[task_id]
+        lines.append(
+            f"  {task_id}{label(task_id)}: {len(codes)} code task(s) wait on it "
+            f"({', '.join(codes)})")
+    lines.append(
+        "Nothing is handed out, and implement is not finished: spawn no "
+        "subagent, write no implementation summary and run no `util metrics` "
+        "or `util finalize-tracking`. Report the deferred tasks above, then end "
+        "the report with the section `util next-command` prints: the resume "
+        "that records the manual task done, which runs the code tasks waiting "
+        "on it.")
+    eta = metrics_mod.closing_line(
+        "implement", done=0, total=0,
+        why=(f"{', '.join(gating)} left for you (manual); {len(held)} code "
+             f"task(s) wait on {it}"))
+    return lines, headline, eta
 
 
 def _refuse_answer(message: str) -> int:
@@ -1355,7 +1453,7 @@ def check_findings_notice(found: Dict[str, List[str]]) -> str:
     return clip(
         "check findings (review-code is told about them; all listed in "
         "implement/summary.md): "
-        + "; ".join(parts), 900)
+        + join_clauses(parts), 900)
 
 
 def run_implement_write_phase(
@@ -1470,7 +1568,9 @@ def run_implement_write_phase(
         # Racing re-run 4 (2026-10-05): a check task's problems were on no
         # surface a host reads. The result line's `notice` carries them,
         # beside the `[CHECK_FINDINGS]` lines above.
-        record_notice("; ".join(notice))
+        # Fix round 28 (live run 12 #7): joined so a clause gives up its
+        # closing stop to the separator, never ".;".
+        record_notice(join_clauses(notice))
     if result.report_path:
         print(f"[write-subagents] report: {result.report_path}")
     if result.summary_file:
@@ -2718,8 +2818,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         manual_ids = sorted(
             set(native_human_plan.deferred()) & {str(t) for t in human_task_ids}
         )
+        # Fix round 28 (live run 12, Codex racing 06): only the manual tasks
+        # the user can do now, and the note says what waits on them.
+        native_gates = _native_manual_gates(native_human_plan, output_data, state)
+        waiting = 0
+        if native_gates is not None:
+            manual_ids = [t for t in manual_ids if t in native_gates["closable"]]
+            waiting = len({
+                code for task_id in manual_ids
+                for code in native_gates["waiting"].get(task_id, ())
+            })
         note = (
-            _manual_close_note(args, str(output_data["plan_arg"]), manual_ids)
+            _manual_close_note(
+                args, str(output_data["plan_arg"]), manual_ids, waiting=waiting)
             if manual_ids else None
         )
         if note:
@@ -2744,6 +2855,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not args.task:
             print(_dispatch_line(output_data))
         write_native_handoff()
+    # Fix round 28 (live run 12, Codex racing 06): an emit that hands out
+    # nothing because every code task left waits on a manual task not
+    # recorded done is a stop for the user, as on the executor leg.
+    native_gate = (
+        _native_manual_gate_stop(native_human_plan, output_data, state)
+        if (native_withheld is not None and not args.task
+            and native_human_plan is not None
+            and not any(native_withheld[key] for key in native_withheld)
+            and not kept_checks
+            and not output_data["tasks_to_dispatch"]
+            and not state.is_phase_completed("implement"))
+        else None
+    )
 
     # --- the detach boundary (D4) ---------------------------------------------
     # Crossed here, before the write executor and independently of it: `implement`
@@ -2834,7 +2958,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"Total tasks: {output_data['total_tasks']}")
     print(f"Pending tasks: {output_data.get('pending_tasks', output_data['total_tasks'])}")
     print(f"Batches: {len(output_data['batches'])}")
-    if "tasks_to_dispatch" in output_data:
+    if "tasks_to_dispatch" in output_data and native_gate is None:
         # The one number the host passes to `util metrics` (fix round 16:
         # the host counted "5 execution batches" and passed that). Fix round
         # 18 (run 7 #2): it is in the [ETA] line's unit, one record per task
@@ -2857,7 +2981,17 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         deferred = native_human_plan.deferred()
         declined = native_human_plan.declined()
-        if deferred:
+        if deferred and native_gate is not None:
+            # Fix round 28: nothing runs and no summary is written; the
+            # report's closing section gives the resume that records the
+            # manual task done, so no note repeats its command here.
+            print(
+                "Deferred tasks (recorded skipped in state.json; do not "
+                "dispatch them; name them in your report):"
+            )
+            for task_id, reason in sorted(deferred.items()):
+                print(f"  {_named(task_id)}: {reason}")
+        elif deferred:
             note = output_data.get("manual_tasks_note")
             print(
                 "Deferred tasks (recorded skipped in state.json; do not "
@@ -2985,13 +3119,31 @@ def main(argv: Optional[List[str]] = None) -> int:
         stopped_short = bool(
             kept_checks or any(native_withheld[key] for key in native_withheld)
         )
-        if not output_data["batches"]:
+        if not output_data["batches"] and native_gate is None:
             print(
                 "Nothing to dispatch: every task is done, skipped, accepted or "
                 "listed above. Do not spawn a subagent; still run step 7's "
                 "`util metrics finish`, which prints this run's closing [ETA] "
                 "line (no `util metrics start` is needed)."
             )
+
+    if native_gate is not None:
+        # The stop's own block, its closing [ETA] line, and the records a
+        # resume reads: the plan's deferrals and implement started (never
+        # completed), so `util next-command` answers its resume.
+        lines, headline, eta_line = native_gate
+        print(eta_line)
+        for line in lines:
+            print(line)
+        metrics_mod.set_left_out_in_state(state.state, "implement", {})
+        metrics_mod.set_set_aside_in_state(state.state, "implement", {})
+        from utils.write_batch_scheduler import persist_human_task_plan
+
+        persist_human_task_plan(state, native_human_plan)
+        state.mark_phase_started("implement")
+        state.save()
+        record_error(headline)
+        return 3
 
     # Fix round 14: a resume of a completed implement that only records
     # answers (`--human-task T007=done` closing a deferred manual task) hands

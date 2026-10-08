@@ -121,6 +121,8 @@ try:
         record_batch_items_in_state,
         set_task_batch_check_accepted_in_state,
         set_task_batch_check_in_state,
+        set_task_batch_check_repeats_in_state,
+        set_task_own_check_note_in_state,
         set_task_own_check_ran_in_state,
         set_task_check_findings_in_state,
         set_task_check_tree_in_state,
@@ -128,8 +130,8 @@ try:
     )
     from .stream_bootstrap import bootstrap_streams
     from .subagent_executor import (
-        DECLINED_SECTION_HEADING, SKIPPED_SECTION_HEADING, check_findings_from,
-        declined_reason,
+        CHECK_NOTE_MAX_CHARS, DECLINED_SECTION_HEADING, SKIPPED_SECTION_HEADING,
+        check_findings_from, declined_reason,
     )
     from .text_clip import clip, with_closing_mark
     from .subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set
@@ -139,8 +141,12 @@ try:
         check_findings_line,
         HALF_APPLIED_PREFIX,
         accepted_findings_for,
+        accepted_findings_with_words_added,
         batch_check_accepted_line,
         batch_check_line,
+        batch_check_repeated_line,
+        move_check_repeats_in_state,
+        repeated_findings_for,
         BLOCKED_BY_CHECK_PREFIX,
         CODE_WRITE_KINDS,
         blocked_by_check_reason,
@@ -148,8 +154,10 @@ try:
         is_check_task,
         rerunnable_checks,
         split_accepted_findings,
+        split_repeated_findings,
         transitive_dependents,
         upstream_held_check,
+        words_added_to,
     )
     from .write_prompt import (
         WritePromptError, changed_since_bound, check_tree_fingerprint,
@@ -170,6 +178,8 @@ except ImportError:  # pragma: no cover - direct script invocation
         record_batch_items_in_state,
         set_task_batch_check_accepted_in_state,
         set_task_batch_check_in_state,
+        set_task_batch_check_repeats_in_state,
+        set_task_own_check_note_in_state,
         set_task_own_check_ran_in_state,
         set_task_check_findings_in_state,
         set_task_check_tree_in_state,
@@ -177,8 +187,8 @@ except ImportError:  # pragma: no cover - direct script invocation
     )
     from utils.stream_bootstrap import bootstrap_streams  # type: ignore
     from utils.subagent_executor import (  # type: ignore
-        DECLINED_SECTION_HEADING, SKIPPED_SECTION_HEADING, check_findings_from,
-        declined_reason,
+        CHECK_NOTE_MAX_CHARS, DECLINED_SECTION_HEADING, SKIPPED_SECTION_HEADING,
+        check_findings_from, declined_reason,
     )
     from utils.text_clip import clip, with_closing_mark  # type: ignore
     from utils.subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set  # type: ignore
@@ -188,8 +198,12 @@ except ImportError:  # pragma: no cover - direct script invocation
         check_findings_line,
         HALF_APPLIED_PREFIX,
         accepted_findings_for,
+        accepted_findings_with_words_added,
         batch_check_accepted_line,
         batch_check_line,
+        batch_check_repeated_line,
+        move_check_repeats_in_state,
+        repeated_findings_for,
         BLOCKED_BY_CHECK_PREFIX,
         CODE_WRITE_KINDS,
         blocked_by_check_reason,
@@ -197,8 +211,10 @@ except ImportError:  # pragma: no cover - direct script invocation
         is_check_task,
         rerunnable_checks,
         split_accepted_findings,
+        split_repeated_findings,
         transitive_dependents,
         upstream_held_check,
+        words_added_to,
     )
     from utils.write_prompt import (  # type: ignore
         WritePromptError, changed_since_bound, check_tree_fingerprint,
@@ -207,6 +223,7 @@ except ImportError:  # pragma: no cover - direct script invocation
 
 
 __all__ = [
+    "FINDING_RESTATE_MARKER",
     "BATCH_DECLINED_MARKER",
     "BATCH_SKIPPED_MARKER",
     "CHECK_BLOCKED_MARKER",
@@ -352,9 +369,17 @@ def record_batch(
     skipped: Optional[List[str]] = None,
     listed: Optional[List[str]] = None,
     partial: bool = False,
+    note: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Record *task_id*'s outcome; the ``{task_id, status, items, state_file,
     check_findings}`` written.
+
+    *note* (``--note``, fix round 28) is a code batch's own words about the
+    checks it ran (its reply's ``check.note``): recorded beside its own
+    check (``task_own_check_note`` for an implement task, the
+    ``apply_fix_batch_checks`` entry for an apply-code-fixes batch) and
+    shown on its ``[BATCH_CHECK_*]`` line, never read as a finding. Only
+    with ``--own-check``.
 
     *partial* (``--partial``, fix round 21) is a ``failed`` task whose
     subagent changed files before it failed: the executor's partial
@@ -427,6 +452,14 @@ def record_batch(
             "--own-check the checks a task that edits files ran on its own "
             "edits. Nothing was recorded."
         )
+    if str(note or "").strip() and own_check is None:
+        raise WritePromptError(
+            "--note is recorded only with --own-check (a task that edits "
+            "files): it is that task's own words about the checks it ran, "
+            "from its reply's check.note. Pass it beside --own-check, or "
+            "leave it out. Nothing was recorded."
+        )
+    note = clip(note, CHECK_NOTE_MAX_CHARS) if str(note or "").strip() else None
     if findings and check != "findings" and own_check != "findings":
         raise WritePromptError(
             "--finding is recorded only with --check findings (a check task) "
@@ -558,21 +591,44 @@ def record_batch(
         update_task_status_in_state(state, task_id, status, reason)
         blocked: List[str] = []
         accepted_again: Dict[str, List[str]] = {}
+        echoed: Dict[str, List[str]] = {}
+        echoes_moved: Dict[str, Any] = {}
+        restate: Optional[Dict[str, Any]] = None
+        phase_tasks = [
+            t for t in (document.get("batches") or document.get("tasks") or [])
+            if isinstance(t, dict)
+        ]
         if kind == "implement" and batch_check:
             # Fix round 22: what only repeats findings the user accepted for
             # a check is that check's, never this task's own failure (the
             # executor's reading, `split_accepted_findings`). Fix round 23:
             # only the checks this task was told were accepted, and none
             # whose failure is its own job (`accepted_findings_for`).
-            own, accepted_again = split_accepted_findings(
-                batch_check, accepted_findings_for(
-                    [t for t in (document.get("batches") or document.get("tasks") or [])
-                     if isinstance(t, dict)],
-                    task, state,
-                ),
-            )
+            accepted = accepted_findings_for(phase_tasks, task, state)
+            reported = list(batch_check)
+            own, accepted_again = split_accepted_findings(batch_check, accepted)
             if accepted_again:
                 batch_check = own
+            # Fix round 28: and what is the same finding a check task of the
+            # run already reported is that check's (`repeated_findings_for`).
+            own, echoed = split_repeated_findings(
+                own, repeated_findings_for(phase_tasks, task, state))
+            if echoed:
+                batch_check = own
+            # Fix round 28: a finding that holds an accepted one word for
+            # word with words added stays the task's own; the host is told
+            # how to record it again restated (`main`), never told it is
+            # accepted.
+            flagged = accepted_findings_with_words_added(own, accepted)
+            if flagged:
+                swap = {finding: accepted_text for finding, _c, accepted_text in flagged}
+                added = [words_added_to(finding, text) for finding, _c, text in flagged]
+                restate = {
+                    "flagged": flagged,
+                    "findings": [swap.get(finding, finding) for finding in reported],
+                    "note": clip("; ".join(
+                        part for part in [note or "", *added] if part), CHECK_NOTE_MAX_CHARS),
+                }
         if kind == "implement":
             set_task_check_findings_in_state(state, task_id, check_findings)
             set_task_check_tree_in_state(state, task_id, tree)
@@ -588,6 +644,15 @@ def record_batch(
             # Fix round 23: what it reported again of the accepted findings,
             # by check, beside it (and cleared by any other record).
             set_task_batch_check_accepted_in_state(state, task_id, accepted_again)
+            # Fix round 28: what it reported of a check task's findings.
+            set_task_batch_check_repeats_in_state(state, task_id, echoed)
+            if check_findings and status == "completed":
+                # Fix round 28: a code task recorded earlier whose own check
+                # reported the finding this check now has on record.
+                echoes_moved = move_check_repeats_in_state(state, phase_tasks, task_id)
+            # Fix round 28: its own words about its checks, never a finding.
+            set_task_own_check_note_in_state(
+                state, task_id, note if status == "completed" else None)
             blocked = _hold_or_release_dependents(
                 state, document, task_id, held=bool(check_findings),
             )
@@ -607,6 +672,7 @@ def record_batch(
                 grouped_sha256=_known_checks.review_stamp(task),
                 findings=batch_check if completed else None,
                 listed=listed_outcomes if completed else None,
+                note=note if completed else None,
             )
         tracked = _tracked_after_batch(state, target, kind)
         if tracked is not None:
@@ -654,6 +720,12 @@ def record_batch(
         "listed_ignored": listed_ignored,
         "partial": bool(partial),
         "check_not_recorded": result_left_out,
+        "note": note,
+        "restate": restate,
+        "batch_check_repeats": echoed,
+        "repeats_moved": {
+            moved_id: merged for moved_id, (_own, merged) in echoes_moved.items()
+        },
     }
 
 
@@ -697,6 +769,46 @@ def _record_again_call(args: argparse.Namespace, result_flag: str) -> str:
         parts.extend(f"{flag} {shlex.quote(str(value))}" for value in values or [])
     parts.append(result_flag)
     return " ".join(parts)
+
+
+#: The line ``util batch-done`` prints for a finding that holds a finding
+#: the user accepted, word for word, with words added (fix round 28).
+FINDING_RESTATE_MARKER = "[FINDING_RESTATE]"
+
+
+def finding_restate_line(
+    args: argparse.Namespace, task_id: str, restate: Dict[str, Any],
+) -> str:
+    """The :data:`FINDING_RESTATE_MARKER` line (fix round 28, live run 12:
+    Claude Code's host recorded T007's "… (known problem the user accepted
+    in T002)" as written, and the strict match read it as T007's own
+    failure). It names each such finding and the accepted finding it holds,
+    says it is recorded as the task's own failure, and gives the one call
+    that records the task again with the accepted finding alone and the
+    added words as its ``--note`` — for the host to run only when those
+    words are its subagent's comment. The plugin never records it as
+    accepted itself (``write_batch_scheduler.accepted_findings_with_words_added``)."""
+    flagged = list(restate.get("flagged") or [])
+    named = "; ".join(
+        f"its finding \"{clip(finding, 160)}\" holds the finding the user "
+        f"accepted for {check_id} word for word, with words added"
+        for finding, check_id, _accepted in flagged
+    )
+    flags = "--own-check findings " + " ".join(
+        f"--finding {shlex.quote(str(finding))}"
+        for finding in restate.get("findings") or []
+    )
+    if restate.get("note"):
+        flags += f" --note {shlex.quote(str(restate['note']))}"
+    return (
+        f"{FINDING_RESTATE_MARKER} {task_id}: {named}, so it is recorded as "
+        f"{task_id}'s own failure. If those added words are its subagent's "
+        f"comment, record {task_id} again with the accepted finding alone and "
+        f"the words as its note: {_record_again_call(args, flags)} (that "
+        f"record replaces this one, and the line it prints is the one to "
+        f"follow). If they report something the check printed beyond the "
+        f"accepted finding, leave the record as it is."
+    )
 
 
 def check_not_recorded_line(
@@ -1208,7 +1320,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--finding", action="append", default=None, metavar="TEXT",
         help="One problem a check reported (repeatable; with --check findings "
-             "or --own-check findings).",
+             "or --own-check findings), exactly as the reply wrote it.",
+    )
+    parser.add_argument(
+        "--note", default=None, metavar="TEXT",
+        help="With --own-check: the reply's check.note, its own words about "
+             "the checks it ran. Recorded and shown beside them, never read "
+             "as a finding.",
     )
     parser.add_argument(
         "--declined", action="append", default=None, metavar="ID=REASON",
@@ -1255,6 +1373,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             skipped=args.skipped,
             listed=args.listed_check,
             partial=args.partial,
+            note=args.note,
         )
     except WritePromptError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -1289,22 +1408,46 @@ def main(argv: Optional[List[str]] = None) -> int:
         # Fix round 22: reported again, never the task's own failure.
         task_id = written["task_id"]
         print(
-            f"{batch_check_accepted_line(task_id, accepted_again)}. List it in "
+            f"{batch_check_accepted_line(task_id, accepted_again, note=written.get('note'))}. List it in "
             f"the phase's summary.md under ## Check Findings, beside "
             f"{', '.join(accepted_again)}'s accepted findings, as {task_id} "
             f"running that check again: it does not make the phase unclean and "
             f"is not a check of {task_id}'s that fails."
         )
+    echoed = written.get("batch_check_repeats") or {}
+    if echoed:
+        # Fix round 28: a check task's finding, never this task's own.
+        task_id = written["task_id"]
+        print(
+            f"{batch_check_repeated_line(task_id, echoed, note=written.get('note'))}. "
+            f"List it in the phase's summary.md under ## Check Findings, beside "
+            f"{', '.join(echoed)}'s findings, as {task_id} running that check "
+            f"too: it is not a check of {task_id}'s that fails."
+        )
+    for moved_id, merged in (written.get("repeats_moved") or {}).items():
+        # Fix round 28: the code task recorded first; this check now owns it.
+        print(
+            f"{batch_check_repeated_line(moved_id, merged)}. Recorded again now "
+            f"that {written['task_id']} reported it: the [BATCH_CHECK_FAILED] "
+            f"line {moved_id}'s record printed for it no longer stands. List "
+            f"{moved_id} in summary.md under {written['task_id']}'s findings, "
+            f"not as a check of {moved_id}'s that fails."
+        )
     failing = written.get("batch_check") or []
+    restate = written.get("restate")
     if failing:
         # Fix round 14: the native leg's counterpart of the executor's line.
         print(
-            f"{batch_check_line(written['task_id'], failing)}. The edits are "
+            f"{batch_check_line(written['task_id'], failing, note=written.get('note'))}. The edits are "
             f"kept. List it under "
             f"## Check Findings in the phase's summary.md, and say in your "
             f"final report that this check fails: never report the phase as a "
             f"clean success."
         )
+    if restate:
+        # Fix round 28: what to run when the added words are a comment;
+        # the plugin never records such a finding as accepted itself.
+        print(finding_restate_line(args, written["task_id"], restate))
     ignored = written.get("listed_ignored") or []
     if ignored:
         print(
