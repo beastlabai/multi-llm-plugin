@@ -133,6 +133,9 @@ UTIL_COMMANDS: Dict[str, Tuple[Optional[str], str, str]] = {
     "report-check": ("utils.report_check", "main",
                      "Check a turn's final message copies the printed next "
                      "command (Claude Code Stop hook)."),
+    "wakeup-check": ("utils.wakeup_check", "main",
+                     "Refuse a scheduled wakeup or cron job while a phase "
+                     "runs (Claude Code PreToolUse hook)."),
     "next-command": ("utils.next_phase", "main",
                      "Print a plan's next workflow command (read-only; "
                      "--after <mode>, --host <id>)."),
@@ -589,6 +592,12 @@ def _run_mode(word: str, rest: Sequence[str], ctx: ResultContext) -> int:
         # same capability gate as an explicit one, so a host with no executor-
         # capable runner is exit 3 here rather than a marker nobody continues.
         _require_executor_capability(argv)
+        # A plan spelled from the repository root, typed in a subdirectory of
+        # it (live run 11): the whole command runs from the root, before
+        # anything reads a path or records the invocation.
+        _run_from_repository_root(
+            [flag_value(argv, option) for option in _MODE_INPUT_PATH_OPTIONS]
+        )
         # What a detached child re-executes: the mode word plus this normalized
         # argv, never a remembered sys.argv (see utils/detach.build_child_command).
         # A continuation also carries the plan spelling its hand-off recorded.
@@ -623,7 +632,129 @@ def _run_util(rest: Sequence[str], ctx: ResultContext) -> int:
         return _run_util_instructions(args, ctx)
     module_path, attr, _summary = UTIL_COMMANDS[name]
     assert module_path is not None
+    if not flag_present(args, "--help", "-h"):
+        _run_from_repository_root(_util_input_paths(name, args))
     return _call_target(_load_target(module_path, attr), args)
+
+
+# ---------------------------------------------------------------------------
+# A command run from a subdirectory of the repository
+# ---------------------------------------------------------------------------
+# Live run 11 (Claude Code racing 03, 2026-10-08): the host had `cd`'d into the
+# phase folder to look at its files, then ran `generate-tasks
+# plans/racing-game.md --reaggregate` there, and the plan "was not found" at
+# plans/racing-game/generate-tasks/plans/racing-game.md. Every path a workflow
+# command names (the plan, its folder, state.json, a phase folder, tasks.md) is
+# spelled from the repository root, so when the relative ones name nothing from
+# the cwd and each names something inside the root of the repository the cwd is
+# in, the command runs from that root, exactly as it would have there, and says
+# so on one line.
+
+#: A mode's options whose value is an existing file the command reads (a plan
+#: positional is ``--plan-file`` by now).
+_MODE_INPUT_PATH_OPTIONS: Tuple[str, ...] = (
+    "--plan-file", "--question-file", "--tasks-file", "--files-from",
+)
+
+#: A ``util`` command's options whose value names something the workflow keeps
+#: in the repository.
+_UTIL_INPUT_PATH_OPTIONS: Tuple[str, ...] = (
+    "--plan-file", "--state-file", "--phase-dir", "--output-dir", "--tasks-file",
+    "--output-file", "--project-root",
+)
+
+#: The ``util`` commands whose first positional is such a path, with their
+#: options that take a value (whose value is not that positional).
+_UTIL_PATH_POSITIONAL: Dict[str, Tuple[str, ...]] = {
+    "next-command": ("--after", "--blocked", "--host"),
+    "check-tasks": (),
+    "backup": (),
+}
+
+#: The cwd :func:`_run_from_repository_root` moved away from, which ``main``
+#: moves back to on its way out (an in-process caller keeps its own cwd).
+_CWD_BEFORE_ROOT: List[str] = []
+
+
+def _first_positional(args: Sequence[str], value_options: Sequence[str]) -> Optional[str]:
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            return args[index + 1] if index + 1 < len(args) else None
+        if token.startswith("-") and token != "-":
+            if "=" not in token and token in value_options:
+                index += 1
+            index += 1
+            continue
+        return token
+    return None
+
+
+def _util_input_paths(name: str, args: Sequence[str]) -> List[Optional[str]]:
+    paths = [flag_value(args, option) for option in _UTIL_INPUT_PATH_OPTIONS]
+    if name in _UTIL_PATH_POSITIONAL:
+        paths.append(_first_positional(args, _UTIL_PATH_POSITIONAL[name]))
+    return paths
+
+
+def _inside(path: str, root: str) -> bool:
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def _run_from_repository_root(paths: Sequence[Optional[str]]) -> None:
+    """Move to the repository root when the command's relative paths name
+    nothing from here and each names something inside that root.
+
+    The root is the one the write path pins (``git_utils.pin_repo_root``: the
+    nearest ``.git`` entry above the cwd, which git must confirm; nothing is
+    pinned while ``GIT_DIR`` and the like redirect git). Nothing moves when no
+    path is relative, when any of them names something from the cwd (so a
+    spelling that works here keeps working, and a mixed one is not guessed at),
+    when the cwd is the root already, or when a path is missing from the root
+    too or resolves outside it (a ``..`` or a link out of the repository).
+    """
+    relative = [
+        path for path in paths
+        if path and path != "-" and not path.startswith("~") and not os.path.isabs(path)
+    ]
+    if not relative or any(os.path.lexists(path) for path in relative):
+        return
+    try:
+        cwd = os.getcwd()
+        from utils.git_utils import pin_repo_root
+
+        root, problem = pin_repo_root(cwd)
+    except Exception:  # noqa: BLE001 - a convenience: the command runs as typed
+        return
+    if root is None or problem or os.path.realpath(cwd) == root:
+        return
+    for path in relative:
+        candidate = os.path.join(root, path)
+        if not (
+            os.path.exists(candidate)
+            and _inside(os.path.normpath(candidate), root)
+            and _inside(os.path.realpath(candidate), root)
+        ):
+            return
+    os.chdir(root)
+    _CWD_BEFORE_ROOT.append(cwd)
+    print(
+        f"multi-llm: running from the repository root {root}, where "
+        f"{relative[0]} is (it is not under the current directory {cwd}).",
+        file=sys.stderr,
+    )
+
+
+def _back_to_the_callers_cwd() -> None:
+    if not _CWD_BEFORE_ROOT:
+        return
+    cwd = _CWD_BEFORE_ROOT[0]
+    del _CWD_BEFORE_ROOT[:]
+    try:
+        os.chdir(cwd)
+    except OSError:  # pragma: no cover - the folder went away meanwhile
+        pass
 
 
 def _run_util_instructions(args: Sequence[str], ctx: ResultContext) -> int:
@@ -1015,6 +1146,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _close_detached_run(exit_code, crash or ctx.error, ctx.state)
         deactivate_result()
         clear_invocation()
+        _back_to_the_callers_cwd()
 
 
 def _write_phases() -> "frozenset":

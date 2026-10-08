@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+"""``util wakeup-check``: refuse a scheduled wakeup while a phase is running.
+
+The Claude Code plugin's ``PreToolUse`` hook (``hooks/wakeup-check.sh``) runs
+this for the ``ScheduleWakeup`` and ``CronCreate`` tools (fix round 26, live
+run 11 #2). Claude Code 2.1.293 runs a phase's subagents in the background, so
+a headless host ends a turn while they run, and in racing 03 the host called
+``ScheduleWakeup`` (1200 s, its prompt re-running ``--generate-tasks … --yes``)
+before ending one. The ``claude -p`` process then stayed alive about 16 minutes
+after its final result, until the driver killed it; had the wakeup fired, the
+phase would have run again. Racing 04 called it mid-run too, and the wakeup's
+turn became the run's final message. The subagents' completion notifications
+arrive on their own, so a phase never needs one.
+
+**What "a phase is running" means here.** The session's transcript, the one
+``report-check.sh`` reads, since the prompt the user last typed
+(``report_check.read_turn``: a task notification or a wakeup prompt is not
+one): a Bash call that ran the dispatcher with a long-running mode
+(``modes.DETACH_MODES``, an alias resolved) started a phase, and the phase is
+over once a later tool result printed the next-step block (``[NEXT_COMMAND]``
+or ``[WORKFLOW_COMPLETE]`` at a line start, ``report_check.find_blocks``: the
+finished phase's own result, or ``util next-command``'s at a stop as on a
+success), or that phase call's own result line ended it (exit ``1`` or ``3``,
+a failure or a stop before anything ran; ``ask``, which prints no block, on any
+result line). The native write leg's first call exits ``0`` with ``next`` null
+and hands its batches to the host, so a result line alone never says a phase
+is over. The plugin's ``state.json`` is not read: which plan the session
+works on, and whether its phase was started by this session or is left over
+from another, only the transcript says.
+
+**The user's own wakeups are never refused.** A session that never ran the
+dispatcher, a phase that finished, failed or stopped, and anything after a
+prompt the user typed all pass. Only a session whose phase is still running
+is refused, and the refusal says what to do instead.
+
+**Advisory, so every error passes.** An unreadable transcript, a bad
+argument, a tool this does not watch: exit 0, no output, and the tool runs.
+Nothing here touches the network or writes anything.
+
+**Stdout is the hook's decision channel**, as for ``util report-check``: the
+decision is one line starting with :data:`DECISION_PREFIX`, which the hook
+script selects from beside the dispatcher's result line.
+
+Import is side-effect free: argparse and all I/O live inside :func:`main`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+try:
+    from . import report_check
+    from .stream_bootstrap import bootstrap_streams
+except ImportError:  # direct script invocation
+    import report_check  # type: ignore
+    from stream_bootstrap import bootstrap_streams  # type: ignore
+
+#: The tools that schedule a prompt for later: a self-paced ``/loop`` uses the
+#: first, a fixed-interval one and every cron job the second.
+SCHEDULING_TOOLS: Tuple[str, ...] = ("ScheduleWakeup", "CronCreate")
+
+#: Every decision line starts with this (Claude Code's ``PreToolUse`` output).
+DECISION_PREFIX = '{"hookSpecificOutput"'
+
+#: ``python <…>/multi_llm.py <mode>``: the dispatcher run, its path bare or
+#: quoted (a space inside quotes), then the mode word (quotes allowed). A
+#: ``grep multi_llm.py …`` or a path read is not a run.
+_DISPATCH_RE = re.compile(
+    r"\bpython3?\s+(?:\"[^\"]*multi_llm\.py\"|'[^']*multi_llm\.py'|\S*multi_llm\.py)"
+    r"\s+[\"']?([A-Za-z][\w-]*)"
+)
+
+#: The last ``MULTI_LLM_RESULT: {…}`` line of a tool result.
+_RESULT_RE = re.compile(r"^MULTI_LLM_RESULT:\s*(\{.*\})\s*$", re.MULTILINE)
+
+#: The mode whose phase prints no next-step block: its result line ends it.
+_NO_BLOCK_MODES = ("ask",)
+
+#: Flags that make a phase call a preview that starts nothing (help, or a dry
+#: run that dispatches no subagent), read in the call's own command.
+_PREVIEW_FLAGS = ("--help", "-h", "--dry-run", "--dry-run-subagents")
+
+#: Where one chained shell command ends and the next begins.
+_COMMAND_END_RE = re.compile(r"&&|\|\||[;|\n]")
+
+
+def phase_mode(command: str) -> Optional[str]:
+    """The long-running mode a Bash *command* runs the dispatcher with, else
+    ``None`` (a ``util`` or ``status`` call, a ``--help`` or dry-run preview,
+    or no dispatcher at all). With several calls chained, the last
+    long-running one."""
+    try:
+        from .cli_common import modes_table
+    except ImportError:  # direct script invocation
+        from cli_common import modes_table  # type: ignore
+    modes = modes_table()
+    found: Optional[str] = None
+    for match in _DISPATCH_RE.finditer(command):
+        mode = modes.resolve(match.group(1))
+        if mode is None or mode.name not in modes.DETACH_MODES:
+            continue
+        rest = _COMMAND_END_RE.split(command[match.end():], 1)[0]
+        if any(token.strip("\"'") in _PREVIEW_FLAGS for token in rest.split()):
+            continue
+        found = mode.name
+    return found
+
+
+def _bash_calls(entry: Dict[str, Any]) -> Iterable[Tuple[str, str]]:
+    """``(tool_use_id, command)`` for each Bash call an assistant entry makes."""
+    content = report_check._content(entry)
+    if not isinstance(content, list):
+        return
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        if block.get("name") != "Bash":
+            continue
+        tool_input = block.get("input")
+        command = tool_input.get("command") if isinstance(tool_input, dict) else None
+        if isinstance(command, str):
+            yield str(block.get("id") or ""), command
+
+
+def _results(entry: Dict[str, Any]) -> Iterable[Tuple[str, str]]:
+    """``(tool_use_id, text)`` for each tool result a user entry carries."""
+    content = report_check._content(entry)
+    if not isinstance(content, list):
+        return
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        inner = block.get("content")
+        if isinstance(inner, str):
+            text = inner
+        elif isinstance(inner, list):
+            text = "\n".join(
+                part.get("text", "") for part in inner
+                if isinstance(part, dict) and isinstance(part.get("text"), str)
+            )
+        else:
+            continue
+        yield str(block.get("tool_use_id") or ""), text
+
+
+def _result_exit(text: str) -> Optional[int]:
+    """The ``exit`` of the last result line in *text*, else ``None``."""
+    matches = _RESULT_RE.findall(text)
+    if not matches:
+        return None
+    try:
+        result = json.loads(matches[-1])
+    except ValueError:
+        return None
+    code = result.get("exit") if isinstance(result, dict) else None
+    return code if isinstance(code, int) and not isinstance(code, bool) else None
+
+
+def phase_in_flight(turn: Sequence[Dict[str, Any]]) -> Optional[str]:
+    """The mode of the phase still running in *turn*, else ``None``."""
+    running: Optional[str] = None
+    calls: Dict[str, str] = {}
+    for entry in turn:
+        kind = entry.get("type")
+        if kind == "assistant":
+            for tool_use_id, command in _bash_calls(entry):
+                mode = phase_mode(command)
+                if mode is not None:
+                    calls[tool_use_id] = mode
+                    running = mode
+        elif kind == "user":
+            for tool_use_id, text in _results(entry):
+                if report_check.find_blocks(text):
+                    running = None
+                    continue
+                mode = calls.get(tool_use_id)
+                if mode is None:
+                    continue
+                code = _result_exit(text)
+                if code in (1, 3) or (code is not None and mode in _NO_BLOCK_MODES):
+                    running = None
+    return running
+
+
+def deny_reason(tool: str, mode: str) -> str:
+    """What the model reads when its scheduling call is refused."""
+    return (
+        f"multi-llm: {tool} is refused while the {mode} phase you started in "
+        "this session is still running. Do not schedule a wakeup, a cron job "
+        "or a loop to come back to it, and never schedule a phase command to "
+        "run again: a scheduled prompt keeps a headless session open after its "
+        "last reply, and when it fires the phase runs a second time. Keep "
+        "waiting for the phase's subagents (or the dispatcher command you ran "
+        "in the background) in this session: each one's completion "
+        "notification arrives on its own, and ending your turn while they run "
+        "is how you wait. When they are back, carry on with the phase's next "
+        "step."
+    )
+
+
+def check(hook: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The hook decision for one tool call: ``None`` to allow, else the deny
+    object. Raises ``report_check._Unreadable`` for a transcript it cannot
+    read; the caller turns that into an allow."""
+    tool = hook.get("tool_name")
+    if tool not in SCHEDULING_TOOLS:
+        return None
+    transcript = hook.get("transcript_path")
+    if not isinstance(transcript, str) or not transcript:
+        return None
+    path = Path(transcript)
+    if not path.is_file():
+        return None
+    mode = phase_in_flight(report_check.read_turn(path, partial_tail=True))
+    if mode is None:
+        return None
+    return {"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": deny_reason(str(tool), mode),
+    }}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = report_check._QuietParser(
+        prog="multi_llm.py util wakeup-check",
+        description=(
+            "Refuse a ScheduleWakeup or CronCreate call while a multi-llm phase "
+            "this Claude Code session started is still running. Run by the "
+            "Claude Code plugin's PreToolUse hook. Prints nothing to allow the "
+            'call, and one {"hookSpecificOutput": {…, "permissionDecision": '
+            '"deny", …}} line to refuse it. Always exits 0: every error allows.'
+        ),
+    )
+    parser.add_argument(
+        "--hook-input",
+        metavar="PATH",
+        required=True,
+        help="The PreToolUse hook's input JSON, as a file or - for stdin. "
+             "Supplies tool_name and transcript_path.",
+    )
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    bootstrap_streams()
+    parser = build_parser()
+    try:
+        args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
+    except report_check._ArgumentError:
+        return 0
+    try:
+        decision = check(report_check._read_hook_input(args.hook_input))
+    except Exception:  # noqa: BLE001 - advisory: every failure allows the call
+        return 0
+    if decision is not None:
+        sys.stdout.write(json.dumps(decision) + "\n")
+        try:
+            sys.stdout.flush()
+        except (AttributeError, ValueError):  # pragma: no cover - closed stream
+            pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

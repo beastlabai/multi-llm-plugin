@@ -52,7 +52,7 @@ Usage::
     multi_llm.py util batch-done --phase-dir <dir> --task-id <id> \\
         --status completed|failed [--reason TEXT] [--partial] [--state-file PATH] \\
         [--check passed|findings|could-not-run [--finding TEXT ...]] \\
-        [--own-check passed|findings [--finding TEXT ...]]
+        [--own-check passed|findings|none [--finding TEXT ...]]
 
 ``--check`` is a check task's structured result (an implement task that
 declares no files; its reply's ``check`` object): ``findings`` records each
@@ -74,7 +74,8 @@ findings``. A batch that edits code (implement's tasks that declare files,
 apply-code-fixes' batches; fix round 14) records the checks it ran on its
 own edits with ``--own-check passed|findings``: a failing one prints a
 ``[BATCH_CHECK_FAILED]`` line telling the host to list it in summary.md and
-report it, and holds nothing back. A ``completed`` record of such a batch
+report it, and holds nothing back; ``--own-check none`` (fix round 26) is a
+reply whose ``check`` says it ran no check, recorded as no check. A ``completed`` record of such a batch
 given no ``--own-check`` (of a check task, no ``--check``) prints
 ``[OWN_CHECK_NOT_RECORDED]`` (``[CHECK_NOT_RECORDED]``) naming the call that
 records the result with the same flags (fix round 24); beside a recorded
@@ -128,11 +129,12 @@ try:
         DECLINED_SECTION_HEADING, SKIPPED_SECTION_HEADING, check_findings_from,
         declined_reason,
     )
-    from .text_clip import clip
+    from .text_clip import clip, without_closing_mark
     from .subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set
     from .write_phase_bridge import WRITE_TASK_FILENAME
     from .write_batch_scheduler import (
         BATCH_CHECK_MARKER,
+        check_findings_line,
         HALF_APPLIED_PREFIX,
         accepted_findings_for,
         batch_check_accepted_line,
@@ -176,11 +178,12 @@ except ImportError:  # pragma: no cover - direct script invocation
         DECLINED_SECTION_HEADING, SKIPPED_SECTION_HEADING, check_findings_from,
         declined_reason,
     )
-    from utils.text_clip import clip  # type: ignore
+    from utils.text_clip import clip, without_closing_mark  # type: ignore
     from utils.subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set  # type: ignore
     from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
     from utils.write_batch_scheduler import (  # type: ignore
         BATCH_CHECK_MARKER,
+        check_findings_line,
         HALF_APPLIED_PREFIX,
         accepted_findings_for,
         batch_check_accepted_line,
@@ -263,8 +266,12 @@ CHECK_RESULTS = ("passed", "findings", "could-not-run")
 #: ``--own-check``'s words: what a code batch's reply said in its ``check``
 #: object about the checks it ran on its own edits (fix round 18). A code
 #: batch has no ``could-not-run``: a check of its own that could not run is
-#: one of its findings.
-OWN_CHECK_RESULTS = ("passed", "findings")
+#: one of its findings. ``none`` (fix round 26): its ``check`` says it ran no
+#: check (an empty ``ran``, ``subagent_executor.ran_no_check``) — recorded as
+#: no check, never as a pass, as the executor reads the same reply.
+OWN_CHECK_RESULTS = ("passed", "findings", "none")
+#: The ``--own-check`` word for a reply that ran no check.
+OWN_CHECK_NONE = "none"
 
 #: The reason ``--check could-not-run`` records when ``--reason`` gives none.
 COULD_NOT_RUN_REASON = (
@@ -501,7 +508,7 @@ def record_batch(
         check_findings = check_findings_from({
             "check": {"passed": check == "passed", "findings": list(findings or [])}
         }) or []
-    elif own_check is not None:
+    elif own_check is not None and own_check != OWN_CHECK_NONE:
         # A code batch's own check: reported, never a hold (fix round 14).
         batch_check = check_findings_from({
             "check": {"passed": own_check == "passed", "findings": list(findings or [])}
@@ -564,7 +571,7 @@ def record_batch(
             # included, for the tests line (`implement_checks_ran`).
             set_task_own_check_ran_in_state(
                 state, task_id,
-                own_check is not None and status == "completed")
+                own_check not in (None, OWN_CHECK_NONE) and status == "completed")
             # Fix round 23: what it reported again of the accepted findings,
             # by check, beside it (and cleared by any other record).
             set_task_batch_check_accepted_in_state(state, task_id, accepted_again)
@@ -728,8 +735,9 @@ def check_not_recorded_line(
         return (
             f"{head} Record it again now: "
             f"{_record_again_call(args, '--own-check passed')} when it says "
-            f"\"passed\": true, or the same call with --own-check findings "
-            f"and one --finding per failing check."
+            f"\"passed\": true, the same call with --own-check findings "
+            f"and one --finding per failing check, or with --own-check none "
+            f"when its `ran` is empty (it ran no check)."
         )
     return (
         f"{OWN_CHECK_NOT_RECORDED_MARKER} {task_id} edits files and was "
@@ -737,9 +745,10 @@ def check_not_recorded_line(
         f"ran on its own edits are not on record. If its reply carries a "
         f"`check` object, record it again now with its result: "
         f"{_record_again_call(args, '--own-check passed')} when it says "
-        f"\"passed\": true, or the same call with --own-check findings and one "
-        f"--finding per failing check. Leave the record as it is only when "
-        f"the reply carries no `check`."
+        f"\"passed\": true, the same call with --own-check findings and one "
+        f"--finding per failing check, or with --own-check none when its "
+        f"`ran` is empty (it ran no check). Leave the record as it is only "
+        f"when the reply carries no `check`."
     )
 
 
@@ -765,7 +774,8 @@ def _not_a_check_task_message(
             f"Record the checks its subagent ran on its own edits with "
             f"--own-check instead: {call} --status completed --own-check passed "
             f"when its reply's `check` says \"passed\": true, or --own-check "
-            f"findings with one --finding per failing check; leave --own-check "
+            f"findings with one --finding per failing check, or --own-check "
+            f"none when its `ran` is empty (it ran no check); leave --own-check "
             f"out when its reply carries no `check`."
         )
     else:
@@ -1177,9 +1187,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--own-check", default=None, choices=OWN_CHECK_RESULTS, dest="own_check",
         help="For a task that edits files (an implement task that declares "
              "files, an apply-code-fixes batch): the checks its subagent ran "
-             "on its own edits, from its reply's check object — passed, or "
-             "findings (one --finding per failing check), with --status "
-             "completed. Never --check on such a task.",
+             "on its own edits, from its reply's check object — passed, "
+             "findings (one --finding per failing check, with --status "
+             "completed), or none (its check's ran is empty: it ran no "
+             "check). Never --check on such a task.",
     )
     parser.add_argument(
         "--finding", action="append", default=None, metavar="TEXT",
@@ -1244,6 +1255,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     if found:
         suffix += f" ({len(found)} check finding(s) recorded)"
     print(f"{MARKER} {written['task_id']} {written['status']}{suffix}")
+    if found:
+        # Fix round 26 (live run 11 #11): the executor's own line, which
+        # this leg's host would otherwise never see (no run log here).
+        print(check_findings_line(written["task_id"], found))
     if written.get("partial"):
         # Fix round 21: the executor's partial-application stop, in words.
         task_id = written["task_id"]
@@ -1287,10 +1302,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
     for item, why in (written.get("declined") or {}).items():
         # Fix round 18: never applied, and never silent. Fix round 22: in its
-        # own summary.md section, never under an applied heading.
+        # own summary.md section, never under an applied heading. Fix round
+        # 26: the record keeps the reason's closing stop; this line adds one.
         print(
             f"{BATCH_DECLINED_MARKER} {written['task_id']} {item}: not applied, "
-            f"the batch declined it — {why}. List it in the phase's summary.md "
+            f"the batch declined it — {without_closing_mark(why)}. List it in "
+            f"the phase's summary.md "
             f"under \"## {DECLINED_SECTION_HEADING}\", with its id and this "
             f"reason, never under the applied ones, and name it in your report; "
             f"never count it as applied."
@@ -1298,7 +1315,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     for item, why in (written.get("skipped") or {}).items():
         print(
             f"{BATCH_SKIPPED_MARKER} {written['task_id']} {item}: not applied, "
-            f"{why}. List it in the phase's summary.md under \"## "
+            f"{without_closing_mark(why)}. List it in the phase's summary.md under \"## "
             f"{SKIPPED_SECTION_HEADING}\", with its id, never under the applied "
             f"ones, and name it in your report."
         )

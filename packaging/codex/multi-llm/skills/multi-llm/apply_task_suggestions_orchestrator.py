@@ -77,6 +77,21 @@ class ApplyTaskSuggestionsOrchestrator(ApplyOrchestratorBase[Dict[str, Any], Sug
         """The tasks file, not the plan: that is what these batches edit (D3h)."""
         return self.tasks_file or self.plan_path
 
+    def _completed_target_label(self) -> Optional[str]:
+        """The task list, found as ``pre_validate_hook`` finds it: the
+        ``--mark-completed`` call runs before that hook, and without it
+        ``write_phase_artifact`` would name the plan (fix round 26)."""
+        if not self.tasks_file:
+            import contextlib
+            import io
+
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    self.tasks_file = find_tasks_file(self.plan_path)
+            except (OSError, ValueError):
+                return None
+        return super()._completed_target_label()
+
     def write_target_backup(self) -> Optional[str]:
         """Already taken, under the name this phase's own output publishes.
 

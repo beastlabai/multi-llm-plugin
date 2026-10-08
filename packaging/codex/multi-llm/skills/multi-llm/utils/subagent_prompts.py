@@ -106,6 +106,16 @@ def _json_block(value: Any) -> str:
 #: array is its last key, has not shown it. Key order means nothing to any
 #: reader of the reply; a reply that still breaks is re-asked once
 #: (``util check-reply``), never repaired.
+#:
+#: Fix round 26 (live run 11, Claude Code review-plan batch 5): a Sonnet
+#: validator printed its object with two hashes swapped, then "Wait, the
+#: hashes above are swapped relative to the groups; corrected reply:" and a
+#: second object. The native file did not parse and the batch was re-asked.
+#: The contract now says to check the hashes before printing and to print the
+#: object once, and rule 2 says a neighbouring group's hash moves the verdict
+#: (only a hash foreign to the batch is discarded). A reply holding several
+#: objects is still re-asked, never cut down to one (``util check-reply``
+#: names it).
 _VALIDATION_REPLY_CONTRACT = '''## Reply
 
 Print ONE JSON object and nothing else — no prose, no markdown fences, no
@@ -116,6 +126,9 @@ the first character is `{` and the last is the `}` that closes it. Keep every
 `metadata` comes first and `groups` last, so the reply ends with the last
 result's `}`, the `]` that closes `groups` and the `}` that closes the object:
 `}]}`. Re-read the object once for balanced brackets before you finish.
+Settle every verdict, and check each result's `group_hash` against its group
+above, before you print anything, then print the object once: a reply that
+adds a correction, a note or a second object after the first does not parse.
 
 {
   "metadata": {"model": "<the model you are>", "timestamp": "<ISO 8601>", "schema_version": "2.1"},
@@ -129,7 +142,8 @@ Rules:
 2. Each group above carries its own `group_index` — echo that group's
    `group_index` value back into its result, and copy its `group_hash` value
    verbatim too. The `group_index` you echo is advisory; the hash is what the
-   results are joined on, so a wrong hash discards the result.
+   results are joined on, so a wrong hash discards the result, and the hash
+   of another group in this batch puts your verdict on that group.
 3. Confidence is a number between 0.0 and 1.0.
 4. Be conservative: when you cannot decide from the context given, answer
    "needs-human-decision" rather than guessing.
@@ -1287,10 +1301,10 @@ def build_schema_repair_prompt(
         # change their results or lose apply-code-fixes' per-command evidence.
         take += (
             "\nIf it gave a readable `check` object, include that entire object "
-            "unchanged,\nincluding `passed`, `findings`, `could_not_run` and "
-            "every `listed` command\nand outcome it supplied. Do not omit a "
-            "check or turn a failure into a pass.\nDo not run any check again "
-            "or invent one the previous reply never reported."
+            "unchanged,\nincluding `passed`, `findings`, `ran`, `not_run`, "
+            "`could_not_run` and every `listed` command\nand outcome it supplied. "
+            "Do not omit a check or turn a failure into a pass.\nDo not run any "
+            "check again or invent one the previous reply never reported."
         )
         why = (
             "does not say what\nhappened to every item of the batch"

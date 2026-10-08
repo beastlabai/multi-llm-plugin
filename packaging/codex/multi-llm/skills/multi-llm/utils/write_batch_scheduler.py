@@ -57,7 +57,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import prior_changes as _prior_changes
     from . import process_control as _process_control
     from . import subagent_executor as _executor
-    from .text_clip import clip, plain_line
+    from .text_clip import clip, plain_line, without_closing_mark
     from .providers.base import (
         SANDBOX_RUNG_PLUGIN_LANDLOCK,
         host_write_posture_consent,
@@ -161,7 +161,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         safety_dir,
     )
 except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.text_clip import clip, plain_line  # type: ignore
+    from utils.text_clip import clip, plain_line, without_closing_mark  # type: ignore
     from utils import git_utils as _git_utils
     from utils import known_checks as _known_checks
     from utils import landlock_dispatch as _landlock
@@ -277,6 +277,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
 __all__ = [
     "BATCH_CHECK_MARKER",
     "CHECK_FINDINGS_MARKER",
+    "check_findings_line",
     "STRATEGIES",
     "STRATEGY_PAUSE",
     "STRATEGY_SKIP_CONTINUE",
@@ -405,6 +406,18 @@ CODE_WRITE_KINDS = frozenset({"apply_code_fixes", "implement"})
 #: (``WriteBatchScheduler._check_findings_lines``, racing re-run 4).
 CHECK_FINDINGS_MARKER = "[CHECK_FINDINGS]"
 
+
+def check_findings_line(task_id: str, findings: Sequence[str]) -> str:
+    """One ``[CHECK_FINDINGS]`` line: a check task that ran and reported
+    *findings*. The executor prints it at the end of a run (or a stop); the
+    native leg's ``util batch-done --check findings`` prints the same line
+    when it records them (fix round 26, live run 11 #11: that leg keeps no
+    run log, so the line was on the executor's leg alone)."""
+    return (
+        f"{CHECK_FINDINGS_MARKER} {task_id} {len(findings)} problem(s): "
+        f"{'; '.join(findings)}"
+    )
+
 #: The line a code phase prints per batch whose own check failed after its
 #: edits (``WriteBatchScheduler._batch_check_lines``, ``util batch-done
 #: --own-check findings`` on a code batch; fix round 14).
@@ -513,7 +526,9 @@ def declined_words(
     for member, reason in declined.items():
         where = positions.get(str(member))
         label = f"{item} {where[1]} (`{member}`)" if where else f"`{member}`"
-        parts.append(f"{label} — {reason}")
+        # Fix round 26: the record keeps the reason's closing stop; every
+        # caller puts a mark after these words.
+        parts.append(f"{label} — {without_closing_mark(reason)}")
     return "; ".join(parts)
 
 
@@ -3494,19 +3509,36 @@ def with_result_contract(
         # Fix round 18 (Codex racing run 7, apply-code-fixes 08): a batch
         # left a fix out on purpose, said so in `notes`, could not say so in
         # the contract, and stopped as a partial application on every resume.
+        # Fix round 26 (live run 11, Codex decline fixture): a fix the plan
+        # forbids outright ("Do not add a clamp …") was declined as "requires
+        # a plan decision". The reason now names and quotes the decision
+        # that already decides it, and says "needs a plan decision" only
+        # when nothing does.
+        sources = (
+            "the plan, its task list or the implementation record"
+            if item == "fix" else "the plan or its task list"
+        )
         id_lines = (
             f"- `ids`: the ids of the {plural} you applied **or found already "
             f"applied by a prior batch**, from this list (numbered in the "
             f"order they appear above): {listed}.\n"
             f"- `declined`: each {item} from that list you deliberately left "
-            f"unapplied — one the implementation record says was a deliberate "
-            f"decision, one that needs a plan decision, one you judge wrong "
-            f"for this code — as `{{\"id\": \"<its id>\", \"reason\": "
+            f"unapplied, as `{{\"id\": \"<its id>\", \"reason\": "
             f"\"<why, in one sentence>\"}}`; `[]` when you applied every one. "
+            f"The reason says what decides it: when {sources} already decides "
+            f"against the {item} (a rule it states, a decision it records), "
+            f"name which one and quote that decision; when you judge the "
+            f"{item} wrong for this code, say why; say it needs a plan "
+            f"decision only when nothing there decides it. "
             f"Every {item} goes in exactly one of `ids` and `declined`: one "
             f"left out of both reads as a {item} you meant to apply and did "
             f"not finish, and the run stops for a human to inspect it."
         )
+    # Fix round 26 (live run 11): a batch that edits code carries `check` in
+    # the shape itself. Asked for in a section of its own below the shape,
+    # "required when you ran any", it was left out by replies that ran
+    # `npm test` (Claude Code racing T005, OpenCode stop T001).
+    own_checks = kind in CODE_WRITE_KINDS and not is_check_task(kind, task)
     shape = (
         '{"status": "applied", "ids": ["<id>", "..."], '
         + (
@@ -3515,7 +3547,12 @@ def with_result_contract(
         )
         + '"files_touched": ["<repo-relative path>"], '
         '"summary": "<one line, at most 200 characters>", '
-        '"notes": "<the per-item summary requested above>"}\n'
+        '"notes": "<the per-item summary requested above>"'
+        + (
+            ', "check": {"passed": true, "findings": [], "ran": '
+            '{"<each check command you ran>": "passed"}}' if own_checks else ""
+        )
+        + '}\n'
     )
     status_line = (
         "- `status`: `applied` if you edited any file; `no-op` if you edited "
@@ -3555,15 +3592,19 @@ def with_result_contract(
         "`no-op` and `failed`).\n"
         "- `summary`: one line; it is recorded verbatim as this batch's "
         "entry in the prior-changes log the next batch reads.\n"
-        "- `notes`: the per-item summary the return format above asks for.\n\n"
+        "- `notes`: the per-item summary the return format above asks for.\n"
+        + (
+            "- `check`: required in every reply, also when you ran no check — "
+            "which checks you ran on your edits and how each one ended "
+            "(see below).\n"
+            if own_checks else ""
+        )
+        + "\n"
         "A reply without this JSON object is recorded as a FAILED batch even "
         "when the edits landed, so send it in every case — including when "
         "nothing needed changing.\n"
         + (CHECK_RESULT_CONTRACT if is_check_task(kind, task) else "")
-        + (
-            WRITE_CHECK_CONTRACT + (checks_section or "")
-            if kind in CODE_WRITE_KINDS and not is_check_task(kind, task) else ""
-        )
+        + (WRITE_CHECK_CONTRACT + (checks_section or "") if own_checks else "")
     )
 
 
@@ -3577,18 +3618,37 @@ def with_result_contract(
 #: the corrected run that replaces a failing one is pinned to the same check
 #: over the same scope, as :data:`CHECK_RESULT_CONTRACT` pins it to the task's
 #: own command; a narrower re-run passing never launders the failure.
+#: Fix round 26 (live run 11): required in every reply, with ``ran`` naming
+#: each command and how it ended, or an empty ``ran`` and a ``not_run``
+#: reason. "Required when you ran any" and "leave `check` out when you ran no
+#: check" let replies that had run ``npm test`` omit it (Claude Code racing
+#: T005, OpenCode stop T001); an empty ``ran`` is read as no check, never as
+#: a pass (``subagent_executor.batch_check_findings``; ``util batch-done
+#: --own-check none`` on the native leg).
 WRITE_CHECK_CONTRACT = (
-    "\n## Checks you ran (required when you ran any)\n\n"
-    "If you ran any check on your edits — a test, a build, a type check, a "
-    "linter, a syntax check — add a `check` object to the JSON above:\n\n"
-    "```json\n"
-    '{"check": {"passed": false, "findings": ["<one failing check: the '
-    'command and what it reported>"]}}\n'
-    "```\n\n"
+    "\n## Checks you ran (required in every reply)\n\n"
+    "Always send the `check` object in the JSON above, also when you ran no "
+    "check: it is the only record of what was checked after your edits, and "
+    "a reply without it leaves the checks you ran off the record.\n\n"
+    "- `ran`: every check you ran on your edits — a test, a build, a type "
+    "check, a linter, a syntax check — as its command mapped to how its last "
+    "run ended, `\"passed\"` or `\"failed\"`.\n"
     "- `passed`: the JSON boolean `true` only when the last run of every "
     "check you ran passed, else `false`.\n"
-    "- `findings`: one string per check whose last run failed; `[]` when "
-    "`passed` is `true`.\n\n"
+    "- `findings`: one string per check whose last run failed (the command "
+    "and what it reported); `[]` when `passed` is `true`.\n\n"
+    "A batch whose check failed answers:\n\n"
+    "```json\n"
+    '{"check": {"passed": false, "findings": ["<one failing check: the '
+    'command and what it reported>"], "ran": {"<that command>": "failed", '
+    '"<another command you ran>": "passed"}}}\n'
+    "```\n\n"
+    "If you ran no check, say so and why: `ran` empty, no `passed`, and the "
+    "reason in `not_run`:\n\n"
+    "```json\n"
+    '{"check": {"ran": {}, "not_run": "<why no check could run on these '
+    'edits>"}}\n'
+    "```\n\n"
     "Report the last run of each check. A run that failed because of how you "
     "ran it (a wrong flag, mode or path) and that you then ran correctly is "
     "reported by the corrected run, and so is a check you ran again after "
@@ -3601,8 +3661,7 @@ WRITE_CHECK_CONTRACT = (
     "check: report it. Never describe a passing run as a finding.\n\n"
     "Report a failing check here even when you think your change did not "
     "cause it: the batch is then recorded as applied with a failing check, "
-    "and the user is told, instead of the run reporting a clean success. "
-    "Leave `check` out when you ran no check.\n"
+    "and the user is told, instead of the run reporting a clean success.\n"
 )
 
 
@@ -5384,8 +5443,7 @@ class WriteBatchScheduler:
         if not found:
             return []
         lines = [
-            f"{CHECK_FINDINGS_MARKER} {task_id} {len(findings)} problem(s): "
-            f"{'; '.join(findings)}"
+            check_findings_line(task_id, findings)
             for task_id, findings in found.items()
         ]
         where = (
@@ -12057,6 +12115,18 @@ class WriteBatchScheduler:
             return None
         return _parse_local_timestamp(completed.get(review))
 
+    def _applied_to_label(self) -> Optional[str]:
+        """The phase's single write target relative to the repository root
+        (the plan for apply-suggestions, the task list for
+        apply-task-suggestions), or ``None`` for a phase without one."""
+        if not self.write_target:
+            return None
+        try:
+            return os.path.relpath(
+                self.write_target, os.path.realpath(self.repo_root))
+        except ValueError:  # pragma: no cover - another drive (Windows)
+            return self.write_target
+
     def _manual_close_note(self, deferred: Dict[str, str]) -> Optional[str]:
         """How to record the deferred manual tasks done, in the host's
         spelling (``user_commands["answers"]``), or ``None``.
@@ -12079,7 +12149,8 @@ class WriteBatchScheduler:
         from .next_phase import manual_close_note
 
         return manual_close_note(template.replace(
-            "{answers}", " ".join(f"--human-task {task_id}=done" for task_id in manual)))
+            "{answers}", " ".join(f"--human-task {task_id}=done" for task_id in manual)),
+            len(manual))
 
     def _dispatched_sentence(self, result: SchedulerResult) -> str:
         """summary.md's count of what this run dispatched: the tasks a
@@ -12142,6 +12213,28 @@ class WriteBatchScheduler:
             or outcome.task_id in self._refused_before_dispatch
         )
 
+    @staticmethod
+    def _answered_this_run(result: SchedulerResult) -> Dict[str, Tuple[str, str]]:
+        """``{task_id: (label, reason)}`` for the tasks this run's answers
+        settled without a runner: accepted (``=done`` on a failed task or a
+        check), completed by hand (``=done`` on a manual task), and skipped
+        at the user's request with the tasks skipped with them — in the
+        accounting line's words (fix round 26)."""
+        plan = result.human_plan
+        out: Dict[str, Tuple[str, str]] = {}
+        for task_id, reason in (plan.declined() or {}).items():
+            seed = str(reason).startswith((USER_DECLINED_REASON, ANSWERED_SKIP_PREFIX))
+            out[str(task_id)] = (
+                "skipped at your request" if seed else "skipped with a skipped task",
+                str(reason),
+            )
+        for task_id, reason in (plan.accepted or {}).items():
+            out[str(task_id)] = (answered_done_label(plan, task_id), str(reason))
+        for task_id in plan.completed or ():
+            out[str(task_id)] = (
+                COMPLETED_BY_HAND_LABEL, f"answered --human-task {task_id}=done")
+        return out
+
     def _write_summary(self, result: SchedulerResult) -> str:
         """The implementation summary, with the three conditional sections (D3n)."""
         plan_name = Path(self.plan_file).name if self.plan_file else "(plan)"
@@ -12160,7 +12253,11 @@ class WriteBatchScheduler:
         if self.kind in CODE_WRITE_KINDS:
             lines.append(f"**Verification**: {verification_line(result)}")
         rows = result.report_rows()
-        earlier = [row for row in rows if row.get("from_earlier_run")]
+        answered = self._answered_this_run(result)
+        earlier = [
+            row for row in rows
+            if row.get("from_earlier_run") and str(row.get("task_id")) not in answered
+        ]
         account = self._accounting(result)
         lines += [
             "",
@@ -12181,6 +12278,7 @@ class WriteBatchScheduler:
             "| Task | Outcome | Files touched | Notes |",
             "|------|---------|---------------|-------|",
         ]
+        folded: Set[str] = set()
         for row in rows:
             # `reason` first: it is `_classify`'s own diagnostic (why a
             # partial/clean-failure/no-op-with-bytes-moved outcome landed
@@ -12201,15 +12299,35 @@ class WriteBatchScheduler:
                     if batch_check_could_not_run(row_batch_check_findings(row))
                     else "its check fails"
                 )
+            notes = (row.get("reason") or row.get("summary") or "").replace("|", "/")
+            answer = answered.get(str(row.get("task_id")))
+            if answer is not None and row.get("from_earlier_run"):
+                # Fix round 26 (live run 11 #9, OpenCode fix 02): a task you
+                # answered on this run reads as your answer, its earlier
+                # run's outcome named as what the answer was about; it read
+                # "(earlier run) policy-violation" here beside "## Skipped
+                # at your request" below.
+                label, why = answer
+                folded.add(str(row["task_id"]))
+                lines.append(
+                    f"| {row['task_id']} | {label} | — | "
+                    f"{clip(why.replace('|', '/'), 120)} (earlier run: "
+                    f"{outcome_cell}: {clip(notes, 160)}) |"
+                )
+                continue
             lines.append(
                 f"| {task_cell} | {outcome_cell} | "
                 f"{', '.join(row.get('files_touched') or []) or '—'} | "
-                f"{clip((row.get('reason') or row.get('summary') or '').replace('|', '/'), 160)} |"
+                f"{clip(notes, 160)} |"
             )
         for task_id, reason in sorted(result.human_plan.accepted.items()):
+            if task_id in folded:
+                continue
             label = answered_done_label(result.human_plan, task_id)
             lines.append(f"| {task_id} | {label} | — | {clip(reason.replace('|', '/'), 160)} |")
         for task_id in sorted(result.human_plan.completed):
+            if task_id in folded:
+                continue
             lines.append(f"| {task_id} | completed by hand | — | answered --human-task {task_id}=done |")
         for task_id, reason in sorted(result.not_run.items()):
             lines.append(f"| {task_id} | not run | — | {clip(reason.replace('|', '/'), 160)} |")
@@ -12540,6 +12658,12 @@ class WriteBatchScheduler:
                         ],
                         "items_total": items_total,
                         "items_applied": items_applied,
+                        # Fix round 26 (live run 11, OpenCode 05): the one
+                        # file a single-target phase edits, repo-relative,
+                        # so `status` says where the items were applied
+                        # ("applied to plans/x.md" was the host's guess).
+                        **({"applied_to": self._applied_to_label()}
+                           if self._applied_to_label() else {}),
                         # Fix round 18: what finished batches did not apply
                         # on purpose, and why — `status` names each one.
                         **({"declined_items": declined_rows}
