@@ -87,9 +87,13 @@ class TestTheNativeLeg:
         self._done(capsys, phase_dir, "apply-fix-batch-1", "failed",
                    "--reason", "subagent failed, files unchanged")
         last = _eta(self._record(capsys, state_file, 2, 2))
-        assert len(last) == 1 and last[0].startswith(
-            f"[ETA] {PHASE}: batch 2/2 done in "), last
-        assert "COMPLETE" not in last[0], last
+        # Fix round 25 (stops #2): its record names no batch (`Batch 2`, no
+        # `--task-id`), and apply-fix-batch-1 is this run's one failed batch
+        # with no record yet, so the line says it failed, as the executor's
+        # does since fix round 24.
+        assert last == [
+            f"[ETA] {PHASE}: batch 2/2 failed (subagent failed, files "
+            f"unchanged) after 0m 1s"], last
         closing = self._finish(capsys, state_file)
         assert len(closing) == 1, closing
         assert re.fullmatch(
