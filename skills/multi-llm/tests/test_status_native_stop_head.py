@@ -212,3 +212,92 @@ class TestAHostStillWorkingIsNotHeadedStopped:
         head = _head(_status_lines(capsys, "--view", "run"))
         assert head.startswith("  implement  done on the host (marked completed)"), head
         assert _json_view(capsys)["stopped"] is False
+
+
+class TestAClosedLoopWithTasksLeftIsStopped:
+    """Fix round 25 (review of round 24, stops #3; coordinator's decision,
+    permissive): a Claude Code host ended its turn right after a failed
+    task, leaving an independent task pending. Its loop is closed (`util
+    metrics finish` ran) and a task waits for an answer, so the head reads
+    "stopped and needs you" though the host could still run T002 and T007;
+    the block names them, as the resume runs them, `--json` says
+    `stopped`, and the resume and answers below it are `util
+    next-command`'s."""
+
+    RUNNABLE = "      T002 and T007 can still run: the resume runs them"
+
+    @staticmethod
+    def _fail_t003(repo, capsys, *, finish: bool = True) -> None:
+        """No refusal (the policy allows every file): T001 done, T003 timed
+        out, so T004-T006 wait on it; T002 (the check) and T007 after it
+        were handed out and never run."""
+        gate._policy(repo, gate.ALLOW)
+        leg = _leg()
+        leg._emit(repo, capsys)
+        _metrics(capsys, "start", repo, "--total-batches", "7")
+        phase = str(repo.phase_dir)
+        assert leg._util(capsys, "batch-done", "--phase-dir", phase, "--task-id",
+                         "T001", "--status", "completed")[0] == 0
+        assert leg._util(capsys, "batch-done", "--phase-dir", phase, "--task-id",
+                         "T003", "--status", "failed", "--reason",
+                         "the subagent timed out")[0] == 0
+        if finish:
+            _metrics(capsys, "finish", repo)
+
+    def test_the_head_says_stopped_and_names_what_can_still_run(self, repo, capsys):
+        self._fail_t003(repo, capsys)
+        for flags in (["--view", "run"], []):
+            lines = _status_lines(capsys, *flags)
+            assert STOPPED_HEAD in lines, lines
+            block = lines[lines.index(STOPPED_HEAD):]
+            assert self.RUNNABLE in block, block
+            assert block.index(self.RUNNABLE) < next(
+                i for i, line in enumerate(block) if "resume with:" in line)
+
+    def test_json_says_so_and_names_them(self, repo, capsys):
+        self._fail_t003(repo, capsys)
+        view = _json_view(capsys)
+        assert view["stopped"] is True
+        assert view["still_runnable"] == ["T002", "T007"]
+
+    def test_status_and_next_command_give_the_same_way_on(self, repo, capsys):
+        self._fail_t003(repo, capsys)
+        lines = _status_lines(capsys, "--view", "run")
+        block = lines[lines.index(STOPPED_HEAD):]
+        resume = next(line for line in block if "resume with:" in line)
+        answers = [line.split("or answer the stop with: ", 1)[1]
+                   for line in block if "or answer the stop with:" in line]
+        code, out, err = _leg()._util(
+            capsys, "next-command", PLAN, "--after", "implement")
+        assert code == 0, err
+        told = [l.split(" ", 1)[1] for l in out.splitlines()
+                if l.startswith("[NEXT_COMMAND] ")]
+        told_answers = [l.split(" ", 1)[1] for l in out.splitlines()
+                        if l.startswith("[NEXT_COMMAND_ANSWERS] ")]
+        assert resume == f"      resume with: {told[0]}"
+        assert answers == told_answers and answers, (answers, told_answers)
+        assert any(a.endswith("--human-task T003=skip") for a in answers)
+
+    def test_a_loop_still_open_reads_in_progress(self, repo, capsys):
+        self._fail_t003(repo, capsys, finish=False)
+        head = _head(_status_lines(capsys, "--view", "run"))
+        assert head.startswith("  implement  in progress on the host (started "), head
+        assert _json_view(capsys)["stopped"] is False
+
+    def test_the_reviewer_s_record(self):
+        """`{T002: failed, T003: pending (no deps), T004: pending (after
+        T002)}`, the loop closed: stopped, T003 still runnable."""
+        record = {
+            "implement_task_ids": ["T001", "T002", "T003", "T004"],
+            "task_status": {"T001": "completed", "T002": "failed",
+                            "T003": "pending", "T004": "pending"},
+            "task_status_reasons": {"T002": "timeout"},
+            "implement_task_depends_on": {
+                "T001": [], "T002": ["T001"], "T003": [], "T004": ["T002"]},
+        }
+        statuses = record["task_status"]
+        assert run_status.native_run_stopped(record, statuses) is True
+        assert run_status.native_still_runnable(record, statuses) == ["T003"]
+        # The emit's left-out record still there: its loop never closed.
+        record["metrics_left_out"] = {"implement": {"T005": "refused"}}
+        assert run_status.native_run_stopped(record, statuses) is False

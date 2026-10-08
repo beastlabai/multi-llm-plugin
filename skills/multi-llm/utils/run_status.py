@@ -2174,6 +2174,8 @@ def state_implement_view(
         record, _IMPLEMENT_PHASE)
     stop_answers: List[Dict[str, Any]] = []
     stop_resume_why: Optional[str] = None
+    stopped = bool(
+        resumable and not in_progress_since and native_run_stopped(record, statuses))
     if resumable:
         from .write_batch_scheduler import native_resume_why, native_stop_answers
 
@@ -2193,8 +2195,10 @@ def state_implement_view(
         # Fix round 24 (live run 10, Claude Code stop 01/01b): whether the
         # run ended short and waits for the user, as the executor routes'
         # "stopped and needs you" head says (:func:`native_run_stopped`).
-        "stopped": resumable and not in_progress_since
-        and native_run_stopped(record, statuses),
+        "stopped": stopped,
+        # Fix round 25 (stops #3): the tasks a stopped run's host could
+        # still run, which the resume runs (:func:`native_still_runnable`).
+        "still_runnable": native_still_runnable(record, statuses) if stopped else [],
         # Fix round 18 (Claude Code racing 06, mid-run): when the host's loop
         # is between `util metrics start` and `finish`.
         "in_progress_since": in_progress_since,
@@ -2228,6 +2232,35 @@ def state_implement_view(
     }
 
 
+def native_still_runnable(
+    record: Mapping[str, Any], statuses: Mapping[str, Any],
+) -> List[str]:
+    """The tasks of a native implement that waits for an answer which the
+    host could still run without it, in task order (fix round 25): every
+    task of the decomposition not recorded completed, skipped or failed that
+    is not manual, not held by a check's findings and not after a failed
+    task. ``[]`` when nothing waits for an answer, or the record cannot be
+    read."""
+    from .write_batch_scheduler import _native_stop_facts
+
+    try:
+        scope = [str(t) for t in record.get("implement_task_ids") or []]
+        facts = _native_stop_facts(record)
+        if facts is None:
+            return []
+        manual = {str(t) for t in (record.get("implement_human_task_ids") or [])}
+        kept_out = set(facts["failed_ids"]) | set(facts["blocked"])
+        for task_id in facts["failed_ids"]:
+            kept_out.update(facts["undone_with"](task_id))
+    except Exception:  # noqa: BLE001 - advisory: the run view is not
+        return []
+    return [
+        task_id for task_id in scope
+        if statuses.get(task_id) not in ("completed", "skipped", "failed")
+        and task_id not in manual and task_id not in kept_out
+    ]
+
+
 def native_run_stopped(
     record: Mapping[str, Any], statuses: Mapping[str, Any],
 ) -> bool:
@@ -2248,16 +2281,22 @@ def native_run_stopped(
       itself) or a check whose findings hold tasks back — what the stop's
       answers are composed from
       (``write_batch_scheduler.native_stop_answers``);
-    * no task is left that the host could still run without that answer:
-      every task not completed, skipped or failed is a manual one, held by a
-      check, or after a failed task. A task the emit handed out and the host
-      has not recorded yet can still run, so the moments between the emit
-      and the host's records never read as a stop.
+    * and either no task is left that the host could still run without that
+      answer (every task not completed, skipped or failed is a manual one,
+      held by a check, or after a failed task), or the host closed the loop
+      the last emit opened: its ``util metrics finish`` removed the emit's
+      left-out record (``metrics_left_out``), or the emit left nothing out.
 
-    The emit's left-out record (``metrics_left_out``) is not needed: each
-    task it names is refused (recorded failed), after a refused task, or
-    held by a check, and ``util metrics finish`` removes it. Advisory: an
-    unreadable record is not a stop.
+    Fix round 25 (review of round 24, stops #3; the coordinator's decision,
+    permissive): a host that ended its turn right after a failed task,
+    leaving an independent task pending, read "not finished on the host"
+    while ``util next-command`` gave the resume and the answers. Its loop is
+    closed and something waits, so it is stopped; the block names the tasks
+    it could still run (:func:`native_still_runnable`), which the resume
+    runs. Right after an emit that recorded a refusal (its left-out record
+    still there), the tasks it handed out can still run, so the moments
+    between the emit and the host's records never read as a stop. Advisory:
+    an unreadable record is not a stop.
     """
     from .write_batch_scheduler import _native_stop_facts
 
@@ -2265,20 +2304,14 @@ def native_run_stopped(
         scope = [str(t) for t in record.get("implement_task_ids") or []]
         if any(statuses.get(task_id) == "in_progress" for task_id in scope):
             return False
-        facts = _native_stop_facts(record)
-        if facts is None:
+        if _native_stop_facts(record) is None:
             return False
-        manual = {str(t) for t in (record.get("implement_human_task_ids") or [])}
-        kept_out = set(facts["failed_ids"]) | set(facts["blocked"])
-        for task_id in facts["failed_ids"]:
-            kept_out.update(facts["undone_with"](task_id))
+        if not native_still_runnable(record, statuses):
+            return True
+        left = record.get("metrics_left_out")
+        return not (isinstance(left, Mapping) and left.get(_IMPLEMENT_PHASE))
     except Exception:  # noqa: BLE001 - advisory: the run view is not
         return False
-    return not any(
-        statuses.get(task_id) not in ("completed", "skipped", "failed")
-        and task_id not in manual and task_id not in kept_out
-        for task_id in scope
-    )
 
 
 def _host_run_started_at(record: Mapping[str, Any], phase: str) -> Optional[str]:
@@ -2422,6 +2455,23 @@ def _native_stop_lines(
     return lines
 
 
+#: How many task ids the still-runnable line names before "and N more".
+STILL_RUNNABLE_IDS_SHOWN = 8
+
+
+def _still_runnable_clause(ids: Sequence[str]) -> str:
+    """``T003 can still run: the resume runs it`` (fix round 25)."""
+    shown = list(ids[:STILL_RUNNABLE_IDS_SHOWN])
+    rest = len(ids) - len(shown)
+    if rest:
+        named = ", ".join(shown) + f" and {rest} more"
+    elif len(shown) == 1:
+        named = shown[0]
+    else:
+        named = ", ".join(shown[:-1]) + f" and {shown[-1]}"
+    return f"{named} can still run: the resume runs {'it' if len(ids) == 1 else 'them'}"
+
+
 def render_state_implement_lines(
     view: Dict[str, Any], *, resume: Optional[str] = None,
     answers: Sequence[Tuple[str, str]] = (),
@@ -2446,6 +2496,10 @@ def render_state_implement_lines(
     lines.append(
         f"      all tasks:      {implement_tally_text(view['tally'], live=bool(since))}"
     )
+    runnable = [str(t) for t in (view.get("still_runnable") or [])]
+    if runnable:
+        # Fix round 25 (stops #3): stopped with tasks the host could run.
+        lines.append(f"      {_still_runnable_clause(runnable)}")
     if since:
         lines += _native_resume_line(resume)
     for task_id, reason in view["reasons"].items():
