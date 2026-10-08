@@ -180,6 +180,10 @@ def _detached_run(plan: Path, *, exit_code, state="failed") -> None:
     })
 
 
+def _run_state_line(out: str) -> str:
+    return next(line for line in out.splitlines() if "run.state:" in line)
+
+
 def _run_block(capsys) -> str:
     run_status.main(["--plan-file", "plans/p.md", "--view", "run"])
     return capsys.readouterr().out
@@ -192,10 +196,16 @@ class TestTheHeadOfAStoppedRun:
         out = _run_block(capsys)
         head = [l for l in out.splitlines() if l.startswith("  implement  run ")]
         assert head == ["  implement  run 2843b4c3  stopped and needs you (exit 3)"], out
+        # Fix round 26 (live run 11 #6): never "failed" under that head; the
+        # record keeps its word.
         assert (
-            "      run.state:      failed (exit 3: the run stopped and needs "
-            "you; nothing crashed)"
+            "      run.state:      stopped (exit 3: the run needs you; nothing "
+            "crashed)\n"
         ) in out, out
+        assert "failed" not in _run_state_line(out), out
+        status = json.loads(
+            (plan.parent / plan.stem / "implement" / ".status.json").read_text())
+        assert status["run"]["state"] == "failed"
 
     def test_a_runner_failure_reads_stopped_without_nothing_crashed(self, plan, capsys):
         """Fix round 23 (review of round 22, #4): a stop on a task whose
@@ -211,9 +221,10 @@ class TestTheHeadOfAStoppedRun:
         head = [l for l in out.splitlines() if l.startswith("  implement  run ")]
         assert head == ["  implement  run 2843b4c3  stopped and needs you (exit 3)"], out
         assert (
-            "      run.state:      failed (exit 3: the run stopped and needs you)\n"
+            "      run.state:      stopped (exit 3: the run needs you)\n"
         ) in out, out
         assert "nothing crashed" not in out, out
+        assert "failed" not in _run_state_line(out), out
 
     def test_an_older_mirror_with_a_failed_task_says_nothing_crashed_neither(
         self, plan, capsys,
