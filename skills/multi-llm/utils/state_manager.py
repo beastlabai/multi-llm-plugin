@@ -384,6 +384,36 @@ def set_task_batch_check_in_state(
         state.pop(TASK_BATCH_CHECK_KEY, None)
 
 
+#: ``state.json``'s map of an implement task's own words about the checks it
+#: ran on its edits (its reply's ``check.note``): ``{task_id: note}``,
+#: present only while some task has one (fix round 28, live run 12: the
+#: released T007 wrote "(known problem the user accepted in T002)" into its
+#: finding, which the strict match then read as its own failure). Recorded
+#: and shown, never read as a finding or matched on. Written by both legs
+#: (``util batch-done --note``, the scheduler from
+#: ``TaskOutcome.batch_check_note``); every other record of the task clears
+#: it.
+TASK_OWN_CHECK_NOTE_KEY = "task_own_check_note"
+
+
+def set_task_own_check_note_in_state(
+    state: Dict[str, Any], task_id: str, note: Optional[str],
+) -> None:
+    """Record (or, with no note, clear) *task_id*'s own-check note; the key
+    is dropped when the map empties."""
+    recorded = state.get(TASK_OWN_CHECK_NOTE_KEY)
+    current = dict(recorded) if isinstance(recorded, dict) else {}
+    text = str(note or "").strip()
+    if text:
+        current[str(task_id)] = text
+    else:
+        current.pop(str(task_id), None)
+    if current:
+        state[TASK_OWN_CHECK_NOTE_KEY] = current
+    else:
+        state.pop(TASK_OWN_CHECK_NOTE_KEY, None)
+
+
 #: ``state.json``'s list of the implement tasks whose last record carried a
 #: report of their OWN checks (passed, failing, or repeating only accepted
 #: findings), sorted, present only while some task has one (fix round 24,
