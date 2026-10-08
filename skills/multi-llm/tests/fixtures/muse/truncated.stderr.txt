@@ -1,2 +1,3 @@
 muse: workspace root: /work/sample-project (cwd default)
-run ended with Failed
+muse: Agent delegation: auto unavailable: workspace is untrusted.
+run ended with Failed: model call chain exceeded the 12m wall-clock ceiling measured from its first failed attempt: 4 failed attempts (40 provider requests) over 16m19s since the first counted provider request, all [transport_eof_before_terminal_event]. dominant failure [transport_eof_before_terminal_event] — next step: check network connectivity (VPN/proxy) and retry; if it persists, re-authenticate with the provider — a very large context can also repeatedly break streams, so consider compacting the session

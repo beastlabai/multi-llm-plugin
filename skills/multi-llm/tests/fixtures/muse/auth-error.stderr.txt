@@ -1,2 +1,3 @@
 muse: workspace root: /work/sample-project (cwd default)
-run ended with Failed
+muse: Agent delegation: auto unavailable: workspace is untrusted.
+run ended with Failed: your API key from META_API_KEY was rejected — update or unset it

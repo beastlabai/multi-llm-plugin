@@ -1,1 +1,2 @@
 muse: workspace root: /work/sample-project (cwd default)
+muse: Agent delegation: auto unavailable: workspace is untrusted.
