@@ -1,0 +1,374 @@
+[
+  {
+    "id": "user-turn-46749569237b6452e03eda072a14023b-1",
+    "sessionId": "edecbabc-5dd3-8da1-44d2-d06fcde28ae7",
+    "turnId": "turn-46749569237b6452e03eda072a14023b",
+    "inputEntryId": null,
+    "createdAt": 1791566528987,
+    "updatedAt": 1791566528987,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "message",
+    "role": "user",
+    "content": [
+      {
+        "type": "text",
+        "text": "Summarise the project in one sentence."
+      }
+    ],
+    "source": "turn_start",
+    "userDisplayContent": null
+  },
+  {
+    "id": "assistant-428f8404-96d2-5850-ab33-383b5dec7ad6",
+    "sessionId": "edecbabc-5dd3-8da1-44d2-d06fcde28ae7",
+    "turnId": "turn-46749569237b6452e03eda072a14023b",
+    "inputEntryId": "user-turn-46749569237b6452e03eda072a14023b-1",
+    "createdAt": 1791566529062,
+    "updatedAt": 1791566529062,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "message",
+    "role": "assistant",
+    "content": [
+      {
+        "type": "text",
+        "text": "Here is the review:\n\n```json\n[\n  {\"id\": \"S001\", \"severity\": \"high\", \"title\": \"argv-only transport\", \"detail\": \"A multi-KB prompt exceeds the Windows command-line cap.\"},\n  {\"id\": \"S002\", \"severity\": \"medium\", \"title\": \"unmeasured retry envelope\", \"detail\": \"The retry budget is declared from documentation rather than measurement.\"},\n  {\"id\": \"S003\", \"severity\": \"low\", \"title\": \"tier not recorded\", \"detail\": \"The permission tier ships without a probe transcript.\"}\n]\n```\n"
+      }
+    ],
+    "source": "harness",
+    "userDisplayContent": null
+  },
+  {
+    "id": "effect-c590f458-2674-55d9-a6ba-365b3126283a",
+    "sessionId": "edecbabc-5dd3-8da1-44d2-d06fcde28ae7",
+    "turnId": "turn-46749569237b6452e03eda072a14023b",
+    "inputEntryId": "user-turn-46749569237b6452e03eda072a14023b-1",
+    "createdAt": 1791566529071,
+    "updatedAt": 1791566529081,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "effect",
+    "title": "file_system.read_file",
+    "detail": {
+      "toolName": "file_system.read_file",
+      "display": {
+        "summary": "Reading README.md",
+        "content": null,
+        "suffix": "",
+        "verb": "Reading",
+        "message": "README.md",
+        "settledVerb": "Read",
+        "settledMessage": "README.md",
+        "statusText": "Reading file"
+      },
+      "kind": "file_read",
+      "input": {
+        "filePath": "README.md",
+        "offset": null,
+        "limit": 2000
+      }
+    },
+    "state": {
+      "status": "failed",
+      "error": {
+        "message": "File not found at: /tmp/work-turn-limit/README.md",
+        "code": "tool_failed",
+        "details": null
+      },
+      "output": {
+        "type": "failure",
+        "content": [],
+        "_meta": {
+          "approval": {
+            "approvalSource": "config",
+            "approvalType": "always",
+            "decision": "execute"
+          }
+        },
+        "error": {
+          "code": "tool_failed",
+          "message": "File not found at: /tmp/work-turn-limit/README.md",
+          "retryable": false
+        }
+      },
+      "outputText": "",
+      "durationMs": 0.0,
+      "display": {
+        "success": false,
+        "verb": "",
+        "message": "File not found at: /tmp/work-turn-limit/README.md",
+        "warnings": [],
+        "approvalNote": null,
+        "suffix": ""
+      },
+      "decision": "execute",
+      "approvalType": "always",
+      "approvalSource": "config"
+    }
+  },
+  {
+    "id": "assistant-ea4f8526-721c-53c5-ab86-62e15fb5b634",
+    "sessionId": "edecbabc-5dd3-8da1-44d2-d06fcde28ae7",
+    "turnId": "turn-46749569237b6452e03eda072a14023b",
+    "inputEntryId": "user-turn-46749569237b6452e03eda072a14023b-1",
+    "createdAt": 1791566529094,
+    "updatedAt": 1791566529094,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "message",
+    "role": "assistant",
+    "content": [
+      {
+        "type": "text",
+        "text": "Here is the review:\n\n```json\n[\n  {\"id\": \"S001\", \"severity\": \"high\", \"title\": \"argv-only transport\", \"detail\": \"A multi-KB prompt exceeds the Windows command-line cap.\"},\n  {\"id\": \"S002\", \"severity\": \"medium\", \"title\": \"unmeasured retry envelope\", \"detail\": \"The retry budget is declared from documentation rather than measurement.\"},\n  {\"id\": \"S003\", \"severity\": \"low\", \"title\": \"tier not recorded\", \"detail\": \"The permission tier ships without a probe transcript.\"}\n]\n```\n"
+      }
+    ],
+    "source": "harness",
+    "userDisplayContent": null
+  },
+  {
+    "id": "effect-a3c4f9bf-28ba-579d-970f-9296f182f66b",
+    "sessionId": "edecbabc-5dd3-8da1-44d2-d06fcde28ae7",
+    "turnId": "turn-46749569237b6452e03eda072a14023b",
+    "inputEntryId": "user-turn-46749569237b6452e03eda072a14023b-1",
+    "createdAt": 1791566529097,
+    "updatedAt": 1791566529104,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "effect",
+    "title": "file_system.read_file",
+    "detail": {
+      "toolName": "file_system.read_file",
+      "display": {
+        "summary": "Reading README.md",
+        "content": null,
+        "suffix": "",
+        "verb": "Reading",
+        "message": "README.md",
+        "settledVerb": "Read",
+        "settledMessage": "README.md",
+        "statusText": "Reading file"
+      },
+      "kind": "file_read",
+      "input": {
+        "filePath": "README.md",
+        "offset": null,
+        "limit": 2000
+      }
+    },
+    "state": {
+      "status": "failed",
+      "error": {
+        "message": "File not found at: /tmp/work-turn-limit/README.md",
+        "code": "tool_failed",
+        "details": null
+      },
+      "output": {
+        "type": "failure",
+        "content": [],
+        "_meta": {
+          "approval": {
+            "approvalSource": "config",
+            "approvalType": "always",
+            "decision": "execute"
+          }
+        },
+        "error": {
+          "code": "tool_failed",
+          "message": "File not found at: /tmp/work-turn-limit/README.md",
+          "retryable": false
+        }
+      },
+      "outputText": "",
+      "durationMs": 0.0,
+      "display": {
+        "success": false,
+        "verb": "",
+        "message": "File not found at: /tmp/work-turn-limit/README.md",
+        "warnings": [],
+        "approvalNote": null,
+        "suffix": ""
+      },
+      "decision": "execute",
+      "approvalType": "always",
+      "approvalSource": "config"
+    }
+  },
+  {
+    "id": "assistant-b0d5e63d-d446-5d43-a8d1-7e9c943f146f",
+    "sessionId": "edecbabc-5dd3-8da1-44d2-d06fcde28ae7",
+    "turnId": "turn-46749569237b6452e03eda072a14023b",
+    "inputEntryId": "user-turn-46749569237b6452e03eda072a14023b-1",
+    "createdAt": 1791566529114,
+    "updatedAt": 1791566529114,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "message",
+    "role": "assistant",
+    "content": [
+      {
+        "type": "text",
+        "text": "Here is the review:\n\n```json\n[\n  {\"id\": \"S001\", \"severity\": \"high\", \"title\": \"argv-only transport\", \"detail\": \"A multi-KB prompt exceeds the Windows command-line cap.\"},\n  {\"id\": \"S002\", \"severity\": \"medium\", \"title\": \"unmeasured retry envelope\", \"detail\": \"The retry budget is declared from documentation rather than measurement.\"},\n  {\"id\": \"S003\", \"severity\": \"low\", \"title\": \"tier not recorded\", \"detail\": \"The permission tier ships without a probe transcript.\"}\n]\n```\n"
+      }
+    ],
+    "source": "harness",
+    "userDisplayContent": null
+  },
+  {
+    "id": "effect-ee5f165b-beac-5629-84b6-f20eed12773e",
+    "sessionId": "edecbabc-5dd3-8da1-44d2-d06fcde28ae7",
+    "turnId": "turn-46749569237b6452e03eda072a14023b",
+    "inputEntryId": "user-turn-46749569237b6452e03eda072a14023b-1",
+    "createdAt": 1791566529117,
+    "updatedAt": 1791566529124,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "effect",
+    "title": "file_system.read_file",
+    "detail": {
+      "toolName": "file_system.read_file",
+      "display": {
+        "summary": "Reading README.md",
+        "content": null,
+        "suffix": "",
+        "verb": "Reading",
+        "message": "README.md",
+        "settledVerb": "Read",
+        "settledMessage": "README.md",
+        "statusText": "Reading file"
+      },
+      "kind": "file_read",
+      "input": {
+        "filePath": "README.md",
+        "offset": null,
+        "limit": 2000
+      }
+    },
+    "state": {
+      "status": "failed",
+      "error": {
+        "message": "File not found at: /tmp/work-turn-limit/README.md",
+        "code": "tool_failed",
+        "details": null
+      },
+      "output": {
+        "type": "failure",
+        "content": [],
+        "_meta": {
+          "approval": {
+            "approvalSource": "config",
+            "approvalType": "always",
+            "decision": "execute"
+          }
+        },
+        "error": {
+          "code": "tool_failed",
+          "message": "File not found at: /tmp/work-turn-limit/README.md",
+          "retryable": false
+        }
+      },
+      "outputText": "",
+      "durationMs": 0.0,
+      "display": {
+        "success": false,
+        "verb": "",
+        "message": "File not found at: /tmp/work-turn-limit/README.md",
+        "warnings": [],
+        "approvalNote": null,
+        "suffix": ""
+      },
+      "decision": "execute",
+      "approvalType": "always",
+      "approvalSource": "config"
+    }
+  },
+  {
+    "id": "assistant-2963ea72-980c-5ffb-90d0-7233ec085d99",
+    "sessionId": "edecbabc-5dd3-8da1-44d2-d06fcde28ae7",
+    "turnId": "turn-46749569237b6452e03eda072a14023b",
+    "inputEntryId": "user-turn-46749569237b6452e03eda072a14023b-1",
+    "createdAt": 1791566529134,
+    "updatedAt": 1791566529134,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "message",
+    "role": "assistant",
+    "content": [
+      {
+        "type": "text",
+        "text": "Here is the review:\n\n```json\n[\n  {\"id\": \"S001\", \"severity\": \"high\", \"title\": \"argv-only transport\", \"detail\": \"A multi-KB prompt exceeds the Windows command-line cap.\"},\n  {\"id\": \"S002\", \"severity\": \"medium\", \"title\": \"unmeasured retry envelope\", \"detail\": \"The retry budget is declared from documentation rather than measurement.\"},\n  {\"id\": \"S003\", \"severity\": \"low\", \"title\": \"tier not recorded\", \"detail\": \"The permission tier ships without a probe transcript.\"}\n]\n```\n"
+      }
+    ],
+    "source": "harness",
+    "userDisplayContent": null
+  },
+  {
+    "id": "effect-351bfe32-ec87-5185-a359-8cd4971d7615",
+    "sessionId": "edecbabc-5dd3-8da1-44d2-d06fcde28ae7",
+    "turnId": "turn-46749569237b6452e03eda072a14023b",
+    "inputEntryId": "user-turn-46749569237b6452e03eda072a14023b-1",
+    "createdAt": 1791566529137,
+    "updatedAt": 1791566529144,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "effect",
+    "title": "file_system.read_file",
+    "detail": {
+      "toolName": "file_system.read_file",
+      "display": {
+        "summary": "Reading README.md",
+        "content": null,
+        "suffix": "",
+        "verb": "Reading",
+        "message": "README.md",
+        "settledVerb": "Read",
+        "settledMessage": "README.md",
+        "statusText": "Reading file"
+      },
+      "kind": "file_read",
+      "input": {
+        "filePath": "README.md",
+        "offset": null,
+        "limit": 2000
+      }
+    },
+    "state": {
+      "status": "failed",
+      "error": {
+        "message": "File not found at: /tmp/work-turn-limit/README.md",
+        "code": "tool_failed",
+        "details": null
+      },
+      "output": {
+        "type": "failure",
+        "content": [],
+        "_meta": {
+          "approval": {
+            "approvalSource": "config",
+            "approvalType": "always",
+            "decision": "execute"
+          }
+        },
+        "error": {
+          "code": "tool_failed",
+          "message": "File not found at: /tmp/work-turn-limit/README.md",
+          "retryable": false
+        }
+      },
+      "outputText": "",
+      "durationMs": 0.0,
+      "display": {
+        "success": false,
+        "verb": "",
+        "message": "File not found at: /tmp/work-turn-limit/README.md",
+        "warnings": [],
+        "approvalNote": null,
+        "suffix": ""
+      },
+      "decision": "execute",
+      "approvalType": "always",
+      "approvalSource": "config"
+    }
+  }
+]

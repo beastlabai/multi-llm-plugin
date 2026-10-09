@@ -218,7 +218,8 @@ class TestVibeEnvSurface:
         """2.26.0 retries for a wall-clock budget (vendor default 300 s), not
         three times: unpinned, a fail-forever chain was 16 requests over ~305 s
         and a stall 367 s, past the declared bound. The pin is what keeps the
-        declaration true; 2.24.1, which has no such setting, ignores it."""
+        declaration true; 2.24.1, which has no such setting, ignores it. 2.26.1
+        reads it too: at 150 s, 13 requests over 124.5 s and a stall 185 s."""
         env = VibeProvider().resolve_env(MODEL)
 
         assert env["VIBE_API_RETRY_MAX_ELAPSED_TIME"] == str(vibe_module.API_RETRY_BUDGET_S)
