@@ -2209,7 +2209,11 @@ def restate_findings_problem(
     (:func:`accepted_findings_with_words_added`; fix round 28): each finding
     and the accepted finding it holds, as JSON strings, and the two ways to
     answer — cut it down to the accepted one with the words in ``note``, or
-    keep it whole when those words report more than the accepted finding."""
+    keep it whole when those words report more than the accepted finding.
+    Fix round 29 (review of round 28, checks #3): it says plainly that a
+    note is a comment, never a failure, so a second failure the check
+    printed stays in the finding — the merge cannot tell a comment from a
+    failure moved to the note, and no semantic reading is added."""
     shown = []
     for finding, check_id, accepted in list(flagged)[:ACCEPTED_NOTE_MAX_FINDINGS]:
         shown.append(
@@ -2222,10 +2226,12 @@ def restate_findings_problem(
         f"words are your own comment, restate that finding as the accepted "
         f"finding alone, character for character, and move the added words, "
         f"as they are, into the `check` object's `note`: it is then recorded "
-        f"as the problem the user accepted. If they report something the "
-        f"check printed beyond the accepted finding, keep the finding exactly "
-        f"as it is: it is then recorded as {task_id}'s own failure, which is "
-        f"right."
+        f"as the problem the user accepted. A note is a comment, never a "
+        f"failure: nothing in it is ever read as one, so every failure the "
+        f"check printed stays a finding. If the added words report something "
+        f"the check printed beyond the accepted finding (another value, test "
+        f"or line), keep the finding exactly as it is: it is then recorded as "
+        f"{task_id}'s own failure, which is right."
     )
 
 

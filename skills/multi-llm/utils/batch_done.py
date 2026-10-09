@@ -794,7 +794,10 @@ def finding_restate_line(
     that records the task again with the accepted finding alone and the
     added words as its ``--note`` — for the host to run only when those
     words are its subagent's comment. The plugin never records it as
-    accepted itself (``write_batch_scheduler.accepted_findings_with_words_added``)."""
+    accepted itself (``write_batch_scheduler.accepted_findings_with_words_added``).
+    Fix round 29 (review of round 28, checks #3): it says plainly that a
+    note is a comment, never a failure, so a failure the added words report
+    stays a finding."""
     flagged = list(restate.get("flagged") or [])
     named = "; ".join(
         f"its finding \"{clip(finding, 160)}\" holds the finding the user "
@@ -813,8 +816,10 @@ def finding_restate_line(
         f"comment, record {task_id} again with the accepted finding alone and "
         f"the words as its note: {_record_again_call(args, flags)} (that "
         f"record replaces this one, and the line it prints is the one to "
-        f"follow). If they report something the check printed beyond the "
-        f"accepted finding, leave the record as it is."
+        f"follow). A note is a comment, never a failure: nothing in it is "
+        f"ever read as one. If the added words report something the check "
+        f"printed beyond the accepted finding (another value, test or line), "
+        f"leave the record as it is, so that failure stays a finding."
     )
 
 
