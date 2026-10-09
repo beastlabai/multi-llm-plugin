@@ -1,0 +1,42 @@
+[
+  {
+    "id": "user-turn-683c0d12f0dc433cff83f3c0f07c00a1-1",
+    "sessionId": "0f4f90a1-51c6-18c6-deb0-61d8b051983e",
+    "turnId": "turn-683c0d12f0dc433cff83f3c0f07c00a1",
+    "inputEntryId": null,
+    "createdAt": 1791566532939,
+    "updatedAt": 1791566532939,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "message",
+    "role": "user",
+    "content": [
+      {
+        "type": "text",
+        "text": "Summarise the project in one sentence."
+      }
+    ],
+    "source": "turn_start",
+    "userDisplayContent": null
+  },
+  {
+    "id": "assistant-4fec2199-9edb-5cea-b750-3ed334cc7f10",
+    "sessionId": "0f4f90a1-51c6-18c6-deb0-61d8b051983e",
+    "turnId": "turn-683c0d12f0dc433cff83f3c0f07c00a1",
+    "inputEntryId": "user-turn-683c0d12f0dc433cff83f3c0f07c00a1-1",
+    "createdAt": 1791566533019,
+    "updatedAt": 1791566533019,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "message",
+    "role": "assistant",
+    "content": [
+      {
+        "type": "text",
+        "text": "Here is the review:\n\n```json\n[\n  {\"id\": \"S001\", \"severity\": \"high\", \"title\": \"argv-only transport\", \"detail\": \"A multi-KB prompt exceeds the Windows command-line cap.\"},\n  {\"id\": \"S002\", \"severity\": \"medium\", \"title\": \"unmeasured retry envelope\", \"detail\": \"The retry budget is declared from documentation rather than measurement.\"},\n  {\"id\": \"S003\", \"severity\": \"low\", \"title\": \"tier not recorded\", \"detail\": \"The permission tier ships without a probe transcript.\"}\n]\n```\n"
+      }
+    ],
+    "source": "harness",
+    "userDisplayContent": null
+  }
+]

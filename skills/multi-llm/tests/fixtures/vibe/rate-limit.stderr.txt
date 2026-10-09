@@ -1,2 +1,2 @@
-Error: Client error '429 Too Many Requests' for url 'http://127.0.0.1:8099/s/3f62621fde7f/v1/chat/completions'
+Error: Client error '429 Too Many Requests' for url 'http://127.0.0.1:8099/s/b6319a02f955/v1/chat/completions'
 For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/429: rate limit exceeded

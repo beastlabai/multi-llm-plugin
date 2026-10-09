@@ -1,0 +1,2 @@
+Error: Invalid configuration (1 error(s)):
+  - models.openai/gpt-5.6-luna.thinking: Input should be 'off', 'low', 'medium', 'high' or 'max'

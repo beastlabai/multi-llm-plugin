@@ -1,0 +1,42 @@
+[
+  {
+    "id": "user-turn-36d2a138a8e9f85a3edf773664076503-1",
+    "sessionId": "3440c9c7-7475-3052-24a4-13cdbda96b8e",
+    "turnId": "turn-36d2a138a8e9f85a3edf773664076503",
+    "inputEntryId": null,
+    "createdAt": 1791566577504,
+    "updatedAt": 1791566577504,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "message",
+    "role": "user",
+    "content": [
+      {
+        "type": "text",
+        "text": "Summarise the project in one sentence."
+      }
+    ],
+    "source": "turn_start",
+    "userDisplayContent": null
+  },
+  {
+    "id": "assistant-840e907a-0544-5228-98a8-f452c50ca930",
+    "sessionId": "3440c9c7-7475-3052-24a4-13cdbda96b8e",
+    "turnId": "turn-36d2a138a8e9f85a3edf773664076503",
+    "inputEntryId": "user-turn-36d2a138a8e9f85a3edf773664076503-1",
+    "createdAt": 1791566577658,
+    "updatedAt": 1791566584678,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "message",
+    "role": "assistant",
+    "content": [
+      {
+        "type": "text",
+        "text": "Here is the review:\n\n```json\n[\n  {\"id\": \"S001\", \"severity\": \"high\", \"title\": \"argv-only transport\", \"detail\": \"A multi-KB prompt exceeds the Windows command-line cap.\"},\n  {\"id\": \"S002\", \"severity\": \"medium\", \"title\": \"unmeasured retry "
+      }
+    ],
+    "source": "harness",
+    "userDisplayContent": null
+  }
+]

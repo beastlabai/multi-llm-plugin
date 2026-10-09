@@ -1,1 +1,1 @@
-Error: 
+Error: Timed out waiting for the model to send its response (ReadTimeout).

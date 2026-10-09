@@ -1,2 +1,2 @@
-Error: Server error '500 Internal Server Error' for url 'http://127.0.0.1:8099/s/9ee50ec34ff7/v1/chat/completions'
+Error: Server error '500 Internal Server Error' for url 'http://127.0.0.1:8099/s/57a857fa0b62/v1/chat/completions'
 For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500: upstream boom

@@ -4423,8 +4423,8 @@ class TestVibeProvider:
 
     Every assertion is anchored to a capture in `tests/fixtures/vibe/`, taken
     from the real binary at 2.24.1 inside the §6 probe container and re-taken
-    at 2.26.0 in the pinned image on 2026-10-08 (manifest.yaml) — the
-    `tests/fixtures/kilocode/` precedent.
+    at 2.26.0 in the pinned image on 2026-10-08 and at 2.26.1 on 2026-10-09
+    (manifest.yaml) — the `tests/fixtures/kilocode/` precedent.
 
     vibe is the row where the plan was most wrong, so several tests here exist
     specifically to pin a **corrected** contract rather than the researched one:
@@ -4496,6 +4496,8 @@ class TestVibeProvider:
         `--max-price` is the roster's only USD cap but is checked BETWEEN turns —
         a single completion under a 0.0000001 cap ran to completion with the full
         answer — so `--max-turns` is the bound that actually stops a runaway.
+        2.26.1 still runs that completion to its end, then reports the run
+        `Stopped: price_limit` and exits 3 (the `price-limit` fixture row).
         """
         argv = provider.build_command(self.PROMPT, self.MODEL)
 
@@ -4620,18 +4622,70 @@ class TestVibeProvider:
         assert "no assistant message" in result["error"]
 
     def test_a_config_error_on_stdout_is_not_read_as_an_answer(self, provider):
-        """§6.2's `stdout-error` trap, in vibe's one measured shape.
+        """§6.2's `stdout-error` trap, in vibe's 2.24.1-2.26.0 shape.
 
         Config-validation errors print on **stdout with stderr empty** and still
         exit 1 — the opencode shape. The reason exists only in that text, so it
         has to be reported rather than handed to the extractor, which would find
-        nothing and report an empty answer instead of the cause.
+        nothing and report an empty answer instead of the cause. The fixture is
+        2.26.0's bytes; 2.26.1 moved the error to stderr (the next test).
         """
         result = provider.parse_output(self._fixture("stdout-error.stdout.txt"), "")
 
         assert result["success"] is False
         assert result["data"] is None
         assert "Invalid configuration" in result["error"]
+
+    def test_a_config_error_on_stderr_is_quoted(self, provider):
+        """2.26.1 (2026-10-09): the same validation error, on stderr, stdout empty."""
+        result = provider.parse_output("", self._fixture("config-error.stderr.txt"))
+
+        assert result["success"] is False
+        assert result["data"] is None
+        assert "stderr said: Error: Invalid configuration" in result["error"]
+
+    @pytest.mark.parametrize(
+        "row,outcome",
+        [
+            ("turn-limit", "turn_limit"),
+            ("price-limit", "price_limit"),
+            ("length", "length"),
+            ("terminated", "terminated"),
+        ],
+    )
+    def test_a_run_stopped_by_a_limit_is_not_read_as_an_answer(
+        self, provider, row, outcome
+    ):
+        """2.26.1's exit 3 leaves a whole transcript on stdout (2026-10-09).
+
+        `--max-turns 4`, `--max-price 0.25`, a `length` finish and the harness's
+        SIGTERM each print every entry `completed`, the last assistant message
+        holding half the array or all of it, and say `Stopped: <outcome>` on
+        stderr and nowhere else. Without that line the same bytes parse as a
+        success — which is what the 2.26.0 parser did with all four — so the
+        refusal has to read stderr.
+        """
+        stdout = self._fixture(f"{row}.json")
+        stderr = self._fixture(f"{row}.stderr.txt")
+
+        assert provider.parse_output(stdout, "")["success"] is True
+        result = provider.parse_output(stdout, stderr)
+
+        assert result["success"] is False
+        assert result["data"] is None
+        assert f"(Stopped: {outcome})" in result["error"]
+        assert result["raw"] == stdout
+
+    def test_only_vibe_s_own_stopped_line_refuses(self):
+        """A whole stderr line in vibe's spelling, never a fragment of another."""
+        assert vibe_module.stopped_by_a_limit("Stopped: turn_limit\n") == "turn_limit"
+        assert vibe_module.stopped_by_a_limit(
+            "Warning: /w is not trusted\nStopped: deadline\n"
+        ) == "deadline"
+        assert vibe_module.stopped_by_a_limit("Error: Stopped: turn_limit\n") is None
+        assert vibe_module.stopped_by_a_limit("Stopped: the model gave up\n") is None
+        assert vibe_module.stopped_by_a_limit("") is None
+        assert vibe_module.stopped_by_a_limit(None) is None
 
     def test_zero_bytes_on_both_streams_is_classified(self, provider):
         """Distinguishable from a valid empty answer — the silent-hang shape."""
@@ -4697,7 +4751,9 @@ class TestVibeProvider:
         assert "stub-model" in stderr
 
     def test_no_exit_zero_failure_markers_are_declared(self, provider):
-        """Empty BY MEASUREMENT: every failure mode probed exits 1.
+        """Empty BY MEASUREMENT: every failure mode probed exits nonzero.
+
+        1 at 2.24.1 and 2.26.0; 1, 2 or 3 at 2.26.1 (manifest.yaml).
 
         §6.2's `exit-zero-failure` row is recorded N/A for this CLI rather than
         left untested, and that is what this asserts.
@@ -4723,11 +4779,17 @@ class TestVibeProvider:
         six `Retry-After: 29` 429s followed by a stall end at 267 s, under
         budget + 30 + timeout + 2 = 272 s, the same bound 2.24.1's 3 x 90 + 2
         gives.
+
+        2.26.1 (2026-10-09) backs off 0.5 s x 1.5^n plus up to 1 s of jitter and
+        makes a retry only when its wait ends inside the budget: 13 requests
+        over 124.5 s on every fail-forever row (14 when the jitter runs low),
+        and five `Retry-After: 29` 429s then a stall end at 239 s — so the
+        request count moved up and the 272 s wall still holds.
         """
         envelope = provider.internal_retries
 
         assert envelope is not None
-        assert envelope.max_requests == 11
+        assert envelope.max_requests == 14
         assert envelope.retries_rate_limit is True
         assert envelope.configurable_by == (
             "VIBE_API_TIMEOUT", "VIBE_API_RETRY_MAX_ELAPSED_TIME",
@@ -4756,9 +4818,9 @@ class TestVibeProvider:
         assert provider.structured_output_support is False
 
     def test_the_verified_version_is_the_capture_version(self, provider):
-        # Re-captured on 2.26.0 on 2026-10-08; 2.24.1 (the first capture)
-        # stays the floor.
-        assert provider.verified_version == "2.26.0"
+        # Re-captured on 2.26.0 on 2026-10-08 and on 2.26.1 on 2026-10-09;
+        # 2.24.1 (the first capture) stays the floor.
+        assert provider.verified_version == "2.26.1"
         assert provider.min_version == "2.24.1"
 
 

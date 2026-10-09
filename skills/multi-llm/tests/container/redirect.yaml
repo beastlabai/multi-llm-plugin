@@ -1343,7 +1343,8 @@ clis:
     # backoff, and `Retry-After` is NOT honoured -- so unlike copilot's, this
     # inner bound is real and the outer one only has to clear it. At 2.26.0 it
     # is the pinned 150 s retry budget + one capped 30 s delay + one 90 s
-    # attempt: 272 s, measured 267 s at worst.
+    # attempt: 272 s, measured 267 s at worst. 2.26.1 starts no retry whose wait
+    # ends past the budget: measured 239 s at worst (2026-10-09).
     row_timeout_s: 300
     chain_row_timeout_s: 600
     version_measured: "2.24.1"
@@ -1359,8 +1360,10 @@ clis:
       `default_agent = accept-edits`, whose AgentSafety is DESTRUCTIVE and whose
       write_file/edit permission is `always`, so rung 1 is `--agent plan` (SAFE)
       and the adapter never emits anything wider. Config-validation errors print
-      on STDOUT with stderr empty (the opencode trap); every other failure mode
-      measured exits 1 on stderr, so no exit-0 markers are declared.
+      on STDOUT with stderr empty (the opencode trap) through 2.26.0, on stderr
+      at 2.26.1; every other failure mode measured is on stderr and exits
+      nonzero (1 through 2.26.0; 1, 2 or 3 at 2.26.1, measured 2026-10-09), so
+      no exit-0 markers are declared.
 
   # -------------------------------------------------------------------------
   - cli: omp

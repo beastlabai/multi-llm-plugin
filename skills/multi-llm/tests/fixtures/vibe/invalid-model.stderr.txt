@@ -1,2 +1,2 @@
-Error: Client error '404 Not Found' for url 'http://127.0.0.1:8099/s/dbf2efd7b312/v1/chat/completions'
+Error: Client error '404 Not Found' for url 'http://127.0.0.1:8099/s/1f5fd71a8e3d/v1/chat/completions'
 For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404: The model `stub-model` does not exist
