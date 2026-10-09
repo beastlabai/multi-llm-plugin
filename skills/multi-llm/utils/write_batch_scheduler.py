@@ -318,6 +318,7 @@ __all__ = [
     "split_accepted_findings",
     "accepted_findings_for",
     "task_owns_the_check",
+    "task_own_text",
     "BLOCKED_BY_CHECK_PREFIX",
     "bind_prior_changes",
     "last_phase_end",
@@ -1819,10 +1820,12 @@ _BARE_COMMAND_WORDS = frozenset({
 _SENTENCE_END = re.compile(r"[.;!?](?=\s|$)|\n")
 
 
-def _task_own_text(task: Mapping[str, Any]) -> str:
+def task_own_text(task: Mapping[str, Any]) -> str:
     """What a materialized implement task itself says: its title, and the
     ``## Task`` section and acceptance criteria of its prompt — never the
-    plan context, the dependency titles or the prior batches around them."""
+    plan context, the dependency titles or the prior batches around them.
+    Both legs keep it beside a failing own check
+    (``state_manager.TASK_OWN_TEXT_KEY``, fix round 29)."""
     prompt = str(task.get("prompt") or "")
     parts = [str(task.get("task_title") or task.get("title") or ""),
              str(task.get("description") or "")]
@@ -1877,13 +1880,13 @@ def _asks_to_fix(sentence: str, check_id: str) -> bool:
 def task_owns_the_check(
     task: Mapping[str, Any], check_id: str, findings: Sequence[str],
 ) -> bool:
-    """Whether *task*'s own text (:func:`_task_own_text`) makes the accepted
+    """Whether *task*'s own text (:func:`task_own_text`) makes the accepted
     check's failure its own: it names the check's command (any accepted
     finding's, :func:`_finding_parts`), or asks to fix what it reported or
     to make it pass (:func:`_asks_to_fix`). Fix round 23 (records #2): "T009:
     run the suite and fix failures", released by the check it fixes, had its
     still-failing check read as the accepted findings."""
-    text = _task_own_text(task)
+    text = task_own_text(task)
     plain = _plain_words(text)
     for finding in findings:
         parts = _finding_parts(finding)
@@ -1986,17 +1989,28 @@ def move_check_repeats_in_state(
     :func:`repeated_findings_for`'s strict comparison, the finding
     *check_id* now has on record has that finding moved into
     ``task_batch_check_repeats`` in *state* (a ``state.json`` dict; *tasks*
-    the phase's materialized tasks, read for each task's own text, else its
-    recorded title). Returns ``{task_id: (own findings left, repeats by
-    check)}`` for every task moved, for the caller's own records and lines.
-    Both legs: the scheduler's :meth:`WriteBatchScheduler._move_repeats_of`
-    and ``util batch-done --check findings``."""
+    the phase's materialized tasks, read for each task's own text). Returns
+    ``{task_id: (own findings left, repeats by check)}`` for every task
+    moved, for the caller's own records and lines. Both legs: the
+    scheduler's :meth:`WriteBatchScheduler._move_repeats_of` and ``util
+    batch-done --check findings``.
+
+    Fix round 29 (review of round 28, checks #1): a ``--resume``
+    materializes only what it hands out, and a completed task was rebuilt
+    from its title, so a task whose ``## Task`` asked it to make the check
+    pass (:func:`task_owns_the_check`) had its own failure moved when the
+    check ran again. A task this run did not materialize is read from the
+    own text both legs keep beside its failing own check
+    (``task_own_text``); one with none on record (recorded before round 29)
+    is left as it is, never judged from its title alone."""
     try:
         from .state_manager import (
+            TASK_OWN_TEXT_KEY,
             set_task_batch_check_in_state, set_task_batch_check_repeats_in_state,
         )
     except ImportError:  # pragma: no cover - direct script runs
         from utils.state_manager import (  # type: ignore
+            TASK_OWN_TEXT_KEY,
             set_task_batch_check_in_state, set_task_batch_check_repeats_in_state,
         )
     recorded = state.get("task_batch_check")
@@ -2004,7 +2018,8 @@ def move_check_repeats_in_state(
         return {}
     statuses = state.get("task_status") or {}
     scope = state.get("implement_task_ids")
-    titles = state.get("task_titles") or {}
+    kept_texts = state.get(TASK_OWN_TEXT_KEY)
+    kept_texts = kept_texts if isinstance(kept_texts, dict) else {}
     materialized = {
         str(task.get("task_id", "")): task for task in tasks if isinstance(task, dict)
     }
@@ -2018,9 +2033,14 @@ def move_check_repeats_in_state(
             or (isinstance(scope, list) and task_id not in scope)
         ):
             continue
-        task = materialized.get(task_id) or {
-            "task_id": task_id, "task_title": str(titles.get(task_id) or ""),
-        }
+        task = materialized.get(task_id)
+        if task is None:
+            kept = kept_texts.get(task_id)
+            if not isinstance(kept, str) or not kept.strip():
+                continue
+            # The words recorded beside its failing own check: its title,
+            # `## Task` section and criteria, read as task_own_text reads them.
+            task = {"task_id": task_id, "description": kept}
         repeats = {
             cid: items for cid, items in repeated_findings_for(graph, task, state).items()
             if cid == str(check_id)
@@ -9695,6 +9715,7 @@ class WriteBatchScheduler:
                             set_task_batch_check_repeats_in_state,
                             set_task_own_check_note_in_state,
                             set_task_own_check_ran_in_state,
+                            set_task_own_text_in_state,
                         )
                     except ImportError:  # pragma: no cover - direct script runs
                         from utils.state_manager import (  # type: ignore
@@ -9703,10 +9724,16 @@ class WriteBatchScheduler:
                             set_task_batch_check_repeats_in_state,
                             set_task_own_check_note_in_state,
                             set_task_own_check_ran_in_state,
+                            set_task_own_text_in_state,
                         )
                     set_task_batch_check_in_state(
                         self.state.state, task_id,
                         outcome.batch_check if outcome.ok else None,
+                    )
+                    # Fix round 29: its own words beside a failing own check,
+                    # for a check that reports the same finding in a later run.
+                    set_task_own_text_in_state(
+                        self.state.state, task_id, task_own_text(task),
                     )
                     # Fix round 28: its own words about its checks, as
                     # `util batch-done --note` records them.
