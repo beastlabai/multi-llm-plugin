@@ -124,6 +124,7 @@ try:
         set_task_batch_check_repeats_in_state,
         set_task_own_check_note_in_state,
         set_task_own_check_ran_in_state,
+        set_task_own_text_in_state,
         set_task_check_findings_in_state,
         set_task_check_tree_in_state,
         update_task_status_in_state,
@@ -155,6 +156,7 @@ try:
         rerunnable_checks,
         split_accepted_findings,
         split_repeated_findings,
+        task_own_text,
         transitive_dependents,
         upstream_held_check,
         words_added_to,
@@ -181,6 +183,7 @@ except ImportError:  # pragma: no cover - direct script invocation
         set_task_batch_check_repeats_in_state,
         set_task_own_check_note_in_state,
         set_task_own_check_ran_in_state,
+        set_task_own_text_in_state,
         set_task_check_findings_in_state,
         set_task_check_tree_in_state,
         update_task_status_in_state,
@@ -212,6 +215,7 @@ except ImportError:  # pragma: no cover - direct script invocation
         rerunnable_checks,
         split_accepted_findings,
         split_repeated_findings,
+        task_own_text,
         transitive_dependents,
         upstream_held_check,
         words_added_to,
@@ -636,6 +640,9 @@ def record_batch(
             # findings and never among them (fix round 15): it holds
             # nothing back, and every other record of the task clears it.
             set_task_batch_check_in_state(state, task_id, batch_check)
+            # Fix round 29: its own words beside a failing own check, for a
+            # check that reports the same finding in a later run.
+            set_task_own_text_in_state(state, task_id, task_own_text(task))
             # Fix round 24: that its own check reported at all, a pass
             # included, for the tests line (`implement_checks_ran`).
             set_task_own_check_ran_in_state(

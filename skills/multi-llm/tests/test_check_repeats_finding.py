@@ -22,13 +22,30 @@ import pytest
 
 import multi_llm  # noqa: E402
 from tests.test_accepted_check_rerun import _result_line, _row  # noqa: E402
-from tests.test_check_gate_fixture import repo  # noqa: F401 - `repo` is a fixture
+from tests.test_check_gate_fixture import (  # noqa: F401 - `repo` is a fixture
+    CHECK_GATE,
+    DENY,
+    PLAN,
+    _policy,
+    repo,
+)
+from tests.test_implement_stop_account import (  # noqa: E402
+    _dispatched_titles,
+    _implement,
+    make_repo,
+)
+from utils import provider_registry as registry  # noqa: E402
 from utils import run_status  # noqa: E402
-from utils.state_manager import get_or_create_state  # noqa: E402
+from utils.state_manager import (  # noqa: E402
+    get_or_create_state,
+    set_task_batch_check_in_state,
+    set_task_own_text_in_state,
+)
 from utils.write_batch_scheduler import (  # noqa: E402
     BATCH_CHECK_MARKER,
     BATCH_CHECK_REPEATED_MARKER,
     implement_checks_ran,
+    move_check_repeats_in_state,
     repeated_findings_for,
     with_result_contract,
 )
@@ -317,3 +334,133 @@ class TestTheNativeLeg:
                           "T004", "--status", "completed", "--own-check", "passed")[0] == 0
         state = json.loads((repo.phase_dir.parent / "state.json").read_text())
         assert "task_batch_check_repeats" not in state
+
+
+# -- a check reporting in a later run (fix round 29) ------------------------
+
+
+#: T001's own text makes T002's check its job (`task_owns_the_check`): the
+#: plan asks it to make the release check pass.
+OWNER_PLAN = PLAN.replace(
+    "### T001: Edit: create the configuration file\nCreate the configuration.",
+    "### T001: Edit: create the configuration file\nCreate the configuration and "
+    "fix the release check: make `node scripts/check.mjs` pass by setting "
+    "retries to 3.",
+)
+
+
+@pytest.fixture
+def owner_repo(tmp_path, monkeypatch):
+    obj = make_repo(tmp_path, monkeypatch, OWNER_PLAN)
+    _policy(obj, DENY)
+    monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps([f"T00{n}" for n in range(1, 8)]))
+    monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS", CHECK_GATE)
+    yield obj
+    registry._config = None
+    registry._config_key = None
+
+
+def _touch(repo) -> None:
+    main = repo.root / "src" / "main.py"
+    main.write_text(main.read_text() + "# touched\n", encoding="utf-8")
+
+
+class TestALaterRunsCheck:
+    """Fix round 29 (review of round 28, checks #1): a ``--resume``
+    materializes only what it hands out, and a completed code task was
+    rebuilt from its title alone, so T001 — asked to make T002's check pass
+    — had its own failure moved into "repeats" when T002 ran again. Both
+    legs now keep the task's own words beside its failing own check and
+    judge from them; a task with none on record is left as it is."""
+
+    def test_the_executor_keeps_the_owners_failure_on_a_resume(self, owner_repo, capsys):
+        repo = owner_repo
+        _check_reports(repo)
+        _code_task_reports(repo, T001, [SAME])
+        text = _run(repo, capsys)
+        assert any(l.startswith(f"{BATCH_CHECK_MARKER} T001") for l in text.splitlines())
+        state = get_or_create_state(repo.plan).state
+        assert state["task_batch_check"] == {"T001": [SAME]}
+        assert "fix the release check" in state["task_own_text"]["T001"]
+        _touch(repo)
+        assert _implement(repo, "--resume") == 3
+        text = capsys.readouterr().out
+        assert "Check the module" in _dispatched_titles(repo)
+        assert not any(l.startswith(BATCH_CHECK_REPEATED_MARKER) for l in text.splitlines())
+        state = get_or_create_state(repo.plan).state
+        assert state["task_batch_check"] == {"T001": [SAME]}
+        assert "task_batch_check_repeats" not in state
+        status = _status_text(repo, capsys)
+        assert "a task's own report says a check it ran fails" in status, status
+        assert "its check repeated" not in status, status
+
+    def _emit(self, repo, capsys, *flags) -> str:
+        import implement_orchestrator
+
+        assert implement_orchestrator.main(
+            ["--plan-file", str(repo.plan), "--yes", *flags]) == 0
+        capsys.readouterr()
+        return str(repo.phase_dir)
+
+    def _util(self, capsys, *argv):
+        code = multi_llm.main(["util", *argv])
+        captured = capsys.readouterr()
+        return code, captured.out, captured.err
+
+    def _record_t001_then_resume(self, repo, capsys) -> str:
+        """The native host records T001's failing own check, then stops
+        before T002; a ``--resume`` emit hands out T002 and not T001."""
+        phase = self._emit(repo, capsys)
+        code, _out, err = self._util(
+            capsys, "batch-done", "--phase-dir", phase, "--task-id", "T001",
+            "--status", "completed", "--own-check", "findings", "--finding", SAME)
+        assert code == 0, err
+        self._emit(repo, capsys, "--resume")
+        document = json.loads((repo.phase_dir / "write_tasks.json").read_text())
+        handed = {t["task_id"] for t in document.get("tasks") or document.get("batches")}
+        assert "T001" not in handed and "T002" in handed
+        code, out, err = self._util(
+            capsys, "batch-done", "--phase-dir", phase, "--task-id", "T002",
+            "--status", "completed", "--check", "findings", "--finding", CHECKED)
+        assert code == 0, err
+        return out
+
+    def test_the_native_leg_keeps_the_owners_failure_on_a_resume(self, owner_repo, capsys):
+        out = self._record_t001_then_resume(owner_repo, capsys)
+        assert BATCH_CHECK_REPEATED_MARKER not in out, out
+        state = json.loads((owner_repo.phase_dir.parent / "state.json").read_text())
+        assert state["task_batch_check"] == {"T001": [SAME]}
+        assert "task_batch_check_repeats" not in state
+
+    def test_another_task_is_still_moved_by_its_recorded_words(self, repo, capsys):
+        """Run 12 #3 across a stop: T001 is not T002's fixer, and its
+        finding is T002's, though T002 reported it only after the resume."""
+        out = self._record_t001_then_resume(repo, capsys)
+        assert any(l.startswith(f"{BATCH_CHECK_REPEATED_MARKER} T001: ")
+                   for l in out.splitlines()), out
+        state = json.loads((repo.phase_dir.parent / "state.json").read_text())
+        assert "T001" not in (state.get("task_batch_check") or {})
+        assert "task_own_text" not in state
+        assert state["task_batch_check_repeats"] == {"T001": {"T002": [SAME]}}
+
+    def test_a_task_with_no_words_on_record_is_left_as_it_is(self):
+        """A completed task recorded before round 29 kept no words: never
+        judged from its title alone."""
+        state = {
+            "task_status": {"T001": "completed", "T002": "completed"},
+            "task_titles": {"T001": "Edit: create the configuration file"},
+            "task_check_findings": {"T002": [CHECKED]},
+            "task_batch_check": {"T001": [SAME]},
+        }
+        check = {"task_id": "T002", "task_title": "Check the module", "depends_on": ["T001"]}
+        assert move_check_repeats_in_state(state, [check], "T002") == {}
+        assert state["task_batch_check"] == {"T001": [SAME]}
+
+    def test_clearing_the_failing_check_clears_the_words(self):
+        state = {"task_batch_check": {"T001": [SAME]}}
+        set_task_own_text_in_state(state, "T001", "Fix the release check.")
+        assert state["task_own_text"] == {"T001": "Fix the release check."}
+        set_task_batch_check_in_state(state, "T001", None)
+        assert "task_own_text" not in state and "task_batch_check" not in state
+        set_task_own_text_in_state(state, "T001", "Fix the release check.")
+        assert "task_own_text" not in state
