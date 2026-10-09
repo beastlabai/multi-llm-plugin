@@ -2238,10 +2238,12 @@ def state_implement_view(
         # Fix round 28 (live run 12, Codex racing 06): every code task left
         # waits on a manual task the user can do now, so the resume records
         # it done; the run stopped for the user.
-        gate_flags, gate_why = _native_manual_gate(state)
+        gate_flags, gate_why, gate_answers = _native_manual_gate(state)
         if gate_flags:
             stop_resume_why = gate_why or stop_resume_why
             stopped = not in_progress_since
+            # Fix round 29 (review of round 28 #1): and the user's decline.
+            stop_answers = list(stop_answers) + gate_answers
     return {
         "completed": completed,
         # Fix round 20: whether `--implement <plan> --resume` continues it,
@@ -2323,17 +2325,21 @@ def native_still_runnable(
     ]
 
 
-def _native_manual_gate(state: Any) -> Tuple[List[str], Optional[str]]:
-    """``(resume flags, why)`` of a native implement whose every code task
-    left waits on a manual task the user can do now (fix round 28), the
-    words ``util next-command`` gives them, else ``([], None)``."""
+def _native_manual_gate(
+    state: Any,
+) -> Tuple[List[str], Optional[str], List[Dict[str, Any]]]:
+    """``(resume flags, why, answers)`` of a native implement whose every
+    code task left waits on a manual task the user can do now (fix round
+    28), the words ``util next-command`` gives them — the answers being the
+    user's decline of each such task (fix round 29) — else
+    ``([], None, [])``."""
     from . import next_phase
 
     try:
         deferred = state.deferred_implementation_tasks()
         gates = state.manual_task_gates(deferred)
         if not gates or not gates.get("gated"):
-            return [], None
+            return [], None, []
         entry = {
             "manual_gate": True,
             "manual_tasks": deferred,
@@ -2341,9 +2347,12 @@ def _native_manual_gate(state: Any) -> Tuple[List[str], Optional[str]]:
             "manual_waiting": gates.get("waiting") or {},
         }
         flags = next_phase.manual_gate_flags(entry)
-        return (flags, next_phase.manual_gate_why(entry)) if flags else ([], None)
+        if not flags:
+            return [], None, []
+        return (flags, next_phase.manual_gate_why(entry),
+                next_phase.manual_gate_decline_answers(entry))
     except Exception:  # noqa: BLE001 - advisory: the plain resume stands
-        return [], None
+        return [], None, []
 
 
 def native_run_stopped(

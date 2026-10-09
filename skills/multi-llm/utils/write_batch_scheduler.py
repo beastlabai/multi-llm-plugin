@@ -1058,12 +1058,28 @@ def manual_gate_head(
 
 
 def manual_gate_way_on(gating: Sequence[str]) -> str:
-    """The gate's one way on, as a stop headline says it (fix round 28)."""
+    """The gate's ways on, as a stop headline says them (fix round 28):
+    the resume recording the gating manual tasks done, then (fix round 29,
+    review of round 28 #1) the user's decline, ``--human-task <id>=skip``,
+    which skips the task and the code tasks that wait on it."""
     it = "it" if len(gating) == 1 else "them"
     answers = " ".join(f"--human-task {task_id}=done" for task_id in gating)
+    if len(gating) == 1:
+        decline = (
+            f"or, if you will not do {gating[0]}, resume with --human-task "
+            f"{gating[0]}=skip instead (it and the code tasks that wait on it "
+            f"are skipped)"
+        )
+    else:
+        skips = ", ".join(f"--human-task {task_id}=skip" for task_id in gating)
+        decline = (
+            f"or, for any of them you will not do, give its answer instead "
+            f"({skips}): it and the code tasks that wait on it are skipped"
+        )
     return (
         f"To go on: do {', '.join(gating)} by hand, then resume this phase "
-        f"with {answers} (the code tasks that wait on {it} then run)."
+        f"with {answers} (the code tasks that wait on {it} then run); "
+        f"{decline}."
     )
 
 
@@ -1151,8 +1167,15 @@ USER_DECLINED_REASON = "skipped by user during pause-and-ask"
 
 #: The prefix of the recorded reason of a failed code task the user answered
 #: ``--human-task <id>=skip`` (``StateManager._ANSWERED_SKIP_PREFIX`` is its
-#: twin). The sentence ends ``<id>=skip after it failed``.
+#: twin). The sentence ends ``<id>=skip after it failed``; for a manual task
+#: answered ``skip`` under a skip strategy, :data:`MANUAL_DECLINED_TAIL`.
 ANSWERED_SKIP_PREFIX = "skipped — you answered --human-task "
+
+#: What follows ``<id>=skip`` in the recorded reason of a manual task the
+#: user declined under a skip strategy (fix round 29, review of round 28 #1:
+#: under ``--yes`` the answer was printed and the task deferred again, so a
+#: manual-task gate re-stopped for good and only a false ``=done`` went on).
+MANUAL_DECLINED_TAIL = ": you will not do this manual task"
 
 #: The prefix of the recorded reason of a failed code task the user answered
 #: ``--human-task <id>=done`` (:func:`resolve_human_task_plan` writes the
@@ -3472,6 +3495,16 @@ def resolve_human_task_plan(
                 # task stayed owed on every surface. Its dependents run.
                 plan.completed.append(task_id)
                 continue
+            if decisions.get(task_id) == "skip":
+                # The user will not do it (fix round 29, review of round 28
+                # #1): skipped at their request, so it is not owed, and under
+                # skip-dependents the walk below skips the tasks after it
+                # with it (`declined`), which no gate then holds back. Under
+                # skip-continue the strategy still runs that code.
+                plan.skipped[task_id] = (
+                    f"{ANSWERED_SKIP_PREFIX}{task_id}=skip{MANUAL_DECLINED_TAIL}")
+                seeds.append(task_id)
+                continue
             plan.skipped[task_id] = _deferred_reason(strategy)
             seeds.append(task_id)
 
@@ -3487,15 +3520,27 @@ def resolve_human_task_plan(
         for dep in task.get("depends_on") or []:
             dependents.setdefault(str(dep), []).append(str(task.get("task_id", "")))
     code_set = set(code_seeds)
+    # A manual task the user declined under a skip strategy walks first, and
+    # its walk takes over a task a deferral reached: a later manual task
+    # after code that now never runs is skipped with it, not owed (fix round
+    # 29). A failed code task answered `skip` keeps fix round 8's rule: a
+    # manual task after it stays owed.
+    walked = code_seeds if strategy == STRATEGY_SKIP_CONTINUE else seeds
+    declined_seeds = {
+        seed for seed in walked
+        if plan.skipped.get(seed, "").endswith(MANUAL_DECLINED_TAIL)
+    }
     # (task, the skipped task a dependent names, whether the walk may pass
-    # through a task this run does not hold — only from a code seed).
+    # through a task this run does not hold — only from a code seed, whether
+    # it walks from a manual task the user declined).
     queue = [
-        (seed, seed, seed in code_set)
-        for seed in (code_seeds if strategy == STRATEGY_SKIP_CONTINUE else seeds)
+        (seed, seed, seed in code_set, seed in declined_seeds)
+        for seed in sorted(walked, key=lambda seed: seed not in declined_seeds)
     ]
+    reached_declined: set = set(declined_seeds)
     passed: set = set()
     while queue:
-        parent, named, through = queue.pop(0)
+        parent, named, through, declined = queue.pop(0)
         named_title = str(by_id.get(named, {}).get("task_title", "") or named)
         for child in sorted(set(dependents.get(parent, []))):
             if not child:
@@ -3503,15 +3548,18 @@ def resolve_human_task_plan(
             if child not in by_id:
                 if through and child not in passed:
                     passed.add(child)
-                    queue.append((child, named, through))
+                    queue.append((child, named, through, declined))
                 continue
-            if child in plan.skipped:
+            if child in plan.skipped and (
+                    not declined or child in reached_declined):
                 continue
             plan.skipped[child] = (
                 f"skipped — depends on skipped task {named} ({named_title})"
             )
             plan.chain[child] = named
-            queue.append((child, child, through))
+            if declined:
+                reached_declined.add(child)
+            queue.append((child, child, through, declined))
 
     if strategy == STRATEGY_SKIP_CONTINUE:
         # A manual task's edges are treated as satisfied: its dependents run,
@@ -11681,10 +11729,29 @@ class WriteBatchScheduler:
         why = self._manual_gate_why(gating, waiting)
         if why:
             result.stop["resume_why"] = why
+        # Fix round 29 (review of round 28 #1): the user's decline beside
+        # that resume, as an answer the section lists.
+        answers = self._manual_gate_answers(gating, waiting)
+        if answers:
+            result.stop["answers"] = answers
         # The merge of fix round 28: and beside it the line without the way
         # on the section carries (its resume records the gate done), which
         # the tool routes relay in the `error`'s place.
         self._set_stop_headline(result.stop)
+
+    def _manual_gate_entry(
+        self, gating: Sequence[str], waiting: Mapping[str, Sequence[str]],
+    ) -> Dict[str, Any]:
+        """The gate as the workflow payload's ``implement`` entry gives it
+        to ``next_phase``'s gate words, over this run's titles."""
+        return {
+            "manual_close_ids": list(gating),
+            "manual_waiting": {k: list(v) for k, v in waiting.items()},
+            "manual_tasks": [
+                {"id": manual, "title": self._task_title(manual)}
+                for manual in gating
+            ],
+        }
 
     def _manual_gate_why(
         self, gating: Sequence[str], waiting: Mapping[str, Sequence[str]],
@@ -11693,18 +11760,23 @@ class WriteBatchScheduler:
         words, over this run's titles."""
         from .next_phase import manual_gate_why
 
-        entry = {
-            "manual_close_ids": list(gating),
-            "manual_waiting": {k: list(v) for k, v in waiting.items()},
-            "manual_tasks": [
-                {"id": manual, "title": self._task_title(manual)}
-                for manual in gating
-            ],
-        }
         try:
-            return manual_gate_why(entry)
+            return manual_gate_why(self._manual_gate_entry(gating, waiting))
         except Exception:  # noqa: BLE001 - advisory wording
             return None
+
+    def _manual_gate_answers(
+        self, gating: Sequence[str], waiting: Mapping[str, Sequence[str]],
+    ) -> List[Dict[str, Any]]:
+        """The gate's other ways on, ``next_phase.manual_gate_decline_answers``
+        (fix round 29): the user's ``--human-task <id>=skip`` for each
+        gating manual task, recorded on the stop as its ``answers``."""
+        from .next_phase import manual_gate_decline_answers
+
+        try:
+            return manual_gate_decline_answers(self._manual_gate_entry(gating, waiting))
+        except Exception:  # noqa: BLE001 - advisory: the resume stands
+            return []
 
     def _task_title(self, task_id: str) -> Optional[str]:
         """*task_id*'s title from this run's tasks, else ``state.json``'s
@@ -11749,6 +11821,13 @@ class WriteBatchScheduler:
             f"recording {it} done; the code tasks that wait on {it} then run:"
         )
         lines.append(f"        {command or 'add ' + answers + ' to the resume command'}")
+        # Fix round 29 (review of round 28 #1): or the user's decline.
+        for entry in stop.get("answers") or []:
+            skips = " ".join(list(entry.get("flags") or [])[1:])
+            spelled = (
+                template.replace("{answers}", skips) if "{answers}" in template else "")
+            lines.append(f"  - or, {entry.get('why')}:")
+            lines.append(f"        {spelled or 'add ' + skips + ' to the resume command'}")
         return lines
 
     def _check_block_message(self, result: SchedulerResult) -> List[str]:
@@ -12602,7 +12681,7 @@ class WriteBatchScheduler:
                 )
             return
         if self.state is not None:
-            self._metrics_finish()
+            self._metrics_finish(result)
             # A resume of a phase already completed that dispatched nothing —
             # `implement --resume --human-task T007=done` closing a deferred
             # manual task — changed no code, so its completion keeps its date:
@@ -12990,7 +13069,7 @@ class WriteBatchScheduler:
             # Fix round 24: the total the first line is held to.
             self._eta_line_ids = set(self._eta_task_ids(result))
 
-    def _metrics_finish(self) -> None:
+    def _metrics_finish(self, result: Optional[SchedulerResult] = None) -> None:
         """Pop the phase's ETA baseline and log its closing line (F7).
 
         The line goes through ``self.log`` for the same reason every per-batch
@@ -12998,6 +13077,11 @@ class WriteBatchScheduler:
         beside the lines it closes. ``finish_metrics_phase`` used to print it to
         stderr itself, which on a foreground or in-process ``full`` run put the
         closing line somewhere none of the others went.
+
+        Fix round 29 (review of round 28 #1): an implement run that started
+        no runner has no N/N line to name the tasks its plan set aside, so
+        its ``phase complete`` line names them (a manual task declined with
+        ``--human-task <id>=skip`` and the tasks skipped with it, say).
         """
         if not hasattr(self.state, "finish_metrics_phase"):
             return
@@ -13011,7 +13095,17 @@ class WriteBatchScheduler:
         # `(elapsed_ms, line)` when the phase had a baseline, `None` when it
         # never started.
         if isinstance(finished, tuple) and finished[1]:
-            self.log(finished[1])
+            line = finished[1]
+            if (result is not None and self.kind == "implement"
+                    and not any(self._started_a_runner(o) for o in result.outcomes)):
+                try:
+                    tail = _metrics.set_aside_tail(set_aside_by_plan(
+                        result.human_plan, self._manual_task_ids()))
+                except Exception:  # noqa: BLE001 - a count line must not fail a phase
+                    tail = ""
+                if tail:
+                    line = f"{line} · {tail}"
+            self.log(line)
 
     def _finalize_tracking(self, result: Optional[SchedulerResult] = None) -> None:
         """``finalize_tracking.py --state-file`` in process (D3n).

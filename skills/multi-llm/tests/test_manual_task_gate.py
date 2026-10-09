@@ -548,7 +548,32 @@ def test_a_gate_over_two_manual_tasks_names_how_many_wait_on_each():
     assert manual_gate_way_on(["T010", "T011"]) == (
         "To go on: do T010, T011 by hand, then resume this phase with "
         "--human-task T010=done --human-task T011=done (the code tasks that "
-        "wait on them then run).")
+        "wait on them then run); or, for any of them you will not do, give "
+        "its answer instead (--human-task T010=skip, --human-task T011=skip): "
+        "it and the code tasks that wait on it are skipped.")
+    # Fix round 29: one gating task's decline (review of round 28 #1).
+    assert manual_gate_way_on(["T010"]) == (
+        "To go on: do T010 by hand, then resume this phase with --human-task "
+        "T010=done (the code tasks that wait on it then run); or, if you will "
+        "not do T010, resume with --human-task T010=skip instead (it and the "
+        "code tasks that wait on it are skipped).")
+    answers = np_.manual_gate_decline_answers({
+        "manual_close_ids": ["T010", "T011"],
+        "manual_waiting": {"T010": ["T001", "T002"], "T011": ["T003"]},
+        "manual_tasks": [{"id": "T010", "title": "Fixture"}, {"id": "T011"}]})
+    assert answers == [
+        {"flags": ["--resume", "--human-task", "T010=skip", "--human-task",
+                   "T011=skip"],
+         "why": ("if you will do none of T010 (Fixture), T011, skip them and "
+                 "the 3 code tasks that wait on them, and implement goes on "
+                 "without them")},
+        {"flags": ["--resume", "--human-task", "T010=skip"],
+         "why": ("if you will not do T010 (Fixture), skip it and the 2 code "
+                 "tasks that wait on it, and implement goes on without them")},
+        {"flags": ["--resume", "--human-task", "T011=skip"],
+         "why": ("if you will not do T011, skip it and the code task that "
+                 "waits on it, and implement goes on without them")},
+    ]
 
 
 def test_a_code_task_behind_a_later_manual_task_is_not_counted_as_released():
@@ -577,3 +602,243 @@ def test_a_code_task_behind_a_later_manual_task_is_not_counted_as_released():
         "recorded done, so a plain resume runs nothing. Once you have done "
         "T001 by hand, this command records it done and runs the code task "
         "that waits on it.")
+
+
+# ---------------------------------------------------------------------------
+# Fix round 29 (the Fable review of round 28, gate findings 1-4)
+# ---------------------------------------------------------------------------
+
+#: T001 and T002 stand alone, T003 waits on T002: the reviewer's plan.
+PLAN3 = """# P
+
+## Overview
+x
+
+## Tasks
+
+### T001: Alpha task
+Do alpha.
+- Depends on: none
+- Files to modify: src/main.py
+
+### T002: Bravo manual
+Do bravo by hand.
+- Depends on: none
+- Files to modify: src/main.py
+
+### T003: Charlie task
+Do charlie.
+- Depends on: T002
+- Files to modify: src/main.py
+"""
+
+
+def _plan3(repo, *manual, plan=PLAN3):
+    _clean_env(repo.monkeypatch)
+    _seed_generate_tasks(repo)
+    repo.plan.write_text(plan, encoding="utf-8")
+    _manual(repo, *manual)
+    repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
+        {"path": "src/main.py", "mode": "patch", "content": "# edited\n"}]))
+    repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", IMPLEMENT_WRITE_IDS)
+
+
+def _section(out: str) -> str:
+    from utils import report_check
+
+    return out.split(f"{report_check.NEXT_STEP_MARKDOWN}\n", 1)[1].split(
+        f"\n{report_check.NEXT_STEP_MARKDOWN_END}", 1)[0]
+
+
+class TestAnExplicitSkipIsTheUsersDecline:
+    """Review of round 28, gate #1 (MEDIUM): under `--yes` a manual task the
+    gate holds on had no decline route. `--resume --human-task T001=skip`
+    printed `[HUMAN_TASK_ANSWERED] T001=skip`, recorded T001 deferred again
+    and stopped on the same gate, exit 3, forever; only a false `=done`
+    completed the run. Under the skip strategies an explicit `=skip` on a
+    manual task is now the user's decline: the task is recorded skipped at
+    the user's request, the tasks after it skipped with it, nothing is owed,
+    the gate no longer holds and the run completes saying what it skipped.
+    The gate's stop offers that answer as its second way forward."""
+
+    TASKS = [
+        {"task_id": "T001", "executor_role": "human", "depends_on": [],
+         "task_title": "Create the module"},
+        {"task_id": "T002", "depends_on": ["T001"], "task_title": "Wire it"},
+        {"task_id": "T003", "depends_on": ["T002"], "task_title": "Add tests"},
+    ]
+
+    def test_the_plan_reads_the_skip_as_a_decline(self):
+        from utils.write_batch_scheduler import (
+            ANSWERED_SKIP_PREFIX, resolve_human_task_plan,
+        )
+
+        plan = resolve_human_task_plan(
+            self.TASKS, strategy="skip-dependents", decisions={"T001": "skip"})
+        assert plan.skipped["T001"] == (
+            f"{ANSWERED_SKIP_PREFIX}T001=skip: you will not do this manual task")
+        assert plan.skipped["T002"] == (
+            "skipped — depends on skipped task T001 (Create the module)")
+        assert plan.deferred() == {}
+        assert sorted(plan.declined()) == ["T001", "T002", "T003"]
+        # No answer: deferred, as before.
+        plan = resolve_human_task_plan(
+            self.TASKS, strategy="skip-dependents", decisions={})
+        assert plan.skipped["T001"].startswith("deferred — manual task")
+        # skip-continue keeps running the code after a manual task: the
+        # decline only stops the task being owed.
+        plan = resolve_human_task_plan(
+            self.TASKS, strategy="skip-continue", decisions={"T001": "skip"})
+        assert sorted(plan.skipped) == ["T001"] and plan.deferred() == {}
+        assert plan.overrides == {"T002": ["T001"]}
+
+    def test_a_manual_task_after_the_declined_one_is_declined_with_it(self):
+        """T001 (manual) -> T002 -> T003 (manual) -> T004: the user will not
+        do T001, so T003, after code that now never runs, is skipped with
+        it, not owed as a deferral the user could close."""
+        from utils.write_batch_scheduler import resolve_human_task_plan
+
+        tasks = [
+            {"task_id": "T001", "executor_role": "human", "depends_on": [],
+             "task_title": "Fixture"},
+            {"task_id": "T002", "depends_on": ["T001"], "task_title": "Code"},
+            {"task_id": "T003", "executor_role": "human", "depends_on": ["T002"],
+             "task_title": "Play it"},
+            {"task_id": "T004", "depends_on": ["T003"], "task_title": "Tune"},
+        ]
+        plan = resolve_human_task_plan(
+            tasks, strategy="skip-dependents", decisions={"T001": "skip"})
+        assert plan.deferred() == {}
+        assert sorted(plan.declined()) == ["T001", "T002", "T003", "T004"]
+        assert plan.skipped["T003"] == (
+            "skipped — depends on skipped task T002 (Code)")
+        # Declining the later one alone leaves the first owed.
+        plan = resolve_human_task_plan(
+            tasks, strategy="skip-dependents", decisions={"T003": "skip"})
+        assert sorted(plan.deferred()) == ["T001", "T002"]
+        assert sorted(plan.declined()) == ["T003", "T004"]
+
+    def _gate(self, repo, capsys, *, native=False):
+        _clean_env(repo.monkeypatch)
+        _seed_generate_tasks(repo)
+        _manual(repo, "T001")
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", IMPLEMENT_WRITE_IDS)
+        leg = ["--host", "claude-code"] if native else [
+            "--exec-subagents", "--host", "codex"]
+        code, out, err, result = _run(
+            ["implement", str(repo.plan), "--yes", *leg], capsys)
+        assert code == 3, err
+        return leg, result
+
+    def test_the_executor_gate_offers_the_decline(self, repo, capsys):
+        from utils.write_batch_scheduler import (
+            HEADLINE_BESIDE_SECTION_KEY, answers_cover,
+        )
+
+        _leg, result = self._gate(repo, capsys)
+        assert "--human-task T001=skip" in result["error"], result["error"]
+        phase_dir = output_dir_path(repo.plan) / "implement"
+        stop = json.loads((phase_dir / "write_batch_report.json").read_text())["stop"]
+        assert stop["answers"] == [{
+            "flags": ["--resume", "--human-task", "T001=skip"],
+            "why": ("if you will not do T001 (Create the module), skip it and "
+                    "the 2 code tasks that wait on it, and implement goes on "
+                    "without them"),
+        }]
+        beside = stop[HEADLINE_BESIDE_SECTION_KEY]
+        assert "=skip" not in beside and "=done" not in beside
+        assert answers_cover(stop["headline"], beside, stop)
+        code, out, err, lookup = _run([
+            "util", "next-command", str(repo.plan), "--blocked", "implement",
+            "--host", "codex"], capsys)
+        assert code == 0, err
+        resume = lookup["user_resume"]
+        assert resume["flags"] == ["--resume", "--human-task", "T001=done"]
+        assert [a["flags"] for a in resume["answers"]] == [
+            ["--resume", "--human-task", "T001=skip"]]
+        assert resume["answers"][0]["command"].endswith(
+            "--resume --human-task T001=skip")
+        markdown = resume["markdown"]
+        assert markdown.index("T001=done") < markdown.index(
+            "Or answer the stop with one of these:") < markdown.index("T001=skip")
+        # The servers still swap in the line beside the section.
+        assert resume["error_line"] == result["error"]
+        assert resume["error_beside_section"] == beside
+        # The printed block offers it too.
+        assert "if you will not do T001" in _err_block(repo, capsys)
+
+    def test_the_decline_completes_the_run(self, repo, capsys):
+        from utils.write_batch_scheduler import ANSWERED_SKIP_PREFIX
+
+        leg, _result = self._gate(repo, capsys)
+        code, out, err, result = _run([
+            "implement", str(repo.plan), "--yes", *leg, "--resume",
+            "--human-task", "T001=skip"], capsys)
+        assert code == 0, err
+        assert result["state"] == "done", result
+        state = _state(repo)
+        assert state["task_status"] == {
+            "T001": "skipped", "T002": "skipped", "T003": "skipped"}
+        reasons = state["task_status_reasons"]
+        assert reasons["T001"].startswith(f"{ANSWERED_SKIP_PREFIX}T001=skip")
+        assert reasons["T002"].startswith("skipped — depends on skipped task T001")
+        assert "implement" in (state.get("phases_completed") or {})
+        summary = (output_dir_path(repo.plan) / "implement" / "summary.md").read_text()
+        assert "## Skipped at your request" in summary
+        assert "## Manual Tasks (Deferred)" not in summary
+        assert "Waiting On A Manual Task" not in summary
+        if "--exec-subagents" in leg:
+            # The closing line says what the run skipped.
+            assert ("phase complete in 0s · T001 skipped at your request; "
+                    "T002, T003 skipped with a skipped task") in out + err
+        # Nothing is owed: no manual task left for the user.
+        step = result.get("user_next_step") or {}
+        assert not step.get("manual_tasks"), step
+
+    def test_the_native_gate_offers_the_decline(self, repo, capsys):
+        leg, result = self._gate(repo, capsys, native=True)
+        assert "--human-task T001=skip" in result["error"], result["error"]
+        code, out, err, lookup = _run([
+            "util", "next-command", str(repo.plan), "--after", "implement",
+            "--host", "claude-code"], capsys)
+        assert code == 0, err
+        section = _section(out)
+        assert section.index("--resume --human-task T001=done") < section.index(
+            "--resume --human-task T001=skip"), section
+        assert "if you will not do T001 (Create the module)" in section
+        code, out, err, _r = _run(["status", str(repo.plan)], capsys)
+        lines = out.splitlines()
+        answer = next(i for i, line in enumerate(lines)
+                      if "or answer the stop with:" in line)
+        assert lines[answer].rstrip().endswith("--resume --human-task T001=skip")
+        assert "if you will not do T001" in lines[answer + 1]
+        # A tool route's lookup of the same stop, with no stop record.
+        code, out, err, blocked = _run([
+            "util", "next-command", str(repo.plan), "--blocked", "implement",
+            "--host", "claude-code"], capsys)
+        assert code == 0, err
+        resume = blocked["user_resume"]
+        assert resume["flags"] == ["--resume", "--human-task", "T001=done"]
+        assert [a["flags"] for a in resume["answers"]] == [
+            ["--resume", "--human-task", "T001=skip"]]
+        assert "--human-task T001=skip" in resume["markdown"]
+
+    def test_the_native_decline_completes_the_emit(self, repo, capsys):
+        leg, _result = self._gate(repo, capsys, native=True)
+        code, out, err, result = _run([
+            "implement", str(repo.plan), "--yes", *leg, "--resume",
+            "--human-task", "T001=skip"], capsys)
+        assert code == 0, err
+        assert "[MANUAL_GATE]" not in out
+        assert "Skipped at your request" in out
+        assert "T001 Create the module: skipped — you answered --human-task T001=skip" in out
+        assert "Deferred tasks (" not in out
+
+
+def _err_block(repo, capsys) -> str:
+    """The exit-3 block a re-run of the gated executor prints."""
+    code, out, err, _result = _run([
+        "implement", str(repo.plan), "--yes", "--exec-subagents",
+        "--host", "codex", "--resume"], capsys)
+    assert code == 3, err
+    return err
