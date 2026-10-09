@@ -2799,8 +2799,9 @@ def state_apply_views(
     host's loop is going. ``{phase, phase_dir, completed,
     in_progress_since, batches_recorded, batches_total}`` (plus
     ``declined_items`` / ``skipped_items`` when a batch's record names one,
-    fix round 22, and ``items_applied`` / ``items_total`` / ``applied_to``
-    once a record names one of its items, fix round 28) in workflow order;
+    fix round 22, ``items_applied`` / ``items_total`` / ``applied_to``
+    once a record names one of its items, fix round 28, counted over the
+    run, fix round 29) in workflow order;
     *only* limits it to one phase (``--phase``). Read-only.
     """
     from .metrics import _current_run_id
@@ -2992,18 +2993,31 @@ def _native_apply_not_applied(
     batch-done --declined`` was on no ``status`` surface). Read from
     ``processed_<phase dir>``: a record of the review the phase's
     ``write_tasks.json`` applies (its ``grouped_sha256``), or, for a record
-    or a task without that stamp, one whose item a current batch holds.
+    or a task without that stamp, one whose item the run handed out.
     ``{}`` when nothing applies or either cannot be read.
 
     Fix round 28 (live run 12 #4, Claude Code decline): the block printed
     "1 declined by its batch (not applied): …" with no "2/3 items applied;"
-    before it, which the executor's line has. ``items_total`` is every item
-    the batches of ``write_tasks.json`` hold, ``items_applied`` those a
-    record of this run says ``applied`` (as the executor counts an applied
-    batch's items less the ones it declined or skipped); both are left out
-    until a record of this run names one of them. ``applied_to`` is the one
-    file a single-target phase's batches all declare, from the repository
-    root, as the executor names it."""
+    before it, which the executor's line has. ``items_applied`` counts the
+    items a record of this run says ``applied`` (as the executor counts an
+    applied batch's items less the ones it declined or skipped); both are
+    left out until a record of this run names one of its items.
+    ``applied_to`` is the one file a single-target phase's batches all
+    declare, from the repository root, as the executor names it.
+
+    Fix round 29 (review of round 28): the run is the file's ``native_run``
+    (``write_phase_bridge.native_run_record``), not the file's batches,
+    which a native ``--resume`` cuts down to the ones still to run: right
+    after a resume's emit the count was gone, and once its batch was
+    recorded it read "1/1 items applied" for a phase that applied 3 of 4.
+    ``items_total`` is every item the run handed out (with any item a
+    record of this run names), and a record written before the run started
+    (``started_at``) is an earlier run's: a bare re-run of a completed
+    phase read the earlier run's "4/4 items applied" before it recorded
+    anything. A file without ``native_run`` reads as before: its batches'
+    items, every record of the review."""
+    from .state_manager import _parse_completion_time
+
     try:
         document = json.loads((directory / _WRITE_TASKS).read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001 - advisory
@@ -3022,34 +3036,46 @@ def _native_apply_not_applied(
         stamp = stamp or str(inputs.get("grouped_sha256") or "")
         for item in task.get("expected_ids") or []:
             holder.setdefault(str(item), str(task.get("task_id") or ""))
+    run = document.get("native_run")
+    run = run if isinstance(run, dict) else {}
+    run_items = [str(i) for i in run.get("items") or [] if str(i)] if isinstance(
+        run.get("items"), list) else []
+    items: Dict[str, None] = dict.fromkeys([*run_items, *holder])
+    started = _parse_completion_time(run.get("started_at"))
+
+    def _before(entry: Dict[str, Any], when: Any) -> bool:
+        written = _parse_completion_time(entry.get("timestamp"))
+        return when is not None and written is not None and written < when
+
     out: Dict[str, Any] = {}
     applied = 0
     on_record = False
     for item, entry in processed.items():
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or _before(entry, started):
             continue
         details = entry.get("details") if isinstance(entry.get("details"), dict) else {}
         recorded = str(details.get("grouped_sha256") or "")
         if stamp and recorded:
             if recorded != stamp:
                 continue
-        elif str(item) not in holder:
+        elif str(item) not in items:
             continue
-        if str(item) in holder:
-            on_record = True
-            applied += entry.get("status") == "applied"
-        key = {"declined": "declined_items", "skipped": "skipped_items"}.get(
-            entry.get("status"))
+        status = entry.get("status")
+        task_id = str(details.get("task_id") or holder.get(str(item)) or "")
+        items.setdefault(str(item), None)
+        on_record = True
+        applied += status == "applied"
+        key = {"declined": "declined_items", "skipped": "skipped_items"}.get(status)
         if key is None:
             continue
         out.setdefault(key, []).append({
-            "task_id": str(details.get("task_id") or holder.get(str(item)) or ""),
+            "task_id": task_id,
             "id": str(item),
             "reason": str(details.get("reason") or ""),
         })
     if on_record:
         out["items_applied"] = applied
-        out["items_total"] = len(holder)
+        out["items_total"] = len(items)
         target = _native_single_target(tasks, directory) if (
             phase in _SINGLE_TARGET_APPLY_PHASES) else None
         if target:
