@@ -635,7 +635,7 @@ class TestInternalRetryEnvelopeDeclarations:
         "name",
         [
             n for n in _envelope_sweep_names()
-            if n not in ("claude-code", "codex", "copilot", "gemini",
+            if n not in ("claude-code", "cline", "codex", "copilot", "gemini",
                          "goose", "grok", "kimi",
                          "muse", "omp", "pi", "qwen-code", "vibe")
         ],
@@ -725,6 +725,17 @@ class TestInternalRetryEnvelopeDeclarations:
         assert "API_TIMEOUT_MS" not in provider.get_env("sonnet")
         assert provider.internal_retries.max_wall_s is None
         assert provider.internal_retries.max_requests == 4
+
+    def test_cline_declares_its_measured_ladder(self, registry):
+        """Six requests on a 500, a 429 or a zero-byte body, 429 retried by
+        cline itself, no statable wall (measured on 3.0.70, 2026-10-09:
+        `tests/fixtures/cline/manifest.yaml`)."""
+        envelope = registry["cline"].internal_retries
+
+        assert envelope is not None
+        assert envelope.max_requests == 6
+        assert envelope.retries_rate_limit is True
+        assert envelope.max_wall_s is None
 
     def test_codex_declares_thirty_requests(self, registry):
         """(stream+1) × (request+1), defaults 4 and 5 — measured, not inferred."""
