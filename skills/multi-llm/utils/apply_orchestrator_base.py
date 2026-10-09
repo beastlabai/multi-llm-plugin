@@ -3698,6 +3698,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             return None
         from .write_phase_bridge import (
             materialize_write_tasks,
+            native_run_record,
             write_task_file_for_phase,
         )
 
@@ -3723,10 +3724,16 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # than an earlier executor run's `.status.json`.
         from .host_capabilities import resolve_host_id
 
+        # Fix round 29: and with the run its batches belong to, read before
+        # this rewrite, so `status` counts what the whole run handed out
+        # across a `--resume` and none of an earlier run's records.
+        run = native_run_record(
+            phase_dir, tasks, resume=bool(getattr(self.args, "resume", False)))
         return write_task_file_for_phase(
             kind=self.write_kind, tasks=tasks, phase_dir=phase_dir,
             plan_file=self.plan_path, tasks_file=tasks_file, grouped_file=grouped,
             native_host=resolve_host_id(explicit=self._host_id()),
+            native_run=run,
         )
 
     def _refuse_unrecorded_native_resume(self) -> None:

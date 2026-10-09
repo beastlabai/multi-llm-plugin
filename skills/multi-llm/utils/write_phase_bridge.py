@@ -270,6 +270,71 @@ def materialize_write_tasks(
     return tasks
 
 
+#: ``write_tasks.json``'s record of the native apply run its batches belong
+#: to (fix round 29): ``{started_at, items, emitted_at}``. A native
+#: ``--resume`` re-materializes the file with only the batches still to run,
+#: so the file alone no longer says what the run handed out; and a bare
+#: re-run keeps the earlier run's ``processed_<phase>`` records. ``status``
+#: counts the run's ``items`` and the records written since ``started_at``
+#: (``run_status._native_apply_not_applied``).
+NATIVE_RUN_KEY = "native_run"
+
+
+def native_run_record(
+    phase_dir: str,
+    tasks: Sequence[Dict[str, Any]],
+    *,
+    resume: bool,
+    now: Optional[str] = None,
+) -> Dict[str, Any]:
+    """The :data:`NATIVE_RUN_KEY` record the native emit of *tasks* writes.
+
+    ``started_at`` is when the run began and ``items`` every item it handed
+    out, in order; ``emitted_at`` is when this file was written. A
+    ``--resume`` (*resume*) of the review the previous native file applied
+    (the same ``inputs.grouped_sha256``) carries that file's ``started_at``
+    and adds its own items to that file's ``items``. A ``--resume`` with no
+    such file before it (an executor run's, or one written before this
+    record existed) records ``started_at: None``, so every record of the
+    review counts, as it did before. Any other emit — a first run, a bare
+    re-run, ``--fresh`` — starts a run: ``started_at`` is *now*."""
+    from datetime import datetime
+
+    now = now or datetime.now().isoformat()
+    items: List[str] = []
+    for task in tasks:
+        for item in (task.get("expected_ids") or []) if isinstance(task, dict) else []:
+            if str(item) and str(item) not in items:
+                items.append(str(item))
+    if not resume:
+        return {"started_at": now, "items": items, "emitted_at": now}
+    previous: Any = None
+    try:
+        import json
+
+        with open(os.path.join(phase_dir, WRITE_TASK_FILENAME), encoding="utf-8") as handle:
+            previous = json.load(handle)
+    except (OSError, ValueError):
+        previous = None
+    run = previous.get(NATIVE_RUN_KEY) if isinstance(previous, dict) else None
+
+    def _stamp(inputs: Any) -> str:
+        return str(inputs.get("grouped_sha256") or "") if isinstance(inputs, dict) else ""
+
+    current = next((_stamp(t.get("inputs")) for t in tasks if isinstance(t, dict)), "")
+    if (not isinstance(run, dict) or previous.get("leg") != NATIVE_LEG
+            or _stamp(previous.get("inputs")) != current):
+        return {"started_at": None, "items": items, "emitted_at": now}
+    earlier = [str(i) for i in (run.get("items") or []) if str(i)] if isinstance(
+        run.get("items"), list) else []
+    started = run.get("started_at")
+    return {
+        "started_at": started if isinstance(started, str) and started else None,
+        "items": earlier + [item for item in items if item not in earlier],
+        "emitted_at": now,
+    }
+
+
 def write_task_file_for_phase(
     *,
     kind: str,
@@ -279,6 +344,7 @@ def write_task_file_for_phase(
     grouped_file: Optional[str] = None,
     tasks_file: Optional[str] = None,
     native_host: Optional[str] = None,
+    native_run: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Persist the phase's materialized write tasks. Returns the path written.
 
@@ -297,6 +363,10 @@ def write_task_file_for_phase(
     behind when the phase goes on natively; ``status`` reads the stamp to
     show the native run as the current one (:data:`NATIVE_LEG`). The
     executor leg passes none, so its rewrite drops the stamp.
+
+    *native_run* (the native apply emit's, fix round 29;
+    :func:`native_run_record`) is written beside that stamp as
+    :data:`NATIVE_RUN_KEY`.
     """
     extra: Dict[str, Any] = {
         "total_batches": len(tasks),
@@ -306,6 +376,8 @@ def write_task_file_for_phase(
     if native_host is not None:
         extra["leg"] = NATIVE_LEG
         extra["host"] = str(native_host)
+        if native_run is not None:
+            extra[NATIVE_RUN_KEY] = dict(native_run)
     document = make_task_file(
         kind=kind,
         tasks=list(tasks),
