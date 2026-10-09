@@ -845,6 +845,15 @@ class TestTheWritePhasesResumeWithResume:
         assert "--force" not in tokens and "--reaggregate" not in tokens
         assert tokens[-4:-1] == ["--host", "opencode", "--detach"]
 
+    def test_full_resumes_with_resume_and_never_force(self):
+        """A stopped `full` run names `full <plan> --resume` in its own row-14
+        stop; `status` used to fall through to `--force`, which re-enters
+        every recorded phase instead of continuing from the first open one."""
+        tokens = self._resume("full", ["--host", "opencode", "--quick"])
+        assert tokens[-1] == "--resume"
+        assert "--force" not in tokens
+        assert tokens[-4:-1] == ["--host", "opencode", "--quick"]
+
     def test_the_selection_flags_survive_ahead_of_the_verb(self):
         tokens = self._resume(
             "apply-task-suggestions", ["--host", "opencode", "--claude-decide"]
