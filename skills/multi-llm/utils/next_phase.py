@@ -623,6 +623,27 @@ def manual_gate_decline_answers(implement: Mapping[str, Any]) -> List[Dict[str, 
     return answers
 
 
+def gate_resume_suggested(workflow: Mapping[str, Any]) -> List[str]:
+    """The flags of implement's resume when it, not the payload's
+    ``suggested_next``, is the next step, else ``[]`` (fix round 29, review
+    of round 28 #4): implement completed with code tasks still waiting on a
+    manual task the user can do now (:func:`manual_gate_flags`) and the
+    suggestion is a phase after it. ``next_phase_commands`` then leads with
+    that resume, the suggested phase kept as the other way on, as its
+    ``--after implement`` walk does, and ``status``'s ``suggested next``
+    line says the same."""
+    phases = workflow.get("phases") or {}
+    implement = phases.get("implement") or {}
+    primary = workflow.get("suggested_next")
+    if implement.get("status") != "completed" or not primary:
+        return []
+    order = list(_skill_module("modes").PREREQUISITE_PHASES)
+    if ("implement" not in order or primary not in order
+            or order.index(primary) <= order.index("implement")):
+        return []
+    return manual_gate_flags(implement)
+
+
 def instead_why(phase: str) -> str:
     """The why above the way on that stays beside the resume running code
     tasks left waiting on a manual task (fix round 28)."""
@@ -1155,6 +1176,11 @@ def next_phase_commands(
             ))
         return tuple(steps)
 
+    if start is None and gate_resume_suggested(workflow):
+        # Fix round 29 (review of round 28 #4): implement finished with code
+        # tasks waiting on a manual task the user can do now; the answer
+        # leads with its resume, as the `--after implement` walk's does.
+        start = "implement"
     if start is None:
         primary = workflow.get("suggested_next")
         if primary is None:
