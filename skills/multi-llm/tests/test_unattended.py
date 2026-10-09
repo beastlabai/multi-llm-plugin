@@ -230,6 +230,15 @@ class TestDecisionInputContract:
                     f"{spec.choices} (D5a: values are validated, not guessed)"
                 )
 
+    @pytest.mark.parametrize("flag", ["--models", "--quick"])
+    def test_full_owns_the_model_selection_flags_it_forwards(self, flag):
+        """Row 2 lists `full`, which parses `--models` and `--quick` and
+        forwards them to its fan-out phases, so its script is one of the
+        parsers that answers the row."""
+        spec = next(s for s in un.DECISION_FLAGS if s.name == flag)
+        assert "full_workflow_orchestrator.py" in spec.parsers
+        assert _accepts("full_workflow_orchestrator.py", flag)
+
     def test_skip_prerequisites_is_defined_once_in_the_shared_parent(self):
         assert "--skip-prerequisites" in _parent_parser_options()
 

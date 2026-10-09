@@ -3711,12 +3711,18 @@ _REAGGREGATE_MODES = ("review-plan", "review-tasks", "review-code")
 #: on a failed ``apply-task-suggestions``: the log said ``--resume``, this line
 #: said ``--force``, and the session model ran ``--claude-decide --force`` twice
 #: before a human typed ``--resume`` by hand.
+#:
+#: ``full`` resumes with ``--resume`` too, the verb its own row-14 stop names
+#: (``full <plan> --resume``, continue from the first phase not recorded). Under
+#: ``full`` ``--force`` re-enters every recorded phase, so a stopped ``full`` run
+#: told to re-run with it started over instead of continuing.
 _RESUME_VERB_BY_MODE = {
     "generate-tasks": "--yes",
     "apply-suggestions": "--resume",
     "apply-task-suggestions": "--resume",
     "apply-code-fixes": "--resume",
     "implement": "--resume",
+    "full": "--resume",
 }
 
 #: The modes whose progress mirror is ``write_subagents``
