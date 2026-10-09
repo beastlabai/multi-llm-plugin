@@ -396,6 +396,13 @@ class FakeState:
     def is_phase_completed(self, phase):
         return phase in self.state.get("phases_completed", {})
 
+    def completion_predates(self, apply, review):
+        # The real rule over this dict: `_finalize` asks it before keeping an
+        # apply phase's old completion date (a "now" stamp parses to nothing,
+        # so it keeps the date, as the real rule does for an unparseable one).
+        from utils.state_manager import StateManager
+        return StateManager.completion_predates(self, apply, review)
+
     def refresh_plan_hash(self):
         """F5: `_finalize` calls this beside `mark_phase_completed`. Recorded
         rather than computed for real, since this fake carries no plan hash of
@@ -2362,6 +2369,53 @@ class TestScheduler:
             phase = PHASE_BY_WRITE_KIND[kind]
             assert prereq.PHASE_PREREQUISITES[phase][0] == review
         assert "implement" not in REVIEW_PHASE_BY_WRITE_KIND
+
+    def _a_completed_apply_then_a_resume_that_dispatches_nothing(
+        self, env, review_after_apply,
+    ):
+        from datetime import datetime, timedelta
+
+        from utils.state_manager import StateManager
+
+        state = StateManager(env.plan)
+        state.mark_phase_completed("review-plan")
+        state.save()
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        assert env.scheduler([env.apply_task(0)], state=state).run().exit_code == 0
+        stamps = state.state["phases_completed"]
+        if review_after_apply:
+            # The review ran again after the apply finished, both in the past.
+            now = datetime.now()
+            stamps["apply-suggestions"] = (now - timedelta(seconds=2)).isoformat()
+            stamps["review-plan"] = (now - timedelta(seconds=1)).isoformat()
+        applied_at = stamps["apply-suggestions"]
+        state.save()
+        result = env.scheduler([env.apply_task(0)], state=state, resume=True).run()
+        assert result.exit_code == 0
+        assert all(outcome.skipped for outcome in result.outcomes), result.outcomes
+        return applied_at, state.state["phases_completed"]
+
+    def test_a_resume_that_dispatches_nothing_keeps_the_apply_date(self, env):
+        """Fix round 14: an apply phase resumed with nothing to dispatch changed
+        nothing, so its completion keeps its date."""
+        applied_at, stamps = (
+            self._a_completed_apply_then_a_resume_that_dispatches_nothing(
+                env, review_after_apply=False))
+        assert stamps["apply-suggestions"] == applied_at
+
+    def test_but_never_a_date_older_than_its_review(self, env):
+        """2026-10-09: a `--force` review that re-reports every batch byte for
+        byte leaves an apply that keeps them all and dispatches nothing. Its
+        findings are applied, so the apply is stamped after the review; the old
+        date read as "review not applied yet" and no later `improve-plan` or
+        `improve-code` reached `[ALREADY_COMPLETE]`."""
+        applied_at, stamps = (
+            self._a_completed_apply_then_a_resume_that_dispatches_nothing(
+                env, review_after_apply=True))
+        assert stamps["apply-suggestions"] != applied_at
+        assert stamps["apply-suggestions"] > stamps["review-plan"]
 
     def test_finalize_re_stamps_plan_hash_so_the_next_session_sees_no_change(
         self, env
