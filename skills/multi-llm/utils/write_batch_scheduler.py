@@ -1947,9 +1947,10 @@ def repeated_findings_for(
     """``{check id: findings}`` a code task's own failing check may be the
     same finding as: each check task of the run with findings on record
     (:func:`reported_checks_on_record`), wherever it sits in the graph,
-    except the accepted checks upstream of the task (those are
-    :func:`accepted_findings_for`'s, read first) and any check whose
-    failure the task's own text makes its job (:func:`task_owns_the_check`).
+    except every check the user accepted (:func:`accepted_checks_on_record`)
+    and any check whose failure the task's own text makes its job
+    (:func:`task_owns_the_check`). *tasks* is the decomposition, as
+    :func:`accepted_findings_for` takes it.
 
     Fix round 28 (live run 12, OpenCode stop accept 01): T001's runner ran
     T002's release check unprompted, and the failure T002 exists to report
@@ -1957,16 +1958,21 @@ def repeated_findings_for(
     "T001: a check it ran fails". Split with :func:`split_repeated_findings`
     — the same strict comparison, nothing looser — what matches is recorded
     as repeating that check's finding (``batch_check_repeats``), never as the
-    task's own failure, whichever of the two finished first."""
+    task's own failure, whichever of the two finished first.
+
+    Fix round 29 (review of round 28, checks #2): an accepted check is never
+    one, upstream of the task or not. Its findings are the accepted ones, and
+    only a task the acceptance released was told they are known and not its
+    own (:func:`accepted_findings_for`, read first); a task it never released
+    that reports one again keeps it as its own failure (round 23's scope),
+    the same with F3's annotation or without it. T002 not yet accepted when
+    T001 recorded (run 12's case) still makes T001's finding a repeat."""
     task_id = str(task.get("task_id") or "")
-    upstream_accepted = {
-        check_id for check_id, _title, _findings
-        in accepted_upstream_checks(tasks, task_id, state)
-    }
+    accepted = accepted_checks_on_record(state)
     return {
         check_id: findings
         for check_id, findings in reported_checks_on_record(state).items()
-        if check_id != task_id and check_id not in upstream_accepted
+        if check_id != task_id and check_id not in accepted
         and not task_owns_the_check(task, check_id, findings)
     }
 
