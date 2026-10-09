@@ -8,14 +8,16 @@
 # it.
 schema_version: 1
 provider: cline
-cli_version: "3.0.69"
-captured: "2026-10-08"
+cli_version: "3.0.70"
+captured: "2026-10-09"
 method: >-
-  Re-run on cline 3.0.69 on 2026-10-08 by the same rig (the probe's
+  Re-run on cline 3.0.70 on 2026-10-09 by the same rig (the probe's
   `incontainer.py`, one container per row, the same prompt, scenarios and
-  failserver modes) in the pinned image built from tests/container/Dockerfile at
-  the cli-versions.lock pins; the set was first captured on 3.0.55 on 2026-08-19
-  in mllm-e2e:local, and `ClineProvider.build_command`'s argv has not changed
+  failserver modes; the scratch side now a docker volume, since Docker refuses
+  to bind-mount a /tmp scratch dir) in the pinned image built from
+  tests/container/Dockerfile at the cli-versions.lock pins, as it was on 3.0.69
+  on 2026-10-08; the set was first captured on 3.0.55 on 2026-08-19 in
+  mllm-e2e:local, and `ClineProvider.build_command`'s argv has not changed
   since. §6 step 5, with `--network none`, the rig
   mounted read-only at /rig, and NO credential — the only key in the child's
   environment is the wrapper's per-exec `mllm-stub-<id>` string, which is
@@ -37,23 +39,31 @@ notes: >-
   incidental. (1) cline exits **1** on all nine measured failures — 401, 404,
   400 context-length, 500-forever, 429-forever, a truncated body, a zero-byte
   response, a 200 carrying an error object, and an empty completion — at 3.0.55
-  and again at 3.0.69. That is a
+  and again at 3.0.69 and 3.0.70. That is a
   CHANGE from the 3.0.39 measurement the adapter's own comment records ("cline
   **exits 0**", 2026-08-16), and it is why `exit-zero-failure` is
   not-applicable below. (2) The diagnosis rides BOTH channels: stdout carries
   the JSONL `run_result` with `finishReason: "error"`, and stderr carries a
   one-line `{"type":"error","message":…}` copy of the same text. (3) At 3.0.69
-  that one line is ALL stderr carries (91–465 bytes on a failure) and the green
-  run's stderr is EMPTY: the three AI SDK deprecation warnings 3.0.55 wrote ahead
-  of everything (938–1029 bytes) are gone. stderr is still never the only
-  carrier, so a parser reading stdout alone loses nothing.
+  and 3.0.70 that one line is ALL stderr carries (91–465 bytes on a failure)
+  and the green run's stderr is EMPTY: the three AI SDK deprecation warnings
+  3.0.55 wrote ahead of everything (938–1029 bytes) are gone. stderr is still
+  never the only carrier, so a parser reading stdout alone loses nothing.
+  3.0.70 left every row's bytes where 3.0.69 put them: each file is the same
+  length, and the lines differ only in ids, timestamps, `durationMs` and the
+  Bun bundle chunk named in a stack trace (`chunk-wzbf2d52.js` ->
+  `chunk-4eeszfc5.js`). Its `--help` moved `--retries` from a default of 6 to
+  3, which does NOT touch the HTTP retry ladder below: `--retries` counts the
+  agent loop's consecutive mistakes, and a 500-forever run with `--retries 1`
+  and with `--retries 6` made the same 6 requests over 63.0 s as the
+  adapter's argv, which passes none.
 
 rows:
   success:
     stdout: success.stdout.txt
     stderr: success.stderr.txt
     exit_code: 0
-    wall_s: 0.99
+    wall_s: 0.73
     requests: 1
     notes: >-
       Nine JSONL lines: `hook_event` agent_start, `agent_event` iteration_start /
@@ -77,13 +87,14 @@ rows:
     stdout: truncated.stdout.txt
     stderr: truncated.stderr.txt
     exit_code: 1
-    wall_s: 0.95
+    wall_s: 0.72
     requests: 1
     notes: >-
       failserver `--mode trunc`: 200 headers promising a full Content-Length, a
-      60-byte prefix of the body, then the socket closes. At 3.0.69 cline makes
-      **one** request, does not retry, and reports `Response stream ended
-      without a finish reason.` (`errorClass: "unknown"`) in 1.0 s. 3.0.55 retried
+      60-byte prefix of the body, then the socket closes. At 3.0.69 and 3.0.70
+      cline makes **one** request, does not retry, and reports `Response stream
+      ended without a finish reason.` (`errorClass: "unknown"`) in under 1 s
+      (0.95 s, 0.72 s). 3.0.55 retried
       it three times inside 2.4 s and reported `Model returned empty response`,
       the same words as an empty completion; 3.0.69 tells the two apart (see the
       README), though the wire condition is still not named — no decode error, no
@@ -104,7 +115,7 @@ rows:
     stdout: ephemeral-only.stdout.txt
     stderr: ephemeral-only.stderr.txt
     exit_code: 1
-    wall_s: 1.50
+    wall_s: 1.35
     requests: 3
     notes: >-
       An all-noise run, produced by a stub scenario whose answer is the EMPTY
@@ -112,10 +123,11 @@ rows:
       filters — `hook_event`, `agent_event` iteration_start/usage, `agent_event`
       error — and the run must therefore be a failure rather than an
       empty-string success. cline itself refuses to treat an empty completion as
-      an answer: it retries three times (0.0 s, 0.26 s, 0.54 s) and then reports
-      `Model returned empty response`. 3.0.55 said the same of a truncated body
-      and a 200 error object; 3.0.69 says it of this row alone, and this is now
-      the one failure row with no `"errorClass":` key.
+      an answer: it makes three requests (3.0.69: 0.0 s, 0.26 s, 0.54 s; 3.0.70:
+      0.0 s, 0.30 s, 0.55 s) and then reports `Model returned empty response`.
+      3.0.55 said the same of a truncated body and a 200 error object; 3.0.69 and
+      3.0.70 say it of this row alone, and this is the one failure row with no
+      `"errorClass":` key.
     expect:
       salvage: none
       success: false
@@ -129,12 +141,12 @@ rows:
     stdout: multi-assistant.stdout.txt
     stderr: multi-assistant.stderr.txt
     exit_code: 0
-    wall_s: 0.99
+    wall_s: 0.73
     requests: 1
     synthesized: true
     provenance: >-
-      Derived from `success.stdout.txt` (re-derived from the 3.0.69 capture on
-      2026-10-08 by the same recipe) by inserting a SECOND `run_result` line
+      Derived from `success.stdout.txt` (re-derived from the 3.0.70 capture on
+      2026-10-09 by the same recipe, as from 3.0.69's on 2026-10-08) by inserting a SECOND `run_result` line
       ahead of the real one, built by json.loads-ing cline's own line, replacing
       only its `text` value with a decoy array, and re-serialising with
       `separators=(',',':')` — verified byte-identical to the original line
@@ -161,12 +173,13 @@ rows:
     stdout: error-envelope.stdout.txt
     stderr: error-envelope.stderr.txt
     exit_code: 1
-    wall_s: 0.87
+    wall_s: 0.75
     requests: 1
     notes: >-
       failserver `--mode errbody`: HTTP **200** whose body is a provider error
       object carrying the 401 wording. The measured result is worse than "the
-      error text is served as the answer" — the text is LOST. At 3.0.69 cline's
+      error text is served as the answer" — the text is LOST. At 3.0.69 and
+      3.0.70 cline's
       openai-compatible transport reads the JSON body as a stream that never
       finished and reports `Response stream ended without a finish reason.` after
       ONE request (3.0.55 called it `Model returned empty response` and retried
@@ -190,7 +203,8 @@ rows:
       a truncated body, a zero-byte response, a 200 carrying an error object and
       an empty completion (nine modes, nine captures, all `exit_code: 1`; the
       per-row meta is in plans/harness-expansion/probe-out/cline/*.meta.json) —
-      and again at 3.0.69 (the 2026-10-08 re-capture, nine for nine).
+      and again at 3.0.69 (the 2026-10-08 re-capture, nine for nine) and 3.0.70
+      (2026-10-09, nine for nine).
       `ClineProvider`'s comment records exit **0** at 3.0.39 with an invalid
       OPENROUTER_API_KEY, so the exit-0 shape existed and no longer does. The
       declared `exit_zero_failure_markers` are NOT dead: classify_streams
@@ -204,9 +218,9 @@ rows:
       does exit non-zero with its whole diagnosis on stdout (that is every
       failure row above), but stderr is NEVER empty on a failure. It carries a
       one-line `{"type":"error","message":…}` copy of the same text on all nine
-      failure modes — at 3.0.69 nothing else (3.0.55 put three AI SDK
+      failure modes — at 3.0.69 and 3.0.70 nothing else (3.0.55 put three AI SDK
       deprecation warnings ahead of it); the smallest failure stderr measured at
-      3.0.69 is 91 bytes and the largest 465. The half that IS the trap — a
+      3.0.69 and 3.0.70 is 91 bytes and the largest 465. The half that IS the trap — a
       nonzero exit whose diagnosis is
       on stdout must not be read as an answer — is pinned by all eight failure
       rows here, each asserting `success: false`.
@@ -215,18 +229,18 @@ rows:
     not_applicable: >-
       Unreachable while cline runs at all: the `hook_event` agent_start and
       `agent_event` iteration_start lines are written before the first HTTP
-      request, so the smallest capture in this set is **1319 bytes** on stdout
-      and none is smaller. Zero bytes on both channels would mean the process was
-      killed before it wrote a line, which is a harness artifact rather than a
-      CLI behaviour — and manufacturing one with `timeout(1)` is the known
-      zero-byte-hang trap §6 step 3 forbids. parse_output's no-run_result branch
+      request, so the smallest capture in this set is **1257 bytes** on stdout
+      (`stall`, 3.0.70; 1319 before it) and none is smaller. Zero bytes on both
+      channels would mean the process was killed before it wrote a line, which
+      is a harness artifact rather than a CLI behaviour — and manufacturing one
+      with `timeout(1)` is the known zero-byte-hang trap §6 step 3 forbids. parse_output's no-run_result branch
       is still covered, by the fallback assertion in test_providers.py.
 
   auth-error:
     stdout: auth-error.stdout.txt
     stderr: auth-error.stderr.txt
     exit_code: 1
-    wall_s: 1.00
+    wall_s: 0.71
     requests: 1
     notes: >-
       failserver `--mode 401`. **One** request — no retry, terminal — and the
@@ -246,7 +260,7 @@ rows:
       sentence passed through, which is why the pattern set needs one entry per
       upstream rather than one per CLI. Checked against every capture in this
       directory — the phrase occurs here and nowhere else, so no other cell
-      moves. At 3.0.69 cline also tags this error `errorClass: "auth"` (3.0.55:
+      moves. At 3.0.69 and 3.0.70 cline also tags this error `errorClass: "auth"` (3.0.55:
       `"unknown"`); the adapter reads the key's presence, never its value.
     expect:
       salvage: none
@@ -261,16 +275,22 @@ rows:
     stdout: rate-limit.stdout.txt
     stderr: rate-limit.stderr.txt
     exit_code: 1
-    wall_s: 63.11
+    wall_s: 63.00
     requests: 6
     notes: >-
       failserver `--mode 429`, fail-forever. cline **does** retry a 429
-      internally — six requests over 63.1 s at 3.0.69 (0, 2, 6, 14, 30, 62 s:
-      backoff doubling from 2 s), where 3.0.55 made three over 7.8 s — so an
-      executor-level re-dispatch of a rate-limited cline slot doubles a wait the
-      CLI already served
-      (§7.6(b)'s rule 6b). The upstream text survives, so `rate limit` in
-      base.rate_limit_patterns matches before the exit-0 marker gets its turn.
+      internally — six requests over 63.1 s at 3.0.69 and 63.0 s at 3.0.70 (0,
+      2, 6, 14, 30, 62 s: backoff doubling from 2 s), where 3.0.55 made three
+      over 7.8 s — so an executor-level re-dispatch of a rate-limited cline slot
+      doubles a wait the CLI already served (§7.6(b)'s rule 6b). Measured on
+      3.0.70 with failserver `--mode 429ra` (no files kept: the bytes are this
+      row's again): a `Retry-After` under 60 s is HONOURED as the gap and the
+      count stays six — `Retry-After: 1` 6 requests over 6.0 s, `30` 150.9 s,
+      `31` 155.9 s, `45` 225.9 s, `59` **295.9 s**, the longest 429 chain
+      measured — while 60 s or more is ignored for the 2 s ladder (`60`, `61`
+      and `120` each 6 requests over ~62.8 s). The upstream text survives, so
+      `rate limit` in base.rate_limit_patterns matches before the exit-0 marker
+      gets its turn.
     expect:
       salvage: none
       success: false
@@ -284,7 +304,7 @@ rows:
     stdout: invalid-model.stdout.txt
     stderr: invalid-model.stderr.txt
     exit_code: 1
-    wall_s: 0.91
+    wall_s: 0.75
     requests: 1
     notes: >-
       failserver `--mode 404`. One request, terminal. The failure NAMES the
@@ -303,7 +323,7 @@ rows:
     stdout: context-overflow.stdout.txt
     stderr: context-overflow.stderr.txt
     exit_code: 1
-    wall_s: 0.96
+    wall_s: 0.73
     requests: 1
     notes: >-
       failserver `--mode ctx` (400, `context_length_exceeded`, the verbatim
@@ -313,7 +333,8 @@ rows:
       `ContextWindowOverflowError` whose message QUOTES the provider's sentence
       in full (`provider reported: …`). Because that quote survives,
       CONTEXT_OVERFLOW_MARKERS matches and the terminal classification is
-      reached with no retry budget spent — one request, 1.0 s.
+      reached with no retry budget spent — one request, under 1 s (3.0.69:
+      0.96 s, 3.0.70: 0.73 s).
     expect:
       salvage: none
       success: false
@@ -330,7 +351,7 @@ rows:
     stdout: zero-body.stdout.txt
     stderr: zero-body.stderr.txt
     exit_code: 1
-    wall_s: 62.95
+    wall_s: 63.00
     requests: 6
     notes: >-
       failserver `--mode empty`: the request is accepted and the socket closed
@@ -348,8 +369,9 @@ rows:
       `connection (?:was )?(?:refused|reset|closed|…)`, which is a better
       reading of the same bytes: a socket dropped after zero body bytes is
       precisely what `connection_error` means. Re-captured on 3.0.69
-      (2026-10-08): the same sentence, now after six requests over 63 s where
-      3.0.55 made three over 7.9 s. (`ECONNRESET` itself is still not
+      (2026-10-08) and 3.0.70 (2026-10-09): the same sentence, after six
+      requests over 63 s (3.0.70: 0, 2, 6, 14, 30, 62 s, the 500 row's ladder)
+      where 3.0.55 made three over 7.9 s. (`ECONNRESET` itself is still not
       in the table — `ECONNREFUSED` is — but it no longer has to be, because the
       sentence in front of it now matches.) omp's `empty` row carries the
       identical Bun/undici sentence and was re-pinned `null` →
@@ -373,16 +395,21 @@ rows:
     stdout: server-error.stdout.txt
     stderr: server-error.stderr.txt
     exit_code: 1
-    wall_s: 62.98
+    wall_s: 62.96
     requests: 6
     notes: >-
-      failserver `--mode 500`, fail-forever — §6.1.1's experiment 2, and the
-      whole internal-retry envelope in one capture: at 3.0.69 **6 requests over
-      63.0 s** (0, 2, 6, 14, 30, 62 s — a 2 s backoff doubling four times), then
-      exit 1; 3.0.55 made 3 requests over 8.0 s (0.0 s, ~1 s, ~6 s).
-      `ClineProvider` declares no `internal_retries` envelope, so the ladder still
-      assumes one request per dispatch (§7.5 rule 6(c)). The row is here rather
-      than under
+      failserver `--mode 500`, fail-forever — §6.1.1's experiment 2: at 3.0.69
+      and again at 3.0.70 **6 requests over 63.0 s** (0, 2, 6, 14, 30, 62 s — a
+      2 s backoff doubling four times), then exit 1; 3.0.55 made 3 requests over
+      8.0 s (0.0 s, ~1 s, ~6 s). 3.0.70's `--retries` (default 3, was 6) does
+      not reach this ladder: the same mode under `--retries 1` and under
+      `--retries 6` made 6 requests over 63.0 s each. Nor is this the whole
+      internal-retry envelope any more: a 429 whose `Retry-After` is under 60 s
+      stretches the same six requests to 295.9 s (`rate-limit`), and a stalled
+      request is one request over 361 s (`stall`). `ClineProvider` still
+      declares no `internal_retries` envelope, so the ladder assumes one
+      request per dispatch (§7.5 rule 6(c)) and makes no admission test. The
+      row is here rather than under
       `exit-zero-failure` because cline's exit code is 1; it classifies
       `runner_error` because OpenAI's 500 sentence ("The server had an error
       while processing your request") matches no member of
@@ -396,3 +423,33 @@ rows:
         - "The server had an error while processing your request. Sorry about that!"
         - '"finishReason":"error"'
       classify_failure: "runner_error"
+
+  stall:
+    stdout: stall.stdout.txt
+    stderr: stall.stderr.txt
+    exit_code: 1
+    wall_s: 361.29
+    requests: 1
+    notes: >-
+      failserver `--mode stall` (accept the request, never answer; `--stall-s`
+      3600), first captured on 3.0.70 (2026-10-09). cline makes **one**
+      request, does not retry it, and gives up after 360 s of its own
+      (`durationMs` 360418; the adapter passes no `-t/--timeout`, whose
+      default is 0, "no timeout") with `The operation timed out.`
+      (`errorClass: "unknown"`), exit 1, the tenth failure mode to exit 1. It
+      is the longest single dispatch measured here, past the six-request 500
+      and 429 ladders, and inside the adapter's 600 s `default_timeout`; a 429
+      chain that ends in a stall (five 59 s `Retry-After` waits, then 360 s)
+      would not be, but that composite is inferred, not measured. Nothing but
+      the error follows `iteration_start`, so this is the smallest capture in
+      the set (1257 bytes on stdout, 86 on stderr). `timed out` is a base
+      timeout pattern, so the row reads `timeout` rather than falling to the
+      adapter's `finishReason` marker.
+    expect:
+      salvage: none
+      success: false
+      error_contains: ["The operation timed out."]
+      raw_contains:
+        - "The operation timed out."
+        - '"finishReason":"error"'
+      classify_failure: "timeout"
