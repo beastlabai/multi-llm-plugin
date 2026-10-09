@@ -6,6 +6,7 @@ from typing import Any, Dict, List, NamedTuple, Optional
 
 from ..json_extractor import extract_json_from_text
 from .base import (
+    InternalRetryEnvelope,
     LLMProvider,
     ReasoningLadder,
     StructuredSchema,
@@ -175,8 +176,8 @@ class ClineProvider(LLMProvider):
     version_cmd = ("cline", "--version")
     #: 3.0.55 is where every fixture in ``tests/fixtures/cline/`` was first
     #: captured — the §6 step-5 probe, ``--network none``, the stub and the
-    #: failserver both running inside the container, no credential — and 3.0.69
-    #: is where they were re-captured (below) and the version
+    #: failserver both running inside the container, no credential — and 3.0.70
+    #: is where they were last re-captured (below, after 3.0.69) and the version
     #: ``tests/container/cli-versions.lock`` pins.
     #:
     #: 3.0.39 is the *other* release this parser has been run against (the ``user
@@ -211,7 +212,8 @@ class ClineProvider(LLMProvider):
     #: ``unknown`` and the warning is skipped. Confirmed against the pinned
     #: binary 2026-08-20 (``docker run --rm --network none --entrypoint
     #: /opt/mllm/real/cline mllm-e2e:local --version``): a bare ``3.0.55`` on
-    #: stdout, which the base :meth:`parse_version` reads without an override.
+    #: stdout, which the base :meth:`parse_version` reads without an override
+    #: (a bare ``3.0.70`` the same way on 2026-10-09).
     #: It is the SLOW probe of the set — cline makes ~10 outbound connects on
     #: ``--version`` alone and takes 8.7 s when egress is blackholed — but that
     #: is well inside ``_run_probe``'s 30 s timeout, and it runs at most once per
@@ -226,7 +228,46 @@ class ClineProvider(LLMProvider):
     #: in one request as ``Response stream ended without a finish reason.``
     #: (was ``Model returned empty response`` after three); and stderr lost its
     #: AI SDK deprecation warnings, so a green run's stderr is empty.
-    verified_version = "3.0.69"
+    #:
+    #: **Moved 3.0.69 -> 3.0.70 on 2026-10-09**, the same way and again with no
+    #: parser change: every file is the length 3.0.69 wrote, the lines differing
+    #: only in ids, timestamps, ``durationMs`` and the bundle chunk a stack trace
+    #: names. 3.0.70's ``--help`` drops ``--retries``' default from 6 to 3, which
+    #: does not touch the HTTP retry ladder: it counts the agent loop's
+    #: consecutive mistakes, and a 500-forever run made 6 requests over 63.0 s
+    #: under ``--retries 1``, ``--retries 6`` and this argv, which passes none.
+    #: Measured on 3.0.70 (``tests/fixtures/cline/manifest.yaml``): a 500, a
+    #: 429 and a zero-byte body take 6 requests at 0/2/6/14/30/62 s, as on
+    #: 3.0.69; a 429's ``Retry-After`` under 60 s is honoured as the gap (59 s:
+    #: 6 requests over 295.9 s), and 60 s or more is ignored for that ladder; a
+    #: stalled request is ONE request that cline gives up on after 360 s
+    #: (``The operation timed out.``, the new ``stall`` row, ``timeout``).
+    #: Nothing measured here reaches ``default_timeout``'s 600 s, though a 429
+    #: chain ending in a stall (295 + 360 s, inferred) would; ``internal_retries``
+    #: below declares what was measured.
+    verified_version = "3.0.70"
+
+    #: §7.6(b), declared 2026-10-09 from the 3.0.70 measurements above (until
+    #: then undeclared, so §7.5 rule 6(c) assumed one request where cline makes
+    #: up to six):
+    #:
+    #: * ``max_requests=6``: a 500, a 429 and a zero-byte body each take 6
+    #:   requests (0/2/6/14/30/62 s), as on 3.0.69; ``--retries`` (default 3 on
+    #:   3.0.70, unset by this argv) counts the agent loop's mistakes and does
+    #:   not move it (6 requests under ``--retries 1`` and ``--retries 6``).
+    #: * ``retries_rate_limit=True``: the 429 row is 6 requests of 429, so rule
+    #:   6(b) adds no identical re-dispatch on top of cline's own chain.
+    #: * ``max_wall_s=None``: no bound this adapter can state. A ``Retry-After``
+    #:   under 60 s is honoured as the gap (59 s: 295.9 s), a stall is one
+    #:   request given up after 360 s, and a chain of the two is not measured;
+    #:   rule 4 then makes no admission test, as for pi.
+    #: * ``configurable_by`` is empty: no flag, env var or setting moving the
+    #:   HTTP ladder was found.
+    internal_retries = InternalRetryEnvelope(
+        max_requests=6,
+        max_wall_s=None,
+        retries_rate_limit=True,
+    )
 
     # §7.2 — per-adapter pattern overrides, EXTENDING the base sets.
     #
