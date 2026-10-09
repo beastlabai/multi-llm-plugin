@@ -563,9 +563,10 @@ def manual_close_note(
     from . import next_phase
 
     # The manual tasks themselves, never a code task skipped with one
-    # (`next_phase.manual_close_ids`, fix round 16).
+    # (`next_phase.manual_close_ids`, fix round 16); while a manual-task gate
+    # holds, the gate's alone (`manual_note_ids`, fix round 29).
     implement = payload.get("phases", {}).get("implement") or {}
-    ids = next_phase.manual_close_ids(implement)
+    ids = next_phase.manual_note_ids(implement)
     if not ids:
         return None
 
@@ -582,6 +583,7 @@ def manual_close_note(
         next_phase.close_command(template, plan_spelling, ids), len(ids),
         # Fix round 28: never "No later phase waits" beside code tasks that do.
         waiting=next_phase.manual_waiting_count(implement, ids),
+        named=next_phase.manual_note_named(implement, ids),
     )
 
 

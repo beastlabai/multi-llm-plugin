@@ -842,3 +842,83 @@ def _err_block(repo, capsys) -> str:
         "--host", "codex", "--resume"], capsys)
     assert code == 3, err
     return err
+
+
+class TestOneRecordDoneCommandAtAGate:
+    """Review of round 28, gate #2 (LOW): T001 a free manual task, T002 the
+    manual task gating T003. The stop's section said `--resume --human-task
+    T002=done`; summary.md's note, `status`'s trailer and the lookup's
+    manual-task note said `--resume --human-task T001=done --human-task
+    T002=done`. While the gate holds there is one command, the gate's
+    resume; T001 stays listed."""
+
+    def _stop(self, repo, capsys, *, native=False):
+        _plan3(repo, "T001", "T002")
+        leg = ["--host", "claude-code"] if native else [
+            "--exec-subagents", "--host", "codex"]
+        code, out, err, result = _run(
+            ["implement", str(repo.plan), "--yes", *leg], capsys)
+        assert code == 3, err
+        return result
+
+    def test_summary_and_status_give_the_gates_resume_only(self, repo, capsys):
+        self._stop(repo, capsys)
+        summary = (output_dir_path(repo.plan) / "implement" / "summary.md").read_text()
+        assert "| T001 | deferred" in summary
+        assert "T001=done" not in summary, summary
+        assert "--resume --human-task T002=done" in summary
+        code, out, err, _r = _run(["status", str(repo.plan), "--host", "codex"], capsys)
+        trailer = next(line for line in out.splitlines()
+                       if "manual tasks left for you:" in line)
+        assert "T001 Alpha task" in trailer
+        assert "T001=done" not in trailer, trailer
+        assert trailer.rstrip().endswith("--resume --human-task T002=done"), trailer
+        assert "on manual task T002" in trailer, trailer
+
+    def test_a_tool_routes_poll_names_the_tasks_and_no_command(self, repo, capsys):
+        """The detached run's terminal poll: its notice names T001 and T002
+        and leaves the one command to the section (45efcf5's rule, which
+        the free manual task's second command used to bypass)."""
+        from utils import run_status, status_file
+
+        result = self._stop(repo, capsys)
+        phase_dir = output_dir_path(repo.plan) / "implement"
+        progress = json.loads((phase_dir / ".status.json").read_text())["progress"]
+        status_file.claim_run(str(phase_dir), {
+            "run_id": "run-gate-0029", "state": "failed", "exit_code": 3,
+            "error": result["error"], "detached": True, "mode": "implement",
+            "started_at": "2026-10-09T10:00:00", "host": "codex"})
+        status_file.update_status(str(phase_dir), {"progress": progress})
+        capsys.readouterr()
+        repo.monkeypatch.setenv("MULTI_LLM_ROUTE", "package")
+        ctx = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            code = run_status.main([
+                "--plan-file", str(repo.plan), "--view", "run", "--phase",
+                "implement", "--host", "codex"])
+            payload = ctx.payload(code)
+        finally:
+            cli_common.deactivate_result()
+        out = capsys.readouterr().out
+        assert code == 3, out
+        notice = payload.get("notice") or ""
+        assert "T001 Alpha task" in notice and "T002 Bravo manual" in notice, notice
+        assert "=done" not in notice, notice
+        trailer = [line for line in out.splitlines()
+                   if line.startswith("workflow manual tasks left for you")]
+        assert trailer and "=done" not in trailer[0], trailer
+
+    @pytest.mark.parametrize("native", [False, True])
+    def test_the_lookup_gives_one_command(self, repo, capsys, native):
+        self._stop(repo, capsys, native=native)
+        host = "claude-code" if native else "codex"
+        code, out, err, result = _run([
+            "util", "next-command", str(repo.plan), "--after", "implement",
+            "--host", host], capsys)
+        assert code == 0, err
+        step = result["user_next_step"]
+        assert step["command"].endswith("--resume --human-task T002=done")
+        assert "manual_tasks_command" not in step, step
+        assert [t["id"] for t in step["manual_tasks"]] == ["T001", "T002", "T003"]
+        assert "T001=done" not in step["markdown"]
+        assert "[MANUAL_TASK_COMMAND]" not in out
