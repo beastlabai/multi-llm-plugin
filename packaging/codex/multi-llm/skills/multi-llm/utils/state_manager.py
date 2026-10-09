@@ -378,10 +378,47 @@ def set_task_batch_check_in_state(
         current[str(task_id)] = kept
     else:
         current.pop(str(task_id), None)
+        # Fix round 29: the words kept beside a failing own check go with it.
+        set_task_own_text_in_state(state, task_id, None)
     if current:
         state[TASK_BATCH_CHECK_KEY] = current
     else:
         state.pop(TASK_BATCH_CHECK_KEY, None)
+
+
+#: ``state.json``'s map of what an implement task with a failing own check
+#: (:data:`TASK_BATCH_CHECK_KEY`) itself says — its title, ``## Task``
+#: section and acceptance criteria (``write_batch_scheduler.task_own_text``)
+#: — ``{task_id: text}``, present only while some such task has one (fix
+#: round 29, review of round 28, checks #1). A check task that reports the
+#: same finding in a later run (a ``--resume`` materializes only what it
+#: hands out) reads it to judge whether the check is the task's own job
+#: (``task_owns_the_check``) before recording the task's finding as a
+#: repeat of the check's (``move_check_repeats_in_state``): never from its
+#: title alone. Written by both legs beside the failing own check (``util
+#: batch-done``, the scheduler); clearing the task's failing own check
+#: clears it.
+TASK_OWN_TEXT_KEY = "task_own_text"
+
+
+def set_task_own_text_in_state(
+    state: Dict[str, Any], task_id: str, text: Optional[str],
+) -> None:
+    """Record *task_id*'s own text while it has a failing own check on
+    record (:data:`TASK_BATCH_CHECK_KEY`), else drop it; the key is dropped
+    when the map empties."""
+    recorded = state.get(TASK_OWN_TEXT_KEY)
+    current = dict(recorded) if isinstance(recorded, dict) else {}
+    failing = state.get(TASK_BATCH_CHECK_KEY)
+    value = str(text or "").strip()
+    if value and isinstance(failing, dict) and failing.get(str(task_id)):
+        current[str(task_id)] = value
+    else:
+        current.pop(str(task_id), None)
+    if current:
+        state[TASK_OWN_TEXT_KEY] = current
+    else:
+        state.pop(TASK_OWN_TEXT_KEY, None)
 
 
 #: ``state.json``'s map of an implement task's own words about the checks it

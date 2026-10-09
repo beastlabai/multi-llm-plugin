@@ -91,6 +91,11 @@
       "description": "Per implement task that edits files and whose reply's check carried a note: its own words about the checks it ran (fix round 28). Recorded and shown beside its check, never read as a finding or matched on; every other record of the task clears it. Present only while some task has one",
       "additionalProperties": { "type": "string" }
     },
+    "task_own_text": {
+      "type": "object",
+      "description": "Per implement task with a failing own check (task_batch_check): what the task itself says, its title, `## Task` section and acceptance criteria (fix round 29). Read when a check task reports the same finding in a later run, to judge whether the check is the task's own job before recording its finding as a repeat; never shown. Clearing the task's failing own check clears it. Present only while some task has one",
+      "additionalProperties": { "type": "string" }
+    },
     "task_own_check_ran": {
       "type": "array",
       "description": "The implement tasks that edit files whose last record carried a report of their own checks (passed, failing, or repeating only accepted findings), sorted. Every other record of the task clears it. Present only while some task has one; read by the line saying what ran the repository's tests",

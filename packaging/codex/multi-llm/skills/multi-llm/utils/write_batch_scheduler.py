@@ -318,6 +318,7 @@ __all__ = [
     "split_accepted_findings",
     "accepted_findings_for",
     "task_owns_the_check",
+    "task_own_text",
     "BLOCKED_BY_CHECK_PREFIX",
     "bind_prior_changes",
     "last_phase_end",
@@ -1057,12 +1058,28 @@ def manual_gate_head(
 
 
 def manual_gate_way_on(gating: Sequence[str]) -> str:
-    """The gate's one way on, as a stop headline says it (fix round 28)."""
+    """The gate's ways on, as a stop headline says them (fix round 28):
+    the resume recording the gating manual tasks done, then (fix round 29,
+    review of round 28 #1) the user's decline, ``--human-task <id>=skip``,
+    which skips the task and the code tasks that wait on it."""
     it = "it" if len(gating) == 1 else "them"
     answers = " ".join(f"--human-task {task_id}=done" for task_id in gating)
+    if len(gating) == 1:
+        decline = (
+            f"or, if you will not do {gating[0]}, resume with --human-task "
+            f"{gating[0]}=skip instead (it and the code tasks that wait on it "
+            f"are skipped)"
+        )
+    else:
+        skips = ", ".join(f"--human-task {task_id}=skip" for task_id in gating)
+        decline = (
+            f"or, for any of them you will not do, give its answer instead "
+            f"({skips}): it and the code tasks that wait on it are skipped"
+        )
     return (
         f"To go on: do {', '.join(gating)} by hand, then resume this phase "
-        f"with {answers} (the code tasks that wait on {it} then run)."
+        f"with {answers} (the code tasks that wait on {it} then run); "
+        f"{decline}."
     )
 
 
@@ -1150,8 +1167,15 @@ USER_DECLINED_REASON = "skipped by user during pause-and-ask"
 
 #: The prefix of the recorded reason of a failed code task the user answered
 #: ``--human-task <id>=skip`` (``StateManager._ANSWERED_SKIP_PREFIX`` is its
-#: twin). The sentence ends ``<id>=skip after it failed``.
+#: twin). The sentence ends ``<id>=skip after it failed``; for a manual task
+#: answered ``skip`` under a skip strategy, :data:`MANUAL_DECLINED_TAIL`.
 ANSWERED_SKIP_PREFIX = "skipped — you answered --human-task "
+
+#: What follows ``<id>=skip`` in the recorded reason of a manual task the
+#: user declined under a skip strategy (fix round 29, review of round 28 #1:
+#: under ``--yes`` the answer was printed and the task deferred again, so a
+#: manual-task gate re-stopped for good and only a false ``=done`` went on).
+MANUAL_DECLINED_TAIL = ": you will not do this manual task"
 
 #: The prefix of the recorded reason of a failed code task the user answered
 #: ``--human-task <id>=done`` (:func:`resolve_human_task_plan` writes the
@@ -1819,10 +1843,12 @@ _BARE_COMMAND_WORDS = frozenset({
 _SENTENCE_END = re.compile(r"[.;!?](?=\s|$)|\n")
 
 
-def _task_own_text(task: Mapping[str, Any]) -> str:
+def task_own_text(task: Mapping[str, Any]) -> str:
     """What a materialized implement task itself says: its title, and the
     ``## Task`` section and acceptance criteria of its prompt — never the
-    plan context, the dependency titles or the prior batches around them."""
+    plan context, the dependency titles or the prior batches around them.
+    Both legs keep it beside a failing own check
+    (``state_manager.TASK_OWN_TEXT_KEY``, fix round 29)."""
     prompt = str(task.get("prompt") or "")
     parts = [str(task.get("task_title") or task.get("title") or ""),
              str(task.get("description") or "")]
@@ -1877,13 +1903,13 @@ def _asks_to_fix(sentence: str, check_id: str) -> bool:
 def task_owns_the_check(
     task: Mapping[str, Any], check_id: str, findings: Sequence[str],
 ) -> bool:
-    """Whether *task*'s own text (:func:`_task_own_text`) makes the accepted
+    """Whether *task*'s own text (:func:`task_own_text`) makes the accepted
     check's failure its own: it names the check's command (any accepted
     finding's, :func:`_finding_parts`), or asks to fix what it reported or
     to make it pass (:func:`_asks_to_fix`). Fix round 23 (records #2): "T009:
     run the suite and fix failures", released by the check it fixes, had its
     still-failing check read as the accepted findings."""
-    text = _task_own_text(task)
+    text = task_own_text(task)
     plain = _plain_words(text)
     for finding in findings:
         parts = _finding_parts(finding)
@@ -1947,9 +1973,10 @@ def repeated_findings_for(
     """``{check id: findings}`` a code task's own failing check may be the
     same finding as: each check task of the run with findings on record
     (:func:`reported_checks_on_record`), wherever it sits in the graph,
-    except the accepted checks upstream of the task (those are
-    :func:`accepted_findings_for`'s, read first) and any check whose
-    failure the task's own text makes its job (:func:`task_owns_the_check`).
+    except every check the user accepted (:func:`accepted_checks_on_record`)
+    and any check whose failure the task's own text makes its job
+    (:func:`task_owns_the_check`). *tasks* is the decomposition, as
+    :func:`accepted_findings_for` takes it.
 
     Fix round 28 (live run 12, OpenCode stop accept 01): T001's runner ran
     T002's release check unprompted, and the failure T002 exists to report
@@ -1957,16 +1984,21 @@ def repeated_findings_for(
     "T001: a check it ran fails". Split with :func:`split_repeated_findings`
     — the same strict comparison, nothing looser — what matches is recorded
     as repeating that check's finding (``batch_check_repeats``), never as the
-    task's own failure, whichever of the two finished first."""
+    task's own failure, whichever of the two finished first.
+
+    Fix round 29 (review of round 28, checks #2): an accepted check is never
+    one, upstream of the task or not. Its findings are the accepted ones, and
+    only a task the acceptance released was told they are known and not its
+    own (:func:`accepted_findings_for`, read first); a task it never released
+    that reports one again keeps it as its own failure (round 23's scope),
+    the same with F3's annotation or without it. T002 not yet accepted when
+    T001 recorded (run 12's case) still makes T001's finding a repeat."""
     task_id = str(task.get("task_id") or "")
-    upstream_accepted = {
-        check_id for check_id, _title, _findings
-        in accepted_upstream_checks(tasks, task_id, state)
-    }
+    accepted = accepted_checks_on_record(state)
     return {
         check_id: findings
         for check_id, findings in reported_checks_on_record(state).items()
-        if check_id != task_id and check_id not in upstream_accepted
+        if check_id != task_id and check_id not in accepted
         and not task_owns_the_check(task, check_id, findings)
     }
 
@@ -1980,17 +2012,28 @@ def move_check_repeats_in_state(
     :func:`repeated_findings_for`'s strict comparison, the finding
     *check_id* now has on record has that finding moved into
     ``task_batch_check_repeats`` in *state* (a ``state.json`` dict; *tasks*
-    the phase's materialized tasks, read for each task's own text, else its
-    recorded title). Returns ``{task_id: (own findings left, repeats by
-    check)}`` for every task moved, for the caller's own records and lines.
-    Both legs: the scheduler's :meth:`WriteBatchScheduler._move_repeats_of`
-    and ``util batch-done --check findings``."""
+    the phase's materialized tasks, read for each task's own text). Returns
+    ``{task_id: (own findings left, repeats by check)}`` for every task
+    moved, for the caller's own records and lines. Both legs: the
+    scheduler's :meth:`WriteBatchScheduler._move_repeats_of` and ``util
+    batch-done --check findings``.
+
+    Fix round 29 (review of round 28, checks #1): a ``--resume``
+    materializes only what it hands out, and a completed task was rebuilt
+    from its title, so a task whose ``## Task`` asked it to make the check
+    pass (:func:`task_owns_the_check`) had its own failure moved when the
+    check ran again. A task this run did not materialize is read from the
+    own text both legs keep beside its failing own check
+    (``task_own_text``); one with none on record (recorded before round 29)
+    is left as it is, never judged from its title alone."""
     try:
         from .state_manager import (
+            TASK_OWN_TEXT_KEY,
             set_task_batch_check_in_state, set_task_batch_check_repeats_in_state,
         )
     except ImportError:  # pragma: no cover - direct script runs
         from utils.state_manager import (  # type: ignore
+            TASK_OWN_TEXT_KEY,
             set_task_batch_check_in_state, set_task_batch_check_repeats_in_state,
         )
     recorded = state.get("task_batch_check")
@@ -1998,7 +2041,8 @@ def move_check_repeats_in_state(
         return {}
     statuses = state.get("task_status") or {}
     scope = state.get("implement_task_ids")
-    titles = state.get("task_titles") or {}
+    kept_texts = state.get(TASK_OWN_TEXT_KEY)
+    kept_texts = kept_texts if isinstance(kept_texts, dict) else {}
     materialized = {
         str(task.get("task_id", "")): task for task in tasks if isinstance(task, dict)
     }
@@ -2012,9 +2056,14 @@ def move_check_repeats_in_state(
             or (isinstance(scope, list) and task_id not in scope)
         ):
             continue
-        task = materialized.get(task_id) or {
-            "task_id": task_id, "task_title": str(titles.get(task_id) or ""),
-        }
+        task = materialized.get(task_id)
+        if task is None:
+            kept = kept_texts.get(task_id)
+            if not isinstance(kept, str) or not kept.strip():
+                continue
+            # The words recorded beside its failing own check: its title,
+            # `## Task` section and criteria, read as task_own_text reads them.
+            task = {"task_id": task_id, "description": kept}
         repeats = {
             cid: items for cid, items in repeated_findings_for(graph, task, state).items()
             if cid == str(check_id)
@@ -2151,7 +2200,12 @@ def words_added_to(finding: str, accepted: str) -> str:
     """The words *finding* adds around *accepted*, which it holds word for
     word (:func:`accepted_findings_with_words_added`): what the native
     restate line offers as the ``--note``, one plain line, the separators
-    and one pair of brackets around them dropped."""
+    and one pair of brackets around them dropped.
+
+    Fix round 29 (review of round 28, checks #4): a bracket the partition
+    cut from its pair — the ``[`` before and the ``]`` after an accepted
+    finding written ``[<accepted>] — my note`` — is dropped too, so the note
+    reads ``my note``, never ``[; ] — my note``."""
     plain = " ".join(str(finding or "").split())
     inner = " ".join(str(accepted or "").split())
     before, _, after = plain.partition(inner)
@@ -2163,9 +2217,24 @@ def words_added_to(finding: str, accepted: str) -> str:
                 return False
         return depth == 0
 
+    def paired(text: str) -> str:
+        """*text* without the brackets that have no partner in it."""
+        open_at: List[Tuple[str, int]] = []
+        unpaired: Set[int] = set()
+        for index, char in enumerate(text):
+            if char in "([":
+                open_at.append((char, index))
+            elif char in ")]":
+                if open_at and open_at[-1][0] + char in ("()", "[]"):
+                    open_at.pop()
+                else:
+                    unpaired.add(index)
+        unpaired.update(index for _char, index in open_at)
+        return "".join(char for index, char in enumerate(text) if index not in unpaired)
+
     parts = []
     for part in (before, after):
-        text = part.strip(" \t—–-:;,.")
+        text = paired(part).strip(" \t—–-:;,.")
         while (
             len(text) > 1 and text[0] + text[-1] in ("()", "[]")
             and balanced(text[1:-1], text[0], text[-1])
@@ -2183,7 +2252,11 @@ def restate_findings_problem(
     (:func:`accepted_findings_with_words_added`; fix round 28): each finding
     and the accepted finding it holds, as JSON strings, and the two ways to
     answer — cut it down to the accepted one with the words in ``note``, or
-    keep it whole when those words report more than the accepted finding."""
+    keep it whole when those words report more than the accepted finding.
+    Fix round 29 (review of round 28, checks #3): it says plainly that a
+    note is a comment, never a failure, so a second failure the check
+    printed stays in the finding — the merge cannot tell a comment from a
+    failure moved to the note, and no semantic reading is added."""
     shown = []
     for finding, check_id, accepted in list(flagged)[:ACCEPTED_NOTE_MAX_FINDINGS]:
         shown.append(
@@ -2196,10 +2269,12 @@ def restate_findings_problem(
         f"words are your own comment, restate that finding as the accepted "
         f"finding alone, character for character, and move the added words, "
         f"as they are, into the `check` object's `note`: it is then recorded "
-        f"as the problem the user accepted. If they report something the "
-        f"check printed beyond the accepted finding, keep the finding exactly "
-        f"as it is: it is then recorded as {task_id}'s own failure, which is "
-        f"right."
+        f"as the problem the user accepted. A note is a comment, never a "
+        f"failure: nothing in it is ever read as one, so every failure the "
+        f"check printed stays a finding. If the added words report something "
+        f"the check printed beyond the accepted finding (another value, test "
+        f"or line), keep the finding exactly as it is: it is then recorded as "
+        f"{task_id}'s own failure, which is right."
     )
 
 
@@ -3420,6 +3495,16 @@ def resolve_human_task_plan(
                 # task stayed owed on every surface. Its dependents run.
                 plan.completed.append(task_id)
                 continue
+            if decisions.get(task_id) == "skip":
+                # The user will not do it (fix round 29, review of round 28
+                # #1): skipped at their request, so it is not owed, and under
+                # skip-dependents the walk below skips the tasks after it
+                # with it (`declined`), which no gate then holds back. Under
+                # skip-continue the strategy still runs that code.
+                plan.skipped[task_id] = (
+                    f"{ANSWERED_SKIP_PREFIX}{task_id}=skip{MANUAL_DECLINED_TAIL}")
+                seeds.append(task_id)
+                continue
             plan.skipped[task_id] = _deferred_reason(strategy)
             seeds.append(task_id)
 
@@ -3435,15 +3520,27 @@ def resolve_human_task_plan(
         for dep in task.get("depends_on") or []:
             dependents.setdefault(str(dep), []).append(str(task.get("task_id", "")))
     code_set = set(code_seeds)
+    # A manual task the user declined under a skip strategy walks first, and
+    # its walk takes over a task a deferral reached: a later manual task
+    # after code that now never runs is skipped with it, not owed (fix round
+    # 29). A failed code task answered `skip` keeps fix round 8's rule: a
+    # manual task after it stays owed.
+    walked = code_seeds if strategy == STRATEGY_SKIP_CONTINUE else seeds
+    declined_seeds = {
+        seed for seed in walked
+        if plan.skipped.get(seed, "").endswith(MANUAL_DECLINED_TAIL)
+    }
     # (task, the skipped task a dependent names, whether the walk may pass
-    # through a task this run does not hold — only from a code seed).
+    # through a task this run does not hold — only from a code seed, whether
+    # it walks from a manual task the user declined).
     queue = [
-        (seed, seed, seed in code_set)
-        for seed in (code_seeds if strategy == STRATEGY_SKIP_CONTINUE else seeds)
+        (seed, seed, seed in code_set, seed in declined_seeds)
+        for seed in sorted(walked, key=lambda seed: seed not in declined_seeds)
     ]
+    reached_declined: set = set(declined_seeds)
     passed: set = set()
     while queue:
-        parent, named, through = queue.pop(0)
+        parent, named, through, declined = queue.pop(0)
         named_title = str(by_id.get(named, {}).get("task_title", "") or named)
         for child in sorted(set(dependents.get(parent, []))):
             if not child:
@@ -3451,15 +3548,18 @@ def resolve_human_task_plan(
             if child not in by_id:
                 if through and child not in passed:
                     passed.add(child)
-                    queue.append((child, named, through))
+                    queue.append((child, named, through, declined))
                 continue
-            if child in plan.skipped:
+            if child in plan.skipped and (
+                    not declined or child in reached_declined):
                 continue
             plan.skipped[child] = (
                 f"skipped — depends on skipped task {named} ({named_title})"
             )
             plan.chain[child] = named
-            queue.append((child, child, through))
+            if declined:
+                reached_declined.add(child)
+            queue.append((child, child, through, declined))
 
     if strategy == STRATEGY_SKIP_CONTINUE:
         # A manual task's edges are treated as satisfied: its dependents run,
@@ -9689,6 +9789,7 @@ class WriteBatchScheduler:
                             set_task_batch_check_repeats_in_state,
                             set_task_own_check_note_in_state,
                             set_task_own_check_ran_in_state,
+                            set_task_own_text_in_state,
                         )
                     except ImportError:  # pragma: no cover - direct script runs
                         from utils.state_manager import (  # type: ignore
@@ -9697,10 +9798,16 @@ class WriteBatchScheduler:
                             set_task_batch_check_repeats_in_state,
                             set_task_own_check_note_in_state,
                             set_task_own_check_ran_in_state,
+                            set_task_own_text_in_state,
                         )
                     set_task_batch_check_in_state(
                         self.state.state, task_id,
                         outcome.batch_check if outcome.ok else None,
+                    )
+                    # Fix round 29: its own words beside a failing own check,
+                    # for a check that reports the same finding in a later run.
+                    set_task_own_text_in_state(
+                        self.state.state, task_id, task_own_text(task),
                     )
                     # Fix round 28: its own words about its checks, as
                     # `util batch-done --note` records them.
@@ -11622,10 +11729,29 @@ class WriteBatchScheduler:
         why = self._manual_gate_why(gating, waiting)
         if why:
             result.stop["resume_why"] = why
+        # Fix round 29 (review of round 28 #1): the user's decline beside
+        # that resume, as an answer the section lists.
+        answers = self._manual_gate_answers(gating, waiting)
+        if answers:
+            result.stop["answers"] = answers
         # The merge of fix round 28: and beside it the line without the way
         # on the section carries (its resume records the gate done), which
         # the tool routes relay in the `error`'s place.
         self._set_stop_headline(result.stop)
+
+    def _manual_gate_entry(
+        self, gating: Sequence[str], waiting: Mapping[str, Sequence[str]],
+    ) -> Dict[str, Any]:
+        """The gate as the workflow payload's ``implement`` entry gives it
+        to ``next_phase``'s gate words, over this run's titles."""
+        return {
+            "manual_close_ids": list(gating),
+            "manual_waiting": {k: list(v) for k, v in waiting.items()},
+            "manual_tasks": [
+                {"id": manual, "title": self._task_title(manual)}
+                for manual in gating
+            ],
+        }
 
     def _manual_gate_why(
         self, gating: Sequence[str], waiting: Mapping[str, Sequence[str]],
@@ -11634,18 +11760,23 @@ class WriteBatchScheduler:
         words, over this run's titles."""
         from .next_phase import manual_gate_why
 
-        entry = {
-            "manual_close_ids": list(gating),
-            "manual_waiting": {k: list(v) for k, v in waiting.items()},
-            "manual_tasks": [
-                {"id": manual, "title": self._task_title(manual)}
-                for manual in gating
-            ],
-        }
         try:
-            return manual_gate_why(entry)
+            return manual_gate_why(self._manual_gate_entry(gating, waiting))
         except Exception:  # noqa: BLE001 - advisory wording
             return None
+
+    def _manual_gate_answers(
+        self, gating: Sequence[str], waiting: Mapping[str, Sequence[str]],
+    ) -> List[Dict[str, Any]]:
+        """The gate's other ways on, ``next_phase.manual_gate_decline_answers``
+        (fix round 29): the user's ``--human-task <id>=skip`` for each
+        gating manual task, recorded on the stop as its ``answers``."""
+        from .next_phase import manual_gate_decline_answers
+
+        try:
+            return manual_gate_decline_answers(self._manual_gate_entry(gating, waiting))
+        except Exception:  # noqa: BLE001 - advisory: the resume stands
+            return []
 
     def _task_title(self, task_id: str) -> Optional[str]:
         """*task_id*'s title from this run's tasks, else ``state.json``'s
@@ -11690,6 +11821,13 @@ class WriteBatchScheduler:
             f"recording {it} done; the code tasks that wait on {it} then run:"
         )
         lines.append(f"        {command or 'add ' + answers + ' to the resume command'}")
+        # Fix round 29 (review of round 28 #1): or the user's decline.
+        for entry in stop.get("answers") or []:
+            skips = " ".join(list(entry.get("flags") or [])[1:])
+            spelled = (
+                template.replace("{answers}", skips) if "{answers}" in template else "")
+            lines.append(f"  - or, {entry.get('why')}:")
+            lines.append(f"        {spelled or 'add ' + skips + ' to the resume command'}")
         return lines
 
     def _check_block_message(self, result: SchedulerResult) -> List[str]:
@@ -12543,7 +12681,7 @@ class WriteBatchScheduler:
                 )
             return
         if self.state is not None:
-            self._metrics_finish()
+            self._metrics_finish(result)
             # A resume of a phase already completed that dispatched nothing —
             # `implement --resume --human-task T007=done` closing a deferred
             # manual task — changed no code, so its completion keeps its date:
@@ -12931,7 +13069,7 @@ class WriteBatchScheduler:
             # Fix round 24: the total the first line is held to.
             self._eta_line_ids = set(self._eta_task_ids(result))
 
-    def _metrics_finish(self) -> None:
+    def _metrics_finish(self, result: Optional[SchedulerResult] = None) -> None:
         """Pop the phase's ETA baseline and log its closing line (F7).
 
         The line goes through ``self.log`` for the same reason every per-batch
@@ -12939,6 +13077,11 @@ class WriteBatchScheduler:
         beside the lines it closes. ``finish_metrics_phase`` used to print it to
         stderr itself, which on a foreground or in-process ``full`` run put the
         closing line somewhere none of the others went.
+
+        Fix round 29 (review of round 28 #1): an implement run that started
+        no runner has no N/N line to name the tasks its plan set aside, so
+        its ``phase complete`` line names them (a manual task declined with
+        ``--human-task <id>=skip`` and the tasks skipped with it, say).
         """
         if not hasattr(self.state, "finish_metrics_phase"):
             return
@@ -12952,7 +13095,17 @@ class WriteBatchScheduler:
         # `(elapsed_ms, line)` when the phase had a baseline, `None` when it
         # never started.
         if isinstance(finished, tuple) and finished[1]:
-            self.log(finished[1])
+            line = finished[1]
+            if (result is not None and self.kind == "implement"
+                    and not any(self._started_a_runner(o) for o in result.outcomes)):
+                try:
+                    tail = _metrics.set_aside_tail(set_aside_by_plan(
+                        result.human_plan, self._manual_task_ids()))
+                except Exception:  # noqa: BLE001 - a count line must not fail a phase
+                    tail = ""
+                if tail:
+                    line = f"{line} · {tail}"
+            self.log(line)
 
     def _finalize_tracking(self, result: Optional[SchedulerResult] = None) -> None:
         """``finalize_tracking.py --state-file`` in process (D3n).
@@ -13147,6 +13300,7 @@ class WriteBatchScheduler:
 
     def _manual_close_note(
         self, deferred: Dict[str, str], plan: Optional[HumanTaskPlan] = None,
+        stop: Optional[Mapping[str, Any]] = None,
     ) -> Optional[str]:
         """How to record the deferred manual tasks done, in the host's
         spelling (``user_commands["answers"]``), or ``None``.
@@ -13155,7 +13309,11 @@ class WriteBatchScheduler:
         result only, never its summary.md, on either leg. The manual tasks
         only: a code task skipped with one is not answerable ``done`` and
         runs on that resume. Fix round 28: only the ones the user can do now
-        (:meth:`_manual_gates`), and the note says what waits on them.
+        (:meth:`_manual_gates`), and the note says what waits on them. Fix
+        round 29 (review of round 28 #2): a run that stopped on a manual-task
+        gate (*stop*) gives the gate's resume alone, the one command its stop
+        names, and the note names the task(s) it records when the list above
+        holds another manual task, which stays listed.
         """
         template = self.user_commands.get("answers")
         if self.kind != "implement" or not template or "{answers}" not in template:
@@ -13165,21 +13323,30 @@ class WriteBatchScheduler:
             if (self._task_by_id(task_id) or {}).get("executor_role") == "human"
             or (self._task_by_id(task_id) or {}).get("is_human")
         )
-        gates = self._manual_gates(plan) if plan is not None else None
-        waiting = 0
-        if gates is not None:
-            manual = [task_id for task_id in manual if task_id in gates["closable"]]
-            waiting = len({
-                code for task_id in manual
-                for code in gates["waiting"].get(task_id, ())
-            })
+        listed = list(manual)
+        named: Optional[List[str]] = None
+        if (stop or {}).get("kind") == "manual-gate":
+            gating = [str(t) for t in (stop or {}).get("manual_task_ids") or []]
+            manual = [task_id for task_id in gating if task_id in listed]
+            waiting = len(set((stop or {}).get("held_task_ids") or []))
+            if set(listed) - set(manual):
+                named = list(manual)
+        else:
+            gates = self._manual_gates(plan) if plan is not None else None
+            waiting = 0
+            if gates is not None:
+                manual = [task_id for task_id in manual if task_id in gates["closable"]]
+                waiting = len({
+                    code for task_id in manual
+                    for code in gates["waiting"].get(task_id, ())
+                })
         if not manual:
             return None
         from .next_phase import manual_close_note
 
         return manual_close_note(template.replace(
             "{answers}", " ".join(f"--human-task {task_id}=done" for task_id in manual)),
-            len(manual), waiting=waiting)
+            len(manual), waiting=waiting, named=named)
 
     def _manual_gates(self, plan: Optional[HumanTaskPlan]) -> Optional[Dict[str, Any]]:
         """:func:`plan_manual_gates` over this run's decomposition and
@@ -13407,9 +13574,11 @@ class WriteBatchScheduler:
             # Fix round 28: a code task whose own check reported only what a
             # check task reported is named under that check too.
             repeated: Dict[str, List[str]] = {}
+            repeated_found: Dict[Tuple[str, str], List[str]] = {}
             for task_id, matched in result.batch_check_repeats().items():
-                for check_id in matched:
+                for check_id, found in matched.items():
                     repeated.setdefault(check_id, []).append(task_id)
+                    repeated_found[(task_id, check_id)] = [str(item) for item in found]
             for task_id, findings in findings_by_task.items():
                 lines.append(f"### {task_id}")
                 lines.append("")
@@ -13422,6 +13591,22 @@ class WriteBatchScheduler:
                         f"failure.{_note_sentence(notes.get(rerun))}", "",
                     ]
                 for rerun in repeated.get(task_id, []):
+                    # Fix round 29 (review of round 28, checks #5): the record
+                    # is what the task's run saw. A check that ran again and
+                    # no longer lists what it repeated has the repeat quoted,
+                    # never set under findings the task never reported.
+                    found = repeated_found.get((rerun, task_id)) or []
+                    left, _same = split_repeated_findings(found, {task_id: findings})
+                    if found and left:
+                        lines += [
+                            f"{rerun} ran this check too, and its own report "
+                            f"said only what {task_id} reported then: "
+                            f"{quoted_findings(found, 300)} — not what "
+                            f"{task_id} reports now, and not counted as "
+                            f"{rerun}'s own failure."
+                            f"{_note_sentence(notes.get(rerun))}", "",
+                        ]
+                        continue
                     lines += [
                         f"{rerun} ran this check too, and its own report says "
                         f"only what {task_id} reported: it repeats {task_id}'s "
@@ -13446,7 +13631,7 @@ class WriteBatchScheduler:
             lines += ["| Task | Reason |", "|------|--------|"]
             for task_id, reason in sorted(deferred.items()):
                 lines.append(f"| {task_id} | {reason} |")
-            note = self._manual_close_note(deferred, plan)
+            note = self._manual_close_note(deferred, plan, stop=result.stop)
             if note:
                 lines += ["", note]
         if declined:

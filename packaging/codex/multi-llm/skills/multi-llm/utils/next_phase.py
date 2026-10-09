@@ -405,11 +405,50 @@ def _manual_tasks(
         if isinstance(entry, Mapping) and task_id(entry.get("id"))
     )
     note = command = None
-    ids = manual_close_ids(implement)
+    ids = manual_note_ids(implement)
     if manual and ids and template is not None and plan_arg is not None:
-        note = manual_close_lead(len(ids), waiting=manual_waiting_count(implement, ids))
+        note = manual_close_lead(
+            len(ids), waiting=manual_waiting_count(implement, ids),
+            named=manual_note_named(implement, ids))
         command = close_command(template, plan_arg, ids)
     return manual, note, command
+
+
+def manual_note_ids(implement: Mapping[str, Any]) -> List[str]:
+    """The manual tasks the note under the deferred list records done: while
+    a manual-task gate holds (``manual_gate``), only the gate's
+    (:func:`manual_gate_ids`) — the resume the stop's section leads with —
+    else every one the user can do now (:func:`manual_close_ids`).
+
+    Fix round 29 (review of round 28 #2): with a free manual task beside the
+    gating one, summary.md's note, ``status``'s trailer and the lookup's note
+    gave ``--human-task T001=done --human-task T002=done`` beside the
+    section's ``--human-task T002=done``: two different record-done commands
+    on one surface. The free task stays listed under the manual tasks left
+    for the user; its command comes once the gate's resume has run."""
+    if implement.get("manual_gate"):
+        ids = manual_gate_ids(implement)
+        if ids:
+            return ids
+    return manual_close_ids(implement)
+
+
+def manual_note_named(
+    implement: Mapping[str, Any], ids: Sequence[str],
+) -> Optional[List[str]]:
+    """*ids*, when the note's command records fewer manual tasks than the
+    deferred list names (a gate beside a free manual task, fix round 29), so
+    its lead names them rather than saying "this manual task"; else
+    ``None``."""
+    if not implement.get("manual_gate"):
+        return None
+    # A deferred entry with no `waits_on` is a manual task itself.
+    manual = {
+        str(entry.get("id")) for entry in implement.get("manual_tasks") or ()
+        if isinstance(entry, Mapping) and entry.get("id")
+        and not entry.get("waits_on")
+    }
+    return list(ids) if manual - set(ids) else None
 
 
 def manual_waiting_count(
@@ -468,14 +507,15 @@ def manual_gate_flags(implement: Mapping[str, Any]) -> List[str]:
 
 def gate_resume_closes_the_manual_tasks(implement: Mapping[str, Any]) -> bool:
     """Whether the resume a stopped implement's section leads with
-    (:func:`_resume_flags` under ``manual_gate``) is the very command that
-    records the deferred manual tasks done: the gate's ids are every one
-    :func:`manual_close_ids` names (the merge of fix round 28). A stop's
-    notice then names the tasks and leaves that command to the section."""
+    (:func:`_resume_flags` under ``manual_gate``) is the very command the
+    note under the deferred list gives (the merge of fix round 28): while a
+    gate holds, the note records the gate's manual tasks done and no other
+    (:func:`manual_note_ids`, fix round 29). A stop's notice then names the
+    tasks and leaves that command to the section."""
     if not implement.get("manual_gate"):
         return False
     ids = manual_gate_ids(implement)
-    return bool(ids) and ids == manual_close_ids(implement)
+    return bool(ids) and ids == manual_note_ids(implement)
 
 
 def _manual_gate_names(implement: Mapping[str, Any], ids: Sequence[str]) -> str:
@@ -537,6 +577,73 @@ def manual_gate_why(implement: Mapping[str, Any], *, stopped: bool = True) -> Op
     )
 
 
+def manual_gate_decline_answers(implement: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """The other ways on from a manual-task gate, as stop answers
+    (``[{"flags", "why"}]``, ``--resume`` first), or ``[]`` (fix round 29,
+    review of round 28 #1: under ``--yes`` the gate re-stopped on every
+    ``--human-task <id>=skip`` and only a false ``=done`` went on).
+
+    For each manual task the gate's resume records done
+    (:func:`manual_gate_ids`), ``--human-task <id>=skip``: the user's call
+    that they will not do it, which skips it and the code tasks that wait
+    on it; the combined answer first when the gate holds on more than one,
+    the order ``write_batch_scheduler.compose_stop_answers`` gives a stop's
+    answers. The executor records them on its stop and every reader of a
+    native gate derives them from ``state.json``, so both legs word them
+    alike."""
+    ids = manual_gate_ids(implement)
+    if not ids:
+        return []
+
+    def tasks(count: int, pronoun: str) -> str:
+        if count == 1:
+            return f"the code task that waits on {pronoun}"
+        return f"the {count} code tasks that wait on {pronoun}"
+
+    answers: List[Dict[str, Any]] = []
+    if len(ids) > 1:
+        flags = [RESUME_FLAG]
+        for task_id in ids:
+            flags += ["--human-task", f"{task_id}=skip"]
+        answers.append({
+            "flags": flags,
+            "why": (
+                f"if you will do none of {_manual_gate_names(implement, ids)}, "
+                f"skip them and {tasks(manual_waiting_count(implement, ids), 'them')}, "
+                f"and implement goes on without them"),
+        })
+    for task_id in ids:
+        answers.append({
+            "flags": [RESUME_FLAG, "--human-task", f"{task_id}=skip"],
+            "why": (
+                f"if you will not do {_manual_gate_names(implement, [task_id])}, "
+                f"skip it and {tasks(manual_waiting_count(implement, [task_id]), 'it')}, "
+                f"and implement goes on without them"),
+        })
+    return answers
+
+
+def gate_resume_suggested(workflow: Mapping[str, Any]) -> List[str]:
+    """The flags of implement's resume when it, not the payload's
+    ``suggested_next``, is the next step, else ``[]`` (fix round 29, review
+    of round 28 #4): implement completed with code tasks still waiting on a
+    manual task the user can do now (:func:`manual_gate_flags`) and the
+    suggestion is a phase after it. ``next_phase_commands`` then leads with
+    that resume, the suggested phase kept as the other way on, as its
+    ``--after implement`` walk does, and ``status``'s ``suggested next``
+    line says the same."""
+    phases = workflow.get("phases") or {}
+    implement = phases.get("implement") or {}
+    primary = workflow.get("suggested_next")
+    if implement.get("status") != "completed" or not primary:
+        return []
+    order = list(_skill_module("modes").PREREQUISITE_PHASES)
+    if ("implement" not in order or primary not in order
+            or order.index(primary) <= order.index("implement")):
+        return []
+    return manual_gate_flags(implement)
+
+
 def instead_why(phase: str) -> str:
     """The why above the way on that stays beside the resume running code
     tasks left waiting on a manual task (fix round 28)."""
@@ -593,7 +700,10 @@ def close_command(template: str, plan_arg: str, task_ids: Sequence[str]) -> str:
     return template.replace(ARGS_SLOT, args)
 
 
-def manual_close_lead(count: Optional[int] = None, *, waiting: int = 0) -> str:
+def manual_close_lead(
+    count: Optional[int] = None, *, waiting: int = 0,
+    named: Optional[Sequence[str]] = None,
+) -> str:
     """The sentence that leads into the command closing deferred manual
     tasks (:func:`close_command`), ending with a colon: what
     ``user_next_step.manual_tasks_note`` and ``[MANUAL_TASK_NOTE]`` say, the
@@ -610,6 +720,10 @@ def manual_close_lead(count: Optional[int] = None, *, waiting: int = 0) -> str:
     nine code tasks waiting on T010): implement has not run those, and the
     command that records the manual task done runs them, so the sentence
     says that instead.
+
+    *named* (fix round 29): the ids the command records, when the list
+    above it names other manual tasks too (a manual-task gate beside a free
+    one): the sentence names them instead of saying "this manual task".
     """
     if waiting:
         tasks = (
@@ -617,13 +731,16 @@ def manual_close_lead(count: Optional[int] = None, *, waiting: int = 0) -> str:
             else f"the {waiting} code tasks that wait"
         )
         if count == 1:
+            which = f"manual task {named[0]}" if named else "this manual task"
             return (
-                f"Implement has not run {tasks} on this manual task. Once you "
+                f"Implement has not run {tasks} on {which}. Once you "
                 f"have done it by hand, this command records it done and runs "
                 f"{'it' if waiting == 1 else 'them'}:"
             )
+        which = (
+            f"manual tasks {', '.join(named)}" if named else "these manual tasks")
         return (
-            f"Implement has not run {tasks} on these manual tasks. Once you "
+            f"Implement has not run {tasks} on {which}. Once you "
             "have done one by hand, this command records it done and runs what "
             "no longer waits; keep a --human-task answer only for each task you "
             "did:"
@@ -642,6 +759,7 @@ def manual_close_lead(count: Optional[int] = None, *, waiting: int = 0) -> str:
 
 def manual_close_note(
     command: str, count: Optional[int] = None, *, waiting: int = 0,
+    named: Optional[Sequence[str]] = None,
 ) -> str:
     """The one plain line that says how to close deferred manual tasks, for a
     surface that is one line of text (a summary, ``status``'s trailer).
@@ -651,7 +769,7 @@ def manual_close_note(
     copied that into the command's fence). *count* and *waiting* as in
     :func:`manual_close_lead`.
     """
-    return f"{manual_close_lead(count, waiting=waiting)} {command}"
+    return f"{manual_close_lead(count, waiting=waiting, named=named)} {command}"
 
 
 # ---------------------------------------------------------------------------
@@ -1058,6 +1176,11 @@ def next_phase_commands(
             ))
         return tuple(steps)
 
+    if start is None and gate_resume_suggested(workflow):
+        # Fix round 29 (review of round 28 #4): implement finished with code
+        # tasks waiting on a manual task the user can do now; the answer
+        # leads with its resume, as the `--after implement` walk's does.
+        start = "implement"
     if start is None:
         primary = workflow.get("suggested_next")
         if primary is None:
@@ -1593,6 +1716,32 @@ def implement_answers(
     return tuple(steps)
 
 
+def gate_decline_steps(
+    plan_arg: str,
+    host_id: str,
+    route: Optional[str],
+    phases: Mapping[str, Mapping[str, Any]],
+) -> Tuple[AnswersStep, ...]:
+    """:func:`manual_gate_decline_answers` for the workflow payload's
+    implement entry while its manual-task gate holds (``manual_gate``),
+    each command in this host's spelling (:func:`phase_command`); ``()``
+    otherwise (fix round 29)."""
+    implement = phases.get("implement") or {}
+    if not implement.get("manual_gate"):
+        return ()
+    steps: List[AnswersStep] = []
+    for entry in manual_gate_decline_answers(implement):
+        flags = list(entry["flags"])
+        steps.append(AnswersStep(
+            command=phase_command(plan_arg, host_id, route, "implement", *flags),
+            why=str(entry["why"]),
+            answers=tuple(
+                flags[index + 1] for index, flag in enumerate(flags[:-1])
+                if flag == "--human-task"),
+        ))
+    return tuple(steps)
+
+
 def implement_resume_why(
     plan_arg: str, *, plan_path: Optional[Union[str, Path]] = None,
 ) -> Optional[str]:
@@ -1731,6 +1880,17 @@ def emit_answer(
                 why = implement_resume_why(plan_arg, plan_path=plan_path)
                 if why:
                     answer = _replace(answer, why=why)
+            else:
+                # Fix round 29 (review of round 28 #1): a manual-task gate's
+                # other way on, the user's decline, as the executor's stop
+                # records it for the tool routes.
+                if workflow is None:
+                    workflow = _workflow_payload(Path(os.path.abspath(str(
+                        plan_arg if plan_path is None else plan_path))), host_id)
+                declines = gate_decline_steps(
+                    plan_arg, host_id, route, workflow.get("phases") or {})
+                if declines:
+                    answer = _replace(answer, answers=declines)
             # Fix round 24: under the line the tool routes' section opens with.
             answer = _replace(answer, lead=resume_lead(answer.phase))
             # Fix round 18 (live run 7, Claude Code stop 01): the native
@@ -1841,9 +2001,22 @@ def emit_resume(
         if len(resume["flags"]) > 1 else None
     )
     try:
-        answers = resume_answers(
-            plan_arg, host_id, route, mode_word, plan_path=plan_path,
-        )
+        if gate_why is not None:
+            # Fix round 29 (review of round 28 #1): a manual-task gate's
+            # answers are the user's decline, read off the workflow on both
+            # legs (the executor's stop records the same ones).
+            answers = [
+                {"command": step.command,
+                 "flags": [RESUME_FLAG] + [
+                     token for answer in step.answers
+                     for token in ("--human-task", answer)],
+                 "why": step.why}
+                for step in gate_decline_steps(plan_arg, host_id, route, phases)
+            ]
+        else:
+            answers = resume_answers(
+                plan_arg, host_id, route, mode_word, plan_path=plan_path,
+            )
     except Exception as exc:  # noqa: BLE001 - advisory: the resume still stands
         print(lookup_failure_line(exc), file=err)
         answers = []
