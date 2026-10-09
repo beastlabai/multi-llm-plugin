@@ -2701,10 +2701,68 @@ def superseded_by_native(
     ``state_implement_view`` and ``state_apply_views`` stood back for any
     executor record. A record whose phase folder the native emit wrote last
     (:func:`native_leg_stamp`) is that earlier run, unless it is a detached
-    run still going, which is never set aside."""
+    run still going, which is never set aside, or a run recorded as started
+    after that emit (:func:`_run_started_after_native_emit`): a detached
+    executor attempt that failed or was aborted before it rewrote
+    ``write_tasks.json`` leaves the stamp behind, and the stamp alone does not
+    say which run is newer."""
     if _write_phase_of(plan_path, view) is None or _run_is_live(view):
         return None
-    return native_leg_stamp(Path(str(view.get("phase_dir") or "")))
+    directory = Path(str(view.get("phase_dir") or ""))
+    stamp = native_leg_stamp(directory)
+    if stamp is None or _run_started_after_native_emit(view, directory):
+        return None
+    return stamp
+
+
+def _native_emit_time(directory: Path) -> Optional[float]:
+    """When the native emit wrote *directory*'s ``write_tasks.json``, as
+    epoch seconds, or ``None``: the ``native_run.emitted_at`` the apply emit
+    records (``write_phase_bridge.native_run_record``), else the file's
+    modification time (implement's emit records no time; only
+    ``write_phase_bridge.write_task_file_for_phase`` writes the file)."""
+    path = Path(directory) / _WRITE_TASKS
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - advisory
+        document = None
+    record = document.get("native_run") if isinstance(document, dict) else None
+    emitted = detach._parse_stamp(
+        record.get("emitted_at") if isinstance(record, dict) else None)
+    if emitted is not None:
+        try:
+            return emitted.timestamp()
+        except (OverflowError, OSError, ValueError):
+            pass
+    try:
+        return os.stat(path).st_mtime
+    except OSError:
+        return None
+
+
+def _run_started_after_native_emit(view: Mapping[str, Any], directory: Path) -> bool:
+    """Whether *view*'s run record began after the native emit last wrote
+    *directory*'s ``write_tasks.json`` (:func:`_native_emit_time`).
+
+    Every executor run rewrites that file and drops the native stamp, but a
+    detached attempt that failed or was aborted before its rewrite leaves the
+    stamp of the native run before it; its terminal record is then the newer
+    run, and setting it aside hid that failure behind the native block's
+    "this run … is newer". The run's own ``started_at`` (written once, by the
+    worker's claim) against the emit's time decides. A record with no
+    readable start (a foreground run records none) keeps the stamp's
+    reading, as does an emit with no readable time."""
+    run = view.get("run") if isinstance(view.get("run"), Mapping) else {}
+    started = detach._parse_stamp(run.get("started_at"))
+    if started is None:
+        return False
+    emitted = _native_emit_time(directory)
+    if emitted is None:
+        return False
+    try:
+        return started.timestamp() > emitted
+    except (OverflowError, OSError, ValueError):
+        return False
 
 
 def set_aside_superseded_runs(

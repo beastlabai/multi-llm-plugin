@@ -702,21 +702,41 @@ _UTIL_PATH_POSITIONAL: Dict[str, Tuple[str, ...]] = {
     "backup": (),
 }
 
+#: Of those options, the ones that take one or more values (``nargs="+"``):
+#: argparse hands such an option every token up to the next option, so none
+#: of them is the positional (``util improve-steps --models m1 m2 --mode
+#: improve-plan <plan>`` names the plan last, not ``m2``).
+_UTIL_VARIADIC_OPTIONS: Dict[str, Tuple[str, ...]] = {
+    "improve-steps": ("--models",),
+}
+
 #: The cwd :func:`_run_from_repository_root` moved away from, which ``main``
 #: moves back to on its way out (an in-process caller keeps its own cwd).
 _CWD_BEFORE_ROOT: List[str] = []
 
 
-def _first_positional(args: Sequence[str], value_options: Sequence[str]) -> Optional[str]:
+def _is_option_token(token: str) -> bool:
+    return token.startswith("-") and token != "-"
+
+
+def _first_positional(
+    args: Sequence[str], value_options: Sequence[str],
+    variadic_options: Sequence[str] = (),
+) -> Optional[str]:
     index = 0
     while index < len(args):
         token = args[index]
         if token == "--":
             return args[index + 1] if index + 1 < len(args) else None
-        if token.startswith("-") and token != "-":
-            if "=" not in token and token in value_options:
-                index += 1
+        if _is_option_token(token):
             index += 1
+            if "=" in token:
+                continue
+            if token in variadic_options:
+                while index < len(args) and not _is_option_token(args[index]):
+                    index += 1
+            elif token in value_options:
+                index += 1
             continue
         return token
     return None
@@ -725,7 +745,9 @@ def _first_positional(args: Sequence[str], value_options: Sequence[str]) -> Opti
 def _util_input_paths(name: str, args: Sequence[str]) -> List[Optional[str]]:
     paths = [flag_value(args, option) for option in _UTIL_INPUT_PATH_OPTIONS]
     if name in _UTIL_PATH_POSITIONAL:
-        paths.append(_first_positional(args, _UTIL_PATH_POSITIONAL[name]))
+        paths.append(_first_positional(
+            args, _UTIL_PATH_POSITIONAL[name], _UTIL_VARIADIC_OPTIONS.get(name, ()),
+        ))
     return paths
 
 

@@ -170,6 +170,60 @@ class TestTheStampFollowsTheNewestRun:
         assert run_status.superseded_by_native(
             tmp_path / "plans" / "p.md", view) == {"leg": "native", "host": "claude-code"}
 
+    def test_a_detached_run_started_after_the_native_emit_is_not_set_aside(
+        self, tmp_path,
+    ):
+        """A detached executor attempt that failed or was aborted before it
+        rewrote `write_tasks.json` leaves the native stamp behind: the stamp
+        alone does not make its record the earlier run."""
+        from datetime import datetime
+
+        plan = tmp_path / "plans" / "p.md"
+        phase = tmp_path / "plans" / "p" / "implement"
+        phase.mkdir(parents=True)
+        plan.write_text("# P\n", encoding="utf-8")
+        tasks = phase / WRITE_TASK_FILENAME
+        tasks.write_text(
+            json.dumps({"leg": "native", "host": "claude-code"}), encoding="utf-8")
+        emitted = tasks.stat().st_mtime
+        stamp = {"leg": "native", "host": "claude-code"}
+        for verdict in ("failed", "aborted"):
+            view = {"phase_dir": str(phase), "verdict": verdict, "run": {
+                "run_id": "y",
+                "started_at": datetime.fromtimestamp(emitted + 60).isoformat(),
+            }}
+            assert run_status.superseded_by_native(plan, view) is None, verdict
+            view["run"]["started_at"] = datetime.fromtimestamp(emitted - 60).isoformat()
+            assert run_status.superseded_by_native(plan, view) == stamp, verdict
+        # The apply emit's recorded `native_run.emitted_at` is the emit's time.
+        tasks.write_text(json.dumps({**stamp, "native_run": {
+            "emitted_at": datetime.fromtimestamp(emitted - 3600).isoformat(),
+        }}), encoding="utf-8")
+        view = {"phase_dir": str(phase), "verdict": "failed", "run": {
+            "run_id": "y",
+            "started_at": datetime.fromtimestamp(emitted - 60).isoformat(),
+        }}
+        assert run_status.superseded_by_native(plan, view) is None
+
+    def test_status_shows_a_newer_detached_failure_over_the_native_block(
+        self, repo, capsys,
+    ):
+        from datetime import datetime
+
+        _first_run(repo, capsys)
+        _go_on_natively(repo, capsys)
+        emitted = (repo.phase_dir / WRITE_TASK_FILENAME).stat().st_mtime
+        run_id = "5d1e7a2b-0c4f-4e8e-9a51-3f2b6c7d8e90"
+        status_file.update_status(str(repo.phase_dir), {"run": {
+            "run_id": run_id, "state": "failed", "exit_code": 1, "detached": True,
+            "mode": "implement", "error": "worker crashed before dispatch",
+            "started_at": datetime.fromtimestamp(emitted + 60).isoformat(),
+        }})
+        out = _status(capsys, repo, "--view", "run")
+        assert "run 5d1e7a2b" in out, out
+        assert "worker crashed before dispatch" in out, out
+        assert EARLIER not in out.splitlines(), out
+
 
 @pytest.fixture
 def apply_plan(tmp_path, monkeypatch):

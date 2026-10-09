@@ -1992,13 +1992,28 @@ def repeated_findings_for(
     own (:func:`accepted_findings_for`, read first); a task it never released
     that reports one again keeps it as its own failure (round 23's scope),
     the same with F3's annotation or without it. T002 not yet accepted when
-    T001 recorded (run 12's case) still makes T001's finding a repeat."""
+    T001 recorded (run 12's case) still makes T001's finding a repeat.
+
+    Only a check of the decomposition implement recorded last
+    (``implement_task_ids``, when one is on record) is eligible: a check a
+    regenerated task list dropped keeps its ``completed`` status and
+    findings in ``state.json``, and a current task reporting the same
+    failure would otherwise lose it from its own check (and from the
+    failure context review-code reads) to a check no longer in the run. The
+    whole decomposition is recorded, never a resume's subset, so a check an
+    earlier run of it completed stays eligible across resumes."""
     task_id = str(task.get("task_id") or "")
     accepted = accepted_checks_on_record(state)
+    try:
+        scope = state.get("implement_task_ids") if state is not None else None
+    except Exception:  # noqa: BLE001 - a read for a classification, never fatal
+        scope = None
+    current = {str(t) for t in scope} if isinstance(scope, list) else None
     return {
         check_id: findings
         for check_id, findings in reported_checks_on_record(state).items()
         if check_id != task_id and check_id not in accepted
+        and (current is None or check_id in current)
         and not task_owns_the_check(task, check_id, findings)
     }
 

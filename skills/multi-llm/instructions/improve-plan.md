@@ -238,15 +238,37 @@ that read `skip` reads the same files, which the run on record left. Paths are u
 | models | `review-plan/.status.json` | `models_completed`, and each `models_failed` entry with its reason, out of `models_requested` |
 | findings | `review-plan/grouped.json` | the number of entries in `groups` |
 | valid, invalid, needs human decision, validation failed | `review-plan/.status.json` | `validation_counts`. With no such key, a review whose `grouped.json` holds no group prints `0` for each |
-| items applied | `state.json` | the `processed_apply-suggestions` records with status `applied` or `no-op`, for the `expected_ids` of the batches in `apply-suggestions/write_tasks.json` |
-| declined by their batch, skipped at your request | `state.json` | the same records with status `declined` or `skipped`, each with its reason |
+| items applied | `apply-suggestions/write_tasks.json`, `state.json` | the run's records (below) with status `applied` or `no-op` |
+| declined by their batch, skipped at your request | `apply-suggestions/write_tasks.json`, `state.json` | the run's records with status `declined` or `skipped`, each with its `details.reason` |
 | decided by the judge | `state.json` | the `human_decisions_apply-suggestions` entries whose `batch_context.decision_source` is `judge_auto_decide` (approved or skipped, by `decision`) or `judge_auto_decide_salvage` (salvaged); the older `claude_auto_decide` spellings read the same. The judge's raw replies (`apply-suggestions/human_decision_batch_*.json`) are not counted |
 | items skipped | `apply-suggestions/orchestrator_output.json` | `skipped_count`, with `skipped_items` naming each |
 
+The run is the whole apply run, every `--resume` of it included. A native `--resume`
+rewrites `write_tasks.json` with only the batches still to run, and `state.json` keeps
+the records of earlier runs, so neither the file's batches nor every record is the run:
+
+- **The run's items** are `native_run.items` in `apply-suggestions/write_tasks.json`
+  (every item the run handed out, carried across its resumes) and the `expected_ids`
+  of its `batches`. A file with no `native_run` (an `--exec-subagents` run, whose
+  resume keeps every batch in the file) has its batches' `expected_ids` alone.
+- **The run's records** are the `processed_apply-suggestions` entries (one per item
+  id) whose `details.grouped_sha256` equals the batches' `inputs.grouped_sha256`, or,
+  when either has none, whose item is one of the run's items. When
+  `native_run.started_at` is set, leave out every entry whose `timestamp` is earlier:
+  it is an earlier run's.
+- **When `apply-suggestions/orchestrator_output.json` holds no batch**, the apply's
+  last call handed nothing out, and `write_tasks.json` says why. A file whose
+  `native_run.emitted_at` is later than `phases_completed["review-plan"]` in
+  `state.json` is this review's: that call was a `--resume` that found every batch
+  already recorded (the host stopped before `--mark-completed`), so count the run
+  from it as above. Otherwise (no `write_tasks.json`, no `native_run`, or one emitted
+  before the review last completed, which an earlier review left) this review left
+  nothing to apply: count nothing from that file, and an apply phase on record as
+  completed prints `0` items applied and no declined or skipped line.
+
 - A field whose file is missing or unreadable prints `not recorded (<path> missing)`,
-  never `0` and never a number taken from another file. One exception: an apply phase
-  on record as completed whose `orchestrator_output.json` holds no batch prints `0`
-  items applied.
+  never `0` and never a number taken from another file, except as the no-batch rule
+  above says.
 - An output file that does not exist is listed with `(not written)` after it.
 
 ```markdown
