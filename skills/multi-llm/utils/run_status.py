@@ -2801,7 +2801,7 @@ def state_apply_views(
     ``declined_items`` / ``skipped_items`` when a batch's record names one,
     fix round 22, ``items_applied`` / ``items_total`` / ``applied_to``
     once a record names one of its items, fix round 28, counted over the
-    run, fix round 29) in workflow order;
+    run, and ``failed_batches``, fix round 29) in workflow order;
     *only* limits it to one phase (``--phase``). Read-only.
     """
     from .metrics import _current_run_id
@@ -2987,14 +2987,14 @@ _SINGLE_TARGET_APPLY_PHASES = ("apply-suggestions", "apply-task-suggestions")
 def _native_apply_not_applied(
     record: Dict[str, Any], directory: Path, phase: str = "",
 ) -> Dict[str, Any]:
-    """``{declined_items, skipped_items, items_applied, items_total,
-    applied_to}`` for a native apply phase, in the write mirror's shape
-    (fix round 22, live run 9: the decline the host recorded with ``util
-    batch-done --declined`` was on no ``status`` surface). Read from
-    ``processed_<phase dir>``: a record of the review the phase's
+    """``{declined_items, skipped_items, failed_batches, items_applied,
+    items_total, applied_to}`` for a native apply phase, in the write
+    mirror's shape (fix round 22, live run 9: the decline the host recorded
+    with ``util batch-done --declined`` was on no ``status`` surface). Read
+    from ``processed_<phase dir>``: a record of the review the phase's
     ``write_tasks.json`` applies (its ``grouped_sha256``), or, for a record
-    or a task without that stamp, one whose item the run handed out.
-    ``{}`` when nothing applies or either cannot be read.
+    or a task without that stamp, one whose item the run handed out. ``{}``
+    when nothing applies or either cannot be read.
 
     Fix round 28 (live run 12 #4, Claude Code decline): the block printed
     "1 declined by its batch (not applied): …" with no "2/3 items applied;"
@@ -3015,7 +3015,11 @@ def _native_apply_not_applied(
     (``started_at``) is an earlier run's: a bare re-run of a completed
     phase read the earlier run's "4/4 items applied" before it recorded
     anything. A file without ``native_run`` reads as before: its batches'
-    items, every record of the review."""
+    items, every record of the review. ``failed_batches`` (``[{task_id,
+    reason}]``) are the batches recorded ``failed`` since this file was
+    written (``emitted_at``; an earlier part's failure is handed out again
+    by the resume that wrote it), each with the reason its record gave: a
+    failed batch alone read "0/4 items applied" and named nothing."""
     from .state_manager import _parse_completion_time
 
     try:
@@ -3042,6 +3046,7 @@ def _native_apply_not_applied(
         run.get("items"), list) else []
     items: Dict[str, None] = dict.fromkeys([*run_items, *holder])
     started = _parse_completion_time(run.get("started_at"))
+    emitted = _parse_completion_time(run.get("emitted_at"))
 
     def _before(entry: Dict[str, Any], when: Any) -> bool:
         written = _parse_completion_time(entry.get("timestamp"))
@@ -3050,6 +3055,7 @@ def _native_apply_not_applied(
     out: Dict[str, Any] = {}
     applied = 0
     on_record = False
+    failed: Dict[str, str] = {}
     for item, entry in processed.items():
         if not isinstance(entry, dict) or _before(entry, started):
             continue
@@ -3062,6 +3068,10 @@ def _native_apply_not_applied(
             continue
         status = entry.get("status")
         task_id = str(details.get("task_id") or holder.get(str(item)) or "")
+        if status == "failed":
+            if _before(entry, emitted):
+                continue
+            failed.setdefault(task_id, _failed_batch_reason(record, task_id, details))
         items.setdefault(str(item), None)
         on_record = True
         applied += status == "applied"
@@ -3073,6 +3083,10 @@ def _native_apply_not_applied(
             "id": str(item),
             "reason": str(details.get("reason") or ""),
         })
+    if failed:
+        out["failed_batches"] = [
+            {"task_id": task_id, "reason": reason} for task_id, reason in failed.items()
+        ]
     if on_record:
         out["items_applied"] = applied
         out["items_total"] = len(items)
@@ -3081,6 +3095,51 @@ def _native_apply_not_applied(
         if target:
             out["applied_to"] = target
     return out
+
+
+def _failed_batch_reason(
+    record: Mapping[str, Any], task_id: str, details: Mapping[str, Any],
+) -> str:
+    """The reason a native apply batch's ``failed`` record gave: its own
+    ``details.reason`` when it carries one, else ``task_status_reasons``
+    while ``task_status`` still says that batch failed; ``""`` otherwise."""
+    if details.get("reason"):
+        return str(details["reason"])
+    statuses = record.get("task_status") if isinstance(record.get("task_status"), dict) else {}
+    reasons = record.get("task_status_reasons") if isinstance(
+        record.get("task_status_reasons"), dict) else {}
+    if statuses.get(task_id) == "failed" and reasons.get(task_id):
+        return str(reasons[task_id])
+    return ""
+
+
+#: The words of the clause naming a native apply phase's failed batches
+#: (fix round 29), for one and for several.
+_FAILED_BATCH_WORDS = ("1 batch failed", "{n} batches failed")
+
+
+def failed_batch_clause(view: Mapping[str, Any]) -> List[str]:
+    """``1 batch failed: apply-batch-0 (<reason>)`` (``2 batches failed: …;
+    …``) for a native apply view's ``failed_batches``, else ``[]``: the
+    executor's line names its failed batches (``failed apply-batch-0``), and
+    the native view's count read "0/4 items applied" beside one and named
+    nothing (fix round 29)."""
+    raw = view.get("failed_batches")
+    entries = [
+        entry for entry in raw
+        if isinstance(entry, dict) and entry.get("task_id")
+    ] if isinstance(raw, list) else []
+    if not entries:
+        return []
+    one, several = _FAILED_BATCH_WORDS
+    head = one if len(entries) == 1 else several.format(n=len(entries))
+    named = []
+    for entry in entries[:5]:
+        reason = plain_line(str(entry.get("reason") or ""))
+        why = f" ({clip(without_closing_mark(reason), 120)})" if reason else ""
+        named.append(f"{plain_line(str(entry['task_id']))}{why}")
+    more = f" (+{len(entries) - 5} more)" if len(entries) > 5 else ""
+    return [f"{head}: " + "; ".join(named) + more]
 
 
 def _native_single_target(tasks: Sequence[Any], directory: Path) -> Optional[str]:
@@ -3164,7 +3223,8 @@ def render_state_apply_lines(
     # Fix round 22: in the executor's progress-line words. Fix round 28
     # (live run 12 #4): after the items count they are left out of, as the
     # executor's line puts them, "2/3 items applied; 1 declined by …".
-    not_applied = not_applied_item_clauses(view)
+    # Fix round 29: and the batches recorded failed, by name.
+    not_applied = not_applied_item_clauses(view) + failed_batch_clause(view)
     count = native_items_count(view)
     if count:
         lines.append("      " + "; ".join([count, *not_applied]))
