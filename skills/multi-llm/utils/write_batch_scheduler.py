@@ -13466,9 +13466,11 @@ class WriteBatchScheduler:
             # Fix round 28: a code task whose own check reported only what a
             # check task reported is named under that check too.
             repeated: Dict[str, List[str]] = {}
+            repeated_found: Dict[Tuple[str, str], List[str]] = {}
             for task_id, matched in result.batch_check_repeats().items():
-                for check_id in matched:
+                for check_id, found in matched.items():
                     repeated.setdefault(check_id, []).append(task_id)
+                    repeated_found[(task_id, check_id)] = [str(item) for item in found]
             for task_id, findings in findings_by_task.items():
                 lines.append(f"### {task_id}")
                 lines.append("")
@@ -13481,6 +13483,22 @@ class WriteBatchScheduler:
                         f"failure.{_note_sentence(notes.get(rerun))}", "",
                     ]
                 for rerun in repeated.get(task_id, []):
+                    # Fix round 29 (review of round 28, checks #5): the record
+                    # is what the task's run saw. A check that ran again and
+                    # no longer lists what it repeated has the repeat quoted,
+                    # never set under findings the task never reported.
+                    found = repeated_found.get((rerun, task_id)) or []
+                    left, _same = split_repeated_findings(found, {task_id: findings})
+                    if found and left:
+                        lines += [
+                            f"{rerun} ran this check too, and its own report "
+                            f"said only what {task_id} reported then: "
+                            f"{quoted_findings(found, 300)} — not what "
+                            f"{task_id} reports now, and not counted as "
+                            f"{rerun}'s own failure."
+                            f"{_note_sentence(notes.get(rerun))}", "",
+                        ]
+                        continue
                     lines += [
                         f"{rerun} ran this check too, and its own report says "
                         f"only what {task_id} reported: it repeats {task_id}'s "
