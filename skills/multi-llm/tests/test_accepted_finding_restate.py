@@ -94,6 +94,28 @@ class TestTheTrigger:
         assert "restate that finding as the accepted finding alone" in problem
         assert "keep the finding exactly as it is" in problem
 
+    def test_every_surface_says_a_note_is_a_comment_never_a_failure(self):
+        """Fix round 29 (review of round 28, checks #3): a restatement may
+        move a second failure the check printed into the note, and the
+        merge cannot tell it from a comment without reading meaning (the
+        user's decision: none). The re-ask, its problem and the rule the
+        native host follows say plainly that every failure stays a finding."""
+        from pathlib import Path
+
+        problem = restate_findings_problem("T007", [(MORE, "T002", ACCEPTED)])
+        assert "A note is a comment, never a failure" in problem
+        assert "every failure the check printed stays a finding" in problem
+        prompt = " ".join(build_schema_repair_prompt(
+            "implement", "the batch", [problem], previous_reply='{"status": "applied"}',
+            expected_ids=["T007"], restate_findings=True,
+        ).split())
+        assert ("a note is a comment, never a failure, so every failure the "
+                "check printed stays a finding") in prompt
+        rule = (Path(__file__).resolve().parents[1] / "references" / "own-check.md"
+                ).read_text(encoding="utf-8")
+        assert "A note is a comment, never a failure" in rule
+        assert "every failure the check printed stays a `--finding`" in rule
+
     def test_the_reask_lets_only_the_finding_and_note_change(self):
         prompt = build_schema_repair_prompt(
             "implement", "the batch", ["the problem"], previous_reply='{"status": "applied"}',
@@ -273,6 +295,9 @@ class TestTheNativeLeg:
         assert any(l.startswith(f"{BATCH_CHECK_MARKER} T007:") for l in lines)
         restate = next(l for l in lines if l.startswith(FINDING_RESTATE_MARKER))
         assert "holds the finding the user accepted for T002 word for word" in restate
+        # Fix round 29 (review of round 28, checks #3).
+        assert "A note is a comment, never a failure" in restate
+        assert "so that failure stays a finding" in restate
         state = json.loads((repo.phase_dir.parent / "state.json").read_text())
         assert state["task_batch_check"]["T007"] == [ADDED]
         call = restate.split("the words as its note: ", 1)[1].split(" (that record", 1)[0]
