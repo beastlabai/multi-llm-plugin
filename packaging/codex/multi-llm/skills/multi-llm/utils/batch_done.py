@@ -124,6 +124,7 @@ try:
         set_task_batch_check_repeats_in_state,
         set_task_own_check_note_in_state,
         set_task_own_check_ran_in_state,
+        set_task_own_text_in_state,
         set_task_check_findings_in_state,
         set_task_check_tree_in_state,
         update_task_status_in_state,
@@ -155,6 +156,7 @@ try:
         rerunnable_checks,
         split_accepted_findings,
         split_repeated_findings,
+        task_own_text,
         transitive_dependents,
         upstream_held_check,
         words_added_to,
@@ -181,6 +183,7 @@ except ImportError:  # pragma: no cover - direct script invocation
         set_task_batch_check_repeats_in_state,
         set_task_own_check_note_in_state,
         set_task_own_check_ran_in_state,
+        set_task_own_text_in_state,
         set_task_check_findings_in_state,
         set_task_check_tree_in_state,
         update_task_status_in_state,
@@ -212,6 +215,7 @@ except ImportError:  # pragma: no cover - direct script invocation
         rerunnable_checks,
         split_accepted_findings,
         split_repeated_findings,
+        task_own_text,
         transitive_dependents,
         upstream_held_check,
         words_added_to,
@@ -636,6 +640,9 @@ def record_batch(
             # findings and never among them (fix round 15): it holds
             # nothing back, and every other record of the task clears it.
             set_task_batch_check_in_state(state, task_id, batch_check)
+            # Fix round 29: its own words beside a failing own check, for a
+            # check that reports the same finding in a later run.
+            set_task_own_text_in_state(state, task_id, task_own_text(task))
             # Fix round 24: that its own check reported at all, a pass
             # included, for the tests line (`implement_checks_ran`).
             set_task_own_check_ran_in_state(
@@ -787,7 +794,10 @@ def finding_restate_line(
     that records the task again with the accepted finding alone and the
     added words as its ``--note`` — for the host to run only when those
     words are its subagent's comment. The plugin never records it as
-    accepted itself (``write_batch_scheduler.accepted_findings_with_words_added``)."""
+    accepted itself (``write_batch_scheduler.accepted_findings_with_words_added``).
+    Fix round 29 (review of round 28, checks #3): it says plainly that a
+    note is a comment, never a failure, so a failure the added words report
+    stays a finding."""
     flagged = list(restate.get("flagged") or [])
     named = "; ".join(
         f"its finding \"{clip(finding, 160)}\" holds the finding the user "
@@ -806,8 +816,10 @@ def finding_restate_line(
         f"comment, record {task_id} again with the accepted finding alone and "
         f"the words as its note: {_record_again_call(args, flags)} (that "
         f"record replaces this one, and the line it prints is the one to "
-        f"follow). If they report something the check printed beyond the "
-        f"accepted finding, leave the record as it is."
+        f"follow). A note is a comment, never a failure: nothing in it is "
+        f"ever read as one. If the added words report something the check "
+        f"printed beyond the accepted finding (another value, test or line), "
+        f"leave the record as it is, so that failure stays a finding."
     )
 
 

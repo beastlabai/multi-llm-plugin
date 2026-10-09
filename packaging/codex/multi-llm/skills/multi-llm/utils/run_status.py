@@ -563,9 +563,10 @@ def manual_close_note(
     from . import next_phase
 
     # The manual tasks themselves, never a code task skipped with one
-    # (`next_phase.manual_close_ids`, fix round 16).
+    # (`next_phase.manual_close_ids`, fix round 16); while a manual-task gate
+    # holds, the gate's alone (`manual_note_ids`, fix round 29).
     implement = payload.get("phases", {}).get("implement") or {}
-    ids = next_phase.manual_close_ids(implement)
+    ids = next_phase.manual_note_ids(implement)
     if not ids:
         return None
 
@@ -582,6 +583,7 @@ def manual_close_note(
         next_phase.close_command(template, plan_spelling, ids), len(ids),
         # Fix round 28: never "No later phase waits" beside code tasks that do.
         waiting=next_phase.manual_waiting_count(implement, ids),
+        named=next_phase.manual_note_named(implement, ids),
     )
 
 
@@ -633,7 +635,23 @@ def _workflow_trailer_lines(
             f"  ({' / '.join(pending_optional)} optional, not run)"
             if pending_optional else ""
         )
-        lines.append(f"{prefix}suggested next: {payload['suggested_next']}{suffix}")
+        from .next_phase import gate_resume_suggested
+
+        gate = gate_resume_suggested(payload)
+        if gate:
+            # Fix round 29 (review of round 28 #4): implement finished with
+            # code tasks waiting on a manual task the user can do now, and
+            # every other surface leads with its resume, as this does.
+            answers = " ".join(gate[1:])
+            ids = ", ".join(
+                flag.split("=", 1)[0] for flag in gate[2::2])
+            lines.append(
+                f"{prefix}suggested next: implement  (resume it with "
+                f"{answers} once you have done {ids} by hand; or "
+                f"{payload['suggested_next']}, over the code implement has "
+                f"run so far)")
+        else:
+            lines.append(f"{prefix}suggested next: {payload['suggested_next']}{suffix}")
     for notice in payload.get("notices", []) or []:
         if plain_line(notice) in said_whys:
             continue
@@ -2238,10 +2256,12 @@ def state_implement_view(
         # Fix round 28 (live run 12, Codex racing 06): every code task left
         # waits on a manual task the user can do now, so the resume records
         # it done; the run stopped for the user.
-        gate_flags, gate_why = _native_manual_gate(state)
+        gate_flags, gate_why, gate_answers = _native_manual_gate(state)
         if gate_flags:
             stop_resume_why = gate_why or stop_resume_why
             stopped = not in_progress_since
+            # Fix round 29 (review of round 28 #1): and the user's decline.
+            stop_answers = list(stop_answers) + gate_answers
     return {
         "completed": completed,
         # Fix round 20: whether `--implement <plan> --resume` continues it,
@@ -2323,17 +2343,21 @@ def native_still_runnable(
     ]
 
 
-def _native_manual_gate(state: Any) -> Tuple[List[str], Optional[str]]:
-    """``(resume flags, why)`` of a native implement whose every code task
-    left waits on a manual task the user can do now (fix round 28), the
-    words ``util next-command`` gives them, else ``([], None)``."""
+def _native_manual_gate(
+    state: Any,
+) -> Tuple[List[str], Optional[str], List[Dict[str, Any]]]:
+    """``(resume flags, why, answers)`` of a native implement whose every
+    code task left waits on a manual task the user can do now (fix round
+    28), the words ``util next-command`` gives them — the answers being the
+    user's decline of each such task (fix round 29) — else
+    ``([], None, [])``."""
     from . import next_phase
 
     try:
         deferred = state.deferred_implementation_tasks()
         gates = state.manual_task_gates(deferred)
         if not gates or not gates.get("gated"):
-            return [], None
+            return [], None, []
         entry = {
             "manual_gate": True,
             "manual_tasks": deferred,
@@ -2341,9 +2365,12 @@ def _native_manual_gate(state: Any) -> Tuple[List[str], Optional[str]]:
             "manual_waiting": gates.get("waiting") or {},
         }
         flags = next_phase.manual_gate_flags(entry)
-        return (flags, next_phase.manual_gate_why(entry)) if flags else ([], None)
+        if not flags:
+            return [], None, []
+        return (flags, next_phase.manual_gate_why(entry),
+                next_phase.manual_gate_decline_answers(entry))
     except Exception:  # noqa: BLE001 - advisory: the plain resume stands
-        return [], None
+        return [], None, []
 
 
 def native_run_stopped(
@@ -2799,8 +2826,9 @@ def state_apply_views(
     host's loop is going. ``{phase, phase_dir, completed,
     in_progress_since, batches_recorded, batches_total}`` (plus
     ``declined_items`` / ``skipped_items`` when a batch's record names one,
-    fix round 22, and ``items_applied`` / ``items_total`` / ``applied_to``
-    once a record names one of its items, fix round 28) in workflow order;
+    fix round 22, ``items_applied`` / ``items_total`` / ``applied_to``
+    once a record names one of its items, fix round 28, counted over the
+    run, and ``failed_batches``, fix round 29) in workflow order;
     *only* limits it to one phase (``--phase``). Read-only.
     """
     from .metrics import _current_run_id
@@ -2986,24 +3014,41 @@ _SINGLE_TARGET_APPLY_PHASES = ("apply-suggestions", "apply-task-suggestions")
 def _native_apply_not_applied(
     record: Dict[str, Any], directory: Path, phase: str = "",
 ) -> Dict[str, Any]:
-    """``{declined_items, skipped_items, items_applied, items_total,
-    applied_to}`` for a native apply phase, in the write mirror's shape
-    (fix round 22, live run 9: the decline the host recorded with ``util
-    batch-done --declined`` was on no ``status`` surface). Read from
-    ``processed_<phase dir>``: a record of the review the phase's
+    """``{declined_items, skipped_items, failed_batches, items_applied,
+    items_total, applied_to}`` for a native apply phase, in the write
+    mirror's shape (fix round 22, live run 9: the decline the host recorded
+    with ``util batch-done --declined`` was on no ``status`` surface). Read
+    from ``processed_<phase dir>``: a record of the review the phase's
     ``write_tasks.json`` applies (its ``grouped_sha256``), or, for a record
-    or a task without that stamp, one whose item a current batch holds.
-    ``{}`` when nothing applies or either cannot be read.
+    or a task without that stamp, one whose item the run handed out. ``{}``
+    when nothing applies or either cannot be read.
 
     Fix round 28 (live run 12 #4, Claude Code decline): the block printed
     "1 declined by its batch (not applied): …" with no "2/3 items applied;"
-    before it, which the executor's line has. ``items_total`` is every item
-    the batches of ``write_tasks.json`` hold, ``items_applied`` those a
-    record of this run says ``applied`` (as the executor counts an applied
-    batch's items less the ones it declined or skipped); both are left out
-    until a record of this run names one of them. ``applied_to`` is the one
-    file a single-target phase's batches all declare, from the repository
-    root, as the executor names it."""
+    before it, which the executor's line has. ``items_applied`` counts the
+    items a record of this run says ``applied`` (as the executor counts an
+    applied batch's items less the ones it declined or skipped); both are
+    left out until a record of this run names one of its items.
+    ``applied_to`` is the one file a single-target phase's batches all
+    declare, from the repository root, as the executor names it.
+
+    Fix round 29 (review of round 28): the run is the file's ``native_run``
+    (``write_phase_bridge.native_run_record``), not the file's batches,
+    which a native ``--resume`` cuts down to the ones still to run: right
+    after a resume's emit the count was gone, and once its batch was
+    recorded it read "1/1 items applied" for a phase that applied 3 of 4.
+    ``items_total`` is every item the run handed out (with any item a
+    record of this run names), and a record written before the run started
+    (``started_at``) is an earlier run's: a bare re-run of a completed
+    phase read the earlier run's "4/4 items applied" before it recorded
+    anything. A file without ``native_run`` reads as before: its batches'
+    items, every record of the review. ``failed_batches`` (``[{task_id,
+    reason}]``) are the batches recorded ``failed`` since this file was
+    written (``emitted_at``; an earlier part's failure is handed out again
+    by the resume that wrote it), each with the reason its record gave: a
+    failed batch alone read "0/4 items applied" and named nothing."""
+    from .state_manager import _parse_completion_time
+
     try:
         document = json.loads((directory / _WRITE_TASKS).read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001 - advisory
@@ -3022,39 +3067,106 @@ def _native_apply_not_applied(
         stamp = stamp or str(inputs.get("grouped_sha256") or "")
         for item in task.get("expected_ids") or []:
             holder.setdefault(str(item), str(task.get("task_id") or ""))
+    run = document.get("native_run")
+    run = run if isinstance(run, dict) else {}
+    run_items = [str(i) for i in run.get("items") or [] if str(i)] if isinstance(
+        run.get("items"), list) else []
+    items: Dict[str, None] = dict.fromkeys([*run_items, *holder])
+    started = _parse_completion_time(run.get("started_at"))
+    emitted = _parse_completion_time(run.get("emitted_at"))
+
+    def _before(entry: Dict[str, Any], when: Any) -> bool:
+        written = _parse_completion_time(entry.get("timestamp"))
+        return when is not None and written is not None and written < when
+
     out: Dict[str, Any] = {}
     applied = 0
     on_record = False
+    failed: Dict[str, str] = {}
     for item, entry in processed.items():
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or _before(entry, started):
             continue
         details = entry.get("details") if isinstance(entry.get("details"), dict) else {}
         recorded = str(details.get("grouped_sha256") or "")
         if stamp and recorded:
             if recorded != stamp:
                 continue
-        elif str(item) not in holder:
+        elif str(item) not in items:
             continue
-        if str(item) in holder:
-            on_record = True
-            applied += entry.get("status") == "applied"
-        key = {"declined": "declined_items", "skipped": "skipped_items"}.get(
-            entry.get("status"))
+        status = entry.get("status")
+        task_id = str(details.get("task_id") or holder.get(str(item)) or "")
+        if status == "failed":
+            if _before(entry, emitted):
+                continue
+            failed.setdefault(task_id, _failed_batch_reason(record, task_id, details))
+        items.setdefault(str(item), None)
+        on_record = True
+        applied += status == "applied"
+        key = {"declined": "declined_items", "skipped": "skipped_items"}.get(status)
         if key is None:
             continue
         out.setdefault(key, []).append({
-            "task_id": str(details.get("task_id") or holder.get(str(item)) or ""),
+            "task_id": task_id,
             "id": str(item),
             "reason": str(details.get("reason") or ""),
         })
+    if failed:
+        out["failed_batches"] = [
+            {"task_id": task_id, "reason": reason} for task_id, reason in failed.items()
+        ]
     if on_record:
         out["items_applied"] = applied
-        out["items_total"] = len(holder)
+        out["items_total"] = len(items)
         target = _native_single_target(tasks, directory) if (
             phase in _SINGLE_TARGET_APPLY_PHASES) else None
         if target:
             out["applied_to"] = target
     return out
+
+
+def _failed_batch_reason(
+    record: Mapping[str, Any], task_id: str, details: Mapping[str, Any],
+) -> str:
+    """The reason a native apply batch's ``failed`` record gave: its own
+    ``details.reason`` when it carries one, else ``task_status_reasons``
+    while ``task_status`` still says that batch failed; ``""`` otherwise."""
+    if details.get("reason"):
+        return str(details["reason"])
+    statuses = record.get("task_status") if isinstance(record.get("task_status"), dict) else {}
+    reasons = record.get("task_status_reasons") if isinstance(
+        record.get("task_status_reasons"), dict) else {}
+    if statuses.get(task_id) == "failed" and reasons.get(task_id):
+        return str(reasons[task_id])
+    return ""
+
+
+#: The words of the clause naming a native apply phase's failed batches
+#: (fix round 29), for one and for several.
+_FAILED_BATCH_WORDS = ("1 batch failed", "{n} batches failed")
+
+
+def failed_batch_clause(view: Mapping[str, Any]) -> List[str]:
+    """``1 batch failed: apply-batch-0 (<reason>)`` (``2 batches failed: …;
+    …``) for a native apply view's ``failed_batches``, else ``[]``: the
+    executor's line names its failed batches (``failed apply-batch-0``), and
+    the native view's count read "0/4 items applied" beside one and named
+    nothing (fix round 29)."""
+    raw = view.get("failed_batches")
+    entries = [
+        entry for entry in raw
+        if isinstance(entry, dict) and entry.get("task_id")
+    ] if isinstance(raw, list) else []
+    if not entries:
+        return []
+    one, several = _FAILED_BATCH_WORDS
+    head = one if len(entries) == 1 else several.format(n=len(entries))
+    named = []
+    for entry in entries[:5]:
+        reason = plain_line(str(entry.get("reason") or ""))
+        why = f" ({clip(without_closing_mark(reason), 120)})" if reason else ""
+        named.append(f"{plain_line(str(entry['task_id']))}{why}")
+    more = f" (+{len(entries) - 5} more)" if len(entries) > 5 else ""
+    return [f"{head}: " + "; ".join(named) + more]
 
 
 def _native_single_target(tasks: Sequence[Any], directory: Path) -> Optional[str]:
@@ -3138,7 +3250,8 @@ def render_state_apply_lines(
     # Fix round 22: in the executor's progress-line words. Fix round 28
     # (live run 12 #4): after the items count they are left out of, as the
     # executor's line puts them, "2/3 items applied; 1 declined by …".
-    not_applied = not_applied_item_clauses(view)
+    # Fix round 29: and the batches recorded failed, by name.
+    not_applied = not_applied_item_clauses(view) + failed_batch_clause(view)
     count = native_items_count(view)
     if count:
         lines.append("      " + "; ".join([count, *not_applied]))

@@ -233,7 +233,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         metavar='ID=done|skip|retry',
         help='Answer one human task (D6 row 9), repeatable: --human-task '
              'T004=done. Turns the pause-and-ask pause into a process boundary '
-             'instead of a blocked stdin. With --resume it also answers a code '
+             'instead of a blocked stdin. Under skip-dependents (the --yes '
+             'default), T004=skip says you will not do that manual task: it '
+             'and the tasks after it are skipped at your request, never owed '
+             '(under skip-continue the code after it still runs). With '
+             '--resume it also answers a code '
              'task the last run recorded failed (a check that failed), or a '
              'check whose findings hold back the tasks after it: done treats '
              'it as satisfied and runs the tasks after it, skip leaves it and '
@@ -1212,9 +1216,14 @@ def _native_manual_gates(
     emit has not persisted *plan* yet); ``None`` when it cannot be read
     (fix round 28).
 
-    The note it words is read once the host ran the batches (its summary,
-    its report), so a code task this emit hands out counts as done: a manual
-    task after it is one the user can do by then."""
+    A code task this emit hands out is not done yet. Fix round 29 (review of
+    round 28 #3): it used to count as done, so the note named a manual task
+    that comes after it as one the user can do, and the host copied that
+    note into summary.md even when the task then failed, while ``status``
+    and ``util next-command`` said the manual task comes after it. Such a
+    manual task is ``after`` here: the emit lists it with what it comes
+    after, and the report's lookup, made once the batches are recorded,
+    gives its command."""
     try:
         from utils.write_batch_scheduler import decomposition_graph, plan_manual_gates
 
@@ -1231,14 +1240,9 @@ def _native_manual_gates(
             }
             for task in entries
         ]
-        statuses = dict(state.get_all_task_statuses())
-        for task in entries:
-            task_id = str(task.get("id") or "")
-            if (task_id and not (task.get("is_human") or task.get("executor_role") == "human")
-                    and not plan.is_skipped(task_id)):
-                statuses[task_id] = "completed"
         return plan_manual_gates(
-            plan, decomposition_graph(nodes, state.state), statuses)
+            plan, decomposition_graph(nodes, state.state),
+            dict(state.get_all_task_statuses()))
     except Exception:  # noqa: BLE001 - advisory wording, never fatal
         return None
 
@@ -1286,7 +1290,7 @@ def _native_manual_gate_stop(
         "or `util finalize-tracking`. Report the deferred tasks above, then end "
         "the report with the section `util next-command` prints: the resume "
         "that records the manual task done, which runs the code tasks waiting "
-        "on it.")
+        "on it, and the answer that skips them if the user will not do it.")
     eta = metrics_mod.closing_line(
         "implement", done=0, total=0,
         why=(f"{', '.join(gating)} left for you (manual); {len(held)} code "
@@ -2787,6 +2791,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # plan was only resolved for a plan holding a human task (fix round 8).
     native_human_plan = None
     answered_on_record = None
+    native_after: Dict[str, List[str]] = {}
     if not executor_backed:
         from utils.write_batch_scheduler import answered_done_on_record
 
@@ -2824,6 +2829,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         native_gates = _native_manual_gates(native_human_plan, output_data, state)
         waiting = 0
         if native_gates is not None:
+            # Fix round 29: what each later manual task comes after, for
+            # its line in the deferred list below.
+            native_after = dict(native_gates.get("after") or {})
             manual_ids = [t for t in manual_ids if t in native_gates["closable"]]
             waiting = len({
                 code for task_id in manual_ids
@@ -3003,8 +3011,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                    "too" if note else "")
                 + "):"
             )
+            from utils.next_phase import after_code_note
+
             for task_id, reason in sorted(deferred.items()):
-                print(f"  {_named(task_id)}: {reason}")
+                # Fix round 29: a manual task after code this emit hands out
+                # says so; the report's lookup gives its command.
+                after = native_after.get(task_id)
+                print(f"  {_named(task_id)}: {reason}"
+                      + (f" {after_code_note(after)}" if after else ""))
             if note:
                 print(f"[MANUAL_TASK_NOTE] {note}")
         if declined:
