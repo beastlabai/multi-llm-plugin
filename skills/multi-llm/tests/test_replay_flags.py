@@ -1019,3 +1019,97 @@ class TestTheWritePhasesResumeWithResume:
         assert lines[0].rstrip().endswith("--reaggregate")
         assert "re-dispatches the 2 failed task(s)" in lines[1]
         assert "reviewer panel" in lines[1]
+
+
+class TestACompositeResumesWithItsContinuation:
+    """`status`'s `resume with:` of a review-then-apply composite run
+    (plans/improve-plan-and-improve-code.md §2.6): its tokens are
+    `improve_workflow.recorded_continuation` of the run record's own
+    `replay_flags`, never the recorded flags plus a verb. A run launched with
+    `--force` is not told to start another round, and the line is the
+    `util next-command --blocked` continuation."""
+
+    COMPOSITES = ("improve-plan", "improve-code")
+
+    def _resume(self, mode, flags):
+        view = {"run": {"mode": mode, "replay_flags": flags}, "progress": {}}
+        return _tokens(run_status._resume_command(view, Path(PLAN)))
+
+    @pytest.mark.parametrize("mode", COMPOSITES)
+    def test_a_forced_run_is_not_told_to_force_again(self, mode):
+        recorded = replay_flags(mode, _argv("--force", "--models", "a,b",
+                                            "--host", "codex", "--detach"))
+        assert "--force" in recorded
+        tokens = self._resume(mode, recorded)
+        assert tokens[tokens.index(mode) + 1:] == [PLAN, "--models", "a,b", "--resume"]
+        assert not {"--force", "--rerun-all", "--host", "--detach", "--yes"} & set(tokens)
+
+    def test_improve_codes_scope_selectors_survive(self):
+        recorded = replay_flags("improve-code", _argv(
+            "--force", "--files", "a.py", "--base-ref", "origin/release"))
+        tokens = self._resume("improve-code", recorded)
+        assert tokens[-5:] == ["--files", "a.py", "--base-ref", "origin/release",
+                               "--resume"]
+
+    @pytest.mark.parametrize("stored", [None, [], "not a list"],
+                             ids=["absent", "empty", "malformed"])
+    def test_no_usable_record_is_resume_alone(self, stored):
+        tokens = self._resume("improve-plan", stored)
+        assert tokens[tokens.index("improve-plan") + 1:] == [PLAN, "--resume"]
+
+    def test_flags_its_parser_rejects_fall_back_to_resume_alone(self, capsys):
+        """`--files` is improve-code's: on an improve-plan record the parser
+        rejects it. Replayed as recorded it would not parse; the line names
+        `--resume` alone and one stderr line says why."""
+        tokens = self._resume("improve-plan", ["--force", "--files", "x.py"])
+        assert tokens[tokens.index("improve-plan") + 1:] == [PLAN, "--resume"]
+        err = capsys.readouterr().err
+        assert len(err.splitlines()) == 1
+        assert "improve-plan's run recorded flags its parser rejects" in err
+
+    def test_full_keeps_its_recorded_flags_and_verb(self):
+        tokens = self._resume("full", ["--host", "opencode", "--force", "--quick"])
+        assert tokens[-4:] == ["--host", "opencode", "--quick", "--resume"]
+
+    def test_the_status_view_of_a_stopped_forced_run(self, tmp_path, capsys):
+        plan = tmp_path / "a plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        phase = tmp_path / "a_plan" / "improve-plan"
+        phase.mkdir(parents=True)
+        _failed_run(phase, mode="improve-plan", replay_flags=replay_flags(
+            "improve-plan", _argv("--force", "--quick", "--detach", plan=str(plan))))
+        out = _status_out(plan, capsys)
+        resume = [line for line in out.splitlines() if "resume with:" in line]
+        assert resume == [
+            f'      resume with: /multi-llm:multi-llm --improve-plan "{plan}" '
+            "--quick --resume"], out
+
+    def test_the_line_is_the_blocked_continuation(self, tmp_path, monkeypatch, capsys):
+        from utils import next_phase
+        from utils.output_handler import output_dir_path
+        from utils.state_manager import StateManager
+
+        plan = tmp_path / "plans" / "x.md"
+        plan.parent.mkdir()
+        plan.write_text("# x\n", encoding="utf-8")
+        StateManager(plan).save()
+        phase = output_dir_path(plan) / "improve-plan"
+        phase.mkdir(parents=True)
+        _failed_run(phase, mode="improve-plan", replay_flags=replay_flags(
+            "improve-plan", ["--plan-file", str(plan), "--force", "--quick",
+                             "--host", "codex", "--detach"]))
+        monkeypatch.chdir(tmp_path)
+        for name in ("MULTI_LLM_HOST", mode_table.ROUTE_ENV):
+            monkeypatch.delenv(name, raising=False)
+        view = {"run": status_file.read_run(str(phase)), "progress": {}}
+        line = run_status._resume_command(
+            view, Path("plans/x.md"),
+            spell=run_status.user_speller("claude-code", "plans/x.md"))
+        assert line == "/multi-llm:multi-llm --improve-plan plans/x.md --quick --resume"
+        record = {}
+        monkeypatch.setattr(cli_common, "record_user_resume",
+                            lambda obj: record.setdefault("v", obj))
+        assert next_phase.main(
+            ["plans/x.md", "--blocked", "improve-plan", "--host", "claude-code"]) == 0
+        assert capsys.readouterr().out == f"[RESUME_COMMAND] {line}\n"
+        assert record["v"]["command"] == line

@@ -2969,6 +2969,69 @@ class TestTheStopsAnswersLeadTheOptions:
         assert calls == [dict(IMPLEMENT_CALL, extra_flags=["--resume"])]
 
 
+IMPROVE_PLAN_CALL = {"mode": "improve-plan", "plan": "plans/x.md", "question": "",
+                     "extra_flags": []}
+
+
+def failed_improve_plan_status(harness) -> dict:
+    """A status poll of a stopped improve-plan run (exit 3), plan absolute."""
+    absolute = os.path.join(os.path.realpath(harness.workspace), "plans", "x.md")
+    return {"exit": CODES["needs_human"], "stdout": [
+        "improve-plan: failed (stopped in apply-suggestions)",
+        "      resume with: {} improve-plan {} --resume".format(UV_PREFIX, absolute),
+        result_line(mode="improve-plan", phase="improve-plan",
+                    state=STATES["needs_human"], exit=CODES["needs_human"])]}
+
+
+class TestACompositesInnerResumeLeadsTheOptions:
+    """plans/improve-plan-and-improve-code.md §2.6: `--blocked improve-plan`
+    answers with the inner phase's own resume when the stop is inside it, and
+    `user_resume.mode` names that phase. The option calls are built from it:
+    built from the word asked about, an answer would become an `improve-plan`
+    call carrying `--human-task`, which the composite's parser rejects."""
+
+    def _run(self, harness, step, command):
+        return harness.run(
+            IMPROVE_PLAN_CALL, [launch_step(), failed_improve_plan_status(harness)],
+            meta=turn_meta(sandbox_mode="workspace-write"),
+            extra_env={"STUB_RESUME_COMMAND": command,
+                       "STUB_RESUME_EXTRA": json.dumps(step)})[0]
+
+    def test_an_inner_apply_leads_the_options_with_its_own_calls(self, harness):
+        sys.path.insert(0, str(SKILL_ROOT))
+        from utils import next_phase
+
+        host = SURFACE["host"]
+        flags = ["--resume", "--human-task", "apply-batch-1=skip"]
+        answers = [{
+            "command": next_phase.phase_command(
+                "plans/x.md", host, "package", "apply-suggestions", *flags),
+            "flags": flags, "why": "leave batch 1 as it stands"}]
+        command = next_phase.phase_command(
+            "plans/x.md", host, "package", "apply-suggestions", "--resume")
+        step = {"phase": "apply-suggestions", "mode": "apply-suggestions",
+                "flags": ["--resume"], "answers": answers,
+                "answers_text": next_phase.render_resume_answers(answers)}
+        envelope = self._run(harness, step, command)
+        assert [call["argv"][-3] for call in harness.resume_calls()] == ["improve-plan"]
+        assert envelope["resume_command"] == command
+        calls = [option for option in envelope["options"] if "human" not in option]
+        inner = dict(IMPROVE_PLAN_CALL, mode="apply-suggestions")
+        assert calls[:2] == [dict(inner, extra_flags=["--resume"]),
+                             dict(inner, extra_flags=flags)]
+        assert not any(call["mode"] == "improve-plan"
+                       and "--human-task" in call["extra_flags"] for call in calls)
+        assert envelope["resume_answers"] == [
+            {"command": answers[0]["command"], "why": answers[0]["why"]}]
+
+    def test_with_no_mode_the_asked_word_builds_the_calls(self, harness):
+        """An older lookup with no `mode`: the word asked about, as before."""
+        command = "$multi-llm:multi-llm --improve-plan plans/x.md --resume"
+        envelope = self._run(harness, {"flags": ["--resume"]}, command)
+        calls = [option for option in envelope["options"] if "human" not in option]
+        assert calls[0] == dict(IMPROVE_PLAN_CALL, extra_flags=["--resume"])
+
+
 #: A stop's line as the run recorded it, and the same line without the ways
 #: forward its resume section carries (fix round 28, live run 12 #5).
 STOP_LINE = (

@@ -1124,24 +1124,37 @@ class TestExitThreeConvention:
 
 #: The mode file(s) that must state each row's `--yes` resolution, on top of
 #: `full-workflow.md` (which must mention all fifteen).
+#:
+#: The two composite cores (plans/improve-plan-and-improve-code.md §2.6) state
+#: every row they reach: row 1, because their step 1 (`util improve-steps`) is
+#: the run's first `uv run`, ahead of any phase core's own prerequisite; rows 2
+#: and 3, the review half under `--yes`; row 4 for `improve-plan.md` only (code
+#: review has no consolidation pass); rows 10 and 11, the apply half under `--yes
+#: --agent-decide --no-confirm`; row 14, step 3's stop with `[IMPROVE_RERUN]`;
+#: and row 15, `util improve-steps`' exit 3 before any step. Rows 5-9, 12 and 13
+#: are reached by neither composite, and unlike `full-workflow.md` the cores are
+#: not required to mention all fifteen.
+_IMPROVE_CORES = ("improve-plan.md", "improve-code.md")
+
 ROW_DOCS = {
-    1: ("review-plan.md", "review-code.md", "init-config.md"),
-    2: ("review-plan.md", "review-tasks.md", "review-code.md"),
-    3: ("review-plan.md", "review-tasks.md", "review-code.md", "ask.md"),
-    4: ("review-plan.md",),
+    1: ("review-plan.md", "review-code.md", "init-config.md", *_IMPROVE_CORES),
+    2: ("review-plan.md", "review-tasks.md", "review-code.md", *_IMPROVE_CORES),
+    3: ("review-plan.md", "review-tasks.md", "review-code.md", "ask.md",
+        *_IMPROVE_CORES),
+    4: ("review-plan.md", "improve-plan.md"),
     5: ("generate-tasks.md",),
     6: ("implement.md",),
     7: ("implement.md",),
     8: ("implement.md",),
     9: ("implement.md",),
     10: ("apply-suggestions.md", "apply-task-suggestions.md",
-         "apply-code-fixes.md", "review-tasks.md"),
+         "apply-code-fixes.md", "review-tasks.md", *_IMPROVE_CORES),
     11: ("apply-suggestions.md", "apply-task-suggestions.md",
-         "apply-code-fixes.md"),
+         "apply-code-fixes.md", *_IMPROVE_CORES),
     12: ("full-workflow.md",),
     13: ("review-tasks.md",),
-    14: ("full-workflow.md",),
-    15: ("full-workflow.md",),
+    14: ("full-workflow.md", *_IMPROVE_CORES),
+    15: ("full-workflow.md", *_IMPROVE_CORES),
 }
 
 
@@ -1174,6 +1187,21 @@ class TestDocumentedResolutions:
             assert _mentions_row(text, number) or "--yes" in text, (
                 f"{name} does not state row {number}'s --yes resolution"
             )
+
+    @pytest.mark.parametrize("name", _IMPROVE_CORES)
+    def test_the_composite_cores_name_every_row_they_reach(self, name):
+        """The check above also passes on a bare `--yes`, which every flags line
+        of a composite core carries, so it would pass a core that states no row
+        at all. These two state each of their rows by number."""
+        text = (SKILL_ROOT / "instructions" / name).read_text(encoding="utf-8")
+        missing = [
+            number for number, names in sorted(ROW_DOCS.items())
+            if name in names and not _mentions_row(text, number)
+        ]
+        assert not missing, f"{name} does not name row(s) {missing}"
+        # Row 1's statement is the review core's own prerequisite paragraph:
+        # step 1 is the run's first `uv run`, ahead of any phase core's.
+        assert "**Prerequisite — `uv` (D6 row 1).**" in text
 
     def test_no_instruction_file_still_offers_to_install_uv(self):
         """Row 1 is fail-closed: instructions may forbid the offer, never make it."""

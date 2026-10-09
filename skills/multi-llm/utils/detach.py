@@ -52,7 +52,13 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from . import process_control, run_registry, status_file, stream_bootstrap
+from . import (
+    output_handler,
+    process_control,
+    run_registry,
+    status_file,
+    stream_bootstrap,
+)
 from .cli_common import (
     EXIT_ERROR,
     EXIT_NEEDS_HUMAN,
@@ -817,32 +823,46 @@ def classify_run(
     return view
 
 
-#: ``full``'s mode word — the one mode whose handle does not own the directories
-#: its progress lands in. It claims ``{plan}/full/`` for its lock, log and ``run``
-#: record and then calls each phase's ``main()`` in process, where every tracker
-#: is built for ``{plan}/<phase>/`` and writes there through the foreign-dir
-#: branch of :func:`report_progress` (F3, 2026-09-20).
-FULL_MODE = "full"
+def _driven_dir_names(mode: Optional[str]) -> Tuple[str, ...]:
+    """The on-disk dir word of each phase a composite *mode* drives, in order.
+
+    A composite (``modes.Mode.is_composite``) is the one kind of mode whose
+    handle does not own the directories its progress lands in. It claims its run
+    dir (``{plan}/full/``) for its lock, log and ``run`` record and then calls
+    each phase's ``main()`` in process, where every tracker is built for
+    ``{plan}/<phase>/`` and writes there through the foreign-dir branch of
+    :func:`report_progress` (F3, 2026-09-20).
+
+    Each phase word goes through ``output_handler.PHASE_DIRECTORIES``, read
+    directly: ``get_phase_dir`` would create the directory it names, and a
+    close-out must not leave dirs behind. The mode words themselves would miss
+    two dirs, ``code-review/`` and ``apply-fixes/``. Empty for a mode that runs
+    no other and for a word the table does not know.
+    """
+    row = modes_table().resolve(str(mode or ""))
+    if row is None or not row.is_composite:
+        return ()
+    return tuple(
+        output_handler.PHASE_DIRECTORIES.get(phase, phase)
+        for phase in row.sequence_phases
+    )
 
 
-def _sibling_phase_dirs(phase_dir: str) -> List[str]:
-    """Every *other* directory beside *phase_dir* that carries a checkpoint.
+def _driven_phase_dirs(phase_dir: str, mode: Optional[str]) -> List[str]:
+    """The checkpointed dirs beside *phase_dir* that composite *mode* drove.
 
-    Read-only and best-effort: a plan's output dir holds one directory per phase
-    and nothing else, so this is the phase dirs of the same plan minus the one
-    the caller owns. Anything without a ``.status.json`` cannot hold a map and is
-    skipped before it is ever opened.
+    Only the composite's own ``sequence`` is looked at. A plan's output dir also
+    holds the dirs of runs this one never drove (``ask/``, another composite's
+    run dir), and an aborted composite has nothing to say about those. The
+    caller's own dir is skipped (its compare-and-set path retires it), and so is
+    one without a ``.status.json``, which cannot hold a map.
     """
     directory = os.path.abspath(str(phase_dir))
     parent = os.path.dirname(directory)
     found: List[str] = []
-    try:
-        names = sorted(os.listdir(parent))
-    except OSError:
-        return found
-    for name in names:
+    for name in _driven_dir_names(mode):
         candidate = os.path.join(parent, name)
-        if candidate == directory or not os.path.isdir(candidate):
+        if candidate == directory:
             continue
         if os.path.exists(status_file.status_path(candidate)):
             found.append(candidate)
@@ -852,22 +872,28 @@ def _sibling_phase_dirs(phase_dir: str) -> List[str]:
 def _retire_driven_phase_maps(
     phase_dir: str, mode: Optional[str], *, reason: Optional[str] = None
 ) -> int:
-    """Retire the maps left live in the phase dirs a ``full`` run drove.
+    """Retire the maps left live in the phase dirs a composite run drove.
 
     "Whoever records the ending retires the map" (F1, 2026-09-20) reads the
-    ending's own dir, which is right for every mode but one. ``full`` records its
-    ending in ``{plan}/full/`` — a directory that holds no ``progress.models`` at
-    all — while the phase that was actually fanning out when the run was aborted
-    or died wrote its map into ``{plan}/<phase>/``. Those rows carry no ``run``
-    record of their own, so nothing else will ever retire them: the table went on
-    reading ``codex:gpt-5.6-sol  running  30m00s/30m``, the dir went on reporting
-    ``running in foreground (…)``, and ``_checkpoint_in_flight`` stayed ``True``
-    on every later poll — on the longest-running mode the tool has.
+    ending's own dir, which is right for every mode but a composite. ``full``
+    records its ending in ``{plan}/full/`` — a directory that holds no
+    ``progress.models`` at all — while the phase that was actually fanning out
+    when the run was aborted or died wrote its map into ``{plan}/<phase>/``.
+    Those rows carry no ``run`` record of their own, so nothing else will ever
+    retire them: the table went on reading ``codex:gpt-5.6-sol  running
+    30m00s/30m``, the dir went on reporting ``running in foreground (…)``, and
+    ``_checkpoint_in_flight`` stayed ``True`` on every later poll — on the
+    longest-running mode the tool has.
 
-    A sibling carrying a **live ``run`` record of its own** is skipped. That is an
-    independently detached phase run, not one this handle drove, and retiring it
-    would mark a live run's slots ``cancelled`` — exactly what the compare-and-set
-    in the callers prevents for their own dir.
+    Only the dirs of the composite's ``sequence`` are swept
+    (:func:`_driven_phase_dirs`). Until ``Mode.sequence`` existed, ``full``
+    swept every sibling holding a ``.status.json``, so an aborted ``full`` also
+    marked a foreground ``ask`` running beside it ``cancelled``.
+
+    A driven dir carrying a **live ``run`` record of its own** is skipped. That
+    is an independently detached phase run, not one this handle drove, and
+    retiring it would mark a live run's slots ``cancelled`` — exactly what the
+    compare-and-set in the callers prevents for their own dir.
 
     Called **after** the caller has released its own ``checkpoint_lock``, never
     inside it, and that is deliberate. :func:`progress_tracker.retire_live_entries`
@@ -882,12 +908,16 @@ def _retire_driven_phase_maps(
 
     Returns how many dirs were rewritten. Never raises.
     """
-    if str(mode or "") != FULL_MODE:
+    try:
+        driven = _driven_phase_dirs(phase_dir, mode)
+    except Exception:  # noqa: BLE001 - a close-out never raises
+        return 0
+    if not driven:
         return 0
     from . import progress_tracker
 
     swept = 0
-    for sibling in _sibling_phase_dirs(phase_dir):
+    for sibling in driven:
         try:
             other = status_file.read_run(sibling)
             if other.get("run_id") and other.get("state") not in TERMINAL_RUN_STATES:
@@ -965,9 +995,9 @@ def close_out_dead_run(phase_dir: str, *, reason: str = "heartbeat_timeout") -> 
 
             progress_tracker.retire_live_entries(phase_dir, reason=reason)
     if wrote:
-        # `full` records its ending here but fills no map here; the maps it
-        # drove are one directory over. Outside the lock above on purpose — see
-        # `_retire_driven_phase_maps`.
+        # A composite (`full`) records its ending here but fills no map here;
+        # the maps it drove are one directory over. Outside the lock above on
+        # purpose — see `_retire_driven_phase_maps`.
         _retire_driven_phase_maps(phase_dir, run.get("mode"), reason=reason)
         holder = process_control.read_lock_holder(lock_path(phase_dir))
         if holder is None or holder.get("run_id") == run_id:
@@ -1035,8 +1065,8 @@ def abort_run(phase_dir: str, *, force: bool = False) -> Dict[str, Any]:
 
             progress_tracker.retire_live_entries(phase_dir)
     if wrote:
-        # Same blind spot as `close_out_dead_run`: a `full` run's maps live in
-        # the phase dirs it drove, not in the dir it claimed. Outside the lock
+        # Same blind spot as `close_out_dead_run`: a composite run's maps live
+        # in the phase dirs it drove, not in the dir it claimed. Outside the lock
         # above on purpose — see `_retire_driven_phase_maps`.
         _retire_driven_phase_maps(phase_dir, run.get("mode"))
     holder = process_control.read_lock_holder(lock_path(phase_dir))
@@ -1441,9 +1471,10 @@ class RunHandle:
 
                 progress_tracker.retire_live_entries(self.phase_dir)
         if recorded and state != RUN_STATE_DONE:
-            # And the dirs this run drove but does not own. `full` is the only
-            # mode where those differ from `self.phase_dir`, and it is the one
-            # where the line above sweeps a directory that holds no map at all.
+            # And the dirs this run drove but does not own. A composite
+            # (`full`) is the only kind of mode where those differ from
+            # `self.phase_dir`, and the one where the line above sweeps a
+            # directory that holds no map at all.
             # Outside the lock above on purpose — see `_retire_driven_phase_maps`.
             _retire_driven_phase_maps(self.phase_dir, self.mode)
         run_registry.remove_entry(self.project_root, self.run_id)

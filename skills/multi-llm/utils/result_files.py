@@ -53,6 +53,14 @@ NON_MODEL_JSON_MARKERS = (
 #: Suffix a result file no recorded model owns is renamed with.
 SET_ASIDE_SUFFIX = "set-aside"
 
+#: Suffix the previous round's ``<stem>.json`` is renamed with when a slot found
+#: it there, unchanged since the slot started (:func:`set_aside_stale_result`).
+#: The name no longer ends in ``.json``, so no reader of a phase dir's results
+#: matches it: neither reaggregate's ``*.json`` glob (and so neither
+#: :func:`set_aside_unrecorded_results`), nor :func:`snapshot_candidates`, nor
+#: the salvage recovery loop's ``exists(<stem>.json)``, nor a resume's skip.
+STALE_RESULT_SUFFIX = "stale-earlier-run"
+
 #: ``.status.json`` key holding the phase's notes about its result files.
 RESULT_NOTES_KEY = "result_notes"
 
@@ -130,6 +138,50 @@ def find_misnamed_result(
     if len(fresh) != 1:
         return None
     return Path(phase_dir) / fresh[0]
+
+
+def set_aside_stale_result(path: os.PathLike | str) -> Optional[Path]:
+    """Rename an earlier run's ``<stem>.json`` to ``<stem>.json.stale-earlier-run``.
+
+    Called by ``llm_client.invoke_with_file_output`` when the file a slot asks
+    its model for was there before the slot started and has not moved since:
+    an earlier round's answer, which the slot never reads as its own. Left on
+    disk it was read anyway, one step later, at exit 0 (Fable review
+    2026-10-09): the ``--exec-subagents`` salvage recovery loop moved the model
+    out of ``failed_models`` because ``<stem>.json`` existed, and
+    ``--reaggregate`` kept it because its stem is a recorded model's — round
+    one's findings grouped, validated and applied as round two's.
+
+    A rename, never a delete, under the conventions beside it
+    (``.stale-unselected``, code-review's ``.stale-<scope id>``,
+    ``.set-aside``): the bytes are what that model said last round, and an
+    existing file of the target name is never overwritten (``.<stamp>`` is
+    appended). One line names the new file. Non-fatal and loud: a failed rename
+    warns on stderr naming the file that survived. Returns the new path, or
+    ``None`` when nothing was renamed.
+    """
+    source = Path(path)
+    target = source.with_name(f"{source.name}.{STALE_RESULT_SUFFIX}")
+    if os.path.lexists(target):
+        target = target.with_name(
+            f"{target.name}.{datetime.now().strftime('%Y%m%dT%H%M%S%f')}"
+        )
+    try:
+        os.replace(source, target)
+    except OSError as exc:
+        print(
+            f"Warning: could not set {source.name} aside ({exc}); it is an "
+            f"earlier run's answer, still in {source.parent}, and a later "
+            f"--reaggregate would read it as this model's result",
+            file=sys.stderr,
+        )
+        return None
+    print(
+        f"[RESULT_STALE] {source.name} was there before this slot started and "
+        f"is unchanged, an earlier run's answer: set aside as {target.name} so "
+        f"nothing reads it as this run's (nothing was deleted)"
+    )
+    return target
 
 
 def misnamed_result_note(model_spec: str, wrote: str, expected: str) -> str:

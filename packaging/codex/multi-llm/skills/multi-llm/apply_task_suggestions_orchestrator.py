@@ -189,8 +189,14 @@ Bulk Approval Examples:
             skip_reason = "no actionable findings from review-tasks"
             skip_message = "No actionable task suggestions remain after filtering"
 
-        # Dry runs stay read-only
-        if not getattr(self.args, "dry_run", False) and self.state is not None:
+        # Dry runs stay read-only: both of them, `write_target_backup`'s
+        # two-flag rule, since a `--dry-run-subagents` preflight that recorded
+        # the skip would have a later real run read the phase skipped (the
+        # apply-code-fixes twin of this exit, Fable review 2026-10-09).
+        dry = getattr(self.args, "dry_run", False) or getattr(
+            self.args, "dry_run_subagents", False
+        )
+        if not dry and self.state is not None:
             self.state.mark_phase_skipped(self.phase_name, skip_reason)
             self.state.save()
 

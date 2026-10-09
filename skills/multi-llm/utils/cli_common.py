@@ -1242,9 +1242,12 @@ _REPLAY_YES = _option_table(("yes",))
 
 #: The modes whose ``--yes`` already means ``--agent-decide`` (D6 row 10): the
 #: apply phases set it in ``apply_orchestrator_base.apply_unattended_defaults``,
-#: and ``full`` hands it to them under ``--yes`` (``apply_flags``).
+#: ``full`` hands it to them under ``--yes`` (``apply_flags``), and the two
+#: review-then-apply composites give their apply step ``--agent-decide``
+#: always (``improve_workflow.step_flags``).
 YES_IMPLIES_JUDGE_MODES: FrozenSet[str] = frozenset({
     "apply-suggestions", "apply-task-suggestions", "apply-code-fixes", "full",
+    "improve-plan", "improve-code",
 })
 
 

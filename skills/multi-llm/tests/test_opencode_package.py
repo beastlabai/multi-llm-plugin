@@ -1256,7 +1256,7 @@ class TestArguments:
         assert mode_table.alias_flags("abort") == ("--abort",)
 
     def test_detach_only_for_detach_capable_modes(self, built_package):
-        """``--detach`` for each of the ten, and for neither ``status`` nor
+        """``--detach`` for each of the twelve, and for neither ``status`` nor
         ``init``.
 
         A mode with ``supports_detach`` False **rejects** ``--detach`` with exit
@@ -1282,7 +1282,7 @@ class TestArguments:
         expected = {name: name in mode_table.DETACH_MODES for name in exposed}
         assert result == expected
         assert result["status"] is False and result["init"] is False
-        assert sum(result.values()) == 10, "the ten work modes, and only those"
+        assert sum(result.values()) == 12, "the twelve work modes, and only those"
 
     def test_argv_survives_shell_metacharacters(self, built_package):
         """Every value arrives at the child's ``sys.argv`` byte-for-byte.
@@ -5058,6 +5058,53 @@ class TestResumeCommand:
         assert result["message"].endswith(clause)
         assert list(result)[:5] == [
             "ok", "state", "user_next_step", "resume_command", "resume_answers"]
+
+    def test_a_composites_inner_resume_leads_with_its_own_calls(
+        self, built_package, uv_stub,
+    ):
+        """plans/improve-plan-and-improve-code.md §2.6: `--blocked
+        improve-plan` answers with apply-suggestions' own resume when the stop
+        is inside it, and `user_resume.mode` names it. Built from the word
+        asked about, an answer would become an `improve-plan` call carrying
+        `--human-task`, which the composite's parser rejects."""
+        sys.path.insert(0, str(SKILL_ROOT))
+        from utils import next_phase
+
+        call = dict(self.IMPLEMENT, mode="improve-plan")
+        flags = ["--resume", "--human-task", "apply-batch-1=skip"]
+        answers = [{
+            "command": next_phase.phase_command(
+                "plans/x.md", "opencode", "package", "apply-suggestions", *flags),
+            "flags": flags, "why": "leave batch 1 as it stands"}]
+        command = next_phase.phase_command(
+            "plans/x.md", "opencode", "package", "apply-suggestions", "--resume")
+        step = {"phase": "apply-suggestions", "mode": "apply-suggestions",
+                "flags": ["--resume"], "answers": answers,
+                "answers_text": next_phase.render_resume_answers(answers)}
+        result, _ = uv_stub.run(
+            built_package, call, [self.LAUNCH, self.BLOCKED],
+            extra_env={"STUB_RESUME_COMMAND": command,
+                       "STUB_RESUME_EXTRA": json.dumps(step)})
+        asked = [argv[argv.index("--blocked") + 1] for argv in self._resume_calls(uv_stub)]
+        assert asked == ["improve-plan"]
+        assert result["resume_command"] == command
+        calls = [option["args"] for option in result["options"] if "args" in option]
+        inner = dict(call, mode="apply-suggestions")
+        assert calls[:2] == [dict(inner, extra_flags=["--resume"]),
+                             dict(inner, extra_flags=flags)]
+        assert not any(c["mode"] == "improve-plan" and "--human-task" in c["extra_flags"]
+                       for c in calls)
+        assert result["resume_answers"] == [
+            {"command": answers[0]["command"], "why": answers[0]["why"]}]
+
+    def test_with_no_mode_the_asked_word_builds_the_calls(self, built_package, uv_stub):
+        """An older lookup with no `mode`: the word asked about, as before."""
+        call = dict(self.IMPLEMENT, mode="improve-plan")
+        result, _ = uv_stub.run(
+            built_package, call, [self.LAUNCH, self.BLOCKED],
+            extra_env={"STUB_RESUME_EXTRA": json.dumps({"flags": ["--resume"]})})
+        calls = [option["args"] for option in result["options"] if "args" in option]
+        assert calls[0] == dict(call, extra_flags=["--resume"])
 
     def test_the_plain_resume_carries_what_it_does(self, built_package, uv_stub):
         """Fix round 22 (live run 9, OpenCode accept 01): the plain resume had

@@ -36,6 +36,8 @@ A model is referenced as `provider:model` (e.g. `codex:gpt-5.5`). A bare model n
 
 Model selection priority (highest first): `--models`, then `--interactive`, then `--quick`, then `defaults.models` (from YAML), then interactive fallback.
 
+`--improve-plan` and `--improve-code` resolve no models themselves: they forward `--models` or `--quick` (or neither) to their review phase, which applies this order under its own mode word, `review-plan` or `code-review`, exactly as when it runs alone. They take no `--interactive`, and their review runs under `--yes`, so an empty list there is an exit 3 rather than a picker.
+
 > **`models:` is a menu, not a gate:** a provider's `models:` list only populates the `--interactive` picker's choices, so a model named directly in `defaults.models`, `defaults.quick_models`, `defaults.modes.<mode>`, or `--models provider:model` is dispatched whether or not it appears there.
 
 ## Pointing a provider CLI at a different endpoint (GLM / Z.ai, and the general case)

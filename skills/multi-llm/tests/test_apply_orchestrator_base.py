@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from unittest.mock import MagicMock, patch, PropertyMock
@@ -5739,6 +5740,157 @@ class TestTheTargetFileIsBackedUpBeforeTheFirstBatch:
         (phase_dir / "tasks-backup.md").write_text("# tasks\n", encoding="utf-8")
         assert probe.write_target_backup() == str(phase_dir / "tasks-backup.md")
         assert not (phase_dir / "backup.md").exists()
+
+
+_ROUND_ONE, _REVIEWED, _ROUND_TWO = (
+    "2026-01-01T10:00:00", "2026-01-02T10:00:00", "2026-01-03T10:00:00",
+)
+
+
+class TestProgressIsDatedAgainstTheReview:
+    """Each progress signal is dated against the review's latest completion.
+
+    The phase dir and `state.json` outlive a review re-run, so round one's
+    processed records, report and batch results were round two's "progress":
+    round two printed `Backup kept`, `backup.md` kept the bytes from before
+    round one, and the plan as round two found it was saved nowhere. A
+    signal older than the review is an earlier cycle's; a missing date on
+    either side keeps it; `--resume` counts on its own. A re-stamp keeps the
+    earlier backup aside as `backup.<sha8>.md`, as `--fresh` does.
+    """
+
+    @staticmethod
+    def _apply_suggestions_on(tmp_path, **arg_overrides):
+        orch = _orchestrator_on(tmp_path, **arg_overrides)
+        # The mock declares no write kind; apply-suggestions' names its
+        # review (`REVIEW_PHASE_BY_WRITE_KIND`) and its result files.
+        orch.write_kind = "apply_suggestions"
+        phase_dir = Path(orch.out_dir) / orch.phase_name
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        return orch, phase_dir
+
+    @staticmethod
+    def _review_completed(orch, stamp):
+        orch.state.state.setdefault("phases_completed", {})["review-plan"] = stamp
+
+    @staticmethod
+    def _processed(orch, stamp):
+        record = {"status": "applied", "details": {}}
+        if stamp is not None:
+            record["timestamp"] = stamp
+        orch.state.state[f"processed_{orch.phase_name}"] = {"g" * 16: record}
+
+    @staticmethod
+    def _dated_file(path, text, stamp):
+        path.write_text(text, encoding="utf-8")
+        when = datetime.fromisoformat(stamp).timestamp()
+        os.utime(path, (when, when))
+
+    def _report(self, phase_dir, *, written_at, mtime=_ROUND_ONE):
+        body = {"tasks": []}
+        if written_at is not None:
+            body["written_at"] = written_at
+        self._dated_file(
+            phase_dir / "write_batch_report.json", json.dumps(body), mtime)
+
+    def _result(self, phase_dir, mtime):
+        self._dated_file(phase_dir / "apply_batch_0.json", "{}", mtime)
+
+    @pytest.mark.parametrize("signal", [
+        "processed", "report", "report-mtime", "report-garbled-date", "result",
+    ])
+    def test_a_signal_older_than_the_review_is_not_progress(self, tmp_path, signal):
+        orch, phase_dir = self._apply_suggestions_on(tmp_path)
+        self._review_completed(orch, _REVIEWED)
+        plant = {
+            "processed": lambda stamp: self._processed(orch, stamp),
+            # `written_at` decides, whatever the file's mtime says.
+            "report": lambda stamp: self._report(
+                phase_dir, written_at=stamp, mtime=_ROUND_TWO),
+            # No `written_at`, or one that does not parse: the mtime dates it.
+            "report-mtime": lambda stamp: self._report(
+                phase_dir, written_at=None, mtime=stamp),
+            "report-garbled-date": lambda stamp: self._report(
+                phase_dir, written_at="garbage", mtime=stamp),
+            "result": lambda stamp: self._result(phase_dir, stamp),
+        }[signal]
+        plant(_ROUND_ONE)
+        assert orch._phase_has_recorded_progress(str(phase_dir)) is False
+        plant(_ROUND_TWO)
+        assert orch._phase_has_recorded_progress(str(phase_dir)) is True
+
+    def test_a_signal_stamped_in_the_reviews_own_instant_is_progress(self, tmp_path):
+        """Compared strictly: only an OLDER signal is an earlier cycle's."""
+        orch, phase_dir = self._apply_suggestions_on(tmp_path)
+        self._review_completed(orch, _REVIEWED)
+        self._processed(orch, _REVIEWED)
+        assert orch._phase_has_recorded_progress(str(phase_dir)) is True
+
+    @pytest.mark.parametrize("missing", [
+        "processed-timestamp", "processed-not-a-record",
+        "review-stamp", "review-stamp-unparseable",
+    ])
+    def test_a_signal_with_no_date_still_keeps_the_backup(self, tmp_path, missing):
+        orch, phase_dir = self._apply_suggestions_on(tmp_path)
+        orch.write_target_backup()
+        backup = phase_dir / "backup.md"
+        pre_run = backup.read_text(encoding="utf-8")
+        self._review_completed(orch, {
+            "review-stamp": None, "review-stamp-unparseable": "garbage",
+        }.get(missing, _REVIEWED))
+        if missing == "processed-timestamp":
+            self._processed(orch, None)
+        elif missing == "processed-not-a-record":
+            orch.state.state[f"processed_{orch.phase_name}"] = {"g" * 16: "applied"}
+        else:
+            # Every signal dated before the review: only the review's own
+            # missing date keeps them.
+            self._processed(orch, _ROUND_ONE)
+            self._result(phase_dir, _ROUND_ONE)
+        Path(orch.plan_path).write_text("# Half applied\n", encoding="utf-8")
+
+        assert orch.write_target_backup() is None
+        assert backup.read_text(encoding="utf-8") == pre_run
+        assert not list(phase_dir.glob("backup.*.md"))
+
+    def test_resume_counts_on_its_own(self, tmp_path):
+        orch, phase_dir = self._apply_suggestions_on(tmp_path, resume=True)
+        self._review_completed(orch, _REVIEWED)
+        self._processed(orch, _ROUND_ONE)
+        assert orch._phase_has_recorded_progress(str(phase_dir)) is True
+
+    def test_round_two_re_stamps_and_keeps_round_ones_backup_aside(
+        self, tmp_path, capsys
+    ):
+        import hashlib
+
+        orch, phase_dir = self._apply_suggestions_on(tmp_path)
+        pre_round_one = Path(orch.plan_path).read_bytes()
+        # Round one: backed up, then applied — every signal it leaves.
+        orch.write_target_backup()
+        self._processed(orch, _ROUND_ONE)
+        self._report(phase_dir, written_at=_ROUND_ONE)
+        self._result(phase_dir, _ROUND_ONE)
+        Path(orch.plan_path).write_text("# Test Plan\nround one\n", encoding="utf-8")
+        # A new review completes after it.
+        self._review_completed(orch, _REVIEWED)
+        capsys.readouterr()
+
+        backup = phase_dir / "backup.md"
+        assert orch.write_target_backup() == str(backup)
+
+        assert backup.read_text(encoding="utf-8") == "# Test Plan\nround one\n"
+        kept = phase_dir / f"backup.{hashlib.sha256(pre_round_one).hexdigest()[:8]}.md"
+        assert kept.read_bytes() == pre_round_one
+        err = capsys.readouterr().err
+        assert "Backup kept" not in err
+        assert f"Earlier backup kept at {kept}" in err
+
+    def test_a_re_stamp_over_the_same_bytes_keeps_nothing_aside(self, tmp_path):
+        orch, phase_dir = self._apply_suggestions_on(tmp_path)
+        orch.write_target_backup()
+        assert orch.write_target_backup() == str(phase_dir / "backup.md")
+        assert not list(phase_dir.glob("backup.*.md"))
 
 
 class TestTheExecutorLegHandsBackItsArtifacts:

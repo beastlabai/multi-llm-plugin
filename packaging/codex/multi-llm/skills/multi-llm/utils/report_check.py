@@ -46,6 +46,29 @@ tasks listed. This checks the copy, and only the copy:
   … ``[NEXT_STEP_MARKDOWN_END]``, a success's or a stop's) holds the report
   to every command it fences too, beside the marker lines' (fix round 26),
   and a block reason asks for the section printed as given.
+* **A native ``--improve-plan`` / ``--improve-code`` run is held to its own
+  continuation, never to an inner phase's next step** (Fable review
+  2026-10-09). Its core first runs ``util improve-steps``, which ends with
+  ``[IMPROVE_RERUN] <command>``, the composite's continuation in the host's
+  spelling; each phase it then runs still prints its own standalone block
+  (review-plan's ``--reaggregate`` names ``--apply-suggestions <plan>``), and
+  only the core's closing ``util next-command`` gives the run a next step.
+  Read as the last block, review-plan's would block every correct report of
+  a run whose apply stopped (the core gives ``[IMPROVE_RERUN]`` and the
+  stopped phase's own answer there, and makes no lookup), and the forced
+  turn would hand the user a bare ``--apply-suggestions``, which re-emits
+  every batch on this leg. So an ``[IMPROVE_RERUN]`` line printed by a call
+  that ran ``util improve-steps`` (:func:`planner_call_ids`: a plan or a core
+  quoting the line is not the run's planner) is a block too
+  (:attr:`Block.continuation`), and once it is the block held, a later block
+  with no ready section, an inner phase's, does not replace it. A block with
+  one does: every ``util next-command`` lookup prints a section and no phase
+  result does, so a finished run is held to section 4's lookup as before. A
+  run that never ran the planner (every other mode, and a composite refused
+  or ``[ALREADY_COMPLETE]``, which prints no continuation) is read exactly
+  as before. The one cost: a finished run whose closing lookup failed (exit
+  3, no block) is held to the continuation, which on that plan prints
+  ``[ALREADY_COMPLETE]`` and the next step.
 * A marker counts only at the start of a line, which is where the emitter puts
   it. An indented example of the block (a plan or a doc quoting it, read by a
   tool) is not a phase result.
@@ -184,6 +207,17 @@ MANUAL_TASK_COMMAND = "[MANUAL_TASK_COMMAND] "
 NEXT_STEP_MARKDOWN = "[NEXT_STEP_MARKDOWN]"
 NEXT_STEP_MARKDOWN_END = "[NEXT_STEP_MARKDOWN_END]"
 
+#: The composite's continuation, the last line ``util improve-steps`` prints
+#: (``improve_steps.RERUN_MARKER``; plans/improve-plan-and-improve-code.md
+#: §2.4). Read as a block only in a planner call's result (:func:`last_block`).
+IMPROVE_RERUN = "[IMPROVE_RERUN] "
+
+#: A Bash command that ran the planner: ``multi_llm.py util improve-steps``,
+#: either word quoted or not. A ``grep`` or a ``Read`` of a file quoting the
+#: line, and ``util instructions improve-plan`` printing the core, are not.
+_PLANNER_RE = re.compile(
+    r"multi_llm\.py[\"']?\s+[\"']?util[\"']?\s+[\"']?improve-steps\b")
+
 #: What the report says when the block is ``[WORKFLOW_COMPLETE]`` (§2.3).
 COMPLETE_SENTENCE = "Workflow complete."
 
@@ -239,9 +273,13 @@ class _QuietParser(argparse.ArgumentParser):
 class Block:
     """One ``[NEXT_COMMAND]`` block, or one ``[WORKFLOW_COMPLETE]`` line."""
 
-    def __init__(self, complete: bool, command: Optional[str] = None):
+    def __init__(self, complete: bool, command: Optional[str] = None,
+                 continuation: bool = False):
         self.complete = complete
         self.command = command
+        #: An ``[IMPROVE_RERUN]`` line: a native composite's own continuation
+        #: (Fable review 2026-10-09), held over a later inner phase's block.
+        self.continuation = continuation
         #: ``(why, command)`` pairs, in the order the block printed them.
         self.optional: List[tuple] = []
         #: ``(why, command)`` pairs: the answers lines, in the order printed.
@@ -290,7 +328,7 @@ class Block:
         return listed + extra
 
 
-def find_blocks(text: str) -> List[Block]:
+def find_blocks(text: str, continuations: bool = False) -> List[Block]:
     """Every block in one tool result's text, in the order printed.
 
     A ``[NEXT_COMMAND]`` line or a ``[WORKFLOW_COMPLETE]`` line starts a block;
@@ -300,6 +338,12 @@ def find_blocks(text: str) -> List[Block]:
     prints. A ready section (``[NEXT_STEP_MARKDOWN]`` …
     ``[NEXT_STEP_MARKDOWN_END]``) belongs to the block printed above it, as
     :attr:`Block.section`; one that never closes is not kept.
+
+    With *continuations* (:func:`last_block`, for a planner call's result) an
+    ``[IMPROVE_RERUN]`` line is a block too, a :attr:`Block.continuation` that
+    no later line joins. Without it, the default, the line is not read:
+    ``util wakeup-check`` reads a phase as over once a block is printed, and
+    the planner's line, printed before any phase runs, says nothing of that.
     """
     blocks: List[Block] = []
     current: Optional[Block] = None
@@ -331,6 +375,14 @@ def find_blocks(text: str) -> List[Block]:
         elif line.rstrip() == WORKFLOW_COMPLETE:
             current = Block(complete=True)
             blocks.append(current)
+            pending_why = None
+        elif continuations and line.startswith(IMPROVE_RERUN):
+            # The planner prints it last and alone: nothing joins it.
+            command = line[len(IMPROVE_RERUN):].strip()
+            if command:
+                blocks.append(Block(complete=False, command=command,
+                                    continuation=True))
+            current = None
             pending_why = None
         elif line.startswith(NEXT_COMMAND_OPTIONAL_WHY):
             pending_why = line[len(NEXT_COMMAND_OPTIONAL_WHY):].strip()
@@ -502,9 +554,35 @@ SECTION_REQUEST = (
 
 def block_reason(block: Block, missing: Sequence[str]) -> str:
     """The text the model reads when the hook blocks its stop."""
+    if block.continuation:
+        return _continuation_reason(block)
     if block.section:
         return _section_reason(block, missing)
     return _block_reason(block, missing)
+
+
+def _continuation_reason(block: Block) -> str:
+    """A native composite's continuation the report lacks (Fable review
+    2026-10-09). The command is the only thing held; the reason also says
+    why an inner phase's block is no substitute, since the turn that ends a
+    stopped run holds review-plan's (or review-code's) bare apply command,
+    which is the wrong one to give."""
+    marker = IMPROVE_RERUN.strip()
+    return "\n\n".join([
+        "multi-llm report check: this --improve-plan or --improve-code run's "
+        f"next step is the {marker} command its `util improve-steps` call "
+        "printed, and your final message does not carry it exactly. No "
+        "closing lookup came after it (a stopped run makes none), and the "
+        "[NEXT_COMMAND] blocks its phases printed are each phase's own "
+        "standalone next step, never this run's: do not give one in its place.",
+        f"{WHOLE_REPORT} the way to continue: any answer the stopped phase "
+        "named (its own command, as the stop gave it), then the command below "
+        "alone in its own fenced code block, copied character for character "
+        f"from the {marker} line. Do not rebuild, shorten, re-quote or "
+        "rephrase it, and do not run it: it is for the user to type.",
+        "Missing command:",
+        f"```\n{block.command}\n```",
+    ])
 
 
 def _section_reason(block: Block, missing: Sequence[str]) -> str:
@@ -693,6 +771,14 @@ def _tool_result_texts(
 ) -> Iterable[str]:
     """The text of every ``tool_result`` block a user entry carries, in order,
     but those answering a call whose id is in *skip*."""
+    for _call_id, text in _tool_results(entry, skip):
+        yield text
+
+
+def _tool_results(
+    entry: Dict[str, Any], skip: Iterable[str] = (),
+) -> Iterable[tuple]:
+    """``(tool_use_id, text)`` for :func:`_tool_result_texts`' results."""
     content = _content(entry)
     if not isinstance(content, list):
         return
@@ -700,11 +786,12 @@ def _tool_result_texts(
     for block in content:
         if not isinstance(block, dict) or block.get("type") != "tool_result":
             continue
-        if str(block.get("tool_use_id") or "") in skipped:
+        call_id = str(block.get("tool_use_id") or "")
+        if call_id in skipped:
             continue
         inner = block.get("content")
         if isinstance(inner, str):
-            yield inner
+            yield call_id, inner
         elif isinstance(inner, list):
             texts = [
                 part.get("text", "")
@@ -713,7 +800,7 @@ def _tool_result_texts(
                 and isinstance(part.get("text"), str)
             ]
             if texts:
-                yield "\n".join(texts)
+                yield call_id, "\n".join(texts)
 
 
 def _assistant_text(entry: Dict[str, Any]) -> List[str]:
@@ -862,18 +949,54 @@ def subagent_call_ids(turn: Sequence[Dict[str, Any]]) -> Set[str]:
     return found
 
 
+def planner_call_ids(turn: Sequence[Dict[str, Any]]) -> Set[str]:
+    """The ids of the turn's Bash calls that ran ``util improve-steps``
+    (:data:`_PLANNER_RE`): the only results whose ``[IMPROVE_RERUN]`` line is
+    the run's continuation (Fable review 2026-10-09)."""
+    found: Set[str] = set()
+    for entry in turn:
+        if entry.get("type") != "assistant":
+            continue
+        content = _content(entry)
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not (isinstance(block, dict) and block.get("type") == "tool_use"
+                    and block.get("name") == "Bash"):
+                continue
+            tool_input = block.get("input")
+            command = (tool_input.get("command")
+                       if isinstance(tool_input, dict) else None)
+            if isinstance(command, str) and _PLANNER_RE.search(command):
+                found.add(str(block.get("id") or ""))
+    return found
+
+
 def last_block(turn: Sequence[Dict[str, Any]]) -> Optional[Block]:
     """The last block printed in the turn's tool results, if any, a block a
-    subagent's report quotes left out."""
+    subagent's report quotes left out.
+
+    A native composite's continuation (an ``[IMPROVE_RERUN]`` line in a
+    planner call's result, :func:`planner_call_ids`) is a block, and while it
+    is the one held, a later block with no ready section does not replace it:
+    that is an inner phase's standalone next step, which the composite's core
+    never gives (Fable review 2026-10-09). A block with a section, which
+    only a ``util next-command`` lookup prints, and a later continuation
+    still do. With no planner call in the turn this is the last block, as
+    it always was.
+    """
     found: Optional[Block] = None
     quoted = subagent_call_ids(turn)
+    planners = planner_call_ids(turn)
     for entry in turn:
         if entry.get("type") != "user":
             continue
-        for text in _tool_result_texts(entry, skip=quoted):
-            blocks = find_blocks(text)
-            if blocks:
-                found = blocks[-1]
+        for call_id, text in _tool_results(entry, skip=quoted):
+            for block in find_blocks(text, continuations=call_id in planners):
+                if (found is not None and found.continuation
+                        and not block.continuation and block.section is None):
+                    continue
+                found = block
     return found
 
 

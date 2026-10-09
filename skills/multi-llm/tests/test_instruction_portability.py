@@ -223,6 +223,14 @@ PLACEHOLDER_MANIFEST = {
     # call and the TASKS_FILE verification are all Python now, so the file names no
     # command at all.
     "instructions/generate-tasks.md": (0, 0),
+    # The two composite cores (plans/improve-plan-and-improve-code.md §2.4):
+    # they load the phase cores rather than restating them, so each names only
+    # its own commands. improve-plan: `util improve-steps`, `util instructions
+    # <phase>`, step 1b's `--consolidate` and `--reaggregate-consolidation`, and
+    # step 4's `util next-command` (5 commands, 10 sites). improve-code: the
+    # same less step 1b, which code review has no pass for (3 commands, 6).
+    "instructions/improve-code.md": (0, 6),
+    "instructions/improve-plan.md": (0, 10),
     # 24 -> 20: the skill's own pytest invocation (a dogfooding special case) and
     # the inline `python -c` that inserted the summary reference are gone — the
     # latter is `util finalize-tracking --plan-file --summary-file-relative`.
@@ -1268,14 +1276,48 @@ class TestLegacyInstructionHatch:
 
     LEGACY = SKILL_ROOT / "legacy"
 
+    #: The modes that postdate the rewrite (plans/improve-plan-and-improve-code.md
+    #: §2.4): there is no pre-refactor text to freeze, and a frozen copy of the
+    #: new core would go stale the first time the real one is fixed. The runtime
+    #: already serves the current core for them (`_legacy_instruction_path`
+    #: returns None when no copy exists), so the exemption is test-side only.
+    NO_FROZEN_COPY = {"improve-plan", "improve-code"}
+
     def test_every_served_mode_has_a_frozen_copy(self):
+        without_copy = set()
         for mode in mode_table.MODES:
             if mode.instruction_file is None:
+                continue
+            if not (self.LEGACY / mode_table.instruction_path(mode.name)).exists():
+                without_copy.add(mode.name)
+            if mode.name in self.NO_FROZEN_COPY:
                 continue
             assert (self.LEGACY / mode_table.instruction_path(mode.name)).exists(), (
                 f"no frozen pre-refactor copy for mode '{mode.name}'; the escape "
                 "hatch would silently serve the rewritten core instead"
             )
+        # Exactly the exempt set: a new mode without a copy still fails above,
+        # and an exempt mode that gains a copy or leaves the table fails here.
+        assert without_copy == self.NO_FROZEN_COPY, (
+            f"served modes with no frozen copy {sorted(without_copy)} != the "
+            f"exempt set {sorted(self.NO_FROZEN_COPY)}"
+        )
+
+    @pytest.mark.parametrize("mode", sorted(NO_FROZEN_COPY))
+    def test_a_mode_with_no_frozen_copy_serves_the_current_core(
+        self, mode, monkeypatch, capsys
+    ):
+        """With the hatch open, a mode that postdates the rewrite gets exactly
+        what it gets with the hatch closed, and no `[LEGACY_INSTRUCTIONS]`
+        notice: that notice is printed only when a frozen core is served."""
+        monkeypatch.delenv(multi_llm.LEGACY_INSTRUCTIONS_ENV, raising=False)
+        assert multi_llm.main(["util", "instructions", mode]) == 0
+        closed = capsys.readouterr()
+        monkeypatch.setenv(multi_llm.LEGACY_INSTRUCTIONS_ENV, "1")
+        assert multi_llm.main(["util", "instructions", mode]) == 0
+        opened = capsys.readouterr()
+        assert opened.out == closed.out
+        assert "[LEGACY_INSTRUCTIONS]" not in opened.err
 
     def test_the_frozen_copies_are_the_pre_refactor_text(self):
         """They still name the host's tools — that is the point of keeping them."""
@@ -1329,6 +1371,70 @@ class TestLegacyInstructionHatch:
         readme = (self.LEGACY / "README.md").read_text(encoding="utf-8")
         assert multi_llm.LEGACY_INSTRUCTIONS_ENV in readme
         assert "Claude Code only" in readme
+        # The exempt modes are named, so nobody goes looking for their copy.
+        for mode in sorted(self.NO_FROZEN_COPY):
+            assert f"`{mode}`" in readme, mode
+
+
+# ===========================================================================
+# The composite cores (plans/improve-plan-and-improve-code.md §2.4)
+# ===========================================================================
+
+class TestTheCompositeCores:
+    """`improve-plan.md` and `improve-code.md` load the phase cores they run, so
+    the rules that are theirs alone are pinned here: an inner phase's next-step
+    block is never acted on, and the closing lookup walks on from the core's own
+    mode word, never the other composite's."""
+
+    #: Each composite core, and the one it must never be mistaken for.
+    OTHER = {"improve-plan": "improve-code", "improve-code": "improve-plan"}
+
+    @staticmethod
+    def _raw(mode):
+        return (SKILL_ROOT / "instructions" / f"{mode}.md").read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize("mode", sorted(OTHER))
+    def test_an_inner_next_command_block_is_never_run(self, mode):
+        """Each phase's last dispatcher call still prints `[NEXT_COMMAND]` on
+        this leg; a model that acted on review-plan's would re-invoke the skill
+        with `--apply-suggestions` in the middle of the composite."""
+        text = " ".join(self._raw(mode).split())
+        step2 = text[text.index("### 2. Run each `run` step"):text.index("### 3.")]
+        assert "An inner phase's `[NEXT_COMMAND]` block is never an instruction." in step2
+        assert "Never run it, and never invoke the skill again from it." in step2
+        assert "only section 4's lookup gives the user a next command" in step2
+
+    @pytest.mark.parametrize("mode", sorted(OTHER))
+    def test_step_4_looks_up_after_its_own_mode_word(self, mode):
+        """`--after improve-plan` in improve-code.md would walk on from
+        apply-suggestions and send a finished code workflow to
+        `--generate-tasks`: a wrong answer, not an error."""
+        raw = self._raw(mode)
+        step4 = raw[raw.index("### 4. Report"):]
+        lookups = [
+            command for _, command in _command_units(step4)
+            if " util next-command " in command
+        ]
+        assert len(lookups) == 1, lookups
+        argv = shlex.split(lookups[0])
+        assert argv[argv.index("--after") + 1] == mode
+        assert argv[argv.index("--host") + 1] == "<host-id>"
+        assert f"--after {self.OTHER[mode]}" not in raw
+
+    @pytest.mark.parametrize("mode", sorted(OTHER))
+    def test_step_1_plans_with_the_util_for_its_own_mode(self, mode):
+        raw = self._raw(mode)
+        step1 = raw[raw.index("### 1. Plan the steps"):raw.index("### 2.")]
+        calls = [
+            command for _, command in _command_units(step1)
+            if " util improve-steps " in command
+        ]
+        assert len(calls) == 1, calls
+        argv = shlex.split(calls[0])
+        assert argv[argv.index("--mode") + 1] == mode
+        assert argv[argv.index("--host") + 1] == "<host-id>"
+        # The core never filters a flag: the util's refusal is the one rule.
+        assert "`--interactive` and `-i` included" in raw
 
 
 # ===========================================================================
@@ -1509,6 +1615,21 @@ INVOCATION_LINE_ALLOWLIST = {
     "instructions/generate-tasks.md": (
         AllowedInvocationLine(
             "/multi-llm:multi-llm --generate-tasks <plan_path>",
+            "usage", _USAGE),
+    ),
+    "instructions/improve-code.md": (
+        AllowedInvocationLine(
+            # `--files` is `action="append"`, one path per flag, as review-code's:
+            # `[--files <path> ...]` read as a list (Fable review 2026-10-09).
+            "/multi-llm:multi-llm --improve-code <plan_path> [--quick | --models "
+            "provider:model ...] [--files <path> (repeatable) | --files-from <file>] "
+            "[--base-ref REF] [--force] [--resume]",
+            "usage", _USAGE),
+    ),
+    "instructions/improve-plan.md": (
+        AllowedInvocationLine(
+            "/multi-llm:multi-llm --improve-plan <plan_path> [--quick | --models "
+            "provider:model ...] [--force] [--resume]",
             "usage", _USAGE),
     ),
     "instructions/init-config.md": (

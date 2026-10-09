@@ -3431,6 +3431,89 @@ def misnamed_result_baseline(
     return _result_files.snapshot_candidates(phase_dir)
 
 
+#: ``(st_dev, st_ino, st_size, st_mtime_ns)`` of a slot's requested result file
+#: when the slot started, or ``()`` when there was none.
+ResultFileStamp = Tuple[int, ...]
+
+
+def _result_file_stamp(path: Union[str, Path]) -> ResultFileStamp:
+    """What moves when anything writes *path*: its identity, size and mtime.
+
+    ``()`` when there is no file. Followed through a link, as
+    :func:`read_json_from_file` follows one when it reads the file. The inode is
+    in it so a file renamed over the old one is a change whatever its size and
+    mtime say. No content hash, on purpose: a model that writes the same bytes
+    again has answered this call, and identical bytes would hide it. The mtime
+    is safe at any filesystem's granularity here, because the file it is
+    compared with is a previous round's, written well before the stamp was
+    taken, so any write after the stamp lands on a later tick.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return ()
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def requested_result_baseline(
+    output_dir: Union[str, Path],
+    phase: str,
+    model_spec: str,
+) -> ResultFileStamp:
+    """The stamp of the file :func:`invoke_with_file_output` asks *model_spec* for, now.
+
+    A slot takes this once, before its first attempt, and hands it to every
+    attempt as ``requested_baseline``, for the reason
+    :func:`misnamed_result_baseline` is the slot's: the file an attempt killed
+    after writing it left behind is still this slot's answer when the retry
+    writes nothing. Taken per attempt, that file is in the retry's baseline,
+    the retry skips it, and the slot is recorded failed beside its own answer,
+    while the same file written under the wrong name is adopted (step 1b): the
+    better-named answer would be the one refused. The file that was there
+    before the slot started (the previous round's) is never this slot's, on
+    any attempt, and is not left for anything after the slot to read either:
+    the attempt that finds it unchanged renames it
+    ``<stem>.json.stale-earlier-run`` (:func:`_set_aside_unchanged_result`).
+    Refused but left in place, the salvage recovery loop and ``--reaggregate``
+    both read it back as this round's answer at exit 0 (Fable review
+    2026-10-09).
+    """
+    from .json_extractor import generate_output_path
+
+    return _result_file_stamp(
+        generate_output_path(Path(output_dir), "output", phase, model_spec)
+    )
+
+
+def _set_aside_unchanged_result(path: Path, baseline: ResultFileStamp) -> bool:
+    """Set *path* aside when it is still exactly the file the slot started beside.
+
+    The one place every file-output lane reaches (review-plan and review-tasks
+    through ``run_single_model``, review-code's slot; ``ask`` writes markdown
+    through ``invoke_with_provider`` and has no such file), so the rule holds
+    on every lane: once an attempt has found the previous round's file
+    unchanged, it is renamed out of every result glob before the attempt
+    returns (:func:`utils.result_files.set_aside_stale_result`), whatever the
+    slot then makes of it. Before (Fable review 2026-10-09), the refused file
+    stayed on disk and two readers took it back as this round's answer: the
+    ``--exec-subagents`` salvage recovery loop, and ``--reaggregate``. Doing it
+    at the attempt rather than at the slot's failure also covers a slot failed
+    after this function returned success — the porcelain, mode and home checks,
+    or ``save_model_result`` refusing a stdout answer — and costs a slot that
+    answered on stdout nothing: ``save_model_result`` writes its answer to the
+    requested name, where the old file would have been overwritten. ``()`` (no
+    file when the slot started) and a file that moved since are never touched.
+
+    Returns whether *path* was that earlier round's file — ``True`` even when
+    the rename failed (which warns on stderr), because the caller's question is
+    whether to read it, and the answer is no either way.
+    """
+    if not baseline or _result_file_stamp(path) != baseline:
+        return False
+    _result_files.set_aside_stale_result(path)
+    return True
+
+
 def _adopt_misnamed_result(
     output_json_path: Path,
     before: Dict[str, Tuple[int, int]],
@@ -3490,6 +3573,7 @@ def invoke_with_file_output(
     sandbox_fallback: Optional[str] = None,
     run_model_specs: Optional[Sequence[str]] = None,
     misnamed_baseline: Optional[Dict[str, Tuple[int, int]]] = None,
+    requested_baseline: Optional[ResultFileStamp] = None,
 ) -> Dict[str, Any]:
     """Invoke LLM with file-based JSON output.
 
@@ -3503,6 +3587,12 @@ def invoke_with_file_output(
 
     Fallback strategy:
     1. Primary: Read from output file (with extraction fallback for code blocks)
+       — only a file that appeared or changed since the slot started
+       (``requested_baseline``). One that was there before and is unchanged is
+       a previous round's answer, not this call's: it is not read, it is
+       renamed ``<name>.stale-earlier-run`` so nothing after this call reads
+       it either (:func:`_set_aside_unchanged_result`), and the steps below
+       run as if it were missing
     1b. With ``run_model_specs``, when the output file is missing: the one JSON
         array this model's provider prefix wrote elsewhere in the phase dir
         during the call (``utils/result_files.find_misnamed_result``), renamed
@@ -3538,6 +3628,10 @@ def invoke_with_file_output(
             a file an earlier attempt of the same slot wrote under the wrong
             name is still this slot's on a retry. ``None`` takes it here, at the
             start of this call (a slot of one attempt).
+        requested_baseline: Step 1's baseline, from
+            :func:`requested_result_baseline` taken once at the slot's start
+            (``()`` when the file was not there), for the same reason. ``None``
+            takes it here, at the start of this call (a slot of one attempt).
 
     Returns:
         Dict with keys:
@@ -3546,7 +3640,8 @@ def invoke_with_file_output(
         - 'source': Where JSON came from ('file', 'file_extracted', 'stdout_fallback')
         - 'output_file': Path to the output file (if generated)
         - 'error': Error message (if failed)
-        - 'file_error': File-specific error (if file read failed)
+        - 'file_error': File-specific error (if file read failed, or the file
+          was left unread as older than the slot)
         - 'details': Provider execution details, forwarded verbatim on every
           return path — including §3.6's ``served_model`` /
           ``served_model_is_fallback``, so the JSON's origin travels with it
@@ -3566,11 +3661,23 @@ def invoke_with_file_output(
         phase_files_before = misnamed_baseline
     else:
         phase_files_before = _result_files.snapshot_candidates(output_json_path.parent)
+    # Step 1's baseline, by the same rule and at the same moment: the requested
+    # file is this call's answer only if it appeared (or changed) since the
+    # slot started. Read unconditionally, a re-run over a phase dir that still
+    # holds the previous round's `{model}.json` (`--force --rerun-all`) handed
+    # that round's findings back as the new answer of every model that answered
+    # on stdout or did not write the file this time, logged `source: file`
+    # (measured 2026-10-09 with the suite's mock providers).
+    if requested_baseline is None:
+        requested_baseline = _result_file_stamp(output_json_path)
 
     # Format prompt
     try:
         prompt = prompt_template.format(**full_context)
     except KeyError as e:
+        # A failed slot leaves no earlier round's file behind for the salvage
+        # recovery loop or `--reaggregate` to read (Fable review 2026-10-09).
+        _set_aside_unchanged_result(output_json_path, requested_baseline)
         return {
             "success": False,
             "error": f"Missing prompt variable: {e}",
@@ -3618,13 +3725,38 @@ def invoke_with_file_output(
             log_file, deferred_log, result, model_spec, prompt,
             success=False, error=result.get("error"), result_source=None,
         )
+        # The file channel is never read on this path, so an earlier round's
+        # file is set aside here or not at all: left on disk, the slot's
+        # failure is undone by the salvage recovery loop or a `--reaggregate`
+        # reading it back (Fable review 2026-10-09). A file this attempt wrote
+        # before it died has moved, and stays: it is this slot's.
+        _set_aside_unchanged_result(output_json_path, requested_baseline)
         return {
             **result,
             "output_file": str(output_json_path),
         }
 
-    # Try to read JSON from file first (even if stdout parsing failed)
-    file_result = read_json_from_file(output_json_path, prefer_arrays=prefer_arrays)
+    # Try to read JSON from file first (even if stdout parsing failed) — a file
+    # this slot wrote. One that was there when the slot started and has not
+    # moved since is the previous round's answer: it is set aside now
+    # (`<name>.stale-earlier-run`, never deleted), so neither this call nor
+    # anything after it — the salvage recovery loop, `--reaggregate`, a slot
+    # failed after this returns — can take it for this round's (Fable review
+    # 2026-10-09), and every step below runs exactly as if it were missing. A
+    # stdout answer is then saved to the requested name as before.
+    stale_file = _set_aside_unchanged_result(output_json_path, requested_baseline)
+    if stale_file:
+        file_result = {
+            "success": False,
+            "error": (
+                f"{output_json_path.name} is older than this slot and unchanged: "
+                f"an earlier run's answer, not read"
+            ),
+            "source": "stale",
+            "data": None,
+        }
+    else:
+        file_result = read_json_from_file(output_json_path, prefer_arrays=prefer_arrays)
 
     if file_result.get("success"):
         _finalize_file_output_log(
@@ -3640,10 +3772,11 @@ def invoke_with_file_output(
             "details": result.get("details", {}),
         }
 
-    # Step 1b: the requested file is missing, but the model may have written
-    # its answer under another name. Before stdout, because a file the model
-    # wrote is its deliberate answer and stdout is a scrape.
-    if phase_files_before is not None and file_result.get("source") == "missing":
+    # Step 1b: the requested file is missing (or only the previous round's), but
+    # the model may have written its answer under another name. Before stdout,
+    # because a file the model wrote is its deliberate answer and stdout is a
+    # scrape.
+    if phase_files_before is not None and file_result.get("source") in ("missing", "stale"):
         adopted = _adopt_misnamed_result(
             output_json_path, phase_files_before, model_spec, run_model_specs,
             prefer_arrays=prefer_arrays,
@@ -3666,9 +3799,15 @@ def invoke_with_file_output(
     # Fall back to stdout parsing (the data parsed by the provider)
     stdout_data = result.get("data")
     if _is_valid_parsed_data(stdout_data):
+        # The log names the file it passed over: without it, a reader holding
+        # the old `{model}.json` and this log cannot tell why it did not count.
         _finalize_file_output_log(
             log_file, deferred_log, result, model_spec, prompt,
-            success=True, error=None, result_source="stdout_fallback",
+            success=True, error=None,
+            result_source=(
+                f"stdout_fallback ({file_result['error']})"
+                if stale_file else "stdout_fallback"
+            ),
         )
         return {
             "success": True,
@@ -3679,10 +3818,16 @@ def invoke_with_file_output(
             "details": result.get("details", {}),
         }
 
-    # Both failed
+    # Both failed. The returned `error` is the one string callers match; the
+    # log also says when the file channel was the previous round's file, which
+    # was never parsed at all.
     _finalize_file_output_log(
         log_file, deferred_log, result, model_spec, prompt,
-        success=False, error="JSON parsing failed from both file and stdout",
+        success=False,
+        error=(
+            f"JSON parsing failed from both file and stdout ({file_result['error']})"
+            if stale_file else "JSON parsing failed from both file and stdout"
+        ),
         result_source=None,
     )
     return {

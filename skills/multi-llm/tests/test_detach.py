@@ -4366,9 +4366,9 @@ class TestPollLoopContract:
         before the poll loop started.
         """
         assert detach.DETACH_MODES == (
-            "review-plan", "apply-suggestions", "generate-tasks", "review-tasks",
-            "apply-task-suggestions", "implement", "review-code",
-            "apply-code-fixes", "full", "ask",
+            "review-plan", "apply-suggestions", "improve-plan", "generate-tasks",
+            "review-tasks", "apply-task-suggestions", "implement", "review-code",
+            "apply-code-fixes", "improve-code", "full", "ask",
         )
         for mode in detach.DETACH_MODES:
             assert mode_table.resolve(mode) is not None

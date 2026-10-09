@@ -14,6 +14,7 @@ All tests use mocking to avoid actual LLM provider calls.
 """
 
 import json
+import os
 import subprocess
 import tempfile
 from datetime import datetime
@@ -2240,6 +2241,257 @@ class TestInvokeWithFileOutput:
         assert result["success"] is False
         assert "Missing prompt variable" in result["error"]
         assert result["error_code"] == "PROMPT_FORMAT_ERROR"
+
+
+class TestAnEarlierRoundsResultFileIsNotThisCallsAnswer:
+    """The requested file counts only when this slot wrote it (measured 2026-10-09).
+
+    The file was read before stdout and never checked: a re-run over a phase
+    dir that still held the previous round's ``{model}.json`` (``--force
+    --rerun-all``) handed round one's findings back as round two's answer for
+    every model that answered on stdout (any ``supports_file_output = False``
+    adapter) or did not write the file this time, logged ``source: file``,
+    while a file-writing model got a fresh answer. A file that was there when
+    the slot started and has not moved since is now skipped, exactly as if it
+    were missing, and set aside as ``<name>.stale-earlier-run``: left where it
+    was, the salvage recovery loop and ``--reaggregate`` read it back as this
+    round's answer (Fable review 2026-10-09).
+    """
+
+    SET_ASIDE_SUFFIX = ".stale-earlier-run"
+
+    SPEC = "cursor-agent:auto"
+    PHASE = "test_phase"
+    ROUND_ONE = [{"title": "Round one finding"}]
+    ROUND_TWO = [{"title": "Round two finding"}]
+
+    def _old_file(self, tmp_path):
+        """Round one's file, written well before this round started."""
+        from utils.json_extractor import generate_output_path
+
+        path = generate_output_path(tmp_path, "output", self.PHASE, self.SPEC)
+        path.write_text(json.dumps(self.ROUND_ONE), encoding="utf-8")
+        an_hour_ago = time.time() - 3600
+        os.utime(path, (an_hour_ago, an_hour_ago))
+        return path
+
+    @staticmethod
+    def _reply(data, *, success=True):
+        """What ``invoke_with_provider`` hands back on an exit-0 run."""
+        reply = {
+            "success": success,
+            "data": data,
+            "details": {
+                "provider": "cursor-agent",
+                "model": "auto",
+                "_deferred_log": {
+                    "stdout": json.dumps(data) if success else "prose, no JSON",
+                    "stderr": "",
+                    "returncode": 0,
+                    "duration_seconds": 1.0,
+                },
+            },
+        }
+        if not success:
+            reply.update(error="No valid JSON in stdout", error_code=ERROR_PARSE_ERROR)
+        return reply
+
+    def _call(self, tmp_path, provider, **kwargs):
+        with patch("utils.llm_client.invoke_with_provider", side_effect=provider):
+            return invoke_with_file_output(
+                prompt_template="Write to {output_json_path}",
+                model_spec=self.SPEC,
+                prompt_context={},
+                output_dir=tmp_path,
+                phase=self.PHASE,
+                **kwargs,
+            )
+
+    def test_a_stdout_answer_beside_the_old_file_is_this_rounds(self, tmp_path):
+        old = self._old_file(tmp_path)
+        log = tmp_path / "log.txt"
+
+        result = self._call(
+            tmp_path, lambda *a, **k: self._reply(self.ROUND_TWO), log_file=log,
+        )
+
+        assert result["success"] is True
+        assert result["data"] == self.ROUND_TWO
+        assert result["source"] == "stdout_fallback"
+        assert result["output_file"] == str(old)
+        assert "not read" in result["file_error"]
+        # Set aside, never deleted: `save_model_result` writes this answer to
+        # the requested name, and round one's bytes stay beside it.
+        assert not old.exists()
+        aside = old.with_name(old.name + self.SET_ASIDE_SUFFIX)
+        assert json.loads(aside.read_text(encoding="utf-8")) == self.ROUND_ONE
+        text = log.read_text(encoding="utf-8")
+        assert f"Result source: stdout_fallback ({old.name} is older than" in text
+        assert "Result source: file" not in text
+
+    def test_a_file_the_model_rewrote_wins(self, tmp_path):
+        old = self._old_file(tmp_path)
+
+        def provider(*_a, **_k):
+            old.write_text(json.dumps(self.ROUND_TWO), encoding="utf-8")
+            return self._reply([{"title": "the stdout copy"}])
+
+        result = self._call(tmp_path, provider)
+
+        assert result["success"] is True
+        assert result["source"] == "file"
+        assert result["data"] == self.ROUND_TWO
+
+    @pytest.mark.parametrize("how", ["in place", "renamed over"])
+    def test_the_same_bytes_written_again_are_read(self, tmp_path, how):
+        """A model that writes round one's bytes again has still answered: the
+        stamp is the file's inode, size and mtime, never its content."""
+        old = self._old_file(tmp_path)
+        same = old.read_bytes()
+
+        def provider(*_a, **_k):
+            if how == "in place":
+                old.write_bytes(same)
+            else:
+                fresh = old.with_name(old.name + ".tmp")
+                fresh.write_bytes(same)
+                os.replace(fresh, old)
+            return self._reply(self.ROUND_TWO)
+
+        result = self._call(tmp_path, provider)
+
+        assert result["success"] is True
+        assert result["source"] == "file"
+        assert result["data"] == self.ROUND_ONE
+
+    def test_no_answer_on_either_channel_fails_instead_of_reusing_the_old_file(
+        self, tmp_path
+    ):
+        old = self._old_file(tmp_path)
+        log = tmp_path / "log.txt"
+
+        result = self._call(
+            tmp_path, lambda *a, **k: self._reply(None, success=False), log_file=log,
+        )
+
+        assert result["success"] is False
+        assert result["data"] is None
+        assert result["error_code"] == ERROR_PARSE_ERROR
+        # The string callers match is unchanged; the reason is in `file_error`.
+        assert result["error"] == "JSON parsing failed from both file and stdout"
+        assert "not read" in result["file_error"]
+        assert "File not found" not in result["file_error"]
+        # Nothing after the slot can read it as this round's answer either.
+        assert not old.exists()
+        aside = old.with_name(old.name + self.SET_ASIDE_SUFFIX)
+        assert json.loads(aside.read_text(encoding="utf-8")) == self.ROUND_ONE
+        text = log.read_text(encoding="utf-8")
+        assert f"Error: JSON parsing failed from both file and stdout ({old.name}" in text
+
+    def test_a_hard_failure_sets_the_old_file_aside_too(self, tmp_path, capsys):
+        """The file channel is never read on a timeout, so the set-aside has to
+        happen on that return as well, or the slot's failure is undone later."""
+        old = self._old_file(tmp_path)
+
+        result = self._call(tmp_path, lambda *a, **k: {
+            "success": False, "error": "cursor-agent timed out after 600s",
+            "error_code": ERROR_TIMEOUT, "details": {},
+        })
+
+        assert result["success"] is False
+        assert result["error_code"] == ERROR_TIMEOUT
+        aside = old.with_name(old.name + self.SET_ASIDE_SUFFIX)
+        assert not old.exists()
+        assert json.loads(aside.read_text(encoding="utf-8")) == self.ROUND_ONE
+        out = capsys.readouterr().out
+        assert out.count("[RESULT_STALE]") == 1
+        assert f"set aside as {aside.name}" in out
+
+    def test_an_earlier_set_aside_copy_is_never_overwritten(self, tmp_path):
+        old = self._old_file(tmp_path)
+        aside = old.with_name(old.name + self.SET_ASIDE_SUFFIX)
+        aside.write_text(json.dumps([{"title": "round zero"}]), encoding="utf-8")
+
+        self._call(tmp_path, lambda *a, **k: self._reply(None, success=False))
+
+        assert json.loads(aside.read_text(encoding="utf-8")) == [{"title": "round zero"}]
+        stamped = [
+            p for p in tmp_path.rglob(f"{old.name}{self.SET_ASIDE_SUFFIX}.*")
+        ]
+        assert len(stamped) == 1
+        assert json.loads(stamped[0].read_text(encoding="utf-8")) == self.ROUND_ONE
+
+    def test_a_file_this_attempt_wrote_before_dying_stays(self, tmp_path):
+        """Moved since the slot started, so it is this slot's: never set aside."""
+        old = self._old_file(tmp_path)
+
+        def write_then_die(*_a, **_k):
+            old.write_text(json.dumps(self.ROUND_TWO), encoding="utf-8")
+            return {"success": False, "error": "timed out", "error_code": ERROR_TIMEOUT,
+                    "details": {}}
+
+        baseline = llm_client.requested_result_baseline(tmp_path, self.PHASE, self.SPEC)
+        self._call(tmp_path, write_then_die, requested_baseline=baseline)
+
+        assert json.loads(old.read_text(encoding="utf-8")) == self.ROUND_TWO
+        assert not old.with_name(old.name + self.SET_ASIDE_SUFFIX).exists()
+
+    def test_the_slots_baseline_decides_not_the_calls(self, tmp_path):
+        """A retry is handed the slot's baseline: the file an earlier attempt
+        of the slot wrote is new against it, the previous round's is not."""
+        before_the_slot = llm_client.requested_result_baseline(
+            tmp_path, self.PHASE, self.SPEC
+        )
+        assert before_the_slot == ()
+        self._old_file(tmp_path)  # attempt 1 wrote it, then was killed
+
+        retry = self._call(
+            tmp_path, lambda *a, **k: self._reply(self.ROUND_TWO),
+            requested_baseline=before_the_slot,
+        )
+
+        assert retry["source"] == "file"
+        assert retry["data"] == self.ROUND_ONE
+
+        round_two = self._call(
+            tmp_path, lambda *a, **k: self._reply(self.ROUND_TWO),
+            requested_baseline=llm_client.requested_result_baseline(
+                tmp_path, self.PHASE, self.SPEC
+            ),
+        )
+
+        assert round_two["source"] == "stdout_fallback"
+        assert round_two["data"] == self.ROUND_TWO
+
+    def test_a_misnamed_answer_is_still_adopted_over_the_old_file(self, tmp_path):
+        """Step 1b runs as if the old file were missing."""
+        from utils.json_extractor import generate_output_path
+
+        spec = "pi:openrouter/deepseek/deepseek-v4.1-flash"
+        requested = generate_output_path(tmp_path, "output", self.PHASE, spec)
+        requested.write_text(json.dumps(self.ROUND_ONE), encoding="utf-8")
+        an_hour_ago = time.time() - 3600
+        os.utime(requested, (an_hour_ago, an_hour_ago))
+        misnamed = requested.with_name("pi_openrouter_deepseek_deepseek-v4-flash.json")
+
+        def provider(*_a, **_k):
+            misnamed.write_text(json.dumps(self.ROUND_TWO), encoding="utf-8")
+            return self._reply(None, success=False)
+
+        with patch("utils.llm_client.invoke_with_provider", side_effect=provider):
+            result = invoke_with_file_output(
+                prompt_template="Write to {output_json_path}",
+                model_spec=spec,
+                prompt_context={},
+                output_dir=tmp_path,
+                phase=self.PHASE,
+                run_model_specs=[spec, "codex:gpt-6-luna:high"],
+            )
+
+        assert result["success"] is True
+        assert result["data"] == self.ROUND_TWO
+        assert result["misnamed_from"] == misnamed.name
+        assert json.loads(requested.read_text(encoding="utf-8")) == self.ROUND_TWO
 
 
 class TestInvokeWithFileOutputLogFinalization:
@@ -4808,8 +5060,6 @@ class TestOmpFileRecoveryHonoursTheTerminalCode:
         path = Path(generate_output_path(out_dir, "output", "review_plan", "omp:stub/stub-model"))
         path.parent.mkdir(parents=True, exist_ok=True)
         findings = [{"title": "a finding the model really did write"}]
-        if write_file:
-            path.write_text(json.dumps(findings), encoding="utf-8")
         log_file = tmp_path / "run.log" if log else None
 
         with patch("utils.llm_client.invoke_with_provider") as mock_invoke:
@@ -4821,7 +5071,7 @@ class TestOmpFileRecoveryHonoursTheTerminalCode:
             # mock stands in for it, because the branch under test is the one
             # that has to settle it on a HARD failure — which, before omp, no
             # exit-0 parse could produce.
-            mock_invoke.return_value = {
+            reply = {
                 **parsed,
                 "details": {
                     "provider": "omp",
@@ -4834,6 +5084,16 @@ class TestOmpFileRecoveryHonoursTheTerminalCode:
                     },
                 },
             }
+
+            def run_the_model(*_args, **_kwargs):
+                # Written during the run, as the model writes it: a file that
+                # was already there when the call started is an earlier run's
+                # and is never read (measured 2026-10-09).
+                if write_file:
+                    path.write_text(json.dumps(findings), encoding="utf-8")
+                return reply
+
+            mock_invoke.side_effect = run_the_model
             result = invoke_with_file_output(
                 prompt_template="Write to {output_json_path}",
                 model_spec="omp:stub/stub-model",

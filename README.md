@@ -135,6 +135,7 @@ The path you pass (e.g. `plans/my-feature.md`) is always a **file**. From it, mu
 | `plans/my-feature/implement/summary.md` | `--implement` |
 | `plans/my-feature/code-review/report.md` | `--review-code`, `--apply-code-fixes` |
 | `plans/my-feature/ask/<question-slug>/answers.md` | `--ask` |
+| `plans/my-feature/improve-plan/`, `plans/my-feature/improve-code/` | `--improve-plan`, `--improve-code`: the run's own folder (`.status.json`, log and lock); the two phases it runs write their usual folders |
 
 Throughout this README and the linked docs, `{plan}/...` refers to that derived directory. Because everything is stored next to the plan, a workflow is fully portable - move or commit the plan folder and its state travels with it.
 
@@ -148,12 +149,14 @@ Invoke with `/multi-llm:multi-llm [mode-flag] <plan_path> [options]` - on OpenCo
 | --- | --- |
 | `--review-plan` | Review an implementation plan with multiple LLMs (default) |
 | `--apply-suggestions` | Apply validated review suggestions back into the plan |
+| `--improve-plan` | `--review-plan`, then `--apply-suggestions`, in one unattended command ([below](#review-and-apply-in-one-command)) |
 | `--generate-tasks` | Generate detailed implementation tasks from a high-level plan |
 | `--review-tasks` | Review generated tasks with multiple LLMs |
 | `--apply-task-suggestions` | Apply validated task-review suggestions to `tasks.md` |
 | `--implement` | Execute implementation tasks via subagent delegation |
 | `--review-code` | Review code changes against the plan |
 | `--apply-code-fixes` | Apply validated fixes from a code review |
+| `--improve-code` | `--review-code`, then `--apply-code-fixes`, in one unattended command that edits source files ([below](#review-and-apply-in-one-command)) |
 | `--full` | Run the whole pipeline in sequence |
 | `--status` | Show workflow state and the suggested next action |
 | `--ask` | Ask each model a free-text question about a plan; aggregate the answers |
@@ -205,8 +208,32 @@ flowchart TD
 - 🟣 **Generate & implement** steps produce tasks and write code
 - 🟢 **`--full`** runs the entire flow with one command
 
+`--improve-plan` runs the *Implementation Plan* pair and `--improve-code` the *Code Review* pair, each as one unattended command ([below](#review-and-apply-in-one-command)).
 
 You don't have to run the whole chain: **every step is also a standalone entry point** that reads/writes the shared `{plan}/state.json`, so you can start, stop, and resume at any phase. A few modes sit outside the pipeline - **`--ask`** (read-only Q&A about a plan), **`--status`** (show progress and the suggested next step), and **`--init`** (write a per-project config) - while **`--full`** simply runs the entire flow above end to end.
+
+#### Review and apply in one command
+
+`--improve-plan` and `--improve-code` each run one review and then the apply of its findings, unattended, as one command:
+
+| Command | Runs | The review gets | The apply gets |
+| --- | --- | --- | --- |
+| `--improve-plan <plan>` | `--review-plan`, then `--apply-suggestions` | `--yes`, plus your `--models` or `--quick` | `--yes --agent-decide --no-confirm` |
+| `--improve-code <plan>` | `--review-code`, then `--apply-code-fixes` | `--yes`, plus your `--models` or `--quick` and your `--files` / `--files-from` / `--base-ref` | `--yes --agent-decide --no-confirm`, plus `--base-ref` (yours, else the one the review used) |
+
+- **Models.** The review picks its own list, exactly as when you run it alone: with no flag, `defaults.modes.review-plan` (`--improve-plan`) or `defaults.modes.code-review` (`--improve-code`) when you set one, else `defaults.models`; with `--quick`, that entry's `quick` list, else `defaults.quick_models`. The `--improve-*` modes have no model list of their own, so a `defaults.modes.improve-plan` or `improve-code` entry is read by nothing ([docs/configuration.md](docs/configuration.md#good-to-know)). Nothing asks you to choose; `--models` wins over `--quick`.
+- **Consolidation.** `--improve-plan` runs review-plan's consolidation pass between the two steps when the review recommends it, as `--full` does.
+- **Re-runs and `--resume`.** Running the command again skips a step already done for the review on record and continues the one that stopped: an unfinished review runs its missing models, and an interrupted apply continues with `--resume` whether or not you type it. Once both steps are done for that review, it runs nothing, prints `[ALREADY_COMPLETE]` and the next command, and exits 2.
+- **`--force`** starts a new review round: every model reviews the plan (or the code) as it reads now (`--force --rerun-all`, which replaces the previous round's review files), and the apply then applies that round's findings. A stopped run names the command that continues it, without `--force`; typing `--force` again starts yet another round. `--improve-code` also reviews again with no flag when a newer `--implement` ran after the review, or when the `--files` / `--files-from` you type differ from the files that review covered.
+- **`--interactive` is refused.** To pick models or approve items yourself, run the two phases separately.
+- **`--full` remains the whole workflow**; these two run only its first two or its last two phases.
+
+**Before you run it.** Both modes edit files with nobody asked: the mode word is the opt-in, and there is no confirmation and no extra flag.
+
+- *What gets written, and how to undo it.* `--improve-plan` edits the plan in place; the plan as it was before the apply stays in `{plan}/apply-suggestions/backup.md`. After a `--force` round that file is the plan as that round's apply found it, and the earlier round's backup stays beside it as `backup.<sha8>.md`. **`--improve-code` edits source files anywhere in the repository, unattended.** When the run uses `--exec-subagents` (the Codex and OpenCode default) each batch keeps a pre-batch snapshot that `multi_llm.py util restore-batch` restores; nothing backs up the repository as a whole, so git is the way back.
+- *Who decides.* A judge agent decides every `needs-human-decision` item, and nobody is asked. The run's summary names the judge and each decision it made.
+- *What your tree should be.* Commit or stash first, so `git diff` shows exactly what the run changed and `git restore` undoes it. Nothing refuses a dirty tree. When the apply runs with `--exec-subagents` (the Codex and OpenCode default), it records your uncommitted paths in `{plan}/state.json` (`pre_existing_changes`) as its baseline and names them at its start (`dirty tree at start: N uncommitted path(s) recorded as the baseline …`, the first ten listed), unless the plan already holds a baseline, which it keeps and only counts (an earlier `--implement` records one, before it changed anything). Without `--exec-subagents` (the Claude Code default, where the host runs the batches), the apply records nothing about your tree and says nothing about it.
+- *What it costs.* One review call per model in the review's list (`defaults.models`, or the `--quick` or `--models` list), then validation, judging, and one write dispatch per batch. `--quick` is the cheap way to run it; `--force` pays for a whole new review round. `--improve-plan` adds one consolidation pass (one subagent call per consolidation batch) when the review recommends it - 15 or more actionable groups - and that pass changes nothing that gets applied.
 
 ### 3.2 Examples
 
@@ -223,6 +250,12 @@ You don't have to run the whole chain: **every step is also a standalone entry p
 # Review code changes against the plan
 /multi-llm:multi-llm --review-code plans/my-feature.md
 
+# Review the plan, then apply the validated suggestions to it, unattended
+/multi-llm:multi-llm --improve-plan plans/my-feature.md --quick
+
+# Review the code changes, then apply the validated fixes to the source files, unattended
+/multi-llm:multi-llm --improve-code plans/my-feature.md
+
 # Review/implement/code-review a plan using the configured default LLMs completely hands-off
 /multi-llm:multi-llm --full plans/my-feature.md --agent-decide --non-interactive
 
@@ -237,12 +270,12 @@ These flags combine with any mode and are **position-independent** - they may ap
 | Flag | Effect |
 | --- | --- |
 | `--models <provider:model> ...` | Use exactly these models (variadic), overriding YAML defaults. Each must exist in `providers.yaml`. |
-| `--quick` | Use the smaller `quick_models` subset for a faster  run. |
+| `--quick` | Use the smaller `quick_models` subset for a faster  run. In `--improve-plan` / `--improve-code` it goes to the review step. |
 | `--interactive` | Force two-step model selection (provider, then models), ignoring YAML defaults. |
 | `--no-confirm` | Skip confirmation prompts - for unattended/silent runs. |
 | `--dry-run` | Show what would happen (tasks/batches) without making changes. Applies to `--implement` and the apply modes. |
 | `--agent-decide` | In the apply modes, let a judge agent decide every `needs-human-decision` finding instead of prompting you (see [below](#34-letting-the-agent-decide-ambiguous-findings)). Implied by `--yes`, which the Codex and OpenCode shims bake in. `--claude-decide` / `--let-claude-decide` are accepted legacy spellings. |
-| `--force` | **Meaning depends on mode.** In the fan-out review/ask modes (`--review-plan`, `--review-tasks`, `--review-code`, `--ask`), resume an interrupted run: keep already-completed per-model results, run only the missing models, and bypass the completed-phase / partial-completion guards. In the apply modes, it's an alias for `--yes` (confirm bulk approval). |
+| `--force` | **Meaning depends on mode.** In the fan-out review/ask modes (`--review-plan`, `--review-tasks`, `--review-code`, `--ask`), resume an interrupted run: keep already-completed per-model results, run only the missing models, and bypass the completed-phase / partial-completion guards. In the apply modes, it's an alias for `--yes` (confirm bulk approval). In `--improve-plan` / `--improve-code`, it starts a new review round, then applies that round's findings ([above](#review-and-apply-in-one-command)). |
 | `--rerun-all` | In the fan-out review/ask modes, re-run every model from scratch, discarding any existing per-model results. Combine with `--force` (`--force --rerun-all`) for a fresh full re-run of an already-completed phase. |
 
 The apply and implement modes accept additional approval flags (`--yes`, `--approve-all`, `--resume`, `--task`, and more); run `multi_llm.py <mode> --help` for the authoritative list, or read the per-mode files in `skills/multi-llm/instructions/`.
@@ -251,7 +284,7 @@ The apply and implement modes accept additional approval flags (`--yes`, `--appr
 
 When the models disagree or a suggestion is borderline, validation marks it `needs-human-decision`. In the apply modes (`--apply-suggestions`, `--apply-code-fixes`, `--apply-task-suggestions`) Claude Code prompts you to approve or skip each one through its structured `AskUserQuestion` tool - it is the only host that has one, so on Codex and OpenCode the baked-in `--yes` resolves these without asking ([docs/hosts.md](docs/hosts.md)). Every such prompt also offers a **Let the agent decide** option, per item or for a whole batch, that hands just that judgment to a judge agent instead of you.
 
-To skip the prompts entirely and have a judge agent decide **every** `needs-human-decision` finding up front, pass `--agent-decide` - which is what the baked-in `--yes` already does on Codex and OpenCode. The judge is not necessarily Claude: on a host with native subagents (Claude Code) it is the host's own agent, and under `--exec-subagents` (the Codex and OpenCode default) it is the model your session is running on, e.g. `codex:<chat model>` on Codex. A `driver.subagent_runner` you set explicitly (in `<git-root>/.multi-llm/providers.yaml` or the file `MULTI_LLM_PROVIDERS_CONFIG` names) overrides that, and the host's floor runner (`codex:gpt-6-astra` on Codex) is used only when neither is available. The summary names it on a `judge:` line.
+To skip the prompts entirely and have a judge agent decide **every** `needs-human-decision` finding up front, pass `--agent-decide` - which is what the baked-in `--yes` already does on Codex and OpenCode. The judge is not necessarily Claude: on a host with native subagents (Claude Code) it is the host's own agent, and under `--exec-subagents` (the Codex and OpenCode default) it is the model your session is running on, e.g. `codex:<chat model>` on Codex. A `driver.subagent_runner` you set explicitly (in `<git-root>/.multi-llm/providers.yaml` or the file `MULTI_LLM_PROVIDERS_CONFIG` names) overrides that, and the host's floor runner (`codex:gpt-6-astra` on Codex) is used only when neither is available. The summary names it on a `judge:` line. `--improve-plan` and `--improve-code` imply `--agent-decide` (with `--yes` and `--no-confirm`) for their apply step on every host.
 
 ```text
 /multi-llm:multi-llm --apply-code-fixes plans/my-feature.md --agent-decide --no-confirm

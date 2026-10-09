@@ -1074,13 +1074,16 @@ def next_phase_commands(
 
     Returns:
         ``None`` when there is no answer: *finished_mode* (or *after_mode*) is
-        neither a workflow phase nor ``full``, or the finished phase is not on
-        record (the gate, *finished_mode* only). Otherwise a :class:`NextPhase`:
-        the same phase with ``--resume`` when it is ``in_progress``; else the
-        first open required phase after it (``complete`` when none is left),
-        with the open optional phases in between as ``optional_before``.
-        ``full``, and both modes ``None``, answer from ``suggested_next``
-        instead (the fallback).
+        neither a workflow phase nor a composite, or the finished phase is not
+        on record (the gate, *finished_mode* only). Otherwise a
+        :class:`NextPhase`: the same phase with ``--resume`` when it is
+        ``in_progress``; else the first open required phase after it
+        (``complete`` when none is left), with the open optional phases in
+        between as ``optional_before``. A composite that is not the whole
+        workflow (``improve-plan``, ``improve-code``) answers as the phase it
+        ends on, ``Mode.last_phase``, gate included (plans/improve-plan-and-
+        improve-code.md §2.6). ``full``, and both modes ``None``, answer from
+        ``suggested_next`` instead (the fallback).
     """
     modes = _skill_module("modes")
     prereq = _skill_module("check_workflow_prerequisites")
@@ -1094,6 +1097,11 @@ def next_phase_commands(
             return None
         if mode.runs_workflow:
             start = None  # `full` names no single phase: the fallback.
+        elif mode.is_composite:
+            # The phase it ends on, read through the row's helper so the
+            # word-to-phase mapping stays in modes.py (`improve-code` ends on
+            # `apply-code-fixes`, whose phase word is the same).
+            start = mode.last_phase
         elif mode.is_workflow_phase and mode.phase:
             start = mode.phase
         else:
@@ -1394,13 +1402,23 @@ def phase_command(
     that fixes what a failed check reported, and the ``--human-task`` variants
     that accept the failure. No gate: the caller has just stopped the phase
     it names. Raises ``ValueError`` for a (host, route) pair with no template.
+
+    Every flag token goes through the plan argument's own rule,
+    :func:`quote_plan_arg` (plan improve-plan-and-improve-code §2.4, *Every
+    argument is rendered token-safe*): a composite's continuation carries
+    ``--files``/``--files-from`` paths, which may hold a space or a quote.
+    Every token the other callers pass (``--resume``, ``--human-task``,
+    ``T003=done``, ``{task_id}=skip``) has neither and comes back bare.
     """
     modes = _skill_module("modes")
     mode = modes.resolve(mode_word)
     if mode is None:
         raise ValueError(f"unknown mode {mode_word!r}")
     template = _host_capabilities().next_command_template(host_id, route)
-    args = " ".join([f"--{mode.name}", quote_plan_arg(plan_arg), *flags])
+    args = " ".join([
+        f"--{mode.name}", quote_plan_arg(plan_arg),
+        *(quote_plan_arg(str(flag)) for flag in flags),
+    ])
     return template.replace(ARGS_SLOT, args)
 
 
@@ -1924,6 +1942,82 @@ def emit_answer(
     return answer
 
 
+class AlreadyComplete(Exception):
+    """Raised by :func:`emit_resume` for a composite whose every step is on
+    record for the review on file, after it printed :attr:`line` (§2.3's
+    ``[ALREADY_COMPLETE]`` line) on its stream. Not a failed lookup: ``util
+    next-command --blocked`` exits 2 on it, the code the composite's own
+    re-run exits with in the same state (plans/improve-plan-and-improve-code.md
+    §2.6), and records no ``user_resume``."""
+
+    def __init__(self, line: str):
+        super().__init__(line)
+        self.line = line
+
+
+def _composite_of(mode_word: str):
+    """*mode_word*'s row when it is a composite that is not the whole
+    workflow (``improve-plan``, ``improve-code``), else ``None``."""
+    mode = _skill_module("modes").resolve(mode_word)
+    if mode is None or not mode.is_composite or mode.runs_workflow:
+        return None
+    return mode
+
+
+def _blocked_step(mode_word: str, plan_path: Union[str, Path]) -> str:
+    """The mode word ``--blocked <mode_word>`` answers for (§2.6).
+
+    *mode_word* itself, unless it names a composite. For a composite, the first
+    word of its ``sequence`` that ``improve_workflow.skip_reason`` runs, on the
+    ``records`` ``read_records`` builds with no flag typed: the step a bare
+    re-run would run first, so a stop inside the composite (review completed,
+    apply ``in_progress``) names the apply, never the review. The planner's
+    predicate, not a second one; staleness and an apply older than its review
+    enter only through it. Raises :class:`AlreadyComplete` when it passes over
+    every step, and ``improve_workflow.StateReadError`` for a ``state.json`` it
+    cannot read (a failed lookup).
+    """
+    mode = _composite_of(mode_word)
+    if mode is None:
+        return mode_word
+    from . import improve_workflow
+
+    args = improve_workflow.parse_args(mode.name, ["--plan-file", str(plan_path)])
+    records = improve_workflow.read_records(mode.name, plan_path, args)
+    for word in mode.sequence:
+        if improve_workflow.skip_reason(mode.name, word, args, records) is None:
+            return word
+    raise AlreadyComplete(improve_workflow.already_complete_line(mode.name, args, records))
+
+
+def _composite_continuation(mode_word: str, plan_path: Union[str, Path]) -> List[str]:
+    """The flags after the plan in a composite's own continuation (§2.6).
+
+    ``improve_workflow.recorded_continuation`` of the ``replay_flags`` the
+    composite's ``run`` record holds in its run dir (``{plan}/improve-plan/``):
+    the row-14 command its ``_phase_failed`` printed, the user's selectors and
+    never ``--force``, plus ``--resume``. ``--resume`` alone with no record (a
+    foreground run writes none) or a record whose list is not a list. Raises
+    ``improve_workflow.ContinuationError`` for flags the composite's parser
+    rejects, and ``ValueError`` for a token one printed line cannot carry: the
+    folder is writable by every jailed batch, and both are a failed lookup.
+    """
+    from . import improve_workflow
+    from .output_handler import phase_dir_path
+    from .status_file import read_run
+
+    mode = _skill_module("modes").resolve(mode_word)
+    source = Path(os.path.abspath(str(plan_path)))
+    run = read_run(str(phase_dir_path(source, mode.phase)))
+    recorded = run.get("replay_flags") if isinstance(run, dict) else None
+    flags = improve_workflow.recorded_continuation(
+        mode.name, recorded if isinstance(recorded, list) else None)
+    if any(not token or not token.isprintable() for token in flags):
+        raise ValueError(
+            f"{mode.name}'s run record holds a flag one printed command cannot carry")
+    return flags
+
+
 def emit_resume(
     plan_arg: str,
     host_id: str,
@@ -1944,14 +2038,30 @@ def emit_resume(
     whose ``state.json`` does not exist: nothing can be in progress there, and
     the workflow read would create the plan's output dir (as in
     :func:`emit_answer`).
+
+    A composite (``improve-plan``, ``improve-code``) is resolved first, before
+    the route, the command, the answers and the why are read, so all of them
+    and the payload's ``phase`` read the one mode word whose command is
+    printed (§2.6): the step a bare re-run would run first
+    (:func:`_blocked_step`), with that phase's own resume, answers, why and
+    section when it has a resume; else the composite's own continuation
+    (:func:`_composite_continuation`), the composite's word, in the host's
+    spelling. Every step on record prints the ``[ALREADY_COMPLETE]`` line on
+    *stream* and raises :class:`AlreadyComplete`, with no ``user_resume``.
+    ``user_resume.mode`` names the mode its command runs, which the tool
+    routes build their option calls from.
     """
     from . import cli_common
 
     err = sys.stderr if stderr is None else stderr
+    out = sys.stdout if stream is None else stream
+    continuation: Optional[List[str]] = None
     try:
         source = plan_arg if plan_path is None else plan_path
         if not _state_file(os.path.abspath(str(source))).is_file():
             return None
+        asked = mode_word
+        mode_word = _blocked_step(asked, source)
         route = resolve_route(host_id, stderr=err, recorded=recorded_route)
         # Read once here only for a phase whose resume reads it (fix round
         # 28: an implement's resume also carries a manual task's answer);
@@ -1968,14 +2078,27 @@ def emit_resume(
             plan_arg, host_id, route, mode_word, plan_path=plan_path,
             workflow=workflow,
         )
+        if command is None and mode_word != asked:
+            # The inner step has no resume of its own (a review that stopped,
+            # nothing recorded yet, an apply with no progress for this
+            # review): the composite's own continuation, in its word.
+            continuation = _composite_continuation(asked, source)
+            mode_word = _composite_of(asked).name
+            command = phase_command(plan_arg, host_id, route, mode_word, *continuation)
         if command is None:
             return None
-        out = sys.stdout if stream is None else stream
         print(f"{RESUME_COMMAND_MARKER} {command}", file=out)
         try:
             out.flush()
         except (AttributeError, ValueError):  # pragma: no cover - closed stream
             pass
+    except AlreadyComplete as done:
+        print(done.line, file=out)
+        try:
+            out.flush()
+        except (AttributeError, ValueError):  # pragma: no cover - closed stream
+            pass
+        raise
     except Exception as exc:  # noqa: BLE001 - advisory: never fails the caller
         print(lookup_failure_line(exc), file=err)
         if strict:
@@ -1983,9 +2106,26 @@ def emit_resume(
         return None
     modes = _skill_module("modes")
     mode = modes.resolve(mode_word)
+    if continuation is not None:
+        # The composite's own continuation: no stop of its own on record, so
+        # no answers, why or stop lines; the flags are the command's own, so
+        # a tool route's first option is this very command.
+        resume = {
+            "phase": mode.phase,
+            "mode": mode.name,
+            "command": command,
+            "flags": list(continuation),
+            "markdown": render_resume_markdown(mode.name, command, None, []),
+        }
+        cli_common.record_user_resume(resume)
+        return command
     phases = (workflow or {}).get("phases") or {}
     resume: Dict[str, Any] = {
         "phase": mode.phase,
+        # The mode its command runs (§2.6): a composite asked about answers
+        # with an inner phase's resume, and an option call built from the word
+        # asked would hand `--human-task` to the composite's parser.
+        "mode": mode.name,
         "command": command,
         # The flags the command carries after the plan, so a tool route
         # offers this very command as its first `options` entry (fix round
@@ -2265,11 +2405,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     exit 3 with one stderr line for an unknown ``--after``, a missing plan, or
     a workflow read / builder that raised. ``--blocked`` answers from the same
     ``state.json`` and refuses a missing plan the same way (adversarial review,
-    2026-10-02: it skipped the plan check and read no state).
+    2026-10-02: it skipped the plan check and read no state). ``--blocked`` of
+    a composite whose every step is on record prints the ``[ALREADY_COMPLETE]``
+    line and exits 2 (plans/improve-plan-and-improve-code.md §2.6).
     """
     import argparse
 
     modes = _skill_module("modes")
+    # The composites that are not the whole workflow, from the table.
+    composites = [m for m in modes.MODES if m.is_composite and not m.runs_workflow]
+    composite_words = "|".join(m.name for m in composites)
     parser = argparse.ArgumentParser(
         prog="multi_llm.py util next-command",
         description=(
@@ -2279,16 +2424,21 @@ def main(argv: Optional[List[str]] = None) -> int:
             "recorded. Prints nothing when there is no answer."
         ),
         epilog=(
-            "exit codes: 0 = answered, or nothing to answer | 3 = unknown "
-            "--after mode, missing plan, or the lookup failed (one stderr line, "
-            "no command printed)."
+            "exit codes: 0 = answered, or nothing to answer | 2 = --blocked "
+            f"{composite_words}: every step is on record for this review "
+            "([ALREADY_COMPLETE] printed, nothing to resume) | 3 = unknown "
+            "--after or --blocked mode, missing plan, or the lookup failed (one "
+            "stderr line, no command printed)."
         ),
     )
     parser.add_argument("plan", help="Path to the plan file, as the user typed it")
     parser.add_argument(
         "--after", metavar="MODE", default=None,
         help="The mode that just ran: the walk starts after its phase "
-             "(any mode word or alias; `full` reads suggested_next)",
+             "(any mode word or alias; `full` reads suggested_next; "
+             + "; ".join(f"`{m.name}` starts after {m.sequence[-1]}"
+                         for m in composites)
+             + ")",
     )
     parser.add_argument(
         "--blocked", metavar="MODE", default=None, dest="blocked",
@@ -2297,7 +2447,11 @@ def main(argv: Optional[List[str]] = None) -> int:
              "generate-tasks whose dispatch failed in a way a re-run can change "
              "(`[RESUME_COMMAND]`, and "
              "MULTI_LLM_RESULT.user_resume). The tool routes ask this after an "
-             "exit 3. Prints nothing for a mode that has none. Excludes --after.",
+             "exit 3. Prints nothing for a mode that has none. "
+             f"For {composite_words}: the step a plain re-run would run first, "
+             "with that phase's own resume when it has one, else the "
+             "composite's own continuation; when every step is on record, the "
+             "[ALREADY_COMPLETE] line and exit 2. Excludes --after.",
     )
     parser.add_argument(
         "--host", default=None,
@@ -2336,6 +2490,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 args.plan, host_id, args.blocked, plan_path=plan_path, strict=True,
                 recorded_route=recorded,
             )
+        except AlreadyComplete:
+            return 2
         except LookupFailed:
             return 3
         return 0
