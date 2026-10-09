@@ -922,3 +922,64 @@ class TestOneRecordDoneCommandAtAGate:
         assert [t["id"] for t in step["manual_tasks"]] == ["T001", "T002", "T003"]
         assert "T001=done" not in step["markdown"]
         assert "[MANUAL_TASK_COMMAND]" not in out
+
+
+class TestTheNativeNoteNamesWhatCanBeDoneNow:
+    """Review of round 28, gate #3 (LOW): the native emit counted the code
+    tasks it hands out as done, so T002, a manual task after T001, read
+    doable in `[MANUAL_TASK_NOTE]` — which the host copies into summary.md —
+    even when T001 then failed, while `status` and `util next-command` said
+    "after T001". The emit's note names only the manual tasks the user can
+    do now; such a task says what it comes after, and the report's lookup,
+    after the batches are recorded, gives its command."""
+
+    PLAN = PLAN3.replace(
+        "Do bravo by hand.\n- Depends on: none", "Do bravo by hand.\n- Depends on: T001")
+
+    def _emit(self, repo, capsys):
+        _plan3(repo, "T002", plan=self.PLAN)
+        code, out, err, _result = _run(
+            ["implement", str(repo.plan), "--yes", "--host", "claude-code"], capsys)
+        assert code == 0, err
+        path = next(line.split(": ", 1)[1] for line in out.splitlines()
+                    if line.startswith("Output file: "))
+        return json.loads(Path(path).read_text()), out
+
+    def test_the_emit_gives_no_command_for_a_task_after_code_it_hands_out(
+            self, repo, capsys):
+        handoff, out = self._emit(repo, capsys)
+        assert [t["id"] for b in handoff["batches"] for t in b["tasks"]] == ["T001"]
+        assert "manual_tasks_note" not in handoff
+        assert "[MANUAL_TASK_NOTE]" not in out
+        assert "T002=done" not in out
+        assert ("T002 Bravo manual: deferred — manual task, left for you to "
+                "complete after implementation (human-task strategy: "
+                "skip-dependents) (after T001: do it once implement has run "
+                "that task)") in out
+        # When T001 fails, the lookup and status agree: T002 comes after it.
+        phase = str(output_dir_path(repo.plan) / "implement")
+        code, _o, err, _r = _run([
+            "util", "batch-done", "--phase-dir", phase, "--task-id", "T001",
+            "--status", "failed", "--reason", "boom"], capsys)
+        assert code == 0, err
+        code, out, err, _r = _run(["status", str(repo.plan)], capsys)
+        assert "T002=done" not in out
+        assert "T002 Bravo manual (after T001" in out
+
+    def test_once_the_code_ran_the_lookup_gives_the_command(self, repo, capsys):
+        handoff, _out = self._emit(repo, capsys)
+        phase = str(output_dir_path(repo.plan) / "implement")
+        code, _o, err, _r = _run([
+            "util", "batch-done", "--phase-dir", phase, "--task-id", "T001",
+            "--status", "completed"], capsys)
+        assert code == 0, err
+        code, _o, err, _r = _run([
+            "util", "finalize-tracking", "--state-file", handoff["state_file"],
+            "--mark-completed"], capsys)
+        assert code == 0, err
+        code, out, err, result = _run([
+            "util", "next-command", str(repo.plan), "--after", "implement",
+            "--host", "claude-code"], capsys)
+        assert code == 0, err
+        assert result["user_next_step"]["command"].endswith(
+            "--resume --human-task T002=done")

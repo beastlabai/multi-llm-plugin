@@ -122,12 +122,36 @@ def _finish_the_native_run(repo, capsys, handoff) -> None:
 
 class TestTheEmitCarriesTheNote:
 
-    def test_the_deferred_list_ends_with_the_note(self, repo, capsys):
+    def test_a_manual_task_after_code_it_hands_out_gets_no_command_yet(
+            self, repo, capsys):
+        """Fix round 29 (review of round 28 #3): T005 comes after T004,
+        which this emit hands out. The note counted T004 as done and named
+        T005 as doable, and the host copied it into summary.md even when
+        T004 then failed. T005's line says what it comes after; the report's
+        lookup, once the batches are recorded, gives its command
+        (`TestTheReportLookupCarriesIt`)."""
         handoff, out = _emit(capsys)
         assert sorted(handoff["skipped_tasks"]) == ["T005", "T006"]
+        assert "manual_tasks_note" not in handoff
+        assert "[MANUAL_TASK_NOTE]" not in out
+        lines = out.splitlines()
+        heading = next(i for i, line in enumerate(lines)
+                       if line.startswith("Deferred tasks ("))
+        t005 = next(line for line in lines[heading:] if line.startswith("  T005 "))
+        assert t005.endswith(
+            "(after T001, T002, T004: do it once implement has run those tasks)")
+
+    def test_the_deferred_list_ends_with_the_note(self, repo, capsys):
+        """A manual task the user can do when the emit runs: T004 is done,
+        so T005 is, and the note under the list records it done."""
+        handoff, _out = _emit(capsys)
+        _finish_the_native_run(repo, capsys, handoff)
+        assert multi_llm.main(
+            ["implement", PLAN_ARG, "--host", "claude-code", "--yes", "--resume"]
+        ) == 0
+        out = capsys.readouterr().out
         note = _close_note(PLAN_ARG, ["T005"], waiting=1)
         assert "No later phase waits" not in note
-        assert handoff["manual_tasks_note"] == note
         lines = out.splitlines()
         heading = next(i for i, line in enumerate(lines)
                        if line.startswith("Deferred tasks ("))
