@@ -129,8 +129,8 @@ class TestTheNpmLayerMovesAsOneTree:
         # Untouched rows keep their pin: the drift probe said nothing about them.
         # RESTATED, not read from the lock — the point is to disagree with a bad
         # edit, so it moves by hand when the pin does (2026-09-30: 3.0.64 -> 3.0.66,
-        # 2026-10-08: 3.0.66 -> 3.0.69).
-        assert rows["cline"] == "3.0.69"
+        # 2026-10-08: 3.0.66 -> 3.0.69, 2026-10-09: 3.0.69 -> 3.0.70).
+        assert rows["cline"] == "3.0.70"
 
         manifest = json.loads((container_dir / "package.json").read_text("utf-8"))
         assert manifest["dependencies"]["@openai/codex"] == "0.147.0"
@@ -161,7 +161,7 @@ class TestTheNpmLayerMovesAsOneTree:
         root = evidence({"codex": "0.147.0"}, npm_versions={"codex": "0.148.0"})
         assert _apply(container_dir, root, tmp_path) == 2
         lock = yaml.safe_load((container_dir / "cli-versions.lock").read_text("utf-8"))
-        assert {row["id"]: row["version"] for row in lock["clis"]}["codex"] == "0.161.0"
+        assert {row["id"]: row["version"] for row in lock["clis"]}["codex"] == "0.162.0"
 
     def test_a_new_unhashed_dependency_stops_the_layer_but_not_the_run(
             self, container_dir, evidence, tmp_path):
@@ -173,7 +173,7 @@ class TestTheNpmLayerMovesAsOneTree:
 
         lock = yaml.safe_load((container_dir / "cli-versions.lock").read_text("utf-8"))
         rows = {row["id"]: row["version"] for row in lock["clis"]}
-        assert rows["codex"] == "0.161.0", "the npm layer must not have moved"
+        assert rows["codex"] == "0.162.0", "the npm layer must not have moved"
         assert rows["grok"] == "1.0.3", (
             "the artifact rows are independent files and must still move"
         )
@@ -234,7 +234,7 @@ class TestTheNpmLayerMovesAsOneTree:
 
         lock = yaml.safe_load((container_dir / "cli-versions.lock").read_text("utf-8"))
         rows = {row["id"]: row["version"] for row in lock["clis"]}
-        assert rows["codex"] == "0.161.0", "the npm layer must not have moved"
+        assert rows["codex"] == "0.162.0", "the npm layer must not have moved"
         assert rows["grok"] == "1.0.3", "and the artifact rows must still move"
         record = json.loads((tmp_path / "record.json").read_text("utf-8"))
         assert any(entry["row"] == "npm layer" for entry in record["not_moved"])
@@ -315,7 +315,7 @@ class TestTheArtifactRowsMoveOnlyWhenTheBytesSurvive:
         """goose is unpacked and the tarball discarded: the checksum is gone."""
         assert _apply(container_dir, evidence({"goose": "1.46.0"}), tmp_path) == 2
         lock = yaml.safe_load((container_dir / "cli-versions.lock").read_text("utf-8"))
-        assert lock["artifacts"]["goose"]["version"] == "1.53.0"
+        assert lock["artifacts"]["goose"]["version"] == "1.54.0"
 
         record = json.loads((tmp_path / "record.json").read_text("utf-8"))
         [refused] = [entry for entry in record["not_moved"] if entry["row"] == "goose"]

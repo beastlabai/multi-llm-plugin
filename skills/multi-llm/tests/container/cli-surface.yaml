@@ -94,6 +94,36 @@
 #   * codex 0.161.0 documents `-p/--profile` as config-profile v2 (layering
 #     `$CODEX_HOME/<name>.config.toml`); CodexProvider passes no profile.
 #
+# RE-SEEDED 2026-10-09 for ten pin moves (`make e2e-lock-update` for the npm layer
+# and the grok/muse/omp downloads, goose, agy and vibe by hand): codex 0.161.0 ->
+# 0.162.0, claude-code 2.1.293 -> 2.1.295, cline 3.0.69 -> 3.0.70, copilot 1.0.93
+# -> 1.0.94, vibe 2.26.0 -> 2.26.1, goose 1.53.0 -> 1.54.0, grok 1.0.46 -> 1.0.50,
+# muse 1.4.3-R5018.1 -> 1.4.4-R5419.1, agy 1.3.1 -> 1.3.2, omp 18.8.3 -> 18.8.7
+# (gemini, kilocode, kimi, qwen-code, pi, opencode, aider and cursor-agent held).
+# `missing_options` was grok's hidden `--no-auto-update` alone, still accepted at
+# 1.0.50 (exit 0 against a bogus flag's 2, re-verified by hand). Four help digests
+# moved (cline, muse, omp, vibe); the other six rows moved their version only. Each
+# changed help was diffed against the previous pin's own binary, whose digest
+# reproduced the one recorded here before the diff was read; every option an
+# adapter dispatches is documented in the same form and none is marked
+# deprecated. What changed, none needing a code change here:
+#
+#   * cline 3.0.70: `--retries` takes `<count>` (was `[value]`) and defaults to 3
+#     (was 6), `-k/--key` now also saves the key as the provider's, the reasoning
+#     effort's omitted case follows the level last chosen with `/model`, and the
+#     `dashboard` command is gone; ClineProvider passes none of them.
+#   * muse 1.4.4: `muse exec` gains `-c/--config <KEY=VALUE>` (repeatable, values
+#     are JSON) and names `--effort` as an alias of `--reasoning-effort`;
+#     MuseProvider uses neither.
+#   * omp 18.8.7: the digest moved only because the help opens with the version
+#     banner (`omp v18.8.3` -> `omp v18.8.7`); no option line changed.
+#   * vibe 2.26.1 adds `--time-limit`, `--prompt-file` and `--output-dir`
+#     (export.json plus a session journal on every exit) and documents the
+#     programmatic exit codes: 0 finished, 1 usage or config error, 2
+#     infrastructure failure, 3 stopped by a limit. VibeProvider's docstring says
+#     every failure it measured exits 1 (2.24.1, 2.26.0); whether 2.26.1 now
+#     exits 2 or 3 where it exited 1 was not re-measured here.
+#
 # Captured 2026-08-14 against the pinned image, offline. `options` is derived from
 # each adapter's own build_command()/build_agent_command() across every profile it
 # declares — never hand-listed — so the contract cannot drift from what we
@@ -151,7 +181,7 @@ clis:
   # not a deprecation. Read the help before moving the digest anyway.
   - cli: agy
     binary: agy
-    version: "1.3.1"
+    version: "1.3.2"
     probe: ok
     help_invocation: "agy --help"
     help_sha256: 8fcf40227fe84704f7f8155b3b5ebcee79dfdc5208fde6e8b07569c24425f976
@@ -206,7 +236,7 @@ clis:
 
   - cli: claude-code
     binary: claude
-    version: "2.1.293 (Claude Code)"
+    version: "2.1.295 (Claude Code)"
     probe: ok
     help_invocation: "claude --help"
     help_sha256: 550db4f88ae1d97bf7244ca96dc89554aabd3978241ceb69f79001e816c35f09
@@ -222,11 +252,11 @@ clis:
 
   - cli: cline
     binary: cline
-    version: "3.0.69"
+    version: "3.0.70"
     probe: ok
     help_invocation: "cline --help"
-    help_sha256: 8561f6bf1b96f2a1fdbfea774e206ba167e0058e827200f1adfaa3fbd099b710
-    help_bytes: 3983
+    help_sha256: 04d834c4ae0cc8ea0bf304351a54a4d534acfb52f92c40fa6e28bd290ddef651
+    help_bytes: 3993
     profiles: [generate]
     options:
       - "--json"
@@ -235,7 +265,7 @@ clis:
 
   - cli: codex
     binary: codex
-    version: "codex-cli 0.161.0"
+    version: "codex-cli 0.162.0"
     probe: ok
     help_invocation: "codex exec --help"
     help_sha256: df0d864ca2076f7654288c6a1e3394e3eaa2ea8f15021df2524efdd90c70986c
@@ -282,7 +312,7 @@ clis:
   # `probe: none` that would have been a false statement.
   - cli: copilot
     binary: copilot
-    version: "GitHub Copilot CLI 1.0.93."
+    version: "GitHub Copilot CLI 1.0.94."
     probe: ok
     help_invocation: "copilot --help"
     help_sha256: aba443be298305579f1113450d0cd80a714572b6b8f744e1db341b19a893e45c
@@ -330,7 +360,7 @@ clis:
 
   - cli: goose
     binary: goose
-    version: "1.53.0"
+    version: "1.54.0"
     probe: ok
     help_invocation: "goose run --help"
     help_sha256: c6c76cbcf38ba3839df9e36b66bee049c435bb9ec9ba320404fa87ca5b353583
@@ -350,7 +380,7 @@ clis:
 
   - cli: grok
     binary: grok
-    version: "grok 1.0.46 (2765805b9442)"
+    version: "grok 1.0.50 (c58f321264ba)"
     probe: ok
     help_invocation: "grok --help"
     help_sha256: cda6873e2f90a7d77de94c2e3026794671fac04b2e40ac74e4d91f429f829403
@@ -439,11 +469,11 @@ clis:
 
   - cli: muse
     binary: muse
-    version: "Muse Code 1.4.3 (1.4.3-R5018.1)"
+    version: "Muse Code 1.4.4 (1.4.4-R5419.1)"
     probe: ok
     help_invocation: "muse exec --help"
-    help_sha256: 9aa6519b8b52de40dc4f0783df56266e917b725b21c33735000686634ef3c6fb
-    help_bytes: 3875
+    help_sha256: ca967ab8506c011bf102203d9dad53c3eb0c100e18cb5e6402ef4971dfa9480b
+    help_bytes: 4076
     profiles: [generate]
     subcommands: [exec]
     options:
@@ -517,11 +547,11 @@ clis:
   # `--model` flag at all, and the alias travels in VIBE_ACTIVE_MODEL.
   - cli: vibe
     binary: vibe
-    version: "vibe 2.26.0"
+    version: "vibe 2.26.1"
     probe: ok
     help_invocation: "vibe --help"
-    help_sha256: 9e2fef7eed7725ff61a4544c62b190eee34f946ea05ac99f8b9599ad2f36bdf2
-    help_bytes: 5492
+    help_sha256: f514c9100e363b718b9ee91582368050f30860ca81362175552ab4ecd37028cf
+    help_bytes: 6308
     profiles: [generate]
     options:
       - "--agent"
@@ -549,10 +579,10 @@ clis:
   # the eight below.
   - cli: omp
     binary: omp
-    version: "omp/18.8.3"
+    version: "omp/18.8.7"
     probe: ok
     help_invocation: "omp --help"
-    help_sha256: 256710da85171aa70e26a69c3ed94049cc03dca0f68474f161f75ea5de8f3650
+    help_sha256: df028950a04cf57c57e418a832ef8388bc9351a354503417a3672fa33ac20b22
     help_bytes: 15368
     profiles: [generate]
     options:

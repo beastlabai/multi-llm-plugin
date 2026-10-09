@@ -80,17 +80,17 @@ ARG MLLM_PIN_MODE=pinned
 
 # Every value here is cross-checked against cli-versions.lock by
 # tests/test_container_dockerfile_pins.py, so the two cannot drift apart.
-ARG UV_VERSION=0.11.28
-ARG UV_SHA256=e490a6464492183c5d4534a5527fb4440f7f2bb2f228162ad7e4afe076dc0224
-ARG GOOSE_VERSION=1.53.0
-ARG GOOSE_URL=https://github.com/aaif-goose/goose/releases/download/v1.53.0/goose-x86_64-unknown-linux-gnu.tar.bz2
-ARG GOOSE_SHA256=2d010c66dfd4348bb437b3a94001882468a5db1aa556858920481522f57752d7
-ARG GROK_VERSION=1.0.46
-ARG GROK_URL=https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-1.0.46-linux-x86_64
-ARG GROK_SHA256=41626a53292324140b92556b9d42ff5542e3dcd04aff85eafb8689dd4adb44fc
-ARG MUSE_VERSION=1.4.3-R5018.1
-ARG MUSE_URL=https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.3-R5018.1&file=muse-x86-linux
-ARG MUSE_SHA256=e671790882bc88d65edb4ae0f713becf378ebf91011034ab75abebe3592dde4f
+ARG UV_VERSION=0.12.24
+ARG UV_SHA256=b4dfaef47d491a7296981f8374a4595f55dbf84e8937c8ecd2983574d8bb3da6
+ARG GOOSE_VERSION=1.54.0
+ARG GOOSE_URL=https://github.com/aaif-goose/goose/releases/download/v1.54.0/goose-x86_64-unknown-linux-gnu.tar.bz2
+ARG GOOSE_SHA256=bf01cb6359f7a2b1acb54ca4827e1d059b18aabb3d2b75202e21066cfd3a3396
+ARG GROK_VERSION=1.0.50
+ARG GROK_URL=https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-1.0.50-linux-x86_64
+ARG GROK_SHA256=c80de0155706ff2d995623887b102f2d0abd2c62b2643dea3a0cebaf7dd724d5
+ARG MUSE_VERSION=1.4.4-R5419.1
+ARG MUSE_URL=https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.4-R5419.1&file=muse-x86-linux
+ARG MUSE_SHA256=cfc9d068441ff46036ad6bbf30dd794043b25b7efb69648c92c022ccf65f7d19
 # The documented install is `curl https://cursor.com/install | bash`, and that
 # script is SERVER-RENDERED: it bakes the current version into its body as a
 # literal DOWNLOAD_URL, so the URL is stable while what it installs is not.
@@ -106,9 +106,9 @@ ARG CURSOR_AGENT_SHA256=a79726c6e644520e993970be4c45775a6889802b67abe461a677a532
 #
 # agy RELEASES DAILY (1.1.15 on 2026-08-19, 1.2.7 on 2026-09-19), so this is a
 # pin to re-confirm whenever this file is touched.
-ARG AGY_VERSION=1.3.1
-ARG AGY_URL=https://github.com/google-antigravity/antigravity-cli/releases/download/1.3.1/agy_cli_linux_x64.tar.gz
-ARG AGY_SHA256=0e313b309ea58c71431ce86bb820936a3700e17e44eabce7bf2264617dc822db
+ARG AGY_VERSION=1.3.2
+ARG AGY_URL=https://github.com/google-antigravity/antigravity-cli/releases/download/1.3.2/agy_cli_linux_x64.tar.gz
+ARG AGY_SHA256=bf8504c72097c97de77d271b160bdb10b956031cf79cf95d96cb948df161c25f
 # oh-my-pi. A DOWNLOAD, never the npm layer: the npm package
 # `@oh-my-pi/pi-coding-agent` needs Bun >= 1.3.14 and does not run under node at
 # all, so `npm ci` cannot install it into this image. What ships instead is the
@@ -120,9 +120,9 @@ ARG AGY_SHA256=0e313b309ea58c71431ce86bb820936a3700e17e44eabce7bf2264617dc822db
 # OWN: the release publishes a SHA256SUMS.txt naming it against
 # `omp-linux-x64`. Confirmed on 2026-09-17 to agree with sha256sum over the
 # fetched file -- which is the point of checking it below anyway.
-ARG OMP_VERSION=18.8.3
-ARG OMP_URL=https://github.com/can1357/oh-my-pi/releases/download/v18.8.3/omp-linux-x64
-ARG OMP_SHA256=8cb6d6a0035a3c5d9c40a58852ca361569eafc2cecbbeef4521e0fefc8ccbc37
+ARG OMP_VERSION=18.8.7
+ARG OMP_URL=https://github.com/can1357/oh-my-pi/releases/download/v18.8.7/omp-linux-x64
+ARG OMP_SHA256=b87f9835a0acdbb81bbbad8273aa2d999b608a208598421a9584cffeb3139a8a
 # vibe's interpreter, NOT the product's. `mistral-vibe` declares
 # `requires_python >=3.12` and bookworm-slim ships 3.11.2 -- and this file sets
 # `UV_PYTHON_DOWNLOADS=never`, so `uv venv --python 3.12` cannot fetch one
@@ -516,7 +516,7 @@ RUN if [ "${MLLM_PIN_MODE}" = "latest" ]; then \
 # directly, offline, as uid 10001, and diffs the flags our adapter emits against
 # the flags this version still documents.
 #
-# COST: +201 MiB unpacked (211,026,152 bytes) from a 62 MB tarball -- second
+# COST: +202 MiB unpacked (211,841,256 bytes) from a 62 MB tarball -- second
 # only to cursor-agent's 555 MiB. Nothing else in the image gets larger for it:
 # a dynamically linked glibc binary, no bundled node, no second interpreter.
 #
