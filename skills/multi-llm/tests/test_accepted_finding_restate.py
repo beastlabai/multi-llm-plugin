@@ -84,6 +84,11 @@ class TestTheTrigger:
         (f"Again: {ACCEPTED}", "Again"),
         (f"{ACCEPTED} — the accepted T002 problem (retries 2), noted",
          "the accepted T002 problem (retries 2), noted"),
+        # Fix round 29 (review of round 28, checks #4): the bracket halves
+        # the partition leaves are dropped, never offered as "[; ] — …".
+        (f"[{ACCEPTED}] — my note (x)", "my note (x)"),
+        (f"({ACCEPTED} — known problem)", "known problem"),
+        (f"accepted in T002: [{ACCEPTED}]", "accepted in T002"),
     ])
     def test_the_words_added(self, finding, words):
         assert words_added_to(finding, ACCEPTED) == words

@@ -2177,7 +2177,12 @@ def words_added_to(finding: str, accepted: str) -> str:
     """The words *finding* adds around *accepted*, which it holds word for
     word (:func:`accepted_findings_with_words_added`): what the native
     restate line offers as the ``--note``, one plain line, the separators
-    and one pair of brackets around them dropped."""
+    and one pair of brackets around them dropped.
+
+    Fix round 29 (review of round 28, checks #4): a bracket the partition
+    cut from its pair — the ``[`` before and the ``]`` after an accepted
+    finding written ``[<accepted>] — my note`` — is dropped too, so the note
+    reads ``my note``, never ``[; ] — my note``."""
     plain = " ".join(str(finding or "").split())
     inner = " ".join(str(accepted or "").split())
     before, _, after = plain.partition(inner)
@@ -2189,9 +2194,24 @@ def words_added_to(finding: str, accepted: str) -> str:
                 return False
         return depth == 0
 
+    def paired(text: str) -> str:
+        """*text* without the brackets that have no partner in it."""
+        open_at: List[Tuple[str, int]] = []
+        unpaired: Set[int] = set()
+        for index, char in enumerate(text):
+            if char in "([":
+                open_at.append((char, index))
+            elif char in ")]":
+                if open_at and open_at[-1][0] + char in ("()", "[]"):
+                    open_at.pop()
+                else:
+                    unpaired.add(index)
+        unpaired.update(index for _char, index in open_at)
+        return "".join(char for index, char in enumerate(text) if index not in unpaired)
+
     parts = []
     for part in (before, after):
-        text = part.strip(" \t—–-:;,.")
+        text = paired(part).strip(" \t—–-:;,.")
         while (
             len(text) > 1 and text[0] + text[-1] in ("()", "[]")
             and balanced(text[1:-1], text[0], text[-1])
