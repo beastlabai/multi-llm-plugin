@@ -31,6 +31,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -82,6 +83,13 @@ _STEP_METHODS: Dict[str, str] = {
 
 #: ``detach.classify_run`` verdicts that mean a run is still writing its dir.
 _LIVE_VERDICTS = (detach.VERDICT_STARTING, detach.VERDICT_RUNNING, detach.VERDICT_STALE)
+
+#: How many times a step tries its phase dir's lock, and how far apart, before
+#: the live-run refusal (about 100 ms in all). ``detach.classify_run`` probes
+#: every phase dir's lock on each ``status`` poll by taking and dropping it, so
+#: one refusal can be a probe, not a run.
+STEP_LOCK_ATTEMPTS = 5
+STEP_LOCK_RETRY_S = 0.025
 
 #: The decisions :func:`plan_steps` gives a step.
 RUN = "run"
@@ -614,6 +622,12 @@ def continuation_flags(mode: str, args: argparse.Namespace) -> List[str]:
     ``--yes`` (implied) and no cross-cutting flag (a route re-adds its own).
     The recorded ``review_scope_files`` is never carried: the resumed run reads
     the record again.
+
+    ``--files-from -`` is left out (a ``--files-from <file>`` stays): the
+    printed command carries no stdin, so typed in a shell it would wait on a
+    list it never mentions, and on a route that composes ``--detach`` a
+    review it runs refuses ``-`` (:func:`files_from_stdin_refused`).
+    :func:`continuation_stdin_note` is the line that says so.
     """
     flags: List[str] = []
     if getattr(args, "models", None):
@@ -623,12 +637,28 @@ def continuation_flags(mode: str, args: argparse.Namespace) -> List[str]:
     if _reviews_code(mode):
         for path in getattr(args, "files", None) or []:
             flags += ["--files", path]
-        if getattr(args, "files_from", None) is not None:
-            flags += ["--files-from", args.files_from]
+        files_from = getattr(args, "files_from", None)
+        if files_from is not None and files_from != "-":
+            flags += ["--files-from", files_from]
         if getattr(args, "base_ref", None):
             flags += ["--base-ref", args.base_ref]
     flags.append("--resume")
     return flags
+
+
+def continuation_stdin_note(mode: str, args: argparse.Namespace) -> Optional[str]:
+    """The line under a continuation that left ``--files-from -`` out, or ``None``.
+
+    ``None`` unless *mode* reviews code and ``-`` was typed. A stop in the
+    review prints it under the row-14 command, which runs the review again.
+    """
+    if not _reviews_code(mode) or getattr(args, "files_from", None) != "-":
+        return None
+    return (
+        f"NOTE: {_row(mode).name}'s command above leaves out --files-from -, "
+        "which reads stdin: to review that list, pipe it into the command again "
+        "with --files-from - added, or pass the files with --files."
+    )
 
 
 class ContinuationError(ValueError):
@@ -1330,6 +1360,19 @@ class ImproveWorkflow(fwo.FullWorkflow):
     def resume_flags(self) -> List[str]:
         return continuation_flags(self.row.name, self.args)
 
+    def _phase_failed(self, step: fwo.Step, detail: str, code: Optional[int]) -> int:
+        """``full``'s row-14 stop, then :func:`continuation_stdin_note` for a stop in the review.
+
+        Only there: the command it names runs the review again, which a stop
+        in the apply's does not.
+        """
+        exit_code = super()._phase_failed(step, detail, code)
+        if step.phase == self.row.sequence_phases[0]:
+            note = continuation_stdin_note(self.row.name, self.args)
+            if note:
+                print(f"       {note}", file=sys.stderr)
+        return exit_code
+
     def step_apply_code_fixes(self) -> Tuple[str, str, Optional[int]]:
         """Run the phase, with neither of ``full``'s two pre-checks.
 
@@ -1366,21 +1409,34 @@ class ImproveWorkflow(fwo.FullWorkflow):
         lock itself, and without it a standalone ``--detach`` launch of the
         same phase would start a second writer in the dir. Taken non-blocking,
         as a foreground ``ask`` takes its question dir's, and released when the
-        phase returns; the OS drops it if this process dies. A lock it cannot
-        take (a run launched after the composite's own check) stops the step
-        with the live-run refusal and exit 3.
+        phase returns; the OS drops it if this process dies. A refusal is
+        tried :data:`STEP_LOCK_ATTEMPTS` times, :data:`STEP_LOCK_RETRY_S`
+        apart, because every ``status`` poll probes each phase dir's lock by
+        taking and dropping it (``process_control.lock_is_free``). A lock it
+        still cannot take (a run launched after the composite's own check)
+        stops the step with the live-run refusal and exit 3.
         """
         phase = mode_table.phase_for(mode_word) or mode_word
         step_dir = get_phase_dir(self.plan_path, phase)
         lock = process_control.PhaseLock(detach.lock_path(str(step_dir)))
-        try:
-            lock.acquire(self._step_lock_payload(mode_word))
-        except process_control.LockUnavailable as exc:
+        payload = self._step_lock_payload(mode_word)
+        refused: Optional[process_control.LockUnavailable] = None
+        for attempt in range(STEP_LOCK_ATTEMPTS):
+            if attempt:
+                time.sleep(STEP_LOCK_RETRY_S)
+            try:
+                lock.acquire(payload)
+            except process_control.LockUnavailable as exc:
+                refused = exc
+                continue
+            refused = None
+            break
+        if refused is not None:
             owner = _inspect(str(self.plan_path), phase, step_dir) or LiveOwner(
                 directory=str(step_dir),
-                holder=str(exc.holder.get("holder") or "an unrecorded holder"),
-                pid=exc.holder.get("pid"),
-                verdict=process_control.holder_verdict(exc.holder or None),
+                holder=str(refused.holder.get("holder") or "an unrecorded holder"),
+                pid=refused.holder.get("pid"),
+                verdict=process_control.holder_verdict(refused.holder or None),
                 heartbeat_age_s=None,
                 status_command=detach.status_command_for(
                     str(self.plan_path), phase=phase
@@ -1440,7 +1496,8 @@ class ImproveWorkflow(fwo.FullWorkflow):
         """The review's report, the apply's summary, and what the apply wrote.
 
         Only the files that exist. improve-plan's write target is the plan;
-        improve-code's are the files ``tracked_files`` names.
+        improve-code's are the files the apply's own batches changed
+        (:meth:`_applied_paths`).
         """
         review_dir, apply_dir = (
             self.plan_dir / PHASE_DIRECTORIES.get(phase, phase)
@@ -1451,7 +1508,7 @@ class ImproveWorkflow(fwo.FullWorkflow):
             candidates.append(review_dir / "consolidated-report.md")
         candidates.append(apply_dir / "summary.md")
         if _reviews_code(self.row.name):
-            candidates += self._tracked_paths()
+            candidates += self._applied_paths(apply_dir)
         else:
             candidates.append(self.plan_path)
         seen: List[str] = []
@@ -1460,28 +1517,79 @@ class ImproveWorkflow(fwo.FullWorkflow):
                 seen.append(str(path))
         return seen
 
-    def _tracked_paths(self) -> List[Path]:
-        """``tracked_files`` as paths, read through a read-only ``StateManager``.
+    def _applied_paths(self, apply_dir: Path) -> List[Path]:
+        """The files the apply's own batches changed, as paths.
 
-        Not ``self.state``: its load writes the judge-name upgrade back (and
+        The ``files_touched`` of every ``ok`` or partly applied row of the
+        apply's ``write_batch_report.json``: the set the apply hands back as
+        its own ``touched_file_{n}`` (``ApplyOrchestratorBase._touched_files``),
+        earlier runs of this review cycle's rows included. Never
+        ``tracked_files``: that list also holds implement's entries (label
+        ``implementation``), so the summary, and the artifacts on the result
+        line, named every file implement created or edited as what this
+        unattended run wrote, the ones the apply never touched included; and
+        the apply's own census label alone would leave out a file implement
+        recorded first that the apply then edited.
+
+        A report written before the review's latest completion is an earlier
+        cycle's and names nothing, the scheduler's own rule
+        (``_earlier_report_rows``); a missing date on either side keeps it. A
+        missing or unreadable report names nothing, so an apply with nothing
+        to fix lists no file it did not write.
+
+        ``state.json`` is read through a read-only ``StateManager``, not
+        ``self.state``: its load writes the judge-name upgrade back (and
         takes ``.state.lock``) when an old run left a ``claude_*`` spelling,
         and this report is also what a finished run's exit 2 prints, which
         writes nothing (§2.3, §2.4; Fable review 2026-10-09).
         """
         from .git_utils import get_project_root
+        from .retry_ladder import STATUS_OK
+        from .subagent_executor import WRITE_PARTIAL
+        from .write_batch_scheduler import WRITE_BATCH_REPORT_FILENAME
 
+        report_path = apply_dir / WRITE_BATCH_REPORT_FILENAME
         try:
-            tracked = StateManager(self.plan_path, read_only=True).get("tracked_files")
-        except Exception:  # noqa: BLE001 - a report never fails a run
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
             return []
-        if not isinstance(tracked, list):
+        rows = report.get("tasks") if isinstance(report, dict) else None
+        if not isinstance(rows, list):
+            return []
+        written_at = _parse_completion_time(report.get("written_at"))
+        if written_at is None:
+            try:
+                written_at = datetime.fromtimestamp(report_path.stat().st_mtime)
+            except OSError:
+                written_at = None
+        try:
+            completed = StateManager(self.plan_path, read_only=True).get(
+                "phases_completed")
+        except Exception:  # noqa: BLE001 - a report never fails a run
+            completed = None
+        reviewed_at = (
+            _parse_completion_time(
+                completed.get(review_phase_for(self.row.sequence[1])))
+            if isinstance(completed, dict) else None
+        )
+        if written_at is not None and reviewed_at is not None \
+                and written_at < reviewed_at:
             return []
         root = Path(get_project_root(str(self.plan_path)) or os.getcwd())
-        return [
-            root / entry["path"]
-            for entry in tracked
-            if isinstance(entry, dict) and isinstance(entry.get("path"), str)
-        ]
+        paths: List[Path] = []
+        for row in rows:
+            if not isinstance(row, dict) or not (
+                row.get("status") == STATUS_OK
+                or row.get("write_outcome") == WRITE_PARTIAL
+            ):
+                continue
+            touched = row.get("files_touched")
+            for name in touched if isinstance(touched, list) else []:
+                if isinstance(name, str) and name:
+                    path = root / name
+                    if path not in paths:
+                        paths.append(path)
+        return paths
 
 
 # ---------------------------------------------------------------------------

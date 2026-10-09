@@ -208,6 +208,30 @@ class TestEveryUtilThatTakesAPathRunsFromTheRoot:
         assert code == 0, err
         assert seen[0]["cwd"] == str(root)
 
+    def test_improve_steps_plan_after_its_variadic_models(self, repo, monkeypatch, capsys):
+        """``--models`` takes every token up to the next option (``nargs="+"``),
+        so its second model is not the plan positional."""
+        root, _here = repo
+        seen = _stub_targets(monkeypatch)
+        code, _out, err = _run(
+            ["util", "improve-steps", "--models", "codex:a", "codex:b",
+             "--mode", "improve-plan", PLAN, "--host", "claude-code"],
+            capsys,
+        )
+        assert code == 0, err
+        assert seen[0]["cwd"] == str(root)
+        assert f"{NOTICE} {root}, where {PLAN} is" in err
+
+    def test_the_variadic_table_is_improve_steps_own(self):
+        from utils import improve_steps
+
+        for mode in (None, "improve-plan", "improve-code"):
+            parser = improve_steps.build_parser(mode)
+            variadic = {option for action in parser._actions
+                        if action.nargs in ("+", "*") for option in action.option_strings}
+            assert variadic == set(multi_llm._UTIL_VARIADIC_OPTIONS["improve-steps"])
+            assert variadic <= set(multi_llm._UTIL_PATH_POSITIONAL["improve-steps"])
+
     def test_the_real_lookup_answers_as_it_does_from_the_root(self, repo, capsys):
         """Unstubbed: the phase-folder answer is the root answer plus the one line."""
         root, here = repo
