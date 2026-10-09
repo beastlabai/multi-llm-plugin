@@ -233,9 +233,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         metavar='ID=done|skip|retry',
         help='Answer one human task (D6 row 9), repeatable: --human-task '
              'T004=done. Turns the pause-and-ask pause into a process boundary '
-             'instead of a blocked stdin. Under a skip strategy (--yes), '
-             'T004=skip says you will not do that manual task: it and the '
-             'tasks after it are skipped at your request, never owed. With '
+             'instead of a blocked stdin. Under skip-dependents (the --yes '
+             'default), T004=skip says you will not do that manual task: it '
+             'and the tasks after it are skipped at your request, never owed '
+             '(under skip-continue the code after it still runs). With '
              '--resume it also answers a code '
              'task the last run recorded failed (a check that failed), or a '
              'check whose findings hold back the tasks after it: done treats '
