@@ -635,7 +635,23 @@ def _workflow_trailer_lines(
             f"  ({' / '.join(pending_optional)} optional, not run)"
             if pending_optional else ""
         )
-        lines.append(f"{prefix}suggested next: {payload['suggested_next']}{suffix}")
+        from .next_phase import gate_resume_suggested
+
+        gate = gate_resume_suggested(payload)
+        if gate:
+            # Fix round 29 (review of round 28 #4): implement finished with
+            # code tasks waiting on a manual task the user can do now, and
+            # every other surface leads with its resume, as this does.
+            answers = " ".join(gate[1:])
+            ids = ", ".join(
+                flag.split("=", 1)[0] for flag in gate[2::2])
+            lines.append(
+                f"{prefix}suggested next: implement  (resume it with "
+                f"{answers} once you have done {ids} by hand; or "
+                f"{payload['suggested_next']}, over the code implement has "
+                f"run so far)")
+        else:
+            lines.append(f"{prefix}suggested next: {payload['suggested_next']}{suffix}")
     for notice in payload.get("notices", []) or []:
         if plain_line(notice) in said_whys:
             continue

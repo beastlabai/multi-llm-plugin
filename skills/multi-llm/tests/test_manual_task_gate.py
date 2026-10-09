@@ -983,3 +983,36 @@ class TestTheNativeNoteNamesWhatCanBeDoneNow:
         assert code == 0, err
         assert result["user_next_step"]["command"].endswith(
             "--resume --human-task T002=done")
+
+
+class TestStatusSuggestsWhatTheLookupLeadsWith:
+    """Review of round 28, gate #4 (LOW): after a partly-run implement (T001
+    ran, T003 waits on the manual T002) `status`'s workflow block said
+    "suggested next: code-review" while the result line, `util next-command
+    --after implement`, summary.md and the trailer led with `--resume
+    --human-task T002=done`."""
+
+    def _partial(self, repo, capsys):
+        _plan3(repo, "T002")
+        code, out, err, result = _run([
+            "implement", str(repo.plan), "--yes", "--exec-subagents",
+            "--host", "codex"], capsys)
+        assert code == 0, err
+        assert result["user_next_step"]["phase"] == "implement"
+
+    def test_the_workflow_block_suggests_the_resume(self, repo, capsys):
+        self._partial(repo, capsys)
+        code, out, err, _r = _run(["status", str(repo.plan), "--host", "codex"], capsys)
+        line = next(l for l in out.splitlines() if "suggested next:" in l)
+        assert "suggested next: implement" in line, line
+        assert "--human-task T002=done" in line, line
+        assert "code-review" in line  # still the other way on
+
+    def test_the_lookup_without_a_phase_leads_the_same_way(self, repo, capsys):
+        self._partial(repo, capsys)
+        code, out, err, result = _run([
+            "util", "next-command", str(repo.plan), "--host", "codex"], capsys)
+        assert code == 0, err
+        step = result["user_next_step"]
+        assert step["command"].endswith("--resume --human-task T002=done"), step
+        assert step["instead"][0]["phase"] == "code-review"
