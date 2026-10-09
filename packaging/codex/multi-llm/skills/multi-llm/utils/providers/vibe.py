@@ -46,16 +46,35 @@ The answer is the **last** entry with ``role == "assistant"`` and
 ``type == "message"``, concatenating the ``text`` of its ``content[]`` blocks —
 last-wins is what the ``multi-assistant`` fixture pins.
 
-**The error channel has one exception and it is §6.2's ``stdout-error`` trap.**
+**The error channel is stderr, and since 2.26.1 the exit code names the kind.**
 Every runtime failure measured — 401, 404, 400 context, 429, 500, stall,
-truncated stream, error envelope — writes to **stderr** and exits 1. *Config
-validation* errors instead print on **stdout with stderr empty**, still exit 1.
-So a nonzero exit's stdout must never be read as an answer, which is exactly the
-shape opencode cost this repo a debugging round for.
+truncated stream, error envelope, zero-byte response — writes to **stderr** with
+stdout empty. At 2.24.1 and 2.26.0 every one exits 1, and *config validation*
+errors are §6.2's ``stdout-error`` trap: they print on **stdout with stderr
+empty**, still exit 1. 2.26.1 (re-measured 2026-10-09) documents four
+programmatic exits and uses them: **0** finished; **1** usage or config error —
+the 401, and a config validation error, which now prints ``Error: Invalid
+configuration …`` on **stderr** with stdout empty; **2** infrastructure failure
+— the 404, the 400 context overflow, the stall and every retry-budget
+exhaustion; **3** stopped by a limit. The wording on stderr is 2.26.0's byte for
+byte except the stall's, which now names its ``ReadTimeout``. So a nonzero
+exit's stdout must never be read as an answer, which is exactly the shape
+opencode cost this repo a debugging round for.
 
-**No exit-0 failures.** Every failure mode measured exits 1, so
-``exit_zero_failure_markers`` is empty *by measurement* and §6.2's
-``exit-zero-failure`` row is recorded N/A rather than skipped.
+**Exit 3 leaves a whole transcript on stdout, and it is not an answer.** A run
+stopped by ``--max-turns 4``, by ``--max-price 0.25``, by a ``length`` finish or
+by a SIGTERM (what the harness's own timeout sends) prints the transcript at
+exit — every entry ``generationStatus: completed``, its last assistant message
+whatever the run had said: half an array, or all of it — and says only
+``Stopped: <outcome>`` on stderr. :meth:`VibeProvider.parse_output` read all
+four as success; it now refuses any stdout beside that line
+(:func:`stopped_by_a_limit`). The fan-out and ask lanes already fail a nonzero
+exit, but the executor lane lets a schema-valid result win over one.
+
+**No exit-0 failures.** Every failure mode measured exits nonzero (1 at 2.24.1
+and 2.26.0; 1, 2 or 3 at 2.26.1), so ``exit_zero_failure_markers`` is empty *by
+measurement* and §6.2's ``exit-zero-failure`` row is recorded N/A rather than
+skipped.
 
 **``VIBE_API_TIMEOUT`` is pinned, and that is load-bearing rather than tidy.**
 vibe retries 3 times over ``{408, 409, 425, 429, 500, 502, 503, 504, 529}``, and
@@ -65,7 +84,8 @@ a single slot**. Pinning the knob and declaring the pinned number is the
 ``claude_code.py`` precedent, and it is what keeps the declared envelope honest.
 That is 2.24.1's chain. 2.26.0 retries for a wall-clock budget instead
 (``api_retry_max_elapsed_time``, default 300 s), so ``VIBE_API_RETRY_MAX_ELAPSED_TIME``
-is pinned beside it (2026-10-08; see ``API_RETRY_BUDGET_S``).
+is pinned beside it (2026-10-08; see ``API_RETRY_BUDGET_S``). 2.26.1 keeps the
+budget and changes the chain inside it (2026-10-09; see ``internal_retries``).
 
 **``--max-price`` ships, and its role is narrower than §7.4 assumed.** §4.2 feared
 vibe enforces the cap against a priced catalog the stub cannot serve; measured,
@@ -76,7 +96,11 @@ precise: *"Session will be interrupted if cost exceeds this limit"*. It is a
 **between-turns** guard, and a single completion under a ``0.0000001`` cap ran to
 completion with the full answer. So it bounds a runaway loop, **not** one
 expensive call, and it is not sufficient as §7.4's spend bound on its own —
-``--max-turns`` and the key-side credit cap remain load-bearing.
+``--max-turns`` and the key-side credit cap remain load-bearing. 2.26.1 still
+lets that one completion run to its end, but then reports the run
+``Stopped: price_limit`` and exits 3 with the whole answer on stdout (the
+``price-limit`` row, a stub reporting 2,000,000 prompt tokens): the call is paid
+for and its answer is a failure.
 
 **Reasoning effort is supported, through the seed rather than argv.** The level
 is the ``[[models]]`` config key ``thinking``, whose accepted set was read off
@@ -95,6 +119,7 @@ alt-screen on stderr), so ``-p`` is mandatory and the trailing-positional shape
 """
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -164,16 +189,27 @@ API_TIMEOUT_S = 90
 #: is 300 s, which measured 16 requests over ~305 s on a fail-forever row and
 #: 367 s on a stall, past 2.24.1's declared 272 s. 150 s keeps the worst case at
 #: that same 272 s (below). 2.24.1 has no such setting and ignores the variable.
+#:
+#: 2.26.1 reads the same variable and spends it differently
+#: (``mistralai_vibe_local_harness/vibe/adapters/_retry.py``, measured
+#: 2026-10-09): a retry is made only when its *wait* ends inside the budget (the
+#: provider's ``Retry-After`` uncapped, else the backoff), the backoff is 0.5 s ×
+#: 1.5ⁿ plus up to 1 s of jitter, still capped at 30 s, and a stall is retried
+#: once. At 150 s that is 13 requests over 124.5 s on every fail-forever row, a
+#: stall 2 requests over 185 s, and five ``Retry-After: 29`` 429s then a stall 6
+#: requests over 239 s.
 API_RETRY_BUDGET_S = 150
 
-#: 2.26.0's backoff cap, read off the harness source (``_MAX_RETRY_DELAY_S``).
+#: 2.26.0's backoff cap, read off the harness source (``_MAX_RETRY_DELAY_S``),
+#: and 2.26.1's (``_MAX_RETRY_DELAY_S = 30.0`` in ``_retry.py``).
 _MAX_RETRY_DELAY_S = 30
 
-#: ``max_wall_s`` for the declaration below, the larger of the two supported
+#: ``max_wall_s`` for the declaration below, the largest of the supported
 #: releases' bounds: 2.24.1's three attempts at the pinned timeout plus its
 #: measured ~1.6 s of backoff, and 2.26.0's last retry granted just inside the
 #: budget, one capped delay, then one attempt at the pinned timeout. Both are
-#: 272 s at these pins.
+#: 272 s at these pins. 2.26.1's is smaller — its last attempt starts inside the
+#: budget, so budget + one attempt, 240 s, measured 239 s — and the 272 s stands.
 _MAX_WALL_S = max(
     3 * API_TIMEOUT_S + 2,
     API_RETRY_BUDGET_S + _MAX_RETRY_DELAY_S + API_TIMEOUT_S + 2,
@@ -224,6 +260,28 @@ _STRIPPED_VENDOR_VARS: Tuple[str, ...] = (
     # an answer.
     "LOG_LEVEL",
 )
+
+
+#: 2.26.1's line for a run that ended without finishing and without an error
+#: (``vibe/cli/cli.py``: ``print(f"Stopped: {result.outcome}", file=sys.stderr)``
+#: when the outcome is not ``finished`` and carries no error message; a run that
+#: does carry one prints ``Error: …`` instead and leaves stdout empty). These are
+#: the exit-3 outcomes (``RunOutcome`` in ``vibe/app_server/run_export.py``):
+#: ``turn_limit``, ``token_limit``, ``price_limit``, ``deadline``,
+#: ``terminated``, ``length``. Measured 2026-10-09: ``turn_limit``,
+#: ``price_limit``, ``length``, ``terminated`` and ``deadline``, each exit 3
+#: beside a whole transcript on stdout.
+_STOPPED_LINE = re.compile(r"^Stopped: ([a-z_]+)[ \t]*$", re.MULTILINE)
+
+
+def stopped_by_a_limit(stderr: str) -> Optional[str]:
+    """The outcome on 2.26.1's ``Stopped: <outcome>`` stderr line, else ``None``.
+
+    The stopped run's transcript is byte-for-byte a finished one's shape, so this
+    line is the one place the stop can be read without the exit code.
+    """
+    match = _STOPPED_LINE.search(stderr or "")
+    return match.group(1) if match else None
 
 
 def _create_home_dir() -> str:
@@ -325,31 +383,53 @@ class VibeProvider(LLMProvider):
     #: finish-less streams retried. :meth:`get_env` now pins that budget
     #: (:data:`API_RETRY_BUDGET_S`) and ``internal_retries`` below covers both
     #: releases.
+    #:
+    #: 2026-10-09: re-captured on 2.26.1 the same way, the argv unchanged. The
+    #: stderr wording is 2.26.0's byte for byte except the stall's; what moved is
+    #: the exit code (1 config, 2 infrastructure, 3 stopped by a limit), the
+    #: config error's channel (stderr now, so ``stdout-error`` keeps its 2.26.0
+    #: bytes beside a new ``config-error`` row) and the retry chain inside the
+    #: pinned budget. One parser change: a ``Stopped: <outcome>`` line on stderr
+    #: refuses the transcript beside it (:func:`stopped_by_a_limit`).
     min_version = "2.24.1"
-    verified_version = "2.26.0"
+    verified_version = "2.26.1"
 
     #: Measured at 2.24.1 (§6.1.1), every field, including the one experiment the
     #: other adapters do not run, and re-measured at 2.26.0 on 2026-10-08 with
-    #: the retry budget pinned (2.26.0 retries for a budget, not three times).
+    #: the retry budget pinned (2.26.0 retries for a budget, not three times),
+    #: and at 2.26.1 on 2026-10-09.
     #:
-    #: ``max_requests`` is **11**, 2.26.0's: at the pinned 150 s budget a
-    #: 500-forever stub logged 11 requests over 155 s (0, 0.5, 1.5, … 121.5,
-    #: 151.5 s). 2.24.1's was 3 — ``async_retry(tries=3, delay_seconds=0.5,
-    #: backoff_factor=2.0)`` in the installed source, confirmed against the
-    #: stub's request log for 5xx and 429 alike.
+    #: ``max_requests`` is **14**, 2.26.1's. At the pinned 150 s budget six
+    #: fail-forever rows (500, 429, a cut stream, a finish-less stream, a 200
+    #: error body, a zero-byte response) each logged 13 requests over 124.5 s
+    #: (0, ~0.9, ~1.8, … ~90.4, ~120.4 s); the 13th request starts at 115.5 s
+    #: plus the summed jitter of the eleven delays before it, and when that sum
+    #: is under ~4.5 s (about one run in eight) a 14th fits inside the budget.
+    #: 2.26.0's was 11 (0, 0.5, 1.5, … 121.5, 151.5 s) and 2.24.1's 3 —
+    #: ``async_retry(tries=3, delay_seconds=0.5, backoff_factor=2.0)`` in the
+    #: installed source, confirmed against the stub's request log for 5xx and
+    #: 429 alike. **The count is the server's whenever it sends a ``Retry-After``
+    #: shorter than the backoff**: 2.26.0 and 2.26.1 take that wait as given, so
+    #: ``Retry-After: 1`` measured 150 requests over 153 s at 2.26.1 (one per
+    #: second until the budget). The wall bound below holds either way.
     #:
     #: ``retries_rate_limit`` is **True** (429 is in the retryable set), so §7.5
     #: rule 6(b) suppresses an identical harness-side re-dispatch. ``Retry-After``
     #: was **not** honoured at 2.24.1 (a 30 s header produced no sleep at all);
     #: 2.26.0 honours it up to a 30 s cap, so a server-chosen delay is still
     #: bounded, which is what lets this adapter state a real ``max_wall_s`` where
-    #: copilot and qwen-code cannot.
+    #: copilot and qwen-code cannot. 2.26.1 sleeps the same capped delay and
+    #: makes no retry whose uncapped wait would end past the budget
+    #: (``Retry-After: 30`` measured 5 requests 30 s apart, 124 s).
     #:
     #: ``max_wall_s`` is computed from the **pinned** ``VIBE_API_TIMEOUT`` and
     #: retry budget, not from the vendor defaults, which is the whole reason the
     #: pins exist (see :data:`_MAX_WALL_S`). Measured at 2.26.0: six 429s with
     #: ``Retry-After: 29`` then a stalled request ended at 267 s, 7 requests,
     #: under the declared 272 s; a plain stall ended at 184 s, 2 requests.
+    #: Measured at 2.26.1: five such 429s then a stall ended at 239 s, 6
+    #: requests (the last started at 145 s); a plain stall at 185 s, 2 requests,
+    #: because 2.26.1 retries a stall once whatever the budget has left.
     #:
     #: **Experiment 6 is why this row is trustworthy.** §4.2 predicted that a 200
     #: whose stream carries no ``finish_reason`` makes vibe "treat the stream as
@@ -362,7 +442,7 @@ class VibeProvider(LLMProvider):
     #: showed ``emits_finish_reason = false`` in the seed turns that hard error
     #: into a clean exit 0 against an endpoint that omits the field.
     internal_retries = InternalRetryEnvelope(
-        max_requests=11,
+        max_requests=14,
         max_wall_s=_MAX_WALL_S,
         retries_rate_limit=True,
         configurable_by=("VIBE_API_TIMEOUT", "VIBE_API_RETRY_MAX_ELAPSED_TIME"),
@@ -387,9 +467,10 @@ class VibeProvider(LLMProvider):
 
     #: **Empty by measurement, not by omission.** Every failure mode the probe
     #: exercised — 401, 404, 400 context-overflow, 429, 500, stall, truncated
-    #: stream, error envelope and a bad config — exits **1**. §6.2's
-    #: ``exit-zero-failure`` row is therefore recorded N/A for this CLI rather
-    #: than left untested.
+    #: stream, error envelope and a bad config — exits **1** at 2.24.1 and
+    #: 2.26.0, and nonzero at 2.26.1 (1, or 2 for infrastructure; a run stopped
+    #: by a limit exits 3). §6.2's ``exit-zero-failure`` row is therefore
+    #: recorded N/A for this CLI rather than left untested.
     exit_zero_failure_markers: Tuple[Any, ...] = ()
 
     @property
@@ -513,8 +594,8 @@ class VibeProvider(LLMProvider):
         every measured failure vibe writes to **stderr** (``Error: API error
         from …``, ``Rate limits exceeded``, ``The conversation context exceeds
         …``) and stderr is returned unchanged, while a config-validation error
-        lands on stdout as bare prose that never parses as JSON and is therefore
-        passed straight through.
+        lands on stdout (stderr at 2.26.1) as bare prose that never parses as
+        JSON and is therefore passed straight through.
         """
         try:
             text = stdout.strip() if stdout else ""
@@ -562,6 +643,11 @@ class VibeProvider(LLMProvider):
 
         A transcript with **no** assistant entry is a failure, not an
         empty-string success; that is what the ``ephemeral-only`` fixture pins.
+        So is any transcript beside a ``Stopped: <outcome>`` line on stderr
+        (:func:`stopped_by_a_limit`): 2.26.1 prints the whole transcript and
+        exits 3 when ``--max-turns``, ``--max-price``, a ``length`` finish or a
+        SIGTERM stops the run, and nothing on stdout says so (the
+        ``turn-limit``, ``price-limit``, ``length`` and ``terminated`` rows).
 
         **Step 2** runs :func:`extract_json_from_text` over that text with
         ``prefer_arrays=True``, so ``data`` carries the model's own document
@@ -569,7 +655,8 @@ class VibeProvider(LLMProvider):
 
         The stdout-carrying failure case is handled first and deliberately: a
         *config validation* error prints on stdout with **stderr empty** and
-        still exits 1, so unparseable stdout must be reported as a failure
+        still exits 1 (2.24.1 and 2.26.0; 2.26.1 moved it to stderr, and the
+        floor is still 2.24.1), so unparseable stdout must be reported as a failure
         carrying that text rather than passed to the extractor, which would
         happily find nothing and report an empty answer instead of the reason.
         """
@@ -578,6 +665,23 @@ class VibeProvider(LLMProvider):
             return {
                 "success": False,
                 "error": self._empty_stdout_reason(stderr),
+                "raw": stdout,
+                "data": None,
+            }
+
+        stopped = stopped_by_a_limit(stderr)
+        if stopped is not None:
+            # 2.26.1's exit 3: the whole transcript is on stdout, every entry
+            # `completed`, and its last assistant message is whatever the run
+            # had said when the limit fell -- half an array, or a whole one
+            # that cost more than --max-price. stderr's one line is the only
+            # sign; read without it, all four limit rows parsed as success.
+            return {
+                "success": False,
+                "error": (
+                    f"vibe stopped before finishing (Stopped: {stopped}); the "
+                    "transcript on stdout is a stopped run's, not an answer"
+                ),
                 "raw": stdout,
                 "data": None,
             }
@@ -703,7 +807,7 @@ class VibeProvider(LLMProvider):
 
         ``VIBE_API_TIMEOUT`` is pinned because the vendor default is 720 s and
         vibe retries three times: an unpinned stall is ~36 minutes inside one
-        slot. ``VIBE_API_RETRY_MAX_ELAPSED_TIME`` is pinned because 2.26.0
+        slot. ``VIBE_API_RETRY_MAX_ELAPSED_TIME`` is pinned because 2.26.0+
         retries for that budget (default 300 s) rather than three times. The
         declared :attr:`internal_retries` envelope is computed from the pinned
         values, so they cannot drift.
@@ -723,7 +827,7 @@ class VibeProvider(LLMProvider):
             "VIBE_ACTIVE_MODEL": alias,
             # The pinned inner bound the declared envelope is computed from.
             "VIBE_API_TIMEOUT": str(API_TIMEOUT_S),
-            # 2.26.0's retry budget (vendor default 300 s), the envelope's other
+            # 2.26.0+'s retry budget (vendor default 300 s), the envelope's other
             # input; 2.24.1 has no such setting and ignores it.
             "VIBE_API_RETRY_MAX_ELAPSED_TIME": str(API_RETRY_BUDGET_S),
             # Both default TRUE, and the dependency tree carries sentry-sdk and

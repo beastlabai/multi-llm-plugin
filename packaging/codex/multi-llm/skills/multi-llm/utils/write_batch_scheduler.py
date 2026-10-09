@@ -12706,8 +12706,24 @@ class WriteBatchScheduler:
             # `batches_dispatched`, which a batch of resume skips joins too —
             # a check whose findings stand, materialized again on every
             # resume and kept without a dispatch, re-stamped the date.
+            # 2026-10-09: but never a date older than the review this apply
+            # phase applies. A `--force` round whose review re-reports every
+            # batch byte for byte keeps them all and dispatches nothing; the
+            # findings are applied, so the apply is stamped after the review
+            # (plan improve-plan-and-improve-code §2.5). Kept, the old date
+            # read as "review not applied yet" to `ImproveWorkflow`, and no
+            # later re-run of the composite reached `[ALREADY_COMPLETE]`.
             ran = any(not outcome.skipped for outcome in result.outcomes)
-            if not (not ran and self.state.is_phase_completed(self.phase)):
+            review = REVIEW_PHASE_BY_WRITE_KIND.get(self.kind)
+            keeps_date = (
+                not ran
+                and self.state.is_phase_completed(self.phase)
+                and not (
+                    review is not None
+                    and self.state.completion_predates(self.phase, review)
+                )
+            )
+            if not keeps_date:
                 self.state.mark_phase_completed(self.phase)
             # F5: re-stamp `plan_hash` to what this run actually left on disk.
             # Every batch's edit is already written by the time `_finalize`
