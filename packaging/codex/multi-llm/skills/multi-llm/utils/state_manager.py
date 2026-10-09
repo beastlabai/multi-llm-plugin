@@ -1992,6 +1992,58 @@ class StateManager:
         skip_info = self.state.get("phases_skipped", {}).get(phase)
         return skip_info.get("reason") if skip_info else None
 
+    def completion_predates(self, apply: str, review: str) -> bool:
+        """Whether every record of phase *apply* predates *review*'s completion.
+
+        Both are phase words (``state.json``'s keys: ``code-review``, never
+        the mode word ``review-code``). The apply's records are its
+        ``phases_completed`` stamp and its skip's ``skipped_at``; the NEWER of
+        the two is compared, strictly, with ``phases_completed[review]``. Not
+        the precedence ``full``'s ``_recorded`` reads (completed wins): both
+        records can be on file at once (:meth:`mark_phase_completed` leaves
+        an older skip in place), and an earlier cycle's completion must not
+        hide a skip written after this review. True means the review ran
+        again after the apply last finished, so its findings are not applied
+        yet.
+
+        Every stamp goes through :func:`_parse_completion_time`, the reading
+        ``phase_completion_is_stale`` and ``is_phase_started`` give a stamp
+        (``write_batch_scheduler._parse_local_timestamp`` and
+        ``check_workflow_prerequisites._parse_timestamp`` are its copies), so
+        a stamp with a UTC offset and a naive local one compare as instants.
+
+        False whenever a date does not parse (an unparseable review stamp, a
+        completion that is not a string, a skip that is not a dict or has no
+        parseable ``skipped_at``): absence of a date is not staleness, the
+        rule :meth:`phase_completion_is_stale` follows, so the apply stays
+        done. An apply stamp equal to the review's keeps it done too. False
+        as well when *apply* has neither record: nothing on file predates
+        anything, and "never recorded" is the caller's own case (the apply
+        has not run), not this one.
+        """
+        completed = self.state.get("phases_completed")
+        completed = completed if isinstance(completed, dict) else {}
+        reviewed_at = _parse_completion_time(completed.get(review))
+        if reviewed_at is None:
+            return False
+        stamps: List[datetime] = []
+        if apply in completed:
+            stamp = _parse_completion_time(completed[apply])
+            if stamp is None:
+                return False
+            stamps.append(stamp)
+        skipped = self.state.get("phases_skipped")
+        if isinstance(skipped, dict) and apply in skipped:
+            record = skipped[apply]
+            stamp = (
+                _parse_completion_time(record.get("skipped_at"))
+                if isinstance(record, dict) else None
+            )
+            if stamp is None:
+                return False
+            stamps.append(stamp)
+        return bool(stamps) and max(stamps) < reviewed_at
+
     def has_plan_changed(self) -> bool:
         """Check if plan has changed since last run."""
         return self.state.get("plan_changed", False)

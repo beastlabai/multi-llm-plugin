@@ -50,7 +50,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 # Absolute, symlinks preserved — see utils/cli_common.py.
 sys.path.insert(0, str(Path(os.path.abspath(__file__)).parent))
@@ -63,6 +63,7 @@ from check_workflow_prerequisites import (
     record_prerequisite_skip,
 )
 from utils.cli_common import (
+    ERROR_MAX_CHARS,
     EXIT_ERROR,
     EXIT_NEEDS_HUMAN,
     EXIT_NOTHING_TO_DO,
@@ -71,25 +72,15 @@ from utils.cli_common import (
     build_parent_parser,
     dispatcher_command,
     record_artifact,
+    record_error,
     record_next,
 )
 from utils.output_handler import get_output_dir, get_phase_dir
 from utils.state_manager import StateManager
 from utils.stream_bootstrap import bootstrap_streams
+from utils.text_clip import clip
 from utils import unattended as unattended_mod
 from utils.unattended import NeedsHuman
-
-#: The mode word, and the run-dir name ``--detach`` claims. `full` records no
-#: workflow phase of its own — each phase it runs records itself — but it does own
-#: a directory for ``.status.json``, the run log and the lock.
-MODE_NAME = "full"
-RUN_DIR_PHASE = "full"
-
-#: Where the workflow's own bookkeeping lands in ``state.json``. Display and
-#: diagnostics only: the resume decision reads ``phases_completed`` /
-#: ``phases_skipped``, never this key, so a hand-deleted record cannot make the
-#: workflow re-run a phase that really did complete.
-STATE_KEY = "full_workflow"
 
 #: Step outcomes the driver branches on.
 DONE = "done"
@@ -220,7 +211,31 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 
 class FullWorkflow:
-    """The state machine. One instance per invocation."""
+    """The state machine. One instance per invocation.
+
+    A composite mode that runs a few of these phases subclasses it rather than
+    copying it, so everything that names *which* workflow this is lives on the
+    class and is read through the instance: a read that bound a module global
+    would hand the subclass `full`'s run dir, progress record and resume
+    command. The hooks (:meth:`step_argv`, :meth:`skip_reason`,
+    :meth:`nothing_to_do`, :meth:`resume_flags`, :meth:`report_artifacts`)
+    default to `full`'s own behaviour.
+    """
+
+    #: The mode word, and the run-dir name ``--detach`` claims. `full` records no
+    #: workflow phase of its own — each phase it runs records itself — but it does
+    #: own a directory for ``.status.json``, the run log and the lock.
+    MODE_NAME = "full"
+    RUN_DIR_PHASE = "full"
+
+    #: Where the workflow's own bookkeeping lands in ``state.json``. Display and
+    #: diagnostics only: the resume decision reads ``phases_completed`` /
+    #: ``phases_skipped``, never this key, so a hand-deleted record cannot make
+    #: the workflow re-run a phase that really did complete.
+    STATE_KEY = "full_workflow"
+
+    #: The heading :meth:`print_report` prints.
+    REPORT_TITLE = "Full Workflow Summary"
 
     def __init__(self, args: argparse.Namespace):
         self.args = args
@@ -268,13 +283,13 @@ class FullWorkflow:
 
     def _record_progress(self, *, current: str, failed: Optional[str] = None) -> None:
         state = self.state
-        record = dict(state.get(STATE_KEY) or {})
+        record = dict(state.get(self.STATE_KEY) or {})
         record.update({
             "current_phase": current,
             "failed_phase": failed,
             "steps": {r.phase or r.label: r.outcome for r in self.reports},
         })
-        state.set(STATE_KEY, record)
+        state.set(self.STATE_KEY, record)
         state.save()
 
     # -- in-process dispatch -------------------------------------------
@@ -335,6 +350,17 @@ class FullWorkflow:
         ctx = active_result()
         return ctx.next if ctx is not None else None
 
+    @staticmethod
+    def _clear_error() -> None:
+        """Drop an earlier step's ``error`` line before the next step runs.
+
+        A step that recorded one and still finished did not stop the run, so
+        its line is not the stop :meth:`_phase_failed` reports for a later one.
+        """
+        ctx = active_result()
+        if ctx is not None:
+            ctx.error = None
+
     # -- flag forwarding -----------------------------------------------
     def common_flags(self) -> List[str]:
         """Cross-cutting flags every phase gets, and only those.
@@ -384,6 +410,23 @@ class FullWorkflow:
         if getattr(self.args, "resume", False):
             flags += ["--resume"]
         return flags
+
+    def step_argv(self, step: str) -> List[str]:
+        """The flags after the plan for *step*: a mode word, or ``"consolidate"``.
+
+        One hook for the five steps a composite reuses (both reviews, both
+        applies of their findings, and review-plan's consolidation pass), so a
+        subclass that gives them its own flags reaches every one, the inherited
+        steps included. The steps only `full` runs, and :meth:`apply_runner`'s
+        auto-run, build their own argv.
+        """
+        if step in ("review-plan", "review-code"):
+            return self.model_flags() + self.common_flags()
+        if step in ("apply-suggestions", "apply-code-fixes"):
+            return self.apply_flags() + self.common_flags()
+        if step == "consolidate":
+            return ["--consolidate", *self.common_flags()]
+        raise ValueError(f"no step_argv for step {step!r}")
 
     # -- the prerequisite gates (D6a rows 5/6) --------------------------
     def apply_runner(self, site_id: str) -> Optional[Callable[[str], int]]:
@@ -437,7 +480,7 @@ class FullWorkflow:
     # -- run dir --------------------------------------------------------
     @property
     def run_dir(self) -> Path:
-        return get_phase_dir(self.plan_path, RUN_DIR_PHASE)
+        return get_phase_dir(self.plan_path, self.RUN_DIR_PHASE)
 
     # ------------------------------------------------------------------
     # Steps
@@ -461,9 +504,7 @@ class FullWorkflow:
         ]
 
     def step_review_plan(self) -> Tuple[str, str, Optional[int]]:
-        code = self.run_mode(
-            "review-plan", self.model_flags() + self.common_flags()
-        )
+        code = self.run_mode("review-plan", self.step_argv("review-plan"))
         return self._verify("review-plan", code)
 
     def step_consolidate(self) -> Tuple[str, str, Optional[int]]:
@@ -479,23 +520,15 @@ class FullWorkflow:
         if not self.args.consolidate:
             if not self.unattended:
                 return SKIPPED, "not requested (--consolidate)", None
-            from utils.consolidation import consolidation_is_current
-
-            # This step is not skippable, so a resumed `--full` re-entered it
-            # and ran the pass again on groups it had already consolidated
-            # (live run 8's stale recommendation, the workflow's copy).
-            if consolidation_is_current(str(self.plan_dir / "review-plan")):
-                return SKIPPED, "already ran on these review groups", None
-            if not self._consolidation_recommended():
-                return SKIPPED, "not recommended by review-plan", None
+            reason = consolidation_skip_reason(self.plan_dir)
+            if reason:
+                return SKIPPED, reason, None
             unattended_mod.record_resolution(
                 str(self.run_dir),
                 unattended_mod.row(4).site_id,
                 "auto-ran consolidation once ([CONSOLIDATION_RECOMMENDED])",
             )
-        code = self.run_mode(
-            "review-plan", ["--consolidate", *self.common_flags()]
-        )
+        code = self.run_mode("review-plan", self.step_argv("consolidate"))
         if code != EXIT_OK:
             print(
                 f"multi-llm warning: consolidation exited {code}; continuing "
@@ -505,20 +538,9 @@ class FullWorkflow:
             return SKIPPED, f"consolidation exited {code} (non-fatal)", code
         return DONE, "", code
 
-    def _consolidation_recommended(self) -> bool:
-        """The same threshold ``review_plan_orchestrator`` prints its marker on."""
-        from utils.consolidation import CONSOLIDATION_RECOMMENDED_THRESHOLD
-
-        entries = _validation_entries(self.plan_dir / "review-plan" / "validation.json")
-        actionable = sum(
-            1 for entry in entries
-            if entry.get("status") in ("valid", "needs-human-decision")
-        )
-        return actionable >= CONSOLIDATION_RECOMMENDED_THRESHOLD
-
     def step_apply_suggestions(self) -> Tuple[str, str, Optional[int]]:
         code = self.run_mode(
-            "apply-suggestions", self.apply_flags() + self.common_flags()
+            "apply-suggestions", self.step_argv("apply-suggestions")
         )
         return self._verify("apply-suggestions", code)
 
@@ -626,9 +648,7 @@ class FullWorkflow:
         return self._verify("implement", code)
 
     def step_review_code(self) -> Tuple[str, str, Optional[int]]:
-        code = self.run_mode(
-            "review-code", self.model_flags() + self.common_flags()
-        )
+        code = self.run_mode("review-code", self.step_argv("review-code"))
         return self._verify("code-review", code)
 
     def step_apply_code_fixes(self) -> Tuple[str, str, Optional[int]]:
@@ -655,7 +675,7 @@ class FullWorkflow:
                 "Skipped: code review produced zero actionable findings",
             )
         code = self.run_mode(
-            "apply-code-fixes", self.apply_flags() + self.common_flags()
+            "apply-code-fixes", self.step_argv("apply-code-fixes")
         )
         return self._verify("apply-code-fixes", code)
 
@@ -792,18 +812,43 @@ class FullWorkflow:
             )
         return FAILED, f"exited {code}", code
 
+    def skip_reason(self, step: Step) -> Optional[str]:
+        """The word :meth:`run` passes over *step* with, or ``None`` to run it.
+
+        Asked only for a skippable step and never under ``--force``. `full`
+        passes over any phase already recorded completed or skipped
+        (:meth:`_recorded`), which is what makes every phase boundary a resume
+        point.
+        """
+        return self._recorded(step.phase)
+
+    def nothing_to_do(self) -> bool:
+        """Whether every step of this workflow would be passed over.
+
+        A composite asks it before its detach boundary, to exit 2 instead of
+        launching a worker with nothing to run. `full` answers ``False``: a
+        re-run of a finished workflow passes over each recorded phase and
+        exits 0, as it always has.
+        """
+        return False
+
+    def resume_flags(self) -> List[str]:
+        """The flags after the plan in row 14's re-invocation.
+
+        The run's own ``--yes`` and ``--resume``, never an invented flag: an
+        attended run is resumed attended.
+        """
+        return [*(["--yes"] if self.unattended else []), "--resume"]
+
     def _phase_failed(self, step: Step, detail: str, code: Optional[int]) -> int:
         """D6 row 14: exit 3, name the phase and the ``--resume`` re-invocation."""
         resume = dispatcher_command(
-            MODE_NAME, self.plan_path, *(["--yes"] if self.unattended else []),
-            "--resume",
+            self.MODE_NAME, self.plan_path, *self.resume_flags()
         )
         pending = self._pending_next()
-        lines = [
-            "",
-            f"ERROR: {step.label} did not complete ({detail}). The workflow "
-            f"stopped here; no later phase ran.",
-        ]
+        head = f"{step.label} did not complete ("
+        tail = "). The workflow stopped here; no later phase ran."
+        lines = ["", f"ERROR: {head}{detail}{tail}"]
         if pending:
             lines += [
                 "       That phase printed a follow-up of its own — run it first:",
@@ -816,9 +861,20 @@ class FullWorkflow:
             "makes a hard failure proceed (D6 row 14).",
         ]
         print("\n".join(lines), file=sys.stderr)
+        # The stop is the result line's `error` too, which a detached close-out
+        # writes as `run.error` and both tool routes relay as the run's last
+        # line; it used to be on stderr alone (Fable review 2026-10-09). A
+        # phase that recorded its own stop line keeps it: an apply's or
+        # implement's names the remedy, where this one would say `exited 3`.
+        # The detail gives way to the limit, never the sentence saying the
+        # workflow stopped.
+        ctx = active_result()
+        if ctx is None or not ctx.error:
+            room = ERROR_MAX_CHARS - len(head) - len(tail)
+            record_error(f"{head}{clip(detail, room)}{tail}")
         self._record_progress(current=step.phase or step.label,
                               failed=step.phase or step.label)
-        unattended_mod.mark_needs_human(MODE_NAME)
+        unattended_mod.mark_needs_human(self.MODE_NAME)
         # The machine-readable follow-up is the *next* command to run, and when the
         # phase printed a prerequisite of its own that is that one — resuming
         # before it re-materializes the same pending state and points back here, so
@@ -830,15 +886,16 @@ class FullWorkflow:
     def run(self) -> int:
         for step in self.steps():
             if step.skippable and not self.args.force:
-                recorded = self._recorded(step.phase)
-                if recorded:
-                    print(f"\n=== {step.label}: already {recorded}, skipping ===")
+                reason = self.skip_reason(step)
+                if reason:
+                    print(f"\n=== {step.label}: already {reason}, skipping ===")
                     self.reports.append(
-                        StepReport(step.label, step.phase, ALREADY, recorded)
+                        StepReport(step.label, step.phase, ALREADY, reason)
                     )
                     continue
             print(f"\n=== {step.label} ===")
             self._record_progress(current=step.phase or step.label)
+            self._clear_error()
             outcome, detail, code = step.run()
             self.reports.append(
                 StepReport(step.label, step.phase, outcome, detail, code)
@@ -857,13 +914,13 @@ class FullWorkflow:
     # Reporting
     # ------------------------------------------------------------------
     def print_report(self) -> None:
-        print("\n## Full Workflow Summary\n")
+        print(f"\n## {self.REPORT_TITLE}\n")
         print(f"**Plan**: {self.plan_path}")
         print("")
         for report in self.reports:
             suffix = f" — {report.detail}" if report.detail else ""
             print(f"- {report.label}: {report.outcome}{suffix}")
-        artifacts = self._artifacts()
+        artifacts = self.report_artifacts()
         if artifacts:
             print("\n### Output files\n")
             for path in artifacts:
@@ -872,8 +929,12 @@ class FullWorkflow:
         print("")
         self._print_metrics()
 
-    def _artifacts(self) -> List[str]:
-        """The per-phase artifacts a reader is most likely to open next."""
+    def report_artifacts(self) -> List[str]:
+        """The per-phase artifacts a reader is most likely to open next.
+
+        Only the ones that exist: the report lists them under *Output files* and
+        records each on the result line.
+        """
         candidates = [
             self.plan_dir / "review-plan" / "report.html",
             self.plan_dir / "review-plan" / "consolidated-report.md",
@@ -897,6 +958,40 @@ class FullWorkflow:
             return
         if report:
             print(report)
+
+
+# ---------------------------------------------------------------------------
+# Row 4: whether the unattended consolidation pass runs
+# ---------------------------------------------------------------------------
+
+def consolidation_skip_reason(plan_dir: Union[str, Path]) -> Optional[str]:
+    """Why the unattended consolidation pass does not run, or ``None`` to run it.
+
+    A module function, not a method, so a planner that builds no workflow asks
+    the same question with only the plan dir. The step that runs the pass is
+    not skippable, so a resumed run re-enters it; without the first check it
+    ran the pass again on groups it had already consolidated (live run 8's
+    stale recommendation, the workflow's copy).
+    """
+    from utils.consolidation import consolidation_is_current
+
+    if consolidation_is_current(str(Path(plan_dir) / "review-plan")):
+        return "already ran on these review groups"
+    if not _consolidation_recommended(plan_dir):
+        return "not recommended by review-plan"
+    return None
+
+
+def _consolidation_recommended(plan_dir: Union[str, Path]) -> bool:
+    """The same threshold ``review_plan_orchestrator`` prints its marker on."""
+    from utils.consolidation import CONSOLIDATION_RECOMMENDED_THRESHOLD
+
+    entries = _validation_entries(Path(plan_dir) / "review-plan" / "validation.json")
+    actionable = sum(
+        1 for entry in entries
+        if entry.get("status") in ("valid", "needs-human-decision")
+    )
+    return actionable >= CONSOLIDATION_RECOMMENDED_THRESHOLD
 
 
 # ---------------------------------------------------------------------------
@@ -943,10 +1038,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     detached = maybe_detach(
         args=args,
-        mode=MODE_NAME,
+        mode=workflow.MODE_NAME,
         phase_dir=str(workflow.run_dir),
         plan_file=str(plan_path),
-        phase=RUN_DIR_PHASE,
+        phase=workflow.RUN_DIR_PHASE,
     )
     if detached is not None:
         return detached

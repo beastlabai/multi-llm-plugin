@@ -207,6 +207,13 @@ ROWS = [
     ("full-falls-back-to-suggested_next",
      S(("review-plan",), files=RP_VALID), "full", None,
      A(f"--apply-suggestions {P}")),
+    # A composite that is not the whole workflow answers as its `last_phase`
+    # (§2.6), so each row mirrors its last phase's own row above.
+    ("improve-plan->generate-tasks",
+     S(("review-plan", "apply-suggestions"), files=RP_VALID), "improve-plan",
+     None, A(f"--generate-tasks {P}")),
+    ("improve-code->complete",
+     S(ALL_REQUIRED, files=CR_FINDING), "improve-code", None, "complete"),
 
     # -- --resume, built from state ----------------------------------------
     ("after-implement-in-progress->implement-resume",
@@ -432,10 +439,10 @@ def test_table(tmp_path, spec, finished, after, expect):
         assert (None if again is None else again.to_dict()) == got, where
 
 
-def test_the_table_covers_every_workflow_mode_and_full():
+def test_the_table_covers_every_workflow_mode_and_every_composite():
     finished = {row[2] for row in ROWS} | {row[3] for row in ROWS}
     for mode in modes.MODES:
-        if mode.is_workflow_phase or mode.runs_workflow:
+        if mode.is_workflow_phase or mode.is_composite:
             assert mode.name in finished, mode.name
 
 
@@ -1075,7 +1082,7 @@ class TestResumeCommand:
         assert code == 0
         assert out.out == f"[RESUME_COMMAND] $multi-llm:multi-llm --implement {P} --resume\n"
         command = f"$multi-llm:multi-llm --implement {P} --resume"
-        assert key == {"phase": "implement", "command": command,
+        assert key == {"phase": "implement", "mode": "implement", "command": command,
                        "flags": ["--resume"],
                        # Fix round 24: the section a tool route copies.
                        "markdown": f"To go on with implement:\n\n```\n{command}\n```"}
@@ -1216,7 +1223,8 @@ class TestResumeCommand:
         assert code == 0
         assert out.out == f"[RESUME_COMMAND] /multi-llm --generate-tasks {P}\n"
         command = f"/multi-llm --generate-tasks {P}"
-        assert key == {"phase": "generate-tasks", "command": command, "flags": [],
+        assert key == {"phase": "generate-tasks", "mode": "generate-tasks",
+                       "command": command, "flags": [],
                        "markdown": f"To go on with generate-tasks:\n\n```\n{command}\n```"}
 
     def test_no_re_invoke_after_a_prerequisite_refusal(self, tmp_path, monkeypatch, capsys):
@@ -1264,3 +1272,424 @@ class TestResumeCommand:
             {"phase": "implement", "command": "x"}
         assert "user_resume" not in cli_common.ResultContext(
             "implement", "implement").payload(cli_common.EXIT_NEEDS_HUMAN)
+
+
+# ---------------------------------------------------------------------------
+# The review-then-apply composites (plans/improve-plan-and-improve-code.md §2.6)
+# ---------------------------------------------------------------------------
+
+#: Each composite, and the phase's mode word it ends on.
+COMPOSITE_LAST = {"improve-plan": "apply-suggestions", "improve-code": "apply-code-fixes"}
+
+#: States the two `--after` answers are compared on, per composite.
+AFTER_STATES = {
+    "improve-plan": [
+        S(("review-plan", "apply-suggestions"), files=RP_VALID),
+        S(("review-plan",), tasks={"apply-batch-0": "completed"}, files=RP_VALID),
+        S(("review-plan",), files=RP_VALID),
+        S(),
+        S(UP_TO_TASKS, tasks=IMPLEMENT_PARTIAL),
+    ],
+    "improve-code": [
+        S(ALL_REQUIRED, files=CR_FINDING),
+        S(("code-review", "apply-code-fixes"), files=CR_FINDING),
+        S(UP_TO_CODE_REVIEW, tasks={"apply-fix-batch-0": "completed"}, files=CR_FINDING),
+        S(UP_TO_TASKS + ("code-review", "apply-code-fixes"),
+          tasks=IMPLEMENT_PARTIAL, files=CR_FINDING),
+        S(),
+    ],
+}
+
+
+def _no_route_env(monkeypatch):
+    for name in ("MULTI_LLM_HOST", modes.ROUTE_ENV):
+        monkeypatch.delenv(name, raising=False)
+
+
+class TestTheCompositesAnswerAsTheirLastPhase:
+    """`--after improve-plan` is `--after apply-suggestions`, `--after
+    improve-code` is `--after apply-code-fixes`: one `start` branch, the
+    composite's `last_phase`, which each native core's closing lookup names
+    with its own mode word (§2.4 step 4)."""
+
+    @pytest.mark.parametrize("composite", list(COMPOSITE_LAST))
+    @pytest.mark.parametrize("host,route,prefix", ROUTES, ids=ROUTE_IDS)
+    def test_after_the_composite_is_after_its_last_phase(
+        self, tmp_path, composite, host, route, prefix
+    ):
+        for index, spec in enumerate(AFTER_STATES[composite]):
+            plan = _build(tmp_path / str(index), spec)
+            got = np_.next_phase_commands(P, host, route, None, after_mode=composite,
+                                          plan_path=plan)
+            want = np_.next_phase_commands(P, host, route, None,
+                                           after_mode=COMPOSITE_LAST[composite],
+                                           plan_path=plan)
+            assert got is not None, (composite, index)
+            assert got.to_dict() == want.to_dict(), (composite, index)
+
+    def test_the_wrong_word_is_a_wrong_answer_not_an_error(self, tmp_path):
+        """A plan whose code workflow is finished and whose generate-tasks never
+        ran: `--after improve-code` is complete, while `--after improve-plan`
+        walks on from apply-suggestions to `--generate-tasks`."""
+        plan = _build(tmp_path, S(("code-review", "apply-code-fixes"), files=CR_FINDING))
+        code = np_.next_phase_commands(P, "claude-code", None, None,
+                                       after_mode="improve-code", plan_path=plan)
+        assert code.complete
+        planned = np_.next_phase_commands(P, "claude-code", None, None,
+                                          after_mode="improve-plan", plan_path=plan)
+        assert planned.command == f"/multi-llm:multi-llm --generate-tasks {P}"
+
+    @pytest.mark.parametrize("composite", list(COMPOSITE_LAST))
+    def test_the_util_prints_the_same_block(self, tmp_path, monkeypatch, capsys,
+                                            composite):
+        _build(tmp_path, AFTER_STATES[composite][0])
+        monkeypatch.chdir(tmp_path)
+        _no_route_env(monkeypatch)
+        recorded = []
+        monkeypatch.setattr(cli_common, "record_user_next_step", recorded.append)
+        outs = []
+        for word in (composite, COMPOSITE_LAST[composite]):
+            assert np_.main([P, "--after", word, "--host", "opencode"]) == 0
+            outs.append(capsys.readouterr().out)
+        assert outs[0] == outs[1] and outs[0]
+        assert recorded[0] == recorded[1]
+
+    def test_the_after_help_names_both_composites(self, capsys, monkeypatch):
+        monkeypatch.setenv("COLUMNS", "2000")  # no wrap at a hyphen
+        with pytest.raises(SystemExit):
+            np_.main(["--help"])
+        text = " ".join(capsys.readouterr().out.split())
+        for composite, last in COMPOSITE_LAST.items():
+            assert f"`{composite}` starts after {last}" in text
+
+    def test_the_gate_stays(self, tmp_path):
+        """The finished phase must be on record: an exit 0 of the composite
+        whose apply is not (a native first call's shape) answers nothing."""
+        plan = _build(tmp_path, S(("review-plan",), files=RP_VALID))
+        assert np_.next_phase_commands(P, "claude-code", None, "improve-plan",
+                                       plan_path=plan) is None
+        assert np_.next_phase_commands(P, "claude-code", None, "apply-suggestions",
+                                       plan_path=plan) is None
+
+
+class TestTheCompositesInvocationCarriesTheNextStep:
+    """`multi_llm._emit_user_next_step`: a composite carries `user_next_step` on
+    exit 0 and on exit 2 (`[ALREADY_COMPLETE]`); `full` keeps exit 0 only. The
+    target is stubbed: the builder reads only the recorded state."""
+
+    PLUGIN = "/multi-llm:multi-llm "
+
+    def _dispatch(self, tmp_path, monkeypatch, capsys, argv, body):
+        import multi_llm
+
+        from utils import detach
+
+        monkeypatch.chdir(tmp_path)
+        _no_route_env(monkeypatch)
+        for name in (detach.PLAN_ARG_ENV, detach.WORKER_ENV):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(multi_llm, "_load_target",
+                            lambda module_path, attr: body)
+        code = multi_llm.main(list(argv))
+        out = capsys.readouterr()
+        return code, out, cli_common.parse_result_line(out.out)
+
+    @pytest.mark.parametrize("exit_code", [0, 2])
+    @pytest.mark.parametrize("composite,spec,expect", [
+        ("improve-plan", S(("review-plan", "apply-suggestions"), files=RP_VALID),
+         f"--generate-tasks {P}"),
+        ("improve-code", S(UP_TO_IMPLEMENT + ("code-review", "apply-code-fixes"),
+                           files=CR_FINDING), None),
+    ], ids=["improve-plan", "improve-code"])
+    def test_exit_0_and_exit_2_both_carry_it(self, tmp_path, monkeypatch, capsys,
+                                             composite, spec, expect, exit_code):
+        _build(tmp_path, spec)
+        code, out, result = self._dispatch(
+            tmp_path, monkeypatch, capsys, [composite, P], lambda argv: exit_code)
+        assert code == exit_code
+        step = result["user_next_step"]
+        if expect is None:
+            assert step["complete"] is True
+            assert np_.WORKFLOW_COMPLETE_MARKER in out.out.splitlines()
+        else:
+            assert step["command"] == self.PLUGIN + expect
+            assert f"{np_.NEXT_COMMAND_MARKER} {self.PLUGIN}{expect}" in out.out.splitlines()
+
+    def test_full_still_answers_on_exit_0_only(self, tmp_path, monkeypatch, capsys):
+        _build(tmp_path, S(("review-plan", "apply-suggestions"), files=RP_VALID))
+        code, _out, result = self._dispatch(
+            tmp_path, monkeypatch, capsys, ["full", P], lambda argv: 2)
+        assert code == 2 and "user_next_step" not in result
+
+    def test_a_detach_invocation_that_exits_2_before_the_boundary_carries_it(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A tool route's re-run of a finished composite: `--detach` on argv,
+        exit 2 before the boundary, no run launched and no `next` recorded."""
+        _build(tmp_path, S(("review-plan", "apply-suggestions"), files=RP_VALID))
+        seen = {}
+
+        def finished(argv):
+            seen["argv"] = list(argv)
+            return 2
+
+        code, _out, result = self._dispatch(
+            tmp_path, monkeypatch, capsys, ["improve-plan", P, "--detach"], finished)
+        assert code == 2 and "--detach" in seen["argv"]
+        assert result["next"] is None
+        assert result["user_next_step"]["command"] == f"{self.PLUGIN}--generate-tasks {P}"
+
+    @pytest.mark.parametrize("exit_code", [1, 3])
+    def test_a_failed_or_stopped_composite_carries_none(
+        self, tmp_path, monkeypatch, capsys, exit_code
+    ):
+        _build(tmp_path, S(("review-plan", "apply-suggestions"), files=RP_VALID))
+        code, _out, result = self._dispatch(
+            tmp_path, monkeypatch, capsys, ["improve-plan", P], lambda argv: exit_code)
+        assert code == exit_code and "user_next_step" not in result
+
+    def test_a_launch_that_owes_its_poll_carries_none(self, tmp_path, monkeypatch, capsys):
+        from utils import detach
+
+        _build(tmp_path, S(("review-plan", "apply-suggestions"), files=RP_VALID))
+
+        def launched(argv):
+            cli_common.record_next(detach.status_command_for(P, phase="improve-plan"))
+            return 0
+
+        code, _out, result = self._dispatch(
+            tmp_path, monkeypatch, capsys, ["improve-plan", P, "--detach"], launched)
+        assert code == 0 and result["next"] and "user_next_step" not in result
+
+    def test_the_gate_stays_on_exit_0(self, tmp_path, monkeypatch, capsys):
+        _build(tmp_path, S(("review-plan",), files=RP_VALID))
+        code, _out, result = self._dispatch(
+            tmp_path, monkeypatch, capsys, ["improve-plan", P], lambda argv: 0)
+        assert code == 0 and "user_next_step" not in result
+
+
+def _write_stop(plan: Path, phase_dir: str, stop: dict) -> None:
+    """A write phase's `.status.json` whose write mirror recorded *stop*."""
+    target = output_dir_path(plan) / phase_dir
+    target.mkdir(parents=True, exist_ok=True)
+    (target / ".status.json").write_text(json.dumps(
+        {"progress": {"write_subagents": {"stop": stop}}}), encoding="utf-8")
+
+
+def _composite_run(plan: Path, composite: str, **run) -> None:
+    """The composite's own `run` record in its run dir, as a detached worker
+    leaves it (`status_file.claim_run`)."""
+    from utils import status_file
+
+    target = output_dir_path(plan) / composite
+    target.mkdir(parents=True, exist_ok=True)
+    status_file.write_status(str(target), {"phase": composite})
+    record = {"run_id": "run-improve-0001", "state": "failed", "exit_code": 3,
+              "detached": True, "mode": composite}
+    record.update(run)
+    status_file.claim_run(str(target), record)
+
+
+def _build_outside(root: Path, spec) -> Path:
+    """:func:`_build` from the repository, for a test already in *root*: a
+    plan's first ``StateManager`` records ``git rev-parse HEAD`` from the cwd."""
+    here = os.getcwd()
+    os.chdir(Path(__file__).parent.parent)
+    try:
+        return _build(root, spec)
+    finally:
+        os.chdir(here)
+
+
+class TestBlockedComposite:
+    """`util next-command --blocked improve-plan|improve-code`, one case per
+    row of §2.6's state table. The composite is resolved at the top of
+    `emit_resume`, so the command, the answers, the why and `phase` all read
+    the one mode word whose command is printed; `user_resume.mode` names it."""
+
+    def _run(self, argv, monkeypatch, capsys):
+        record = {}
+        monkeypatch.setattr(cli_common, "record_user_resume",
+                            lambda obj: record.setdefault("v", obj))
+        code = np_.main(argv)
+        return code, capsys.readouterr(), record.get("v")
+
+    @pytest.fixture
+    def here(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _no_route_env(monkeypatch)
+        return tmp_path
+
+    # -- plan file missing: as today --------------------------------------------
+
+    @pytest.mark.parametrize("composite", list(COMPOSITE_LAST))
+    def test_a_missing_plan_is_exit_3(self, here, monkeypatch, capsys, composite):
+        code, out, key = self._run(["plans/ghost.md", "--blocked", composite],
+                                   monkeypatch, capsys)
+        assert (code, out.out, key) == (3, "", None)
+        assert "plan file not found" in out.err
+
+    # -- no state.json: nothing, and nothing created --------------------------
+
+    @pytest.mark.parametrize("composite", list(COMPOSITE_LAST))
+    def test_no_state_file_prints_nothing(self, here, monkeypatch, capsys, composite):
+        plan = here / P
+        plan.parent.mkdir(parents=True)
+        plan.write_text("# foo\n", encoding="utf-8")
+        code, out, key = self._run([P, "--blocked", composite], monkeypatch, capsys)
+        assert (code, out.out, key) == (0, "", None)
+        assert not output_dir_path(plan).exists()
+
+    # -- every step skipped: [ALREADY_COMPLETE], exit 2, no user_resume -------
+
+    @pytest.mark.parametrize("composite,spec", [
+        ("improve-plan", S(("review-plan", "apply-suggestions"), files=RP_VALID)),
+        ("improve-code", S(("code-review", "apply-code-fixes"), files=CR_FINDING)),
+    ], ids=["improve-plan", "improve-code"])
+    def test_every_step_on_record_is_exit_2_with_the_line(
+        self, here, monkeypatch, capsys, composite, spec
+    ):
+        from utils import improve_workflow as iw
+
+        plan = _build_outside(here, spec)
+        code, out, key = self._run([P, "--blocked", composite], monkeypatch, capsys)
+        assert code == 2 and key is None and out.err == ""
+        args = iw.parse_args(composite, ["--plan-file", str(plan)])
+        line = iw.already_complete_line(composite, args, iw.read_records(composite, plan, args))
+        assert out.out == line + "\n"
+        review = modes.resolve(composite).sequence[0]
+        assert line.startswith(f"[ALREADY_COMPLETE] {composite}: {review} completed ")
+        assert line.endswith(f"; nothing to do. --force runs {review} again.")
+        assert np_.RESUME_COMMAND_MARKER not in out.out
+
+    # -- the inner step's resume answers: that phase's, unchanged -------------
+
+    def test_an_apply_in_progress_is_named_with_its_own_answers_and_why(
+        self, here, monkeypatch, capsys
+    ):
+        """A stop inside the composite leaves the review completed and the apply
+        `in_progress`; `skip_reason` passes over the review and names the apply,
+        whose own resume, answers, why and section are the answer."""
+        plan = _build_outside(here, S(("review-plan",), tasks={"apply-batch-0": "completed"},
+                              files=RP_VALID))
+        why = "applies the batches left; keeps the 1 already applied"
+        flags = ["--resume", "--human-task", "apply-batch-1=skip"]
+        _write_stop(plan, "apply-suggestions", {
+            "answers": [{"flags": flags, "why": "leave batch 1 as it stands"}],
+            "resume_why": why,
+        })
+        monkeypatch.setenv(modes.ROUTE_ENV, "package")
+        code, out, key = self._run(
+            [P, "--blocked", "improve-plan", "--host", "opencode"], monkeypatch, capsys)
+        assert code == 0, out.err
+        command = f"/multi-llm --apply-suggestions {P} --resume"
+        assert out.out == f"{np_.RESUME_COMMAND_MARKER} {command}\n"
+        answers = [{"command": f"/multi-llm --apply-suggestions {P} {' '.join(flags)}",
+                    "flags": flags, "why": "leave batch 1 as it stands"}]
+        assert key == {
+            "phase": "apply-suggestions", "mode": "apply-suggestions",
+            "command": command, "flags": ["--resume"],
+            "answers": answers, "answers_text": np_.render_resume_answers(answers),
+            "why": why,
+            "markdown": np_.render_resume_markdown(
+                "apply-suggestions", command, why, answers),
+        }
+
+    def test_improve_codes_apply_in_progress_resumes_apply_code_fixes(
+        self, here, monkeypatch, capsys
+    ):
+        _build_outside(here, S(UP_TO_CODE_REVIEW, tasks={"apply-fix-batch-0": "completed"},
+                       files=CR_FINDING))
+        code, out, key = self._run(
+            [P, "--blocked", "improve-code", "--host", "claude-code"], monkeypatch, capsys)
+        assert code == 0, out.err
+        command = f"/multi-llm:multi-llm --apply-code-fixes {P} --resume"
+        assert out.out == f"{np_.RESUME_COMMAND_MARKER} {command}\n"
+        assert (key["phase"], key["mode"], key["command"]) == (
+            "apply-code-fixes", "apply-code-fixes", command)
+
+    # -- the inner step has none: the composite's own continuation ------------
+
+    @pytest.mark.parametrize("composite,spec", [
+        ("improve-plan", S()),
+        ("improve-plan", S(("review-plan",), files=RP_VALID)),
+        ("improve-code", S(UP_TO_IMPLEMENT)),
+        ("improve-code", S(UP_TO_CODE_REVIEW, files=CR_FINDING)),
+    ], ids=["plan-review-not-done", "plan-apply-not-started",
+            "code-review-not-done", "code-apply-not-started"])
+    def test_with_no_inner_resume_the_composite_continues_itself(
+        self, here, monkeypatch, capsys, composite, spec
+    ):
+        """A review that stopped, nothing recorded yet, or an apply with no
+        progress for this review: `--<composite> <plan> --resume`, the
+        row-14 command, with no record (a foreground run writes none)."""
+        _build_outside(here, spec)
+        code, out, key = self._run(
+            [P, "--blocked", composite, "--host", "claude-code"], monkeypatch, capsys)
+        assert code == 0, out.err
+        command = f"/multi-llm:multi-llm --{composite} {P} --resume"
+        assert out.out == f"{np_.RESUME_COMMAND_MARKER} {command}\n"
+        assert key == {
+            "phase": composite, "mode": composite, "command": command,
+            "flags": ["--resume"],
+            "markdown": np_.render_resume_markdown(composite, command, None, []),
+        }
+
+    def test_a_forced_runs_continuation_has_no_force(self, here, monkeypatch, capsys):
+        """The run record's own flags through the composite's parser: its
+        selectors kept, `--force` and the route's own flags dropped, then
+        `--resume` — and spelled in the route that run was started on, which
+        `recorded_route` reads off the composite's own run dir."""
+        from utils.cli_common import replay_flags
+
+        plan = _build_outside(here, S(UP_TO_IMPLEMENT))
+        launched = ["--plan-file", str(plan), "--host", "codex", "--detach", "--force",
+                    "--models", "a,b", "--base-ref", "origin/release"]
+        _composite_run(plan, "improve-code", host="codex", route="package",
+                       replay_flags=replay_flags("improve-code", launched))
+        code, out, key = self._run(
+            [P, "--blocked", "improve-code", "--host", "codex"], monkeypatch, capsys)
+        assert code == 0, out.err
+        flags = ["--models", "a,b", "--base-ref", "origin/release", "--resume"]
+        command = f"$multi-llm:multi-llm --improve-code {P} {' '.join(flags)}"
+        assert out.out == f"{np_.RESUME_COMMAND_MARKER} {command}\n"
+        assert key["flags"] == flags and key["mode"] == "improve-code"
+        assert "--force" not in out.out
+
+    # -- a read that fails, or a run record the parser rejects: exit 3 --------
+
+    @pytest.mark.parametrize("composite", list(COMPOSITE_LAST))
+    def test_an_unreadable_state_file_is_exit_3_with_one_line(
+        self, here, monkeypatch, capsys, composite
+    ):
+        plan = _build_outside(here, S())
+        state = output_dir_path(plan) / "state.json"
+        state.write_text('{"phases_completed": ["review-plan"]}', encoding="utf-8")
+        code, out, key = self._run([P, "--blocked", composite], monkeypatch, capsys)
+        assert (code, out.out, key) == (3, "", None)
+        assert len(out.err.splitlines()) == 1
+        assert out.err.startswith(np_.LOOKUP_FAILED_PREFIX)
+        assert "phases_completed is a list, not an object" in out.err
+
+    def test_a_run_record_the_parser_rejects_is_exit_3(self, here, monkeypatch, capsys):
+        plan = _build_outside(here, S())
+        _composite_run(plan, "improve-plan", replay_flags=["--files", "x.py"])
+        code, out, key = self._run([P, "--blocked", "improve-plan"], monkeypatch, capsys)
+        assert (code, out.out, key) == (3, "", None)
+        assert len(out.err.splitlines()) == 1
+        assert out.err.startswith(np_.LOOKUP_FAILED_PREFIX)
+
+    def test_resume_command_itself_stays_phase_only(self):
+        workflow = {"phases": {phase: {"status": "in_progress"}
+                               for phase in modes.PREREQUISITE_PHASES}}
+        for composite in COMPOSITE_LAST:
+            assert np_.resume_command(P, "codex", "package", composite,
+                                      workflow=workflow) is None
+
+    def test_the_blocked_help_and_epilog_name_exit_2(self, capsys, monkeypatch):
+        monkeypatch.setenv("COLUMNS", "2000")  # no wrap at a hyphen
+        with pytest.raises(SystemExit):
+            np_.main(["--help"])
+        text = " ".join(capsys.readouterr().out.split())
+        assert "2 = --blocked improve-plan|improve-code" in text
+        assert "[ALREADY_COMPLETE] line and exit 2" in text

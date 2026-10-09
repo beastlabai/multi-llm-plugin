@@ -139,6 +139,9 @@ UTIL_COMMANDS: Dict[str, Tuple[Optional[str], str, str]] = {
     "next-command": ("utils.next_phase", "main",
                      "Print a plan's next workflow command (read-only; "
                      "--after <mode>, --host <id>)."),
+    "improve-steps": ("utils.improve_steps", "main",
+                      "Plan an --improve-plan/--improve-code run: each step's "
+                      "decision and flags (read-only; the native leg's planner)."),
     "check-tasks": ("utils.tasks_graph_check", "main",
                     "Report inconsistencies in a tasks.md's task graph (advisory)."),
     "check-reply": ("utils.check_reply", "main",
@@ -272,6 +275,12 @@ def render_util_help() -> str:
         "workflow's next phase as the next-command block (or the workflow-complete",
         "line) and sets MULTI_LLM_RESULT.user_next_step: a command for the user to",
         "type, never a follow-up for the caller. It reads state.json as recorded.",
+        "",
+        "`util improve-steps <plan> --mode improve-plan|improve-code [flags...]`",
+        "prints the steps a native --improve-plan or --improve-code run takes, each",
+        "step's run/skip decision and its exact flags, and the command that continues",
+        "the run; exit 2 with [ALREADY_COMPLETE] when nothing is left to do. --json",
+        "prints the same facts as one object. Read-only, like next-command.",
     ]
     return "\n".join(lines)
 
@@ -672,10 +681,11 @@ _MODE_OUTPUT_PATH_OPTIONS: Tuple[str, ...] = ("--out-dir", "--output")
 #: A ``util`` command's options whose value names something the workflow keeps
 #: in the repository (``--output-file`` is the orchestrator output
 #: ``util decisions`` reads, and ``--output-dir`` the plan folder
-#: ``prior-changes`` reads and appends to).
+#: ``prior-changes`` reads and appends to; ``--files-from`` is the scope list
+#: ``improve-steps`` reads, as the mode route reads review-code's).
 _UTIL_INPUT_PATH_OPTIONS: Tuple[str, ...] = (
     "--plan-file", "--state-file", "--phase-dir", "--output-dir", "--tasks-file",
-    "--output-file", "--project-root",
+    "--output-file", "--project-root", "--files-from",
 )
 
 #: A ``util`` command's options whose value is a path it creates:
@@ -686,6 +696,8 @@ _UTIL_OUTPUT_PATH_OPTIONS: Tuple[str, ...] = ("--output",)
 #: options that take a value (whose value is not that positional).
 _UTIL_PATH_POSITIONAL: Dict[str, Tuple[str, ...]] = {
     "next-command": ("--after", "--blocked", "--host"),
+    "improve-steps": ("--mode", "--host", "--models", "--files", "--files-from",
+                      "--base-ref", "--max-detached", "--internal-run-id"),
     "check-tasks": (),
     "backup": (),
 }
@@ -1211,8 +1223,9 @@ def _write_phases() -> "frozenset":
 def _emit_user_next_step(ctx: ResultContext, exit_code: int) -> None:
     """Set ``user_next_step`` and print its block (plans/next-phase-command.md §2.2(1)).
 
-    Only for the recorded invocation of a workflow-phase mode that exits 0 or 2,
-    or ``full`` on 0, with no ``next`` owed — and never for a write phase that
+    Only for the recorded invocation of a workflow-phase mode or a
+    review-then-apply composite (``improve-plan``, ``improve-code``) that exits
+    0 or 2, or ``full`` on 0, with no ``next`` owed — and never for a write phase that
     handed its batch loop to the invoker (no ``--exec-subagents`` and not the
     closing ``--mark-completed`` call) or for the invoker of a ``--detach``
     launch, whose run's terminal poll answers instead.
@@ -1239,7 +1252,16 @@ def _emit_user_next_step(ctx: ResultContext, exit_code: int) -> None:
     if mode.runs_workflow:
         if exit_code != EXIT_OK:
             return
-    elif not (mode.is_workflow_phase and exit_code in (EXIT_OK, EXIT_NOTHING_TO_DO)):
+    elif not (
+        (mode.is_workflow_phase or mode.is_composite)
+        and exit_code in (EXIT_OK, EXIT_NOTHING_TO_DO)
+    ):
+        # A review-then-apply composite answers on 0 and on 2 too
+        # (plans/improve-plan-and-improve-code.md §2.6): its exit 2 is
+        # `[ALREADY_COMPLETE]`, returned before its detach boundary, so a tool
+        # route's `--detach` re-run of a finished composite carries the next
+        # step like any foreground exit 2. The builder answers as the phase
+        # it ends on, gate included.
         return
     argv = list(record.get("argv") or [])
     # No `--detach` test here: a launched or re-attached run already returned

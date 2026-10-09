@@ -2598,8 +2598,17 @@ class Server:
         go to ``resume_answers`` and, through the surface's ``answers`` clause
         filled with the dispatcher's ``answers_text``, into ``message``. This
         file spells none of it. The port of ``attachAnswers``.
+
+        The option calls name ``user_resume.mode``, the mode the resume runs,
+        and the word asked about only when the lookup names none: a composite
+        asked about answers with an inner phase's resume and answers
+        (plans/improve-plan-and-improve-code.md §2.6), and a call built from
+        the composite's word would carry ``--human-task`` to a parser that
+        rejects it.
         """
-        row = resolve_mode(word, self.surface)
+        named = step.get("mode")
+        row = resolve_mode(named if isinstance(named, str) and named else word,
+                           self.surface)
         if not row:
             return
 

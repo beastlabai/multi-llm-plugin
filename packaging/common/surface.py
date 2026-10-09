@@ -164,17 +164,16 @@ def _writes_worktree(mode: "mode_table.Mode") -> bool:
     """Can *mode*'s ``--exec-subagents`` dispatch reach ``agent-write``?
 
     Directly, when its phase dispatches a write kind (the apply family and
-    ``implement``); or by containment, when the row declares it runs the whole
-    workflow (``runs_workflow``, i.e. ``full``) and any workflow phase writes.
+    ``implement``); or by containment, when the row is a composite and **any**
+    phase of its ``sequence`` writes. Any, not every and not the last alone: the
+    question is whether the dispatch can *reach* ``agent-write``, and one
+    writing phase reaches it, wherever it sits in the sequence.
     """
     phases = _write_phases()
     if mode.phase in phases:
         return True
-    if mode.runs_workflow:
-        return any(
-            other.phase in phases
-            for other in mode_table.MODES if other.is_workflow_phase
-        )
+    if mode.is_composite:
+        return any(phase in phases for phase in mode.sequence_phases)
     return False
 
 

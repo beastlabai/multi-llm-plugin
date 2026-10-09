@@ -966,7 +966,11 @@ def render_run_text(
             lines.extend(_resume_lines(view, plan_path, resume_workflow, spell))
         if view["verdict"] in (detach.VERDICT_FAILED, detach.VERDICT_ABORTED):
             lines.append(f"      exit_code: {run.get('exit_code')}")
-            lines.append(f"      error:     {run.get('error')}")
+            # A worker that returned non-zero with no stop line and no crash
+            # closes out with no `error`; printed raw, that read `error: None`
+            # (Fable review 2026-10-09).
+            if run.get("error"):
+                lines.append(f"      error:     {run.get('error')}")
             tail = detach._log_tail(run.get("log_path") or "", 20)
             if tail:
                 lines.append("      last log lines:")
@@ -3716,6 +3720,11 @@ _REAGGREGATE_MODES = ("review-plan", "review-tasks", "review-code")
 #: (``full <plan> --resume``, continue from the first phase not recorded). Under
 #: ``full`` ``--force`` re-enters every recorded phase, so a stopped ``full`` run
 #: told to re-run with it started over instead of continuing.
+#:
+#: The two review-then-apply composites resume with ``--resume`` as well, and
+#: ``--force`` would start a new review round. Their line is not built from
+#: this verb and the recorded flags but from the composite's own continuation
+#: (:func:`_composite_resume_tokens`); the entries say what that ends with.
 _RESUME_VERB_BY_MODE = {
     "generate-tasks": "--yes",
     "apply-suggestions": "--resume",
@@ -3723,6 +3732,8 @@ _RESUME_VERB_BY_MODE = {
     "apply-code-fixes": "--resume",
     "implement": "--resume",
     "full": "--resume",
+    "improve-plan": "--resume",
+    "improve-code": "--resume",
 }
 
 #: The modes whose progress mirror is ``write_subagents``
@@ -3857,25 +3868,66 @@ def _resume_command(
     ``question`` field — the one place it is stored — and falls back to the
     questionless string when the key is missing. With *spell*
     (:func:`user_speller`) the same retry in the host's spelling.
+
+    A review-then-apply composite (``improve-plan``, ``improve-code``) takes
+    its tokens from its own continuation instead (:func:`_composite_resume_tokens`,
+    plans/improve-plan-and-improve-code.md §2.6): the selectors its launcher
+    typed, never ``--force``, then ``--resume``. A run launched with ``--force``
+    is then not told to start another round, and the line names the command
+    ``util next-command --blocked <composite>`` names when no inner phase has a
+    resume of its own.
     """
     run = view["run"]
     mode = str(run.get("mode") or view.get("phase") or "review-plan")
-    flags = cli_common.current_replay_flags(run.get("replay_flags"), mode=mode)
     positionals = [str(plan_path)]
-    if mode == "ask" and view.get("question"):
-        positionals.append(str(view["question"]))
-    verb = _RESUME_VERB_BY_MODE.get(mode) or (
-        "--reaggregate" if mode in _REAGGREGATE_MODES else "--force"
-    )
-    # *extra*: the answers the resume carries (fix round 28: a manual task
-    # every code task left waits on, `_manual_gate_answers`).
-    verbs = [verb, *[str(token) for token in extra]]
+    row = cli_common._modes().resolve(mode)
+    if row is not None and row.is_composite and not row.runs_workflow:
+        flags: List[str] = []
+        verbs = _composite_resume_tokens(row.name, run.get("replay_flags"))
+    else:
+        flags = cli_common.current_replay_flags(run.get("replay_flags"), mode=mode)
+        if mode == "ask" and view.get("question"):
+            positionals.append(str(view["question"]))
+        verb = _RESUME_VERB_BY_MODE.get(mode) or (
+            "--reaggregate" if mode in _REAGGREGATE_MODES else "--force"
+        )
+        # *extra*: the answers the resume carries (fix round 28: a manual task
+        # every code task left waits on, `_manual_gate_answers`).
+        verbs = [verb, *[str(token) for token in extra]]
     if spell is not None:
         _positionals, tokens = cli_common.retry_tokens(*positionals, *verbs, flags=flags)
         spelled = spell(mode, positionals[1:], tokens)
         if spelled:
             return spelled
     return cli_common.retry_command(mode, *positionals, *verbs, flags=flags)
+
+
+def _composite_resume_tokens(mode: str, replay_flags: Any) -> List[str]:
+    """A composite run's ``resume with:`` tokens after the plan (§2.6).
+
+    ``improve_workflow.recorded_continuation`` of the run record's own
+    ``replay_flags``, the list ``util next-command --blocked`` reads, so the
+    two name one command. A list that is not a list reads as no record
+    (``--resume`` alone). Flags the composite's parser rejects (a record from
+    an older parser, or one a batch rewrote) cost one stderr line and fall
+    back to ``--resume`` alone: replayed as recorded they would not parse
+    either, and their ``--force`` would start another round. ``--blocked``
+    refuses the same record (exit 3), since it hands its command back as a
+    tool call.
+    """
+    from . import improve_workflow
+
+    recorded = replay_flags if isinstance(replay_flags, list) else None
+    try:
+        return improve_workflow.recorded_continuation(mode, recorded)
+    except improve_workflow.ContinuationError as exc:
+        detail = " ".join(str(exc).split())
+        print(
+            f"multi-llm: {mode}'s run recorded flags its parser rejects "
+            f"({detail}); resume with: names --resume alone",
+            file=sys.stderr,
+        )
+        return [_RESUME_VERB_BY_MODE.get(mode, "--resume")]
 
 
 def _manual_gate_answers(
@@ -5086,6 +5138,10 @@ def _emit_user_next_step(
     workflow is read now, after any ``--wait``; *workflow* is such a read when
     the caller already took one. A failed read or builder raise prints one
     stderr line and sets nothing. Returns the answer it emitted, or ``None``.
+    A composite's run (``full``, ``improve-plan``, ``improve-code``) answers
+    too: the builder walks on from the phase a review-then-apply composite
+    ends on (plans/improve-plan-and-improve-code.md §2.6), and from
+    ``suggested_next`` for ``full``.
     """
     from . import host_capabilities, next_phase
     from .cli_common import _modes
@@ -5093,7 +5149,7 @@ def _emit_user_next_step(
     run = view.get("run") or {}
     finished_mode = str(run.get("mode") or view.get("phase") or "") or None
     mode = _modes().resolve(finished_mode) if finished_mode else None
-    if mode is None or not (mode.is_workflow_phase or mode.runs_workflow):
+    if mode is None or not (mode.is_workflow_phase or mode.is_composite):
         return None  # an ask, or no mode on record: no phase finished, no answer
     plan_arg = next_phase.recorded_plan_spelling(
         run.get("plan_arg"), str(plan_path)

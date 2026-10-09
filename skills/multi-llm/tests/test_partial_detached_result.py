@@ -460,7 +460,10 @@ class TestAReaggregateWhoseAnswersHoldNoFindingsStillCompletes:
         """The grouping and validation round left by an earlier run describe
         findings no longer on disk: the report shows zero groups, and the
         leftover task file is neither read against the new grouping nor
-        re-materialized."""
+        re-materialized. It retires with the rest of its round, and
+        ``validation.json`` is written as ``[]``, so apply-suggestions loads
+        zero groups (plan improve-plan-and-improve-code T3; this test used to
+        pin the task file left in place)."""
         plan = _plan(tmp_path)
         phase = _phase_dir(plan)
         _left_by_a_fanout(phase)
@@ -483,10 +486,14 @@ class TestAReaggregateWhoseAnswersHoldNoFindingsStillCompletes:
         )
 
         assert code == 0
-        assert "[VALIDATION" not in out
+        assert "[VALIDATION_PENDING]" not in out
+        assert "[VALIDATION_BATCHES_PENDING]" not in out
         grouped = json.loads((phase / "grouped.json").read_text(encoding="utf-8"))
         assert grouped["groups"] == []
-        assert (phase / "validation_tasks.json").read_text(encoding="utf-8") == stale_tasks
+        assert not (phase / "validation_tasks.json").exists()
+        retired = sorted(phase.glob("validation_tasks.*.stale.json"))
+        assert [p.read_text(encoding="utf-8") for p in retired] == [stale_tasks]
+        assert (phase / "validation.json").read_text(encoding="utf-8") == "[]\n"
         report = (phase / "report.md").read_text(encoding="utf-8")
         assert "**Groups:** 0" in report
         assert "Add input validation" not in report

@@ -2057,15 +2057,26 @@ class TestAFullRunRetiresTheMapsOfThePhasesItDrove:
     ``True`` on every later poll, on the longest-running mode the tool has.
 
     All three close-outs carry the blind spot, so all three are driven here.
+    The sweep is keyed on the row's ``sequence`` (``Mode.is_composite``), and
+    reaches exactly the dirs of the phases it names, so `full` is the net for
+    an off-by-one in that walk: every one of its eight dirs is seeded below.
     """
 
-    def _plan_dirs(self, tmp_path):
-        """``{plan}/full/`` beside ``{plan}/review-plan/``, as the mode lays them out."""
+    #: The dirs `full` drives, written out rather than derived, so a walk that
+    #: dropped a phase or used a mode word as a dir name (`review-code`,
+    #: `apply-code-fixes`) fails here.
+    FULL_DRIVES = (
+        "review-plan", "apply-suggestions", "generate-tasks", "review-tasks",
+        "apply-task-suggestions", "implement", "code-review", "apply-fixes",
+    )
+
+    def _plan_dirs(self, tmp_path, phase_name="review-plan", run_dir="full"):
+        """``{plan}/full/`` beside ``{plan}/<phase>/``, as the mode lays them out."""
         plan = tmp_path / "a plan.md"
         plan.write_text("# Plan\n", encoding="utf-8")
         out = tmp_path / "a_plan"
-        full = out / "full"
-        phase = out / "review-plan"
+        full = out / run_dir
+        phase = out / phase_name
         full.mkdir(parents=True)
         phase.mkdir(parents=True)
         return plan, full, phase
@@ -2108,12 +2119,13 @@ class TestAFullRunRetiresTheMapsOfThePhasesItDrove:
         assert {models[spec]["error"] for spec in SPECS[1:]} == {error}
         assert read_progress(phase)["models_done"] == 3
 
+    @pytest.mark.parametrize("phase_name", FULL_DRIVES)
     def test_an_aborted_full_run_retires_the_phase_it_was_driving(
-        self, tmp_path, clock, monkeypatch
+        self, tmp_path, clock, monkeypatch, phase_name
     ):
         import signal as _signal
 
-        plan, full, phase = self._plan_dirs(tmp_path)
+        plan, full, phase = self._plan_dirs(tmp_path, phase_name)
         handle = self._handle(plan, full, monkeypatch)
         self._driven_fan_out(phase, clock)
 
@@ -2143,13 +2155,14 @@ class TestAFullRunRetiresTheMapsOfThePhasesItDrove:
         assert read_progress(phase)["models"] == before
         assert read_progress(phase)["models"][SPECS[1]]["state"] == STATE_RUNNING
 
-    def test_only_full_reaches_into_its_neighbours(
+    def test_only_a_composite_reaches_into_its_neighbours(
         self, tmp_path, clock, monkeypatch
     ):
         """A phase run owns one dir and must never touch the dir next door.
 
         `review-plan --detach` ending is not a statement about `tasks/`, and the
-        sweep is keyed on the mode word for exactly that reason.
+        sweep is keyed on the row's ``sequence`` for exactly that reason: a
+        phase row has none.
         """
         plan, full, phase = self._plan_dirs(tmp_path)
         own = full.parent / "tasks"
@@ -2164,6 +2177,67 @@ class TestAFullRunRetiresTheMapsOfThePhasesItDrove:
 
         assert status_file.read_run(str(own))["state"] == detach.RUN_STATE_FAILED
         assert read_progress(phase)["models"] == before
+
+    def test_an_aborted_full_run_leaves_a_dir_it_never_drove_alone(
+        self, tmp_path, clock, monkeypatch
+    ):
+        """`ask/` is not in `full`'s sequence, so an aborted `full` never opens it.
+
+        Before the sweep read the sequence it took every sibling holding a
+        ``.status.json``, and a foreground `--ask` running beside the aborted run
+        had its live slots marked `cancelled` (plan improve-plan-and-improve-code
+        §2.6, a labelled change to `full`).
+        """
+        import signal as _signal
+
+        plan, full, phase = self._plan_dirs(tmp_path)
+        ask = full.parent / "ask"
+        ask.mkdir()
+        handle = self._handle(plan, full, monkeypatch, run_id="run-full-0006")
+        self._driven_fan_out(phase, clock)
+        self._driven_fan_out(ask, clock)
+        before = read_progress(ask)["models"]
+
+        monkeypatch.setattr(detach.os, "_exit", [].append)
+        handle._on_signal(_signal.SIGTERM)
+
+        self._assert_retired(phase, CANCELLED_ERROR)
+        assert read_progress(ask)["models"] == before
+        assert read_progress(ask)["models"][SPECS[1]]["state"] == STATE_RUNNING
+
+    def test_an_aborted_two_phase_composite_retires_only_its_own_phases(
+        self, tmp_path, clock, monkeypatch
+    ):
+        """A composite's dirs come from its row, through the on-disk dir words.
+
+        `improve-code` runs `review-code` then `apply-code-fixes`, whose dirs
+        are `code-review/` and `apply-fixes/` — neither is its mode word. The
+        real row in ``modes.MODES``, so a change to it reaches this sweep.
+        """
+        import signal as _signal
+
+        plan, run_dir, review = self._plan_dirs(
+            tmp_path, "code-review", run_dir="improve-code"
+        )
+        apply_dir = run_dir.parent / "apply-fixes"
+        apply_dir.mkdir()
+        plan_review = run_dir.parent / "review-plan"
+        plan_review.mkdir()
+        handle = self._handle(
+            plan, run_dir, monkeypatch, mode="improve-code",
+            run_id="run-improve-0001",
+        )
+        for phase in (review, apply_dir, plan_review):
+            self._driven_fan_out(phase, clock)
+        before = read_progress(plan_review)["models"]
+
+        monkeypatch.setattr(detach.os, "_exit", [].append)
+        handle._on_signal(_signal.SIGTERM)
+
+        assert status_file.read_run(str(run_dir))["state"] == detach.RUN_STATE_ABORTED
+        self._assert_retired(review, CANCELLED_ERROR)
+        self._assert_retired(apply_dir, CANCELLED_ERROR)
+        assert read_progress(plan_review)["models"] == before
 
     def test_a_neighbour_with_a_live_run_of_its_own_is_left_alone(
         self, tmp_path, clock, monkeypatch

@@ -623,6 +623,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         self.groups: List[Dict[str, Any]] = []
         self.validation: List[Dict[str, Any]] = []
         self.merged: List[Dict[str, Any]] = []
+        # How many groups step 23 dropped from a `--resume` as recorded done.
+        # Non-zero with nothing left to apply is the closing call an earlier
+        # run never made (apply-code-fixes' no-items exit reads it).
+        self.resume_dropped_groups: int = 0
 
         # User feedback data
         self.edit_log: List[Dict[str, Any]] = []
@@ -988,15 +992,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             if self.edits_the_plan:
                 state.refresh_plan_hash()
             state.save()
-            if self.write_kind == "apply_code_fixes":
-                # Fix round 20: the native leg's line saying nothing ran the
-                # repository's tests, naming the checks the batches were
-                # asked to run and what each reported (the executor's own).
-                from .write_batch_scheduler import native_apply_fixes_unverified_line
-
-                tests = native_apply_fixes_unverified_line(self.plan_path)
-                if tests:
-                    print(f"[TESTS_NOT_RUN] {tests}", file=sys.stderr)
+            self.print_native_tests_not_run()
             # Fix round 26 (live run 11, OpenCode 05: "applied to
             # plans/racing-game.md" for edits to tasks/tasks.md): the native
             # leg's closing line names the file its batches edited, as the
@@ -1541,6 +1537,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     f"{len(unprocessed_merged)} remaining",
                     file=sys.stderr,
                 )
+            self.resume_dropped_groups = len(self.merged) - len(unprocessed_merged)
             self.merged = unprocessed_merged
 
         # Step 24: Apply validation overrides
@@ -2216,6 +2213,17 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 # the record says so — a started record here would wait for
                 # a closing step over an empty loop.
                 self.state.mark_phase_completed(word)
+                # Under `--resume` the empty loop is what step 23 left after
+                # dropping every group an earlier native run applied: that
+                # host edited the plan and died before its `--mark-completed`,
+                # so the drift on disk is the plugin's own, and this record
+                # stands in for that call's re-stamp. Without it the next
+                # `StateManager` reads the edit as a human's and `implement
+                # --resume` reports "Plan has changed since last session"
+                # (Fable review 2026-10-09). A run with no `--resume` applied
+                # nothing, so any drift there stays the human's to report.
+                if self.edits_the_plan and getattr(self.args, "resume", False):
+                    self.state.refresh_plan_hash()
             else:
                 self.state.mark_phase_started(word)
             self.state.save()
@@ -2312,6 +2320,31 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             return None
         return self.write_phase_artifact() or None
 
+    def _review_completed_at(self) -> Optional[datetime]:
+        """When the review this phase applies last completed, or ``None``.
+
+        The cutoff between review cycles that every check over this phase's
+        own records dates against: the review is
+        ``REVIEW_PHASE_BY_WRITE_KIND``'s entry for this write kind (the
+        scheduler's ``_review_completed_at`` reads the same one), and its
+        stamp is read with the scheduler's ``_parse_local_timestamp``.
+        ``None`` for a phase with no write kind, before ``_setup`` built the
+        state, or when the review has no parseable completion — and every
+        caller then keeps what it was dating (absence of a date is not
+        staleness).
+        """
+        from .write_batch_scheduler import (
+            REVIEW_PHASE_BY_WRITE_KIND, _parse_local_timestamp,
+        )
+        recorded_state = getattr(getattr(self, "state", None), "state", None)
+        if not isinstance(recorded_state, dict):
+            return None
+        completed = recorded_state.get("phases_completed")
+        review = REVIEW_PHASE_BY_WRITE_KIND.get(getattr(self, "write_kind", "") or "")
+        if not isinstance(completed, dict) or not review:
+            return None
+        return _parse_local_timestamp(completed.get(review))
+
     def _fresh_target_refusal(self) -> Optional[str]:
         """Why ``--fresh`` must not run against the target as it is, or ``None``.
 
@@ -2336,9 +2369,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         from .write_safety import (
             AuditLog, file_sha256, relative_to_root, resolve_repo_root,
         )
-        from .write_batch_scheduler import (
-            REVIEW_PHASE_BY_WRITE_KIND, _parse_local_timestamp,
-        )
+        from .write_batch_scheduler import _parse_local_timestamp
         records = AuditLog(phase_dir).records()
         if not records:
             return None
@@ -2350,19 +2381,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             target_key = relative_to_root(target, root)
         except Exception:  # noqa: BLE001 - fall back to matching by hash alone
             target_key = None
-        reviewed_at = None
-        recorded_state = getattr(self.state, "state", None)
-        if isinstance(recorded_state, dict):
-            completed = recorded_state.get("phases_completed")
-            review = REVIEW_PHASE_BY_WRITE_KIND.get(
-                getattr(self, "write_kind", "") or ""
-            )
-            if isinstance(completed, dict) and review:
-                reviewed_at = _parse_local_timestamp(completed.get(review))
-                if reviewed_at is not None:
-                    # The audit stamps whole seconds; a completion in the
-                    # review's own second is this cycle's.
-                    reviewed_at = reviewed_at.replace(microsecond=0)
+        reviewed_at = self._review_completed_at()
+        if reviewed_at is not None:
+            # The audit stamps whole seconds; a completion in the review's
+            # own second is this cycle's.
+            reviewed_at = reviewed_at.replace(microsecond=0)
         hits: List[Tuple[str, str]] = []
         for record in records:
             if record.get("event") != "completed":
@@ -2439,12 +2462,14 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         part-applied bytes would destroy the only copy of the pre-run file.
         It is *not* kept merely because the file is there: an apply phase may be
         re-run freely after a new review cycle, with the same phase dir and no
-        progress in it, and keeping cycle 1's snapshot there would leave the
-        cycle-2 bytes the phase is about to overwrite saved nowhere while the
-        line below told the user they were backed up. ``--fresh`` declares prior
-        progress void and re-stamps for the same reason — keeping a differing
-        earlier backup aside first (:meth:`keep_backup_aside`), never
-        overwriting a rollback point.
+        progress *of that cycle* in it (:meth:`_phase_has_recorded_progress`
+        dates each signal against the review), and keeping cycle 1's snapshot
+        there would leave the cycle-2 bytes the phase is about to overwrite
+        saved nowhere while the line below told the user they were backed up.
+        ``--fresh`` declares prior progress void and re-stamps for the same
+        reason. Either re-stamp keeps a differing earlier backup aside first
+        (:meth:`keep_backup_aside`, ``backup.<sha8>.md``): cycle 1's is the
+        plan from before cycle 1, a rollback point nothing else holds.
         Returns the path written, or ``None`` when nothing was.
 
         Neither dry run writes one: ``--dry-run`` reports and stops, and
@@ -2472,14 +2497,22 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 file=sys.stderr,
             )
             return None
-        if getattr(self.args, "fresh", False):
-            kept = self.keep_backup_aside(backup_path, target)
-            if kept:
-                print(
-                    f"Earlier backup kept at {kept} (its bytes differ from the "
-                    f"file --fresh is about to back up)",
-                    file=sys.stderr,
-                )
+        # A re-stamp, by `--fresh` or over an earlier review cycle's backup:
+        # a backup whose bytes differ from the file about to be overwritten is
+        # an earlier run's rollback point, and is kept aside. (Only `--fresh`
+        # used to, so the apply after a re-run review lost the plan from
+        # before the first cycle.)
+        kept = self.keep_backup_aside(backup_path, target)
+        if kept:
+            about = (
+                "the file --fresh is about to back up"
+                if getattr(self.args, "fresh", False)
+                else "the file this run is about to back up"
+            )
+            print(
+                f"Earlier backup kept at {kept} (its bytes differ from {about})",
+                file=sys.stderr,
+            )
         try:
             shutil.copy2(target, backup_path)
         except OSError as exc:  # noqa: BLE001 - a backup must not fail the phase
@@ -2489,7 +2522,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         return backup_path
 
     def _phase_has_recorded_progress(self, phase_dir: str) -> bool:
-        """Whether this phase has already applied something in this attempt.
+        """Whether this phase has already applied something in this review cycle.
 
         Three signals, any one of which means the target file on disk is no
         longer the pre-run file: an item recorded as processed, the scheduler's
@@ -2500,28 +2533,74 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         half-applied phase (`apply_task_suggestions_orchestrator` keys its own
         `tasks-backup.md` on the same flag).
 
+        Each signal is dated against the review's latest completion
+        (:meth:`_review_completed_at`) and compared strictly, as the
+        scheduler's ``_earlier_report_rows`` compares: a processed record by
+        its ``timestamp``, the report by its ``written_at`` (its mtime when
+        that is missing or unreadable), a batch result by its mtime. One older
+        than the review is an earlier cycle's: the phase dir and ``state.json``
+        outlive a review re-run, and counting it made the apply after a
+        ``--review-plan --force`` print "Backup kept" over the bytes from
+        before the first cycle, leaving the plan as the new cycle found it
+        saved nowhere. A missing date on either side keeps the signal, as in
+        every other cycle check. ``--resume`` is not dated: mid-cycle it is
+        the native leg's only signal.
+
         What is deliberately NOT a signal is the backup file's existence: a new
         review cycle re-runs the phase in the same dir, so that question answers
         "resume" for a run that is nothing of the kind.
         """
         if getattr(self.args, "resume", False):
             return True
-        if self.state is not None and self.state.get_processed_items(self.phase_name):
-            return True
         from .subagent_executor import OUTPUT_NAME_PATTERN_BY_KIND
-        from .write_batch_scheduler import WRITE_BATCH_REPORT_FILENAME
+        from .write_batch_scheduler import (
+            WRITE_BATCH_REPORT_FILENAME, _parse_local_timestamp,
+        )
 
+        reviewed_at = self._review_completed_at()
+
+        def this_cycle(stamped: Optional[datetime]) -> bool:
+            return stamped is None or reviewed_at is None or not stamped < reviewed_at
+
+        def modified_at(path: str) -> Optional[datetime]:
+            try:
+                return datetime.fromtimestamp(os.stat(path).st_mtime)
+            except OSError:
+                return None
+
+        if self.state is not None:
+            for record in self.state.get_processed_items(self.phase_name).values():
+                stamped = (
+                    _parse_local_timestamp(record.get("timestamp"))
+                    if isinstance(record, dict) else None
+                )
+                if this_cycle(stamped):
+                    return True
         try:
             names = os.listdir(phase_dir)
         except OSError:
             return False
         if WRITE_BATCH_REPORT_FILENAME in names:
-            return True
+            report_path = os.path.join(phase_dir, WRITE_BATCH_REPORT_FILENAME)
+            try:
+                with open(report_path, "r", encoding="utf-8") as handle:
+                    report = json.load(handle)
+            except (OSError, ValueError):
+                report = None
+            written_at = (
+                _parse_local_timestamp(report.get("written_at"))
+                if isinstance(report, dict) else None
+            )
+            if this_cycle(written_at or modified_at(report_path)):
+                return True
         # The kind's own result pattern, never a glob typed here: it is the same
         # table the executor admits a result filename against, so a new write
         # kind cannot leave this check silently blind.
         pattern = OUTPUT_NAME_PATTERN_BY_KIND.get(self.write_kind)
-        return pattern is not None and any(pattern.match(name) for name in names)
+        return pattern is not None and any(
+            pattern.match(name) and this_cycle(modified_at(os.path.join(phase_dir, name)))
+            for name in names
+        )
 
     def _touched_files(self) -> List[str]:
         """The files the write batches actually verified changed (F7).
@@ -4524,6 +4603,27 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 self.plan_path,
             )
             return ""
+
+    def print_native_tests_not_run(self) -> None:
+        """``--mark-completed``'s ``[TESTS_NOT_RUN]`` line, for apply-code-fixes.
+
+        Fix round 20: the native leg's line saying nothing ran the repository's
+        tests, naming the checks the batches were asked to run and what each
+        reported (the executor's own, ``native_apply_fixes_unverified_line``,
+        which is ``None`` with a ``driver.verify_command`` set or no batch of
+        the phase recorded completed). One method, because two calls close the
+        phase: ``--mark-completed``, and the no-items exit of a ``--resume``
+        that found every batch already applied (Fable review 2026-10-09), and
+        the record and this line must not disagree between them. A no-op for
+        the phases that edit no code.
+        """
+        if self.write_kind != "apply_code_fixes":
+            return
+        from .write_batch_scheduler import native_apply_fixes_unverified_line
+
+        tests = native_apply_fixes_unverified_line(self.plan_path)
+        if tests:
+            print(f"[TESTS_NOT_RUN] {tests}", file=sys.stderr)
 
     def handle_no_items_early_exit(self) -> None:
         """Handle the case where no actionable items remain after filtering.

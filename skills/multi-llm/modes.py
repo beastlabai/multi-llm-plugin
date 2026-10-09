@@ -47,7 +47,9 @@ class Mode:
         target_attr: Callable attribute on that module, called as
             ``main(argv) -> int``.
         phase: ``state.json`` / phase-dir name, or ``None`` for modes that own no
-            phase (``full``, ``status``, ``init``, the install modes).
+            phase (``status``, ``init``, the install modes). A composite's
+            (``full``) names its run dir only, for ``--detach``'s lock, log and
+            ``run`` record; it records no phase of its own.
         instruction_file: Core instruction file under ``instructions/``, served
             token-free by ``multi_llm.py util instructions <mode>``.
         user_facing: True for the modes that appear in ``SKILL.md``'s
@@ -77,13 +79,25 @@ class Mode:
         unavailable: When set, the mode is dispatchable but exits 3 with this
             reason instead of running. Keeps the boundary a shim sees stable
             while the implementation is still a markdown sequence.
-        runs_workflow: True for a mode that runs every ``is_workflow_phase``
-            mode in sequence (``full``). Data rather than a name check, because
-            a package's generated surface derives a composite mode's properties
-            from the phases it contains — ``writes_worktree`` is true of
-            ``full`` *because* it runs the apply phases and ``implement`` — and
-            a second composite added later is classified by this column, not by
-            a list in a host layer.
+        runs_workflow: True for the mode that runs the whole workflow
+            (``full``). Narrower than :attr:`is_composite`: a composite that
+            runs two phases runs other modes but not the workflow. Read only
+            where "the whole workflow" is the point, the next step a finished
+            ``full`` falls back to (``suggested_next``), since it has no single
+            next phase of its own. A reader that means "a mode that runs other
+            modes" reads :attr:`is_composite`.
+        sequence: The mode words a composite runs, in order, each through its
+            own ``main(argv)``; empty on every other row. Mode words, and no
+            reader uses them raw: :attr:`sequence_phases` gives the
+            ``state.json`` phase words (``review-code`` → ``code-review``),
+            :attr:`last_phase` the one it ends on, and ``utils/detach.py`` maps
+            each phase through ``output_handler.PHASE_DIRECTORIES`` for the
+            on-disk dir (``apply-code-fixes`` → ``apply-fixes``), which stays out
+            of this module because ``output_handler`` imports it. Data rather
+            than a name check, so a package's generated surface derives a
+            composite's ``writes_worktree`` from the phases it runs, and a
+            stopped composite retires the maps of exactly the phases it drove,
+            without a list in a host layer or a mode word in ``detach``.
         optional_why: The generic reason an *optional* phase is offered before
             the next required one, shown beside its command in a finished
             phase's next-step block (``user_next_step.optional_before[].why``,
@@ -112,7 +126,39 @@ class Mode:
     requires_uv: bool = True
     unavailable: Optional[str] = None
     runs_workflow: bool = False
+    sequence: Tuple[str, ...] = ()
     optional_why: Optional[str] = None
+
+    @property
+    def is_composite(self) -> bool:
+        """True for a mode that runs other modes (``sequence`` is set)."""
+        return bool(self.sequence)
+
+    @property
+    def sequence_phases(self) -> Tuple[str, ...]:
+        """``sequence`` as ``state.json`` phase words, in order.
+
+        Resolved at call time, never stored: a row is a frozen dataclass built
+        inside ``MODES``, so it cannot read the table it sits in. A word that
+        resolves to no phase is a table bug, and raises rather than hand a
+        reader ``None`` to use as a phase or a directory name.
+        """
+        phases = []
+        for word in self.sequence:
+            phase = phase_for(word)
+            if phase is None:
+                raise ValueError(
+                    f"modes.py row {self.name!r}: sequence word {word!r} "
+                    "resolves to no phase"
+                )
+            phases.append(phase)
+        return tuple(phases)
+
+    @property
+    def last_phase(self) -> Optional[str]:
+        """The phase a composite ends on; ``None`` for a mode that runs no other."""
+        phases = self.sequence_phases
+        return phases[-1] if phases else None
 
 
 # Reason strings for the modes that are dispatchable but not yet implemented.
@@ -159,6 +205,17 @@ MODES: Tuple[Mode, ...] = (
         instruction_file="apply-suggestions.md",
         is_workflow_phase=True,
         supports_detach=True,
+    ),
+    Mode(
+        name="improve-plan",
+        positionals=(POS_PLAN,),
+        summary="Review the plan with every model, then apply the validated "
+                "suggestions to it (unattended).",
+        target_module="improve_plan_orchestrator",
+        phase="improve-plan",          # run dir only, as `full`
+        instruction_file="improve-plan.md",
+        supports_detach=True,
+        sequence=("review-plan", "apply-suggestions"),
     ),
     Mode(
         name="generate-tasks",
@@ -229,6 +286,17 @@ MODES: Tuple[Mode, ...] = (
         supports_detach=True,
     ),
     Mode(
+        name="improve-code",
+        positionals=(POS_PLAN,),
+        summary="Review the code changes with every model, then apply the "
+                "validated fixes (unattended).",
+        target_module="improve_code_orchestrator",
+        phase="improve-code",
+        instruction_file="improve-code.md",
+        supports_detach=True,
+        sequence=("review-code", "apply-code-fixes"),
+    ),
+    Mode(
         name="full",
         positionals=(POS_PLAN,),
         summary="Run the whole plan-to-code workflow as one resumable sequence.",
@@ -241,6 +309,15 @@ MODES: Tuple[Mode, ...] = (
         instruction_file="full-workflow.md",
         supports_detach=True,
         runs_workflow=True,
+        # The eight workflow mode words, in `PREREQUISITE_PHASES` order, as a
+        # literal: the row cannot derive them from the table it sits in.
+        # `tests/test_mode_sequence.py` holds it to the `is_workflow_phase`
+        # rows and to `FullWorkflow.steps()`.
+        sequence=(
+            "review-plan", "apply-suggestions", "generate-tasks", "review-tasks",
+            "apply-task-suggestions", "implement", "review-code",
+            "apply-code-fixes",
+        ),
     ),
     Mode(
         name="ask",

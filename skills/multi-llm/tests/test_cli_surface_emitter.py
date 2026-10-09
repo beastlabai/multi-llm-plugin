@@ -15,7 +15,7 @@ What is graded here and nowhere else:
 * **Host-keyed clauses are keyed on the host id**: the ``@`` sigil clause is
   OpenCode's alone, the write-capable note codex's alone.
 * **``writes_worktree`` is derived**, from the executor's write-kind table and
-  the mode table's ``runs_workflow`` column, never from a hand list.
+  the mode table's ``sequence`` column, never from a hand list.
 * **Schema v5's route signal is generated, never guessed**:
   ``dispatcher.route_env`` is ``modes.ROUTE_ENV`` plus the one
   ``modes.TOOL_ROUTES`` member the host's ``next_command`` cell carries, and the
@@ -218,23 +218,41 @@ def test_the_write_capable_note_is_codexs_alone():
 
 
 def test_writes_worktree_is_derived_from_the_write_kinds():
-    """The apply family, ``implement``, and ``full`` which runs them — derived."""
+    """The apply family, ``implement``, and the composites that run them — derived.
+
+    A composite writes when **any** phase of its ``sequence`` does: the field
+    asks whether the dispatch can reach ``agent-write``, and one writer is enough.
+    """
     write_phases = set(subagent_tasks.PHASE_BY_WRITE_KIND.values())
     rows = {r["name"]: r for r in surface.cli_surface("codex")["modes"]}
     for mode in mode_table.user_facing_modes():
         expected = mode.phase in write_phases or (
-            mode.runs_workflow and any(
-                m.phase in write_phases
-                for m in mode_table.MODES if m.is_workflow_phase
-            )
+            mode.is_composite
+            and any(phase in write_phases for phase in mode.sequence_phases)
         )
         assert rows[mode.name]["writes_worktree"] is expected, mode.name
     # Spot-check the reading the plan names, so a derivation that went wrong in
     # both places at once still fails.
     assert {n for n, r in rows.items() if r["writes_worktree"]} == {
-        "apply-suggestions", "apply-task-suggestions", "apply-code-fixes",
-        "implement", "full",
+        "apply-suggestions", "improve-plan", "apply-task-suggestions",
+        "apply-code-fixes", "improve-code", "implement", "full",
     }
+
+
+@pytest.mark.parametrize("sequence, expected", [
+    # A writer anywhere is enough: not AND, and not the last phase alone.
+    (("apply-suggestions", "review-code"), True),
+    (("review-code", "apply-code-fixes"), True),
+    (("review-plan", "review-code"), False),
+])
+def test_a_composite_writes_when_any_phase_of_its_sequence_does(
+    sequence, expected
+):
+    row = mode_table.Mode(
+        name="composite", positionals=(mode_table.POS_PLAN,), summary="x",
+        phase="composite", sequence=sequence,
+    )
+    assert surface._writes_worktree(row) is expected
 
 
 @pytest.mark.parametrize("host", HOSTS)

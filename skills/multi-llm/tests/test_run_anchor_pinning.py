@@ -76,7 +76,27 @@ EXEMPT: dict = {
         "pins through the sub-mode it dispatches — every phase "
         "full_workflow_orchestrator.run_mode runs is one of the modes asserted "
         "here, against the same --plan-file; demonstrated by "
-        "test_full_pins_through_the_sub_mode_it_dispatches below"
+        "test_every_composite_pins_through_the_sub_mode_it_dispatches below"
+    ),
+    "improve-plan": (
+        "pins through the sub-mode it dispatches — the composite owns no "
+        "pre-flight pin; the first phase ImproveWorkflow.run_mode dispatches "
+        "against the same --plan-file (review-plan, or apply-suggestions when "
+        "the review is recorded) is a mode asserted here, and nothing before "
+        "that dispatch reads provider config (only argv, state.json and the "
+        "typed scope); a run with nothing to do exits 2 before any dispatch "
+        "and starts no run to anchor. Demonstrated by "
+        "test_every_composite_pins_through_the_sub_mode_it_dispatches below"
+    ),
+    "improve-code": (
+        "pins through the sub-mode it dispatches — the composite owns no "
+        "pre-flight pin; the first phase ImproveWorkflow.run_mode dispatches "
+        "against the same --plan-file (review-code, or apply-code-fixes when "
+        "the review is recorded) is a mode asserted here, and nothing before "
+        "that dispatch reads provider config (only argv, state.json and the "
+        "typed scope); a run with nothing to do exits 2 before any dispatch "
+        "and starts no run to anchor. Demonstrated by "
+        "test_every_composite_pins_through_the_sub_mode_it_dispatches below"
     ),
     "status": (
         "a reporting view over state.json and {phase}/.status.json: it starts "
@@ -283,16 +303,23 @@ def test_every_plan_mode_pins_the_run_anchor(mode, plan_file, pins, capsys):
     )
 
 
-def test_full_pins_through_the_sub_mode_it_dispatches(plan_file, pins):
-    """``full``'s exemption, demonstrated rather than asserted in prose.
+@pytest.mark.parametrize(
+    "composite", [m for m in mode_table.MODES if m.is_composite],
+    ids=lambda m: m.name,
+)
+def test_every_composite_pins_through_the_sub_mode_it_dispatches(
+    composite, plan_file, pins
+):
+    """A composite's exemption, demonstrated rather than asserted in prose.
 
-    ``full`` resolves ``--plan-file`` and owns no pre-flight pin of its own; it
-    pins because the first phase it dispatches is one of the modes above,
-    against that same plan. If that ever stopped being true this fails, and
-    ``full``'s entry in ``EXEMPT`` stops being free.
+    A composite (``full``, ``improve-plan``, ``improve-code``) resolves
+    ``--plan-file`` and owns no pre-flight pin of its own; it pins because the
+    first phase it dispatches is one of the modes above, against that same
+    plan. If that ever stopped being true this fails, and its entry in
+    ``EXEMPT`` stops being free.
     """
     with pytest.raises(_Pinned):
-        _drive(mode_table.resolve("full"), [str(plan_file)], pins)
+        _drive(composite, [str(plan_file)], pins)
 
     assert registry.get_run_anchor() == os.path.realpath(str(plan_file))
 

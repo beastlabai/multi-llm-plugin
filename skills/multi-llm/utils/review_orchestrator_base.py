@@ -86,6 +86,7 @@ from .llm_client import (
     misnamed_result_baseline,
     render_output_location,
     render_working_limits,
+    requested_result_baseline,
 )
 from .providers.base import (
     CATEGORY_CONNECTION_ERROR,
@@ -4350,6 +4351,25 @@ def report_misnamed_result(
     return note
 
 
+def _answer_text(data: Any) -> str:
+    """The text :func:`save_model_result` parses, from a completed run's ``data``.
+
+    A parsed payload is serialized back whatever its length: ``[]`` is a whole
+    answer, the one a reviewer that found nothing gives. Both success returns
+    of :func:`run_single_model` used to test the payload's truthiness, turned
+    that ``[]`` into ``""``, and ``save_model_result`` then read a model that
+    answered as one that left no output (measured 2026-10-09, plan
+    improve-plan-and-improve-code T3: two mock reviewers each answered ``[]``,
+    both were recorded failed with ``Unknown error``, and review-plan exited 3
+    "All models failed" instead of completing a clean review).
+    """
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        return data
+    return json.dumps(data)
+
+
 async def run_single_model(
     model_spec: str,
     plan_path: str,
@@ -4657,11 +4677,7 @@ async def run_single_model(
                 }
 
             if result["success"]:
-                output_data = result.get("data", "")
-                if output_data and not isinstance(output_data, str):
-                    output_str = json.dumps(output_data)
-                else:
-                    output_str = str(output_data) if output_data else ""
+                output_str = _answer_text(result.get("data"))
                 return {
                     "success": True,
                     "output": output_str,
@@ -4788,6 +4804,15 @@ async def run_single_model(
             )
             if run_model_specs is not None else None
         )
+        # The requested file's baseline is the slot's too, for the same reason:
+        # the file attempt 1 wrote before it was killed is still this slot's
+        # answer on attempt 2, and the one already there when the slot started
+        # (the previous round's, under `--force --rerun-all`) is never read as
+        # this slot's on any attempt (measured 2026-10-09). Taken whatever the
+        # model list, since every slot has a requested file.
+        requested_baseline = await asyncio.to_thread(
+            requested_result_baseline, out_dir, invoke_phase, model_spec
+        )
 
         while (slice_s := ladder.next_attempt()) is not None:
             # Never a fresh copy of `effective_timeout`: `next_attempt()` returns
@@ -4832,6 +4857,7 @@ async def run_single_model(
                 anchor=plan_path,
                 run_model_specs=run_model_specs,
                 misnamed_baseline=misnamed_baseline,
+                requested_baseline=requested_baseline,
                 **sandbox_fallback_kwargs(sandbox),
             )
 
@@ -5054,11 +5080,7 @@ async def run_single_model(
                     model_spec, result, get_phase_dir(Path(plan_path), phase_name),
                 )
             print(f"[{display_name}] Completed successfully in {duration:.1f}s (source: {source})")
-            output_data = result.get("data", "")
-            if output_data and not isinstance(output_data, str):
-                output_str = json.dumps(output_data)
-            else:
-                output_str = str(output_data) if output_data else ""
+            output_str = _answer_text(result.get("data"))
 
             return {
                 "success": True, "output": output_str,
@@ -6952,6 +6974,18 @@ async def reaggregate_from_existing_files(
             # merge or resume — a leftover validation_tasks.json is bound to the
             # grouping just rewritten and must not be read against it.
             validated_groups_for_report = []
+            # So it retires with the rest of that round, and `validation.json`
+            # is written as `[]`, the fan-out's empty branch and code-review's
+            # reaggregate alike. The regroup above retired `validation.json`
+            # alone and put nothing in its place, so apply-suggestions exited 1
+            # on the missing file after a reaggregate that found nothing
+            # (measured 2026-10-09; plan improve-plan-and-improve-code §2.3,
+            # *Empty apply outcomes*).
+            retire_stale_validation_round(
+                phase_dir, reason="review returned no suggestions"
+            )
+            with open(validation_path, 'w', encoding='utf-8') as f:
+                f.write("[]\n")
         elif honour_validation_file:
             # §2.3 step 5 / 2.9 apply to reused verdicts too, not only to the
             # batch-merge branch below: a merged validation.json whose batch
@@ -7794,7 +7828,7 @@ async def run_review_orchestration(
         salvage_ticker = PhaseProgress(phase_dir, anchor=plan_path)
         salvage_ticker.start_ticker()
         try:
-            await asyncio.to_thread(
+            repaired = await asyncio.to_thread(
                 dispatch_salvage_tasks,
                 args,
                 phase_dir=phase_dir,
@@ -7803,11 +7837,23 @@ async def run_review_orchestration(
             )
         finally:
             await salvage_ticker.stop_ticker()
+        # Only a file this attempt's salvage dispatch names as repaired is a
+        # recovery, as in `code_review_orchestrator`'s loop. The bare "the file
+        # exists and is not empty" test adopted whatever was there: a failed
+        # slot under `--force --rerun-all --exec-subagents` (the executor leg's
+        # `--improve-plan --force` round) beside the previous round's
+        # `{model}.json` printed "recovered by salvage", flipped the model done
+        # and grouped, validated and applied round one's findings at exit 0
+        # (Fable review 2026-10-09). The slot now sets that file aside
+        # (`llm_client._set_aside_unchanged_result`); this is the second lock.
+        repaired_paths = {os.path.abspath(path) for path in repaired or ()}
         salvaged: List[str] = []
         for model_spec in list(failed_models):
             recovered = os.path.join(
                 phase_dir, f"{sanitize_model_name(model_spec)}.json"
             )
+            if os.path.abspath(recovered) not in repaired_paths:
+                continue
             if os.path.exists(recovered) and os.path.getsize(recovered) > 0:
                 print(f"[{model_spec}] recovered by salvage: {recovered}")
                 del failed_models[model_spec]
@@ -8118,6 +8164,32 @@ async def run_review_orchestration(
                         return  # Exit early - Claude Code handles validation
             else:
                 print("\nSkipping validation (--skip-validation flag set)")
+        else:
+            # Zero findings from every model that answered: a finished review
+            # with zero groups, and it replaces the previous findings, as
+            # code-review's own empty branch does (the `else` of its `if
+            # all_issues:`). This block used to have no `else`, so the round
+            # wrote neither file: apply-suggestions' `load_data` then exited 1
+            # on the missing `validation.json` (measured 2026-10-08), stopping
+            # `full` at exit 3 on a clean plan, and an empty `--force` round
+            # left the previous round's two files in place, so the report
+            # below listed its groups and apply-suggestions handed its valid
+            # ones out again (plan improve-plan-and-improve-code §2.3, *Empty
+            # apply outcomes*). The whole round retires, not only
+            # `validation.json`: an empty grouping has no batch of its own to
+            # keep. review-tasks shares this branch, and its zero-group
+            # `grouped.json` is what `check_apply_task_suggestions_prerequisite`
+            # reads as `skipped (no findings)`.
+            validated_groups_for_report = []
+            retire_stale_validation_round(
+                phase_dir, reason="review returned no suggestions"
+            )
+            grouped_path = os.path.join(phase_dir, "grouped.json")
+            with open(grouped_path, 'w', encoding='utf-8') as f:
+                json.dump(save_groups_payload([]), f, indent=2)
+            print(f"Grouped suggestions saved to: {grouped_path} (no suggestions)")
+            with open(os.path.join(phase_dir, "validation.json"), 'w', encoding='utf-8') as f:
+                f.write("[]\n")
 
         # Aggregate results
         report_path = aggregate_results(

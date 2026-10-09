@@ -19,6 +19,8 @@ Runs all modes in sequence for complete automation.
 5. **Phase 5: Review Code** (automatic review)
 6. **Phase 6: Apply Code Fixes** (auto-apply validated code-review findings to the code)
 
+`--improve-plan` runs Phases 1–2 on its own, and `--improve-code` runs Phases 5–6.
+
 ## How Full Mode Works
 
 Full mode is a **resumable state machine in Python** over the modes above, on the
@@ -343,7 +345,7 @@ with the next step its `### Next Steps` rule gives, copied from
 - Suggestions applied: N
 - Human decisions made: N
 - Suggestions skipped: N
-- Applied suggestions report: {plan}_applied_suggestions.md
+- Applied suggestions report: {plan}/apply-suggestions/summary.md
 
 ### Phase 3: Generate Tasks
 - Tasks generated: N
@@ -374,7 +376,7 @@ with the next step its `### Next Steps` rule gives, copied from
 - Fixes applied: N
 - Decided by the judge agent: N (A approved, V salvaged, S skipped) *(under `--yes`)*
 - Fixes skipped: N
-- Applied code fixes report: {prefix}_applied_code_fixes.md
+- Applied code fixes report: {plan}/apply-fixes/summary.md
 
 ### All Output Files
 - [List all generated files with full paths]

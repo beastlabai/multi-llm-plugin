@@ -865,6 +865,17 @@ class ScopeFilesError(ValueError):
     """A ``--files``/``--files-from`` value that cannot be a review scope."""
 
 
+#: Why ``--files-from -`` is refused where the review cannot read the caller's
+#: stdin. One constant, because two guards raise it: this phase's own under
+#: ``--detach`` (:func:`read_scope_files_flags`), and ``--improve-code``'s for a
+#: review it runs (``utils.improve_workflow.files_from_stdin_refused``), which
+#: never forwards ``--detach`` to the phase and so is not covered by this one.
+FILES_FROM_STDIN_DETACHED = (
+    "--files-from - reads stdin, which a --detach worker does not inherit; "
+    "write the list to a file and pass its path instead"
+)
+
+
 def _repo_relative_scope_path(raw: str, root: str) -> str:
     """``raw`` as a repo-relative POSIX path, or :class:`ScopeFilesError`.
 
@@ -921,10 +932,7 @@ def read_scope_files_flags(args: argparse.Namespace, root: str) -> Optional[List
     if files_from is not None:
         if files_from == "-":
             if getattr(args, "detach", False):
-                raise ScopeFilesError(
-                    "--files-from - reads stdin, which a --detach worker does not "
-                    "inherit; write the list to a file and pass its path instead"
-                )
+                raise ScopeFilesError(FILES_FROM_STDIN_DETACHED)
             text = sys.stdin.read()
         else:
             try:

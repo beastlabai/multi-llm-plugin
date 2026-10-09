@@ -2948,9 +2948,16 @@ function relayStopBesideSection(values, outcome, step, surface) {
  * answers go to `resume_answers` and, through the surface's `answers` clause
  * filled with the dispatcher's `answers_text`, into `message`. This file
  * spells none of it. The port of the codex server's `attach_answers`.
+ *
+ * The option calls name the lookup's `mode`, the mode the resume runs, and
+ * the word asked about only when the lookup names none: a composite asked
+ * about answers with an inner phase's resume and answers (plans/improve-plan-
+ * and-improve-code.md §2.6), and a call built from the asked word would hand
+ * `--human-task` to a parser that rejects it.
  */
 function attachAnswers(step, outcome, surface) {
-  const row = resolveMode(step.word, surface)
+  const named = typeof step.mode === "string" && step.mode ? step.mode : step.word
+  const row = resolveMode(named, surface)
   if (!row) return
   const flagsOf = (value) =>
     Array.isArray(value) &&

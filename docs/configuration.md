@@ -50,10 +50,16 @@ prints the path), so you can port any custom settings into the regenerated file.
 - **Lists replace, they don't append.** Set `defaults.models` and you get exactly
   that list. Omitting or blanking a key inherits the base; an explicit empty list
   `[]` is the only way to clear one — and an empty `defaults.models`/`quick_models`
-  falls back to interactive selection (or fails in unattended runs like `--full`).
+  falls back to interactive selection (or fails in unattended runs like `--full`,
+  `--improve-plan` and `--improve-code`, whose review always runs under `--yes`).
 - **Per-mode lists win.** Modes with a base `defaults.modes.<mode>` entry (e.g.
   `--review-plan`, `--review-code`) ignore a project-wide `defaults.models` —
-  override `defaults.modes.<mode>` to change those.
+  override `defaults.modes.<mode>` to change those. The `--improve-*` modes, like
+  `--full`, have no `defaults.modes` entry of their own: their review reads
+  `defaults.modes.review-plan` (`--improve-plan`) or `defaults.modes.code-review`
+  (`--improve-code`; the key is `code-review`, not `review-code`), so that is the
+  entry to set to change an improve run's reviewers. An `improve-plan` or
+  `improve-code` entry is read by nothing.
 - **Requires a git repo.** Discovery resolves the git root, so there's one override
   per repo, shared repo-wide (no per-subdirectory configs). Non-git projects must
   use `MULTI_LLM_PROVIDERS_CONFIG` instead.

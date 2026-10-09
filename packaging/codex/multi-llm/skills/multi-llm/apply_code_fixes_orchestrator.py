@@ -559,7 +559,9 @@ class ApplyCodeFixesOrchestrator(ApplyOrchestratorBase[Dict[str, Any], CodeFixBa
     # completed. Completion is recorded by the host's post-loop
     # `apply-code-fixes --plan-file … --mark-completed` (that instruction's final
     # step), or by `WriteBatchScheduler._finalize` under `--exec-subagents`; both
-    # run only once every batch is verified.
+    # run only once every batch is verified. The one exception is a run with no
+    # fix left to apply, which records itself completed at its no-items exit
+    # (`handle_no_items_early_exit`), since no batch loop will follow it.
     # Partitioned by `file_key`, so batches MAY co-schedule — subject to
     # driver.max_concurrent_write_subagents and the disjointness check (D3h).
     write_kind = "apply_code_fixes"
@@ -681,8 +683,42 @@ Finalization (run by the host AFTER every batch has been applied and verified):
         )
 
     def handle_no_items_early_exit(self) -> None:
-        """Write empty output and exit when no fixes remain."""
+        """Write empty output, record the phase completed and exit when no fixes remain."""
         print("\nNo fixes to apply.", file=sys.stderr)
+
+        # Nothing left to apply is this review cycle's apply, finished: recorded
+        # completed and stamped now, the record apply-suggestions writes when it
+        # hands out no batch (plan improve-plan-and-improve-code §2.3, *Empty
+        # apply outcomes*). This exit used to record nothing, so `full`'s
+        # `_verify` read an all-invalid code review's apply as unfinished (exit
+        # 3, "records no completion") or as done on the previous cycle's stamp.
+        # A completion, never a skip: `mark_phase_skipped` leaves an earlier
+        # cycle's completion standing, and completed wins over skipped. The
+        # word is the one `--mark-completed` persists (`confirmation_phase_name`,
+        # never the dir word `apply-fixes`). The hook runs before the detach
+        # boundary and the executor/native fork, so both legs record it here.
+        # Both dry runs stay read-only, the two-flag rule `write_target_backup`
+        # applies: `--dry-run` reports and stops, and `--dry-run-subagents` is
+        # a preflight ("render every command, start no child") whose record
+        # would have a later real run read the phase done (Fable review
+        # 2026-10-09).
+        dry = getattr(self.args, "dry_run", False) or getattr(
+            self.args, "dry_run_subagents", False
+        )
+        if not dry and self.state is not None:
+            self.state.mark_phase_completed(
+                self.confirmation_phase_name or self.phase_name
+            )
+            self.state.save()
+            # A `--resume` whose step 23 dropped every group as already applied
+            # is the native host that died after its last batch and before
+            # `--mark-completed` (Fable review 2026-10-09): this exit is then
+            # that closing call, so it says what `--mark-completed` says about
+            # the repository's tests, from the same records. Its other two
+            # acts need nothing here: the completion is recorded above, and
+            # the plan re-stamp is only for a phase that edits the plan.
+            if self.resume_dropped_groups:
+                self.print_native_tests_not_run()
 
         phase_dir = os.path.join(self.out_dir, self.phase_name)
         os.makedirs(phase_dir, exist_ok=True)

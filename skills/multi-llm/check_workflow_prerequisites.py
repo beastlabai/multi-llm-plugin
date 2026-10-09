@@ -185,9 +185,7 @@ def implement_records_predate_task_list(state: StateManager) -> bool:
     return False
 
 
-def _apply_batches_predate_review(
-    state: StateManager, phases: Dict[str, dict], phase: str
-) -> bool:
+def _apply_batches_predate_review(state: StateManager, phase: str) -> bool:
     """Whether an apply phase's recorded batches belong to an earlier review.
 
     Nothing clears ``task_status`` when a review is re-run (``review-code
@@ -209,13 +207,46 @@ def _apply_batches_predate_review(
     ``--resume`` that replays that cycle's recorded decisions.)
     """
     review = PHASE_PREREQUISITES[phase][0]
-    if phases[review]["status"] != "completed":
+    # Read as `get_workflow_status`'s first loop reads the review — its status
+    # from `is_phase_completed`, its stamp the raw `phases_completed` entry —
+    # so a caller holding no `phases` map gets the answer `status` prints.
+    if not state.is_phase_completed(review):
         return True
-    reviewed_at = _parse_timestamp(phases[review].get("timestamp"))
+    completed = state.state.get("phases_completed") or {}
+    reviewed_at = _parse_timestamp(completed.get(review))
     last_run = _latest_phase_activity(state, phase)
     if reviewed_at is None or last_run is None:
         return False
     return last_run < reviewed_at
+
+
+def apply_phase_in_progress(state: StateManager, phase: str) -> bool:
+    """Whether apply phase *phase* has progress of the review on record.
+
+    ``get_workflow_status``'s rule for marking an apply phase ``in_progress``
+    (the one status the next-step builder spells with ``--resume``), as one
+    predicate, so ``status``, ``next-command``, the ``--blocked`` delegation
+    and a composite deciding whether to infer ``--resume`` cannot disagree.
+    Progress is a started record (:meth:`StateManager.is_phase_started`, the
+    native leg's emit) or one of the phase's own write-batch ids
+    (:data:`APPLY_BATCH_ID_PATTERNS`, both legs) recorded ``completed``. It
+    is discarded when it belongs to an earlier review cycle or the review is
+    not ``completed`` (:func:`_apply_batches_predate_review`).
+
+    *state* is the :class:`StateManager` ``get_workflow_status`` holds, not
+    its raw dict: the started record and the staleness of a code review are
+    its methods' answers. *phase* is an apply phase's word in ``state.json``
+    (``apply-suggestions``, ``apply-task-suggestions``, ``apply-code-fixes``);
+    any other word raises ``KeyError``. It does not ask whether *phase*
+    itself is completed or skipped: ``status`` checks that first
+    (``DONE_STATUSES``), and a caller that needs it asks the same.
+    """
+    pattern = APPLY_BATCH_ID_PATTERNS[phase]
+    has_progress = state.is_phase_started(phase) or any(
+        pattern.match(task_id) and status == "completed"
+        for task_id, status in state.get_all_task_statuses().items()
+    )
+    return has_progress and not _apply_batches_predate_review(state, phase)
 
 
 def check_phase_prerequisite(state: StateManager, required_phase: str) -> dict:
@@ -1212,16 +1243,13 @@ def get_workflow_status(
     # are an earlier cycle's and mark nothing: `--resume` there would replay
     # that cycle's recorded decisions against the new review's findings. The
     # started record is dated the same way (`_latest_phase_activity`), so an
-    # abandoned run from before a review re-run marks nothing either.
-    task_statuses = state.get_all_task_statuses()
-    for phase, pattern in APPLY_BATCH_ID_PATTERNS.items():
+    # abandoned run from before a review re-run marks nothing either. The
+    # rule is `apply_phase_in_progress`, which the composites' inferred
+    # `--resume` asks as well.
+    for phase in APPLY_BATCH_ID_PATTERNS:
         if phases[phase]["status"] in DONE_STATUSES:
             continue
-        has_progress = state.is_phase_started(phase) or any(
-            pattern.match(task_id) and status == "completed"
-            for task_id, status in task_statuses.items()
-        )
-        if has_progress and not _apply_batches_predate_review(state, phases, phase):
+        if apply_phase_in_progress(state, phase):
             phases[phase]["status"] = "in_progress"
             started_at = state.phase_started_at(phase)
             if started_at:

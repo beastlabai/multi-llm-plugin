@@ -67,7 +67,7 @@ With batching, 10 suggestions might become 3-4 batches:
    - Spawn a subagent with the batch prompt
    - Wait for completion before moving to the next batch
    - This prevents conflicts from concurrent edits
-6. **Generate Report**: Create `{prefix}_applied_suggestions.md` with results
+6. **Generate Report**: Create `{plan}/apply-suggestions/summary.md` with results
 
 ## Output Files
 
@@ -407,7 +407,9 @@ Context line for individual review display: `Type: {type}, Section: {reference}`
 
 ### 7. Generate Summary Report
 
-After all batches are processed, create `{prefix}_applied_suggestions.md`:
+After all batches are processed, create `{plan}/apply-suggestions/summary.md` — the
+same path the *Output Files* tree above lists, and the same one the
+`--exec-subagents` leg writes for itself:
 
 ```markdown
 # Applied Suggestions Report

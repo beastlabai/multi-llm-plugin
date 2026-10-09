@@ -157,7 +157,10 @@ PHASE_SCHEMA_FILE: Dict[str, Optional[str]] = {
     "apply-suggestions": None,
     "apply-task-suggestions": None,
     "apply-code-fixes": None,
+    # ---- the composites' run dirs: each phase they run keeps its own row ---
     "full": None,
+    "improve-plan": None,
+    "improve-code": None,
 }
 
 

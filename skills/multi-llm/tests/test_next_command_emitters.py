@@ -101,6 +101,11 @@ MODE_ROWS = [
      S(ALL_REQUIRED + ("review-tasks",), skipped=("apply-task-suggestions",),
        files=_merge(RT_CLEAN, CR_FINDING)),
      (), "complete"),
+    # The review-then-apply composites answer as the phase they end on
+    # (plans/improve-plan-and-improve-code.md §2.6), mirroring that phase's row.
+    ("improve-plan", S(("review-plan", "apply-suggestions"), files=RP_VALID), (),
+     (f"--generate-tasks {P}", [])),
+    ("improve-code", S(ALL_REQUIRED, files=CR_FINDING), (), "complete"),
 ]
 MODE_IDS = [row[0] for row in MODE_ROWS]
 
@@ -776,6 +781,33 @@ class TestTheTerminalPoll:
         lines = out.splitlines()
         assert lines[-2] == f"{NEXT_COMMAND_MARKER} {EXPECTED_POLL}"
         assert lines[-1].startswith(cli_common.RESULT_MARKER)
+
+    @pytest.mark.parametrize("worker_exit", [0, 2])
+    @pytest.mark.parametrize("composite,spec,expect", [
+        ("improve-plan", S(("review-plan", "apply-suggestions"), files=RP_VALID),
+         f"{PLUGIN}--generate-tasks {P}"),
+        ("improve-code", S(ALL_REQUIRED, files=CR_FINDING), None),
+    ], ids=["improve-plan", "improve-code"])
+    def test_a_finished_composite_run_carries_both(
+        self, workdir, capsys, composite, spec, expect, worker_exit
+    ):
+        """The tool routes' one detached composite run: its terminal poll
+        answers as the phase the composite ends on (plans/improve-plan-and-
+        improve-code.md §2.6, criterion 2), from the run record's own mode."""
+        plan = build(workdir, spec)
+        _terminal_record(plan, composite, mode=composite, plan_file=str(plan),
+                         plan_arg=P, exit_code=worker_exit)
+        code, out, err, result = _run(
+            ["status", str(plan), "--phase", composite, "--view", "run"], capsys)
+        assert code == 0, err
+        assert result["mode"] == composite
+        step = result["user_next_step"]
+        if expect is None:
+            assert step["complete"] is True
+            assert _block(out) == [WORKFLOW_COMPLETE_MARKER]
+        else:
+            assert step["command"] == expect
+            assert _block(out) == [f"{NEXT_COMMAND_MARKER} {expect}"]
 
     def test_a_record_without_plan_arg_uses_its_absolute_plan_file(
         self, workdir, capsys
