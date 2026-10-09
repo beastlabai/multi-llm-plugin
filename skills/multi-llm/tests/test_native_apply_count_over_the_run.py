@@ -19,6 +19,10 @@ The native emit now records the phase run its batches belong to in
 out, when this file was written); a `--resume` of the same review carries
 it, anything else starts a new one. `status` counts that run's items and
 the records written since it started.
+
+Records #2: a batch recorded failed and nothing else read "0/4 items
+applied" and named nothing; the block now names the failed batch and its
+recorded reason after the count, as the executor's line names it.
 """
 
 from __future__ import annotations
@@ -212,6 +216,46 @@ class TestABareRerunCountsOnlyItsOwnRecords:
         _emit(plan, capsys)
         out = _status(capsys, "--view", "run")
         assert "declined by its batch" not in out, out
+
+
+class TestAFailedBatchIsNamed:
+
+    def test_a_failed_record_alone_names_its_batch_and_reason(self, plan, capsys):
+        _emit(plan, capsys)
+        _record(plan, capsys, "apply-batch-0", "--reason", "timeout, no file changed.",
+                status="failed")
+        expected = (f"0/4 items applied to {TYPED}; "
+                    "1 batch failed: apply-batch-0 (timeout, no file changed)")
+        for flags in ((), ("--view", "run")):
+            block = _block(_status(capsys, *flags))
+            assert block[0] == expected, block
+        entry = json.loads(_status(capsys, "--view", "run", "--json"))["apply_phases"][0]
+        assert entry["failed_batches"] == [
+            {"task_id": "apply-batch-0", "reason": "timeout, no file changed."}]
+
+    def test_beside_what_applied(self, plan, capsys):
+        _emit(plan, capsys)
+        _record(plan, capsys, "apply-batch-0")
+        _record(plan, capsys, "apply-batch-1", "--reason", "the subagent timed out",
+                status="failed")
+        _record(plan, capsys, "apply-batch-2", "--reason", "no reply", status="failed")
+        block = _block(_status(capsys, "--view", "run"))
+        assert block[0] == (
+            f"2/4 items applied to {TYPED}; 2 batches failed: "
+            "apply-batch-1 (the subagent timed out); apply-batch-2 (no reply)"), block
+
+    def test_a_resume_hands_it_out_again_so_it_is_no_longer_named(self, plan, capsys):
+        first = _emit(plan, capsys)
+        _record(plan, capsys, "apply-batch-0")
+        _record(plan, capsys, "apply-batch-1", "--reason", "the subagent timed out",
+                status="failed")
+        prior_changes.append(str(plan.parent / "test-plan"), first[0]["prior_changes_id"],
+                             "apply-suggestions", "batch applied")
+        second = _emit(plan, capsys, "--resume")
+        assert first[1]["expected_ids"][0] in [i for t in second for i in t["expected_ids"]]
+        block = _block(_status(capsys, "--view", "run"))
+        assert block[0] == f"2/4 items applied to {TYPED}", block
+        assert "failed" not in " ".join(block), block
 
 
 class TestWhatAResumeCarries:
