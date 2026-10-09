@@ -3095,6 +3095,13 @@ class TestAManualGateStopBesideItsSection:
         assert envelope["resume_markdown"].count("--human-task T001=done") == 1
         assert envelope["options"][0]["extra_flags"] == [
             "--resume", "--human-task", "T001=done"]
+        # Fix round 29 (review of round 28 #1): and the user's decline, as
+        # the section's answer and the next option, never in the message.
+        assert envelope["resume_markdown"].count("--human-task T001=skip") == 1
+        assert envelope["options"][1]["extra_flags"] == [
+            "--resume", "--human-task", "T001=skip"]
+        assert [a["command"] for a in envelope["resume_answers"]] == [
+            a["command"] for a in step["answers"]]
 
 
 class TestAReportCallOnAFailedRun:

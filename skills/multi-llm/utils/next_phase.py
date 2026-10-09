@@ -537,6 +537,52 @@ def manual_gate_why(implement: Mapping[str, Any], *, stopped: bool = True) -> Op
     )
 
 
+def manual_gate_decline_answers(implement: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """The other ways on from a manual-task gate, as stop answers
+    (``[{"flags", "why"}]``, ``--resume`` first), or ``[]`` (fix round 29,
+    review of round 28 #1: under ``--yes`` the gate re-stopped on every
+    ``--human-task <id>=skip`` and only a false ``=done`` went on).
+
+    For each manual task the gate's resume records done
+    (:func:`manual_gate_ids`), ``--human-task <id>=skip``: the user's call
+    that they will not do it, which skips it and the code tasks that wait
+    on it; the combined answer first when the gate holds on more than one,
+    the order ``write_batch_scheduler.compose_stop_answers`` gives a stop's
+    answers. The executor records them on its stop and every reader of a
+    native gate derives them from ``state.json``, so both legs word them
+    alike."""
+    ids = manual_gate_ids(implement)
+    if not ids:
+        return []
+
+    def tasks(count: int, pronoun: str) -> str:
+        if count == 1:
+            return f"the code task that waits on {pronoun}"
+        return f"the {count} code tasks that wait on {pronoun}"
+
+    answers: List[Dict[str, Any]] = []
+    if len(ids) > 1:
+        flags = [RESUME_FLAG]
+        for task_id in ids:
+            flags += ["--human-task", f"{task_id}=skip"]
+        answers.append({
+            "flags": flags,
+            "why": (
+                f"if you will do none of {_manual_gate_names(implement, ids)}, "
+                f"skip them and {tasks(manual_waiting_count(implement, ids), 'them')}, "
+                f"and implement goes on without them"),
+        })
+    for task_id in ids:
+        answers.append({
+            "flags": [RESUME_FLAG, "--human-task", f"{task_id}=skip"],
+            "why": (
+                f"if you will not do {_manual_gate_names(implement, [task_id])}, "
+                f"skip it and {tasks(manual_waiting_count(implement, [task_id]), 'it')}, "
+                f"and implement goes on without them"),
+        })
+    return answers
+
+
 def instead_why(phase: str) -> str:
     """The why above the way on that stays beside the resume running code
     tasks left waiting on a manual task (fix round 28)."""
@@ -1593,6 +1639,32 @@ def implement_answers(
     return tuple(steps)
 
 
+def gate_decline_steps(
+    plan_arg: str,
+    host_id: str,
+    route: Optional[str],
+    phases: Mapping[str, Mapping[str, Any]],
+) -> Tuple[AnswersStep, ...]:
+    """:func:`manual_gate_decline_answers` for the workflow payload's
+    implement entry while its manual-task gate holds (``manual_gate``),
+    each command in this host's spelling (:func:`phase_command`); ``()``
+    otherwise (fix round 29)."""
+    implement = phases.get("implement") or {}
+    if not implement.get("manual_gate"):
+        return ()
+    steps: List[AnswersStep] = []
+    for entry in manual_gate_decline_answers(implement):
+        flags = list(entry["flags"])
+        steps.append(AnswersStep(
+            command=phase_command(plan_arg, host_id, route, "implement", *flags),
+            why=str(entry["why"]),
+            answers=tuple(
+                flags[index + 1] for index, flag in enumerate(flags[:-1])
+                if flag == "--human-task"),
+        ))
+    return tuple(steps)
+
+
 def implement_resume_why(
     plan_arg: str, *, plan_path: Optional[Union[str, Path]] = None,
 ) -> Optional[str]:
@@ -1731,6 +1803,17 @@ def emit_answer(
                 why = implement_resume_why(plan_arg, plan_path=plan_path)
                 if why:
                     answer = _replace(answer, why=why)
+            else:
+                # Fix round 29 (review of round 28 #1): a manual-task gate's
+                # other way on, the user's decline, as the executor's stop
+                # records it for the tool routes.
+                if workflow is None:
+                    workflow = _workflow_payload(Path(os.path.abspath(str(
+                        plan_arg if plan_path is None else plan_path))), host_id)
+                declines = gate_decline_steps(
+                    plan_arg, host_id, route, workflow.get("phases") or {})
+                if declines:
+                    answer = _replace(answer, answers=declines)
             # Fix round 24: under the line the tool routes' section opens with.
             answer = _replace(answer, lead=resume_lead(answer.phase))
             # Fix round 18 (live run 7, Claude Code stop 01): the native
@@ -1841,9 +1924,22 @@ def emit_resume(
         if len(resume["flags"]) > 1 else None
     )
     try:
-        answers = resume_answers(
-            plan_arg, host_id, route, mode_word, plan_path=plan_path,
-        )
+        if gate_why is not None:
+            # Fix round 29 (review of round 28 #1): a manual-task gate's
+            # answers are the user's decline, read off the workflow on both
+            # legs (the executor's stop records the same ones).
+            answers = [
+                {"command": step.command,
+                 "flags": [RESUME_FLAG] + [
+                     token for answer in step.answers
+                     for token in ("--human-task", answer)],
+                 "why": step.why}
+                for step in gate_decline_steps(plan_arg, host_id, route, phases)
+            ]
+        else:
+            answers = resume_answers(
+                plan_arg, host_id, route, mode_word, plan_path=plan_path,
+            )
     except Exception as exc:  # noqa: BLE001 - advisory: the resume still stands
         print(lookup_failure_line(exc), file=err)
         answers = []

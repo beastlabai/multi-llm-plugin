@@ -233,7 +233,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         metavar='ID=done|skip|retry',
         help='Answer one human task (D6 row 9), repeatable: --human-task '
              'T004=done. Turns the pause-and-ask pause into a process boundary '
-             'instead of a blocked stdin. With --resume it also answers a code '
+             'instead of a blocked stdin. Under a skip strategy (--yes), '
+             'T004=skip says you will not do that manual task: it and the '
+             'tasks after it are skipped at your request, never owed. With '
+             '--resume it also answers a code '
              'task the last run recorded failed (a check that failed), or a '
              'check whose findings hold back the tasks after it: done treats '
              'it as satisfied and runs the tasks after it, skip leaves it and '
@@ -1286,7 +1289,7 @@ def _native_manual_gate_stop(
         "or `util finalize-tracking`. Report the deferred tasks above, then end "
         "the report with the section `util next-command` prints: the resume "
         "that records the manual task done, which runs the code tasks waiting "
-        "on it.")
+        "on it, and the answer that skips them if the user will not do it.")
     eta = metrics_mod.closing_line(
         "implement", done=0, total=0,
         why=(f"{', '.join(gating)} left for you (manual); {len(held)} code "

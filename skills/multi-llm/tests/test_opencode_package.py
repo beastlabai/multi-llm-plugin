@@ -5238,6 +5238,12 @@ class TestResumeCommand:
         assert f'"{beside}"' in result["message"]
         assert "--human-task" not in result["message"].split("`resume_markdown`")[0]
         assert result["resume_markdown"].count("--human-task T001=done") == 1
+        # Fix round 29 (review of round 28 #1): and the user's decline.
+        assert result["resume_markdown"].count("--human-task T001=skip") == 1
+        calls = [option["args"] for option in result["options"] if "args" in option]
+        assert [call["extra_flags"] for call in calls[:2]] == [
+            ["--resume", "--human-task", "T001=done"],
+            ["--resume", "--human-task", "T001=skip"]]
 
     def test_the_plugin_spells_none_of_the_lookup(self, built_package):
         surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
