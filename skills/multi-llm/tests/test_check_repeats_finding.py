@@ -464,3 +464,48 @@ class TestALaterRunsCheck:
         assert "task_own_text" not in state and "task_batch_check" not in state
         set_task_own_text_in_state(state, "T001", "Fix the release check.")
         assert "task_own_text" not in state
+
+
+class TestACheckThatRanAgain:
+    """Fix round 29 (review of round 28, checks #5): T001's record says what
+    its run saw — its own check reported T002's finding of that time — and
+    stays when T002 runs again with another result. summary.md no longer
+    sets that repeat under findings T002 reports now and T001 never did."""
+
+    def _first_run_then_resume(self, repo, capsys, check: dict) -> str:
+        _check_reports(repo)
+        _code_task_reports(repo, T001, [SAME])
+        _run(repo, capsys)
+        _touch(repo)
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_CHECK", json.dumps(check))
+        _implement(repo, "--resume")
+        capsys.readouterr()
+        assert "Check the module" in _dispatched_titles(repo)
+        state = get_or_create_state(repo.plan).state
+        assert state["task_batch_check_repeats"] == {"T001": {"T002": [SAME]}}
+        assert "T001" not in (state.get("task_batch_check") or {})
+        return (repo.phase_dir / "summary.md").read_text(encoding="utf-8")
+
+    def test_another_finding_has_the_repeat_quoted_not_set_under_it(self, repo, capsys):
+        summary = self._first_run_then_resume(
+            repo, capsys, {"passed": False, "findings": [OTHER]})
+        section = summary.split("### T002", 1)[1].split("## ", 1)[0]
+        assert f"- {OTHER}" in section
+        assert "says only what T002 reported: it repeats" not in section, section
+        assert (
+            f"T001 ran this check too, and its own report said only what T002 "
+            f"reported then: \"{SAME}\" — not what T002 reports now, and not "
+            f"counted as T001's own failure." in section
+        ), section
+
+    def test_the_same_finding_again_keeps_the_line(self, repo, capsys):
+        summary = self._first_run_then_resume(
+            repo, capsys, {"passed": False, "findings": [CHECKED]})
+        assert ("T001 ran this check too, and its own report says only what "
+                "T002 reported: it repeats T002's finding") in summary, summary
+
+    def test_a_pass_leaves_the_record_of_what_its_run_saw(self, repo, capsys):
+        summary = self._first_run_then_resume(
+            repo, capsys, {"passed": True, "findings": []})
+        assert "repeated the findings of T002 in T001" in summary, summary
+        assert "own check fails T001" not in _status_text(repo, capsys)
