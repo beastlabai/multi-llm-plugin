@@ -788,9 +788,13 @@ class TestAnExplicitSkipIsTheUsersDecline:
         assert "## Manual Tasks (Deferred)" not in summary
         assert "Waiting On A Manual Task" not in summary
         if "--exec-subagents" in leg:
-            # The closing line says what the run skipped.
-            assert ("phase complete in 0s · T001 skipped at your request; "
-                    "T002, T003 skipped with a skipped task") in out + err
+            # The closing line says what the run skipped (its duration is
+            # the clock's: a loaded machine reads more than 0s).
+            closing = next(line for line in (out + err).splitlines()
+                           if "[ETA] implement: phase complete in " in line)
+            assert closing.endswith(
+                " · T001 skipped at your request; T002, T003 skipped with a "
+                "skipped task"), closing
         # Nothing is owed: no manual task left for the user.
         step = result.get("user_next_step") or {}
         assert not step.get("manual_tasks"), step
