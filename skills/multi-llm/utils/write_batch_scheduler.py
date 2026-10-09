@@ -13300,6 +13300,7 @@ class WriteBatchScheduler:
 
     def _manual_close_note(
         self, deferred: Dict[str, str], plan: Optional[HumanTaskPlan] = None,
+        stop: Optional[Mapping[str, Any]] = None,
     ) -> Optional[str]:
         """How to record the deferred manual tasks done, in the host's
         spelling (``user_commands["answers"]``), or ``None``.
@@ -13308,7 +13309,11 @@ class WriteBatchScheduler:
         result only, never its summary.md, on either leg. The manual tasks
         only: a code task skipped with one is not answerable ``done`` and
         runs on that resume. Fix round 28: only the ones the user can do now
-        (:meth:`_manual_gates`), and the note says what waits on them.
+        (:meth:`_manual_gates`), and the note says what waits on them. Fix
+        round 29 (review of round 28 #2): a run that stopped on a manual-task
+        gate (*stop*) gives the gate's resume alone, the one command its stop
+        names, and the note names the task(s) it records when the list above
+        holds another manual task, which stays listed.
         """
         template = self.user_commands.get("answers")
         if self.kind != "implement" or not template or "{answers}" not in template:
@@ -13318,21 +13323,30 @@ class WriteBatchScheduler:
             if (self._task_by_id(task_id) or {}).get("executor_role") == "human"
             or (self._task_by_id(task_id) or {}).get("is_human")
         )
-        gates = self._manual_gates(plan) if plan is not None else None
-        waiting = 0
-        if gates is not None:
-            manual = [task_id for task_id in manual if task_id in gates["closable"]]
-            waiting = len({
-                code for task_id in manual
-                for code in gates["waiting"].get(task_id, ())
-            })
+        listed = list(manual)
+        named: Optional[List[str]] = None
+        if (stop or {}).get("kind") == "manual-gate":
+            gating = [str(t) for t in (stop or {}).get("manual_task_ids") or []]
+            manual = [task_id for task_id in gating if task_id in listed]
+            waiting = len(set((stop or {}).get("held_task_ids") or []))
+            if set(listed) - set(manual):
+                named = list(manual)
+        else:
+            gates = self._manual_gates(plan) if plan is not None else None
+            waiting = 0
+            if gates is not None:
+                manual = [task_id for task_id in manual if task_id in gates["closable"]]
+                waiting = len({
+                    code for task_id in manual
+                    for code in gates["waiting"].get(task_id, ())
+                })
         if not manual:
             return None
         from .next_phase import manual_close_note
 
         return manual_close_note(template.replace(
             "{answers}", " ".join(f"--human-task {task_id}=done" for task_id in manual)),
-            len(manual), waiting=waiting)
+            len(manual), waiting=waiting, named=named)
 
     def _manual_gates(self, plan: Optional[HumanTaskPlan]) -> Optional[Dict[str, Any]]:
         """:func:`plan_manual_gates` over this run's decomposition and
@@ -13617,7 +13631,7 @@ class WriteBatchScheduler:
             lines += ["| Task | Reason |", "|------|--------|"]
             for task_id, reason in sorted(deferred.items()):
                 lines.append(f"| {task_id} | {reason} |")
-            note = self._manual_close_note(deferred, plan)
+            note = self._manual_close_note(deferred, plan, stop=result.stop)
             if note:
                 lines += ["", note]
         if declined:

@@ -405,11 +405,50 @@ def _manual_tasks(
         if isinstance(entry, Mapping) and task_id(entry.get("id"))
     )
     note = command = None
-    ids = manual_close_ids(implement)
+    ids = manual_note_ids(implement)
     if manual and ids and template is not None and plan_arg is not None:
-        note = manual_close_lead(len(ids), waiting=manual_waiting_count(implement, ids))
+        note = manual_close_lead(
+            len(ids), waiting=manual_waiting_count(implement, ids),
+            named=manual_note_named(implement, ids))
         command = close_command(template, plan_arg, ids)
     return manual, note, command
+
+
+def manual_note_ids(implement: Mapping[str, Any]) -> List[str]:
+    """The manual tasks the note under the deferred list records done: while
+    a manual-task gate holds (``manual_gate``), only the gate's
+    (:func:`manual_gate_ids`) — the resume the stop's section leads with —
+    else every one the user can do now (:func:`manual_close_ids`).
+
+    Fix round 29 (review of round 28 #2): with a free manual task beside the
+    gating one, summary.md's note, ``status``'s trailer and the lookup's note
+    gave ``--human-task T001=done --human-task T002=done`` beside the
+    section's ``--human-task T002=done``: two different record-done commands
+    on one surface. The free task stays listed under the manual tasks left
+    for the user; its command comes once the gate's resume has run."""
+    if implement.get("manual_gate"):
+        ids = manual_gate_ids(implement)
+        if ids:
+            return ids
+    return manual_close_ids(implement)
+
+
+def manual_note_named(
+    implement: Mapping[str, Any], ids: Sequence[str],
+) -> Optional[List[str]]:
+    """*ids*, when the note's command records fewer manual tasks than the
+    deferred list names (a gate beside a free manual task, fix round 29), so
+    its lead names them rather than saying "this manual task"; else
+    ``None``."""
+    if not implement.get("manual_gate"):
+        return None
+    # A deferred entry with no `waits_on` is a manual task itself.
+    manual = {
+        str(entry.get("id")) for entry in implement.get("manual_tasks") or ()
+        if isinstance(entry, Mapping) and entry.get("id")
+        and not entry.get("waits_on")
+    }
+    return list(ids) if manual - set(ids) else None
 
 
 def manual_waiting_count(
@@ -468,14 +507,15 @@ def manual_gate_flags(implement: Mapping[str, Any]) -> List[str]:
 
 def gate_resume_closes_the_manual_tasks(implement: Mapping[str, Any]) -> bool:
     """Whether the resume a stopped implement's section leads with
-    (:func:`_resume_flags` under ``manual_gate``) is the very command that
-    records the deferred manual tasks done: the gate's ids are every one
-    :func:`manual_close_ids` names (the merge of fix round 28). A stop's
-    notice then names the tasks and leaves that command to the section."""
+    (:func:`_resume_flags` under ``manual_gate``) is the very command the
+    note under the deferred list gives (the merge of fix round 28): while a
+    gate holds, the note records the gate's manual tasks done and no other
+    (:func:`manual_note_ids`, fix round 29). A stop's notice then names the
+    tasks and leaves that command to the section."""
     if not implement.get("manual_gate"):
         return False
     ids = manual_gate_ids(implement)
-    return bool(ids) and ids == manual_close_ids(implement)
+    return bool(ids) and ids == manual_note_ids(implement)
 
 
 def _manual_gate_names(implement: Mapping[str, Any], ids: Sequence[str]) -> str:
@@ -639,7 +679,10 @@ def close_command(template: str, plan_arg: str, task_ids: Sequence[str]) -> str:
     return template.replace(ARGS_SLOT, args)
 
 
-def manual_close_lead(count: Optional[int] = None, *, waiting: int = 0) -> str:
+def manual_close_lead(
+    count: Optional[int] = None, *, waiting: int = 0,
+    named: Optional[Sequence[str]] = None,
+) -> str:
     """The sentence that leads into the command closing deferred manual
     tasks (:func:`close_command`), ending with a colon: what
     ``user_next_step.manual_tasks_note`` and ``[MANUAL_TASK_NOTE]`` say, the
@@ -656,6 +699,10 @@ def manual_close_lead(count: Optional[int] = None, *, waiting: int = 0) -> str:
     nine code tasks waiting on T010): implement has not run those, and the
     command that records the manual task done runs them, so the sentence
     says that instead.
+
+    *named* (fix round 29): the ids the command records, when the list
+    above it names other manual tasks too (a manual-task gate beside a free
+    one): the sentence names them instead of saying "this manual task".
     """
     if waiting:
         tasks = (
@@ -663,13 +710,16 @@ def manual_close_lead(count: Optional[int] = None, *, waiting: int = 0) -> str:
             else f"the {waiting} code tasks that wait"
         )
         if count == 1:
+            which = f"manual task {named[0]}" if named else "this manual task"
             return (
-                f"Implement has not run {tasks} on this manual task. Once you "
+                f"Implement has not run {tasks} on {which}. Once you "
                 f"have done it by hand, this command records it done and runs "
                 f"{'it' if waiting == 1 else 'them'}:"
             )
+        which = (
+            f"manual tasks {', '.join(named)}" if named else "these manual tasks")
         return (
-            f"Implement has not run {tasks} on these manual tasks. Once you "
+            f"Implement has not run {tasks} on {which}. Once you "
             "have done one by hand, this command records it done and runs what "
             "no longer waits; keep a --human-task answer only for each task you "
             "did:"
@@ -688,6 +738,7 @@ def manual_close_lead(count: Optional[int] = None, *, waiting: int = 0) -> str:
 
 def manual_close_note(
     command: str, count: Optional[int] = None, *, waiting: int = 0,
+    named: Optional[Sequence[str]] = None,
 ) -> str:
     """The one plain line that says how to close deferred manual tasks, for a
     surface that is one line of text (a summary, ``status``'s trailer).
@@ -697,7 +748,7 @@ def manual_close_note(
     copied that into the command's fence). *count* and *waiting* as in
     :func:`manual_close_lead`.
     """
-    return f"{manual_close_lead(count, waiting=waiting)} {command}"
+    return f"{manual_close_lead(count, waiting=waiting, named=named)} {command}"
 
 
 # ---------------------------------------------------------------------------
