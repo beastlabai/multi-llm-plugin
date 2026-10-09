@@ -35,10 +35,12 @@ row                     what the @latest image proves, and what it does not
                         artifact's checksum (measured: ``19f40a9c…`` against the
                         recorded ``416de595…``). A pin is the bytes we fetch, and
                         those bytes are gone. Named, with the command.
-``install: pypi``       REFUSED. ``aider``'s pin is a whole ``--generate-hashes``
-                        requirements file. The image has the installed versions
-                        but not the hashes, which come from a resolver run
-                        against the index. Named, with the command.
+``install: pypi``       REFUSED. ``aider``'s and ``vibe``'s pins are whole
+                        ``--generate-hashes`` requirements files. The image has
+                        the installed versions but not the hashes, which come
+                        from a resolver run against the index. Named, with the
+                        command: the REGENERATE recipe each file's own header
+                        documents, since the resolver flags differ by row.
 base image, uv,         REFUSED, and not because of missing evidence: the
 platform                ``latest`` build holds them pinned on purpose, so it can
                         never be the thing that moved them. They change by hand,
@@ -544,7 +546,49 @@ def plan_artifacts(lock: dict, census: dict[str, dict], evidence: Path,
                     "checksum and are asserted to agree"))
 
 
-def plan_untouchable(lock: dict, census: dict[str, dict], plan: Plan) -> None:
+#: The marker that opens a requirements file's own regenerate recipe.
+REGENERATE_MARKER = "# REGENERATE"
+
+
+def regenerate_recipe(requirements: Path, version: str) -> str | None:
+    """The REGENERATE command a requirements file's header documents, for *version*.
+
+    Each hash-pinned requirements file carries its own resolver recipe in its
+    header, because the flags differ by row: aider resolves for the base image's
+    3.11, vibe for the pinned CPython 3.12 standalone, and both pass
+    ``--no-header --no-annotate`` so the hand-written header survives. The recipe
+    is the indented comment lines after ``# REGENERATE``, up to the first blank
+    comment line after them, with ``<version>`` replaced. ``None`` when the file
+    is missing or carries no recipe.
+    """
+    try:
+        lines = requirements.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    start = next((index for index, line in enumerate(lines)
+                  if line.startswith(REGENERATE_MARKER)), None)
+    if start is None:
+        return None
+    recipe: list[str] = []
+    indent = 0
+    for line in lines[start + 1:]:
+        if not line.startswith("#"):
+            break
+        body = line[1:].rstrip()
+        if not body.strip():
+            if recipe:
+                break
+            continue
+        if not recipe:
+            indent = len(body) - len(body.lstrip())
+        recipe.append(body[indent:] if body[:indent].isspace() else body.strip())
+    if not recipe:
+        return None
+    return "\n".join(recipe).replace("<version>", version)
+
+
+def plan_untouchable(lock: dict, census: dict[str, dict], plan: Plan,
+                     container_dir: Path = HERE) -> None:
     """The rows this script will never move, stated as data rather than silence."""
     for row in lock["clis"]:
         if row.get("install") != "pypi":
@@ -554,13 +598,21 @@ def plan_untouchable(lock: dict, census: dict[str, dict], plan: Plan) -> None:
         installed = seen.get("installed")
         if not installed or installed == str(row["version"]):
             continue
+        # The file's own recipe, not one spelling for every row: a single
+        # `--python-version 3.11` hint was unsatisfiable for vibe, which needs
+        # 3.12 (2026-10-09), and dropped `--no-header --no-annotate` for both.
+        command = regenerate_recipe(
+            container_dir / row["requirements"], str(installed)) or (
+            f"uv pip compile --generate-hashes --no-header --no-annotate "
+            f"-o {row['requirements']} - <<< '{row['package']}=={installed}'"
+            f"  # add the --python-version/--python-platform the image's "
+            f"interpreter for this row needs")
         plan.refusals.append(Refused(
             row_id, "pypi", str(row["version"]), str(installed),
             "the pin is a --generate-hashes requirements file; the image has the "
             "installed version but not the hashes, which only a resolver run "
             "against the index can produce",
-            f"uv pip compile --generate-hashes --python-version 3.11 "
-            f"-o {row['requirements']} - <<< '{row['package']}=={installed}'"))
+            command))
 
 
 # --------------------------------------------------------------------------- #
@@ -710,7 +762,7 @@ def cmd_apply(args) -> int:
             + (", ".join(moved) or "none"),
             refusal.command))
     plan_artifacts(lock, rows, evidence, plan)
-    plan_untouchable(lock, rows, plan)
+    plan_untouchable(lock, rows, plan, container_dir)
 
     for refusal in plan.refusals:
         print(f"NOT MOVED  {refusal.row:<12} {refusal.pinned} -> "

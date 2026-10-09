@@ -328,6 +328,35 @@ class TestTheArtifactRowsMoveOnlyWhenTheBytesSurvive:
         [refused] = [entry for entry in record["not_moved"] if entry["row"] == "aider"]
         assert "--generate-hashes" in refused["command"]
 
+    def test_each_pypi_row_is_given_its_own_files_recipe(
+            self, container_dir, evidence, tmp_path):
+        """2026-10-09: one f-string served every PyPI row with
+        `--python-version 3.11`, and the hint printed for vibe 2.26.1 was
+        unsatisfiable (`mistral-vibe` needs >=3.12). Each requirements file
+        documents its own REGENERATE recipe; the hint is that recipe."""
+        for name in ("aider-requirements.txt", "vibe-requirements.txt"):
+            shutil.copy2(CONTAINER_DIR / name, container_dir / name)
+        assert _apply(container_dir, evidence({"aider": "0.90.0", "vibe": "9.1.0"}),
+                      tmp_path) == 2
+        record = json.loads((tmp_path / "record.json").read_text("utf-8"))
+        commands = {entry["row"]: entry["command"] for entry in record["not_moved"]}
+        assert "'mistral-vibe==9.1.0'" in commands["vibe"]
+        assert "--python-version 3.12" in commands["vibe"]
+        assert "'aider-chat==0.90.0'" in commands["aider"]
+        assert "--python-version 3.11" in commands["aider"]
+        for command in commands.values():
+            assert "--no-header --no-annotate" in command
+            assert "<version>" not in command
+
+    def test_a_requirements_file_without_a_recipe_still_names_the_resolver_run(
+            self, container_dir, evidence, tmp_path):
+        assert _apply(container_dir, evidence({"vibe": "9.1.0"}), tmp_path) == 2
+        record = json.loads((tmp_path / "record.json").read_text("utf-8"))
+        [refused] = [entry for entry in record["not_moved"] if entry["row"] == "vibe"]
+        assert "mistral-vibe==9.1.0" in refused["command"]
+        assert "--no-header --no-annotate" in refused["command"]
+        assert "--python-version 3.11" not in refused["command"]
+
 
 # --------------------------------------------------------------------------- #
 # What it refuses outright
