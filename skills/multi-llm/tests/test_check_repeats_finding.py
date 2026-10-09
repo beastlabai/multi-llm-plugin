@@ -101,6 +101,17 @@ class TestTheReading:
         task = {"task_id": "T007", "task_title": "Write the note", "depends_on": ["T002"]}
         assert repeated_findings_for([task], task, state) == {}
 
+    def test_an_accepted_check_is_never_one_upstream_or_not(self):
+        """Fix round 29 (review of round 28, checks #2): T005 does not depend
+        on T002, so T002's acceptance never released it; the accepted
+        finding it reports again stays its own failure (round 23's scope)."""
+        state = {
+            **self.STATE,
+            "task_status_reasons": {"T002": "accepted — you answered --human-task T002=done"},
+        }
+        task = {"task_id": "T005", "task_title": "Add the stamp", "depends_on": []}
+        assert repeated_findings_for([task], task, state) == {}
+
     def test_the_comparison_is_the_strict_one_without_f3s_annotation(self):
         from utils.write_batch_scheduler import split_repeated_findings
 
