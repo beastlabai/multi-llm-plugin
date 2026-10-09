@@ -2673,7 +2673,7 @@ CODEX_ENTRY = dict(dict(HOSTS).get("codex") or {})
 PACKAGE_PROBES = [dict(p) for p in (CODEX_ENTRY.get("package_probes") or [])]
 PACKAGE_PROBE_IDS = [p["id"] for p in PACKAGE_PROBES]
 #: The plugin floor, from the matrix cell that names it.
-CODEX_PLUGIN_FLOOR = str(CODEX_ENTRY.get("plugin_floor") or "0.161.0")
+CODEX_PLUGIN_FLOOR = str(CODEX_ENTRY.get("plugin_floor") or "0.162.0")
 CODEX_PLUGIN_ID = "multi-llm@beastlabai"
 CODEX_PLUGIN_TABLE = f'[plugins."{CODEX_PLUGIN_ID}"]'
 
