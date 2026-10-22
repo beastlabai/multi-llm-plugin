@@ -3,7 +3,7 @@
 # `uv pip install --require-hashes -r` against this file is the PyPI twin of
 # `npm ci` against package-lock.json: the version is named, and so is every byte
 # behind it. `mistral-vibe` pulls 96 transitive packages, and a bare
-# `pip install mistral-vibe==2.26.1` re-resolves every one of them per build and
+# `pip install mistral-vibe==3.0.1` re-resolves every one of them per build and
 # accepts whatever wheel PyPI serves for each today.
 #
 # THE INTERPRETER IS NOT THE BASE IMAGE'S, and that is why the resolution flags
@@ -434,13 +434,13 @@ miniaudio==1.71 \
     --hash=sha256:f4a44b70b66628b0c307e40ae0ae857695978cae18462179b806d8edc807d416 \
     --hash=sha256:f7042af3a4db5b90e5efaea257b6dfcff9389239ea643e6b0faa80169528e2e6 \
     --hash=sha256:ff51e2887bb673e2e757752b586b3dc924d59aa5fbcae9bbc45f4a111bd3262b
-mistral-vibe==2.26.1 \
-    --hash=sha256:0d2c181bf162ac57f0b6a7a9d43c8b0714873099eaf0be2d23bd5cc809350103 \
-    --hash=sha256:1ceb43e38a2e82cb8c54e1032b011874f8422e998cf87b4a3fdf58704133de55 \
-    --hash=sha256:30c6b973d73aff8784b918b5b1d14dc0aade16d15d4ce1dffc868a6f35beb14d \
-    --hash=sha256:515d8b5b10a5a2b10eb4628294d30ca90a27e9314f4d8aaea7514b733179ee36 \
-    --hash=sha256:896a432651b922b7e16f01e26b4fce55b4ebd7a5ca122cf82c1e9d6a8a849821 \
-    --hash=sha256:e92402b2a1705c66463cad9d1f33d549ea2d8fc1bb608ec228c7acaf49ef4332
+mistral-vibe==3.0.1 \
+    --hash=sha256:20fbd27cf912b92490e55efbd17745b5187757e9e714f42548579efde14315b4 \
+    --hash=sha256:3016ea464719ac99a62f6c5ff4ffa013f3ac0c5ddf03c3def486133ebdc7094f \
+    --hash=sha256:4639e0551f484e40d410017ce54e6d074cd1094403ca1983f88c039939abed56 \
+    --hash=sha256:6847f991183b9bce86ee60a7292c2e85ccec780a47ee114c27e940e6bf19e318 \
+    --hash=sha256:aa4f42b44911b198555699e148f8e42c33703eee7f7af40f09d8e1f749486041 \
+    --hash=sha256:b4d1ab55d6ccfc65c658fb19b09b46734e3bf14fd70ca90a5b227a5c640c5882
 mistralai==2.6.0 \
     --hash=sha256:4b7202b0cab84ea03f8ff4a933c8cfc615b3057520d9d76467c07aa23939dab2 \
     --hash=sha256:531a86292ad498fc0fcd6dfcd480a3f4db9e92f558e14ffb22172824831e3a6e

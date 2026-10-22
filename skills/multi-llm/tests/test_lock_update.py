@@ -43,6 +43,11 @@ def lock(container_dir):
     return yaml.safe_load((container_dir / "cli-versions.lock").read_text("utf-8"))
 
 
+@pytest.fixture
+def pinned_versions(lock):
+    return {row["id"]: row["version"] for row in lock["clis"]}
+
+
 def _census(lock, moves: dict[str, str], mode: str = "latest") -> dict:
     """The census the build's last layer writes, with `moves` applied."""
     return {
@@ -118,7 +123,7 @@ def _apply(container_dir, evidence_root, tmp_path, **kwargs):
 # --------------------------------------------------------------------------- #
 class TestTheNpmLayerMovesAsOneTree:
     def test_the_lock_manifest_and_lockfile_all_land_on_the_new_version(
-            self, container_dir, evidence, tmp_path):
+            self, container_dir, evidence, tmp_path, pinned_versions):
         moves = {"codex": "0.147.0", "gemini": "0.55.1"}
         assert _apply(container_dir, evidence(moves, npm_versions=moves),
                       tmp_path) == 0
@@ -127,10 +132,8 @@ class TestTheNpmLayerMovesAsOneTree:
         rows = {row["id"]: row["version"] for row in lock["clis"]}
         assert rows["codex"] == "0.147.0" and rows["gemini"] == "0.55.1"
         # Untouched rows keep their pin: the drift probe said nothing about them.
-        # RESTATED, not read from the lock — the point is to disagree with a bad
-        # edit, so it moves by hand when the pin does (2026-09-30: 3.0.64 -> 3.0.66,
-        # 2026-10-08: 3.0.66 -> 3.0.69, 2026-10-09: 3.0.69 -> 3.0.70).
-        assert rows["cline"] == "3.0.70"
+        # Compare with the snapshot taken before the editor ran.
+        assert rows["cline"] == pinned_versions["cline"]
 
         manifest = json.loads((container_dir / "package.json").read_text("utf-8"))
         assert manifest["dependencies"]["@openai/codex"] == "0.147.0"
@@ -156,15 +159,15 @@ class TestTheNpmLayerMovesAsOneTree:
                 assert manifest["dependencies"][row["package"]] == row["version"]
 
     def test_a_row_the_two_witnesses_disagree_about_stops_the_layer(
-            self, container_dir, evidence, tmp_path):
+            self, container_dir, evidence, tmp_path, pinned_versions):
         """`--version` said one thing, the lockfile another: that is not evidence."""
         root = evidence({"codex": "0.147.0"}, npm_versions={"codex": "0.148.0"})
         assert _apply(container_dir, root, tmp_path) == 2
         lock = yaml.safe_load((container_dir / "cli-versions.lock").read_text("utf-8"))
-        assert {row["id"]: row["version"] for row in lock["clis"]}["codex"] == "0.162.0"
+        assert {row["id"]: row["version"] for row in lock["clis"]}["codex"] == pinned_versions["codex"]
 
     def test_a_new_unhashed_dependency_stops_the_layer_but_not_the_run(
-            self, container_dir, evidence, tmp_path):
+            self, container_dir, evidence, tmp_path, pinned_versions):
         """A tarball installed by URL alone is a trust decision, not bookkeeping."""
         root = evidence({"codex": "0.147.0", "grok": "1.0.3"},
                         npm_versions={"codex": "0.147.0"},
@@ -173,7 +176,7 @@ class TestTheNpmLayerMovesAsOneTree:
 
         lock = yaml.safe_load((container_dir / "cli-versions.lock").read_text("utf-8"))
         rows = {row["id"]: row["version"] for row in lock["clis"]}
-        assert rows["codex"] == "0.162.0", "the npm layer must not have moved"
+        assert rows["codex"] == pinned_versions["codex"], "the npm layer must not have moved"
         assert rows["grok"] == "1.0.3", (
             "the artifact rows are independent files and must still move"
         )
@@ -213,7 +216,7 @@ class TestTheNpmLayerMovesAsOneTree:
         )
 
     def test_an_unadjudicated_entry_still_stops_it_when_a_sibling_exists(
-            self, container_dir, evidence, tmp_path):
+            self, container_dir, evidence, tmp_path, pinned_versions):
         """Reading the allowlist must not become "allow everything".
 
         The sibling is present and names a DIFFERENT dependency, which is the
@@ -234,7 +237,7 @@ class TestTheNpmLayerMovesAsOneTree:
 
         lock = yaml.safe_load((container_dir / "cli-versions.lock").read_text("utf-8"))
         rows = {row["id"]: row["version"] for row in lock["clis"]}
-        assert rows["codex"] == "0.162.0", "the npm layer must not have moved"
+        assert rows["codex"] == pinned_versions["codex"], "the npm layer must not have moved"
         assert rows["grok"] == "1.0.3", "and the artifact rows must still move"
         record = json.loads((tmp_path / "record.json").read_text("utf-8"))
         assert any(entry["row"] == "npm layer" for entry in record["not_moved"])
@@ -313,9 +316,10 @@ class TestTheArtifactRowsMoveOnlyWhenTheBytesSurvive:
     def test_an_archive_row_is_refused_with_the_command(
             self, container_dir, evidence, tmp_path):
         """goose is unpacked and the tarball discarded: the checksum is gone."""
+        before = yaml.safe_load((container_dir / "cli-versions.lock").read_text("utf-8"))
         assert _apply(container_dir, evidence({"goose": "1.46.0"}), tmp_path) == 2
         lock = yaml.safe_load((container_dir / "cli-versions.lock").read_text("utf-8"))
-        assert lock["artifacts"]["goose"]["version"] == "1.54.0"
+        assert lock["artifacts"]["goose"] == before["artifacts"]["goose"]
 
         record = json.loads((tmp_path / "record.json").read_text("utf-8"))
         [refused] = [entry for entry in record["not_moved"] if entry["row"] == "goose"]
