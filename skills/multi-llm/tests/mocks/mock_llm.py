@@ -1526,7 +1526,7 @@ def parse_provider_args(provider: str) -> tuple[argparse.Namespace, str]:
 #: These are the releases the shipped parser fixtures were captured from, so a
 #: mock run passes the D3m minimum-version gate the way a supported CLI does.
 VERSION_STRINGS = {
-    "codex": "codex-cli 0.161.0",
+    "codex": "codex-cli 0.163.0",
     "opencode": "1.19.3",
     # Moved 2.1.224 -> 2.1.232 with the adapter, 2026-08-20, and to 2.1.293 on
     # 2026-10-08: the shipped claude-code fixtures were captured at 2.1.293 and

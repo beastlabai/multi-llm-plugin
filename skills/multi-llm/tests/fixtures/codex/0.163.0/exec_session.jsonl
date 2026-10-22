@@ -1,0 +1,8 @@
+{"type":"thread.started","thread_id":"01a1634e-461b-7010-9705-023aba1bcdac"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"/bin/bash -lc 'sleep 3; echo done > s.txt'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"/bin/bash -lc 'sleep 3; echo done > s.txt'","aggregated_output":"","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc bash","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc bash","aggregated_output":"user@host:/work/tree$ echo tty > t.txt\r\nuser@host:/work/tree$ exit\r\nexit\r\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"[]"}}
+{"type":"turn.completed","usage":{"input_tokens":5,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}}
