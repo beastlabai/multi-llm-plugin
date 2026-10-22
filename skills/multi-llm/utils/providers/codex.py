@@ -351,13 +351,16 @@ PLUGIN_LANDLOCK_WRAPPER = "landlock_exec"
 #: names a newer installed codex as the likely cause. Raising it needs the
 #: allow-list re-measurement (plan §8.2) to pass on the newer build.
 PLUGIN_LANDLOCK_MEASURED_THROUGH: Tuple[str, str] = (
-    "0.161.0",
+    "0.163.0",
     "measured 2026-09-29 on 0.158.0 (preflight step 1), re-measured "
     "2026-09-30 on 0.159.0 and 0.159.1 (step 1c), on 0.159.2 and on "
     "2026-10-08 on 0.161.0 (tests/test_codex_jail_rig.py, the promoted rig, "
     "all 12 rows): a read-only turn, a code-mode turn and a plan-file edit "
     "completed inside the jail; every write outside the allow-list denied; "
-    "codex writes nothing new outside $CODEX_HOME",
+    "codex writes nothing new outside $CODEX_HOME. Re-measured 2026-10-22 "
+    "on 0.163.0: all 12 promoted rig rows passed, including strace allow-list "
+    "and positive controls, denied repo writes, in-place plan editing, "
+    "repo-wide toolchain execution and seeded-home integrity; no grants widened",
 )
 
 #: The env names the rung's canary reads. The targets reach the script through
@@ -1144,7 +1147,11 @@ class CodexProvider(LLMProvider):
     # installed 0.161.0 gave byte-identical streams for the three kept cases
     # (thread ids and the commit hash aside) and the same event kinds and keys
     # for all five scripted cases (`tests/fixtures/codex/0.161.0/`).
-    verified_version = "0.161.0"
+    # 0.163.0 since 2026-10-22: four offline recaptures (read_only_clean,
+    # quoting_render, writes_patches_sessions, exec_session) retain the event
+    # kinds and keys of 0.156.1. See tests/fixtures/codex/0.163.0/README.md;
+    # collaboration, hosted tools and code mode were not re-measured.
+    verified_version = "0.163.0"
 
     # M14/§5.4.1(a) — the exemption, as data. Each of these was re-verified
     # FUNCTIONALLY (not merely found in help text) at the declared floor above

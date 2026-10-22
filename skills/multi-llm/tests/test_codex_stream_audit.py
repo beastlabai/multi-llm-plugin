@@ -100,20 +100,26 @@ class TestTheCapturedFixtures:
              if path.is_dir() and path.name[0].isdigit()),
             key=lambda name: tuple(int(part) for part in name.split(".")),
         )
-        assert newest == "0.161.0"
+        assert newest == "0.163.0"
         assert CodexProvider().verified_version == newest
 
-    @pytest.mark.parametrize("version", ["0.160.0", "0.160.1", "0.161.0"])
-    @pytest.mark.parametrize("name", [
-        "read_only_clean.jsonl", "quoting_render.jsonl", "collab_spawn_agent.jsonl",
+    @pytest.mark.parametrize("version,name", [
+        (version, name)
+        for version in ("0.160.0", "0.160.1", "0.161.0")
+        for name in ("read_only_clean.jsonl", "quoting_render.jsonl", "collab_spawn_agent.jsonl")
+    ] + [
+        ("0.163.0", name) for name in (
+            "read_only_clean.jsonl", "quoting_render.jsonl",
+            "writes_patches_sessions.jsonl", "exec_session.jsonl",
+        )
     ])
     def test_each_recapture_parses_and_keeps_the_0_156_1_event_shapes(
         self, name, version,
     ):
         """2026-10-02 (0.160.0), 2026-10-06 (0.160.1) and 2026-10-08
-        (0.161.0): the offline rig re-run on the installed codex (the
-        version-lag WARN's cause was the pin trailing the install). Same event
-        kinds, same keys."""
+        (0.161.0), and 2026-10-22 (0.163.0): the offline rig re-run on the
+        installed codex (the version-lag WARN's cause was the pin trailing
+        the install). Same event kinds, same keys."""
         newer = FIXTURES.parent / version / name
         result = CodexProvider().parse_output(newer.read_text(), "")
         assert result["success"] is True and result["data"] == []
@@ -131,6 +137,17 @@ class TestTheCapturedFixtures:
         # 0.156.1 also emitted an `error` item (a deprecation notice) that 0.160.0
         # no longer does; nothing the parser reads is new.
         assert shapes(newer) - shapes(FIXTURES / name) == set()
+
+    @pytest.mark.parametrize("name,clean", [
+        ("read_only_clean.jsonl", True),
+        ("quoting_render.jsonl", False),
+        ("writes_patches_sessions.jsonl", False),
+        ("exec_session.jsonl", False),
+    ])
+    def test_0_163_0_recaptures_preserve_the_readonly_verdict(self, name, clean):
+        stream = (FIXTURES.parent / "0.163.0" / name).read_text()
+        assert audit_codex_stream(stream).clean is clean
+        assert "/home/" not in stream and "/tmp/" not in stream
 
     def test_command_is_one_wrapped_string_and_shlex_recovers_the_argv(self):
         commands = [e["item"]["command"] for e in _events("quoting_render.jsonl")
