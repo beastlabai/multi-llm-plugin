@@ -65,6 +65,13 @@ _RUN_BUNDLE_RE = re.compile(r"^\d{8}T\d{6}Z(?:-[\w.-]+)?$")
 #: tracked files, and a plugin install would have copied all of it. `0` disables
 #: the sweep; `MLLM_E2E_RUNS_KEEP` overrides it.
 RUNS_KEEP_DEFAULT = 8
+# Hold each run's lease until the driver exits: session-scoped graders read
+# evidence long after run_row returns. Keep lock files outside the bundles so
+# acquiring a lease never changes their recorded digests.
+_RUN_LEASES: dict[Path, object] = {}
+_RUN_LEASE_MUTEX = threading.Lock()
+
+
 RECORD_SCHEMA = RECORDS / "record.schema.json"
 #: Written by `verify_versions.py` in the final build layer: what the image really
 #: installed, as opposed to what `cli-versions.lock` asked for. It is the only
@@ -83,6 +90,27 @@ SKILL_ROOT = HERE.parents[1]
 DEFAULT_IMAGE = os.environ.get("MLLM_E2E_IMAGE", "mllm-e2e:local")
 
 
+def retain_run(run_root: Path) -> None:
+    """Protect a run from other processes' retention sweeps for this session."""
+    if os.name != "posix":
+        return  # prune_runs also declines to sweep without POSIX locks
+    import fcntl
+
+    root = run_root.resolve()
+    with _RUN_LEASE_MUTEX:
+        if root in _RUN_LEASES:
+            return
+        locks = root.parent / ".run-locks"
+        locks.mkdir(parents=True, exist_ok=True)
+        lease = (locks / root.name).open("a")
+        try:
+            fcntl.flock(lease, fcntl.LOCK_SH)
+        except BaseException:
+            lease.close()
+            raise
+        _RUN_LEASES[root] = lease
+
+
 def prune_runs(runs_root: Path | None = None, keep: int | None = None,
                protect: Path | None = None) -> list[Path]:
     """Delete all but the newest `keep` run bundles; return what was removed.
@@ -90,7 +118,8 @@ def prune_runs(runs_root: Path | None = None, keep: int | None = None,
     Ordering is by directory NAME, which is a UTC stamp — a real chronology that
     does not move when a filesystem restamps mtimes (a copy, a restore, a
     `chmod -R`). `protect` survives however old it sorts, which is what lets the
-    sweep run *during* a row rather than only between them.
+    sweep run *during* a row rather than only between them. Runs leased by any
+    active driver survive until that process exits, including later grading.
 
     Best-effort by construction: a bundle another process still holds open can
     fail to unlink, and a retention sweep is never a reason to fail a run.
@@ -102,8 +131,11 @@ def prune_runs(runs_root: Path | None = None, keep: int | None = None,
             keep = int(raw) if raw else RUNS_KEEP_DEFAULT
         except ValueError:
             keep = RUNS_KEEP_DEFAULT
-    if keep <= 0 or not root.is_dir():
+    if keep <= 0 or not root.is_dir() or os.name != "posix":
         return []
+    import fcntl
+
+    locks = root / ".run-locks"
     kept = protect.resolve() if protect else None
     bundles = sorted(
         (p for p in root.iterdir()
@@ -115,7 +147,12 @@ def prune_runs(runs_root: Path | None = None, keep: int | None = None,
         if kept is not None and path.resolve() == kept:
             continue
         try:
-            shutil.rmtree(path)
+            locks.mkdir(exist_ok=True)
+            # Never unlink these zero-byte lock files: waiters must keep using
+            # the same inode even if a timestamp is reused for another run.
+            with (locks / path.name).open("a") as lease:
+                fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                shutil.rmtree(path)
         except OSError:
             continue
         removed.append(path)
@@ -3457,6 +3494,7 @@ def run_row(row: Row, posture: dict | None = None, image: str = DEFAULT_IMAGE,
     utc = utc or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     runs_root = runs_root or RUNS
     run_root = runs_root / utc
+    retain_run(run_root)
     # The whole-lane cap, claimed before the bundle directory is even made: a
     # refused row must leave nothing on disk that reads like a run.
     MATRIX.claim(row.row_id, run_root)

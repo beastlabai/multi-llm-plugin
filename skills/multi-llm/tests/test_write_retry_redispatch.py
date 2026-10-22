@@ -458,3 +458,54 @@ def test_a_failed_dispatch_with_no_result_file_draws_no_verdict_warning(env):
     assert result.outcomes[0].status == executor.STATUS_UNPARSEABLE
     assert not (env.phase_dir / "apply_batch_0.json").exists()
     assert not [line for line in lines if VERDICT_WARNING in line], lines
+
+
+@pytest.mark.parametrize("mode", ["full", "improve-plan", "improve-code"])
+def test_parent_runtime_files_are_not_runner_edits(env, mode):
+    from types import SimpleNamespace
+    from utils import detach
+
+    parent = env.out_dir / mode
+    parent.mkdir()
+    env.monkeypatch.setattr(detach, "_ACTIVE", SimpleNamespace(phase_dir=str(parent)))
+    scheduler = env.scheduler([env.apply_task(0)])
+    before = scheduler._census()
+    for name in (".status.json", ".status.lock", "orchestrator-run.log"):
+        (parent / name).write_text("runtime update\n")
+    assert scheduler._census() == before
+    # A source edit, a sibling artifact and a composite result are still visible.
+    (env.root / "src/a.py").write_text("changed source bytes\n")
+    (parent / "result.json").write_text("changed result\n")
+    sibling = env.out_dir / "review-plan"
+    sibling.mkdir()
+    (sibling / ".status.json").write_text("unrelated phase\n")
+    after = scheduler._census()
+    changed = {p for p in set(before) | set(after) if before.get(p) != after.get(p)}
+    assert changed == {"src/a.py", f".multi-llm/p/{mode}/result.json", ".multi-llm/p/review-plan/.status.json"}
+
+
+def test_report_reask_survives_parent_heartbeat_and_log_updates(env):
+    from types import SimpleNamespace
+    from utils import detach, write_batch_scheduler as scheduler_module
+
+    parent = env.out_dir / "full"
+    parent.mkdir()
+    env.monkeypatch.setattr(detach, "_ACTIVE", SimpleNamespace(phase_dir=str(parent)))
+    env.edits([_patch_edit(env.plan)], prose=True)
+    env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESULT", json.dumps(GOOD))
+    original = scheduler_module.dispatch_task
+    fingerprints = []
+
+    def dispatch(*args, tree_fingerprint=None, **kwargs):
+        def fingerprint(context):
+            fingerprints.append(context)
+            for name in (".status.json", "orchestrator-run.log"):
+                (parent / name).write_text(f"parent update {len(fingerprints)}\n")
+            return tree_fingerprint(context)
+        return original(*args, tree_fingerprint=fingerprint, **kwargs)
+
+    env.monkeypatch.setattr(scheduler_module, "dispatch_task", dispatch)
+    result = env.scheduler([env.apply_task(0)]).run()
+    assert len(fingerprints) >= 2
+    assert result.exit_code == 0
+    assert result.outcomes[0].write_outcome == executor.WRITE_APPLIED

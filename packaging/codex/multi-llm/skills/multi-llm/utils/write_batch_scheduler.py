@@ -7316,6 +7316,22 @@ class WriteBatchScheduler:
             excluded.append(os.path.abspath(str(state_file)))
         if self.summary_file:
             excluded.append(os.path.abspath(self.summary_file))
+        # A detached composite (full/improve-*) owns a different phase dir.
+        # Its heartbeat and redirected stdout continue while this write batch
+        # runs, including during report-only re-asks. Exempt just those runtime
+        # files, not the composite's whole tree or unrelated phase artifacts.
+        try:
+            from . import detach, status_file
+        except ImportError:  # pragma: no cover - direct-script import shim
+            from utils import detach, status_file
+
+        active = detach.active_run()
+        if active is not None:
+            excluded.extend(os.path.abspath(path) for path in (
+                status_file.status_path(active.phase_dir),
+                status_file.status_lock_path(active.phase_dir),
+                detach.log_path(active.phase_dir),
+            ))
         return tuple(excluded)
 
     def _census(self) -> Optional[Dict[str, Tuple[int, int]]]:

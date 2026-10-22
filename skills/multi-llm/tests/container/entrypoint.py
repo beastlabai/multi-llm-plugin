@@ -560,7 +560,7 @@ class Stub:
 #: token added there and not here would be copied into the host's `$HOME` as a
 #: literal `{{…}}` string rather than skipped.
 SEED_TOKENS = ("{{base_url}}", "{{base_url_root}}", "{{stub_session_key}}",
-               "{{api_key_env}}", "{{model_name}}")
+               "{{api_key_env}}", "{{model_name}}", "{{model_alias}}")
 
 
 def seed_host_home(host: str, home: Path) -> list[str]:
@@ -2425,6 +2425,7 @@ def export_harness_names_into_profile(home: Path) -> None:
     profile.write_text(body + ("" if not body or body.endswith("\n") else "\n")
                        + lines, encoding="utf-8")
     os.chmod(profile, 0o600)
+    assert_profile_is_read(home)
 
 
 #: Where every login shell that reads the seeded `.profile` files one line.
@@ -4374,9 +4375,13 @@ def wire_fallback_credentials(host: str, home: Path, slug: str,
         (codex_home / "config.toml").write_text(
             _codex_fallback_config(effort), encoding="utf-8")
         overlay["CODEX_HOME"] = str(codex_home)
-        # No `.profile` export on this path: there is no OpenRouter key to
-        # carry, and the vendor auth codex reads is the copied auth.json.
+        # Subscription auth stays in auth.json. The plugin's login-shell child
+        # still needs the harness locations: Codex's MCP environment allowlist
+        # strips them just as it does on the OpenRouter route.
         _seed_codex_plugin(home, route)
+        if route == "package":
+            export_harness_names_into_profile(home)
+            wrap_profile_with_read_probe(home)
 
     elif host == "opencode":
         if seed.is_dir():

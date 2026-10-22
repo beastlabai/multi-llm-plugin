@@ -432,10 +432,10 @@ def seed_invocation_root(cli: str, root: Path, row: dict) -> None:
         # differs per lane -- the stub answers `stub-model`, OpenRouter answers
         # the slug -- and §7 step 6 sanctions exactly this extension for a seed
         # that cannot otherwise express its row's model ("extend the home_seed
-        # copytree tokens ... never `config_files`"). The ALIAS is not templated:
-        # it is byte-identical across providers.yaml, the redirect row and the
-        # seed, so only the wire name moves.
+        # copytree tokens ... never `config_files`"). The alias selects the
+        # redirect row's model while the wire name still reaches the stub.
         "{{model_name}}": "stub-model",
+        "{{model_alias}}": str(row.get("model_arg", "")),
     }
     for path in root.rglob("*"):
         if not path.is_file():
