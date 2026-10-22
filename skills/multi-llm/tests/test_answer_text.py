@@ -160,6 +160,7 @@ def _lines(stdout: str):
 #: Where each capture's answer string sits, read without the adapter's hook, so
 #: a missing hook turns its row red on the assertion rather than in setup.
 _FIXTURE_ANSWER: Dict[str, Callable[[str], str]] = {
+    "fx": lambda s: json.loads(s)["final_output"],
     "pi": _hook_answer("pi"),
     "omp": _hook_answer("omp"),
     "codex": _hook_answer("codex"),
@@ -181,6 +182,7 @@ _FIXTURE_ANSWER: Dict[str, Callable[[str], str]] = {
 
 #: provider -> (model spec, committed success capture).
 _CAPTURED: Dict[str, Tuple[str, str]] = {
+    "fx": ("fx:test/model", "fx/success.stdout.txt"),
     "pi": ("pi:openrouter/deepseek/deepseek-v4.1-flash", "pi/success.stdout.txt"),
     "omp": ("omp:stub/stub-model", "omp/success.stdout.txt"),
     "codex": ("codex:gpt-5", "codex/gpt5_sol_single_message.jsonl"),

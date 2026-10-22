@@ -1,0 +1,4 @@
+Running pwd; command -v fx-canary; printf FX_SHELL_OK
+/workspace
+/fixture/bin/fx-canary
+FX_SHELL_OK

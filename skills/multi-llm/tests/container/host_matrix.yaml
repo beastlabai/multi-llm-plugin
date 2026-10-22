@@ -4572,6 +4572,8 @@ hosts:
                      # and the one row whose chain-lane figure has never been
                      # captured, so a host-lane invocation is its first.
       - qwen-code    # `chat`, `stub-model`; needs QWEN_HOME — see (5).
+      - fx           # `chat`, `stub-model`; wrapper-owned HOME and fake
+                     # OPENROUTER_API_KEY. Assignment unmeasured on this host.
       - vibe         # `chat`, `openai/gpt-5.6-luna` — the one spelling in the
                      # whole partition that no other CLI shares, and therefore
                      # the strongest argument for building specs from

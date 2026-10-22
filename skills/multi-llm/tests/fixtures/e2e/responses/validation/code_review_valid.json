@@ -119,6 +119,16 @@
     },
     {
       "group_index": 2,
+      "group_hash": "87a0ed27cf52b4a6",
+      "_reviewers": 1,
+      "_variant": "fx 0.0.14 final_output removes inline Markdown backticks",
+      "_theme": "Token comparison is not constant time",
+      "status": "valid",
+      "reason": "Plain equality short-circuits, which is exactly the timing leak the finding describes.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 2,
       "group_hash": "165f73729541e880",
       "_reviewers": 2,
       "_theme": "Token comparison is not constant time",
@@ -227,6 +237,16 @@
     },
     {
       "group_index": 4,
+      "group_hash": "5f2e462487597adc",
+      "_reviewers": 1,
+      "_variant": "fx 0.0.14 final_output removes inline Markdown backticks",
+      "_theme": "Lockout threshold is off by one",
+      "status": "valid",
+      "reason": "The comparison uses `>` where the documented limit calls for `>=`, so the off-by-one is real.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 4,
       "group_hash": "07163c4b20380254",
       "_reviewers": 2,
       "_theme": "Lockout threshold is off by one",
@@ -281,8 +301,8 @@
       "1": "every single-spec row: the provider lane's chain rows, the `fan_out: native` rows, and any row whose fan-out left one survivor (the negative-auth rows, measured)",
       "2": "no declared panel; reachable when a larger panel loses all but two members",
       "3": "no declared panel; reachable when a larger panel loses all but three members",
-      "4": "the opencode host's fan_out (claude-code, omp, qwen-code, vibe), grok carved out 2026-09-22",
-      "5": "the codex host's fan_out (opencode, gemini, aider, copilot, kimi)",
+      "4": "the opencode host's original fan_out (claude-code, omp, qwen-code, vibe), before fx assignment; grok carved out 2026-09-22",
+      "5": "the codex host's fan_out (opencode, gemini, aider, copilot, kimi) and the opencode host's fan_out (claude-code, omp, qwen-code, fx, vibe)",
       "6": "the claude-code host's fan_out (codex, muse, cline, kilocode, pi, goose) -- the largest declared"
     },
     "note": [

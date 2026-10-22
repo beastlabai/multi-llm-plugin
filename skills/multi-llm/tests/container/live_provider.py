@@ -38,6 +38,7 @@ import binascii
 import json
 import os
 import shutil
+from contextlib import ExitStack
 from urllib.parse import urlsplit
 import subprocess
 import sys
@@ -113,7 +114,7 @@ ENV_CAPTURE_PREFIXES = (
     "AIDER_", "ANTHROPIC_", "CLAUDE_", "CLINE_", "CODEX_", "COPILOT_",
     "CURSOR_", "DEEPSEEK_", "DSH_", "GEMINI_", "GOOGLE_", "GOOSE_", "GROK_",
     "KILO_", "KILOCODE_", "KIMI_", "MISTRAL_", "OPENAI_", "OPENCODE_",
-    "OPENROUTER_", "PI_", "QWEN_", "VIBE_", "XAI_",
+    "OPENROUTER_", "PI_", "QWEN_", "VIBE_", "XAI_", "FX_",
 )
 
 #: The image-wide opt-outs from the Dockerfile's step-8 ENV block, which carry no
@@ -287,6 +288,11 @@ def render_seed(cli: str, home: Path, base_url: str, api_key_env: str,
             text = text.replace(token, value)
         path.write_text(text, encoding="utf-8")
         rendered.append(str(path))
+    if cli == "fx":
+        settings = home / ".fx" / "settings.json"
+        if settings.is_file():
+            settings.parent.chmod(0o700)
+            settings.chmod(0o600)
     return rendered
 
 
@@ -532,6 +538,7 @@ def main() -> int:
                     f"the lane's containment cannot be applied",
                     EXIT_CONTROL_UNAVAILABLE)
 
+    dispatches = ExitStack()
     try:
         # ---- Workspace: empty, disposable, no checkout in sight ----------- #
         # §7.4's containment table: no repository mount, no `-v $(pwd)`, and
@@ -541,6 +548,15 @@ def main() -> int:
         home = workdir / "home"
         workdir.mkdir(parents=True, exist_ok=True)
         home.mkdir(parents=True, exist_ok=True)
+        if args.cli == "fx":
+            from utils.provider_registry import get_provider
+
+            fx = get_provider("fx")
+            if fx is None:
+                return bail("no built-in fx adapter", EXIT_CONTROL_UNAVAILABLE)
+            dispatches.enter_context(fx.hermetic_dispatch("generate", args.model))
+            home = Path(fx.get_env(args.model)["HOME"])
+            evidence["managed_home"] = str(home)
 
         # The row's `seed_links`, before anything else touches HOME: a config
         # root or a credential under a linked subtree has to resolve THROUGH the
@@ -858,6 +874,7 @@ def main() -> int:
             for marker in (getattr(provider, "exit_zero_failure_markers", ()) or ())
         ]
     finally:
+        dispatches.close()
         udp.shutdown()
         tcp.shutdown()
 

@@ -178,6 +178,89 @@ class TestTheAllowlistStaysCredentialFree:
         )
 
 
+class TestFxWrapperOwnsItsSeededHome:
+    @pytest.mark.parametrize("only_skill", [False, True])
+    def test_login_path_cannot_restore_the_skill_venv(self, monkeypatch, tmp_path, only_skill):
+        skill_env = tmp_path / "skill-venv"
+        (skill_env / "bin").mkdir(parents=True)
+        alias = tmp_path / "venv-alias"
+        alias.symlink_to(skill_env, target_is_directory=True)
+        monkeypatch.setattr(wrapper_module, "SKILL_ENVIRONMENT", skill_env)
+        monkeypatch.setattr(wrapper_module, "REDIRECT_YAML", REDIRECT_YAML)
+        entries = [str(skill_env / "bin"), str(alias / "bin")]
+        expected = os.defpath
+        if not only_skill:
+            entries += ["/opt/mllm/bin", "/usr/bin", "/user/venv/bin"]
+            expected = "/opt/mllm/bin:/usr/bin:/user/venv/bin"
+        monkeypatch.setenv("PATH", os.pathsep.join(entries))
+        monkeypatch.setenv("MULTI_LLM_FX_PATH", str(skill_env / "bin"))
+        env = wrapper_module.build_child_env(
+            "fx", "abc123", wrapper_module.load_row("fx"), tmp_path / "home")
+        assert env["PATH"] == expected
+        assert env["MULTI_LLM_FX_PATH"] == expected
+
+    def test_bare_adapter_env_has_only_pinned_knobs_and_an_optional_key(self, monkeypatch):
+        from utils.providers.fx import FxProvider
+
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        env = FxProvider().get_env("stub-model")
+        assert env == {
+            "FX_PROVIDER": "openrouter", "FX_MAX_AGENT_STEPS": "60",
+            "FX_AUTO_UPGRADE": "0", "FX_PERMISSION_MODE": "auto", "NO_COLOR": "1",
+        }
+        assert all(_is_carried(key, "fx") for key in env)
+
+    def test_active_dispatch_cannot_replace_the_wrappers_home(self, monkeypatch, tmp_path):
+        from utils.providers.fx import FxProvider
+
+        monkeypatch.setattr(wrapper_module, "REDIRECT_YAML", REDIRECT_YAML)
+        provider = FxProvider()
+        row = wrapper_module.load_row("fx")
+        root = tmp_path / "wrapper-home"
+        monkeypatch.setenv("PATH", "/opt/mllm/bin:/usr/bin:/bin")
+        monkeypatch.setenv("OPENROUTER_API_KEY", SENTINEL)
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/real-user/.gitconfig")
+        with provider.hermetic_dispatch("generate", "stub-model"):
+            delta = provider.get_env("stub-model")
+            managed = Path(delta["HOME"])
+            assert managed.is_dir()
+            for name, value in delta.items():
+                monkeypatch.setenv(name, value)
+            env = wrapper_module.build_child_env("fx", "abc123", row, root)
+            assert env["HOME"] == str(root)
+            assert env["XDG_CONFIG_HOME"] == str(root / ".config")
+            assert env["XDG_DATA_HOME"] == str(root / ".local/share")
+            assert env["XDG_CACHE_HOME"] == str(root / ".cache")
+            assert "GIT_CONFIG_GLOBAL" not in env
+            assert env["OPENROUTER_API_KEY"] == "mllm-stub-abc123"
+            assert env["MULTI_LLM_FX_PATH"] == "/opt/mllm/bin:/usr/bin:/bin"
+            assert all(env[k] == delta[k] for k in row["env_extra"])
+        assert not managed.exists()
+
+    def test_seed_matches_production_and_becomes_private_after_substitution(self, monkeypatch, tmp_path):
+        from utils.providers.fx import render_settings
+
+        source = Path(__file__).parent / "container/home_seed/fx/.fx/settings.json"
+        assert json.loads(source.read_text()) == render_settings(base_url="{{base_url}}")
+        homes = tmp_path / "homes"
+        settings = homes / "fx/.fx/settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(source.read_text())
+        settings.parent.chmod(0o755)
+        settings.chmod(0o644)
+        monkeypatch.setattr(wrapper_module, "HOMES_ROOT", homes)
+        url = "http://127.0.0.1:18881/s/abc123/v1"
+        monkeypatch.setenv("MLLM_STUB_BASE_URL", url)
+        root = tmp_path / "invocation"
+        wrapper_module.seed_invocation_root("fx", root, wrapper_module.load_row("fx"))
+        rendered = root / ".fx/settings.json"
+        assert json.loads(rendered.read_text()) == render_settings(base_url=url)
+        assert "{{" not in rendered.read_text()
+        assert rendered.parent.stat().st_mode & 0o777 == 0o700
+        assert rendered.stat().st_mode & 0o777 == 0o600
+        assert (root / ".bash_profile").read_text() == 'export PATH="$MULTI_LLM_FX_PATH"\n'
+
+
 # --------------------------------------------------------------------------- #
 # T4.9 (plans/opencode-validator-false-rate-limit-and-denied-turn.md): the one
 # structured value the carry-over admits, and the guard that keeps it keyless.

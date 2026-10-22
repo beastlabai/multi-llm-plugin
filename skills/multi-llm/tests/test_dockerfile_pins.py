@@ -226,7 +226,7 @@ def test_every_download_verifies_a_checksum(instructions):
 
 @pytest.mark.parametrize(
     "artifact",
-    ["uv", "goose", "grok", "muse", "cursor-agent", "agy", "omp", "python312"])
+    ["uv", "goose", "grok", "muse", "cursor-agent", "agy", "omp", "fx", "python312"])
 def test_artifact_args_match_the_lock(artifact, build_args, lock):
     """Two copies of a checksum that can disagree are worse than one."""
     entry = lock["artifacts"][artifact]
@@ -246,6 +246,25 @@ def test_artifact_args_match_the_lock(artifact, build_args, lock):
     else:
         # uv's URL is assembled from its version in the RUN itself.
         assert str(entry["version"]) in entry["url"]
+
+
+def test_fx_checks_identity_and_version_before_discarding_the_archive(instructions, lock):
+    from utils.providers.fx import FX_REQUIRED_FLAGS
+
+    [layer] = [line for line in instructions
+               if line.startswith("RUN ") and "install -m 0755 /tmp/fx " in line]
+    assert layer.index("sha256sum --check --strict") < layer.index("tar -xzf")
+    assert '/opt/mllm/real/fx --version)' in layer and '= "${fx_version}"' in layer
+    assert "/opt/mllm/real/fx ask --help" in layer
+    assert "grep -Fq 'fx ask'" in layer
+    for flag in FX_REQUIRED_FLAGS:
+        assert flag in layer
+    assert 'grep -Fq -- "$flag" /tmp/fx-help || exit 1' in layer
+    assert "FX_AUTO_UPGRADE=0" in layer
+    artifact = lock["artifacts"]["fx"]
+    assert artifact["url"].count(artifact["version"]) == 1
+    [row] = [row for row in lock["clis"] if row["id"] == "fx"]
+    assert row["install"] == "archive"
 
 
 # --------------------------------------------------------------------------- #

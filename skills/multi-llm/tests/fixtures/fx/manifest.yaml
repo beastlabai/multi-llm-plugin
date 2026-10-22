@@ -1,0 +1,182 @@
+schema_version: 1
+provider: fx
+cli_version: 0.0.14
+captured: '2026-10-22'
+method: Checksummed Linux x86_64 fx0.0.14 in mllm-e2e image a89b6eaace0a2f43df90ca3d572affe205034070c1e150133be69df3f397e29b,
+  network none, UID10001, dummy credential. capture_probe.py imports the production
+  adapter; only render_settings base_url changes to localhost. Shell-reviewed/held/malformed,
+  success/multi-assistant/empty/auth/rate/empty-stream rows are fresh adapter runs.
+  Truncated, malformed SSE and HTTP400 use retained integration probes; invalid-model/context-overflow
+  use retained bounded live probes from the same binary. Source hashes for historical
+  captures are in captures.json. No new paid calls.
+rows:
+  success:
+    stdout: success.stdout.txt
+    stderr: success.stderr.txt
+    exit_code: 0
+    expect:
+      success: true
+      classify_failure: null
+      salvage: answer
+      data: []
+    wall_s: 0.023
+    requests: 1
+  truncated:
+    stdout: truncated.stdout.txt
+    stderr: truncated.stderr.txt
+    exit_code: 1
+    expect:
+      success: false
+      classify_failure: server_error
+      salvage: none
+    synthesized: true
+    provenance: Re-serialized a recorded decoded JSON object where raw stdout was
+      not retained; scrubbed only fixture workspace and canary paths. No answer or
+      verdict was changed.
+  ephemeral-only:
+    stdout: ephemeral-only.stdout.txt
+    stderr: ephemeral-only.stderr.txt
+    exit_code: -15
+    expect:
+      success: false
+      classify_failure: null
+      salvage: none
+    wall_s: 2.01
+    requests: 1
+    notes: SIGTERM during an unfinished stream produced zero stdout. fx emits no per-event
+      answer stream.
+  multi-assistant:
+    stdout: multi-assistant.stdout.txt
+    stderr: multi-assistant.stderr.txt
+    exit_code: 0
+    expect:
+      success: true
+      classify_failure: null
+      salvage: answer
+      data: []
+    wall_s: 0.037
+    requests: 2
+  error-envelope:
+    stdout: error-envelope.stdout.txt
+    stderr: error-envelope.stderr.txt
+    exit_code: 1
+    expect:
+      success: false
+      classify_failure: server_error
+      salvage: none
+    synthesized: true
+    provenance: Re-serialized a recorded decoded JSON object where raw stdout was
+      not retained; scrubbed only fixture workspace and canary paths. No answer or
+      verdict was changed.
+  exit-zero-failure:
+    stdout: exit-zero-failure.stdout.txt
+    stderr: exit-zero-failure.stderr.txt
+    exit_code: 0
+    expect:
+      success: false
+      classify_failure: null
+      salvage: none
+    wall_s: 0.024
+    requests: 1
+  stdout-error:
+    stdout: stdout-error.stdout.txt
+    stderr: stdout-error.stderr.txt
+    exit_code: 1
+    expect:
+      success: false
+      classify_failure: null
+      salvage: none
+    synthesized: true
+    provenance: Re-serialized a recorded decoded JSON object where raw stdout was
+      not retained; scrubbed only fixture workspace and canary paths. No answer or
+      verdict was changed.
+  empty:
+    stdout: empty.stdout.txt
+    stderr: empty.stderr.txt
+    exit_code: -15
+    expect:
+      success: false
+      classify_failure: null
+      salvage: none
+    wall_s: 2.01
+    requests: 1
+    notes: SIGTERM during an unfinished stream produced zero stdout. fx emits no per-event
+      answer stream.
+  auth-error:
+    stdout: auth-error.stdout.txt
+    stderr: auth-error.stderr.txt
+    exit_code: 1
+    expect:
+      success: false
+      classify_failure: auth_failed
+      salvage: none
+    wall_s: 0.024
+    requests: 1
+  rate-limit:
+    stdout: rate-limit.stdout.txt
+    stderr: rate-limit.stderr.txt
+    exit_code: -15
+    expect:
+      success: false
+      classify_failure: rate_limited
+      salvage: none
+    wall_s: 2.009
+    requests: 3
+    notes: Parent deadline after 2 seconds. Adapter diagnoses captured rate notices;
+      both dispatch callers must preserve TIMEOUT precedence.
+  invalid-model:
+    stdout: invalid-model.stdout.txt
+    stderr: invalid-model.stderr.txt
+    exit_code: 1
+    expect:
+      success: false
+      classify_failure: invalid_model
+      salvage: none
+  context-overflow:
+    stdout: context-overflow.stdout.txt
+    stderr: context-overflow.stderr.txt
+    exit_code: 1
+    expect:
+      success: false
+      classify_failure: context_length_exceeded
+      salvage: none
+  shell-reviewed:
+    stdout: shell-reviewed.stdout.txt
+    stderr: shell-reviewed.stderr.txt
+    exit_code: 0
+    expect:
+      success: true
+      classify_failure: null
+      salvage: answer
+      data: []
+    wall_s: 0.141
+    requests: 3
+    synthesized: true
+    provenance: 'SCRUB ONLY: /tmp/fx-adapter-work -> /workspace; /tmp/fx-canary-bin
+      -> /fixture/bin. No answer or verdict changed.'
+    notes: Production --auto policy; 2 agent requests plus 1 reviewer request. Usage
+      reports only the agent requests.
+  shell-held:
+    stdout: shell-held.stdout.txt
+    stderr: shell-held.stderr.txt
+    exit_code: 0
+    expect:
+      success: false
+      classify_failure: null
+      salvage: none
+    wall_s: 0.066
+    requests: 3
+    notes: Production --auto policy; 2 agent requests plus 1 reviewer request. Usage
+      reports only the agent requests.
+  reviewer-malformed:
+    stdout: reviewer-malformed.stdout.txt
+    stderr: reviewer-malformed.stderr.txt
+    exit_code: 0
+    expect:
+      success: false
+      classify_failure: null
+      salvage: none
+    wall_s: 0.067
+    requests: 3
+    notes: Production --auto policy; 2 agent requests plus 1 reviewer request. Usage
+      reports only the agent requests.

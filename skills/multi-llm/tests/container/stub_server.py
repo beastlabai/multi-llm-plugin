@@ -242,15 +242,17 @@ def chat_body(model: str, answer: str) -> dict:
     }
 
 
-def chat_stream(model: str, answer: str):
+def chat_stream(model: str, answer: str, include_usage: bool = False):
     base = {"id": "chatcmpl-stub", "object": "chat.completion.chunk",
             "created": 0, "model": model}
     yield None, dict(base, choices=[{"index": 0, "delta": {"role": "assistant"},
                                      "finish_reason": None}])
     yield None, dict(base, choices=[{"index": 0, "delta": {"content": answer},
                                      "finish_reason": None}])
-    yield None, dict(base, choices=[{"index": 0, "delta": {},
-                                     "finish_reason": "stop"}])
+    final = dict(base, choices=[{"index": 0, "delta": {}, "finish_reason": "stop"}])
+    if include_usage:
+        final["usage"] = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    yield None, final
 
 
 def responses_body(model: str, answer: str) -> dict:
@@ -427,6 +429,19 @@ class ScriptedToolCall:
                 f"{source}: `scripted_tool_call.then_shell` is rendered for the "
                 f"`responses` surface only — drop `chat` from `surfaces` or "
                 f"drop `then_shell`")
+        self.fx_permission_decision = block.get("fx_permission_decision")
+        if self.fx_permission_decision is not None:
+            request = self.arguments.get("request")
+            if (self.fx_permission_decision not in ("clear", "caution")
+                    or self.name != "shell" or self.namespace
+                    or "chat" not in self.surfaces
+                    or not isinstance(request, dict)
+                    or request.get("action") != "run"
+                    or not isinstance(request.get("command"), str)
+                    or not request["command"] or "\n" in request["command"]):
+                raise ValueError(
+                    f"{source}: fx_permission_decision requires clear/caution "
+                    "and one explicit single-line fx shell run command on chat")
 
     @property
     def flat_name(self) -> str:
@@ -642,6 +657,27 @@ def responses_call_stream(model: str, script: ScriptedToolCall,
                                  "sequence_number": 6, "response": resp}
 
 
+def fx_permission_review(body: dict, script: ScriptedToolCall) -> str | None:
+    """Answer only the opted-in fixture's exact fx shell review request.
+
+    This is deterministic protocol plumbing, not a real safety reviewer. Other
+    commands, tool schemas and scenarios keep the normal unmatched-request gate.
+    """
+    if script.fx_permission_decision is None:
+        return None
+    names = [(tool.get("function") or {}).get("name")
+             for tool in body.get("tools") or [] if isinstance(tool, dict)
+             and isinstance(tool.get("function"), dict)]
+    if names != ["permission_decision"]:
+        return None
+    text = extract_prompt(body)
+    command = script.arguments["request"]["command"]
+    if "<permission_review>" not in text or command not in re.findall(
+            r"^command: (.*)$", text, re.MULTILINE):
+        return None
+    return script.fx_permission_decision
+
+
 def chat_call_body(model: str, script: ScriptedToolCall) -> dict:
     """The chat-completions message carrying the ONE scripted tool call."""
     return {
@@ -654,7 +690,8 @@ def chat_call_body(model: str, script: ScriptedToolCall) -> dict:
     }
 
 
-def chat_call_stream(model: str, script: ScriptedToolCall):
+def chat_call_stream(model: str, script: ScriptedToolCall,
+                     include_usage: bool = False):
     """The chat-completions chunks for ONE tool call.
 
     Same envelope as `chat_stream`. The call opens with its id, type and name
@@ -674,8 +711,10 @@ def chat_call_stream(model: str, script: ScriptedToolCall):
     yield None, dict(base, choices=[{"index": 0, "delta": {"tool_calls": [{
         "index": 0, "function": {"arguments": call["function"]["arguments"]}}]},
         "finish_reason": None}])
-    yield None, dict(base, choices=[{"index": 0, "delta": {},
-                                     "finish_reason": "tool_calls"}])
+    final = dict(base, choices=[{"index": 0, "delta": {}, "finish_reason": "tool_calls"}])
+    if include_usage:
+        final["usage"] = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    yield None, final
 
 
 def catalog(surface: str) -> dict:
@@ -875,6 +914,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         script = _tool_script
         assert script is not None
+        include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
         declaration = script.chat_declaration(body)
         output = script.chat_returned_output(body)
         record: dict = {
@@ -894,7 +934,7 @@ class Handler(BaseHTTPRequestHandler):
             record["output"] = output[:SCRIPTED_OUTPUT_CAP]
             record["output_truncated"] = len(output) > SCRIPTED_OUTPUT_CAP
             if streamed:
-                frames = list(chat_stream(model, script.terminal))
+                frames = list(chat_stream(model, script.terminal, include_usage))
             else:
                 frames = [(None, chat_body(model, script.terminal))]
         elif declaration is not None:
@@ -902,7 +942,7 @@ class Handler(BaseHTTPRequestHandler):
             record["flat"] = True
             record["arguments"] = script.arguments
             if streamed:
-                frames = list(chat_call_stream(model, script))
+                frames = list(chat_call_stream(model, script, include_usage))
             else:
                 frames = [(None, chat_call_body(model, script))]
         else:
@@ -1038,6 +1078,22 @@ class Handler(BaseHTTPRequestHandler):
         elif method == "POST" and path.endswith("/messages"):
             surface = "anthropic"
 
+        if surface == "chat" and _tool_script is not None:
+            decision = fx_permission_review(body, _tool_script)
+            if decision is not None:
+                review = ScriptedToolCall({
+                    "name": "permission_decision", "surfaces": ["chat"],
+                    "arguments": {"decision": decision,
+                                  "rationale": "fixed offline fixture decision"},
+                    "call_id": "call_fx_permission_review",
+                })
+                entry.update(surface="chat", fixture="fx_permission_review",
+                             scripted={"phase": "fx-permission-review", "decision": decision})
+                if streamed:
+                    include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
+                    return self._send_sse(chat_call_stream(model, review, include_usage))
+                return self._send_json(chat_call_body(model, review))
+
         # Only on a surface the script names (`surfaces:`, default
         # `[responses]`), so a Responses-only script leaves chat untouched.
         if (surface in ("responses", "chat") and _tool_script is not None
@@ -1062,6 +1118,9 @@ class Handler(BaseHTTPRequestHandler):
                 "anthropic": (messages_body, messages_stream),
             }[surface]
             if streamed:
+                if surface == "chat":
+                    include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
+                    return self._send_sse(chat_stream(model, answer, include_usage))
                 return self._send_sse(renderers[1](model, answer))
             return self._send_json(renderers[0](model, answer))
 

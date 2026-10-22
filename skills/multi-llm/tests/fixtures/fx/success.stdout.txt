@@ -1,0 +1,1 @@
+{"output":"[]","final_output":"[]","exit_code":0,"model":"success","resolved_provider":null,"session_id":"","steps":0,"tool_calls":[],"usage":{"input_tokens":10,"output_tokens":2}}

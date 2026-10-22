@@ -1269,6 +1269,8 @@ ENV_ALLOWLIST_PROFILES: Dict[str, RunnerEnvProfile] = {
         ("CURSOR_",),
         ("AGENT_CLI_CREDENTIAL_STORE", "NODE_COMPILE_CACHE"),
     ),
+    # Native TLS label only: fx 0.0.14 uses system trust, not SSL_CERT_FILE.
+    "fx": RunnerEnvProfile(CA_FAMILY_NATIVE, ("FX_",), ()),
     "gemini": RunnerEnvProfile(
         CA_FAMILY_NODE, ("GEMINI_",), ("GEMINI_DIR", "GEMINI_CLI_HOME")
     ),
@@ -1733,8 +1735,9 @@ class InternalRetryEnvelope:
     #: Requests the CLI may make to the upstream API inside one dispatch, at the
     #: configuration this harness actually runs (i.e. *including* whatever
     #: ``get_env`` pins). Never the CLI's out-of-the-box number when the adapter
-    #: overrides it.
-    max_requests: int
+    #: overrides it. ``None`` means no finite request bound is known; unlike
+    #: an absent envelope, this can still declare measured internal retries.
+    max_requests: Optional[int]
 
     #: The worst-case wall clock one dispatch may burn *inside* the child, in
     #: seconds. ``None`` means "no bound this adapter can state": rule 4 then

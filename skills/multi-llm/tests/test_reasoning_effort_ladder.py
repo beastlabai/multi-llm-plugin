@@ -152,7 +152,7 @@ class TestTheLadderItself:
 
 
 class TestEveryRegisteredProviderDeclaresItsPosition:
-    """The registry sweep: seventeen today, N tomorrow, no list written down."""
+    """The registry sweep: every adapter, with no second roster written down."""
 
     @pytest.mark.parametrize("provider_name", _registry_provider_names())
     def test_provider_declares_an_effort_ladder(self, provider_name):

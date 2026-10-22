@@ -229,7 +229,7 @@ class InternalRetryEnvelopeLike(Protocol):
     imports to remain pure.
     """
 
-    max_requests: int
+    max_requests: Optional[int]
     max_wall_s: Optional[float]
     retries_rate_limit: bool
 
@@ -555,11 +555,16 @@ class RetryLadder:
         if getattr(self.envelope, "retries_rate_limit", False):
             self.stop_reason = STOP_VENDOR_ALREADY_RETRIED
             requests = getattr(self.envelope, "max_requests", None)
+            request_bound = (
+                f"{requests} requests per dispatch"
+                if requests is not None
+                else "no finite request bound is known"
+            )
             return Action(
                 retry=False,
                 reason=(
                     "rate_limited, and this adapter declares it already retries "
-                    f"rate limits internally ({requests} requests per dispatch); "
+                    f"rate limits internally ({request_bound}); "
                     "an identical re-dispatch would repeat a chain that already ran"
                 ),
             )

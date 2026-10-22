@@ -166,6 +166,18 @@ captured_on: "2026-08-14"
 image: mllm-e2e:local
 
 clis:
+  # Captured from the checksummed Vercel 0.0.14 binary, 2026-10-22.
+  - cli: fx
+    binary: fx
+    version: "0.0.14"
+    probe: ok
+    help_invocation: "fx ask --help"
+    help_sha256: 25db350082aa92b568843273c3ff59883d9cbf24446edc6d584bb46e89183448
+    help_bytes: 3099
+    profiles: [generate]
+    subcommands: [ask]
+    options: ["--auto", "--json", "--model", "--no-save"]
+
 
   # THE ROW WITH NO OTHER COVERAGE AT ALL, and the reason `surface_probe` exists.
   # agy reaches no stub -- its auth resolves BEFORE the first RPC, and

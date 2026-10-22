@@ -63,6 +63,7 @@ REAL_DIR = Path(os.environ.get("MLLM_REAL_DIR", "/opt/mllm/real"))
 HOMES_ROOT = Path(os.environ.get("MLLM_HOMES_ROOT", "/work/homes"))
 REDIRECT_YAML = Path(os.environ.get("MLLM_REDIRECT_YAML",
                                     "/opt/mllm/rig/redirect.yaml"))
+SKILL_ENVIRONMENT = Path("/opt/mllm/skill/.venv")
 
 # --------------------------------------------------------------------------- #
 # Redaction — at WRITE time, never at read time.
@@ -378,6 +379,17 @@ def build_child_env(cli: str, exec_id: str, row: dict, invocation_root: Path) ->
     for var, value in (row.get("env_extra") or {}).items():
         env[var] = str(value)
 
+    if cli == "fx":
+        # This wrapper runs under system Python, so sys.prefix cannot identify
+        # the image's skill venv. Never restore that venv through bash --login.
+        scripts = {(SKILL_ENVIRONMENT / name).resolve() for name in ("bin", "Scripts")}
+        tool_path = os.pathsep.join(
+            entry for entry in env.get("PATH", os.defpath).split(os.pathsep)
+            if not (entry and os.path.isabs(entry) and Path(entry).resolve() in scripts)
+        ) or os.defpath
+        env["PATH"] = tool_path
+        env["MULTI_LLM_FX_PATH"] = tool_path
+
     env["MLLM_EXEC_ID"] = exec_id
     env["MLLM_STUB_BASE_URL"] = base_url
     return env
@@ -458,6 +470,21 @@ def seed_invocation_root(cli: str, root: Path, row: dict) -> None:
             template.replace("{base_url}", os.environ.get("MLLM_STUB_BASE_URL", "")),
             encoding="utf-8",
         )
+
+    # Git cannot retain private directory/file modes. Tighten the copied fx
+    # profile AFTER substitution, before the binary sees it. Bare adapter env
+    # enumeration leaves this wrapper-owned HOME alone.
+    if cli == "fx":
+        settings = root / ".fx" / "settings.json"
+        if settings.is_file():
+            settings.parent.chmod(0o700)
+            settings.chmod(0o600)
+        # fx starts shell tools with bash --login; /etc/profile may reset PATH.
+        # Capture the wrapper's PATH, never an adapter's managed HOME path.
+        profile = root / ".bash_profile"
+        profile.write_text(
+            'export PATH="$MULTI_LLM_FX_PATH"\n', encoding="utf-8")
+        profile.chmod(0o600)
 
     # Vendor bytes the image already holds, POINTED AT rather than copied — and
     # deliberately the last step, after the token pass has walked the tree.

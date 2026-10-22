@@ -48,6 +48,32 @@
 version: 1
 
 entries:
+  # Hand-added: fx's default transport and its identity probe. No timeout flag.
+  - provider: fx
+    profile: generate
+    transport: stdin
+    binary: fx
+    subcommands: [ask]
+    options:
+      "--auto": null
+      "--json": null
+      "--model": "<model>"
+      "--no-save": null
+    tail: []
+    prompt: stdin
+    min_records: 1
+
+  - provider: fx
+    profile: probe
+    transport: stdin
+    binary: fx
+    subcommands: [ask]
+    options:
+      "--help": null
+    tail: []
+    prompt: stdin
+    min_records: 1
+
   - provider: aider
     profile: generate
     transport: argv

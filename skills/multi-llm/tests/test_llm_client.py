@@ -1331,6 +1331,7 @@ ANSWER_CAP_MARKER = f"\n... [answer text truncated at {MAX_ANSWER_TEXT_BYTES} B]
 
 #: One spec per adapter that `invoke_with_provider` renders offline.
 SPECS = {
+    "fx": "fx:test/model",
     "agy": "agy:stub-model",
     "aider": "aider:openai/stub-model",
     "claude-code": "claude-code:haiku",

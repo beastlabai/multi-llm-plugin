@@ -1,0 +1,1 @@
+fx ask: API request failed · HTTP 400 · openai/fx-preflight-nonexistent-20261022 is not a valid model ID

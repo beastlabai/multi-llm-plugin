@@ -169,7 +169,7 @@ def adapter_contract() -> dict:
             for token in argv[1:]:
                 if token.startswith("-"):
                     break
-                if token in ("exec", "run"):
+                if token in ("exec", "run", "ask"):
                     subcommands.add(token)
                 break
         # The rig's own leg of the argv, recorded separately so a reader can

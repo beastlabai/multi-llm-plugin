@@ -270,6 +270,20 @@ class TestBudgetExhaustedRefusesToSpawn:
 class TestRule6bNoIdenticalRateLimitRedispatch:
     """§7.5 rule 6(b) — the two mechanisms compose; they must not multiply."""
 
+    def test_unknown_request_bound_still_prevents_identical_redispatch(self):
+        ladder = _ladder(
+            Clock(), envelope=_envelope(max_requests=None, retries_rate_limit=True)
+        )
+        assert ladder.next_attempt() is not None
+        action = ladder.record(STATUS_RATE_LIMITED)
+        assert not action.retry
+        assert action.delay == 0
+        assert ladder.stop_reason == STOP_VENDOR_ALREADY_RETRIED
+        assert "no finite request bound is known" in action.reason
+        assert "None requests" not in action.reason
+        assert ladder.next_attempt() is None
+        assert ladder.spawns == 1
+
     def test_an_adapter_that_retries_429s_internally_is_not_re_dispatched(self):
         clock = Clock()
         ladder = _ladder(

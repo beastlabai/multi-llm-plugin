@@ -117,6 +117,7 @@ _ICON_DEFS: Dict[str, tuple] = {
     # No first-party SVG reachable — letter-icon fallback only
     "xiaomi":     (None, "M", "#FF6900"),
     "arcee":      (None, "T", "#3B82F6"),
+    "vercel":     (None, "V", "#F45B25"),
     "deepseek":   (None, "D", "#4D6BFE"),
     "cline":      (None, "C", "#0EA5A4"),
     "aider":      (None, "A", "#14B8A6"),
@@ -141,6 +142,8 @@ _PROVIDER_ICON_KEYS: Dict[str, str] = {
     # Backfill: these ship today and had no provider-icon row, so the provider
     # column rendered nothing whenever the model name matched no family.
     "grok":         "xai",
+    # Vercel fx is a CLI identity; model-family icons are resolved separately.
+    "fx":           "vercel",
     "cline":        "cline",
     "goose":        "goose",
     "aider":        "aider",
