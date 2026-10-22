@@ -152,6 +152,15 @@
 # kilocode and opencode list only subcommands at the top level, so a contract
 # taken there would be made of the wrong text.
 
+# RE-SEEDED 2026-10-22 after seventeen CLI upgrades (aider unchanged).
+# All documented options remain present, and grok's hidden --no-auto-update
+# still passes the bogus-flag control. Reviewed the changed help: no dispatched
+# option was removed; qwen retains its existing deprecated flags. omp 18.12.6
+# now loads natives for --help, so redirect.yaml points PI_NATIVES_DIR at the
+# image's pre-extracted addons. Probes ran offline as uid 10001 with all
+# capabilities dropped; this host's Snap Docker rejects no-new-privileges even
+# for /bin/echo in the official Node base, so the full posture gate is unverified.
+#
 version: 1
 captured_on: "2026-08-14"
 image: mllm-e2e:local
@@ -181,11 +190,11 @@ clis:
   # not a deprecation. Read the help before moving the digest anyway.
   - cli: agy
     binary: agy
-    version: "1.3.2"
+    version: "1.4.5"
     probe: ok
     help_invocation: "agy --help"
-    help_sha256: 8fcf40227fe84704f7f8155b3b5ebcee79dfdc5208fde6e8b07569c24425f976
-    help_bytes: 2901
+    help_sha256: a12355e8fc064b330eeb25ba52de596406582752442e293083bcda6388a63b78
+    help_bytes: 2907
     profiles: [generate]
     subcommands: []
     options:
@@ -236,11 +245,11 @@ clis:
 
   - cli: claude-code
     binary: claude
-    version: "2.1.295 (Claude Code)"
+    version: "2.1.308 (Claude Code)"
     probe: ok
     help_invocation: "claude --help"
-    help_sha256: 550db4f88ae1d97bf7244ca96dc89554aabd3978241ceb69f79001e816c35f09
-    help_bytes: 22108
+    help_sha256: b10f5c36adfe3285f6c5a0d18284f466e6c4486499de56ef62745e13312a7fbc
+    help_bytes: 22311
     profiles: [generate, agent-readonly, agent-write]
     options:
       - "--allowed-tools"
@@ -252,7 +261,7 @@ clis:
 
   - cli: cline
     binary: cline
-    version: "3.0.70"
+    version: "3.0.73"
     probe: ok
     help_invocation: "cline --help"
     help_sha256: 04d834c4ae0cc8ea0bf304351a54a4d534acfb52f92c40fa6e28bd290ddef651
@@ -265,7 +274,7 @@ clis:
 
   - cli: codex
     binary: codex
-    version: "codex-cli 0.162.0"
+    version: "codex-cli 0.163.0"
     probe: ok
     help_invocation: "codex exec --help"
     help_sha256: df0d864ca2076f7654288c6a1e3394e3eaa2ea8f15021df2524efdd90c70986c
@@ -312,11 +321,11 @@ clis:
   # `probe: none` that would have been a false statement.
   - cli: copilot
     binary: copilot
-    version: "GitHub Copilot CLI 1.0.94."
+    version: "GitHub Copilot CLI 1.0.102."
     probe: ok
     help_invocation: "copilot --help"
-    help_sha256: aba443be298305579f1113450d0cd80a714572b6b8f744e1db341b19a893e45c
-    help_bytes: 13956
+    help_sha256: d3eb12c9c2bf565ad101ea0e89664638e7707bb6361e4ab24b45d39dea01ccf3
+    help_bytes: 14753
     profiles: [generate]
     subcommands: []
     options:
@@ -332,7 +341,7 @@ clis:
 
   - cli: cursor-agent
     binary: cursor-agent
-    version: "2026.10.01-e373342"
+    version: "2026.10.19-6bbf2c4"
     probe: ok
     help_invocation: "cursor-agent --help"
     help_sha256: c24026e17118188478fcb47ed8113fa842f93df2043da5116660a368d3dc64b0
@@ -348,7 +357,7 @@ clis:
 
   - cli: gemini
     binary: gemini
-    version: "0.63.0"
+    version: "0.65.0"
     probe: ok
     help_invocation: "gemini --help"
     help_sha256: b5c6e1af180f48adb3700982e7b06e905f29d2965f047eaeebd0b5c4f676b632
@@ -360,7 +369,7 @@ clis:
 
   - cli: goose
     binary: goose
-    version: "1.54.0"
+    version: "1.55.0"
     probe: ok
     help_invocation: "goose run --help"
     help_sha256: c6c76cbcf38ba3839df9e36b66bee049c435bb9ec9ba320404fa87ca5b353583
@@ -380,11 +389,11 @@ clis:
 
   - cli: grok
     binary: grok
-    version: "grok 1.0.50 (c58f321264ba)"
+    version: "grok 1.0.67 (2fe064390d07)"
     probe: ok
     help_invocation: "grok --help"
-    help_sha256: cda6873e2f90a7d77de94c2e3026794671fac04b2e40ac74e4d91f429f829403
-    help_bytes: 7512
+    help_sha256: 5f1fce5a2c6bed62f49a503ba3770e02dd5832f1fac1c7f8ea96a8c72dd85219
+    help_bytes: 5148
     profiles: [generate]
     options:
       - "--always-approve"
@@ -414,11 +423,11 @@ clis:
 
   - cli: kimi
     binary: kimi
-    version: "2.1.1"
+    version: "2.3.0"
     probe: ok
     help_invocation: "kimi --help"
-    help_sha256: 38366cf8f3a746da0527b722bb8f017d5cdcecd16e6885148a05b19794ef0ca0
-    help_bytes: 3409
+    help_sha256: f5a0ed1d6b6ab479f0f6b3a931cc7cb1cab72d7499199c372ac8658f788ee624
+    help_bytes: 3506
     profiles: [generate]
     subcommands: []
     options:
@@ -427,7 +436,7 @@ clis:
 
   - cli: qwen-code
     binary: qwen
-    version: "0.25.0"
+    version: "0.26.0"
     probe: ok
     # NOT `qwen --help`: five of the options this adapter emits are HIDDEN and
     # absent from the visible help, and qwen returns 0 for a bogus flag whenever
@@ -436,8 +445,8 @@ clis:
     # complete option list deterministically, so that is the surface probed.
     # See the redirect.yaml row for the full reasoning.
     help_invocation: "qwen --mllm-force-full-help"
-    help_sha256: dd751dbb65b099f726838ffab45241423860840fcc25ba0cdf7bb0a01d7e263b
-    help_bytes: 11731
+    help_sha256: d999156ce62198709ad79aafb752897f3ce5b1733e535fbe328a1347cbeb279c
+    help_bytes: 11979
     profiles: [generate]
     subcommands: []
     options:
@@ -456,7 +465,7 @@ clis:
 
   - cli: kilocode
     binary: kilocode
-    version: "7.8.8"
+    version: "7.8.15"
     probe: ok
     help_invocation: "kilocode run --help"
     help_sha256: 4fff43529130e190fee0b7336c8187fe31298d364ffbaf25d50caa237e2a3300
@@ -469,11 +478,11 @@ clis:
 
   - cli: muse
     binary: muse
-    version: "Muse Code 1.4.4 (1.4.4-R5419.1)"
+    version: "Muse Code 1.4.11 (1.4.11-R6667.1)"
     probe: ok
     help_invocation: "muse exec --help"
-    help_sha256: ca967ab8506c011bf102203d9dad53c3eb0c100e18cb5e6402ef4971dfa9480b
-    help_bytes: 4076
+    help_sha256: d7398a8f9cda096a090bd07c244aef309588065859be86d1ed99c1b41e7ebf81
+    help_bytes: 4335
     profiles: [generate]
     subcommands: [exec]
     options:
@@ -490,11 +499,11 @@ clis:
 
   - cli: opencode
     binary: opencode
-    version: "1.18.35"
+    version: "1.19.3"
     probe: ok
     help_invocation: "opencode run --help"
-    help_sha256: d62299ebc267afdf5bab2c07fbfe1a6625cc8769cb7073b3bad975e9531c5732
-    help_bytes: 3053
+    help_sha256: 177277faec689a9ed77962dd130d68c045f279ee104ddebd9ab59d1ec22217ec
+    help_bytes: 2952
     profiles: [generate, agent-readonly, agent-write]
     subcommands: [run]
     options:
@@ -506,7 +515,7 @@ clis:
 
   - cli: pi
     binary: pi
-    version: "1.1.0"
+    version: "1.4.0"
     probe: ok
     help_invocation: "pi --help"
     help_sha256: 7e4c9e558ae8e1b64f6ebeb5a28d9f7dee8a99fcf99197cc4610f642861a3dba
@@ -547,11 +556,11 @@ clis:
   # `--model` flag at all, and the alias travels in VIBE_ACTIVE_MODEL.
   - cli: vibe
     binary: vibe
-    version: "vibe 2.26.1"
+    version: "vibe 3.0.1"
     probe: ok
     help_invocation: "vibe --help"
-    help_sha256: f514c9100e363b718b9ee91582368050f30860ca81362175552ab4ecd37028cf
-    help_bytes: 6308
+    help_sha256: 76a08c570eb8774826396c205fc8d01f9c5ca057e6f12013266d07959c79ab93
+    help_bytes: 3086
     profiles: [generate]
     options:
       - "--agent"
@@ -579,11 +588,11 @@ clis:
   # the eight below.
   - cli: omp
     binary: omp
-    version: "omp/18.8.7"
+    version: "omp/18.12.6"
     probe: ok
     help_invocation: "omp --help"
-    help_sha256: df028950a04cf57c57e418a832ef8388bc9351a354503417a3672fa33ac20b22
-    help_bytes: 15368
+    help_sha256: 02b2d737374f07bdd127e3bfc53851cb09fbeded50a0f2b36f71a970cf2685a9
+    help_bytes: 16269
     profiles: [generate]
     options:
       - "--approval-mode"

@@ -1398,6 +1398,9 @@ clis:
     # conditional on the host having one and has no business on this lane.
     env_extra:
       OMP_SKIP_SETUP: "1"
+      # 18.12.6 loads addons even for --help. Surface probes bypass seed_links
+      # and use a noexec tmpfs HOME; load the image's pre-extracted addons.
+      PI_NATIVES_DIR: "/opt/mllm/omp-natives"
     seed_files: [".omp/agent/models.yml"]
     # THE 346 MB THAT NEVER ENTER A $HOME. omp extracts its native addons into
     # $HOME/.omp/natives/<version>/ on the first run that loads them (3.6 s;
@@ -1408,9 +1411,9 @@ clis:
     # ONCE in the image's own download layer, under the read-only root;
     # `wrapper.seed_invocation_root` makes this link in each per-invocation $HOME
     # after it has copied and templated the seed. Not an image ENV: the wrapper
-    # builds its child's environment from scratch, and omp has no variable that
-    # relocates the extraction anyway (OMP_NATIVE_LIBRARY_PATH only appends to a
-    # spawned subprocess's LD_LIBRARY_PATH). Not the seed tree: that tree is
+    # builds its child's environment from scratch. PI_NATIVES_DIR above also
+    # supports direct probes at 18.12.6; keep the home link for code that reads
+    # the default native path. Not the seed tree: that tree is
     # committed, and the wrapper copytrees it per EXEC onto a tmpfs.
     seed_links:
       ".omp/natives": "/opt/mllm/omp-natives"

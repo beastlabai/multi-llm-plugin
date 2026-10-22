@@ -1830,8 +1830,8 @@ class OpenCodeProvider(LLMProvider):
     # `auth_list.<v>.json`, `debug_config.<v>.json`), and the tests then grade
     # the parser on the new captures. `make opencode-latest-check` says when
     # npm has a newer release than this one.
-    min_version = "1.18.35"
-    verified_version = "1.18.35"
+    min_version = "1.19.3"
+    verified_version = "1.19.3"
     #: What the below-floor refusal tells the user to run (never executed).
     upgrade_hint = "opencode upgrade {version}"
     #: T4.2 — the inclusive (floor, ceiling) opencode range in which

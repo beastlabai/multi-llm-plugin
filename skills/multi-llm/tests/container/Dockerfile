@@ -67,7 +67,7 @@
 # whose entire premise is that there are none. Nothing below needs a feature the
 # built-in frontend lacks.
 
-FROM docker.io/library/node:22-bookworm-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436
+FROM docker.io/library/node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d
 
 # `-o pipefail` matters: several steps below are `curl … | sha256sum -c -` style
 # pipelines, where the default shell would report the exit status of the last
@@ -80,25 +80,25 @@ ARG MLLM_PIN_MODE=pinned
 
 # Every value here is cross-checked against cli-versions.lock by
 # tests/test_container_dockerfile_pins.py, so the two cannot drift apart.
-ARG UV_VERSION=0.12.24
-ARG UV_SHA256=b4dfaef47d491a7296981f8374a4595f55dbf84e8937c8ecd2983574d8bb3da6
-ARG GOOSE_VERSION=1.54.0
-ARG GOOSE_URL=https://github.com/aaif-goose/goose/releases/download/v1.54.0/goose-x86_64-unknown-linux-gnu.tar.bz2
-ARG GOOSE_SHA256=bf01cb6359f7a2b1acb54ca4827e1d059b18aabb3d2b75202e21066cfd3a3396
-ARG GROK_VERSION=1.0.50
-ARG GROK_URL=https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-1.0.50-linux-x86_64
-ARG GROK_SHA256=c80de0155706ff2d995623887b102f2d0abd2c62b2643dea3a0cebaf7dd724d5
-ARG MUSE_VERSION=1.4.4-R5419.1
-ARG MUSE_URL=https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.4-R5419.1&file=muse-x86-linux
-ARG MUSE_SHA256=cfc9d068441ff46036ad6bbf30dd794043b25b7efb69648c92c022ccf65f7d19
+ARG UV_VERSION=0.13.5
+ARG UV_SHA256=f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f
+ARG GOOSE_VERSION=1.55.0
+ARG GOOSE_URL=https://github.com/aaif-goose/goose/releases/download/v1.55.0/goose-x86_64-unknown-linux-gnu.tar.bz2
+ARG GOOSE_SHA256=d9afefe7b8f4e372ebefd8b465ab6eea1f297304d058e8e9379ed627e0329708
+ARG GROK_VERSION=1.0.67
+ARG GROK_URL=https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-1.0.67-linux-x86_64
+ARG GROK_SHA256=ce33b1a29e37901f56fe59916cda7a1149e6fd377118f918e90d89f9abb52a51
+ARG MUSE_VERSION=1.4.11-R6667.1
+ARG MUSE_URL=https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.11-R6667.1&file=muse-x86-linux
+ARG MUSE_SHA256=6fda12a6a4f236528dafa707384cf6395fe859b1438ef77c7be26ed9d7976839
 # The documented install is `curl https://cursor.com/install | bash`, and that
 # script is SERVER-RENDERED: it bakes the current version into its body as a
 # literal DOWNLOAD_URL, so the URL is stable while what it installs is not.
 # Piping it into a shell would pin nothing, so the tarball is named by its bytes
 # here instead. The sha256 is ours -- Cursor publishes none.
-ARG CURSOR_AGENT_VERSION=2026.10.01-e373342
-ARG CURSOR_AGENT_URL=https://downloads.cursor.com/lab/2026.10.01-e373342/linux/x64/agent-cli-package.tar.gz
-ARG CURSOR_AGENT_SHA256=a79726c6e644520e993970be4c45775a6889802b67abe461a677a53219ae28e8
+ARG CURSOR_AGENT_VERSION=2026.10.19-6bbf2c4
+ARG CURSOR_AGENT_URL=https://downloads.cursor.com/lab/2026.10.19-6bbf2c4/linux/x64/agent-cli-package.tar.gz
+ARG CURSOR_AGENT_SHA256=cf80cc18d8b33bf33e762353977ca1868cfc45290c92c0ffdcef83bb8b37b44f
 # Google's Antigravity CLI. The sha256 is UPSTREAM'S OWN -- the GitHub release
 # API publishes a `digest` per asset -- unlike cursor-agent's, which is ours
 # because Cursor publishes none. The build checks it anyway: a published digest
@@ -106,9 +106,9 @@ ARG CURSOR_AGENT_SHA256=a79726c6e644520e993970be4c45775a6889802b67abe461a677a532
 #
 # agy RELEASES DAILY (1.1.15 on 2026-08-19, 1.2.7 on 2026-09-19), so this is a
 # pin to re-confirm whenever this file is touched.
-ARG AGY_VERSION=1.3.2
-ARG AGY_URL=https://github.com/google-antigravity/antigravity-cli/releases/download/1.3.2/agy_cli_linux_x64.tar.gz
-ARG AGY_SHA256=bf8504c72097c97de77d271b160bdb10b956031cf79cf95d96cb948df161c25f
+ARG AGY_VERSION=1.4.5
+ARG AGY_URL=https://github.com/google-antigravity/antigravity-cli/releases/download/1.4.5/agy_cli_linux_x64.tar.gz
+ARG AGY_SHA256=90cc1894b6862510869ad4cf1a6f4c043b7ae7c095bad8d5c355788a0ca935c7
 # oh-my-pi. A DOWNLOAD, never the npm layer: the npm package
 # `@oh-my-pi/pi-coding-agent` needs Bun >= 1.3.14 and does not run under node at
 # all, so `npm ci` cannot install it into this image. What ships instead is the
@@ -120,9 +120,9 @@ ARG AGY_SHA256=bf8504c72097c97de77d271b160bdb10b956031cf79cf95d96cb948df161c25f
 # OWN: the release publishes a SHA256SUMS.txt naming it against
 # `omp-linux-x64`. Confirmed on 2026-09-17 to agree with sha256sum over the
 # fetched file -- which is the point of checking it below anyway.
-ARG OMP_VERSION=18.8.7
-ARG OMP_URL=https://github.com/can1357/oh-my-pi/releases/download/v18.8.7/omp-linux-x64
-ARG OMP_SHA256=b87f9835a0acdbb81bbbad8273aa2d999b608a208598421a9584cffeb3139a8a
+ARG OMP_VERSION=18.12.6
+ARG OMP_URL=https://github.com/can1357/oh-my-pi/releases/download/v18.12.6/omp-linux-x64
+ARG OMP_SHA256=85d9daf3a05fc76e8cd425ae1904eb576af8d21cc85fcf4690742626e07ccfa4
 # vibe's interpreter, NOT the product's. `mistral-vibe` declares
 # `requires_python >=3.12` and bookworm-slim ships 3.11.2 -- and this file sets
 # `UV_PYTHON_DOWNLOADS=never`, so `uv venv --python 3.12` cannot fetch one
@@ -133,9 +133,9 @@ ARG OMP_SHA256=b87f9835a0acdbb81bbbad8273aa2d999b608a208598421a9584cffeb3139a8a
 # The `install_only_stripped` build is deliberate: the unstripped tarball
 # unpacks to 333 MB against this one's 99 MB, and nothing in this image debugs
 # CPython. Measured: the venv builds and `vibe --version` answers on both.
-ARG PYTHON312_VERSION=3.12.11
-ARG PYTHON312_URL=https://github.com/astral-sh/python-build-standalone/releases/download/20250818/cpython-3.12.11%2B20250818-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
-ARG PYTHON312_SHA256=b5a4f189f25cbacba0f76c9bd6f3ea8c35d2064068aa74ccbb6863068caababd
+ARG PYTHON312_VERSION=3.12.15
+ARG PYTHON312_URL=https://github.com/astral-sh/python-build-standalone/releases/download/20261021/cpython-3.12.15%2B20261021-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
+ARG PYTHON312_SHA256=6d7521138fd33afddc1ccd08abb007d9a2829e38117c2576f9efdc0ec73ce772
 
 LABEL org.opencontainers.image.title="multi-llm containerized E2E harness"
 LABEL org.opencontainers.image.description="Real coding-agent CLIs, stubbed backends, both lanes."

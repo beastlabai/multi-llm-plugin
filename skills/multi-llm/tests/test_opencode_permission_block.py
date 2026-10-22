@@ -361,13 +361,15 @@ class TestContinueLoopOnDenyGate:
     def test_above_the_ceiling_it_is_absent_and_warns_once(
         self, provider, dispatch_env, capsys
     ):
+        major, minor, patch = map(int, CEILING.split("."))
+        newer = f"{major}.{minor}.{patch + 1}"
         for _ in range(3):
-            document = _content(provider, PROFILE_AGENT_READONLY, runner_version="1.19.0")
+            document = _content(provider, PROFILE_AGENT_READONLY, runner_version=newer)
             assert "experimental" not in document
             assert document["agent"]["plan"]["permission"]["doom_loop"] == "deny"
         err = capsys.readouterr().err
         assert err.count("continue_loop_on_deny") == 1
-        assert "1.19.0" in err and FLOOR in err and CEILING in err
+        assert newer in err and FLOOR in err and CEILING in err
 
     def test_below_the_floor_it_is_absent_with_no_warning(
         self, provider, dispatch_env, capsys
