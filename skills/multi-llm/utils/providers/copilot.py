@@ -160,6 +160,8 @@ OUTPUT_RESERVE_TOKENS = 8000
 #: ``(context_length, top_provider.max_completion_tokens)`` read from
 #: OpenRouter's own catalog on 2026-08-18 for the slugs this block ships.
 _MODEL_CATALOG: Dict[str, Tuple[int, int]] = {
+    # OpenRouter /api/v1/models, 2026-10-22: context_length / max_completion_tokens.
+    "openai/gpt-6-luna": (1050000, 128000),
     # Read from OpenRouter's catalog on 2026-08-19 when this became models[0].
     "openai/gpt-5.6-luna": (1050000, 128000),
     "openai/gpt-4.1-mini": (1047576, 32768),

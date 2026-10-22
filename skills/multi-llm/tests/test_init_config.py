@@ -212,25 +212,25 @@ def _real_init(detected_list):
 class TestD2aGuard:
     def test_gemini_only_injects_first_model(self):
         parsed, expected, notices = _real_init(["gemini"])
-        assert parsed["defaults"]["models"] == ["gemini:gemini-2.5-flash"]
-        assert parsed["defaults"]["quick_models"] == ["gemini:gemini-2.5-flash"]
-        assert expected == ["gemini:gemini-2.5-flash"]
+        assert parsed["defaults"]["models"] == ["gemini:gemini-4-argon"]
+        assert parsed["defaults"]["quick_models"] == ["gemini:gemini-4-argon"]
+        assert expected == ["gemini:gemini-4-argon"]
         assert any("gemini" in n and "defaults.models" in n for n in notices)
 
     def test_cline_only_injects_first_model(self):
         parsed, _expected, notices = _real_init(["cline"])
-        assert parsed["defaults"]["models"] == ["cline:openrouter/z-ai/glm-5.2"]
-        assert parsed["defaults"]["quick_models"] == ["cline:openrouter/z-ai/glm-5.2"]
+        assert parsed["defaults"]["models"] == ["cline:openrouter/z-ai/glm-5.3"]
+        assert parsed["defaults"]["quick_models"] == ["cline:openrouter/z-ai/glm-5.3"]
         assert any("cline" in n for n in notices)
 
     def test_multi_offpanel_injects_both_and_names_both(self):
         parsed, _expected, notices = _real_init(["gemini", "cline"])
         assert parsed["defaults"]["models"] == [
-            "gemini:gemini-2.5-flash",
-            "cline:openrouter/z-ai/glm-5.2",
+            "gemini:gemini-4-argon",
+            "cline:openrouter/z-ai/glm-5.3",
         ]
         # quick_models gets only the FIRST detected provider's first model.
-        assert parsed["defaults"]["quick_models"] == ["gemini:gemini-2.5-flash"]
+        assert parsed["defaults"]["quick_models"] == ["gemini:gemini-4-argon"]
         models_notice = next(n for n in notices if "defaults.models" in n)
         assert "gemini" in models_notice and "cline" in models_notice
 
@@ -255,9 +255,9 @@ class TestD2aGuard:
         # catalog (whose `models:` key is uncommented at a deeper indent). The
         # provider blocks must stay BARE model ids after D2a.
         cline_catalog = [
-            "openrouter/z-ai/glm-5.2",
-            "openrouter/moonshotai/kimi-k2.7-code",
-            "openrouter/openai/gpt-5.5",
+            "openrouter/z-ai/glm-5.3",
+            "openrouter/moonshotai/kimi-k3",
+            "openrouter/openai/gpt-6-astra",
         ]
         for detected, catalogs in (
             (["cline"], {"cline": cline_catalog}),
@@ -265,10 +265,9 @@ class TestD2aGuard:
                 ["gemini"],
                 {
                     "gemini": [
-                        "gemini-2.5-flash",
-                        "gemini-2.5-pro",
-                        "gemini-3-flash-preview",
-                        "gemini-3.1-pro-preview",
+                        "gemini-4-argon",
+                        "gemini-3.8-flash",
+                        "gemini-3.5-flash-lite",
                         "gemini-flash-latest",
                     ]
                 },
@@ -277,10 +276,9 @@ class TestD2aGuard:
                 ["gemini", "cline"],
                 {
                     "gemini": [
-                        "gemini-2.5-flash",
-                        "gemini-2.5-pro",
-                        "gemini-3-flash-preview",
-                        "gemini-3.1-pro-preview",
+                        "gemini-4-argon",
+                        "gemini-3.8-flash",
+                        "gemini-3.5-flash-lite",
                         "gemini-flash-latest",
                     ],
                     "cline": cline_catalog,
@@ -331,7 +329,7 @@ class TestEndToEndInit:
         # Only detected providers' defaults specs are uncommented.
         assert written["defaults"]["models"] == [
             "cursor-agent:composer-2.5",
-            "cursor-agent:gemini-3.6-flash-high",
+            "cursor-agent:gemini-4-argon-high",
             "cursor-agent:grok-4.7-high",
             "claude-code:claude-fable-5-1:high",
         ]
@@ -395,8 +393,8 @@ class TestEndToEndInit:
         _reset_cache()
         assert init_config.main(["--dir", str(tmp_path)]) == 0
         _reset_cache()
-        assert registry.get_default_models(anchor=str(tmp_path)) == ["gemini:gemini-2.5-flash"]
-        assert registry.get_quick_models(anchor=str(tmp_path)) == ["gemini:gemini-2.5-flash"]
+        assert registry.get_default_models(anchor=str(tmp_path)) == ["gemini:gemini-4-argon"]
+        assert registry.get_quick_models(anchor=str(tmp_path)) == ["gemini:gemini-4-argon"]
         _reset_cache()
 
     def test_modes_example_safe_when_claude_and_cursor_detected(self, tmp_path, monkeypatch):

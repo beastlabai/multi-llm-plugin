@@ -64,9 +64,9 @@ provider = "openrouter"
 # POSTs), so `--max-price` is decided entirely from these numbers rather than
 # from a served catalog -- which is why §4.2's "the stub serves no prices" worry
 # does not fire.
-# Updated 2026-08-19 with the move to gpt-5.6-luna: OpenRouter lists $0.20/M in
-# and $1.20/M out. vibe issues no catalog GET, so these numbers are the ONLY
-# input to `--max-price`; leaving the previous pair would have under-counted
-# spend against the cap by 4x on output.
+# Default catalog model: GPT-6 Luna (OpenRouter /api/v1/models, 2026-10-22).
+# Use its higher long-context tier conservatively because this seed cannot
+# switch prices at 272k prompt tokens: $0.20/M input and $0.75/M output.
+# Model overrides must supply appropriate prices for their own billing tier.
 input_price = 0.2
-output_price = 1.2
+output_price = 0.75

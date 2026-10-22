@@ -3228,13 +3228,13 @@ class TestKimiProvider:
             assert KimiProvider().get_env(slug)["KIMI_MODEL_NAME"] == slug
 
     def test_the_default_model_is_models_zero(self):
-        """§8 item 3: `--init` injects models[0], so it must be the §6.1 slug
-        the §7.4 live smoke actually ran."""
+        """`--init` injects models[0]; the current Kimi slug must reach its env."""
         from utils.provider_registry import load_base_config
 
         models = load_base_config()["providers"]["kimi"]["models"]
 
-        assert models[0] == "moonshotai/kimi-k2.5"
+        assert models[0] == "moonshotai/kimi-k3"
+        assert KimiProvider().get_env(models[0])["KIMI_MODEL_NAME"] == models[0]
 
     def test_defaults_models_gains_no_uncommented_row(self):
         """§8 item 3's rule: the shipped example line is COMMENTED.

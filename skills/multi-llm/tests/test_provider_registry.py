@@ -277,8 +277,8 @@ class TestGetAvailableModels:
         gemini_models = models.get("gemini", [])
 
         # Check some known gemini models
-        assert "gemini-2.5-flash" in gemini_models
-        assert "gemini-2.5-pro" in gemini_models
+        assert "gemini-3.8-flash" in gemini_models
+        assert "gemini-4-argon" in gemini_models
 
 
 class TestGetAllModelSpecs:
@@ -309,7 +309,7 @@ class TestGetAllModelSpecs:
 
         # Check for some expected model specs
         assert "cursor-agent:auto" in specs
-        assert "gemini:gemini-2.5-flash" in specs
+        assert "gemini:gemini-3.8-flash" in specs
 
 
 class TestGetProvider:
@@ -441,11 +441,11 @@ class TestIsModelValid:
         assert is_model_valid("cursor-agent:auto") is True
 
     def test_is_model_valid_gemini_flash(self):
-        """Validate gemini:gemini-2.5-flash as valid."""
+        """Validate gemini:gemini-3.8-flash as valid."""
         import utils.provider_registry as registry
         registry._config = None
 
-        assert is_model_valid("gemini:gemini-2.5-flash") is True
+        assert is_model_valid("gemini:gemini-3.8-flash") is True
 
     def test_is_model_valid_without_prefix(self):
         """Validate model without prefix using default provider."""
@@ -576,7 +576,7 @@ class TestProviderRegistryIntegration:
         import utils.provider_registry as registry
         registry._config = None
 
-        spec = "gemini:gemini-2.5-flash"
+        spec = "gemini:gemini-3.8-flash"
         provider, model = parse_model_spec(spec)
 
         # Reconstruct spec

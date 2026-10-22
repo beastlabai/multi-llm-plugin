@@ -63,6 +63,11 @@
 # tests/test_reasoning_effort_ladder.py checks all of that over the live
 # provider registry, so a new adapter cannot slip past it.
 
+# Model catalog refreshed 2026-10-22. Native IDs: `codex debug models`,
+# `cursor-agent models`, `agy models`, `grok models`, and vendor model docs.
+# OpenRouter IDs: https://openrouter.ai/api/v1/models; Kilo variants are captured
+# in tests/fixtures/kilocode/model_variants.json. Keep each provider's spelling:
+# a model available through OpenRouter may not exist in a native CLI catalog.
 providers:
   claude-code:
     default_timeout: 1800
@@ -71,11 +76,17 @@ providers:
     # translated to "--effort <level>". Valid: low, medium, high, xhigh, max;
     # unsupported levels are silently downgraded by the CLI per model.
     # Without a suffix, the CLI's default effort applies.
+    # Moving aliases remain supported; explicit IDs pin the current generation.
+    # https://code.claude.com/docs/en/model-config
     models:
       - sonnet
       - opus
       - fable
       - haiku
+      - claude-sonnet-5-5
+      - claude-opus-5-5
+      - claude-fable-5-1
+      - claude-haiku-5-5
     # `--fallback-model <m1,m2>`: automatic fallback when the primary is
     # overloaded (three consecutive 529s) or unavailable (a 404 falls back on
     # the FIRST error — free insurance against a retired model alias above).
@@ -203,25 +214,23 @@ providers:
     # -xhigh variants); no ":effort" suffix support needed or implemented.
     models:
       - auto
-      - glm-5.2-max
-      - gpt-5.5-extra-high
+      - composer-2.5
       - gpt-5.6-sol-xhigh
-      - gemini-3.1-pro
-      - gemini-3.5-flash
-      - gemini-3.6-flash-high
-      - kimi-k2.7-code
+      - gpt-5.6-terra-xhigh
+      - gpt-5.6-luna-high
+      - gemini-4-argon-high
+      - gemini-3.8-flash-high
       - kimi-k3-high
       - kimi-k3-max
       - glm-5.2-high
-      # Canonical name. The legacy grok-4.5-{medium,high,xhigh} aliases still
-      # resolve but are absent from `cursor-agent models`, and ALL of them —
-      # xhigh included — land on "Cursor Grok 4.5 High" (verified via the
-      # stream-json init event). There is no xhigh grok tier in cursor-agent.
-      - cursor-grok-4.5-high
-      - claude-sonnet-5-thinking-xhigh
-      - claude-opus-4-8-thinking-xhigh
-      - claude-fable-5-high
-      - composer-2.5
+      - glm-5.2-max
+      - grok-4.7-high
+      - claude-sonnet-5-5-xhigh
+      - claude-opus-5-5-xhigh
+      - claude-fable-5-1-high
+      - claude-haiku-5-5-thinking-high
+      - muse-wonder-1.0-xhigh
+      - muse-spark-1.3-xhigh
 
   gemini:
     default_timeout: 1200  # Gemini can be slower
@@ -229,42 +238,33 @@ providers:
     # thinking, define a custom alias with a thinkingConfig under
     # modelConfigs.customAliases in ~/.gemini/settings.json (or the project's
     # .gemini/settings.json) and list that alias name here as the model.
-    # Gemini 3 models take thinkingLevel LOW/HIGH; 2.5 takes a numeric thinkingBudget.
-    # MEASURED 2026-08-19 against generativelanguage.googleapis.com/v1beta with a
-    # GEMINI_API_KEY: of the five ids previously listed here, `gemini-3-flash`,
-    # `gemini-3-pro` and `gemini-3.1-pro` are ABSENT from the catalog, and
-    # `gemini-3-flash` 404s on :generateContent. It was models[0], so a bare
-    # `gemini` spec resolved to a model the API-key path cannot serve. The two
-    # verified ids lead now; the gemini-3 line is kept, corrected to the names the
-    # catalog really publishes, and flagged as unverified on the OAuth/Code Assist
-    # path which resolves a different catalog.
+    # Current text/tool models: https://ai.google.dev/gemini-api/docs/models
+    # API-key and OAuth/Code Assist availability can differ.
     models:
-      - gemini-2.5-flash          # verified 200
-      - gemini-2.5-pro            # verified in catalog
-      - gemini-3-flash-preview    # verified 200 (was: gemini-3-flash, absent)
-      - gemini-3.1-pro-preview    # in catalog (was: gemini-3.1-pro, absent)
-      - gemini-flash-latest       # moving alias, in catalog
+      - gemini-4-argon
+      - gemini-3.8-flash
+      - gemini-3.5-flash-lite
+      - gemini-flash-latest
 
   grok:
     default_timeout: 1200
     # Run "grok models" to see the full list of available models
-    # ":effort" suffix (e.g. grok-4.5:low) -> "--reasoning-effort <level>".
+    # ":effort" suffix (e.g. grok-4.6:low) -> "--reasoning-effort <level>".
     # Valid: none, minimal, low, medium, high, xhigh, max. Per-model support
-    # varies: grok-4.5 supports high/medium/low; grok-composer-2.5-fast has none.
+    # varies. `grok models` lists 4.6 as latest on this CLI (2026-10-22).
     models:
-      - grok-4.5:high
-      - grok-composer-2.5-fast
+      - grok-4.6:high
 
   fx:
     default_timeout: 1200
     max_concurrent: 2
     # Vercel fx 0.0.14, checksummed release pinned in the container. Its `fx`
     # binary name collides with an unrelated npm/Homebrew JSON viewer; do not
-    # resolve or install that package as this provider. A live OpenRouter run
-    # used this existing model slug; no reasoning option is sent on custom
-    # connections, and prompts travel over stdin by default.
+    # resolve or install that package as this provider. Model IDs are OpenRouter
+    # slugs; no reasoning option is sent on custom connections, and prompts
+    # travel over stdin by default.
     models:
-      - openai/gpt-5.6-luna
+      - openai/gpt-6-luna
 
   opencode:
     default_timeout: 1200
@@ -329,34 +329,19 @@ providers:
     #       my-model: {}
     #
     # Run "opencode models" to see the full list of available models
-    # ":effort" suffix (e.g. openai/gpt-5.5:high) -> "run --variant <name>".
+    # ":effort" suffix (e.g. openai/gpt-6.1-sol:high) -> "run --variant <name>".
     # Variant names are provider-specific (OpenAI: none/minimal/low/medium/high/xhigh;
     # Anthropic: high/max); unknown variants are resolved/ignored server-side.
     models:
-      # `opencode/*` ids are Zen's server-side catalog and vanish between
-      # releases: `opencode/sonnet`, `opencode/deepseek-v4-flash-free` and
-      # `opencode/hy3-free` were all gone from `opencode models` on 1.18.30
-      # (probed 2026-09-11). `opencode/big-pickle` is the one id measured
-      # answering with no credential present (hosts/capabilities.yaml carries
-      # the dated probe); the container lane's catalog diff flags the next
-      # removal.
       - opencode/big-pickle
       - opencode/nemotron-3-ultra-free
-      - google/gemini-3.1-pro-preview
-      - openai/gpt-5.5
-      # openrouter/* needs a stored credential: opencode auth login
-      # --provider openrouter --method api. Without it opencode lists no
-      # openrouter models at all and the name fails to resolve.
-      # NO ":effort" suffix on this one. It advertises low/high/max variants,
-      # but on opencode 1.18.12 every --variant run hangs indefinitely without
-      # writing a byte to either stream or reaching session creation — it burns
-      # the full timeout instead. Plain (no suffix) answers in ~3s.
-      # The denylist itself is NOT in this file: it is `EFFORT_LADDER.model_caps`
-      # in utils/providers/opencode.py, which `build_command` consults before it
-      # emits --variant, so a suffix that reaches it from anywhere — this list,
-      # a --models spec, or the host session's own picker variant — is dropped
-      # with one warning rather than dispatched. One owner, both routes.
-      - openrouter/deepseek/deepseek-v4-flash-0731
+      - google/gemini-4-argon
+      - openai/gpt-6.1-sol
+      - openai/gpt-6-astra
+      # Requires stored OpenRouter auth (`opencode auth login`). Keep the plain
+      # model selection: variant hangs were measured on the earlier V4 Flash;
+      # this catalog refresh does not re-probe the V4.1 variant execution path.
+      - openrouter/deepseek/deepseek-v4.1-flash-1017
 
   codex:
     default_timeout: 1800
@@ -374,20 +359,20 @@ providers:
     # OPENAI_API_KEY is never stripped on any path: it is measured not consulted
     # by codex at all, and stripping it breaks configs declaring
     # `env_key = "OPENAI_API_KEY"` for a custom provider.
-    # Model entries may carry an optional ":effort" suffix (e.g. gpt-5.5:high),
+    # Model entries may carry an optional ":effort" suffix (e.g. gpt-6.1-sol:high),
     # translated by the codex adapter to "-c model_reasoning_effort=<effort>".
     # Valid efforts: none, minimal, low, medium, high, xhigh, max — plus "ultra",
     # which is accepted and rewritten to "max" before argv is built. `max` is
     # advertised per model by `codex debug models` (supported_reasoning_levels)
-    # for gpt-5.6-sol/-terra/-luna; none/minimal are taken on the wire but
+    # for gpt-6.1-sol/gpt-6-astra/gpt-6-luna; none/minimal are taken on the wire but
     # advertised by no catalog entry, so pass one only when you mean it.
     # Without a suffix, codex uses the default from the user's ~/.codex/config.toml
     models:
-      - gpt-5.5
-      - gpt-5.5:high
-      - gpt-5.6-terra
-      - gpt-5.6-sol
-      - gpt-5.6-sol:xhigh
+      - gpt-6.1-sol
+      - gpt-6.1-sol:xhigh
+      - gpt-6-astra
+      - gpt-6-astra:xhigh
+      - gpt-6-luna
     # sandbox_fallback: auto | contained | off   (default: auto)
     #
     # D6 (2026-09-17; ladder 2026-09-22; plugin-landlock 2026-09-30) — the ONE
@@ -498,52 +483,44 @@ providers:
     # Run "kilocode models" to see the full list of available models
     # Model names use 3-part format: backend/provider/model
     # ":variant" suffix -> "run --variant <name>". Variant names are MODEL-specific
-    # and drift, so there is no per-family rule to memorise — 183 of 374 openrouter
-    # models publish a `variants` list and each one is its own. Measured 2026-09-21
-    # on kilocode 7.5.16: glm-5.2 high/xhigh; glm-5.3 low/high/max; kimi-k3
-    # low/high/max; nemotron-3-ultra medium/high; mimo-v2.5-pro low/medium/high;
-    # hy3 none/low/high; step-3.7-flash low/medium/high. The openrouter backend
-    # has since dropped EVERY variant from minimax-m2.7, minimax-m3,
-    # kimi-k2.7-code, qwen3.7-max and trinity-large-thinking (the kilo backend
-    # still publishes them), and openrouter/qwen/qwen3.8-max has left the
-    # catalog altogether — the rows below name the dated qwen3.8-max-0902
-    # snapshot instead, which carries the same minimal/low/medium/high/xhigh
-    # ladder.
-    # Discover with "kilocode models <backend> --verbose" (credential-free); the
-    # capture backing these rows is tests/fixtures/kilocode/model_variants.json.
+    # and drift, so check each model rather than assuming a family-wide ladder.
+    # Refreshed 2026-10-22 with kilocode 7.8.15: glm-5.3 publishes low/high/max;
+    # kimi-k3 none/low/high/max; nemotron-3-ultra none/medium/high;
+    # mimo-v2.6-pro low/medium/high;
+    # qwen3.8-max-0902 minimal/low/medium/high/xhigh. Prime/ultraspeed SKUs are
+    # separate speed-priced variants, not replacements for these standard IDs.
+    # Discover with "kilocode models <backend> --refresh --verbose"; the capture
+    # backing these rows is tests/fixtures/kilocode/model_variants.json.
     # GOTCHA: an invalid/unsupported variant is SILENTLY ignored. Whitelisted
     # suffixes: none, minimal, low, medium, high, xhigh, max, thinking, instant;
     # anything else (e.g. ":free" model ids) passes through as part of the model name.
     max_concurrent: 2
     models:
-      - openrouter/moonshotai/kimi-k2.7-code
-      - openrouter/moonshotai/kimi-k3:max          # was :thinking (publishes low, high, max)
+      - openrouter/moonshotai/kimi-k3:max
       - openrouter/nvidia/nemotron-3-ultra-550b-a55b
-      - openrouter/z-ai/glm-5.2:xhigh
-      - kilo/z-ai/glm-5.2
-      - openrouter/minimax/minimax-m2.7
-      - openrouter/minimax/minimax-m3              # was :thinking (openrouter now publishes no variants)
-      - openrouter/x-ai/grok-4.20-multi-agent
+      - openrouter/z-ai/glm-5.3:max
+      - kilo/z-ai/glm-5.3
+      - openrouter/minimax/minimax-m3.1-flash
+      - openrouter/x-ai/grok-4.7
       - openrouter/arcee-ai/trinity-large-thinking
-      - openrouter/xiaomi/mimo-v2.5-pro
-      - openrouter/qwen/qwen3.7-max                # was :max (openrouter now publishes no variants)
-      - openrouter/qwen/qwen3.8-max-0902:xhigh     # was qwen3.8-max (gone from the catalog)
-      - openrouter/tencent/hy3:high                # was :xhigh (publishes low, high, none)
-      - openrouter/stepfun/step-3.7-flash:high     # was :xhigh (publishes low, medium, high)
-      - openrouter/openai/gpt-5.5-pro
-      - openai/gpt-5.5-pro
-      - openrouter/nex-agi/nex-n2-pro
-      - openrouter/inclusionai/ring-2.6-1t
-      - openrouter/google/gemini-3.5-flash
-      - google/gemini-3.1-pro-preview
-      - openrouter/deepseek/deepseek-v4-pro
-      - openrouter/anthropic/claude-sonnet-5
-      - openrouter/anthropic/claude-fable-5
+      - openrouter/xiaomi/mimo-v2.6-pro
+      - openrouter/qwen/qwen3.8-max-0902:xhigh
+      - openrouter/tencent/hy4-preview:high
+      - openrouter/stepfun/step-5-preview:high
+      - openrouter/openai/gpt-6-astra-pro
+      - openai/gpt-6-astra
+      - openrouter/nex-agi/nex-n2.5-pro
+      - openrouter/google/gemini-3.8-flash
+      - openrouter/google/gemini-4-argon
+      - google/gemini-4-argon
+      - openrouter/deepseek/deepseek-v4-pro-0813
+      - openrouter/anthropic/claude-sonnet-5.5
+      - openrouter/anthropic/claude-fable-5.1
 
   cline:
     default_timeout: 1200
     # Model names use the format <cline-provider>/<model-id>, e.g.
-    # openrouter/z-ai/glm-5.2 — the segment before the first "/" is the cline
+    # openrouter/z-ai/glm-5.3 — the segment before the first "/" is the cline
     # backend provider (-P), the rest is the model id (-m).
     # -m mutates the saved default in ~/.cline, so cap concurrency.
     # ":effort" suffix -> "--thinking <level>". Valid: none, low, medium, high,
@@ -552,14 +529,14 @@ providers:
     # Note: xhigh may be downgraded to high on some provider paths inside cline.
     max_concurrent: 2
     models:
-      - openrouter/z-ai/glm-5.2
-      - openrouter/moonshotai/kimi-k2.7-code
-      - openrouter/openai/gpt-5.5
+      - openrouter/z-ai/glm-5.3
+      - openrouter/moonshotai/kimi-k3
+      - openrouter/openai/gpt-6-astra
 
   goose:
     default_timeout: 1200
     # Model names use the format <goose-provider>/<model-id>, e.g.
-    # openrouter/z-ai/glm-5.2 — the segment before the first "/" is the goose
+    # openrouter/z-ai/glm-5.3 — the segment before the first "/" is the goose
     # backend provider (--provider), the rest is the model id (--model).
     # Auth is env-only: the openrouter backend needs OPENROUTER_API_KEY in
     # the environment.
@@ -568,14 +545,14 @@ providers:
     # max, xhigh. GOTCHA: goose SILENTLY ignores it for openrouter models it
     # doesn't classify as reasoning-capable, and silently ignores invalid values.
     models:
-      - openrouter/z-ai/glm-5.2
-      - openrouter/moonshotai/kimi-k2.7-code
-      - openrouter/openai/gpt-5.5
+      - openrouter/z-ai/glm-5.3
+      - openrouter/moonshotai/kimi-k3
+      - openrouter/openai/gpt-6-astra
 
   aider:
     default_timeout: 1200
     # Model names are litellm model specs passed VERBATIM to --model, e.g.
-    # openrouter/z-ai/glm-5.2 (no provider/model splitting).
+    # openrouter/z-ai/glm-5.3 (no provider/model splitting).
     # Auth is env-only: openrouter/ models need OPENROUTER_API_KEY in the
     # environment.
     # ":effort" suffix -> "--reasoning-effort <value>". Whitelist: none, minimal,
@@ -583,9 +560,9 @@ providers:
     # openrouter/ models always accept it (sent as OpenRouter's reasoning.effort),
     # other models warn-and-ignore.
     models:
-      - openrouter/z-ai/glm-5.2
-      - openrouter/moonshotai/kimi-k2.7-code
-      - openrouter/openai/gpt-5.5
+      - openrouter/z-ai/glm-5.3
+      - openrouter/moonshotai/kimi-k3
+      - openrouter/openai/gpt-6-astra
 
   agy:
     # This is now the ONLY number. agy's `--print-timeout` (its internal
@@ -607,26 +584,28 @@ providers:
     # is a REAL flag on top of it (read from `agy --help`, agy 1.1.13) — this
     # file used to deny that flag existed, so a configured effort was refused by
     # our own whitelist. Entries may therefore carry a ":effort" suffix, e.g.
-    # "Gemini 3.1 Pro (High):high"; valid levels are low, medium, high ONLY, and
+    # "Gemini 4 Argon (High):high"; valid levels are low, medium, high ONLY, and
     # anything else stays part of the model name (agy then rejects it out loud).
     models:
-      - "Gemini 3.6 Flash (High)"
-      - "Gemini 3.6 Flash (Medium)"
-      - "Gemini 3.6 Flash (Low)"
-      - "Gemini 3.5 Flash (Medium)"
-      - "Gemini 3.5 Flash (High)"
-      - "Gemini 3.5 Flash (Low)"
-      - "Gemini 3.1 Pro (Low)"
-      - "Gemini 3.1 Pro (High)"
-      - "Claude Sonnet 4.6 (Thinking)"
-      - "Claude Opus 4.6 (Thinking)"
+      - "Gemini 4 Argon (High)"
+      - "Gemini 4 Argon (Medium)"
+      - "Gemini 4 Argon (Low)"
+      - "Gemini 3.8 Flash (High)"
+      - "Gemini 3.8 Flash (Medium)"
+      - "Gemini 3.8 Flash (Low)"
+      - "Claude Opus 5.5 (High)"
+      - "Claude Opus 5.5 (Medium)"
+      - "Claude Opus 5.5 (Low)"
+      - "Claude Sonnet 5.5 (High)"
+      - "Claude Sonnet 5.5 (Medium)"
+      - "Claude Sonnet 5.5 (Low)"
       - "GPT-OSS 120B (Medium)"
 
   muse:
     default_timeout: 1800
     # Meta's Muse Code harness. Auth is a stored provider credential
     # (`muse login` / `muse auth set`), not an env var.
-    # ":effort" suffix (e.g. muse-spark-1.2:xhigh) -> "--reasoning-effort <level>".
+    # ":effort" suffix (e.g. muse-spark-1.3:xhigh) -> "--reasoning-effort <level>".
     # Valid: none, minimal, low, medium, high, xhigh, ultra. GOTCHA: muse
     # hard-errors on any other value, so an unknown suffix stays part of the
     # model name and fails model resolution instead. WITHOUT a suffix muse does
@@ -635,14 +614,19 @@ providers:
     # Timeout is generous on purpose: muse retries a failing provider call up
     # to 10 times with exponential backoff (a 429 alone waits 60s), so an
     # unfunded account burns minutes before reporting the 402.
+    # https://dev.meta.ai/docs/models; `muse model-profile show <id>`.
+    # Wonder Full requires a Power Usage or Maximum Usage subscription.
     models:
-      - muse-spark-1.2
-      - muse-spark-1.2:xhigh
+      - muse-wonder-1.0
+      - muse-wonder-1.0:xhigh
+      - muse-wonder-full-1.0
+      - muse-spark-1.3
+      - muse-spark-1.3:xhigh
 
   pi:
     default_timeout: 1200
     # Model names are pi model patterns passed VERBATIM to --model; pi resolves
-    # "provider/id" forms itself (e.g. openrouter/z-ai/glm-5.2). Run
+    # "provider/id" forms itself (e.g. openrouter/z-ai/glm-5.3). Run
     # "pi --list-models" to see the full list.
     # Auth: provider API-key env vars (OPENROUTER_API_KEY, ANTHROPIC_API_KEY, ...)
     # inherited by the subprocess, or keys stored via pi's /login.
@@ -652,9 +636,9 @@ providers:
     # (e.g. ":free" ids, bedrock "...-v1:0") stay part of the model name.
     # Runs "pi --mode json" and reports token usage and pi's estimated cost.
     models:
-      - openrouter/z-ai/glm-5.2
-      - openrouter/moonshotai/kimi-k2.7-code
-      - openrouter/openai/gpt-5.5
+      - openrouter/z-ai/glm-5.3
+      - openrouter/moonshotai/kimi-k3
+      - openrouter/openai/gpt-6-astra
 
   kimi:
     default_timeout: 1200
@@ -687,20 +671,10 @@ providers:
     # connection attempt simply is not gated. In the container the egress
     # allowlist refuses it and nothing leaves; on YOUR machine there is no such
     # allowlist, so the request goes out. Re-check on the next version bump.
-    # MODEL CHOICE, 2026-08-19. Kimi K3 was requested "on low reasoning"; that
-    # qualifier is NOT expressible through this adapter, so K3 was not taken.
-    # Two measured reasons, both already recorded above: there is no ":effort"
-    # suffix (a third ":"-segment is part of the model id, so `kimi-k3:low` would
-    # travel to OpenRouter verbatim as an unknown model), and
-    # KIMI_MODEL_THINKING_EFFORT is inert on the wire at 0.36.1 (byte-identical
-    # request body with and without it). OpenRouter exposes `reasoning_effort` as
-    # a request parameter, but the kimi CLI never sends one. K3 would therefore
-    # have run at default reasoning for $3.00/M in and $15.00/M out -- 5x and 6x
-    # this row's previous cost, on the token side that reasoning inflates.
-    # `kimi-k2.5` is the chosen alternative: newer than kimi-k2-thinking and
-    # CHEAPER than it too ($0.45/M in, $2.25/M out against $0.60/$2.50).
+    # Current OpenRouter family: Kimi K3 (2026-10-22). This adapter sends no
+    # reasoning-effort setting, so K3 uses its backend default.
     models:
-      - moonshotai/kimi-k2.5
+      - moonshotai/kimi-k3
 
   qwen-code:
     default_timeout: 1200
@@ -748,14 +722,10 @@ providers:
     # would execute in YOUR checkout -- from a provider that only ever parses the
     # output as an answer. A structured-output dispatch (`--json-schema`) is
     # quieter: the synthetic tool is exempt from the cap.
+    # Keep the current small model first; Max is a separate capacity tier.
     models:
-      # MODEL CHOICE, 2026-08-19: the cheap member of the same family, moved off
-      # `qwen/qwen3.8-max`. $0.45/M in, $3.20/M out against max's $2.00/$6.00 --
-      # 4.4x cheaper on input. This also directly relieves the recorded live-lane
-      # failure: qwen-code took OpenRouter 402 "requested up to 64000 tokens, but
-      # can only afford 43729", which is a max_tokens-vs-balance check, and a
-      # cheaper slug raises the affordable ceiling for the same credit.
       - qwen/qwen3.8-27b
+      - qwen/qwen3.8-max-0902
 
   copilot:
     default_timeout: 1200
@@ -771,13 +741,10 @@ providers:
     # and is consulted only for token limits, so none of it transfers here and
     # none of it belongs in this list.
     #
-    # NON-REASONING SLUGS ONLY. A model whose OpenRouter stream carries
-    # `reasoning_content` deltas breaks copilot's completions parser
-    # (copilot-cli#4196). Both entries below were chosen off OpenRouter's own
-    # `supported_parameters` (neither advertises `reasoning`/`reasoning_effort`)
-    # and both were run on the live smoke. `COPILOT_PROVIDER_WIRE_API=responses`
-    # is the proven fallback if a future slug needs it -- measured working
-    # against the committed stub -- but it is not set today.
+    # The original 1.0.80 probe recorded a completions-parser issue with
+    # reasoning_content deltas (copilot-cli#4196). This catalog refresh verifies
+    # model availability, not that parser's live compatibility with GPT-6 Luna.
+    # COPILOT_PROVIDER_WIRE_API=responses was the stub-tested fallback.
     #
     # Model entries may carry an optional ":effort" suffix, split on the LAST
     # colon.  Valid: none, minimal, low, medium, high, xhigh, max
@@ -795,21 +762,8 @@ providers:
     # `result.exitCode: 0` and an empty assistant message with no error record.
     # There is no text for a marker to match, so the adapter detects it
     # structurally in parse_output instead.
-    # MODEL CHOICE, 2026-08-19: moved off the dated `openai/gpt-4.1-mini`.
-    # `openai/gpt-5.6-luna` is newer AND cheaper -- $0.20/M in, $1.20/M out
-    # against gpt-4.1-mini's $0.40/$1.60 (OpenRouter catalog, same day).
-    #
-    # ONE RISK, RECORDED RATHER THAN DISCOVERED LATER: gpt-4.1-mini was chosen
-    # partly for being a NON-REASONING slug, because a stream carrying
-    # `reasoning_content` deltas breaks copilot's completions parser
-    # (copilot-cli#4196). Luna advertises `reasoning`/`reasoning_effort` where
-    # gpt-4.1-mini advertised no reasoning parameters at all, so whether it emits
-    # those deltas unprompted is the open question. The credentialed live lane is
-    # exactly the instrument for it: a2/a3 fail loudly if the parser breaks.
     models:
-      - openai/gpt-5.6-luna
-      - openai/gpt-4.1-mini
-      - openai/gpt-4o-mini
+      - openai/gpt-6-luna
 
   vibe:
     default_timeout: 1200
@@ -831,10 +785,8 @@ providers:
     # DIFFERENT catalog and none of this transfers to it; MISTRAL_API_KEY is
     # stripped so a stale one cannot select the vendor backend underneath.
     #
-    # ADDING AN ENTRY IS A TWO-FILE CHANGE. An alias listed here with no
-    # `[[models]]` entry behind it is selectable in the picker and fails at
-    # dispatch; on the container lane the alias must also equal the redirect row's
-    # `model_arg` byte-for-byte, or test_the_stub_saw_only_this_row_s_model fails.
+    # A host alias listed here needs a matching `[[models]]` entry in the
+    # host config. Container lanes render the alias from the selected model.
     #
     # Model entries may carry an optional ":effort" suffix, split on the LAST
     # colon.  Valid: off, low, medium, high, max
@@ -854,12 +806,10 @@ providers:
     # SPEND: `--max-price 0.25` is the roster's only USD cap, but it is checked
     # BETWEEN turns -- a single completion runs to completion regardless -- so
     # `--max-turns 4` is the bound that actually stops a runaway.
-    # MODEL CHOICE, 2026-08-19: same move as copilot -- newer and cheaper.
-    # THIS VALUE IS BYTE-COUPLED TO TWO OTHERS: the redirect row's `model_arg`
-    # and the seed's `[[models]] alias`. vibe is the one adapter whose model
-    # surface is an indirection, so all three must be changed together.
+    # The container seed renders alias/name from the selected model. A host
+    # still needs the matching alias in its own $VIBE_HOME/config.toml.
     models:
-      - openai/gpt-5.6-luna
+      - openai/gpt-6-luna
 
   omp:
     default_timeout: 1200
@@ -867,8 +817,8 @@ providers:
     #
     # Model names are omp model SELECTORS passed VERBATIM to --model. Run
     # `omp models openrouter --json` for the catalog — the field to copy is
-    # `selector` (openrouter/openai/gpt-5.6-luna), not `id`
-    # (openai/gpt-5.6-luna). The lookup is local (~/.omp/agent/models.db) and
+    # `selector` (openrouter/openai/gpt-6-luna), not `id`
+    # (openai/gpt-6-luna). The lookup is local (~/.omp/agent/models.db) and
     # needs no network.
     #
     # AUTH — omp's own $env chain, in the order omp reads it:
@@ -924,10 +874,10 @@ providers:
     # dispatch and `--no-rules` does not stop it. Kept on for parity with
     # claude-code; the opt-out is a commented block in that overlay.
     models:
-      - openrouter/openai/gpt-5.6-luna
-      - openrouter/z-ai/glm-5.2
-      - openrouter/moonshotai/kimi-k2.7-code
-      - openrouter/openai/gpt-5.5
+      - openrouter/openai/gpt-6-luna
+      - openrouter/z-ai/glm-5.3
+      - openrouter/moonshotai/kimi-k3
+      - openrouter/openai/gpt-6-astra
 
 
 # Default provider when model name doesn't include provider prefix
@@ -1397,40 +1347,36 @@ defaults:
   models:
     - cursor-agent:composer-2.5
     #- cursor-agent:gpt-5.6-sol-xhigh
-    - cursor-agent:gemini-3.6-flash-high
-    - cursor-agent:grok-4.7-high                          # was cursor-grok-4.7-high (4.7 has no cursor- slug)
+    - cursor-agent:gemini-4-argon-high
+    - cursor-agent:grok-4.7-high
     #- cursor-agent:kimi-k3-high
     #- opencode:opencode/big-pickle
-    - opencode:openrouter/deepseek/deepseek-v4-flash-0731
-    # kilocode variants are MODEL-specific and an unsupported one is SILENTLY
-    # ignored, so four of these six rows used to run at their model's default
-    # effort while reporting success. Each now asks for the top variant the
-    # model actually publishes, per `kilocode models <backend> --verbose`
-    # (kilocode 7.5.16, captured 2026-09-21 into
-    # tests/fixtures/kilocode/model_variants.json, which is what
-    # tests/test_providers.py::TestKiloCodeDefaultModelSpecs checks these
-    # against). Do not edit a suffix here without checking that capture.
-    - kilocode:openrouter/moonshotai/kimi-k3:max          # was :thinking (publishes low, high, max)
-    - kilocode:openrouter/nvidia/nemotron-3-ultra-550b-a55b:high   # was :xhigh (publishes medium, high)
-    - kilocode:openrouter/z-ai/glm-5.3:max                # was :xhigh (publishes low, high, max)
-    - kilocode:openrouter/minimax/minimax-m3              # was :thinking (openrouter now publishes no variants)
-    - kilocode:openrouter/xiaomi/mimo-v2.5-pro:high       # was :xhigh (publishes low, medium, high)
-    - kilocode:openrouter/qwen/qwen3.8-max-0902:xhigh     # was qwen3.8-max (gone from the catalog)
+    - opencode:openrouter/deepseek/deepseek-v4.1-flash-1017
+    # KiloCode silently ignores unsupported variants. These suffixes match
+    # `kilocode models <backend> --refresh --verbose` (7.8.15, 2026-10-22),
+    # captured in tests/fixtures/kilocode/model_variants.json and checked by
+    # tests/test_providers.py::TestKiloCodeDefaultModelSpecs.
+    - kilocode:openrouter/moonshotai/kimi-k3:max
+    - kilocode:openrouter/nvidia/nemotron-3-ultra-550b-a55b:high
+    - kilocode:openrouter/z-ai/glm-5.3:max
+    - kilocode:openrouter/minimax/minimax-m3.1-flash
+    - kilocode:openrouter/xiaomi/mimo-v2.6-pro:high
+    - kilocode:openrouter/qwen/qwen3.8-max-0902:xhigh
     - codex:gpt-6-astra:xhigh
     - claude-code:claude-fable-5-1:high
-    #- grok:grok-4.5
-    #- cline:openrouter/z-ai/glm-5.2
-    #- goose:openrouter/z-ai/glm-5.2
-    #- aider:openrouter/z-ai/glm-5.2
-    #- "agy:Gemini 3.1 Pro (High)"
-    #- pi:openrouter/z-ai/glm-5.2
-    #- omp:openrouter/openai/gpt-5.6-luna
-    #- muse:muse-spark-1.2:xhigh
-    #- kimi:moonshotai/kimi-k2-thinking
-    #- qwen-code:qwen/qwen3.8-max
-    #- copilot:openai/gpt-4.1-mini
-    #- vibe:openai/gpt-4.1-mini
-    #- fx:openai/gpt-5.6-luna
+    #- grok:grok-4.6
+    #- cline:openrouter/z-ai/glm-5.3
+    #- goose:openrouter/z-ai/glm-5.3
+    #- aider:openrouter/z-ai/glm-5.3
+    #- "agy:Gemini 4 Argon (High)"
+    #- pi:openrouter/z-ai/glm-5.3
+    #- omp:openrouter/openai/gpt-6-luna
+    #- muse:muse-spark-1.3:xhigh
+    #- kimi:moonshotai/kimi-k3
+    #- qwen-code:qwen/qwen3.8-max-0902
+    #- copilot:openai/gpt-6-luna
+    #- vibe:openai/gpt-6-luna
+    #- fx:openai/gpt-6-luna
 
   # Lightweight model subset for the --quick / -q flag
   # Used instead of defaults.models for faster reviews with fewer models
@@ -1445,9 +1391,9 @@ defaults:
   #   review-plan:
   #     models:
   #       - cursor-agent:auto
-  #       - gemini:gemini-2.5-flash
+  #       - gemini:gemini-3.8-flash
   #     quick:
   #       - cursor-agent:auto
   #   code-review:
   #     models:
-  #       - cursor-agent:gpt-5.2-high
+  #       - cursor-agent:gpt-5.6-sol-xhigh
