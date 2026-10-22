@@ -12,7 +12,7 @@ from .container import wrapper
 RIG = Path(__file__).parent / "container"
 
 
-@pytest.mark.parametrize("model", ["openai/gpt-5.6-luna", "minimax/minimax-m3.1-flash:free", "deepseek/deepseek-v4.1-flash"])
+@pytest.mark.parametrize("model", ["openai/gpt-6-luna", "minimax/minimax-m3.1-flash:free", "deepseek/deepseek-v4.1-flash"])
 @pytest.mark.parametrize("live", [False, True])
 def test_selected_alias_reaches_the_configured_provider(tmp_path, monkeypatch, model, live):
     home = tmp_path / "home"
