@@ -43,6 +43,7 @@ from .providers.cline import ClineProvider
 from .providers.codex import CodexProvider
 from .providers.copilot import CopilotProvider
 from .providers.cursor_agent import CursorAgentProvider
+from .providers.fx import FxProvider
 from .providers.gemini import GeminiProvider
 from .providers.goose import GooseProvider
 from .providers.grok import GrokProvider
@@ -65,6 +66,7 @@ _PROVIDERS: Dict[str, LLMProvider] = {
     "codex": CodexProvider(),
     "copilot": CopilotProvider(),
     "cursor-agent": CursorAgentProvider(),
+    "fx": FxProvider(),
     "gemini": GeminiProvider(),
     "goose": GooseProvider(),
     "grok": GrokProvider(),

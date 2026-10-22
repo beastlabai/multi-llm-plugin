@@ -332,6 +332,17 @@ class TestTheArtifactRowsMoveOnlyWhenTheBytesSurvive:
         [refused] = [entry for entry in record["not_moved"] if entry["row"] == "aider"]
         assert "--generate-hashes" in refused["command"]
 
+    def test_fx_archive_never_uses_the_installed_elf_as_its_checksum(
+            self, container_dir, evidence, tmp_path):
+        before = yaml.safe_load((container_dir / "cli-versions.lock").read_text("utf-8"))
+        assert _apply(container_dir, evidence({"fx": "0.0.15"}), tmp_path) == 2
+        lock = yaml.safe_load((container_dir / "cli-versions.lock").read_text("utf-8"))
+        assert lock["artifacts"]["fx"] == before["artifacts"]["fx"]
+        record = json.loads((tmp_path / "record.json").read_text("utf-8"))
+        [refused] = [entry for entry in record["not_moved"] if entry["row"] == "fx"]
+        assert "v0.0.15/fx-linux-x86_64.tar.gz" in refused["command"]
+        assert "sha256sum" in refused["command"]
+
     def test_each_pypi_row_is_given_its_own_files_recipe(
             self, container_dir, evidence, tmp_path):
         """2026-10-09: one f-string served every PyPI row with

@@ -60,6 +60,12 @@ base_image:
 # Fetched by URL + sha256 and verified BEFORE they execute. The uv installer
 # script would otherwise be a live remote input running as root.
 artifacts:
+  fx:
+    version: "0.0.14"
+    url: "https://github.com/vercel-labs/fx/releases/download/v0.0.14/fx-linux-x86_64.tar.gz"
+    sha256: "731c1914fc2d497a10583f4416f8382c192e4897d6a0b4f713d6194455a8548b"
+    releases_url: "https://api.github.com/repos/vercel-labs/fx/releases/latest"
+    member: "fx"
   uv:
     version: "0.13.5"
     url: "https://github.com/astral-sh/uv/releases/download/0.13.5/uv-x86_64-unknown-linux-gnu.tar.gz"
@@ -297,6 +303,19 @@ toolchain:
 # IN, for the surface probe alone: `lane: fake` in redirect.yaml, no
 # provider-lane row, no argv golden, no full-chain bundle.
 clis:
+  - id: fx
+    binary: fx
+    install: archive
+    artifact: fx
+    version: "0.0.14"
+    verify:
+      command: ["fx", "--version"]
+      pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
+    note: >-
+      vercel-labs/fx, not the unrelated npm JSON viewer. Identity is asserted
+      separately with ask --help and all required flags in the install layer.
+      FX_AUTO_UPGRADE=0 is repeated in the wrapper's redirect environment.
+
   - id: codex
     binary: codex
     install: npm

@@ -782,7 +782,7 @@ class TestNoFalsePositivesOnBenignCorpora:
     #: verbatim inside the probe prompt, so it is the opposite of a secret --
     #: the constant exists only so the question and the answer cannot drift
     #: apart. A constant assignment in source again, same class as the rest.
-    KNOWN_SOURCE_HITS = 8
+    KNOWN_SOURCE_HITS = 9
 
 
     def test_utils_source_tree_is_a_diagnostic_not_a_gate(self):
@@ -799,7 +799,8 @@ class TestNoFalsePositivesOnBenignCorpora:
             "human_decisions.py, `token_count=token_count` and `token_count=args.tokens` in metrics.py, "
             "`ENV_GIT_CREDENTIAL_HELPER_VAR` in provider_registry.py, `nested_exec_credentials` in "
             "subagent_executor.py, `OMP_CREDENTIAL_ENV` + `credential_helper=credential_helper` "
-            "in providers/omp.py, and `NESTED_PROBE_TOKEN` in subagent_executor.py). This corpus is a "
+            "in providers/omp.py, and `FX_CREDENTIAL_ENV` in providers/fx.py, "
+            "and `NESTED_PROBE_TOKEN` in subagent_executor.py). This corpus is a "
             "diagnostic rather than a gate, but a count that moved means a pattern got "
             "looser — investigate before shipping:\n  " + "\n  ".join(hits)
         )

@@ -9222,6 +9222,10 @@ def _classify_failed_run(
         except ImportError:  # pragma: no cover - direct-script import shim
             from utils.providers.base import context_length_message
         return STATUS_CONTEXT_LENGTH_EXCEEDED, context_length_message(model)
+    if classified == STATUS_BUDGET_EXHAUSTED:
+        # The provider already consumed its internal step budget. Repeating
+        # the same prompt would silently grant a fresh budget to the same run.
+        return STATUS_BUDGET_EXHAUSTED, "the provider exhausted its internal step budget"
     if classified not in (
         STATUS_AUTH_FAILED, STATUS_RATE_LIMITED, STATUS_INVALID_MODEL,
         STATUS_SANDBOX_UNAVAILABLE,

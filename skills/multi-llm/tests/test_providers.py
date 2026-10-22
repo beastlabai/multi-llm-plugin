@@ -31,6 +31,7 @@ from utils.providers.claude_code import ClaudeCodeProvider
 from utils.providers.cline import ClineProvider
 from utils.providers.codex import CodexProvider
 from utils.providers.copilot import CopilotProvider
+from utils.providers.fx import FxProvider
 from utils.providers import cursor_agent as cursor_agent_module
 from utils.providers.cursor_agent import CursorAgentProvider
 from utils.providers.gemini import GeminiProvider
@@ -607,7 +608,7 @@ class TestInternalRetryEnvelopeDeclarations:
         whose name disagrees with its assertion is worse than one with no name at
         all. Bump the number with the registry entry that moves it.
         """
-        assert len(registry) == 18, sorted(registry)
+        assert len(registry) == 19, sorted(registry)
 
     def test_the_base_default_is_none(self):
         """An adapter that measured nothing declares nothing, by inheriting."""
@@ -626,6 +627,12 @@ class TestInternalRetryEnvelopeDeclarations:
         if envelope is None:
             return
 
+        if envelope.max_requests is None:
+            assert name == "fx", f"{name} has an unexplained unbounded retry declaration"
+            assert envelope.max_wall_s is None
+            assert envelope.retries_rate_limit is True
+            assert envelope.configurable_by == ()
+            return
         assert isinstance(envelope.max_requests, int) and envelope.max_requests >= 1
         assert envelope.max_wall_s is None or envelope.max_wall_s > 0
         assert isinstance(envelope.retries_rate_limit, bool)
@@ -637,7 +644,7 @@ class TestInternalRetryEnvelopeDeclarations:
             n for n in _envelope_sweep_names()
             if n not in ("claude-code", "cline", "codex", "copilot", "gemini",
                          "goose", "grok", "kimi",
-                         "muse", "omp", "pi", "qwen-code", "vibe")
+                         "muse", "omp", "pi", "qwen-code", "vibe", "fx")
         ],
     )
     def test_every_unmeasured_adapter_declares_none(self, registry, name):
@@ -650,6 +657,14 @@ class TestInternalRetryEnvelopeDeclarations:
         assert registry[name].internal_retries is None
 
     # -- the measured rows ------------------------------------------------
+
+    def test_fx_declares_an_unknown_internal_request_bound(self, registry):
+        """fx 0.0.14 retries transient failures without a finite request cap."""
+        envelope = registry["fx"].internal_retries
+        assert envelope is not None
+        assert envelope.max_requests is None
+        assert envelope.max_wall_s is None
+        assert envelope.retries_rate_limit is True
 
     def _with_timeout(self, monkeypatch, seconds):
         """Pin the resolved per-provider slot timeout the envelope derives from."""
@@ -6018,6 +6033,7 @@ TRANSPORT_CASES = [
     # AND declares a stdin transport a caller may ask for: piped stdin with
     # the `-p` PAIR omitted entirely carried a 30 KB prompt (§6.4, measured).
     (CopilotProvider, "argv", "openai/gpt-4.1-mini"),
+    (FxProvider, "stdin", "openai/gpt-5.6-luna"),
     (CursorAgentProvider, "argv", "auto"),
     (GeminiProvider, "argv", "gemini-2.5-pro"),
     # kimi is argv-only by MEASUREMENT, not by default: `-p -` delivers the
@@ -6121,6 +6137,12 @@ class TestSubagentRunnerDeclarations:
         from utils.provider_registry import _PROVIDERS
 
         provider = _PROVIDERS[name]
+        if name == "fx":
+            # Fx overrides the dispatcher only to route the generate profile
+            # through its specialized CLI command. It delegates agent-readonly
+            # to the base implementation and advertises generate alone.
+            assert provider.agent_profiles == ("generate",)
+            return
         implements = (
             type(provider).build_agent_command is not LLMProvider.build_agent_command
         )
@@ -6464,6 +6486,7 @@ class TestDeclaredGenerateShellAndReadScope:
     #:   claude-code  False  `acceptEdits` denies headless Bash (3 denials)
     #:   qwen-code    False  `--max-tool-calls 0` aborts before any tool runs
     #:   gemini       False  no `run_shell_command` under this argv (0.25.2)
+    #:   fx           True   production 0.0.14 --auto probe; shell-reviewed fixtures
     SHELL_IN_GENERATE = {
         "pi": True,
         "omp": True,
@@ -6472,6 +6495,7 @@ class TestDeclaredGenerateShellAndReadScope:
         "claude-code": False,
         "qwen-code": False,
         "gemini": False,
+        "fx": True,
     }
     #: The adapters whose read scope is measured away from the `"cwd"` default.
     #: cursor-agent declares `"cwd"` explicitly (measured, and equal to the
@@ -6692,6 +6716,7 @@ STDOUT_THEN_STDERR = "stdout-then-stderr"
 STDOUT_ELSE_STDERR = "stdout-else-stderr"
 
 _DESCRIBE_FAILURE_CHANNELS = {
+    "fx": STDOUT_ELSE_STDERR,
     "opencode": STDOUT_THEN_STDERR,
     "muse": "stdout",
     # pi moved from "stderr" with `--mode json` (plan §7, T7.6), to omp's shape
@@ -6818,6 +6843,13 @@ class TestDescribeFailureChannels:
         if not rows:
             pytest.skip(f"{name} ships no .stdout.txt/.stderr.txt capture pairs")
 
+        if name == "fx":
+            # fx carries terminal errors inside its JSON stdout envelope and
+            # only uses anchored stderr when that envelope cannot supply a
+            # diagnosis. The generic stream-channel table cannot model that
+            # nested envelope; the fx-specific fixture assertion below does.
+            pytest.skip("fx envelope channel behavior is tested separately")
+
         for row, stdout, stderr in rows:
             both = provider.describe_failure(stdout, stderr)
             if declared == STDOUT_THEN_STDERR:
@@ -6862,6 +6894,25 @@ class TestDescribeFailureChannels:
                 f"{name}/{row}: a reason was recovered from the channel "
                 f"{name} does NOT declare"
             )
+
+    def test_fx_failure_description_uses_its_json_envelope(self):
+        """A successful JSON envelope outranks incidental stderr; auth errors
+        are read from the JSON result even when stderr repeats the diagnosis."""
+        from utils.provider_registry import _PROVIDERS
+
+        provider = _PROVIDERS["fx"]
+        fixture_dir = Path(__file__).parent / "fixtures" / "fx"
+        success = provider.describe_failure(
+            (fixture_dir / "multi-assistant.stdout.txt").read_text(),
+            (fixture_dir / "multi-assistant.stderr.txt").read_text(),
+        )
+        assert success is None
+
+        stdout = (fixture_dir / "auth-error.stdout.txt").read_text()
+        stderr = (fixture_dir / "auth-error.stderr.txt").read_text()
+        full = provider.describe_failure(stdout, stderr)
+        assert full is not None
+        assert full == provider.describe_failure(stdout, "")
 
     @pytest.mark.parametrize("name", sorted(_DESCRIBE_FAILURE_CHANNELS))
     def test_every_override_survives_garbage_on_both_channels(self, name):
@@ -7440,7 +7491,7 @@ class TestMuseProvider:
 
 
 class TestOmpProvider:
-    """oh-my-pi (`omp`), the eighteenth adapter and the first with a stdin default.
+    """oh-my-pi (`omp`), the adapter that introduced the stdin default.
 
     What this class grades is everything about omp that is *not* a captured
     stream: identity, the setup metadata, the rendered argv, the flag gate that
@@ -10036,6 +10087,7 @@ PRE_L5_ARGV_MODELS = {
     "gemini": "gemini-2.5-pro",
     "goose": "openrouter/z-ai/glm-5.2",
     "grok": "grok-4",
+    "fx": "openai/gpt-5.6-luna",
     "kilocode": "openai-native/gpt-5.5",
     "kimi": "moonshotai/kimi-k2-thinking",
     "muse": "muse-spark-1.2",
@@ -10121,6 +10173,10 @@ PRE_L5_ARGV = {
     "grok": [
         "grok", "--no-auto-update", "--always-approve",
         "--output-format", "json", "-m", "grok-4", "-p", PRE_L5_ARGV_PROMPT,
+    ],
+    "fx": [
+        "fx", "ask", "--json", "--no-save", "--auto", "--model",
+        "openai/gpt-5.6-luna", "--", PRE_L5_ARGV_PROMPT,
     ],
     "kilocode": [
         "kilocode", "run", "--auto", "-m", "openai-native/gpt-5.5",
@@ -10221,7 +10277,7 @@ class TestTimeoutKeywordIsInertWhenUnset:
 
     def test_the_table_covers_every_registered_adapter(self):
         assert set(PRE_L5_ARGV) == set(_registered_provider_names())
-        assert len(PRE_L5_ARGV) == 18
+        assert len(PRE_L5_ARGV) == 19
 
     @pytest.mark.parametrize("name", sorted(PRE_L5_ARGV))
     def test_explicit_none_renders_the_pre_l5_argv(self, name):

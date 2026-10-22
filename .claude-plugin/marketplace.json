@@ -10,7 +10,7 @@
     {
       "name": "multi-llm",
       "source": "./",
-      "description": "Multi-LLM orchestration: parallel plan review, task generation, implementation, and code review across 18 coding harnesses (Codex, Cursor, opencode, pi, omp, aider, Antigravity…).",
+      "description": "Multi-LLM orchestration: parallel plan review, task generation, implementation, and code review across 19 coding harnesses (Codex, Cursor, opencode, pi, omp, fx, aider, Antigravity…).",
       "category": "workflow",
       "keywords": [
         "multi-llm",

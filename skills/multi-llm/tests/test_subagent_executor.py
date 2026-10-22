@@ -3554,17 +3554,20 @@ class TestProviderCapabilityDeclarations:
     """Declaration and implementation are cross-checked, so data cannot drift."""
 
     def test_declared_profiles_match_implemented_members(self):
-        from utils.providers.base import LLMProvider
+        from utils.providers.base import LLMProvider, ProfileUnsupported
 
         for name, provider in registry._PROVIDERS.items():
             implements = (
                 type(provider).build_agent_command is not LLMProvider.build_agent_command
             )
             declares = PROFILE_AGENT_READONLY in provider.agent_profiles
-            assert implements == declares, (
-                f"{name}: build_agent_command implemented={implements} but "
-                f"agent_profiles declares agent-readonly={declares}"
-            )
+            if declares:
+                assert implements, f"{name}: declared read-only profile has no implementation"
+            else:
+                # An adapter may override this method for generate alone.
+                # Verify that the undeclared profile is actually refused.
+                with pytest.raises(ProfileUnsupported):
+                    provider.build_agent_command("hello", "test/model", PROFILE_AGENT_READONLY)
 
     def test_only_the_three_runner_adapters_claim_agent_write(self):
         """The write profile is exactly the three adapters that implement it.
@@ -3618,6 +3621,30 @@ _SERVER_FAULT_STDERR = (
     'cause="Error: upstream returned HTTP 502 Bad Gateway\n'
     '    at <anonymous> (/$bunfs/root/chunk-2ybdzszf.js:439:94278)"\n'
 )
+
+
+def test_fx_step_budget_is_terminal_in_dispatch(tmp_path, runner_env, monkeypatch):
+    """The executor must not give fx another internal budget after exhaustion."""
+    runner_env.use("fx:test/model", subagent_retries=2)
+    # Exercise the shared dispatch machinery using fx's supported generate
+    # profile; this does not add a read-only runner profile to the adapter.
+    monkeypatch.setattr(executor, "profile_for_kind", lambda kind: "generate")
+    calls = []
+
+    def spawn(**kwargs):
+        calls.append(kwargs)
+        return executor._Capture(
+            stdout=json.dumps({"output": "", "final_output": "", "exit_code": 1}),
+            stderr="Agent step limit reached\n", exit_code=1,
+        )
+
+    monkeypatch.setattr(executor, "_spawn_child", spawn)
+    outcome = executor.dispatch_task(
+        _validation_batch(tmp_path), phase_dir=str(tmp_path), runner="fx:test/model",
+        sleep=lambda seconds: pytest.fail("terminal budget must not back off"),
+    )
+    assert outcome.status == executor.STATUS_BUDGET_EXHAUSTED
+    assert len(calls) == len(outcome.attempts) == 1
 
 
 def _install_opencode_capture(

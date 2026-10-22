@@ -274,9 +274,14 @@ class TestTheEvidenceSurvivedTheContainer:
             leaked = {n for n in names
                       if n.endswith(("_API_KEY", "_AUTH_TOKEN"))
                       and not n.startswith(("STUB_", "MLLM_"))}
-            # The fake per-exec stub key is expected where a vendor variable is;
-            # a REAL vendor variable name is not.
-            assert "OPENROUTER_API_KEY" not in names, (
+            # Only fx declares this name as its fake per-exec credential.
+            # test_wrapper_env_contract pins replacement of an inherited real key.
+            fx_credentials = {"OPENROUTER_API_KEY"} if record["cli"] == "fx" else set()
+            if fx_credentials:
+                fx_row = next(row for row in VERIFIED if row["cli"] == "fx")
+                assert fx_credentials <= set(fx_row["credential_vars"])
+                assert fx_credentials <= names
+            assert "OPENROUTER_API_KEY" not in (names - fx_credentials), (
                 f"{record['cli']}: the live key name reached the child environment"
             )
             assert not (leaked - {"OPENAI_API_KEY", "META_API_KEY", "XAI_API_KEY",
@@ -294,7 +299,7 @@ class TestTheEvidenceSurvivedTheContainer:
                                   # partner: without a provider key beside the
                                   # provider base URL the CLI falls through to
                                   # the GitHub seat path.
-                                  "COPILOT_PROVIDER_API_KEY"}), (
+                                  "COPILOT_PROVIDER_API_KEY"} - fx_credentials), (
                 f"{record['cli']}: unexpected credential-shaped variable {leaked}"
             )
 

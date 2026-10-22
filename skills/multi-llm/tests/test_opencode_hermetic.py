@@ -1114,7 +1114,7 @@ class TestHermeticScopeAndHatch:
         monkeypatch.setattr(registry, "load_config", _explode)
         assert oc.hermetic_policy() == oc.HERMETIC_DEFAULT
 
-    def test_no_other_adapter_declares_the_context(self):
+    def test_only_managed_config_adapters_declare_the_context(self):
         """Swept over the registry, so a new adapter cannot quietly inherit it."""
         from utils.provider_registry import _PROVIDERS
 
@@ -1122,9 +1122,9 @@ class TestHermeticScopeAndHatch:
             has_hook = callable(
                 getattr(registry.get_provider(name), "hermetic_dispatch", None)
             )
-            assert has_hook == (name == "opencode"), (
-                f"{name} declares a hermetic dispatch context; opencode's config "
-                f"layering is what this contains, and it is not a general concern"
+            assert has_hook == (name in {"opencode", "fx"}), (
+                f"{name}: only opencode's isolated config and fx's managed HOME "
+                "currently need a dispatch-scoped configuration context"
             )
 
 

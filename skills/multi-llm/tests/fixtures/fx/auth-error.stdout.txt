@@ -1,0 +1,1 @@
+{"output":"configured provider authentication failed · HTTP 401\n","final_output":"","exit_code":1,"model":"auth","resolved_provider":null,"session_id":"","steps":0,"tool_calls":[],"usage":{"input_tokens":null,"output_tokens":null},"auth_failure":{"source":"configured provider","reason":"http_unauthorized","http_status":401}}

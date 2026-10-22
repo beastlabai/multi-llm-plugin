@@ -83,7 +83,7 @@ RECORD = harness.HERE / "records" / "live-provider.jsonl"
 #: proving the same three surfaces reach OpenRouter since 2026-08-14.
 LANE_CLIS = ("copilot", "kimi", "qwen-code", "vibe", "cursor-agent",
              "aider", "goose", "pi", "cline", "kilocode",
-             "codex", "opencode", "claude-code", "grok", "gemini", "omp")
+             "codex", "opencode", "claude-code", "grok", "gemini", "omp", "fx")
 
 #: The slug a row is pinned to ON THIS LANE, where `providers.yaml`'s `models[0]`
 #: is not servable by the endpoint this lane holds a key for — with the reason,
@@ -529,6 +529,10 @@ _OMP_PROVIDER_PROBE = (
 )
 
 REFUSED_EGRESS: dict[str, dict[str, str]] = {
+    "fx": {
+        "ai-gateway.vercel.sh": "custom OpenRouter profile must not fall back to the Gateway",
+        "releases.fx.sh": "FX_AUTO_UPGRADE=0 disables release checks",
+    },
     "kimi": {
         "telemetry-logs.kimi.com":
             "TELEMETRY THE OPT-OUT DOES NOT GATE, measured and unfixable from "
@@ -1059,6 +1063,7 @@ NO_MODEL_ECHO_ON_SUBSCRIPTION: dict[str, str] = {
 }
 
 OPT_OUTS: dict[str, tuple[str, ...]] = {
+    "fx": ("FX_AUTO_UPGRADE",),
     "copilot": ("COPILOT_OFFLINE", "COPILOT_AUTO_UPDATE"),
     "kimi": ("KIMI_CODE_NO_AUTO_UPDATE", "KIMI_DISABLE_TELEMETRY"),
     # Measured at 0.21.13 (§7.4's belt-and-braces assertion): the updater and
@@ -1706,11 +1711,11 @@ def smoke(request, posture, credit_window):
         proc = subprocess.run(argv, capture_output=True, text=True,
                               env=client_env,
                               timeout=int(row.get("row_timeout_s", 300)))
-        code, out, err = proc.returncode, proc.stdout, proc.stderr
+        code, err = proc.returncode, proc.stderr
     except subprocess.TimeoutExpired as exc:
         # Hitting the outer bound kills the row and FAILS it. It is never retried
         # into a second charge.
-        code, out, err = None, "", f"outer row_timeout_s expired: {exc}"
+        code, err = None, f"outer row_timeout_s expired: {exc}"
 
     evidence_path = out_dir / "live-provider.json"
     evidence = (json.loads(evidence_path.read_text(encoding="utf-8"))

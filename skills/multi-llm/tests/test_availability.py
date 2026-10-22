@@ -58,8 +58,8 @@ def _registry_names():
 
     **No test in this module may name an adapter or a count** (M0.a): the
     specifications M10 came from were written against thirteen adapters and the
-    registry holds seventeen, so a literal roster is under-specified rather than
-    merely stale.
+    registry has grown beyond that, so a literal roster is under-specified
+    rather than merely stale.
     """
     return sorted(_PROVIDERS)
 
@@ -529,9 +529,13 @@ class TestTheStatusConsumers:
     @pytest.mark.parametrize("name", _registry_names())
     def test_a_login_notice_in_a_failed_run_names_the_state(self, name):
         provider = _PROVIDERS[name]
-
+        stdout, stderr = "", "Error: not logged in."
+        if name == "fx":
+            # fx mixes shell output into stderr, so an unqualified login
+            # notice cannot identify the CLI's auth state. Use its own error.
+            stdout, stderr = '{"error":"MissingCredentials"}', ""
         assert (
-            availability_from_failure(provider, "", "Error: not logged in.", 1)
+            availability_from_failure(provider, stdout, stderr, 1)
             is Availability.NEEDS_AUTH
         )
 

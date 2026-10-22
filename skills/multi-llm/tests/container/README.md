@@ -27,39 +27,40 @@ A flag that exists only here is a bug in that split.
 **Four, not two.** The table this section used to carry described a world of two,
 and it predates both the chain lane's separation from the single-phase provider
 lane and the credentialed `live_provider` lane. Counted as the modules that
-actually run, 2026-09-21:
+actually run; roster updated 2026-10-22:
 
 | lane | marker | model backend | CLIs exercised | phases per row | write phase |
 | --- | --- | --- | --- | --- | --- |
-| provider, single-phase (`test_container_provider_lane.py`) | `container` | stub, `--network none` | 16 | 1 | none |
-| provider, chain (`test_container_full_chain.py`) | `container` | stub, `--network none` | 16 | 8 | 4, graded as no-op |
-| host (`test_container_host_lane.py`) | `container`, `live` on the credentialed tiers | host = real OpenRouter; **fan-out = real CLIs redirected at the stub** | **16 declared** across three hosts, disjoint — **unmeasured**; 1 (codex) is what has run | 1, or 8 on the two `full` rows | 4 on `full`, 1 on each apply row |
-| live provider (`test_container_live_provider.py`) | `container and live_provider` | real vendor endpoints | 16 | 1 smoke `generate` | none |
+| provider, single-phase (`test_container_provider_lane.py`) | `container` | stub, `--network none` | 17 | 1 | none |
+| provider, chain (`test_container_full_chain.py`) | `container` | stub, `--network none` | 17 | 8 | 4, graded as no-op |
+| host (`test_container_host_lane.py`) | `container`, `live` on the credentialed tiers | host = real OpenRouter; **fan-out = real CLIs redirected at the stub** | **17 assigned or carved out** across three hosts, disjoint — **unmeasured**; 1 (codex) is what has run | 1, or 8 on the two `full` rows | 4 on `full`, 1 on each apply row |
+| live provider (`test_container_live_provider.py`) | `container and live_provider` | real vendor endpoints | 17 | 1 smoke `generate` | none |
 
-**The host lane's `16` is declared, not measured, and that distinction is the
-whole cell.** The fan-out and the write runner are matrix keys as of 2026-09-22:
+**The host lane's roster is declared, with a named carve-out; it is not measured.**
+The fan-out and the write runner are matrix keys as of 2026-09-22:
 `harness.host_fan_out` and `harness.host_runner_cli` read `fan_out:` and
 `runner:` out of `host_matrix.yaml`, and `harness.provider_spec` builds each slug
 from that CLI's own `model_arg` in `redirect.yaml` rather than from a literal.
-The three hosts declare a **disjoint partition of all 16** stub-capable provider
-CLIs — 6 on the claude-code host, 5 on the codex host, 5 on the opencode host —
-and `test_redirect_matrix_claims.py` holds that shape in plain CI: every host
-declares a list, the lists do not overlap, their union is exactly the `lane:
-provider` roster, and no row's effective list may name a CLI outside its own
-host's. (`fan_out: native` rows are declared carve-outs that fan out to nothing,
+The three hosts assign 16 stub-capable provider CLIs — 6 on the claude-code
+host, 5 on the codex host, 5 on the opencode host (including fx) — and name
+`grok` as a measured egress carve-out, accounting for all 17 provider rows.
+`test_redirect_matrix_claims.py` holds that shape in plain CI: every host
+declares a list, the lists do not overlap, their union plus named carve-outs
+is exactly the `lane: provider` roster, and no row's effective list may name
+a CLI outside its own host's. (`fan_out: native` rows are declared carve-outs that fan out to nothing,
 and `remove_seed` rows inherit nothing and keep their own host CLI.)
 
 **Every one of those cells is `unmeasured`, and reads as such in the file** —
 `fan_out_provenance: unmeasured` (T3) beside `runner: opencode` /
 `runner_provenance: unmeasured` (T0a). Until 2026-09-22 the slug was the
 hard-coded literal `codex:stub-model` for every row on every host, so no widened
-fan-out has ever executed: 15 of the 16 CLIs are newly *named* in this lane, not
+fan-out has ever executed: the other CLIs are newly *named* in this lane, not
 yet *exercised* by it. T3's one-row two-spec spike — widen one `ask` row, then
 count the distinct provider invocations, stub sessions and result files in that
 row's receipts from the host-start watermark — is what turns the declaration
-into coverage. Read the cell as "16 declared, 1 proven" until it does.
+into coverage. Read the cell as "16 assigned, 1 carved out, 1 proven" until it does.
 
-The live-provider lane's 16 is 15 of the provider lane's rows — every one but
+The live-provider lane's 17 is 16 of the provider lane's rows — every one but
 `muse` — plus `cursor-agent`, which joins through an explicit `live_lane` opt-in
 rather than by being moved off `lane: fake` and losing its fake-lane coverage.
 
@@ -113,7 +114,8 @@ All typed at the checkout root, no `-C`: the build context *is* the repo root.
 
 Phase 1 pointed every configured CLI at a local three-surface stub and recorded
 what it did on the wire; the four CLIs `harness-expansion.md` added afterwards
-were probed the same way. **16 of the 18 configured CLIs are redirectable**
+were probed the same way. fx joined through an isolated offline run on
+2026-10-22. **17 of the 19 configured CLIs are redirectable**
 (`redirect.yaml` carries the full row per CLI, including the exact mechanism and
 the HTTP footprint):
 
@@ -135,11 +137,24 @@ the HTTP footprint):
 | `kimi` | the `KIMI_MODEL_*` env family | chat | 1 | not timed |
 | `vibe` | a seeded `config.toml` `[[providers]]` block (no env var exists) | chat | 1 | not timed |
 | `omp` | `~/.omp/agent/models.yml` provider block (no env var exists) — and the **prompt arrives on stdin** | chat | 1 | not timed |
+| `fx` | wrapper-owned `~/.fx/settings.json` OpenRouter connection + fake `OPENROUTER_API_KEY`; stdin prompt | chat | 1 | not timed |
 
-**The last four rows are later arrivals, and the table says so in one column.**
-Their mechanism, surface and turn count are measured exactly like the others,
+**The last five rows are later arrivals, and the table says so in one column.**
+Their mechanism, surface and turn count are measured like the others,
 but none carries a `turn_s` or a `chain_s`, so every *timing* figure in this
 file is over the original eleven and says which.
+
+fx 0.0.14 passed its isolated provider row, all eight chain phases, and a second
+run against its seeded golden with no allowlist entries. The tool smoke uses
+`--auto`: a compound shell command makes an extra permission-review request,
+which fx excludes from its reported main-agent usage. Web tools remain allowed;
+the offline smoke checks their advertisement without fetching external pages.
+The wrapper repairs login-shell PATH after removing the skill venv. These runs
+first used the `mllm-e2e:fx-stage-e` offline overlay, then passed on the complete
+pinned `mllm-e2e:fx-verified` build (32 passed, 3 inapplicable checks skipped).
+All seven live-provider checks also passed on that image with
+`fx:openai/gpt-5.6-luna`; the observed DNS destination was `openrouter.ai`.
+The assigned host fan-out has not been executed.
 
 Not one of Phase 1's `documented` guesses turned out to be wrong, and both of its
 surprises went our way: `pi` (the one `unknown` row) and `grok` (predicted
@@ -261,7 +276,7 @@ Three things about that row are not optional:
 - **Both driver keys.** `providers.tmpl.yaml` renders `driver.subagent_runner`
   *and* `driver.subagent_runner_cheap`; an unset cheap key keeps base's
   `claude-code:haiku` and adds a second binary to every row.
-- **Thirteen of the sixteen CLIs declare no `agent-write` profile** — only
+- **Fourteen of the seventeen CLIs declare no `agent-write` profile** — only
   `claude-code`, `codex` and `opencode` do — so their chain row's executor is a
   second binary: `opencode`, named per row in `redirect.yaml`'s
   `chain_write_runner` and carried as that row's one `allowed_helper`. A plain-CI
@@ -318,13 +333,13 @@ being added to fix it.
   that paired a reviewer with a *different* writer paired it with codex.
 
 Repointing the shared helper fixes neither defect by itself — it renames the
-single point of failure. The reviewer axis still grades one writer 14 times and
-the other two once each; it is `opencode` that is now the 14, and codex that is
-down to its own row.
+single point of failure. With fx added, the reviewer axis assigns 15 rows to
+`opencode` and one each to `codex` and `claude-code`. The isolated fx chain
+measured the new `fx` reviewer + `opencode` writer pairing on 2026-10-22.
 
-**The fix is a second axis, not more rows on the first one.** The existing 16
+**The fix is a second axis, not more rows on the first one.** The 17 reviewer
 rows stay the **reviewer axis** — one provider CLI per row, one shared write
-runner, so the 16 baselines stay structurally comparable — and three new rows
+runner, so the 17 baselines stay structurally comparable — and three new rows
 vary the writer with the reviewer held still:
 
 ```

@@ -1,0 +1,178 @@
+{
+  "cli_version": "0.0.14",
+  "captured": "2026-10-22",
+  "notes": "Retained preflight captures. normalized_stdout means the recorded decoded object was serialized again; no answer content was fabricated. Integration shell probes used full access and do not establish the shipping permission policy.",
+  "cases": [
+    {
+      "name": "canonical_success",
+      "source": "integration/results-full.json",
+      "source_sha256": "064114b27eeff45b6c3362f824ac725605665b53835a15441fd4e5c8ccf97b2a",
+      "normalized_stdout": true,
+      "stdout": "{\"output\": \"canonical repository stub answer\", \"final_output\": \"canonical repository stub answer\", \"exit_code\": 0, \"model\": \"stub-model\", \"resolved_provider\": null, \"session_id\": \"\", \"steps\": 0, \"tool_calls\": [], \"usage\": {\"input_tokens\": null, \"output_tokens\": null}}\n",
+      "stderr": "Full access enabled: fx permission checks disabled\n",
+      "returncode": 0
+    },
+    {
+      "name": "truncated_stream",
+      "source": "integration/results-full.json",
+      "source_sha256": "064114b27eeff45b6c3362f824ac725605665b53835a15441fd4e5c8ccf97b2a",
+      "normalized_stdout": true,
+      "stdout": "{\"output\": \"canonical repository stub answer\", \"final_output\": \"\", \"exit_code\": 1, \"model\": \"stub-model\", \"resolved_provider\": null, \"session_id\": \"\", \"steps\": 0, \"tool_calls\": [], \"usage\": {\"input_tokens\": null, \"output_tokens\": null}, \"error\": \"IncompleteStream\"}\n",
+      "stderr": "Full access enabled: fx permission checks disabled\n",
+      "returncode": 1
+    },
+    {
+      "name": "scripted_read_file",
+      "source": "integration/results-full.json",
+      "source_sha256": "064114b27eeff45b6c3362f824ac725605665b53835a15441fd4e5c8ccf97b2a",
+      "normalized_stdout": true,
+      "stdout": "{\"output\": \"scripted read_file terminal\", \"final_output\": \"scripted read_file terminal\", \"exit_code\": 0, \"model\": \"stub-model\", \"resolved_provider\": null, \"session_id\": \"\", \"steps\": 1, \"tool_calls\": [{\"name\": \"read_file\", \"status\": \"success\"}], \"usage\": {\"input_tokens\": null, \"output_tokens\": null}}\n",
+      "stderr": "Full access enabled: fx permission checks disabled\nReading /tmp/fx-integration/read-probe.txt\n",
+      "returncode": 0
+    },
+    {
+      "name": "scripted_write_file",
+      "source": "integration/results-full.json",
+      "source_sha256": "064114b27eeff45b6c3362f824ac725605665b53835a15441fd4e5c8ccf97b2a",
+      "normalized_stdout": true,
+      "stdout": "{\"output\": \"scripted write_file terminal\", \"final_output\": \"scripted write_file terminal\", \"exit_code\": 0, \"model\": \"stub-model\", \"resolved_provider\": null, \"session_id\": \"\", \"steps\": 1, \"tool_calls\": [{\"name\": \"write_file\", \"status\": \"success\"}], \"usage\": {\"input_tokens\": null, \"output_tokens\": null}}\n",
+      "stderr": "Full access enabled: fx permission checks disabled\nWriting /tmp/fx-integration/write-probe.txt\n",
+      "returncode": 0
+    },
+    {
+      "name": "scripted_shell",
+      "source": "integration/results-full.json",
+      "source_sha256": "064114b27eeff45b6c3362f824ac725605665b53835a15441fd4e5c8ccf97b2a",
+      "normalized_stdout": true,
+      "stdout": "{\"output\": \"scripted shell terminal\", \"final_output\": \"scripted shell terminal\", \"exit_code\": 0, \"model\": \"stub-model\", \"resolved_provider\": null, \"session_id\": \"\", \"steps\": 1, \"tool_calls\": [{\"name\": \"shell\", \"status\": \"success\", \"command_result\": {\"kind\": \"command\", \"command\": \"printf fx-shell-probe\", \"cwd\": \"/work/sample-project\", \"exit_code\": 0, \"signal\": null, \"timed_out\": false, \"duration_ms\": 3, \"stdout_bytes\": 14, \"stderr_bytes\": 0, \"truncated\": false, \"output_file\": \"fx-command-replay-c73091e13e4db3a068bfa647c663a202.bin\", \"stdout_file\": null, \"stderr_file\": null}}], \"usage\": {\"input_tokens\": null, \"output_tokens\": null}}\n",
+      "stderr": "Full access enabled: fx permission checks disabled\nRunning printf fx-shell-probe\nfx-shell-probe\n",
+      "returncode": 0
+    },
+    {
+      "name": "http_400",
+      "source": "integration/results-full.json",
+      "source_sha256": "064114b27eeff45b6c3362f824ac725605665b53835a15441fd4e5c8ccf97b2a",
+      "normalized_stdout": true,
+      "stdout": "{\"output\": \"API request failed · HTTP 400 · integration mocked status 400\\n\", \"final_output\": \"\", \"exit_code\": 1, \"model\": \"stub-model\", \"resolved_provider\": null, \"session_id\": \"\", \"steps\": 0, \"tool_calls\": [], \"usage\": {\"input_tokens\": null, \"output_tokens\": null}}\n",
+      "stderr": "Full access enabled: fx permission checks disabled\nfx ask: API request failed · HTTP 400 · integration mocked status 400\n",
+      "returncode": 1
+    },
+    {
+      "name": "http_401",
+      "source": "integration/results-full.json",
+      "source_sha256": "064114b27eeff45b6c3362f824ac725605665b53835a15441fd4e5c8ccf97b2a",
+      "normalized_stdout": true,
+      "stdout": "{\"output\": \"configured provider authentication failed · HTTP 401\\n\", \"final_output\": \"\", \"exit_code\": 1, \"model\": \"stub-model\", \"resolved_provider\": null, \"session_id\": \"\", \"steps\": 0, \"tool_calls\": [], \"usage\": {\"input_tokens\": null, \"output_tokens\": null}, \"auth_failure\": {\"source\": \"configured provider\", \"reason\": \"http_unauthorized\", \"http_status\": 401}}\n",
+      "stderr": "Full access enabled: fx permission checks disabled\nfx ask: configured provider authentication failed · HTTP 401\n",
+      "returncode": 1
+    },
+    {
+      "name": "http_402",
+      "source": "integration/results-full.json",
+      "source_sha256": "064114b27eeff45b6c3362f824ac725605665b53835a15441fd4e5c8ccf97b2a",
+      "normalized_stdout": true,
+      "stdout": "{\"output\": \"API request failed · HTTP 502 · integration mocked status 402\\n\", \"final_output\": \"\", \"exit_code\": 1, \"model\": \"stub-model\", \"resolved_provider\": null, \"session_id\": \"\", \"steps\": 0, \"tool_calls\": [], \"usage\": {\"input_tokens\": null, \"output_tokens\": null}}\n",
+      "stderr": "Full access enabled: fx permission checks disabled\nfx ask: API request failed · HTTP 502 · integration mocked status 402\n",
+      "returncode": 1
+    },
+    {
+      "name": "http_403",
+      "source": "integration/results-full.json",
+      "source_sha256": "064114b27eeff45b6c3362f824ac725605665b53835a15441fd4e5c8ccf97b2a",
+      "normalized_stdout": true,
+      "stdout": "{\"output\": \"API access denied · HTTP 403 · integration mocked status 403\\n\", \"final_output\": \"\", \"exit_code\": 1, \"model\": \"stub-model\", \"resolved_provider\": null, \"session_id\": \"\", \"steps\": 0, \"tool_calls\": [], \"usage\": {\"input_tokens\": null, \"output_tokens\": null}}\n",
+      "stderr": "Full access enabled: fx permission checks disabled\nfx ask: API access denied · HTTP 403 · integration mocked status 403\n",
+      "returncode": 1
+    },
+    {
+      "name": "http_404",
+      "source": "integration/results-full.json",
+      "source_sha256": "064114b27eeff45b6c3362f824ac725605665b53835a15441fd4e5c8ccf97b2a",
+      "normalized_stdout": true,
+      "stdout": "{\"output\": \"API request failed · HTTP 502 · integration mocked status 404\\n\", \"final_output\": \"\", \"exit_code\": 1, \"model\": \"stub-model\", \"resolved_provider\": null, \"session_id\": \"\", \"steps\": 0, \"tool_calls\": [], \"usage\": {\"input_tokens\": null, \"output_tokens\": null}}\n",
+      "stderr": "Full access enabled: fx permission checks disabled\nfx ask: API request failed · HTTP 502 · integration mocked status 404\n",
+      "returncode": 1
+    },
+    {
+      "name": "malformed_sse",
+      "source": "integration/results-full.json",
+      "source_sha256": "064114b27eeff45b6c3362f824ac725605665b53835a15441fd4e5c8ccf97b2a",
+      "normalized_stdout": true,
+      "stdout": "{\"output\": \"\", \"final_output\": \"\", \"exit_code\": 1, \"model\": \"stub-model\", \"resolved_provider\": null, \"session_id\": \"\", \"steps\": 0, \"tool_calls\": [], \"usage\": {\"input_tokens\": null, \"output_tokens\": null}, \"error\": \"InvalidChunk\"}\n",
+      "stderr": "Full access enabled: fx permission checks disabled\n",
+      "returncode": 1
+    },
+    {
+      "name": "retry_after_short",
+      "source": "integration/results-full.json",
+      "source_sha256": "064114b27eeff45b6c3362f824ac725605665b53835a15441fd4e5c8ccf97b2a",
+      "normalized_stdout": true,
+      "stdout": "{\"output\": \"wire option probe answer\", \"final_output\": \"wire option probe answer\", \"exit_code\": 0, \"model\": \"stub-model\", \"resolved_provider\": null, \"session_id\": \"\", \"steps\": 0, \"tool_calls\": [], \"usage\": {\"input_tokens\": 4, \"output_tokens\": 5}, \"recovery\": {\"state\": \"recovered\", \"kind\": \"auto_recovered\", \"attempt\": 2, \"attempt_limit\": 10, \"delay_seconds\": 0, \"durable\": false, \"message\": \"✓ recovered · succeeded on attempt 2\"}}\n",
+      "stderr": "Full access enabled: fx permission checks disabled\n[notice] ⚠ Rate limited · HTTP 429 · rate limit · retrying request in 1s\n[notice] ⚠ Rate limited · HTTP 429 · rate limit · retrying request in 1s\n[notice] ✓ recovered · succeeded on attempt 2\n",
+      "returncode": 0
+    },
+    {
+      "name": "empty",
+      "source": "capture-confirmed.txt",
+      "source_sha256": "d17cf2a9a8ff69e2ae1081afc2bb45b7035659726b37f3e536bd9d656ccef9e3",
+      "normalized_stdout": false,
+      "stdout": "{\"output\":\"\",\"final_output\":\"Done.\",\"exit_code\":0,\"model\":\"probe/model\",\"resolved_provider\":null,\"session_id\":\"\",\"steps\":0,\"tool_calls\":[],\"usage\":{\"input_tokens\":12,\"output_tokens\":3}}\n",
+      "stderr": "Done.",
+      "returncode": 0
+    },
+    {
+      "name": "writable_settings",
+      "source": "capture-confirmed.txt",
+      "source_sha256": "d17cf2a9a8ff69e2ae1081afc2bb45b7035659726b37f3e536bd9d656ccef9e3",
+      "normalized_stdout": false,
+      "stdout": "{\"output\":\"\",\"final_output\":\"\",\"exit_code\":1,\"model\":\"\",\"resolved_provider\":null,\"session_id\":\"\",\"steps\":0,\"tool_calls\":[],\"usage\":{\"input_tokens\":null,\"output_tokens\":null},\"error\":\"UnknownConfiguredProvider\"}\n",
+      "stderr": "",
+      "returncode": 1
+    },
+    {
+      "name": "tool_shell_allow",
+      "source": "policy/capture-policy.jsonl",
+      "source_sha256": "aeb2c6551316a5d95b38b782bff83885208d259981919ee410b069fd2cce9109",
+      "normalized_stdout": true,
+      "stdout": "{\"output\": \"done\", \"final_output\": \"done\", \"exit_code\": 0, \"model\": \"probe/model\", \"resolved_provider\": null, \"session_id\": \"\", \"steps\": 1, \"tool_calls\": [{\"name\": \"shell\", \"status\": \"error\", \"action\": \"run\", \"error\": {\"category\": \"rejected\", \"code\": \"rejected\"}}], \"usage\": {\"input_tokens\": 20, \"output_tokens\": 4}}\n",
+      "stderr": "Running printf \"PATH=%s\\n\" \"$PATH\"; command -v fx-preflight-canary\n",
+      "returncode": 0
+    },
+    {
+      "name": "tool_shell_deny",
+      "source": "policy/capture-policy.jsonl",
+      "source_sha256": "aeb2c6551316a5d95b38b782bff83885208d259981919ee410b069fd2cce9109",
+      "normalized_stdout": true,
+      "stdout": "{\"output\": \"done\", \"final_output\": \"done\", \"exit_code\": 0, \"model\": \"probe/model\", \"resolved_provider\": null, \"session_id\": \"\", \"steps\": 1, \"tool_calls\": [{\"name\": \"shell\", \"status\": \"error\", \"action\": \"run\", \"error\": {\"category\": \"rejected\", \"code\": \"rejected\"}}], \"usage\": {\"input_tokens\": 20, \"output_tokens\": 4}}\n",
+      "stderr": "Running printf \"PATH=%s\\n\" \"$PATH\"; command -v fx-preflight-canary\n",
+      "returncode": 0
+    },
+    {
+      "name": "tool_write_file_deny",
+      "source": "policy/capture-policy.jsonl",
+      "source_sha256": "aeb2c6551316a5d95b38b782bff83885208d259981919ee410b069fd2cce9109",
+      "normalized_stdout": true,
+      "stdout": "{\"output\": \"\", \"final_output\": \"\", \"exit_code\": 1, \"model\": \"probe/model\", \"resolved_provider\": null, \"session_id\": \"\", \"steps\": 0, \"tool_calls\": [], \"usage\": {\"input_tokens\": null, \"output_tokens\": null}, \"error\": \"InvalidToolName\"}\n",
+      "stderr": "",
+      "returncode": 1
+    },
+    {
+      "name": "invalid-model",
+      "source": "live/evidence/invalid-model.json",
+      "source_sha256": "4b9c3b5ce9e4239f8c08734b90c75d1206b7b2915d082d05a2db37397cc3d1fd",
+      "normalized_stdout": false,
+      "stdout": "{\"output\":\"API request failed · HTTP 400 · openai/fx-preflight-nonexistent-20261022 is not a valid model ID\\n\",\"final_output\":\"\",\"exit_code\":1,\"model\":\"openai/fx-preflight-nonexistent-20261022\",\"resolved_provider\":null,\"session_id\":\"\",\"steps\":0,\"tool_calls\":[],\"usage\":{\"input_tokens\":null,\"output_tokens\":null}}\n",
+      "stderr": "fx ask: API request failed · HTTP 400 · openai/fx-preflight-nonexistent-20261022 is not a valid model ID\n",
+      "returncode": 1
+    },
+    {
+      "name": "context-overflow",
+      "source": "live/evidence/context-overflow.json",
+      "source_sha256": "be9b3d4da40dc820ad0ef9e3b705a1181777fd16f474c2435bbf0dceb3a4a472",
+      "normalized_stdout": false,
+      "stdout": "{\"output\":\"API request failed · HTTP 400 · This endpoint's maximum context length is 16385 tokens. However, you requested about 35116 tokens (32054 of text input, 3046 of tool input, 16 in the output). Please reduce the length of either one, or use the context-compression plugin to compress your prompt automatically.\\n\",\"final_output\":\"\",\"exit_code\":1,\"model\":\"openai/gpt-3.5-turbo\",\"resolved_provider\":null,\"session_id\":\"\",\"steps\":0,\"tool_calls\":[],\"usage\":{\"input_tokens\":null,\"output_tokens\":null}}\n",
+      "stderr": "fx ask: API request failed · HTTP 400 · This endpoint's maximum context length is 16385 tokens. However, you requested about 35116 tokens (32054 of text input, 3046 of tool input, 16 in the output). Please reduce the length of either one, or use the context-compression plugin to compress your prompt automatically.\n",
+      "returncode": 1
+    }
+  ]
+}

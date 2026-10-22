@@ -337,9 +337,9 @@ def provider_dispatch_context(
     env together cannot be entered on one lane and skipped on the other.
 
     The hook is duck-typed (``hermetic_dispatch``) rather than a base-class
-    method because exactly one adapter needs it — opencode, whose config layering
-    is the thing being contained. Every other adapter yields an empty context and
-    renders byte-identical argv and env.
+    method so adapters can scope their configuration independently: opencode's
+    config root and fx's managed HOME both live until the child has finished.
+    Adapters without the hook yield an empty context.
 
     ``runner_version`` is the CLI version a caller's preflight already read
     (the executor's ``_VERSION_CACHE``), handed through so the adapter can gate
@@ -351,7 +351,7 @@ def provider_dispatch_context(
     # to be told a dispatch is about to start (codex records its trust state
     # so the run can remove the entries its children add). A separate,
     # side-effect-only hook — never a context, never a refusal, never argv or
-    # env — so `hermetic_dispatch` stays opencode's alone.
+    # env — so `hermetic_dispatch` remains the configuration lifecycle hook.
     note = getattr(provider, "note_dispatch", None)
     if callable(note):
         try:

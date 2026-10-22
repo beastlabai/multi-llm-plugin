@@ -6,8 +6,8 @@ Three guards, and they answer three different questions:
   block carries one row per registered adapter, checked against
   ``provider_registry._PROVIDERS`` rather than against a roster written here.
   Nothing in this module names an adapter or a count — the specification it
-  implements was written for thirteen adapters and the registry holds
-  seventeen, and a literal list is precisely how four of them fell out of it
+  implements was written for thirteen adapters and the registry has grown
+  beyond that, and a literal list is precisely how adapters fell out of it
   (``harness-residual-work.md`` M0.a).
 
 * **An unprobed row is `null`, never a guess.** ``mechanism:`` and ``probed:``

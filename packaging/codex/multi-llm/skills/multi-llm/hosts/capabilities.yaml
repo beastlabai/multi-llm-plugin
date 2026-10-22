@@ -489,7 +489,7 @@ hosts:
       version: "0.1.0"
       config_key: plugin
       provides: [command, tool]
-      min_host_version: "1.18.35"   # the one supported opencode release (the
+      min_host_version: "1.19.3"   # the one supported opencode release (the
                                     # newest; `make opencode-bump` moves it with
                                     # every other pin), never a lower one that
                                     # might work: `engines` is a hard gate, and

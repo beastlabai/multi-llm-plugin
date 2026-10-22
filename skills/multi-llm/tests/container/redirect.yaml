@@ -1468,6 +1468,39 @@ clis:
       that dies in 0.13 s with an empty stub log is that COPY, not the redirect.
 
   # -------------------------------------------------------------------------
+  - cli: fx
+    provenance: verified
+    lane: provider
+    chain_write_runner: opencode
+    surface: chat
+    mechanism: "$HOME/.fx/settings.json custom OpenAI chat-completions connection"
+    model_arg: "stub-model"
+    session_prefix: true
+    credential_vars: [OPENROUTER_API_KEY]
+    seed_files: [".fx/settings.json"]
+    env_extra:
+      FX_PROVIDER: "openrouter"
+      FX_MAX_AGENT_STEPS: "60"
+      FX_AUTO_UPGRADE: "0"
+      FX_PERMISSION_MODE: "auto"
+      NO_COLOR: "1"
+    http_log:
+      - {method: POST, path: /v1/chat/completions, stream: true, has_tools: true}
+    turns: 1
+    terminates_on_text: true
+    row_timeout_s: 300
+    chain_row_timeout_s: 600
+    version_measured: "0.0.14"
+    help_invocation: "fx ask --help"
+    version_offline: true
+    notes: >-
+      Vercel fx, not the npm JSON viewer. Prompt travels on stdin; only the
+      terminal final_output is the answer. Auto mode may make additional shell
+      reviewer requests; they are authorized and excluded from reported usage.
+      This offline lane has network none; production permits web access.
+      The wrapper owns HOME and tightens .fx/settings.json after substitution.
+
+  # -------------------------------------------------------------------------
   # Rows that reach no model surface. Both are `lane: fake`, which is a PROMISE
   # about mock_llm.py (C5): cursor-agent is already one of its six identities;
   # `agy` is the only provider in this matrix that still needs the five mock parts.

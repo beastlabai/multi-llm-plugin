@@ -34,7 +34,7 @@ override: starting from an inert template, it **uncomments** the full `providers
 block, `defaults.models` / `quick_models` entries, and `default_provider` for each
 CLI it detects, leaving the rest commented. `default_provider` is set to the
 **first detected provider** in base order (claude-code, cursor-agent, gemini,
-grok, opencode, codex, kilocode, kimi, qwen, copilot, cline, goose, aider, agy, pi, muse, vibe, omp). With **no CLIs installed** it writes the inert
+grok, fx, opencode, codex, kilocode, kimi, qwen, copilot, cline, goose, aider, agy, pi, muse, vibe, omp). With **no CLIs installed** it writes the inert
 template (which inherits the built-in defaults) and exits 0 with an install
 notice — it never errors. Pass `--template-only` to skip detection and write the
 pristine commented stub for hand-editing. Add `--gitignore` to keep the file
@@ -137,6 +137,16 @@ exported), then `~/.omp/agent/.env`, then `~/.omp/.env` or `~/.env`, of which
 `~/.omp/agent/.env` is the source that depends on nothing in the parent
 environment and the one to use when the key is not exported in the shell the run
 starts in.
+
+`fx` has a separate context boundary worth understanding before enabling it.
+The adapter supplies a managed `HOME`, so fx ignores the user's existing fx
+configuration and settings. Its context setup suppresses `AGENTS.md` injection;
+skill catalog metadata may still be visible, while the `skill` loading tool is
+denied. This does not provide an OS sandbox or block web access. In `--auto`,
+shell commands may trigger an additional, billed reviewer call; that reviewer's
+usage is not included in fx's reported token counts or cost because fx returns
+no cost field. The reviewer may deny a shell command, and its usage can vary.
+See [the fx provider notes](providers.md#the-provider-table).
 
 The override now deep-merges its full contents (including a `providers:` block)
 over base, exactly like the `MULTI_LLM_PROVIDERS_CONFIG` env layer — but since

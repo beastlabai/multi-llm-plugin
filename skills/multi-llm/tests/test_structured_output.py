@@ -418,10 +418,10 @@ class TestSchemaKeywordIsInertWhenUnset:
 
         table, _models, _prompt = self._table()
         assert set(table) == set(_PROVIDERS)
-        assert len(table) == 18
+        assert len(table) == 19
 
     @pytest.mark.parametrize("name", sorted(so.__dict__.get("_ADAPTERS", ())) or [
-        "agy", "aider", "claude-code", "cline", "codex", "copilot", "cursor-agent",
+        "agy", "aider", "claude-code", "cline", "codex", "copilot", "cursor-agent", "fx",
         "gemini",
         "goose", "grok", "kilocode", "kimi", "muse", "omp", "opencode", "pi",
         "qwen-code",
@@ -436,7 +436,7 @@ class TestSchemaKeywordIsInertWhenUnset:
         assert provider.build_command(prompt, models[name], schema=None) == table[name]
 
     @pytest.mark.parametrize("name", [
-        "agy", "aider", "claude-code", "cline", "codex", "copilot", "cursor-agent",
+        "agy", "aider", "claude-code", "cline", "codex", "copilot", "cursor-agent", "fx",
         "gemini",
         "goose", "grok", "kilocode", "kimi", "muse", "omp", "opencode", "pi",
         "qwen-code",
@@ -453,7 +453,7 @@ class TestSchemaKeywordIsInertWhenUnset:
         )
 
     @pytest.mark.parametrize("name", [
-        "agy", "aider", "claude-code", "cline", "codex", "copilot", "cursor-agent",
+        "agy", "aider", "claude-code", "cline", "codex", "copilot", "cursor-agent", "fx",
         "gemini",
         "goose", "grok", "kilocode", "kimi", "muse", "omp", "opencode", "pi",
         "qwen-code",

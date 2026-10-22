@@ -1,0 +1,5 @@
+[notice] ⚠ Rate limited · HTTP 429 · Too many requests · retrying request
+[notice] ⚠ Rate limited · HTTP 429 · Too many requests · retrying request
+[notice] ⚠ Rate limited · HTTP 429 · Too many requests · retrying request in 1s
+[notice] ⚠ Rate limited · HTTP 429 · Too many requests · retrying request in 1s
+[notice] ⚠ Rate limited · HTTP 429 · Too many requests · retrying request in 2s

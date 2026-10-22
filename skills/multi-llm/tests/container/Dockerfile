@@ -123,6 +123,10 @@ ARG AGY_SHA256=90cc1894b6862510869ad4cf1a6f4c043b7ae7c095bad8d5c355788a0ca935c7
 ARG OMP_VERSION=18.12.6
 ARG OMP_URL=https://github.com/can1357/oh-my-pi/releases/download/v18.12.6/omp-linux-x64
 ARG OMP_SHA256=85d9daf3a05fc76e8cd425ae1904eb576af8d21cc85fcf4690742626e07ccfa4
+# Vercel's agent, not the unrelated npm JSON viewer named fx.
+ARG FX_VERSION=0.0.14
+ARG FX_URL=https://github.com/vercel-labs/fx/releases/download/v0.0.14/fx-linux-x86_64.tar.gz
+ARG FX_SHA256=731c1914fc2d497a10583f4416f8382c192e4897d6a0b4f713d6194455a8548b
 # vibe's interpreter, NOT the product's. `mistral-vibe` declares
 # `requires_python >=3.12` and bookworm-slim ships 3.11.2 -- and this file sets
 # `UV_PYTHON_DOWNLOADS=never`, so `uv venv --python 3.12` cannot fetch one
@@ -625,6 +629,30 @@ RUN if [ "${MLLM_PIN_MODE}" = "latest" ]; then \
  && rm -rf "$warm" /tmp/omp-warm.log
 
 # --------------------------------------------------------------------------- #
+# fx ships a static ELF inside an archive. The archive checksum cannot be
+# recovered from the installed ELF, so lock_update must treat it as an archive.
+RUN if [ "${MLLM_PIN_MODE}" = "latest" ]; then \
+        fx_version="$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 https://api.github.com/repos/vercel-labs/fx/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"].lstrip("v"))')"; \
+        fx_url="https://github.com/vercel-labs/fx/releases/download/v${fx_version}/fx-linux-x86_64.tar.gz"; \
+    else \
+        fx_version="${FX_VERSION}"; fx_url="${FX_URL}"; \
+    fi \
+ && curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+         -o /tmp/fx.tar.gz "${fx_url}" \
+ && if [ "${MLLM_PIN_MODE}" = "pinned" ]; then \
+        echo "${FX_SHA256}  /tmp/fx.tar.gz" | sha256sum --check --strict -; \
+    else \
+        echo "unpinned fx archive sha256: $(sha256sum /tmp/fx.tar.gz)"; \
+    fi \
+ && tar -xzf /tmp/fx.tar.gz -C /tmp fx \
+ && install -m 0755 /tmp/fx /opt/mllm/real/fx \
+ && test "$(FX_AUTO_UPGRADE=0 /opt/mllm/real/fx --version)" = "${fx_version}" \
+ && FX_AUTO_UPGRADE=0 /opt/mllm/real/fx ask --help > /tmp/fx-help \
+ && grep -Fq 'fx ask' /tmp/fx-help \
+ && for flag in --json --no-save --auto --model; do grep -Fq -- "$flag" /tmp/fx-help || exit 1; done \
+ && rm -f /tmp/fx.tar.gz /tmp/fx /tmp/fx-help
+
+# --------------------------------------------------------------------------- #
 # 8. The rig, and the wrapper tree it is the source of (C2).
 #
 #     /opt/mllm/real/<cli>   the genuine binary, untouched
@@ -669,7 +697,7 @@ COPY skills/multi-llm/tests/container/*.yaml            /opt/mllm/rig/
 COPY skills/multi-llm/tests/container/home_seed         /opt/mllm/rig/home_seed
 
 RUN chmod 0755 /opt/mllm/rig/*.py \
- && for b in codex claude gemini opencode cline kilocode kimi pi qwen copilot aider vibe goose grok muse cursor-agent agy omp uv; do \
+ && for b in codex claude gemini opencode cline kilocode kimi pi qwen copilot aider vibe goose grok muse cursor-agent agy omp fx uv; do \
         ln -sf /opt/mllm/rig/wrapper.py "/opt/mllm/bin/$b"; \
     done \
  && /usr/bin/python3 -m compileall -q /opt/mllm/rig >/dev/null
@@ -723,6 +751,7 @@ ENV MLLM_SKILL_DIR=/opt/mllm/skill \
 # reach a CLI dispatched *through* the wrapper. They cover the entrypoint, the
 # build, and any direct invocation; the per-CLI copies belong in redirect.yaml.
 ENV CLINE_NO_AUTO_UPDATE=1 \
+    FX_AUTO_UPGRADE=0 \
     KIMI_CODE_NO_AUTO_UPDATE=1 \
     KIMI_DISABLE_TELEMETRY=1 \
     QWEN_TELEMETRY_ENABLED=false \

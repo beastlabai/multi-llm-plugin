@@ -56,6 +56,7 @@ MODELS = {
     # reasoning parameters. That tension is real and is graded on the live lane,
     # not here -- this table only shapes argv.
     "copilot": "openai/gpt-5.6-luna",
+    "fx": "openai/gpt-5.6-luna",
     "cursor-agent": "auto",
     "gemini": "gemini-2.5-pro",
     "goose": "openrouter/z-ai/glm-5.2",
@@ -468,6 +469,12 @@ STOPS_FILE_WRITES = {
 #: Atoms that LOOK restrictive and were checked to be compatible with the write.
 #: A row here is a claim someone verified, not a flag someone waved through.
 REVIEWED_STILL_WRITES = {
+    ("fx", "ask"): (
+        "`ask` is fx's top-level command, not a read-only permission mode. The "
+        "0.0.14 probe measured `auto` file writes with no review for edit "
+        "permissions; shell review is separate and may deny a command. See "
+        "plans/add-fx-provider.md §2.4 and §9.4."
+    ),
     ("muse", "--disable-sandbox"): (
         "The word is `sandbox` but the flag REMOVES one. D6 (2026-09-11) turns "
         "muse's shell sandbox off: it is bubblewrap with --unshare-net, and on a "
@@ -791,6 +798,13 @@ class ShellEvidence(NamedTuple):
 #: by a named measurement, AND its argv must grant no shell tool — so a later
 #: tool-list edit that grants one turns this red.
 SHELL_EVIDENCE = {
+    "fx": ShellEvidence(
+        True,
+        "MEASURED with production fx 0.0.14 in --auto: two concurrent runs, "
+        "each main/reviewer/main using its own model; shared HOME cleanup and "
+        "the PATH canary passed. Canonical shell-reviewed, shell-held and "
+        "reviewer-malformed captures are in tests/fixtures/fx/manifest.yaml.",
+    ),
     "pi": ShellEvidence(
         True,
         "`bash` in the `--tools` allow-list (PI_TOOLS, D3.1); pi has no "

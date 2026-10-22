@@ -22,8 +22,16 @@ from utils.html_report_generator import (
     split_section_refs,
     _extract_file_path,
     _build_suggestion_data,
+    _get_icon_data_uri,
+    _resolve_provider_icon_key,
 )
 from utils.report_parser import load_html_selections, merge_selections
+
+
+def test_fx_provider_icon_is_available():
+    key = _resolve_provider_icon_key("fx")
+    assert key == "vercel"
+    assert _get_icon_data_uri(key).startswith("data:image/svg+xml;base64,")
 
 
 class TestParseModelString:

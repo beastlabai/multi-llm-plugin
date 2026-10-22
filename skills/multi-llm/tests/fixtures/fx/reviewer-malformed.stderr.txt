@@ -1,0 +1,1 @@
+Running pwd; command -v fx-canary; printf FX_SHELL_OK

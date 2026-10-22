@@ -1,0 +1,28 @@
+{
+  "provider": "openrouter",
+  "providers": {
+    "openrouter": {
+      "protocol": "openai-chat-completions",
+      "base_url": "{{base_url}}",
+      "auth": {
+        "type": "bearer",
+        "env": "OPENROUTER_API_KEY"
+      }
+    }
+  },
+  "auto_upgrade": false,
+  "context": false,
+  "permission_mode": "auto",
+  "permission": {
+    "read": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "edit": "allow",
+    "bash": "allow",
+    "web_fetch": "allow",
+    "skill": "deny",
+    "subagent": "deny",
+    "mcp_select_tool": "deny",
+    "mcp_features": "deny"
+  }
+}
