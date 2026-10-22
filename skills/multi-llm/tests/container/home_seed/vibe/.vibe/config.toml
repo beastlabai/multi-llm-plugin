@@ -23,7 +23,7 @@
 # the per-run selection is environment. That is also why this adapter needs no
 # per-run file write and therefore no §1 `prepare_run` hook.
 
-active_model = "openai/gpt-5.6-luna"
+active_model = "{{model_alias}}"
 
 [[providers]]
 # NOT named `mistral`. §2.2's vibe row claims a seed missing `backend =
@@ -49,13 +49,15 @@ emits_finish_reason = true
 # only adapter here whose model surface is an indirection, and giving the alias a
 # second spelling would put a name in `providers.yaml` that exists nowhere else
 # in the system.
+# Render the alias from the run's selected model as well, so a live model
+# override still selects this provider instead of Vibe's built-in default.
 #
 # `name` is what reaches the WIRE, and it is the one value that genuinely
 # differs per lane -- the stub answers `stub-model`, OpenRouter answers the slug.
 # So it is a copytree token, which is exactly the extension §7 step 6 sanctions
 # ("extend the home_seed copytree tokens ... never config_files") for a seed that
 # cannot express its row's model otherwise.
-alias = "openai/gpt-5.6-luna"
+alias = "{{model_alias}}"
 name = "{{model_name}}"
 provider = "openrouter"
 # vibe never issues GET /models (measured: zero catalog requests across 25

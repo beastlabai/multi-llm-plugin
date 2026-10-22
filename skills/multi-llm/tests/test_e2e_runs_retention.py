@@ -23,6 +23,7 @@ rewrites.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -59,7 +60,7 @@ def test_keeps_the_newest_and_deletes_the_rest(runs: Path) -> None:
     removed = prune_runs(runs, keep=2)
 
     assert sorted(p.name for p in removed) == names[:3]
-    assert sorted(p.name for p in runs.iterdir()) == names[3:]
+    assert sorted(p.name for p in runs.iterdir() if p.name != ".run-locks") == names[3:]
 
 
 def test_leaves_everything_that_is_not_a_bundle(runs: Path) -> None:
@@ -76,7 +77,7 @@ def test_leaves_everything_that_is_not_a_bundle(runs: Path) -> None:
 
     prune_runs(runs, keep=1)
 
-    survivors = sorted(p.name for p in runs.iterdir())
+    survivors = sorted(p.name for p in runs.iterdir() if p.name != ".run-locks")
     assert survivors == ["20260815T120000Z", "README.md", "lock-update", "surface"]
 
 
@@ -102,7 +103,7 @@ def test_ordering_is_the_name_not_the_mtime(runs: Path) -> None:
     removed = prune_runs(runs, keep=1)
 
     assert [p.name for p in removed] == ["20260814T120000Z"]
-    assert [p.name for p in runs.iterdir()] == ["20260825T120000Z"]
+    assert [p.name for p in runs.iterdir() if p.name != ".run-locks"] == ["20260825T120000Z"]
 
 
 def test_protect_survives_however_old_it_sorts(runs: Path) -> None:
@@ -118,7 +119,7 @@ def test_protect_survives_however_old_it_sorts(runs: Path) -> None:
     removed = prune_runs(runs, keep=1, protect=current)
 
     assert removed == []
-    assert sorted(p.name for p in runs.iterdir()) == [
+    assert sorted(p.name for p in runs.iterdir() if p.name != ".run-locks") == [
         "20260101T000000Z", "20260825T120000Z"]
 
 
@@ -126,7 +127,7 @@ def test_keep_zero_disables_the_sweep(runs: Path) -> None:
     _bundle(runs, "20260814T120000Z")
 
     assert prune_runs(runs, keep=0) == []
-    assert [p.name for p in runs.iterdir()] == ["20260814T120000Z"]
+    assert [p.name for p in runs.iterdir() if p.name != ".run-locks"] == ["20260814T120000Z"]
 
 
 def test_the_environment_overrides_the_default(runs: Path, monkeypatch) -> None:
@@ -150,8 +151,45 @@ def test_an_unreadable_override_falls_back_to_the_default(
     removed = prune_runs(runs)
 
     assert len(removed) == 2
-    assert len(list(runs.iterdir())) == RUNS_KEEP_DEFAULT
+    assert len([p for p in runs.iterdir() if p.name != ".run-locks"]) == RUNS_KEEP_DEFAULT
 
 
 def test_a_missing_runs_directory_is_not_an_error(tmp_path: Path) -> None:
     assert prune_runs(tmp_path / "nope") == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX retention leases")
+@pytest.mark.parametrize("crash", [False, True])
+def test_active_session_survives_other_process_sweeps(runs, crash):
+    old = _bundle(runs, "20260101T000000Z")
+    _bundle(runs, "20260825T120000Z")
+    script = """
+import sys
+from pathlib import Path
+from tests.container.harness import retain_run
+retain_run(Path(sys.argv[1]))
+print("leased", flush=True)
+sys.stdin.readline()
+"""
+    child = subprocess.Popen(
+        [sys.executable, "-c", script, str(old)],
+        cwd=TESTS_DIR.parent, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        import select
+        assert select.select([child.stdout], [], [], 10)[0], "lease timed out"
+        assert child.stdout.readline().strip() == "leased"
+        assert prune_runs(runs, keep=1) == []
+        assert (old / "row-id" / "stub.jsonl").is_file()
+        if crash:
+            child.kill()
+        else:
+            child.stdin.write("done\n")
+            child.stdin.flush()
+        child.wait(timeout=10)
+        assert prune_runs(runs, keep=1) == [old]
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.communicate(timeout=10)

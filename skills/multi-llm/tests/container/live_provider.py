@@ -271,6 +271,7 @@ def render_seed(cli: str, home: Path, base_url: str, api_key_env: str,
         # Without it the smoke would POST `stub-model` and take a 400 that reads
         # like an adapter bug.
         "{{model_name}}": model_name,
+        "{{model_alias}}": model_name,
     }
     rendered = []
     for path in home.rglob("*"):

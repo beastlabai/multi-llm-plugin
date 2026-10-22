@@ -3132,6 +3132,9 @@ class TestTheCodexPackageAskUsedThePlugin:
     def test_the_key_was_exported_into_an_unshadowed_profile(self, codex_package_ask):
         result, _row, _entry = codex_package_ask
         export = _bundle_json(result, "profile-export.json")
+        if result.row.creds == "fallback":
+            assert export is None, "subscription runs must not export an OpenRouter key"
+            return
         assert export, "no profile-export.json: D3a's second carrier was not written"
         assert export["form"] == "export"
         assert export["exported"] == ["OPENROUTER_API_KEY"]
@@ -3174,4 +3177,5 @@ class TestTheCodexPackageAskUsedThePlugin:
             f"no login shell whose parent is mcp/server.py read .profile: "
             f"{[r.get('parent') for r in reads]}")
         assert all(r["key_before_profile"] is False for r in child), child
-        assert all(r["key_after_profile"] is True for r in child), child
+        expected_key = result.row.creds != "fallback"
+        assert all(r["key_after_profile"] is expected_key for r in child), child

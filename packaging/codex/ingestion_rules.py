@@ -50,6 +50,13 @@ same five system skills under ``skills/.system/`` and no ``plugin-creator``, so
 there is still no ``validate_plugin.py`` to read; the stamp moves as an absence
 re-confirmation again, and ``SOURCE_SHA256`` stays the 0.156.1 value.
 
+**2026-10-22 (0.162.0 -> 0.163.0): still absent.** An offline initialization
+of the pinned container binary in an empty temporary ``CODEX_HOME`` unpacked
+``imagegen``, ``openai-docs``, ``review-agent``, ``skill-creator`` and
+``skill-installer``. No ``plugin-creator`` or ``validate_plugin.py`` was present.
+The version and date record this absence check; the last known source hash and
+the restated rules remain unchanged.
+
 **The validator is stricter than local ingestion (R5).** ``codex plugin add``
 installs a manifest carrying ``hooks`` that the validator rejects by name. What
 ships is held to the validator's stricter rules anyway, so the tree is clean if
@@ -75,7 +82,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 #: container pin (``tests/container/package.json``), asserted. As of this
 #: value the file at SOURCE_PATH is confirmed ABSENT (see the module
 #: docstring's 2026-09-30 note) -- the version records the check, not a read.
-SOURCE_CODEX_VERSION = "0.162.0"
+SOURCE_CODEX_VERSION = "0.163.0"
 
 #: Where that file used to live, relative to ``$CODEX_HOME``. The container
 #: drift row looks here; off the image, or on any codex build that no longer
@@ -87,9 +94,9 @@ SOURCE_PATH = "skills/.system/plugin-creator/scripts/validate_plugin.py"
 SOURCE_SHA256 = "f4eeadb733b28b0c3e714de263a76d6542866a672f3e99bdffcf4dbcdf85e944"
 
 #: The day this stamp was last checked, ISO 8601 (an absence re-confirmation
-#: on 2026-09-30, 2026-10-08 and again on 2026-10-09, not a fresh read -- the file has had no bytes to read since
+#: most recently on 2026-10-22, not a fresh read -- the file has had no bytes to read since
 #: at least 0.156.1's successor).
-SOURCE_READ_DATE = "2026-10-09"
+SOURCE_READ_DATE = "2026-10-22"
 
 # ---------------------------------------------------------------------------
 # The server's own interpreter floor

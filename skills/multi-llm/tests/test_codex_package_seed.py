@@ -337,3 +337,30 @@ class TestTheHarnessForwardsTheProbe:
     def test_no_other_row_grows_the_flag(self, tmp_path):
         assert "--probe" not in self._argv(tmp_path)
         assert "--probe" not in self._argv(tmp_path, route="package")
+
+
+@pytest.mark.parametrize("route", ["file", "package"])
+def test_subscription_package_keeps_instrumentation_without_a_key(rig, monkeypatch, route):
+    import subprocess
+
+    home, out, _log = rig
+    monkeypatch.setattr(entrypoint, "copy_in_fallback_credentials", lambda *args: [])
+    expected = {name: f"test-{name}" for name in entrypoint.HARNESS_PROFILE_NAMES}
+    for name, value in expected.items():
+        monkeypatch.setenv(name, value)
+    entrypoint.wire_fallback_credentials("codex", home, "gpt-6-luna", route=route)
+    profile = home / ".profile"
+    assert profile.exists() is (route == "package")
+    assert not (out / "profile-export.json").exists()
+    if route == "file":
+        return
+    shell_env = {"PATH": os.environ["PATH"]}
+    command = '. "$1"; env'
+    result = subprocess.run(["/bin/sh", "-c", command, "sh", str(profile)],
+                            env=shell_env, text=True, capture_output=True, check=True)
+    actual = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    assert {name: actual[name] for name in expected} == expected
+    assert "OPENROUTER_API_KEY" not in actual
+    reads = [json.loads(line) for line in (out / entrypoint.PROFILE_READS).read_text().splitlines()]
+    assert reads[-1]["key_before_profile"] is False
+    assert reads[-1]["key_after_profile"] is False

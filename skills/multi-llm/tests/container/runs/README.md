@@ -42,7 +42,11 @@ directory is a supported thing to do.
 ## Capped, and safe to delete
 
 The lane prunes itself: `harness.prune_runs` runs as each bundle directory is
-created and keeps the newest **8**, protecting the bundle being written.
+created and keeps the newest **8**, plus bundles leased by active drivers.
+Leases last until the driver exits, so concurrent runs cannot prune evidence
+that session-scoped graders still need. Process exit (including a crash)
+releases the lease. Zero-byte files in `.run-locks/` keep lock identities stable
+without entering bundle digests. Platforms without POSIX locks skip pruning.
 `MLLM_E2E_RUNS_KEEP` overrides the number and `0` turns the sweep off.
 `make e2e-prune KEEP=n` is the same sweep on demand, for a checkout that predates
 it. Both are shape-aware: only `<utc>[-<suffix>]/` directories are candidates, so
