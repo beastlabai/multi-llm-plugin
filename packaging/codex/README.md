@@ -84,7 +84,7 @@ whoever can move the `release` ref and the workflow that moves it.
 | --- | --- |
 | Linux | `verified` — the only platform this route claims |
 | macOS | `unmeasured`. The run's `bash -lc` login shell reads `~/.bash_profile` / `~/.profile`, not `~/.zprofile` or `~/.zshrc` |
-| Windows | `unsupported for the tool route` — `python3` is usually absent under that name, so the server never starts. Git Bash (or another POSIX `bash`) on `PATH` is also a hard prerequisite: without it the tool refuses with a missing-`bash` error. Use the file route (`install-host codex`) |
+| Windows | `unsupported for the tool route` — `python3` is usually absent under that name, so the server never starts. Git Bash (or another POSIX `bash`) on `PATH`, or beside a `git` that is, is also a hard prerequisite (WSL's `System32\bash.exe` does not count): without it the tool refuses with a missing-`bash` error. Use the file route (`install-host codex`) |
 
 ## Upgrade
 

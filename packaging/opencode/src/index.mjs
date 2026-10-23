@@ -558,7 +558,9 @@ function expandHome(target, env = process.env) {
 function uvMissingText(surface) {
   const file = path.join(SKILL_DIR, ...surface.uv.missing_message_file.split("/"))
   try {
-    return fs.readFileSync(file, "utf8").replace(/\n+$/, "")
+    // Line endings read the way Python's text mode reads them (CRLF is LF), so a
+    // CRLF checkout cannot leave a `\r` where the trailing newline was trimmed.
+    return fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n").replace(/\n+$/, "")
   } catch {
     // A partial install is the only way to get here, so say so rather than
     // duplicating the text this file deliberately does not carry.

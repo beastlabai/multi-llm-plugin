@@ -14,7 +14,8 @@ Windows launcher is shaped the way npm installs a real CLI: ``<name>.cmd``
 dispatching to ``node mocks/<name>.js``. The product parses that shim and starts
 node directly, cmd.exe never involved, and the node trampoline starts the
 script's interpreter with argv passed through verbatim. ``harness/skill_runner.py``
-installs the same pair for the e2e suite and explains the shape at length.
+installs its e2e launchers through :func:`install_mock_llm`, so the pair is
+rendered here and nowhere else.
 
 POSIX bytes are what the fixtures wrote before this module existed.
 """
@@ -36,7 +37,8 @@ _IS_WINDOWS = os.name == "nt"
 
 #: Windows only: the subdirectory of bin/ holding each launcher's node trampoline
 #: and script body. Never bin/ itself, so a PATHEXT carrying ``.JS`` or ``.PY``
-#: cannot resolve ``codex`` to one of them (``SkillRunner.MOCK_JS_SUBDIR``).
+#: cannot resolve ``codex`` to one of them. ``SkillRunner.MOCK_JS_SUBDIR`` is
+#: this constant.
 SCRIPT_SUBDIR = "mocks"
 
 
@@ -116,29 +118,35 @@ def remove_launcher(bin_dir: Path, name: str) -> None:
     launcher_file(bin_dir, name).unlink()
 
 
-def install_mock_llm(bin_dir: Path, name: str) -> Path:
-    """Put ``mock_llm.py`` on the mock PATH as the CLI ``name``.
+def install_mock_llm(bin_dir: Path, name: str, mock_llm: Path = MOCK_LLM) -> Path:
+    """Put ``mock_llm`` (the real one unless a harness points elsewhere) on the
+    mock PATH as the CLI ``name``.
 
     A *copied* POSIX launcher cannot find ``tests/scenario_matcher.py`` through
     its own ``__file__`` the way the real file and a symlink to it can, so the
     one definition of what a scenario means is copied beside it. The Windows
     trampoline runs the real file, and hands the identity over in
-    ``MOCK_LLM_PROVIDER`` because python sets ``sys.argv[0]`` to the script.
+    ``MOCK_LLM_PROVIDER`` because python sets ``sys.argv[0]`` to the script. The
+    identity is the adapter's id, which is the launcher's name for every CLI but
+    one: the claude-code adapter's binary is ``claude`` (``mock_llm`` maps the
+    two the same way when it reads ``sys.argv[0]``; an unmapped ``claude`` here
+    would answer in cursor-agent's wire format, which is its fallback).
     """
     bin_dir.mkdir(parents=True, exist_ok=True)
     if _IS_WINDOWS:
         identity = "claude-code" if name == "claude" else name
         return _install_windows(
-            bin_dir, name, [sys.executable, str(MOCK_LLM)],
+            bin_dir, name, [sys.executable, str(mock_llm)],
             {"MOCK_LLM_PROVIDER": identity},
         )
     target = bin_dir / name
     try:
-        target.symlink_to(MOCK_LLM)
+        target.symlink_to(mock_llm)
     except (OSError, NotImplementedError):  # pragma: no cover
-        shutil.copyfile(MOCK_LLM, target)
+        shutil.copyfile(mock_llm, target)
         target.chmod(target.stat().st_mode | stat.S_IXUSR)
-        shutil.copyfile(SCENARIO_MATCHER, bin_dir / SCENARIO_MATCHER.name)
+        matcher = mock_llm.parent.parent / SCENARIO_MATCHER.name
+        shutil.copyfile(matcher, bin_dir / matcher.name)
     return target
 
 

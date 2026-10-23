@@ -32,6 +32,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -87,6 +88,7 @@ LOGIN_SHELL_SCRIPT = CONST["LOGIN_SHELL_SCRIPT"]
 CANCEL_LATENCY_BOUND_S = CONST["CANCEL_LATENCY_BOUND_S"]
 RUNNABLE_MARKER = CONST["RUNNABLE_MARKER"]
 NEXT_MARKER = CONST["NEXT_MARKER"]
+WSL_LAUNCHER_DIRS = CONST["WSL_LAUNCHER_DIRS"]
 
 
 # ===========================================================================
@@ -282,8 +284,15 @@ def dispatcher_argv(call: dict) -> list:
 
 #: The bash the server finds on this PATH, pinned as the fallback where a row
 #: empties PATH to hide uv: only uv may be missing there. ``/bin/bash``, the
-#: built-in fallback, is no file on Windows, so bash went missing first.
-REAL_BASH = shutil.which("bash") or "/bin/bash"
+#: built-in fallback, is no file on Windows, so bash went missing first. There it
+#: is Git Bash, as the server's own lookup has it (``windows_bash``): a bare
+#: ``which`` answers with WSL's ``System32\bash.exe`` wherever the feature is on.
+if sys.platform == "win32":
+    from utils.host_install import git_bash
+
+    REAL_BASH = git_bash() or "/bin/bash"
+else:
+    REAL_BASH = shutil.which("bash") or "/bin/bash"
 
 
 def word(path) -> str:
@@ -301,6 +310,14 @@ posix_group_kill = pytest.mark.skipif(
     sys.platform == "win32",
     reason="POSIX process-group kill and SIGTERM handling; the codex tool route "
            "is unsupported on Windows")
+
+
+#: A recording ``bash`` first on PATH is a shebang script, which CreateProcess
+#: cannot start (and ``shutil.which`` finds it only by its bare name, last).
+posix_shebang_shell = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="a recording `bash` stand-in is a shebang script, which CreateProcess "
+           "cannot start; the login profile test asserts the same argv on every OS")
 
 
 _ABSENT = object()
@@ -1258,7 +1275,7 @@ class TestArguments:
         for place in (harness.workspace, harness.cwd, harness.home, harness.tmp):
             assert not list(Path(place).glob("PWNED*"))
 
-    def test_child_is_spawned_through_one_login_shell_at_one_site(self, harness, tmp_path):
+    def test_the_server_spawns_at_one_site_and_never_through_a_shell_string(self):
         """Inverted from the reference: exactly one shell, one site, a constant -c."""
         src = SERVER_SRC.read_text(encoding="utf-8")
         tree = ast.parse(src)
@@ -1269,7 +1286,10 @@ class TestArguments:
         for node in ast.walk(tree):
             if isinstance(node, ast.keyword) and node.arg == "shell":
                 assert isinstance(node.value, ast.Constant) and node.value.value is False
-        # And at run time: a recording bash first on PATH sees the pinned argv.
+
+    @posix_shebang_shell
+    def test_child_is_spawned_through_one_login_shell_at_one_site(self, harness, tmp_path):
+        """At run time: a recording bash first on PATH sees the pinned argv."""
         bindir = tmp_path / "bin"
         bindir.mkdir()
         record = tmp_path / "bash-argv.log"
@@ -1280,7 +1300,7 @@ class TestArguments:
             "os.execv('/bin/bash', ['bash'] + sys.argv[1:])\n".format(
                 sys.executable, str(record)), encoding="utf-8")
         wrapper.chmod(0o755)
-        path = "{}:{}".format(bindir, os.environ.get("PATH", ""))
+        path = os.pathsep.join([str(bindir), os.environ.get("PATH", "")])
         envelope, _, _, _ = harness.run(
             REVIEW, [launch_step(), poll_step(2), poll_step(0)],
             extra_env={"PATH": path})
@@ -1291,6 +1311,96 @@ class TestArguments:
             assert argv[1:5] == ["-lc", LOGIN_SHELL_SCRIPT, "bash", anchor]
         assert envelope["environment"]["shell"] == [
             str(wrapper), "-lc", LOGIN_SHELL_SCRIPT, "bash"]
+
+    def test_the_login_shell_is_handed_bash_the_anchor_and_the_dispatcher(self, harness):
+        """What the real bash was handed, read by the real bash.
+
+        The OS-independent twin of the recording-wrapper test above: a login
+        profile records ``$0`` and ``"$@"`` (the anchor, then the stub the
+        dispatcher argv starts with), so it also proves ``-l`` took effect. The
+        ``-lc`` and the constant script are what ``environment.shell`` reports
+        of the very list the one ``Popen`` was given.
+        """
+        record = harness.tmp / "profile-argv.log"
+        (harness.home / ".profile").write_text(
+            "printf '%s\\n' @@ \"$0\" \"$@\" >> \"{}\"\n".format(record.as_posix()),
+            encoding="utf-8")
+        envelope, _, _, _ = harness.run(
+            REVIEW, [launch_step(), poll_step(2), poll_step(0)])
+        anchor = os.path.realpath(harness.workspace)
+        spawns = [chunk.splitlines() for chunk in record.read_text().split("@@\n")[1:]]
+        assert len(spawns) == 3
+        for lines in spawns:
+            assert lines[:3] == ["bash", anchor, str(harness.stub)]
+        shell = envelope["environment"]["shell"]
+        assert shell[1:] == ["-lc", LOGIN_SHELL_SCRIPT, "bash"]
+        assert Path(shell[0]).name.lower() in ("bash", "bash.exe")
+        assert Path(shell[0]).parent.name.lower() not in WSL_LAUNCHER_DIRS
+
+
+class TestWindowsBash:
+    """On Windows the shell is Git Bash, and ``bash`` on PATH may be WSL's.
+
+    ``windows_bash`` runs on every OS here, over a stand-in tree: the logic is
+    path and name arithmetic, so a tmp dir named ``System32`` is as good a
+    launcher as the real one (``os.pathsep`` and the ``.exe`` suffix PATH needs
+    are the platform's own).
+    """
+
+    EXE = ".exe" if os.name == "nt" else ""
+
+    @staticmethod
+    def same(found, expected) -> bool:
+        """Same file: ``which`` spells the suffix in PATHEXT's case (``.EXE``)."""
+        return found is not None and os.path.samefile(found, expected)
+
+    @pytest.fixture
+    def tree(self, tmp_path):
+        """WSL's launcher, and Git's ``cmd``, ``bin`` and ``usr/bin`` directories.
+
+        ``bin`` holds ``bash.exe`` under that exact name on every OS, because
+        that is the file the beside-git lookup names; ``usr/bin`` holds the one
+        PATH can match.
+        """
+        def make(*parts):
+            target = tmp_path.joinpath(*parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("", encoding="utf-8")
+            target.chmod(0o755)
+            return target
+
+        return types.SimpleNamespace(
+            launcher=make("Windows", "System32", "bash" + self.EXE),
+            git=make("Git", "cmd", "git" + self.EXE),
+            bin_bash=make("Git", "bin", "bash.exe"),
+            usr_bash=make("Git", "usr", "bin", "bash" + self.EXE))
+
+    def test_wsl_s_launcher_is_skipped_for_the_git_bash_behind_it_on_path(self, tree):
+        path = os.pathsep.join([str(tree.launcher.parent), str(tree.usr_bash.parent)])
+        # A bare `which` is what chose the launcher before.
+        assert self.same(shutil.which("bash", path=path), tree.launcher)
+        assert self.same(_server_module().windows_bash(path), tree.usr_bash)
+
+    def test_git_s_default_install_has_only_cmd_on_path_and_bash_is_found_beside_it(
+        self, tree
+    ):
+        path = os.pathsep.join([str(tree.launcher.parent), str(tree.git.parent)])
+        assert self.same(_server_module().windows_bash(path), tree.bin_bash)
+
+    def test_the_launcher_alone_is_no_shell(self, tree):
+        module = _server_module()
+        assert module.windows_bash(str(tree.launcher.parent)) is None
+        assert module.windows_bash("") is None
+
+    def test_find_shell_takes_that_route_on_windows_only(self, tree, monkeypatch):
+        module = _server_module()
+        server = module.Server.__new__(module.Server)
+        server.layer1 = {"PATH": os.pathsep.join(
+            [str(tree.launcher.parent), str(tree.git.parent)])}
+        monkeypatch.setattr(module, "sys", types.SimpleNamespace(platform="linux"))
+        assert self.same(server.find_shell(), tree.launcher)
+        monkeypatch.setattr(module, "sys", types.SimpleNamespace(platform="win32"))
+        assert self.same(server.find_shell(), tree.bin_bash)
 
 
 # ===========================================================================
