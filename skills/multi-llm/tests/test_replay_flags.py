@@ -50,7 +50,10 @@ from tests.test_subagent_executor import (  # noqa: E402,F401
     runner_env,
 )
 
-PLAN = "/tmp/a plan.md"
+#: Spelled the way this OS spells it: a command names the plan natively (shell-
+#: quoted), and ``str(Path(...))`` of a ``/``-spelled string is not that string
+#: on Windows.
+PLAN = str(Path("/tmp/a plan.md"))
 
 
 @pytest.fixture(autouse=True)

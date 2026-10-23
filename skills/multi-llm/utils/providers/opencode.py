@@ -478,8 +478,10 @@ def _lane_a_runner_version(provider: Any) -> str:
         argv = list(getattr(provider, "version_cmd", ()) or ())
         try:
             if argv:
+                # Resolved like every other opencode spawn here: a bare
+                # `opencode` is WinError 2 against npm's `opencode.cmd`.
                 completed = subprocess.run(
-                    argv,
+                    [*_opencode_launcher(argv[0]), *argv[1:]],
                     stdin=subprocess.DEVNULL,
                     capture_output=True,
                     text=True,

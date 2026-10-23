@@ -79,7 +79,8 @@ def test_an_added_entry_is_removed_byte_for_byte_and_the_mode_restored(tmp_path,
     assert (home / "config.toml").read_bytes() != SEED
     assert codex_trust.restore_all() == []
     assert (home / "config.toml").read_bytes() == SEED
-    assert (os.stat(home / "config.toml").st_mode & 0o777) == 0o644
+    if os.name != "nt":  # Windows keeps no POSIX mode bits to restore
+        assert (os.stat(home / "config.toml").st_mode & 0o777) == 0o644
 
 
 def test_a_file_codex_created_is_removed_again(tmp_path, armed):
@@ -206,7 +207,9 @@ _SCRIPT = textwrap.dedent(
 )
 
 
-@pytest.mark.parametrize("how", ["normal", "exception", "sigterm"])
+@pytest.mark.parametrize("how", ["normal", "exception", pytest.param(
+    "sigterm", marks=pytest.mark.skipif(
+        os.name == "nt", reason="POSIX SIGTERM (Windows terminates, no handler runs)"))])
 def test_every_terminal_path_restores_the_file(tmp_path, how):
     skill = str(Path(__file__).resolve().parent.parent)
     repo = _repo(tmp_path)
@@ -222,7 +225,8 @@ def test_every_terminal_path_restores_the_file(tmp_path, how):
         proc.send_signal(signal.SIGTERM)
     proc.communicate(timeout=60)
     assert (home / "config.toml").read_bytes() == SEED
-    assert (os.stat(home / "config.toml").st_mode & 0o777) == 0o600
+    if os.name != "nt":  # Windows keeps no POSIX mode bits to restore
+        assert (os.stat(home / "config.toml").st_mode & 0o777) == 0o600
 
 
 #: A real detached worker driving the production ``RunHandle``: it arms a temp

@@ -77,6 +77,7 @@ class TestOptionA:
         assert _changed(repo, lambda r: (r / "tracked.txt").write_text(
             "v1\n", encoding="utf-8")) == ["tracked.txt"]
 
+    @pytest.mark.skipif(os.name == "nt", reason="Windows files carry no exec bit to change")
     def test_a_mode_only_change_to_a_pre_dirty_file(self, repo):
         (repo / "tracked.txt").write_text("dirty\n", encoding="utf-8")
         assert _changed(repo, lambda r: os.chmod(r / "tracked.txt", 0o755)) == [

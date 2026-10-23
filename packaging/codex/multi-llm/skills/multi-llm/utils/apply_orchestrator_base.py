@@ -3080,7 +3080,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             relative = os.path.relpath(os.path.realpath(target), root)
         except (OSError, ValueError):
             return target
-        return target if relative.startswith(os.pardir) else relative
+        # A label in prose and in the result line: `/` on every platform.
+        return target if relative.startswith(os.pardir) else relative.replace(os.sep, "/")
 
     def _publish_run_notes(self) -> None:
         """Hand :meth:`run_notes` to the result line and to ``status``.

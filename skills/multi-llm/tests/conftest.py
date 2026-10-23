@@ -431,7 +431,20 @@ def _pin_real_sandbox_probes(request, monkeypatch):
         yield
         return
     real = executor._run_sandbox_probe
-    temp_root = os.path.abspath(tempfile.gettempdir())
+    # `realpath`, because pytest's `tmp_path` is a resolved path: with `/var` a
+    # symlink to `/private/var` (macOS) or a short 8.3 `RUNNER~1` user dir
+    # (Windows) the unresolved temp dir is not a prefix of any mock's path.
+    temp_root = os.path.normcase(os.path.realpath(tempfile.gettempdir()))
+
+    def _in_temp(path: str) -> bool:
+        # The DIRECTORY is resolved, never the file: a mock launcher is often a
+        # symlink from `tmp_path/bin` into the harness, and the PATH entry is the
+        # fact that matters.
+        absolute = os.path.abspath(path)
+        resolved = os.path.join(
+            os.path.realpath(os.path.dirname(absolute)), os.path.basename(absolute)
+        )
+        return os.path.normcase(resolved).startswith(temp_root + os.sep)
 
     def _provider_commands() -> Set[str]:
         names: Set[str] = set()
@@ -476,7 +489,7 @@ def _pin_real_sandbox_probes(request, monkeypatch):
             wrapper = next(
                 (str(a) for a in argv[:6] if str(a).endswith(".py")), ""
             )
-            if not os.path.abspath(wrapper).startswith(temp_root + os.sep):
+            if not _in_temp(wrapper):
                 # The production wrapper: answered as a kernel with no usable
                 # Landlock (the wrapper's own exit 126), so the walk records
                 # the rung `absent` and falls through exactly as before the
@@ -493,11 +506,9 @@ def _pin_real_sandbox_probes(request, monkeypatch):
         head = os.path.basename(str(argv[0])) if argv else ""
         if head in _provider_commands():
             launcher, _ = _resolve_executable(str(argv[0]))
-            # `abspath`, not `realpath`: a mock launcher is often a symlink
-            # from `tmp_path/bin` into the harness, and the PATH entry is the
-            # fact that matters.
-            resolved = os.path.abspath(str(launcher[0])) if launcher else ""
-            if not resolved.startswith(temp_root + os.sep):
+            # Any word: an npm-style shim (a Windows mock) launches as
+            # `node <cli.js>`, whose second word is the one in the temp dir.
+            if not any(_in_temp(str(part)) for part in launcher):
                 if tuple(str(a) for a in argv) in _rung_probes():
                     return subprocess.CompletedProcess(
                         list(argv), 2, "",

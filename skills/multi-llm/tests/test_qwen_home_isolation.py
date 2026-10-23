@@ -112,6 +112,7 @@ class TestQwenHomeIsolation:
 
         assert first != second
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits: Windows has no 0700 to read back")
     def test_the_root_is_private_to_this_user(self, sentinel_home):
         root = Path(QwenCodeProvider().get_env(MODEL)["QWEN_HOME"])
         assert oct(root.stat().st_mode & 0o777) == "0o700"

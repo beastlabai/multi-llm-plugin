@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -108,8 +109,9 @@ def test_live_seed_uses_the_same_profile_with_private_modes(monkeypatch, tmp_pat
     runner.render_seed("fx", home, endpoint, "OPENROUTER_API_KEY", "stub-model")
     settings = home / ".fx/settings.json"
     assert json.loads(settings.read_text()) == render_settings(base_url=endpoint)
-    assert settings.parent.stat().st_mode & 0o777 == 0o700
-    assert settings.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":  # POSIX mode bits: Windows keeps only a read-only flag
+        assert settings.parent.stat().st_mode & 0o777 == 0o700
+        assert settings.stat().st_mode & 0o777 == 0o600
     assert runner.seed_guards(home, endpoint) == []
 
 

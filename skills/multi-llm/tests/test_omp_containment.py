@@ -151,7 +151,7 @@ class TestTheCommittedFixtureBytesCarryNothingPersonal:
         """
         import yaml
 
-        manifest = yaml.safe_load((FIXTURES / "manifest.yaml").read_text())
+        manifest = yaml.safe_load((FIXTURES / "manifest.yaml").read_text(encoding="utf-8"))
         for name, row in manifest["rows"].items():
             if not row.get("synthesized"):
                 continue

@@ -525,7 +525,8 @@ class TestGateCProjectConfigIsolation:
             assert home.is_dir()
             assert list(home.iterdir()) == []
             assert home.name.startswith(oc.HERMETIC_DIR_PREFIX)
-            assert oct(home.stat().st_mode & 0o777) == "0o700"
+            if os.name != "nt":  # POSIX mode bits: Windows keeps only a read-only flag
+                assert oct(home.stat().st_mode & 0o777) == "0o700"
 
     def test_pure_is_rendered_only_inside_the_context(
         self, provider, user_xdg, monkeypatch

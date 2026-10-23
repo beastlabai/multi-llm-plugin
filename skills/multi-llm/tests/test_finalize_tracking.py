@@ -1,6 +1,7 @@
 """Unit tests for finalize_tracking.py module."""
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -409,6 +410,8 @@ class TestStateFileUpdates:
 
         assert tracked_paths == ["alpha.py", "middle.py", "zebra.py"]
 
+    @pytest.mark.skipif(os.name == "nt", reason="Windows ignores a directory's "
+                        "mode bits, so a chmod 0o555 directory still takes the file")
     @patch("finalize_tracking.get_all_modified_files")
     def test_write_failure_returns_error(self, mock_get_files, valid_state):
         """Returns error when the state file cannot be written.

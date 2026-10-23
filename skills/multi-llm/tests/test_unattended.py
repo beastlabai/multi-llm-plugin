@@ -984,7 +984,8 @@ class TestUvBackstop:
         assert un.find_uv() == str(stub.resolve()) or un.find_uv() == str(stub)
         monkeypatch.delenv(un.UV_ENV)
         monkeypatch.setattr(un.shutil, "which", lambda name: "/usr/bin/uv")
-        assert un.find_uv() == "/usr/bin/uv"
+        # Made absolute on this OS: Windows gives a rooted path the cwd's drive.
+        assert un.find_uv() == os.path.abspath("/usr/bin/uv")
 
     def test_the_candidate_list_matches_the_shim_contract(self):
         contract = (SKILL_ROOT / "references" / "uv-check.md").read_text(

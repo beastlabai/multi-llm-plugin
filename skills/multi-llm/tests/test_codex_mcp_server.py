@@ -25,6 +25,7 @@ import ast
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -277,6 +278,29 @@ REVIEW = {"mode": "review-plan", "plan": "p.md", "question": "", "extra_flags": 
 def dispatcher_argv(call: dict) -> list:
     argv = call["argv"]
     return argv[argv.index("--") + 3:]
+
+
+#: The bash the server finds on this PATH, pinned as the fallback where a row
+#: empties PATH to hide uv: only uv may be missing there. ``/bin/bash``, the
+#: built-in fallback, is no file on Windows, so bash went missing first.
+REAL_BASH = shutil.which("bash") or "/bin/bash"
+
+
+def word(path) -> str:
+    """*path* as a dispatcher command prints it (``cli_common._quote``): bare on
+    POSIX, single-quoted where it holds a backslash — a Windows path, which a
+    scripted line spelled bare would hand ``split_posix`` as escapes."""
+    return shlex.quote(str(path))
+
+
+#: The rows that kill a child through its POSIX process group (``os.killpg``)
+#: or a SIGTERM the server handles. Windows has neither: ``send_signal`` is
+#: ``TerminateProcess`` on the bash leader alone, which leaves the stub's python
+#: running, and the tool route is unsupported there (packaging/codex/README.md).
+posix_group_kill = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX process-group kill and SIGTERM handling; the codex tool route "
+           "is unsupported on Windows")
 
 
 _ABSENT = object()
@@ -900,6 +924,7 @@ class TestWireContract:
                     in dispatcher_argv(c)]
         assert client.close() == 0
 
+    @posix_group_kill
     def test_a_cancel_mid_launch_poll_kills_the_group_and_aborts_once(self, harness):
         client = harness.client([launch_step(run_id="RID-C"),
                                  {"exit": 2, "sleep": 60, "grandchild": True},
@@ -952,6 +977,7 @@ class TestWireContract:
         aborts = [c for c in harness.calls() if DISPATCHER["abort"][1] in dispatcher_argv(c)]
         assert len(aborts) == 1
 
+    @posix_group_kill
     def test_sigterm_with_stdin_closed_cancels_the_call_in_flight(self, harness):
         # Codex's own shape, measured by Phase 1 row 10 (codex 0.156.1): an
         # interrupted session closes stdin and SIGTERMs the server in the same
@@ -973,6 +999,7 @@ class TestWireContract:
         aborts = [c for c in harness.calls() if DISPATCHER["abort"][1] in dispatcher_argv(c)]
         assert len(aborts) == 1
 
+    @posix_group_kill
     def test_codex_s_turn_end_teardown_still_aborts_the_claimed_run(self, harness):
         # Measured offline on codex 0.160.1 (fix round 16, Codex racing 06):
         # under code mode the model calls this tool from a JavaScript `exec`
@@ -1284,7 +1311,7 @@ class TestUvPreflight:
         (bindir / "uv").chmod(0o755)
         _, _, calls, _ = harness.run(status, step, extra_env={
             "MULTI_LLM_UV": str(tmp_path / "nope"),
-            "PATH": "{}:{}".format(bindir, os.environ["PATH"])})
+            "PATH": os.pathsep.join([str(bindir), os.environ["PATH"]])})
         assert calls[0]["env"]["MULTI_LLM_UV"] == str(bindir / "uv")
         # A PATH miss falls through to the surface's candidates.
         local = harness.home / ".local" / "bin"
@@ -1292,7 +1319,8 @@ class TestUvPreflight:
         shutil.copyfile(harness.stub, local / "uv")
         (local / "uv").chmod(0o755)
         _, _, calls, _ = harness.run(status, step, extra_env={
-            "MULTI_LLM_UV": None, "PATH": "/usr/bin:/bin"})
+            "MULTI_LLM_UV": None, "PATH": "/usr/bin:/bin",
+            "MLLM_TEST_FALLBACK_SHELL": REAL_BASH})
         assert calls[0]["env"]["MULTI_LLM_UV"] == str(local / "uv")
         assert calls[0]["env"]["MULTI_LLM_SKILL_DIR"] == str(
             harness.root / "skills" / "multi-llm")
@@ -1313,7 +1341,8 @@ class TestUvPreflight:
 
     def test_a_missing_uv_refuses_with_the_payload_s_message(self, harness, tmp_path):
         envelope = _refused(harness, REVIEW, extra_env={
-            "MULTI_LLM_UV": None, "PATH": str(tmp_path)})
+            "MULTI_LLM_UV": None, "PATH": str(tmp_path),
+            "MLLM_TEST_FALLBACK_SHELL": REAL_BASH})
         expected = (SKILL_ROOT / SURFACE["uv"]["missing_message_file"]).read_text(
             encoding="utf-8").rstrip("\n")
         assert envelope["message"] == expected
@@ -1321,7 +1350,8 @@ class TestUvPreflight:
 
 
 def test_server_starts_without_uv_and_lists_the_tool(harness, tmp_path):
-    client = harness.client(extra_env={"MULTI_LLM_UV": None, "PATH": str(tmp_path)})
+    client = harness.client(extra_env={"MULTI_LLM_UV": None, "PATH": str(tmp_path),
+                                       "MLLM_TEST_FALLBACK_SHELL": REAL_BASH})
     tools = client.response(client.request("tools/list"))["result"]["tools"]
     assert [t["name"] for t in tools] == [SURFACE["tool_name"]]
     answer = client.response(client.start_call(REVIEW))
@@ -1428,10 +1458,15 @@ class TestChildEnvironment:
         assert calls and {c["env"]["UV_PROJECT_ENVIRONMENT"] for c in calls} == {None}
 
     def test_a_forwarded_project_environment_is_passed_on_unchanged(self, harness):
-        """The container image forwards one through `.mcp.json`'s allowlist."""
+        """The container image forwards one through `.mcp.json`'s allowlist.
+
+        Absolute in this platform's own spelling: Git Bash rewrites a POSIX
+        path in the environment of a native child (`/image/venv` arrives as
+        `C:/Program Files/Git/image/venv`), which no Windows user would set."""
+        venv = os.path.abspath("/image/venv")
         _, _, calls, _ = harness.run(REVIEW, [launch_step(), poll_step(0)],
-                                     extra_env={"UV_PROJECT_ENVIRONMENT": "/image/venv"})
-        assert {c["env"]["UV_PROJECT_ENVIRONMENT"] for c in calls} == {"/image/venv"}
+                                     extra_env={"UV_PROJECT_ENVIRONMENT": venv})
+        assert {c["env"]["UV_PROJECT_ENVIRONMENT"] for c in calls} == {venv}
 
     SESSION_ENV = DISPATCHER["session_model_env"]
 
@@ -1794,6 +1829,7 @@ class TestExecuteStateMachine:
         envelope, _, _, _ = harness.run(REVIEW, [launch_step(), noisy])
         assert envelope["artifacts"] == ["last"]
 
+    @posix_group_kill
     def test_a_child_ignoring_sigterm_is_killed(self, harness):
         client = harness.client([launch_step(run_id="RID-T"),
                                  {"exit": 2, "sleep": 60, "ignore_term": True},
@@ -1898,6 +1934,7 @@ class TestBudgetHandoff:
                 and n.id == "CANCEL_LATENCY_BOUND_S" and isinstance(n.ctx, ast.Load)]
         assert uses == []
 
+    @posix_group_kill
     def test_a_cancel_after_the_handoff_does_nothing(self, harness):
         client = harness.client([launch_step(run_id="RID-P")] + [poll_step(2, sleep=0.2)] * 50,
                                 extra_env={"MLLM_TEST_POLL_BUDGET_MS": "1000"})
@@ -2435,7 +2472,7 @@ class TestResumeCommand:
         the same plan is launched with the spelling the user typed."""
         absolute = os.path.join(os.path.realpath(harness.workspace), "plans", "p.md")
         done = poll_step(0, next="uv run -- python multi_llm.py review-plan {} "
-                                 "--reaggregate --host codex --yes".format(absolute))
+                                 "--reaggregate --host codex --yes".format(word(absolute)))
         _, _, calls, _ = harness.run(
             dict(REVIEW, plan="plans/p.md"),
             [launch_step(run_id="R1"), done, launch_step(run_id="R2"), poll_step(0)])
@@ -2529,7 +2566,7 @@ class TestTheTypedPlanSurvivesEveryFailure:
         the plan absolutely, as `run_status` prints it."""
         return {"exit": CODES["needs_human"], "stdout": [
             "      resume with: {} {} {} --host {} --detach --yes --resume".format(
-                UV_PREFIX, row["name"], self._absolute(harness), SURFACE["host"]),
+                UV_PREFIX, row["name"], word(self._absolute(harness)), SURFACE["host"]),
             result_line(mode=row["name"], phase=row["phase"],
                         state=STATES["needs_human"], exit=CODES["needs_human"])]}
 
@@ -2565,7 +2602,7 @@ class TestTheTypedPlanSurvivesEveryFailure:
         live = {"exit": 2, "stdout": [result_line(
             state=STATES["nothing_to_do"], exit=2,
             next="uv run -- python multi_llm.py status {} --view run --wait "
-                 "--run-id RID-T".format(self._absolute(harness)))]}
+                 "--run-id RID-T".format(word(self._absolute(harness))))]}
         envelope, _, calls, _ = harness.run(
             handoff["next"], [live, self._failed_poll(harness, row)], meta=self.META)
         # The re-attach still polls by the absolute path inside the server.
@@ -2574,7 +2611,7 @@ class TestTheTypedPlanSurvivesEveryFailure:
 
     def test_an_unfollowed_next_names_the_plan_as_typed(self, harness):
         done = poll_step(0, next="uv run -- python multi_llm.py generate-tasks {}".format(
-            self._absolute(harness)))
+            word(self._absolute(harness))))
         envelope, _, _, _ = harness.run(
             dict(REVIEW, plan=TYPED_PLAN), [launch_step(), done])
         assert envelope["next"]["mode"] == "generate-tasks"
@@ -2675,9 +2712,9 @@ def failed_generate_tasks(harness) -> dict:
     host = SURFACE["host"]
     return {"exit": CODES["needs_human"], "stdout": [
         "Re-invoke to retry only the failures (task_generation):",
-        "  {} generate-tasks {} --host {} --yes".format(UV_PREFIX, absolute, host),
+        "  {} generate-tasks {} --host {} --yes".format(UV_PREFIX, word(absolute), host),
         "      resume with: {} generate-tasks {} --host {} --detach --yes".format(
-            UV_PREFIX, absolute, host),
+            UV_PREFIX, word(absolute), host),
         result_line(mode="generate-tasks", state=STATES["needs_human"],
                     exit=CODES["needs_human"])]}
 
@@ -2837,7 +2874,7 @@ def failed_implement_status(harness, **body) -> dict:
     return {"exit": CODES["needs_human"], "stdout": [
         "implement: failed (batch 2 of 4)",
         "      resume with: {} implement {} --host {} --detach --resume".format(
-            UV_PREFIX, absolute, SURFACE["host"]),
+            UV_PREFIX, word(absolute), SURFACE["host"]),
         result_line(**payload)]}
 
 
@@ -2978,7 +3015,7 @@ def failed_improve_plan_status(harness) -> dict:
     absolute = os.path.join(os.path.realpath(harness.workspace), "plans", "x.md")
     return {"exit": CODES["needs_human"], "stdout": [
         "improve-plan: failed (stopped in apply-suggestions)",
-        "      resume with: {} improve-plan {} --resume".format(UV_PREFIX, absolute),
+        "      resume with: {} improve-plan {} --resume".format(UV_PREFIX, word(absolute)),
         result_line(mode="improve-plan", phase="improve-plan",
                     state=STATES["needs_human"], exit=CODES["needs_human"])]}
 
@@ -3308,7 +3345,7 @@ class TestASymlinkedPlanDir:
         real = os.path.realpath(shared / "x.md")
         failed = {"exit": CODES["needs_human"], "stdout": [
             "  {} generate-tasks {} --host {} --yes".format(
-                UV_PREFIX, real, SURFACE["host"]),
+                UV_PREFIX, word(real), SURFACE["host"]),
             result_line(mode="generate-tasks", state=STATES["needs_human"],
                         exit=CODES["needs_human"])]}
         envelope, _, _, _ = harness.run(

@@ -393,8 +393,9 @@ def test_the_review_fixes_section_of_the_plan(tmp_path):
     import code_review_orchestrator
 
     plan = tmp_path / "plan.md"
-    plan.write_text("# Plan\n")
+    plan.write_text("# Plan\n", encoding="utf-8")
     code_review_orchestrator.update_plan_with_fixes(
         plan, [{"fixed": False, "issue_title": "Clamp", "reason": LONG_REASON}])
-    line = next(item for item in plan.read_text().splitlines() if "**Clamp**" in item)
+    line = next(item for item in plan.read_text(encoding="utf-8").splitlines()
+                if "**Clamp**" in item)
     assert_clean_cut(line, LONG_REASON)

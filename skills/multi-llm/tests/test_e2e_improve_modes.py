@@ -703,7 +703,8 @@ class TestImproveCode:
         edited = {rel for task in report["tasks"] for rel in task["files_touched"]}
         assert edited == set(WORKING_DIFF), "the review's findings name both changed files"
         for rel, text in expected_text.items():
-            assert (world.repo / rel).read_text(encoding="utf-8") == text, (
+            # Decoded bytes, not read_text: that folds a Windows `\r\n` away.
+            assert (world.repo / rel).read_bytes().decode("utf-8") == text, (
                 f"{rel}: one marker per batch that touched it, appended to the reviewed bytes")
 
         # -- the result line ----------------------------------------------------
@@ -977,7 +978,7 @@ class TestAnInterruptedImproveCode:
         for task in final["tasks"]:
             expected[task["files_touched"][0]] += CODE_MARKER.format(id=task["expected_ids"][0])
         for rel, text in expected.items():
-            assert (world.repo / rel).read_text(encoding="utf-8") == text, rel
+            assert (world.repo / rel).read_bytes().decode("utf-8") == text, rel
 
 
 # --------------------------------------------------------------------------- #

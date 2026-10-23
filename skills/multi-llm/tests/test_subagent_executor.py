@@ -51,9 +51,13 @@ from utils.subagent_tasks import (  # noqa: E402
     make_task_file,
     write_task_file,
 )
-
-MOCK_LLM = Path(__file__).parent / "mocks" / "mock_llm.py"
-SCENARIO_MATCHER = Path(__file__).parent / "scenario_matcher.py"
+from tests.mock_launchers import (  # noqa: E402
+    MOCK_LLM,
+    install_mock_llm,
+    mock_path,
+    remove_launcher,
+    write_launcher,
+)
 
 #: Runner specs the read path ships a real `agent-readonly` profile for. The
 #: sentinel test and the equivalence test are parametrized over all three, so a
@@ -71,26 +75,8 @@ ELIGIBLE_RUNNERS = [
 # ---------------------------------------------------------------------------
 
 def _install_launcher(bin_dir: Path, name: str) -> Path:
-    """Put a mock provider CLI called ``name`` on a temp PATH.
-
-    A *copied* launcher cannot find ``tests/scenario_matcher.py`` through its own
-    ``__file__`` the way the real file and a symlink to it can, so the one
-    definition of what a scenario means is copied beside it.
-    """
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    target = bin_dir / name
-    if os.name == "nt":  # pragma: no cover - POSIX CI
-        target = bin_dir / f"{name}.py"
-        shutil.copyfile(MOCK_LLM, target)
-        shutil.copyfile(SCENARIO_MATCHER, bin_dir / SCENARIO_MATCHER.name)
-    else:
-        try:
-            target.symlink_to(MOCK_LLM)
-        except (OSError, NotImplementedError):  # pragma: no cover
-            shutil.copyfile(MOCK_LLM, target)
-            target.chmod(target.stat().st_mode | stat.S_IXUSR)
-            shutil.copyfile(SCENARIO_MATCHER, bin_dir / SCENARIO_MATCHER.name)
-    return target
+    """Put a mock provider CLI called ``name`` on a temp PATH."""
+    return install_mock_llm(bin_dir, name)
 
 
 @pytest.fixture
@@ -106,11 +92,9 @@ def runner_env(tmp_path, monkeypatch):
     # PATH is REPLACED, not prepended: this suite spawns real subprocesses, and a
     # test that unlinks a mock launcher (the spawn_failed rung) would otherwise
     # fall through to a developer's real `codex`/`claude` and make a live API
-    # call. Only the mock bin dir plus an interpreter's own dir are on it.
-    interpreter_dir = str(Path(sys.executable).parent)
-    monkeypatch.setenv(
-        "PATH", os.pathsep.join([str(bin_dir), interpreter_dir, "/usr/bin", "/bin"])
-    )
+    # call. Only the mock bin dir, an interpreter's own dir and where git lives
+    # (node too, on Windows) are on it.
+    monkeypatch.setenv("PATH", mock_path(bin_dir, ("codex", "opencode", "claude")))
     monkeypatch.setenv("MULTI_LLM_TEST_MODE", "1")
     monkeypatch.setenv("MULTI_LLM_TEST_FAST_BACKOFF", "1")
     for name in ("codex", "opencode", "claude"):
@@ -1043,7 +1027,7 @@ class TestBatchOutcome:
     def test_a_missing_binary_is_refused_by_preflight(self, tmp_path, runner_env):
         """Rung 1 at batch level: no child is started for any task."""
         runner_env.use("codex:gpt-5.5")
-        (runner_env.bin_dir / "codex").unlink()
+        remove_launcher(runner_env.bin_dir, "codex")
         with pytest.raises(executor.RunnerRejected) as excinfo:
             executor.run_tasks(
                 [_validation_batch(tmp_path)], phase_dir=str(tmp_path),
@@ -1289,7 +1273,7 @@ class TestJudgeDispatchIsAudited:
     def test_no_attempt_means_no_completed_line(self, tmp_path, runner_env):
         """A pre-dispatch refusal writes neither line — nothing was attempted."""
         runner_env.use("codex:gpt-5.5")
-        (runner_env.bin_dir / "codex").unlink()
+        remove_launcher(runner_env.bin_dir, "codex")
         with pytest.raises(executor.RunnerRejected):
             executor.run_tasks(
                 [_judge_task(tmp_path)], phase_dir=str(tmp_path),
@@ -3649,22 +3633,21 @@ def test_fx_step_budget_is_terminal_in_dispatch(tmp_path, runner_env, monkeypatc
 
 def _install_opencode_capture(
     bin_dir: Path, stdout: str, stderr: str, exit_code: int = 1
-) -> None:
+) -> Path:
     """Replace the mock `opencode` with a CLI that replays one captured failure.
 
     Version and auth probes answer like a logged-in pinned release; every other
     invocation — the nested-exec probe and the dispatch alike — drains stdin,
     writes the two captured streams and exits ``exit_code``. A shell script
     rather than a mock knob, so the bytes the real ``OpencodeProvider`` parses
-    are exactly the bytes the incident recorded.
+    are exactly the bytes the incident recorded. Returns the script's file.
     """
     out = bin_dir / "opencode-capture.stdout"
     err = bin_dir / "opencode-capture.stderr"
-    out.write_text(stdout, encoding="utf-8")
-    err.write_text(stderr, encoding="utf-8")
-    script = bin_dir / "opencode"
-    script.unlink()
-    script.write_text(
+    out.write_text(stdout, encoding="utf-8", newline="\n")
+    err.write_text(stderr, encoding="utf-8", newline="\n")
+    return write_launcher(
+        bin_dir, "opencode",
         textwrap.dedent(
             f"""\
             #!/bin/sh
@@ -3678,9 +3661,7 @@ def _install_opencode_capture(
             exit {exit_code}
             """
         ),
-        encoding="utf-8",
     )
-    script.chmod(0o755)
 
 
 class TestInvalidModelIsFatal:
@@ -6485,16 +6466,15 @@ class TestHostSinksNeverSeeTheReadonlyChildsConfigContent:
         )
         registry._config = None
         registry._config_key = None
-        _install_opencode_capture(
+        script = _install_opencode_capture(
             runner_env.bin_dir, _DENIED_STDOUT, _DENIED_STDERR, exit_code=0
         )
         dump = tmp_path.parent / f"{tmp_path.name}-child-env.txt"
-        script = runner_env.bin_dir / "opencode"
-        script.write_text(
-            script.read_text().replace(
+        write_launcher(
+            runner_env.bin_dir, "opencode",
+            script.read_text(encoding="utf-8").replace(
                 "cat >/dev/null\n", f'cat >/dev/null\nenv > "{dump}"\n', 1
             ),
-            encoding="utf-8",
         )
         monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", json.dumps(
             {"provider": {"mine": {"options": {"apiKey": self.SENTINEL}}}}

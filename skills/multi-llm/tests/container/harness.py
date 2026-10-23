@@ -1548,7 +1548,7 @@ def artifact_files(result: RowResult) -> list[str]:
     root = result.out_dir / "artifacts"
     if not root.is_dir():
         return []
-    return sorted(str(path.relative_to(root))
+    return sorted(path.relative_to(root).as_posix()
                   for path in root.rglob("*") if path.is_file())
 
 
@@ -2202,7 +2202,7 @@ def bundle_block(out_dir: Path, archive_url: str | None = None) -> dict | None:
         return None
     resolved = out_dir.resolve()
     try:
-        root = str(resolved.relative_to(HERE))
+        root = resolved.relative_to(HERE).as_posix()
     except ValueError:
         root = str(resolved)
     block = {"root": root, "files": files, "aggregate": aggregate}

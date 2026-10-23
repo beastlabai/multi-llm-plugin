@@ -304,7 +304,10 @@ class TestRealDetachedWorker:
 
         view = detach.classify_run(str(phase))
         assert view["verdict"] == "running", view
-        assert view["run"]["pid"] == pid
+        if os.name != "nt":
+            # Not on Windows: a venv's python.exe there is a launcher that runs
+            # the interpreter as its child, and the worker records its own pid.
+            assert view["run"]["pid"] == pid
         assert view["run"]["detached"] is True
         assert view["lock_held"] is True, "the worker holds {phase}/.lock"
         assert _status(["--plan-file", str(plan), "--view", "run"], capsys) == 2

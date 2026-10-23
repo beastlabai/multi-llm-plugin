@@ -1432,9 +1432,11 @@ def _record_implement_write_artifacts(
                 seen.add(touched_path)
                 touched.append(touched_path)
     for index, touched_path in enumerate(touched, start=1):
+        # The report's `/`-spelled relative path, joined natively: on Windows a
+        # bare join gave `C:\repo\src/main.py`, a second spelling of the file.
         resolved = (
             touched_path if os.path.isabs(touched_path)
-            else os.path.join(repo_root, touched_path)
+            else os.path.join(repo_root, os.path.normpath(touched_path))
         )
         paths[f"touched_file_{index}"] = resolved
 

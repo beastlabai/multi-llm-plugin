@@ -67,6 +67,16 @@ from tests.test_plugin_landlock_executor import (  # noqa: E402
     use_own_temp_base,
 )
 
+# Windows runs no plugin jail (codex has its own sandbox there), and this suite
+# could not stand one in even as a fake: the scratch repo's codex is a symlink to
+# a shebang script on a replaced PATH, which Windows can neither find nor run.
+# macOS does run it (tier 1 is kernel-independent; the real-jail legs below skip
+# themselves where Landlock is missing).
+pytestmark = pytest.mark.skipif(
+    os.name == "nt",
+    reason="symlinked shebang mock codex on a replaced PATH; Windows runs no plugin jail",
+)
+
 MOCK_LLM = Path(__file__).parent / "mocks" / "mock_llm.py"
 SCENARIO_MATCHER = Path(__file__).parent / "scenario_matcher.py"
 RUNNER = "codex:gpt-5.5"

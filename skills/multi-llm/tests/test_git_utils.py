@@ -2003,17 +2003,25 @@ class TestIntentToAddUntracked:
             git_dir / f"multi-llm-index.{dead_pid}.111.lock",
             git_dir / f"multi-llm-index.{dead_pid}.222",
         ]
+        # Alive and not ours: pid 1 is init on POSIX, but Windows has no pid 1.
+        other = 1 if os.name != "nt" else subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"])
         kept = [
             git_dir / f"multi-llm-index.{os.getpid()}.333",
-            git_dir / f"multi-llm-index.1.444",  # init: alive, not ours
+            git_dir / f"multi-llm-index.{getattr(other, 'pid', other)}.444",
             git_dir / "multi-llm-index.notapid",
         ]
         for path in gone + kept:
             path.write_bytes(b"x")
         (temp_git_repo / "new.py").write_text("x = 1\n", encoding="utf-8")
 
-        with intent_to_add_untracked(["new.py"]) as touched:
-            assert touched == ["new.py"]
+        try:
+            with intent_to_add_untracked(["new.py"]) as touched:
+                assert touched == ["new.py"]
+        finally:
+            if not isinstance(other, int):
+                other.kill()
+                other.wait()
 
         for path in gone:
             assert not path.exists(), path.name
@@ -2180,6 +2188,9 @@ class TestThePrivateIndexKeepsGitsRacyCheck:
         hasattr(os, "geteuid") and os.geteuid() == 0,
         reason="root writes into a read-only directory",
     )
+    @pytest.mark.skipif(
+        os.name == "nt", reason="Windows ignores a directory's mode bits, so "
+        "a chmod 0o555 git dir still takes the copy")
     def test_the_temp_dir_fallback_keeps_the_index_time_too(
         self, temp_git_repo, monkeypatch, tmp_path
     ):

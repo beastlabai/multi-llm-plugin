@@ -92,6 +92,8 @@ def user_xdg(tmp_path, monkeypatch):
     (home / "opencode").mkdir(parents=True)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home))
     monkeypatch.setenv("HOME", str(tmp_path / "user-home"))
+    # Windows' `expanduser` reads USERPROFILE, never HOME; some layer reads use it.
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "user-home"))
     monkeypatch.setenv("OPENCODE_TEST_MANAGED_CONFIG_DIR", str(tmp_path / "no-managed-config"))
     monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
     monkeypatch.delenv("OPENCODE_CONFIG_DIR", raising=False)

@@ -191,7 +191,7 @@ class TestFxWrapperOwnsItsSeededHome:
         expected = os.defpath
         if not only_skill:
             entries += ["/opt/mllm/bin", "/usr/bin", "/user/venv/bin"]
-            expected = "/opt/mllm/bin:/usr/bin:/user/venv/bin"
+            expected = os.pathsep.join(["/opt/mllm/bin", "/usr/bin", "/user/venv/bin"])
         monkeypatch.setenv("PATH", os.pathsep.join(entries))
         monkeypatch.setenv("MULTI_LLM_FX_PATH", str(skill_env / "bin"))
         env = wrapper_module.build_child_env(
@@ -256,8 +256,9 @@ class TestFxWrapperOwnsItsSeededHome:
         rendered = root / ".fx/settings.json"
         assert json.loads(rendered.read_text()) == render_settings(base_url=url)
         assert "{{" not in rendered.read_text()
-        assert rendered.parent.stat().st_mode & 0o777 == 0o700
-        assert rendered.stat().st_mode & 0o777 == 0o600
+        if os.name != "nt":  # POSIX mode bits: Windows keeps only a read-only flag
+            assert rendered.parent.stat().st_mode & 0o777 == 0o700
+            assert rendered.stat().st_mode & 0o777 == 0o600
         assert (root / ".bash_profile").read_text() == 'export PATH="$MULTI_LLM_FX_PATH"\n'
 
 
