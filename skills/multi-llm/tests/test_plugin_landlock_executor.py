@@ -63,6 +63,7 @@ from utils.providers.codex import (  # noqa: E402
     CodexProvider,
 )
 from utils.subagent_tasks import READ_KINDS, WRITE_KINDS, build_inputs, make_write_task  # noqa: E402
+from tests.mock_launchers import is_this_interpreter  # noqa: E402
 from tests.test_subagent_executor import (  # noqa: E402,F401
     _pid_alive,
     _validation_batch,
@@ -415,7 +416,8 @@ class TestTheWalk:
         [probe] = wrapper.records(probe=True)
         # The probe is wrapped exactly like a dispatch: the interpreter under
         # -I -S, the wrapper, the allow entries, `--`, then codex's pinned tail.
-        assert probe["orig_argv"][:4] == [sys.executable, "-I", "-S", str(wrapper.path)]
+        assert is_this_interpreter(probe["orig_argv"][0])
+        assert probe["orig_argv"][1:4] == ["-I", "-S", str(wrapper.path)]
         assert probe["cmd"][1:] == list(PLUGIN_LANDLOCK_RUNG.probe_argv[1:])
         assert "--allow" in probe["allow"]
         assert probe["tmpdir_exists"] is True
@@ -856,7 +858,8 @@ class TestTheWrappedSpawn:
         capture = _spawn_on_rung(repo, kind)
         assert capture.exit_code == 0, capture.stderr
         [row] = wrapper.records(probe=False)
-        assert row["orig_argv"][:4] == [sys.executable, "-I", "-S", str(wrapper.path)]
+        assert is_this_interpreter(row["orig_argv"][0])
+        assert row["orig_argv"][1:4] == ["-I", "-S", str(wrapper.path)]
         # The launcher the product resolved on the mock PATH: the mock itself
         # where it is a script, `node <cli.js>` where it is an npm-style shim.
         launcher, _ = _resolve_executable("codex")
@@ -1190,7 +1193,9 @@ class TestTheDispatchOnTheRung:
         )
         assert outcome.ok, outcome.reason
         out = capsys.readouterr().out
-        assert "1 command write(s) outside the grant denied (/etc/stray)" in out
+        # The product names the denied path resolved: /private/etc/stray on macOS.
+        denied = os.path.realpath("/etc/stray")
+        assert f"1 command write(s) outside the grant denied ({denied})" in out
         assert "[JAIL_DENIED]" not in out
 
     def test_the_home_check_warns_and_keeps_the_verdict(self, repo, wrapper, runner_env, jail_home, capsys):

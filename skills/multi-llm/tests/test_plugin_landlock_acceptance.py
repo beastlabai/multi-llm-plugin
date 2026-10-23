@@ -59,6 +59,7 @@ from utils.providers.base import (  # noqa: E402
 )
 from utils.state_manager import StateManager  # noqa: E402
 from utils.write_safety import AuditLog, safety_dir  # noqa: E402
+from tests.mock_launchers import is_this_interpreter  # noqa: E402
 from tests.test_plugin_landlock_executor import (  # noqa: E402
     BWRAP_LINE,
     F6_LEAD,
@@ -739,7 +740,8 @@ class TestTheEnabledKindsTakeTheRung:
         assert len(rows) == len(scratch.exec_calls()) == len(scratch.write_calls()) == count
         real_target = os.path.realpath(target)
         for row in rows:
-            assert row["orig_argv"][:4] == [sys.executable, "-I", "-S", str(scratch.wrapper.path)]
+            assert is_this_interpreter(row["orig_argv"][0])
+            assert row["orig_argv"][1:4] == ["-I", "-S", str(scratch.wrapper.path)]
             cmd = row["cmd"]
             assert cmd[:2] == [str(scratch.codex), "exec"]
             assert cmd[cmd.index("--sandbox") + 1] == "danger-full-access"

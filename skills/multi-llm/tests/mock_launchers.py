@@ -265,3 +265,24 @@ def _node_trampoline_source(argv: List[str], env: Dict[str, str]) -> str:
         "}\n"
         "process.exit(res.status === null ? 1 : res.status);\n"
     )
+
+
+def is_this_interpreter(argv0: str) -> bool:
+    """Whether a child's ``sys.orig_argv[0]`` is the ``sys.executable`` it was
+    spawned as.
+
+    Equal, except on a macOS framework build: there a venv's ``python`` re-execs
+    the framework's ``Python.app`` binary, so the child sees that binary as its
+    argv[0] (measured on the macOS runner, Homebrew python@3.15). Both then sit
+    in the same ``Python.framework``.
+    """
+    if argv0 == sys.executable:
+        return True
+    marker = ".framework/"
+    real = os.path.realpath(sys.executable)
+    return (
+        sys.platform == "darwin"
+        and marker in argv0
+        and marker in real
+        and argv0.split(marker)[0] == real.split(marker)[0]
+    )
