@@ -3618,11 +3618,11 @@ class TestTheCliTreeSnapshot:
 
 
 _PS_TABLE = (
-    "  100     1   100 Mon Sep  8 09:00:00 2026\n"
-    "  101   100   101 Mon Sep  8 09:00:01 2026\n"
-    "  102   101   102 Mon Sep  8 09:00:02 2026      \n"
-    "  103   101   101 Mon Sep 28 10:00:00 2026\n"
-    "  900     1   900 Mon Sep 28 10:00:00 2026\n"
+    "  100     1   100 Ss   Mon Sep  8 09:00:00 2026\n"
+    "  101   100   101 S+   Mon Sep  8 09:00:01 2026\n"
+    "  102   101   102 Z    Mon Sep  8 09:00:02 2026      \n"
+    "  103   101   101 R    Mon Sep 28 10:00:00 2026\n"
+    "  900     1   900 S    Mon Sep 28 10:00:00 2026\n"
 )
 
 
@@ -3638,12 +3638,16 @@ class TestTheTableWalkOffLinux:
     def _fake_ps(monkeypatch, *, lstart_supported: bool = True):
         calls = []
 
+        columns = ("pid", "ppid", "pgid", "stat", "lstart")
+
         def fake_run(argv, **kwargs):
             calls.append(list(argv))
             if "lstart=" in argv and not lstart_supported:
                 return subprocess.CompletedProcess(argv, 1, "", "ps: lstart: unknown")
-            stdout = _PS_TABLE if "lstart=" in argv else "".join(
-                " ".join(line.split()[:3]) + "\n" for line in _PS_TABLE.splitlines()
+            asked = [arg[:-1] for arg in argv if arg.endswith("=")]
+            stdout = "".join(
+                " ".join(line.split(None, 4)[columns.index(name)] for name in asked) + "\n"
+                for line in _PS_TABLE.splitlines()
             )
             return subprocess.CompletedProcess(argv, 0, stdout, "")
 
@@ -3677,6 +3681,17 @@ class TestTheTableWalkOffLinux:
         # `%e` pads a one-digit day: the spacing is the per-pid probe's, kept.
         assert found[102].start_time == "Mon Sep  8 09:00:02 2026"
         assert found[103].pgid == 101
+
+    def test_the_walk_says_which_rows_are_zombies(self, monkeypatch):
+        """`kill(pid, 0)` answers for a zombie too; the state column is what
+        a sweep tells it from a process that runs by."""
+        self._fake_ps(monkeypatch)
+        states = {pid: row.state for pid, row in process_control._ps_process_table().items()}
+        assert states == {100: "S", 101: "S", 102: "Z", 103: "R", 900: "S"}
+
+        self._fake_ps(monkeypatch, lstart_supported=False)
+        undated = process_control._ps_process_table()
+        assert undated[102].state == "Z" and undated[102].start_time is None
 
     def test_a_ps_without_lstart_still_yields_the_tree(self, monkeypatch):
         calls = self._fake_ps(monkeypatch, lstart_supported=False)
@@ -3746,8 +3761,17 @@ class TestTheSweepIsBoundedByOneClock:
             for group in groups:
                 _kill_quietly(group.pid)
 
-    def test_a_zombie_leader_holds_up_no_wait(self):
-        """Dead but unreaped still answers `kill(pid, 0)`; it is not *running*."""
+    @pytest.mark.parametrize("route", ["native", "ps"])
+    def test_a_zombie_leader_holds_up_no_wait(self, monkeypatch, route):
+        """Dead but unreaped still answers `kill(pid, 0)`; it is not *running*.
+
+        `ps` is macOS's route: no `/proc`, so the process table, the start times
+        and the zombie are all `ps`'s to say. `native` is this platform's own.
+        """
+        if route == "ps":
+            monkeypatch.setattr(process_control, "_linux_start_time", lambda pid: None)
+            monkeypatch.setattr(process_control, "_linux_process_table", lambda: None)
+            monkeypatch.setattr(process_control, "_linux_state", lambda pid: None)
         leader = subprocess.Popen(["sleep", "60"], start_new_session=True)
         cli = subprocess.Popen([sys.executable, "-c", "pass"])
         cli.wait()

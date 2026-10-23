@@ -24,6 +24,7 @@ sandbox probe verdict pinned, because the probe is not what is under test.
 import asyncio
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -59,6 +60,8 @@ from utils.providers.codex import (  # noqa: E402
     CodexProvider,
 )
 from utils.subagent_executor import SandboxProbeResult  # noqa: E402
+
+_REAL_RUN = subprocess.run
 
 BWRAP_LINE = "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
 SPEC = "codex:gpt-5.5"
@@ -177,6 +180,12 @@ def _run_review_plan(tmp_path, monkeypatch, rung, *, prior_served=None):
         return result
 
     def fake_run(cmd, **kwargs):
+        if os.path.basename(str(cmd[0])) == "ps":
+            # `subprocess.run` is one attribute for every module: off Linux
+            # `process_control` asks `ps -o lstart=` for this process's start
+            # time through it, and the jail names its scratch directory after
+            # the answer. The real `ps` answers; the fake sees the slot alone.
+            return _REAL_RUN(cmd, **kwargs)
         # Only the dispatch itself — `codex exec …`; any other probe the lane
         # runs through the same module (a version check) is not the slot. A
         # slot on the plugin's jail is `[python, -I, -S, <wrapper>, --allow …,

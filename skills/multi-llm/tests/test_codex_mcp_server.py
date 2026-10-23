@@ -1320,10 +1320,18 @@ class TestArguments:
         dispatcher argv starts with), so it also proves ``-l`` took effect. The
         ``-lc`` and the constant script are what ``environment.shell`` reports
         of the very list the one ``Popen`` was given.
+
+        The profile arms a one-shot DEBUG trap rather than reading ``$0`` and
+        ``"$@"`` itself: macOS's bash 3.2 runs its startup files before it binds
+        the arguments of a ``-c`` string (the profile saw ``$0`` as ``/bin/bash``
+        and no ``"$@"``), where bash 4 and later bind them first. The trap fires
+        before the script's first command, when every bash has them.
         """
         record = harness.tmp / "profile-argv.log"
         (harness.home / ".profile").write_text(
-            "printf '%s\\n' @@ \"$0\" \"$@\" >> \"{}\"\n".format(record.as_posix()),
+            "record=\"{}\"\n"
+            "trap 'printf \"%s\\n\" @@ \"$0\" \"$@\" >> \"$record\"; trap - DEBUG' DEBUG\n"
+            .format(record.as_posix()),
             encoding="utf-8")
         envelope, _, _, _ = harness.run(
             REVIEW, [launch_step(), poll_step(2), poll_step(0)])
