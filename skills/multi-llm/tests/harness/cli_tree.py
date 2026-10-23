@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import signal
 import sys
 import time
@@ -47,17 +48,9 @@ PARTIAL_LINE = '{"type":"session","version":3,"id":"cli-tree-partial-line"}'
 
 _TREE_SH = """#!/bin/sh
 # The detached shell: its own session and group (the CLI started it with
-# start_new_session). `timeout` then takes a group of its own inside it; where
-# the host has none, the stand-in does the same.
-own_group() {{
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 60 "$@"
-  else
-    {python} {stand_in} "$@"
-  fi
-}}
+# start_new_session). `timeout` then takes a group of its own inside it.
 echo "sh $$" >> "$1"
-own_group sh -c 'echo "timeout $PPID" >> "$0"; echo "sleep $$" >> "$0"; exec sleep 60' "$1" \\
+{own_group} sh -c 'echo "timeout $PPID" >> "$0"; echo "sleep $$" >> "$0"; exec sleep 60' "$1" \\
   | sh -c 'echo "cat $$" >> "$0"; exec cat' "$1"
 """
 
@@ -151,11 +144,16 @@ def install_fake_cli(directory: Path, name: str = "pi") -> Path:
     stand_in = directory / "own-group.py"
     stand_in.write_text(_OWN_GROUP, encoding="utf-8")
     tree_sh = directory / "cli-tree.sh"
-    tree_sh.write_text(
-        _TREE_SH.format(python=shlex.quote(sys.executable),
-                        stand_in=shlex.quote(str(stand_in))),
-        encoding="utf-8",
+    # Chosen here, not in the script: a shell function wrapping `timeout` would
+    # put an unrecorded shell between it and the tree's shell (dash does not
+    # exec a function's last command inside a pipeline). With a GNU `timeout`
+    # the script is the one it always was; without one (macOS) the stand-in
+    # takes its place on the same line.
+    own_group = (
+        "timeout 60" if shutil.which("timeout")
+        else f"{shlex.quote(sys.executable)} {shlex.quote(str(stand_in))}"
     )
+    tree_sh.write_text(_TREE_SH.format(own_group=own_group), encoding="utf-8")
     fake = directory / name
     fake.write_text(
         _FAKE_CLI.format(python=sys.executable, tree_sh=str(tree_sh),

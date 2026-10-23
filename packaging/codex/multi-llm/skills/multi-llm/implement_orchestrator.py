@@ -1154,7 +1154,10 @@ def _remove_kept_prompts(phase_dir: Path) -> int:
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     directory = getattr(os, "O_DIRECTORY", 0)
     if not nofollow or not directory or os.unlink not in os.supports_dir_fd:
-        return _remove_kept_prompts_by_path(phase_dir)
+        # Windows only: there no jail runs, so a path walk is as safe as the
+        # descriptors. A POSIX build without them keeps removing nothing — it
+        # may be under one, and a path is what a jailed write can swap.
+        return _remove_kept_prompts_by_path(phase_dir) if os.name == "nt" else 0
 
     flags = os.O_RDONLY | directory | nofollow
     try:
