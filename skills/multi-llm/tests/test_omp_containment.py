@@ -30,7 +30,7 @@ import socket
 import subprocess
 import sys
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 import pytest
@@ -306,7 +306,9 @@ class TestNoMcpServerMountsOnADispatch:
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
-        server = ThreadingHTTPServer(("127.0.0.1", port), _StubHandler)
+        from tests.container.stub_server import LoopbackHTTPServer
+
+        server = LoopbackHTTPServer(("127.0.0.1", port), _StubHandler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
 
         (home / ".omp" / "agent" / "models.yml").write_text(json.dumps({"providers": {
