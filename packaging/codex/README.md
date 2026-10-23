@@ -12,10 +12,9 @@ the plugin contributes two things:
   *"Use the `multi-llm:multi-llm` skill with exactly these arguments:
   `--review-plan plans/x.md`"*.
 
-**Not yet published.** The `release` ref the install names does not exist until the first
-release is promoted; until then `--ref release` does not resolve, `codex plugin
-marketplace add` fails with a git error, and the file route — `install-host codex`, see
-the repository's `docs/hosts.md` — is what works.
+The install below pins `--ref release`, which the publish workflow moves to each promoted
+`codex-v*` tag (first release: `codex-v0.1.0`). The file route — `install-host codex`, see
+the repository's `docs/hosts.md` — remains the alternative.
 
 ## Floors
 

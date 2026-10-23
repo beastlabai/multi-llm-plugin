@@ -2138,10 +2138,14 @@ class TestRoutePromotion:
         assert not ({"shim", "install_paths", "arguments", "reload"}
                     & local_fields)
 
-        git = self._edits(row, self._result(row, tmp_path / "git",
-                                            install_source="git"))
-        assert {"host": "codex", "field": "package", "from": "documented",
-                "to": "verified", "evidence": row.row_id} in git
+        git_result = self._result(row, tmp_path / "git", install_source="git")
+        # The rule itself, independent of the cell's current value: a Git
+        # install is what may move `package`. (Since codex-v0.1.0 the cell IS
+        # verified, so `promotions` proposes no edit for it any more.)
+        assert "package" in harness.promotable_fields(row, git_result)
+        git = self._edits(row, git_result)
+        assert not any(edit["field"] == "package" and edit["from"] != "documented"
+                       for edit in git), git
 
         # No install source recorded at all is the local case, not the Git one.
         bare = self._result(row, tmp_path / "bare", install_source=None)
