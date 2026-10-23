@@ -34,6 +34,7 @@ Covered here:
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import subprocess
@@ -848,6 +849,30 @@ def _completed(stdout, returncode=0, stderr=""):
     return proc
 
 
+_REAL_RUN = subprocess.run
+
+
+@contextlib.contextmanager
+def _patch_spawn(new=None, **mock_kwargs):
+    """Fake the codex spawn: ``patch("utils.llm_client.subprocess.run", …)``,
+    except for ``ps``.
+
+    ``subprocess.run`` is one module attribute, so patching it for the spawn
+    reaches every caller, and on macOS ``process_control`` asks ``ps -o lstart=``
+    for a start time through it (Linux reads ``/proc``). That call goes to the
+    real ``run``; the fake, or the mock this yields, sees the spawn alone.
+    """
+    fake = new if new is not None else MagicMock(**mock_kwargs)
+
+    def run(cmd, *args, **kwargs):
+        if cmd and os.path.basename(str(cmd[0])) == "ps":
+            return _REAL_RUN(cmd, *args, **kwargs)
+        return fake(cmd, *args, **kwargs)
+
+    with patch("utils.llm_client.subprocess.run", run):
+        yield fake
+
+
 def _invoke(scratch, **kwargs):
     return llm_client.invoke_with_provider(
         "prompt", SPEC, timeout=60, cwd=str(scratch["repo"]),
@@ -890,7 +915,7 @@ class TestCarryingTheGrant:
             return _completed(_stream())
 
         results = []
-        with patch("utils.llm_client.subprocess.run", side_effect=fake_run):
+        with _patch_spawn(side_effect=fake_run):
             threads = [
                 threading.Thread(target=lambda: results.append(_invoke(scratch)))
                 for _ in range(5)
@@ -920,7 +945,7 @@ class TestCarryingTheGrant:
             seen.append(_tmpdir_of(cmd))
             raise subprocess.TimeoutExpired(cmd, 60, output=_stream(findings=False), stderr="")
 
-        with patch("utils.llm_client.subprocess.run", side_effect=fake_run):
+        with _patch_spawn(side_effect=fake_run):
             result = _invoke(scratch)
         assert result["error_code"] == llm_client.ERROR_TIMEOUT
         assert result["details"]["sandbox"] == RUNG
@@ -953,7 +978,7 @@ class TestCarryingTheGrant:
             assert os.path.isdir(seen[0])
             release.set()
 
-        with patch("utils.llm_client.subprocess.run", side_effect=fake_run):
+        with _patch_spawn(side_effect=fake_run):
             asyncio.run(main())
             deadline = time.time() + 30
             while os.path.exists(seen[0]) and time.time() < deadline:
@@ -974,7 +999,7 @@ class TestCarryingTheGrant:
                 handle.write("injected\n")
             return _completed(_stream())
 
-        with patch("utils.llm_client.subprocess.run", side_effect=fake_run):
+        with _patch_spawn(side_effect=fake_run):
             result = _invoke(scratch)
         assert f"dir:{os.path.realpath(custom)}" in argv_seen[0]
         assert f"dir:{os.path.realpath(scratch['home'])}" not in argv_seen[0]
@@ -988,7 +1013,7 @@ class TestCarryingTheGrant:
             tmpdirs.append(_tmpdir_of(cmd))
             return _completed(_stream())
 
-        with patch("utils.llm_client.subprocess.run", side_effect=fake_run):
+        with _patch_spawn(side_effect=fake_run):
             _invoke(scratch)
         provider = get_provider("codex")
         text = repr(vars(provider))
@@ -1002,7 +1027,7 @@ class TestCarryingTheGrant:
         monkeypatch.setenv("CODEX_HOME", str(scratch["tmp"] / "no-such-home"))
         fake_run = MagicMock()
         before = set(os.listdir(scratch["slot_base"]))
-        with patch("utils.llm_client.subprocess.run", fake_run):
+        with _patch_spawn(fake_run):
             result = _invoke(scratch)
         fake_run.assert_not_called()
         details = result["details"]
@@ -1018,7 +1043,7 @@ class TestCarryingTheGrant:
         inside.mkdir()
         monkeypatch.setattr(tempfile, "tempdir", str(inside))
         fake_run = MagicMock()
-        with patch("utils.llm_client.subprocess.run", fake_run):
+        with _patch_spawn(fake_run):
             result = _invoke(scratch)
         fake_run.assert_not_called()
         assert result["details"]["retryable"] is False
@@ -1033,7 +1058,7 @@ class TestCarryingTheGrant:
         def fake_run(cmd, **kwargs):
             return _completed("", 125, f"landlock_exec: required-entry: dir:{gone}: missing\n")
 
-        with patch("utils.llm_client.subprocess.run", side_effect=fake_run):
+        with _patch_spawn(side_effect=fake_run):
             result = _invoke(scratch)
         details = result["details"]
         assert details["failure_reason"] == "jail-denied" and details["retryable"] is False
@@ -1045,7 +1070,7 @@ class TestCarryingTheGrant:
             inside_tmp = os.path.join(_tmpdir_of(cmd), "x")
             return _completed("", 1, f"Error: Permission denied (os error 13) {inside_tmp}\n")
 
-        with patch("utils.llm_client.subprocess.run", side_effect=fake_run):
+        with _patch_spawn(side_effect=fake_run):
             result = _invoke(scratch)
         assert "not a jail denial" in result["error"]
         assert "jail_failure" not in result["details"]
@@ -1062,7 +1087,7 @@ class TestCarryingTheGrant:
                 stderr=f"Error: failed to write {denied}: Permission denied (os error 13)\n",
             )
 
-        with patch("utils.llm_client.subprocess.run", side_effect=fake_run):
+        with _patch_spawn(side_effect=fake_run):
             result = _invoke(scratch)
         details = result["details"]
         assert result["error_code"] == llm_client.ERROR_TIMEOUT
@@ -1093,8 +1118,7 @@ class TestCarryingTheGrant:
         denied = scratch["tmp"] / "outside.txt"
         stream = self._answer_stream("The plan covers the email field; it looks sound.")
         stderr = f"Error: failed to write {denied}: Permission denied (os error 13)\n"
-        with patch("utils.llm_client.subprocess.run",
-                   side_effect=lambda cmd, **kw: _completed(stream, 0, stderr)):
+        with _patch_spawn(side_effect=lambda cmd, **kw: _completed(stream, 0, stderr)):
             result = _invoke(scratch, want_answer_text=True)
         details = result["details"]
         assert details.get("failure_reason") != "jail-denied"
@@ -1107,8 +1131,7 @@ class TestCarryingTheGrant:
         denied = scratch["tmp"] / "outside.txt"
         stream = self._answer_stream()
         stderr = f"Error: failed to write {denied}: Permission denied (os error 13)\n"
-        with patch("utils.llm_client.subprocess.run",
-                   side_effect=lambda cmd, **kw: _completed(stream, 0, stderr)):
+        with _patch_spawn(side_effect=lambda cmd, **kw: _completed(stream, 0, stderr)):
             result = _invoke(scratch)
         details = result["details"]
         assert details["failure_reason"] == "jail-denied" and details["retryable"] is False
@@ -1123,8 +1146,7 @@ class TestCarryingTheGrant:
             "Let me read the plan first.",
             failed=f"failed to write {denied}: Permission denied (os error 13)",
         )
-        with patch("utils.llm_client.subprocess.run",
-                   side_effect=lambda cmd, **kw: _completed(stream, 0, "")):
+        with _patch_spawn(side_effect=lambda cmd, **kw: _completed(stream, 0, "")):
             result = _invoke(scratch)
         details = result["details"]
         assert details["failure_reason"] == "jail-denied"
@@ -1132,8 +1154,7 @@ class TestCarryingTheGrant:
         assert details["jail_failure"]["path"] == str(denied)
 
     def test_the_readonly_audit_runs_on_the_jail_and_not_on_a_contained_rung(self, scratch):
-        with patch("utils.llm_client.subprocess.run",
-                   side_effect=lambda cmd, **kw: _completed(_stream(CLEAN_COMMAND))):
+        with _patch_spawn(side_effect=lambda cmd, **kw: _completed(_stream(CLEAN_COMMAND))):
             jailed = _invoke(scratch)
             contained = llm_client.invoke_with_provider(
                 "prompt", SPEC, timeout=60, cwd=str(scratch["repo"]),
