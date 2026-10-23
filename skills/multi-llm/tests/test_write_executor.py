@@ -1150,7 +1150,7 @@ class TestVerificationOnlyImplementTask:
         )["verdict"]
         assert verdict["write_outcome"] == "no-op"
         assert verdict["outcome_label"] == "verified"
-        assert "| T009 | verified |" in Path(result.summary_file).read_text()
+        assert "| T009 | verified |" in Path(result.summary_file).read_text(encoding="utf-8")
         batch_lines = [l for l in lines if "batch 0: T009" in l]
         assert batch_lines and "T009 verified in" in batch_lines[0], lines
 
@@ -1257,7 +1257,7 @@ class TestVerificationOnlyImplementTask:
         assert verdict["outcome_label"] == "check-findings"
         assert verdict["check"]["findings"] == self.FINDINGS
 
-        text = Path(result.summary_file).read_text()
+        text = Path(result.summary_file).read_text(encoding="utf-8")
         assert "| T009 | check-findings |" in text
         assert "| T009 | verified |" not in text
         assert "## Check Findings" in text
@@ -1716,7 +1716,9 @@ class TestVerificationOnlyImplementTask:
         the loop at exit 3. The declared set was always judged by sha256
         (`TaskSnapshot.changed`); the sweep now applies the same rule."""
         index = env.root / "index.html"
-        index.write_text("<p>orig</p>\n", encoding="utf-8")
+        # Bytes, as the mock writes them: a text-mode write is `\r\n` on
+        # Windows, and the mock's LF rewrite then really moved bytes.
+        index.write_bytes(b"<p>orig</p>\n")
         env.edits([{"path": str(index), "mode": "create",
                     "content": "<p>orig</p>\n"}],
                   result={"status": "applied", "ids": ["T009"],
@@ -2226,7 +2228,7 @@ class TestScheduler:
         assert result.exit_code == 0
         assert result.finalized is True
         assert Path(result.summary_file).is_file()
-        assert "## Task Results" in Path(result.summary_file).read_text()
+        assert "## Task Results" in Path(result.summary_file).read_text(encoding="utf-8")
         assert state.is_phase_completed("apply-suggestions")
         assert "## Implementation Summary" in env.plan.read_text()
 
@@ -2260,7 +2262,7 @@ class TestScheduler:
         assert [r["task_id"] for r in report["tasks"]] == ["T001", "T002"]
         assert report["tasks"][0]["from_earlier_run"] is True
         assert "from_earlier_run" not in report["tasks"][1]
-        text = Path(result.summary_file).read_text()
+        text = Path(result.summary_file).read_text(encoding="utf-8")
         assert "| T001 (earlier run) | applied |" in text
         assert "| T002 | applied |" in text
         assert "recorded by earlier run(s)" in text
@@ -2635,7 +2637,7 @@ class TestScheduler:
 
         assert result.exit_code == 0, result.messages
         assert list(result.to_dict()["skipped_tasks"]) == ["T014"]
-        text = Path(result.summary_file).read_text()
+        text = Path(result.summary_file).read_text(encoding="utf-8")
         assert "## Manual Tasks (Deferred)" in text
         assert "| T014 |" in text
 
@@ -3198,7 +3200,9 @@ class TestEveryWriteKindClosesTheLoop:
         env.plan.write_text("# Plan\n\n## Step 1\nbody\n", encoding="utf-8")
 
         def respond(t, prompt):
-            env.plan.write_text(env.plan.read_text() + "edit\n", encoding="utf-8")
+            # The mock runner's patch, byte for byte: a text-mode rewrite is
+            # `\r\n` on Windows, another plan and another `sha256_after`.
+            env.plan.write_bytes(env.plan.read_bytes() + b"edit\n")
             return payload
 
         env.scheduler([task], respond=respond, finalize=False).run()
@@ -5848,7 +5852,7 @@ class TestHostSinksNeverSeeTheChildsConfigContent:
             if path.is_file():
                 texts[str(path)] = path.read_text(encoding="utf-8", errors="replace")
         assert any(p.endswith("subagent_audit.jsonl") for p in texts)
-        assert any("/failed/" in p for p in texts)
+        assert any(f"{os.sep}failed{os.sep}" in p for p in texts)
         assert any(p.endswith(".status.json") for p in texts)
         for name, text in texts.items():
             for marker in self.MARKERS:

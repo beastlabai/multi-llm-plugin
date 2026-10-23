@@ -83,7 +83,7 @@ def repo_nohuman(tmp_path, monkeypatch):
 
 def _summary(repo) -> str:
     report = json.loads((repo.phase_dir / "write_batch_report.json").read_text())
-    return Path(report["summary_file"]).read_text()
+    return Path(report["summary_file"]).read_text(encoding="utf-8")
 
 
 def _report(repo) -> dict:

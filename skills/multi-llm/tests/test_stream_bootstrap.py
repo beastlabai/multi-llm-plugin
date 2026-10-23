@@ -70,6 +70,20 @@ class TestBootstrapStreams:
         # Lone surrogate (the surrogateescape failure mode) must not raise.
         print("bad \udce9 byte")
 
+    def test_stdin_reads_utf8_and_keeps_its_error_handler(self, monkeypatch):
+        """A host pipes UTF-8 in, which a Windows pipe decoded with cp1252:
+        the em dash read as mojibake and ``ō`` (C5 8D) raised outright."""
+        text = "summary — with Kō\n"
+        monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(
+            io.BytesIO(text.encode("utf-8")), encoding="cp1252", errors="strict"))
+        monkeypatch.setattr(sys, "stdout", _cp1252_stream())
+        monkeypatch.setattr(sys, "stderr", _cp1252_stream())
+
+        bootstrap_streams()
+
+        assert sys.stdin.read() == text
+        assert sys.stdin.errors == "strict"
+
     def test_non_reconfigurable_streams_are_tolerated(self, monkeypatch):
         """Streams without reconfigure (StringIO, test doubles) are skipped."""
         monkeypatch.setattr(sys, "stdout", io.StringIO())

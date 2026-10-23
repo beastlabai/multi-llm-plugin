@@ -370,7 +370,10 @@ See [{tasks_file}]({tasks_file}) for the detailed task breakdown.
         # Replace existing reference section
         # Find the section boundaries (## Implementation Tasks ... <!-- TASKS_FILE -->)
         section_pattern = r'## Implementation Tasks\s*\n.*?' + TASKS_FILE_REFERENCE_PATTERN
-        content = re.sub(section_pattern, reference_section.strip(), content, flags=re.DOTALL)
+        # A function replacement: a template string would read the path's
+        # backslashes (a Windows spelling) as escapes and raise `bad escape`.
+        replacement = reference_section.strip()
+        content = re.sub(section_pattern, lambda _m: replacement, content, flags=re.DOTALL)
         return content
 
     # Check for legacy embedded tasks and remove them
@@ -457,7 +460,10 @@ See [{summary_file}]({summary_file}) for the implementation summary including fi
     if existing_match:
         # Replace existing reference section
         section_pattern = r'## Implementation Summary\s*\n.*?' + IMPL_SUMMARY_REFERENCE_PATTERN
-        content = re.sub(section_pattern, reference_section.strip(), content, flags=re.DOTALL)
+        # Literal, as in insert_tasks_file_reference: `..\.multi-llm\p\...`
+        # was `bad escape \p` (Windows CI, 2026-10-23).
+        replacement = reference_section.strip()
+        content = re.sub(section_pattern, lambda _m: replacement, content, flags=re.DOTALL)
         return content
 
     # Append new reference section at the end

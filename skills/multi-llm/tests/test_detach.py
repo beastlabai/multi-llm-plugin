@@ -103,6 +103,22 @@ sys.exit(EXIT_CODE)
 '''
 
 
+#: A worker whose stdio is not the log when it reaches the boundary, taking
+#: the Windows branch (flipped here; a no-op on Windows).
+OFF_THE_LOG_WORKER = '''
+import sys
+sys.path.insert(0, {skill!r})
+from utils import process_control
+
+process_control.IS_WINDOWS = True
+process_control._assign_own_job_object = lambda: None
+print("before the boundary", flush=True)
+process_control.enter_detached_worker({log!r})
+print("after the boundary \\u2014 on the log")
+sys.stderr.write("stderr after the boundary\\n")
+'''
+
+
 #: A worker that prints on both streams *before* the detach boundary, the way
 #: every orchestrator does on its way to `maybe_detach`.
 PRE_DETACH_WORKER = '''
@@ -3964,12 +3980,13 @@ class TestWindowsSeam:
         assert log.read_text(encoding="utf-8") == "existing\n"
         assert recorded["stdout_closed"] is False
 
-    def test_windows_worker_does_not_reopen_stdio_but_joins_a_job_object(
+    def test_windows_worker_on_the_log_already_only_joins_a_job_object(
         self, monkeypatch
     ):
-        """The launcher already handed the log in; the worker adds the reaper."""
+        """The launcher handed the log in; the worker adds the reaper."""
         calls = []
         monkeypatch.setattr(process_control, "IS_WINDOWS", True)
+        monkeypatch.setattr(process_control, "_stdio_already_on", lambda _log: True)
         monkeypatch.setattr(
             process_control, "_assign_own_job_object",
             lambda: calls.append("job"),
@@ -3980,9 +3997,32 @@ class TestWindowsSeam:
         )
         process_control.enter_detached_worker("C:\\nope\\orchestrator-run.log")
         assert calls == ["job"], (
-            "on Windows the log arrives as an inherited handle, so redirecting "
-            "fds would be wrong; the Job Object is what reaps provider children"
+            "stdio already on the log is not opened twice; the Job Object is "
+            "what reaps provider children"
         )
+
+    def test_windows_worker_off_the_log_reopens_it(self, tmp_path):
+        """Windows CI, 2026-10-23: a `.cmd` uv between the launcher and the
+        worker lost the handed-in handle, and the run reached `done` with an
+        empty log. The worker reopens the log as on POSIX, and its streams
+        follow (on Windows they do not follow a dup2 by themselves)."""
+        log = tmp_path / "orchestrator-run.log"
+        log.write_text("a predecessor's bytes\n", encoding="utf-8")
+        script = tmp_path / "off-the-log-worker.py"
+        script.write_text(
+            OFF_THE_LOG_WORKER.format(skill=str(SKILL_ROOT), log=str(log)),
+            encoding="utf-8",
+        )
+        proc = subprocess.run(
+            [sys.executable, str(script)], capture_output=True, timeout=60,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.splitlines() == [b"before the boundary"]
+        assert proc.stderr == b""
+        text = log.read_text(encoding="utf-8")
+        assert text.startswith("a predecessor's bytes\n"), "O_APPEND, never O_TRUNC"
+        assert "after the boundary \u2014 on the log" in text
+        assert "stderr after the boundary" in text
 
     def test_windows_abort_escalates_to_taskkill_of_the_whole_tree(self,
                                                                   monkeypatch):
