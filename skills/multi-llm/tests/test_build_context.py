@@ -439,6 +439,15 @@ def test_dockerfile_copy_sources_resolve_inside_the_manifest():
             "drawn from tests/container/context_manifest.txt"
         )
         matched = globlib.glob(str(REPO_ROOT / source), recursive=True)
+        if not matched and any(
+            entry.optional and (entry.matches(source) or entry.matches(f"{source}/x"))
+            for entry in MANIFEST
+        ):
+            # A build output the manifest marks `# optional` (the staged
+            # opencode payload, `make opencode-stage`): absent from a clean
+            # checkout, which is what a CI runner has. Its manifest entry is
+            # the containment this rule asks for; there is nothing to walk.
+            continue
         assert matched, f"COPY source {source!r} resolves to nothing in the repo"
 
         files: list[str] = []

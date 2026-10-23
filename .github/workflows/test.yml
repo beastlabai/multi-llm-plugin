@@ -19,10 +19,14 @@ jobs:
       # bump the two together.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          # The committed-secret scanner walks `git ls-files`; a shallow checkout
-          # is fine for that, but the scanner also needs the repo's own
-          # .gitignore/.gitleaks.toml, which the default checkout provides.
-          fetch-depth: 1
+          # Full history, as every developer clone has. The committed-secret
+          # scanner would be fine shallow, but several code-review tests build
+          # their scratch project outside any repository, so their `git diff`
+          # runs in this checkout and needs `HEAD~1` to resolve: on a shallow
+          # clone they end `[DIFF_FAILED] ... a shallow clone` (measured on the
+          # first CI run of this history, 2026-10-23). Giving each its own
+          # two-commit repository is the better fix and is recorded as owed.
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
       # The committed-secret guard is the one that actually holds the line for a
       # PUBLIC repo, so it has to run on a PR rather than only where a developer
