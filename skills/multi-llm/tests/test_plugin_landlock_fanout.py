@@ -939,7 +939,12 @@ class TestCarryingTheGrant:
 
         async def main():
             task = asyncio.ensure_future(asyncio.to_thread(_invoke, scratch))
+            # Bounded: an invoke that never reaches the spawn (macOS, 2026-10-23)
+            # must fail this row, not hold the whole leg until its cap.
+            deadline = time.monotonic() + 30
             while not started.is_set():
+                if task.done() or time.monotonic() > deadline:
+                    pytest.fail(f"the invoke never reached the spawn: {task.done() and task.result()!r}")
                 await asyncio.sleep(0.01)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
