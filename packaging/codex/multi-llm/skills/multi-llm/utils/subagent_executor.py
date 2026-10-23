@@ -2140,6 +2140,10 @@ NESTED_PROBE_TIMEOUT_S = 30.0
 #: exactly like the nested-exec probe's inconclusive branch.
 SANDBOX_PROBE_TIMEOUT_S = 10.0
 
+#: How long a timed-out sandbox probe's tree kill, and then the read of what is
+#: left in its pipes, may each take on Windows (:func:`_run_sandbox_probe`).
+SANDBOX_PROBE_KILL_S = 1.0
+
 #: The advisory readers' probe budget (`status`, `init`, the next-step block:
 #: `repo_wide_write_refusal`), for the standard probe and the rung walk
 #: together. `status` has a sub-second contract and dispatches nothing, so a
@@ -3326,6 +3330,9 @@ def _run_sandbox_probe(
     kwargs: Dict[str, Any] = {}
     if env is not None:
         kwargs["env"] = dict(env)
+    if process_control.IS_WINDOWS:
+        return _run_sandbox_probe_tree([*launcher, *argv[1:]], cwd=cwd,
+                                       timeout=timeout, **kwargs)
     try:
         return subprocess.run(
             [*launcher, *argv[1:]],
@@ -3340,6 +3347,58 @@ def _run_sandbox_probe(
         )
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+def _run_sandbox_probe_tree(
+    command: Sequence[str], *, cwd: Optional[str], timeout: float, **kwargs: Any,
+) -> Optional["subprocess.CompletedProcess"]:
+    """:func:`_run_sandbox_probe` on Windows, where ``subprocess.run`` does not
+    keep its timeout.
+
+    There ``run`` kills the direct child alone on a timeout and then reads both
+    pipes to their end with no timeout at all, so a grandchild still holding
+    them (``sh -c`` → ``sleep``, a CLI's own helper) held the probe for as long
+    as it lived: 5.3 s against a 0.2 s budget on the Windows CI (Windows port,
+    round seven). A timed-out probe's whole tree is killed instead
+    (``process_control.taskkill_tree``) and its pipes are read for at most
+    :data:`SANDBOX_PROBE_KILL_S` more, then let go unclosed — a close would
+    wait on the read that holds them. ``None`` on a timeout, as before.
+    """
+    try:
+        proc = subprocess.Popen(
+            list(command),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=cwd,
+            **kwargs,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process_control.taskkill_tree(proc.pid, timeout=SANDBOX_PROBE_KILL_S)
+        try:
+            proc.kill()
+        except OSError:  # pragma: no cover - already gone
+            pass
+        try:
+            proc.communicate(timeout=SANDBOX_PROBE_KILL_S)
+        except (subprocess.SubprocessError, OSError, ValueError):
+            pass
+        return None
+    except BaseException as exc:
+        # What `run` does on any other way out: no child left, and an OSError
+        # is "could not be run", like the spawn's.
+        proc.kill()
+        if isinstance(exc, (OSError, subprocess.SubprocessError)):
+            return None
+        raise
+    return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
 
 #: How one rung of the fallback walk ended (landlock rung, 2026-09-22).

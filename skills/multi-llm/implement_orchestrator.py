@@ -1142,8 +1142,10 @@ def _remove_kept_prompts(phase_dir: Path) -> int:
     follows a link: the phase dir and ``prompts/`` are opened
     ``O_DIRECTORY | O_NOFOLLOW`` (a symlink there removes nothing), each name
     is checked with ``lstat`` relative to that descriptor and removed only
-    when it is a regular file, by ``unlink(dir_fd=…)``. Best-effort: a
-    platform without ``dir_fd`` removes nothing.
+    when it is a regular file, by ``unlink(dir_fd=…)``. A platform without
+    ``dir_fd`` (Windows, where no jail runs) goes by path instead
+    (:func:`_remove_kept_prompts_by_path`); it used to remove nothing, so a
+    start-over there kept every earlier prompt (Windows port, round seven).
     """
     import stat as _stat
 
@@ -1152,7 +1154,7 @@ def _remove_kept_prompts(phase_dir: Path) -> int:
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     directory = getattr(os, "O_DIRECTORY", 0)
     if not nofollow or not directory or os.unlink not in os.supports_dir_fd:
-        return 0
+        return _remove_kept_prompts_by_path(phase_dir)
 
     flags = os.O_RDONLY | directory | nofollow
     try:
@@ -1181,6 +1183,44 @@ def _remove_kept_prompts(phase_dir: Path) -> int:
             removed += 1
     finally:
         os.close(folder_fd)
+    return removed
+
+
+def _remove_kept_prompts_by_path(phase_dir: Path) -> int:
+    """:func:`_remove_kept_prompts` where descriptors are not available, the
+    way ``utils.prompt_files`` writes there: the phase dir and ``prompts/``
+    are ``lstat``-checked and a link or a junction there removes nothing,
+    each name is ``lstat``-checked and removed only when it is a regular
+    file. Best-effort, like the descriptor walk."""
+    import stat as _stat
+
+    from utils.write_batch_scheduler import DISPATCHED_PROMPTS_SUBDIR
+
+    reparse = getattr(_stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    folder = os.path.join(str(phase_dir), DISPATCHED_PROMPTS_SUBDIR)
+    try:
+        for shown in (str(phase_dir), folder):
+            info = os.lstat(shown)
+            if (
+                not _stat.S_ISDIR(info.st_mode)
+                or getattr(info, "st_file_attributes", 0) & reparse
+            ):
+                return 0
+        names = os.listdir(folder)
+    except OSError:
+        return 0
+    removed = 0
+    for name in names:
+        if not name.endswith(".prompt.txt"):
+            continue
+        path = os.path.join(folder, name)
+        try:
+            if not _stat.S_ISREG(os.lstat(path).st_mode):
+                continue
+            os.unlink(path)
+        except OSError:
+            continue
+        removed += 1
     return removed
 
 

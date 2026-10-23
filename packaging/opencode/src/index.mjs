@@ -806,7 +806,7 @@ function planFromRoot(result, values, anchor, surface) {
   }
   let here
   try {
-    here = fs.realpathSync(anchor)
+    here = realPath(anchor)
   } catch {
     return
   }
@@ -2485,17 +2485,41 @@ function samePlanFile(left, right) {
   return realPathOf(left) === realPathOf(right)
 }
 
-/** `fs.realpathSync`, else the real directory plus the name, else as given. */
+/** `realPath`, else the real directory plus the name, else as given. */
 function realPathOf(target) {
   try {
-    return fs.realpathSync(target)
+    return realPath(target)
   } catch {
     try {
-      return path.join(fs.realpathSync(path.dirname(target)), path.basename(target))
+      return path.join(realPath(path.dirname(target)), path.basename(target))
     } catch {
       return path.resolve(target)
     }
   }
+}
+
+/**
+ * The real path the dispatcher names a file by. Throws as `fs.realpathSync`.
+ *
+ * On Windows that is `fs.realpathSync.native`: the dispatcher prints paths
+ * through `Path.resolve()` and pins its root with `os.path.realpath`, which
+ * there answer the file's on-disk case, its long name for an 8.3 one and the
+ * real drive behind a `subst`; the JS walk only follows links. So an anchor
+ * spelled `c:\users\me\proj` (a shell `cd` keeps the case it was typed in)
+ * never equalled the dispatcher's `C:\Users\Me\proj`, and every command
+ * handed back named the plan absolutely. The codex port compares with
+ * `os.path.realpath` already. Elsewhere, and when the native call fails (a
+ * volume it cannot query), the JS walk as before.
+ */
+function realPath(target) {
+  if (process.platform === "win32") {
+    try {
+      return fs.realpathSync.native(target)
+    } catch {
+      // The JS walk below, which also throws for a path that does not exist.
+    }
+  }
+  return fs.realpathSync(target)
 }
 
 /**

@@ -39,6 +39,7 @@ import ast
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -2123,6 +2124,14 @@ def uv_stub(tmp_path):
 def _dispatcher_argv(call):
     """The dispatcher's own argv, i.e. everything after the ``--`` separator."""
     return call[call.index("--") + 3:]  # skip "--", "python", "<script>"
+
+
+def word(path) -> str:
+    """*path* as a dispatcher command prints it (``cli_common._quote``): bare on
+    POSIX, single-quoted where it holds a backslash — a Windows path, which a
+    scripted line spelled bare would hand ``splitPosix`` as escapes. The
+    codex suite's helper of the same name."""
+    return shlex.quote(str(path))
 
 
 def _terminal(package, child, values):
@@ -5015,7 +5024,7 @@ class TestPlanSpelling:
             "run_id: R1", "log: /l", 'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}']}
         first = {"exit": 0, "stdout": [
             'MULTI_LLM_RESULT: {"state":"done","exit":0,"artifacts":[],"next":'
-            + json.dumps(f"uv run -- python multi_llm.py review-plan {absolute} "
+            + json.dumps(f"uv run -- python multi_llm.py review-plan {word(absolute)} "
                          "--reaggregate --host opencode") + "}"]}
         second_launch = {"exit": 0, "stdout": [
             "run_id: R2", "log: /l2", 'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}']}
@@ -5448,7 +5457,7 @@ class TestTheTypedPlanSurvivesEveryFailure:
         body = {"mode": row["name"], "phase": row["phase"], "state": "needs-human",
                 "exit": 3, "artifacts": [], "next": None}
         return {"exit": 3, "stdout": [
-            f"      resume with: {prefix} {row['name']} {absolute} --host opencode "
+            f"      resume with: {prefix} {row['name']} {word(absolute)} --host opencode "
             "--detach --yes --resume",
             "MULTI_LLM_RESULT: " + json.dumps(body)]}
 
@@ -5491,7 +5500,7 @@ class TestTheTypedPlanSurvivesEveryFailure:
         absolute = str(tmp_path / "plans" / "p.md")
         done = {"exit": 0, "stdout": [
             'MULTI_LLM_RESULT: {"state":"done","exit":0,"artifacts":[],"next":'
-            + json.dumps(f"uv run -- python multi_llm.py generate-tasks {absolute}")
+            + json.dumps(f"uv run -- python multi_llm.py generate-tasks {word(absolute)}")
             + "}"]}
         result, _ = uv_stub.run(
             built_package, {"mode": "review-plan", "plan": self.PLAN, "question": "",
@@ -5600,8 +5609,8 @@ class TestAFailedResultSaysWhatTheUserCanRun:
                 "exit": 3, "artifacts": [], "next": None}
         return {"exit": 3, "stdout": [
             "Re-invoke to retry only the failures (task_generation):",
-            f"  {prefix} generate-tasks {absolute} --host opencode --yes",
-            f"      resume with: {prefix} generate-tasks {absolute} "
+            f"  {prefix} generate-tasks {word(absolute)} --host opencode --yes",
+            f"      resume with: {prefix} generate-tasks {word(absolute)} "
             "--host opencode --detach --yes",
             "MULTI_LLM_RESULT: " + json.dumps(body),
         ]}
@@ -5770,7 +5779,7 @@ class TestAReportCallOnAFailedRun:
         payload.update(body)
         return {"exit": 3, "stdout": [
             "implement: failed (batch 2 of 4)",
-            f"      resume with: {UV_PREFIX} implement {absolute} --host opencode "
+            f"      resume with: {UV_PREFIX} implement {word(absolute)} --host opencode "
             "--detach --resume",
             "MULTI_LLM_RESULT: " + json.dumps(payload),
         ]}
@@ -5972,7 +5981,7 @@ class TestASymlinkedAnchor:
             "run_id: R", "log: /l",
             'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}']}
         failed = {"exit": 3, "stdout": [
-            f"  {UV_PREFIX} generate-tasks {resolved} --host opencode --yes",
+            f"  {UV_PREFIX} generate-tasks {word(resolved)} --host opencode --yes",
             'MULTI_LLM_RESULT: {"state":"needs-human","exit":3,"next":null}']}
         result, _ = uv_stub.run(
             built_package,
@@ -5984,6 +5993,43 @@ class TestASymlinkedAnchor:
         calls = [option for option in result["options"] if "args" in option]
         assert [call["args"]["plan"] for call in calls] == ["plans/x.md"]
         assert str(real.resolve()) not in json.dumps(result)
+
+    def test_on_windows_the_real_path_is_the_native_one(self, built_package, tmp_path):
+        """Windows port, round seven: there the dispatcher's ``Path.resolve()``
+        and its root's ``os.path.realpath`` answer the on-disk case (and the
+        long name for an 8.3 one), which the JS ``fs.realpathSync`` walk never
+        does, so an anchor spelled in another case named the plan absolutely
+        in every command handed back. Forced to ``win32``, with the native call
+        folding case as ``GetFinalPathNameByHandleW`` does there; on any other
+        platform the walk is still the answer, case and all."""
+        root = tmp_path / "Proj"
+        (root / "plans").mkdir(parents=True)
+        real = str(root / "plans" / "x.md")
+        Path(real).write_text("# x\n", encoding="utf-8")
+        shouted = str(tmp_path / "PROJ" / "plans" / "x.md")
+        answers = node_json(
+            f"""
+            const fs = (await import("node:fs")).default
+            const real = {json.dumps(real)}, root = {json.dumps(str(root))}
+            const known = [real, root]
+            fs.realpathSync.native = (target) => {{
+              const hit = known.find((p) => p.toLowerCase() === target.toLowerCase())
+              if (hit) return hit
+              throw Object.assign(new Error("ENOENT"), {{ code: "ENOENT" }})
+            }}
+            const values = {{ plan: {json.dumps(shouted)}, planArg: "plans/x.md" }}
+            Object.defineProperty(process, "platform", {{ value: "linux" }})
+            const elsewhere = T.typedPlan(real, values)
+            Object.defineProperty(process, "platform", {{ value: "win32" }})
+            const rooted = {{ planArg: "plans/x.md" }}
+            T.planFromRoot({{ ran_from_root: root }}, rooted,
+                           {json.dumps(str(tmp_path / "PROJ"))},
+                           {{ dispatcher: {{ ran_from_root_key: "ran_from_root" }} }})
+            emit({{ elsewhere, windows: T.typedPlan(real, values), rooted: rooted.plan }})
+            """,
+            built_package,
+        )
+        assert answers == {"elsewhere": real, "windows": "plans/x.md", "rooted": real}
 
 
 #: Values the plan quoting must agree on with `next_phase.quote_plan_arg`.

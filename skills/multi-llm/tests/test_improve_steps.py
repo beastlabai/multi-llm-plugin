@@ -99,6 +99,11 @@ def _typed(plan: Path) -> str:
     return os.path.relpath(plan)
 
 
+def _shown(path: Path) -> str:
+    """A path as a message names it: relative to the cwd, ``/``-separated on every OS."""
+    return _typed(path).replace(os.sep, "/")
+
+
 def _run(capsys, plan, mode, *argv) -> Tuple[int, str, str]:
     """``util improve-steps`` in-process; ``(exit, stdout, stderr)``."""
     target = plan if isinstance(plan, str) else _typed(plan)
@@ -437,7 +442,7 @@ class TestAnUnreadableStateFile:
         code, out, err = _run(capsys, plan, mode, *as_json)
         assert (code, out) == (3, ""), "nothing on stdout, --json or not"
         [line] = [l for l in err.splitlines() if l.startswith("ERROR:")]
-        assert line.startswith(f"ERROR: {mode}: cannot read {_typed(state_file)} (")
+        assert line.startswith(f"ERROR: {mode}: cannot read {_shown(state_file)} (")
         assert detail in line
         assert line.endswith(
             "; nothing was run. Repair the file, or move it aside to start the "
