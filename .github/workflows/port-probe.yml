@@ -17,30 +17,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Round 3 (4f4b86fb found the hang: test_plugin_landlock_fanout.py's
-          # cancelled-coroutine row waited on an event nothing set; it is bounded
-          # now). The fanout file alone, the whole macOS prefix again — which can
-          # finish now, and so print its tracebacks — and the Windows files that
-          # failed in c60ce88d's leg, to verify the sh-less probe.
+          # Round 4: the fanout rows again (ps -o lstart= now reaches the real
+          # run); the round-3 prefix and Windows legs are still running on 588bc847.
           - leg: macos-fanout
             os: macos-latest
             minutes: 15
             targets: skills/multi-llm/tests/test_plugin_landlock_fanout.py
-          - leg: macos-prefix-through-the-hang
-            os: macos-latest
-            minutes: 75
-            through: test_plugin_landlock_surfaces.py
-          - leg: windows-c60-failures
-            os: windows-latest
-            minutes: 60
-            in_tests: >-
-              test_write_executor.py test_write_executor_orchestrators.py
-              test_check_findings_hold_dependents.py test_check_gate_fixture.py
-              test_codex_route.py test_implement_stop_account.py
-              test_write_retry_redispatch.py test_resume_why.py
-              test_human_task_answers.py test_plugin_landlock_executor.py
-              test_apply_backup_across_rounds.py
-              test_write_reply_prose_before_object.py test_e2e_improve_modes.py
     name: probe (${{ matrix.leg }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.minutes }}
@@ -71,3 +53,50 @@ jobs:
           uv run --project skills/multi-llm -- pytest $files \
             -m "not live and not container and not package and not codex_jail" \
             -v -rfE -o faulthandler_timeout=120 -p no:cacheprovider
+
+  # Why a second stub_server.py never publishes its port on macOS (c60ce88d's
+  # second-half leg: the first stub serves, every later one is silent for 20 s,
+  # 87 rows). Each stub runs under a faulthandler timer, so a stuck one prints
+  # where it is stuck; getfqdn is timed because HTTPServer.server_bind calls it.
+  stub-diag:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+      - name: Start three stubs, one after another
+        shell: bash
+        working-directory: skills/multi-llm
+        run: |
+          set -u
+          uv run --project . -- python -c "
+          import socket, time
+          for _ in range(3):
+              t = time.time(); name = socket.getfqdn('127.0.0.1')
+              print(f'getfqdn(127.0.0.1) = {name!r} in {time.time() - t:.2f}s', flush=True)
+          "
+          d=$(mktemp -d)
+          for i in 1 2 3; do
+            PYTHONPATH=. uv run --project . -- python -c "
+          import faulthandler, runpy, sys
+          faulthandler.dump_traceback_later(25)
+          sys.argv = sys.argv[1:]
+          runpy.run_path(sys.argv[0], run_name='__main__')
+          " tests/container/stub_server.py --port 0 --port-file "$d/port-$i" --log "$d/log-$i" \
+              --scenario tests/fixtures/e2e/scenarios/happy_path.yaml > "$d/out-$i" 2> "$d/err-$i" &
+            start=$(date +%s)
+            until [ -s "$d/port-$i" ] || [ $(( $(date +%s) - start )) -ge 30 ]; do sleep 0.2; done
+            echo "stub $i: port file after $(( $(date +%s) - start ))s: $(cat "$d/port-$i" 2>/dev/null || echo none)"
+          done
+          sleep 28
+          for i in 1 2 3; do echo "--- stub $i stderr"; cat "$d/err-$i"; echo "--- stub $i stdout"; cat "$d/out-$i"; done
+          pkill -f stub_server.py || true
+      - name: The two stub files alone
+        if: always()
+        shell: bash
+        run: |
+          uv run --project skills/multi-llm -- pytest \
+            skills/multi-llm/tests/test_scenario_matcher_parity.py \
+            skills/multi-llm/tests/test_stub_scripted_tool_call.py \
+            -m "not live and not container and not package and not codex_jail" \
+            -x -q -o faulthandler_timeout=60 -p no:cacheprovider
