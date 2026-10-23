@@ -881,8 +881,8 @@ class _ProcRow(NamedTuple):
     pgid: Optional[int]
     sid: Optional[int]
     start_time: Optional[str]
-    #: ``/proc`` state letter; ``Z`` is a zombie (dead, not yet reaped).
-    #: ``None`` where ``ps`` built the table.
+    #: The state letter (``/proc``'s, or the first of ``ps``'s ``stat``); ``Z``
+    #: is a zombie (dead, not yet reaped). ``None`` where ``ps`` could not say.
     state: Optional[str] = None
 
 
@@ -926,7 +926,7 @@ def _linux_process_table() -> Optional[Dict[int, _ProcRow]]:
 #: The ``ps`` columns :func:`_ps_process_table` asks for, each as its own ``-o``
 #: (POSIX reads everything after a ``name=`` as that column's header, commas
 #: included). ``lstart`` is last because it is several words.
-_PS_TABLE_COLUMNS = ("pid", "ppid", "pgid", "lstart")
+_PS_TABLE_COLUMNS = ("pid", "ppid", "pgid", "stat", "lstart")
 
 
 def _ps_process_table() -> Dict[int, _ProcRow]:
@@ -939,12 +939,14 @@ def _ps_process_table() -> Dict[int, _ProcRow]:
     the whole of a fan-out. ``lstart`` is the column :func:`_ps_start_time`
     reads, so a row's start time is the string :func:`process_start_time`
     returns for that pid — its internal spacing kept, since ``%e`` pads a
-    one-digit day — and :func:`probe` can corroborate it at sweep time. The
+    one-digit day — and :func:`probe` can corroborate it at sweep time. ``stat``
+    gives the state a sweep needs to tell a zombie from a process that runs
+    (``kill(pid, 0)`` and ``killpg`` answer for both, here as on Linux). The
     session id is left to :func:`_complete_row` (``os.getsid``, a system call,
     not a spawn), because ``ps`` spells it differently on every platform. A
     ``ps`` that rejects ``lstart`` still yields the tree, undated.
     """
-    for columns in (_PS_TABLE_COLUMNS, _PS_TABLE_COLUMNS[:3]):
+    for columns in (_PS_TABLE_COLUMNS, _PS_TABLE_COLUMNS[:4], _PS_TABLE_COLUMNS[:3]):
         argv = ["ps", "-A"]
         for column in columns:
             argv += ["-o", f"{column}="]
@@ -956,26 +958,32 @@ def _ps_process_table() -> Dict[int, _ProcRow]:
         except (OSError, subprocess.SubprocessError):
             return {}
         if result.returncode == 0:
-            return _parse_ps_table(result.stdout)
+            return _parse_ps_table(result.stdout, columns)
     return {}
 
 
-def _parse_ps_table(stdout: str) -> Dict[int, _ProcRow]:
+def _parse_ps_table(
+    stdout: str, columns: Sequence[str] = _PS_TABLE_COLUMNS
+) -> Dict[int, _ProcRow]:
     table: Dict[int, _ProcRow] = {}
     for line in stdout.splitlines():
-        parts = line.split(None, 3)
+        parts = line.split(None, len(columns) - 1)
         if len(parts) < 3:
             continue
         try:
             pid, ppid, pgid = (int(part) for part in parts[:3])
         except ValueError:
             continue
-        start = parts[3].strip() if len(parts) > 3 else ""
-        table[pid] = _ProcRow(pid, ppid, pgid, None, start or None)
+        extra = dict(zip(columns[3:], parts[3:]))
+        state = extra.get("stat", "")[:1] or None
+        start = extra.get("lstart", "").strip()
+        table[pid] = _ProcRow(pid, ppid, pgid, None, start or None, state)
     return table
 
 
 def _process_table() -> Dict[int, _ProcRow]:
+    """Every process: ``/proc`` on Linux, one ``ps -A`` elsewhere, ``{}`` on
+    Windows or when neither could be read."""
     if IS_WINDOWS:  # pragma: no cover - Windows
         return {}
     table = _linux_process_table()
@@ -1133,15 +1141,19 @@ def _linux_state(pid: int) -> Optional[str]:
 
 
 def _running(pid: int) -> bool:
-    """Alive and not a zombie (a zombie keeps its pid and group, runs nothing)."""
+    """Alive and not a zombie (a zombie keeps its pid and group, runs nothing).
+
+    The per-pid answer, for a sweep whose process table could not be read
+    (:class:`_Liveness`); it needs ``/proc`` to see a zombie.
+    """
     return process_alive(pid) and _linux_state(pid) != "Z"
 
 
 def _group_running(pgid: int) -> bool:
     """Does any process that is not a zombie still belong to *pgid*?
 
-    ``killpg(pgid, 0)`` succeeds for a group of zombies too, so on Linux the
-    answer comes from ``/proc``; elsewhere membership is the best available.
+    ``killpg(pgid, 0)`` succeeds for a group of zombies too, so the answer comes
+    from ``/proc``; where that cannot be read, membership is the best available.
     """
     if not _group_has_members(pgid):
         return False
@@ -1182,15 +1194,17 @@ class _SweepClock:
 class _Liveness:
     """One look at what still runs, shared by every group a poll checks.
 
-    One ``/proc`` scan per poll however many groups are waited on; off Linux
-    each question falls back to its own per-pid probe. "Running" never counts a
-    zombie: an unreaped leader still answers ``kill(pid, 0)``, and a wait that
-    trusted that would sit out its whole window on a process already dead.
+    One process-table scan per poll however many groups are waited on — the
+    ``/proc`` pass, or off Linux one ``ps -A`` — and each question falls back to
+    its own per-pid probe only where neither could be read. "Running" never
+    counts a zombie: an unreaped leader still answers ``kill(pid, 0)`` (macOS
+    too), and a wait that trusted that would sit out its whole window on a
+    process already dead.
     """
 
     def __init__(self) -> None:
         try:
-            self.table: Optional[Dict[int, _ProcRow]] = _linux_process_table()
+            self.table: Optional[Dict[int, _ProcRow]] = _process_table() or None
         except Exception:  # noqa: BLE001 - the per-pid probes still answer
             self.table = None
         self._groups = None if self.table is None else {
