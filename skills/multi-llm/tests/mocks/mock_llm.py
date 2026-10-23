@@ -986,15 +986,27 @@ def _append_line(path: Path, line: str) -> None:
             return
         import msvcrt
 
+        # LK_NBLCK in a short loop, not LK_LOCK: that one sleeps a whole second
+        # between tries and raises after ten, which would turn a busy log into
+        # a mock that dies before it answers. Past the deadline the line is
+        # written unlocked — a rare torn line beats a failed provider call.
+        locked = False
+        deadline = time.monotonic() + 30
         handle.seek(_APPEND_LOCK_OFFSET)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        while not locked and time.monotonic() < deadline:
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                locked = True
+            except OSError:
+                time.sleep(0.005)
         try:
             handle.seek(0, os.SEEK_END)
             handle.write(data)
             handle.flush()
         finally:
-            handle.seek(_APPEND_LOCK_OFFSET)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            if locked:
+                handle.seek(_APPEND_LOCK_OFFSET)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def format_cursor_agent_output(content: str) -> str:

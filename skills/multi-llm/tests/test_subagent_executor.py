@@ -63,6 +63,13 @@ from tests.mock_launchers import (  # noqa: E402
 #: Windows, where `sh` is not on PATH and the plugin's interpreter takes its steps.
 _PROBE_SHELL = sys.executable if os.name == "nt" else "sh"
 
+#: The shell the fake probes below run. On Windows, resolved here while PATH is
+#: still the session's: `runner_env` narrows PATH to the mock bin, python, and
+#: git's and node's directories, and on the runner git can live in a directory
+#: with no `sh.exe` beside it (Git\ucrt64\bin, 2026-10-23), which left every
+#: fake probe unable to start. POSIX keeps the bare name.
+_SH = (shutil.which("sh") or "sh") if os.name == "nt" else "sh"
+
 #: Runner specs the read path ships a real `agent-readonly` profile for. The
 #: sentinel test and the equivalence test are parametrized over all three, so a
 #: profile that silently stops being read-only fails here rather than on a user's
@@ -4832,7 +4839,7 @@ class TestSandboxUnavailable:
     def _fake_command(script: str):
         """A `sandbox_probe_command` that answers `script` for the write profile."""
         def command(self, profile):
-            return ["sh", "-c", script] if profile == PROFILE_AGENT_WRITE else None
+            return [_SH, "-c", script] if profile == PROFILE_AGENT_WRITE else None
         return command
 
     @staticmethod
@@ -5000,7 +5007,7 @@ class TestSandboxUnavailable:
         def readonly_probe(self, profile):
             if profile != PROFILE_AGENT_READONLY:
                 return None
-            return ["sh", "-c", f"echo '{_BWRAP_BROKEN_LINE}' >&2; exit 1"]
+            return [_SH, "-c", f"echo '{_BWRAP_BROKEN_LINE}' >&2; exit 1"]
 
         monkeypatch.setattr(
             type(provider), "sandbox_probe_command", readonly_probe
@@ -5036,7 +5043,7 @@ class TestSandboxUnavailable:
         def command(self, requested):
             if requested != profile:
                 return None
-            return ["sh", "-c", f"echo '{_BWRAP_BROKEN_LINE}' >&2; exit 1"]
+            return [_SH, "-c", f"echo '{_BWRAP_BROKEN_LINE}' >&2; exit 1"]
         return command
 
     def test_a_read_only_batch_dispatches_unsandboxed_by_default(
@@ -5275,7 +5282,7 @@ class TestSandboxUnavailable:
         provider = registry.get_provider("codex")
 
         def slow(self, requested):
-            return ["sh", "-c", "sleep 5"] if requested == PROFILE_AGENT_READONLY else None
+            return [_SH, "-c", "sleep 5"] if requested == PROFILE_AGENT_READONLY else None
 
         monkeypatch.setattr(type(provider), "sandbox_probe_command", slow)
         monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 0.2)
@@ -5408,14 +5415,14 @@ class TestSandboxUnavailable:
         started = time.monotonic()
         # `; :` so no shell execs the sleep in its own place: a grandchild.
         result = executor._run_sandbox_probe(
-            ["sh", "-c", "sleep 5; :"], cwd=str(tmp_path), timeout=0.2)
+            [_SH, "-c", "sleep 5; :"], cwd=str(tmp_path), timeout=0.2)
         assert time.monotonic() - started < 4.0
         assert result is None
         if sys.platform != "win32":
             [(_, below)] = killed
             assert below, "the sleep was not below the shell"
         done = executor._run_sandbox_probe(
-            ["sh", "-c", "echo out; echo err >&2; exit 3"], cwd=str(tmp_path),
+            [_SH, "-c", "echo out; echo err >&2; exit 3"], cwd=str(tmp_path),
             timeout=30)
         assert (done.returncode, done.stdout, done.stderr) == (3, "out\n", "err\n")
 
@@ -5510,7 +5517,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         def sandbox_probe_command(self, profile):
             if profile != PROFILE_GENERATE:
                 return None
-            return ["sh", "-c", f"echo '{_BWRAP_BROKEN_LINE}' >&2; exit 1"]
+            return [_SH, "-c", f"echo '{_BWRAP_BROKEN_LINE}' >&2; exit 1"]
 
         def sandbox_fallback_rungs(self, profile):
             from utils.providers.codex import UNSANDBOXED_RUNG
