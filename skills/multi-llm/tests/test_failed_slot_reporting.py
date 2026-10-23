@@ -246,7 +246,12 @@ class TestTheFanoutCarriesWhatAFailedSlotSpent:
         def fake_run(cmd, **kwargs):
             return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr="")
 
+        # The availability gate runs ahead of the spawn and reads PATH, so it is
+        # stubbed with the spawn: on a machine without the claude CLI (CI) the
+        # slot otherwise ends "CLI not found in PATH" before the envelope is read.
+        provider_cls = type(get_provider("claude-code"))
         with mock.patch.object(llm_client.subprocess, "run", fake_run), \
+                mock.patch.object(provider_cls, "is_available", lambda self: True), \
                 mock.patch.object(llm_client, "_resolve_executable", lambda name: ([name], True)):
             return llm_client.invoke_with_provider(
                 "prompt", "claude-code:claude-fable-5-1:high", timeout=5

@@ -42,7 +42,13 @@ from __future__ import annotations
 
 import re
 
-from .container import entrypoint
+import pytest
+
+# tests/container/entrypoint.py is the Linux image's entrypoint and imports
+# POSIX-only modules (fcntl, pty, termios) at load; on a runner without them
+# there is nothing of it to test, and the module says so instead of erroring.
+pytest.importorskip("fcntl", reason="tests/container/entrypoint.py runs only in the Linux image (POSIX-only imports)")
+from .container import entrypoint  # noqa: E402
 
 
 def _render(raw: bytes) -> str:

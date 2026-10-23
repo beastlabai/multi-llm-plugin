@@ -28,6 +28,10 @@ from pathlib import Path
 
 import pytest
 
+# tests/container/entrypoint.py is the Linux image's entrypoint and imports
+# POSIX-only modules (fcntl, pty, termios) at load; on a runner without them
+# there is nothing of it to test, and the module says so instead of erroring.
+pytest.importorskip("fcntl", reason="tests/container/entrypoint.py runs only in the Linux image (POSIX-only imports)")
 from .container import entrypoint
 from .container import harness
 

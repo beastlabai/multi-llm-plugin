@@ -6669,6 +6669,21 @@ class TestGeneratedDocs:
 class TestCheckRouteDetection:
     """D5, driven by a fabricated merged config plus a fake cache tree."""
 
+    @pytest.fixture(autouse=True)
+    def ready(self, monkeypatch):
+        """Row 5's prerequisites stubbed, as `test_install_host.py`'s `ready`
+        does: these tests are about which route row 1 reports, and whether the
+        configured runner's CLI happens to be installed on the machine running
+        them is not their question. Unstubbed, a runner without it (CI has no
+        claude/codex/opencode binary) fails row 5, whose repair names
+        `install-host`, and `install()` refuses the shim outright."""
+        monkeypatch.setattr(host_install, "find_uv", lambda: "/usr/bin/uv")
+        monkeypatch.setattr(host_install, "runner_available", lambda provider: True)
+        monkeypatch.setattr(
+            host_install, "probe_runner",
+            lambda spec, **kwargs: {"auth": "ok", "version": "9.9.9", "problem": ""},
+        )
+
     @pytest.fixture
     def posture(self, tmp_path):
         from utils import host_capabilities as caps

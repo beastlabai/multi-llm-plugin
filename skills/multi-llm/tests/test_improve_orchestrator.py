@@ -1231,6 +1231,10 @@ class TestALiveRun:
         plan = _plan(repo)
         _write_state(plan, completed={REVIEW_PHASE[mode]: T(0)})
         monkeypatch.setenv(detach.UV_ENV, sys.executable)
+        # The composite implies `--exec-subagents`, so the launcher checks the
+        # runner's binary is on PATH first: tested on its own elsewhere, and
+        # here only a question about this machine's claude CLI.
+        monkeypatch.setattr(detach, "missing_runner_binaries", lambda *a, **k: {})
         for name in ("MULTI_LLM_HOST", mode_table.ROUTE_ENV,
                      detach.PLAN_ARG_ENV, detach.WORKER_ENV):
             monkeypatch.delenv(name, raising=False)

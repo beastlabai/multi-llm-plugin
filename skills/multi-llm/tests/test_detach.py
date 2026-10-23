@@ -4563,6 +4563,10 @@ class TestReplayFlagsAcrossTheDetachBoundary:
         plan = _plan(tmp_path)
         phase = _phase_dir(plan)
         monkeypatch.setenv(detach.UV_ENV, str(_fake_uv(tmp_path)))
+        # `--exec-subagents` makes the launcher check the runner's binary is on
+        # PATH; that pre-flight is tested on its own, and here it would test
+        # whether this machine has the claude CLI.
+        monkeypatch.setattr(detach, "missing_runner_binaries", lambda *a, **k: {})
         seen = {}
 
         def fake_spawn(command, *, cwd, env, log_path):
