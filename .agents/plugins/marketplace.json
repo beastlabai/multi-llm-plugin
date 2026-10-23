@@ -1,12 +1,16 @@
 {
   "name": "beastlabai",
-  "description": "Codex marketplace catalog for this repository. Its one entry installs packaging/codex/multi-llm/, the generated and checked-in plugin tree (plans/codex-native-plugin.md, D1) — never the repository root. This file also SHADOWS .claude-plugin/marketplace.json, which codex reads too and whose one entry has source './': with only that file present, `codex plugin add multi-llm@beastlabai` copied the entire working tree (264 MB, .git, .venv and gitignored scratch included) into the plugin cache at a version segment of 'local'. The entry's path must stay relative and inside the repository (R20′: anything else is skipped silently), its name must equal the plugin manifest's (R29), and it carries no version and no policy. tests/test_marketplace_manifest_location.py is the guard.",
+  "description": "Codex marketplace catalog for this repository. Its one entry installs packaging/codex/multi-llm/, the generated and checked-in plugin tree (plans/codex-native-plugin.md, D1) \u2014 never the repository root. This file also SHADOWS .claude-plugin/marketplace.json, which codex reads too and whose one entry has source './': with only that file present, `codex plugin add multi-llm@beastlabai` copied the entire working tree (264 MB, .git, .venv and gitignored scratch included) into the plugin cache at a version segment of 'local'. The entry's path must stay relative and inside the repository (R20\u2032: anything else is skipped silently), its name must equal the plugin manifest's (R29), it carries no version, and its policy is written out explicitly as the OpenAI packaging guide asks (installation AVAILABLE, authentication ON_INSTALL). Those two values are exactly what codex reports for an entry with no policy (measured 2026-10-23 on codex 0.159.2 and 0.164.0), so writing them changes no install; a value outside codex's enum makes `codex plugin marketplace add` reject the whole catalog. tests/test_marketplace_manifest_location.py is the guard.",
   "plugins": [
     {
       "name": "multi-llm",
       "source": {
         "source": "local",
         "path": "./packaging/codex/multi-llm"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
       },
       "category": "Developer Tools"
     }

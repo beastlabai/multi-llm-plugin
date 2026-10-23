@@ -28,6 +28,11 @@ tool:
   before `uv` is involved)
 - **uv**, any version, on `PATH`
 
+Before a release is published, its install, skill and tool are checked offline on three
+codex builds: 0.159.2 (the floor above), the version the repository's container pins, and
+npm's newest `@openai/codex` that day. The release notes name the versions and any
+`codex features list` change the newest one showed.
+
 ## Install
 
 ```bash
@@ -90,8 +95,13 @@ codex plugin add multi-llm@beastlabai
 # then start a NEW session
 ```
 
-Re-running the install's first command does **not** upgrade: adding a marketplace that is
-already added is a no-op. The upgrade fetches whatever the `release` ref points at.
+Re-running the install's first command does **not** upgrade: the same command again
+reports the marketplace as already added and changes nothing, and the same command with a
+different `--ref` or different `--sparse` paths is refused ("already added from a
+different source") — remove the marketplace first (`codex plugin marketplace remove
+beastlabai`) to switch refs. The upgrade fetches whatever the registered ref points at; when
+the version moved it replaces the installed version directory itself, and the `plugin add`
+after it is the explicit step (measured on codex 0.164.0).
 
 ## Uninstall
 

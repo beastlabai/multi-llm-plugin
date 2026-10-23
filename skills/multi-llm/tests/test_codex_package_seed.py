@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import stat
 from pathlib import Path
 
@@ -248,6 +250,150 @@ class TestThePromptInputParse:
         assert parsed["resolved"] is None
 
 
+def _mirror(root: Path) -> Path:
+    """A miniature of Dockerfile §10c's mirror: the catalog and a plugin tree
+    with a manifest, an ordinary file and an executable one."""
+    (root / ".agents" / "plugins").mkdir(parents=True, exist_ok=True)
+    (root / ".agents" / "plugins" / "marketplace.json").write_text(
+        json.dumps({"name": "beastlabai", "plugins": [{
+            "name": "multi-llm",
+            "source": {"source": "local", "path": "./packaging/codex/multi-llm"}}]}),
+        encoding="utf-8")
+    plugin = root / "packaging" / "codex" / "multi-llm"
+    (plugin / ".codex-plugin").mkdir(parents=True, exist_ok=True)
+    (plugin / ".codex-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "multi-llm", "version": "0.1.0"}), encoding="utf-8")
+    (plugin / "mcp").mkdir(exist_ok=True)
+    server = plugin / "mcp" / "server.py"
+    server.write_text("print('server')\n", encoding="utf-8")
+    server.chmod(0o755)
+    (plugin / "LICENSE").write_text("MIT\n", encoding="utf-8")
+    return plugin
+
+
+class TestTheGitFixture:
+    """A4 row 6b's offline Git marketplace, with real git and no codex."""
+
+    @pytest.fixture
+    def fixture(self, rig):
+        home, _out, _log = rig
+        _mirror(entrypoint.CODEX_MARKETPLACE_DIR)
+        return home, entrypoint.build_git_marketplace(home)
+
+    def test_release_is_held_one_release_behind_the_default_branch(self, fixture):
+        home, fx = fixture
+        env = entrypoint._git_fixture_env(home)
+        bare = Path(fx["bare"])
+        assert fx["release_sha"] != fx["default_sha"]
+        assert entrypoint._git(["rev-parse", "refs/heads/release"], bare, env)[
+            "stdout"].strip() == fx["release_sha"]
+        assert entrypoint._git(["rev-parse", "refs/heads/master"], bare, env)[
+            "stdout"].strip() == fx["default_sha"]
+        assert (fx["release_version"], fx["next_version"]) == ("0.1.0", "0.1.1")
+        assert entrypoint._git(["merge-base", "--is-ancestor", fx["release_sha"],
+                                fx["default_sha"]], bare, env, check=False)["exit"] == 0
+        assert fx["url"] == f"ssh://localhost{bare}"
+        assert fx["env"]["GIT_SSH_COMMAND"].startswith("sh "), (
+            "/home/e2e is noexec: the shim runs through sh, never as a program")
+
+    def test_the_ssh_url_resolves_offline_through_the_shim(self, fixture):
+        """What codex's own clone does first, done by plain git."""
+        home, fx = fixture
+        env = {**entrypoint._git_fixture_env(home), **fx["env"]}
+        listed = entrypoint._git(["ls-remote", fx["url"]], home, env)
+        assert f"{fx['release_sha']}\trefs/heads/release" in listed["stdout"]
+
+    def test_the_decoys_sit_outside_both_sparse_paths(self, fixture):
+        _home, fx = fixture
+        for decoy in fx["decoys"]:
+            assert not decoy.startswith(tuple(f"{p}/" for p in fx["sparse"])), decoy
+
+    def test_the_tree_comparison_reads_blobs_not_names(self, fixture, tmp_path):
+        home, fx = fixture
+        env = entrypoint._git_fixture_env(home)
+        bare = Path(fx["bare"])
+        install = tmp_path / "install"
+        shutil.copytree(entrypoint.CODEX_MARKETPLACE_DIR / entrypoint.GIT_PLUGIN_PATH,
+                        install)
+        same = entrypoint.compare_tree_to_commit(install, bare, fx["release_sha"], env)
+        assert same["matches"] and not same["next_marker_present"], same
+        assert same["mode_differs"] == [], same
+        newer = entrypoint.compare_tree_to_commit(install, bare, fx["default_sha"], env)
+        assert not newer["matches"]
+        assert newer["differing"] == [".codex-plugin/plugin.json"], newer
+        assert newer["missing"] == [entrypoint.GIT_NEXT_MARKER], newer
+        (install / ".git").mkdir()
+        (install / ".git" / "HEAD").write_text("ref: x\n", encoding="utf-8")
+        (install / "plans").mkdir()
+        (install / "plans" / "p.md").write_text("x\n", encoding="utf-8")
+        polluted = entrypoint.compare_tree_to_commit(install, bare, fx["release_sha"], env)
+        assert not polluted["matches"]
+        assert polluted["has_git_dir"] and polluted["has_plans"], polluted
+        assert entrypoint.compare_tree_to_commit(None, bare, fx["release_sha"], env)[
+            "compared"] is False
+
+    def test_a_git_seed_runs_the_published_flags(self, rig):
+        home, out, log = rig
+        _mirror(entrypoint.CODEX_MARKETPLACE_DIR)
+        entrypoint._seed_codex_plugin(home, "package", install_source="git")
+        argvs = [json.loads(line) for line in log.read_text().splitlines()]
+        record = json.loads((out / "plugin-install.json").read_text())
+        url = record["git"]["fixture"]["url"]
+        assert argvs[0] == ["plugin", "marketplace", "add", url, "--ref", "release",
+                            "--sparse", ".agents", "--sparse", "packaging/codex",
+                            "--json"]
+        assert argvs[1:] == [["plugin", "add", "multi-llm@beastlabai", "--json"],
+                             ["plugin", "list", "--json"]]
+        assert record["install_source"] == "git"
+        assert record["marketplace_dir"] == url
+        assert record["overlay"]["GIT_SSH_COMMAND"].startswith("sh ")
+        assert record["git"]["tree"]["compared"] is True
+        assert record["git"]["snapshot"]["exists"] is False, (
+            "the fake codex clones nothing; the record says so rather than "
+            "inventing a snapshot")
+
+    def test_an_unknown_install_source_is_refused(self, rig):
+        home, _out, log = rig
+        with pytest.raises(SystemExit, match="unknown codex install source"):
+            entrypoint._seed_codex_plugin(home, "package", install_source="npm")
+        assert not log.exists()
+
+    def test_only_the_git_route_probe_installs_through_git(self):
+        source = (TESTS_DIR / "container" / "entrypoint.py").read_text(encoding="utf-8")
+        assert ('install_source=("git" if args.probe == GIT_ROUTE_PROBE\n'
+                in source)
+        assert entrypoint.GIT_ROUTE_PROBE in entrypoint.CODEX_PACKAGE_PROBES
+
+
+def _release_gate():
+    import importlib.util
+
+    path = SKILL_DIR.parent.parent / "packaging" / "codex" / "release_gate.py"
+    spec = importlib.util.spec_from_file_location("_codex_release_gate_seed", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestEveryGateRowHasItsOwnGrader:
+    """A run record is graded `pass` when ANY test that read the row passed,
+    and the generic seed checks pass on every package row. So a gate row whose
+    own grader stopped matching it (a renamed probe word, a dropped class)
+    would still come back green. This holds the grader text to the matrix."""
+
+    def test_every_required_probe_is_named_by_an_only_guard(self):
+        gate = _release_gate()
+        source = (TESTS_DIR / "test_container_host_lane.py").read_text(encoding="utf-8")
+        named = set()
+        for args in re.findall(r"_only\(package_probe,\s*([^)]*)\)", source):
+            named |= set(re.findall(r'"([a-z-]+)"', args))
+        # `seed` is graded on every row by TestTheCodexPackageSeed by design.
+        required = set(gate.EVERY_TIER) - {"seed"}
+        assert required <= named, sorted(required - named)
+        assert "class TestTheCodexPackageSeed" in source
+        assert set(gate.EVERY_TIER) <= set(entrypoint.CODEX_PACKAGE_PROBES)
+
+
 class TestTheMatrix:
     def test_probe_rows_are_not_credentialed_rows(self):
         credentialed = {row["id"] for row in CODEX["rows"]}
@@ -279,7 +425,7 @@ class TestTheMatrix:
 
     def test_the_exec_driven_probes_name_the_scenario(self):
         exec_driven = {"scripted-call", "loader-tools", "anchor", "environment",
-                       "progress-cancellation", "sandbox-posture"}
+                       "progress-cancellation", "sandbox-posture", "git-route"}
         for row in CODEX["package_probes"]:
             if row["probe"] in exec_driven:
                 assert row.get("scenario"), (

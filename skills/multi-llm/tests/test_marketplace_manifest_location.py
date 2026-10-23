@@ -158,6 +158,24 @@ def test_no_entry_carries_an_unparseable_auth_policy() -> None:
             )
 
 
+#: `policy.installation`'s enum, as codex 0.164.0 names it when it refuses a
+#: catalog over a bad value (measured 2026-10-23: `unknown variant `BOGUS`,
+#: expected one of `NOT_AVAILABLE`, `AVAILABLE`, `INSTALLED_BY_DEFAULT``).
+INSTALL_POLICIES = {"NOT_AVAILABLE", "AVAILABLE", "INSTALLED_BY_DEFAULT"}
+
+
+def test_no_entry_carries_an_unparseable_install_policy() -> None:
+    """The same dead-catalog failure, on the other policy key."""
+    for entry in _load(AGENTS_CATALOG)["plugins"]:
+        policy = entry.get("policy") or {}
+        if "installation" in policy:
+            assert policy["installation"] in INSTALL_POLICIES, (
+                f"{entry.get('name')!r}: policy.installation "
+                f"{policy['installation']!r} is not one of {sorted(INSTALL_POLICIES)}; "
+                "codex refuses the whole marketplace file"
+            )
+
+
 def test_the_payload_carries_no_symlink_the_install_would_drop() -> None:
     """Measured, and worse than the dangling link anyone would have predicted.
 

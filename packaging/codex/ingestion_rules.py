@@ -57,6 +57,22 @@ of the pinned container binary in an empty temporary ``CODEX_HOME`` unpacked
 The version and date record this absence check; the last known source hash and
 the restated rules remain unchanged.
 
+**2026-10-23: what A4 rows 1 and 1a now mean.** Row 1 used to read "the real
+``validate_plugin.py`` passes on the built directory"; there has been no real one
+to run since 0.156.1, so the row is restated rather than reported green by
+default. The release gate (``release_gate.py``) runs an ``upstream-validator``
+container row on the pinned codex, the declared minimum and npm's newest: it
+searches the ``$CODEX_HOME`` codex just unpacked its system skills into, records
+``absent`` when there is nothing (0.164.0 on the host the same day: the same five
+system skills, no ``plugin-creator``), and when a copy reappears it must pass on
+the installed tree AND hash to ``SOURCE_SHA256`` before anything is stamped. An
+absence is carried into the stamp as ``absent``, never as a pass. What grades the
+compatibility layout instead is twofold, and labelled for what it is: the rules
+below plus ``validate_layout`` (restated from the packaging guide, never an
+upstream checker), and codex's own ingestion of the built tree on all three
+builds — the Git install, the advertised skill, the listed tool and a real call
+(rows 6b, 7 and 13). Row 1a stays this module's stamp, at or above the pin.
+
 **The validator is stricter than local ingestion (R5).** ``codex plugin add``
 installs a manifest carrying ``hooks`` that the validator rejects by name. What
 ships is held to the validator's stricter rules anyway, so the tree is clean if
@@ -183,6 +199,33 @@ RESERVED_MARKETPLACE_NAMES = frozenset({"openai-curated", "openai-api-curated"})
 
 #: ``policy.authentication``'s enum; any other value kills the whole catalog.
 AUTH_POLICIES = frozenset({"ON_INSTALL", "ON_USE"})
+
+#: ``policy.installation``'s enum, as codex itself names it. Measured
+#: 2026-10-23 on 0.164.0: ``"installation": "BOGUS"`` makes ``codex plugin
+#: marketplace add`` exit 1 with ``unknown variant `BOGUS`, expected one of
+#: `NOT_AVAILABLE`, `AVAILABLE`, `INSTALLED_BY_DEFAULT``` — the whole catalog,
+#: not the one entry.
+INSTALL_POLICIES = frozenset({"NOT_AVAILABLE", "AVAILABLE", "INSTALLED_BY_DEFAULT"})
+
+#: The three keys OpenAI's packaging guide says every catalog entry carries
+#: ("Always include `policy.installation`, `policy.authentication`, and
+#: `category` on each plugin entry",
+#: developers.openai.com/plugins/build/plugins#marketplace-metadata, read
+#: 2026-10-23). A restated documentation rule, like everything in this module:
+#: no upstream checker enforces it, and codex installs an entry without them.
+ENTRY_REQUIRED_POLICY_KEYS: Tuple[str, ...] = ("installation", "authentication")
+
+#: The policy the shipped entry declares. Measured 2026-10-23 on codex 0.159.2
+#: (the declared minimum) and 0.164.0 (npm's newest that day), local-path
+#: marketplace, isolated ``CODEX_HOME``: an entry with NO policy is reported by
+#: ``codex plugin list --json`` as ``installPolicy: AVAILABLE``,
+#: ``authPolicy: ON_INSTALL``, and this explicit pair produces the same two
+#: values and the same install. Writing the defaults out changes nothing a user
+#: sees; it makes the catalog say what the guide asks it to say.
+SHIPPED_POLICY: Mapping[str, str] = {
+    "installation": "AVAILABLE",
+    "authentication": "ON_INSTALL",
+}
 
 MARKETPLACE_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
 
@@ -423,15 +466,79 @@ def validate_catalog(catalog: Any) -> List[str]:
                 f"catalog entry {label!r}: source path must be relative, `./`-"
                 "prefixed and inside the root, or codex skips it silently (R20′)"
             )
-        policy = entry.get("policy") or {}
-        if isinstance(policy, Mapping) and "authentication" in policy:
-            if policy["authentication"] not in AUTH_POLICIES:
-                errors.append(
-                    f"catalog entry {label!r}: policy.authentication must be one "
-                    f"of {sorted(AUTH_POLICIES)}"
-                )
+        policy = entry.get("policy")
+        if not isinstance(policy, Mapping):
+            errors.append(
+                f"catalog entry {label!r}: carries no `policy` object; the "
+                "packaging guide asks for policy.installation and "
+                "policy.authentication on every entry"
+            )
+            policy = {}
+        for key in ENTRY_REQUIRED_POLICY_KEYS:
+            if key not in policy:
+                errors.append(f"catalog entry {label!r}: policy.{key} is missing")
+        if "installation" in policy and policy["installation"] not in INSTALL_POLICIES:
+            errors.append(
+                f"catalog entry {label!r}: policy.installation must be one of "
+                f"{sorted(INSTALL_POLICIES)}, or codex refuses the whole catalog"
+            )
+        if "authentication" in policy and policy["authentication"] not in AUTH_POLICIES:
+            errors.append(
+                f"catalog entry {label!r}: policy.authentication must be one "
+                f"of {sorted(AUTH_POLICIES)}"
+            )
+        if not _non_empty_string(entry.get("category")):
+            errors.append(f"catalog entry {label!r}: `category` must be a non-empty string")
         if "version" in entry:
             errors.append(f"catalog entry {label!r} carries a version; none is read")
+    return errors
+
+
+#: Where the compatibility-layout rules below were read, and when. Not an
+#: upstream checker: OpenAI ships none any more (module docstring). These are
+#: the packaging guide's own sentences, restated as checks.
+LAYOUT_SOURCE = "https://developers.openai.com/plugins/build/plugins#plugin-structure"
+LAYOUT_READ_DATE = "2026-10-23"
+
+
+def validate_layout(plugin_root: Path) -> List[str]:
+    """The Codex compatibility layout this release ships, as the guide states it.
+
+    Three rules from the "Plugin structure" section (``LAYOUT_SOURCE``):
+
+    * "When you add a Codex overlay, keep only its ``plugin.json`` inside
+      ``.codex-plugin/``" — referenced resources stay at the plugin root;
+    * the compatibility layout's MCP file is the root ``.mcp.json``;
+    * no portable root ``plugin.json`` / ``mcp.json`` beside it. The guide
+      reads a root ``plugin.json`` first and the ``.codex-plugin`` copy only as
+      a fallback, so shipping both makes which manifest a host loads depend on
+      the host. Migrating is a separate decision (the portable MCP format adds a
+      transport ``type`` per server; renaming files is not enough).
+
+    A pass here is a pass of restated documentation rules, never of an upstream
+    validator.
+    """
+    root = Path(plugin_root)
+    errors: List[str] = []
+    overlay = root / ".codex-plugin"
+    if not (overlay / "plugin.json").is_file():
+        errors.append(".codex-plugin/plugin.json is missing")
+    if overlay.is_dir():
+        extra = sorted(p.name for p in overlay.iterdir() if p.name != "plugin.json")
+        if extra:
+            errors.append(
+                f".codex-plugin/ holds {extra}; the guide keeps only plugin.json "
+                "there and every referenced resource at the plugin root"
+            )
+    if not (root / ".mcp.json").is_file():
+        errors.append("the compatibility layout's root .mcp.json is missing")
+    for portable in ("plugin.json", "mcp.json"):
+        if (root / portable).exists():
+            errors.append(
+                f"a portable root {portable} ships beside the compatibility "
+                "layout; a host that reads the root manifest first would load a "
+                "different file than this build validated"
+            )
     return errors
 
 
