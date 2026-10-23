@@ -94,6 +94,13 @@ LOGIN_SHELL_SCRIPT = 'cd -- "$1" && shift && exec "$@"'
 SHELL_NAME = "bash"
 FALLBACK_SHELL = "/bin/bash"
 
+#: Windows only: the directories a ``bash`` on PATH may sit in without being a
+#: POSIX shell. ``%SystemRoot%\System32\bash.exe`` is WSL's launcher, present
+#: wherever the feature is enabled and ahead of Git on a stock PATH; it starts a
+#: Linux VM that has no ``C:\`` anchor and no ``uv.exe`` to ``exec``. The tool's
+#: Windows prerequisite is Git Bash (``host_install.git_bash`` draws the same line).
+WSL_LAUNCHER_DIRS = ("system32", "syswow64")
+
 #: SIGTERM → SIGKILL grace for every kill, and the drain-thread join bound.
 KILL_GRACE_S = 5
 #: The signal-free abort dispatch's own timeout (rule f), never the remainder.
@@ -626,6 +633,31 @@ def _is_file(target) -> bool:
         return os.path.isfile(target)
     except (OSError, ValueError):
         return False
+
+
+def windows_bash(path: str):
+    """Git for Windows' ``bash`` along *path*, never WSL's launcher, or None.
+
+    ``bash`` on PATH minus its System32 entries; failing that the one installed
+    beside a ``git`` on PATH, because Git's default install puts only
+    ``<root>\\cmd`` there (``<root>\\bin`` is a separate installer option).
+    """
+    kept = os.pathsep.join(
+        entry for entry in path.split(os.pathsep)
+        if re.split(r"[/\\]", entry.rstrip("/\\"))[-1].lower() not in WSL_LAUNCHER_DIRS)
+    found = shutil.which(SHELL_NAME, path=kept)
+    if found:
+        return found
+    git = shutil.which("git", path=path)
+    if git:
+        # <root>\cmd\git.exe, <root>\bin\git.exe or <root>\mingw64\bin\git.exe
+        parents = Path(os.path.abspath(git)).parents
+        for root in [parents[index] for index in (1, 2) if index < len(parents)]:
+            for relative in (("bin", "bash.exe"), ("usr", "bin", "bash.exe")):
+                candidate = root.joinpath(*relative)
+                if _is_file(candidate):
+                    return str(candidate)
+    return None
 
 
 def file_uri_path(parsed) -> str:
@@ -1903,7 +1935,11 @@ class Server:
         return posture
 
     def find_shell(self):
-        found = shutil.which(SHELL_NAME, path=self.layer1.get("PATH") or os.defpath)
+        path = self.layer1.get("PATH") or os.defpath
+        if sys.platform == "win32":
+            found = windows_bash(path)
+        else:
+            found = shutil.which(SHELL_NAME, path=path)
         if found:
             return os.path.abspath(found)
         fallback = self.layer1.get("MLLM_TEST_FALLBACK_SHELL") or FALLBACK_SHELL

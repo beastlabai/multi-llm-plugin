@@ -1716,14 +1716,7 @@ class TestUvPreflight:
         The wording lives in exactly one place. A plugin that carried its own
         copy would be a second owner of a message the file route already prints.
         """
-        # Node reads the file's bytes as they are, Python in text mode: a
-        # checkout that converted the file to CRLF (`core.autocrlf`, which is
-        # what a Windows runner does) is the same message to both once the
-        # reader's newline handling is taken out of the comparison. (The
-        # plugin's own trailing-newline trim leaves the last line's "\r".)
-        served = node_json(
-            "emit(T.uvMissingText(surface))", built_package
-        ).replace("\r\n", "\n").removesuffix("\r")
+        served = node_json("emit(T.uvMissingText(surface))", built_package)
         shipped = (
             built_package / "skills" / "multi-llm" / "hosts" / "uv-missing.txt"
         ).read_text("utf-8").rstrip("\n")
@@ -1734,6 +1727,28 @@ class TestUvPreflight:
         for line in shipped.splitlines():
             if len(line.strip()) > 40:
                 assert line.strip() not in body
+
+    def test_a_crlf_message_file_is_served_without_a_carriage_return(
+        self, built_package
+    ):
+        """A checkout that converted the file to CRLF (``core.autocrlf``, Git
+        for Windows' default) reads as the same message: the trailing-newline
+        trim once left the last line's ``\\r`` behind."""
+        served = node_json(
+            """
+            const fs = (await import("node:fs")).default
+            const real = fs.readFileSync
+            fs.readFileSync = (file, ...rest) =>
+              String(real(file, ...rest)).replace(/\\n/g, "\\r\\n")
+            const crlf = T.uvMissingText(surface)
+            fs.readFileSync = real
+            emit([crlf, T.uvMissingText(surface)])
+            """,
+            built_package,
+        )
+        crlf, lf = served
+        assert "\r" not in crlf
+        assert crlf == lf
 
     def test_uv_on_a_path_the_platform_spells_differently_is_found(
         self, built_package, tmp_path
