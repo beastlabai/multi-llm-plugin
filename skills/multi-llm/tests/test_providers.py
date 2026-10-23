@@ -7621,8 +7621,15 @@ class TestOmpProvider:
 
         assert hint == hint.strip() and "\n" not in hint
         assert "/home/" not in hint
+        # A value the adapter's own source spells out is a constant, not a
+        # read: a GitHub runner exports GITHUB_SERVER_URL=https://github.com,
+        # which the install hint's public releases URL contains (first CI run
+        # of this history, 2026-10-23).
+        import inspect
+
+        source = inspect.getsource(type(provider))
         for value in os.environ.values():
-            if len(value) >= 12:
+            if len(value) >= 12 and value not in source:
                 assert value not in hint
 
     def test_doctors_auth_row_is_unprobed_and_spawns_nothing(self, provider):
