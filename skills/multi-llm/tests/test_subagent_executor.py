@@ -2480,7 +2480,17 @@ class TestLongestFirstDispatch:
         same reason. Preflight still runs against the real mock CLI, so the
         batch reaches the gate exactly as a real one does.
         """
+        from utils import review_orchestrator_base as rob
+
         runner_env.use("codex:gpt-5.5", max_concurrent_subagents=1)
+        # Tasks reach the one lane in the order their stagger sleeps end, and
+        # the stagger is ``index * PROVIDER_STAGGER_DELAY``. FAST_BACKOFF
+        # flattens it to 10 ms for every index, which only orders the tasks
+        # while the loop clock can tell two timers apart: Windows' ticks every
+        # 15.6 ms, so those timers tie and wake in heap order, not file order
+        # (Windows CI: tasks 3 and 4 swapped). Keep the index-proportional
+        # shape at a tenth of a second per index instead.
+        monkeypatch.setattr(rob, "get_backoff_delay", lambda delay: delay / 20)
         tasks = self._sized_batches(tmp_path)
         dispatched = []
 
@@ -5368,6 +5378,47 @@ class TestSandboxUnavailable:
         assert "recording sandbox 'unknown'" in err
         assert "Dispatching anyway" in err
 
+    def test_the_windows_probe_kills_a_grandchild_holding_its_pipes(
+        self, tmp_path, monkeypatch
+    ):
+        """Windows port, round seven: Windows' ``subprocess.run`` kills the
+        direct child alone on a timeout and then reads the pipes with no
+        timeout, so the ``sleep`` below ``sh`` held the row above for 5.3 s.
+        Its own path kills the tree. Forced on every runner; off Windows a
+        kill of every descendant stands in for ``taskkill /T /F``."""
+        from utils import process_control
+
+        killed = []
+        if sys.platform != "win32":
+            import signal
+
+            def taskkill_tree(pid, *, timeout=30.0):
+                # Read as the platform it is: `descendants` answers [] on win32.
+                monkeypatch.setattr(process_control, "IS_WINDOWS", False)
+                below = process_control.descendants(pid)
+                monkeypatch.setattr(process_control, "IS_WINDOWS", True)
+                killed.append((pid, [member.pid for member in below]))
+                for member in below:
+                    os.kill(member.pid, signal.SIGKILL)
+                os.kill(pid, signal.SIGKILL)
+
+            monkeypatch.setattr(process_control, "IS_WINDOWS", True)
+            monkeypatch.setattr(process_control, "taskkill_tree", taskkill_tree)
+        monkeypatch.chdir(tmp_path)
+        started = time.monotonic()
+        # `; :` so no shell execs the sleep in its own place: a grandchild.
+        result = executor._run_sandbox_probe(
+            ["sh", "-c", "sleep 5; :"], cwd=str(tmp_path), timeout=0.2)
+        assert time.monotonic() - started < 4.0
+        assert result is None
+        if sys.platform != "win32":
+            [(_, below)] = killed
+            assert below, "the sleep was not below the shell"
+        done = executor._run_sandbox_probe(
+            ["sh", "-c", "echo out; echo err >&2; exit 3"], cwd=str(tmp_path),
+            timeout=30)
+        assert (done.returncode, done.stdout, done.stderr) == (3, "out\n", "err\n")
+
     def test_a_command_that_cannot_run_dispatches_with_unknown(
         self, tmp_path, runner_env, monkeypatch
     ):
@@ -6522,7 +6573,7 @@ class TestHostSinksNeverSeeTheReadonlyChildsConfigContent:
         for found in phase_dir.rglob("*"):
             if found.is_file():
                 texts[str(found)] = found.read_text(encoding="utf-8", errors="replace")
-        assert any("/failed/" in name for name in texts)
+        assert any("/failed/" in name.replace(os.sep, "/") for name in texts)
         assert any(name.endswith(".status.json") for name in texts)
         for name, text in texts.items():
             for marker in self.MARKERS:

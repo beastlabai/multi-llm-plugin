@@ -47,7 +47,8 @@ APPLIED_S0 = {"status": "applied", "ids": ["s0"], "files_touched": ["plans/p.md"
 
 
 def _dispatch_prompts(log: Path):
-    rows = [json.loads(line) for line in log.read_text().splitlines() if line]
+    rows = [json.loads(line)
+            for line in log.read_text(encoding="utf-8").splitlines() if line]
     return [r["prompt"] for r in rows if "--version" not in r.get("argv", [])]
 
 
@@ -97,8 +98,10 @@ class TestTheReSend:
         sent = _dispatch_prompts(log)
         assert sorted(p.name for p in prompts.iterdir()) == [
             "apply-batch-0.attempt-2.prompt.txt", "apply-batch-0.prompt.txt"]
-        assert (prompts / "apply-batch-0.prompt.txt").read_text() == sent[0]
-        assert (prompts / "apply-batch-0.attempt-2.prompt.txt").read_text() == sent[1]
+        assert (prompts / "apply-batch-0.prompt.txt").read_text(
+            encoding="utf-8") == sent[0]
+        assert (prompts / "apply-batch-0.attempt-2.prompt.txt").read_text(
+            encoding="utf-8") == sent[1]
         assert HEADING not in sent[0] and HEADING in sent[1]
 
         # A fresh dispatch of the same task: its first attempt rewrites the
@@ -109,8 +112,8 @@ class TestTheReSend:
         again = env.scheduler([env.apply_task(0)]).run()
         assert len(again.outcomes[0].attempts) == 1, "dispatched once, no re-send"
         assert sorted(p.name for p in prompts.iterdir()) == ["apply-batch-0.prompt.txt"]
-        assert (prompts / "apply-batch-0.prompt.txt").read_text() == (
-            _dispatch_prompts(log)[-1])
+        assert (prompts / "apply-batch-0.prompt.txt").read_text(
+            encoding="utf-8") == _dispatch_prompts(log)[-1]
 
     def test_a_planted_prompts_symlink_is_never_followed(self, env, tmp_path):
         """A jailed repo-wide batch can write the phase dir; the scheduler is
@@ -448,7 +451,8 @@ def test_an_implement_task_that_changed_nothing_is_not_done_and_holds_the_rest(r
     assert "Done and kept: 1 task(s) (T001)." in text
     assert "Not run (the stop came before they were dispatched): T003." in text
     assert "--human-task T002=done" in text
-    report = json.loads((_phase_dir(repo) / "write_batch_report.json").read_text())
+    report = json.loads(
+        (_phase_dir(repo) / "write_batch_report.json").read_text(encoding="utf-8"))
     rows = {row["task_id"]: row for row in report["tasks"]}
     assert rows["T002"]["status"] == executor.STATUS_BATCH_FAILED
     assert rows["T002"]["applied_without_changes"] is True

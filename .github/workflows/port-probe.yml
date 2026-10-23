@@ -17,15 +17,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Round 7: the three rows round 6 still failed.
+          # Round 8: the six files the first full Windows run (40e03db4) failed,
+          # and on macOS the files whose product code moved with them.
           - leg: windows-verify
             os: windows-latest
-            minutes: 40
-            in_tests: test_e2e_improve_modes.py test_detach.py
+            minutes: 45
+            in_tests: >-
+              test_improve_steps.py test_opencode_package.py test_subagent_executor.py
+              test_implement_continues_a_started_run.py
+              test_selected_tasks_and_check_trees.py test_applied_without_changes.py
           - leg: macos-verify
             os: macos-latest
-            minutes: 20
-            in_tests: test_plugin_landlock_acceptance.py
+            minutes: 30
+            in_tests: >-
+              test_opencode_package.py test_subagent_executor.py
+              test_implement_continues_a_started_run.py
     name: probe (${{ matrix.leg }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.minutes }}

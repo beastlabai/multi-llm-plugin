@@ -780,6 +780,24 @@ def _posix_kill_tree(
     return "survived" if process_alive(pid) else "killed"
 
 
+def taskkill_tree(pid: int, *, timeout: float = 30.0) -> None:  # pragma: no cover
+    """``taskkill /T /F`` on *pid*: Windows' kill of a process and every process
+    it spawned, at once.
+
+    :func:`kill_tree`'s escalation there, and the whole kill of a child that
+    was started in no group of its own, which a ``CTRL_BREAK_EVENT`` cannot
+    target: ``Popen.kill`` is ``TerminateProcess`` on the direct child alone.
+    Best-effort: a ``taskkill`` that is missing or overruns *timeout* is let go.
+    """
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            capture_output=True, timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def _windows_kill_tree(pid: int, escalate_after_s: float) -> str:  # pragma: no cover
     try:
         import ctypes
@@ -796,13 +814,7 @@ def _windows_kill_tree(pid: int, escalate_after_s: float) -> str:  # pragma: no 
         time.sleep(0.1)
     # A group-less kill would strand the provider CLIs, so escalate to the whole
     # child tree.
-    try:
-        subprocess.run(
-            ["taskkill", "/PID", str(pid), "/T", "/F"],
-            capture_output=True, timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError):
-        pass
+    taskkill_tree(pid)
     deadline = time.time() + 5.0
     while time.time() < deadline:
         if not process_alive(pid):

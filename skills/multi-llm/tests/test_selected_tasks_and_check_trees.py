@@ -203,7 +203,7 @@ class TestColocatedCodeIsInTheCheckTree:
         record_check_tree(repo.phase_dir, "T002")
         code.write_text("value = 'changed by the check'\n")
         assert changed_since_bound(repo.phase_dir, "T002", []) == [
-            str(code.relative_to(repo.root))
+            code.relative_to(repo.root).as_posix()
         ]
         with pytest.raises(WritePromptError, match="its subagent changed"):
             record_batch(repo.phase_dir, "T002", "completed", check="passed")
