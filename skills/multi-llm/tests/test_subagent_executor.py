@@ -59,6 +59,10 @@ from tests.mock_launchers import (  # noqa: E402
     write_launcher,
 )
 
+#: What codex's sandbox probe runs inside `codex sandbox --`: `sh`, except on
+#: Windows, where `sh` is not on PATH and the plugin's interpreter takes its steps.
+_PROBE_SHELL = sys.executable if os.name == "nt" else "sh"
+
 #: Runner specs the read path ships a real `agent-readonly` profile for. The
 #: sentinel test and the equivalence test are parametrized over all three, so a
 #: profile that silently stops being read-only fails here rather than on a user's
@@ -4908,7 +4912,7 @@ class TestSandboxUnavailable:
         file, not only the write it stopped asking for."""
         provider = registry.get_provider("codex")
         expected_head = [
-            "codex", "sandbox", "-c", 'sandbox_mode="workspace-write"', "--", "sh",
+            "codex", "sandbox", "-c", 'sandbox_mode="workspace-write"', "--", _PROBE_SHELL,
         ]
         write_argv = provider.sandbox_probe_command(PROFILE_AGENT_WRITE)
         generate_argv = provider.sandbox_probe_command(PROFILE_GENERATE)
@@ -4937,9 +4941,9 @@ class TestSandboxUnavailable:
         provider = registry.get_provider("codex")
         argv = provider.sandbox_probe_command(PROFILE_AGENT_READONLY)
         assert argv[:6] == [
-            "codex", "sandbox", "-c", 'sandbox_mode="read-only"', "--", "sh",
+            "codex", "sandbox", "-c", 'sandbox_mode="read-only"', "--", _PROBE_SHELL,
         ]
-        assert argv[-1] == "exit 0"
+        assert argv[-1] == ("pass" if os.name == "nt" else "exit 0")
         # Nothing in it touches the repo — a read-only dispatch never writes,
         # and neither may the probe that stands in for it.
         assert ".multi-llm" not in argv[-1]
@@ -4950,6 +4954,23 @@ class TestSandboxUnavailable:
             if adapter.sandbox_probe_command(PROFILE_AGENT_READONLY)
         }
         assert answering == {"codex"}
+
+    def test_the_windows_write_probe_writes_one_byte_and_leaves_nothing(self, tmp_path):
+        """The command Windows runs inside `codex sandbox` (no `sh` there) is
+        python taking the POSIX script's steps; it is plain python, so it is
+        exercised here on every OS: exit 0 with the repo left as it was, and
+        non-zero when the write is denied."""
+        from utils.providers.codex import _WINDOWS_WRITE_PROBE
+
+        probe = [sys.executable, "-I", "-c", _WINDOWS_WRITE_PROBE]
+        assert subprocess.run(probe, cwd=tmp_path).returncode == 0
+        assert list(tmp_path.iterdir()) == []
+        (tmp_path / ".multi-llm" / "tmp").mkdir(parents=True)
+        (tmp_path / ".multi-llm" / "tmp" / "sandbox-probe-0").mkdir()
+        # A directory where the file goes: the open fails on every OS, as a
+        # denied write does, and the probe says so.
+        blocked = probe[:-1] + [_WINDOWS_WRITE_PROBE.replace("os.getpid()", "0")]
+        assert subprocess.run(blocked, cwd=tmp_path).returncode == 1
 
     def test_a_read_only_batch_is_refused_when_the_sandbox_cannot_start(
         self, tmp_path, runner_env, monkeypatch, capsys

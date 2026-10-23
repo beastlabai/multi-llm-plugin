@@ -99,13 +99,41 @@ def mock_path(bin_dir: Path, names: Iterable[str] = ()) -> str:
     if not _IS_WINDOWS:
         return os.pathsep.join([str(bin_dir), interpreter_dir, "/usr/bin", "/bin"])
     rest = [interpreter_dir] + [d for d in _WINDOWS_TOOL_DIRS if d != interpreter_dir]
+    _assert_no_provider_on(rest, names)
+    return os.pathsep.join([str(bin_dir), *rest])
+
+
+def shim_path(bin_dir: Path) -> str:
+    """A PATH of ``bin_dir`` alone, for a test that pins exactly that.
+
+    POSIX: ``bin_dir``, byte for byte. Windows: ``bin_dir`` and node's
+    directory, since each launcher there is a ``.cmd`` whose ``node`` comes off
+    PATH — held, like :func:`mock_path`, to resolve no provider CLI.
+    """
+    if not _IS_WINDOWS:
+        return str(bin_dir)
+    rest = [os.path.dirname(_NODE)] if _NODE else []
+    _assert_no_provider_on(rest, ())
+    return os.pathsep.join([str(bin_dir), *rest])
+
+
+def spawn_environment() -> Dict[str, str]:
+    """What a Windows child cannot start without, for a test that hands a
+    subprocess an environment it built by hand: cmd.exe, node and python all
+    read ``SYSTEMROOT``. Empty elsewhere."""
+    if not _IS_WINDOWS:
+        return {}
+    keys = ("SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT")
+    return {key: os.environ[key] for key in keys if key in os.environ}
+
+
+def _assert_no_provider_on(dirs: List[str], names: Iterable[str]) -> None:
     for name in sorted(set(names) | set(_registered_commands())):
-        leaked = shutil.which(name, path=os.pathsep.join(rest))
+        leaked = shutil.which(name, path=os.pathsep.join(dirs))
         assert leaked is None, (
             f"{name} resolves to {leaked!r} on the mock PATH with the mock removed; "
             f"this suite must never be able to reach a real provider CLI"
         )
-    return os.pathsep.join([str(bin_dir), *rest])
 
 
 def launcher_file(bin_dir: Path, name: str) -> Path:
@@ -271,12 +299,18 @@ def is_this_interpreter(argv0: str) -> bool:
     """Whether a child's ``sys.orig_argv[0]`` is the ``sys.executable`` it was
     spawned as.
 
-    Equal, except on a macOS framework build: there a venv's ``python`` re-execs
-    the framework's ``Python.app`` binary, so the child sees that binary as its
-    argv[0] (measured on the macOS runner, Homebrew python@3.15). Both then sit
-    in the same ``Python.framework``.
+    Equal, except where a venv's interpreter is a launcher: on Windows it starts
+    the base interpreter (``sys._base_executable``; measured on the runner), and
+    on a macOS framework build it re-execs the framework's ``Python.app`` binary
+    (Homebrew python@3.15 on the runner), which sits in the same
+    ``Python.framework``.
     """
     if argv0 == sys.executable:
+        return True
+    # A Windows venv's Scripts\python.exe is a launcher too: it starts the base
+    # interpreter, whose path is what the child reports.
+    base = getattr(sys, "_base_executable", "")
+    if _IS_WINDOWS and base and os.path.normcase(argv0) == os.path.normcase(base):
         return True
     marker = ".framework/"
     real = os.path.realpath(sys.executable)
