@@ -12,6 +12,15 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    # Windows runs and reports, but does not fail the workflow (a user
+    # decision, 2026-10-23). The suite grew from a few hundred tests to ~23 000
+    # on Linux-only development, and its first Windows run on master failed
+    # ~2 100 of them, almost all through a few test-harness causes: fixtures
+    # that build POSIX symlink/shebang mock CLIs with no `.cmd` shim, a Node
+    # harness importing `C:\` paths instead of `file://` URLs, and scripts
+    # spawned without a Windows-runnable extension. Porting those is owed
+    # (plans/codex-plugin-publish.md); turn this back off when the leg is green.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     steps:
       # Actions are pinned by commit SHA, not by tag, for the reason the publish
       # workflow spells out: `@v4`/`@v5` are mutable refs the action owner can
