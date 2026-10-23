@@ -17,37 +17,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - leg: macos-landlock
+          # Round 2 (after c60ce88d showed the file passes alone, 21 in 7 s): the
+          # hang needs what ran before it. Its neighbours in suite order, then the
+          # whole prefix through it.
+          - leg: macos-landlock-neighbours
             os: macos-latest
-            minutes: 30
+            minutes: 25
             targets: >-
               skills/multi-llm/tests/test_plugin_landlock_acceptance.py
               skills/multi-llm/tests/test_plugin_landlock_executor.py
-          # Alone, so its hang cannot cost the other files their summary.
-          - leg: macos-the-hang
+              skills/multi-llm/tests/test_plugin_landlock_fanout.py
+              skills/multi-llm/tests/test_plugin_landlock_surfaces.py
+          - leg: macos-prefix-through-the-hang
             os: macos-latest
-            minutes: 12
-            targets: skills/multi-llm/tests/test_plugin_landlock_surfaces.py
-          - leg: macos-after-the-hang
-            os: macos-latest
-            minutes: 60
-            after: test_plugin_landlock_write.py
-          - leg: windows-failing-and-unreached
-            os: windows-latest
-            minutes: 60
-            after: test_write_executor.py
-            targets: >-
-              skills/multi-llm/tests/test_codex_route.py
-              skills/multi-llm/tests/test_fake_lane_output_channel.py
-              skills/multi-llm/tests/test_human_task_answers.py
-              skills/multi-llm/tests/test_apply_backup_across_rounds.py
-              skills/multi-llm/tests/test_implement_stop_account.py
-              skills/multi-llm/tests/test_e2e_improve_modes.py
-              skills/multi-llm/tests/test_resume_why.py
-              skills/multi-llm/tests/test_plugin_landlock_executor.py
-              skills/multi-llm/tests/test_e2e_exec_subagents.py
-              skills/multi-llm/tests/test_check_gate_fixture.py
-              skills/multi-llm/tests/test_check_findings_hold_dependents.py
+            minutes: 70
+            through: test_plugin_landlock_surfaces.py
     name: probe (${{ matrix.leg }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.minutes }}
@@ -61,12 +45,17 @@ jobs:
         env:
           TARGETS: ${{ matrix.targets }}
           AFTER: ${{ matrix.after }}
+          THROUGH: ${{ matrix.through }}
         run: |
           set -euo pipefail
           files="$TARGETS"
           if [ -n "$AFTER" ]; then
             files="$files $(ls skills/multi-llm/tests/test_*.py | LC_ALL=C sort \
               | awk -v a="skills/multi-llm/tests/$AFTER" '$0 >= a')"
+          fi
+          if [ -n "$THROUGH" ]; then
+            files="$files $(ls skills/multi-llm/tests/test_*.py | LC_ALL=C sort \
+              | awk -v t="skills/multi-llm/tests/$THROUGH" '$0 <= t')"
           fi
           uv run --project skills/multi-llm -- pytest $files \
             -m "not live and not container and not package and not codex_jail" \
