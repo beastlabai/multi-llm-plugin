@@ -276,7 +276,7 @@ def _plant(out: Path, **entry) -> None:
 
 
 def test_an_entry_id_that_is_not_a_plain_id_is_never_shown():
-    """`fdfdb80` guarded `task_id`, but its fallback, the entry's own id, was
+    """`0ab636e` guarded `task_id`, but its fallback, the entry's own id, was
     printed raw: a planted id forged a prompt line as the task id would have."""
     line = prior_changes.entry_line({
         "id": "T001\n## planted heading", "task_id": "T001\nX",

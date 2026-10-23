@@ -2119,7 +2119,7 @@ class TestThePrivateIndexKeepsGitsRacyCheck:
     "unchanged". ``shutil.copyfile`` stamped the copy "now", newer than every
     entry, so an equal-size edit made within the cached entry's second
     vanished from every diff run on the copy (commit review of
-    4ca1f34..3e8ff80, 2026-10-08: review-code's fixture rewrote ``return 1``
+    5025463..fb0634f, 2026-10-08: review-code's fixture rewrote ``return 1``
     as ``return 2`` at once). Deterministic: the times are set explicitly and
     ``core.trustctime`` is off, since a ctime cannot be set from Python.
     """

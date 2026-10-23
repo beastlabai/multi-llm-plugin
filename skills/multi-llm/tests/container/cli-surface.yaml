@@ -82,7 +82,7 @@
 # cline, codex, copilot, muse, omp, pi, qwen-code, vibe); each was read against
 # the newly installed binary, every option an adapter dispatches still documented
 # with the same form, none marked deprecated. codex's row gains `-c`, which every
-# codex argv has carried since c485b42 (`-c features.plugins=false`) and this
+# codex argv has carried since dac3372 (`-c features.plugins=false`) and this
 # file had not recorded. Worth knowing, none needing a code change here:
 #
 #   * vibe 2.26.0 makes the "Unified Harness" its default runtime
@@ -299,7 +299,7 @@ clis:
       - "--model"
       - "--sandbox"
       - "--skip-git-repo-check"
-      - "-c"                  # `-c features.plugins=false` on every argv since c485b42
+      - "-c"                  # `-c features.plugins=false` on every argv since dac3372
 
   # THE ONE ROW WHOSE ONLY OTHER COVERAGE IS CREDENTIALED. cursor-agent has no
   # provider-lane row and can never have one (binary protobuf over Connect-RPC —

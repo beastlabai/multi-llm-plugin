@@ -248,7 +248,7 @@ def wrapper(tmp_path, monkeypatch):
 #: The temp dir every process on the machine shares. :func:`_slot_dirs` never
 #: scans it: another pytest worker's, or another run's, live slots are there,
 #: and the cleanup assertions read them as this test's leftovers (the user's
-#: commit review of 4ca1f34..3e8ff80, 2026-10-08).
+#: commit review of 5025463..fb0634f, 2026-10-08).
 _SHARED_TEMP = os.path.realpath(tempfile.gettempdir())
 
 

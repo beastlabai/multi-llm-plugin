@@ -184,7 +184,7 @@ class TestTheExecutorReadsIt:
         assert not executor.ran_no_check({"check": check})
 
     def test_a_report_repair_keeps_none_ran(self):
-        """F4 (eb93ee3) keeps a readable check across a report-only repair;
+        """F4 (150750e) keeps a readable check across a report-only repair;
         "no check ran" is kept too, so the repair cannot make it a pass."""
         assert executor._report_check_evidence({"check": NONE_RAN}) == NONE_RAN
 

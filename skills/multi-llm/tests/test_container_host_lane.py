@@ -683,7 +683,7 @@ def _refuse_empty_lane(config, utc: str) -> None:
     module's teardown), and answered from the census's final `ran` list. It
     used to be asked at every key skip, which could not know whether a later
     row would run: a keyless subscription run skips opencode, the first host in
-    the schedule, before any codex row (f4d2382), and the prediction added for
+    the schedule, before any codex row (246d270), and the prediction added for
     that, "does some row of the TIER have a credential", was True under
     `-k '[opencode-ask]'`, where the tier's codex rows were never collected,
     and under a forced `MLLM_E2E_HOST_CREDS=fallback` with no credential file.

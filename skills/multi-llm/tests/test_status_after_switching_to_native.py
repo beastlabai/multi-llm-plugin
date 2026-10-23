@@ -2,7 +2,7 @@
 
 The commit review of 2026-10-08 ("Exclusions and limits"): "Stale executor
 status after switching to native execution was reproduced, but its
-suppression guards predate 4ca1f34." Its reproduction: implement stops on
+suppression guards predate 5025463." Its reproduction: implement stops on
 the executor leg (the check-gate fixture: T002's check reports findings,
 T005 is refused by the write policy), the user goes on with the same phase
 on the Claude Code native leg (`--resume --human-task T002=done

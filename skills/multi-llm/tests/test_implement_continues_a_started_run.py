@@ -122,7 +122,7 @@ class TestTheExecutorLeg:
         assert "T001" in _ids_in(log.read_text(encoding="utf-8"))
 
     def test_an_explicit_task_rerun_is_left_alone(self, repo, capsys):
-        """4ca1f34's `--task` path: it reruns the task it names, no resume."""
+        """5025463's `--task` path: it reruns the task it names, no resume."""
         _stop_after_t001(repo)
         code, text, log = _second_run(repo, capsys, "--task", "T001")
         assert CONTINUED not in text
@@ -508,7 +508,7 @@ class TestALaterCycleOnTheNativeLeg:
         assert "T001" in text and "T002 (" not in text and "T003 (" not in text, text
 
     def test_an_interrupted_task_rerun_is_handed_out_again(self, repo, capsys):
-        """4ca1f34's `--task` rerun of a completed task, the host gone before
+        """5025463's `--task` rerun of a completed task, the host gone before
         its `batch-done`: the plain emit continues it and hands T001 out,
         instead of refusing it on the log line of the run before."""
         _finish_once(repo)
@@ -645,7 +645,7 @@ class TestAStartOverClearsTheEarlierPrompts:
 
 
 class TestAFirstImplementSetsNothingAside:
-    """Fix round 18 (run 7 #9, the container goldens re-seeded at 8e8f559): a
+    """Fix round 18 (run 7 #9, the container goldens re-seeded at 72be2b3): a
     plain FIRST implement ran the start-over step, which set nothing aside
     yet stamped `implement_task_reset_at` for every code task and recorded
     implement started; the executor's completion popped that record and left

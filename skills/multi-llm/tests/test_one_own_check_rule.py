@@ -207,7 +207,7 @@ class TestTheExecutorLeg:
         reply = {"check": {"passed": True, "findings": [],
                            "ran": [{"command": PLACEHOLDER, "outcome": "passed"}]}}
         assert executor.ran_no_check(reply)
-        # F4 (eb93ee3): a report-only repair keeps it, so the repair cannot
+        # F4 (150750e): a report-only repair keeps it, so the repair cannot
         # turn it into a pass.
         assert executor._report_check_evidence(reply) == reply["check"]
 

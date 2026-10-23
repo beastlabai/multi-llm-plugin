@@ -796,7 +796,7 @@ def _copy_index_keeping_its_time(source: str, target: str) -> None:
     that check off: an edit of the same size made within the cached entry's
     second (review-code's fixture rewrites ``return 1`` as ``return 2`` at
     once) matched its stale stat data and dropped out of every diff the review
-    ran on the copy (commit review of 4ca1f34..3e8ff80, 2026-10-08). The copy
+    ran on the copy (commit review of 5025463..fb0634f, 2026-10-08). The copy
     is read from one open file, so the time it carries is that file's even
     if git replaces the index meanwhile. A copy that fails halfway is removed.
     """

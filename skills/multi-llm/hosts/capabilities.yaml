@@ -285,7 +285,7 @@ hosts:
     # a credential-free floor (the last rung of `resolve_subagent_runner`'s
     # ladder, chosen so a zero-config install dispatches at all), not an
     # independent opinion about which model is current. `providers.yaml` is where
-    # the codex model is actually chosen and re-measured (249442a moved the whole
+    # the codex model is actually chosen and re-measured (3f95a6e moved the whole
     # fan-out to gpt-6-astra against a live catalog), so the edit only ever runs
     # one way: the roster moves, then this pin. The fan-out's `:xhigh` effort
     # suffix does NOT come across — the floor takes the model's default effort

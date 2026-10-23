@@ -2692,7 +2692,7 @@ def superseded_by_native(
     """The native stamp that makes *view* an earlier run, else ``None``.
 
     The commit review of 2026-10-08 ("stale executor status after switching
-    to native execution", reproduced, its guards older than 4ca1f34): an
+    to native execution", reproduced, its guards older than 5025463): an
     executor run of a write phase (a tool route or ``--exec-subagents``)
     leaves ``{phase}/.status.json`` and ``write_batch_report.json`` behind,
     and when the user went on with the same phase on the Claude Code native

@@ -881,7 +881,7 @@ class TestOneRecordDoneCommandAtAGate:
 
     def test_a_tool_routes_poll_names_the_tasks_and_no_command(self, repo, capsys):
         """The detached run's terminal poll: its notice names T001 and T002
-        and leaves the one command to the section (45efcf5's rule, which
+        and leaves the one command to the section (0c8ee5c's rule, which
         the free manual task's second command used to bypass)."""
         from utils import run_status, status_file
 

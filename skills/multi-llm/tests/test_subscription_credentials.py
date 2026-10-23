@@ -314,7 +314,7 @@ class TestAKeylessSubscriptionRunIsNotRefusedAsEmpty:
     UTC = "20261002T000000Z"
 
     def test_a_skip_never_refuses_the_lane(self, lane, monkeypatch, tmp_path):
-        """The f4d2382 regression: opencode skips first, a codex row runs after."""
+        """The 246d270 regression: opencode skips first, a codex row runs after."""
         monkeypatch.setattr(harness, "subscription_available",
                             lambda host: host in ("codex", "claude-code"))
         config = self._Config(self.PROVIDER)
@@ -331,7 +331,7 @@ class TestAKeylessSubscriptionRunIsNotRefusedAsEmpty:
 
         The tier's codex rows were never collected, so the opencode skip was the
         whole lane. The tier-wide prediction said a codex row could still run and
-        the lane exited 0; before f4d2382 the same run exited 1.
+        the lane exited 0; before 246d270 the same run exited 1.
         """
         monkeypatch.setattr(harness, "subscription_available",
                             lambda host: host in ("codex", "claude-code"))

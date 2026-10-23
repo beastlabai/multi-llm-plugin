@@ -1,6 +1,6 @@
 """The frozen `legacy/` core still closes the two phases the Python moved.
 
-Reviewer finding 3 (fix round 6, 2026-10-05): since 3c2f5bb the write
+Reviewer finding 3 (fix round 6, 2026-10-05): since 4dbcae2 the write
 phases' native emit path records the phase *started* and only the host's
 closing step (`--mark-completed`, `finalize_tracking.py --mark-completed`)
 records it completed. The legacy copies were written against the emit-time
