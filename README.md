@@ -12,7 +12,7 @@ Orchestrate **plan reviews, task generation, implementation, and code reviews ac
 
 `multi-llm` fans a single workflow out to several CLI-based LLMs ([Cursor Agent](https://cursor.com/docs/cli/overview), [Gemini CLI](https://geminicli.com/docs/get-started/), [Grok Build](https://docs.x.ai/build), [Codex](https://developers.openai.com/codex/cli), [OpenCode](https://opencode.ai/docs/cli/), [Kilocode](https://kilo.ai/docs/cli), [Cline](https://docs.cline.bot/), [goose](https://block.github.io/goose/), [Aider](https://aider.chat/), [Antigravity CLI](https://antigravity.google/docs/cli/using), [Pi](https://pi.dev/docs/latest/usage), [Muse Code](https://dev.meta.ai/docs/muse-code/extending), [Kimi Code](https://code.kimi.com/docs), [Qwen Code](https://qwenlm.github.io/qwen-code-docs/), [GitHub Copilot CLI](https://docs.github.com/en/copilot/concepts/agents/about-copilot-cli), [Mistral Vibe](https://docs.mistral.ai/vibe/), [oh-my-pi](https://github.com/can1357/oh-my-pi), and [Claude Code](https://code.claude.com/docs/en/) itself), validates and consolidates their suggestions, and hands the host structured instructions to apply the results. The orchestrators never modify your code directly - they produce JSON that the host executes through its own tools, so every change stays reviewable.
 
-It installs as a **Claude Code plugin**, and the same workflow runs inside **Codex** and **OpenCode** too - as a Codex plugin and an OpenCode npm package, or, until those are published, through `install-host`, which writes a native entry point into either one. See [Installation](#1-installation) and [docs/hosts.md](docs/hosts.md).
+It installs as a **Claude Code plugin**, and the same workflow runs inside **Codex** and **OpenCode** too - as a Codex plugin, or through `install-host`, which writes a native entry point into either one (the OpenCode npm package is not published yet; until it is, `install-host opencode` is the OpenCode route). See [Installation](#1-installation) and [docs/hosts.md](docs/hosts.md).
 
 ---
 
@@ -56,8 +56,6 @@ Then invoke the skill (plugin skills are namespaced `plugin:skill`):
 ### 1.2 Codex
 
 Installs as a Codex plugin: a `multi_llm` tool plus a `multi-llm:multi-llm` skill. Needs codex >= 0.159.2, python3 >= 3.9 and `uv` on `PATH`. Linux is verified; on Windows use the file route.
-
-> **This route is not yet published.** The `release` ref the install names does not exist yet, so the commands below fail with a git error until the first release. Until then, use the file route, `install-host codex`, described in [docs/hosts.md](docs/hosts.md).
 
 ```bash
 codex plugin marketplace add beastlabai/multi-llm-plugin --ref release \

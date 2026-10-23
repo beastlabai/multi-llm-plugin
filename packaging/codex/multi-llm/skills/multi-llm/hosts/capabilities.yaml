@@ -411,12 +411,20 @@ hosts:
       max_concurrent_subagents: documented
       timeout_ceiling_s: unknown
       timeout_override: unknown
-      # `documented` until a Git-route install is recorded: the `release` ref
-      # the install line names does not exist until the publish workflow first
-      # moves it, so today `marketplace add … --ref release` fails loudly with a
-      # git error. The container's local-path installs never promote this line
-      # (a local directory is not the published route).
-      package: documented
+      # PROMOTED 2026-10-23 with the first release, codex-v0.1.0 (ae089856),
+      # on the two Git-route records rule (j) asks for, never the container's
+      # local-path installs: the offline Git-route row `codex-package-git-route`
+      # (an ssh://localhost bare repository with `release` one commit behind,
+      # `--ref release` and both `--sparse` paths; green on codex 0.159.2,
+      # 0.163.0 and 0.164.0 in the stamped gate session 2bc2b6ca), and the
+      # manual network check from GitHub itself,
+      # tests/container/records/20261023T132656Z-codex-release-network-check.json
+      # (a fresh stock-image container, codex 0.164.0, all six criteria pass
+      # for the tag). After promotion the published `--ref release` line was
+      # run the same way in a second fresh container: the snapshot resolved to
+      # the tagged commit, all six criteria passed, and `marketplace upgrade` +
+      # `plugin add` left the install byte-identical. Linux only.
+      package: verified
 
   opencode:
     # commands/ is PLURAL — the singular command/ path is simply not scanned.

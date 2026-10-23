@@ -653,11 +653,19 @@ class TestConservativeResolution:
     #: fallback`). It promotes `next_command.skill` and nothing else: the plugin
     #: route (`next_command.default`), the Stop hook (not installed under plain-skill
     #: staging) and TUI typing were not exercised.
+    #:
+    #: codex 0.159.2 / 0.163.0 / 0.164.0, 2026-10-23, the first release
+    #: (codex-v0.1.0, ae089856): `package` on the two Git-route records rule (j)
+    #: names — the offline `codex-package-git-route` row in the stamped gate
+    #: session, and the manual network check from GitHub
+    #: (records/20261023T132656Z-codex-release-network-check.json, six of six),
+    #: plus the published `--ref release` line re-run after promotion. It
+    #: promotes `package` and nothing else.
     RECORDED_SMOKES = {
         "claude-code": {"next_command.skill"},
         "codex": {
             "invocation", "session_runner_provider",
-            "next_command.default", "next_command.package",
+            "next_command.default", "next_command.package", "package",
         },
         "opencode": {
             "shim", "installable", "install_paths", "reload", "arguments",

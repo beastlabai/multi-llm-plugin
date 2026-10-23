@@ -272,6 +272,12 @@ class TestNoUnlistedReader:
                 "test_install_host.py", "test_instruction_portability.py",
             ):
                 continue
+            # A committed run record QUOTES what ran on a user's machine (the
+            # codex-v0.1.0 network check's dispatcher argv was
+            # `/home/checker/.local/bin/uv`); it is evidence, never a reader of
+            # the list, and editing it to satisfy this scan would falsify it.
+            if path.parent.as_posix().endswith("tests/container/records"):
+                continue
             if line.startswith(CODEX_PAYLOAD_COPY):
                 hits.add(line[len(CODEX_PAYLOAD_COPY):])
                 continue

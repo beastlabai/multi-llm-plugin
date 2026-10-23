@@ -65,9 +65,9 @@ Use the multi-llm skill with exactly these arguments: plans/my-feature.md
 Use the multi-llm skill with exactly these arguments: --review-code plans/my-feature.md
 ```
 
-**`codex` — install via codex-marketplace (not yet published)** — documented
+**`codex` — install via codex-marketplace** — verified
 
-A second route on `codex`, and the one this documentation will recommend once it is published. **It is not yet published**: the `release` ref the first command names does not exist until the publish workflow first moves it, so today `codex plugin marketplace add … --ref release` fails **loudly**, with a git error naming the missing ref — nothing is half-installed. Until then, the `install-host codex` route above is what works.
+The recommended route on `codex`: two commands in this order, no config file edited by hand, and no baked path that goes stale on an update — the plugin is a copy of the `release` ref, installed where codex resolves it.
 
 **Read this before installing.** The plugin's tool runs the orchestrator from a server codex starts *outside* its own exec sandbox, so the session's `--sandbox` posture does not govern it: installing the plugin gives a codex session a write path it did not have. So under a read-only posture, or one it cannot read, the tool **refuses write-capable modes** before it spawns anything, unless `MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1` is in the environment that starts codex. Despite its name, `MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1` lifts only this tool's own refusal of write-capable modes under a read-only or unreadable session posture. It never lets the codex processes the orchestrator starts write without a sandbox, and it does not change which sandbox they run under: a codex editing job refused because codex's own sandbox cannot start on this host stays refused with it set. Provider CLIs the orchestrator dispatches stay under their own sandboxes.
 
@@ -166,7 +166,7 @@ Repair is always re-render, never in-place patching, and a re-install with nothi
 
 ## Codex plugin route
 
-The README has the two install commands. This section has what they don't cover. **The route is not yet published**: the `release` ref the install names does not exist until the first release is promoted, so `--ref release` does not resolve yet and `codex plugin marketplace add` fails with a git error. **What works today is `install-host codex`** (the file route above).
+The README has the two install commands. This section has what they don't cover. The route is published: `release` points at the newest promoted `codex-v*` tag (first release `codex-v0.1.0`), and `install-host codex` (the file route above) remains the alternative.
 
 **Floors.** These are published but not enforced, since nothing in the plugin checks them: **codex >= 0.159.2**, **python3 >= 3.9** on `PATH` under that exact name, and **uv** at any version. Neither install command installs dependencies. The first invocation builds the plugin's venv (`pyyaml` alone), which needs the network or a warm uv cache.
 
