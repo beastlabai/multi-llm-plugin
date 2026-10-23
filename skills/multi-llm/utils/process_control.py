@@ -1941,6 +1941,18 @@ def _stdio_already_on(log_path: str) -> bool:
     return True
 
 
+def _rebind_std_streams() -> None:
+    """``sys.stdout``/``sys.stderr`` as fresh text streams over fds 1 and 2.
+
+    For Windows, after :func:`enter_detached_worker` pointed the descriptors
+    at the log: the streams Python opened at start may not follow a ``dup2``
+    there (see that function). :func:`~utils.stream_bootstrap.bootstrap_streams`
+    sets them up as usual afterwards.
+    """
+    sys.stdout = open(1, "w", encoding="utf-8", errors="replace", closefd=False)
+    sys.stderr = open(2, "w", encoding="utf-8", errors="replace", closefd=False)
+
+
 def enter_detached_worker(log_path: Optional[str]) -> None:
     """Worker-side setup: own the log, own the process group, own the tree.
 
@@ -1954,7 +1966,7 @@ def enter_detached_worker(log_path: Optional[str]) -> None:
     cannot drop the bytes the first one wrote.
 
     Where the comparison fails (a worker launched some other way, or one whose
-    log was rotated out from under it) POSIX reopens fds 1 and 2 onto *log_path*,
+    log was rotated out from under it) fds 1 and 2 are reopened onto *log_path*,
     so no application output — the worker's own or any provider subprocess's —
     passes through a descriptor the host handed us. Either way the stream
     bootstrap is re-run so the log gets line-buffered UTF-8 with
@@ -1963,12 +1975,19 @@ def enter_detached_worker(log_path: Optional[str]) -> None:
     Windows-piped stream defaults to cp1252 and raises ``UnicodeEncodeError`` on
     the first em dash a model emits.
 
-    Windows: the launcher already handed the log in as stdout/stderr, so there is
-    nothing to reopen; instead assign this process to a Job Object with
-    ``KILL_ON_JOB_CLOSE`` so the OS reaps provider children even if the worker
-    crashes without running a handler.
+    Windows: the launcher hands the log in as stdout/stderr too, but nothing
+    makes every process between it and the worker pass the handle on: behind a
+    ``uv`` that is a ``.cmd`` shim (cmd.exe, node, then python, under
+    ``DETACHED_PROCESS``) the worker's stdout was not the log (Windows CI,
+    2026-10-23: the run reached ``done``, its log stayed empty). So the same
+    comparison and reopen run there, and
+    ``sys.stdout``/``sys.stderr`` are rebuilt over the new descriptors: the
+    old ones may be ``None`` (no valid handle at start) or console streams,
+    which write through ``WriteConsoleW`` and a file handle refuses. The worker
+    also joins a Job Object with ``KILL_ON_JOB_CLOSE`` so the OS reaps provider
+    children even if the worker crashes without running a handler.
     """
-    if not IS_WINDOWS and log_path and not _stdio_already_on(log_path):
+    if log_path and not _stdio_already_on(log_path):
         try:
             fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
         except OSError:
@@ -1983,6 +2002,8 @@ def enter_detached_worker(log_path: Optional[str]) -> None:
             os.dup2(fd, 2)
             if fd > 2:
                 os.close(fd)
+            if IS_WINDOWS:
+                _rebind_std_streams()
     if IS_WINDOWS:  # pragma: no cover - Windows
         _assign_own_job_object()
     from .stream_bootstrap import bootstrap_streams

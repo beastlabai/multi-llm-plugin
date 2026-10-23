@@ -242,7 +242,7 @@ class TestTheStopAccountsForEveryTask:
 
         summary = Path(
             json.loads((repo.phase_dir / "write_batch_report.json").read_text())["summary_file"]
-        ).read_text()
+        ).read_text(encoding="utf-8")
         assert (
             "**Tasks in this decomposition**: 5 — 1 done, 1 failed (T002), "
             "2 not run (T003, T004), 1 deferred manual (T005)."
@@ -356,7 +356,7 @@ class TestAResumeThatChangesNothingDoesNotRerunTheCheck:
         report = json.loads((repo.phase_dir / "write_batch_report.json").read_text())
         assert report["finalized"] is True
         assert report["not_run_tasks"] == {}
-        summary = Path(report["summary_file"]).read_text()
+        summary = Path(report["summary_file"]).read_text(encoding="utf-8")
         assert "**Tasks in this decomposition**: 5 — 4 done, 1 deferred manual (T005)." in summary
 
 
@@ -379,7 +379,7 @@ class TestAcceptingTheFailure:
         assert state.is_phase_completed("implement")
         report = json.loads((repo.phase_dir / "write_batch_report.json").read_text())
         assert report["accepted_tasks"] == {"T002": state.get_task_status_reason("T002")}
-        summary = Path(report["summary_file"]).read_text()
+        summary = Path(report["summary_file"]).read_text(encoding="utf-8")
         assert "| T002 | accepted after failing |" in summary
         assert "1 accepted after failing (T002)" in summary
         mirror = json.loads((repo.phase_dir / ".status.json").read_text())

@@ -159,12 +159,14 @@ from typing import Any, Dict, List, Optional
 
 
 def bootstrap_streams() -> None:
-    """Force UTF-8 stdout/stderr, mirroring utils.stream_bootstrap.
+    """Force UTF-8 stdin/stdout/stderr, mirroring utils.stream_bootstrap.
 
     The orchestrator captures this process's output with ``encoding="utf-8"``.
     On Windows a piped stdout otherwise defaults to the locale codec (cp1252),
     so a fixture/response containing an em dash or any non-cp1252 character
     would either raise UnicodeEncodeError here or arrive as mojibake there.
+    The prompt comes in on stdin as UTF-8 the same way, and read as cp1252 it
+    reached the call log with every em dash as ``â€”``.
     """
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -172,6 +174,12 @@ def bootstrap_streams() -> None:
             continue
         try:
             reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+    reconfigure = getattr(sys.stdin, "reconfigure", None)
+    if reconfigure is not None:
+        try:
+            reconfigure(encoding="utf-8", errors=sys.stdin.errors)
         except (AttributeError, ValueError, OSError):
             pass
 

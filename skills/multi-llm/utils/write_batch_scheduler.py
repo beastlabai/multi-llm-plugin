@@ -13775,9 +13775,10 @@ class WriteBatchScheduler:
             from .plan_updater import insert_implementation_summary_reference
         except ImportError:  # pragma: no cover
             from utils.plan_updater import insert_implementation_summary_reference
+        # `/`-spelled like `get_relative_output_path`'s: a link in the plan.
         relative = self.summary_file_relative or os.path.relpath(
             summary_file, str(Path(self.plan_file).parent)
-        )
+        ).replace(os.sep, "/")
         try:
             path = Path(self.plan_file)
             content = path.read_text(encoding="utf-8")

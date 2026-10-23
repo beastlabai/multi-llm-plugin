@@ -1290,7 +1290,9 @@ class _ApplyRig:
 
         plan = repo.root / "plans" / "apply.md"
         if not plan.exists():
-            plan.write_text(APPLY_PLAN, encoding="utf-8")
+            # Bytes: `backup.<sha8>.md` names the sha256 of APPLY_PLAN's LF
+            # bytes, which a text-mode write turns into CRLF on Windows.
+            plan.write_bytes(APPLY_PLAN.encode("utf-8"))
         review = repo.root / "plans" / "apply" / "review-plan"
         review.mkdir(parents=True, exist_ok=True)
         (review / "grouped.json").write_text(json.dumps(_groups(prefix)), encoding="utf-8")
