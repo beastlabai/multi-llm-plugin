@@ -12,7 +12,6 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
-from http.server import ThreadingHTTPServer
 
 sys.path[:0] = ["/opt/mllm/skill", "/opt/mllm/rig"]
 
@@ -35,7 +34,7 @@ def main():
     canary.write_text("#!/bin/sh\nprintf path-ok\n")
     canary.chmod(0o755)
     os.environ["PATH"] = str(canary.parent) + ":" + os.environ["PATH"]
-    server = ThreadingHTTPServer(("127.0.0.1", 0), stub_server.Handler)
+    server = stub_server.LoopbackHTTPServer(("127.0.0.1", 0), stub_server.Handler)
     os.environ["MLLM_STUB_PORT"] = str(server.server_port)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
