@@ -1,0 +1,416 @@
+{
+  "kind": "codex-release-network-check",
+  "rehearsal": false,
+  "plan": "plans/codex-native-plugin.md Phase 4 (the manual network check) / A6 step 6; plans/codex-plugin-publish.md step 4",
+  "stamp": "20261023T132656Z",
+  "tag": "codex-v0.1.0",
+  "sha": "ae089856bb178d9cadc82cdd20aec1e2e2aaaae5",
+  "source": "github.com/beastlabai/multi-llm-plugin (public), fetched by codex over HTTPS",
+  "source_url": "https://github.com/beastlabai/multi-llm-plugin.git",
+  "machine_kind": "fresh container from the stock image docker.io/library/node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d: codex installed from npm, uv from astral.sh/uv/install.sh, a new non-root user with no ~/.codex before the run; no checkout of this repository, no e2e image, no mirror",
+  "machine": {
+    "codex_home_existed_before": false,
+    "os": "Debian GNU/Linux 12 (bookworm)",
+    "kernel": "Linux 510e8124d6bd 7.0.14-linuxkit #1 SMP PREEMPT_DYNAMIC Tue Oct 20 23:09:17 UTC 2026 x86_64 GNU/Linux",
+    "codex": "codex-cli 0.164.0",
+    "python3": "Python 3.11.2",
+    "uv": "uv 0.13.5 (x86_64-unknown-linux-gnu)",
+    "git": "git version 2.39.5",
+    "home": "/home/checker",
+    "codex_home": "/home/checker/.codex (CODEX_HOME unset, codex default)",
+    "repo_checkout_present": false
+  },
+  "install_line": [
+    "codex plugin marketplace add beastlabai/multi-llm-plugin --ref codex-v0.1.0 --sparse .agents --sparse packaging/codex",
+    "codex plugin add multi-llm@beastlabai"
+  ],
+  "commands": [
+    {
+      "leg": "machine",
+      "argv": [
+        "sh",
+        "-c",
+        ". /etc/os-release && echo \"$PRETTY_NAME\""
+      ],
+      "exit": 0,
+      "wall_clock_s": 0.0,
+      "stdout": "Debian GNU/Linux 12 (bookworm)\n",
+      "stderr": ""
+    },
+    {
+      "leg": "machine",
+      "argv": [
+        "uname",
+        "-a"
+      ],
+      "exit": 0,
+      "wall_clock_s": 0.0,
+      "stdout": "Linux 510e8124d6bd 7.0.14-linuxkit #1 SMP PREEMPT_DYNAMIC Tue Oct 20 23:09:17 UTC 2026 x86_64 GNU/Linux\n",
+      "stderr": ""
+    },
+    {
+      "leg": "machine",
+      "argv": [
+        "codex",
+        "--version"
+      ],
+      "exit": 0,
+      "wall_clock_s": 0.03,
+      "stdout": "codex-cli 0.164.0\n",
+      "stderr": ""
+    },
+    {
+      "leg": "machine",
+      "argv": [
+        "python3",
+        "--version"
+      ],
+      "exit": 0,
+      "wall_clock_s": 0.0,
+      "stdout": "Python 3.11.2\n",
+      "stderr": ""
+    },
+    {
+      "leg": "machine",
+      "argv": [
+        "bash",
+        "-lc",
+        "uv --version"
+      ],
+      "exit": 0,
+      "wall_clock_s": 0.0,
+      "stdout": "uv 0.13.5 (x86_64-unknown-linux-gnu)\n",
+      "stderr": ""
+    },
+    {
+      "leg": "machine",
+      "argv": [
+        "git",
+        "--version"
+      ],
+      "exit": 0,
+      "wall_clock_s": 0.0,
+      "stdout": "git version 2.39.5\n",
+      "stderr": ""
+    },
+    {
+      "leg": "install",
+      "argv": [
+        "codex",
+        "plugin",
+        "marketplace",
+        "add",
+        "beastlabai/multi-llm-plugin",
+        "--ref",
+        "codex-v0.1.0",
+        "--sparse",
+        ".agents",
+        "--sparse",
+        "packaging/codex"
+      ],
+      "exit": 0,
+      "wall_clock_s": 2.74,
+      "stdout": "Added marketplace `beastlabai` from https://github.com/beastlabai/multi-llm-plugin.git#codex-v0.1.0.\nInstalled marketplace root: /home/checker/.codex/.tmp/marketplaces/beastlabai\n",
+      "stderr": ""
+    },
+    {
+      "leg": "install",
+      "argv": [
+        "codex",
+        "plugin",
+        "add",
+        "multi-llm@beastlabai"
+      ],
+      "exit": 0,
+      "wall_clock_s": 0.04,
+      "stdout": "Added plugin `multi-llm` from marketplace `beastlabai`.\nInstalled plugin root: /home/checker/.codex/plugins/cache/beastlabai/multi-llm/0.1.0\n",
+      "stderr": ""
+    },
+    {
+      "leg": "inspect",
+      "argv": [
+        "codex",
+        "plugin",
+        "marketplace",
+        "list",
+        "--json"
+      ],
+      "exit": 0,
+      "wall_clock_s": 0.03,
+      "stdout": "{\n  \"marketplaces\": [\n    {\n      \"name\": \"beastlabai\",\n      \"root\": \"/home/checker/.codex/.tmp/marketplaces/beastlabai\",\n      \"marketplaceSource\": {\n        \"sourceType\": \"git\",\n        \"source\": \"https://github.com/beastlabai/multi-llm-plugin.git\"\n      }\n    }\n  ]\n}\n",
+      "stderr": ""
+    },
+    {
+      "leg": "inspect",
+      "argv": [
+        "codex",
+        "plugin",
+        "list",
+        "--json"
+      ],
+      "exit": 0,
+      "wall_clock_s": 0.03,
+      "stdout": "{\n  \"installed\": [\n    {\n      \"pluginId\": \"multi-llm@beastlabai\",\n      \"name\": \"multi-llm\",\n      \"marketplaceName\": \"beastlabai\",\n      \"version\": \"0.1.0\",\n      \"installed\": true,\n      \"enabled\": true,\n      \"source\": {\n        \"source\": \"local\",\n        \"path\": \"/home/checker/.codex/.tmp/marketplaces/beastlabai/packaging/codex/multi-llm\"\n      },\n      \"marketplaceSource\": {\n        \"sourceType\": \"git\",\n        \"source\": \"https://github.com/beastlabai/multi-llm-plugin.git\"\n      },\n      \"installPolicy\": \"AVAILABLE\",\n      \"authPolicy\": \"ON_INSTALL\"\n    }\n  ],\n  \"available\": []\n}\n",
+      "stderr": ""
+    },
+    {
+      "leg": "inspect",
+      "argv": [
+        "git",
+        "-C",
+        "/home/checker/.codex/.tmp/marketplaces/beastlabai",
+        "rev-parse",
+        "HEAD"
+      ],
+      "exit": 0,
+      "wall_clock_s": 0.0,
+      "stdout": "ae089856bb178d9cadc82cdd20aec1e2e2aaaae5\n",
+      "stderr": ""
+    },
+    {
+      "leg": "verify",
+      "argv": [
+        "git",
+        "clone",
+        "-q",
+        "--depth",
+        "1",
+        "--branch",
+        "codex-v0.1.0",
+        "https://github.com/beastlabai/multi-llm-plugin.git",
+        "/tmp/refcheck"
+      ],
+      "exit": 0,
+      "wall_clock_s": 2.03,
+      "stdout": "",
+      "stderr": "Note: switching to 'ae089856bb178d9cadc82cdd20aec1e2e2aaaae5'.\n\nYou are in 'detached HEAD' state. You can look around, make experimental\nchanges and commit them, and you can discard any commits you make in this\nstate without impacting any branches by switching back to a branch.\n\nIf you want to create a new branch to retain commits you create, you may\ndo so (now or later) by using -c with the switch command. Example:\n\n  git switch -c <new-branch-name>\n\nOr undo this operation with:\n\n  git switch -\n\nTurn off this advice by setting config variable advice.detachedHead to false\n\n"
+    },
+    {
+      "leg": "verify",
+      "argv": [
+        "git",
+        "-C",
+        "/tmp/refcheck",
+        "rev-parse",
+        "HEAD"
+      ],
+      "exit": 0,
+      "wall_clock_s": 0.0,
+      "stdout": "ae089856bb178d9cadc82cdd20aec1e2e2aaaae5\n",
+      "stderr": ""
+    },
+    {
+      "leg": "verify",
+      "argv": [
+        "git",
+        "-C",
+        "/tmp/refcheck",
+        "ls-tree",
+        "-r",
+        "HEAD",
+        "packaging/codex/multi-llm/"
+      ],
+      "exit": 0,
+      "wall_clock_s": 0.0,
+      "stdout": "100644 blob b1d44ebdca466138be5f4559d59cc636bdb90b44\tpackaging/codex/multi-llm/.codex-plugin/plugin.json\n100644 blob 52ddcd918f53aa5a7ce186d9341d8f107a0ee362\tpackaging/codex/multi-llm/.mcp.json\n100644",
+      "stderr": ""
+    },
+    {
+      "leg": "inspect",
+      "argv": [
+        "codex",
+        "mcp",
+        "get",
+        "multi_llm",
+        "--json"
+      ],
+      "exit": 0,
+      "wall_clock_s": 0.03,
+      "stdout": "{\n  \"name\": \"multi_llm\",\n  \"enabled\": true,\n  \"disabled_reason\": null,\n  \"transport\": {\n    \"type\": \"stdio\",\n    \"command\": \"python3\",\n    \"args\": [\n      \"./mcp/server.py\"\n    ],\n    \"env\": null,\n    \"env_vars\": [\n      \"CODEX_HOME\",\n      \"MULTI_LLM_PROVIDERS_CONFIG\",\n      \"MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE\",\n      \"MULTI_LLM_GIT_CREDENTIAL_HELPER\",\n      \"MULTI_LLM_HOST\",\n      \"MULTI_LLM_UV\",\n      \"MULTI_LLM_UV_RUN_ARGS\",\n      \"MULTI_LLM_SKILL_DIR\",\n      \"MULTI_LLM_MAX_DETACHED\",\n      \"MULTI_LLM_HEARTBEAT_INTERVAL_S\",\n      \"MULTI_LLM_HANDSHAKE_TIMEOUT_S\",\n      \"MULTI_LLM_REPLAY_",
+      "stderr": ""
+    },
+    {
+      "leg": "inspect",
+      "argv": [
+        "codex",
+        "debug",
+        "prompt-input"
+      ],
+      "exit": 0,
+      "note": "the prompt itself is not recorded; its skill roots and the locator line are"
+    }
+  ],
+  "plugin_list": {
+    "installed": [
+      {
+        "pluginId": "multi-llm@beastlabai",
+        "name": "multi-llm",
+        "marketplaceName": "beastlabai",
+        "version": "0.1.0",
+        "installed": true,
+        "enabled": true,
+        "source": {
+          "source": "local",
+          "path": "/home/checker/.codex/.tmp/marketplaces/beastlabai/packaging/codex/multi-llm"
+        },
+        "marketplaceSource": {
+          "sourceType": "git",
+          "source": "https://github.com/beastlabai/multi-llm-plugin.git"
+        },
+        "installPolicy": "AVAILABLE",
+        "authPolicy": "ON_INSTALL"
+      }
+    ],
+    "available": []
+  },
+  "marketplace_list": {
+    "marketplaces": [
+      {
+        "name": "beastlabai",
+        "root": "/home/checker/.codex/.tmp/marketplaces/beastlabai",
+        "marketplaceSource": {
+          "sourceType": "git",
+          "source": "https://github.com/beastlabai/multi-llm-plugin.git"
+        }
+      }
+    ]
+  },
+  "mcp_get": {
+    "name": "multi_llm",
+    "enabled": true,
+    "disabled_reason": null,
+    "transport": {
+      "type": "stdio",
+      "command": "python3",
+      "args": [
+        "./mcp/server.py"
+      ],
+      "env": null,
+      "env_vars": [
+        "CODEX_HOME",
+        "MULTI_LLM_PROVIDERS_CONFIG",
+        "MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE",
+        "MULTI_LLM_GIT_CREDENTIAL_HELPER",
+        "MULTI_LLM_HOST",
+        "MULTI_LLM_UV",
+        "MULTI_LLM_UV_RUN_ARGS",
+        "MULTI_LLM_SKILL_DIR",
+        "MULTI_LLM_MAX_DETACHED",
+        "MULTI_LLM_HEARTBEAT_INTERVAL_S",
+        "MULTI_LLM_HANDSHAKE_TIMEOUT_S",
+        "MULTI_LLM_REPLAY_FLAGS",
+        "MULTI_LLM_LEGACY_INSTRUCTIONS",
+        "MULTI_LLM_CODEX_UNSANDBOXED_WRITES",
+        "UV_PROJECT_ENVIRONMENT",
+        "UV_CACHE_DIR",
+        "UV_OFFLINE",
+        "PWD"
+      ],
+      "cwd": "/home/checker/.codex/plugins/cache/beastlabai/multi-llm/0.1.0/."
+    },
+    "enabled_tools": null,
+    "disabled_tools": null,
+    "startup_timeout_sec": null,
+    "tool_timeout_sec": 900.0
+  },
+  "locator_line": "- multi-llm:multi-llm: Orchestrate plan reviews, task generation, implementation and code reviews across several LLM CLIs in parallel, or ask every model one free-text question about a plan. Use when the user says: review my plan, multi-llm, run a code review, generate tasks from a plan, implement this plan, ask the models about my plan. (file: r1/multi-llm/0.1.0/skills/multi-llm/SKILL.md)",
+  "skill_roots": "- `r0` = `/home/checker/.codex/skills/.system`\n- `r1` = `/home/checker/.codex/plugins/cache/beastlabai`",
+  "locator_resolved": "/home/checker/.codex/plugins/cache/beastlabai/multi-llm/0.1.0/skills/multi-llm/SKILL.md",
+  "install_tree": {
+    "installed_path": "/home/checker/.codex/plugins/cache/beastlabai/multi-llm/0.1.0",
+    "expected_files": 198,
+    "installed_files": 198,
+    "missing": [],
+    "extra": [],
+    "differing": [],
+    "has_git": false,
+    "has_plans": false,
+    "has_tests_dir": false,
+    "matches": true
+  },
+  "tool_call": {
+    "server_argv": [
+      "python3",
+      "./mcp/server.py"
+    ],
+    "server_cwd": "/home/checker/.codex/plugins/cache/beastlabai/multi-llm/0.1.0",
+    "tools_listed": [
+      "multi_llm"
+    ],
+    "arguments": {
+      "mode": "status",
+      "plan": "plans/demo.md",
+      "question": "",
+      "extra_flags": []
+    },
+    "envelope": {
+      "ok": true,
+      "state": "nothing-to-do",
+      "exit": 2,
+      "anchor": "/tmp/ws",
+      "anchor_source": "env:PWD",
+      "argv": [
+        "/home/checker/.local/bin/uv",
+        "run",
+        "--frozen",
+        "--no-dev",
+        "--project",
+        "/home/checker/.codex/plugins/cache/beastlabai/multi-llm/0.1.0/skills/multi-llm",
+        "--",
+        "python",
+        "/home/checker/.codex/plugins/cache/beastlabai/multi-llm/0.1.0/skills/multi-llm/multi_llm.py",
+        "status",
+        "plans/demo.md",
+        "--host",
+        "codex",
+        "--yes",
+        "--exec-subagents"
+      ]
+    },
+    "output_head": "workflow (state.json) \u2014 which phases are done:\n  review-plan             pending\n  apply-suggestions       pending\n  generate-tasks          pending\n  review-tasks            pending  (optional)\n  apply-task-suggestions  pending  (optional)\n  implement               pending\n  code-review             pending\n  apply-code-fixes        pending\n  suggested next: review-plan\n\nruns ({phase}/.status.json) \u2014 is a launched run still alive:\n  no run recorded for this plan\n\ndriver.subagent_runner \u2014 what a dispatched subagent would run:\n  codex:gpt-6-astra  (supplied by host capabilities)\n  every subagent codex dispatches runs through it",
+    "zero_quota": "a read-only `status` call: no provider runs, no credentials exist on the machine"
+  },
+  "criteria": [
+    {
+      "name": "marketplace_resolves_beastlabai",
+      "pass": true,
+      "evidence": "marketplace add exit 0: 'Added marketplace `beastlabai` from https://github.com/beastlabai/multi-llm-plugin.git#codex-v0.1.0.\\nInstalled marketplace root: /home/checker/.codex/.tmp/marketplaces/beastlabai'; root /home/checker/.codex/.tmp/marketplaces/beastlabai; snapshot HEAD ae089856bb178d9cadc82cdd20aec1e2e2aaaae5"
+    },
+    {
+      "name": "listed_with_manifest_version",
+      "pass": true,
+      "evidence": "plugin list --json: {\"pluginId\": \"multi-llm@beastlabai\", \"version\": \"0.1.0\", \"installed\": true, \"enabled\": true, \"installPolicy\": \"AVAILABLE\", \"authPolicy\": \"ON_INSTALL\"}"
+    },
+    {
+      "name": "install_tree_matches_tag",
+      "pass": true,
+      "evidence": "installedPath /home/checker/.codex/plugins/cache/beastlabai/multi-llm/0.1.0; 198 files blob-equal to an independent clone of codex-v0.1.0 (ae089856bb178d9cadc82cdd20aec1e2e2aaaae5) packaging/codex/multi-llm/ (198); missing 0, extra 0, differing 0; no .git/ or plans/ inside; marketplace snapshot at the same commit"
+    },
+    {
+      "name": "locator_resolves_inside_cache_dir",
+      "pass": true,
+      "evidence": "locator r1/multi-llm/0.1.0/skills/multi-llm/SKILL.md with roots {'r0': '/home/checker/.codex/skills/.system', 'r1': '/home/checker/.codex/plugins/cache/beastlabai'} resolves to /home/checker/.codex/plugins/cache/beastlabai/multi-llm/0.1.0/skills/multi-llm/SKILL.md"
+    },
+    {
+      "name": "server_runs_payload_from_cache_dir",
+      "pass": true,
+      "evidence": "server ['python3', './mcp/server.py'] cwd /home/checker/.codex/plugins/cache/beastlabai/multi-llm/0.1.0 lists ['multi_llm']; status call ok=True exit 2 state 'nothing-to-do'; dispatched from the cache: True"
+    },
+    {
+      "name": "mcp_get_echoes_server",
+      "pass": true,
+      "evidence": "codex mcp get multi_llm --json exit 0: {\"name\": \"multi_llm\", \"enabled\": true, \"disabled_reason\": null, \"transport\": {\"type\": \"stdio\", \"command\": \"python3\", \"args\": [\"./mcp/server.py\"], \"env\": null, \"env_vars\": [\"CODEX_HOME\", \"MULTI_LLM_PROVIDERS_CONFIG\", \"MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE\", \"MULTI_LLM_GIT_CREDENTIAL_HELPER\", \"MULTI_L"
+    }
+  ],
+  "observations": {
+    "config_toml_after_add": "[marketplaces.beastlabai]\nsource_type = \"git\"\nsource = \"https://github.com/beastlabai/multi-llm-plugin.git\"\nref = \"codex-v0.1.0\"\nsparse_paths = [\".agents\", \"packaging/codex\"]\n\n[plugins.\"multi-llm@beastlabai\"]\nenabled = true\n",
+    "marketplace_snapshot": {
+      "root": "/home/checker/.codex/.tmp/marketplaces/beastlabai",
+      "head": "ae089856bb178d9cadc82cdd20aec1e2e2aaaae5"
+    },
+    "venv_location": [
+      ".codex/plugins/cache/beastlabai/multi-llm/0.1.0/skills/multi-llm/.venv/pyvenv.cfg"
+    ],
+    "tree_compared_before_first_use": true
+  }
+}
