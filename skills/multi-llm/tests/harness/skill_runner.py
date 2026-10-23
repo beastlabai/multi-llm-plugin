@@ -105,13 +105,20 @@ class SkillRunner:
     """
 
     # Default providers to create mock launchers for. These are LAUNCHER names
-    # (what lands on PATH), which is why `claude-code` is absent: its binary is
-    # `claude`, and nothing in this suite dispatches it as a fake. `agy` is here
-    # because it is one of the two `lane: fake` rows in
-    # tests/container/redirect.yaml — the fake binary is its ONLY possible
-    # coverage, so the launcher is part of the C5 contract
+    # (what lands on PATH), which is why claude-code appears as `claude`, its
+    # binary. Nothing in this suite dispatches it as a fake model, but
+    # `claude-code:sonnet` is the base `driver.subagent_runner`, and a detached
+    # `--exec-subagents` launch refuses before the fork unless that runner's
+    # binary is on PATH (`detach.missing_runner_binaries`). Without this
+    # launcher those tests passed only where the REAL claude CLI was installed
+    # and failed on a CI runner (measured on the first push of this history to
+    # master, 2026-10-23); with it, an accidental dispatch hits the mock, never
+    # a real account. `agy` is here because it is one of the two `lane: fake`
+    # rows in tests/container/redirect.yaml — the fake binary is its ONLY
+    # possible coverage, so the launcher is part of the C5 contract
     # (tests/test_fake_lane_roster.py asserts it).
-    PROVIDERS = ["cursor-agent", "gemini", "opencode", "codex", "kilocode", "agy"]
+    PROVIDERS = ["cursor-agent", "gemini", "opencode", "codex", "kilocode", "agy",
+                 "claude"]
 
     # Windows only: subdirectory of bin/ holding the node trampolines the
     # provider .cmd shims dispatch to (kept out of bin/ itself so that a

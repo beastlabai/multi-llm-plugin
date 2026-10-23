@@ -25,6 +25,27 @@ from .harness import (
 )
 
 
+#: The uv this test session runs under, resolved once at import — before any
+#: test narrows PATH to a mock bin directory.
+_SESSION_UV = os.environ.get("MULTI_LLM_UV") or __import__("shutil").which("uv")
+
+
+@pytest.fixture(autouse=True)
+def _session_uv_stays_reachable(monkeypatch):
+    """Keep the real uv reachable for the dispatcher's uv backstop.
+
+    Many fixtures narrow PATH to a mock bin dir plus `/usr/bin:/bin`, and
+    `unattended.require_uv()` runs before every mode. On a developer machine it
+    then still found uv through its `~/.local/bin` home fallback, so those tests
+    passed there and stopped at `[UV_MISSING]` (exit 3) on a CI runner, whose uv
+    lives in the tool cache: measured 2026-10-23, 104 tests on the first push of
+    this history to master. `$MULTI_LLM_UV` is the lookup's documented first
+    rung; tests of the lookup itself `delenv` it, which still wins.
+    """
+    if _SESSION_UV and "MULTI_LLM_UV" not in os.environ:
+        monkeypatch.setenv("MULTI_LLM_UV", _SESSION_UV)
+
+
 def pytest_addoption(parser):
     """The container host lane's empty-lane escape hatch (C6).
 
