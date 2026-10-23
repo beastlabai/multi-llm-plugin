@@ -27,6 +27,7 @@ import argparse
 import base64
 import binascii
 import fcntl
+import hashlib
 import json
 import os
 import pty
@@ -1253,7 +1254,7 @@ def _declare_opencode_config_provider(base_url: str) -> None:
 
 
 def wire_stub_host(host: str, home: Path, base_url: str,
-                   route: str = "file") -> dict:
+                   route: str = "file", install_source: str = "local-path") -> dict:
     """Point the HOST's own model at the container stub. No credential, no route.
 
     The credentialed twin of this is `wire_credentials`, and the differences are
@@ -1288,7 +1289,10 @@ def wire_stub_host(host: str, home: Path, base_url: str,
         overlay["MLLM_STUB_API_KEY"] = STUB_PLACEHOLDER_KEY
         # The package route's install, into the config just written (which
         # stays quiet — `_seed_codex_plugin` asserts it). A no-op on `file`.
-        _seed_codex_plugin(home, route)
+        # A Git install hands back the one variable every later codex call
+        # needs to reach its repository (`GIT_SSH_COMMAND`).
+        seeded = _seed_codex_plugin(home, route, install_source)
+        overlay.update((seeded or {}).get("overlay") or {})
 
     elif host == "opencode":
         # The image's baked cold-start tree, for the same reason the credentialed
@@ -2243,8 +2247,19 @@ def codex_installed_root(home: Path, install: dict | None = None) -> Path | None
     return versions[-1] if len(versions) == 1 else None
 
 
-def _seed_codex_plugin(home: Path, route: str) -> dict | None:
+def _seed_codex_plugin(home: Path, route: str,
+                       install_source: str = "local-path") -> dict | None:
     """Install the codex plugin into ``<home>/.codex`` on a `route: package` row.
+
+    ``install_source="git"`` is A4 row 6b's install (the `git-route` probe):
+    the same three commands and the same record, except that step 1 adds an
+    OFFLINE Git marketplace — ``ssh://localhost<bare repo>`` with ``--ref
+    release`` and the two published ``--sparse`` paths — built from this same
+    mirror by :func:`build_git_marketplace`. The record then also carries a
+    ``git`` block (the fixture, the snapshot codex checked out, and the
+    installed tree compared blob for blob with the release ref's tree, before
+    anything ran from it) and an ``overlay`` naming ``GIT_SSH_COMMAND``, which
+    every later codex call on the row needs to reach the repository.
 
     Three commands, in the order the plan fixes (item 5), each recorded whole
     in ``plugin-install.json``:
@@ -2278,10 +2293,18 @@ def _seed_codex_plugin(home: Path, route: str) -> dict | None:
     assert_codex_config_quiet(home)
     config = codex_home / "config.toml"
     before = config.read_text(encoding="utf-8") if config.is_file() else ""
-    env = _codex_env(home)
+    if install_source not in ("local-path", "git"):
+        raise SystemExit(f"entrypoint: unknown codex install source {install_source!r}")
+    fixture = build_git_marketplace(home) if install_source == "git" else None
+    env = _codex_env(home, fixture["env"] if fixture else None)
 
-    marketplace = _run_codex(
-        ["plugin", "marketplace", "add", str(CODEX_MARKETPLACE_DIR)], env)
+    if fixture:
+        marketplace = _run_codex(
+            ["plugin", "marketplace", "add", fixture["url"], *_git_marketplace_flags(),
+             "--json"], env)
+    else:
+        marketplace = _run_codex(
+            ["plugin", "marketplace", "add", str(CODEX_MARKETPLACE_DIR)], env)
     add = _run_codex(["plugin", "add", CODEX_PLUGIN_ID, "--json"], env)
     listing = _run_codex(["plugin", "list", "--json"], env)
     # VERBATIM — the whole stdout, uncapped, as codex printed it.
@@ -2317,7 +2340,17 @@ def _seed_codex_plugin(home: Path, route: str) -> dict | None:
             is not None),
         "file_shim_present": (home / CODEX_FILE_SHIM).exists(),
         "divergence": None,
+        # The digest the installed tree says it was built as. The release gate
+        # requires it to equal the checkout's, so a row graded green on an image
+        # built from other bytes cannot vouch for these (packaging/codex/release_gate.py).
+        "installed_digest": _installed_digest(root),
+        "list_document": _json_or_none(listing["_stdout_full"]),
     }
+    if fixture:
+        record["install_source"] = "git"
+        record["marketplace_dir"] = fixture["url"]
+        record["overlay"] = dict(fixture["env"])
+        record["git"] = _git_install_facts(home, fixture, root)
     (OUT / "plugin-install.json").write_text(
         json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
     log(f"route=package: codex plugin {CODEX_PLUGIN_ID} "
@@ -2329,6 +2362,366 @@ def _seed_codex_plugin(home: Path, route: str) -> dict | None:
             f"installed directory (exit {add['exit']}, installedPath "
             f"{installed_path!r}); plugin-install.json has all three commands. "
             f"Every package row stands on this install.")
+    return record
+
+
+# --------------------------------------------------------------------------- #
+# A4 row 6b — the OFFLINE Git marketplace (plans/codex-native-plugin.md,
+# Phase 4's "offline Git-route row").
+#
+# The published install is a Git marketplace pinned to a ref with two sparse
+# paths; the local-path seed above lands in a different marketplace root and
+# never runs that code path in codex. This fixture runs it with no network:
+#
+#   * a repository built from this image's own mirror (the catalog users fetch
+#     and the checked-in plugin tree, byte for byte), plus decoys outside the
+#     two sparse paths — `plans/`, a root README and the shadowed Claude
+#     catalog — that must never reach the install;
+#   * `release` holds commit A; the default branch holds commit B, which bumps
+#     the manifest version and adds a marker file, the shape every real next
+#     release has (bump discipline: digest moved => version moved);
+#   * a bare clone served as `ssh://localhost<abs path>`, through a
+#     `GIT_SSH_COMMAND` that runs the remote command locally. codex accepts
+#     only `owner/repo`, HTTPS and SSH URLs (measured 0.164.0: `file://` is
+#     "invalid marketplace source format"), so SSH is the one offline spelling.
+#
+# Measured on the host 2026-10-23 (codex 0.164.0, isolated CODEX_HOME) before
+# this row existed: the install takes `release`'s tree and not the default
+# branch's; `marketplace upgrade` re-resolves the pinned ref and, when the
+# version moved, replaces the cache's version directory itself; and re-adding
+# the marketplace with a different `--ref` is REFUSED ("already added from a
+# different source"), not ignored. The row records each of those again here.
+# --------------------------------------------------------------------------- #
+
+#: The published flags, in the order the README prints them.
+GIT_RELEASE_REF = "release"
+GIT_DEFAULT_BRANCH = "master"
+GIT_SPARSE_PATHS = (".agents", "packaging/codex")
+#: Where the plugin lives inside the repository (the catalog's `source.path`).
+GIT_PLUGIN_PATH = "packaging/codex/multi-llm"
+#: Commit B's marker: present on the default branch, absent from `release`.
+GIT_NEXT_MARKER = "NEXT-RELEASE-MARKER"
+#: Outside both sparse paths. None of them may appear in the install.
+GIT_DECOYS = {
+    "plans/decoy-plan.md": "# A gitignored-scratch stand-in; never installed\n",
+    "README.md": "# The repository root; never installed\n",
+    # The real repository ships this file, with a root source. The `.agents`
+    # catalog shadows it; the sparse checkout must not even fetch it.
+    ".claude-plugin/marketplace.json": json.dumps({
+        "name": "beastlabai", "plugins": [{"name": "multi-llm", "source": "./"}],
+    }, indent=2) + "\n",
+}
+#: git's "simple" ssh variant passes `<host> <command>`; the command is last.
+_GIT_SSH_SHIM = (
+    "# A local stand-in for ssh: run the remote command (the last argument).\n"
+    'eval "remote=\\${$#}"\n'
+    'exec sh -c "$remote"\n'
+)
+
+
+def _git_marketplace_flags(ref: str = GIT_RELEASE_REF) -> list[str]:
+    flags = ["--ref", ref]
+    for path in GIT_SPARSE_PATHS:
+        flags += ["--sparse", path]
+    return flags
+
+
+def _git_binary() -> str:
+    return shutil.which("git") or "/usr/bin/git"
+
+
+def _git(args: list[str], cwd: Path, env: dict, check: bool = True) -> dict:
+    """One git command, recorded. ``check`` raises on a non-zero exit: every
+    fixture step is a precondition, and a half-built fixture graded as a codex
+    failure would be the rig's bug reported as the product's."""
+    argv = [_git_binary(), *args]
+    done = subprocess.run(argv, cwd=str(cwd), env=env, capture_output=True,
+                          text=True, stdin=subprocess.DEVNULL, timeout=120)
+    result = {"argv": ["git", *args], "exit": done.returncode,
+              "stdout": done.stdout[:CODEX_OUTPUT_CAP],
+              "stderr": done.stderr[:CODEX_OUTPUT_CAP]}
+    if check and done.returncode != 0:
+        raise SystemExit(f"entrypoint: git fixture step failed: {result}")
+    return result
+
+
+def _git_fixture_env(home: Path) -> dict:
+    """No system or global git config, a fixed identity and a fixed clock."""
+    stamp = f"@{os.environ.get('SOURCE_DATE_EPOCH', '1767225600')} +0000"
+    env = dict(os.environ)
+    env.update({
+        "HOME": str(home), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_AUTHOR_NAME": "mllm-fixture", "GIT_AUTHOR_EMAIL": "fixture@invalid",
+        "GIT_COMMITTER_NAME": "mllm-fixture", "GIT_COMMITTER_EMAIL": "fixture@invalid",
+        "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp,
+    })
+    return env
+
+
+def _next_patch(version: str) -> str:
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(.*)", version or "")
+    if not match:
+        raise SystemExit(f"entrypoint: the manifest version {version!r} is not semver")
+    major, minor, patch, _rest = match.groups()
+    return f"{major}.{minor}.{int(patch) + 1}"
+
+
+def build_git_marketplace(home: Path) -> dict:
+    """Build the offline Git marketplace and return how to reach it.
+
+    Returns ``url``, ``bare``, ``release_sha``, ``default_sha``, both manifest
+    versions, and ``env`` — the one variable codex needs to fetch it
+    (``GIT_SSH_COMMAND``), which the row carries into every later codex call.
+    """
+    root = home / "git-marketplace"
+    if root.exists():
+        shutil.rmtree(root)
+    source = root / "src"
+    source.mkdir(parents=True)
+    env = _git_fixture_env(home)
+    _git(["init", "-q", "-b", GIT_DEFAULT_BRANCH, str(source)], root, env)
+    # Commit A: the mirror, unedited, plus the decoys.
+    for rel in (".agents/plugins/marketplace.json",):
+        target = source / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(CODEX_MARKETPLACE_DIR / rel, target)
+    shutil.copytree(CODEX_MARKETPLACE_DIR / GIT_PLUGIN_PATH, source / GIT_PLUGIN_PATH,
+                    symlinks=True)
+    for rel, text in GIT_DECOYS.items():
+        target = source / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    _git(["add", "-A"], source, env)
+    _git(["commit", "-q", "-m", "release N (the tagged commit)"], source, env)
+    release_sha = _git(["rev-parse", "HEAD"], source, env)["stdout"].strip()
+    _git(["branch", GIT_RELEASE_REF], source, env)
+    # Commit B: the next release, on the default branch only.
+    manifest_path = source / GIT_PLUGIN_PATH / ".codex-plugin" / "plugin.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    release_version = str(manifest.get("version"))
+    next_version = _next_patch(release_version)
+    manifest["version"] = next_version
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    (source / GIT_PLUGIN_PATH / GIT_NEXT_MARKER).write_text(
+        f"commit B: {next_version}\n", encoding="utf-8")
+    _git(["add", "-A"], source, env)
+    _git(["commit", "-q", "-m", "release N+1 (not yet promoted)"], source, env)
+    default_sha = _git(["rev-parse", "HEAD"], source, env)["stdout"].strip()
+    bare = root / "beastlabai-multi-llm-plugin.git"
+    _git(["clone", "-q", "--bare", str(source), str(bare)], root, env)
+    shim = root / "ssh-shim.sh"
+    shim.write_text(_GIT_SSH_SHIM, encoding="utf-8")
+    return {
+        "root": str(root), "bare": str(bare), "url": f"ssh://localhost{bare}",
+        "release_ref": GIT_RELEASE_REF, "default_branch": GIT_DEFAULT_BRANCH,
+        "sparse": list(GIT_SPARSE_PATHS),
+        "release_sha": release_sha, "default_sha": default_sha,
+        "release_version": release_version, "next_version": next_version,
+        "decoys": sorted(GIT_DECOYS),
+        # `sh <file>` rather than an executable shim: /home/e2e is noexec.
+        "env": {"GIT_SSH_COMMAND": f"sh {shim}"},
+    }
+
+
+def _git_tree_blobs(bare: Path, commit: str, path: str, env: dict) -> dict:
+    """``{relative path: [mode, blob id]}`` for every file under ``path`` at
+    ``commit``, read out of the bare repository (never a checkout)."""
+    listed = _git(["ls-tree", "-r", "--full-tree", f"{commit}:{path}"], bare, env)
+    blobs = {}
+    for line in listed["stdout"].splitlines():
+        meta, _, rel = line.partition("\t")
+        mode, kind, blob = meta.split()
+        if kind == "blob":
+            blobs[rel] = [mode, blob]
+    return blobs
+
+
+def _disk_tree_blobs(root: Path, env: dict) -> dict:
+    """The same mapping for a directory on disk: git's blob id of each file's
+    bytes (``hash-object --no-filters``) and its mode as git would record it."""
+    files = sorted(p for p in root.rglob("*") if p.is_file() or p.is_symlink())
+    if not files:
+        return {}
+    rels = [p.relative_to(root).as_posix() for p in files]
+    done = subprocess.run([_git_binary(), "hash-object", "--no-filters", "--stdin-paths"],
+                          cwd=str(root), env=env, input="\n".join(rels) + "\n",
+                          capture_output=True, text=True, timeout=120)
+    if done.returncode != 0:
+        raise SystemExit(f"entrypoint: git hash-object failed: {done.stderr[:2000]}")
+    blobs = {}
+    for rel, path, blob in zip(rels, files, done.stdout.split()):
+        if path.is_symlink():
+            mode = "120000"
+        else:
+            mode = "100755" if os.access(path, os.X_OK) else "100644"
+        blobs[rel] = [mode, blob]
+    return blobs
+
+
+def compare_tree_to_commit(installed: Path | None, bare: Path, commit: str,
+                           env: dict) -> dict:
+    """The installed plugin directory against the plugin tree at ``commit``."""
+    if not installed or not Path(installed).is_dir():
+        return {"compared": False, "reason": f"no installed directory at {installed}"}
+    expected = _git_tree_blobs(bare, commit, GIT_PLUGIN_PATH, env)
+    actual = _disk_tree_blobs(Path(installed), env)
+    differing = sorted(rel for rel in set(expected) & set(actual)
+                       if expected[rel][1] != actual[rel][1])
+    mode_differs = sorted(rel for rel in set(expected) & set(actual)
+                          if expected[rel][1] == actual[rel][1]
+                          and expected[rel][0] != actual[rel][0])
+    parts = {part for rel in actual for part in Path(rel).parts}
+    return {
+        "compared": True, "commit": commit,
+        "expected_files": len(expected), "installed_files": len(actual),
+        "missing": sorted(set(expected) - set(actual))[:50],
+        "extra": sorted(set(actual) - set(expected))[:50],
+        "differing": differing[:50], "mode_differs": mode_differs[:50],
+        "matches": not (set(expected) ^ set(actual)) and not differing,
+        "has_git_dir": ".git" in parts,
+        "has_plans": "plans" in parts,
+        "next_marker_present": GIT_NEXT_MARKER in actual,
+    }
+
+
+def _git_snapshot(home: Path) -> dict:
+    """What codex checked out as the marketplace root, read off its own clone."""
+    snapshot = home / ".codex" / ".tmp" / "marketplaces" / CODEX_MARKETPLACE
+    env = _git_fixture_env(home)
+    if not (snapshot / ".git").exists():
+        return {"root": str(snapshot), "exists": snapshot.is_dir(), "head": None}
+    head = _git(["rev-parse", "HEAD"], snapshot, env, check=False)
+    sparse = _git(["sparse-checkout", "list"], snapshot, env, check=False)
+    top = sorted(p.name for p in snapshot.iterdir() if p.name != ".git")
+    return {"root": str(snapshot), "exists": True,
+            "head": head["stdout"].strip() or None,
+            "sparse_list": sparse["stdout"].split(),
+            "top_level": top,
+            "decoys_present": sorted(rel for rel in GIT_DECOYS
+                                     if (snapshot / rel).exists())}
+
+
+def _marketplace_table_text(text: str) -> str | None:
+    """The `[marketplaces.beastlabai]` table, header to the next header."""
+    lines = text.splitlines()
+    header = f"[marketplaces.{CODEX_MARKETPLACE}]"
+    for index, line in enumerate(lines):
+        if line.split("#", 1)[0].strip() == header:
+            block = [line]
+            for follow in lines[index + 1:]:
+                if follow.split("#", 1)[0].strip().startswith("["):
+                    break
+                block.append(follow)
+            return "\n".join(block).rstrip() + "\n"
+    return None
+
+
+def _list_entry(document) -> dict | None:
+    """The multi-llm entry of a `codex plugin list --json` document."""
+    entries = (document if isinstance(document, list)
+               else (document or {}).get("installed") if isinstance(document, dict)
+               else None)
+    for entry in entries or []:
+        if isinstance(entry, dict) and entry.get("pluginId") == CODEX_PLUGIN_ID:
+            return entry
+    return None
+
+
+def _installed_digest(root: Path | None) -> str | None:
+    path = Path(root) / "dist" / "tree.sha256" if root else None
+    if path and path.is_file():
+        return path.read_text(encoding="utf-8").strip() or None
+    return None
+
+
+def _git_install_facts(home: Path, fixture: dict, root: Path | None) -> dict:
+    """The Git half of plugin-install.json, taken before anything ran."""
+    env = _git_fixture_env(home)
+    config = home / ".codex" / "config.toml"
+    text = config.read_text(encoding="utf-8") if config.is_file() else ""
+    public = {k: v for k, v in fixture.items() if k != "env"}
+    return {
+        "fixture": public,
+        "snapshot": _git_snapshot(home),
+        "marketplace_table": _marketplace_table_text(text),
+        "tree": compare_tree_to_commit(root, Path(fixture["bare"]),
+                                       fixture["release_sha"], env),
+    }
+
+
+def git_route_legs(home: Path, root: Path | None, overlay: dict, stub_log: Path,
+                   install: dict | None, status_call: dict) -> dict:
+    """A4 row 6b after the Git install: discovery, the tool, then a promotion.
+
+    In order — the loader rows and the tool call run against the RELEASE
+    install, before anything moves; then `release` is fast-forwarded to the
+    default branch exactly as the promote job moves it, and the documented
+    upgrade sequence (`marketplace upgrade`, `plugin add`) is graded on the
+    tree it leaves. Every leg is recorded; the grader decides.
+    """
+    git = (install or {}).get("git") or {}
+    fixture = git.get("fixture") or {}
+    env = _codex_env(home, overlay)
+    git_env = _git_fixture_env(home)
+    record: dict = {"fixture": fixture}
+
+    mcp_get = _run_codex(["mcp", "get", CODEX_MCP_SERVER, "--json"], env)
+    record["mcp_get"] = {"command": _public(mcp_get),
+                         "document": _json_or_none(mcp_get["_stdout_full"])}
+    prompt = _run_codex(["debug", "prompt-input"], env)
+    record["prompt_input"] = {"command": _public(prompt),
+                              "skill": _parse_prompt_input(prompt["_stdout_full"])}
+    record["exec"] = codex_exec_leg(home, overlay, stub_log, "git-route")
+    stdio_env = {**os.environ, "PWD": str(WORKSPACE)}
+    record["stdio"] = stdio_session(root, [status_call], env=stdio_env) if root else None
+    listed = _run_codex(["plugin", "marketplace", "list", "--json"], env)
+    record["marketplace_list"] = {"command": _public(listed),
+                                  "document": _json_or_none(listed["_stdout_full"])}
+
+    # Re-adding the registered marketplace at another ref: the publish plan's
+    # step 5 assumption, measured rather than assumed.
+    config = home / ".codex" / "config.toml"
+    re_add = _run_codex(["plugin", "marketplace", "add", fixture.get("url", ""),
+                         *_git_marketplace_flags(GIT_DEFAULT_BRANCH), "--json"], env)
+    record["re_add_other_ref"] = {
+        "command": _public(re_add),
+        "marketplace_table_after": _marketplace_table_text(
+            config.read_text(encoding="utf-8") if config.is_file() else ""),
+    }
+
+    # The promotion: a fast-forward of `release`, as the promote job pushes it.
+    bare = Path(fixture.get("bare", ""))
+    if not bare.is_dir():
+        record["legs_not_driven"] = {"refresh": "no fixture bare repository recorded"}
+        return record
+    ancestor = _git(["merge-base", "--is-ancestor", fixture["release_sha"],
+                     fixture["default_sha"]], bare, git_env, check=False)
+    moved = _git(["update-ref", f"refs/heads/{GIT_RELEASE_REF}", fixture["default_sha"],
+                  fixture["release_sha"]], bare, git_env, check=False)
+    upgrade = _run_codex(["plugin", "marketplace", "upgrade", CODEX_MARKETPLACE,
+                          "--json"], env)
+    cache = home / ".codex" / "plugins" / "cache" / CODEX_MARKETPLACE / "multi-llm"
+    versions_after_upgrade = sorted(p.name for p in cache.glob("*") if p.is_dir())
+    add = _run_codex(["plugin", "add", CODEX_PLUGIN_ID, "--json"], env)
+    add_doc = _json_or_none(add["_stdout_full"])
+    refreshed = codex_installed_root(home, {"installedPath": _find_key(add_doc,
+                                                                       "installedPath")})
+    after_list = _run_codex(["plugin", "list", "--json"], env)
+    record["refresh"] = {
+        "fast_forward": ancestor["exit"] == 0,
+        "update_ref": moved,
+        "upgrade": {"command": _public(upgrade),
+                    "document": _json_or_none(upgrade["_stdout_full"])},
+        "snapshot_after_upgrade": _git_snapshot(home),
+        "versions_after_upgrade": versions_after_upgrade,
+        "add": {"command": _public(add), "document": add_doc},
+        "installed_root": str(refreshed) if refreshed else None,
+        "versions_after_add": sorted(p.name for p in cache.glob("*") if p.is_dir()),
+        "tree": compare_tree_to_commit(refreshed, bare, fixture["default_sha"], git_env),
+        "list_entry": _list_entry(_json_or_none(after_list["_stdout_full"])),
+        "stdio": (stdio_session(refreshed, [status_call], env=stdio_env)
+                  if refreshed else None),
+    }
     return record
 
 
@@ -2928,7 +3321,14 @@ CODEX_PACKAGE_PROBES = (
     "loader-mcp-get", "loader-prompt-input", "loader-tools",
     "anchor", "runnability", "environment", "progress-cancellation",
     "plugin-data", "sandbox-posture", "overlay", "timeout",
+    # The release gate's two (plans/codex-native-plugin.md A4): row 6b's
+    # offline Git install, whose wiring step installs through Git instead of
+    # the local path, and row 1's search for an upstream validator.
+    "git-route", "upstream-validator",
 )
+
+#: The one probe whose wiring step installs through the Git route.
+GIT_ROUTE_PROBE = "git-route"
 
 #: Markers for the environment probe (D3a, row 9(a)). Presence is asserted,
 #: never a value — the dummy credential is a NAME whose arrival is the reading.
@@ -4042,6 +4442,51 @@ def _cap_fires_legs(home: Path, root: Path | None, overlay: dict) -> dict:
     return out
 
 
+def upstream_validator_legs(home: Path, root: Path | None, env: dict) -> dict:
+    """A4 row 1: look for upstream's own plugin validator, and run it if found.
+
+    ``codex debug prompt-input`` unpacks codex's bundled system skills into
+    ``$CODEX_HOME/skills/.system/`` (measured 0.164.0); ``validate_plugin.py``
+    lived in the ``plugin-creator`` skill there up to 0.156.1 and has shipped
+    nowhere since. So the row searches the whole home for the file rather than
+    one path, runs every copy it finds against the installed tree, and hashes
+    each. ``status: absent`` is a RECORDED absence: the gate reports it as
+    such, never as a validator pass (packaging/codex/ingestion_rules.py).
+    """
+    prompt = _run_codex(["debug", "prompt-input"], env)
+    codex_home = home / ".codex"
+    system = codex_home / "skills" / ".system"
+    skills = (sorted(p.name for p in system.iterdir() if p.is_dir())
+              if system.is_dir() else [])
+    cache = codex_home / "plugins" / "cache"
+    found = sorted(path for path in codex_home.rglob("validate_plugin.py")
+                   if cache not in path.parents)
+    python = shutil.which("python3") or "/usr/bin/python3"
+    runs = []
+    for path in found:
+        data = path.read_bytes()
+        argv = [python, str(path), str(root)] if root else None
+        done = (subprocess.run(argv, env=env, capture_output=True, text=True,
+                               timeout=120, stdin=subprocess.DEVNULL)
+                if argv else None)
+        runs.append({
+            "path": str(path.relative_to(codex_home)),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "bytes": len(data),
+            "argv": ["python3", str(path.relative_to(codex_home)), "<installed root>"],
+            "exit": done.returncode if done else None,
+            "stdout": (done.stdout if done else "")[:CODEX_OUTPUT_CAP],
+            "stderr": (done.stderr if done else "")[:CODEX_OUTPUT_CAP],
+        })
+    return {
+        "codex_version": _codex_version(home),
+        "prompt_input": _public(prompt),
+        "system_skills": skills,
+        "validators": runs,
+        "status": "present" if runs else "absent",
+    }
+
+
 def run_codex_package_probe(probe: str, home: Path, overlay: dict,
                             stub_log: Path, install: dict | None) -> dict:
     """Run one package-route probe row and write `probe-<name>.json`.
@@ -4090,6 +4535,11 @@ def run_codex_package_probe(probe: str, home: Path, overlay: dict,
         record["skill"] = _parse_prompt_input(result["_stdout_full"])
     elif probe in ("scripted-call", "loader-tools"):
         record["exec"] = codex_exec_leg(home, overlay, stub_log, probe)
+    elif probe == GIT_ROUTE_PROBE:
+        record.update(git_route_legs(home, root, overlay, stub_log, install,
+                                     status_call))
+    elif probe == "upstream-validator":
+        record.update(upstream_validator_legs(home, root, env))
     elif probe == "runnability":
         # The anchor row 7 settled is `env:PWD` (codex advertises no `roots`),
         # so the stdio driver hands the server the workspace as `PWD`, exactly
@@ -6095,7 +6545,9 @@ def main(argv=None) -> int:
                             probe_overlay = wire_stub_host(
                                 args.host, Path.home(),
                                 f"http://127.0.0.1:{args.stub_port}/v1",
-                                route=args.route)
+                                route=args.route,
+                                install_source=("git" if args.probe == GIT_ROUTE_PROBE
+                                                else "local-path"))
                         elif args.host != "opencode":
                             raise SystemExit(
                                 f"entrypoint: --route package has no host config "

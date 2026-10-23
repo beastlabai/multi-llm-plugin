@@ -70,6 +70,7 @@ from common.payload import (  # noqa: E402,F401
 from utils import host_install  # noqa: E402
 
 import ingestion_rules  # noqa: E402
+import release_gate as gate  # noqa: E402
 
 #: The host this plugin distributes. Not a new host id.
 HOST_ID = "codex"
@@ -365,7 +366,7 @@ def build(
         errors = ingestion_rules.validate_manifest(
             json.loads((scratch / ".codex-plugin" / "plugin.json").read_text("utf-8")),
             scratch,
-        )
+        ) + ingestion_rules.validate_layout(scratch)
         if errors:
             raise PayloadError(
                 "the built plugin breaks the restated ingestion rules:\n"
@@ -431,9 +432,29 @@ def _stamp_path(stamp: Optional[Path]) -> Path:
     return Path(stamp) if stamp else PACKAGE_DIR / STAMP_NAME
 
 
+def _stamped_tiers(evidence: Mapping[str, Any]) -> Dict[str, Any]:
+    """What the stamp keeps of each tier's evidence: enough to say which codex
+    builds the gate ran, on which image, and what row 1 actually found."""
+    kept = {}
+    for tier in gate.TIERS:
+        item = evidence[tier]
+        kept[tier] = {
+            "session": item.get("session"),
+            "run": item.get("run"),
+            "codex_version": item.get("codex_version"),
+            "image": item.get("image"),
+            "image_digest": item.get("image_digest"),
+            "rows": sorted(item.get("rows") or {}),
+            "upstream_validator": (item.get("upstream_validator") or {}).get("status"),
+            "features_diff": (item.get("features") or {}).get("diff") or {},
+            "checked_at": item.get("checked_at"),
+        }
+    return kept
+
+
 def write_stamp(
     *, timestamp: str = "", stamp: Optional[Path] = None,
-    root: Optional[Path] = None,
+    root: Optional[Path] = None, evidence_dir: Optional[Path] = None,
 ) -> Path:
     """Record that the full gate passed **on the committed bytes**.
 
@@ -441,6 +462,11 @@ def write_stamp(
     produced no diff against the commit: a stamp over bytes nobody committed
     would authorize a tag over a tree the tag does not contain. Takes no
     ``allow_dirty`` at all — the environment opt-in is for ``codex-regen``.
+
+    Then refuses unless ``release_gate.py`` left passing evidence for every tier
+    (pinned, the declared minimum, npm's newest) over this exact digest and
+    version: the stamp is the gate's record, so it cannot be written for rows
+    that never ran (A4; plans/codex-plugin-publish.md).
     """
     report = build(root=root)
     drift = committed_drift(root)
@@ -450,12 +476,23 @@ def write_stamp(
             + "\n".join(f"    {line}" for line in drift[:20])
             + "\nRun `make codex-regen`, commit, and re-run the gate."
         )
+    directory = Path(evidence_dir) if evidence_dir else gate.EVIDENCE_DIR
+    evidence = gate.load_evidence(directory)
+    problems = gate.evidence_problems(evidence, report["digest"], report["version"],
+                                      session=gate.current_session(directory))
+    if problems:
+        raise PayloadError(
+            "the release gate's container rows did not all pass on these bytes:\n"
+            + "\n".join(f"    {line}" for line in problems)
+            + "\nRun `make codex-package-check`; it writes this evidence and the stamp."
+        )
     path = _stamp_path(stamp)
     path.write_text(json.dumps({
         "tier": FULL_TIER,
         "digest": report["digest"],
         "version": report["version"],
         "stamped_at": timestamp,
+        "gate": _stamped_tiers(evidence),
     }, indent=2) + "\n", encoding="utf-8")
     return path
 
@@ -486,6 +523,14 @@ def check_stamp(
             f"the stamp says tier={record.get('tier')!r}. Only a full "
             "`make codex-package-check` authorizes a publish; the CI tier writes "
             "no stamp."
+        )
+    tiers = record.get("gate")
+    if not isinstance(tiers, Mapping) or any(
+            not (tiers.get(tier) or {}).get("rows") for tier in gate.TIERS):
+        return (
+            f"the stamp names no passing container rows for every gate tier "
+            f"({', '.join(gate.TIERS)}); it predates the wired gate or was written "
+            "by hand. Re-run `make codex-package-check`."
         )
     if tree is None:
         drift = committed_drift(root)

@@ -4180,16 +4180,21 @@ hosts:
       packaging/codex/ingestion_rules.py once it lands).
       `test_container_codex_meets_plugin_floor` reads `codex --version` in the
       image and SKIPS every plugin row below this floor, naming the measured
-      version and the floor.
+      version and the floor. Under the release gate (`MLLM_CODEX_GATE_TIER`,
+      packaging/codex/release_gate.py) that skip is a FAILURE, and the
+      `minimum` tier holds the rows to `hosts.codex.package.min_host_version`
+      instead of this value, since running below the pin is what it measures.
     package_probes:
       - id: codex-package-floor
         probe: floor
+        gate_tiers: [pinned, minimum, ceiling]
         item: "1"
         blocking: true
         provenance: unmeasured   # authored 2026-09-23; never executed — the plugin tree does not exist yet
         records: [probe-floor.json]
       - id: codex-package-features
         probe: features
+        gate_tiers: [pinned, minimum, ceiling]
         item: "1"
         blocking: false
         provenance: unmeasured   # authored 2026-09-23; never executed
@@ -4199,6 +4204,7 @@ hosts:
           removed false`, `multi_agent stable true` at the 0.155.1 pin, and again at 0.156.1.
       - id: codex-package-seed
         probe: seed
+        gate_tiers: [pinned, minimum, ceiling]
         item: "5"
         blocking: true
         provenance: unmeasured   # authored 2026-09-23; never executed
@@ -4211,6 +4217,7 @@ hosts:
           file shim in the home.
       - id: codex-package-scripted-call
         probe: scripted-call
+        gate_tiers: [pinned, minimum, ceiling]
         item: "1a"
         blocking: true
         scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/scripted_codex_plugin_tool_call.yaml
@@ -4222,6 +4229,7 @@ hosts:
           Evidence of the MECHANISM only — never of a model choosing the tool.
       - id: codex-package-loader-mcp-get
         probe: loader-mcp-get
+        gate_tiers: [pinned, minimum, ceiling]
         item: "6"
         blocking: true
         provenance: unmeasured   # authored 2026-09-23; never executed
@@ -4233,6 +4241,7 @@ hosts:
           `tool_timeout_sec` as shipped.
       - id: codex-package-loader-prompt-input
         probe: loader-prompt-input
+        gate_tiers: [pinned, minimum, ceiling]
         item: "6"
         blocking: true
         provenance: unmeasured   # authored 2026-09-23; never executed
@@ -4243,6 +4252,7 @@ hosts:
           (R8′ — the locator is root-relative).
       - id: codex-package-loader-tools
         probe: loader-tools
+        gate_tiers: [pinned, minimum, ceiling]
         item: "6"
         blocking: true
         scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/scripted_codex_plugin_tool_call.yaml
@@ -4254,6 +4264,7 @@ hosts:
           `scripted.declaration`).
       - id: codex-package-anchor
         probe: anchor
+        gate_tiers: [pinned]
         item: "7"
         blocking: false
         scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/scripted_codex_plugin_tool_call.yaml
@@ -4265,6 +4276,7 @@ hosts:
           until then.
       - id: codex-package-runnability
         probe: runnability
+        gate_tiers: [pinned, minimum, ceiling]
         item: "8"
         blocking: true
         provenance: unmeasured   # authored 2026-09-23; never executed
@@ -4276,6 +4288,7 @@ hosts:
           still listed).
       - id: codex-package-environment
         probe: environment
+        gate_tiers: [pinned]
         item: "9"
         blocking: false
         scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/scripted_codex_plugin_tool_call.yaml
@@ -4291,6 +4304,7 @@ hosts:
           blocking are graded by `TestTheSeptember24FixesHoldInTheImage`.
       - id: codex-package-progress-cancellation
         probe: progress-cancellation
+        gate_tiers: [pinned]
         item: "10"
         blocking: false
         scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/scripted_codex_plugin_tool_call.yaml
@@ -4298,12 +4312,14 @@ hosts:
         records: [probe-progress-cancellation.json]
       - id: codex-package-plugin-data
         probe: plugin-data
+        gate_tiers: [pinned]
         item: "11"
         blocking: false
         provenance: unmeasured   # authored 2026-09-23; never executed
         records: [probe-plugin-data.json]
       - id: codex-package-sandbox-posture
         probe: sandbox-posture
+        gate_tiers: [pinned]
         item: "12"
         blocking: false
         scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/scripted_codex_plugin_tool_call.yaml
@@ -4323,6 +4339,7 @@ hosts:
           them.
       - id: codex-package-overlay
         probe: overlay
+        gate_tiers: [pinned]
         item: "13"
         blocking: false
         provenance: unmeasured   # authored 2026-09-23; never executed
@@ -4332,6 +4349,7 @@ hosts:
           `.mcp.json` is written (D3a's fallback waits on this answer).
       - id: codex-package-timeout
         probe: timeout
+        gate_tiers: [pinned]
         item: "14"
         blocking: false
         provenance: unmeasured   # authored 2026-09-23; never executed
@@ -4340,6 +4358,47 @@ hosts:
           Read through row 13's answer, so it runs after it. A2b's 900 is not
           raised until this row is green. The cap-fires half runs a detached
           `ask` whose nested codex exec sleeps past a few-second cap.
+      # --- The release gate's own rows (plans/codex-native-plugin.md A4) ---
+      - id: codex-package-git-route
+        probe: git-route
+        gate_tiers: [pinned, minimum, ceiling]
+        item: "A4 6b"
+        blocking: true
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/scripted_codex_plugin_tool_call.yaml
+        provenance: unmeasured   # authored 2026-10-23; measured on the host the same day, never yet in-image
+        records: [plugin-install.json, codex-plugin-list.json, probe-git-route.json,
+                  codex-exec-git-route.jsonl, stub.jsonl]
+        note: >
+          A4 row 6b: the published two-command install, offline. The wiring
+          step installs through an `ssh://localhost` bare repository built from
+          the image's own mirror (`entrypoint.build_git_marketplace`) with the
+          published `--ref release --sparse .agents --sparse packaging/codex`,
+          `release` held one commit behind the default branch. Graded: the
+          install is the release ref's tree blob for blob, before first use,
+          with no `.git/` or `plans/`; the marketplace table and the list entry
+          say `git`; the explicit catalog policy round-trips; the server is
+          echoed, the skill advertised inside the cache, the tool listed and
+          called, `status` answered from the cache. Then `release` is
+          fast-forwarded as the promote job moves it and `marketplace upgrade`
+          + `plugin add` must land the next version's tree. Re-adding at
+          another ref is recorded (codex refuses it, measured 0.164.0). Its
+          probe receipts promote nothing (rule j's second half needs the manual
+          network check).
+      - id: codex-package-upstream-validator
+        probe: upstream-validator
+        gate_tiers: [pinned, minimum, ceiling]
+        item: "A4 1"
+        blocking: true
+        provenance: unmeasured   # authored 2026-10-23
+        records: [probe-upstream-validator.json]
+        note: >
+          A4 row 1 as restated on 2026-10-23: upstream's `validate_plugin.py`
+          has shipped in no codex since 0.156.1, so the row searches the home
+          codex just unpacked its system skills into. Absent is RECORDED and
+          reported as absent — never as a validator pass. Present: every copy
+          must pass on the installed tree, and its sha256 must equal
+          `ingestion_rules.SOURCE_SHA256`, or the restated rules are re-read
+          and re-stamped first.
 
   # ===========================================================================
   opencode:

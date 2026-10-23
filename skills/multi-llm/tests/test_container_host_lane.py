@@ -2671,9 +2671,35 @@ REPO_ROOT = harness.HERE.parents[3]
 CODEX_PLUGIN_TREE = REPO_ROOT / "packaging" / "codex" / "multi-llm"
 CODEX_ENTRY = dict(dict(HOSTS).get("codex") or {})
 PACKAGE_PROBES = [dict(p) for p in (CODEX_ENTRY.get("package_probes") or [])]
+#: The release gate's tier, set by `packaging/codex/release_gate.py` (A4; the Makefile's
+#: `codex-gate-*` targets). When set, only the probe rows whose `gate_tiers`
+#: name that tier are scheduled, and a row that cannot run FAILS naming why
+#: instead of skipping: a gate that skipped a row it requires never ran it.
+GATE_TIER_ENV = "MLLM_CODEX_GATE_TIER"
+GATE_TIER = os.environ.get(GATE_TIER_ENV) or None
+if GATE_TIER:
+    PACKAGE_PROBES = [p for p in PACKAGE_PROBES
+                      if GATE_TIER in (p.get("gate_tiers") or [])]
 PACKAGE_PROBE_IDS = [p["id"] for p in PACKAGE_PROBES]
 #: The plugin floor, from the matrix cell that names it.
 CODEX_PLUGIN_FLOOR = str(CODEX_ENTRY.get("plugin_floor") or "0.162.0")
+
+
+def _declared_codex_minimum() -> str:
+    """`hosts.codex.package.min_host_version`: the floor users are told."""
+    capabilities = yaml.safe_load(
+        (REPO_ROOT / "skills" / "multi-llm" / "hosts" / "capabilities.yaml")
+        .read_text(encoding="utf-8"))
+    return str(capabilities["hosts"]["codex"]["package"]["min_host_version"])
+
+
+#: The gate's `minimum` tier runs these rows BELOW the matrix's design floor on
+#: purpose: the version under test there is the declared minimum, and holding
+#: it to `plugin_floor` (which tracks the container pin) would refuse exactly
+#: the measurement the tier exists to take. Measured first on 2026-10-23, when
+#: that refusal showed no row had ever run on the declared 0.159.2.
+if GATE_TIER == "minimum":
+    CODEX_PLUGIN_FLOOR = _declared_codex_minimum()
 CODEX_PLUGIN_ID = "multi-llm@beastlabai"
 CODEX_PLUGIN_TABLE = f'[plugins."{CODEX_PLUGIN_ID}"]'
 
@@ -2719,9 +2745,27 @@ def test_container_codex_meets_plugin_floor():
     """
     reason = _codex_floor_skip_reason()
     if reason:
-        pytest.skip(reason)
+        _skip_or_fail_for_the_gate(reason)
     assert _version_tuple(harness.cli_version("codex")) >= _version_tuple(
         CODEX_PLUGIN_FLOOR)
+
+
+def _skip_or_fail_for_the_gate(reason: str) -> None:
+    """A skip on an ordinary run; a FAILURE under the release gate's tier."""
+    if GATE_TIER:
+        pytest.fail(f"release gate tier {GATE_TIER!r}: a required codex package "
+                    f"row cannot run: {reason}")
+    pytest.skip(reason)
+
+
+def test_the_gate_tier_schedules_rows():
+    """Under the release gate, an unknown tier or an empty one is a failure,
+    never an empty (and so green) parameter set."""
+    if not GATE_TIER:
+        pytest.skip(f"{GATE_TIER_ENV} is unset: not a release-gate run")
+    assert PACKAGE_PROBES, (
+        f"{GATE_TIER_ENV}={GATE_TIER!r} selects no package probe row in "
+        f"host_matrix.yaml's gate_tiers")
 
 
 class TestThePackageProbesAreScheduled:
@@ -2751,7 +2795,7 @@ def package_probe(request, posture, utc):
     probe = request.param
     for reason in (_plugin_tree_skip_reason(), _codex_floor_skip_reason()):
         if reason:
-            pytest.skip(reason)
+            _skip_or_fail_for_the_gate(reason)
     row = harness.Row(
         row_id=probe["id"], lane="host", host="codex", creds="none",
         # Inert on this tier (nothing dispatches a provider except the
@@ -2995,6 +3039,189 @@ class TestTheRunnabilityRow:
         assert partial["removed"] in json.dumps(partial["stdio"]["calls"][0])
 
 
+def _ingestion_rules():
+    """`packaging/codex/ingestion_rules.py`, loaded from the checkout: the
+    restated rules and the provenance stamp the graders compare against."""
+    import importlib.util
+
+    path = REPO_ROOT / "packaging" / "codex" / "ingestion_rules.py"
+    spec = importlib.util.spec_from_file_location("_codex_ingestion_rules_lane", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _plugin_list_entry(document) -> dict | None:
+    entries = (document if isinstance(document, list)
+               else (document or {}).get("installed") if isinstance(document, dict)
+               else None)
+    for entry in entries or []:
+        if isinstance(entry, dict) and entry.get("pluginId") == CODEX_PLUGIN_ID:
+            return entry
+    return None
+
+
+def _assert_stdio_status(stdio, where: str) -> None:
+    assert stdio, f"{where}: no installed root to drive"
+    listed = [t.get("name") for t in
+              ((stdio["tools_list"].get("result") or {}).get("tools") or [])]
+    assert "multi_llm" in listed, f"{where}: {listed}"
+    response = stdio["calls"][0]["response"]
+    assert (response.get("result") or {}).get("isError") is False, response
+    _assert_status_envelope(_tool_envelope(response), where, response)
+
+
+class TestTheGitRoute:
+    """A4 row 6b: the published two-command install, executed offline.
+
+    `codex plugin marketplace add ssh://localhost<bare> --ref release --sparse
+    .agents --sparse packaging/codex`, then `codex plugin add`, against a bare
+    repository the entrypoint built from the image's own mirror — `release` one
+    commit behind the default branch, decoys outside both sparse paths. The
+    local-path seed never runs this code path in codex (R28); this row does.
+    """
+
+    def _install(self, package_probe) -> dict:
+        _only(package_probe, "git-route")
+        result, probe = package_probe
+        install = _bundle_json(result, "plugin-install.json")
+        assert install, f"{probe['id']}: no plugin-install.json"
+        assert install.get("git"), f"{probe['id']}: the install recorded no git block"
+        return install
+
+    def test_the_install_came_through_git_at_the_release_ref(self, package_probe):
+        install = self._install(package_probe)
+        assert install["install_source"] == "git", install["install_source"]
+        git = install["git"]
+        fixture = git["fixture"]
+        assert install["commands"][0]["exit"] == 0, install["commands"][0]
+        table = git["marketplace_table"] or ""
+        assert re.search(r'(?m)^source_type\s*=\s*"git"', table), table
+        assert re.search(r'(?m)^ref\s*=\s*"release"', table), table
+        assert '".agents"' in table and '"packaging/codex"' in table, table
+        snapshot = git["snapshot"]
+        assert "/.codex/.tmp/marketplaces/beastlabai" in snapshot["root"], snapshot
+        assert fixture["release_sha"] != fixture["default_sha"]
+        assert snapshot["head"] == fixture["release_sha"], (
+            f"the marketplace snapshot is at {snapshot['head']}, not the release "
+            f"ref's {fixture['release_sha']} — the install did not take the ref "
+            f"(the default branch is {fixture['default_sha']})")
+        assert snapshot["sparse_list"] == [".agents", "packaging/codex"], snapshot
+        # Cone-mode sparse checkout keeps root-level FILES (the decoy README);
+        # what it must leave out are the directories outside both paths.
+        for decoy in ("plans/decoy-plan.md", ".claude-plugin/marketplace.json"):
+            assert decoy not in snapshot["decoys_present"], snapshot
+
+    def test_the_installed_tree_is_the_release_tree_before_first_use(
+            self, package_probe):
+        install = self._install(package_probe)
+        fixture = install["git"]["fixture"]
+        tree = install["git"]["tree"]
+        assert tree["compared"], tree
+        assert tree["matches"], (
+            f"the installed tree differs from release:{fixture['release_sha']}'s "
+            f"packaging/codex/multi-llm: missing {tree['missing']}, extra "
+            f"{tree['extra']}, differing {tree['differing']}")
+        assert not tree["has_git_dir"] and not tree["has_plans"], tree
+        assert not tree["next_marker_present"], (
+            "the default branch's next-release marker reached a --ref release "
+            "install")
+        assert install["installed_root"].endswith(
+            f"/plugins/cache/beastlabai/multi-llm/{fixture['release_version']}"), (
+            install["installed_root"])
+        assert install["installed_digest"], "the installed tree carries no digest"
+
+    def test_the_list_entry_names_git_and_the_catalog_policy(self, package_probe):
+        install = self._install(package_probe)
+        fixture = install["git"]["fixture"]
+        entry = _plugin_list_entry(install["list_document"])
+        assert entry, install["list_document"]
+        assert entry["version"] == fixture["release_version"], entry
+        assert (entry.get("marketplaceSource") or {}).get("sourceType") == "git", entry
+        policy = _ingestion_rules().SHIPPED_POLICY
+        assert entry.get("installPolicy") == policy["installation"], entry
+        assert entry.get("authPolicy") == policy["authentication"], entry
+
+    def test_the_server_skill_and_tool_load_from_the_git_install(self, package_probe):
+        install = self._install(package_probe)
+        record = _probe_record(package_probe)
+        root = install["installed_root"]
+        mcp_get = record["mcp_get"]["document"]
+        assert mcp_get, record["mcp_get"]["command"]
+        assert root in json.dumps(mcp_get), (
+            f"`codex mcp get` does not run the server from {root}: {mcp_get}")
+        skill = record["prompt_input"]["skill"]
+        assert skill["advertised"] and skill["resolved_exists"], skill
+        assert skill["resolved"].startswith(root), (skill["resolved"], root)
+        exec_leg = record["exec"]
+        assert exec_leg["declarations"], "no tools[] entry for mcp__multi_llm"
+        names = [t.get("name") for t in exec_leg["declarations"][0].get("tools") or []]
+        assert "multi_llm" in names, exec_leg["declarations"][0]
+        assert "terminal" in exec_leg["scripted_phases"], exec_leg
+        _assert_status_envelope(_tool_envelope(exec_leg["returned_output"]),
+                                "the git install's tool call", exec_leg["returned_output"])
+        _assert_stdio_status(record["stdio"], "status from the git install")
+
+    def test_a_promoted_release_reaches_the_install(self, package_probe):
+        install = self._install(package_probe)
+        fixture = install["git"]["fixture"]
+        refresh = _probe_record(package_probe)["refresh"]
+        assert refresh["fast_forward"], "the fixture's promotion was not a fast-forward"
+        assert refresh["update_ref"]["exit"] == 0, refresh["update_ref"]
+        assert refresh["upgrade"]["command"]["exit"] == 0, refresh["upgrade"]
+        assert not (refresh["upgrade"]["document"] or {}).get("errors"), refresh["upgrade"]
+        assert refresh["snapshot_after_upgrade"]["head"] == fixture["default_sha"], (
+            "`marketplace upgrade` did not re-resolve the pinned ref")
+        assert refresh["add"]["command"]["exit"] == 0, refresh["add"]
+        assert (refresh["installed_root"] or "").endswith(
+            f"/multi-llm/{fixture['next_version']}"), refresh["installed_root"]
+        tree = refresh["tree"]
+        assert tree["matches"] and tree["next_marker_present"], tree
+        assert (refresh["list_entry"] or {}).get("version") == fixture["next_version"]
+        _assert_stdio_status(refresh["stdio"], "status after the upgrade")
+
+    def test_re_adding_at_another_ref_keeps_the_registration(self, package_probe):
+        """Graded on the one invariant users depend on: a second `marketplace
+        add` at another ref never silently re-points an existing registration.
+        The exit code is recorded and carried into the gate's evidence
+        (`git_route.re_add_other_ref_exit`; 1 on 0.159.2, 0.163.0 and 0.164.0,
+        "already added from a different source"), not graded: a codex that made
+        it a quiet no-op would leave users no worse off, only the README's
+        sentence to update."""
+        self._install(package_probe)
+        re_add = _probe_record(package_probe)["re_add_other_ref"]
+        table = re_add["marketplace_table_after"] or ""
+        assert re.search(r'(?m)^ref\s*=\s*"release"', table), (
+            f"re-adding at another ref moved the registration: {table}")
+
+
+class TestTheUpstreamValidatorRow:
+    """A4 row 1, restated 2026-10-23. Absent is a recorded absence; present
+    means it runs, passes and hashes to the bytes the rules were read from."""
+
+    def test_the_search_ran_after_codex_unpacked_its_system_skills(self, package_probe):
+        _only(package_probe, "upstream-validator")
+        record = _probe_record(package_probe)
+        assert record["prompt_input"]["exit"] == 0, record["prompt_input"]
+        assert record["system_skills"], (
+            "codex unpacked no system skills, so the search proves nothing")
+        assert record["status"] in ("absent", "present"), record["status"]
+
+    def test_a_validator_that_ships_passes_on_the_known_bytes(self, package_probe):
+        _only(package_probe, "upstream-validator")
+        record = _probe_record(package_probe)
+        rules = _ingestion_rules()
+        for run in record["validators"]:
+            assert run["exit"] == 0, (
+                f"upstream's {run['path']} rejects the installed tree: "
+                f"{run['stdout'][-2000:]}{run['stderr'][-2000:]}")
+            assert run["sha256"] == rules.SOURCE_SHA256, (
+                f"{run['path']} is back, at sha256 {run['sha256']} — not the "
+                f"{rules.SOURCE_CODEX_VERSION} read the restated rules carry "
+                f"({rules.SOURCE_SHA256}). Re-read it, fix "
+                f"packaging/codex/ingestion_rules.py and re-stamp it first.")
+
+
 class TestTheSeptember24FixesHoldInTheImage:
     """The fixes of 2026-09-24 (plans/codex-native-plugin.md, "Fixes for the
     issues rows 1b and 1-14 found"), each asserted on the row that found the
@@ -3099,6 +3326,16 @@ class TestTheRecordedProbes:
             pytest.skip(f"{probe['id']} is a blocking row, graded above")
         record = _probe_record(package_probe)
         assert record["probe"] == probe["probe"]
+        for name in probe.get("records") or []:
+            assert (package_probe[0].out_dir / name).is_file(), (
+                f"{probe['id']}: declared record {name} is missing")
+
+    def test_a_gate_row_wrote_every_record_it_declares(self, package_probe):
+        """Under the release gate, a blocking row's declared records are checked
+        too: the gate's evidence points at them."""
+        _result, probe = package_probe
+        if not GATE_TIER or not probe.get("blocking"):
+            pytest.skip("checked above, or not a release-gate run")
         for name in probe.get("records") or []:
             assert (package_probe[0].out_dir / name).is_file(), (
                 f"{probe['id']}: declared record {name} is missing")

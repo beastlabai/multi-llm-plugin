@@ -63,6 +63,7 @@ codex_build = importlib.util.module_from_spec(_spec)
 sys.modules["codex_build"] = codex_build
 _spec.loader.exec_module(codex_build)
 import ingestion_rules  # noqa: E402
+import release_gate  # noqa: E402
 
 #: Set by the package job: a row that would skip fails instead.
 REQUIRE_ROWS_ENV = "MLLM_REQUIRE_PACKAGE_ROWS"
@@ -1300,8 +1301,9 @@ class TestVersioning:
 class TestCatalog:
     def test_marketplace_entry_resolves(self):
         """A2a's shape: the name equals the manifest's (R29); ``source.path``
-        relative, ``./``-prefixed and inside the root (R20′); no policy, or a
-        legal one; no version anywhere."""
+        relative, ``./``-prefixed and inside the root (R20′); the explicit
+        policy the packaging guide asks for, equal to codex's own defaults
+        (``ingestion_rules.SHIPPED_POLICY``); no version anywhere."""
         catalog = _load(AGENTS_CATALOG)
         assert ingestion_rules.validate_catalog(catalog) == []
         assert catalog["name"] == "beastlabai"
@@ -1311,7 +1313,11 @@ class TestCatalog:
         entry = entries[0]
         assert entry["source"] == {"source": "local", "path": "./packaging/codex/multi-llm"}
         assert "version" not in json.dumps(entry)
-        assert "policy" not in entry
+        # Measured on 0.159.2 and 0.164.0: these are the values codex reports
+        # for an entry with no policy, so writing them out moves no install.
+        assert entry["policy"] == {"installation": "AVAILABLE",
+                                   "authentication": "ON_INSTALL"}
+        assert entry["policy"] == dict(ingestion_rules.SHIPPED_POLICY)
         plugin_dir = (REPO_ROOT / entry["source"]["path"]).resolve()
         assert plugin_dir == PLUGIN_DIR.resolve()
         assert REPO_ROOT.resolve() in plugin_dir.parents
@@ -1320,17 +1326,83 @@ class TestCatalog:
         assert entry["category"] == manifest["interface"]["category"]
 
     def test_the_catalog_rules_fire(self):
-        base = {"name": "beastlabai", "plugins": [
-            {"name": "x", "source": {"source": "local", "path": "./p"}}]}
+        good = {"source": {"source": "local", "path": "./p"},
+                "policy": {"installation": "AVAILABLE", "authentication": "ON_USE"},
+                "category": "Developer Tools"}
+        base = {"name": "beastlabai", "plugins": [{"name": "x", **good}]}
         assert ingestion_rules.validate_catalog(base) == []
+
+        def entry(**changes):
+            body = {"name": "x", **good, **changes}
+            return {"name": "beastlabai",
+                    "plugins": [{k: v for k, v in body.items() if v is not None}]}
+
         for bad in (
             {"name": "openai-curated", "plugins": []},
-            {"name": "beastlabai", "plugins": [{"name": "x", "source": "/abs"}]},
-            {"name": "beastlabai", "plugins": [{"name": "x", "source": "./../up"}]},
-            {"name": "beastlabai", "plugins": [
-                {"name": "x", "source": "./p", "policy": {"authentication": "NONE"}}]},
+            entry(source="/abs"),
+            entry(source="./../up"),
+            entry(policy={"installation": "AVAILABLE", "authentication": "NONE"}),
+            # codex 0.164.0 rejects the catalog on this one (measured).
+            entry(policy={"installation": "BOGUS", "authentication": "ON_INSTALL"}),
+            entry(policy={"authentication": "ON_INSTALL"}),
+            entry(policy={"installation": "AVAILABLE"}),
+            entry(policy=None),
+            entry(category=None),
+            entry(category=""),
         ):
             assert ingestion_rules.validate_catalog(bad), bad
+
+    def test_the_policy_enums_are_codex_s_own(self):
+        """Read off codex's own refusal text at 0.164.0, never guessed."""
+        assert ingestion_rules.INSTALL_POLICIES == {
+            "NOT_AVAILABLE", "AVAILABLE", "INSTALLED_BY_DEFAULT"}
+        assert ingestion_rules.AUTH_POLICIES == {"ON_INSTALL", "ON_USE"}
+        assert ingestion_rules.SHIPPED_POLICY["installation"] in \
+            ingestion_rules.INSTALL_POLICIES
+        assert ingestion_rules.SHIPPED_POLICY["authentication"] in \
+            ingestion_rules.AUTH_POLICIES
+
+
+class TestCompatibilityLayout:
+    """A4 row 1, as restated on 2026-10-23: the compatibility layout's own rules
+    from the packaging guide, checked on the shipped tree and on every build."""
+
+    def test_the_shipped_tree_is_the_compatibility_layout(self):
+        assert ingestion_rules.validate_layout(PLUGIN_DIR) == []
+        assert sorted(p.name for p in (PLUGIN_DIR / ".codex-plugin").iterdir()) == [
+            "plugin.json"]
+        assert (PLUGIN_DIR / ".mcp.json").is_file()
+        assert not (PLUGIN_DIR / "plugin.json").exists()
+        assert not (PLUGIN_DIR / "mcp.json").exists()
+
+    def test_the_layout_rules_fire(self, tmp_path):
+        def tree(*files):
+            root = tmp_path / f"t{len(list(tmp_path.iterdir()))}"
+            for name in files:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}", encoding="utf-8")
+            return root
+
+        assert ingestion_rules.validate_layout(
+            tree(".codex-plugin/plugin.json", ".mcp.json")) == []
+        for files in (
+            (".mcp.json",),
+            (".codex-plugin/plugin.json",),
+            (".codex-plugin/plugin.json", ".codex-plugin/.mcp.json", ".mcp.json"),
+            (".codex-plugin/plugin.json", ".mcp.json", "plugin.json"),
+            (".codex-plugin/plugin.json", ".mcp.json", "mcp.json"),
+        ):
+            assert ingestion_rules.validate_layout(tree(*files)), files
+
+    def test_the_build_runs_the_layout_rules(self):
+        source = (CODEX_PKG / "build.py").read_text(encoding="utf-8")
+        assert "ingestion_rules.validate_layout(scratch)" in source
+
+    def test_the_layout_rules_name_their_source(self):
+        assert ingestion_rules.LAYOUT_SOURCE.startswith(
+            "https://developers.openai.com/plugins/")
+        datetime.date.fromisoformat(ingestion_rules.LAYOUT_READ_DATE)
 
     def test_gitattributes_marks_the_tree_generated(self):
         """D1a: one rule, and nothing else."""
@@ -1396,10 +1468,56 @@ class TestMake:
         assert joined.index("--check-stamp") < joined.index("git tag")
         assert "codex-v" in joined and "opencode-v" not in joined
 
-    def test_the_full_gate_refuses_rows_it_cannot_run(self):
-        recipe = "\n".join(_makefile_recipes()["codex-package-check"])
-        assert "REFUSING" in recipe
-        assert recipe.index("REFUSING (rows 6b, 14)") < recipe.index("--write-stamp")
+    def test_the_full_gate_runs_every_tier_before_it_stamps(self):
+        """Rows 6b and 14 are wired: the refusal that stood in for them is gone,
+        and the stamp is the last step, after all three tiers and the bump."""
+        makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+        header = re.search(r"^codex-package-check:(.*)$", makefile, re.M)
+        assert header and not header.group(1).strip(), (
+            "the tiers are recipe lines, never prerequisites: `make -j` would "
+            "reorder the reset after a tier")
+        lines = _makefile_recipes()["codex-package-check"]
+        steps = [line.split()[-1] for line in lines if line.startswith("$(MAKE)")]
+        assert steps == ["codex-gate-reset", "codex-package-check-ci",
+                         "codex-gate-pinned", "codex-gate-minimum", "codex-gate-ceiling"]
+        recipe = "\n".join(lines)
+        assert "$(CODEX_GATE) begin" in "\n".join(_makefile_recipes()["codex-gate-reset"])
+        assert "REFUSING (rows 6b, 14)" not in makefile
+        assert recipe.index("--check-bump") < recipe.index("--write-stamp")
+        assert "exit 1" not in recipe, "an unconditional refusal before the stamp is back"
+
+    def test_every_tier_ends_in_the_record_check(self):
+        recipes = _makefile_recipes()
+        for target in ("codex-gate-pinned", "codex-gate-derived"):
+            recipe = "\n".join(recipes[target])
+            assert "$(CODEX_GATE) preflight" in recipe, target
+            assert "MLLM_CODEX_GATE_TIER=" in recipe, target
+            run = recipe.index("$(CODEX_GATE_PYTEST)")
+            check = recipe.index("$(CODEX_GATE) check")
+            assert run < check and "&&" in recipe[run:check], (
+                f"{target}: the record check must run after, and only after, a "
+                f"green pytest")
+        for target, tier in (("codex-gate-minimum", "minimum"),
+                             ("codex-gate-ceiling", "ceiling")):
+            recipe = "\n".join(recipes[target])
+            assert f"$(CODEX_GATE) version {tier}" in recipe, target
+            assert "|| exit 1" in recipe, f"{target}: a failed version lookup must stop"
+            assert "codex-gate-derived" in recipe, target
+        derived = "\n".join(recipes["codex-gate-derived"])
+        assert "- < $(CODEX_VERSION_DOCKERFILE)" in derived, (
+            "the derived image is built with no context")
+        assert "--build-arg BASE_IMAGE=$(IMAGE)" in derived
+
+    def test_the_gate_pytest_runs_no_credentialed_row(self):
+        makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+        block = re.search(r"^CODEX_GATE_PYTEST :=(.*?)(?:\n\n|\n#)", makefile,
+                          re.M | re.S).group(1)
+        for name in ("OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+            assert f"-u {name}" in block, name
+        for mark in ("not live", "not live_provider", "not live_native_phase",
+                     "not live_next_command"):
+            assert mark in block, mark
+        assert "test_container_host_lane.py" in block
 
     def test_ci_runs_the_codex_tier_beside_opencode(self):
         workflow = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text("utf-8")
@@ -1550,6 +1668,29 @@ def _copy_worktree(destination: Path) -> None:
         shutil.copy2(source, target)
 
 
+def _write_gate_evidence(repo: Path, *, version: str,
+                         validator: str = "absent") -> None:
+    """Every tier's evidence, as `release_gate.py check` writes it after a green
+    tier, over the plugin tree checked in at ``repo``."""
+    digest = (repo / "packaging/codex/multi-llm/dist/tree.sha256").read_text(
+        "utf-8").strip()
+    directory = repo / "packaging" / "codex" / ".gate"
+    release_gate.begin_session(directory)
+    versions = {**release_gate.expected_versions(),
+                "ceiling": release_gate.expected_versions()["pinned"]}
+    for tier in release_gate.TIERS:
+        release_gate.write_evidence({
+            "tier": tier, "image": f"mllm-e2e:{tier}", "image_digest": "sha256:0",
+            "codex_version": versions[tier], "digest": digest, "version": version,
+            "since": "20260101T000000Z", "checked_at": "2026-01-01T00:00:00Z",
+            "rows": {row: {"record": f"20260101T000000Z-{row}.json", "outcome": "pass"}
+                     for row in release_gate.required_rows(tier)},
+            "features": {"printout": {}, "diff": {}},
+            "upstream_validator": {"status": validator},
+            "git_route": {},
+        }, directory=directory)
+
+
 def _bump(text: str, old: str, new: str, pattern: str) -> str:
     replaced, count = re.subn(pattern.format(re.escape(old)), lambda m: m.group(0).replace(old, new), text, flags=re.M)
     assert count >= 1, pattern
@@ -1655,16 +1796,289 @@ class TestReleaseSequence:
         assert publish.returncode != 0
         assert "no " in publish.stderr and ".package-check.stamp" in publish.stderr
         assert _git(repo, "tag", "--list", "codex-v*").stdout.strip() == ""
-        stamp = subprocess.run(
-            [sys.executable, "packaging/codex/build.py", "--write-stamp", "2026-01-01T00:00:00Z"],
-            cwd=str(repo), capture_output=True, text=True, env=env, timeout=300,
-        )
+
+        def write_stamp() -> subprocess.CompletedProcess:
+            return subprocess.run(
+                [sys.executable, "packaging/codex/build.py", "--write-stamp",
+                 "2026-01-01T00:00:00Z"],
+                cwd=str(repo), capture_output=True, text=True, env=env, timeout=300,
+            )
+
+        # Step 4's container half has not run here, so the stamp refuses,
+        # naming every tier — no stamp over rows nobody ran.
+        refused_stamp = write_stamp()
+        assert refused_stamp.returncode != 0
+        for tier in ("pinned", "minimum", "ceiling"):
+            assert f"tier {tier}: no evidence" in refused_stamp.stderr, refused_stamp.stderr
+        assert not (repo / "packaging" / "codex" / ".package-check.stamp").exists()
+
+        # What a green gate leaves behind (release_gate.py check writes it per tier).
+        _write_gate_evidence(repo, version=new)
+        stamp = write_stamp()
         assert stamp.returncode == 0, stamp.stdout + stamp.stderr
         checked = subprocess.run(
             [sys.executable, "packaging/codex/build.py", "--check-stamp"],
             cwd=str(repo), capture_output=True, text=True, env=env, timeout=300,
         )
         assert checked.returncode == 0, checked.stdout + checked.stderr
+        recorded = json.loads(
+            (repo / "packaging" / "codex" / ".package-check.stamp").read_text("utf-8"))
+        assert set(recorded["gate"]) == set(release_gate.TIERS)
+        assert recorded["gate"]["ceiling"]["upstream_validator"] == "absent"
+
+
+# ===========================================================================
+# The release gate's container accounting (packaging/codex/release_gate.py)
+# ===========================================================================
+
+def _gate_matrix() -> dict:
+    """A host matrix carrying exactly the rows every tier requires, plus one
+    pinned-only row."""
+    rows = [{"id": f"codex-package-{probe}", "probe": probe, "blocking": True,
+             "gate_tiers": list(release_gate.TIERS)}
+            for probe in release_gate.EVERY_TIER]
+    rows.append({"id": "codex-package-anchor", "probe": "anchor", "blocking": False,
+                 "gate_tiers": ["pinned"]})
+    return {"hosts": {"codex": {"package_probes": rows}}}
+
+
+class TestTheReleaseGate:
+    SINCE = "20261023T100000Z"
+    DIGEST = "d" * 64
+
+    def _records(self, tmp_path, tier="ceiling", version="0.164.0",
+                 image="mllm-e2e:codex-ceiling", skip=(), **overrides):
+        """One passing record and bundle per required row, written the way
+        `harness.emit_record` and the entrypoint write them."""
+        matrix = _gate_matrix()
+        records = tmp_path / "records"
+        records.mkdir(exist_ok=True)
+        for row in matrix["hosts"]["codex"]["package_probes"]:
+            if tier not in row["gate_tiers"] or row["id"] in skip:
+                continue
+            change = overrides.get(row["id"], {})
+            stamp = change.get("stamp", "20261023T100500Z")
+            bundle = tmp_path / "runs" / stamp / row["id"]
+            bundle.mkdir(parents=True, exist_ok=True)
+            (bundle / "plugin-install.json").write_text(json.dumps({
+                "installed_digest": change.get("digest", self.DIGEST),
+                "install_source": "git" if row["probe"] == "git-route" else "local-path",
+            }), "utf-8")
+            probe = {"probe": row["probe"]}
+            if row["probe"] == "features":
+                probe["features"] = change.get("features", {
+                    "plugins": ["stable", True], "plugin_hooks": ["removed", False],
+                    "multi_agent": ["stable", True]})
+            if row["probe"] == "upstream-validator":
+                probe.update({"status": "absent", "system_skills": ["imagegen"],
+                              "validators": []})
+            (bundle / f"probe-{row['probe']}.json").write_text(json.dumps(probe), "utf-8")
+            entry = {"row_id": row["id"], "outcome": change.get("outcome", "pass"),
+                     "cli_version": change.get("cli_version", version)}
+            if "reason" in change:
+                entry["reason"] = change["reason"]
+            (records / f"{stamp}-{row['id']}.json").write_text(json.dumps({
+                "outcome": change.get("outcome", "pass"),
+                "rows": [entry],
+                "image": {"tag": change.get("image", image), "digest": "sha256:abc"},
+                "bundle": {"root": f"runs/{stamp}/{row['id']}"},
+            }), "utf-8")
+        return matrix, records
+
+    def _check(self, tmp_path, matrix, records, tier="ceiling",
+               image="mllm-e2e:codex-ceiling", version="0.164.0", expected=None,
+               since=None):
+        return release_gate.check_tier(tier, image, since or self.SINCE, version,
+                                       records_dir=records, container_dir=tmp_path,
+                                       matrix=matrix, digest=self.DIGEST,
+                                       expected_version=expected or version)
+
+    def test_the_shipped_schedule_is_complete(self):
+        assert release_gate.schedule_problems() == []
+        rows = release_gate.probe_rows()
+        assert release_gate.required_rows("pinned") == [row["id"] for row in rows]
+        for tier in ("minimum", "ceiling"):
+            probes = {row["probe"] for row in rows
+                      if row["id"] in release_gate.required_rows(tier)}
+            assert probes == set(release_gate.EVERY_TIER), tier
+
+    def test_the_schedule_rules_fire(self):
+        matrix = _gate_matrix()
+        assert release_gate.schedule_problems(matrix) == []
+        rows = matrix["hosts"]["codex"]["package_probes"]
+        rows[0]["gate_tiers"] = ["pinned"]                    # floor off two tiers
+        rows[1]["gate_tiers"] = ["pinned", "nightly"]         # an unknown tier
+        rows[-1]["gate_tiers"] = ["ceiling"]                  # not on pinned
+        del rows[2]                                           # `seed` gone
+        problems = "\n".join(release_gate.schedule_problems(matrix))
+        assert "codex-package-floor (`floor`) is not scheduled on ['minimum', 'ceiling']" in problems
+        assert "unknown gate tier(s) ['nightly']" in problems
+        assert "codex-package-anchor: every package row runs on the pinned tier" in problems
+        assert "no package probe row runs `seed`" in problems
+        with pytest.raises(release_gate.GateError):
+            release_gate.required_rows("nightly")
+
+    def test_the_versions_come_from_their_owners(self):
+        import yaml
+
+        pins = json.loads((SKILL_ROOT / "tests/container/package.json").read_text("utf-8"))
+        assert release_gate.pinned_version() == pins["dependencies"]["@openai/codex"]
+        caps = yaml.safe_load((SKILL_ROOT / "hosts/capabilities.yaml").read_text("utf-8"))
+        assert release_gate.minimum_version() == \
+            caps["hosts"]["codex"]["package"]["min_host_version"]
+
+    def test_the_newest_version_is_asked_of_npm_and_never_skipped(self):
+        def answer(stdout="", code=0, raises=None):
+            def runner(argv, **_kwargs):
+                assert argv[:3] == ["npm", "view", "@openai/codex"], argv
+                if raises:
+                    raise raises
+                return subprocess.CompletedProcess(argv, code, stdout, "boom")
+            return runner
+
+        assert release_gate.newest_version(answer('"0.164.0"\n')) == "0.164.0"
+        for runner in (answer(code=1), answer(raises=OSError("no npm")),
+                       answer('"latest"'), answer("")):
+            with pytest.raises(release_gate.GateError, match="A4 row 14"):
+                release_gate.newest_version(runner)
+
+    def test_a_green_tier_writes_its_evidence(self, tmp_path):
+        matrix, records = self._records(tmp_path)
+        evidence = self._check(tmp_path, matrix, records)
+        assert sorted(evidence["rows"]) == sorted(
+            release_gate.required_rows("ceiling", matrix))
+        assert evidence["codex_version"] == "0.164.0"
+        assert evidence["digest"] == self.DIGEST
+        assert evidence["features"]["diff"] == {}
+        assert evidence["upstream_validator"]["status"] == "absent"
+        assert evidence["git_route"]["install_source"] == "git"
+        path = release_gate.write_evidence(evidence, directory=tmp_path / "gate")
+        assert json.loads(path.read_text("utf-8"))["tier"] == "ceiling"
+
+    def test_a_features_diff_is_recorded_not_red(self, tmp_path):
+        moved = {"plugins": ["stable", True], "plugin_hooks": ["removed", False]}
+        matrix, records = self._records(
+            tmp_path, **{"codex-package-features": {"features": moved}})
+        evidence = self._check(tmp_path, matrix, records)
+        assert evidence["features"]["diff"] == {
+            "multi_agent": {"expected": ["stable", True], "measured": None}}
+
+    @pytest.mark.parametrize("change, expected", [
+        ({"outcome": "fail"}, "outcome 'fail'"),
+        ({"cli_version": "0.163.0"}, "ran codex '0.163.0', the tier asked for 0.164.0"),
+        ({"image": "mllm-e2e:local"}, "ran on image 'mllm-e2e:local'"),
+        ({"digest": "e" * 64}, "the image was built from other bytes"),
+        ({"stamp": "20261023T095959Z"}, "never ran in this gate"),
+        ({"reason": "the grader never graded this row"}, None),
+    ])
+    def test_the_check_refuses_a_row_that_did_not_pass_here(self, tmp_path, change,
+                                                            expected):
+        from tests.container import harness
+
+        if expected is None:
+            change = {"reason": harness.UNGRADED_REASON}
+            expected = "not graded by both verdicts"
+        matrix, records = self._records(
+            tmp_path, **{"codex-package-git-route": change})
+        with pytest.raises(release_gate.GateError) as caught:
+            self._check(tmp_path, matrix, records)
+        assert "codex-package-git-route" in str(caught.value)
+        assert expected in str(caught.value), str(caught.value)
+
+    def test_a_missing_row_is_named(self, tmp_path):
+        matrix, records = self._records(tmp_path, skip=("codex-package-upstream-validator",))
+        with pytest.raises(release_gate.GateError, match=(
+                "codex-package-upstream-validator: no run record")):
+            self._check(tmp_path, matrix, records)
+
+    def test_a_tier_is_bound_to_the_codex_it_is_for(self, tmp_path):
+        """`codex-gate-derived TIER=minimum CODEX_VERSION=<the pin>` cannot
+        produce minimum evidence."""
+        matrix, records = self._records(tmp_path, tier="minimum", version="0.163.0",
+                                        image="mllm-e2e:codex-minimum")
+        with pytest.raises(release_gate.GateError,
+                           match="tier minimum is for codex 0.159.2, but the rows "
+                                 "were run on 0.163.0"):
+            self._check(tmp_path, matrix, records, tier="minimum",
+                        image="mllm-e2e:codex-minimum", version="0.163.0",
+                        expected="0.159.2")
+
+    def test_the_since_stamp_must_be_one(self, tmp_path):
+        matrix, records = self._records(tmp_path)
+        with pytest.raises(release_gate.GateError, match="is not a YYYYmmddTHHMMSSZ"):
+            self._check(tmp_path, matrix, records, since="2026-10-23T10:00:00Z")
+
+    def test_rows_from_two_runs_are_refused(self, tmp_path):
+        matrix, records = self._records(
+            tmp_path, **{"codex-package-git-route": {"stamp": "20261023T110000Z"}})
+        with pytest.raises(release_gate.GateError, match="come from 2 different runs"):
+            self._check(tmp_path, matrix, records)
+
+    def _all_tiers(self, tmp_path, directory, **versions):
+        session = release_gate.begin_session(directory)["id"]
+        expected = {"pinned": "0.163.0", "minimum": "0.159.2"}
+        for tier, version, image in (("pinned", "0.163.0", "mllm-e2e:local"),
+                                     ("minimum", "0.159.2", "mllm-e2e:codex-minimum"),
+                                     ("ceiling", "0.164.0", "mllm-e2e:codex-ceiling")):
+            version = versions.get(tier, version)
+            root = tmp_path / tier
+            root.mkdir()
+            matrix, records = self._records(root, tier=tier, version=version,
+                                            image=image)
+            release_gate.write_evidence(
+                self._check(root, matrix, records, tier=tier, image=image,
+                            version=version), directory=directory)
+        return session, expected, matrix
+
+    def test_the_stamp_needs_every_tier_of_one_session_over_these_bytes(self, tmp_path):
+        directory = tmp_path / "gate"
+        session, expected, matrix = self._all_tiers(tmp_path, directory)
+        loaded = release_gate.load_evidence(directory)
+        version = loaded["ceiling"]["version"]
+        assert release_gate.evidence_problems(
+            loaded, self.DIGEST, version, matrix, session=session,
+            expected=expected) == []
+        moved = release_gate.evidence_problems(loaded, "f" * 64, version, matrix,
+                                               session=session, expected=expected)
+        assert any("tier ceiling: ran over digest" in p for p in moved), moved
+        other = release_gate.evidence_problems(loaded, self.DIGEST, version, matrix,
+                                               session="another", expected=expected)
+        assert sum("belongs to another gate session" in p for p in other) == 3, other
+        none = release_gate.evidence_problems(loaded, self.DIGEST, version, matrix,
+                                              session=None, expected=expected)
+        assert any(p.startswith("no gate session") for p in none), none
+        bumped = release_gate.evidence_problems(
+            loaded, self.DIGEST, version, matrix, session=session,
+            expected={"pinned": "0.165.0", "minimum": "0.159.2"})
+        assert "tier pinned: ran codex '0.163.0', the tier is for 0.165.0" in bumped
+        assert any(p.startswith("tier ceiling: codex 0.164.0 is below") for p in bumped)
+        del loaded["minimum"]
+        partial = release_gate.evidence_problems(loaded, self.DIGEST, version, matrix,
+                                                 session=session, expected=expected)
+        assert "tier minimum: no evidence (run `make codex-gate-minimum`)" in partial
+
+    def test_a_new_session_deletes_earlier_evidence(self, tmp_path):
+        directory = tmp_path / "gate"
+        first, _expected, _matrix = self._all_tiers(tmp_path, directory)
+        second = release_gate.begin_session(directory)["id"]
+        assert second != first
+        assert release_gate.load_evidence(directory) == {
+            tier: None for tier in release_gate.TIERS}
+        assert release_gate.current_session(directory) == second
+
+    def test_an_absent_validator_is_never_described_as_a_pass(self, tmp_path):
+        matrix, records = self._records(tmp_path)
+        evidence = self._check(tmp_path, matrix, records)
+        line = release_gate.describe({"ceiling": evidence})[2]
+        assert "upstream validator: absent" in line
+        assert "validated" not in line and "validator pass" not in line
+
+    def test_check_stamp_refuses_a_stamp_from_before_the_wired_gate(self, tmp_path):
+        stamp = tmp_path / "stamp.json"
+        stamp.write_text(json.dumps({"tier": codex_build.FULL_TIER, "digest": "x",
+                                     "version": "0.1.0", "stamped_at": ""}), "utf-8")
+        reason = codex_build.check_stamp(stamp=stamp, tree=PLUGIN_DIR)
+        assert reason and "no passing container rows for every gate tier" in reason
 
 
 # ===========================================================================

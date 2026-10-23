@@ -88,6 +88,21 @@ CODEX_PACKAGE_PYTEST := uv run --project skills/multi-llm -- pytest \
     skills/multi-llm/tests/test_codex_package.py \
     skills/multi-llm/tests/test_codex_mcp_server.py \
     skills/multi-llm/tests/test_uv_candidates.py
+# The full gate's container half (A4 rows 1, 6b, 7, 13, 14). release_gate.py owns which
+# rows each tier requires (host_matrix.yaml's `gate_tiers`), the codex version
+# each tier runs, and the accounting that turns run records into the evidence
+# the stamp requires.
+CODEX_GATE := uv run --project skills/multi-llm -- python $(CODEX_PKG)/release_gate.py
+CODEX_VERSION_DOCKERFILE := skills/multi-llm/tests/container/Dockerfile.codex-version
+CODEX_MINIMUM_IMAGE := mllm-e2e:codex-minimum
+CODEX_CEILING_IMAGE := mllm-e2e:codex-ceiling
+# The zero-quota package rows and nothing else: every key unset, no live or
+# credentialed tier selected, the module's own row filter set by the tier.
+CODEX_GATE_PYTEST := env -u OPENROUTER_API_KEY -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
+    -u OPENAI_API_KEY uv run --project skills/multi-llm -- pytest \
+    skills/multi-llm/tests/test_container_host_lane.py -q -rs \
+    -m "container and not live and not live_provider and not live_native_phase and not live_next_command" \
+    -k "codex-package or plugin_floor or gate_tier"
 
 # The whole-lane wall-clock cap (C1). Defaulted here, overridable on the command
 # line, and ENFORCED in the host-side driver (tests/container/harness.py's
@@ -112,7 +127,8 @@ export MLLM_E2E_MATRIX_TIMEOUT_S
         opencode-stage opencode-package opencode-package-check-ci \
         opencode-package-check opencode-publish opencode-bump opencode-latest-check \
         codex-regen codex-package codex-package-check-ci codex-package-check \
-        codex-publish
+        codex-gate-reset codex-gate-pinned codex-gate-minimum codex-gate-ceiling \
+        codex-gate-derived codex-publish
 
 help:
 	@echo "Containerized E2E harness (see $(CONTAINER_DIR)/README.md)"
@@ -149,6 +165,9 @@ help:
 	@echo "  make codex-package                clean rebuild; must equal the committed tree (after the commit)"
 	@echo "  make codex-package-check-ci       the A4 rows that need no Docker and no codex binary"
 	@echo "  make codex-package-check          the FULL gate; stamps only if every row ran"
+	@echo "  make codex-gate-pinned            the gate's container rows on the pinned codex (rows 1, 6b, 7, 13)"
+	@echo "  make codex-gate-minimum           the same rows on the declared minimum codex"
+	@echo "  make codex-gate-ceiling           the same rows on npm's newest codex (row 14; fetches it)"
 	@echo "  make codex-publish                refuses unless the full gate passed on these exact bytes; tags codex-v<version>"
 
 # One line naming what is missing (binary absent vs daemon unreachable), rather
@@ -796,29 +815,74 @@ codex-package-check-ci:
 	MLLM_REQUIRE_PACKAGE_ROWS=1 $(CODEX_PACKAGE_PYTEST) -m "package and not container" -q
 	@echo "codex-package-check-ci: CI tier green (no stamp written)"
 
-# The full A4 gate. IT STAMPS ONLY WHAT IT RAN: rows 1, 6b, 7, 13 and 14 need
-# the seeded container (and row 14 the network), and each refuses below by
-# number until its row exists, rather than being quietly absent (rule i).
-codex-package-check: codex-package-check-ci
-	@command -v docker >/dev/null 2>&1 || { \
-	  echo "make: the full gate needs a Docker daemon (rows 1, 7, 13); run codex-package-check-ci instead"; exit 1; }
-	@uv run --project skills/multi-llm -- python -c \
-	  'import sys; sys.path.insert(0, "skills/multi-llm"); \
-	   from tests.container.harness import load_host_matrix; \
-	   rows = (load_host_matrix().get("codex") or {}).get("rows") or []; \
-	   sys.exit(0 if any(r.get("route") == "package" for r in rows) else 1)' || { \
-	  echo "make: REFUSING (rows 1, 7, 13): host_matrix.yaml declares no codex row with" >&2; \
-	  echo "      'route: package'. A green file-shim run is no evidence about the plugin," >&2; \
-	  echo "      and this gate does not stamp rows it never ran." >&2; \
-	  exit 1; }
-	$(PYTEST) -m container -q -k "codex and (package or plugin_floor)"
+# The full A4 gate. IT STAMPS ONLY WHAT IT RAN. The CI tier, then the container
+# rows on THREE codex builds — the container's pin, the plugin's declared
+# minimum (`hosts.codex.package.min_host_version`) and npm's newest, resolved now
+# (row 14) — then bump discipline, then the stamp. Every tier ends in
+# `release_gate.py check`, which reads the run records this invocation wrote and
+# refuses unless each row the tier requires came back graded `pass` on that
+# image, that codex and an installed tree carrying this checkout's digest; and
+# `--write-stamp` refuses without all three tiers' evidence over these bytes.
+# pytest's exit code alone is not that: a module skipped for want of a daemon
+# exits 0 too. Serial by construction — recipe lines, never prerequisites, so
+# `make -j` cannot reorder the reset after a tier or race two tiers on the
+# shared records directory and docker. The reset begins a gate SESSION and the
+# stamp takes only evidence from it: every tier of one invocation, none older.
+codex-package-check:
+	$(MAKE) --no-print-directory codex-gate-reset
+	$(MAKE) --no-print-directory codex-package-check-ci
+	$(MAKE) --no-print-directory codex-gate-pinned
+	$(MAKE) --no-print-directory codex-gate-minimum
+	$(MAKE) --no-print-directory codex-gate-ceiling
 	$(CODEX_BUILD) --check-bump
-	@echo "make: REFUSING (rows 6b, 14): the offline Git-route container row (Phase 4) and" >&2; \
-	echo "      the newest-codex ceiling row are not wired. Until both exist this gate" >&2; \
-	echo "      writes no stamp and codex-publish stays refused, which is the point." >&2; \
-	exit 1
+	@$(CODEX_GATE) summary
 	$(CODEX_BUILD) --write-stamp "$$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	@echo "codex-package-check: full gate green; stamp written to $(CODEX_STAMP)"
+
+# One invocation's evidence, never an earlier one's: a new session id, and every
+# earlier tier's evidence deleted, before any tier runs.
+codex-gate-reset:
+	@$(CODEX_GATE) begin
+
+# Rows 1, 6b, 7 and 13 on the image `make e2e-image` builds from this tree: every
+# package probe row, as the gate has always run them.
+codex-gate-pinned: e2e-image
+	@$(CODEX_GATE) preflight
+	@since="$$(date -u +%Y%m%dT%H%M%SZ)"; \
+	  version="$$($(CODEX_GATE) version pinned)" || exit 1; \
+	  MLLM_CODEX_GATE_TIER=pinned MLLM_E2E_IMAGE=$(IMAGE) $(CODEX_GATE_PYTEST) && \
+	  $(CODEX_GATE) check pinned --image $(IMAGE) --since "$$since" --version "$$version"
+
+# The declared floor, measured rather than assumed: the pinned tier runs on the
+# container's pin, which is not the minimum users are told they need. Under this
+# tier the lane holds the rows to `min_host_version` instead of host_matrix's
+# `plugin_floor` (which tracks the pin and would refuse them).
+codex-gate-minimum: e2e-image
+	@version="$$($(CODEX_GATE) version minimum)" || exit 1; \
+	  $(MAKE) --no-print-directory codex-gate-derived TIER=minimum \
+	    CODEX_VERSION="$$version" CODEX_IMAGE=$(CODEX_MINIMUM_IMAGE)
+
+# A4 row 14, the ceiling: npm's newest @openai/codex, asked NOW. A fetch that
+# fails stops here naming what it could not reach — never a skip.
+codex-gate-ceiling: e2e-image
+	@version="$$($(CODEX_GATE) version ceiling)" || exit 1; \
+	  echo "codex-gate-ceiling: npm's newest @openai/codex is $$version"; \
+	  $(MAKE) --no-print-directory codex-gate-derived TIER=ceiling \
+	    CODEX_VERSION="$$version" CODEX_IMAGE=$(CODEX_CEILING_IMAGE)
+
+# The pinned image with only codex moved (Dockerfile.codex-version: built with no
+# context, the fetch is this build's one network access), then the tier's rows
+# on it. Internal: the two targets above are what to type.
+codex-gate-derived:
+	@test -n "$(TIER)" && test -n "$(CODEX_VERSION)" && test -n "$(CODEX_IMAGE)" || { \
+	  echo "usage: make codex-gate-minimum | codex-gate-ceiling (sets TIER, CODEX_VERSION, CODEX_IMAGE)"; exit 1; }
+	@$(CODEX_GATE) preflight
+	docker build --platform $(PLATFORM) \
+	  --build-arg BASE_IMAGE=$(IMAGE) --build-arg CODEX_VERSION=$(CODEX_VERSION) \
+	  -t $(CODEX_IMAGE) - < $(CODEX_VERSION_DOCKERFILE)
+	@since="$$(date -u +%Y%m%dT%H%M%SZ)"; \
+	  MLLM_CODEX_GATE_TIER=$(TIER) MLLM_E2E_IMAGE=$(CODEX_IMAGE) $(CODEX_GATE_PYTEST) && \
+	  $(CODEX_GATE) check $(TIER) --image $(CODEX_IMAGE) --since "$$since" --version $(CODEX_VERSION)
 
 # Developer-facing, never a CI target: CI holds no credential that pushes a tag.
 # Refuses before tagging on a missing or stale stamp (rule i) and on a digest

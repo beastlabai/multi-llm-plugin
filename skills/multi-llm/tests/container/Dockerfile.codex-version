@@ -1,0 +1,51 @@
+# The pinned E2E image with ONE thing moved: the codex CLI.
+#
+# The codex plugin's release gate (packaging/codex/release_gate.py, plans/codex-native-
+# plugin.md A4) runs the same zero-quota package rows on three codex builds:
+# the container's pin, the plugin's declared minimum, and npm's newest. The pin
+# is `mllm-e2e:local` itself. This file is the other two: it starts FROM that
+# image — every other CLI, the rig, the posture and the plugin tree held exactly
+# as built — and installs `@openai/codex@$CODEX_VERSION` into a prefix of its
+# own, then re-points `/opt/mllm/real/codex` (the one name the wrapper and the
+# entrypoint call) at it.
+#
+# WHY A DERIVED IMAGE AND NOT `MLLM_PIN_MODE=latest`. That build moves every CLI
+# at once; A4 row 14 asks what the NEWEST CODEX does with these bytes, and a red
+# there must be codex's, not pi's or copilot's.
+#
+# THE FETCH IS THE ROW'S ONE NETWORK ACCESS (A4 row 14: "the one gate row that
+# wants the network"). It happens here, at build time; the rows themselves still
+# run `--network none` like every other package row. A fetch that fails fails
+# this build, and the gate stops there, naming the version it could not reach.
+#
+# THE VERSION REPORT IS RE-TAKEN, NOT EDITED. The image's lock is rewritten so
+# its codex row asks for $CODEX_VERSION, and verify_versions.py — the base
+# image's own last step — runs again in `pinned` mode, so a resolver that
+# installed anything else is a failed build here, and the report the harness
+# reads (`cli_version` on every record) is a measurement of what landed.
+#
+# Built with no context (`docker build - < this file`): it copies nothing in.
+#
+#   docker build --build-arg BASE_IMAGE=mllm-e2e:local \
+#     --build-arg CODEX_VERSION=0.164.0 -t mllm-e2e:codex-ceiling - < this file
+ARG BASE_IMAGE=mllm-e2e:local
+FROM ${BASE_IMAGE}
+ARG CODEX_VERSION
+USER root
+RUN set -eu \
+ && test -n "${CODEX_VERSION}" || { echo "Dockerfile.codex-version: CODEX_VERSION is required" >&2; exit 1; } \
+ && mkdir -p /opt/mllm/codex-version \
+ && cd /opt/mllm/codex-version \
+ && printf '{"name":"mllm-e2e-codex-version","version":"0.0.0","private":true,"dependencies":{"@openai/codex":"%s"}}\n' "${CODEX_VERSION}" > package.json \
+ && npm install --no-audit --no-fund \
+ && node /opt/mllm/npm/link_cli_bins.mjs /opt/mllm/codex-version /opt/mllm/real codex \
+ && /usr/bin/python3 -c 'import sys, yaml; path = "/opt/mllm/lock/cli-versions.lock"; lock = yaml.safe_load(open(path)); rows = [r for r in lock.get("clis") or [] if r.get("id") == "codex"]; assert len(rows) == 1, rows; rows[0]["pinned_by_the_base_image"] = rows[0].get("version"); rows[0]["version"] = sys.argv[1]; yaml.safe_dump(lock, open(path, "w"), sort_keys=False)' "${CODEX_VERSION}" \
+ && /usr/bin/python3 /opt/mllm/rig/verify_versions.py \
+        --lock /opt/mllm/lock/cli-versions.lock \
+        --mode pinned \
+        --out /opt/mllm/lock/cli-versions.installed.json \
+        --home /tmp/mllm-verify-home \
+ && rm -rf /tmp/mllm-verify-home /tmp/mllm-inv \
+ && npm cache clean --force \
+ && chmod -R a+rX /opt/mllm/codex-version /opt/mllm/lock
+USER 10001:10001
