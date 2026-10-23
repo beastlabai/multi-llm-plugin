@@ -39,7 +39,8 @@ def hash_bundle(root: Path) -> tuple[dict[str, str], str]:
     files: dict[str, str] = {}
     for path in sorted(root.rglob("*")):
         if path.is_file():
-            files[str(path.relative_to(root))] = sha256_file(path)
+            # POSIX names: a record is portable, and its aggregate hashes them.
+            files[path.relative_to(root).as_posix()] = sha256_file(path)
     aggregate = hashlib.sha256(
         "\n".join(f"{name}:{digest}" for name, digest in sorted(files.items()))
         .encode("utf-8")

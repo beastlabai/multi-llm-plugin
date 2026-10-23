@@ -21,8 +21,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
-import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -41,8 +39,7 @@ from utils import status_file  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
 from utils.output_handler import get_phase_dir  # noqa: E402
 from utils.state_manager import get_or_create_state  # noqa: E402
-
-MOCK_LLM = Path(__file__).parent / "mocks" / "mock_llm.py"
+from tests.mock_launchers import install_mock_llm, mock_path  # noqa: E402
 
 #: Five tasks: an edit, a read-only check and an independent edit in one
 #: batch, an edit that depends on the check, and a manual task after that —
@@ -111,16 +108,8 @@ def make_repo(tmp_path, monkeypatch, plan_text: str = PLAN):
     subprocess.run(["git", "commit", "-qm", "init"], cwd=root, check=True, env=env)
 
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    target = bin_dir / "codex"
-    try:
-        target.symlink_to(MOCK_LLM)
-    except (OSError, NotImplementedError):  # pragma: no cover
-        shutil.copyfile(MOCK_LLM, target)
-        target.chmod(target.stat().st_mode | stat.S_IXUSR)
-    monkeypatch.setenv("PATH", os.pathsep.join(
-        [str(bin_dir), str(Path(sys.executable).parent), "/usr/bin", "/bin"]
-    ))
+    install_mock_llm(bin_dir, "codex")
+    monkeypatch.setenv("PATH", mock_path(bin_dir, ("codex",)))
     monkeypatch.setenv("MULTI_LLM_TEST_MODE", "1")
     monkeypatch.setenv("MULTI_LLM_TEST_FAST_BACKOFF", "1")
     config = tmp_path / "driver.yaml"

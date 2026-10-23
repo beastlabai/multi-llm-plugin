@@ -127,6 +127,7 @@ class TestVibeHomeIsolation:
 
         assert {e["VIBE_ACTIVE_MODEL"] for e in envs} == {"alpha-alias", "beta-alias"}
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits: Windows has no 0700 to read back")
     def test_the_root_is_private_to_this_user(self, sentinel_home):
         """0700, asserted rather than inherited from `mkdtemp`'s default."""
         root = VibeProvider().resolve_env(MODEL)["VIBE_HOME"]

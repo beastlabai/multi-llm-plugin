@@ -1544,8 +1544,8 @@ class _JailHost:
     the mock, never a resolver stub."""
 
     def __init__(self, tmp_path, monkeypatch):
+        from tests.mock_launchers import SCENARIO_MATCHER, install_mock_llm, mock_path
         from tests.test_plugin_landlock_executor import FakeWrapper
-        from tests.test_plugin_landlock_acceptance import MOCK_LLM, SCENARIO_MATCHER
         from utils import provider_registry as registry
         from utils import subagent_executor as executor
         import shutil as _shutil
@@ -1573,13 +1573,12 @@ class _JailHost:
         # runner under test) and opencode (so the opencode host's session rung
         # resolves to a real opencode spec, which has no sandbox probe).
         for name in ("codex", "opencode"):
-            (bin_dir / name).symlink_to(MOCK_LLM)
+            install_mock_llm(bin_dir, name)
         _shutil.copyfile(SCENARIO_MATCHER, bin_dir / SCENARIO_MATCHER.name)
         uv = _shutil.which("uv")
         if uv:
             monkeypatch.setenv("MULTI_LLM_UV", uv)
-        monkeypatch.setenv("PATH", os.pathsep.join(
-            [str(bin_dir), str(Path(sys.executable).parent), "/usr/bin", "/bin"]))
+        monkeypatch.setenv("PATH", mock_path(bin_dir, ("codex", "opencode")))
         monkeypatch.setenv("MULTI_LLM_TEST_MODE", "1")
         monkeypatch.setenv("MOCK_LLM_SANDBOX_BROKEN", "1")
         for name in ("MULTI_LLM_HOST", "MULTI_LLM_HOST_SESSION_MODEL",

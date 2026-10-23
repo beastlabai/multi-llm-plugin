@@ -20,6 +20,7 @@ poll's `notice` no longer repeats the note when `user_next_step` carries it.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -208,7 +209,8 @@ class TestTheNoticeDoesNotRepeatTheStep:
             cli_common.deactivate_result()
         out = capsys.readouterr().out
         step = payload["user_next_step"]
-        assert step["command"].endswith("plans/foo.md"), step
+        # The plan as typed: absolute, so in this OS's spelling.
+        assert step["command"].endswith(os.path.join("plans", "foo.md")), step
         assert "--implement" in step["command"], step
         assert "suggested next" not in (payload.get("notice") or ""), payload
         # Fix round 26: what the review left unapplied is the optional

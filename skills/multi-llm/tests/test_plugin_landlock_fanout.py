@@ -66,6 +66,14 @@ from utils.providers.base import (  # noqa: E402
 from utils.providers.codex import PLUGIN_LANDLOCK_RUNG, CodexProvider  # noqa: E402
 from utils.subagent_executor import SandboxProbeResult  # noqa: E402
 
+# The fan-out's jailed slots are measured through POSIX things: a shebang fake
+# codex on PATH, 0700 slot directories, tracked file modes, hardlinks on a
+# venv inode. Windows runs no plugin jail (codex has its own sandbox there).
+pytestmark = pytest.mark.skipif(
+    os.name == "nt",
+    reason="shebang fake codex, POSIX file modes and hardlinks; Windows runs no plugin jail",
+)
+
 SPEC = "codex:gpt-5.5"
 RUNG = "plugin-landlock"
 #: The codex version the faked walk was judged against: the rung's own

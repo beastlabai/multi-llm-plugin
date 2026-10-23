@@ -254,12 +254,17 @@ def build(
     source = PACKAGE_DIR / "src" / "index.mjs"
     shutil.copy2(source, dist / "index.mjs")
 
-    # 2. The command body, {SKILL_DIR} intact.
-    (dist / "command.md").write_text(command_body(skill_base), encoding="utf-8")
+    # 2. The command body, {SKILL_DIR} intact. ``newline="\n"`` on every file
+    #    this function writes: text mode would turn each "\n" into "\r\n" on
+    #    Windows, and the tree digest below is taken over bytes, so the same
+    #    source would build a package with a different digest there.
+    (dist / "command.md").write_text(
+        command_body(skill_base), encoding="utf-8", newline="\n"
+    )
 
     # 3. The generated CLI surface.
     (dist / "cli-surface.json").write_text(
-        cli_surface_json(skill_base), encoding="utf-8"
+        cli_surface_json(skill_base), encoding="utf-8", newline="\n"
     )
 
     # 4. The payload, by allowlist, with the sweep and the inventory assertion.
@@ -287,7 +292,9 @@ def build(
     #    ``__pycache__`` fall out of it by the same rule rather than by name:
     #    npm does not pack them.
     accumulator = tree_digest(out, exclude=_not_shipped)
-    (dist / DIGEST_NAME).write_text(accumulator + "\n", encoding="utf-8")
+    (dist / DIGEST_NAME).write_text(
+        accumulator + "\n", encoding="utf-8", newline="\n"
+    )
 
     # 7. And dist/ is exactly what those steps wrote. The digest cannot stand in
     #    for this check, because a stale file is *inside* the digest.

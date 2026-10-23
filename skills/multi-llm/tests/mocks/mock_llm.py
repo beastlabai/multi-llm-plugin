@@ -509,6 +509,8 @@ def apply_mock_edits(prompt: str = "") -> List[Dict[str, Any]]:
             sys.exit(EXIT_TEST_AUTHORING_ERROR)
 
         mode = str(entry.get("mode") or "patch")
+        # Bytes in, bytes out, the way an editing model's tool writes: text
+        # mode on Windows would turn every `\n` of the file into `\r\n`.
         if mode == "delete":
             try:
                 resolved.unlink()
@@ -516,14 +518,12 @@ def apply_mock_edits(prompt: str = "") -> List[Dict[str, Any]]:
                 pass
         elif mode == "create":
             resolved.parent.mkdir(parents=True, exist_ok=True)
-            resolved.write_text(str(entry.get("content") or ""), encoding="utf-8")
+            resolved.write_bytes(str(entry.get("content") or "").encode("utf-8"))
         elif mode == "patch":
             resolved.parent.mkdir(parents=True, exist_ok=True)
-            existing = (
-                resolved.read_text(encoding="utf-8") if resolved.is_file() else ""
-            )
-            resolved.write_text(
-                existing + str(entry.get("content") or ""), encoding="utf-8"
+            existing = resolved.read_bytes() if resolved.is_file() else b""
+            resolved.write_bytes(
+                existing + str(entry.get("content") or "").encode("utf-8")
             )
         else:
             print(

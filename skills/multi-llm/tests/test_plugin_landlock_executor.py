@@ -45,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import landlock_dispatch  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils.llm_client import _resolve_executable  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     HOST_SANDBOX_POSTURE_ENV,
     PROFILE_AGENT_READONLY,
@@ -77,6 +78,27 @@ ABSENT_NOTE = "landlock_exec: unavailable: Landlock ABI none (ENOSYS); the floor
 ABI2_NOTE = "landlock_exec: unavailable: Landlock ABI 2 found; the floor is 3"
 REQUIRED_NOTE = "landlock_exec: required-entry: dir:/nowhere/codex-home: missing"
 
+#: For the one test that backgrounds a grandchild with ``sh`` and reads the
+#: wrapper's process-group id. Every other test here is OS-neutral code (the
+#: walk, the gates, the wrapped argv, the lines a denial prints) driven through
+#: a fake wrapper that is a plain Python script, so it runs wherever the mock
+#: codex does; Windows has no process groups to kill and runs no plugin jail.
+posix_process_groups = pytest.mark.skipif(
+    os.name == "nt",
+    reason="needs sh and process groups (os.getpgid); Windows runs no plugin jail",
+)
+
+#: For the tests that read the jail's denial text or the ``~/`` rendering. Both
+#: are POSIX path shapes (``failed to write /home/…``, ``$HOME`` shown as ``~``,
+#: a denied ``/etc/stray``), a trust table keys on a POSIX path that TOML would
+#: need escaped on Windows, and ``st_ctime`` there is a creation time. The jail
+#: that writes such text is Linux's; Windows runs none.
+posix_paths = pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX path shapes in the jail's denial text, ~/ rendering and "
+           "st_ctime; Windows runs no plugin jail",
+)
+
 
 # ---------------------------------------------------------------------------
 # The fake wrapper (§8.1 tier 1): records its argv and env, then does what the
@@ -90,11 +112,13 @@ MODES = {modes!r}
 args = sys.argv[1:]
 sep = args.index("--")
 allow, cmd = args[:sep], args[sep + 1:]
-probe = len(cmd) > 1 and cmd[1] == "sandbox"
+# Where codex is an npm-style shim (a Windows mock) the launcher is `node
+# <cli.js>`, so the subcommand is the second or third word.
+probe = "sandbox" in cmd[1:3]
 record = {{
     "argv": sys.argv, "orig_argv": getattr(sys, "orig_argv", None),
     "executable": sys.executable, "allow": allow, "cmd": cmd, "probe": probe,
-    "pid": os.getpid(), "pgid": os.getpgid(0),
+    "pid": os.getpid(), "pgid": os.getpgid(0) if hasattr(os, "getpgid") else None,
     "env": {{k: os.environ.get(k) for k in (
         "TMPDIR", "MULTI_LLM_CANARY_SEEDED", "MULTI_LLM_CANARY_WRITE_FILE",
         "MULTI_LLM_CANARY_WRITE_DIR", "MULTI_LLM_CANARY_WORKDIR", "CODEX_HOME",
@@ -112,8 +136,16 @@ def say(text, code, err=True):
     print(text, file=sys.stderr if err else sys.stdout, flush=True)
     sys.exit(code)
 
+def run(argv):
+    # exec(2) where there is one. Windows has none (os.execvp starts the child
+    # and ends this process with status 0), so the child runs under this
+    # process and its status is relayed.
+    if os.name == "nt":
+        sys.exit(subprocess.run(argv).returncode)
+    os.execvp(argv[0], argv)
+
 if kind == "exec":
-    os.execvp(cmd[0], cmd)
+    run(cmd)
 if kind == "deny":
     say({denied!r}, 0, err=False)
 if kind == "absent":
@@ -149,13 +181,13 @@ if kind == "home":
     home = os.environ["CODEX_HOME"]
     with open(os.path.join(home, "config.toml"), "a", encoding="utf-8") as handle:
         handle.write(arg.replace("\\n", "\n"))
-    os.execvp(cmd[0], cmd)
+    run(cmd)
 if kind == "link":
     # uv traffic on a shared inode: a name made and removed (ctime only).
     time.sleep(0.02)
     os.link(arg, arg + ".spare")
     os.unlink(arg + ".spare")
-    os.execvp(cmd[0], cmd)
+    run(cmd)
 if kind == "linkwrite":
     # The same inode rewritten at the same size, mtime put back.
     info = os.stat(arg)
@@ -164,7 +196,7 @@ if kind == "linkwrite":
         handle.seek(0)
         handle.write(data.replace(b"6.0.3", b"6.6.6"))
     os.utime(arg, ns=(info.st_atime_ns, info.st_mtime_ns))
-    os.execvp(cmd[0], cmd)
+    run(cmd)
 if kind == "cmdeny":
     done = subprocess.run(cmd, capture_output=True, text=True)
     item = {{"type": "item.completed", "item": {{
@@ -825,8 +857,11 @@ class TestTheWrappedSpawn:
         assert capture.exit_code == 0, capture.stderr
         [row] = wrapper.records(probe=False)
         assert row["orig_argv"][:4] == [sys.executable, "-I", "-S", str(wrapper.path)]
-        codex_path = str(runner_env.bin_dir / "codex")
-        assert row["cmd"][0] == codex_path and row["cmd"][1] == "exec"
+        # The launcher the product resolved on the mock PATH: the mock itself
+        # where it is a script, `node <cli.js>` where it is an npm-style shim.
+        launcher, _ = _resolve_executable("codex")
+        assert row["cmd"][:len(launcher)] == launcher
+        assert row["cmd"][len(launcher)] == "exec"
         assert row["cmd"][row["cmd"].index("--sandbox") + 1] == "danger-full-access"
         assert any(a.startswith("developer_instructions=") for a in row["cmd"])
         allow = row["allow"]
@@ -902,6 +937,7 @@ class TestTheWrappedSpawn:
         assert capture.launch_error and "grant" in capture.launch_error
         assert wrapper.records() == [] and _slot_dirs() <= before
 
+    @posix_process_groups
     def test_the_group_kill_reaches_the_exec_d_child(self, repo, wrapper, runner_env, tmp_path):
         runner_env.use("codex:gpt-5.5")
         pidfile = tmp_path / "grandchild.pid"
@@ -1084,6 +1120,7 @@ class TestTheDispatchOnTheRung:
         assert len(dirs) == 2 and dirs[0] != dirs[1]
         assert not any(os.path.exists(d) for d in dirs)
 
+    @posix_paths
     def test_a_jail_eacces_is_one_line_and_never_retried(self, repo, wrapper, runner_env, jail_home, capsys):
         runner_env.use("codex:gpt-5.5")
         denied = Path(os.environ["HOME"]) / "elsewhere" / "state.db"
@@ -1122,6 +1159,7 @@ class TestTheDispatchOnTheRung:
         assert outcome.status == executor.STATUS_REJECTED
         assert "path not named" in outcome.reason and len(outcome.attempts) == 1
 
+    @posix_paths
     def test_an_ordinary_permission_error_is_not_a_jail_denial(self, repo, wrapper, runner_env, capsys):
         runner_env.use("codex:gpt-5.5")
         # Inside the attempt's own TMPDIR: an allow entry, so not the jail's.
@@ -1138,6 +1176,7 @@ class TestTheDispatchOnTheRung:
         assert "not a jail denial" in outcome.reason
         assert "[JAIL_DENIED]" not in capsys.readouterr().out
 
+    @posix_paths
     def test_a_command_output_denial_fails_nothing(self, repo, wrapper, runner_env, capsys):
         runner_env.use("codex:gpt-5.5")
         runner_env.echo("validation")
@@ -1174,7 +1213,9 @@ class TestTheDispatchOnTheRung:
         assert "Warn-only" in lines[0]
         assert "mcp_servers.x" in (jail_home / "config.toml").read_text(encoding="utf-8")
 
-    @pytest.mark.parametrize("where", ["other", "root", "sub"])
+    @pytest.mark.parametrize("where", [
+        "other", "root", pytest.param("sub", marks=posix_paths),
+    ])
     def test_a_trust_entry_added_during_the_run_is_named_in_the_summary(
         self, repo, wrapper, runner_env, jail_home, capsys, where
     ):
@@ -1249,6 +1290,7 @@ class TestTheDispatchOnTheRung:
         return cached, venv / "__init__.py"
 
     @pytest.mark.parametrize("dispatch, warned", [("link", False), ("linkwrite", True)])
+    @posix_paths
     def test_the_home_check_reads_content_not_ctime(
         self, repo, wrapper, runner_env, jail_home, tmp_path, capsys, dispatch, warned
     ):

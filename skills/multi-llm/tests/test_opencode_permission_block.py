@@ -531,6 +531,9 @@ class TestTheRigMeasuredTheseRows:
         [("builtin_tmp_plan", "plan"), ("builtin_tmp_build", "build"),
          ("builtin_plansdir_plan", "plan")],
     )
+    @pytest.mark.skipif(
+        os.name == "nt", reason="the captures are Linux opencode runs with POSIX "
+        "env paths, and the globs are joined with this OS's separator")
     def test_the_relisted_allows_are_the_ones_the_deny_shadowed(self, case, agent):
         """The deny error lists the resolved rules. Every allow before our
         `"*": "deny"`, except `tool-output` (re-appended after the agent layer)

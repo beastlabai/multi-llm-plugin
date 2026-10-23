@@ -1019,7 +1019,7 @@ class TestPlanVariants:
     def _cap_exhausting_question(tmp_path):
         """A question naming ``_MAX_READ_FILES`` existing absolute files, all
         ahead of the plan block in the rendered prompt."""
-        from utils.providers.aider import _MAX_READ_FILES
+        from utils.providers.aider import _ABS_PATH_RE, _MAX_READ_FILES
 
         named = tmp_path / "named"
         named.mkdir()
@@ -1028,7 +1028,8 @@ class TestPlanVariants:
             f = named / f"f{i}.py"
             f.write_text("x = 1\n", encoding="utf-8")
             paths.append(os.path.realpath(str(f)))
-        assert all(re.fullmatch(r"/[\w.\-/]+", p) for p in paths)
+        # The extractor's own pattern, so a Windows `C:\...` temp path qualifies too.
+        assert all(_ABS_PATH_RE.fullmatch(p) for p in paths)
         return "How do these relate to the plan? " + " ".join(paths)
 
     def test_a_question_that_exhausts_aiders_read_cap_gets_the_inline_block(
@@ -3093,7 +3094,8 @@ class TestAFailedRunIsNeverAnAnswer:
     def test_a_timed_out_run_s_answer_file_is_a_partial(self, plan, monkeypatch, content):
         """How the run ended decides, never how finished the file looks."""
         def write_then_time_out(cmd, kwargs):
-            Path(answer_path_in(cmd)).write_text(content, encoding="utf-8")
+            # Bytes, so Windows' text mode adds no `\r` the product would keep.
+            Path(answer_path_in(cmd)).write_bytes(content.encode("utf-8"))
             raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"), output="", stderr="")
 
         ScriptedCLIs(monkeypatch, kilocode=write_then_time_out)

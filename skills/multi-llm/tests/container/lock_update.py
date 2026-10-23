@@ -872,7 +872,10 @@ def revert_command(container_dir: Path, written: dict) -> str:
     paths = []
     for name in written:
         absolute = container_dir / name
-        relative = os.path.relpath(absolute, Path.cwd())
+        try:
+            relative = os.path.relpath(absolute, Path.cwd())
+        except ValueError:  # Windows: another drive than the cwd's
+            relative = os.pardir
         # `make` runs this from the checkout root, where the relative form is the
         # readable one; anywhere else it would be a ladder of `../` and the
         # absolute path is what a reader can act on.

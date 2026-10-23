@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
-import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -36,8 +34,12 @@ from utils.write_phase_bridge import (  # noqa: E402
     materialize_write_tasks,
     write_task_file_for_phase,
 )
-
-MOCK_LLM = Path(__file__).parent / "mocks" / "mock_llm.py"
+from tests.mock_launchers import (  # noqa: E402
+    MOCK_LLM,  # noqa: F401 - imported from here by sibling files
+    install_mock_llm,
+    mock_path,
+    write_sh_command,
+)
 
 PLAN = """# Sample Implementation Plan
 
@@ -85,16 +87,8 @@ def repo(tmp_path, monkeypatch):
     subprocess.run(["git", "commit", "-qm", "init"], cwd=root, check=True, env=env)
 
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    target = bin_dir / "codex"
-    try:
-        target.symlink_to(MOCK_LLM)
-    except (OSError, NotImplementedError):  # pragma: no cover
-        shutil.copyfile(MOCK_LLM, target)
-        target.chmod(target.stat().st_mode | stat.S_IXUSR)
-    monkeypatch.setenv("PATH", os.pathsep.join(
-        [str(bin_dir), str(Path(sys.executable).parent), "/usr/bin", "/bin"]
-    ))
+    install_mock_llm(bin_dir, "codex")
+    monkeypatch.setenv("PATH", mock_path(bin_dir, ("codex",)))
     monkeypatch.setenv("MULTI_LLM_TEST_MODE", "1")
     monkeypatch.setenv("MULTI_LLM_TEST_FAST_BACKOFF", "1")
     config = tmp_path / "driver.yaml"
@@ -277,10 +271,9 @@ class TestImplementOrchestratorWiring:
         exit 3. The prescribed `--resume` materializes NO task, and used to
         complete the phase without running the check again."""
         _seed_generate_tasks(repo)
-        verify = repo.tmp_path / "verify.sh"
-        verify.write_text("#!/bin/sh\necho 'typecheck failed'\nexit 2\n",
-                          encoding="utf-8")
-        verify.chmod(verify.stat().st_mode | stat.S_IXUSR)
+        verify = write_sh_command(
+            repo.tmp_path / "verify.sh", "#!/bin/sh\necho 'typecheck failed'\nexit 2\n"
+        )
         config = repo.tmp_path / "driver.yaml"
         config.write_text(
             "driver:\n  subagent_runner: codex:gpt-5.5\n"
@@ -314,7 +307,7 @@ class TestImplementOrchestratorWiring:
         assert mirror["progress"]["write_subagents"]["verification"]["exit_code"] == 2
 
         # The repository fixed: the same resume completes the phase.
-        verify.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        write_sh_command(repo.tmp_path / "verify.sh", "#!/bin/sh\nexit 0\n")
         assert implement_orchestrator.main([
             "--plan-file", str(repo.plan), "--yes", "--exec-subagents", "--resume",
         ]) == 0

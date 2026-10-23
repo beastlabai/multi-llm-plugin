@@ -46,6 +46,12 @@ from utils import write_batch_scheduler as wbs  # noqa: E402
 from utils.output_handler import output_dir_path  # noqa: E402
 from utils.state_manager import StateManager  # noqa: E402
 
+#: A `--files-from` listing whose name carries both quote kinds. Windows forbids
+#: `"` in a filename, so there it keeps only the `'`; the `--files` names,
+#: which never touch the disk, still carry both.
+LISTING_NAME = "list 'x' \"y\".txt" if os.name != "nt" else "list 'x' y.txt"
+
+
 PLAN = "improve-plan"
 CODE = "improve-code"
 MODES = [PLAN, CODE]
@@ -1481,7 +1487,7 @@ class TestTheContinuation:
 
     def test_the_row_14_command_is_token_safe(self, repo, stub, capsys):
         names = ["a b.py", "it's.py", 'say "hi".py']
-        listing = repo / "list 'x' \"y\".txt"
+        listing = repo / LISTING_NAME
         listing.write_text("c.py\n", encoding="utf-8")
         stub(fail={"review-code": 1})
         plan = _plan(repo, name="spaced plan")

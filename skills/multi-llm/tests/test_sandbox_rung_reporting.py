@@ -538,6 +538,11 @@ class TestEveryOutcomeOnTheJailRecordsTheWord:
         assert result["sandbox"] == JAIL_WORD
         assert base.collect_served_models({SPEC: result}) == {SPEC: {"sandbox": JAIL_WORD}}
 
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="the jail's denial line names a POSIX path (~/outside/state.db); "
+               "Windows runs no plugin jail",
+    )
     def test_a_jail_denied_slot_carries_its_reason_and_path(self, jail_env, monkeypatch):
         _pin_probe(monkeypatch, JAIL)
         outside = jail_env / "outside"

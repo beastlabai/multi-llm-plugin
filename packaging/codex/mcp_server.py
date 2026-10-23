@@ -628,6 +628,21 @@ def _is_file(target) -> bool:
         return False
 
 
+def file_uri_path(parsed) -> str:
+    """The local path of a parsed ``file://`` URI.
+
+    A Windows URI carries its drive behind the path's leading slash
+    (``file:///C:/src/x`` parses to ``/C:/src/x``), which ``ntpath``
+    resolves under the current drive into no directory at all; so every root a
+    Windows client offered was "not a directory" and the anchor fell through to
+    the next rung.
+    """
+    path = unquote(parsed.path)
+    if os.name == "nt" and re.match(r"/[A-Za-z]:", path):
+        path = path[1:]
+    return path
+
+
 def expand_home(target: str, env) -> str:
     home = env.get("HOME") or env.get("USERPROFILE") or os.path.expanduser("~")
     if target == "~":
@@ -653,7 +668,9 @@ def find_uv(surface, env):
     for candidate in surface["uv"]["candidates"]:
         expanded = expand_home(candidate, env)
         if _is_file(expanded):
-            return expanded
+            # Normalized like the two rungs above: on Windows the candidate's
+            # `/`s would otherwise follow the home's `\`s into the child's env.
+            return os.path.abspath(expanded)
     return None
 
 
@@ -1227,13 +1244,20 @@ def _drain_stderr(pipe, tail: _Tail):
 
 
 def _signal_group(proc, which) -> None:
-    try:
-        os.killpg(proc.pid, which)
-    except (ProcessLookupError, PermissionError, OSError):
+    # Windows has no process groups and no ``os.killpg`` (its AttributeError
+    # used to escape every timeout and cancel): there the leader alone is
+    # signalled, ``TerminateProcess``, and the dispatcher's python outlives it.
+    killpg = getattr(os, "killpg", None)
+    if killpg is not None:
         try:
-            proc.send_signal(which)
-        except (ProcessLookupError, OSError):
+            killpg(proc.pid, which)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
             pass
+    try:
+        proc.send_signal(which)
+    except (ProcessLookupError, OSError):
+        pass
 
 
 def kill_tree(proc, drains) -> None:
@@ -1723,7 +1747,7 @@ class Server:
                 if parsed is None or parsed.scheme != "file":
                     note = "the first root is not a file:// URI"
                 else:
-                    path, note = self._usable_dir(unquote(parsed.path))
+                    path, note = self._usable_dir(file_uri_path(parsed))
                     if path:
                         return path, "roots", probed
                 break  # the first root is the anchor, or nothing is

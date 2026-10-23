@@ -1710,7 +1710,10 @@ class TestTheHomeCheck:
             pytest.skip("no sleep binary to name codex")
         (tmp_path / "bin").mkdir()
         decoy = tmp_path / "bin" / "codex"
-        shutil.copy2(sleep, decoy)
+        # Not copy2: it copies st_flags too, and on macOS the system `sleep`
+        # carries SIP's `restricted` flag, which chflags(2) refuses to set.
+        shutil.copyfile(sleep, decoy)
+        decoy.chmod(0o755)
         where = tmp_path / "planted"
         where.mkdir()
         path = os.path.realpath(where)

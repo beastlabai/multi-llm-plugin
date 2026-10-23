@@ -301,9 +301,21 @@ def expand_env_home(provider_env: Dict[str, str]) -> Dict[str, str]:
     that is not a home-relative path passes through unchanged.
     """
     return {
-        key: (os.path.expanduser(value) if isinstance(value, str) else value)
+        key: (_expand_leading_tilde(value) if isinstance(value, str) else value)
         for key, value in provider_env.items()
     }
+
+
+def _expand_leading_tilde(value: str) -> str:
+    """``os.path.expanduser``, minus Windows' guess at another user's home.
+
+    ``ntpath.expanduser`` never looks ``~name`` up: it answers with a sibling of
+    the current profile dir (``%USERPROFILE%\\..\\name``) whether that user exists or
+    not, so there only the current user's ``~`` is expanded.
+    """
+    if os.name == "nt" and value.startswith("~") and value[1:2] not in ("", "/", "\\"):
+        return value
+    return os.path.expanduser(value)
 
 
 class DispatchContext:

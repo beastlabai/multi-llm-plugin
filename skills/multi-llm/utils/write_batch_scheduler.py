@@ -13340,8 +13340,9 @@ class WriteBatchScheduler:
         if not self.write_target:
             return None
         try:
+            # A label in prose and in the result line: `/` on every platform.
             return os.path.relpath(
-                self.write_target, os.path.realpath(self.repo_root))
+                self.write_target, os.path.realpath(self.repo_root)).replace(os.sep, "/")
         except ValueError:  # pragma: no cover - another drive (Windows)
             return self.write_target
 

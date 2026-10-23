@@ -1,1 +1,6 @@
+# Every text file is checked out LF on every platform. Git for Windows defaults
+# to core.autocrlf=true, which turned the checked-in plugin trees into CRLF
+# bytes their recorded digests do not cover, and put a `\r` on every line of
+# the bash hook scripts.
+* text=auto eol=lf
 packaging/codex/multi-llm/** linguist-generated=true -diff

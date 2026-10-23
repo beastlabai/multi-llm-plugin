@@ -88,6 +88,11 @@ def jailed(tmp_path, monkeypatch):
     logs each invocation and either answers as a jail whose canary held (exit
     0 and the affirmative marker, the seeded file untouched) or as a kernel
     without Landlock (the wrapper's own exit 126 and its note)."""
+    if os.name == "nt":
+        pytest.skip(
+            "symlinked shebang mock codex on a replaced PATH, which Windows can "
+            "neither find nor run; Windows runs no plugin jail"
+        )
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "codex").symlink_to(MOCK_LLM)

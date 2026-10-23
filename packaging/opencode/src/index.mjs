@@ -483,7 +483,7 @@ function findUv(surface, env) {
 }
 
 function whichUv(env) {
-  const raw = env.PATH || ""
+  const raw = pathVariable(env)
   if (!raw) return null
   const names = process.platform === "win32" ? ["uv.exe", "uv"] : ["uv"]
   for (const dir of raw.split(path.delimiter)) {
@@ -496,6 +496,22 @@ function whichUv(env) {
     }
   }
   return null
+}
+
+/**
+ * The PATH of an environment object, under whatever name the platform gave it.
+ *
+ * `process.env` itself is case-insensitive on Windows, but the copy `execute`
+ * takes of it is an ordinary object, and it keeps each name as the system
+ * spelled it: `Path`. `env.PATH` on that copy is `undefined`, so the probe
+ * would walk no directory and report a uv that is on the PATH as missing —
+ * silently, for every Windows install the candidate list does not name (winget,
+ * scoop, pip). The child gets the copy whole, so it never needed this.
+ */
+function pathVariable(env) {
+  if (process.platform !== "win32") return env.PATH || ""
+  const name = Object.keys(env).find((key) => key.toUpperCase() === "PATH")
+  return (name && env[name]) || ""
 }
 
 function isFile(target) {

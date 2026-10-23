@@ -105,6 +105,18 @@ def built_package(tmp_path_factory) -> Path:
     return destination
 
 
+def module_url(package: Path) -> str:
+    """The built plugin as a ``file:`` URL, which is what ``import()`` takes.
+
+    Node's ESM loader reads a bare string as a URL, and ``C:\\...`` parses as
+    the scheme ``c:`` (``ERR_UNSUPPORTED_ESM_URL_SCHEME``). POSIX paths happen
+    to be valid specifiers, which is the only reason ``str(path)`` ever worked.
+    Only the specifier needs this: a path handed to ``fs`` or ``process.env``
+    inside the snippet is an ordinary string.
+    """
+    return (package / "dist" / "index.mjs").as_uri()
+
+
 def run_node(script: str, *, cwd: Path | None = None, env: dict | None = None):
     """Evaluate an ES-module snippet and return its ``CompletedProcess``."""
     node = _need_node()
@@ -116,7 +128,10 @@ def run_node(script: str, *, cwd: Path | None = None, env: dict | None = None):
         cwd=str(cwd) if cwd else None,
         env=environment,
         capture_output=True,
-        text=True,
+        # UTF-8 both ways: Node writes it, and `text=True` alone decodes with the
+        # locale (cp1252 on Windows), which turns every em dash in a result into
+        # three characters nothing compares equal to.
+        encoding="utf-8",
         timeout=300,
     )
 
@@ -136,7 +151,7 @@ def node_json(script: str, package: Path, **kwargs):
     helper simply reads the shape that rule leaves behind.
     """
     prelude = f"""
-    const {{ MultiLlmPlugin }} = await import({json.dumps(str(package / "dist" / "index.mjs"))})
+    const {{ MultiLlmPlugin }} = await import({json.dumps(module_url(package))})
     const T = MultiLlmPlugin.__testing
     const surface = T.loadSurface()
     const emit = (value) => console.log("@@" + JSON.stringify(value) + "@@")
@@ -531,7 +546,7 @@ class TestBuildArtifacts:
         """
         result = run_node(
             f"""
-            const module = await import({json.dumps(str(built_package / "dist" / "index.mjs"))})
+            const module = await import({json.dumps(module_url(built_package))})
             const table = Object.keys(module).map((n) => [n, typeof module[n]])
             console.log("@@" + JSON.stringify(table) + "@@")
             """
@@ -1523,7 +1538,7 @@ class TestConfigHook:
         # No command.md, no cli-surface.json.
         result = run_node(
             f"""
-            const {{ MultiLlmPlugin }} = await import({json.dumps(str(broken / "dist" / "index.mjs"))})
+            const {{ MultiLlmPlugin }} = await import({json.dumps(module_url(broken))})
             const cfg = {{}}
             const p = await MultiLlmPlugin()
             await p.config(cfg)
@@ -1577,7 +1592,7 @@ class TestConfigHook:
         )
         result = run_node(
             f"""
-            const {{ MultiLlmPlugin }} = await import({json.dumps(str(broken / "dist" / "index.mjs"))})
+            const {{ MultiLlmPlugin }} = await import({json.dumps(module_url(broken))})
             const p = await MultiLlmPlugin()
             console.log("@@" + JSON.stringify({{
               tools: Object.keys(p.tool ?? {{}}),
@@ -1609,7 +1624,7 @@ class TestConfigHook:
         """
         result = run_node(
             f"""
-            const {{ MultiLlmPlugin }} = await import({json.dumps(str(built_package / "dist" / "index.mjs"))})
+            const {{ MultiLlmPlugin }} = await import({json.dumps(module_url(built_package))})
             const cfg = {{command: {{"multi-llm": {{template: "old", description: "d",
                                                      agent: "x"}}}}}}
             const p = await MultiLlmPlugin()
@@ -1701,7 +1716,14 @@ class TestUvPreflight:
         The wording lives in exactly one place. A plugin that carried its own
         copy would be a second owner of a message the file route already prints.
         """
-        served = node_json("emit(T.uvMissingText(surface))", built_package)
+        # Node reads the file's bytes as they are, Python in text mode: a
+        # checkout that converted the file to CRLF (`core.autocrlf`, which is
+        # what a Windows runner does) is the same message to both once the
+        # reader's newline handling is taken out of the comparison. (The
+        # plugin's own trailing-newline trim leaves the last line's "\r".)
+        served = node_json(
+            "emit(T.uvMissingText(surface))", built_package
+        ).replace("\r\n", "\n").removesuffix("\r")
         shipped = (
             built_package / "skills" / "multi-llm" / "hosts" / "uv-missing.txt"
         ).read_text("utf-8").rstrip("\n")
@@ -1712,6 +1734,29 @@ class TestUvPreflight:
         for line in shipped.splitlines():
             if len(line.strip()) > 40:
                 assert line.strip() not in body
+
+    def test_uv_on_a_path_the_platform_spells_differently_is_found(
+        self, built_package, tmp_path
+    ):
+        """Windows spells the variable ``Path``, and ``execute``'s copy keeps it.
+
+        ``process.env`` is case-insensitive there; the object ``execute`` spreads
+        out of it is not, so a probe reading ``env.PATH`` walked no directory at
+        all and called a uv that is on the PATH missing. Forced to ``win32`` so
+        the row means the same on every runner.
+        """
+        uv = tmp_path / "bin" / "uv.exe"
+        uv.parent.mkdir(parents=True)
+        uv.write_text("not a real uv\n", encoding="utf-8")
+        uv.chmod(0o755)
+        found = node_json(
+            f"""
+            Object.defineProperty(process, "platform", {{ value: "win32" }})
+            emit(T.findUv(surface, {{ Path: {json.dumps(str(uv.parent))} }}))
+            """,
+            built_package,
+        )
+        assert found == str(uv)
 
     def test_a_missing_uv_refuses_rather_than_falling_back(self, built_package, tmp_path):
         """No bare-``python`` fallback, ever.
@@ -1746,6 +1791,68 @@ class TestUvPreflight:
 # ===========================================================================
 # The execute state machine
 # ===========================================================================
+
+#: Runs a stub script from inside the interpreter, for a platform whose
+#: ``spawn`` cannot start the script itself (see :func:`spawnable_stub`).
+#: ``sitecustomize`` is imported before Python looks at its command line, which
+#: is what lets the ``run --frozen ...`` the plugin passes to its "uv" go to the
+#: script untouched instead of being taken for a script name. The script sees
+#: the argv it would have had as an executable, ``sys.argv[1:]`` included.
+_STUB_SITECUSTOMIZE = '''\
+import os, runpy, sys, traceback
+
+script = os.environ.get("MLLM_STUB_SCRIPT")
+if script:
+    # What a shebang script gets on POSIX: UTF-8 (the plugin decodes utf8) and a
+    # bare "\\n" (Windows would write "\\r\\n" into the pipe).
+    sys.stdout.reconfigure(encoding="utf-8", newline="\\n")
+    sys.stderr.reconfigure(encoding="utf-8", newline="\\n")
+    sys.argv = [script, *sys.argv]
+    try:
+        runpy.run_path(script, run_name="__main__")
+        code = 0
+    except SystemExit as stop:
+        code = stop.code if isinstance(stop.code, int) else int(stop.code is not None)
+    except BaseException:
+        traceback.print_exc()
+        code = 1
+    sys.stdout.flush()
+    sys.stderr.flush()
+    # Not a return: a returning sitecustomize would let Python go on to open
+    # the "script" `run`.
+    os._exit(code)
+'''
+
+
+def spawnable_stub(directory: Path, name: str, source: str) -> tuple[Path, dict]:
+    """Write *source* as an executable the plugin can ``spawn``.
+
+    Returns ``(executable, environment)``: point ``MULTI_LLM_UV`` at the first
+    and add the second to the environment the plugin runs in.
+
+    POSIX runs the shebang script as it stands. Windows has no shebang:
+    ``CreateProcess`` starts a PE image and nothing else, and since Node 20.12
+    ``spawn`` refuses a ``.cmd`` outside a shell, which this plugin never uses
+    (``shell: false`` is the point of the file). So there the "executable" is an
+    interpreter and the script rides in ``sitecustomize``. It is the **base**
+    interpreter, not a venv's ``python.exe``: that one is a launcher that starts
+    the real interpreter as a child, so killing it (every abort row does) would
+    leave the stub running.
+    """
+    stub = directory / name
+    stub.write_text(source, encoding="utf-8")
+    if os.name != "nt":
+        stub.chmod(0o755)
+        return stub, {}
+    launcher = directory / "stub-launcher"
+    launcher.mkdir(exist_ok=True)
+    (launcher / "sitecustomize.py").write_text(_STUB_SITECUSTOMIZE, encoding="utf-8")
+    inherited = os.environ.get("PYTHONPATH")
+    return Path(getattr(sys, "_base_executable", sys.executable)), {
+        "PYTHONPATH": os.pathsep.join(filter(None, [str(launcher), inherited])),
+        "MLLM_STUB_SCRIPT": str(stub),
+    }
+
 
 #: A `uv` replacement that records its argv and replays scripted exits. Every
 #: poll-loop row drives the real `execute` through this, so the loop's control
@@ -1819,13 +1926,14 @@ sys.exit(step.get("exit", 0))
 @pytest.fixture
 def uv_stub(tmp_path):
     """A stubbed uv plus a helper that drives ``execute`` against it."""
-    stub = tmp_path / "uv-stub"
-    stub.write_text(UV_SCRIPT_STUB, encoding="utf-8")
-    stub.chmod(0o755)
+    stub, launch_env = spawnable_stub(tmp_path, "uv-stub", UV_SCRIPT_STUB)
+    #: What a row hands the plugin so that it runs this stub as its uv.
+    uv_env = {"MULTI_LLM_UV": str(stub), **launch_env}
     log = tmp_path / "argv.log"
 
     class Driver:
         path = stub
+        env = uv_env
         log_path = log
 
         def run(self, package, args, script, ctx=None, extra_env=None):
@@ -1836,7 +1944,7 @@ def uv_stub(tmp_path):
             script_path = tmp_path / "script.json"
             script_path.write_text(json.dumps(script), encoding="utf-8")
             env = {
-                "MULTI_LLM_UV": str(stub),
+                **uv_env,
                 "STUB_LOG": str(log),
                 "STUB_SCRIPT_FILE": str(script_path),
             }
@@ -1887,7 +1995,7 @@ def uv_stub(tmp_path):
             script_path = tmp_path / "script.json"
             script_path.write_text(json.dumps(script), encoding="utf-8")
             env = {
-                "MULTI_LLM_UV": str(stub),
+                **uv_env,
                 "STUB_LOG": str(log),
                 "STUB_SCRIPT_FILE": str(script_path),
             }
@@ -1962,7 +2070,7 @@ def uv_stub(tmp_path):
             script_path = tmp_path / "script.json"
             script_path.write_text(json.dumps(script), encoding="utf-8")
             env = {
-                "MULTI_LLM_UV": str(stub),
+                **uv_env,
                 "STUB_LOG": str(log),
                 "STUB_SCRIPT_FILE": str(script_path),
             }
@@ -3046,7 +3154,7 @@ class TestExecuteStateMachine:
             const controller = new AbortController()
             const promise = MultiLlmPlugin.execute(
               {{mode: "review-plan", plan: "p.md", question: "", extra_flags: []}},
-              {{directory: "/tmp", abort: controller.signal}}, surface,
+              {{directory: {json.dumps(str(log.parent))}, abort: controller.signal}}, surface,
             )
             const settled = await promise
             controller.abort()               // the ~20 ms teardown
@@ -3057,7 +3165,7 @@ class TestExecuteStateMachine:
             """,
             built_package,
             env={
-                "MULTI_LLM_UV": str(uv_stub.path),
+                **uv_stub.env,
                 "STUB_LOG": str(log),
                 "STUB_SCRIPT": json.dumps([launch, done, done]),
             },
@@ -3097,12 +3205,12 @@ class TestExecuteStateMachine:
             setTimeout(() => controller.abort(), 400)
             emit(await MultiLlmPlugin.execute(
               {{mode: "review-plan", plan: "p.md", question: "", extra_flags: []}},
-              {{directory: "/tmp", abort: controller.signal}}, surface,
+              {{directory: {json.dumps(str(log.parent))}, abort: controller.signal}}, surface,
             ))
             """,
             built_package,
             env={
-                "MULTI_LLM_UV": str(uv_stub.path),
+                **uv_stub.env,
                 "STUB_LOG": str(log),
                 "STUB_SCRIPT": json.dumps([launch, running]),
             },
@@ -3132,16 +3240,14 @@ class TestExecuteStateMachine:
         reading the resulting silence — no exit code, no result line — as the
         dispatcher's own verdict.
         """
-        stubborn = tmp_path / "deaf-uv"
-        stubborn.write_text(
+        stubborn, launch_env = spawnable_stub(
+            tmp_path, "deaf-uv",
             "#!/usr/bin/env python3\n"
             "import signal, time\n"
             "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
             "while True:\n"
             "    time.sleep(0.2)\n",
-            encoding="utf-8",
         )
-        stubborn.chmod(0o755)
         outcome = node_json(
             f"""
             const started = Date.now()
@@ -3158,6 +3264,7 @@ class TestExecuteStateMachine:
                   spawnError: out.spawnError}})
             """,
             built_package,
+            env=launch_env,
         )
         # Settled at all is the whole point: without the SIGKILL this hangs
         # until the caller's own timeout kills node.
@@ -3202,12 +3309,12 @@ class TestExecuteStateMachine:
             setTimeout(() => controller.abort(), 400)
             emit(await MultiLlmPlugin.execute(
               {{mode: "review-plan", plan: "p.md", question: "", extra_flags: []}},
-              {{directory: "/tmp", abort: controller.signal}}, surface,
+              {{directory: {json.dumps(str(log.parent))}, abort: controller.signal}}, surface,
             ))
             """,
             built_package,
             env={
-                "MULTI_LLM_UV": str(uv_stub.path),
+                **uv_stub.env,
                 "STUB_LOG": str(log),
                 "STUB_SCRIPT": json.dumps([launch, done]),
             },
@@ -4556,13 +4663,13 @@ class TestInstructionsSurface:
         plain = subprocess.run(
             [sys.executable, str(SKILL_ROOT / "multi_llm.py"),
              "util", "instructions", "review-plan"],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, encoding="utf-8", timeout=120,
         )
         assert plain.returncode == 0, plain.stderr
         with_host = subprocess.run(
             [sys.executable, str(SKILL_ROOT / "multi_llm.py"),
              "util", "instructions", "review-plan", "--host", "opencode"],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, encoding="utf-8", timeout=120,
         )
         assert with_host.returncode == 0, with_host.stderr
 
@@ -4580,7 +4687,7 @@ class TestInstructionsSurface:
         result = subprocess.run(
             [sys.executable, str(SKILL_ROOT / "multi_llm.py"),
              "util", "instructions", "review-plan", "--host", "nope"],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, encoding="utf-8", timeout=120,
         )
         assert result.returncode == cli_common.EXIT_NEEDS_HUMAN
 
@@ -4618,7 +4725,7 @@ class TestInstructionsSurface:
                 subprocess.run(
                     [sys.executable, str(SKILL_ROOT / "multi_llm.py"),
                      "util", "instructions", "review-plan", "--host", "opencode"],
-                    capture_output=True, text=True, timeout=180,
+                    capture_output=True, encoding="utf-8", timeout=180,
                 ).stdout.splitlines()
             ),
         }
@@ -4941,14 +5048,14 @@ class TestResumeCommand:
         path = Path(str(uv_stub.log_path) + ".resume")
         if not path.exists():
             return []
-        return [json.loads(line) for line in path.read_text().splitlines() if line]
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
     def test_the_result_carries_it_and_the_message_says_how_to_use_it(
         self, built_package, uv_stub
     ):
         result, calls = uv_stub.run(
             built_package, self.IMPLEMENT, [self.LAUNCH, self.BLOCKED])
-        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text(encoding="utf-8"))
         assert result["resume_command"] == "/multi-llm --implement plans/x.md --resume"
         assert result["message"].endswith(surface["needs_human_message"]["resume"])
         assert result.get("next") is None
@@ -4958,7 +5065,7 @@ class TestResumeCommand:
         self, built_package, uv_stub
     ):
         uv_stub.run(built_package, self.IMPLEMENT, [self.LAUNCH, self.BLOCKED])
-        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text(encoding="utf-8"))
         resume = surface["dispatcher"]["resume"]
         (asked,) = self._resume_calls(uv_stub)
         assert _dispatcher_argv(asked) == resume["argv"] + [
@@ -4985,7 +5092,7 @@ class TestResumeCommand:
         result, _ = uv_stub.run(
             built_package, self.IMPLEMENT, [self.LAUNCH, self.BLOCKED],
             extra_env={"STUB_RESUME_FAIL": "1"})
-        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text(encoding="utf-8"))
         assert "resume_command" not in result
         assert not result["message"].endswith(surface["needs_human_message"]["resume"])
         assert result["state"] == surface["dispatcher"]["states"]["needs_human"]
@@ -4993,7 +5100,7 @@ class TestResumeCommand:
     def test_a_surface_without_the_entry_skips_the_lookup(self, built_package, uv_stub):
         """Additive within schema v5: an older surface only loses the command."""
         assert "resume" in json.loads(
-            (built_package / "dist" / "cli-surface.json").read_text())["dispatcher"]
+            (built_package / "dist" / "cli-surface.json").read_text(encoding="utf-8"))["dispatcher"]
         out = node_json(
             """
             const bare = structuredClone(surface)
@@ -5042,7 +5149,7 @@ class TestResumeCommand:
         result, _ = uv_stub.run(
             built_package, self.IMPLEMENT, [self.LAUNCH, resume_line],
             extra_env={"STUB_RESUME_EXTRA": json.dumps(step)})
-        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text(encoding="utf-8"))
         assert result["resume_command"] == "/multi-llm --implement plans/x.md --resume"
         calls = [option["args"] for option in result["options"] if "args" in option]
         assert calls[0] == dict(self.IMPLEMENT, extra_flags=["--resume"])
@@ -5122,7 +5229,7 @@ class TestResumeCommand:
         result, _ = uv_stub.run(
             built_package, self.IMPLEMENT, [self.LAUNCH, resume_line],
             extra_env={"STUB_RESUME_EXTRA": json.dumps(step)})
-        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text(encoding="utf-8"))
         text = surface["needs_human_message"]
         assert result["resume_why"] == why
         assert text["resume_why"].replace("{why}", why) in result["message"]
@@ -5152,7 +5259,7 @@ class TestResumeCommand:
         result, _ = uv_stub.run(
             built_package, self.IMPLEMENT, [self.LAUNCH, resume_line],
             extra_env={"STUB_RESUME_EXTRA": json.dumps(step)})
-        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text(encoding="utf-8"))
         text = surface["needs_human_message"]
         assert result["resume_markdown"] == step["markdown"]
         assert result["message"].endswith(text["resume_markdown"])
@@ -5209,7 +5316,7 @@ class TestResumeCommand:
         assert result["result"]["error"] == self.STOP_LINE_BESIDE
         assert f'"{self.STOP_LINE_BESIDE}"' in result["message"]
         assert self.STOP_LINE not in result["message"]
-        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text(encoding="utf-8"))
         assert result["message"].endswith(
             surface["needs_human_message"]["resume_markdown"])
         # The tool's own line, which shows without the model, says it too.
@@ -5293,9 +5400,9 @@ class TestResumeCommand:
             ["--resume", "--human-task", "T001=skip"]]
 
     def test_the_plugin_spells_none_of_the_lookup(self, built_package):
-        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text(encoding="utf-8"))
         resume = surface["dispatcher"]["resume"]
-        source = (REPO_ROOT / "packaging" / "opencode" / "src" / "index.mjs").read_text()
+        source = (REPO_ROOT / "packaging" / "opencode" / "src" / "index.mjs").read_text(encoding="utf-8")
         for word in [*resume["argv"], resume["option"]]:
             assert f'"{word}"' not in source, word
 
@@ -5466,7 +5573,7 @@ class TestAFailedResultSaysWhatTheUserCanRun:
 
     @staticmethod
     def _surface(package):
-        return json.loads((package / "dist" / "cli-surface.json").read_text())
+        return json.loads((package / "dist" / "cli-surface.json").read_text(encoding="utf-8"))
 
     def _failed(self, tmp_path):
         """The poll a failed detached generate-tasks answers with: its own
@@ -5655,12 +5762,12 @@ class TestAReportCallOnAFailedRun:
 
     def _asked(self, uv_stub):
         path = Path(str(uv_stub.log_path) + ".resume")
-        lines = path.read_text().splitlines() if path.exists() else []
+        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
         return [argv[argv.index("--blocked") + 1]
                 for argv in (json.loads(line) for line in lines if line)]
 
     def test_it_asks_about_the_runs_own_phase(self, built_package, uv_stub, tmp_path):
-        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text(encoding="utf-8"))
         result, _ = uv_stub.run(built_package, self.STATUS, [self._failed(tmp_path)],
                                 extra_env={"STUB_RESUME_ONLY": "implement"})
         assert self._asked(uv_stub) == ["implement"]
@@ -5684,7 +5791,7 @@ class TestAReportCallOnAFailedRun:
     def test_no_lookup_answer_beside_a_visible_one_claims_no_absence(
         self, built_package, uv_stub, tmp_path
     ):
-        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text(encoding="utf-8"))
         result, _ = uv_stub.run(built_package, self.STATUS, [self._failed(tmp_path)],
                                 extra_env={"STUB_RESUME_ONLY": "review-plan"})
         assert f"resume with: {self.SPELLED}" in result["output"]
@@ -5698,7 +5805,7 @@ class TestAReportCallOnAFailedRun:
                                                    tmp_path):
         """On a phase's own exit 3 the lookup is authoritative: a visible retry
         it does not back is one that would repeat the stop."""
-        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text(encoding="utf-8"))
         launch = {"exit": 0, "stdout": [
             "run_id: R", "log: /l",
             'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}']}
@@ -5893,7 +6000,7 @@ class TestRestatedComposedFlags:
         result, calls = uv_stub.run(
             built_package, dict(self.ARGS, extra_flags=[*flags, "--quick"]),
             [self.DONE, self.FINISHED])
-        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text(encoding="utf-8"))
         assert result["ok"] is True, result
         launch = _dispatcher_argv(calls[0])
         for baked in surface["baked_flags"]:
@@ -7193,6 +7300,14 @@ class TestRouteStaging:
         """No command dispatched, and not one byte written into the host's
         ``$HOME`` — the claude-code leg symlinks the skill tree *before* it
         dispatches, so the exit code alone would not have caught it."""
+        # The entrypoint is the Linux image's driver and imports POSIX-only
+        # modules (fcntl, pty, termios) at load: on a runner without them there
+        # is no entrypoint to stage anything with.
+        pytest.importorskip(
+            "fcntl",
+            reason="tests/container/entrypoint.py runs only in the Linux image "
+                   "(POSIX-only imports)",
+        )
         from tests.container import entrypoint
 
         dispatched = []
@@ -7212,10 +7327,13 @@ class TestRouteStaging:
 
     def test_every_call_site_passes_the_row_route(self):
         """Over `main`'s AST, because both call sites only execute inside a
-        container: a defaulted call is `route="file"`, which is the bug back."""
-        from tests.container import entrypoint
+        container: a defaulted call is `route="file"`, which is the bug back.
 
-        source = Path(entrypoint.__file__).read_text(encoding="utf-8")
+        Read as text, never imported: the module's POSIX-only imports would
+        skip this row on a runner that can perfectly well parse it."""
+        source = (Path(__file__).parent / "container" / "entrypoint.py").read_text(
+            encoding="utf-8"
+        )
         main = next(node for node in ast.walk(ast.parse(source))
                     if isinstance(node, ast.FunctionDef) and node.name == "main")
         calls = [node for node in ast.walk(main)
@@ -7782,7 +7900,7 @@ class TestTheSessionModelIsObservedAndHandedToPython:
     def test_a_rejecting_client_is_swallowed_and_warned(self, built_package):
         result = run_node(
             f"""
-            const {{ MultiLlmPlugin }} = await import({json.dumps(str(built_package / "dist" / "index.mjs"))})
+            const {{ MultiLlmPlugin }} = await import({json.dumps(module_url(built_package))})
             const T = MultiLlmPlugin.__testing
             const v = await T.resolveSessionModel(
               {_client('throw new Error("route is gone")')}, {{sessionID: "ses_1"}},
@@ -7818,7 +7936,7 @@ class TestTheSessionModelIsObservedAndHandedToPython:
         """`async ({ client } = {})`: an older loader passes nothing (rule 4)."""
         result = run_node(
             f"""
-            const {{ MultiLlmPlugin }} = await import({json.dumps(str(built_package / "dist" / "index.mjs"))})
+            const {{ MultiLlmPlugin }} = await import({json.dumps(module_url(built_package))})
             const p = await MultiLlmPlugin()
             console.log("@@" + JSON.stringify(Object.keys(p.tool ?? {{}})) + "@@")
             """
@@ -7838,17 +7956,15 @@ class TestTheSessionModelIsObservedAndHandedToPython:
         for the fan-out itself.
         """
         env_log = tmp_path / "child-env.json"
-        stub = tmp_path / "uv-env-stub"
-        stub.write_text(
+        stub, launch_env = spawnable_stub(
+            tmp_path, "uv-env-stub",
             "#!/usr/bin/env python3\n"
             "import json, os\n"
             f"open({json.dumps(str(env_log))}, 'w', encoding='utf-8').write(\n"
             "    json.dumps({k: v for k, v in os.environ.items()\n"
             "                if k.startswith('MULTI_LLM_')}))\n"
             'print(\'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}\')\n',
-            encoding="utf-8",
         )
-        stub.chmod(0o755)
         outcome = node_json(
             f"""
             const plugin = await MultiLlmPlugin({{
@@ -7861,7 +7977,7 @@ class TestTheSessionModelIsObservedAndHandedToPython:
             emit(JSON.parse(r))
             """,
             built_package,
-            env={"MULTI_LLM_UV": str(stub)},
+            env={"MULTI_LLM_UV": str(stub), **launch_env},
         )
         assert outcome["session_model"] == "opencode/nemotron-3-ultra-free"
         child_env = json.loads(env_log.read_text(encoding="utf-8"))
@@ -7879,17 +7995,15 @@ class TestTheSessionModelIsObservedAndHandedToPython:
         special case on each side.
         """
         env_log = tmp_path / "child-env-2.json"
-        stub = tmp_path / "uv-env-stub-2"
-        stub.write_text(
+        stub, launch_env = spawnable_stub(
+            tmp_path, "uv-env-stub-2",
             "#!/usr/bin/env python3\n"
             "import json, os\n"
             f"open({json.dumps(str(env_log))}, 'w', encoding='utf-8').write(\n"
             "    json.dumps({k: v for k, v in os.environ.items()\n"
             "                if k.startswith('MULTI_LLM_')}))\n"
             'print(\'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}\')\n',
-            encoding="utf-8",
         )
-        stub.chmod(0o755)
         outcome = node_json(
             f"""
             const plugin = await MultiLlmPlugin({{
@@ -7902,7 +8016,7 @@ class TestTheSessionModelIsObservedAndHandedToPython:
             emit(JSON.parse(r))
             """,
             built_package,
-            env={"MULTI_LLM_UV": str(stub)},
+            env={"MULTI_LLM_UV": str(stub), **launch_env},
         )
         assert "session_model" not in outcome
         child_env = json.loads(env_log.read_text(encoding="utf-8"))
@@ -8038,7 +8152,7 @@ class TestTheRouteSignalReachesEveryChild:
         script.write_text(json.dumps([_poll(0, state="done")]), encoding="utf-8")
         result = run_node(
             f"""
-            const {{ MultiLlmPlugin }} = await import({json.dumps(str(package / "dist" / "index.mjs"))})
+            const {{ MultiLlmPlugin }} = await import({json.dumps(module_url(package))})
             const p = await MultiLlmPlugin()
             const surface = MultiLlmPlugin.__testing.loadSurface()
             const answer = await MultiLlmPlugin.execute(
@@ -8049,7 +8163,7 @@ class TestTheRouteSignalReachesEveryChild:
               tools: Object.keys(p.tool ?? {{}}), surface, answer,
             }}) + "@@")
             """,
-            env={"MULTI_LLM_UV": str(uv_stub.path), "STUB_LOG": str(log),
+            env={**uv_stub.env, "STUB_LOG": str(log),
                  "STUB_SCRIPT_FILE": str(script)},
         )
         assert result.returncode == 0, result.stderr

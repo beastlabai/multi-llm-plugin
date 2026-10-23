@@ -88,6 +88,8 @@ _PATH_KEY_RE = re.compile(
     r"(^|_)(path|paths|file|files|dir|dirs|directory|root|log|logs)$"
 )
 
+#: A path under the run root after :func:`_relativize` named it.
+_UNDER_ROOT_RE = re.compile(r"<run-root>[\\/][\w.\\/-]*")
 _ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?")
 _UUID_RE = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"
@@ -123,6 +125,9 @@ def _relativize(text: str, root: str) -> str:
         for candidate in (root, root.replace("\\", "/"), root.replace("/", "\\")):
             if candidate:
                 out = out.replace(candidate, "<run-root>")
+        # And the rest of each such path: an absolute path is written natively,
+        # so on Windows `<run-root>\plan\state.json` would differ by OS alone.
+        out = _UNDER_ROOT_RE.sub(lambda m: m.group(0).replace("\\", "/"), out)
     out = _UUID_RE.sub("<uuid>", out)
     out = _ISO_RE.sub("<timestamp>", out)
     return out

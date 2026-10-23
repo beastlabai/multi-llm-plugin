@@ -815,11 +815,22 @@ def plan_steps(mode: str, args: argparse.Namespace, records: Records) -> List[St
 # ---------------------------------------------------------------------------
 
 def _display_path(path: Union[str, Path]) -> str:
-    """*path* relative to the cwd when it lies under it, else as given."""
-    shown = os.path.relpath(str(path))
+    """*path* relative to the cwd when it lies under it (``/``-separated on
+    every platform), else as given."""
+    try:
+        shown = os.path.relpath(str(path))
+    except ValueError:  # Windows: another drive than the cwd's
+        return str(path)
     if shown == os.pardir or shown.startswith(os.pardir + os.sep):
         return str(path)
-    return shown
+    return shown.replace(os.sep, "/")
+
+
+def _display_dir(path: Union[str, Path]) -> str:
+    """:func:`_display_path` of a directory, closed by the separator it is spelled with."""
+    shown = _display_path(path)
+    sep = os.sep if os.path.isabs(shown) else "/"
+    return shown.rstrip(sep) + sep
 
 
 def interactive_refusal(mode: str) -> str:
@@ -1084,7 +1095,7 @@ def live_owner_refusal(mode: str, owner: LiveOwner) -> str:
     age = owner.heartbeat_age_s
     lines = [
         f"ERROR: {_row(mode).name}: a live run owns "
-        f"{_display_path(owner.directory).rstrip(os.sep)}{os.sep} "
+        f"{_display_dir(owner.directory)} "
         f"({owner.holder}, pid {owner.pid or 'unrecorded'}, {owner.verdict}, "
         f"last heartbeat {'never' if age is None else f'{age:.0f}s ago'}). Two "
         "runs must not write one phase dir, so nothing was started.",

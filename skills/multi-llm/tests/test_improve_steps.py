@@ -44,6 +44,7 @@ from tests.test_improve_orchestrator import (  # noqa: E402,F401
     APPLY_PHASE,
     CODE,
     ENTRY,
+    LISTING_NAME,
     MODES,
     PLAN,
     REFUSAL,
@@ -792,7 +793,7 @@ class TestTokenSafeRendering:
     NAMES = ["a b.py", "it's.py", 'say "hi".py']
 
     def _typed_scope(self, repo):
-        listing = repo / "list 'x' \"y\".txt"
+        listing = repo / LISTING_NAME
         listing.write_text("c.py\n", encoding="utf-8")
         argv: List[str] = []
         for name in self.NAMES:

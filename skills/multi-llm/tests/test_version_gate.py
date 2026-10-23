@@ -31,7 +31,6 @@ installed.
 from __future__ import annotations
 
 import os
-import stat
 import subprocess
 import sys
 import textwrap
@@ -42,6 +41,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from tests.mock_launchers import launcher_file, write_launcher  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
 from utils.provider_registry import _PROVIDERS, load_base_config  # noqa: E402
 from utils.providers import base as base_module  # noqa: E402
@@ -130,11 +130,11 @@ def _write_cli(path: Path, *, stdout: str = "", stderr: str = "", exit_code: int
         ),
         encoding="utf-8",
     )
-    path.write_text(
-        f"#!/bin/sh\nexec {sys.executable!r} {str(script)!r} \"$@\"\n", encoding="utf-8"
+    write_launcher(
+        path.parent, path.name,
+        f"#!/bin/sh\nexec {Path(sys.executable).as_posix()!r} {script.as_posix()!r} \"$@\"\n",
     )
-    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    return path
+    return launcher_file(path.parent, path.name)
 
 
 @pytest.fixture(autouse=True)
