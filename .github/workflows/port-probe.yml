@@ -17,28 +17,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Round 6: quick checks of the last fixes ahead of the full run —
-          # every file that still failed on either OS in the last probes.
+          # Round 7: the three rows round 6 still failed.
           - leg: windows-verify
             os: windows-latest
-            minutes: 60
-            in_tests: >-
-              test_write_executor.py test_write_executor_orchestrators.py
-              test_check_findings_hold_dependents.py test_check_gate_fixture.py
-              test_codex_route.py test_implement_stop_account.py
-              test_write_retry_redispatch.py test_resume_why.py
-              test_human_task_answers.py test_plugin_landlock_executor.py
-              test_apply_backup_across_rounds.py
-              test_write_reply_prose_before_object.py test_e2e_improve_modes.py
-              test_plan_updater.py test_stream_bootstrap.py test_detach.py
+            minutes: 40
+            in_tests: test_e2e_improve_modes.py test_detach.py
           - leg: macos-verify
             os: macos-latest
-            minutes: 30
-            in_tests: >-
-              test_plugin_landlock_fanout.py test_sandbox_rung_reporting.py
-              test_detach.py test_codex_mcp_server.py test_plugin_landlock_acceptance.py
-              test_plugin_landlock_executor.py test_scenario_matcher_parity.py
-              test_stub_scripted_tool_call.py
+            minutes: 20
+            in_tests: test_plugin_landlock_acceptance.py
     name: probe (${{ matrix.leg }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.minutes }}

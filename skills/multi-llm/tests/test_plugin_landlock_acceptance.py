@@ -902,7 +902,9 @@ class TestNoRouteReachesUnsandboxed:
         if policy != "auto":
             scratch.configure(fallback=policy)
         if probe == "hang":
-            monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 0.8)
+            # Room for the wrapper to start and record the probe before it hangs:
+            # 0.8 s was not always enough on the macOS runner (2026-10-23).
+            monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 2.5)
         before = _bytes(scratch.target(mode))
         code = scratch.run(mode)
         cap = capsys.readouterr()

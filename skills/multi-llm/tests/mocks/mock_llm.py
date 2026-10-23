@@ -961,8 +961,40 @@ def log_call(provider: str, args: List[str], prompt: str) -> None:
     log_file = Path(log_path)
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(log_file, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry) + "\n")
+    _append_line(log_file, json.dumps(entry) + "\n")
+
+
+#: Where a Windows writer takes its turn (:func:`_append_line`): one byte far
+#: past any real end of file, so the lock orders writers and blocks no reader.
+_APPEND_LOCK_OFFSET = 1 << 30
+
+
+def _append_line(path: Path, line: str) -> None:
+    """Append one whole line, whatever else is appending to ``path``.
+
+    POSIX ``O_APPEND`` is one atomic seek-and-write per ``write``. Windows has
+    no such thing behind ``open(..., "a")``: the C runtime seeks to the end and
+    then writes, so two mocks finishing together can land on one offset and
+    leave a line no JSON reader parses (Windows CI, 2026-10-23). There each
+    writer takes a byte-range lock first; the OS drops it with the handle, so
+    a mock killed mid-append blocks nobody.
+    """
+    data = line.encode("utf-8")
+    with open(path, "ab") as handle:
+        if os.name != "nt":
+            handle.write(data)
+            return
+        import msvcrt
+
+        handle.seek(_APPEND_LOCK_OFFSET)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            handle.seek(0, os.SEEK_END)
+            handle.write(data)
+            handle.flush()
+        finally:
+            handle.seek(_APPEND_LOCK_OFFSET)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def format_cursor_agent_output(content: str) -> str:

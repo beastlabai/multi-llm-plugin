@@ -7001,6 +7001,7 @@ class TestACtrlCAtTheDispatcherSweepsTheRegisteredClis:
         assert multi_llm.main(["review-plan", "plan.md"]) == 1
         assert "[INTERRUPT_SWEEP]" not in capsys.readouterr().err
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX sessions and groups")
     def test_a_real_threaded_fan_out_is_swept_before_the_executor_shuts_down(
         self, tmp_path
     ):
