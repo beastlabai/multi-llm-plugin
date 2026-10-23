@@ -4,7 +4,7 @@ Every host starts the dispatcher with ``uv run --project <skill dir>``, and uv
 exports ``VIRTUAL_ENV`` naming the skill's environment to it; a forwarded or
 image-wide ``UV_PROJECT_ENVIRONMENT`` can name the same environment. Every
 child the dispatcher spawns copies its environment, so without a strip a
-subagent working in the user's repository inherited both. Round 7 (3b9cf25)
+subagent working in the user's repository inherited both. Round 7 (631bf9f)
 exported ``UV_PROJECT_ENVIRONMENT`` from the codex MCP server, and a ``uv run``
 in the user's repository then targeted the skill's environment: inside the
 plugin's jail it failed with Permission denied (exit 2), outside it the

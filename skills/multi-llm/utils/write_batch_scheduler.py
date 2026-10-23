@@ -2306,7 +2306,7 @@ def split_repeated_findings(
     first words, in order (:func:`_finding_parts`, :func:`_says_only`) —
     without its reading of a trailing acceptance annotation, which stays
     tied to an accepted check upstream of the task (the user's F3 in
-    ``eb93ee3``): a finding annotated "(the problem the user accepted from
+    ``150750e``): a finding annotated "(the problem the user accepted from
     T002)" by a task T002's acceptance never released stays its own."""
     pools: Dict[str, Dict[str, List[List[str]]]] = {}
     for check_id, items in reported.items():

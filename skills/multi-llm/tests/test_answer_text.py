@@ -23,7 +23,7 @@ fenced JSON block — nemotron's shape (§2.1): the parse succeeds with dict
 the key. The two returns are different sites in ``invoke_with_provider``, and
 each row pins which one it reached.
 
-**The families.** The six hooks from ``cab9f89`` (pi, omp, codex, opencode,
+**The families.** The six hooks from ``8d95891`` (pi, omp, codex, opencode,
 copilot, muse); the generic rules (claude-code, cursor-agent, gemini and agy
 unwrap a clean envelope, kilocode is ``"plain"``); and the adapters whose hooks
 land with this plan — aider (T4.1) and goose, grok, vibe, cline, kimi and
@@ -139,7 +139,7 @@ def _swap_answer(stdout: str, old: str, new: str) -> str:
 
 
 def _hook_answer(provider: str) -> Callable[[str], str]:
-    """The six ``cab9f89`` hooks already say where the answer is."""
+    """The six ``8d95891`` hooks already say where the answer is."""
     return lambda stdout: get_provider(provider).salvage_text(stdout)
 
 

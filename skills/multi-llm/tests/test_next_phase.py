@@ -1095,7 +1095,7 @@ class TestResumeCommand:
         assert (code, out.out, key) == (0, "", None)
 
     def test_util_prints_nothing_for_a_phase_never_started(self, tmp_path, monkeypatch, capsys):
-        """The 0defcbd symptom: `--blocked implement` after a PREREQUISITE_UNMET
+        """The 5992f4f symptom: `--blocked implement` after a PREREQUISITE_UNMET
         refusal printed `--implement <plan> --resume`."""
         _build(tmp_path, S(("review-plan", "apply-suggestions")))
         monkeypatch.chdir(tmp_path)

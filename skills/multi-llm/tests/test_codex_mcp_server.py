@@ -1417,7 +1417,7 @@ class TestChildEnvironment:
         assert {c["env"]["PYTHONDONTWRITEBYTECODE"] for c in calls} == {"x"}
 
     def test_the_payload_environment_stays_where_the_home_check_watches_it(self, harness):
-        """Fix round 8 reverted 3b9cf25: the server exported
+        """Fix round 8 reverted 631bf9f: the server exported
         UV_PROJECT_ENVIRONMENT under the user's cache directory for a payload
         inside $CODEX_HOME, every subagent's `uv run` in the user's repository
         inherited it, and the relocated environment was code the next call ran

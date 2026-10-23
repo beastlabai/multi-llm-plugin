@@ -87,7 +87,7 @@ class TestTheTestsLineTravelsWithTheStop:
     def test_the_tool_output_carries_it_not_the_opencode_stop_title(
         self, repo, capsys,
     ):
-        """Review of round 18, #5: d1cdc11 said the line reaches the OpenCode
+        """Review of round 18, #5: b93c103 said the line reaches the OpenCode
         stop title, which cuts the error line at `STOP_TITLE["max_line"]`
         characters; a real stop's headline runs past that before the line,
         so it reaches the host in the tool output's `error` (and `notice`,

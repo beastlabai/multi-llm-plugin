@@ -1460,7 +1460,7 @@ def env_allowlist_column_is_green(
 #: install into the skill's environment and the second makes every ``uv run``
 #: use it: fix round 8 measured that a jailed ``uv run`` failed with Permission
 #: denied (exit 2) and an unjailed one installed the repository's dependencies
-#: into the skill's environment, after round 7 (3b9cf25, reverted) exported the
+#: into the skill's environment, after round 7 (631bf9f, reverted) exported the
 #: second from the codex MCP server. :func:`build_child_env` drops each one
 #: that names the running interpreter's environment; a value naming any other
 #: environment is the user's and stays. The same builder also takes the

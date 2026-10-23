@@ -9,7 +9,7 @@ wrote its comment into the finding itself:
 * OpenCode: ``… — the accepted T002 problem (src/config.json has retries 2;
   check requires 3), not caused by this note``.
 
-The strict match (fix rounds 22/23, the user's F3 in ``eb93ee3``) read both
+The strict match (fix rounds 22/23, the user's F3 in ``150750e``) read both
 as T007's own failure: ``[BATCH_CHECK_FAILED] T007``, "not a clean finish".
 The prompt had said "you may cite them (for example, in a note on the
 check's outcome)" and named no place for that note.

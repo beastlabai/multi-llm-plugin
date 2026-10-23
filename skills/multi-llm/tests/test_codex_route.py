@@ -601,7 +601,7 @@ _PACKAGED_PLACES = ("plugins/cache", "$CODEX_HOME", "skill directory", "installe
 #: capabilities.yaml's `next_command` promotion) ran it on codex-cli 0.159.2.
 #: It is what `min_host_version` and every doc publish. A container pin bump
 #: does not move it — the ingestion stamp follows the pin, the floor does not
-#: (review 24, pins #6: 5efbcca raised it to 0.161.0 with nothing measured to
+#: (review 24, pins #6: 9a9208b raised it to 0.161.0 with nothing measured to
 #: break on 0.159.2-0.160.1); a measured break does.
 MEASURED_CODEX_FLOOR = "0.159.2"
 
