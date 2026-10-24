@@ -328,7 +328,6 @@ class TestEndToEndInit:
         assert "supports_json_output" not in written["providers"]["claude-code"]
         # Only detected providers' defaults specs are uncommented.
         assert written["defaults"]["models"] == [
-            "cursor-agent:composer-2.5",
             "cursor-agent:gemini-4-argon-high",
             "cursor-agent:grok-4.7-high",
             "claude-code:claude-fable-5-1:high",

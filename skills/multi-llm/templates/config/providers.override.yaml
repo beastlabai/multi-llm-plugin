@@ -383,7 +383,6 @@ defaults:
   ## `--init` uncomments the candidates whose provider is detected; with none
   ## uncommented the (blank) list inherits the base.
   models:
-#     - cursor-agent:composer-2.5
 #     - cursor-agent:gemini-4-argon-high
 #     - cursor-agent:grok-4.7-high
 #     - opencode:openrouter/deepseek/deepseek-v4.1-flash-1017
