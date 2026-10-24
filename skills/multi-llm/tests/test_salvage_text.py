@@ -676,6 +676,13 @@ NOT_A_STREAM = (
 )
 
 #: Inputs a hook must survive without raising.
+def _garbage_id(stdout: str):
+    """A long value's id is clipped: pytest puts the node id in
+    ``PYTEST_CURRENT_TEST``, and Windows refuses an environment variable over
+    32767 characters (the 40000-char row) before the test can run."""
+    return None if len(stdout) <= 1000 else f"{stdout[:8]}...{len(stdout)}-chars"
+
+
 GARBAGE = (
     "\x00\xff�",
     "x" * 40000,
@@ -725,7 +732,7 @@ class TestTheHookContract:
         assert ADAPTERS[provider]().salvage_text(stdout) == ""  # type: ignore[arg-type]
 
     @pytest.mark.parametrize("provider", sorted(ADAPTERS))
-    @pytest.mark.parametrize("stdout", GARBAGE)
+    @pytest.mark.parametrize("stdout", GARBAGE, ids=_garbage_id)
     def test_never_raises(self, provider: str, stdout: str) -> None:
         text = ADAPTERS[provider]().salvage_text(stdout)
         assert text is None or isinstance(text, str)

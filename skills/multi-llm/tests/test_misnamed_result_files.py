@@ -22,6 +22,7 @@ things then went wrong, and each half of the fix is pinned here on that shape:
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -709,6 +710,7 @@ class TestTheAggregateReadsOnlyTheModelsThePhaseRecords:
         assert (phase_dir / "notes.json").exists()
         assert "notes.json is not a result file of any model this review ran" in out
 
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="Windows has no FIFO special files")
     def test_a_fifo_under_a_result_name_is_not_opened(self, tmp_path, capsys):
         """A FIFO named `*.json` would hang the read that decides whether it is
         a result; it is named and left where it is instead."""

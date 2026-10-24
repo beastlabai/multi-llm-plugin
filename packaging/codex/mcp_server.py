@@ -94,6 +94,13 @@ LOGIN_SHELL_SCRIPT = 'cd -- "$1" && shift && exec "$@"'
 SHELL_NAME = "bash"
 FALLBACK_SHELL = "/bin/bash"
 
+#: Windows only: the directories a ``bash`` on PATH may sit in without being a
+#: POSIX shell. ``%SystemRoot%\System32\bash.exe`` is WSL's launcher, present
+#: wherever the feature is enabled and ahead of Git on a stock PATH; it starts a
+#: Linux VM that has no ``C:\`` anchor and no ``uv.exe`` to ``exec``. The tool's
+#: Windows prerequisite is Git Bash (``host_install.git_bash`` draws the same line).
+WSL_LAUNCHER_DIRS = ("system32", "syswow64")
+
 #: SIGTERM → SIGKILL grace for every kill, and the drain-thread join bound.
 KILL_GRACE_S = 5
 #: The signal-free abort dispatch's own timeout (rule f), never the remainder.
@@ -628,6 +635,46 @@ def _is_file(target) -> bool:
         return False
 
 
+def windows_bash(path: str):
+    """Git for Windows' ``bash`` along *path*, never WSL's launcher, or None.
+
+    ``bash`` on PATH minus its System32 entries; failing that the one installed
+    beside a ``git`` on PATH, because Git's default install puts only
+    ``<root>\\cmd`` there (``<root>\\bin`` is a separate installer option).
+    """
+    kept = os.pathsep.join(
+        entry for entry in path.split(os.pathsep)
+        if re.split(r"[/\\]", entry.rstrip("/\\"))[-1].lower() not in WSL_LAUNCHER_DIRS)
+    found = shutil.which(SHELL_NAME, path=kept)
+    if found:
+        return found
+    git = shutil.which("git", path=path)
+    if git:
+        # <root>\cmd\git.exe, <root>\bin\git.exe or <root>\mingw64\bin\git.exe
+        parents = Path(os.path.abspath(git)).parents
+        for root in [parents[index] for index in (1, 2) if index < len(parents)]:
+            for relative in (("bin", "bash.exe"), ("usr", "bin", "bash.exe")):
+                candidate = root.joinpath(*relative)
+                if _is_file(candidate):
+                    return str(candidate)
+    return None
+
+
+def file_uri_path(parsed) -> str:
+    """The local path of a parsed ``file://`` URI.
+
+    A Windows URI carries its drive behind the path's leading slash
+    (``file:///C:/src/x`` parses to ``/C:/src/x``), which ``ntpath``
+    resolves under the current drive into no directory at all; so every root a
+    Windows client offered was "not a directory" and the anchor fell through to
+    the next rung.
+    """
+    path = unquote(parsed.path)
+    if os.name == "nt" and re.match(r"/[A-Za-z]:", path):
+        path = path[1:]
+    return path
+
+
 def expand_home(target: str, env) -> str:
     home = env.get("HOME") or env.get("USERPROFILE") or os.path.expanduser("~")
     if target == "~":
@@ -653,7 +700,9 @@ def find_uv(surface, env):
     for candidate in surface["uv"]["candidates"]:
         expanded = expand_home(candidate, env)
         if _is_file(expanded):
-            return expanded
+            # Normalized like the two rungs above: on Windows the candidate's
+            # `/`s would otherwise follow the home's `\`s into the child's env.
+            return os.path.abspath(expanded)
     return None
 
 
@@ -1227,17 +1276,43 @@ def _drain_stderr(pipe, tail: _Tail):
 
 
 def _signal_group(proc, which) -> None:
-    try:
-        os.killpg(proc.pid, which)
-    except (ProcessLookupError, PermissionError, OSError):
+    # POSIX process groups; tolerate a missing killpg in embedded runtimes too.
+    killpg = getattr(os, "killpg", None)
+    if killpg is not None:
         try:
-            proc.send_signal(which)
-        except (ProcessLookupError, OSError):
+            killpg(proc.pid, which)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
             pass
+    try:
+        proc.send_signal(which)
+    except (ProcessLookupError, OSError):
+        pass
 
 
 def kill_tree(proc, drains) -> None:
-    """SIGTERM to the process group, a 5 s grace, then SIGKILL. No graceful drain."""
+    """Stop the tree, bounded: taskkill on Windows, TERM then KILL on POSIX."""
+    if sys.platform == "win32":
+        # Kill the tree while its leader still exists. Terminating bash/uv
+        # first loses taskkill's root and leaves the dispatcher running.
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=KILL_GRACE_S,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=KILL_GRACE_S)
+        except subprocess.TimeoutExpired:
+            pass
+        return
     _signal_group(proc, signal.SIGTERM)
     try:
         proc.wait(timeout=KILL_GRACE_S)
@@ -1723,7 +1798,7 @@ class Server:
                 if parsed is None or parsed.scheme != "file":
                     note = "the first root is not a file:// URI"
                 else:
-                    path, note = self._usable_dir(unquote(parsed.path))
+                    path, note = self._usable_dir(file_uri_path(parsed))
                     if path:
                         return path, "roots", probed
                 break  # the first root is the anchor, or nothing is
@@ -1879,7 +1954,11 @@ class Server:
         return posture
 
     def find_shell(self):
-        found = shutil.which(SHELL_NAME, path=self.layer1.get("PATH") or os.defpath)
+        path = self.layer1.get("PATH") or os.defpath
+        if sys.platform == "win32":
+            found = windows_bash(path)
+        else:
+            found = shutil.which(SHELL_NAME, path=path)
         if found:
             return os.path.abspath(found)
         fallback = self.layer1.get("MLLM_TEST_FALLBACK_SHELL") or FALLBACK_SHELL

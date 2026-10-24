@@ -15,6 +15,7 @@ tool routes' `resume_why`, the native `util next-command`'s
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -408,9 +409,11 @@ class TestTheNativeLeg:
         _native_stop(native_repo, capsys, check="findings")
         run_status.main(["--plan-file", str(native_repo.plan), "--view", "run"])
         status = capsys.readouterr().out.splitlines()
+        # The plan as this call spelled it: absolute, so native separators.
+        plan = os.path.join("plans", "checked.md")
         at = next(i for i, line in enumerate(status)
                   if line.strip().startswith("resume with: ")
-                  and line.endswith("plans/checked.md --resume"))
+                  and line.endswith(f"{plan} --resume"))
         assert status[at + 1] == f"        {RECORDED}", "\n".join(status)
         assert status[at + 2].strip().startswith("or answer the stop with:")
 

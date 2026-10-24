@@ -29,7 +29,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import stat
 import subprocess
 import sys
 import time
@@ -68,9 +67,14 @@ from utils.write_batch_scheduler import (  # noqa: E402
     WriteBatchScheduler,
     resolve_human_task_plan,
 )
-
-MOCK_LLM = Path(__file__).parent / "mocks" / "mock_llm.py"
-SCENARIO_MATCHER = Path(__file__).parent / "scenario_matcher.py"
+from tests.mock_launchers import (  # noqa: E402
+    MOCK_LLM,
+    install_mock_llm,
+    mock_path,
+    remove_launcher,
+    write_launcher,
+    write_sh_command,
+)
 
 #: The three adapters that ship a real `agent-write` invocation. Parametrized over
 #: so a profile that silently stops being edit-capable fails here rather than on a
@@ -161,26 +165,8 @@ class _RecordingPopen:
 # ---------------------------------------------------------------------------
 
 def _install_launcher(bin_dir: Path, name: str) -> Path:
-    """Put a mock provider CLI called ``name`` on a temp PATH.
-
-    A *copied* launcher cannot find ``tests/scenario_matcher.py`` through its own
-    ``__file__`` the way the real file and a symlink to it can, so the one
-    definition of what a scenario means is copied beside it.
-    """
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    target = bin_dir / name
-    if os.name == "nt":  # pragma: no cover - POSIX CI
-        target = bin_dir / f"{name}.py"
-        shutil.copyfile(MOCK_LLM, target)
-        shutil.copyfile(SCENARIO_MATCHER, bin_dir / SCENARIO_MATCHER.name)
-    else:
-        try:
-            target.symlink_to(MOCK_LLM)
-        except (OSError, NotImplementedError):  # pragma: no cover
-            shutil.copyfile(MOCK_LLM, target)
-            target.chmod(target.stat().st_mode | stat.S_IXUSR)
-            shutil.copyfile(SCENARIO_MATCHER, bin_dir / SCENARIO_MATCHER.name)
-    return target
+    """Put a mock provider CLI called ``name`` on a temp PATH."""
+    return install_mock_llm(bin_dir, name)
 
 
 def _install_crashing_launcher(bin_dir: Path, name: str, code: int = 17) -> Path:
@@ -191,10 +177,8 @@ def _install_crashing_launcher(bin_dir: Path, name: str, code: int = 17) -> Path
     pass through untouched, or the runner would be refused before dispatch and
     the classification under test would never run.
     """
-    target = bin_dir / (f"{name}.py" if os.name == "nt" else name)
-    if target.is_symlink() or target.exists():
-        target.unlink()
-    target.write_text(
+    return write_launcher(
+        bin_dir, name,
         "#!/usr/bin/env python3\n"
         "import os, subprocess, sys\n"
         "argv = sys.argv[1:]\n"
@@ -203,10 +187,7 @@ def _install_crashing_launcher(bin_dir: Path, name: str, code: int = 17) -> Path
         "probe = any(a in ('--version', '-v', 'login', 'status', 'sandbox') for a in argv)\n"
         "sys.exit(rc if probe or rc else %d)\n"
         % ("claude-code" if name == "claude" else name, str(MOCK_LLM), code),
-        encoding="utf-8",
     )
-    target.chmod(target.stat().st_mode | stat.S_IXUSR)
-    return target
 
 
 class WriteEnv:
@@ -241,9 +222,7 @@ class WriteEnv:
         # PATH is REPLACED, never prepended: this suite spawns real subprocesses
         # with EDIT access, so it must be structurally impossible to reach a
         # developer's real `codex`/`claude`.
-        monkeypatch.setenv("PATH", os.pathsep.join(
-            [str(bin_dir), str(Path(sys.executable).parent), "/usr/bin", "/bin"]
-        ))
+        monkeypatch.setenv("PATH", mock_path(bin_dir, ("codex", "opencode", "claude")))
         monkeypatch.setenv("MULTI_LLM_TEST_MODE", "1")
         monkeypatch.setenv("MULTI_LLM_TEST_FAST_BACKOFF", "1")
         for name in ("codex", "opencode", "claude"):
@@ -1171,7 +1150,7 @@ class TestVerificationOnlyImplementTask:
         )["verdict"]
         assert verdict["write_outcome"] == "no-op"
         assert verdict["outcome_label"] == "verified"
-        assert "| T009 | verified |" in Path(result.summary_file).read_text()
+        assert "| T009 | verified |" in Path(result.summary_file).read_text(encoding="utf-8")
         batch_lines = [l for l in lines if "batch 0: T009" in l]
         assert batch_lines and "T009 verified in" in batch_lines[0], lines
 
@@ -1278,7 +1257,7 @@ class TestVerificationOnlyImplementTask:
         assert verdict["outcome_label"] == "check-findings"
         assert verdict["check"]["findings"] == self.FINDINGS
 
-        text = Path(result.summary_file).read_text()
+        text = Path(result.summary_file).read_text(encoding="utf-8")
         assert "| T009 | check-findings |" in text
         assert "| T009 | verified |" not in text
         assert "## Check Findings" in text
@@ -1737,7 +1716,9 @@ class TestVerificationOnlyImplementTask:
         the loop at exit 3. The declared set was always judged by sha256
         (`TaskSnapshot.changed`); the sweep now applies the same rule."""
         index = env.root / "index.html"
-        index.write_text("<p>orig</p>\n", encoding="utf-8")
+        # Bytes, as the mock writes them: a text-mode write is `\r\n` on
+        # Windows, and the mock's LF rewrite then really moved bytes.
+        index.write_bytes(b"<p>orig</p>\n")
         env.edits([{"path": str(index), "mode": "create",
                     "content": "<p>orig</p>\n"}],
                   result={"status": "applied", "ids": ["T009"],
@@ -2247,7 +2228,7 @@ class TestScheduler:
         assert result.exit_code == 0
         assert result.finalized is True
         assert Path(result.summary_file).is_file()
-        assert "## Task Results" in Path(result.summary_file).read_text()
+        assert "## Task Results" in Path(result.summary_file).read_text(encoding="utf-8")
         assert state.is_phase_completed("apply-suggestions")
         assert "## Implementation Summary" in env.plan.read_text()
 
@@ -2281,7 +2262,7 @@ class TestScheduler:
         assert [r["task_id"] for r in report["tasks"]] == ["T001", "T002"]
         assert report["tasks"][0]["from_earlier_run"] is True
         assert "from_earlier_run" not in report["tasks"][1]
-        text = Path(result.summary_file).read_text()
+        text = Path(result.summary_file).read_text(encoding="utf-8")
         assert "| T001 (earlier run) | applied |" in text
         assert "| T002 | applied |" in text
         assert "recorded by earlier run(s)" in text
@@ -2656,7 +2637,7 @@ class TestScheduler:
 
         assert result.exit_code == 0, result.messages
         assert list(result.to_dict()["skipped_tasks"]) == ["T014"]
-        text = Path(result.summary_file).read_text()
+        text = Path(result.summary_file).read_text(encoding="utf-8")
         assert "## Manual Tasks (Deferred)" in text
         assert "| T014 |" in text
 
@@ -3219,7 +3200,9 @@ class TestEveryWriteKindClosesTheLoop:
         env.plan.write_text("# Plan\n\n## Step 1\nbody\n", encoding="utf-8")
 
         def respond(t, prompt):
-            env.plan.write_text(env.plan.read_text() + "edit\n", encoding="utf-8")
+            # The mock runner's patch, byte for byte: a text-mode rewrite is
+            # `\r\n` on Windows, another plan and another `sha256_after`.
+            env.plan.write_bytes(env.plan.read_bytes() + b"edit\n")
             return payload
 
         env.scheduler([task], respond=respond, finalize=False).run()
@@ -4068,7 +4051,7 @@ class TestTheEmptyDiffBranch:
         assert first.exit_code == 3
         assert first.outcomes[0].write_outcome == executor.WRITE_PARTIAL
         # Back to a runner that finishes, for the resume.
-        (env.bin_dir / "codex").unlink()
+        remove_launcher(env.bin_dir, "codex")
         _install_launcher(env.bin_dir, "codex")
         executor.reset_version_cache()
         return first
@@ -5394,10 +5377,7 @@ class TestThePhaseRunsTheRepositorysOwnCheck:
 
     def _script(self, env, body: str) -> Path:
         """A tiny shell script standing in for a repo's typecheck."""
-        path = env.tmp_path / "verify.sh"
-        path.write_text("#!/bin/sh\n" + body, encoding="utf-8")
-        path.chmod(path.stat().st_mode | stat.S_IXUSR)
-        return path
+        return write_sh_command(env.tmp_path / "verify.sh", "#!/bin/sh\n" + body)
 
     def _fix_task(self, env):
         return make_write_task(
@@ -5577,7 +5557,8 @@ class TestThePhaseRunsTheRepositorysOwnCheck:
 
         release = env.tmp_path / "release"
         verify = self._script(
-            env, f"echo waiting\nwhile [ ! -f {release} ]; do sleep 0.02; done\n"
+            env,
+            f"echo waiting\nwhile [ ! -f {release.as_posix()} ]; do sleep 0.02; done\n",
         )
         env.use(verify_command=str(verify))
         env.edits([{"path": "src/a.py", "mode": "patch", "content": "a = 2\n"}],
@@ -5618,6 +5599,9 @@ class TestThePhaseRunsTheRepositorysOwnCheck:
         `exited 124` and moved on — and a grandchild holding the capture pipes
         kept the internal `communicate()` blocked past the deadline, so the
         timeout was not a bound at all."""
+        if os.name == "nt":  # pragma: no cover - POSIX process groups
+            # `$!` is an MSYS pid, and `os.kill(pid, 0)` on Windows terminates.
+            pytest.skip("process groups are POSIX; Windows tears down via taskkill /T")
         child_pid_file = env.tmp_path / "child.pid"
         verify = self._script(
             env,
@@ -5720,10 +5704,8 @@ def _install_denied_opencode(env: "WriteEnv") -> Dict[str, Path]:
     recorded.
     """
     counter = env.tmp_path / "t48-spawns.txt"
-    script = env.bin_dir / "opencode"
-    if script.is_symlink() or script.exists():
-        script.unlink()
-    script.write_text(
+    write_launcher(
+        env.bin_dir, "opencode",
         "#!/bin/sh\n"
         'case "$1" in\n'
         f'  --version|-V) echo "opencode {_oc_pin.PIN}"; exit 0;;\n'
@@ -5740,9 +5722,7 @@ def _install_denied_opencode(env: "WriteEnv") -> Dict[str, Path]:
         f'cat "{_oc_pin.capture("denied_turn")}"\n'
         f'cat "{_oc_pin.capture("denied_turn", ".stderr.txt")}" >&2\n'
         "exit 0\n",
-        encoding="utf-8",
     )
-    script.chmod(0o755)
     executor.reset_version_cache()
     return {"counter": counter}
 
@@ -5872,7 +5852,7 @@ class TestHostSinksNeverSeeTheChildsConfigContent:
             if path.is_file():
                 texts[str(path)] = path.read_text(encoding="utf-8", errors="replace")
         assert any(p.endswith("subagent_audit.jsonl") for p in texts)
-        assert any("/failed/" in p for p in texts)
+        assert any(f"{os.sep}failed{os.sep}" in p for p in texts)
         assert any(p.endswith(".status.json") for p in texts)
         for name, text in texts.items():
             for marker in self.MARKERS:

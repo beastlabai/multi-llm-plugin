@@ -31,10 +31,13 @@ def docker_skip_reason() -> str | None:
     ``docker version`` rather than ``docker --version`` on purpose: the latter
     answers from the client binary alone and says nothing about whether a daemon
     is reachable, which is the thing that actually decides whether a row can run.
+    The daemon must also run Linux containers: every lane builds a Linux image,
+    and a Windows-container daemon (the GitHub Windows runner's) answers the
+    probe and then refuses the build.
     """
     try:
         completed = subprocess.run(
-            ["docker", "version"],
+            ["docker", "version", "--format", "{{.Server.Os}}"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -44,6 +47,9 @@ def docker_skip_reason() -> str | None:
     except (OSError, subprocess.SubprocessError) as exc:
         return f"docker probe failed: {exc}"
     if completed.returncode == 0:
+        server_os = (completed.stdout or "").strip()
+        if server_os and server_os != "linux":
+            return f"docker daemon runs {server_os} containers, not Linux ones"
         return None
     detail = [
         line.strip()

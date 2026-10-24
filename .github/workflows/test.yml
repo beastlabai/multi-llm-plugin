@@ -5,6 +5,15 @@ on:
     branches: [master]
   pull_request:
 
+# A new push to a pull request supersedes the run still going on its previous
+# head: the Windows and macOS legs run for up to two hours, and macOS jobs share
+# a cap of five at a time across the account. Runs on master each get a group of
+# their own (the run id), so none of them is ever cancelled. Use the PR number:
+# separate forks can open independent PRs with the same branch name.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   test:
     strategy:
@@ -12,20 +21,18 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    # Windows and macOS run and report, but do not fail the workflow (a user
-    # decision, 2026-10-23). The suite grew from a few hundred tests to ~23 000
-    # on Linux-only development. Its first Windows run on master failed ~2 100
-    # of them, almost all through a few test-harness causes: fixtures that build
-    # POSIX symlink/shebang mock CLIs with no `.cmd` shim, a Node harness
-    # importing `C:\` paths instead of `file://` URLs, and scripts spawned
-    # without a Windows-runnable extension. macOS failed many tests too and then
-    # stalled at ~55%, near test_landlock_dispatch.py's FIFO home-check tests
-    # (the plugin-Landlock rung is Linux-only). Porting both is owed
-    # (plans/codex-plugin-publish.md); turn this back off when a leg is green.
-    continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
-    # Ubuntu runs the suite in ~35 minutes; a leg still running after two hours
-    # is hung, and GitHub's default would hold the run for six.
-    timeout-minutes: 120
+    # All three legs gate (a user decision, 2026-10-24). Windows and macOS ran
+    # report-only from 2026-10-23 while the suite, written on Linux alone, was
+    # ported: the first Windows run failed ~2 100 of ~23 000 tests and macOS
+    # hung at ~55%. PR #5 (fix/windows-macos-tests) took both to zero, and the
+    # product bugs the port found are fixed with it; what it left for later is
+    # tracked in a local working note (plans/windows-macos-portability.md, kept
+    # out of the published repo).
+    #
+    # Measured on PR #5: Ubuntu ~25 min, macOS ~60, Windows ~80 (every mock CLI
+    # spawn there is a .cmd shim, node and python). A leg past its cap is hung;
+    # GitHub's default would hold the run for six hours.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 180 || 120 }}
     steps:
       # Actions are pinned by commit SHA, not by tag, for the reason the publish
       # workflow spells out: `@v4`/`@v5` are mutable refs the action owner can

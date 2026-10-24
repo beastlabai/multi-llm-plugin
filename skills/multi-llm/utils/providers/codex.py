@@ -2,6 +2,7 @@
 import json
 import os
 import shutil
+import sys
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from ..json_extractor import _loads_reply, extract_json_from_text
@@ -1033,6 +1034,39 @@ def _splice_developer_instructions(cmd: List[str], context: JailContext) -> None
     cmd[splice:splice] = ["-c", value]
 
 
+
+#: The write probe's steps for Windows (`sandbox_probe_command`): the POSIX
+#: script's mkdir, touch, remove and best-effort rmdir, run by python because
+#: `sh` is not on a Windows PATH. Exit 0 when the file could be created, which
+#: is the question; the remove is retried, because a scanner that opens a new
+#: file for a moment makes an immediate remove a sharing violation, and a
+#: write the sandbox allowed must not read as one it denied.
+_WINDOWS_WRITE_PROBE = (
+    "import os, sys, time\n"
+    "d = '.multi-llm/tmp'\n"
+    "f = d + '/sandbox-probe-%d' % os.getpid()\n"
+    "try:\n"
+    "    os.makedirs(d, exist_ok=True)\n"
+    "    open(f, 'w').close()\n"
+    "    rc = 0\n"
+    "except OSError:\n"
+    "    rc = 1\n"
+    "for _ in range(20 if rc == 0 else 0):\n"
+    "    try:\n"
+    "        os.remove(f)\n"
+    "        break\n"
+    "    except FileNotFoundError:\n"
+    "        break\n"
+    "    except OSError:\n"
+    "        time.sleep(0.05)\n"
+    "for p in (d, '.multi-llm'):\n"
+    "    try:\n"
+    "        os.rmdir(p)\n"
+    "    except OSError:\n"
+    "        pass\n"
+    "sys.exit(rc)\n"
+)
+
 class CodexProvider(LLMProvider):
     """Provider for OpenAI Codex CLI tool.
 
@@ -1316,7 +1350,20 @@ class CodexProvider(LLMProvider):
             policy = _sandbox_for(profile)
         except ValueError:
             return None
-        if profile == PROFILE_AGENT_READONLY:
+        readonly = profile == PROFILE_AGENT_READONLY
+        if os.name == "nt":
+            # Windows has no `sh` on PATH as a rule (Git for Windows puts only
+            # Git\cmd there), and a probe whose command cannot start reads as a
+            # sandbox that cannot: every codex dispatch refused before codex was
+            # asked. So the command is the plugin's own interpreter taking the
+            # same steps. Unmeasured on Windows: whether `codex sandbox` starts
+            # there is the question the probe asks, not one this answers.
+            return [
+                "codex", "sandbox", "-c", f'sandbox_mode="{policy}"',
+                "--", sys.executable, "-I", "-c",
+                "pass" if readonly else _WINDOWS_WRITE_PROBE,
+            ]
+        if readonly:
             # Nothing to clean up, so nothing to clean up *as*: the question is
             # only whether the sandbox comes up.
             script = "exit 0"

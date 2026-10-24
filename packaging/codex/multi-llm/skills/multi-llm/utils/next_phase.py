@@ -851,6 +851,8 @@ def recorded_plan_spelling(recorded: Any, plan: str) -> Optional[str]:
         return None
     if not _RECORDED_SPELLING.fullmatch(recorded):
         return None
+    if not _steps_back_only_out_of_dirs(recorded):
+        return None
     try:
         same = os.path.realpath(recorded, strict=True) == os.path.realpath(
             plan, strict=True
@@ -858,6 +860,19 @@ def recorded_plan_spelling(recorded: Any, plan: str) -> Optional[str]:
     except (OSError, ValueError):
         return None
     return recorded if same else None
+
+
+def _steps_back_only_out_of_dirs(spelling: str) -> bool:
+    """Whether every component *spelling* steps back out of with ``..`` is an
+    existing directory. POSIX ``realpath(strict=True)`` already refuses one
+    that is not; Windows' collapses ``missing/..`` before it looks at the disk."""
+    head = spelling
+    while True:
+        head, tail = os.path.split(head)
+        if not tail:
+            return True
+        if tail == os.pardir and head and not os.path.isdir(head):
+            return False
 
 
 # ---------------------------------------------------------------------------

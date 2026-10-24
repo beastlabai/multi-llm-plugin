@@ -44,6 +44,7 @@ from tests.test_improve_orchestrator import (  # noqa: E402,F401
     APPLY_PHASE,
     CODE,
     ENTRY,
+    LISTING_NAME,
     MODES,
     PLAN,
     REFUSAL,
@@ -96,6 +97,11 @@ def repo(tmp_path, monkeypatch):
 def _typed(plan: Path) -> str:
     """The plan as the user typed it: relative to the cwd (the repository)."""
     return os.path.relpath(plan)
+
+
+def _shown(path: Path) -> str:
+    """A path as a message names it: relative to the cwd, ``/``-separated on every OS."""
+    return _typed(path).replace(os.sep, "/")
 
 
 def _run(capsys, plan, mode, *argv) -> Tuple[int, str, str]:
@@ -436,7 +442,7 @@ class TestAnUnreadableStateFile:
         code, out, err = _run(capsys, plan, mode, *as_json)
         assert (code, out) == (3, ""), "nothing on stdout, --json or not"
         [line] = [l for l in err.splitlines() if l.startswith("ERROR:")]
-        assert line.startswith(f"ERROR: {mode}: cannot read {_typed(state_file)} (")
+        assert line.startswith(f"ERROR: {mode}: cannot read {_shown(state_file)} (")
         assert detail in line
         assert line.endswith(
             "; nothing was run. Repair the file, or move it aside to start the "
@@ -792,7 +798,7 @@ class TestTokenSafeRendering:
     NAMES = ["a b.py", "it's.py", 'say "hi".py']
 
     def _typed_scope(self, repo):
-        listing = repo / "list 'x' \"y\".txt"
+        listing = repo / LISTING_NAME
         listing.write_text("c.py\n", encoding="utf-8")
         argv: List[str] = []
         for name in self.NAMES:

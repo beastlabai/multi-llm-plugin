@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -12,6 +14,8 @@ from utils.plan_updater import (
     extract_task_list,
     IMPL_START_MARKER,
     IMPL_END_MARKER,
+    insert_implementation_summary_reference,
+    insert_tasks_file_reference,
 )
 
 
@@ -152,3 +156,17 @@ class TestExtractTaskList:
 
         t001 = next(t for t in tasks if t["id"] == "T001")
         assert t001["status"] == "completed"
+
+
+@pytest.mark.parametrize("insert", [
+    insert_implementation_summary_reference, insert_tasks_file_reference,
+])
+def test_a_rewritten_reference_keeps_the_path_literally(insert):
+    """The second insert rewrites the section through `re.sub`, which read a
+    template's backslashes as escapes: a Windows path was `bad escape \\p`
+    (`..\\.multi-llm\\p\\implement\\summary.md`, Windows CI 2026-10-23)."""
+    first = insert("# Plan\n", "old/summary.md")
+    path = "..\\.multi-llm\\p\\implement\\summary.md"
+    content = insert(first, path)
+    assert f"[{path}]({path})" in content
+    assert "old/summary.md" not in content

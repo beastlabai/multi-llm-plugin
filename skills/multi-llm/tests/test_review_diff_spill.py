@@ -307,7 +307,7 @@ class TestHostilePathsStayInsideTheDiffDir:
         # Nothing new outside the phase dir: every added path is under it (or
         # is one of the directories leading to it).
         added = _tree(repo) - before - {Path("plans"), Path("plans/feature")}
-        assert all(str(path).startswith("plans/feature/code-review") for path in added)
+        assert all(path.as_posix().startswith("plans/feature/code-review") for path in added)
         assert result.coverage == DIFF_COVERAGE_COMPLETE
         # Each file still holds its own path's diff, found through the manifest.
         manifest = Path(result.scope_file).read_text(encoding="utf-8")
@@ -591,10 +591,11 @@ class TestANonUtf8PathName:
         # Python hands such a name over as a lone surrogate (argv, os.listdir);
         # `-z` numstat must key it the same way, and the scope id and manifest
         # must encode it rather than raise.
-        path = os.fsdecode(self.RAW)
         try:
+            # Windows decodes file names as strict UTF-8 (they are UTF-16 on disk).
+            path = os.fsdecode(self.RAW)
             (repo / path).write_bytes(b"one\n")
-        except (OSError, UnicodeEncodeError):
+        except (OSError, UnicodeError):
             pytest.skip("this filesystem refuses a file name that is not UTF-8")
         _commit(repo, "base")
         (repo / path).write_bytes(b"one\ntwo\n")

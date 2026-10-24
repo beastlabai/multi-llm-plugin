@@ -85,6 +85,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from harness import PERF_SCALE, SkillRunner  # noqa: E402
 from utils.cli_common import parse_result_line  # noqa: E402
+from tests.mock_launchers import launcher_file, write_launcher  # noqa: E402
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 MULTI_LLM = SKILL_DIR / "multi_llm.py"
@@ -703,7 +704,8 @@ class TestImproveCode:
         edited = {rel for task in report["tasks"] for rel in task["files_touched"]}
         assert edited == set(WORKING_DIFF), "the review's findings name both changed files"
         for rel, text in expected_text.items():
-            assert (world.repo / rel).read_text(encoding="utf-8") == text, (
+            # Decoded bytes, not read_text: that folds a Windows `\r\n` away.
+            assert (world.repo / rel).read_bytes().decode("utf-8") == text, (
                 f"{rel}: one marker per batch that touched it, appended to the reviewed bytes")
 
         # -- the result line ----------------------------------------------------
@@ -977,7 +979,7 @@ class TestAnInterruptedImproveCode:
         for task in final["tasks"]:
             expected[task["files_touched"][0]] += CODE_MARKER.format(id=task["expected_ids"][0])
         for rel, text in expected.items():
-            assert (world.repo / rel).read_text(encoding="utf-8") == text, rel
+            assert (world.repo / rel).read_bytes().decode("utf-8") == text, rel
 
 
 # --------------------------------------------------------------------------- #
@@ -1047,6 +1049,18 @@ def _stub_uv(tmp_path: Path) -> Path:
     interpreter, so the detached worker re-executes the dispatcher with no ``uv``
     resolution (and no network) in the way. Everything else about the worker is real:
     the double fork, the phase lock, the heartbeat, the log it owns."""
+    if os.name == "nt":
+        # No `/bin/sh` to exec: the same steps in python, behind the `.cmd`
+        # launcher Windows can start (an extensionless script is WinError 193).
+        write_launcher(
+            tmp_path, "stub-uv",
+            f"#!{sys.executable}\n"
+            "import subprocess, sys\n"
+            "args = sys.argv[1:]\n"
+            "args = args[args.index('--') + 2:]\n"
+            "sys.exit(subprocess.call([sys.executable, *args]))\n",
+        )
+        return launcher_file(tmp_path, "stub-uv")
     path = tmp_path / "stub-uv"
     path.write_text(
         "#!/bin/sh\n"

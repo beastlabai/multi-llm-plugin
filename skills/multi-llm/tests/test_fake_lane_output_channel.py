@@ -34,6 +34,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from tests.mock_launchers import install_mock_llm  # noqa: E402
 from utils.llm_client import (  # noqa: E402
     FILE_OUTPUT_LOCATION,
     STDOUT_OUTPUT_LOCATION,
@@ -54,7 +55,7 @@ def mock_path(tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     for launcher in ("cursor-agent", "claude"):
-        (bin_dir / launcher).symlink_to(MOCK_LLM)
+        install_mock_llm(bin_dir, launcher)
 
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("MULTI_LLM_TEST_MODE", "1")
@@ -224,7 +225,7 @@ class TestTheMockRosterTracksTheDeclaration:
         stdout, the mock writes nothing, and the slot is served from the
         fallback — the same per-model result either way."""
         bin_dir = mock_path
-        (bin_dir / "codex").symlink_to(MOCK_LLM)
+        install_mock_llm(bin_dir, "codex")
 
         result = _invoke("codex:gpt-5.5", tmp_path / "out")
 

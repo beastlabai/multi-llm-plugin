@@ -103,6 +103,22 @@ sys.exit(EXIT_CODE)
 '''
 
 
+#: A worker whose stdio is not the log when it reaches the boundary, taking
+#: the Windows branch (flipped here; a no-op on Windows).
+OFF_THE_LOG_WORKER = '''
+import sys
+sys.path.insert(0, {skill!r})
+from utils import process_control
+
+process_control.IS_WINDOWS = True
+process_control._assign_own_job_object = lambda: None
+print("before the boundary", flush=True)
+process_control.enter_detached_worker({log!r})
+print("after the boundary \\u2014 on the log")
+sys.stderr.write("stderr after the boundary\\n")
+'''
+
+
 #: A worker that prints on both streams *before* the detach boundary, the way
 #: every orchestrator does on its way to `maybe_detach`.
 PRE_DETACH_WORKER = '''
@@ -304,7 +320,10 @@ class TestRealDetachedWorker:
 
         view = detach.classify_run(str(phase))
         assert view["verdict"] == "running", view
-        assert view["run"]["pid"] == pid
+        if os.name != "nt":
+            # Not on Windows: a venv's python.exe there is a launcher that runs
+            # the interpreter as its child, and the worker records its own pid.
+            assert view["run"]["pid"] == pid
         assert view["run"]["detached"] is True
         assert view["lock_held"] is True, "the worker holds {phase}/.lock"
         assert _status(["--plan-file", str(plan), "--view", "run"], capsys) == 2
@@ -3615,11 +3634,11 @@ class TestTheCliTreeSnapshot:
 
 
 _PS_TABLE = (
-    "  100     1   100 Mon Sep  8 09:00:00 2026\n"
-    "  101   100   101 Mon Sep  8 09:00:01 2026\n"
-    "  102   101   102 Mon Sep  8 09:00:02 2026      \n"
-    "  103   101   101 Mon Sep 28 10:00:00 2026\n"
-    "  900     1   900 Mon Sep 28 10:00:00 2026\n"
+    "  100     1   100 Ss   Mon Sep  8 09:00:00 2026\n"
+    "  101   100   101 S+   Mon Sep  8 09:00:01 2026\n"
+    "  102   101   102 Z    Mon Sep  8 09:00:02 2026      \n"
+    "  103   101   101 R    Mon Sep 28 10:00:00 2026\n"
+    "  900     1   900 S    Mon Sep 28 10:00:00 2026\n"
 )
 
 
@@ -3635,12 +3654,16 @@ class TestTheTableWalkOffLinux:
     def _fake_ps(monkeypatch, *, lstart_supported: bool = True):
         calls = []
 
+        columns = ("pid", "ppid", "pgid", "stat", "lstart")
+
         def fake_run(argv, **kwargs):
             calls.append(list(argv))
             if "lstart=" in argv and not lstart_supported:
                 return subprocess.CompletedProcess(argv, 1, "", "ps: lstart: unknown")
-            stdout = _PS_TABLE if "lstart=" in argv else "".join(
-                " ".join(line.split()[:3]) + "\n" for line in _PS_TABLE.splitlines()
+            asked = [arg[:-1] for arg in argv if arg.endswith("=")]
+            stdout = "".join(
+                " ".join(line.split(None, 4)[columns.index(name)] for name in asked) + "\n"
+                for line in _PS_TABLE.splitlines()
             )
             return subprocess.CompletedProcess(argv, 0, stdout, "")
 
@@ -3674,6 +3697,17 @@ class TestTheTableWalkOffLinux:
         # `%e` pads a one-digit day: the spacing is the per-pid probe's, kept.
         assert found[102].start_time == "Mon Sep  8 09:00:02 2026"
         assert found[103].pgid == 101
+
+    def test_the_walk_says_which_rows_are_zombies(self, monkeypatch):
+        """`kill(pid, 0)` answers for a zombie too; the state column is what
+        a sweep tells it from a process that runs by."""
+        self._fake_ps(monkeypatch)
+        states = {pid: row.state for pid, row in process_control._ps_process_table().items()}
+        assert states == {100: "S", 101: "S", 102: "Z", 103: "R", 900: "S"}
+
+        self._fake_ps(monkeypatch, lstart_supported=False)
+        undated = process_control._ps_process_table()
+        assert undated[102].state == "Z" and undated[102].start_time is None
 
     def test_a_ps_without_lstart_still_yields_the_tree(self, monkeypatch):
         calls = self._fake_ps(monkeypatch, lstart_supported=False)
@@ -3743,8 +3777,17 @@ class TestTheSweepIsBoundedByOneClock:
             for group in groups:
                 _kill_quietly(group.pid)
 
-    def test_a_zombie_leader_holds_up_no_wait(self):
-        """Dead but unreaped still answers `kill(pid, 0)`; it is not *running*."""
+    @pytest.mark.parametrize("route", ["native", "ps"])
+    def test_a_zombie_leader_holds_up_no_wait(self, monkeypatch, route):
+        """Dead but unreaped still answers `kill(pid, 0)`; it is not *running*.
+
+        `ps` is macOS's route: no `/proc`, so the process table, the start times
+        and the zombie are all `ps`'s to say. `native` is this platform's own.
+        """
+        if route == "ps":
+            monkeypatch.setattr(process_control, "_linux_start_time", lambda pid: None)
+            monkeypatch.setattr(process_control, "_linux_process_table", lambda: None)
+            monkeypatch.setattr(process_control, "_linux_state", lambda pid: None)
         leader = subprocess.Popen(["sleep", "60"], start_new_session=True)
         cli = subprocess.Popen([sys.executable, "-c", "pass"])
         cli.wait()
@@ -3937,12 +3980,13 @@ class TestWindowsSeam:
         assert log.read_text(encoding="utf-8") == "existing\n"
         assert recorded["stdout_closed"] is False
 
-    def test_windows_worker_does_not_reopen_stdio_but_joins_a_job_object(
+    def test_windows_worker_on_the_log_already_only_joins_a_job_object(
         self, monkeypatch
     ):
-        """The launcher already handed the log in; the worker adds the reaper."""
+        """The launcher handed the log in; the worker adds the reaper."""
         calls = []
         monkeypatch.setattr(process_control, "IS_WINDOWS", True)
+        monkeypatch.setattr(process_control, "_stdio_already_on", lambda _log: True)
         monkeypatch.setattr(
             process_control, "_assign_own_job_object",
             lambda: calls.append("job"),
@@ -3953,9 +3997,32 @@ class TestWindowsSeam:
         )
         process_control.enter_detached_worker("C:\\nope\\orchestrator-run.log")
         assert calls == ["job"], (
-            "on Windows the log arrives as an inherited handle, so redirecting "
-            "fds would be wrong; the Job Object is what reaps provider children"
+            "stdio already on the log is not opened twice; the Job Object is "
+            "what reaps provider children"
         )
+
+    def test_windows_worker_off_the_log_reopens_it(self, tmp_path):
+        """Windows CI, 2026-10-23: a `.cmd` uv between the launcher and the
+        worker lost the handed-in handle, and the run reached `done` with an
+        empty log. The worker reopens the log as on POSIX, and its streams
+        follow (on Windows they do not follow a dup2 by themselves)."""
+        log = tmp_path / "orchestrator-run.log"
+        log.write_text("a predecessor's bytes\n", encoding="utf-8")
+        script = tmp_path / "off-the-log-worker.py"
+        script.write_text(
+            OFF_THE_LOG_WORKER.format(skill=str(SKILL_ROOT), log=str(log)),
+            encoding="utf-8",
+        )
+        proc = subprocess.run(
+            [sys.executable, str(script)], capture_output=True, timeout=60,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.splitlines() == [b"before the boundary"]
+        assert proc.stderr == b""
+        text = log.read_text(encoding="utf-8")
+        assert text.startswith("a predecessor's bytes\n"), "O_APPEND, never O_TRUNC"
+        assert "after the boundary \u2014 on the log" in text
+        assert "stderr after the boundary" in text
 
     def test_windows_abort_escalates_to_taskkill_of_the_whole_tree(self,
                                                                   monkeypatch):
@@ -6934,6 +7001,7 @@ class TestACtrlCAtTheDispatcherSweepsTheRegisteredClis:
         assert multi_llm.main(["review-plan", "plan.md"]) == 1
         assert "[INTERRUPT_SWEEP]" not in capsys.readouterr().err
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX sessions and groups")
     def test_a_real_threaded_fan_out_is_swept_before_the_executor_shuts_down(
         self, tmp_path
     ):

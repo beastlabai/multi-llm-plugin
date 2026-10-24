@@ -25,12 +25,14 @@ import ast
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -86,6 +88,7 @@ LOGIN_SHELL_SCRIPT = CONST["LOGIN_SHELL_SCRIPT"]
 CANCEL_LATENCY_BOUND_S = CONST["CANCEL_LATENCY_BOUND_S"]
 RUNNABLE_MARKER = CONST["RUNNABLE_MARKER"]
 NEXT_MARKER = CONST["NEXT_MARKER"]
+WSL_LAUNCHER_DIRS = CONST["WSL_LAUNCHER_DIRS"]
 
 
 # ===========================================================================
@@ -277,6 +280,44 @@ REVIEW = {"mode": "review-plan", "plan": "p.md", "question": "", "extra_flags": 
 def dispatcher_argv(call: dict) -> list:
     argv = call["argv"]
     return argv[argv.index("--") + 3:]
+
+
+#: The bash the server finds on this PATH, pinned as the fallback where a row
+#: empties PATH to hide uv: only uv may be missing there. ``/bin/bash``, the
+#: built-in fallback, is no file on Windows, so bash went missing first. There it
+#: is Git Bash, as the server's own lookup has it (``windows_bash``): a bare
+#: ``which`` answers with WSL's ``System32\bash.exe`` wherever the feature is on.
+if sys.platform == "win32":
+    from utils.host_install import git_bash
+
+    REAL_BASH = git_bash() or "/bin/bash"
+else:
+    REAL_BASH = shutil.which("bash") or "/bin/bash"
+
+
+def word(path) -> str:
+    """*path* as a dispatcher command prints it (``cli_common._quote``): bare on
+    POSIX, single-quoted where it holds a backslash — a Windows path, which a
+    scripted line spelled bare would hand ``split_posix`` as escapes."""
+    return shlex.quote(str(path))
+
+
+#: The rows that kill a child through its POSIX process group (``os.killpg``)
+#: or a SIGTERM the server handles. Windows has neither: ``send_signal`` is
+#: ``TerminateProcess`` on the bash leader alone, which leaves the stub's python
+#: running, and the tool route is unsupported there (packaging/codex/README.md).
+posix_group_kill = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX process-group kill and SIGTERM handling; the codex tool route "
+           "is unsupported on Windows")
+
+
+#: A recording ``bash`` first on PATH is a shebang script, which CreateProcess
+#: cannot start (and ``shutil.which`` finds it only by its bare name, last).
+posix_shebang_shell = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="a recording `bash` stand-in is a shebang script, which CreateProcess "
+           "cannot start; the login profile test asserts the same argv on every OS")
 
 
 _ABSENT = object()
@@ -900,6 +941,7 @@ class TestWireContract:
                     in dispatcher_argv(c)]
         assert client.close() == 0
 
+    @posix_group_kill
     def test_a_cancel_mid_launch_poll_kills_the_group_and_aborts_once(self, harness):
         client = harness.client([launch_step(run_id="RID-C"),
                                  {"exit": 2, "sleep": 60, "grandchild": True},
@@ -952,6 +994,7 @@ class TestWireContract:
         aborts = [c for c in harness.calls() if DISPATCHER["abort"][1] in dispatcher_argv(c)]
         assert len(aborts) == 1
 
+    @posix_group_kill
     def test_sigterm_with_stdin_closed_cancels_the_call_in_flight(self, harness):
         # Codex's own shape, measured by Phase 1 row 10 (codex 0.156.1): an
         # interrupted session closes stdin and SIGTERMs the server in the same
@@ -973,6 +1016,7 @@ class TestWireContract:
         aborts = [c for c in harness.calls() if DISPATCHER["abort"][1] in dispatcher_argv(c)]
         assert len(aborts) == 1
 
+    @posix_group_kill
     def test_codex_s_turn_end_teardown_still_aborts_the_claimed_run(self, harness):
         # Measured offline on codex 0.160.1 (fix round 16, Codex racing 06):
         # under code mode the model calls this tool from a JavaScript `exec`
@@ -1231,7 +1275,7 @@ class TestArguments:
         for place in (harness.workspace, harness.cwd, harness.home, harness.tmp):
             assert not list(Path(place).glob("PWNED*"))
 
-    def test_child_is_spawned_through_one_login_shell_at_one_site(self, harness, tmp_path):
+    def test_the_server_spawns_at_one_site_and_never_through_a_shell_string(self):
         """Inverted from the reference: exactly one shell, one site, a constant -c."""
         src = SERVER_SRC.read_text(encoding="utf-8")
         tree = ast.parse(src)
@@ -1242,7 +1286,10 @@ class TestArguments:
         for node in ast.walk(tree):
             if isinstance(node, ast.keyword) and node.arg == "shell":
                 assert isinstance(node.value, ast.Constant) and node.value.value is False
-        # And at run time: a recording bash first on PATH sees the pinned argv.
+
+    @posix_shebang_shell
+    def test_child_is_spawned_through_one_login_shell_at_one_site(self, harness, tmp_path):
+        """At run time: a recording bash first on PATH sees the pinned argv."""
         bindir = tmp_path / "bin"
         bindir.mkdir()
         record = tmp_path / "bash-argv.log"
@@ -1253,7 +1300,7 @@ class TestArguments:
             "os.execv('/bin/bash', ['bash'] + sys.argv[1:])\n".format(
                 sys.executable, str(record)), encoding="utf-8")
         wrapper.chmod(0o755)
-        path = "{}:{}".format(bindir, os.environ.get("PATH", ""))
+        path = os.pathsep.join([str(bindir), os.environ.get("PATH", "")])
         envelope, _, _, _ = harness.run(
             REVIEW, [launch_step(), poll_step(2), poll_step(0)],
             extra_env={"PATH": path})
@@ -1264,6 +1311,165 @@ class TestArguments:
             assert argv[1:5] == ["-lc", LOGIN_SHELL_SCRIPT, "bash", anchor]
         assert envelope["environment"]["shell"] == [
             str(wrapper), "-lc", LOGIN_SHELL_SCRIPT, "bash"]
+
+    def test_the_login_shell_is_handed_bash_the_anchor_and_the_dispatcher(self, harness):
+        """What the real bash was handed, read by the real bash.
+
+        The OS-independent twin of the recording-wrapper test above: a login
+        profile records ``$0`` and ``"$@"`` (the anchor, then the stub the
+        dispatcher argv starts with), so it also proves ``-l`` took effect. The
+        ``-lc`` and the constant script are what ``environment.shell`` reports
+        of the very list the one ``Popen`` was given.
+
+        The profile arms a one-shot DEBUG trap rather than reading ``$0`` and
+        ``"$@"`` itself: macOS's bash 3.2 runs its startup files before it binds
+        the arguments of a ``-c`` string (the profile saw ``$0`` as ``/bin/bash``
+        and no ``"$@"``), where bash 4 and later bind them first. The trap fires
+        before the script's first command, when every bash has them.
+        """
+        record = harness.tmp / "profile-argv.log"
+        (harness.home / ".profile").write_text(
+            "record=\"{}\"\n"
+            "trap 'printf \"%s\\n\" @@ \"$0\" \"$@\" >> \"$record\"; trap - DEBUG' DEBUG\n"
+            .format(record.as_posix()),
+            encoding="utf-8")
+        envelope, _, _, _ = harness.run(
+            REVIEW, [launch_step(), poll_step(2), poll_step(0)])
+        anchor = os.path.realpath(harness.workspace)
+        spawns = [chunk.splitlines() for chunk in record.read_text().split("@@\n")[1:]]
+        assert len(spawns) == 3
+        for lines in spawns:
+            assert lines[:3] == ["bash", anchor, str(harness.stub)]
+        shell = envelope["environment"]["shell"]
+        assert shell[1:] == ["-lc", LOGIN_SHELL_SCRIPT, "bash"]
+        assert Path(shell[0]).name.lower() in ("bash", "bash.exe")
+        assert Path(shell[0]).parent.name.lower() not in WSL_LAUNCHER_DIRS
+
+
+def test_windows_cancel_kills_the_dispatchers_descendants(tmp_path, monkeypatch):
+    """A live wrapper must survive until taskkill has found its children."""
+    module = _server_module()
+    real_run = subprocess.run
+    monkeypatch.setattr(module, "os", types.SimpleNamespace(
+        **{name: value for name, value in vars(os).items() if name != "killpg"}))
+    if sys.platform != "win32":
+        def taskkill(argv, **kwargs):
+            assert argv == ["taskkill", "/PID", str(proc.pid), "/T", "/F"]
+            assert proc.poll() is None, "the wrapper died before its tree was killed"
+            os.killpg(proc.pid, signal.SIGKILL)
+            return subprocess.CompletedProcess(argv, 0)
+
+        monkeypatch.setattr(module.subprocess, "run", taskkill)
+    monkeypatch.setattr(module, "sys", types.SimpleNamespace(platform="win32"))
+    proc = subprocess.Popen(
+        [sys.executable, "-c",
+         "import subprocess, sys, time; "
+         "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+         "print(p.pid, flush=True); time.sleep(60)"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        assert int(proc.stdout.readline()) > 0
+        module.kill_tree(proc, [])
+        # A surviving grandchild keeps these pipes open for sixty seconds.
+        proc.communicate(timeout=3)
+        assert proc.returncode is not None
+    finally:
+        if sys.platform == "win32":
+            real_run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                     capture_output=True, timeout=10)
+        else:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        proc.communicate(timeout=10)
+
+
+@pytest.mark.parametrize("failure", [OSError("missing"), subprocess.TimeoutExpired("taskkill", 5)])
+def test_windows_cancel_still_reaps_the_child_if_taskkill_fails(monkeypatch, failure):
+    module = _server_module()
+    monkeypatch.setattr(module, "sys", types.SimpleNamespace(platform="win32"))
+    calls = []
+
+    def unavailable(*args, **kwargs):
+        calls.append("taskkill")
+        raise failure
+
+    monkeypatch.setattr(module.subprocess, "run", unavailable)
+    proc = types.SimpleNamespace(
+        pid=123, poll=lambda: None,
+        kill=lambda: calls.append("kill"),
+        wait=lambda **kwargs: calls.append("wait"),
+    )
+    module.kill_tree(proc, [])
+    assert calls == ["taskkill", "kill", "wait"]
+
+
+class TestWindowsBash:
+    """On Windows the shell is Git Bash, and ``bash`` on PATH may be WSL's.
+
+    ``windows_bash`` runs on every OS here, over a stand-in tree: the logic is
+    path and name arithmetic, so a tmp dir named ``System32`` is as good a
+    launcher as the real one (``os.pathsep`` and the ``.exe`` suffix PATH needs
+    are the platform's own).
+    """
+
+    EXE = ".exe" if os.name == "nt" else ""
+
+    @staticmethod
+    def same(found, expected) -> bool:
+        """Same file: ``which`` spells the suffix in PATHEXT's case (``.EXE``)."""
+        return found is not None and os.path.samefile(found, expected)
+
+    @pytest.fixture
+    def tree(self, tmp_path):
+        """WSL's launcher, and Git's ``cmd``, ``bin`` and ``usr/bin`` directories.
+
+        ``bin`` holds ``bash.exe`` under that exact name on every OS, because
+        that is the file the beside-git lookup names; ``usr/bin`` holds the one
+        PATH can match.
+        """
+        def make(*parts):
+            target = tmp_path.joinpath(*parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("", encoding="utf-8")
+            target.chmod(0o755)
+            return target
+
+        return types.SimpleNamespace(
+            launcher=make("Windows", "System32", "bash" + self.EXE),
+            git=make("Git", "cmd", "git" + self.EXE),
+            bin_bash=make("Git", "bin", "bash.exe"),
+            usr_bash=make("Git", "usr", "bin", "bash" + self.EXE))
+
+    def test_wsl_s_launcher_is_skipped_for_the_git_bash_behind_it_on_path(self, tree):
+        path = os.pathsep.join([str(tree.launcher.parent), str(tree.usr_bash.parent)])
+        # A bare `which` is what chose the launcher before.
+        assert self.same(shutil.which("bash", path=path), tree.launcher)
+        assert self.same(_server_module().windows_bash(path), tree.usr_bash)
+
+    def test_git_s_default_install_has_only_cmd_on_path_and_bash_is_found_beside_it(
+        self, tree
+    ):
+        path = os.pathsep.join([str(tree.launcher.parent), str(tree.git.parent)])
+        assert self.same(_server_module().windows_bash(path), tree.bin_bash)
+
+    def test_the_launcher_alone_is_no_shell(self, tree):
+        module = _server_module()
+        assert module.windows_bash(str(tree.launcher.parent)) is None
+        assert module.windows_bash("") is None
+
+    def test_find_shell_takes_that_route_on_windows_only(self, tree, monkeypatch):
+        module = _server_module()
+        server = module.Server.__new__(module.Server)
+        server.layer1 = {"PATH": os.pathsep.join(
+            [str(tree.launcher.parent), str(tree.git.parent)])}
+        monkeypatch.setattr(module, "sys", types.SimpleNamespace(platform="linux"))
+        assert self.same(server.find_shell(), tree.launcher)
+        monkeypatch.setattr(module, "sys", types.SimpleNamespace(platform="win32"))
+        assert self.same(server.find_shell(), tree.bin_bash)
 
 
 # ===========================================================================
@@ -1284,7 +1490,7 @@ class TestUvPreflight:
         (bindir / "uv").chmod(0o755)
         _, _, calls, _ = harness.run(status, step, extra_env={
             "MULTI_LLM_UV": str(tmp_path / "nope"),
-            "PATH": "{}:{}".format(bindir, os.environ["PATH"])})
+            "PATH": os.pathsep.join([str(bindir), os.environ["PATH"]])})
         assert calls[0]["env"]["MULTI_LLM_UV"] == str(bindir / "uv")
         # A PATH miss falls through to the surface's candidates.
         local = harness.home / ".local" / "bin"
@@ -1292,7 +1498,8 @@ class TestUvPreflight:
         shutil.copyfile(harness.stub, local / "uv")
         (local / "uv").chmod(0o755)
         _, _, calls, _ = harness.run(status, step, extra_env={
-            "MULTI_LLM_UV": None, "PATH": "/usr/bin:/bin"})
+            "MULTI_LLM_UV": None, "PATH": "/usr/bin:/bin",
+            "MLLM_TEST_FALLBACK_SHELL": REAL_BASH})
         assert calls[0]["env"]["MULTI_LLM_UV"] == str(local / "uv")
         assert calls[0]["env"]["MULTI_LLM_SKILL_DIR"] == str(
             harness.root / "skills" / "multi-llm")
@@ -1313,7 +1520,8 @@ class TestUvPreflight:
 
     def test_a_missing_uv_refuses_with_the_payload_s_message(self, harness, tmp_path):
         envelope = _refused(harness, REVIEW, extra_env={
-            "MULTI_LLM_UV": None, "PATH": str(tmp_path)})
+            "MULTI_LLM_UV": None, "PATH": str(tmp_path),
+            "MLLM_TEST_FALLBACK_SHELL": REAL_BASH})
         expected = (SKILL_ROOT / SURFACE["uv"]["missing_message_file"]).read_text(
             encoding="utf-8").rstrip("\n")
         assert envelope["message"] == expected
@@ -1321,7 +1529,8 @@ class TestUvPreflight:
 
 
 def test_server_starts_without_uv_and_lists_the_tool(harness, tmp_path):
-    client = harness.client(extra_env={"MULTI_LLM_UV": None, "PATH": str(tmp_path)})
+    client = harness.client(extra_env={"MULTI_LLM_UV": None, "PATH": str(tmp_path),
+                                       "MLLM_TEST_FALLBACK_SHELL": REAL_BASH})
     tools = client.response(client.request("tools/list"))["result"]["tools"]
     assert [t["name"] for t in tools] == [SURFACE["tool_name"]]
     answer = client.response(client.start_call(REVIEW))
@@ -1428,10 +1637,15 @@ class TestChildEnvironment:
         assert calls and {c["env"]["UV_PROJECT_ENVIRONMENT"] for c in calls} == {None}
 
     def test_a_forwarded_project_environment_is_passed_on_unchanged(self, harness):
-        """The container image forwards one through `.mcp.json`'s allowlist."""
+        """The container image forwards one through `.mcp.json`'s allowlist.
+
+        Absolute in this platform's own spelling: Git Bash rewrites a POSIX
+        path in the environment of a native child (`/image/venv` arrives as
+        `C:/Program Files/Git/image/venv`), which no Windows user would set."""
+        venv = os.path.abspath("/image/venv")
         _, _, calls, _ = harness.run(REVIEW, [launch_step(), poll_step(0)],
-                                     extra_env={"UV_PROJECT_ENVIRONMENT": "/image/venv"})
-        assert {c["env"]["UV_PROJECT_ENVIRONMENT"] for c in calls} == {"/image/venv"}
+                                     extra_env={"UV_PROJECT_ENVIRONMENT": venv})
+        assert {c["env"]["UV_PROJECT_ENVIRONMENT"] for c in calls} == {venv}
 
     SESSION_ENV = DISPATCHER["session_model_env"]
 
@@ -1794,6 +2008,7 @@ class TestExecuteStateMachine:
         envelope, _, _, _ = harness.run(REVIEW, [launch_step(), noisy])
         assert envelope["artifacts"] == ["last"]
 
+    @posix_group_kill
     def test_a_child_ignoring_sigterm_is_killed(self, harness):
         client = harness.client([launch_step(run_id="RID-T"),
                                  {"exit": 2, "sleep": 60, "ignore_term": True},
@@ -1898,6 +2113,7 @@ class TestBudgetHandoff:
                 and n.id == "CANCEL_LATENCY_BOUND_S" and isinstance(n.ctx, ast.Load)]
         assert uses == []
 
+    @posix_group_kill
     def test_a_cancel_after_the_handoff_does_nothing(self, harness):
         client = harness.client([launch_step(run_id="RID-P")] + [poll_step(2, sleep=0.2)] * 50,
                                 extra_env={"MLLM_TEST_POLL_BUDGET_MS": "1000"})
@@ -2435,7 +2651,7 @@ class TestResumeCommand:
         the same plan is launched with the spelling the user typed."""
         absolute = os.path.join(os.path.realpath(harness.workspace), "plans", "p.md")
         done = poll_step(0, next="uv run -- python multi_llm.py review-plan {} "
-                                 "--reaggregate --host codex --yes".format(absolute))
+                                 "--reaggregate --host codex --yes".format(word(absolute)))
         _, _, calls, _ = harness.run(
             dict(REVIEW, plan="plans/p.md"),
             [launch_step(run_id="R1"), done, launch_step(run_id="R2"), poll_step(0)])
@@ -2529,7 +2745,7 @@ class TestTheTypedPlanSurvivesEveryFailure:
         the plan absolutely, as `run_status` prints it."""
         return {"exit": CODES["needs_human"], "stdout": [
             "      resume with: {} {} {} --host {} --detach --yes --resume".format(
-                UV_PREFIX, row["name"], self._absolute(harness), SURFACE["host"]),
+                UV_PREFIX, row["name"], word(self._absolute(harness)), SURFACE["host"]),
             result_line(mode=row["name"], phase=row["phase"],
                         state=STATES["needs_human"], exit=CODES["needs_human"])]}
 
@@ -2565,7 +2781,7 @@ class TestTheTypedPlanSurvivesEveryFailure:
         live = {"exit": 2, "stdout": [result_line(
             state=STATES["nothing_to_do"], exit=2,
             next="uv run -- python multi_llm.py status {} --view run --wait "
-                 "--run-id RID-T".format(self._absolute(harness)))]}
+                 "--run-id RID-T".format(word(self._absolute(harness))))]}
         envelope, _, calls, _ = harness.run(
             handoff["next"], [live, self._failed_poll(harness, row)], meta=self.META)
         # The re-attach still polls by the absolute path inside the server.
@@ -2574,7 +2790,7 @@ class TestTheTypedPlanSurvivesEveryFailure:
 
     def test_an_unfollowed_next_names_the_plan_as_typed(self, harness):
         done = poll_step(0, next="uv run -- python multi_llm.py generate-tasks {}".format(
-            self._absolute(harness)))
+            word(self._absolute(harness))))
         envelope, _, _, _ = harness.run(
             dict(REVIEW, plan=TYPED_PLAN), [launch_step(), done])
         assert envelope["next"]["mode"] == "generate-tasks"
@@ -2675,9 +2891,9 @@ def failed_generate_tasks(harness) -> dict:
     host = SURFACE["host"]
     return {"exit": CODES["needs_human"], "stdout": [
         "Re-invoke to retry only the failures (task_generation):",
-        "  {} generate-tasks {} --host {} --yes".format(UV_PREFIX, absolute, host),
+        "  {} generate-tasks {} --host {} --yes".format(UV_PREFIX, word(absolute), host),
         "      resume with: {} generate-tasks {} --host {} --detach --yes".format(
-            UV_PREFIX, absolute, host),
+            UV_PREFIX, word(absolute), host),
         result_line(mode="generate-tasks", state=STATES["needs_human"],
                     exit=CODES["needs_human"])]}
 
@@ -2837,7 +3053,7 @@ def failed_implement_status(harness, **body) -> dict:
     return {"exit": CODES["needs_human"], "stdout": [
         "implement: failed (batch 2 of 4)",
         "      resume with: {} implement {} --host {} --detach --resume".format(
-            UV_PREFIX, absolute, SURFACE["host"]),
+            UV_PREFIX, word(absolute), SURFACE["host"]),
         result_line(**payload)]}
 
 
@@ -2978,7 +3194,7 @@ def failed_improve_plan_status(harness) -> dict:
     absolute = os.path.join(os.path.realpath(harness.workspace), "plans", "x.md")
     return {"exit": CODES["needs_human"], "stdout": [
         "improve-plan: failed (stopped in apply-suggestions)",
-        "      resume with: {} improve-plan {} --resume".format(UV_PREFIX, absolute),
+        "      resume with: {} improve-plan {} --resume".format(UV_PREFIX, word(absolute)),
         result_line(mode="improve-plan", phase="improve-plan",
                     state=STATES["needs_human"], exit=CODES["needs_human"])]}
 
@@ -3308,7 +3524,7 @@ class TestASymlinkedPlanDir:
         real = os.path.realpath(shared / "x.md")
         failed = {"exit": CODES["needs_human"], "stdout": [
             "  {} generate-tasks {} --host {} --yes".format(
-                UV_PREFIX, real, SURFACE["host"]),
+                UV_PREFIX, word(real), SURFACE["host"]),
             result_line(mode="generate-tasks", state=STATES["needs_human"],
                         exit=CODES["needs_human"])]}
         envelope, _, _, _ = harness.run(

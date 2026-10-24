@@ -4316,6 +4316,19 @@ class TestSubprocessDecoding:
         assert "stderr �" in content
 
 
+def _cursor_gate_confirmed():
+    """The cursor flag gate, answered "nothing missing".
+
+    The tests that use it are about the launch guards, and the gate runs first.
+    On POSIX their non-executable ``.cmd`` stand-in leaves it nothing to probe;
+    Windows reports every existing file executable, so the gate would spawn the
+    stand-in, read an empty help and refuse the slot before any guard ran.
+    """
+    return patch(
+        "utils.providers.cursor_agent.CursorAgentProvider.missing_flags", return_value=()
+    )
+
+
 class TestPromptLengthGuard:
     """Windows command-line length check for prompt-on-argv providers.
 
@@ -4420,7 +4433,7 @@ class TestPromptLengthGuard:
         shim.write_text("@echo off", encoding="utf-8")
         prompt = "x" * (CMDLINE_CAP_UTF16_BATCH + 100)
 
-        with patch("shutil.which", return_value=str(shim)), \
+        with patch("shutil.which", return_value=str(shim)), _cursor_gate_confirmed(), \
              patch("utils.llm_client._IS_WINDOWS", True), \
              patch("utils.llm_client.subprocess.run") as mock_run:
             result = invoke_with_provider(prompt=prompt, model_spec="cursor-agent:auto")
@@ -4455,7 +4468,7 @@ class TestPromptLengthGuard:
         mock_result.stdout = json.dumps({"type": "result", "result": "[]"})
         mock_result.stderr = ""
 
-        with patch("shutil.which", return_value=str(shim)), \
+        with patch("shutil.which", return_value=str(shim)), _cursor_gate_confirmed(), \
              patch("utils.llm_client._IS_WINDOWS", False), \
              patch("utils.llm_client.subprocess.run", return_value=mock_result) as mock_run:
             result = invoke_with_provider(prompt=prompt, model_spec="cursor-agent:auto")
@@ -4513,7 +4526,7 @@ class TestBatchShimMetacharGuard:
         shim = tmp_path / "cursor-agent.cmd"
         shim.write_text("@echo off", encoding="utf-8")
 
-        with patch("shutil.which", return_value=str(shim)), \
+        with patch("shutil.which", return_value=str(shim)), _cursor_gate_confirmed(), \
              patch("utils.llm_client._IS_WINDOWS", True), \
              patch("utils.llm_client.subprocess.run") as mock_run:
             result = invoke_with_provider(
@@ -4542,7 +4555,7 @@ class TestBatchShimMetacharGuard:
         shim = tmp_path / "cursor-agent.cmd"
         shim.write_text("@echo off", encoding="utf-8")
 
-        with patch("shutil.which", return_value=str(shim)), \
+        with patch("shutil.which", return_value=str(shim)), _cursor_gate_confirmed(), \
              patch("utils.llm_client._IS_WINDOWS", False), \
              patch("utils.llm_client.subprocess.run",
                    return_value=self._success_result()) as mock_run:
@@ -4871,10 +4884,12 @@ def _install_fake_omp(tmp_path, monkeypatch, *, script_body, help_text=_OMP_FULL
 
     from utils.providers import base as providers_base
 
+    from tests.mock_launchers import write_launcher
+
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
-    fake = bin_dir / "omp"
-    fake.write_text(
+    fake = write_launcher(
+        bin_dir, "omp",
         "#!/bin/sh\n"
         'for a in "$@"; do\n'
         '  case "$a" in\n'
@@ -4884,9 +4899,7 @@ def _install_fake_omp(tmp_path, monkeypatch, *, script_body, help_text=_OMP_FULL
         "  esac\n"
         "done\n"
         f"{script_body}\n",
-        encoding="utf-8",
     )
-    fake.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setenv("OMP_FAKE_DIR", str(tmp_path))
     # The gate memoises `read_help_tokens` on (binary, help argv), and the binary

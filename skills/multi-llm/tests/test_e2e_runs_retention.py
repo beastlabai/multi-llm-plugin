@@ -35,6 +35,10 @@ if str(TESTS_DIR.parent) not in sys.path:
 
 from tests.container.harness import RUNS_KEEP_DEFAULT, prune_runs  # noqa: E402
 
+# The sweep leases each bundle with `fcntl.flock` and is a no-op off POSIX, like
+# the container lane whose runs it prunes.
+pytestmark = pytest.mark.skipif(os.name != "posix", reason="prune_runs is POSIX-only (fcntl leases)")
+
 
 def _bundle(root: Path, name: str, *, mtime: float | None = None) -> Path:
     path = root / name

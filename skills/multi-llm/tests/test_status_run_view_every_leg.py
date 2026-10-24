@@ -130,7 +130,8 @@ class TestResumeWithIsTheHostsSpelling:
         _failed_run(plan, mode="apply-code-fixes", directory="apply-fixes",
                     flags=["--host", "codex", "--detach"])
         line = _resume_line(capsys, "--host", "codex")
-        assert "multi_llm.py apply-code-fixes" in line and line.endswith(
+        # The dispatcher's own prefix, which quotes a Windows script path.
+        assert f"{cli_common.dispatcher_prefix()} apply-code-fixes" in line and line.endswith(
             "--host codex --detach --resume"), line
 
     def test_the_flags_dropped_are_the_ones_the_tool_routes_reserve(self):
@@ -269,7 +270,7 @@ class TestTheAskQuestionIsNeverDropped:
         out = capsys.readouterr().out
         assert "resume with: " in out, out
         command = out.split("resume with: ", 1)[1]
-        assert "multi_llm.py ask " in command, out
+        assert f"{cli_common.dispatcher_prefix()} ask " in command, out
         assert f"'{question}' --host claude-code --quick --force" in command, out
 
     def test_a_one_line_question_is_spelled_the_hosts_way(self, plan, capsys):

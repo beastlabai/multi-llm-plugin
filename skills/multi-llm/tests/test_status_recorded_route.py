@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 
 import multi_llm
-from utils import detach, next_phase, process_control, run_status, status_file
+from utils import cli_common, detach, next_phase, process_control, run_status, status_file
 from utils.state_manager import get_or_create_state
 
 import tests.test_check_gate_fixture as gate
@@ -159,7 +159,8 @@ class TestStatusSpellsTheRunsOwnRoute:
                     flags=["--host", "codex", "--detach"], host="codex",
                     route="package")
         line = _resume_line(capsys, "--host", "codex")
-        assert "multi_llm.py apply-code-fixes" in line, line
+        # The dispatcher's own prefix, which quotes a Windows script path.
+        assert f"{cli_common.dispatcher_prefix()} apply-code-fixes" in line, line
 
     def test_another_hosts_record_is_not_this_hosts_route(self, plan, capsys):
         _failed_run(plan, mode="apply-code-fixes", directory="apply-fixes",

@@ -498,8 +498,10 @@ def get_relative_output_path(plan_path: Path, output_type: str, phase: Optional[
         Relative path from plan to output file (e.g., "my-plan/tasks/tasks.md")
     """
     output_path = get_output_paths(plan_path, output_type, phase)
-    # Return relative path from plan's parent directory to the output file
-    return str(output_path.relative_to(plan_path.parent))
+    # Return relative path from plan's parent directory to the output file.
+    # POSIX form: it is a markdown link and a marker other phases read back, in
+    # a plan file that may be committed and opened on another OS.
+    return output_path.relative_to(plan_path.parent).as_posix()
 
 
 def get_output_dir(plan_path: Path) -> Path:

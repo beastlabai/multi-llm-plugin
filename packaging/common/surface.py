@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, FrozenSet, List, Optional, Sequence
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -531,8 +531,10 @@ def _uninstall_command(host_id: str) -> str:
     ``DEFAULT_UV_RUN_ARGS`` constant in the prefix's own shape and quoting
     (``cli_common._quote``); ``test_cli_surface_emitter`` holds it equal to
     ``uninstall_line`` with the override unset, so the spelling keeps one owner.
+    A ``PurePosixPath``: a ``Path`` joined ``{SKILL_DIR}\\multi_llm.py`` on a
+    Windows builder, so the shipped surface depended on the build's OS.
     """
-    base = Path(SKILL_DIR_TOKEN)
+    base = PurePosixPath(SKILL_DIR_TOKEN)
     flags = "".join(f" {flag}" for flag in unattended.DEFAULT_UV_RUN_ARGS)
     return (
         f"uv run{flags} --project {cli_common._quote(base)} -- "

@@ -130,7 +130,7 @@ def test_tool_rejection_is_a_structural_failure(provider):
 
 
 _CAPTURES = json.loads(
-    (Path(__file__).parent / "fixtures/fx/captures.json").read_text()
+    (Path(__file__).parent / "fixtures/fx/captures.json").read_text(encoding="utf-8")
 )["cases"]
 _CAPTURE_CATEGORIES = {
     "truncated_stream": "server_error", "http_401": "auth_failed",
@@ -218,10 +218,10 @@ def test_help_prompt_is_sent_on_stdin(provider, monkeypatch, prompt):
 
 
 def test_wrong_binary_is_refused_by_ask_help(provider, monkeypatch, tmp_path):
-    executable = tmp_path / "fx"
+    from tests.mock_launchers import write_launcher
+
     args = tmp_path / "args"
-    executable.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > "{args}"\nprintf "Usage: fx [file] [code]\\n"\n')
-    executable.chmod(0o755)
+    write_launcher(tmp_path, "fx", f'#!/bin/sh\nprintf "%s\\n" "$@" > "{args}"\nprintf "Usage: fx [file] [code]\\n"\n')
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
     with pytest.raises(fx.FxFlagsUnconfirmed, match="JSON viewer"):
         provider.build_command("hello", "test/model")
@@ -242,11 +242,12 @@ def test_concurrent_dispatches_share_private_home_then_remove_it(provider):
     def slot(i):
         with provider.hermetic_dispatch("generate", f"test/model{i}"):
             home = Path(provider.get_env("m")["HOME"])
-            assert home.stat().st_mode & 0o777 == 0o700
-            assert (home / ".fx").stat().st_mode & 0o777 == 0o700
             settings = home / ".fx/settings.json"
-            assert settings.stat().st_mode & 0o777 == 0o600
-            assert json.loads(settings.read_text()) == fx.render_settings()
+            if os.name != "nt":  # POSIX mode bits: Windows keeps only a read-only flag
+                assert home.stat().st_mode & 0o777 == 0o700
+                assert (home / ".fx").stat().st_mode & 0o777 == 0o700
+                assert settings.stat().st_mode & 0o777 == 0o600
+            assert json.loads(settings.read_text(encoding="utf-8")) == fx.render_settings()
             barrier.wait(timeout=5)
             barrier.wait(timeout=5)
             return home
@@ -289,6 +290,8 @@ def test_env_uses_composed_source_and_removes_ambient_controls(provider, monkeyp
     assert real.exists() and not home.exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="sources the wrapper's login profile with "
+                    "/bin/bash and reads back a POSIX ':' PATH; Windows has neither")
 def test_login_profile_cannot_restore_skill_virtualenv(provider, monkeypatch, tmp_path):
     from utils.providers import base
     skill_env = tmp_path / "skill-env"
@@ -366,7 +369,7 @@ def test_executor_generate_uses_the_same_transport(provider, monkeypatch):
 
 def test_executor_deadline_precedes_rate_notice_classification():
     from utils.subagent_executor import _Capture, _classify_pre_parse
-    raw = (Path(__file__).parent / "fixtures/fx/rate-limit.stderr.txt").read_text()
+    raw = (Path(__file__).parent / "fixtures/fx/rate-limit.stderr.txt").read_text(encoding="utf-8")
     status, reason = _classify_pre_parse(_Capture(stderr=raw, exit_code=-15, timed_out=True))
     assert status == "timeout"
     assert "timeout" in reason

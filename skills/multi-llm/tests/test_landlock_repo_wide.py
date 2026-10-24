@@ -482,7 +482,11 @@ class TestJailDeniedEditsRepoWide:
         ]
         assert denials.replacement_paths == []
         assert denials.out_of_scope_count == 2
-        assert denials.out_of_scope_paths == ["/tmp/x", "/dev/shm/x"]
+        # Resolved, as the product resolves every denied path: `/tmp` is a link
+        # to `/private/tmp` on macOS.
+        assert denials.out_of_scope_paths == [
+            os.path.realpath("/tmp/x"), os.path.realpath("/dev/shm/x"),
+        ]
         assert denials.failed_file_changes == []
 
     def test_a_symlink_out_of_the_repository_is_out_of_scope(self, wide):

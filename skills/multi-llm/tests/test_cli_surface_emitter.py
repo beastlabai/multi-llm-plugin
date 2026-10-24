@@ -83,12 +83,17 @@ def test_uninstall_command_is_the_owners_line_with_the_default_flags(
     the environment), so it is held equal to the owner here, with the
     override unset — the one posture where the two must agree.
     """
-    from utils import host_install
+    from pathlib import PurePosixPath
+
+    from utils import cli_common, host_install
 
     monkeypatch.delenv(unattended.UV_RUN_ARGS_ENV, raising=False)
-    assert surface.cli_surface(host)["uninstall_command"] == (
-        host_install.uninstall_line(host, surface.SKILL_DIR_TOKEN)
-    )
+    shipped = surface.cli_surface(host)["uninstall_command"]
+    # The surface joins its `{SKILL_DIR}` token with `/` on every OS (it ships
+    # as data); the owner joins a real skill dir natively. Same code, same joins.
+    monkeypatch.setattr(cli_common, "Path", PurePosixPath)
+    monkeypatch.setattr(host_install, "Path", PurePosixPath)
+    assert shipped == host_install.uninstall_line(host, surface.SKILL_DIR_TOKEN)
 
 
 def test_the_emitter_reads_no_environment():

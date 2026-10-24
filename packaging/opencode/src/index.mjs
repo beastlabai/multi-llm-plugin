@@ -483,7 +483,7 @@ function findUv(surface, env) {
 }
 
 function whichUv(env) {
-  const raw = env.PATH || ""
+  const raw = pathVariable(env)
   if (!raw) return null
   const names = process.platform === "win32" ? ["uv.exe", "uv"] : ["uv"]
   for (const dir of raw.split(path.delimiter)) {
@@ -496,6 +496,22 @@ function whichUv(env) {
     }
   }
   return null
+}
+
+/**
+ * The PATH of an environment object, under whatever name the platform gave it.
+ *
+ * `process.env` itself is case-insensitive on Windows, but the copy `execute`
+ * takes of it is an ordinary object, and it keeps each name as the system
+ * spelled it: `Path`. `env.PATH` on that copy is `undefined`, so the probe
+ * would walk no directory and report a uv that is on the PATH as missing —
+ * silently, for every Windows install the candidate list does not name (winget,
+ * scoop, pip). The child gets the copy whole, so it never needed this.
+ */
+function pathVariable(env) {
+  if (process.platform !== "win32") return env.PATH || ""
+  const name = Object.keys(env).find((key) => key.toUpperCase() === "PATH")
+  return (name && env[name]) || ""
 }
 
 function isFile(target) {
@@ -542,7 +558,9 @@ function expandHome(target, env = process.env) {
 function uvMissingText(surface) {
   const file = path.join(SKILL_DIR, ...surface.uv.missing_message_file.split("/"))
   try {
-    return fs.readFileSync(file, "utf8").replace(/\n+$/, "")
+    // Line endings read the way Python's text mode reads them (CRLF is LF), so a
+    // CRLF checkout cannot leave a `\r` where the trailing newline was trimmed.
+    return fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n").replace(/\n+$/, "")
   } catch {
     // A partial install is the only way to get here, so say so rather than
     // duplicating the text this file deliberately does not carry.
@@ -788,7 +806,7 @@ function planFromRoot(result, values, anchor, surface) {
   }
   let here
   try {
-    here = fs.realpathSync(anchor)
+    here = realPath(anchor)
   } catch {
     return
   }
@@ -971,6 +989,28 @@ function runChild({
     const signalTree = (name) => {
       const pid = child.pid
       if (pid === undefined) return
+      if (process.platform === "win32") {
+        const killLeader = () => {
+          try { child.kill("SIGKILL") } catch { /* already gone */ }
+        }
+        if (name === "SIGTERM") {
+          // taskkill needs the live wrapper to find its descendants. Killing
+          // uv first strands Python, which can keep running the phase.
+          try {
+            const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
+              shell: false, windowsHide: true, stdio: "ignore",
+              timeout: KILL_GRACE_MS, killSignal: "SIGKILL",
+            })
+            killer.once("error", killLeader)
+            killer.once("close", (code) => { if (code !== 0) killLeader() })
+          } catch {
+            killLeader()
+          }
+        } else {
+          killLeader()
+        }
+        return
+      }
       try {
         process.kill(-pid, name) // negative pid: the group `detached` created
       } catch {
@@ -2467,17 +2507,41 @@ function samePlanFile(left, right) {
   return realPathOf(left) === realPathOf(right)
 }
 
-/** `fs.realpathSync`, else the real directory plus the name, else as given. */
+/** `realPath`, else the real directory plus the name, else as given. */
 function realPathOf(target) {
   try {
-    return fs.realpathSync(target)
+    return realPath(target)
   } catch {
     try {
-      return path.join(fs.realpathSync(path.dirname(target)), path.basename(target))
+      return path.join(realPath(path.dirname(target)), path.basename(target))
     } catch {
       return path.resolve(target)
     }
   }
+}
+
+/**
+ * The real path the dispatcher names a file by. Throws as `fs.realpathSync`.
+ *
+ * On Windows that is `fs.realpathSync.native`: the dispatcher prints paths
+ * through `Path.resolve()` and pins its root with `os.path.realpath`, which
+ * there answer the file's on-disk case, its long name for an 8.3 one and the
+ * real drive behind a `subst`; the JS walk only follows links. So an anchor
+ * spelled `c:\users\me\proj` (a shell `cd` keeps the case it was typed in)
+ * never equalled the dispatcher's `C:\Users\Me\proj`, and every command
+ * handed back named the plan absolutely. The codex port compares with
+ * `os.path.realpath` already. Elsewhere, and when the native call fails (a
+ * volume it cannot query), the JS walk as before.
+ */
+function realPath(target) {
+  if (process.platform === "win32") {
+    try {
+      return fs.realpathSync.native(target)
+    } catch {
+      // The JS walk below, which also throws for a path that does not exist.
+    }
+  }
+  return fs.realpathSync(target)
 }
 
 /**
