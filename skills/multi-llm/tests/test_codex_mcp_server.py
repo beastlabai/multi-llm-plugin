@@ -1346,6 +1346,67 @@ class TestArguments:
         assert Path(shell[0]).parent.name.lower() not in WSL_LAUNCHER_DIRS
 
 
+def test_windows_cancel_kills_the_dispatchers_descendants(tmp_path, monkeypatch):
+    """A live wrapper must survive until taskkill has found its children."""
+    module = _server_module()
+    real_run = subprocess.run
+    monkeypatch.setattr(module, "os", types.SimpleNamespace(
+        **{name: value for name, value in vars(os).items() if name != "killpg"}))
+    if sys.platform != "win32":
+        def taskkill(argv, **kwargs):
+            assert argv == ["taskkill", "/PID", str(proc.pid), "/T", "/F"]
+            assert proc.poll() is None, "the wrapper died before its tree was killed"
+            os.killpg(proc.pid, signal.SIGKILL)
+            return subprocess.CompletedProcess(argv, 0)
+
+        monkeypatch.setattr(module.subprocess, "run", taskkill)
+    monkeypatch.setattr(module, "sys", types.SimpleNamespace(platform="win32"))
+    proc = subprocess.Popen(
+        [sys.executable, "-c",
+         "import subprocess, sys, time; "
+         "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+         "print(p.pid, flush=True); time.sleep(60)"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        assert int(proc.stdout.readline()) > 0
+        module.kill_tree(proc, [])
+        # A surviving grandchild keeps these pipes open for sixty seconds.
+        proc.communicate(timeout=3)
+        assert proc.returncode is not None
+    finally:
+        if sys.platform == "win32":
+            real_run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                     capture_output=True, timeout=10)
+        else:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        proc.communicate(timeout=10)
+
+
+@pytest.mark.parametrize("failure", [OSError("missing"), subprocess.TimeoutExpired("taskkill", 5)])
+def test_windows_cancel_still_reaps_the_child_if_taskkill_fails(monkeypatch, failure):
+    module = _server_module()
+    monkeypatch.setattr(module, "sys", types.SimpleNamespace(platform="win32"))
+    calls = []
+
+    def unavailable(*args, **kwargs):
+        calls.append("taskkill")
+        raise failure
+
+    monkeypatch.setattr(module.subprocess, "run", unavailable)
+    proc = types.SimpleNamespace(
+        pid=123, poll=lambda: None,
+        kill=lambda: calls.append("kill"),
+        wait=lambda **kwargs: calls.append("wait"),
+    )
+    module.kill_tree(proc, [])
+    assert calls == ["taskkill", "kill", "wait"]
+
+
 class TestWindowsBash:
     """On Windows the shell is Git Bash, and ``bash`` on PATH may be WSL's.
 

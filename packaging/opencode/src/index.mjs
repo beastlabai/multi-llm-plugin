@@ -989,6 +989,28 @@ function runChild({
     const signalTree = (name) => {
       const pid = child.pid
       if (pid === undefined) return
+      if (process.platform === "win32") {
+        const killLeader = () => {
+          try { child.kill("SIGKILL") } catch { /* already gone */ }
+        }
+        if (name === "SIGTERM") {
+          // taskkill needs the live wrapper to find its descendants. Killing
+          // uv first strands Python, which can keep running the phase.
+          try {
+            const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
+              shell: false, windowsHide: true, stdio: "ignore",
+              timeout: KILL_GRACE_MS, killSignal: "SIGKILL",
+            })
+            killer.once("error", killLeader)
+            killer.once("close", (code) => { if (code !== 0) killLeader() })
+          } catch {
+            killLeader()
+          }
+        } else {
+          killLeader()
+        }
+        return
+      }
       try {
         process.kill(-pid, name) // negative pid: the group `detached` created
       } catch {

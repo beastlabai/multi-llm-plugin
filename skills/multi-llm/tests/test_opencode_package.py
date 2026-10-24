@@ -3249,6 +3249,70 @@ class TestExecuteStateMachine:
         assert aborts, "a claimed run was abandoned rather than aborted"
         assert "CLAIMED" in aborts[0]
 
+    @pytest.mark.parametrize("failure", [None, "error", "exit"])
+    def test_windows_cancellation_kills_the_tree_before_its_wrapper(
+        self, built_package, failure
+    ):
+        outcome = node_json(
+            """
+            const cp = (await import('node:child_process')).default
+            const { syncBuiltinESMExports } = await import('node:module')
+            const { EventEmitter } = await import('node:events')
+            const { PassThrough } = await import('node:stream')
+            Object.defineProperty(process, 'platform', { value: 'win32' })
+            const calls = []
+            const child = new EventEmitter()
+            child.pid = 123
+            child.stdout = new PassThrough()
+            child.stderr = new PassThrough()
+            let alive = true
+            let descendantAlive = true
+            const finish = () => {
+              alive = false
+              child.stdout.end()
+              child.stderr.end()
+              child.emit('close', 1)
+            }
+            child.kill = () => { calls.push('leader'); finish() }
+            process.kill = () => { throw new Error('no POSIX groups on Windows') }
+            cp.spawn = (exe, argv, options) => {
+              if (exe === 'fake-uv') return child
+              calls.push({ exe, argv, timeout: options.timeout, alive })
+              const killer = new EventEmitter()
+              queueMicrotask(() => {
+                if (FAILURE === 'error') killer.emit('error', new Error('not found'))
+                else if (FAILURE === 'exit') killer.emit('close', 1)
+                else {
+                  descendantAlive = false
+                  finish()
+                  killer.emit('close', 0)
+                }
+              })
+              return killer
+            }
+            syncBuiltinESMExports()
+            const controller = new AbortController()
+            const pending = T.runChild({
+              uv: 'fake-uv', argv: [], env: process.env,
+              marker: surface.dispatcher.result_marker, signal: controller.signal,
+            })
+            controller.abort()
+            const result = await pending
+            emit({ calls, descendantAlive, aborted: result.aborted })
+            """.replace("FAILURE", json.dumps(failure)),
+            built_package,
+        )
+        assert outcome["aborted"] is True
+        assert outcome["calls"][0] == {
+            "exe": "taskkill", "argv": ["/PID", "123", "/T", "/F"],
+            "timeout": 5000, "alive": True,
+        }
+        if failure is None:
+            assert outcome["descendantAlive"] is False
+            assert len(outcome["calls"]) == 1
+        else:
+            assert outcome["calls"][1:] == ["leader"]
+
     def test_a_bounded_dispatch_survives_a_child_that_ignores_sigterm(
         self, built_package, tmp_path
     ):
@@ -3294,9 +3358,14 @@ class TestExecuteStateMachine:
         # until the caller's own timeout kills node.
         assert outcome["elapsedMs"] < 30_000, "the bounded dispatch was not bounded"
         assert outcome["spawnError"] is None
-        # Killed by a signal, so there is no exit status of the child's own and
-        # no result line — which is exactly why the timeout has to be recorded.
-        assert outcome["code"] is None
+        # A forced termination carries no result line, which is why the timeout
+        # must be recorded independently of the process exit status.
+        if sys.platform == "win32":
+            # An external taskkill reports a native termination exit code;
+            # Node only reports a signal when it sent the signal itself.
+            assert outcome["code"] != 0
+        else:
+            assert outcome["code"] is None
         assert outcome["timedOut"] is True
         # A timeout is not a cancellation: no signal was passed, so nothing may
         # claim the caller aborted.
