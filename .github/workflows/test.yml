@@ -8,9 +8,10 @@ on:
 # A new push to a pull request supersedes the run still going on its previous
 # head: the Windows and macOS legs run for up to two hours, and macOS jobs share
 # a cap of five at a time across the account. Runs on master each get a group of
-# their own (the run id), so none of them is ever cancelled.
+# their own (the run id), so none of them is ever cancelled. Use the PR number:
+# separate forks can open independent PRs with the same branch name.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:

@@ -750,6 +750,23 @@ class TestFailureLadder:
             time.sleep(0.1)
         assert not _pid_alive(pid), "the runner's tool child survived the kill"
 
+    def test_windows_drain_does_not_close_a_pipe_held_by_a_reader(self, monkeypatch):
+        """Closing a Windows communicate reader's pipe can wait forever."""
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(executor.process_control, "IS_WINDOWS", True)
+
+        def timed_out(**kwargs):
+            raise subprocess.TimeoutExpired("runner", kwargs["timeout"])
+
+        def close():
+            pytest.fail("close would wait on the surviving pipe reader's lock")
+
+        pipe = SimpleNamespace(close=close)
+        proc = SimpleNamespace(communicate=timed_out, stdin=pipe, stdout=pipe, stderr=pipe)
+        partial = subprocess.TimeoutExpired("runner", 1, output=b"partial out", stderr=b"err")
+        assert executor._drain_after_kill(proc, partial) == ("partial out", "err")
+
     def test_rung_3_rate_limited_does_not_consume_the_retry_budget(
         self, tmp_path, runner_env, monkeypatch
     ):

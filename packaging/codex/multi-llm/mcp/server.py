@@ -1276,9 +1276,7 @@ def _drain_stderr(pipe, tail: _Tail):
 
 
 def _signal_group(proc, which) -> None:
-    # Windows has no process groups and no ``os.killpg`` (its AttributeError
-    # used to escape every timeout and cancel): there the leader alone is
-    # signalled, ``TerminateProcess``, and the dispatcher's python outlives it.
+    # POSIX process groups; tolerate a missing killpg in embedded runtimes too.
     killpg = getattr(os, "killpg", None)
     if killpg is not None:
         try:
@@ -1293,7 +1291,28 @@ def _signal_group(proc, which) -> None:
 
 
 def kill_tree(proc, drains) -> None:
-    """SIGTERM to the process group, a 5 s grace, then SIGKILL. No graceful drain."""
+    """Stop the tree, bounded: taskkill on Windows, TERM then KILL on POSIX."""
+    if sys.platform == "win32":
+        # Kill the tree while its leader still exists. Terminating bash/uv
+        # first loses taskkill's root and leaves the dispatcher running.
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=KILL_GRACE_S,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=KILL_GRACE_S)
+        except subprocess.TimeoutExpired:
+            pass
+        return
     _signal_group(proc, signal.SIGTERM)
     try:
         proc.wait(timeout=KILL_GRACE_S)

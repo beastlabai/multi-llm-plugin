@@ -52,7 +52,7 @@ import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import (
-    Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence,
+    Any, Callable, Dict, Iterable, Iterator, List, Mapping, NamedTuple, Optional, Sequence,
     Set, Tuple,
 )
 
@@ -7171,6 +7171,15 @@ def _drain_after_kill(
         stdout, stderr = proc.communicate(timeout=TIMEOUT_DRAIN_S)
         return _decode(stdout), _decode(stderr)
     except (subprocess.TimeoutExpired, OSError, ValueError):
+        if process_control.IS_WINDOWS:
+            # communicate's reader threads can still hold the streams' locks.
+            # close() waits for those reads, defeating TIMEOUT_DRAIN_S even
+            # after the tree kill was attempted. Let the readers release the
+            # pipes when the remaining writer exits, as the probe does.
+            return (
+                _decode(getattr(exc, "stdout", None)),
+                _decode(getattr(exc, "stderr", None)),
+            )
         for stream in (proc.stdin, proc.stdout, proc.stderr):
             try:
                 if stream is not None:
