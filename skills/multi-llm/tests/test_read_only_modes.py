@@ -1148,8 +1148,8 @@ class TestTheLandlockPairInTheGoldenNormalizer:
         assert on != off
 
 
-class TestAgentsMdCarriesTheProfileScopedRule:
-    """AGENTS.md is where the next adapter author reads the rule, so it must say it.
+class TestProviderDocsCarryTheProfileScopedRule:
+    """The provider contract linked from AGENTS.md must retain the complete rule.
 
     §3.5's gap was that the shipped bullet is scoped to `agent-readonly` and says
     nothing about `generate` — which is how a draft could put `--yolo`-class
@@ -1158,36 +1158,31 @@ class TestAgentsMdCarriesTheProfileScopedRule:
     """
 
     @staticmethod
-    def _bullet():
-        path = Path(__file__).resolve().parent.parent / "AGENTS.md"
+    def _rule():
+        path = Path(__file__).resolve().parents[3] / "docs/development/providers.md"
         text = path.read_text(encoding="utf-8")
-        bullets = [
-            line
-            for line in text.splitlines()
-            if "A read/analyze dispatch never gets write access" in line
-        ]
-        assert len(bullets) == 1, (
-            f"expected exactly one read/analyze bullet in {path}, found "
-            f"{len(bullets)}"
-        )
-        return bullets[0]
+        heading = "## Read-only provider contracts\n"
+        assert text.count(heading) == 1, f"expected exactly one provider rule section in {path}"
+        section = text.split(heading, 1)[1].split("\n## ", 1)[0]
+        assert "A read/analyze dispatch never gets write access" in section
+        return " ".join(section.split())
 
     def test_the_rule_is_extended_from_agent_readonly_to_generate(self):
-        bullet = self._bullet()
+        bullet = self._rule()
 
         for phrase in ("generate", "build_command", "profile-scoped"):
             assert phrase in bullet, (
-                f"AGENTS.md's read/analyze bullet does not mention {phrase!r}. The "
+                f"The provider contract does not mention {phrase!r}. The "
                 f"rule as written covers `agent-readonly` only, and that gap is "
                 f"what §3.5 exists to close."
             )
 
     def test_the_bullet_names_every_token_of_the_negative_set(self):
-        bullet = self._bullet()
+        bullet = self._rule()
 
         for token in sorted(NEGATIVE_FLAG_TOKENS | NEGATIVE_VALUE_TOKENS):
             assert f"`{token}`" in bullet, (
-                f"AGENTS.md's read/analyze bullet does not name `{token}`. An "
+                f"The provider contract does not name `{token}`. An "
                 f"adapter author reads this list, not the test module."
             )
         for prefix in NEGATIVE_TOKEN_PREFIXES:
@@ -1196,15 +1191,15 @@ class TestAgentsMdCarriesTheProfileScopedRule:
             assert f"`{name}={value}`" in bullet
 
     def test_the_bullet_carries_the_null_row_plus_named_exception_disposition(self):
-        bullet = self._bullet()
+        bullet = self._rule()
 
         assert "read_only_modes" in bullet
         assert re.search(r"`?None`? row|`null` row", bullet), (
-            "AGENTS.md must say what happens to a runner whose only unattended "
+            "The provider contract must say what happens to a runner whose only unattended "
             "mode is a bypass: an explicit None row, never a silent precedent."
         )
         assert "named exception" in bullet
         assert Path(__file__).name in bullet, (
-            "AGENTS.md should name the guard, so the rule and its enforcement are "
+            "The provider contract should name the guard, so the rule and its enforcement are "
             "one click apart."
         )
