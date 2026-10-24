@@ -41,6 +41,11 @@ def _script(bin_dir: Path, name: str, body: str) -> None:
 @pytest.fixture
 def clinic(tmp_path, monkeypatch):
     """A PATH carrying mock `codex`, `grok` and `muse` only, and no model path."""
+    if os.name == "nt":
+        pytest.skip(
+            "the mock providers are a symlink to a shebang script and two `#!/bin/sh` "
+            "scripts on a replaced PATH, which Windows can neither find nor run"
+        )
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "codex").symlink_to(MOCK_LLM)

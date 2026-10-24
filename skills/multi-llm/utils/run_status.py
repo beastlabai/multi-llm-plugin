@@ -3254,7 +3254,8 @@ def _native_single_target(tasks: Sequence[Any], directory: Path) -> Optional[str
         relative = os.path.relpath(os.path.realpath(resolved), root)
     except (OSError, ValueError):
         return target
-    return target if relative.startswith(os.pardir) else relative
+    # Printed beside the count and carried in the JSON view: `/` on every platform.
+    return target if relative.startswith(os.pardir) else relative.replace(os.sep, "/")
 
 
 def _native_apply_batch_checks(record: Dict[str, Any], directory: Path) -> List[Dict[str, Any]]:

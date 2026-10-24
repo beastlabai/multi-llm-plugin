@@ -106,7 +106,9 @@ def user_profile(tmp_path, monkeypatch):
     (data_dir / "projects").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
-    monkeypatch.delenv("USERPROFILE", raising=False)
+    # Windows' `expanduser` reads USERPROFILE, never HOME: unset, `~` there is
+    # the runner's real profile, which both cursor's rules and `child_run` use.
+    monkeypatch.setenv("USERPROFILE", str(home))
 
     config = config_dir / "cli-config.json"
     config.write_text(json.dumps(USER_CONFIG, indent=2) + "\n", encoding="utf-8")
@@ -197,11 +199,25 @@ def _write_override(tmp_path, monkeypatch, value):
     return override
 
 
+@pytest.fixture
+def redirect_here(tmp_path, monkeypatch):
+    """The redirect, on whichever platform runs this file.
+
+    ``auto`` redirects only where cursor's auth rule was measured (Linux); a
+    macOS or Windows user gets the same redirect with ``isolate_profile: on``,
+    so off Linux the tests of the redirect's own mechanics opt in that way. On
+    Linux nothing is written and they keep covering the shipped ``auto``.
+    """
+    if not sys.platform.startswith(cursor_agent_module._AUTH_UNAFFECTED_PLATFORMS):
+        _write_override(tmp_path, monkeypatch, "on")
+
+
 # ---------------------------------------------------------------------------
 # The two cases from the reproduction script, as real tests
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("redirect_here")
 class TestTheReproductionScript:
     """Both cases the probe demonstrated, driven through the real spawn hook."""
 
@@ -277,12 +293,14 @@ class TestTheReproductionScript:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("redirect_here")
 class TestRedirect:
     def test_resolve_env_names_both_cursor_dirs(self, provider, user_profile):
         env = provider.resolve_env("composer-2.5", PROFILE_GENERATE)
         assert env["CURSOR_CONFIG_DIR"] == env["CURSOR_DATA_DIR"]
         assert Path(env["CURSOR_CONFIG_DIR"]).is_dir()
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits: Windows has no 0700 to read back")
     def test_the_profile_dir_is_0700(self, provider, user_profile):
         env = provider.resolve_env("composer-2.5", PROFILE_GENERATE)
         mode = stat.S_IMODE(os.stat(env["CURSOR_CONFIG_DIR"]).st_mode)
@@ -307,7 +325,8 @@ class TestRedirect:
         auth = Path(os.environ["XDG_CONFIG_HOME"]) / "cursor" / "auth.json"
         assert auth == user_profile["auth"]
         assert auth.is_file()
-        assert stat.S_IMODE(auth.stat().st_mode) == 0o600
+        # Windows keeps only the read-only bit, so the fixture's 0600 reads back 0666.
+        assert stat.S_IMODE(auth.stat().st_mode) == (0o666 if os.name == "nt" else 0o600)
         assert json.loads(auth.read_text(encoding="utf-8"))["accessToken"]
 
     def test_the_guard_is_not_armed_when_the_redirect_is_on(self, provider, user_profile):
@@ -327,6 +346,7 @@ class TestRedirect:
         assert len(run_markers) == 1
 
 
+@pytest.mark.usefixtures("redirect_here")
 class TestUserConfigIsNeverWritten:
     """Asserted against the filesystem, not against our own source."""
 
@@ -425,6 +445,7 @@ class TestUserSuppliedDirsAreRespected:
         assert stranger.is_dir()
 
 
+@pytest.mark.usefixtures("redirect_here")
 class TestCleanup:
     def test_the_dir_is_gone_after_a_normal_exit(self, provider, user_profile):
         with cursor_agent_module.isolated_profile_session():
@@ -478,6 +499,7 @@ class TestCleanup:
         assert registered.count(cursor_agent_module.cleanup_isolated_profiles) == 1
 
 
+@pytest.mark.usefixtures("redirect_here")
 class TestCleanupRacesTheLeakedWorker:
     """cursor-agent leaks a detached ``worker-server``, and cleanup must survive it.
 
@@ -637,6 +659,7 @@ class TestCleanupRacesTheLeakedWorker:
         assert cursor_agent_module.remove_profile_dir(created) is False  # no longer ours
 
 
+@pytest.mark.usefixtures("redirect_here")
 class TestScopeIsParameterized:
     """One decision point: :data:`PROFILE_DIR_SCOPE`. Both values are covered.
 
@@ -702,6 +725,7 @@ class TestScopeIsParameterized:
         assert len(cursor_agent_module.isolated_profile_dirs()) == 1
 
 
+@pytest.mark.usefixtures("redirect_here")
 class TestSeedingHook:
     """Seeding is one function — and the live probe says it stays empty.
 

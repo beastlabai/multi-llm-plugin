@@ -7353,8 +7353,11 @@ def already_completed_lines(mode_word: str, phase_dir: Union[str, Path]) -> List
     relayed as an error block). Nothing failed: the exit is 2, "nothing to
     do / phase already complete", which every route reads as a success, and
     the next phase is the result's ``user_next_step`` as on any exit 2."""
-    shown = os.path.relpath(str(phase_dir))
-    if shown == os.pardir or shown.startswith(os.pardir + os.sep):
+    try:
+        shown = os.path.relpath(str(phase_dir)).replace(os.sep, "/")
+    except ValueError:  # Windows: another drive than the cwd's
+        shown = os.pardir
+    if shown == os.pardir or shown.startswith(os.pardir + "/"):
         shown = str(phase_dir)
     return [
         f"{mode_word} has already been completed for this plan, so nothing "

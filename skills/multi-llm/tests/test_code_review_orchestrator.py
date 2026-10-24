@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -3498,7 +3499,8 @@ class TestTheValidatorIsToldToOpenTheFilesItLost:
         assert len(fanout) == 1
         assert fanout == reaggregate
         (instruction,) = fanout
-        assert f"`{(tmp_path / 'src').resolve()}/" in instruction
+        # Absolute, so in this OS's own spelling.
+        assert f"`{(tmp_path / 'src').resolve()}{os.sep}" in instruction
 
     # -- T7.5 ------------------------------------------------------------
 

@@ -12,7 +12,9 @@ is how a killed review's ``timeout 1700 python -m pytest`` could outlive it.
 * it starts ``sh -c 'timeout 60 sleep 60 | cat'`` with ``start_new_session``
   (the detached shell) — reading the shell through a pipe of its own, as pi
   does, or with ``CLI_TREE_SHELL_STDOUT=inherit`` letting ``cat`` hold the
-  CLI's own stdout pipe (the worst case for a drain);
+  CLI's own stdout pipe (the worst case for a drain). Where no GNU ``timeout``
+  is on PATH (macOS ships none) a stand-in takes its group the same way
+  (``setpgid`` right after start, the signals forwarded to its child);
 * it records every pid of that tree — the shell, ``timeout``, ``sleep`` and
   ``cat`` — in a marker file, and its own pid beside it, then hangs.
 
@@ -33,6 +35,8 @@ It answers ``--help`` with pi 0.87.1's ``--tools`` line and ``--version`` with
 from __future__ import annotations
 
 import os
+import shlex
+import shutil
 import signal
 import sys
 import time
@@ -46,8 +50,19 @@ _TREE_SH = """#!/bin/sh
 # The detached shell: its own session and group (the CLI started it with
 # start_new_session). `timeout` then takes a group of its own inside it.
 echo "sh $$" >> "$1"
-timeout 60 sh -c 'echo "timeout $PPID" >> "$0"; echo "sleep $$" >> "$0"; exec sleep 60' "$1" \\
+{own_group} sh -c 'echo "timeout $PPID" >> "$0"; echo "sleep $$" >> "$0"; exec sleep 60' "$1" \\
   | sh -c 'echo "cat $$" >> "$0"; exec cat' "$1"
+"""
+
+#: What GNU ``timeout`` does to the process tree, for a host without it: a group
+#: of its own right after start, the signals it is sent handed to its child.
+_OWN_GROUP = """import os, signal, subprocess, sys
+
+os.setpgid(0, 0)
+child = subprocess.Popen(sys.argv[1:])
+for name in ("SIGTERM", "SIGINT", "SIGHUP"):
+    signal.signal(getattr(signal, name), lambda signum, frame: child.send_signal(signum))
+sys.exit(child.wait())
 """
 
 _FAKE_CLI = """#!{python}
@@ -126,8 +141,19 @@ while True:
 def install_fake_cli(directory: Path, name: str = "pi") -> Path:
     """Write the fake CLI as ``directory/<name>`` and return its path."""
     directory.mkdir(parents=True, exist_ok=True)
+    stand_in = directory / "own-group.py"
+    stand_in.write_text(_OWN_GROUP, encoding="utf-8")
     tree_sh = directory / "cli-tree.sh"
-    tree_sh.write_text(_TREE_SH, encoding="utf-8")
+    # Chosen here, not in the script: a shell function wrapping `timeout` would
+    # put an unrecorded shell between it and the tree's shell (dash does not
+    # exec a function's last command inside a pipeline). With a GNU `timeout`
+    # the script is the one it always was; without one (macOS) the stand-in
+    # takes its place on the same line.
+    own_group = (
+        "timeout 60" if shutil.which("timeout")
+        else f"{shlex.quote(sys.executable)} {shlex.quote(str(stand_in))}"
+    )
+    tree_sh.write_text(_TREE_SH.format(own_group=own_group), encoding="utf-8")
     fake = directory / name
     fake.write_text(
         _FAKE_CLI.format(python=sys.executable, tree_sh=str(tree_sh),

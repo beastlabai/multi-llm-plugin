@@ -341,14 +341,16 @@ def build(
         os.chmod(scratch / PAYLOAD_RELATIVE, 0o755)
 
         # 2. The thin skill, over the staged core SKILL.md (D1, D7).
+        # Every generated file is written ``newline="\n"``: the digest covers
+        # bytes, and a Windows build would otherwise write CRLF ones.
         (scratch / PAYLOAD_RELATIVE / "SKILL.md").write_text(
-            skill_md(skill_base), encoding="utf-8"
+            skill_md(skill_base), encoding="utf-8", newline="\n"
         )
 
         # 3. The generated surface (D3e).
         (scratch / "dist").mkdir(parents=True, exist_ok=True)
         (scratch / "dist" / "cli-surface.json").write_text(
-            cli_surface_json(), encoding="utf-8"
+            cli_surface_json(), encoding="utf-8", newline="\n"
         )
 
         # 4. The server, the server declaration, the manifest, the licence.
@@ -358,7 +360,7 @@ def build(
         (scratch / ".codex-plugin").mkdir(parents=True, exist_ok=True)
         version = project_version(skill_base)
         (scratch / ".codex-plugin" / "plugin.json").write_text(
-            manifest_text(version), encoding="utf-8"
+            manifest_text(version), encoding="utf-8", newline="\n"
         )
         shutil.copyfile(checkout / "LICENSE", scratch / "LICENSE")
 
@@ -379,7 +381,8 @@ def build(
         #    stale file is *inside* a digest.
         scan_tree(scratch)
         digest = digest_of(scratch)
-        (scratch / DIGEST_RELATIVE).write_text(digest + "\n", encoding="utf-8")
+        (scratch / DIGEST_RELATIVE).write_text(digest + "\n", encoding="utf-8",
+                                               newline="\n")
         _inventory(scratch)
 
         # 7. The swap.

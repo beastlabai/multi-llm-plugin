@@ -59,12 +59,23 @@ from utils.providers.base import (  # noqa: E402
 )
 from utils.state_manager import StateManager  # noqa: E402
 from utils.write_safety import AuditLog, safety_dir  # noqa: E402
+from tests.mock_launchers import is_this_interpreter  # noqa: E402
 from tests.test_plugin_landlock_executor import (  # noqa: E402
     BWRAP_LINE,
     F6_LEAD,
     FakeWrapper,
     _slot_dirs,
     use_own_temp_base,
+)
+
+# Windows runs no plugin jail (codex has its own sandbox there), and this suite
+# could not stand one in even as a fake: the scratch repo's codex is a symlink to
+# a shebang script on a replaced PATH, which Windows can neither find nor run.
+# macOS does run it (tier 1 is kernel-independent; the real-jail legs below skip
+# themselves where Landlock is missing).
+pytestmark = pytest.mark.skipif(
+    os.name == "nt",
+    reason="symlinked shebang mock codex on a replaced PATH; Windows runs no plugin jail",
 )
 
 MOCK_LLM = Path(__file__).parent / "mocks" / "mock_llm.py"
@@ -729,7 +740,8 @@ class TestTheEnabledKindsTakeTheRung:
         assert len(rows) == len(scratch.exec_calls()) == len(scratch.write_calls()) == count
         real_target = os.path.realpath(target)
         for row in rows:
-            assert row["orig_argv"][:4] == [sys.executable, "-I", "-S", str(scratch.wrapper.path)]
+            assert is_this_interpreter(row["orig_argv"][0])
+            assert row["orig_argv"][1:4] == ["-I", "-S", str(scratch.wrapper.path)]
             cmd = row["cmd"]
             assert cmd[:2] == [str(scratch.codex), "exec"]
             assert cmd[cmd.index("--sandbox") + 1] == "danger-full-access"
@@ -890,7 +902,9 @@ class TestNoRouteReachesUnsandboxed:
         if policy != "auto":
             scratch.configure(fallback=policy)
         if probe == "hang":
-            monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 0.8)
+            # Room for the wrapper to start and record the probe before it hangs:
+            # 0.8 s was not always enough on the macOS runner (2026-10-23).
+            monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 2.5)
         before = _bytes(scratch.target(mode))
         code = scratch.run(mode)
         cap = capsys.readouterr()

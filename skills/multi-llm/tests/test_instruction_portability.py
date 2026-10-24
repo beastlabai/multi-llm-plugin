@@ -398,6 +398,15 @@ def _command_units(text: str):
         index += 1
 
 
+def _os_argv(argv):
+    """*argv* as the OS reads its paths: the corpus joins ``{SKILL_DIR}/multi_llm.py``
+    with ``/`` and :func:`cli_common.dispatcher_prefix` joins natively, which on
+    Windows name one file with two spellings. Unchanged off Windows."""
+    if os.name != "nt":
+        return list(argv)
+    return [os.path.normpath(word) for word in argv]
+
+
 def _assert_command_is_clean(where: str, command: str, base: str):
     """The three render-and-parse assertions, shared by every caller."""
     for token in FORBIDDEN_IN_RENDERED:
@@ -434,7 +443,7 @@ def _assert_command_is_clean(where: str, command: str, base: str):
     marker = "fixture" if "fixture" in base else base
     for element in argv:
         if marker in element:
-            assert element == base or element.startswith(base + "/"), (
+            assert element == base or element.startswith((base + "/", base + os.sep)), (
                 f"{where}: skill-dir fragment {element!r} is a separate argv "
                 f"element — the path word-split on a space:\n  {command[:200]}"
             )
@@ -617,11 +626,13 @@ class TestUvFlagsComeFromOneOwner:
         """
         source = (SKILL_ROOT / rel).read_text(encoding="utf-8")
         rendered = cli_common.render_instruction_text(source, FIXTURE_SKILL_DIR)
-        expected = shlex.split(cli_common.dispatcher_prefix(Path(FIXTURE_SKILL_DIR)))
+        expected = _os_argv(shlex.split(
+            cli_common.dispatcher_prefix(Path(FIXTURE_SKILL_DIR))))
         for line_no, command in _command_units(rendered):
             argv = shlex.split(command)
             if argv and argv[0] == "PYTHONUNBUFFERED=1":
                 argv = argv[1:]
+            argv = _os_argv(argv)
             assert argv[:len(expected)] == expected, (
                 f"{rel}:{line_no}: the runbook prefix and dispatcher_prefix() "
                 f"disagree.\n  expected: {expected}\n  got:      "
@@ -691,11 +702,13 @@ class TestTheClaudeShimSpellsTheFlagsOut:
         # same substitution, which is what lets the comparison be the whole prefix
         # (flags *and* paths) rather than the flags alone.
         rendered = cli_common.render_instruction_text(self.SOURCE, FIXTURE_SKILL_DIR)
-        expected = shlex.split(cli_common.dispatcher_prefix(Path(FIXTURE_SKILL_DIR)))
+        expected = _os_argv(shlex.split(
+            cli_common.dispatcher_prefix(Path(FIXTURE_SKILL_DIR))))
         for line_no, command in _command_units(rendered):
             argv = shlex.split(command)
             if argv and argv[0] == "PYTHONUNBUFFERED=1":
                 argv = argv[1:]
+            argv = _os_argv(argv)
             assert argv[:len(expected)] == expected, (
                 f"{CLAUDE_SHIM}:{line_no}: the hand-typed prefix and "
                 f"dispatcher_prefix() disagree. Retype the flags in "

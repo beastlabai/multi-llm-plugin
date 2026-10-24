@@ -446,6 +446,8 @@ def home(tmp_path, monkeypatch):
     fake = tmp_path / "home"
     fake.mkdir()
     monkeypatch.setenv("HOME", str(fake))
+    # `Path.home()` — aider's and the adapter's — reads USERPROFILE on Windows.
+    monkeypatch.setenv("USERPROFILE", str(fake))
     monkeypatch.delenv("AIDER_ENV_FILE", raising=False)
     return fake
 

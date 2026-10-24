@@ -59,6 +59,7 @@ import hashlib
 import json
 import os
 import re
+import socketserver
 import sys
 import threading
 import time
@@ -117,6 +118,21 @@ CATALOG_MODELS = [
 #: the failure should name the reason.
 LOCAL_MODEL_PROBE_PORTS = (8080, 1234, 11434)
 
+
+
+class LoopbackHTTPServer(ThreadingHTTPServer):
+    """A ThreadingHTTPServer that never resolves its own name.
+
+    ``HTTPServer.server_bind`` calls ``socket.getfqdn(host)`` only to fill
+    ``server_name``, which nothing here reads, and on the macOS runner that
+    reverse lookup of 127.0.0.1 hung past every caller's 20 s wait — the first
+    stub of a run served and every later one stayed silent (faulthandler under
+    server_bind, 2026-10-23). Every server the suite starts on loopback is this.
+    """
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 def refuse_probe_port(port: int, who: str) -> None:
     if port in LOCAL_MODEL_PROBE_PORTS:
@@ -1288,7 +1304,7 @@ def main(argv=None) -> int:
     # pooling hold keep-alive sockets open. A single-threaded server serializes
     # that fan-out at best and deadlocks a pooling client at worst.
     refuse_probe_port(args.port, "stub")
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    server = LoopbackHTTPServer(("127.0.0.1", args.port), Handler)
     server.daemon_threads = True
     port = server.server_address[1]
     if port != args.port:  # `--port 0`: re-check the port the OS chose

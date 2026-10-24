@@ -81,13 +81,13 @@ class TestTheCapturedFixtures:
         "web_search_hosted_replay.jsonl", "web_search_probe_replay.jsonl",
     ])
     def test_parse_output_reads_the_final_agent_message(self, name):
-        result = CodexProvider().parse_output((FIXTURES / name).read_text(), "")
+        result = CodexProvider().parse_output((FIXTURES / name).read_text(encoding="utf-8"), "")
         assert result["success"] is True
         assert result["data"] == []
 
     def test_parse_usage_reads_the_turn_completed_event(self):
         usage = CodexProvider().parse_usage(
-            (FIXTURES / "read_only_clean.jsonl").read_text(), "")
+            (FIXTURES / "read_only_clean.jsonl").read_text(encoding="utf-8"), "")
         assert usage["input_tokens"] == 7 and usage["output_tokens"] == 7
 
     def test_the_verified_version_is_the_newest_recapture(self):
@@ -121,12 +121,12 @@ class TestTheCapturedFixtures:
         installed codex (the version-lag WARN's cause was the pin trailing
         the install). Same event kinds, same keys."""
         newer = FIXTURES.parent / version / name
-        result = CodexProvider().parse_output(newer.read_text(), "")
+        result = CodexProvider().parse_output(newer.read_text(encoding="utf-8"), "")
         assert result["success"] is True and result["data"] == []
 
         def shapes(path):
             seen = set()
-            for line in path.read_text().splitlines():
+            for line in path.read_text(encoding="utf-8").splitlines():
                 if line.startswith("{"):
                     event = json.loads(line)
                     item = event.get("item") or {}
@@ -145,7 +145,7 @@ class TestTheCapturedFixtures:
         ("exec_session.jsonl", False),
     ])
     def test_0_163_0_recaptures_preserve_the_readonly_verdict(self, name, clean):
-        stream = (FIXTURES.parent / "0.163.0" / name).read_text()
+        stream = (FIXTURES.parent / "0.163.0" / name).read_text(encoding="utf-8")
         assert audit_codex_stream(stream).clean is clean
         assert "/home/" not in stream and "/tmp/" not in stream
 
@@ -252,7 +252,7 @@ class TestTheLiveWebSearchCapture:
 
     @pytest.mark.parametrize("name", WEB_SEARCH_FIXTURES)
     def test_every_web_search_capture_audits_clean(self, name):
-        verdict = audit_codex_stream((FIXTURES / name).read_text())
+        verdict = audit_codex_stream((FIXTURES / name).read_text(encoding="utf-8"))
         assert verdict.clean is True, verdict
         assert verdict.actions == len([e for e in _web_searches(name)
                                        if e["type"] == "item.completed"])
@@ -268,7 +268,7 @@ class TestTheLiveWebSearchCapture:
                  if e["type"] == "item.completed"]
         assert types == ["agent_message", "file_change", "command_execution",
                          "command_execution", "agent_message"]
-        verdict = audit_codex_stream((FIXTURES / "code_mode_writes.jsonl").read_text())
+        verdict = audit_codex_stream((FIXTURES / "code_mode_writes.jsonl").read_text(encoding="utf-8"))
         assert verdict.clean is False and "file_change" in verdict.reason
         assert audit_codex_stream(
             _route("code_mode_writes.jsonl", "item_2")).clean is False  # echo > b.txt
@@ -283,7 +283,7 @@ class TestTheLiveWebSearchCapture:
                 if e["type"] == "item.completed" and e["item"]["type"] != "agent_message"]
         assert [(i["type"], i["server"], i["tool"]) for i in done] == [
             ("mcp_tool_call", "capfs", "write_file")]
-        verdict = audit_codex_stream((FIXTURES / "code_mode_mcp.jsonl").read_text())
+        verdict = audit_codex_stream((FIXTURES / "code_mode_mcp.jsonl").read_text(encoding="utf-8"))
         assert verdict.clean is False and "mcp_tool_call" in verdict.reason
 
     def test_the_code_mode_web_search_is_a_web_run_extension(self):
@@ -454,7 +454,7 @@ class TestTheClassifier:
 class TestTheStreamAudit:
 
     def test_the_captured_read_only_stream_is_clean(self):
-        verdict = audit_codex_stream((FIXTURES / "read_only_clean.jsonl").read_text())
+        verdict = audit_codex_stream((FIXTURES / "read_only_clean.jsonl").read_text(encoding="utf-8"))
         assert verdict.clean is True, verdict
         assert verdict.actions == 6
 
@@ -653,7 +653,7 @@ class TestEveryWriteRouteFails:
         for name in ("writes_patches_sessions.jsonl", "exec_session.jsonl",
                      "mcp_tool_call.jsonl", "collab_spawn_agent.jsonl",
                      "quoting_render.jsonl"):
-            assert audit_codex_stream((FIXTURES / name).read_text()).clean is False, name
+            assert audit_codex_stream((FIXTURES / name).read_text(encoding="utf-8")).clean is False, name
 
 
 # --------------------------------------------------------------------------- #
@@ -824,7 +824,7 @@ from tests.test_subagent_executor import (  # noqa: E402
 
 
 def _audit_of(name_or_stream):
-    text = (FIXTURES / name_or_stream).read_text() if name_or_stream.endswith(
+    text = (FIXTURES / name_or_stream).read_text(encoding="utf-8") if name_or_stream.endswith(
         ".jsonl") else name_or_stream
     return audit_codex_stream(text).to_dict()
 

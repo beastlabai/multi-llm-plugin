@@ -38,6 +38,7 @@ The assertions, per shim:
   correctness property).
 """
 
+import os
 import re
 import shlex
 import sys
@@ -54,8 +55,9 @@ from utils import host_capabilities as caps  # noqa: E402
 #: The ~100 rendered-line budget a shim is held to unless its entry raises it.
 DEFAULT_SHIM_MAX_LINES = 100
 
-#: Fixture skill dir with a space in every segment that can carry one.
-FIXTURE_SKILL_DIR = "/tmp/multi llm fixture/skill dir"
+#: Fixture skill dir with a space in every segment that can carry one. Absolute
+#: on this OS: ``/tmp/…`` names no drive on Windows (``abspath`` adds the cwd's).
+FIXTURE_SKILL_DIR = os.path.abspath("/tmp/multi llm fixture/skill dir")
 
 #: Every template token that must not survive rendering — the skill-dir
 #: spellings, the verb slots, the uv flag list (which a shim carries as

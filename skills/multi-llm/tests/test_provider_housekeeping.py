@@ -726,7 +726,9 @@ class TestPathOnlyAskPromptHasARoute:
         plan = tmp_path / "plan.md"
         plan.write_text(PLAN_BODY, encoding="utf-8")
         plan_path = str(plan.resolve())
-        assert re.fullmatch(r"/[\w.\-/]+", plan_path), (
+        # The extractor's own pattern, so a Windows `C:\...` temp path qualifies too.
+        from utils.providers.aider import _ABS_PATH_RE
+        assert _ABS_PATH_RE.fullmatch(plan_path), (
             f"precondition: {plan_path} must be a path aider's extractor matches whole"
         )
         rendered = render_prompt(

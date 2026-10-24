@@ -159,12 +159,14 @@ from typing import Any, Dict, List, Optional
 
 
 def bootstrap_streams() -> None:
-    """Force UTF-8 stdout/stderr, mirroring utils.stream_bootstrap.
+    """Force UTF-8 stdin/stdout/stderr, mirroring utils.stream_bootstrap.
 
     The orchestrator captures this process's output with ``encoding="utf-8"``.
     On Windows a piped stdout otherwise defaults to the locale codec (cp1252),
     so a fixture/response containing an em dash or any non-cp1252 character
     would either raise UnicodeEncodeError here or arrive as mojibake there.
+    The prompt comes in on stdin as UTF-8 the same way, and read as cp1252 it
+    reached the call log with every em dash as ``â€”``.
     """
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -172,6 +174,12 @@ def bootstrap_streams() -> None:
             continue
         try:
             reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+    reconfigure = getattr(sys.stdin, "reconfigure", None)
+    if reconfigure is not None:
+        try:
+            reconfigure(encoding="utf-8", errors=sys.stdin.errors)
         except (AttributeError, ValueError, OSError):
             pass
 
@@ -509,6 +517,8 @@ def apply_mock_edits(prompt: str = "") -> List[Dict[str, Any]]:
             sys.exit(EXIT_TEST_AUTHORING_ERROR)
 
         mode = str(entry.get("mode") or "patch")
+        # Bytes in, bytes out, the way an editing model's tool writes: text
+        # mode on Windows would turn every `\n` of the file into `\r\n`.
         if mode == "delete":
             try:
                 resolved.unlink()
@@ -516,14 +526,12 @@ def apply_mock_edits(prompt: str = "") -> List[Dict[str, Any]]:
                 pass
         elif mode == "create":
             resolved.parent.mkdir(parents=True, exist_ok=True)
-            resolved.write_text(str(entry.get("content") or ""), encoding="utf-8")
+            resolved.write_bytes(str(entry.get("content") or "").encode("utf-8"))
         elif mode == "patch":
             resolved.parent.mkdir(parents=True, exist_ok=True)
-            existing = (
-                resolved.read_text(encoding="utf-8") if resolved.is_file() else ""
-            )
-            resolved.write_text(
-                existing + str(entry.get("content") or ""), encoding="utf-8"
+            existing = resolved.read_bytes() if resolved.is_file() else b""
+            resolved.write_bytes(
+                existing + str(entry.get("content") or "").encode("utf-8")
             )
         else:
             print(
@@ -953,8 +961,52 @@ def log_call(provider: str, args: List[str], prompt: str) -> None:
     log_file = Path(log_path)
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(log_file, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry) + "\n")
+    _append_line(log_file, json.dumps(entry) + "\n")
+
+
+#: Where a Windows writer takes its turn (:func:`_append_line`): one byte far
+#: past any real end of file, so the lock orders writers and blocks no reader.
+_APPEND_LOCK_OFFSET = 1 << 30
+
+
+def _append_line(path: Path, line: str) -> None:
+    """Append one whole line, whatever else is appending to ``path``.
+
+    POSIX ``O_APPEND`` is one atomic seek-and-write per ``write``. Windows has
+    no such thing behind ``open(..., "a")``: the C runtime seeks to the end and
+    then writes, so two mocks finishing together can land on one offset and
+    leave a line no JSON reader parses (Windows CI, 2026-10-23). There each
+    writer takes a byte-range lock first; the OS drops it with the handle, so
+    a mock killed mid-append blocks nobody.
+    """
+    data = line.encode("utf-8")
+    with open(path, "ab") as handle:
+        if os.name != "nt":
+            handle.write(data)
+            return
+        import msvcrt
+
+        # LK_NBLCK in a short loop, not LK_LOCK: that one sleeps a whole second
+        # between tries and raises after ten, which would turn a busy log into
+        # a mock that dies before it answers. Past the deadline the line is
+        # written unlocked — a rare torn line beats a failed provider call.
+        locked = False
+        deadline = time.monotonic() + 30
+        handle.seek(_APPEND_LOCK_OFFSET)
+        while not locked and time.monotonic() < deadline:
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                locked = True
+            except OSError:
+                time.sleep(0.005)
+        try:
+            handle.seek(0, os.SEEK_END)
+            handle.write(data)
+            handle.flush()
+        finally:
+            if locked:
+                handle.seek(_APPEND_LOCK_OFFSET)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def format_cursor_agent_output(content: str) -> str:

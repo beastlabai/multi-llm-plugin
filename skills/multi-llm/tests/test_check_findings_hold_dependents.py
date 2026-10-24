@@ -135,7 +135,7 @@ class TestTheDependentsAreNotRun:
         assert stop["not_run"] == ["T004"]
         assert stop["reported"] == "; ".join(FINDINGS)
 
-        summary = Path(report["summary_file"]).read_text()
+        summary = Path(report["summary_file"]).read_text(encoding="utf-8")
         assert (
             "**Tasks in this decomposition**: 5 — 3 done (1 with check findings: "
             "T002), 1 not run (T004: upstream check T002 reported problems), "
@@ -361,7 +361,7 @@ class TestAnsweringACheckWithFindings:
         report = _report(repo)
         assert report["accepted_tasks"] == {"T002": reason}
         assert report["blocked_by_check"] == {}
-        summary = Path(report["summary_file"]).read_text()
+        summary = Path(report["summary_file"]).read_text(encoding="utf-8")
         assert "| T002 | accepted with its check findings |" in summary
         # The accounting line names the bucket in the same words (review of
         # fix round 20, #3).

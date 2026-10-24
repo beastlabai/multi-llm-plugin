@@ -51,10 +51,11 @@ import re
 import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from stub_server import (  # noqa: E402
+    LoopbackHTTPServer,
     catalog,
     refuse_probe_port,
     chat_body,
@@ -370,7 +371,7 @@ def main(argv=None) -> int:
     # omp's local-model discovery ports would be found by a CLI nobody pointed
     # at it, and a capture session would record the wrong server's error.
     refuse_probe_port(ARGS.port, "failserver")
-    server = ThreadingHTTPServer(("127.0.0.1", ARGS.port), Handler)
+    server = LoopbackHTTPServer(("127.0.0.1", ARGS.port), Handler)
     server.daemon_threads = True
     print(f"failserver[{ARGS.mode}] listening on 127.0.0.1:{ARGS.port}", flush=True)
     try:

@@ -15,8 +15,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
-import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -28,6 +26,7 @@ if str(SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_DIR))
 
 import implement_orchestrator  # noqa: E402
+from tests.mock_launchers import install_mock_llm, mock_path  # noqa: E402
 from tests.test_write_executor import _patch_edit, env  # noqa: E402,F401
 from utils import provider_registry as registry  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
@@ -35,7 +34,6 @@ from utils.output_handler import get_phase_dir  # noqa: E402
 from utils.state_manager import get_or_create_state  # noqa: E402
 from utils.subagent_tasks import PRIOR_CHANGES_TOKEN  # noqa: E402
 
-MOCK_LLM = Path(__file__).parent / "mocks" / "mock_llm.py"
 REASK_MARKER = "You are re-sending the report of a batch of edits."
 VERDICT_WARNING = "could not record the verdict"
 
@@ -348,16 +346,8 @@ def repo(tmp_path, monkeypatch):
     subprocess.run(["git", "commit", "-qm", "init"], cwd=root, check=True, env=git_env)
 
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    target = bin_dir / "codex"
-    try:
-        target.symlink_to(MOCK_LLM)
-    except (OSError, NotImplementedError):  # pragma: no cover
-        shutil.copyfile(MOCK_LLM, target)
-        target.chmod(target.stat().st_mode | stat.S_IXUSR)
-    monkeypatch.setenv("PATH", os.pathsep.join(
-        [str(bin_dir), str(Path(sys.executable).parent), "/usr/bin", "/bin"]
-    ))
+    install_mock_llm(bin_dir, "codex")
+    monkeypatch.setenv("PATH", mock_path(bin_dir, ("codex",)))
     monkeypatch.setenv("MULTI_LLM_TEST_MODE", "1")
     monkeypatch.setenv("MULTI_LLM_TEST_FAST_BACKOFF", "1")
     config = tmp_path / "driver.yaml"

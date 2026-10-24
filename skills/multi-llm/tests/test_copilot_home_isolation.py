@@ -103,6 +103,7 @@ class TestCopilotHomeIsolation:
             assert Path(root).is_dir()
             assert os.access(root, os.W_OK)
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits: Windows has no 0700 to read back")
     def test_the_root_is_private_to_this_user(self, sentinel_home):
         """0700, asserted rather than inherited from `mkdtemp`'s default."""
         root = CopilotProvider().resolve_env(MODEL)["COPILOT_HOME"]

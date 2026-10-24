@@ -28,6 +28,7 @@ sys.path.insert(0, str(SKILL_ROOT / "hosts"))
 from utils import host_capabilities as caps  # noqa: E402
 from utils import host_install  # noqa: E402
 import render_capabilities as renderer  # noqa: E402
+from tests.mock_launchers import shim_path, spawn_environment, write_launcher  # noqa: E402
 
 PLUGIN_LIST = SKILL_ROOT / "tests" / "fixtures" / "codex" / "plugin-route" / "plugin-list.json"
 PACKAGE = caps.entry("codex")["package"]
@@ -54,10 +55,8 @@ def _table(plugin_id: str, enabled: bool) -> str:
 
 def _script(path: Path, body: str) -> Path:
     """An executable Python script, shebang'd to this interpreter by absolute path
-    so it runs whatever ``PATH`` the test pins."""
-    path.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
-    path.chmod(0o755)
-    return path
+    so it runs whatever ``PATH`` the test pins (a ``.cmd`` launcher on Windows)."""
+    return write_launcher(path.parent, path.name, f"#!{sys.executable}\n{body}")
 
 
 class Home:
@@ -77,10 +76,11 @@ class Home:
 
     def env(self) -> dict:
         return {
+            **spawn_environment(),
             "HOME": str(self.home),
             "USERPROFILE": str(self.home),
             "CODEX_HOME": str(self.codex_home),
-            "PATH": str(self.bin),
+            "PATH": shim_path(self.bin),
         }
 
     def python3(self, version: Optional[str] = "3.12.1") -> None:
@@ -250,7 +250,7 @@ class TestCheckReportsPluginRoute:
         (venv / "bin").mkdir(parents=True)
         _script(venv / "bin" / "python3", "print('Python 3.12.1')\n")
         env = {**bare.env(), "VIRTUAL_ENV": str(venv),
-               "PATH": os.pathsep.join([str(venv / "bin"), str(bare.bin)])}
+               "PATH": os.pathsep.join([str(venv / "bin"), shim_path(bare.bin)])}
         assert host_install._python3_problem(env) is not None
         assert "python3" in host_install._python3_problem(env)
         # Without the activation marker the same PATH entry is the user's own.

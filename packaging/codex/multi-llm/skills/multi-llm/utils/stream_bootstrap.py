@@ -83,6 +83,13 @@ def bootstrap_streams() -> None:
       surrogateescape (lone surrogates blow up on downstream UTF-8
       re-encode), backslashreplace (noisier in model-visible output).
 
+    - stdin reads UTF-8 too, with its own error handler kept. A host pipes
+      UTF-8 in (``util prior-changes append --summary-stdin`` takes a model's
+      summary from a heredoc, ``--files-from -`` a path list), and a Windows
+      pipe decodes with cp1252: an em dash was recorded as ``â€”`` for the
+      next batch to read, and a byte cp1252 leaves undefined (``ō`` is
+      ``C5 8D``) raised UnicodeDecodeError.
+
     Safe to call unconditionally: streams without ``reconfigure`` (tests or
     embedders replacing sys.stdout with non-TextIOWrapper objects) are left
     untouched.
@@ -96,4 +103,10 @@ def bootstrap_streams() -> None:
             )
         except (AttributeError, ValueError, OSError):
             # Non-reconfigurable stream — best effort only.
+            pass
+    if hasattr(sys.stdin, "reconfigure"):
+        try:
+            sys.stdin.reconfigure(encoding="utf-8", errors=sys.stdin.errors)
+        except (AttributeError, ValueError, OSError):
+            # Already read from, or not a text stream: left as it is.
             pass

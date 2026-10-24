@@ -51,9 +51,24 @@ from utils.subagent_tasks import (  # noqa: E402
     make_task_file,
     write_task_file,
 )
+from tests.mock_launchers import (  # noqa: E402
+    MOCK_LLM,
+    install_mock_llm,
+    mock_path,
+    remove_launcher,
+    write_launcher,
+)
 
-MOCK_LLM = Path(__file__).parent / "mocks" / "mock_llm.py"
-SCENARIO_MATCHER = Path(__file__).parent / "scenario_matcher.py"
+#: What codex's sandbox probe runs inside `codex sandbox --`: `sh`, except on
+#: Windows, where `sh` is not on PATH and the plugin's interpreter takes its steps.
+_PROBE_SHELL = sys.executable if os.name == "nt" else "sh"
+
+#: The shell the fake probes below run. On Windows, resolved here while PATH is
+#: still the session's: `runner_env` narrows PATH to the mock bin, python, and
+#: git's and node's directories, and on the runner git can live in a directory
+#: with no `sh.exe` beside it (Git\ucrt64\bin, 2026-10-23), which left every
+#: fake probe unable to start. POSIX keeps the bare name.
+_SH = (shutil.which("sh") or "sh") if os.name == "nt" else "sh"
 
 #: Runner specs the read path ships a real `agent-readonly` profile for. The
 #: sentinel test and the equivalence test are parametrized over all three, so a
@@ -71,26 +86,8 @@ ELIGIBLE_RUNNERS = [
 # ---------------------------------------------------------------------------
 
 def _install_launcher(bin_dir: Path, name: str) -> Path:
-    """Put a mock provider CLI called ``name`` on a temp PATH.
-
-    A *copied* launcher cannot find ``tests/scenario_matcher.py`` through its own
-    ``__file__`` the way the real file and a symlink to it can, so the one
-    definition of what a scenario means is copied beside it.
-    """
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    target = bin_dir / name
-    if os.name == "nt":  # pragma: no cover - POSIX CI
-        target = bin_dir / f"{name}.py"
-        shutil.copyfile(MOCK_LLM, target)
-        shutil.copyfile(SCENARIO_MATCHER, bin_dir / SCENARIO_MATCHER.name)
-    else:
-        try:
-            target.symlink_to(MOCK_LLM)
-        except (OSError, NotImplementedError):  # pragma: no cover
-            shutil.copyfile(MOCK_LLM, target)
-            target.chmod(target.stat().st_mode | stat.S_IXUSR)
-            shutil.copyfile(SCENARIO_MATCHER, bin_dir / SCENARIO_MATCHER.name)
-    return target
+    """Put a mock provider CLI called ``name`` on a temp PATH."""
+    return install_mock_llm(bin_dir, name)
 
 
 @pytest.fixture
@@ -106,11 +103,9 @@ def runner_env(tmp_path, monkeypatch):
     # PATH is REPLACED, not prepended: this suite spawns real subprocesses, and a
     # test that unlinks a mock launcher (the spawn_failed rung) would otherwise
     # fall through to a developer's real `codex`/`claude` and make a live API
-    # call. Only the mock bin dir plus an interpreter's own dir are on it.
-    interpreter_dir = str(Path(sys.executable).parent)
-    monkeypatch.setenv(
-        "PATH", os.pathsep.join([str(bin_dir), interpreter_dir, "/usr/bin", "/bin"])
-    )
+    # call. Only the mock bin dir, an interpreter's own dir and where git lives
+    # (node too, on Windows) are on it.
+    monkeypatch.setenv("PATH", mock_path(bin_dir, ("codex", "opencode", "claude")))
     monkeypatch.setenv("MULTI_LLM_TEST_MODE", "1")
     monkeypatch.setenv("MULTI_LLM_TEST_FAST_BACKOFF", "1")
     for name in ("codex", "opencode", "claude"):
@@ -755,6 +750,23 @@ class TestFailureLadder:
             time.sleep(0.1)
         assert not _pid_alive(pid), "the runner's tool child survived the kill"
 
+    def test_windows_drain_does_not_close_a_pipe_held_by_a_reader(self, monkeypatch):
+        """Closing a Windows communicate reader's pipe can wait forever."""
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(executor.process_control, "IS_WINDOWS", True)
+
+        def timed_out(**kwargs):
+            raise subprocess.TimeoutExpired("runner", kwargs["timeout"])
+
+        def close():
+            pytest.fail("close would wait on the surviving pipe reader's lock")
+
+        pipe = SimpleNamespace(close=close)
+        proc = SimpleNamespace(communicate=timed_out, stdin=pipe, stdout=pipe, stderr=pipe)
+        partial = subprocess.TimeoutExpired("runner", 1, output=b"partial out", stderr=b"err")
+        assert executor._drain_after_kill(proc, partial) == ("partial out", "err")
+
     def test_rung_3_rate_limited_does_not_consume_the_retry_budget(
         self, tmp_path, runner_env, monkeypatch
     ):
@@ -1043,7 +1055,7 @@ class TestBatchOutcome:
     def test_a_missing_binary_is_refused_by_preflight(self, tmp_path, runner_env):
         """Rung 1 at batch level: no child is started for any task."""
         runner_env.use("codex:gpt-5.5")
-        (runner_env.bin_dir / "codex").unlink()
+        remove_launcher(runner_env.bin_dir, "codex")
         with pytest.raises(executor.RunnerRejected) as excinfo:
             executor.run_tasks(
                 [_validation_batch(tmp_path)], phase_dir=str(tmp_path),
@@ -1289,7 +1301,7 @@ class TestJudgeDispatchIsAudited:
     def test_no_attempt_means_no_completed_line(self, tmp_path, runner_env):
         """A pre-dispatch refusal writes neither line — nothing was attempted."""
         runner_env.use("codex:gpt-5.5")
-        (runner_env.bin_dir / "codex").unlink()
+        remove_launcher(runner_env.bin_dir, "codex")
         with pytest.raises(executor.RunnerRejected):
             executor.run_tasks(
                 [_judge_task(tmp_path)], phase_dir=str(tmp_path),
@@ -2492,7 +2504,17 @@ class TestLongestFirstDispatch:
         same reason. Preflight still runs against the real mock CLI, so the
         batch reaches the gate exactly as a real one does.
         """
+        from utils import review_orchestrator_base as rob
+
         runner_env.use("codex:gpt-5.5", max_concurrent_subagents=1)
+        # Tasks reach the one lane in the order their stagger sleeps end, and
+        # the stagger is ``index * PROVIDER_STAGGER_DELAY``. FAST_BACKOFF
+        # flattens it to 10 ms for every index, which only orders the tasks
+        # while the loop clock can tell two timers apart: Windows' ticks every
+        # 15.6 ms, so those timers tie and wake in heap order, not file order
+        # (Windows CI: tasks 3 and 4 swapped). Keep the index-proportional
+        # shape at a tenth of a second per index instead.
+        monkeypatch.setattr(rob, "get_backoff_delay", lambda delay: delay / 20)
         tasks = self._sized_batches(tmp_path)
         dispatched = []
 
@@ -3649,22 +3671,21 @@ def test_fx_step_budget_is_terminal_in_dispatch(tmp_path, runner_env, monkeypatc
 
 def _install_opencode_capture(
     bin_dir: Path, stdout: str, stderr: str, exit_code: int = 1
-) -> None:
+) -> Path:
     """Replace the mock `opencode` with a CLI that replays one captured failure.
 
     Version and auth probes answer like a logged-in pinned release; every other
     invocation — the nested-exec probe and the dispatch alike — drains stdin,
     writes the two captured streams and exits ``exit_code``. A shell script
     rather than a mock knob, so the bytes the real ``OpencodeProvider`` parses
-    are exactly the bytes the incident recorded.
+    are exactly the bytes the incident recorded. Returns the script's file.
     """
     out = bin_dir / "opencode-capture.stdout"
     err = bin_dir / "opencode-capture.stderr"
-    out.write_text(stdout, encoding="utf-8")
-    err.write_text(stderr, encoding="utf-8")
-    script = bin_dir / "opencode"
-    script.unlink()
-    script.write_text(
+    out.write_text(stdout, encoding="utf-8", newline="\n")
+    err.write_text(stderr, encoding="utf-8", newline="\n")
+    return write_launcher(
+        bin_dir, "opencode",
         textwrap.dedent(
             f"""\
             #!/bin/sh
@@ -3678,9 +3699,7 @@ def _install_opencode_capture(
             exit {exit_code}
             """
         ),
-        encoding="utf-8",
     )
-    script.chmod(0o755)
 
 
 class TestInvalidModelIsFatal:
@@ -4837,7 +4856,7 @@ class TestSandboxUnavailable:
     def _fake_command(script: str):
         """A `sandbox_probe_command` that answers `script` for the write profile."""
         def command(self, profile):
-            return ["sh", "-c", script] if profile == PROFILE_AGENT_WRITE else None
+            return [_SH, "-c", script] if profile == PROFILE_AGENT_WRITE else None
         return command
 
     @staticmethod
@@ -4927,7 +4946,7 @@ class TestSandboxUnavailable:
         file, not only the write it stopped asking for."""
         provider = registry.get_provider("codex")
         expected_head = [
-            "codex", "sandbox", "-c", 'sandbox_mode="workspace-write"', "--", "sh",
+            "codex", "sandbox", "-c", 'sandbox_mode="workspace-write"', "--", _PROBE_SHELL,
         ]
         write_argv = provider.sandbox_probe_command(PROFILE_AGENT_WRITE)
         generate_argv = provider.sandbox_probe_command(PROFILE_GENERATE)
@@ -4956,9 +4975,9 @@ class TestSandboxUnavailable:
         provider = registry.get_provider("codex")
         argv = provider.sandbox_probe_command(PROFILE_AGENT_READONLY)
         assert argv[:6] == [
-            "codex", "sandbox", "-c", 'sandbox_mode="read-only"', "--", "sh",
+            "codex", "sandbox", "-c", 'sandbox_mode="read-only"', "--", _PROBE_SHELL,
         ]
-        assert argv[-1] == "exit 0"
+        assert argv[-1] == ("pass" if os.name == "nt" else "exit 0")
         # Nothing in it touches the repo — a read-only dispatch never writes,
         # and neither may the probe that stands in for it.
         assert ".multi-llm" not in argv[-1]
@@ -4969,6 +4988,23 @@ class TestSandboxUnavailable:
             if adapter.sandbox_probe_command(PROFILE_AGENT_READONLY)
         }
         assert answering == {"codex"}
+
+    def test_the_windows_write_probe_writes_one_byte_and_leaves_nothing(self, tmp_path):
+        """The command Windows runs inside `codex sandbox` (no `sh` there) is
+        python taking the POSIX script's steps; it is plain python, so it is
+        exercised here on every OS: exit 0 with the repo left as it was, and
+        non-zero when the write is denied."""
+        from utils.providers.codex import _WINDOWS_WRITE_PROBE
+
+        probe = [sys.executable, "-I", "-c", _WINDOWS_WRITE_PROBE]
+        assert subprocess.run(probe, cwd=tmp_path).returncode == 0
+        assert list(tmp_path.iterdir()) == []
+        (tmp_path / ".multi-llm" / "tmp").mkdir(parents=True)
+        (tmp_path / ".multi-llm" / "tmp" / "sandbox-probe-0").mkdir()
+        # A directory where the file goes: the open fails on every OS, as a
+        # denied write does, and the probe says so.
+        blocked = probe[:-1] + [_WINDOWS_WRITE_PROBE.replace("os.getpid()", "0")]
+        assert subprocess.run(blocked, cwd=tmp_path).returncode == 1
 
     def test_a_read_only_batch_is_refused_when_the_sandbox_cannot_start(
         self, tmp_path, runner_env, monkeypatch, capsys
@@ -4988,7 +5024,7 @@ class TestSandboxUnavailable:
         def readonly_probe(self, profile):
             if profile != PROFILE_AGENT_READONLY:
                 return None
-            return ["sh", "-c", f"echo '{_BWRAP_BROKEN_LINE}' >&2; exit 1"]
+            return [_SH, "-c", f"echo '{_BWRAP_BROKEN_LINE}' >&2; exit 1"]
 
         monkeypatch.setattr(
             type(provider), "sandbox_probe_command", readonly_probe
@@ -5024,7 +5060,7 @@ class TestSandboxUnavailable:
         def command(self, requested):
             if requested != profile:
                 return None
-            return ["sh", "-c", f"echo '{_BWRAP_BROKEN_LINE}' >&2; exit 1"]
+            return [_SH, "-c", f"echo '{_BWRAP_BROKEN_LINE}' >&2; exit 1"]
         return command
 
     def test_a_read_only_batch_dispatches_unsandboxed_by_default(
@@ -5263,7 +5299,7 @@ class TestSandboxUnavailable:
         provider = registry.get_provider("codex")
 
         def slow(self, requested):
-            return ["sh", "-c", "sleep 5"] if requested == PROFILE_AGENT_READONLY else None
+            return [_SH, "-c", "sleep 5"] if requested == PROFILE_AGENT_READONLY else None
 
         monkeypatch.setattr(type(provider), "sandbox_probe_command", slow)
         monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 0.2)
@@ -5366,6 +5402,47 @@ class TestSandboxUnavailable:
         assert "recording sandbox 'unknown'" in err
         assert "Dispatching anyway" in err
 
+    def test_the_windows_probe_kills_a_grandchild_holding_its_pipes(
+        self, tmp_path, monkeypatch
+    ):
+        """Windows port, round seven: Windows' ``subprocess.run`` kills the
+        direct child alone on a timeout and then reads the pipes with no
+        timeout, so the ``sleep`` below ``sh`` held the row above for 5.3 s.
+        Its own path kills the tree. Forced on every runner; off Windows a
+        kill of every descendant stands in for ``taskkill /T /F``."""
+        from utils import process_control
+
+        killed = []
+        if sys.platform != "win32":
+            import signal
+
+            def taskkill_tree(pid, *, timeout=30.0):
+                # Read as the platform it is: `descendants` answers [] on win32.
+                monkeypatch.setattr(process_control, "IS_WINDOWS", False)
+                below = process_control.descendants(pid)
+                monkeypatch.setattr(process_control, "IS_WINDOWS", True)
+                killed.append((pid, [member.pid for member in below]))
+                for member in below:
+                    os.kill(member.pid, signal.SIGKILL)
+                os.kill(pid, signal.SIGKILL)
+
+            monkeypatch.setattr(process_control, "IS_WINDOWS", True)
+            monkeypatch.setattr(process_control, "taskkill_tree", taskkill_tree)
+        monkeypatch.chdir(tmp_path)
+        started = time.monotonic()
+        # `; :` so no shell execs the sleep in its own place: a grandchild.
+        result = executor._run_sandbox_probe(
+            [_SH, "-c", "sleep 5; :"], cwd=str(tmp_path), timeout=0.2)
+        assert time.monotonic() - started < 4.0
+        assert result is None
+        if sys.platform != "win32":
+            [(_, below)] = killed
+            assert below, "the sleep was not below the shell"
+        done = executor._run_sandbox_probe(
+            [_SH, "-c", "echo out; echo err >&2; exit 3"], cwd=str(tmp_path),
+            timeout=30)
+        assert (done.returncode, done.stdout, done.stderr) == (3, "out\n", "err\n")
+
     def test_a_command_that_cannot_run_dispatches_with_unknown(
         self, tmp_path, runner_env, monkeypatch
     ):
@@ -5457,7 +5534,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         def sandbox_probe_command(self, profile):
             if profile != PROFILE_GENERATE:
                 return None
-            return ["sh", "-c", f"echo '{_BWRAP_BROKEN_LINE}' >&2; exit 1"]
+            return [_SH, "-c", f"echo '{_BWRAP_BROKEN_LINE}' >&2; exit 1"]
 
         def sandbox_fallback_rungs(self, profile):
             from utils.providers.codex import UNSANDBOXED_RUNG
@@ -6485,16 +6562,15 @@ class TestHostSinksNeverSeeTheReadonlyChildsConfigContent:
         )
         registry._config = None
         registry._config_key = None
-        _install_opencode_capture(
+        script = _install_opencode_capture(
             runner_env.bin_dir, _DENIED_STDOUT, _DENIED_STDERR, exit_code=0
         )
         dump = tmp_path.parent / f"{tmp_path.name}-child-env.txt"
-        script = runner_env.bin_dir / "opencode"
-        script.write_text(
-            script.read_text().replace(
+        write_launcher(
+            runner_env.bin_dir, "opencode",
+            script.read_text(encoding="utf-8").replace(
                 "cat >/dev/null\n", f'cat >/dev/null\nenv > "{dump}"\n', 1
             ),
-            encoding="utf-8",
         )
         monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", json.dumps(
             {"provider": {"mine": {"options": {"apiKey": self.SENTINEL}}}}
@@ -6521,7 +6597,7 @@ class TestHostSinksNeverSeeTheReadonlyChildsConfigContent:
         for found in phase_dir.rglob("*"):
             if found.is_file():
                 texts[str(found)] = found.read_text(encoding="utf-8", errors="replace")
-        assert any("/failed/" in name for name in texts)
+        assert any("/failed/" in name.replace(os.sep, "/") for name in texts)
         assert any(name.endswith(".status.json") for name in texts)
         for name, text in texts.items():
             for marker in self.MARKERS:

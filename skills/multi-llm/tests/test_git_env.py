@@ -46,7 +46,7 @@ import sys
 import tempfile
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 import pytest
@@ -159,7 +159,9 @@ def private_remote():
         _git("--git-dir", str(bare), "update-server-info")
 
         _AuthedRepoHandler.bare_root = bare
-        server = ThreadingHTTPServer(("127.0.0.1", 0), _AuthedRepoHandler)
+        from tests.container.stub_server import LoopbackHTTPServer
+
+        server = LoopbackHTTPServer(("127.0.0.1", 0), _AuthedRepoHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:

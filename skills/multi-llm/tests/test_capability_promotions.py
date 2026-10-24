@@ -529,11 +529,13 @@ def _run_nested(tmp_path: Path, verdict: str) -> tuple[int, str, Path]:
         skill_dir=str(SKILL_DIR), records=str(records), bundle=str(bundle),
         image=IMAGE, host=HOST, provenance=PROVENANCE, row_id=ROW_ID),
         encoding="utf-8")
-    env = dict(os.environ, MLLM_FAKE_ROW_VERDICT=verdict)
+    # UTF-8 both ways: the promotion lines carry `→`, which a Windows pipe's
+    # default code page cannot encode.
+    env = dict(os.environ, MLLM_FAKE_ROW_VERDICT=verdict, PYTHONIOENCODING="utf-8")
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-s", "-q",
          "-c", str(session / "pytest.ini"), str(session)],
-        cwd=str(session), env=env, capture_output=True, text=True)
+        cwd=str(session), env=env, capture_output=True, encoding="utf-8")
     return (completed.returncode, completed.stdout + completed.stderr,
             records / f"{UTC}-{ROW_ID}.json")
 

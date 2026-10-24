@@ -1291,6 +1291,8 @@ class TestWindowsSeam:
         monkeypatch.setattr(hi, "find_uv", lambda: "/usr/bin/uv")
         monkeypatch.setattr(hi, "runner_available", lambda provider: True)
         monkeypatch.setattr(hi.shutil, "which", lambda name: None)
+        # And no Git install to fall back on (a Windows runner has a real one).
+        monkeypatch.setattr(hi, "_git_bash_candidates", lambda env: [])
         row = hi._environment_row("codex", base=str(skill), windows=True)
         assert not row.ok
         assert "Git for Windows" in row.detail

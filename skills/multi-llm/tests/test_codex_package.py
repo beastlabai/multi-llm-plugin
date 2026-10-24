@@ -1405,10 +1405,13 @@ class TestCompatibilityLayout:
         datetime.date.fromisoformat(ingestion_rules.LAYOUT_READ_DATE)
 
     def test_gitattributes_marks_the_tree_generated(self):
-        """D1a: one rule, and nothing else."""
+        """D1a: one rule for the tree, and nothing else — beside the repository's
+        LF checkout, without which a Windows clone (``core.autocrlf=true``) holds
+        CRLF bytes the recorded digest does not cover."""
         text = (REPO_ROOT / ".gitattributes").read_text(encoding="utf-8")
         rules = [line for line in text.splitlines() if line.strip() and not line.startswith("#")]
-        assert rules == ["packaging/codex/multi-llm/** linguist-generated=true -diff"]
+        assert rules == ["* text=auto eol=lf",
+                         "packaging/codex/multi-llm/** linguist-generated=true -diff"]
 
 
 # ===========================================================================

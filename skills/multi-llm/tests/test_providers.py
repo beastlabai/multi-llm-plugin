@@ -55,6 +55,7 @@ from utils.providers.omp import (
 )
 from utils.providers.opencode import OpenCodeProvider
 from tests import opencode_fixtures as oc_pin
+from tests.mock_launchers import write_launcher
 from utils.providers.pi import PiProvider
 from utils.providers import qwen_code as qwen_code_module
 from utils.providers.qwen_code import QwenCodeProvider
@@ -826,12 +827,10 @@ def _write_fake_claude(tmp_path, *, help_text, body="", name="claude"):
     records: a flag missing from the help text is silently dropped one step
     before argparse would have exited 2 over it.
     """
-    import stat
-
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
-    script = bin_dir / name
-    script.write_text(
+    write_launcher(
+        bin_dir, name,
         "#!/usr/bin/env python3\n"
         "import json, os, sys\n"
         f"HELP = {help_text!r}\n"
@@ -840,9 +839,7 @@ def _write_fake_claude(tmp_path, *, help_text, body="", name="claude"):
         "    sys.stdout.write(HELP)\n"
         "    sys.exit(0)\n"
         f"{body or 'sys.exit(0)'}\n",
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IRWXU)
     return bin_dir
 
 
@@ -1066,8 +1063,8 @@ class TestClaudeCodeFallbackModel:
     ):
         """Non-zero exit / empty help resolve to unsupported, never to a crash."""
         bin_dir = _write_fake_claude(tmp_path, help_text="")
-        (bin_dir / "claude").write_text(
-            "#!/usr/bin/env python3\nimport sys\nsys.exit(2)\n", encoding="utf-8"
+        write_launcher(
+            bin_dir, "claude", "#!/usr/bin/env python3\nimport sys\nsys.exit(2)\n"
         )
         monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
         self._configure(monkeypatch, provider, {"sonnet": ["haiku"]})
@@ -1090,14 +1087,14 @@ class TestClaudeCodeFallbackModel:
             ),
         )
         # Count the help path too, by counting every invocation of the fake.
-        (bin_dir / "claude").write_text(
+        write_launcher(
+            bin_dir, "claude",
             "#!/usr/bin/env python3\n"
             "import os, sys\n"
             f"HELP = {HELP_WITH_FALLBACK!r}\n"
             "open(os.environ['MLLM_HELP_COUNTER'], 'a').write('x')\n"
             "sys.stdout.write(HELP)\n"
             "sys.exit(0)\n",
-            encoding="utf-8",
         )
         monkeypatch.setenv("MLLM_HELP_COUNTER", str(counter))
         monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
@@ -6902,14 +6899,16 @@ class TestDescribeFailureChannels:
 
         provider = _PROVIDERS["fx"]
         fixture_dir = Path(__file__).parent / "fixtures" / "fx"
+        # UTF-8 as the adapter decodes the child's streams: the `·` its patterns
+        # anchor on is mojibake under Windows' cp1252 default.
         success = provider.describe_failure(
-            (fixture_dir / "multi-assistant.stdout.txt").read_text(),
-            (fixture_dir / "multi-assistant.stderr.txt").read_text(),
+            (fixture_dir / "multi-assistant.stdout.txt").read_text(encoding="utf-8"),
+            (fixture_dir / "multi-assistant.stderr.txt").read_text(encoding="utf-8"),
         )
         assert success is None
 
-        stdout = (fixture_dir / "auth-error.stdout.txt").read_text()
-        stderr = (fixture_dir / "auth-error.stderr.txt").read_text()
+        stdout = (fixture_dir / "auth-error.stdout.txt").read_text(encoding="utf-8")
+        stderr = (fixture_dir / "auth-error.stderr.txt").read_text(encoding="utf-8")
         full = provider.describe_failure(stdout, stderr)
         assert full is not None
         assert full == provider.describe_failure(stdout, "")

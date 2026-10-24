@@ -57,6 +57,12 @@ from utils.providers.codex import (  # noqa: E402
 from utils import landlock_dispatch  # noqa: E402
 from utils.providers.base import JailContext, JailRequest  # noqa: E402
 
+#: A read-only directory stands in for the kernel's denial in these rows, and
+#: Windows keeps no mode bits on a directory: ``chmod(0o555)`` denies nothing.
+windows_ignores_dir_modes = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows ignores a directory's mode bits, the stand-in for the denial")
+
 BWRAP_LINE = "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
 PROMPT = "Review the plan. PROMPT-SENTINEL"
 FLAG_VALUE = LANDLOCK_FEATURE_PAIR[1]
@@ -302,6 +308,7 @@ class TestCodexDeclaresThreeRungs:
         hasattr(__import__("os"), "geteuid") and __import__("os").geteuid() == 0,
         reason="root ignores the directory mode that stands in for the denial",
     )
+    @windows_ignores_dir_modes
     def test_the_canary_passes_when_its_write_is_denied(self, tmp_path):
         """A read-only (pre-existing) directory stands in for the kernel's
         denial of the write, and the canary's success is exit 0."""
@@ -327,6 +334,7 @@ class TestCodexDeclaresThreeRungs:
         hasattr(__import__("os"), "geteuid") and __import__("os").geteuid() == 0,
         reason="root ignores the directory mode that stands in for the denial",
     )
+    @windows_ignores_dir_modes
     def test_a_denied_mkdir_is_a_setup_failure_not_containment(self, tmp_path):
         """A `mkdir` that fails never reaches the write: that is a setup
         failure — its own exit code, no marker — never the denial."""
@@ -630,6 +638,7 @@ class TestTheWalkTable:
         hasattr(__import__("os"), "geteuid") and __import__("os").geteuid() == 0,
         reason="root ignores the directory mode",
     )
+    @windows_ignores_dir_modes
     def test_a_canary_dir_unwritable_outside_the_sandbox_is_not_taken(self, tmp_path):
         """Plain permissions deny the write too — the walk proves the directory
         writable outside the sandbox first, so that denial never reads as a
@@ -712,6 +721,12 @@ class TestTheVerdictShape:
 
 
 class TestTheWalkSharesOneDeadline:
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="on Windows subprocess.run waits out a killed shell's `sleep` "
+               "child, which holds the probe's pipes, so the probe overruns "
+               "its budget (measured 5.8 s of a 1 s budget)",
+    )
     def test_a_slow_first_probe_leaves_the_rung_unprobed_inside_one_budget(self):
         """The profile probe spends most of the budget; the rung probe gets
         only what is left of it, and the whole call stays inside one budget."""

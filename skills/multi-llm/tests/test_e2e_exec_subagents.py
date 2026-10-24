@@ -286,8 +286,13 @@ class TestFlagOffIsUnchanged:
             )
             assert result.exit_code == 0, result.stderr
             phase_dir = plan.output_dir / "review-plan"
+            # The runs differ by their own directory, which `_normalize`'s
+            # `/tmp/` rule misses on macOS (`/private/var/…`) and Windows.
+            stdout = result.stdout
+            for spelling in {str(tmp_path / label), os.path.realpath(tmp_path / label)}:
+                stdout = stdout.replace(spelling, "<root>")
             outputs[label] = {
-                "stdout": _normalize(result.stdout),
+                "stdout": _normalize(stdout),
                 "files": sorted(p.name for p in phase_dir.iterdir()),
                 "tasks": json.loads(
                     (phase_dir / "validation_tasks.json").read_text(encoding="utf-8")

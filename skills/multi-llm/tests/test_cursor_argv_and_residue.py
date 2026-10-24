@@ -58,6 +58,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from tests.mock_launchers import launcher_file, write_launcher
 from utils.providers import base as base_module
 from utils.providers import cursor_agent as cursor_agent_module
 from utils.providers.base import PROFILE_GENERATE
@@ -132,9 +133,11 @@ def _write_help_binary(
     )
     script = path.with_suffix(".py")
     script.write_text(body, encoding="utf-8")
-    path.write_text(f"#!/bin/sh\nexec {sys.executable!r} {str(script)!r} \"$@\"\n", encoding="utf-8")
-    path.chmod(0o755)
-    return path
+    write_launcher(
+        path.parent, path.name,
+        f"#!/bin/sh\nexec {Path(sys.executable).as_posix()!r} {script.as_posix()!r} \"$@\"\n",
+    )
+    return launcher_file(path.parent, path.name)
 
 
 REAL_HELP_EXCERPT = (

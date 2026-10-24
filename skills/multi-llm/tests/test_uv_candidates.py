@@ -282,9 +282,9 @@ class TestNoUnlistedReader:
                 hits.add(line[len(CODEX_PAYLOAD_COPY):])
                 continue
             try:
-                hits.add(str(path.relative_to("skills/multi-llm")))
+                hits.add(path.relative_to("skills/multi-llm").as_posix())
             except ValueError:
-                hits.add(str(path))
+                hits.add(path.as_posix())
 
         expected = set(READERS)
         unlisted = hits - expected
