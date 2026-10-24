@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Every link in ``README.md`` and ``docs/*.md`` resolves -- file and anchor.
+"""Every link in README, the development guide, and docs resolves -- file and anchor.
 
 The README was trimmed to a front page and its prose moved into five ``docs/``
 pages, which turned a single document's internal structure into a web of
@@ -69,7 +69,11 @@ DOCS_DIR = REPO_ROOT / "docs"
 #: Link schemes this module cannot follow without a network.
 EXTERNAL_SCHEMES = ("http://", "https://", "mailto:")
 
-#: The ``## Documentation`` table's one row that is not a ``docs/`` page, named
+#: The ``## Documentation`` table indexes top-level ``docs/`` pages. Subsystem
+#: references under ``docs/development/`` are reached through the skill guide;
+#: both the guide and those references participate in the recursive link check.
+#:
+#: The table's one row that is not a ``docs/`` page, named
 #: rather than pattern-matched so a second such row is a decision, not a drift.
 #: The table's omissions are choices too, recorded here so they read as such:
 #: ``TODO.md`` is reached from ``## Roadmap`` instead, and
@@ -152,8 +156,8 @@ def _links(path: Path) -> list[tuple[int, str]]:
 
 
 def _documented_files() -> list[Path]:
-    """The README plus every ``docs/`` page, in a stable order."""
-    return [README] + sorted(DOCS_DIR.glob("*.md"))
+    """The entry points plus every nested ``docs/`` page, in a stable order."""
+    return [README, REPO_ROOT / TABLE_NON_DOCS_ROWS[0]] + sorted(DOCS_DIR.rglob("*.md"))
 
 
 def _where(path: Path, number: int) -> str:

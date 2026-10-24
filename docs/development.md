@@ -6,6 +6,11 @@ validator. Back to the [README](../README.md).
 The skill's source and test suite live under `skills/multi-llm/`. Every command
 below is typed at the checkout root.
 
+For architecture, shared invariants, and subsystem ownership, start with the
+[skill development guide](../skills/multi-llm/AGENTS.md). Its topic index links
+to the detailed contracts and regression history under
+[`docs/development/`](development/); read the references relevant to your change.
+
 ---
 
 ## Test suite

@@ -678,12 +678,13 @@ def test_no_doc_says_only_the_complete_block_renders_them():
     AGENTS.md's `user_next_step` sentence said only the complete block
     renders the manual tasks, while `render_next_phase_lines` lists them
     after every command block that carries them (pinned above)."""
+    contract = "../../docs/development/dispatcher.md"
     for path in ("utils/next_phase.py", "AGENTS.md", "SKILL.md",
-                 "references/summary-format.md"):
+                 "references/summary-format.md", contract):
         text = " ".join((SKILL_ROOT / path).read_text(encoding="utf-8").split()).lower()
         assert "only the complete block renders them" not in text, path
-    agents = " ".join((SKILL_ROOT / "AGENTS.md").read_text(encoding="utf-8").split())
-    assert "every block renders them, after a command block's commands too" in agents
+    text = " ".join((SKILL_ROOT / contract).read_text(encoding="utf-8").split())
+    assert "every block renders them, after a command block's commands too" in text
 
 
 def test_the_tool_routes_say_workflow_complete_only_on_a_complete_result():

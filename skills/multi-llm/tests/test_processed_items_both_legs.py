@@ -373,5 +373,6 @@ def test_the_native_no_op_asymmetry_is_documented():
     text = schema["patternProperties"]["^processed_"]["description"]
     assert "the native leg records a verified no-op batch as applied" in text, text
     assert "no reader tells the two apart" in text, text
-    agents = (SKILL_DIR / "AGENTS.md").read_text(encoding="utf-8")
-    assert "the native leg records a verified no-op batch as `applied`" in agents
+    contract = SKILL_DIR.parents[1] / "docs/development/write-scheduler.md"
+    text = " ".join(contract.read_text(encoding="utf-8").split())
+    assert "the native leg records a verified no-op batch as `applied`" in text
