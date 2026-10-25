@@ -408,6 +408,10 @@ class TestWaitingLooks:
     def test_a_table_older_than_the_wait_or_the_interval_is_read_again(self, ps_route):
         process_control._Liveness(not_before=time.monotonic(), max_age_s=5.0)
         # A wait that began after that read never sees a table from before it.
+        # "After" needs the clock to have moved: on the Windows leg monotonic()
+        # can tick every ~16 ms, and a wait begun in the read's tick may share it.
+        while time.monotonic() <= ps_route[0]:
+            time.sleep(0.001)
         process_control._Liveness(not_before=time.monotonic(), max_age_s=5.0)
         assert len(ps_route) == 2
         # Nor one older than its interval.
