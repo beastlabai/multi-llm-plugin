@@ -9,11 +9,12 @@
 #
 # WHAT CARRIES OVER FROM THE OPENCODE WORKFLOW, and what does not. Its safeguard
 # 1 (a tag pattern of this route's own), 2 (the tag equals the one version owner,
-# here skills/multi-llm/pyproject.toml) and 4 (the gate runs in this job, on the
-# tagged commit — never "it ran on the PR") carry, as does pinning every action
-# by commit SHA. Safeguard 3's pinned npm, the registry probe and `npm publish
-# --provenance` go with the registry, and so does `id-token: write`: nothing is
-# signed and nothing is uploaded, on either job.
+# here skills/multi-llm/pyproject.toml) and 4 (the gate runs on the tagged
+# commit — never "it ran on the PR"; here in the gate job itself, there in the
+# same run, on the same SHA, bound by the digest) carry, as does pinning every
+# action by commit SHA. Safeguard 3's pinned npm, the registry probe and `npm
+# publish --provenance` go with the registry, and so does `id-token: write`:
+# nothing is signed and nothing is uploaded, on either job.
 
 name: publish codex plugin
 

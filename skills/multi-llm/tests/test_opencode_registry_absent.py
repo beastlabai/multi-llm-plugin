@@ -568,17 +568,10 @@ def _row9_violations(path: Path) -> list:
     return problems
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the workflow's publish job still carries its own row-9 copy until the "
-           "gate/verify/publish split lands; strict, so that commit must drop this mark")
 def test_the_publish_workflow_reaches_row_9_only_through_the_entry_point():
     """A generic scan, because another package rewrites this workflow: whatever
     its jobs become, no step may decide absence itself, every step that names
-    row 9 must call the entry point, and at least one job must run it.
-
-    Red until that rewrite lands: today's `publish` job still carries the
-    hand-written copy this script replaces."""
+    row 9 must call the entry point, and at least one job must run it."""
     assert _row9_violations(PUBLISH_WORKFLOW) == []
 
 
