@@ -1258,37 +1258,65 @@ _STOP_SIGNALS = frozenset(
 #: shell leads a group of its own and survives it.
 _STOP_EXIT_CODES = frozenset(128 + sig for sig in _STOP_SIGNALS)
 
+#: ``STATUS_CONTROL_C_EXIT``: the Windows spelling of "died of Ctrl-C"
+#: (2026-10-25). Windows has no signal to die of, so a return code there is
+#: never negative and the ``-N`` half of :func:`_stopped_from_outside` never
+#: fires. A console process whose Ctrl-C or Ctrl-Break reached the default
+#: handler exits with this status instead, and a Python CLI whose
+#: ``KeyboardInterrupt`` went unhandled exits with it on purpose (3.8+), so its
+#: parent can tell. ``Popen`` reports it unsigned. A CLI that handled the
+#: Ctrl-C and exited 130 is :data:`_STOP_EXIT_CODES` on Windows as on POSIX.
+#: No POSIX status is ever this value (those are 0-255, or ``-N``).
+_WINDOWS_CTRL_C_EXIT = 0xC000013A
+
 
 def _stopped_from_outside(returncode: Optional[int]) -> bool:
     """Whether a CLI that returned on its own was stopped by a signal from outside.
 
     Either it died of one of :data:`_STOP_SIGNALS` (``-N``) or its own handler
-    exited with ``128 + N`` for it (:data:`_STOP_EXIT_CODES`).
+    exited with ``128 + N`` for it (:data:`_STOP_EXIT_CODES`), or, on Windows,
+    the console's Ctrl-C ended it (:data:`_WINDOWS_CTRL_C_EXIT`). There a
+    terminal Ctrl-C reaches every process on the console, and what the CLI
+    started that ignored it is still in the CLI's job, which this stop ends.
+    A CLI killed outright from outside (``taskkill /F``, another
+    ``TerminateProcess``) exits with whatever code its killer chose, usually
+    1, which no exit code tells from a failure, so it is not one; the
+    registry's sweep is what reaches its job when the stop is ours.
     """
     if returncode is None:
         return False
-    return -returncode in _STOP_SIGNALS or returncode in _STOP_EXIT_CODES
+    return (-returncode in _STOP_SIGNALS or returncode in _STOP_EXIT_CODES
+            or returncode == _WINDOWS_CTRL_C_EXIT)
 
 
-def _stop_cli_tree(proc: "subprocess.Popen[Any]") -> Optional[process_control.TreeSweep]:
+def _stop_cli_tree(
+    proc: "subprocess.Popen[Any]", job: Optional[process_control.TreeJob] = None,
+) -> Optional[process_control.TreeSweep]:
     """Snapshot *proc*'s descendants, then stop it and every snapshotted group.
 
     The snapshot merges a fresh walk (taken now, while *proc* is un-reaped, so
     its parent links still lead to its children) with the registry's last
-    refreshed one (which still holds them when *proc* itself died first). Never
-    raises: teardown must not mask the timeout or the interrupt that asked for
-    it, so a failed sweep falls back to a plain kill of the CLI.
+    refreshed one (which still holds them when *proc* itself died first). On
+    Windows, where there is no snapshot to take, *job* is the CLI's Job Object
+    and is terminated right after the CLI (2026-10-25). Never raises: teardown
+    must not mask the timeout or the interrupt that asked for it, so a failed
+    sweep falls back to a plain kill of the CLI, and then of its job.
     """
     try:
         snapshot = process_control.live_cli_registry.snapshot_for(proc)
         return process_control.terminate_timed_out(
-            proc, snapshot, LANE_A_TERMINATE_GRACE_S
+            proc, snapshot, LANE_A_TERMINATE_GRACE_S, job=job
         )
     except Exception:  # noqa: BLE001 - see above
         try:
             proc.kill()
         except OSError:
             pass
+        if job is not None:
+            try:
+                job.terminate()
+            except Exception:  # noqa: BLE001 - see above
+                pass
         return None
 
 
@@ -1350,19 +1378,29 @@ def _run_provider_cli(
     long as it is waited on, so an aborted detached worker can sweep it too. The
     CLI is **not** moved into a session of its own: a terminal Ctrl-C must still
     reach it.
+
+    Windows has no groups to snapshot, so the CLI is spawned in a Job Object of
+    its own instead (``process_control.popen_tree``, 2026-10-25), and each stop
+    above, the stop from outside included, ends that job right after the CLI.
+    That is what reaches the children a ``TerminateProcess`` of the CLI alone
+    left running, holding the pipes until the drain's cap. No new process group
+    either: a job does not change who a terminal Ctrl-C reaches, a new group
+    would. The job travels with the CLI into the registry, so a sweep ends it
+    too, and is closed (never a kill) once the CLI is no longer waited on; a CLI
+    that exits on its own leaves whatever it started running, as on POSIX.
     """
     if capture_output:
         popen_kwargs["stdout"] = subprocess.PIPE
         popen_kwargs["stderr"] = subprocess.PIPE
     if input is not None:
         popen_kwargs["stdin"] = subprocess.PIPE
-    proc = subprocess.Popen(cmd, **popen_kwargs)
+    proc, job = process_control.popen_tree(cmd, **popen_kwargs)
     try:
-        with process_control.live_cli_registry.tracking(proc):
+        with process_control.live_cli_registry.tracking(proc, job):
             try:
                 stdout, stderr = proc.communicate(input=input, timeout=timeout)
             except subprocess.TimeoutExpired as exc:
-                sweep = _stop_cli_tree(proc)
+                sweep = _stop_cli_tree(proc, job)
                 out, err = _drain_after_stop(proc, exc)
                 expired = subprocess.TimeoutExpired(
                     proc.args, exc.timeout, output=out, stderr=err
@@ -1370,14 +1408,21 @@ def _run_provider_cli(
                 expired.tree_sweep = sweep
                 raise expired from None
             except BaseException:
-                _stop_cli_tree(proc)
+                _stop_cli_tree(proc, job)
                 raise
             if _stopped_from_outside(proc.returncode):
                 # Dead already, and its detached children may not be: only the
-                # registry's snapshot still links them to this slot.
-                _stop_cli_tree(proc)
+                # registry's snapshot still links them to this slot (on Windows,
+                # its job).
+                _stop_cli_tree(proc, job)
     finally:
-        _release_pipes(proc)
+        # After `tracking` has unregistered the CLI, so a sweep can no longer
+        # be terminating the job through the handle closed here.
+        try:
+            _release_pipes(proc)
+        finally:
+            if job is not None:
+                job.close()
     return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
 
@@ -2216,7 +2261,8 @@ def invoke_with_provider(
         # `subprocess.run`'s contract and arguments, but a `Popen` underneath:
         # on the deadline, a Ctrl-C or an abort the CLI is SIGTERMed first and
         # every process group it spawned is swept, instead of `run`'s bare
-        # SIGKILL of the CLI alone (D3.3; see `_run_provider_cli`).
+        # SIGKILL of the CLI alone (D3.3; see `_run_provider_cli`). On Windows
+        # the CLI runs in a Job Object of its own, and the stop ends that job.
         # Registered for exactly as long as the child runs, so a jailed slot's
         # `[CODEX_HOME_CHECK]` line can say how many other children of this
         # provider shared its window (F1 Limits, 2026-09-30).

@@ -1407,6 +1407,179 @@ def test_windows_cancel_still_reaps_the_child_if_taskkill_fails(monkeypatch, fai
     assert calls == ["taskkill", "kill", "wait"]
 
 
+class _FakeJobApi:
+    """``WindowsJob``'s kernel32/ntdll calls, recorded (round-8 review)."""
+
+    def __init__(self, assign=True, resume=True, terminate=True):
+        self.calls = []
+        self._assign, self._resume, self._terminate = assign, resume, terminate
+
+    def create(self):
+        self.calls.append("create")
+        return 101
+
+    def open_process(self, pid):
+        self.calls.append(("open_process", pid))
+        return 202
+
+    def assign(self, job, process):
+        self.calls.append(("assign", job, process))
+        return self._assign
+
+    def resume(self, process):
+        self.calls.append(("resume", process))
+        return self._resume
+
+    def terminate(self, job):
+        self.calls.append(("terminate", job))
+        return self._terminate
+
+    def close(self, handle):
+        self.calls.append(("close", handle))
+
+
+def _windows_job_module(monkeypatch, api):
+    module = _server_module()
+    monkeypatch.setattr(module, "sys", types.SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(module.WindowsJob, "load_api", classmethod(lambda cls: api))
+    return module
+
+
+@pytest.mark.parametrize("terminated", [True, False])
+def test_windows_cancel_kills_through_the_childs_job_before_taskkill(
+    monkeypatch, terminated
+):
+    """``taskkill /T`` walks parent pids, which Windows leaves stale on orphans:
+    an unrelated orphan whose dead parent's pid was recycled to our child died
+    with it. The child's Job Object holds exactly its tree; taskkill is only
+    the fallback for a job that could not be terminated."""
+    api = _FakeJobApi(terminate=terminated)
+    module = _windows_job_module(monkeypatch, api)
+    calls = []
+    monkeypatch.setattr(module.subprocess, "run",
+                        lambda argv, **kwargs: calls.append(argv[0]))
+    proc = types.SimpleNamespace(
+        pid=123, poll=lambda: None,
+        kill=lambda: calls.append("kill"),
+        wait=lambda **kwargs: calls.append("wait"),
+    )
+    job = module.WindowsJob.create()
+    module.kill_tree(proc, [], job)
+    assert ("terminate", 101) in api.calls
+    assert calls == (["kill", "wait"] if terminated else ["taskkill", "kill", "wait"])
+
+
+def test_windows_job_adopts_a_suspended_child_before_it_runs(monkeypatch):
+    api = _FakeJobApi()
+    module = _windows_job_module(monkeypatch, api)
+    job = module.WindowsJob.create()
+    assert job.adopt(types.SimpleNamespace(pid=77)) is True
+    assert api.calls == ["create", ("open_process", 77), ("assign", 101, 202),
+                         ("resume", 202), ("close", 202)]
+    job.close()
+    job.close()
+    assert api.calls[-1] == ("close", 101) and api.calls.count(("close", 101)) == 1
+    assert job.terminate() is False, "a closed job kills nothing"
+
+    # Popen's own handle has every right CreateProcess grants: no OpenProcess,
+    # and the handle stays Popen's to close.
+    api = _FakeJobApi()
+    module = _windows_job_module(monkeypatch, api)
+    job = module.WindowsJob.create()
+    assert job.adopt(types.SimpleNamespace(pid=77, _handle=999)) is True
+    assert api.calls == ["create", ("assign", 101, 999), ("resume", 999)]
+
+    # One that cannot join still runs; its job is let go, so taskkill kills it.
+    api = _FakeJobApi(assign=False)
+    module = _windows_job_module(monkeypatch, api)
+    job = module.WindowsJob.create()
+    assert job.adopt(types.SimpleNamespace(pid=77)) is True
+    assert ("close", 101) in api.calls and job.terminate() is False
+
+    api = _FakeJobApi(resume=False)
+    module = _windows_job_module(monkeypatch, api)
+    assert module.WindowsJob.create().adopt(types.SimpleNamespace(pid=77)) is False
+
+
+def test_no_job_off_windows():
+    module = _server_module()
+    if sys.platform != "win32":
+        assert module.WindowsJob.create() is None
+
+
+class _FakeShell:
+    """A child that never ran a shell: empty pipes, an exit code on demand."""
+
+    spawned = []
+
+    def __init__(self, argv, **kwargs):
+        import io
+
+        self.argv, self.kwargs, self.pid = argv, kwargs, 4242
+        self.stdout, self.stderr = io.BytesIO(b""), io.BytesIO(b"")
+        self.code = 0 if kwargs.get("finish", True) else None
+        self.events = []
+        _FakeShell.spawned.append(self)
+
+    def poll(self):
+        return self.code
+
+    def kill(self):
+        self.events.append("kill")
+        self.code = 1
+
+    def wait(self, timeout=None):
+        self.events.append("wait")
+        return self.code
+
+
+def _job_server(module):
+    server = module.Server.__new__(module.Server)
+    server.shell = "bash"
+    server.surface = SURFACE
+    server.spawn_argv = lambda argv: ["uv", "run", "--"] + list(argv)
+    call = module.Call(1, {}, None)
+    call.anchor = "/work"
+    return server, call
+
+
+@pytest.mark.parametrize("ends", ["exits", "times out", "never resumes"])
+def test_the_servers_child_runs_in_its_job_from_its_first_instruction(
+    monkeypatch, ends
+):
+    api = _FakeJobApi(resume=ends != "never resumes")
+    module = _windows_job_module(monkeypatch, api)
+    _FakeShell.spawned = []
+
+    class Shell(_FakeShell):
+        def __init__(self, argv, **kwargs):
+            super().__init__(argv, **kwargs)
+            if ends == "times out":
+                self.code = None
+
+    monkeypatch.setattr(module.subprocess, "Popen", Shell)
+    killed = []
+    real_kill_tree = module.kill_tree
+    monkeypatch.setattr(module, "kill_tree", lambda proc, drains, job=None: (
+        killed.append(job), real_kill_tree(proc, drains, job)))
+    server, call = _job_server(module)
+    run = server.run_child(call, ["status"], 0 if ends == "times out" else 30)
+
+    [shell] = _FakeShell.spawned
+    assert shell.kwargs["creationflags"] == module.CREATE_SUSPENDED
+    assert ("assign", 101, 202) in api.calls and ("resume", 202) in api.calls
+    assert api.calls[-1] == ("close", 101), "the job outlived the call"
+    if ends == "exits":
+        assert run.code == 0 and not killed and ("terminate", 101) not in api.calls
+    elif ends == "times out":
+        assert run.timed_out and killed and killed[0] is not None
+        assert ("terminate", 101) in api.calls
+    else:
+        assert "could not be resumed" in run.spawn_error
+        assert "kill" in shell.events
+        assert call.shell_argv is None
+
+
 class TestWindowsBash:
     """On Windows the shell is Git Bash, and ``bash`` on PATH may be WSL's.
 

@@ -31,7 +31,7 @@ import os
 import stat
 import tempfile
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 __all__ = [
     "FOLDER",
@@ -39,6 +39,7 @@ __all__ = [
     "PromptFolder",
     "identify",
     "pin_phase_dir",
+    "remove_held",
 ]
 
 #: The folder under the phase dir: what ``util write-prompt`` writes on the
@@ -319,3 +320,218 @@ class PromptFolder:
             except OSError:
                 pass
             raise
+
+
+# ---------------------------------------------------------------------------
+# Windows: removing through handles held open (round-8 review, 2026-10-24)
+# ---------------------------------------------------------------------------
+
+_FILE_ATTRIBUTE_DIRECTORY = 0x10
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+#: The reparse-tag bit of a tag that names another path: a symlink, a
+#: junction (``IsReparseTagNameSurrogate``). OneDrive's, ProjFS's and VFS for
+#: Git's tags lack it: those are the directory or file they look like.
+_NAME_SURROGATE_BIT = 0x20000000
+
+
+class _WindowsFiles:  # pragma: no cover - Windows
+    """The kernel32 calls :func:`remove_held` makes, typed for 64-bit handles."""
+
+    _FILE_LIST_DIRECTORY = 0x0001
+    _FILE_READ_ATTRIBUTES = 0x0080
+    _DELETE = 0x00010000
+    _SYNCHRONIZE = 0x00100000
+    _FILE_SHARE_READ, _FILE_SHARE_WRITE, _FILE_SHARE_DELETE = 0x1, 0x2, 0x4
+    _OPEN_EXISTING = 3
+    _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+    _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000  # what opens a directory at all
+    _FILE_ATTRIBUTE_TAG_INFO = 9
+    _FILE_DISPOSITION_INFO = 4
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle, boolean, dword = wintypes.HANDLE, wintypes.BOOL, wintypes.DWORD
+        for name, argtypes, restype in (
+            ("CreateFileW", [wintypes.LPCWSTR, dword, dword, ctypes.c_void_p,
+                             dword, dword, handle], handle),
+            ("GetFileInformationByHandleEx",
+             [handle, ctypes.c_int, ctypes.c_void_p, dword], boolean),
+            ("SetFileInformationByHandle",
+             [handle, ctypes.c_int, ctypes.c_void_p, dword], boolean),
+            ("GetFinalPathNameByHandleW", [handle, wintypes.LPWSTR, dword, dword], dword),
+            ("CloseHandle", [handle], boolean),
+        ):
+            function = getattr(kernel32, name)
+            function.argtypes, function.restype = argtypes, restype
+
+        class TagInfo(ctypes.Structure):
+            _fields_ = [("FileAttributes", dword), ("ReparseTag", dword)]
+
+        class Disposition(ctypes.Structure):
+            _fields_ = [("DeleteFile", wintypes.BOOLEAN)]
+
+        self._ctypes = ctypes
+        self._kernel32 = kernel32
+        self._tag_info = TagInfo
+        self._disposition = Disposition
+        self._invalid = ctypes.c_void_p(-1).value
+
+    def open(self, path: str, *, folder: bool) -> Optional[int]:
+        """*path* itself, never what a reparse point there names. A folder is
+        opened to list and shared for reading and writing only, so while it
+        is held nobody can rename, remove or replace it; a file is opened to
+        delete and shared fully, as ``os.unlink`` would find it."""
+        if folder:
+            access = self._FILE_LIST_DIRECTORY | self._FILE_READ_ATTRIBUTES | self._SYNCHRONIZE
+            share = self._FILE_SHARE_READ | self._FILE_SHARE_WRITE
+        else:
+            access = self._DELETE | self._FILE_READ_ATTRIBUTES | self._SYNCHRONIZE
+            share = self._FILE_SHARE_READ | self._FILE_SHARE_WRITE | self._FILE_SHARE_DELETE
+        handle = self._kernel32.CreateFileW(
+            path, access, share, None, self._OPEN_EXISTING,
+            self._FILE_FLAG_OPEN_REPARSE_POINT | self._FILE_FLAG_BACKUP_SEMANTICS, None,
+        )
+        return None if handle in (None, self._invalid) else handle
+
+    def attributes(self, handle: int) -> Tuple[int, int]:
+        """``(FileAttributes, ReparseTag)`` of the opened file itself."""
+        info = self._tag_info()
+        if not self._kernel32.GetFileInformationByHandleEx(
+            handle, self._FILE_ATTRIBUTE_TAG_INFO,
+            self._ctypes.byref(info), self._ctypes.sizeof(info),
+        ):
+            raise self._ctypes.WinError(self._ctypes.get_last_error())
+        return int(info.FileAttributes), int(info.ReparseTag)
+
+    def final_path(self, handle: int) -> str:
+        size = 512
+        while True:
+            buffer = self._ctypes.create_unicode_buffer(size)
+            length = self._kernel32.GetFinalPathNameByHandleW(handle, buffer, size, 0)
+            if not length:
+                raise self._ctypes.WinError(self._ctypes.get_last_error())
+            if length < size:
+                return buffer.value
+            size = length + 1
+
+    def delete(self, handle: int) -> bool:
+        """Mark the opened file deleted: it goes when the handle closes."""
+        info = self._disposition(True)
+        return bool(self._kernel32.SetFileInformationByHandle(
+            handle, self._FILE_DISPOSITION_INFO,
+            self._ctypes.byref(info), self._ctypes.sizeof(info),
+        ))
+
+    def close(self, handle: int) -> None:
+        self._kernel32.CloseHandle(handle)
+
+
+_WINDOWS_FILES: List[Any] = []
+
+
+def _windows_files() -> Optional[Any]:
+    """The Windows calls, loaded once; ``None`` where they cannot be."""
+    if not _WINDOWS_FILES:
+        try:
+            _WINDOWS_FILES.append(_WindowsFiles())
+        except Exception:  # noqa: BLE001 - the caller walks by path instead
+            _WINDOWS_FILES.append(None)
+    return _WINDOWS_FILES[0]
+
+
+def _links_elsewhere(attributes: int, tag: int) -> bool:
+    """A reparse point that names another path (a symlink, a junction)."""
+    return bool(attributes & _FILE_ATTRIBUTE_REPARSE_POINT and tag & _NAME_SURROGATE_BIT)
+
+
+def _same_path(left: str, right: str) -> bool:
+    return os.path.normcase(left) == os.path.normcase(right)
+
+
+def remove_held(
+    phase_dir: str, wanted: Callable[[str], bool], *, api: Any = None,
+) -> Optional[int]:
+    """Windows: remove each file in ``{phase_dir}/prompts`` whose name
+    *wanted* accepts; how many. ``None`` when the walk could not be made at
+    all — the Windows calls cannot be loaded, a folder cannot be opened, or
+    a call fails before any file is reached (a volume with no drive letter,
+    a redirector without final paths) — so the caller can fall back to its
+    path walk; ``0`` when a folder is refused (a link, not a directory, not
+    the phase dir's own ``prompts``).
+
+    Nothing is reached through a path that can be swapped between its check
+    and its removal (round-8 review): the phase dir and ``prompts`` are each
+    opened as themselves, never through a reparse point there, and held open
+    without delete sharing, so neither can be renamed, removed or replaced
+    until the walk ends; ``prompts`` is opened by the phase dir's final path
+    and must be its child by both handles' final paths; and each file is
+    opened as itself below that, must be a file in that folder, and is
+    deleted through its own handle. A symlink or junction anywhere there
+    removes nothing. A reparse point that names no other path (OneDrive Files
+    On-Demand, a ProjFS or VFS for Git checkout) is the folder or file it
+    looks like, so it is walked; ``lstat`` called it a link and the walk
+    removed nothing there. Best-effort: a file that cannot be opened or
+    deleted is left.
+    """
+    files = api if api is not None else _windows_files()
+    if files is None:
+        return None
+    held: List[int] = []
+
+    def hold_folder(path: str) -> Optional[str]:
+        """The folder's final path, held open; ``None`` when it is refused.
+        One that cannot be opened at all raises: no walk, not a refusal."""
+        handle = files.open(path, folder=True)
+        if handle is None:
+            raise OSError(f"{path} could not be opened")
+        held.append(handle)
+        attributes, tag = files.attributes(handle)
+        if not attributes & _FILE_ATTRIBUTE_DIRECTORY or _links_elsewhere(attributes, tag):
+            return None
+        return files.final_path(handle)
+
+    removed = 0
+    try:
+        try:
+            phase = hold_folder(str(phase_dir))
+            if phase is None:
+                return 0
+            folder = hold_folder(os.path.join(phase, FOLDER))
+            if folder is None or not _same_path(folder, os.path.join(phase, FOLDER)):
+                return 0
+            names = os.listdir(folder)
+        except Exception:  # noqa: BLE001 - nothing reached yet: walk by path
+            return None
+        for name in names:
+            if not wanted(name):
+                continue
+            entry = os.path.join(folder, name)
+            handle = files.open(entry, folder=False)
+            if handle is None:
+                continue
+            try:
+                attributes, tag = files.attributes(handle)
+                if (
+                    attributes & _FILE_ATTRIBUTE_DIRECTORY
+                    or _links_elsewhere(attributes, tag)
+                    or not _same_path(files.final_path(handle), entry)
+                ):
+                    continue
+                if files.delete(handle):
+                    removed += 1
+            except Exception:  # noqa: BLE001 - best-effort, like the descriptor walk
+                continue
+            finally:
+                files.close(handle)
+    except Exception:  # noqa: BLE001 - best-effort, like the descriptor walk
+        return removed
+    finally:
+        for handle in reversed(held):
+            try:
+                files.close(handle)
+            except Exception:  # noqa: BLE001 - a leaked handle is all it costs
+                pass
+    return removed

@@ -12521,7 +12521,9 @@ class WriteBatchScheduler:
           to init. The child is its own process-group leader here
           (``process_control.new_process_group_kwargs``) and a timeout takes the
           whole group down through ``kill_tree``, the same facade and the same
-          escalation the runner spawn uses.
+          escalation the runner spawn uses. On Windows, which has no groups,
+          the command starts in a Job Object of its own
+          (``process_control.popen_tree``) and the timeout ends that job.
         * **Bound the wait.** A grandchild that inherited the capture pipes keeps
           ``communicate()`` blocked past the deadline, so ``verify_timeout_s``
           was not a bound at all. Both streams go to one temp file instead:
@@ -12541,7 +12543,7 @@ class WriteBatchScheduler:
             )
         with sink:
             try:
-                proc = subprocess.Popen(  # noqa: S602 - a shell string is the contract
+                proc, job = _process_control.popen_tree(  # noqa: S602 - a shell string is the contract
                     command, shell=True, cwd=self.repo_root,
                     stdin=subprocess.DEVNULL, stdout=sink,
                     stderr=subprocess.STDOUT, env=env,
@@ -12551,39 +12553,48 @@ class WriteBatchScheduler:
                 return VERIFY_EXIT_NOT_RUN, (
                     f"verification command could not be started: {exc}"
                 )
-            # Read the group while the leader is alive: `os.getpgid` stops
-            # answering once it is reaped, and the group is what still holds the
-            # build's children.
-            pgid = _process_control.process_group_id(proc.pid)
-            note = ""
             try:
-                exit_code = int(proc.wait(timeout=timeout))
-            except subprocess.TimeoutExpired:
-                verdict = self._kill_verify_tree(proc, pgid)
-                exit_code = VERIFY_EXIT_TIMEOUT
-                note = (
-                    f"\n(killed after {timeout}s: SIGTERM then SIGKILL to the "
-                    f"command's whole process group — verdict {verdict})"
-                )
+                # Read the group while the leader is alive: `os.getpgid` stops
+                # answering once it is reaped, and the group is what still
+                # holds the build's children.
+                pgid = _process_control.process_group_id(proc.pid)
+                note = ""
+                try:
+                    exit_code = int(proc.wait(timeout=timeout))
+                except subprocess.TimeoutExpired:
+                    verdict = self._kill_verify_tree(proc, pgid, job)
+                    exit_code = VERIFY_EXIT_TIMEOUT
+                    note = (
+                        f"\n(killed after {timeout}s: SIGTERM then SIGKILL to the "
+                        f"command's whole process group — verdict {verdict})"
+                    )
+            finally:
+                if job is not None:
+                    job.close()
             return exit_code, self._verify_output_tail(sink) + note
 
-    def _kill_verify_tree(self, proc: Any, pgid: Optional[int]) -> str:
+    def _kill_verify_tree(
+        self, proc: Any, pgid: Optional[int], job: Any = None,
+    ) -> str:
         """SIGTERM → SIGKILL the timed-out command *and its group*, then reap it.
 
         ``start_time=None`` is how an unverified kill is *requested*: this pid is
         a child still held open here, not a record read off disk, so there is
-        nothing to corroborate and no recycled pid to protect.
+        nothing to corroborate and no recycled pid to protect. *job* is the
+        command's Windows Job Object, the group's stand-in there.
         """
         try:
             verdict = _process_control.kill_tree(
                 proc.pid, start_time=None, pgid=pgid,
                 escalate_after_s=VERIFY_KILL_GRACE_S, poll_interval_s=0.05,
+                job=job,
             )
         except Exception:  # noqa: BLE001 - teardown must never mask the timeout
-            try:
-                proc.kill()
-            except OSError:  # pragma: no cover - already gone
-                pass
+            if job is None or not job.terminate():
+                try:
+                    proc.kill()
+                except OSError:  # pragma: no cover - already gone
+                    pass
             verdict = "killed"
         try:
             proc.wait(timeout=VERIFY_REAP_S)

@@ -626,6 +626,7 @@ def kill_tree(
     pgid: Optional[int] = None,
     escalate_after_s: float = DEFAULT_ESCALATE_AFTER_S,
     poll_interval_s: float = 0.1,
+    job: Optional[TreeJob] = None,
 ) -> str:
     """Terminate *pid* and every process it spawned. Returns a verdict string.
 
@@ -650,8 +651,21 @@ def kill_tree(
     itself is gone (the crash case D4b's close-out has to clean up); it is only
     ever the recorded value, never one re-derived from a pid whose identity just
     failed.
+
+    Windows has no groups. There *job* is the child's :class:`TreeJob` from
+    :func:`popen_tree`, which plays the group's part: the escalation
+    terminates it rather than running ``taskkill /T`` (which can reach an
+    unrelated orphan, :func:`taskkill_tree`), and a leader already gone still
+    has what it left in the job ended. A detached run's pid read off disk
+    has one too, by name: :func:`kill_run_tree` opens it and passes it here
+    (2026-10-25). Without one (a run whose job could not be opened, a child
+    spawned without a job) the escalation is ``taskkill /T`` as before.
     """
     if not pid and not pgid:
+        # Nothing recorded to probe or signal, but a job still names a tree: a
+        # run whose record lost its pid, found by its run id (`kill_run_tree`).
+        if IS_WINDOWS and job is not None:  # pragma: no cover - Windows
+            job.terminate()
         return "gone"
     verdict = probe(pid, start_time) if pid else DEAD
     if verdict == UNKNOWN and start_time:
@@ -659,9 +673,11 @@ def kill_tree(
     if verdict == DEAD:
         if pgid and not IS_WINDOWS:
             return _posix_kill_group(pgid, escalate_after_s, poll_interval_s)
+        if IS_WINDOWS and job is not None:  # pragma: no cover - Windows
+            job.terminate()
         return "gone"
     if IS_WINDOWS:  # pragma: no cover - Windows
-        return _windows_kill_tree(pid, escalate_after_s)
+        return _windows_kill_tree(pid, escalate_after_s, job)
     return _posix_kill_tree(pid, escalate_after_s, poll_interval_s, pgid=pgid)
 
 
@@ -784,10 +800,17 @@ def taskkill_tree(pid: int, *, timeout: float = 30.0) -> None:  # pragma: no cov
     """``taskkill /T /F`` on *pid*: Windows' kill of a process and every process
     it spawned, at once.
 
-    :func:`kill_tree`'s escalation there, and the whole kill of a child that
-    was started in no group of its own, which a ``CTRL_BREAK_EVENT`` cannot
-    target: ``Popen.kill`` is ``TerminateProcess`` on the direct child alone.
+    :func:`kill_tree`'s escalation there when the child has no
+    :class:`TreeJob`, and the whole kill of a child that was started in no
+    group of its own, which a ``CTRL_BREAK_EVENT`` cannot target:
+    ``Popen.kill`` is ``TerminateProcess`` on the direct child alone.
     Best-effort: a ``taskkill`` that is missing or overruns *timeout* is let go.
+
+    Prefer :func:`end_tree` with the child's job. ``taskkill /T`` finds the
+    tree by parent pid, and Windows keeps a dead parent's pid on its orphans,
+    so an unrelated orphan whose dead parent's pid was recycled to *pid* dies
+    with it. It is also a process of its own, which can overrun *timeout* on
+    a loaded machine and then kill nothing past the direct child.
     """
     try:
         subprocess.run(
@@ -798,7 +821,525 @@ def taskkill_tree(pid: int, *, timeout: float = 30.0) -> None:  # pragma: no cov
         pass
 
 
-def _windows_kill_tree(pid: int, escalate_after_s: float) -> str:  # pragma: no cover
+# ---------------------------------------------------------------------------
+# Windows: one Job Object per spawned child (round-8 review, 2026-10-24)
+# ---------------------------------------------------------------------------
+#
+# Windows has no process groups to signal, and `taskkill /T` walks parent pids
+# (see `taskkill_tree`). A Job Object holds exactly a tree: `popen_tree` creates
+# the child suspended, puts it in a job of its own and only then resumes it, so
+# nothing the child starts runs outside the job, and `TerminateJobObject` ends
+# exactly those processes in one call, with no process of its own to time out.
+#
+# Why everything the child starts stays in the job. A child is created in every
+# job its parent is in, unless the parent's own job lets it break away. The
+# venv's `python.exe` launcher, uv's trampolines and libuv (node) each put their
+# child in a job of their own with SILENT_BREAKAWAY_OK, so *their* children
+# leave that job, and keep leaving up the chain of jobs above it until they
+# reach one that does not permit breakaway. A `TreeJob` sets no limit at all,
+# so it permits none, and that is where they stop.
+
+#: ``CreateProcess`` flag: the child's first thread starts suspended.
+_CREATE_SUSPENDED = 0x00000004
+
+#: The spawn :func:`popen_tree` puts in a job: the real one, which creates a
+#: process. A replaced ``subprocess.Popen`` (a test double) creates none, so
+#: there is nothing to put in a job and it is called as it is.
+_REAL_POPEN = subprocess.Popen
+
+#: The exit code ``TerminateJobObject`` gives each process; ``taskkill /F``'s.
+_JOB_KILL_EXIT_CODE = 1
+
+#: ``GetLastError`` after a ``CreateJobObjectW`` that opened an existing job
+#: of that name instead of creating one (WinError.h: 183).
+_ERROR_ALREADY_EXISTS = 183
+
+#: Job access rights (winnt.h). An aborter asks for these two and no more:
+#: ``TerminateJobObject`` needs TERMINATE, ``IsProcessInJob`` needs QUERY.
+_JOB_OBJECT_QUERY = 0x0004
+_JOB_OBJECT_TERMINATE = 0x0008
+
+
+class TreeJob:
+    """A Job Object holding one spawned child and every process it starts.
+
+    No limit is set, ``KILL_ON_JOB_CLOSE`` included: :meth:`close` lets go of
+    the handle and kills nothing, so what a child leaves running after a
+    normal exit keeps running, as a process group's members do on POSIX. Only
+    :meth:`terminate` kills. Made by :func:`popen_tree`; for a detached run's
+    named job, by :func:`spawn_detached_run` (the launcher's handle) and
+    :func:`open_run_job` (an aborter's).
+    """
+
+    def __init__(self, api: Any, handle: int) -> None:
+        self._api = api
+        self._handle: Optional[int] = handle
+
+    def terminate(self) -> bool:
+        """End every process in the job now. ``False`` when that failed or
+        the handle is already closed, which leaves the caller its fallback."""
+        handle = self._handle
+        if handle is None:
+            return False
+        try:
+            return bool(self._api.terminate(handle, _JOB_KILL_EXIT_CODE))
+        except Exception:  # noqa: BLE001 - the caller falls back to taskkill
+            return False
+
+    def close(self) -> None:
+        """Let go of the handle (never a kill). Idempotent."""
+        handle, self._handle = self._handle, None
+        if handle is not None:
+            try:
+                self._api.close(handle)
+            except Exception:  # noqa: BLE001 - a leaked handle is all it costs
+                pass
+
+
+class _JobApi:  # pragma: no cover - Windows
+    """The kernel32 and ntdll calls behind :func:`popen_tree`,
+    :class:`TreeJob` and a detached run's named job (:func:`open_run_job`),
+    typed, so a 64-bit handle is never cut to a C ``int``."""
+
+    #: ``PROCESS_TERMINATE | PROCESS_SET_QUOTA | PROCESS_SUSPEND_RESUME``: what
+    #: ``AssignProcessToJobObject`` and ``NtResumeProcess`` need.
+    _PROCESS_RIGHTS = 0x0001 | 0x0100 | 0x0800
+
+    #: ``PROCESS_QUERY_LIMITED_INFORMATION``: all ``IsProcessInJob`` needs of
+    #: the process it tests, and the least an aborter can ask of a pid it
+    #: read off disk.
+    _PROCESS_QUERY = 0x1000
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        ntdll = ctypes.WinDLL("ntdll")
+        handle, boolean, dword = wintypes.HANDLE, wintypes.BOOL, wintypes.DWORD
+        for name, argtypes, restype in (
+            ("CreateJobObjectW", [ctypes.c_void_p, wintypes.LPCWSTR], handle),
+            ("OpenJobObjectW", [dword, boolean, wintypes.LPCWSTR], handle),
+            ("AssignProcessToJobObject", [handle, handle], boolean),
+            ("IsProcessInJob", [handle, handle, ctypes.POINTER(boolean)], boolean),
+            ("TerminateJobObject", [handle, wintypes.UINT], boolean),
+            ("OpenProcess", [dword, boolean, dword], handle),
+            ("GetCurrentProcess", [], handle),
+            ("CloseHandle", [handle], boolean),
+        ):
+            function = getattr(kernel32, name)
+            function.argtypes, function.restype = argtypes, restype
+        # Undocumented but stable since XP; psutil resumes processes with it.
+        # Popen keeps no handle of the child's first thread, so ResumeThread
+        # has nothing to resume.
+        ntdll.NtResumeProcess.argtypes = [handle]
+        ntdll.NtResumeProcess.restype = ctypes.c_long
+        self._ctypes = ctypes
+        self._bool = boolean
+        self._kernel32 = kernel32
+        self._resume = ntdll.NtResumeProcess
+
+    def create(self) -> Optional[int]:
+        return self._kernel32.CreateJobObjectW(None, None) or None
+
+    def create_named(self, name: str) -> Tuple[Optional[int], bool]:
+        """``CreateJobObjectW(NULL, name)``: the handle (``JOB_OBJECT_ALL_ACCESS``),
+        and whether the name already existed, in which case the handle is the
+        *existing* job's and the caller decides whether it may use it.
+
+        The last error is cleared first: the documented signal for an existing
+        object is a *successful* call whose last error is
+        ``ERROR_ALREADY_EXISTS``, and a fresh creation is not documented to
+        clear a stale value. ``use_last_error`` swaps the ctypes copy in before
+        the call and out after it, so the zero is what the call starts from.
+        """
+        self._ctypes.set_last_error(0)
+        handle = self._kernel32.CreateJobObjectW(None, name) or None
+        existed = (
+            handle is not None
+            and self._ctypes.get_last_error() == _ERROR_ALREADY_EXISTS
+        )
+        return handle, existed
+
+    def open_named(self, name: str, access: int) -> Optional[int]:
+        return self._kernel32.OpenJobObjectW(access, False, name) or None
+
+    def open_process(self, pid: int) -> Optional[int]:
+        # Our own child, which Popen's handle keeps from being reused.
+        return self._kernel32.OpenProcess(self._PROCESS_RIGHTS, False, pid) or None
+
+    def query_process(self, pid: int) -> Optional[int]:
+        return self._kernel32.OpenProcess(self._PROCESS_QUERY, False, pid) or None
+
+    def current_process(self) -> int:
+        # A pseudo handle, (HANDLE)-1 today: never closed, valid wherever a
+        # process handle is, with PROCESS_ALL_ACCESS.
+        return self._kernel32.GetCurrentProcess()
+
+    def in_job(self, process: int, job: int) -> Optional[bool]:
+        """``IsProcessInJob``; ``None`` when the call itself failed."""
+        result = self._bool()
+        if not self._kernel32.IsProcessInJob(process, job, self._ctypes.byref(result)):
+            return None
+        return bool(result.value)
+
+    def assign(self, job: int, process: int) -> bool:
+        return bool(self._kernel32.AssignProcessToJobObject(job, process))
+
+    def resume(self, process: int) -> bool:
+        return self._resume(process) == 0  # STATUS_SUCCESS
+
+    def terminate(self, job: int, exit_code: int) -> bool:
+        return bool(self._kernel32.TerminateJobObject(job, exit_code))
+
+    def close(self, handle: int) -> None:
+        self._kernel32.CloseHandle(handle)
+
+
+_JOB_API: List[Any] = []
+
+
+def _job_api() -> Optional[Any]:
+    """The Windows job calls, loaded once; ``None`` where they cannot be
+    (another OS, a sandbox that denies the DLL), which spawns as before."""
+    if not _JOB_API:
+        try:
+            _JOB_API.append(_JobApi())
+        except Exception:  # noqa: BLE001 - no job: taskkill is the kill
+            _JOB_API.append(None)
+    return _JOB_API[0]
+
+
+def popen_tree(args: Any, **kwargs: Any) -> Tuple[Any, Optional[TreeJob]]:
+    """``subprocess.Popen(args, **kwargs)``, and on Windows the
+    :class:`TreeJob` that holds the child's whole tree.
+
+    The job is ``None`` off Windows, and on Windows where no job could be made
+    or the child could not be put in one; the caller then kills as before
+    (:func:`end_tree` falls back to :func:`taskkill_tree`). With a job, the
+    child is created suspended (``CREATE_SUSPENDED`` is added to any
+    *creationflags*), put in the job, and resumed: a job assigned after the
+    child started could miss a grandchild it had already spawned. A child that
+    cannot be resumed is killed and ``OSError`` is raised, so no spawn is ever
+    left suspended. The caller owns the job and closes it once the child is
+    done with (:meth:`TreeJob.close`).
+    """
+    spawn = subprocess.Popen
+    api = _job_api() if IS_WINDOWS and spawn is _REAL_POPEN else None
+    job_handle: Optional[int] = None
+    if api is not None:
+        try:
+            job_handle = api.create()
+        except Exception:  # noqa: BLE001 - no job: spawn as before
+            job_handle = None
+    if api is None or job_handle is None:
+        return spawn(args, **kwargs), None
+    return _popen_in_job(api, job_handle, spawn, args, kwargs)
+
+
+class _NotResumed(OSError):
+    """A child created suspended for its job could not be resumed, and was
+    killed before it ran an instruction (:func:`_popen_in_job`)."""
+
+
+def _popen_in_job(
+    api: Any, job_handle: int, spawn: Callable[..., Any], args: Any,
+    kwargs: Dict[str, Any],
+) -> Tuple[Any, Optional[TreeJob]]:
+    """*spawn* the child suspended, put it in the job *job_handle* names, and
+    resume it: :func:`popen_tree`'s spawn, and the detached run's
+    (:func:`_spawn_detached_windows`).
+
+    The job handle is the callee's from here on: closed when the spawn fails
+    or the child cannot join (the job is then ``None`` and the child runs
+    without one), else handed back in the :class:`TreeJob`. A child that
+    cannot be resumed is killed and :class:`_NotResumed` raised.
+    """
+    flags = int(kwargs.pop("creationflags", 0) or 0) | _CREATE_SUSPENDED
+    try:
+        proc = spawn(args, creationflags=flags, **kwargs)
+    except BaseException:
+        api.close(job_handle)
+        raise
+    job: Optional[TreeJob] = TreeJob(api, job_handle)
+    resumed = False
+    # Popen's own handle has every right CreateProcess grants; opening another
+    # is only for a Popen that keeps none, and that one is closed again.
+    process: Optional[int] = getattr(proc, "_handle", None)
+    opened = process is None
+    try:
+        if opened:
+            process = api.open_process(proc.pid)
+        if process is not None:
+            if not api.assign(job_handle, process):
+                # Already in a job that cannot nest one (Windows 7, a job with
+                # UI limits): the child runs, and taskkill stays its kill.
+                job.close()
+                job = None
+            resumed = api.resume(process)
+    except Exception:  # noqa: BLE001 - settled below: resumed, or killed
+        pass
+    finally:
+        if opened and process is not None:
+            try:
+                api.close(process)
+            except Exception:  # noqa: BLE001
+                pass
+    if not resumed:
+        _discard_suspended(proc)
+        if job is not None:
+            job.close()
+        raise _NotResumed(
+            f"pid {proc.pid} was created suspended to enter its Job Object, and "
+            "could not be resumed; it was killed"
+        )
+    return proc, job
+
+
+def _discard_suspended(proc: Any) -> None:
+    """Kill and reap a child that never ran, and close its pipes."""
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        try:
+            if stream is not None:
+                stream.close()
+        except (OSError, ValueError):
+            pass
+    try:
+        proc.wait(timeout=5.0)
+    except Exception:  # noqa: BLE001 - killed; the handle goes with the object
+        pass
+
+
+def end_tree(pid: int, job: Optional[TreeJob] = None, *, timeout: float = 30.0) -> None:
+    """Kill *pid*'s whole tree now: its *job* when it has one that can still
+    be terminated, else :func:`taskkill_tree` with *timeout*."""
+    if job is not None and job.terminate():
+        return
+    taskkill_tree(pid, timeout=timeout)
+
+
+# ---------------------------------------------------------------------------
+# Windows: one named Job Object per detached run (2026-10-25)
+# ---------------------------------------------------------------------------
+#
+# A `TreeJob` is a handle, and a handle does not cross processes. The kills of
+# a detached run are made by whoever reads its `.status.json` or registry entry
+# (`status --abort`, a close-out, `util runs --sweep`), so they all still ended
+# in `taskkill /T`, with its unrelated-orphan risk. A run's job therefore has a
+# name, derived from its run id, the uuid4 the launcher mints just before the
+# spawn: `Local\multi-llm-run-<run_id>` (`run_job_name`).
+#
+# * The launcher creates the job and spawns the worker into it from its first
+#   instruction, as `popen_tree` does (`spawn_detached_run`): `uv`, its `.cmd`
+#   shim or trampoline, the worker python and everything under them are in it.
+#   It holds its handle until the handshake resolves, so a failed handshake
+#   ends exactly that tree, then closes it, which never kills.
+# * The worker opens the job and holds the handle for life (`_hold_run_job`,
+#   from `enter_detached_worker`). That handle is what keeps the job findable:
+#   a temporary kernel object has a name only while its handle count is above
+#   zero (the WDK, `ZwMakeTemporaryObject`), and processes in a job hold no
+#   handle to it. With the launcher's handle closed and no worker handle, the
+#   job lives on, nameless. The run's job sets no limit; the worker's reaper
+#   stays the anonymous KILL_ON_JOB_CLOSE job of `_assign_own_job_object`,
+#   which nests inside it. So a worker's normal exit kills nothing past what it
+#   always did, and `uv` ends on its own.
+# * An aborter opens the job by name for TERMINATE and QUERY only, trusts it
+#   only if a live recorded pid is in it (`open_run_job`), and kills through it
+#   (`kill_run_tree`). A dead recorded pid trusts the name: a job by that name
+#   still exists only while some process holds a handle to it.
+#
+# `Local\`, not `Global\`. The session namespace holds the launcher, its worker
+# (a child keeps its parent's session) and the user's `status`; a job's
+# processes must all run in one session anyway. A sweep from another session
+# (a service, a second logon) cannot see the name and kills by `taskkill` as
+# before. `Global\` would let any session see it, and squat it.
+#
+# Squatting. The run id is unguessable before the launch, and still: a name
+# that exists when the launcher creates it is never used (`ERROR_ALREADY_
+# EXISTS`), and the worker uses an existing job only if it is already in it.
+#
+# No job here ever sets JOB_OBJECT_LIMIT_BREAKAWAY_OK, for the reason in the
+# section above: the SILENT_BREAKAWAY_OK jobs of the venv launcher, uv's
+# trampolines and libuv let their children leave only up to the first job that
+# does not permit it, which is ours. Nesting needs Windows 8.
+
+#: The run job's name is this prefix and the run id.
+_RUN_JOB_PREFIX = "Local\\multi-llm-run-"
+
+#: What a run id may hold to name a job. A uuid4 always does; a name may not
+#: hold a backslash after its prefix, and is capped at MAX_PATH characters.
+_RUN_ID_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+)
+_RUN_ID_MAX = 128
+
+#: The worker's own handles on its run job, by name: held for its lifetime,
+#: like ``_JOB_HANDLE``, because the job's name lasts only while one is open.
+_RUN_JOB_HANDLES: Dict[str, int] = {}
+
+
+def run_job_name(run_id: Any) -> Optional[str]:
+    """``Local\\multi-llm-run-<run_id>``, or ``None`` for a run id that cannot
+    name a job (empty, too long, or holding anything but ASCII letters,
+    digits, ``.``, ``_`` and ``-``)."""
+    text = str(run_id) if run_id else ""
+    if not text or len(text) > _RUN_ID_MAX or not set(text) <= _RUN_ID_CHARS:
+        return None
+    return _RUN_JOB_PREFIX + text
+
+
+def _create_run_job(api: Any, run_id: Any) -> Optional[int]:
+    """The launcher's half: a new job named for *run_id*, or ``None``.
+
+    A name that already exists is someone else's job (the run id is minted
+    just before this call), and is never used: its handle is closed and the
+    worker spawns as before, with no job.
+    """
+    name = run_job_name(run_id)
+    if name is None:
+        return None
+    try:
+        handle, existed = api.create_named(name)
+    except Exception:  # noqa: BLE001 - no job: spawn as before
+        return None
+    if handle is not None and existed:
+        try:
+            api.close(handle)
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+    return handle
+
+
+def _hold_run_job(run_id: Any) -> bool:
+    """The worker's half: open (or create) its run's job and hold it for life.
+
+    ``True`` when this process now holds a handle on a job named for *run_id*
+    that it is in. The launcher's job is normally there already, with this
+    process in it since its first instruction; an existing job this process
+    is *not* in is a squatter's, and is let go of. With no job of that name
+    (a worker launched some other way, or one whose launcher could not make
+    the job) the worker creates it and joins it, so its tree is in it from
+    here on. Never raises: ``False`` leaves the worker as it was, and an
+    abort then kills by ``taskkill``.
+    """
+    name = run_job_name(run_id)
+    if name is None:
+        return False
+    if name in _RUN_JOB_HANDLES:
+        return True
+    api = _job_api()
+    if api is None:
+        return False
+    handle: Optional[int] = None
+    held = False
+    try:
+        handle, existed = api.create_named(name)
+        if handle is not None:
+            me = api.current_process()
+            if existed:
+                held = api.in_job(me, handle) is True
+            else:
+                held = api.assign(handle, me)
+    except Exception:  # noqa: BLE001 - not held: as before
+        held = False
+    if not held:
+        if handle is not None:
+            try:
+                api.close(handle)
+            except Exception:  # noqa: BLE001
+                pass
+        return False
+    _RUN_JOB_HANDLES[name] = handle
+    return True
+
+
+def open_run_job(run_id: Any, pid: Optional[int] = None) -> Optional[TreeJob]:
+    """An aborter's handle on a detached run's job, or ``None``.
+
+    ``None`` off Windows (no call is made at all), for a run id that names no
+    job, when no job of that name can be opened (the worker never held one,
+    or it is gone, or the caller is in another session), and when the
+    recorded *pid* is alive but not in the job: a live pid that is not the
+    run's is a recycled one, or the job is a squatter's. A recorded pid that
+    is already dead trusts the name. The caller closes the job
+    (:meth:`TreeJob.close`, never a kill) when the kill is done; ``None``
+    leaves it the ``taskkill`` it had.
+    """
+    if not IS_WINDOWS:
+        return None
+    try:
+        name = run_job_name(run_id)
+        api = _job_api() if name is not None else None
+        if api is None:
+            return None
+        handle = api.open_named(name, _JOB_OBJECT_TERMINATE | _JOB_OBJECT_QUERY)
+    except Exception:  # noqa: BLE001 - no job: taskkill
+        return None
+    if handle is None:
+        return None
+    job = TreeJob(api, handle)
+    try:
+        alive = bool(pid) and process_alive(int(pid))
+        # A "no" is re-checked: a worker that exits between the two looks fails
+        # the membership query only because it is gone, and a dead pid trusts
+        # the name. One still alive and not in the job is not the run's.
+        trusted = (not alive or _pid_in_job(api, int(pid), handle)
+                   or not process_alive(int(pid)))
+    except Exception:  # noqa: BLE001
+        trusted = False
+    if not trusted:
+        job.close()
+        return None
+    return job
+
+
+def _pid_in_job(api: Any, pid: int, job_handle: int) -> bool:
+    """Is *pid* in the job? Only a definite yes counts."""
+    try:
+        process = api.query_process(pid)
+    except Exception:  # noqa: BLE001
+        return False
+    if process is None:
+        return False
+    try:
+        return api.in_job(process, job_handle) is True
+    except Exception:  # noqa: BLE001
+        return False
+    finally:
+        try:
+            api.close(process)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def kill_run_tree(run_id: Any, pid: int, **kwargs: Any) -> str:
+    """:func:`kill_tree` for a detached run known by its record, through the
+    run's named job when one opens (:func:`open_run_job`).
+
+    *kwargs* go to :func:`kill_tree` as they are, and without a job (always,
+    off Windows) the call is exactly the ``kill_tree(pid, **kwargs)`` it
+    replaces. With one, the graceful phase is unchanged and only the
+    escalation's kill is the job's; the job is closed afterwards either way.
+    """
+    try:
+        job = open_run_job(run_id, pid)
+    except Exception:  # noqa: BLE001 - a kill path never raises for its job
+        job = None
+    if job is None:
+        return kill_tree(pid, **kwargs)
+    try:
+        return kill_tree(pid, job=job, **kwargs)
+    finally:
+        job.close()
+
+
+def _send_ctrl_break(pid: int) -> None:  # pragma: no cover - Windows
+    """``CTRL_BREAK_EVENT`` to the console process group *pid* leads."""
     try:
         import ctypes
 
@@ -807,14 +1348,24 @@ def _windows_kill_tree(pid: int, escalate_after_s: float) -> str:  # pragma: no 
         kernel32.GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)
     except Exception:
         pass
+
+
+def _windows_kill_tree(
+    pid: int, escalate_after_s: float, job: Optional[TreeJob] = None,
+) -> str:  # pragma: no cover
+    _send_ctrl_break(pid)
     deadline = time.time() + max(escalate_after_s, 0.0)
     while time.time() < deadline:
         if not process_alive(pid):
+            # The leader took the break; the job takes what it left running,
+            # which is only ever its own tree.
+            if job is not None:
+                job.terminate()
             return "killed"
         time.sleep(0.1)
     # A group-less kill would strand the provider CLIs, so escalate to the whole
     # child tree.
-    taskkill_tree(pid)
+    end_tree(pid, job)
     deadline = time.time() + 5.0
     while time.time() < deadline:
         if not process_alive(pid):
@@ -841,6 +1392,30 @@ def _windows_kill_tree(pid: int, escalate_after_s: float) -> str:  # pragma: no 
 # so a recycled pid is never signalled. The groups are signalled together and
 # share one grace and one SIGKILL window — a sweep's cost does not grow with
 # the number of groups, which is what lets an abort bound it (below).
+#
+# Windows (2026-10-25). There are no groups or sessions to snapshot, so
+# `descendants` is `[]` there, and a stop used to reach the CLI alone: its
+# `TerminateProcess`. That is enough under a detached worker, whose own
+# KILL_ON_JOB_CLOSE job reaps the tree when the worker exits, and nowhere else:
+# a foreground run's CLI left its children running past the timeout, holding the
+# inherited pipes until the drain's cap. So the CLI now starts in a `TreeJob` of
+# its own (`popen_tree`, from `llm_client._run_provider_cli`), and every stop —
+# the timeout, an interrupt, a stop from outside, the registry's sweep — ends
+# that job right after the CLI's own stop (`_end_job`): one `TerminateJobObject`,
+# which reaches exactly what the CLI started and nothing else. A job changes
+# nothing about a terminal Ctrl-C: the console delivers that to every process
+# attached to it, and only CREATE_NEW_PROCESS_GROUP (which disables Ctrl-C for
+# the new group) or the process's own handler list decide who acts on it.
+# `popen_tree` adds CREATE_SUSPENDED and no group, so the CLI still gets it. A
+# CLI that exits on its own keeps its job untouched (closing it is never a
+# kill), as a POSIX CLI's groups are left alone.
+
+#: :attr:`TreeSweep.job`'s verdicts (2026-10-25): ``TerminateJobObject``
+#: succeeded, so every process still in the CLI's job was ended — its whole
+#: tree, the CLI included; or it did not (the call failed, or the handle was
+#: already closed), and what the CLI started may still run.
+JOB_TERMINATED = "terminated"
+JOB_FAILED = "failed"
 
 #: How long :func:`terminate_timed_out` waits between the CLI's SIGTERM and its
 #: SIGKILL, and between each snapshotted group's. SIGTERM first is the point:
@@ -860,6 +1435,10 @@ _KILL_CONFIRM_S = 5.0
 #: merely started, well inside that window. What is left over is the worker's
 #: own close-out (``RunHandle.finish``) after the sweep returns.
 LIVE_SWEEP_BUDGET_S = DEFAULT_ESCALATE_AFTER_S - 3.0
+
+#: The least a sweep's poll sleeps, as a share of its interval, however long
+#: its look at the process table took (:func:`_wait_targets`).
+_POLL_SLEEP_FLOOR_SHARE = 0.2
 
 #: The share of a bounded sweep's budget the SIGTERM graces may use. The SIGKILL
 #: that follows goes out by then at the latest, leaving the rest of the budget
@@ -1004,6 +1583,45 @@ def _process_table() -> Dict[int, _ProcRow]:
     return table
 
 
+#: The last ``ps`` table a waiting poll read, with the monotonic times its read
+#: began and ended (round-8 review, 2026-10-24). Off Linux a look at the process table is
+#: a ``ps -A`` spawn, tens of milliseconds once hundreds of processes run, and
+#: sweeps that wait at the same time (a fan-out's slots timing out together)
+#: each spawned their own on every poll. :func:`_waiting_process_table` shares
+#: one read between them; nothing that decides a signal or a verdict reads it.
+_SHARED_PS_TABLE: List[Tuple[float, float, Dict[int, _ProcRow]]] = []
+_SHARED_PS_TABLE_LOCK = threading.Lock()
+
+
+def _waiting_process_table(not_before: float, max_age_s: float) -> Dict[int, _ProcRow]:
+    """:func:`_process_table` for a poll that only waits for processes to end.
+
+    Linux reads ``/proc`` as always. Off Linux the last shared ``ps`` table is
+    reused when its read began at or after *not_before* (the wait's own start,
+    so it never predates the signals being waited on) and ended less than
+    *max_age_s* ago (the poll interval: a reused table is no staler than the
+    poll that would have read it). One read at a time, so a poll that waited
+    for another's read takes that table instead of spawning a second ``ps``:
+    its age counts from the read's end, or a ``ps`` slower than the interval
+    would be stale on arrival and every waiter behind it would spawn its own.
+    """
+    if IS_WINDOWS:  # pragma: no cover - Windows
+        return {}
+    table = _linux_process_table()
+    if table is not None:
+        return table
+    with _SHARED_PS_TABLE_LOCK:
+        if _SHARED_PS_TABLE:
+            began, ended, shared = _SHARED_PS_TABLE[0]
+            if began >= not_before and ended >= time.monotonic() - max_age_s:
+                return shared
+        began = time.monotonic()
+        table = _ps_process_table()
+        if table:
+            _SHARED_PS_TABLE[:] = [(began, time.monotonic(), table)]
+        return table
+
+
 def _complete_row(row: _ProcRow) -> Descendant:
     # Both tables date their rows, so this per-pid start-time probe (a spawn off
     # Linux) is reached only for a row the table could not date.
@@ -1039,7 +1657,8 @@ def descendants(pid: int) -> List[Descendant]:
 
     Linux reads ``/proc/*/stat`` once; other POSIX platforms run one ``ps -A``
     for pid, ppid, pgid and ``lstart``; Windows returns an empty list (its tree
-    is a Job Object, torn down by the worker's own job, D4d). Breadth-first,
+    is a Job Object: a Lane A CLI's own :class:`TreeJob`, which every stop ends,
+    and under a detached worker the worker's job too, D4d). Breadth-first,
     *pid* itself excluded. The walk follows parent links, which is exactly why
     it must run **before** the CLI dies: afterwards its children belong to init.
     """
@@ -1071,23 +1690,39 @@ class TreeSweep:
     the SIGKILL) or ``survived``. ``groups`` maps each snapshotted process group
     to its verdict, in :func:`kill_tree`'s vocabulary (``gone``, ``killed``,
     ``survived``, ``skipped``), in the order the snapshot met them.
+
+    ``job`` is what ending the CLI's Windows Job Object did (2026-10-25):
+    :data:`JOB_TERMINATED` or :data:`JOB_FAILED`, and ``None`` where there was
+    no job to end — every POSIX run (:func:`popen_tree` makes one only on
+    Windows) and a Windows CLI that could not be put in one. ``None`` leaves
+    :meth:`describe` word for word what it was, so a POSIX log line does not
+    change.
     """
 
     cli: str
     groups: Dict[int, str] = field(default_factory=dict)
+    job: Optional[str] = None
 
     @property
     def survived(self) -> List[int]:
         return [pgid for pgid, verdict in self.groups.items() if verdict == "survived"]
 
     def describe(self) -> str:
-        if not self.groups:
-            return f"cli {self.cli}; no descendant process groups"
-        verdicts = ", ".join(f"{pgid} {verdict}" for pgid, verdict in self.groups.items())
-        line = f"cli {self.cli}; process groups: {verdicts}"
+        line = f"cli {self.cli}"
+        if self.job is not None:
+            line += f"; job {self.job}"
+        if self.groups:
+            verdicts = ", ".join(f"{pgid} {verdict}" for pgid, verdict in self.groups.items())
+            line += f"; process groups: {verdicts}"
+        elif self.job is None:
+            # Windows snapshots no groups, so with a job to name this would only
+            # repeat what the job's verdict already says.
+            line += "; no descendant process groups"
         if self.survived:
             line += (" — SURVIVED: " + ", ".join(str(pgid) for pgid in self.survived)
                      + " still running")
+        if self.job == JOB_FAILED:
+            line += " — JOB NOT ENDED: what the cli started may still be running"
         return line
 
 
@@ -1132,6 +1767,22 @@ def _await_cli(proc: Any, signalled: bool, grace_s: float, poll_interval_s: floa
     except OSError:
         pass
     return "killed" if _wait_exit(proc, _KILL_CONFIRM_S, poll_interval_s) else "survived"
+
+
+def _end_job(job: Optional[TreeJob]) -> Optional[str]:
+    """Terminate a stopped CLI's :class:`TreeJob`; its :attr:`TreeSweep.job` verdict.
+
+    ``None`` when there is none (POSIX, or a Windows CLI that got no job), so
+    the stop is exactly what it was without one. Never raises, and never
+    closes the job: the call that spawned the CLI owns the handle and closes it
+    once it is done waiting (2026-10-25).
+    """
+    if job is None:
+        return None
+    try:
+        return JOB_TERMINATED if job.terminate() else JOB_FAILED
+    except Exception:  # noqa: BLE001 - a teardown step never raises
+        return JOB_FAILED
 
 
 def _worst(verdicts: Sequence[str]) -> str:
@@ -1212,11 +1863,17 @@ class _Liveness:
     counts a zombie: an unreaped leader still answers ``kill(pid, 0)`` (macOS
     too), and a wait that trusted that would sit out its whole window on a
     process already dead.
+
+    *not_before* marks a look that only waits (:func:`_wait_targets`): off
+    Linux it may share a ``ps`` table read since then and within *max_age_s*
+    (:func:`_waiting_process_table`). Every other look reads a fresh one.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, not_before: Optional[float] = None, max_age_s: float = 0.0) -> None:
         try:
-            self.table: Optional[Dict[int, _ProcRow]] = _process_table() or None
+            table = (_process_table() if not_before is None
+                     else _waiting_process_table(not_before, max_age_s))
+            self.table: Optional[Dict[int, _ProcRow]] = table or None
         except Exception:  # noqa: BLE001 - the per-pid probes still answer
             self.table = None
         self._groups = None if self.table is None else {
@@ -1366,15 +2023,26 @@ class _GroupTarget:
 def _wait_targets(
     targets: Sequence[_GroupTarget], until: float, poll_interval_s: float
 ) -> List[_GroupTarget]:
-    """Poll until none of *targets* runs or *until* passes; return those still running."""
+    """Poll until none of *targets* runs or *until* passes; return those still running.
+
+    Each poll sleeps only what its look left of *poll_interval_s*, never less
+    than :data:`_POLL_SLEEP_FLOOR_SHARE` of it: off Linux the look is a ``ps``
+    spawn, and a whole interval slept after it sampled the grace about half
+    as often as asked (round-8 review). The floor keeps a look that costs more
+    than the interval from spawning ``ps`` back to back.
+    """
     still = list(targets)
+    began = time.monotonic()
     while still:
-        look = _Liveness()
+        looked = time.monotonic()
+        look = _Liveness(not_before=began, max_age_s=poll_interval_s)
         still = [target for target in still if target.running(look)]
         now = time.monotonic()
         if not still or now >= until:
             break
-        time.sleep(max(0.0, min(poll_interval_s, until - now)))
+        rest = max(poll_interval_s - (now - looked),
+                   poll_interval_s * _POLL_SLEEP_FLOOR_SHARE)
+        time.sleep(max(0.0, min(rest, until - now)))
     return still
 
 
@@ -1445,6 +2113,7 @@ def terminate_timed_out(
     grace_s: float = DEFAULT_TERMINATE_GRACE_S,
     *,
     poll_interval_s: float = 0.05,
+    job: Optional[TreeJob] = None,
 ) -> TreeSweep:
     """Stop a Lane A CLI and every process group its snapshot recorded.
 
@@ -1459,10 +2128,24 @@ def terminate_timed_out(
     each lead their own. The Ctrl-C and abort paths run the same steps for every
     live CLI at once (:meth:`LiveCliRegistry.sweep`, decision 11.9). Never raises
     for a process that is already gone.
+
+    *job* is the CLI's Windows :class:`TreeJob` (:func:`popen_tree`; ``None``
+    elsewhere), the stand-in there for the snapshot Windows cannot take
+    (2026-10-25). It is terminated right after the CLI's own stop, not after
+    the grace, and whether or not the CLI was still running. The grace exists
+    for a CLI that cleans up after itself on SIGTERM (pi reaps its shells from
+    that handler); Windows has no SIGTERM, ``Popen.terminate`` is
+    ``TerminateProcess``, and a CLI ended that way runs no cleanup at all. So a
+    grace there would buy the CLI nothing and give its children two more
+    seconds of quota and of holding the pipes the drain is waiting on. The
+    verdict is :attr:`TreeSweep.job`; a job that fails to terminate leaves the
+    stop what it was without one.
     """
     signalled = _signal_cli(proc)
+    ended = _end_job(job)
     cli = _await_cli(proc, signalled, grace_s, poll_interval_s)
-    return TreeSweep(cli=cli, groups=_sweep_groups(snapshot, grace_s, poll_interval_s))
+    return TreeSweep(cli=cli, groups=_sweep_groups(snapshot, grace_s, poll_interval_s),
+                     job=ended)
 
 
 @dataclass
@@ -1473,6 +2156,11 @@ class LiveCli:
     start_time: Optional[str]
     proc: Any
     snapshot: List[Descendant] = field(default_factory=list)
+    #: The CLI's Windows :class:`TreeJob` (2026-10-25), what a sweep ends there
+    #: in place of the snapshot; ``None`` elsewhere. The registry only ever
+    #: terminates it, and only while the entry is registered: the call that
+    #: spawned the CLI closes it, after :meth:`LiveCliRegistry.unregister`.
+    job: Optional[TreeJob] = None
 
 
 class LiveCliRegistry:
@@ -1488,6 +2176,13 @@ class LiveCliRegistry:
 
     Safe to read from a signal handler: the lock is re-entrant (the handler runs
     on the main thread, which may already hold it) and never held across a scan.
+
+    On Windows each entry carries its CLI's :class:`TreeJob` (``job``), and
+    :meth:`sweep` ends those (2026-10-25). Each is terminated under the lock,
+    and only while its entry is still registered. The spawning call closes its
+    job only after it has unregistered, so a job is never terminated through a
+    handle already closed, whose value Windows may since have handed to another
+    slot's job. The lock is held across that one call, never a scan.
     """
 
     def __init__(self, interval_s: float = LIVE_SNAPSHOT_INTERVAL_S):
@@ -1497,9 +2192,9 @@ class LiveCliRegistry:
         self._entries: Dict[int, LiveCli] = {}
         self._thread: Optional[threading.Thread] = None
 
-    def register(self, proc: Any) -> LiveCli:
+    def register(self, proc: Any, job: Optional[TreeJob] = None) -> LiveCli:
         entry = LiveCli(pid=int(proc.pid), start_time=process_start_time(proc.pid),
-                        proc=proc)
+                        proc=proc, job=job)
         with self._lock:
             self._entries[id(proc)] = entry
             if not IS_WINDOWS and (self._thread is None or not self._thread.is_alive()):
@@ -1516,8 +2211,9 @@ class LiveCliRegistry:
             self._wake.notify_all()
 
     @contextmanager
-    def tracking(self, proc: Any) -> Iterator[LiveCli]:
-        entry = self.register(proc)
+    def tracking(self, proc: Any, job: Optional[TreeJob] = None) -> Iterator[LiveCli]:
+        """Registered, with *job*, for the ``with`` body; close *job* only after it."""
+        entry = self.register(proc, job)
         try:
             yield entry
         finally:
@@ -1583,11 +2279,18 @@ class LiveCliRegistry:
         (:data:`LIVE_SWEEP_BUDGET_S`, inside the abort's window), the graces
         early enough that the SIGKILLs still go out within it; ``None`` leaves
         the sweep unbounded.
+
+        On Windows every entry's :class:`TreeJob` is terminated right after the
+        CLIs are signalled, before anything is waited on, for the reason
+        :func:`terminate_timed_out` gives (2026-10-25): one call per job and no
+        wait of its own, so the jobs cost the clock nothing, and every CLI's
+        job is ended whether its CLI was still running or not.
         """
         clock = _SweepClock(budget_s)
         entries = self.entries()
         snapshots = [self.snapshot_for(entry.proc) for entry in entries]
         signalled = [_signal_cli(entry.proc) for entry in entries]
+        jobs = [self._end_registered_job(entry) for entry in entries]
         waiting = [entry.proc for entry, sent in zip(entries, signalled) if sent]
         until = clock.grace_until(grace_s)
         for proc in waiting:
@@ -1606,15 +2309,31 @@ class LiveCliRegistry:
         for proc in killed:
             _wait_exit(proc, until - time.monotonic(), poll_interval_s)
         results: List[Tuple[LiveCli, TreeSweep]] = []
-        for entry, sent, swept in zip(entries, signalled, groups):
+        for entry, sent, swept, ended in zip(entries, signalled, groups, jobs):
             if not sent:
                 cli = "exited"
             elif not any(proc is entry.proc for proc in killed):
                 cli = "terminated"
             else:
                 cli = "killed" if _exited(entry.proc) else "survived"
-            results.append((entry, TreeSweep(cli=cli, groups=swept)))
+            results.append((entry, TreeSweep(cli=cli, groups=swept, job=ended)))
         return results
+
+    def _end_registered_job(self, entry: LiveCli) -> Optional[str]:
+        """:func:`_end_job` on *entry*'s job, if *entry* is still registered.
+
+        Under the lock, so the spawning call cannot unregister — and then close
+        the handle — between the check and the terminate. An entry gone since
+        :meth:`sweep` listed it belongs to a call that already returned; that
+        call owns its job, and has closed it or is about to, so the verdict is
+        ``None``: nothing was done to it here.
+        """
+        if entry.job is None:
+            return None
+        with self._lock:
+            if self._entries.get(id(entry.proc)) is not entry:
+                return None
+            return _end_job(entry.job)
 
     def _refresh_loop(self) -> None:
         while True:
@@ -1718,8 +2437,47 @@ def spawn_detached(
     """
     argv = [str(a) for a in argv]
     if IS_WINDOWS:  # pragma: no cover - Windows
-        return _spawn_detached_windows(argv, cwd=cwd, env=env, log_path=log_path)
+        return _spawn_detached_windows(argv, cwd=cwd, env=env, log_path=log_path)[0]
     return _spawn_detached_posix(argv, cwd=cwd, env=env, log_path=log_path)
+
+
+#: The spawn :func:`spawn_detached_run` adds a job to: this module's own. A
+#: replaced ``spawn_detached`` (a test double) starts no process, so there is
+#: nothing to put in a job and it is called as it is, as ``_REAL_POPEN`` is.
+_REAL_SPAWN_DETACHED = spawn_detached
+
+
+def spawn_detached_run(
+    argv: Sequence[str],
+    *,
+    cwd: str,
+    env: Dict[str, str],
+    log_path: Optional[str] = None,
+    run_id: str,
+) -> Tuple[int, Optional[TreeJob]]:
+    """:func:`spawn_detached` for run *run_id*: its pid, and on Windows the
+    launcher's handle on the run's named Job Object (2026-10-25).
+
+    The worker is created suspended, put in the job ``run_job_name(run_id)``
+    names and only then resumed, as :func:`popen_tree` does, so ``uv``, the
+    shim or trampoline behind it, the worker python and everything they start
+    are in the job from the first instruction. The launcher keeps the handle
+    until the handshake resolves: a failed one is killed through it, and either
+    way it is closed after (:meth:`TreeJob.close` never kills). By then the
+    worker holds its own handle (:func:`enter_detached_worker`), which is what
+    keeps the job's name, and so the job, reachable by an abort.
+
+    ``None`` for the job off Windows (the call is :func:`spawn_detached`
+    unchanged), for a run id that names no job, when the name already exists
+    (never used: see :func:`_create_run_job`), and whenever the job route
+    fails: the spawn is then the one it always was.
+    """
+    spawn = spawn_detached
+    if not IS_WINDOWS or spawn is not _REAL_SPAWN_DETACHED:
+        return spawn(argv, cwd=cwd, env=env, log_path=log_path), None
+    return _spawn_detached_windows(
+        [str(a) for a in argv], cwd=cwd, env=env, log_path=log_path, run_id=run_id,
+    )
 
 
 #: Bounds for :func:`_fd_sweep_limit`, which only runs where the kernel does not
@@ -1913,28 +2671,50 @@ def _spawn_detached_posix(
 
 
 def _spawn_detached_windows(  # pragma: no cover - Windows
-    argv: List[str], *, cwd: str, env: Dict[str, str], log_path: Optional[str]
-) -> int:
+    argv: List[str],
+    *,
+    cwd: str,
+    env: Dict[str, str],
+    log_path: Optional[str],
+    run_id: Optional[str] = None,
+) -> Tuple[int, Optional[TreeJob]]:
+    """The one Windows spawn, and with a *run_id* the run's named job.
+
+    The job route is all-or-nothing and never fails a launch: no job API, a
+    replaced ``Popen``, a name that cannot be made or is already taken, or a
+    worker that cannot join all spawn without one, and a worker that was
+    created suspended but could not be resumed (killed before it ran an
+    instruction) is spawned again, as it always was.
+    """
     DETACHED_PROCESS = 0x00000008
     CREATE_NEW_PROCESS_GROUP = 0x00000200
+    flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
     handle = None
     if log_path:
         handle = open(log_path, "ab", buffering=0)
     try:
-        proc = subprocess.Popen(
-            argv,
+        kwargs: Dict[str, Any] = dict(
             cwd=cwd,
             env=env,
             stdin=subprocess.DEVNULL,
             stdout=handle if handle is not None else subprocess.DEVNULL,
             stderr=handle if handle is not None else subprocess.DEVNULL,
             close_fds=True,
-            creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
         )
+        spawn = subprocess.Popen
+        api = _job_api() if run_id is not None and spawn is _REAL_POPEN else None
+        job_handle = _create_run_job(api, run_id) if api is not None else None
+        if job_handle is None:
+            return spawn(argv, creationflags=flags, **kwargs).pid, None
+        try:
+            proc, job = _popen_in_job(
+                api, job_handle, spawn, argv, dict(kwargs, creationflags=flags))
+        except _NotResumed:
+            proc, job = spawn(argv, creationflags=flags, **kwargs), None
+        return proc.pid, job
     finally:
         if handle is not None:
             handle.close()
-    return proc.pid
 
 
 def _stdio_already_on(log_path: str) -> bool:
@@ -1965,7 +2745,7 @@ def _rebind_std_streams() -> None:
     sys.stderr = open(2, "w", encoding="utf-8", errors="replace", closefd=False)
 
 
-def enter_detached_worker(log_path: Optional[str]) -> None:
+def enter_detached_worker(log_path: Optional[str], run_id: Optional[str] = None) -> None:
     """Worker-side setup: own the log, own the process group, own the tree.
 
     Idempotent with the launcher, and that is now the normal case: since the
@@ -1998,6 +2778,13 @@ def enter_detached_worker(log_path: Optional[str]) -> None:
     which write through ``WriteConsoleW`` and a file handle refuses. The worker
     also joins a Job Object with ``KILL_ON_JOB_CLOSE`` so the OS reaps provider
     children even if the worker crashes without running a handler.
+
+    With *run_id* (the run's, which the launcher minted: ``begin_worker_run``
+    passes it) the worker first takes its handle on the run's named job and
+    keeps it for life (:func:`_hold_run_job`, 2026-10-25): that is what keeps
+    the job an abort opens by name. The reaper job then nests inside it, as it
+    nests inside any job the worker is already in. Without a *run_id* (a
+    worker started some other way) nothing about the jobs changes.
     """
     if log_path and not _stdio_already_on(log_path):
         try:
@@ -2017,6 +2804,9 @@ def enter_detached_worker(log_path: Optional[str]) -> None:
             if IS_WINDOWS:
                 _rebind_std_streams()
     if IS_WINDOWS:  # pragma: no cover - Windows
+        if run_id is not None:
+            # First, so a job the worker creates itself holds the reaper's.
+            _hold_run_job(run_id)
         _assign_own_job_object()
     from .stream_bootstrap import bootstrap_streams
 
