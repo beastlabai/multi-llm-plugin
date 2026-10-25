@@ -61,11 +61,13 @@ opencode's TUI and SDK (`session.abort`) make. The row records that as
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import threading
 import time
@@ -177,8 +179,8 @@ def process_rows() -> list[dict]:
         if not entry.name.isdigit():
             continue
         try:
-            stat = (entry / "stat").read_text(encoding="utf-8", errors="replace")
-            head, _, tail = stat.rpartition(")")
+            line = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+            head, _, tail = line.rpartition(")")
             fields = tail.split()
             raw = (entry / "cmdline").read_bytes()
         except (OSError, IndexError):
@@ -209,6 +211,17 @@ def ps_snapshot(out: Path, name: str) -> str:
     return path.name
 
 
+def ancestry(parent: dict[int, int], pid: int) -> list[int]:
+    """`pid`'s ppid chain in ONE process table, nearest first, up to init."""
+    chain, seen = [], set()
+    current = parent.get(pid)
+    while current and current not in seen:
+        seen.add(current)
+        chain.append(current)
+        current = parent.get(current)
+    return chain
+
+
 class Sampler:
     """Samples `/proc` every `interval` seconds for the whole leg.
 
@@ -217,6 +230,15 @@ class Sampler:
     sampler's start. The literal `ps` table is also kept at the moment the
     detached worker is first seen — the "while it runs" evidence scenario 2 asks
     for — and at whatever moments the leg names.
+
+    A detached worker's process (`--internal-worker` in its argv) also carries
+    its ancestry as EACH sample saw it: `ancestors_seen`, the union of its ppid
+    chains, each read from that sample's own table, over every sample it was
+    alive in; `first_chain`, the chain at its first sighting; and
+    `samples_alive`, how many samples those were.
+    The first and the latest ppid alone cannot say the worker was never inside
+    opencode's tree: once the double spawn's intermediate exits, the latest
+    chain stops at init, whatever it was before.
     """
 
     def __init__(self, out: Path, interval: float = 0.1):
@@ -238,6 +260,7 @@ class Sampler:
     def sample(self) -> list[dict]:
         rows = process_rows()
         now = round(time.time() - self.started, 3)
+        parent = {row["pid"]: row["ppid"] for row in rows}
         worker_new = False
         with self._lock:
             self.samples += 1
@@ -255,6 +278,12 @@ class Sampler:
                              pgid=row["pgid"], sid=row["sid"], last_seen=now)
                 if row["state"] != "Z":
                     entry["last_alive"] = now
+                    if "--internal-worker" in row["args"]:
+                        chain = ancestry(parent, row["pid"])
+                        entry["samples_alive"] = entry.get("samples_alive", 0) + 1
+                        entry.setdefault("first_chain", chain)
+                        entry["ancestors_seen"] = sorted(
+                            set(entry.get("ancestors_seen") or []) | set(chain))
         if worker_new and "worker-live" not in self.snapshots:
             self.snapshot("worker-live")
         return rows
@@ -285,6 +314,171 @@ class Sampler:
             "processes": self.processes(),
         }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return name
+
+
+class WorkspaceWatch:
+    """Censuses the workspace every `interval` seconds for a whole leg, as a union.
+
+    The hashed census that brackets a leg (`ctx.census()` before and after) sees
+    the two ends only: a file created and removed inside the leg, or changed and
+    put back, is invisible to it. This one stats every file — size and mtime,
+    never contents, so it is cheap enough to repeat — and keeps every path that
+    was ever created, changed or removed against the census it started from.
+    Something that lived less than one interval can still slip between two
+    censuses; the hashed pair stays beside it for what lands for good.
+
+    Its scope is recorded with what it saw, because it is narrower than
+    "everything the leg wrote": the workspace only, `.git/` aside exactly as the
+    hashed census leaves it. `$HOME` and `/tmp` are tmpfs mounts of their own,
+    outside the workspace, and are not watched. Bounded at `limit` files per
+    census; a census that hit the bound says so instead of passing for complete.
+    """
+
+    def __init__(self, root: Path, *, home: Path | None = None,
+                 interval: float = 0.25, limit: int = 5000):
+        self.root = root
+        self.home = home
+        self.interval = interval
+        self.limit = limit
+        self.started = time.time()
+        self.baseline: dict[str, tuple[int, int]] = {}
+        self.touched: dict[str, dict] = {}
+        self.censuses = 0
+        self.truncated = False
+        self._latest: dict[str, tuple[int, int]] = {}
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _census(self) -> dict[str, tuple[int, int]]:
+        found: dict[str, tuple[int, int]] = {}
+        for directory, subdirs, files in os.walk(self.root):
+            subdirs[:] = [name for name in subdirs if name != ".git"]
+            for name in files:
+                path = os.path.join(directory, name)
+                try:
+                    info = os.stat(path)
+                except OSError:
+                    continue  # removed between the listing and the stat
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                if len(found) >= self.limit:
+                    self.truncated = True
+                    return found
+                found[os.path.relpath(path, self.root)] = (info.st_size,
+                                                          info.st_mtime_ns)
+        return found
+
+    def census(self) -> None:
+        current = self._census()
+        now = round(time.time() - self.started, 3)
+        self.censuses += 1
+        if self.censuses == 1:
+            self.baseline = current
+        for name in set(self.baseline) | set(current):
+            before, after = self.baseline.get(name), current.get(name)
+            if before == after:
+                continue
+            kind = ("created" if before is None else
+                    "removed" if after is None else "changed")
+            entry = self.touched.setdefault(name, {"first_seen": now, "kinds": []})
+            if kind not in entry["kinds"]:
+                entry["kinds"].append(kind)
+        self._latest = current
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval):
+            self.census()
+
+    def __enter__(self) -> "WorkspaceWatch":
+        self.census()
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self._stop.set()
+        self._thread.join(10)
+        self.census()
+
+    def summary(self) -> dict:
+        return {
+            "scope": "workspace",
+            "root": str(self.root),
+            "excluded": [".git/"],
+            "not_watched": {"home": str(self.home) if self.home else None,
+                            "tmp": "/tmp",
+                            "why": "separate tmpfs mounts, outside the workspace"},
+            "interval_s": self.interval,
+            "censuses": self.censuses,
+            "files_at_start": len(self.baseline),
+            "truncated": self.truncated,
+            "touched": {name: dict(entry, present_at_end=name in self._latest)
+                        for name, entry in sorted(self.touched.items())},
+        }
+
+
+class AbortWatch:
+    """The moment the tool's `status --abort --run-id <id>` starts, and the run then.
+
+    Scenario 5 asks whether the tool aborted a run that was still RUNNING. The
+    dispatcher's exit 2 (`nothing-to-do`) is its answer for a run that was
+    already terminal, and a worker killed inside opencode's own process domain
+    records `aborted` through its own SIGTERM handler before any abort reaches
+    it. So from just before the session abort is sent, this thread scans the
+    process table every `interval` seconds; on the first sight of the tool's
+    abort — a direct child of `opencode serve` whose argv carries `--abort` and
+    `--run-id <id>` — it keeps, from that same scan, every process of the claimed
+    worker, and then reads the run's record as it stood. The abort's own
+    interpreter takes ~0.2 s to reach its kill (measured: 0.28 s from the uv
+    wrapper's start to its exit, 2026-10-25), so the reading lands first.
+    """
+
+    def __init__(self, ctx: "GateContext", serve_pid: int, run_id: str, *,
+                 interval: float = 0.02, timeout: float = 120.0):
+        self.ctx = ctx
+        self.serve_pid = serve_pid
+        self.run_id = run_id
+        self.interval = interval
+        self.timeout = timeout
+        self.started: float | None = None
+        self.scans = 0
+        self.seen: dict | None = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        deadline = self.started + self.timeout
+        wanted = f" --run-id {self.run_id}"
+        while not self._stop.is_set() and time.time() < deadline:
+            rows = process_rows()
+            self.scans += 1
+            abort = next((r for r in rows if r["ppid"] == self.serve_pid
+                          and " --abort" in r["args"] and wanted in r["args"]), None)
+            if abort is not None:
+                at = round(time.time() - self.started, 3)
+                workers = [{k: r[k] for k in ("pid", "ppid", "pgid", "sid", "state")}
+                           for r in rows if "--internal-worker" in r["args"]
+                           and f"--internal-run-id {self.run_id}" in r["args"]]
+                run = next((r["run"] for r in run_records(self.ctx)
+                            if r["run"].get("run_id") == self.run_id), None)
+                self.seen = {"at_s": at, "scans": self.scans,
+                             "abort": {k: abort[k] for k in ("pid", "ppid", "args")},
+                             "workers": workers, "run": run}
+                return
+            self._stop.wait(self.interval)
+
+    def start(self) -> None:
+        """Just before the session abort is sent; `at_s` counts from here."""
+        self.started = time.time()
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(10)
+
+    def result(self) -> dict:
+        return {"interval_s": self.interval, "scans": self.scans,
+                "seen": self.seen is not None, **(self.seen or {})}
 
 
 # --------------------------------------------------------------------------- #
@@ -414,8 +608,11 @@ def debug_config(ctx: GateContext, env: dict) -> dict:
         return {"exit": code, "parsed": False}
     command = (config.get("command") or {}).get("multi-llm") or {}
     expected = expected_command(ctx.plugin_dir)
-    matches = (command.get("template") == expected["template"]
-               and command.get("description") == expected["description"])
+    # No skill dir is recorded here. The command body this build ships routes
+    # to the tool and names no path, so a dir "resolved" off the template
+    # would be the constant it was compared against, not a reading. The
+    # grader reads the skill dir the command's legs actually ran off the
+    # tool's own uv argv (`--project`), as row 7's probe does.
     return {
         "exit": code,
         "parsed": True,
@@ -425,9 +622,6 @@ def debug_config(ctx: GateContext, env: dict) -> dict:
         "template_matches_payload": command.get("template") == expected["template"],
         "description_matches_payload": (command.get("description")
                                         == expected["description"]),
-        # The skill dir the injected template was resolved against — the
-        # payload's, and only when the template is the payload's byte for byte.
-        "command_skill_dir": expected["skill_dir"] if matches else None,
         "payload_command_md": str(ctx.plugin_dir / "dist" / "command.md"),
     }
 
@@ -574,12 +768,17 @@ def wait_for(predicate, timeout: float, interval: float = 0.2):
 # --------------------------------------------------------------------------- #
 
 def foreground_leg(ctx: GateContext, label: str, typed: list[str],
-                   arguments: dict, env: dict, timeout: float = 420.0) -> dict:
+                   arguments: dict, env: dict, timeout: float = 420.0,
+                   watch: WorkspaceWatch | None = None) -> dict:
     """`opencode run --command multi-llm -- <typed>`, the host stub scripted.
 
     Launched with stdin at /dev/null (`opencode run` reads a non-TTY stdin to
     EOF before it starts) and never under a `timeout` wrapper, which wedges
     opencode before session creation; the bound is `Popen.wait`'s.
+
+    The leg runs under a `WorkspaceWatch` of its own, unless the caller hands
+    it one that spans more than the host process (the detached flow's does:
+    its worker outlives the tool call by a moment); the caller then records it.
     """
     scenario = call_scenario(ctx, label, arguments)
     stub_log = ctx.out / f"gate-stub-{label}.jsonl"
@@ -588,8 +787,11 @@ def foreground_leg(ctx: GateContext, label: str, typed: list[str],
     argv = run_argv(ctx, typed)
     ctx.log(f"package gate: leg {label}: {' '.join(argv[1:])}")
     timed_out = False
+    own = watch is None
+    watch = watch or WorkspaceWatch(ctx.workspace, home=ctx.home)
     with ctx.stub_cls(HOST_STUB_PORT, stub_log, scenario,
-                      facts=command_facts(ctx)):
+                      facts=command_facts(ctx)), \
+            (watch if own else contextlib.nullcontext()):
         started = time.time()
         with events_path.open("w", encoding="utf-8") as out, \
                 stderr_path.open("w", encoding="utf-8") as err:
@@ -621,6 +823,7 @@ def foreground_leg(ctx: GateContext, label: str, typed: list[str],
                                if e.get("sessionID")}),
         "error_events": [e.get("error") for e in events if e.get("type") == "error"],
         "tool_parts": tool_parts(events),
+        "workspace_watch": watch.summary() if own else None,
     }
 
 
@@ -661,16 +864,21 @@ def init_status(ctx: GateContext, record: dict, env: dict) -> None:
 def detached(ctx: GateContext, record: dict, env: dict) -> None:
     """Scenarios 2-4: one `ask --quick` call the tool detaches and supervises."""
     before = ctx.census()
-    with Sampler(ctx.out) as sampler:
+    # The watch spans the worker's exit too: the run's registry entry
+    # (`.multi-llm/runs/<run_id>.json`) is removed as the worker finishes,
+    # which can land just after the poll that saw the run terminal.
+    watch = WorkspaceWatch(ctx.workspace, home=ctx.home)
+    with Sampler(ctx.out) as sampler, watch:
         leg = foreground_leg(ctx, "ask", ["--ask", PLAN_REL, QUESTION, "--quick"],
                              {"mode": "ask", "plan": PLAN_REL, "question": QUESTION,
-                              "extra_flags": ["--quick"]}, env)
+                              "extra_flags": ["--quick"]}, env, watch=watch)
         # The tool returns only once its poll saw a terminal run, so the worker
         # is finishing; give its exit a moment to land in the table.
         wait_for(lambda: not any("--internal-worker" in r["args"]
                                  and r["state"] != "Z" for r in process_rows()),
                  timeout=30)
         sampler.snapshot("after")
+    leg["workspace_watch"] = watch.summary()
     leg["census_delta"] = census_delta(before, ctx.census())
     record["legs"] = [leg]
     record["host_pid"] = leg["pid"]
@@ -762,6 +970,7 @@ def cancellation(ctx: GateContext, record: dict, env: dict) -> None:
             cwd=str(ctx.workspace), env=env, stdin=subprocess.DEVNULL,
             stdout=handles[0], stderr=handles[1])
         record["serve_pid"] = serve.pid
+        dispatch: AbortWatch | None = None
         try:
             # A request sent before the "listening" line can hang for good
             # (measured: an unbounded GET /session never returned), so the
@@ -783,6 +992,7 @@ def cancellation(ctx: GateContext, record: dict, env: dict) -> None:
             poll = wait_for(lambda: _supervising(serve.pid), timeout=240,
                             interval=0.2)
             abort["supervising_poll"] = poll
+            dispatch = AbortWatch(ctx, serve.pid, poll["run_id"]) if poll else None
             if poll:
                 abort["provider_at_abort"] = wait_for(
                     lambda: _provider_running(poll["run_id"]), timeout=120)
@@ -800,6 +1010,9 @@ def cancellation(ctx: GateContext, record: dict, env: dict) -> None:
                 sampler.snapshot("at-abort")
                 abort["run_records_at_abort"] = run_records(ctx)
                 if session_id:
+                    # Watching before the request goes out: the plugin's abort
+                    # handler can spawn its dispatch before the reply returns.
+                    dispatch.start()
                     abort["sent_at_s"] = round(time.time() - started, 3)
                     status, reply = _http(
                         "POST", f"{base}/session/{session_id}/abort", 20)
@@ -812,6 +1025,12 @@ def cancellation(ctx: GateContext, record: dict, env: dict) -> None:
                 client.kill()
                 leg["exit"] = client.wait(timeout=30)
             leg["wall_clock_s"] = round(time.time() - started, 2)
+            if dispatch is not None and abort["sent"]:
+                # The dispatch is bounded at 30 s (the plugin's own); it is
+                # seen within one 20 ms scan of starting, or never.
+                wait_for(lambda: dispatch.seen, timeout=40)
+                dispatch.stop()
+                abort["dispatch"] = dispatch.result()
 
             # The plugin's abort dispatch is bounded at 30 s plus its 5 s kill
             # grace; the tap line is written once `execute` has returned.
@@ -836,6 +1055,8 @@ def cancellation(ctx: GateContext, record: dict, env: dict) -> None:
                     body, encoding="utf-8")
                 abort["messages_status"] = code
         finally:
+            if dispatch is not None:
+                dispatch.stop()
             serve.send_signal(signal.SIGTERM)
             try:
                 serve.wait(timeout=15)

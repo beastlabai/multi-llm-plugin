@@ -851,11 +851,11 @@ one per scenario, each with its own record and its own grader.
 
 | Row | What its grader establishes |
 | --- | --- |
-| `opencode-package-gate-init-status` | `command["multi-llm"]` is the payload's own `dist/command.md`, resolved against `/opt/mllm/opencode-plugin/skills/multi-llm`; `init` succeeds and creates `.multi-llm/providers.yaml`; `status` answers its documented result |
-| `opencode-package-gate-detach` | the tool appends `--detach`, claims the run id the launch banner printed, and the worker runs in its own session and process group, never a child of `opencode run` |
+| `opencode-package-gate-init-status` | `command["multi-llm"]` is the payload's own `dist/command.md`, template and description recomputed from the installed bytes; the tool both legs called ran `uv run --project /opt/mllm/opencode-plugin/skills/multi-llm`, read off the tool's own argv (the template names no path to read it from); `init` succeeds, creates `.multi-llm/providers.yaml` and moves nothing outside `.multi-llm/`; `status` answers its documented result and moves nothing |
+| `opencode-package-gate-detach` | the tool appends `--detach`, claims the run id the launch banner printed, and the worker runs in its own session and process group, with no opencode process on its ppid chain in any process sample taken while it was alive |
 | `opencode-package-gate-supervision` | `status --wait --run-id <claimed>` polls, non-terminal (exit 2) before terminal (exit 0), and the reported `polls` equals the polls the receipts and the process samples saw |
-| `opencode-package-gate-completion` | one terminal result naming the claimed run, its per-model `answer_*.md` under the plan's dir, nothing written outside it |
-| `opencode-package-gate-cancellation` | `POST /session/<id>/abort` while the tool polls a claimed run with a live provider; the tool dispatches `status --abort --run-id <claimed>`, the run records `aborted`, nothing in the worker's group survives, and the tool's report names the run and its log |
+| `opencode-package-gate-completion` | one terminal result naming the claimed run, its per-model `answer_*.md` under the plan's dir, nothing written outside it: neither in the hashed census before and after the leg nor in the leg's periodic workspace census, which catches a file created and removed in between. The one exception is the run's own registry entry, `.multi-llm/runs/<run_id>.json`, which has to be gone by the end |
+| `opencode-package-gate-cancellation` | `POST /session/<id>/abort` while the tool polls a claimed run with a live provider. The tool dispatches `status --abort --run-id <claimed>` while the run is still `running` with a worker alive, read at the dispatch's first 20 ms sighting. The dispatcher answers exit 0 `done`, its answer for a live run it stopped; exit 2 `nothing-to-do` (the run was already over) fails. The run records `aborted` with the dispatched abort's `aborted_by_request`, not the worker's own handler's. Nothing in the worker's group or tree survives, and the tool's report names the run and its log |
 
 The host is the real `opencode run --command multi-llm -- <args>` with the
 payload declared in its own `opencode.json`; its model is a second stub
@@ -868,6 +868,18 @@ bundle before the session-end re-emit digests it. The driver, and the two rig
 accommodations it records — a slowed provider so a run outlives a poll, and a
 `tool.execute.after` tap because opencode drops an aborted call's late return —
 are in `opencode_package_gate.py`'s docstring.
+
+The periodic workspace census (`WorkspaceWatch`) stats every file under the
+workspace every 0.25 s, sizes and mtimes only, `.git/` aside like the hashed
+census. Its scope is recorded in each leg's `workspace_watch`: the workspace
+only, because `$HOME` and `/tmp` are separate tmpfs mounts outside it and are not
+watched.
+
+The graders themselves are `opencode_package_gate_graders.py`: pure functions
+over a bundle, importable without Docker. `tests/test_opencode_package_gate_graders.py`
+runs every check of all five in the plain suite against a synthetic bundle, with
+one targeted mutation per check that has to fail it. A guard there fails the
+suite when a grader emits a check that has no mutation case.
 
 ```bash
 make e2e-image
