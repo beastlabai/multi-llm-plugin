@@ -159,9 +159,12 @@ def _project(kind: str) -> dict:
     return {"kind": kind, "command_registered": True,
             "command_skill_dir": "/tmp/probe/extracted/package/skills/multi-llm",
             "command_inside_payload": True, "tool_registered": True,
-            "init": {"ok": True, "exit": 0, "result": {"state": "done"},
+            "init": {"ok": True, "exit": 0, "result": {"mode": "init", "state": "done"},
                      "files_created": [".multi-llm/config.yaml"]},
-            "status": {"ok": True, "exit": 0, "result": {"state": "done"}}}
+            # What status answers in a project whose only run was init, measured
+            # on the real probe: exit 2, "no run recorded".
+            "status": {"ok": True, "exit": 2,
+                       "result": {"mode": "status", "state": "nothing-to-do"}}}
 
 
 def row7_raw(facts: dict, *, host: str, registry: str) -> dict:
@@ -577,8 +580,37 @@ class TestRow7:
         broken = _project("no-commit")
         broken["init"] = {"ok": False, "exit": 1, "result": {"error": "GitError"},
                           "files_created": []}
-        with pytest.raises(gate.GateError, match="no-commit project: init did not succeed"):
+        with pytest.raises(gate.GateError,
+                           match="no-commit project: init did not return its documented result"):
             run.row7(projects=[_project("committed"), broken])
+
+    def test_a_status_that_found_a_finished_run_is_documented_too(self, run):
+        run.begin()
+        done = _project("committed")
+        done["status"] = {"ok": True, "exit": 0, "result": {"mode": "status", "state": "done"}}
+        run.row7(projects=[done, _project("no-commit")])
+        assert (run.dir / "row-7.json").exists()
+
+    @pytest.mark.parametrize("status", [
+        {"ok": True, "exit": 1, "result": {"mode": "status", "state": "error"}},
+        {"ok": True, "exit": 3, "result": {"mode": "status", "state": "needs-input"}},
+        {"ok": True, "exit": 2, "result": {"mode": "review-plan", "state": "nothing-to-do"}},
+        {"ok": True, "exit": 0, "result": {"mode": "status"}},
+    ], ids=["exit-1", "exit-3", "another-mode", "no-state"])
+    def test_a_status_outside_its_documented_results_is_refused(self, run, status):
+        run.begin()
+        broken = _project("no-commit")
+        broken["status"] = status
+        with pytest.raises(gate.GateError,
+                           match="no-commit project: status did not return its documented result"):
+            run.row7(projects=[_project("committed"), broken])
+
+    def test_a_skill_dir_outside_the_probe_root_is_refused(self, run):
+        run.begin()
+        elsewhere = _project("committed")
+        elsewhere["command_skill_dir"] = "/home/someone/checkout/skills/multi-llm"
+        with pytest.raises(gate.GateError, match="outside the probe's own root"):
+            run.row7(projects=[elsewhere, _project("no-commit")])
 
     def test_another_tarball_is_refused(self, run, tmp_path):
         run.begin()
