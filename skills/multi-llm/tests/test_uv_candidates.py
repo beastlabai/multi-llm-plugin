@@ -270,7 +270,15 @@ class TestNoUnlistedReader:
                 "test_uv_candidates.py", "test_opencode_package.py",
                 "test_unattended.py", "test_detach.py", "test_shim_correctness.py",
                 "test_install_host.py", "test_instruction_portability.py",
+                # Quotes a recorded dispatcher argv in a fixture.
+                "test_opencode_registry_check.py",
             ):
+                continue
+            # The step-5 registry-install probe's stock-container recipe
+            # INSTALLS uv at /usr/local/bin, the way a first-time user's system
+            # package would; it never searches the list, so it is no reader.
+            # The plugin it then exercises is, and is in READERS.
+            if path.as_posix() == "packaging/opencode/registry_check.py":
                 continue
             # A committed run record QUOTES what ran on a user's machine (the
             # codex-v0.1.0 network check's dispatcher argv was
