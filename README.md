@@ -87,7 +87,7 @@ Installs as the `opencode-multi-llm` npm package: a `/multi-llm` command plus a 
 Add the package to `~/.config/opencode/opencode.json` and restart OpenCode:
 
 ```json
-{ "plugin": ["opencode-multi-llm@0.1.0"] }
+{ "plugin": ["opencode-multi-llm@0.1.1"] }
 ```
 
 ```text
