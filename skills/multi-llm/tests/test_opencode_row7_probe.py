@@ -106,7 +106,7 @@ def _passing_call(kind: str, skill_dir: str, mode: str) -> dict:
     result = {"mode": mode, "phase": None, "state": "done" if mode == "init" else "nothing-to-do",
               "exit": 0 if mode == "init" else 2, "artifacts": [], "next": None}
     call = {"ok": True, "exit": result["exit"], "state": result["state"], "result": result,
-            "skill_dir": skill_dir}
+            "skill_dir": skill_dir, "script": str(Path(skill_dir) / "multi_llm.py")}
     if mode == "init":
         call["files_created"] = [probe.PROVIDERS_FILE]
     return call
@@ -411,7 +411,8 @@ def _fake_drive(no_commit_status_fails: bool):
         assert args["mode"] == mode
         config = json.loads((project / "opencode.json").read_text())
         skill = os.path.join(config["plugin"][0], "skills", "multi-llm")
-        argv = ["uv", "run", "--frozen", "--no-dev", "--project", skill, "--", "python"]
+        argv = ["uv", "run", "--frozen", "--no-dev", "--project", skill, "--", "python",
+                os.path.join(skill, "multi_llm.py"), mode]
         if mode == "init":
             (project / ".multi-llm").mkdir(exist_ok=True)
             (project / probe.PROVIDERS_FILE).write_text("providers: {}\n")
@@ -504,6 +505,35 @@ class TestOneProject:
                                             SURFACE, tmp_path / "diag")
         assert entry["command_inside_payload"] is False
         assert any("/elsewhere/skills/multi-llm" in f for f in failures)
+
+    @pytest.mark.parametrize("kind", ["committed", "no-commit"])
+    @pytest.mark.parametrize("broken", ["project", "script", "missing-script", "null-result"])
+    def test_a_good_init_cannot_hide_a_broken_status(self, faked_opencode, tmp_path,
+                                                   monkeypatch, kind, broken):
+        package, iso = faked_opencode
+        drive = _fake_drive(False)
+
+        def wrong_status(*args, **kwargs):
+            verdict = drive(*args, **kwargs)
+            if kwargs["mode"] == "status":
+                argv = verdict["outcome"]["argv"]
+                if broken == "project":
+                    argv[argv.index("--project") + 1] = "/elsewhere/skills/multi-llm"
+                elif broken == "script":
+                    argv[argv.index("--") + 2] = "/elsewhere/multi_llm.py"
+                elif broken == "missing-script":
+                    del argv[argv.index("--") + 2:]
+                else:
+                    verdict.update(outcome=None, returned="null", output="null")
+            return verdict
+
+        monkeypatch.setattr(probe, "drive_scripted_call", wrong_status)
+        entry, failures = probe.run_project(kind, tmp_path, iso, package, "opencode",
+                                            SURFACE, tmp_path / "diag")
+        assert entry["init"]["ok"] is True
+        assert entry["status"]["ok"] is False
+        assert entry["ok"] is False
+        assert any(f.startswith(f"{kind}: status:") for f in failures), failures
 
 
 # --------------------------------------------------------------------------- #
@@ -615,6 +645,11 @@ class TestAssessCall:
                                     tool_name=TOOL, call_id="c1")
         assert any("ended 'error'" in p for p in verdict["problems"])
 
+    def test_json_null_is_not_a_structured_tool_result(self):
+        verdict = probe.assess_call([_tool_event("null")], self._entries(returned="null"),
+                                    tool_name=TOOL, call_id="c1")
+        assert any("not a JSON object" in p for p in verdict["problems"])
+
     def test_events_parse_from_ndjson_with_noise(self):
         text = "noise\n" + json.dumps(_tool_event("x")) + "\n{broken\n"
         assert probe.parse_events(text) == [_tool_event("x")]
@@ -640,6 +675,12 @@ class TestGradeCall:
         assert not evidence["ok"]
         assert "GitError" in evidence["error"]
         assert any("exited 1, not 2" in p for p in problems)
+
+    @pytest.mark.parametrize("outcome", [None, {}, [], "null"])
+    def test_a_missing_result_never_grades_green(self, outcome):
+        evidence, problems = probe.grade_call(self._call(outcome), mode="status", want_exit=2,
+                                              want_state="nothing-to-do", surface=SURFACE)
+        assert problems and evidence["ok"] is False
 
 
 # --------------------------------------------------------------------------- #
