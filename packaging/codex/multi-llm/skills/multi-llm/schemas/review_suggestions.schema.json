@@ -14,7 +14,7 @@
       },
       "desc": {
         "type": "string",
-        "description": "Text explaining the issue and the recommended fix"
+        "description": "Text explaining the issue, in the form the phase's prompt asks for"
       },
       "importance": {
         "type": "string",
