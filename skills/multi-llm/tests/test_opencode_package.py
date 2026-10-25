@@ -98,6 +98,37 @@ def _need_node() -> str:
     return node
 
 
+def _load_bump():
+    """``packaging/opencode/bump.py`` by path, as ``test_opencode_version_pins``
+    loads it: a bare ``import bump`` would bind whatever module of that name
+    another test put on ``sys.path`` first."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "opencode_bump_for_package_tests", PACKAGE_DIR / "bump.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+#: One release in the schema's spelling: ``x.y.z`` plus an optional
+#: pre-release or build suffix. Dot-separated identifiers only, so a trailing
+#: ``.tgz`` or a sentence's full stop is never read as part of the version.
+_RELEASE = r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?"
+
+
+def _package_versions(text: str, name: str, *, tarballs: bool = False) -> set:
+    """Every version of package *name* that *text* spells as ``name@<v>``.
+
+    With *tarballs*, ``name-<v>.tgz`` counts too: on the npm README a tarball
+    name is a version a bump has to find, like a spec. The pages a user installs
+    from spell no tarball, so they ask for specs alone.
+    """
+    separators = "[@-]" if tarballs else "@"
+    return set(re.findall(rf"{re.escape(name)}{separators}({_RELEASE})", text))
+
+
 @pytest.fixture(scope="session")
 def built_package(tmp_path_factory) -> Path:
     """``build.py``'s output, in a temp directory. Never the working tree."""
@@ -188,8 +219,42 @@ class TestManifest:
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
         assert not manifest.get("dependencies")
         assert not manifest.get("peerDependencies")
-        # The types-only helper belongs in devDependencies and nowhere else.
-        assert "@opencode-ai/plugin" in manifest.get("devDependencies", {})
+
+    def test_the_plugin_sdk_types_are_the_host_pin(self):
+        """``devDependencies["@opencode-ai/plugin"]`` is the supported host
+        release, exactly, and ``make opencode-bump`` is what moves it.
+
+        Nothing compiles against it: ``src/index.mjs`` is plain JavaScript the
+        build copies verbatim, and consumers never install devDependencies. It
+        is the reference for the plugin API the source's comments rely on. But
+        ``package.json`` ships in the tarball, so a stale value publishes a
+        plugin API version older than the ``engines`` floor beside it. That is
+        how this row was found: 1.18.23 under a 1.19.3 floor, behind a row that
+        only checked the entry existed. OpenCode publishes the SDK at every host
+        version, so the host pin owns it: a :data:`bump.PINS` site, which
+        ``test_every_pin_agrees`` then holds equal to every other pin.
+        """
+        from utils.providers.opencode import OpenCodeProvider
+
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        pinned = manifest.get("devDependencies", {}).get("@opencode-ai/plugin")
+        # Exact, never a range: a range resolves independently of the host it
+        # describes, which is the drift this row exists to stop.
+        assert pinned == OpenCodeProvider.verified_version, (
+            f"@opencode-ai/plugin is {pinned!r}, the host pin is "
+            f"{OpenCodeProvider.verified_version}; move both with "
+            "`make opencode-bump VERSION=<x.y.z>`"
+        )
+        bump = _load_bump()
+        sites = [
+            name for name, rel, pattern in bump.PINS
+            if rel == MANIFEST.relative_to(REPO_ROOT) and "@opencode-ai/plugin" in pattern
+        ]
+        assert len(sites) == 1, (
+            "the SDK pin is not one bump.PINS site, so `make opencode-bump` "
+            f"would leave it behind (sites naming it: {sites})"
+        )
+        assert bump.read_pins(REPO_ROOT)[sites[0]] == pinned
 
     def test_package_manifest_is_publishable(self):
         """The publishable shape, asserted rather than remembered."""
@@ -246,13 +311,16 @@ class TestManifest:
         readme = (PACKAGE_DIR / "README.md").read_text(encoding="utf-8")
         spec = f"{manifest['name']}@{manifest['version']}"
         assert spec in readme, f"the package README does not pin {spec}"
-        # And it names no OTHER version of itself.
-        stale = [
-            found for found in
-            re.findall(rf"{re.escape(manifest['name'])}@([0-9][^\s`\"'\)]*)", readme)
-            if found != manifest["version"]
-        ]
-        assert not stale, f"the package README also names {sorted(set(stale))}"
+        # And it names no OTHER version of itself — not as a spec, and not as a
+        # tarball name either, which is spelled `<name>-<version>.tgz` and is
+        # written `<version>` in the prose for exactly this reason: every
+        # number left in the page is one a version bump has to find, and this
+        # is what finds it. It pins `version`, never `public_version`: it ships
+        # inside that version and is read only once npm has it.
+        stale = _package_versions(readme, manifest["name"], tarballs=True) - {
+            manifest["version"]
+        }
+        assert not stale, f"the package README also names {sorted(stale)}"
 
         floor = re.search(
             r">=\s*([0-9]+\.[0-9]+\.[0-9]+)", manifest["engines"]["opencode"]
@@ -260,6 +328,35 @@ class TestManifest:
         assert floor in readme, (
             f"the README does not state the {floor} floor `engines` enforces"
         )
+
+    def test_the_package_readme_reads_as_published(self):
+        """The npm README is read only on npm, from inside the published version.
+
+        npm takes it with the tarball, and editing GitHub afterwards does not
+        change the bytes already published. So it must never say the package is
+        unavailable. It must still carry what a first install needs: the
+        local-directory route, the first-run network requirement (with the uv
+        flags the plugin really passes, read from their owner), and the support
+        claim. That claim is Linux. Windows and macOS keep their caveat, because
+        mocked suites passing on those OSes are not an OpenCode install there.
+        """
+        readme = (PACKAGE_DIR / "README.md").read_text(encoding="utf-8")
+        flat = " ".join(readme.split())
+        for unavailable in ("not yet published", "before this package is published",
+                            "unpublished", "resolves to nothing"):
+            assert unavailable not in flat.lower(), (
+                f"the npm README says {unavailable!r}, and npm only ever shows it "
+                "for a published version"
+            )
+        assert '{ "plugin": ["/abs/path/to/packaging/opencode"] }' in readme
+        flags = " ".join(unattended.DEFAULT_UV_RUN_ARGS)
+        assert f"`uv run {flags}`" in flat, (
+            f"the first-run section no longer names `uv run {flags}`"
+        )
+        assert "needs network" in flat
+        assert "Supported on **Linux**." in flat
+        assert "**Windows is untested on this route.**" in flat
+        assert "macOS is in the same position." in flat
 
     def test_engines_floor_matches_the_container_pin(self):
         """A4 item 6: the ``engines`` floor is the one supported release.
@@ -6853,9 +6950,12 @@ class TestGeneratedDocs:
                 len(lines),
             )
             block = "\n".join(lines[starts[0]:end])
+            # The candidate `version` before the route is verified, the last
+            # registry-checked `public_version` after (TestThePublicPin).
             spec = package["name"]
-            if package.get("version"):
-                spec = f"{spec}@{package['version']}"
+            pinned = caps.package_spec_version(host)
+            if pinned:
+                spec = f"{spec}@{pinned}"
             assert spec in block, f"the pinned spec {spec!r} is not rendered"
             if provenance == "verified":
                 assert "recommended route" in block
@@ -6902,6 +7002,422 @@ class TestGeneratedDocs:
                 "the README must still tell a reader to use the file route, "
                 "which is the only one that works today"
             )
+
+
+#: Where step 5 commits its registry-install record, and the canonical name it
+#: is committed under. The bootstrap check's ``*-opencode-bootstrap-check.json``
+#: is a CI artifact under another name, so this glob never counts one.
+RELEASE_RECORDS = SKILL_ROOT / "tests" / "container" / "records"
+RELEASE_RECORD_GLOB = "*-opencode-release-network-check*.json"
+
+#: The one validator of those records. Called through its CLI, so this file
+#: depends on the contract (``validate --profile release <record>``, exit 0 on
+#: an accepted record) and on none of its internals.
+REGISTRY_RECORD_CLI = PACKAGE_DIR / "registry_record.py"
+
+
+def _pinned_spec_hosts():
+    """The hosts whose package route pins a version: the only ones a public pin
+    applies to (the schema forbids it on every other route)."""
+    return [
+        host_id for host_id in _hosts_with_a_package_block()
+        if caps.entry(host_id)["package"]["update"] == "pinned-spec"
+    ]
+
+
+def _next_patch(version: str) -> str:
+    """The release after *version*'s ``x.y.z``, for a candidate one bump ahead."""
+    major, minor, patch = re.match(r"(\d+)\.(\d+)\.(\d+)", version).groups()
+    return f"{major}.{minor}.{int(patch) + 1}"
+
+
+def _host_paragraph(page: str, host_id: str, registry: str) -> str:
+    """*host_id*'s generated "install via" paragraph on *page*: from its heading
+    to the next host heading or section."""
+    lines = page.splitlines()
+    heading = f"**`{host_id}` — install via {registry}"
+    starts = [i for i, line in enumerate(lines) if line.startswith(heading)]
+    assert len(starts) == 1, f"expected one {heading!r} paragraph, found {len(starts)}"
+    end = next(
+        (i for i in range(starts[0] + 1, len(lines))
+         if lines[i].startswith(("**`", "## "))),
+        len(lines),
+    )
+    return "\n".join(lines[starts[0]:end])
+
+
+def _pin_problems(host_id, host, *, readme=None, host_doc=None) -> list:
+    """What is wrong with the install pins *readme* and *host_doc* spell for
+    *host*'s package, as a list of sentences (empty when nothing is).
+
+    The version they must name is :func:`caps.package_spec_version`'s, which
+    also refuses a public pin that disagrees with the provenance row or is newer
+    than the candidate. Each page must name that version of the package and no
+    other: a second ``name@<v>`` anywhere on it is a line a user can copy. A page
+    left out (``None``) is not checked, so a fixture render can grade the
+    generated block alone.
+    """
+    package = host["package"]
+    name = package["name"]
+    provenance = host["provenance"]["package"]
+    verified = provenance == "verified"
+    expected = caps.package_spec_version(host)
+    problems = []
+    for page, text in (("README.md", readme), ("docs/hosts.md", host_doc)):
+        if text is None:
+            continue
+        found = _package_versions(text, name)
+        if found != {expected}:
+            spelled = ", ".join(f"{name}@{v}" for v in sorted(found)) or "no pin"
+            problems.append(
+                f"{page} names {spelled}; at `{provenance}` it must name "
+                f"{name}@{expected} and no other version"
+            )
+    if host_doc is not None:
+        unpublished = "(not yet published)" in _host_paragraph(
+            host_doc, host_id, package["registry"]
+        )
+        if verified and unpublished:
+            problems.append(
+                f"docs/hosts.md's {host_id} paragraph is `verified` but still "
+                "says it is not yet published"
+            )
+        if not verified and not unpublished:
+            problems.append(
+                f"docs/hosts.md's {host_id} paragraph pins {name}@{expected} "
+                "without the unpublished notice"
+            )
+    if readme is not None and not verified and "not yet published" not in readme:
+        problems.append(
+            f"README.md pins {name}@{expected} without the unpublished notice"
+        )
+    return problems
+
+
+def _record(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _release_record_problems(
+    name, version, *, records=RELEASE_RECORDS, validator=REGISTRY_RECORD_CLI
+) -> list:
+    """Empty when a committed step-5 record backs ``name@version``.
+
+    With the validator present, a record counts only if
+    ``registry_record.py validate --profile release`` accepts it, and it must
+    name the version. **Without it this is a floor, not the check**: the record
+    names the version, came from the registry (``install_source: npm``) and is
+    no rehearsal (``rehearsal: false``). The validator lands with the registry
+    work package. Until it does, nothing can promote the route either, so this
+    branch only runs from a tree that has neither.
+    """
+    candidates = sorted(records.glob(RELEASE_RECORD_GLOB))
+    if validator is not None and Path(validator).is_file():
+        accepted = [
+            path for path in candidates
+            if subprocess.run(
+                [sys.executable, str(validator), "validate", "--profile", "release",
+                 str(path)],
+                capture_output=True, text=True, timeout=300, cwd=REPO_ROOT,
+                stdin=subprocess.DEVNULL,
+            ).returncode == 0
+        ]
+        how = f"that `{Path(validator).name} validate --profile release` accepts"
+    else:
+        accepted = [
+            path for path in candidates
+            if _record(path).get("install_source") == "npm"
+            and _record(path).get("rehearsal") is False
+        ]
+        how = (
+            "with `install_source: npm` and `rehearsal: false` (registry_record.py "
+            "is absent, so that floor stands in for its validation)"
+        )
+    if any(_record(path).get("version") == version for path in accepted):
+        return []
+    return [
+        f"no committed {RELEASE_RECORD_GLOB} record {how} names {name}@{version} "
+        f"({len(candidates)} under {records}); `public_version` moves only after "
+        "that version's registry record validates"
+    ]
+
+
+@pytest.fixture
+def pin_render(tmp_path, monkeypatch):
+    """Render the generated host doc from a COPY of the capability data whose
+    opencode package cells and provenance row are replaced. Never the real file.
+
+    ``render(provenance, **cells)`` returns ``(host, page)``; a cell given as
+    ``None`` is removed. Each call writes its own base directory, so the per-base
+    cache cannot hand one state's document to another.
+    """
+    import yaml
+
+    monkeypatch.syspath_prepend(str(SKILL_ROOT / "hosts"))
+    import render_capabilities as renderer
+
+    monkeypatch.setattr(caps, "_CACHE", {})
+    original = (SKILL_ROOT / caps.CAPABILITIES_FILE).read_text(encoding="utf-8")
+    calls = []
+
+    def render(provenance, **cells):
+        document = yaml.safe_load(original)
+        host = document["hosts"]["opencode"]
+        for key, value in cells.items():
+            if value is None:
+                host["package"].pop(key, None)
+            else:
+                host["package"][key] = value
+        host["provenance"]["package"] = provenance
+        base = tmp_path / f"skill-{len(calls)}"
+        calls.append(base)
+        (base / "hosts").mkdir(parents=True)
+        (base / caps.CAPABILITIES_FILE).write_text(
+            yaml.safe_dump(document, sort_keys=False), encoding="utf-8"
+        )
+        return host, renderer.render_host_doc_section(str(base))
+
+    return render
+
+
+class TestThePublicPin:
+    """``package.version`` is the candidate; ``package.public_version`` is what a
+    user is told to pin.
+
+    ``version`` follows the shared version at every bump, so once the route is
+    verified, a recommendation built from it would name a version npm does not
+    serve yet: through the dispatch and the registry check, and indefinitely if
+    either fails. On this host that is the silent failure: plugin listed, exit 0,
+    nothing loaded. So the recommendation pins ``public_version``, the last
+    version whose registry record validated. The schema forbids it until the
+    route is verified and requires it from then on, and it never runs ahead of
+    the candidate. The npm README is the exception: it ships inside ``version``
+    and is read only once npm has it, so it pins ``version``
+    (``TestManifest.test_the_package_readme_pins_the_same_version``).
+    """
+
+    def test_the_install_pins_follow_the_provenance_row(self):
+        """The committed pages, in whichever state the committed row is.
+
+        At ``documented``, ``README.md`` and the generated ``docs/hosts.md`` pin
+        the candidate under the unpublished notice. At ``verified`` both pin
+        ``public_version`` and no other version, even when ``version`` is newer,
+        and a committed step-5 record backs that version.
+        """
+        hosts = _pinned_spec_hosts()
+        assert hosts, "no package route pins a version, so this row grades nothing"
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        host_doc = (REPO_ROOT / "docs" / "hosts.md").read_text(encoding="utf-8")
+        for host_id in hosts:
+            host = caps.entry(host_id)
+            package = host["package"]
+            problems = _pin_problems(host_id, host, readme=readme, host_doc=host_doc)
+            if host["provenance"]["package"] == "verified":
+                problems += _release_record_problems(
+                    package["name"], package["public_version"]
+                )
+            assert not problems, "\n".join(problems)
+
+    def test_the_verified_paragraph_recommends_the_public_pin_until_it_moves(
+        self, pin_render
+    ):
+        """A candidate one release ahead leaves the recommendation where it is,
+        and advancing ``public_version`` is the one edit that moves it."""
+        public = caps.entry("opencode")["package"]["version"]
+        ahead = _next_patch(public)
+        name = caps.entry("opencode")["package"]["name"]
+
+        host, page = pin_render("verified", version=ahead, public_version=public)
+        assert not _pin_problems("opencode", host, host_doc=page)
+        paragraph = _host_paragraph(page, "opencode", "npm")
+        assert f"{name}@{public}" in paragraph
+        assert "recommended route" in paragraph
+        assert f"{name}@{ahead}" not in page, (
+            "the verified paragraph recommends the candidate, which npm does not "
+            "serve yet"
+        )
+
+        host, page = pin_render("verified", version=ahead, public_version=ahead)
+        assert not _pin_problems("opencode", host, host_doc=page)
+        assert f"{name}@{ahead}" in _host_paragraph(page, "opencode", "npm")
+        assert f"{name}@{public}" not in page
+
+        # Before the promotion the same paragraph names the candidate, and says
+        # it is not published.
+        host, page = pin_render("documented", version=ahead, public_version=None)
+        assert not _pin_problems("opencode", host, host_doc=page)
+        paragraph = _host_paragraph(page, "opencode", "npm")
+        assert f"{name}@{ahead}" in paragraph
+        assert "(not yet published)" in paragraph
+        assert "recommended route" not in paragraph
+
+    def test_the_schema_pairs_the_public_pin_with_the_provenance_row(self):
+        """Forbidden until ``verified``, required at it, and only on a pinned
+        route; :func:`caps.package_spec_version` refuses exactly what the schema
+        does, so a render without the dev extra refuses too."""
+        jsonschema = pytest.importorskip("jsonschema")
+        schema = json.loads(
+            (SKILL_ROOT / "schemas" / "host_capabilities.schema.json")
+            .read_text(encoding="utf-8")
+        )
+        version = caps.entry("opencode")["package"]["version"]
+
+        def variant(host_id, provenance, **cells):
+            document = json.loads(json.dumps(caps.load()))
+            host = document["hosts"][host_id]
+            host["provenance"]["package"] = provenance
+            for key, value in cells.items():
+                if value is None:
+                    host["package"].pop(key, None)
+                else:
+                    host["package"][key] = value
+            return document, host
+
+        cases = [
+            ("opencode", "documented", {"public_version": None}, True),
+            ("opencode", "documented", {"public_version": version}, False),
+            ("opencode", "unknown", {"public_version": version}, False),
+            ("opencode", "verified", {"public_version": None}, False),
+            ("opencode", "verified", {"public_version": version}, True),
+            # A reinstall route has no pin to recommend, verified or not.
+            ("codex", "verified", {"public_version": version}, False),
+            ("codex", "documented", {"public_version": version}, False),
+        ]
+        for host_id, provenance, cells, valid in cases:
+            document, host = variant(host_id, provenance, **cells)
+            label = f"{host_id} at {provenance} with {cells}"
+            if valid:
+                jsonschema.validate(document, schema)
+                caps.package_spec_version(host)
+            else:
+                with pytest.raises(jsonschema.ValidationError):
+                    jsonschema.validate(document, schema)
+                with pytest.raises(caps.PackagePinError):
+                    caps.package_spec_version(host)
+                    pytest.fail(f"package_spec_version accepted {label}")
+
+    def test_the_public_pin_is_never_newer_than_the_candidate(self, pin_render):
+        """No JSON Schema keyword compares two versions, so this half is the
+        helper's and the renderer's: a public pin ahead of the candidate means
+        one was hand-edited past the other, and the render refuses."""
+        version = caps.entry("opencode")["package"]["version"]
+        ahead = _next_patch(version)
+        host = json.loads(json.dumps(caps.entry("opencode")))
+        host["provenance"]["package"] = "verified"
+        host["package"]["public_version"] = ahead
+        with pytest.raises(caps.PackagePinError, match="newer than"):
+            caps.package_spec_version(host)
+        with pytest.raises(SystemExit, match="newer than"):
+            pin_render("verified", public_version=ahead)
+        # Equal is the state right after a promotion or an advance.
+        host["package"]["public_version"] = version
+        assert caps.package_spec_version(host) == version
+
+        # SemVer precedence, not string order: the spec's own example chain,
+        # then the two cases a string compare gets wrong.
+        chain = [
+            "1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta",
+            "1.0.0-beta.2", "1.0.0-beta.11", "1.0.0-rc.1", "1.0.0",
+        ]
+        keys = [caps._release_precedence(item) for item in chain]
+        assert keys == sorted(keys) and len(set(keys)) == len(keys)
+        assert caps._release_precedence("0.1.10") > caps._release_precedence("0.1.9")
+        assert caps._release_precedence("1.0.0+build.7") == caps._release_precedence("1.0.0")
+
+    def test_the_pin_check_catches_a_stale_hand_written_pin(self):
+        """The grader itself, on pages written to fail: a check that cannot go
+        red proves nothing about the committed pages it passes."""
+        base = json.loads(json.dumps(caps.entry("opencode")))
+        name = base["package"]["name"]
+        public = base["package"]["version"]
+        ahead = _next_patch(public)
+
+        verified = json.loads(json.dumps(base))
+        verified["provenance"]["package"] = "verified"
+        verified["package"].update(version=ahead, public_version=public)
+        # The hand-written pin followed the candidate instead of the public pin.
+        stale = f'{{ "plugin": ["{name}@{ahead}"] }}'
+        assert any(
+            "README.md" in problem
+            for problem in _pin_problems("opencode", verified, readme=stale)
+        )
+        both = f"{name}@{public} then {name}@{ahead}"
+        assert _pin_problems("opencode", verified, readme=both)
+        assert not _pin_problems(
+            "opencode", verified, readme=f'{{ "plugin": ["{name}@{public}"] }}'
+        )
+
+        documented = json.loads(json.dumps(base))
+        documented["package"]["version"] = ahead
+        silent = f'{{ "plugin": ["{name}@{ahead}"] }}'
+        assert any(
+            "unpublished notice" in problem
+            for problem in _pin_problems("opencode", documented, readme=silent)
+        )
+        assert not _pin_problems(
+            "opencode", documented,
+            readme=f"> This route is not yet published.\n{silent}",
+        )
+
+    def test_the_record_check_needs_a_registry_record_naming_the_version(
+        self, tmp_path
+    ):
+        """Both branches of the record check, on records written to pass and fail.
+
+        The validator branch runs a stand-in that holds the CLI contract
+        (``validate --profile release <record>``), so the call this file makes
+        is pinned before the real validator exists.
+        """
+        name, version = "opencode-multi-llm", "0.1.1"
+        records = tmp_path / "records"
+        records.mkdir()
+
+        def write(stem, **fields):
+            path = records / f"{stem}.json"
+            path.write_text(json.dumps(fields), encoding="utf-8")
+            return path
+
+        def problems(**kwargs):
+            return _release_record_problems(name, version, records=records, **kwargs)
+
+        # The floor, the branch a tree without registry_record.py takes.
+        assert problems(validator=None), "no record at all passed"
+        write("20261101T000000Z-opencode-bootstrap-check",
+              version=version, install_source="npm", rehearsal=False)
+        assert problems(validator=None), "a bootstrap record counted"
+        write("20261101T000001Z-opencode-release-network-check",
+              version=version, install_source="npm", rehearsal=True)
+        assert problems(validator=None), "a rehearsal counted"
+        write("20261101T000002Z-opencode-release-network-check",
+              version="0.1.0", install_source="npm", rehearsal=False)
+        assert problems(validator=None), "a record for another version counted"
+        write("20261101T000003Z-opencode-release-network-check",
+              version=version, install_source="file", rehearsal=False)
+        assert problems(validator=None), "a non-registry install counted"
+        write("20261101T000004Z-opencode-release-network-check",
+              version=version, install_source="npm", rehearsal=False)
+        assert not problems(validator=None)
+
+        # The validator branch: only what the CLI accepts counts.
+        stand_in = tmp_path / "bin" / "registry_record.py"
+        stand_in.parent.mkdir()
+        stand_in.write_text(textwrap.dedent("""
+            import json, sys
+            assert sys.argv[1:4] == ["validate", "--profile", "release"], sys.argv
+            sys.exit(0 if json.load(open(sys.argv[4])).get("accepted") else 1)
+        """), encoding="utf-8")
+        assert problems(validator=stand_in), "records the validator refused counted"
+        write("20261101T000005Z-opencode-release-network-check",
+              version="0.1.0", accepted=True)
+        assert problems(validator=stand_in), "an accepted record for another version"
+        write("20261101T000006Z-opencode-release-network-check",
+              version=version, accepted=True)
+        assert not problems(validator=stand_in)
+
 
 class TestCheckRouteDetection:
     """D5, driven by a fabricated merged config plus a fake cache tree."""

@@ -653,8 +653,9 @@ function composeSpawnArgv(uv, dispatcherArgv, surface, env) {
  * `ctx.worktree ?? ctx.directory`, in that order: the worktree is the checkout
  * the session is editing and `directory` the project it was opened from, and
  * they differ exactly when the session runs in a git worktree, where the
- * worktree is the right answer. Neither is in the published ToolContext type, so
- * a missing or non-absolute value falls through, finally to `process.cwd()`.
+ * worktree is the right answer. Both are declared strings on the SDK's
+ * published ToolContext type, but a type is not the running host, so a missing
+ * or non-absolute value falls through, finally to `process.cwd()`.
  *
  * This is not cosmetic. `<git-root>/.multi-llm/providers.yaml` discovery walks up
  * from here, and `init` resolves its target from the cwd alone — spawned from the
@@ -688,7 +689,8 @@ const SESSION_MODEL_BUDGET_MS = 3000
  * the host's shipped credential-free floor did. So a run launched from a session
  * whose picker said one model dispatched all of its batches on another, with
  * nothing on screen to say so. The `ToolContext` carries no model — only
- * `sessionID`, `messageID`, `agent`, `directory`, `worktree` and `abort` — but
+ * `sessionID`, `messageID`, `agent`, `directory`, `worktree`, `abort` and the
+ * `metadata`/`ask` callbacks — but
  * the plugin factory's own input carries the SDK `client`, and the session's
  * newest assistant message records the `providerID`/`modelID` it was produced
  * with. That is the observation; what it *means* is Python's to decide, which is

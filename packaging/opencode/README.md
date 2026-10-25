@@ -27,12 +27,16 @@ older host refuses the plugin with a clear compatibility error) and
 supports the OpenCode release that was newest when it was cut, and only that
 one; `opencode upgrade` moves an older host there.
 
+Supported on **Linux**. Windows and macOS are untested on this route (see
+*Caveats*). The first start after an install or a pin change, and the first
+tool call after it, need the network (see *First run*). A spec naming a version
+npm does not have fails silently, like every failure on this route (see
+*Nothing happened, and there is no error*).
+
 ### Installing a local build — a **directory**, never the `.tgz`
 
-Before this package is published — and whenever you want to run a build of your
-own — the spec above resolves to nothing, and on this host that failure is silent
-(see *Nothing happened, and there is no error*). The local route is to point
-`plugin[]` at the built package **directory**:
+To run a build of your own instead of the published package, point `plugin[]`
+at the built package **directory**:
 
 ```json
 { "plugin": ["/abs/path/to/packaging/opencode"] }
@@ -47,15 +51,15 @@ clean `$HOME`:
 | --- | --- |
 | `<dir>` | **yes** |
 | `file://<dir>` | **yes** |
-| `<dir>/opencode-multi-llm-0.1.0.tgz` | **no** — the command map came back empty |
-| `file://<dir>/opencode-multi-llm-0.1.0.tgz` | **no** |
+| `<dir>/opencode-multi-llm-<version>.tgz` | **no** — the command map came back empty |
+| `file://<dir>/opencode-multi-llm-<version>.tgz` | **no** |
 
 OpenCode never opens the archive. A `.tgz` spec resolves to the archive's
 **containing directory** — confirmed by a fifth run with the tarball copied
 *inside* a valid package directory, which loaded. So a tarball path appears to
 work exactly when the directory holding it is itself an unpacked package, and
 `npm pack` writes its tarball straight into the tree it just packed: point at
-`packaging/opencode/opencode-multi-llm-0.1.0.tgz` after a `make opencode-package`
+`packaging/opencode/opencode-multi-llm-<version>.tgz` after a `make opencode-package`
 and the plugin loads — not because the spec resolved, but because its directory
 did. Copy that tarball anywhere else, name it the same way, and it is a silent
 no-op.
@@ -73,11 +77,17 @@ is the whole upgrade.
 ## First run
 
 **The first `/multi-llm` after an install or an upgrade needs network, or a warm
-`~/.cache/uv`.** The tool runs the packaged Python through `uv run --frozen
---no-dev`, which installs the single runtime dependency (`pyyaml`) into a venv
-inside the installed package on first use. After that the route works offline.
-This is the difference between "the first `/multi-llm` is slow, or fails behind a
-proxy" and "the plugin is broken".
+`~/.cache/uv`.** Two downloads happen, at two different moments:
+
+1. **At startup**, OpenCode fetches the pinned package from npm, once per spec.
+2. **At the first tool call.** Every `/multi-llm` has the model call the
+   plugin's `multi_llm` tool, and the first call runs the packaged Python through
+   `uv run --frozen --no-dev`. That installs the runtime dependencies (only
+   `pyyaml`) into a venv inside the installed package. If the machine has no
+   Python 3.10 or newer, uv downloads one first.
+
+After that the route works offline. This is the difference between "the first
+`/multi-llm` is slow, or fails behind a proxy" and "the plugin is broken".
 
 Each installed version pays for its own venv, and the old one is never reclaimed
 — see *Uninstalling* below.
