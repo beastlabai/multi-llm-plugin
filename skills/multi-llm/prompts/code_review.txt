@@ -35,7 +35,8 @@ This list is only the head of the review scope. The full scope is the scope mani
 Look for:
 - **Bugs**: Logic errors, incorrect behavior, edge cases
 - **Missing functionality**: Plan requirements not implemented
-- **Security issues**: Vulnerabilities, unsafe patterns
+- **Tests that test nothing**: Tests in the change offered as evidence for a behaviour that would still pass with that behaviour missing or broken: they never reach the code that implements it, mock out that code, assert something that cannot fail, or are skipped unconditionally or for a reason that does not apply
+- **Security issues**: Vulnerabilities, unsafe patterns, and data exposure through logs, telemetry, caches, test output or committed files
 - **Scope creep**: Code that goes beyond what was planned
 - **Quality issues**: Performance problems, code smells
 
@@ -45,7 +46,7 @@ Look for:
 Return ONLY a valid JSON array with no additional text. Each issue must have this structure:
 {{
   "title": "Short issue title (5-10 words)",
-  "desc": "Detailed description explaining the problem and recommended fix",
+  "desc": "What is wrong and why it matters, with evidence where it helps",
   "importance": "high",
   "file": "path/to/file.py",
   "line_range": [10, 15],
@@ -55,7 +56,7 @@ Return ONLY a valid JSON array with no additional text. Each issue must have thi
 
 Field requirements:
 - "title": string, concise summary (required)
-- "desc": string, 2-4 sentences explaining problem and fix (required)
+- "desc": string, 2-4 sentences: what is wrong and why it matters, with the evidence where it helps (what in the cited lines shows it, another location as path:line, or the plan text the change breaks). If the plan or the surrounding code shows the intended behaviour, say what it is. You don't need to propose a fix; whoever applies the finding decides it. But if the right fix is a design choice that neither settles, propose the one you would make, so that validation can weigh it. (required)
 - "importance": exactly "high", "medium", or "low" (required)
   - high = bugs, security issues, incorrect behavior
   - medium = missing functionality, significant improvements
@@ -64,6 +65,9 @@ Field requirements:
 - "line_range": [start, end] line numbers, or null (required)
 - "type": exactly "bug", "missing", "improvement", "style", or "scope" (required)
 - "anchor_text": string, 10-50 char code snippet for locating issue (required)
+  - for a secret, use a snippet without the value, such as the assignment's left-hand side ("self.api_key ="). If no 10-50 char snippet leaves the value out, a shorter snippet or "" is fine; give line_range so file and line_range locate it
+
+If a finding involves a secret (a key, token or password), say where it is and never copy its value into any field. That includes evidence: cite where the value is, and leave it out of any quote.
 
 If no issues are found, return an empty array: []
 

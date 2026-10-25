@@ -272,6 +272,18 @@ class TestLoadPromptEdgeCases:
 #: `prompt_context_factory` keys, plus the three the dispatch layer injects
 #: (`invoke_with_file_output`, and `run_single_model`'s reconstruction sites).
 _REVIEW_CONTEXT = {
+    # `code_review_orchestrator`'s `prompt_context`, key for key.
+    "code_review.txt": {
+        "plan_path": "/work/plans/p.md",
+        "tracked_files_list": "- src/app.py",
+        "scope_source": "the files the implement phase recorded",
+        "base_ref": "0123abcd",
+        "prefix": "p",
+        "implementation_record": "No implementation record was written.",
+        "scope_file": "/work/plans/p/code-review/scope.json",
+        "diff_dir": "/work/plans/p/code-review/diff",
+        "diff_access": "Each file's diff is under /work/plans/p/code-review/diff.",
+    },
     "plan_review.txt": {"plan_path": "/work/plans/p.md", "prefix": "p"},
     "task_review.txt": {
         "plan_path": "/work/plans/p.md",
@@ -282,7 +294,7 @@ _REVIEW_CONTEXT = {
 
 
 class TestReviewTemplatesCarryWorkingLimits:
-    """The plan and task review prompts state the attempt's time budget and
+    """The plan, task and code review prompts state the attempt's time budget and
     limits (plan: review-run-scope-salvage-and-failure-visibility D3.2), and
     only the review prompts do: `ask.txt` keeps its own read-only section
     (decision 11.7)."""
