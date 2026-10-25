@@ -111,7 +111,11 @@ env:
   BOOTSTRAP_TAG: opencode-v0.1.1
   # What a release tag looks like, checked before any tag reaches git, a
   # checkout or a probe. Tag/version equality then binds it to package.json.
-  RELEASE_TAG_PATTERN: '^opencode-v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+  # Plain x.y.z, no prerelease suffix: the versions here are the shared
+  # pyproject.toml version, and the release-gate record's schema and
+  # `release_gate.py` admit exactly this shape, so a pattern wider than theirs
+  # would only let a tag through to be refused later, by another rule.
+  RELEASE_TAG_PATTERN: '^opencode-v[0-9]+\.[0-9]+\.[0-9]+$'
   # 3. A PINNED npm, NOT `latest`. npm documents trusted publishing for npm
   #    11.5.1+ on Node 22.14.0+ (https://docs.npmjs.com/trusted-publishers/).
   #    This pin is that floor, and it is the npm row 9's `--json` body was
@@ -168,7 +172,8 @@ jobs:
       # token in its own config for the registry it publishes to
       # (lib/commands/publish.js, lib/utils/oidc.js, read 2026-10-25). No
       # rehearsal runs the publish job's row 9, which is why the setup is
-      # identical everywhere and the static test holds it so.
+      # identical everywhere and the static test holds it so; this job's row-9
+      # canary below then records, on every run, what row 9 hears under it.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -286,6 +291,42 @@ jobs:
             exit 1
           fi
           echo "tag and manifest agree on ${VERSION}"
+
+      # ROW 9'S CANARY, ON EVERY PATH: normal and bootstrap, rehearsal or not.
+      # Row 9 and the bootstrap probe both read npm's answer for a version the
+      # registry does not have, and only `E404` is that answer. So this step
+      # asks, through row 9's own entry point and under exactly this job's npm
+      # setup (the setup-node and pinned-npm steps above, the same as every
+      # row-9 job's, and no `env` of its own that npm reads), about the package's
+      # name at 0.0.0, a version it never published, and requires `E404`. An
+      # `E401` from a placeholder token, a proxy's answer, any other code: row 9
+      # would fail closed on the real tag, and the bootstrap probe with it, so it
+      # fails here, before a tag is spent finding out (plan step 0, the `.npmrc`
+      # case). The code lands in the job's evidence and its summary.
+      - name: "Row 9's canary: a version never published answers E404"
+        timeout-minutes: 5
+        env:
+          NAME: ${{ steps.facts.outputs.name }}
+        run: |
+          set -euo pipefail
+          canary="${RUNNER_TEMP}/opencode-row9-canary"
+          rm -rf "${canary}"
+          mkdir -p "${canary}" "${RUNNER_TEMP}/opencode-evidence"
+          python3 - "${NAME}" "${canary}/package.json" <<'PY'
+          import json, sys
+          with open(sys.argv[2], "w", encoding="utf-8") as handle:
+              json.dump({"name": sys.argv[1], "version": "0.0.0"}, handle)
+          PY
+          out="${RUNNER_TEMP}/opencode-evidence/row9-canary.json"
+          status=0
+          make opencode-registry-absent PACKAGE_JSON="${canary}/package.json" OUT="${out}" || status=$?
+          answered="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("code"))' "${out}" 2>/dev/null || echo '<no evidence>')"
+          echo "row 9 canary: ${NAME}@0.0.0 (never published) answered ${answered} under this job's npm setup" \
+            | tee -a "${GITHUB_STEP_SUMMARY}"
+          if [ "${status}" -ne 0 ] || [ "${answered}" != "E404" ]; then
+            echo "REFUSING: a version that was never published answered ${answered}, not E404. Row 9 and the bootstrap probe would fail closed on the real tag; fix the npm setup before tagging." >&2
+            exit 1
+          fi
 
       # The rehearsal's candidate commit stands in for the tag wherever a step
       # resolves one: the shared-version check reads tags, the probe rebuilds

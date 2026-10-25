@@ -84,8 +84,11 @@ empty at the start (recorded), every inherited ``OPENCODE_*`` and friends
 left behind. ``npm_config_registry`` carries the registry, the setting
 OpenCode 1.19.4's bundled installer honours (measured by row 7). The probe's
 own npm reads use caches of their own, so they never warm OpenCode's. The
-project is a plain ``git init`` with no commit. On a CI runner the root lies
-in ``$RUNNER_TEMP``, outside the checkout, which only rebuilds the candidate.
+project is a plain ``git init`` with no commit. The root is made inside
+``--tmp-parent`` whenever it is given (the bootstrap job hands it a fresh,
+checked-empty directory, and its guard later requires the payload under that
+directory), else in ``$RUNNER_TEMP`` on a runner, else the system temp; on a
+runner it lies outside the checkout, which only rebuilds the candidate.
 
 **The container environment** is this script driving Docker from the host,
 because the warm-offline criterion needs a network cut that a process cannot
@@ -98,11 +101,16 @@ make for itself (this machine restricts unprivileged user namespaces, so no
   plus ``python3-yaml`` for the stub model's scenario loader), uv is the
   pinned release fetched by URL and checked against its sha256 before it
   runs, and OpenCode is ``npm ci`` of the pinned install's lockfile subset
-  (``bump.install_subset``), verified by ``--version``;
+  (``bump.install_subset``), checked by ``bump.verify_installed`` as the
+  install phase starts (every installed package from the single registry
+  with the committed integrity, the binary byte-identical to a verified
+  platform package's, never a copy the install script fetched on its own)
+  and by ``--version``;
 * ``docker cp`` of the probe KIT only (:data:`KIT_FILES`: this script, the
-  row-7 probe library, the stub model and its scenario matcher, the payload
-  digest module) and a facts file, never the candidate's sources: the
-  candidate is rebuilt on the host and only its inventory and digest go in;
+  row-7 probe library, the pinned install's check, the stub model and its
+  scenario matcher, the payload digest module) and a facts file, never the
+  candidate's sources: the candidate is rebuilt on the host and only its
+  inventory and digest go in;
 * the install phase, inside, as an unprivileged user (criteria 1-7, and 9);
 * ``docker stop``, ``docker commit``, then the committed image run with
   ``--network none``: the warm-offline ``status`` through the installed
@@ -140,13 +148,19 @@ loopback up), runs the same operation and proof, and records
 **Evidence and exit.** ``--out`` gets the record whenever the criteria ran
 (failing criteria and all; a refusal before that writes nothing). The
 supporting output (every child's streams, the stub logs, the container's raw
-phase results) goes to ``<out stem>.support/`` beside it. Exit 0 only when
-every criterion passed and the validator accepted the record.
+phase results, the candidate's build log) goes to ``<out stem>.support/``
+beside it, on a refusal too: a ``CheckError`` is when it is needed most. Exit
+0 only when every criterion passed and the validator accepted the record.
 ``probe_root`` is removed after a pass unless ``--keep``.
 
-Every subprocess is bounded (``probe.run_bounded`` or a ``timeout``), and
-never by a ``timeout`` wrapper around ``opencode run``. Importable without side
-effects; the suite drives the assembly with fakes (:class:`Steps`).
+Every subprocess is bounded, and never by a ``timeout`` wrapper around
+``opencode run``: every long one (the candidate's build, the pinned install,
+OpenCode, Docker) through ``probe.run_bounded``, whose session kill reaches the
+grandchildren a direct-child ``timeout`` would leave behind; only short ``git``
+reads keep ``subprocess.run(timeout=)``. ``main`` installs
+``probe.install_exit_handlers``, so a SIGTERM unwinds through every sweep
+rather than ending the interpreter with OpenCode still running. Importable
+without side effects; the suite drives the assembly with fakes (:class:`Steps`).
 """
 
 from __future__ import annotations
@@ -243,10 +257,13 @@ _LOOPBACK = re.compile(r"^lo[0-9]*$")
 #: Only test equipment: the candidate is rebuilt on the host, and nothing of
 #: the plugin's own sources enters the container except as npm serves it.
 #: ``registry_record`` comes along because it is where the criteria sets are
-#: defined; its PyYAML import (the tag read) never runs inside.
+#: defined; its PyYAML import (the tag read) never runs inside. ``bump`` is the
+#: pinned install's own check (:func:`bump.verify_installed`), run inside on
+#: what ``npm ci`` put down there.
 KIT_FILES = (
     "packaging/opencode/registry_check.py",
     "packaging/opencode/probe.py",
+    "packaging/opencode/bump.py",
     "packaging/opencode/registry.py",
     "packaging/opencode/registry_record.py",
     "packaging/opencode/registry-record.schema.json",
@@ -378,7 +395,7 @@ def resolve_registries(registry: str, rehearsal_registry: Optional[str] = None,
         raise CheckError(str(exc)) from exc
     if rehearsal_registry is None:
         return single, single, False
-    match = _REHEARSAL.match(rehearsal_registry.strip())
+    match = _REHEARSAL.match(rehearsal_registry)
     if not match or not 0 < int(match.group(1)) < 65536:
         raise CheckError(
             f"--rehearsal-registry {rehearsal_registry!r} is not a loopback stub "
@@ -424,22 +441,25 @@ def default_build_argv(worktree: Path, destination: Path) -> List[str]:
 
 def _plain_run(argv: Sequence[str], cwd: Path, env: Mapping[str, str], budget_s: float,
                log: Path) -> Dict[str, Any]:
-    """A short bounded child whose streams go to ``log``."""
+    """A bounded child whose streams are appended to ``log``; ``exit`` is
+    ``None`` when its budget (or an exit signal) ended it.
+
+    ``probe.run_bounded``, not ``subprocess.run(timeout=)``: the build is
+    ``uv run`` starting Python, and a timeout that kills only the direct child
+    leaves the build running under the next step.
+    """
+    argv = [str(a) for a in argv]
     log.parent.mkdir(parents=True, exist_ok=True)
     with open(log, "ab") as out:
-        out.write(("$ " + " ".join(map(str, argv)) + "\n").encode("utf-8"))
-        out.flush()
-        try:
-            done = subprocess.run(list(map(str, argv)), cwd=str(cwd), env=dict(env), stdout=out,
-                                  stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                  timeout=budget_s)
-            code = done.returncode
-        except subprocess.TimeoutExpired:
-            code = None
-        except OSError as exc:
+        out.write(("$ " + " ".join(argv) + "\n").encode("utf-8"))
+    try:
+        bounded = _probe().run_bounded(argv, cwd=Path(cwd), env=env, budget_s=budget_s,
+                                       stdout=log, stderr=log, append=True)
+    except OSError as exc:
+        with open(log, "ab") as out:
             out.write(f"cannot run: {exc}\n".encode("utf-8"))
-            code = 127
-    return {"argv": [str(a) for a in argv], "exit": code}
+        return {"argv": argv, "exit": 127}
+    return {"argv": argv, "exit": bounded.returncode}
 
 
 def _git_text(repo: Path, *args: str) -> Optional[str]:
@@ -1862,7 +1882,7 @@ def _facts(ctx: Context) -> Dict[str, Any]:
                           ("sha", "digest", "inventory", "digest_files")},
             "binary": ctx.binary, "opencode_pin": ctx.opencode_pin,
             "probe_root": str(ctx.probe_root), "previous_pin": ctx.previous_pin,
-            "poll_s": ctx.poll_s, "interval_s": ctx.interval_s}
+            "poll_s": ctx.poll_s, "interval_s": ctx.interval_s, "pin_prefix": PIN_PREFIX}
 
 
 def _context_from_facts(facts: Mapping[str, Any]) -> Context:
@@ -1873,6 +1893,20 @@ def _context_from_facts(facts: Mapping[str, Any]) -> Context:
                    opencode_pin=facts["opencode_pin"], probe_root=Path(facts["probe_root"]),
                    previous_pin=facts.get("previous_pin"), poll_s=float(facts["poll_s"]),
                    interval_s=float(facts["interval_s"]))
+
+
+def verify_pin(prefix: Path, ctx: Context) -> Dict[str, str]:
+    """``bump.verify_installed`` on the container's ``npm ci`` of the pin, before
+    the binary runs for the probe: refuses (``CheckError``) a binary that is not
+    a verified platform package's own, or a package from elsewhere. The subset
+    lockfile is the host's (``npm ci`` never rewrites it); the registry is the
+    single one the host already checked."""
+    bump = _bump()
+    try:
+        lock = json.loads((prefix / "package-lock.json").read_text(encoding="utf-8"))
+        return bump.verify_installed(prefix, Path(ctx.binary), lock, ctx.single_registry)
+    except (OSError, ValueError, bump.BumpError) as exc:
+        raise CheckError(f"the pinned OpenCode under {prefix}: {exc}") from exc
 
 
 def container_phase(argv: Sequence[str], steps: Optional[Steps] = None) -> int:
@@ -1886,9 +1920,13 @@ def container_phase(argv: Sequence[str], steps: Optional[Steps] = None) -> int:
     try:
         if not (Path("/.dockerenv").exists() or os.environ.get("MLLM_REGISTRY_CHECK_PHASE_TEST")):
             raise CheckError("container-phase runs inside the probe's container only")
-        ctx = _context_from_facts(json.loads(args.facts.read_text(encoding="utf-8")))
+        facts = json.loads(args.facts.read_text(encoding="utf-8"))
+        ctx = _context_from_facts(facts)
         if args.phase == "install":
+            pin = verify_pin(Path(facts["pin_prefix"]), ctx) if facts.get("pin_prefix") else None
             result = run_criteria(ctx, steps)
+            if pin is not None:
+                result["details"]["pinned_install"] = pin
             state = dict(result["state"])
             _write_json(args.out.with_name("install-state.json"), state)
             result["state"] = {k: v for k, v in state.items() if k != "env"}
@@ -1918,21 +1956,23 @@ def _install_host_binary(single: str, root: Path) -> str:
 
     ``bump.py install`` (the gate's own installer) as a child whose ``HOME``
     is fresh: npm's default cache is ``$HOME/.npm``, so nothing it downloads
-    comes from, or goes into, the invoking user's cache.
+    comes from, or goes into, the invoking user's cache. Bounded by
+    ``probe.run_bounded``: ``npm ci`` runs ``opencode-ai``'s install script,
+    which can start an ``npm install`` of its own.
     """
     prefix = root / "opencode-host"
     home = root / "opencode-host-home"
     home.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, HOME=str(home))
-    log = root / "diagnostics" / "opencode-host-install.log"
-    log.parent.mkdir(parents=True, exist_ok=True)
-    with open(log, "wb") as err:
-        done = subprocess.run([sys.executable, str(PACKAGE_DIR / "bump.py"), "install", "--prefix",
-                               str(prefix), "--registry", single], env=env, stdout=subprocess.PIPE,
-                              stderr=err, stdin=subprocess.DEVNULL, timeout=HOST_INSTALL_BUDGET_S)
-    lines = [line for line in done.stdout.decode("utf-8", "replace").splitlines() if line.strip()]
-    if done.returncode != 0 or not lines:
-        raise CheckError(f"bump.py install exited {done.returncode}; see {log}")
+    diag = root / "diagnostics"
+    log = diag / "opencode-host-install.log"
+    bounded = _probe().run_bounded(
+        [sys.executable, str(PACKAGE_DIR / "bump.py"), "install", "--prefix", str(prefix),
+         "--registry", single], cwd=root, env=env, budget_s=HOST_INSTALL_BUDGET_S,
+        stdout=diag / "opencode-host-install.stdout.txt", stderr=log)
+    lines = [line for line in _read(bounded.stdout).splitlines() if line.strip()]
+    if bounded.returncode != 0 or not lines:
+        raise CheckError(f"bump.py install {bounded.describe()}; see {log}")
     return lines[-1].strip()
 
 
@@ -1940,11 +1980,44 @@ def _support_dir(out: Path) -> Path:
     return out.with_name(out.stem + ".support")
 
 
+def probe_parent(tmp_parent: Optional[Path], environment: str,
+                 environ: Mapping[str, str] = os.environ) -> Optional[str]:
+    """Where the probe's root is made: ``--tmp-parent`` whenever it is given.
+
+    Then ``$RUNNER_TEMP`` on a runner, then the system temp (``None``). The
+    flag must win: ``$RUNNER_TEMP`` is set on every runner, and the bootstrap
+    job passes ``--tmp-parent`` a fresh, checked-empty directory precisely so
+    its guard can require the payload under it. Preferring the variable rooted
+    the probe in a sibling of that directory, and the guard refused every run.
+    """
+    if tmp_parent is not None:
+        return str(tmp_parent)
+    if environment == "ci-runner" and environ.get("RUNNER_TEMP"):
+        return environ["RUNNER_TEMP"]
+    return None
+
+
+def collect_support(support: Path, scratch: Optional[Path], local_root: Optional[Path]) -> None:
+    """What the probe left on this host, copied into ``support``: on a pass and
+    on a refusal alike, so a ``CheckError`` keeps the diagnostics that explain
+    it. ``local_root`` is the probe root when it lives on this host (never the
+    container's, whose files the driver copies out itself)."""
+    if local_root is not None:
+        _copy_tree(Path(local_root) / "diagnostics", support / "diagnostics")
+    if scratch is not None:
+        _copy_tree(Path(scratch) / "diagnostics", support / "host-diagnostics")
+        build_log = Path(scratch) / "candidate-build" / "build.log"
+        if build_log.is_file():
+            shutil.copyfile(build_log, support / "candidate-build.log")
+
+
 def check(args: argparse.Namespace, steps: Optional[Steps] = None,
           docker: Optional[Docker] = None) -> int:
     """The whole probe; 0 only when every criterion passed and the record validated."""
     out = Path(args.out).absolute()
     scratch: Optional[Path] = None
+    support: Optional[Path] = None
+    local_root: Optional[Path] = None
     record: Optional[Dict[str, Any]] = None
     errors: List[str] = []
     passed = False
@@ -1999,19 +2072,19 @@ def check(args: argparse.Namespace, steps: Optional[Steps] = None,
                              f"has no previous pin (got {previous})")
 
         pin = _bump().pinned_version()
-        parent = os.environ.get("RUNNER_TEMP") if args.environment == "ci-runner" else None
-        scratch = Path(tempfile.mkdtemp(prefix="mllm-regcheck-", dir=parent or args.tmp_parent)).resolve()
+        parent = probe_parent(args.tmp_parent, args.environment)
+        scratch = Path(tempfile.mkdtemp(prefix="mllm-regcheck-", dir=parent)).resolve()
         if _is_under(scratch, repo):
             raise CheckError(f"the probe's root {scratch} lies inside the checkout {repo}")
+        support = _support_dir(out)
+        _rmtree(support)
+        support.mkdir(parents=True, exist_ok=True)
         print(f"registry check: {args.spec} at {args.tag} ({tag['sha'][:12]}), {kind} release, "
               f"environment {args.environment}{', REHEARSAL against ' + read_registry if rehearsal else ''}; "
               f"root {scratch}", file=sys.stderr, flush=True)
         candidate = rebuild_candidate(repo, tag["sha"], scratch / "candidate-build")
         print(f"registry check: candidate rebuilt from {tag['sha'][:12]}: {candidate['files']} files, "
               f"digest {candidate['digest']}", file=sys.stderr, flush=True)
-        support = _support_dir(out)
-        _rmtree(support)
-        support.mkdir(parents=True, exist_ok=True)
 
         details: Dict[str, Any] = {"single_registry": single, "support": support.name,
                                    "candidate": {k: candidate[k] for k in
@@ -2030,15 +2103,16 @@ def check(args: argparse.Namespace, steps: Optional[Steps] = None,
                           previous_pin=previous, poll_s=args.poll_seconds)
             lock = json.loads((REPO_ROOT / _bump().LOCKFILE).read_text(encoding="utf-8"))
             driven = drive_container(ctx=ctx, base=container_base(), support=support, docker=docker,
-                                     pin_files=_bump().install_subset(lock, pin))
+                                     pin_files=_bump().install_subset(lock, pin, registry=single))
             phase, offline = driven["phase"], driven["offline"]
             details["container"] = driven["details"]
         else:
+            local_root = scratch / "probe-root"
             binary = args.opencode or _install_host_binary(single, scratch)
             ctx = Context(spec=args.spec, name=name, version=version, read_registry=read_registry,
                           single_registry=single, rehearsal=rehearsal, environment=args.environment,
                           candidate=candidate, binary=str(Path(binary).absolute()), opencode_pin=pin,
-                          probe_root=scratch / "probe-root", previous_pin=previous,
+                          probe_root=local_root, previous_pin=previous,
                           poll_s=args.poll_seconds)
             phase = run_criteria(ctx, steps)
             if args.environment == "vm" and phase["state"].get("payload"):
@@ -2053,7 +2127,6 @@ def check(args: argparse.Namespace, steps: Optional[Steps] = None,
                 else:
                     offline = {"pass": False, "evidence": {"problems": [
                         f"the VM's network was never cut (up: {cut['up']})"]}}
-            _copy_tree(ctx.probe_root / "diagnostics", support / "diagnostics")
         criteria = dict(phase["criteria"])
         if args.environment != "ci-runner":
             criteria[OFFLINE] = offline or {"pass": False, "evidence": {
@@ -2079,7 +2152,16 @@ def check(args: argparse.Namespace, steps: Optional[Steps] = None,
         print(f"registry check: REFUSING: {exc}", file=sys.stderr)
         if scratch is not None:
             print(f"  kept {scratch}", file=sys.stderr)
+        if support is not None:
+            print(f"  supporting output: {support}", file=sys.stderr)
         return 1
+    finally:
+        if support is not None:
+            try:
+                collect_support(support, scratch, local_root)
+            except OSError as exc:  # a copy that fails must not hide the verdict
+                print(f"registry check: could not copy the supporting output: {exc}",
+                      file=sys.stderr)
     if record is not None:
         for entry in record["criteria"]:
             verdict = "pass" if entry["pass"] else "FAIL"
@@ -2129,14 +2211,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--poll-seconds", type=float, default=NPM_POLL_S,
                         help=f"how long npm view is polled for the version (default {NPM_POLL_S:.0f})")
     parser.add_argument("--tmp-parent", type=Path, default=None,
-                        help="where the probe's root is made (default: $RUNNER_TEMP on a runner, "
-                             "else the system temp)")
+                        help="where the probe's root is made; wins whenever given (default: "
+                             "$RUNNER_TEMP on a runner, else the system temp)")
     parser.add_argument("--keep", action="store_true", help="keep the probe's root after a pass")
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    # SIGTERM/SIGINT unwind through every sweep (`probe.install_exit_handlers`):
+    # OpenCode and its uv child lead sessions of their own, out of reach of a
+    # signal to this process's group.
+    _probe().install_exit_handlers()
     if argv and argv[0] == "container-phase":
         return container_phase(argv[1:])
     args = build_parser().parse_args(argv)

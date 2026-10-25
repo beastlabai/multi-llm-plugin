@@ -108,6 +108,10 @@ import registry  # noqa: E402
 GH_REPO = "beastlabai/multi-llm-plugin"
 DEFAULT_BRANCH = "master"
 TAG_PREFIX = "opencode-v"
+#: Where a release-gate record is committed, and how its name ends. Named only
+#: to explain a clean-tree refusal that one of them caused.
+RECORDS_PREFIX = "skills/multi-llm/tests/container/records/"
+RECORD_SUFFIX = "-opencode-release-gate.json"
 
 #: The CI workflow whose jobs are the required check runs, and the two jobs.
 TEST_WORKFLOW = ".github/workflows/test.yml"
@@ -340,7 +344,15 @@ class Release:
         if status:
             lines = status.splitlines()
             listing = "; ".join(lines[:5]) + (f"; … {len(lines) - 5} more" if len(lines) > 5 else "")
-            raise Refusal("clean-tree", f"{len(lines)} uncommitted or untracked change(s): {listing}")
+            message = f"{len(lines)} uncommitted or untracked change(s): {listing}"
+            if any(RECORDS_PREFIX in line and line.rstrip().rstrip('"').endswith(RECORD_SUFFIX)
+                   for line in lines):
+                message += (
+                    f". A release-gate record belongs in {RECORDS_PREFIX} only in the default "
+                    "branch's own commit after the fast-forward (plan step 2), never in the "
+                    f"tag's tree: commit it there, then check {self.facts.get('tag') or 'the tag'}'s "
+                    "commit out again, clean, before `make opencode-publish-first`")
+            raise Refusal("clean-tree", message)
 
     def check_stamp(self) -> None:
         self._run([sys.executable, str(BUILD), "--check-stamp"], "stamp",

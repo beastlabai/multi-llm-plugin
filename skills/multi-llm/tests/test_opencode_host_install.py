@@ -10,8 +10,19 @@ values, put down by ``npm ci`` under a scratch prefix against the single
 registry; and the installed ``--version`` must equal the pin before anything is
 handed to the probe.
 
-Offline: npm and the binary are fakes, except one POSIX case that drives the
-real ``_read_version`` against a fake ``opencode`` script.
+After ``npm ci`` and before the binary runs, what npm left is checked
+(``verify_installed``): npm's own record of the install lists only the
+subset's packages, from the single registry with the committed integrity, and
+the binary is byte for byte one of those verified platform packages' own.
+``opencode-ai``'s install script falls back to an unverified ``npm install``
+of a platform package when the linked one is missing or fails its own
+``--version``; a binary that came that way is refused, naming the file.
+
+Offline: npm and the binary are fakes (the fake ``npm ci`` lays down the tree
+the real one does, measured on 1.19.4: the wrapper's ``bin/opencode.exe`` hard
+linked to a platform package's ``bin/opencode``, ``.bin/opencode`` a symlink to
+it, ``node_modules/.package-lock.json`` beside them), except one POSIX case
+that drives the real ``_read_version`` against a fake ``opencode`` script.
 """
 
 from __future__ import annotations
@@ -63,15 +74,55 @@ def repo_copy(tmp_path):
     return root
 
 
-def _fake_npm(calls):
-    """An ``npm ci`` stand-in: records the call, leaves an ``opencode`` behind."""
+def _lay_out(prefix, content=b"fake opencode\n", how="hardlink", platforms=2):
+    """What ``npm ci`` of the subset leaves under ``prefix``, as the real one does.
+
+    The first ``platforms`` platform packages of the subset, each with its own
+    ``bin/opencode`` (only the first one's bytes are ``content``), the wrapper
+    with its manifest and its ``bin/opencode.exe`` made from that first
+    package's binary by ``how`` (``hardlink``, ``copy``), the ``.bin`` command
+    and npm's own record of the install. Returns that first package's key.
+    """
+    subset = json.loads((prefix / "package-lock.json").read_text())["packages"]
+    modules = prefix / "node_modules"
+    shutil.rmtree(modules, ignore_errors=True)  # npm ci starts from no node_modules
+    keys = sorted(k for k in subset if k and k != WRAPPER_KEY)[:platforms]
+    for number, key in enumerate(keys):
+        package = prefix / key
+        (package / "bin").mkdir(parents=True, exist_ok=True)
+        (package / "package.json").write_text(json.dumps({"name": key.split("/", 1)[1]}))
+        binary = package / "bin" / bump._platform_binary_name()
+        binary.write_bytes(content if number == 0 else content + key.encode())
+        binary.chmod(0o755)
+    wrapper = prefix / WRAPPER_KEY
+    (wrapper / "bin").mkdir(parents=True, exist_ok=True)
+    (wrapper / "package.json").write_text(json.dumps(
+        {"name": bump.NPM_PACKAGE, "bin": {"opencode": "./bin/opencode.exe"}}))
+    target = wrapper / "bin" / "opencode.exe"
+    source = prefix / keys[0] / "bin" / bump._platform_binary_name()
+    if how == "hardlink":
+        os.link(source, target)
+    else:
+        shutil.copy2(source, target)
+    command = bump.installed_binary(prefix)
+    command.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        command.write_text("@ECHO off\r\n", encoding="utf-8")
+    else:
+        command.symlink_to(Path("..") / bump.NPM_PACKAGE / "bin" / "opencode.exe")
+    hidden = {"name": bump.INSTALL_NAME, "lockfileVersion": 3,
+              "packages": {key: subset[key] for key in [WRAPPER_KEY, *keys]}}
+    (modules / ".package-lock.json").write_text(json.dumps(hidden, indent=2))
+    return keys[0]
+
+
+def _fake_npm(calls, **layout):
+    """An ``npm ci`` stand-in: records the call, lays the real tree down."""
     def npm_ci(prefix, url):
         calls.append({"prefix": prefix, "registry": url,
                       "manifest": json.loads((prefix / "package.json").read_text()),
                       "lock": json.loads((prefix / "package-lock.json").read_text())})
-        binary = bump.installed_binary(prefix)
-        binary.parent.mkdir(parents=True, exist_ok=True)
-        binary.write_text("fake", encoding="utf-8")
+        _lay_out(prefix, **layout)
     return npm_ci
 
 
@@ -164,16 +215,14 @@ class TestTheVersionAssertion:
     @pytest.mark.skipif(os.name == "nt", reason="a POSIX shell script stands in for the binary")
     def test_the_real_reader_runs_the_binary_in_an_isolated_home(self, tmp_path, capsys):
         seen = tmp_path / "seen.json"
+        script = (
+            "#!/bin/sh\n"
+            f"printf '{{\"home\": \"%s\", \"autoupdate\": \"%s\", \"arg\": \"%s\"}}' "
+            f"\"$HOME\" \"$OPENCODE_DISABLE_AUTOUPDATE\" \"$1\" > '{seen}'\n"
+            "echo 0.0.1\n").encode()
 
         def npm_ci(prefix, _url):
-            binary = bump.installed_binary(prefix)
-            binary.parent.mkdir(parents=True, exist_ok=True)
-            binary.write_text(
-                "#!/bin/sh\n"
-                f"printf '{{\"home\": \"%s\", \"autoupdate\": \"%s\", \"arg\": \"%s\"}}' "
-                f"\"$HOME\" \"$OPENCODE_DISABLE_AUTOUPDATE\" \"$1\" > '{seen}'\n"
-                "echo 0.0.1\n", encoding="utf-8")
-            binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+            _lay_out(prefix, content=script)
 
         with pytest.raises(bump.BumpError, match="'0.0.1'"):
             bump.cmd_install(tmp_path / "prefix", npm_ci=npm_ci)
@@ -234,11 +283,133 @@ class TestTheScratchPrefix:
         assert seen["timeout"] == bump.NPM_CI_BUDGET_S
 
 
+class TestWhatNpmCiLeft:
+    """``verify_installed``: the binary handed to the gate is a verified
+    platform package's own file, and everything installed came from the single
+    registry with the committed integrity — checked before the binary runs."""
+
+    @staticmethod
+    def _prefix(tmp_path, **layout):
+        prefix = tmp_path / "prefix"
+        prefix.mkdir()
+        manifest, scratch = bump.install_subset(LOCK, PIN)
+        (prefix / "package-lock.json").write_text(json.dumps(scratch))
+        key = _lay_out(prefix, **layout)
+        return prefix, scratch, key
+
+    @pytest.mark.parametrize("how, expected", [("hardlink", "same file"),
+                                               ("copy", "byte-identical copy")])
+    def test_the_platform_packages_binary_passes(self, tmp_path, how, expected):
+        prefix, scratch, key = self._prefix(tmp_path, how=how)
+        matched = bump.verify_installed(prefix, bump.installed_binary(prefix), scratch,
+                                        registry.single_registry())
+        assert matched["platform_package"] == key
+        assert matched["how"].startswith(expected)
+        assert len(matched["sha256"]) == 64
+
+    def test_a_binary_the_install_script_fetched_itself_is_refused(self, tmp_path):
+        """The fallback's copy: no platform package npm ci verified holds it."""
+        prefix, scratch, _ = self._prefix(tmp_path, how="copy")
+        target = prefix / WRAPPER_KEY / "bin" / "opencode.exe"
+        target.write_bytes(b"fetched by postinstall's own npm install\n")
+        with pytest.raises(bump.BumpError, match="not the binary of any platform package") as caught:
+            bump.verify_installed(prefix, bump.installed_binary(prefix), scratch,
+                                  registry.single_registry())
+        assert str(target) in str(caught.value)
+
+    def test_a_same_sized_impostor_is_refused(self, tmp_path):
+        prefix, scratch, key = self._prefix(tmp_path, how="copy", content=b"AAAA")
+        (prefix / WRAPPER_KEY / "bin" / "opencode.exe").write_bytes(b"BBBB")
+        with pytest.raises(bump.BumpError, match="fell back to a download"):
+            bump.verify_installed(prefix, bump.installed_binary(prefix), scratch,
+                                  registry.single_registry())
+
+    def _hidden(self, prefix):
+        path = prefix / bump.HIDDEN_LOCKFILE
+        return path, json.loads(path.read_text())
+
+    def test_a_package_from_another_registry_is_refused_by_file(self, tmp_path):
+        prefix, scratch, key = self._prefix(tmp_path)
+        path, hidden = self._hidden(prefix)
+        hidden["packages"][key]["resolved"] = "https://registry.example.invalid/x/-/x.tgz"
+        path.write_text(json.dumps(hidden))
+        with pytest.raises(bump.BumpError, match="not the single registry") as caught:
+            bump.verify_installed(prefix, bump.installed_binary(prefix), scratch,
+                                  registry.single_registry())
+        assert str(path) in str(caught.value) and key in str(caught.value)
+
+    def test_an_integrity_that_is_not_the_committed_one_is_refused(self, tmp_path):
+        prefix, scratch, key = self._prefix(tmp_path)
+        path, hidden = self._hidden(prefix)
+        hidden["packages"][key]["integrity"] = "sha512-" + "A" * 86 + "=="
+        path.write_text(json.dumps(hidden))
+        with pytest.raises(bump.BumpError, match="not the committed"):
+            bump.verify_installed(prefix, bump.installed_binary(prefix), scratch,
+                                  registry.single_registry())
+
+    def test_a_package_outside_the_subset_is_refused(self, tmp_path):
+        prefix, scratch, _ = self._prefix(tmp_path)
+        path, hidden = self._hidden(prefix)
+        hidden["packages"]["node_modules/left-pad"] = {
+            "resolved": f"{registry.single_registry()}/left-pad/-/left-pad-1.0.0.tgz",
+            "integrity": "sha512-" + "B" * 86 + "=="}
+        path.write_text(json.dumps(hidden))
+        with pytest.raises(bump.BumpError, match="not in the committed subset"):
+            bump.verify_installed(prefix, bump.installed_binary(prefix), scratch,
+                                  registry.single_registry())
+
+    def test_a_directory_npm_did_not_record_is_refused(self, tmp_path):
+        prefix, scratch, _ = self._prefix(tmp_path)
+        (prefix / "node_modules" / "opencode-linux-x64-dropped").mkdir()
+        with pytest.raises(bump.BumpError, match="does not list"):
+            bump.verify_installed(prefix, bump.installed_binary(prefix), scratch,
+                                  registry.single_registry())
+
+    def test_no_record_of_the_install_is_refused(self, tmp_path):
+        prefix, scratch, _ = self._prefix(tmp_path)
+        (prefix / bump.HIDDEN_LOCKFILE).unlink()
+        with pytest.raises(bump.BumpError, match=r"\.package-lock\.json"):
+            bump.verify_installed(prefix, bump.installed_binary(prefix), scratch,
+                                  registry.single_registry())
+
+    def test_install_refuses_before_running_the_binary(self, tmp_path, capsys):
+        def npm_ci(prefix, _url):
+            _lay_out(prefix, how="copy")
+            (prefix / WRAPPER_KEY / "bin" / "opencode.exe").write_bytes(b"swapped\n")
+
+        with pytest.raises(bump.BumpError, match="Refusing to run it"):
+            bump.cmd_install(tmp_path / "prefix", npm_ci=npm_ci, version_reader=_never)
+        assert capsys.readouterr().out == ""
+
+    def test_a_committed_url_off_the_registry_refuses_before_npm_runs(self, repo_copy, tmp_path):
+        """The static half: ``npm ci`` fetches a lockfile URL on another host
+        from that host, ``--registry`` notwithstanding."""
+        lock = json.loads((repo_copy / bump.LOCKFILE).read_text())
+        lock["packages"][WRAPPER_KEY]["resolved"] = "https://mirror.example.invalid/o.tgz"
+        (repo_copy / bump.LOCKFILE).write_text(json.dumps(lock))
+        with pytest.raises(bump.BumpError, match="not under the single registry"):
+            bump.cmd_install(tmp_path / "prefix", root=repo_copy, npm_ci=_never,
+                             version_reader=_never)
+        with pytest.raises(bump.BumpError, match="mirror.example.invalid"):
+            bump.install_subset(lock, PIN, registry=registry.single_registry())
+        assert bump.install_subset(lock, PIN)  # without a registry, the old static check only
+
+    def test_verify_install_checks_a_prefix_npm_ci_already_ran_in(self, tmp_path, capsys):
+        prefix, _, key = self._prefix(tmp_path)
+        assert bump.main(["verify-install", "--prefix", str(prefix)]) == 0
+        assert key in capsys.readouterr().out
+        (prefix / WRAPPER_KEY / "bin" / "opencode.exe").unlink()
+        (prefix / WRAPPER_KEY / "bin" / "opencode.exe").write_bytes(b"other\n")
+        assert bump.main(["verify-install", "--prefix", str(prefix)]) == 1
+        assert "not the binary of any platform package" in capsys.readouterr().err
+
+
 class TestNoVersionOfItsOwn:
     def test_the_install_path_names_no_release(self):
         """Every opencode version lives in PINS; this path only reads them."""
         for function in (bump.pinned_version, bump.install_subset, bump.installed_binary,
-                         bump._npm_ci, bump.cmd_install):
+                         bump._npm_ci, bump.cmd_install, bump.verify_installed,
+                         bump.cmd_verify_install):
             source = inspect.getsource(function)
             assert not re.search(r"(?<![\d.])\d+\.\d+\.\d+(?![\d.])", source), function.__name__
 

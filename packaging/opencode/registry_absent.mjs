@@ -53,6 +53,17 @@
  *   * When npm's `E404` names the URL it fetched (`Not Found - GET <url>`), that
  *     URL must lie under the single registry, or the answer is `unknown`.
  *
+ * NOTHING OF THE CALLER'S npm CONFIGURATION. `--registry` alone does not make
+ * the answer the single registry's: a user or global `.npmrc` can still carry
+ * a `proxy`, an `https-proxy`, a `cafile` or `strict-ssl=false`, and any of
+ * them can route the request to, or accept a certificate from, a server that
+ * is not the registry, whose `E404` would then pass for an absence. So npm
+ * gets an empty `--userconfig` and an empty `--globalconfig` (command-line
+ * flags, which outrank every file), and the child's environment drops every
+ * inherited `npm_config_*` variable, which would otherwise outrank those empty
+ * files. The standard proxy variables (`HTTPS_PROXY` …) still pass: they say
+ * how this machine reaches the network at all, as row 7's isolation keeps them.
+ *
  * BOUNDED. A fresh `--cache` per probe (no packument served from an earlier
  * read, nothing written to the caller's cache), `--fetch-retries 2` with short
  * back-offs, a 30 s `--fetch-timeout`, and a hard wall-clock kill on the child,
@@ -139,8 +150,12 @@ function parseArgs(argv) {
   return args;
 }
 
+// registry.py's `normalize`, restated: ONE trailing slash removed, nothing
+// more forgiving. Surrounding whitespace or a second slash stays, compares
+// unequal to the single registry, and is refused as another registry.
 function normalize(url) {
-  return String(url).trim().replace(/\/+$/, "");
+  const text = String(url);
+  return text.endsWith("/") ? text.slice(0, -1) : text;
 }
 
 /** The URL the Makefile defines, without a trailing slash — or a refusal. */
@@ -179,11 +194,13 @@ function readManifest(path) {
 }
 
 /** npm's argv for the probe. Exported for nothing but the suite's reading. */
-export function npmArgv(name, version, registry, cache) {
+export function npmArgv(name, version, registry, { cache, userconfig, globalconfig }) {
   return [
     "view", `${name}@${version}`, "version", "--json",
     `--registry=${registry}`,
     `--cache=${cache}`,
+    `--userconfig=${userconfig}`,
+    `--globalconfig=${globalconfig}`,
     "--prefer-online",
     "--no-update-notifier",
     ...FETCH_FLAGS,
@@ -264,18 +281,31 @@ function main(argv) {
   }
 
   const spec = `${evidence.name}@${evidence.version}`;
-  const cache = mkdtempSync(join(tmpdir(), "mllm-row9-npm-cache-"));
+  // One fresh directory: the cache and the two empty config files, removed
+  // together whatever npm did.
+  const scratch = mkdtempSync(join(tmpdir(), "mllm-row9-npm-"));
+  const paths = {
+    cache: join(scratch, "cache"),
+    userconfig: join(scratch, "npmrc-user"),
+    globalconfig: join(scratch, "npmrc-global"),
+  };
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.toLowerCase().startsWith("npm_config_")),
+  );
   let child;
   try {
-    child = spawnSync("npm", npmArgv(evidence.name, evidence.version, registry, cache), {
+    writeFileSync(paths.userconfig, "", "utf8");
+    writeFileSync(paths.globalconfig, "", "utf8");
+    child = spawnSync("npm", npmArgv(evidence.name, evidence.version, registry, paths), {
       encoding: "utf8",
+      env,
       stdio: ["ignore", "pipe", "pipe"],
       timeout: KILL_AFTER_MS,
       killSignal: "SIGKILL",
       maxBuffer: 16 * 1024 * 1024,
     });
   } finally {
-    rmSync(cache, { recursive: true, force: true });
+    rmSync(scratch, { recursive: true, force: true });
   }
 
   let decided;

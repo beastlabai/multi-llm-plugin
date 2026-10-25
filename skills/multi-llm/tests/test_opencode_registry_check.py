@@ -31,6 +31,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -43,6 +44,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[3]
 PACKAGE_DIR = REPO / "packaging" / "opencode"
+WORKFLOW = REPO / ".github" / "workflows" / "publish-opencode-plugin.yml"
 CHECK_PATH = PACKAGE_DIR / "registry_check.py"
 RECORD_SCRIPT = PACKAGE_DIR / "registry_record.py"
 
@@ -688,6 +690,261 @@ class TestAMismatchFailsBeforeTheFirstToolCall:
 
 
 # --------------------------------------------------------------------------- #
+# The bootstrap job's invocation: the probe root is --tmp-parent's
+# --------------------------------------------------------------------------- #
+
+def _workflow_guard() -> str:
+    """The bootstrap job's own payload-location guard: the heredoc of its
+    validate step, read out of the workflow, never retyped."""
+    import yaml
+
+    gate = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["gate"]["steps"]
+    validate = next(s for s in gate if s.get("name") == "Bootstrap: validate the record "
+                                                          "(bootstrap profile)")
+    match = re.search(r"<<'PY'\n(.*?)\nPY$", validate["run"], re.S | re.M)
+    assert match and "outside the probe root" in match.group(1)
+    return match.group(1)
+
+
+def _fake_rebuild(candidate):
+    def rebuild(repo, sha, scratch, **_kwargs):
+        Path(scratch).mkdir(parents=True, exist_ok=True)
+        return dict(candidate, sha=sha, files=len(candidate["inventory"]),
+                    built_in="a fake of the tag's build", build={"exit": 0},
+                    destination=str(scratch))
+    return rebuild
+
+
+class TestTheProbeRootOnARunner:
+    """The bootstrap job hands ``--tmp-parent`` a fresh, checked-empty
+    directory under ``$RUNNER_TEMP`` and later refuses a payload outside it.
+    The probe preferred ``$RUNNER_TEMP`` (always set on a runner) over the
+    flag, rooted itself in a sibling, and the guard refused every run."""
+
+    def test_tmp_parent_wins_whenever_it_is_given(self, tmp_path):
+        given = tmp_path / "given"
+        assert rc.probe_parent(given, "ci-runner", {"RUNNER_TEMP": "/rt"}) == str(given)
+        assert rc.probe_parent(given, "vm", {}) == str(given)
+        assert rc.probe_parent(None, "ci-runner", {"RUNNER_TEMP": "/rt"}) == "/rt"
+        assert rc.probe_parent(None, "ci-runner", {}) is None
+        assert rc.probe_parent(None, "vm", {"RUNNER_TEMP": "/rt"}) is None
+
+    def _workflow_args(self, fixture, record, binary, probe_root):
+        """The bootstrap probe step's own flags (a rehearsal's, so the fake
+        registry is admitted)."""
+        return rc.build_parser().parse_args([
+            "--spec", SPEC, "--registry", SINGLE, "--tag", fixture["tag"],
+            "--environment", "ci-runner", "--out", str(record),
+            "--opencode", str(binary), "--tmp-parent", str(probe_root),
+            "--workflow-run-id", "4242", "--rehearsal-registry", STUB,
+            "--repo", str(fixture["repo"])])
+
+    def test_the_bootstrap_jobs_invocation_passes_the_jobs_own_guard(
+            self, tmp_path, monkeypatch, candidate_and_tarball):
+        candidate, tarball = candidate_and_tarball
+        fixture = _tagged_repo(tmp_path / "tag")
+        runner_temp = tmp_path / "runner-temp"
+        probe_root = runner_temp / "opencode-bootstrap-probe.AbCd1234"
+        probe_root.mkdir(parents=True)
+        monkeypatch.setenv("RUNNER_TEMP", str(runner_temp))
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        monkeypatch.setenv("GITHUB_RUN_ID", "4242")
+        monkeypatch.setattr(rc, "rebuild_candidate", _fake_rebuild(candidate))
+        binary = tmp_path / "bin" / "opencode"
+        binary.parent.mkdir()
+        binary.write_text("")
+        record_path = (runner_temp / "opencode-bootstrap"
+                       / "20261025T000000Z-opencode-bootstrap-check-rehearsal.json")
+        args = self._workflow_args(fixture, record_path, binary, probe_root)
+
+        assert rc.check(args, steps=FakeHost(tarball).steps()) == 0
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        root = Path(record["environment_details"]["probe_root"])
+        location = Path(record["payload_location"])
+        assert root.is_relative_to(probe_root.resolve()), root
+        assert location.is_relative_to(probe_root.resolve()), location
+        assert not any(p.name.startswith("mllm-regcheck-") for p in runner_temp.iterdir()), \
+            "the probe rooted itself in $RUNNER_TEMP beside --tmp-parent"
+        guard = subprocess.run([sys.executable, "-", str(record_path), str(probe_root)],
+                               input=_workflow_guard(), capture_output=True, text=True, timeout=60)
+        assert guard.returncode == 0, guard.stderr
+        assert "lies under the probe root" in guard.stdout
+
+    def test_without_tmp_parent_a_runner_roots_it_in_runner_temp(self, tmp_path, monkeypatch,
+                                                                 candidate_and_tarball):
+        candidate, tarball = candidate_and_tarball
+        fixture = _tagged_repo(tmp_path / "tag")
+        runner_temp = tmp_path / "runner-temp"
+        runner_temp.mkdir()
+        monkeypatch.setenv("RUNNER_TEMP", str(runner_temp))
+        monkeypatch.setattr(rc, "rebuild_candidate", _fake_rebuild(candidate))
+        binary = tmp_path / "bin" / "opencode"
+        binary.parent.mkdir()
+        binary.write_text("")
+        record_path = tmp_path / "out" / "20261025T000000Z-opencode-bootstrap-check-rehearsal.json"
+        args = self._workflow_args(fixture, record_path, binary, probe_root=None)
+        args.tmp_parent = None
+        args.keep = True
+        assert rc.check(args, steps=FakeHost(tarball).steps()) == 0
+        root = Path(json.loads(record_path.read_text())["environment_details"]["probe_root"])
+        assert root.parent.parent == runner_temp.resolve()
+        assert root.parent.name.startswith("mllm-regcheck-")
+
+
+class TestTheSupportingOutputSurvivesARefusal:
+    """``<out>.support/`` is filled on a ``CheckError`` too: that is when the
+    probe's diagnostics are needed."""
+
+    def _args(self, fixture, tmp_path):
+        binary = tmp_path / "bin" / "opencode"
+        binary.parent.mkdir(exist_ok=True)
+        binary.write_text("")
+        return rc.build_parser().parse_args([
+            "--spec", SPEC, "--registry", SINGLE, "--tag", fixture["tag"],
+            "--environment", "ci-runner", "--out", str(tmp_path / "out" / "record.json"),
+            "--opencode", str(binary), "--tmp-parent", str(tmp_path),
+            "--workflow-run-id", "7", "--rehearsal-registry", STUB, "--repo", str(fixture["repo"])])
+
+    def test_a_refusal_mid_probe_keeps_its_diagnostics(self, tmp_path, monkeypatch, capsys,
+                                                       candidate_and_tarball):
+        candidate, tarball = candidate_and_tarball
+        fixture = _tagged_repo(tmp_path / "tag")
+        monkeypatch.setattr(rc, "rebuild_candidate", _fake_rebuild(candidate))
+
+        class WrongPin(FakeHost):
+            def run(self, argv, **kwargs):
+                bounded = super().run(argv, **kwargs)
+                if Path(str(argv[0])).name == "opencode" and argv[-1] == "--version":
+                    kwargs["stdout"].write_text("9.9.9")
+                return bounded
+
+        args = self._args(fixture, tmp_path)
+        assert rc.check(args, steps=WrongPin(tarball).steps()) == 1
+        err = capsys.readouterr().err
+        assert "not the pin" in err and "supporting output" in err
+        support = tmp_path / "out" / "record.support"
+        assert (support / "diagnostics" / "opencode-version.txt").read_text() == "9.9.9"
+        assert not (tmp_path / "out" / "record.json").exists(), "a refusal writes no record"
+
+    def test_a_failed_build_keeps_its_log(self, tmp_path, monkeypatch, capsys):
+        fixture = _tagged_repo(tmp_path / "tag")
+
+        def failing(repo, sha, scratch, **_kwargs):
+            Path(scratch).mkdir(parents=True, exist_ok=True)
+            (Path(scratch) / "build.log").write_text("the tag's build said why\n")
+            raise rc.CheckError(f"the tag's build exited 1; see {scratch}/build.log")
+
+        monkeypatch.setattr(rc, "rebuild_candidate", failing)
+        assert rc.check(self._args(fixture, tmp_path)) == 1
+        support = tmp_path / "out" / "record.support"
+        assert (support / "candidate-build.log").read_text() == "the tag's build said why\n"
+
+
+# --------------------------------------------------------------------------- #
+# The make target: a rehearsal only from the command line
+# --------------------------------------------------------------------------- #
+
+def _make(tmp_path, *args, env=None, dry_run=False):
+    """``make`` in the repository with ``uv`` a stand-in that only records it
+    ran, and no inherited ``REHEARSAL_REGISTRY``/``MAKEFLAGS`` but ``env``'s."""
+    if not shutil.which("make") or not sys.platform.startswith("linux"):
+        pytest.skip("needs GNU make on Linux, where the release path runs")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    ran = tmp_path / "uv-ran"
+    (bin_dir / "uv").write_text(f"#!/bin/sh\necho \"$@\" > '{ran}'\n", encoding="utf-8")
+    (bin_dir / "uv").chmod(0o755)
+    environ = {k: v for k, v in os.environ.items()
+               if k not in ("REHEARSAL_REGISTRY", "MAKEFLAGS", "MFLAGS", "MAKELEVEL")}
+    environ["PATH"] = f"{bin_dir}{os.pathsep}{environ.get('PATH', '')}"
+    environ.update(env or {})
+    done = subprocess.run(["make", "--no-print-directory", *(["-n"] if dry_run else []), *args],
+                          cwd=REPO, env=environ, capture_output=True, text=True, timeout=120)
+    return done, (ran.read_text() if ran.exists() else None)
+
+
+class TestTheMakeTarget:
+    ARGS = ("opencode-registry-check", f"SPEC={SPEC}", f"TAG=opencode-v{VERSION}",
+            "ENVIRONMENT=vm", "OUT=/tmp/never-written.json")
+
+    def test_a_rehearsal_registry_on_the_command_line_is_passed(self, tmp_path):
+        done, _ = _make(tmp_path, *self.ARGS, f"REHEARSAL_REGISTRY={STUB}", dry_run=True)
+        assert done.returncode == 0, done.stderr
+        assert f'--rehearsal-registry "{STUB}"' in done.stdout
+
+    def test_an_exported_rehearsal_registry_is_refused_by_name(self, tmp_path):
+        """A leftover export must not turn step 5's real run into a rehearsal."""
+        done, ran = _make(tmp_path, *self.ARGS, env={"REHEARSAL_REGISTRY": STUB})
+        assert done.returncode != 0
+        assert f"REHEARSAL_REGISTRY={STUB} comes from the environment" in done.stderr
+        assert ran is None, "the probe ran although the rehearsal registry was refused"
+
+    def test_without_one_the_run_is_no_rehearsal(self, tmp_path):
+        done, ran = _make(tmp_path, *self.ARGS)
+        assert done.returncode == 0, done.stderr
+        assert "--rehearsal-registry" not in ran and "registry_check.py" in ran
+
+    def test_the_command_line_wins_over_an_export(self, tmp_path):
+        done, ran = _make(tmp_path, *self.ARGS, f"REHEARSAL_REGISTRY={STUB}",
+                          env={"REHEARSAL_REGISTRY": "http://127.0.0.1:1"})
+        assert done.returncode == 0, done.stderr
+        assert f"--rehearsal-registry {STUB}" in ran
+
+
+# --------------------------------------------------------------------------- #
+# The container's pinned install is the verified one
+# --------------------------------------------------------------------------- #
+
+class TestTheContainersPinnedInstall:
+    def test_the_facts_carry_the_pin_prefix(self, tmp_path, candidate_and_tarball):
+        candidate, _ = candidate_and_tarball
+        assert rc._facts(_context(tmp_path, candidate, environment="container"))["pin_prefix"] \
+            == rc.PIN_PREFIX
+
+    def test_the_install_phase_checks_the_pin_before_any_criterion(self, tmp_path, monkeypatch,
+                                                                   candidate_and_tarball):
+        candidate, _ = candidate_and_tarball
+        facts = tmp_path / "facts.json"
+        facts.write_text(json.dumps(rc._facts(_context(tmp_path, candidate, environment="container"))))
+        seen = []
+
+        def refuse(prefix, ctx):
+            seen.append(prefix)
+            raise rc.CheckError("the pinned OpenCode under it: not a verified platform binary")
+
+        monkeypatch.setattr(rc, "verify_pin", refuse)
+        monkeypatch.setattr(rc, "run_criteria", lambda *a, **k: pytest.fail("a criterion ran"))
+        monkeypatch.setenv("MLLM_REGISTRY_CHECK_PHASE_TEST", "1")
+        out = tmp_path / "out" / "install.json"
+        assert rc.container_phase(["--phase", "install", "--facts", str(facts),
+                                   "--out", str(out)]) == 1
+        assert seen == [Path(rc.PIN_PREFIX)]
+        assert "not a verified platform binary" in json.loads(out.read_text())["refusal"]
+
+    def test_verify_pin_refuses_a_prefix_npm_ci_did_not_leave(self, tmp_path, candidate_and_tarball):
+        candidate, _ = candidate_and_tarball
+        bump = rc._bump()
+        prefix = tmp_path / "pin"
+        prefix.mkdir()
+        lock = json.loads((REPO / bump.LOCKFILE).read_text(encoding="utf-8"))
+        _manifest, subset = bump.install_subset(lock, bump.pinned_version(), registry=SINGLE)
+        (prefix / "package-lock.json").write_text(json.dumps(subset))
+        ctx = _context(tmp_path, candidate, environment="container", rehearsal=False)
+        with pytest.raises(rc.CheckError, match=r"\.package-lock\.json"):
+            rc.verify_pin(prefix, ctx)
+
+    def test_the_pin_install_reads_only_the_single_registry(self, tmp_path, monkeypatch):
+        """The subset the container installs is refused, before Docker runs,
+        when a committed URL is not under the single registry."""
+        bump = rc._bump()
+        lock = json.loads((REPO / bump.LOCKFILE).read_text(encoding="utf-8"))
+        key = f"node_modules/{bump.NPM_PACKAGE}"
+        lock["packages"][key]["resolved"] = "https://mirror.example.invalid/o.tgz"
+        with pytest.raises(bump.BumpError, match="not under the single registry"):
+            bump.install_subset(lock, bump.pinned_version(), registry=SINGLE)
+
+
+# --------------------------------------------------------------------------- #
 # A later release: the upgrade of an existing installation
 # --------------------------------------------------------------------------- #
 
@@ -915,6 +1172,8 @@ class TestTheKit:
             diag = Path(tempfile.mkdtemp())
             with probe.StubModel(scenario, diag, "kit") as stub:
                 assert stub.port
+            bump = rc._bump()
+            assert str(bump.REPO) == "{kit}" and callable(bump.verify_installed)
             (diag / "f").write_text("x")
             print(json.dumps({{"digest": rc.inventory_digest(diag, ["f"]),
                                "build_loaded": "opencode_build" in sys.modules}}))

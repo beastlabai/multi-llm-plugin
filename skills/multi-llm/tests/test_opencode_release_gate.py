@@ -1060,6 +1060,58 @@ def _validate(tmp_path: Path, records: dict, record: dict, **override) -> subpro
     return subprocess.run(argv, capture_output=True, text=True, timeout=120)
 
 
+class TestTheDirtyTree:
+    """``dirty_paths`` exempts nothing. It used to skip every
+    ``records/*-opencode-release-gate.json``, the gate's own export; since the
+    export lands in the gitignored ``.gate/export/``, that exemption only hid a
+    hand-edited committed record."""
+
+    RECORDS = "skills/multi-llm/tests/container/records"
+
+    @staticmethod
+    def _git(repo, *args):
+        env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "HOME": str(repo.parent),
+               "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
+        done = subprocess.run(["git", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main",
+                               "-C", str(repo), *args], env=env, capture_output=True, text=True,
+                              timeout=60)
+        assert done.returncode == 0, done.stderr
+        return done.stdout
+
+    @pytest.fixture()
+    def repo(self, tmp_path):
+        repo = tmp_path / "repo"
+        records = repo / self.RECORDS
+        records.mkdir(parents=True)
+        (records / f"20261025T000000Z{gate.RECORD_SUFFIX}").write_text('{"tag": "x"}\n')
+        self._git(repo, "init", "-q")
+        self._git(repo, "add", "-A")
+        self._git(repo, "commit", "-q", "-m", "a committed record")
+        return repo
+
+    def test_a_clean_tree_is_clean(self, repo):
+        assert gate.dirty_paths(repo) == []
+
+    def test_a_hand_edited_committed_record_is_dirty(self, repo):
+        name = f"20261025T000000Z{gate.RECORD_SUFFIX}"
+        (repo / self.RECORDS / name).write_text('{"tag": "edited"}\n')
+        assert gate.dirty_paths(repo) == [f" M {self.RECORDS}/{name}"]
+
+    def test_an_untracked_record_is_dirty(self, repo):
+        name = f"20261026T000000Z{gate.RECORD_SUFFIX}"
+        (repo / self.RECORDS / name).write_text('{"tag": "new"}\n')
+        assert gate.dirty_paths(repo) == [f"?? {self.RECORDS}/{name}"]
+
+    def test_a_deleted_record_is_dirty(self, repo):
+        name = f"20261025T000000Z{gate.RECORD_SUFFIX}"
+        (repo / self.RECORDS / name).unlink()
+        assert gate.dirty_paths(repo) == [f" D {self.RECORDS}/{name}"]
+
+    def test_no_exemption_is_left_in_the_module(self):
+        assert not hasattr(gate, "_own_export")
+
+
 class TestExport:
     def test_the_default_export_stays_out_of_the_payload_prefix(self, tmp_path, monkeypatch, built):
         """records/ lies under skills/multi-llm/, the prefix the payload's
