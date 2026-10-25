@@ -247,6 +247,22 @@ blank or whitespace-only behaves as unset.
 **`utils/process_control.py` is the only place
 `fcntl`/`msvcrt`/`ctypes` process internals appear**
 (locking, liveness, creation-time identity, process-group/Job Object teardown, the detached spawn).
+On Windows the executor's runner, the sandbox probe, the verify command and each Lane A provider
+CLI (`llm_client._run_provider_cli`) are spawned through `popen_tree`, which puts each in a Job
+Object of its own before it runs, and their timeout ends that job. The Lane A CLI gets no process
+group of its own, so a terminal Ctrl-C still reaches it; its job travels into `live_cli_registry`,
+and the timeout, an interrupt, a stop from outside (`130`/`143`, or `STATUS_CONTROL_C_EXIT`) and
+the registry's sweep each end it right after the CLI's own `TerminateProcess`. A CLI that exits on
+its own leaves its job alone, as a POSIX CLI's groups are left alone. A detached run's job has a
+name, `Local\multi-llm-run-<run_id>`: the launcher spawns the worker into it suspended
+(`spawn_detached_run`) and the worker holds a handle for life (`enter_detached_worker(...,
+run_id=)`), because a job's name lasts only while a handle to it is open. The kills by recorded
+pid (`status --abort`, the dead-run close-out, `util runs --sweep`) open it by name, trust it only
+if a live recorded pid is in it, and kill through it (`kill_run_tree`); the failed-handshake
+teardown uses the launcher's own handle. `taskkill /T` is left for a child that got no job and for
+a run whose job cannot be opened or trusted (another logon session, a worker that never held it,
+a squatted name). The one other `ctypes` user on Windows is `utils/prompt_files.py`, which
+removes prompt files through handles it holds open; that is filesystem work, not process control.
 It is the façade `plans/windows-macos-portability.md` owns; per that plan's sequencing rule this work typed it
 first, so its signatures are a cross-plan interface. A test fails any other runtime module that
 imports `fcntl` or `msvcrt`.

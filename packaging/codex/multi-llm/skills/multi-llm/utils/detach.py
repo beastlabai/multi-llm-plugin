@@ -952,8 +952,10 @@ def close_out_dead_run(phase_dir: str, *, reason: str = "heartbeat_timeout") -> 
         try:
             # The leader is normally already dead here — that is what "close out"
             # means — so the recorded process group is the only handle left on the
-            # provider CLIs it spawned.
-            process_control.kill_tree(
+            # provider CLIs it spawned. On Windows the run's named job is that
+            # handle, while anything still holds it open (`kill_run_tree`).
+            process_control.kill_run_tree(
+                run_id,
                 int(pid) if pid else 0,
                 start_time=run.get("process_start_time"),
                 pgid=int(pgid) if pgid else None,
@@ -1034,7 +1036,11 @@ def abort_run(phase_dir: str, *, force: bool = False) -> Dict[str, Any]:
     if verdict == process_control.UNKNOWN and not force:
         return {"result": "needs_force", "run": run, "phase_dir": str(phase_dir)}
 
-    kill_verdict = process_control.kill_tree(
+    # Windows: through the run's named job when it opens and the live pid is
+    # in it, so the escalation ends exactly the run's tree rather than
+    # `taskkill /T`'s parent-pid walk (`process_control.kill_run_tree`).
+    kill_verdict = process_control.kill_run_tree(
+        run.get("run_id"),
         int(pid),
         start_time=None if force else run.get("process_start_time"),
         pgid=int(run["pgid"]) if run.get("pgid") else None,
@@ -2039,20 +2045,35 @@ def launch(
     )
     log = log_path(phase_dir)
     try:
-        worker_pid = process_control.spawn_detached(
-            command, cwd=os.getcwd(), env=env, log_path=log
+        # On Windows the worker starts inside the run's named Job Object, and
+        # `run_job` is this launcher's handle on it (`None` elsewhere, and
+        # wherever the job could not be made): held until the handshake
+        # resolves, so a failed one ends exactly the tree it started, then
+        # closed. By then the worker holds the job itself (2026-10-25).
+        worker_pid, run_job = process_control.spawn_detached_run(
+            command, cwd=os.getcwd(), env=env, log_path=log, run_id=run_id
         )
     except (OSError, process_control.SpawnFailed) as exc:
         raise DetachError(
             f"ERROR: could not start the detached worker: {exc}", exit_code=EXIT_ERROR
         )
 
-    observed = _await_handshake(phase_dir, run_id)
+    try:
+        observed = _await_handshake(phase_dir, run_id)
+        if observed is None:
+            try:
+                if run_job is None:
+                    process_control.kill_tree(worker_pid, escalate_after_s=1.0)
+                else:
+                    process_control.kill_tree(
+                        worker_pid, escalate_after_s=1.0, job=run_job
+                    )
+            except Exception:
+                pass
+    finally:
+        if run_job is not None:
+            run_job.close()
     if observed is None:
-        try:
-            process_control.kill_tree(worker_pid, escalate_after_s=1.0)
-        except Exception:
-            pass
         tail = _log_tail(log, 20)
         raise DetachError(
             f"ERROR: the detached worker (pid {worker_pid}) never published "
@@ -2317,7 +2338,10 @@ def begin_worker_run(
         # correct, not a leak: the banner marks where the *invoker* stopped
         # sharing the run, and the lines above it are the worker's own copy of
         # what the invoker printed on the caller's terminal.
-        process_control.enter_detached_worker(log_path(phase_dir))
+        #
+        # The run id goes with it: on Windows the worker holds the run's named
+        # Job Object for life from here, which is what an abort opens.
+        process_control.enter_detached_worker(log_path(phase_dir), run_id=run_id)
     handle = RunHandle(
         phase_dir,
         run_id=run_id,

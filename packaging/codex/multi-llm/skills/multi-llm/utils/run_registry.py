@@ -199,8 +199,11 @@ def sweep(
                 # identity probe came back `unknown` (the /proc or ps read
                 # failed) is a pid we cannot corroborate, and signalling its
                 # process group would hit whatever recycled that pid. The entry
-                # is still pruned; it is just not reported as killed.
-                kill_verdict = process_control.kill_tree(
+                # is still pruned; it is just not reported as killed. On
+                # Windows the run's named job is the kill when it opens
+                # (`process_control.kill_run_tree`).
+                kill_verdict = process_control.kill_run_tree(
+                    entry.get("run_id"),
                     entry.get("pid") or 0,
                     start_time=entry.get("process_start_time"),
                     pgid=entry.get("pgid"),

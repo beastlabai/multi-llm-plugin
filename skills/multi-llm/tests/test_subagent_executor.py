@@ -646,6 +646,35 @@ class TestFailureLadder:
         assert "pgid" in kwargs
         assert kwargs["start_time"] is None  # an unverified kill, requested
 
+    def test_rung_2_kills_the_childs_windows_job_and_lets_go_of_it(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """Round-8 review: Windows has no groups, so the child is spawned in a
+        Job Object of its own (``popen_tree``) and that job is what the timeout
+        hands the facade; once the child is collected the handle is closed."""
+        from types import SimpleNamespace
+
+        runner_env.use("codex:gpt-5.5")
+        job = SimpleNamespace(
+            closed=0, close=lambda: setattr(job, "closed", job.closed + 1))
+        spawned = []
+
+        def popen_tree(argv, **kwargs):
+            spawned.append(_NeverFinishingPopen(argv, **kwargs))
+            return spawned[-1], job
+
+        monkeypatch.setattr(executor.process_control, "popen_tree", popen_tree)
+        killed = []
+        monkeypatch.setattr(
+            executor.process_control,
+            "kill_tree",
+            lambda pid, **kwargs: (killed.append(kwargs), "killed")[1],
+        )
+        self._dispatch(tmp_path, runner_env, retries=0)
+        assert spawned and killed
+        assert all(kwargs["job"] is job for kwargs in killed)
+        assert job.closed == len(spawned)
+
     def test_an_interrupt_in_the_wait_stops_and_reaps_the_group_then_propagates(
         self, tmp_path, runner_env, monkeypatch
     ):

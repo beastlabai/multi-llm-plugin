@@ -1143,8 +1143,8 @@ def _remove_kept_prompts(phase_dir: Path) -> int:
     ``O_DIRECTORY | O_NOFOLLOW`` (a symlink there removes nothing), each name
     is checked with ``lstat`` relative to that descriptor and removed only
     when it is a regular file, by ``unlink(dir_fd=…)``. A platform without
-    ``dir_fd`` (Windows, where no jail runs) goes by path instead
-    (:func:`_remove_kept_prompts_by_path`); it used to remove nothing, so a
+    ``dir_fd`` (Windows, where no jail runs) holds handles instead
+    (:func:`_remove_kept_prompts_windows`); it used to remove nothing, so a
     start-over there kept every earlier prompt (Windows port, round seven).
     """
     import stat as _stat
@@ -1157,7 +1157,7 @@ def _remove_kept_prompts(phase_dir: Path) -> int:
         # Windows only: there no jail runs, so a path walk is as safe as the
         # descriptors. A POSIX build without them keeps removing nothing — it
         # may be under one, and a path is what a jailed write can swap.
-        return _remove_kept_prompts_by_path(phase_dir) if os.name == "nt" else 0
+        return _remove_kept_prompts_windows(phase_dir) if os.name == "nt" else 0
 
     flags = os.O_RDONLY | directory | nofollow
     try:
@@ -1189,12 +1189,29 @@ def _remove_kept_prompts(phase_dir: Path) -> int:
     return removed
 
 
+def _remove_kept_prompts_windows(phase_dir: Path) -> int:
+    """:func:`_remove_kept_prompts` on Windows: through handles held open for
+    the whole walk (``utils.prompt_files.remove_held``), so no folder can be
+    swapped for a junction between a check and a removal, and a folder that
+    OneDrive or a ProjFS checkout tagged is walked rather than taken for a
+    link (round-8 review). The path walk is what is left where that walk
+    cannot be made at all (the calls cannot be loaded, a folder cannot be
+    opened, a volume without a drive letter)."""
+    from utils import prompt_files
+
+    removed = prompt_files.remove_held(
+        str(phase_dir), lambda name: name.endswith(".prompt.txt"),
+    )
+    return _remove_kept_prompts_by_path(phase_dir) if removed is None else removed
+
+
 def _remove_kept_prompts_by_path(phase_dir: Path) -> int:
-    """:func:`_remove_kept_prompts` where descriptors are not available, the
-    way ``utils.prompt_files`` writes there: the phase dir and ``prompts/``
-    are ``lstat``-checked and a link or a junction there removes nothing,
-    each name is ``lstat``-checked and removed only when it is a regular
-    file. Best-effort, like the descriptor walk."""
+    """:func:`_remove_kept_prompts_windows` where its calls cannot be loaded,
+    the way ``utils.prompt_files`` writes there: the phase dir and
+    ``prompts/`` are ``lstat``-checked and a link or a junction there removes
+    nothing, each name is ``lstat``-checked and removed only when it is a
+    regular file. Nothing is held between a check and its removal. Best-effort,
+    like the descriptor walk."""
     import stat as _stat
 
     from utils.write_batch_scheduler import DISPATCHED_PROMPTS_SUBDIR

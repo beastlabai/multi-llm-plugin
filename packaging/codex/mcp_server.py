@@ -1290,19 +1290,133 @@ def _signal_group(proc, which) -> None:
         pass
 
 
-def kill_tree(proc, drains) -> None:
-    """Stop the tree, bounded: taskkill on Windows, TERM then KILL on POSIX."""
+#: ``CreateProcess`` flag: the child's first thread starts suspended (Windows).
+CREATE_SUSPENDED = 0x00000004
+
+
+class WindowsJob:
+    """A Job Object holding one child and every process it starts (Windows).
+
+    ``taskkill /T`` finds a tree by parent pid, and Windows keeps a dead
+    parent's pid on its orphans, so an unrelated orphan whose dead parent's
+    pid was recycled to our child died with it. The child is created
+    suspended, put in a job of its own (:meth:`adopt`) and only then resumed,
+    so all it starts lands in the job: the venv launcher's and libuv's own
+    jobs let their children break away only up to the first job that does not
+    permit it, and this one permits nothing. :meth:`terminate` then ends
+    exactly that tree in one call. No limit is set, so :meth:`close` kills
+    nothing. Stdlib ``ctypes``, typed for 64-bit handles (rule 1).
+    """
+
+    #: ``PROCESS_TERMINATE | PROCESS_SET_QUOTA | PROCESS_SUSPEND_RESUME``.
+    PROCESS_RIGHTS = 0x0001 | 0x0100 | 0x0800
+
+    def __init__(self, api, handle):
+        self.api, self.handle = api, handle
+
+    @classmethod
+    def load_api(cls):  # pragma: no cover - Windows
+        import ctypes
+        import types
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        ntdll = ctypes.WinDLL("ntdll")
+        handle, boolean, dword = wintypes.HANDLE, wintypes.BOOL, wintypes.DWORD
+        for name, argtypes, restype in (
+                ("CreateJobObjectW", [ctypes.c_void_p, wintypes.LPCWSTR], handle),
+                ("AssignProcessToJobObject", [handle, handle], boolean),
+                ("TerminateJobObject", [handle, wintypes.UINT], boolean),
+                ("OpenProcess", [dword, boolean, dword], handle),
+                ("CloseHandle", [handle], boolean)):
+            function = getattr(kernel32, name)
+            function.argtypes, function.restype = argtypes, restype
+        # Popen keeps no handle of the child's first thread, so the whole
+        # process is resumed (undocumented, stable since XP; psutil's resume).
+        ntdll.NtResumeProcess.argtypes = [handle]
+        ntdll.NtResumeProcess.restype = ctypes.c_long
+        return types.SimpleNamespace(
+            create=lambda: kernel32.CreateJobObjectW(None, None) or None,
+            open_process=lambda pid: kernel32.OpenProcess(
+                cls.PROCESS_RIGHTS, False, pid) or None,
+            assign=lambda job, process: bool(
+                kernel32.AssignProcessToJobObject(job, process)),
+            resume=lambda process: ntdll.NtResumeProcess(process) == 0,
+            terminate=lambda job: bool(kernel32.TerminateJobObject(job, 1)),
+            close=kernel32.CloseHandle)
+
+    @classmethod
+    def create(cls):
+        """A new empty job, or ``None`` (not Windows, or no job to be had)."""
+        if sys.platform != "win32":
+            return None
+        try:
+            api = cls.load_api()
+            handle = api.create()
+        except Exception:  # noqa: BLE001 - no job: taskkill is the kill
+            return None
+        return cls(api, handle) if handle else None
+
+    def adopt(self, proc) -> bool:
+        """Put the suspended *proc* in the job and resume it.
+
+        ``False`` only when it could not be resumed. One that could not join
+        the job runs anyway and the job is closed, so taskkill is its kill.
+        Popen's own handle has every right CreateProcess grants; another is
+        opened only for a Popen that keeps none.
+        """
+        process = getattr(proc, "_handle", None)
+        opened = process is None
+        resumed = False
+        try:
+            if opened:
+                process = self.api.open_process(proc.pid)
+            if process:
+                if not self.api.assign(self.handle, process):
+                    self.close()
+                resumed = bool(self.api.resume(process))
+        except Exception:  # noqa: BLE001 - settled by the caller: killed
+            pass
+        finally:
+            if opened and process:
+                try:
+                    self.api.close(process)
+                except Exception:  # noqa: BLE001
+                    pass
+        return resumed
+
+    def terminate(self) -> bool:
+        if not self.handle:
+            return False
+        try:
+            return bool(self.api.terminate(self.handle))
+        except Exception:  # noqa: BLE001 - the caller falls back to taskkill
+            return False
+
+    def close(self) -> None:
+        handle, self.handle = self.handle, None
+        if handle:
+            try:
+                self.api.close(handle)
+            except Exception:  # noqa: BLE001 - a leaked handle is all it costs
+                pass
+
+
+def kill_tree(proc, drains, job=None) -> None:
+    """Stop the tree, bounded: the child's job (else taskkill) on Windows, TERM
+    then KILL on POSIX."""
     if sys.platform == "win32":
         # Kill the tree while its leader still exists. Terminating bash/uv
         # first loses taskkill's root and leaves the dispatcher running.
-        try:
-            subprocess.run(
-                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, timeout=KILL_GRACE_S,
-            )
-        except (OSError, subprocess.SubprocessError):
-            pass
+        if job is None or not job.terminate():
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, timeout=KILL_GRACE_S,
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
         if proc.poll() is None:
             try:
                 proc.kill()
@@ -2036,22 +2150,50 @@ class Server:
         """Spawn ``[bash, -lc, CONST, bash, anchor, *argv]`` and supervise it.
 
         One shell at this one site, an argv list, ``shell=False``, its own
-        session (so the kill reaches uv's python grandchild), stdin from
-        /dev/null (fd 0 is the protocol's read half), both pipes drained by
-        their own threads so a chatty child can never fill one.
+        session (so the kill reaches uv's python grandchild; on Windows, its
+        own Job Object, :class:`WindowsJob`), stdin from /dev/null (fd 0 is
+        the protocol's read half), both pipes drained by their own threads so
+        a chatty child can never fill one.
         """
         argv = self.spawn_argv(dispatcher_argv)
         run = ChildRun(argv)
         prefix = [self.shell, "-lc", LOGIN_SHELL_SCRIPT, SHELL_NAME]
+        job = WindowsJob.create()
         try:
             proc = subprocess.Popen(
                 prefix + [call.anchor] + argv, shell=False, stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                start_new_session=True, close_fds=True)
+                start_new_session=True, close_fds=True,
+                creationflags=CREATE_SUSPENDED if job is not None else 0)
         except (OSError, ValueError) as error:
+            if job is not None:
+                job.close()
             run.spawn_error = str(error)
             return run
+        if job is not None and not job.adopt(proc):
+            # Created suspended and never resumed: nothing ran, and nothing may
+            # be left waiting suspended.
+            job.close()
+            proc.kill()
+            for pipe in (proc.stdout, proc.stderr):
+                _close_quietly(pipe)
+            try:
+                proc.wait(timeout=KILL_GRACE_S)
+            except subprocess.TimeoutExpired:
+                pass
+            run.spawn_error = ("the shell was created suspended to enter its Job "
+                               "Object, and could not be resumed")
+            return run
         call.shell_argv = prefix
+        try:
+            return self.supervise_child(call, run, proc, job, timeout_s, cancellable)
+        finally:
+            if job is not None:
+                job.close()
+
+    def supervise_child(self, call: Call, run: ChildRun, proc, job, timeout_s: float,
+                        cancellable: bool) -> ChildRun:
+        """:meth:`run_child` from the spawn on: drain, wait, kill, collect."""
         dispatcher = self.surface["dispatcher"]
         fields = dispatcher["banner"].get("fields") or [dispatcher["banner"]["run_id_field"]]
         banner_re = re.compile(
@@ -2080,7 +2222,7 @@ class Server:
             else:
                 time.sleep(0.02)
         if run.cancelled or run.timed_out:
-            kill_tree(proc, drains)
+            kill_tree(proc, drains, job)
         for thread in drains:
             # A drain still blocked after the grace is abandoned, never waited on.
             # Each drain closes its own pipe on exit; closing it here would block

@@ -5640,6 +5640,50 @@ class TestThePhaseRunsTheRepositorysOwnCheck:
             os.kill(child, 9)
             pytest.fail(f"pid {child} survived the verification timeout")
 
+    def test_a_timed_out_check_hands_its_windows_job_to_the_kill(self, env, monkeypatch):
+        """Round-8 review: Windows has no groups, so the check is spawned in a
+        Job Object of its own (``popen_tree``), the timeout passes that job to
+        ``kill_tree``, and the handle is let go of once the check is reaped."""
+        if os.name == "nt":  # pragma: no cover - the script below is POSIX sh
+            pytest.skip("a POSIX sh check; the Windows job rows are in test_windows_tree_jobs")
+        from types import SimpleNamespace
+
+        from utils import process_control
+
+        job = SimpleNamespace(closed=0, terminate=lambda: False)
+        job.close = lambda: setattr(job, "closed", job.closed + 1)
+        real_popen_tree, real_kill_tree = process_control.popen_tree, process_control.kill_tree
+
+        spawned = []
+
+        def popen_tree(*args, **kwargs):
+            proc, _ = real_popen_tree(*args, **kwargs)
+            spawned.append(proc)
+            return proc, job
+
+        handed = []
+
+        def kill_tree(pid, **kwargs):
+            handed.append(kwargs.pop("job"))
+            return real_kill_tree(pid, **kwargs)
+
+        monkeypatch.setattr(process_control, "popen_tree", popen_tree)
+        monkeypatch.setattr(process_control, "kill_tree", kill_tree)
+        verify = self._script(env, "echo 'starting the check'\nsleep 300\n")
+        env.use(verify_command=str(verify), verify_timeout_s=1)
+        env.edits([{"path": "src/a.py", "mode": "patch", "content": "a = 2\n"}],
+                  result={"status": "applied", "ids": ["f0"],
+                          "files_touched": ["src/a.py"], "summary": "fixed"})
+        result = env.scheduler(
+            [self._fix_task(env)], kind="apply_code_fixes",
+            state=FakeState(env.tmp_path / "state.json"),
+        ).run()
+
+        assert result.verification["exit_code"] == 124
+        assert handed == [job]
+        # The runner's spawn takes the same route, and every job is let go of.
+        assert len(spawned) >= 2 and job.closed == len(spawned)
+
     def test_only_the_end_of_a_large_output_is_read_back(self, env):
         """F6: `capture_output=True` buffered a whole build in this process to
         hand 2000 characters of it to a report. The capture goes to a file and

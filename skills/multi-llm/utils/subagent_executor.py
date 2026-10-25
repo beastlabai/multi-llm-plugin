@@ -2142,6 +2142,8 @@ SANDBOX_PROBE_TIMEOUT_S = 10.0
 
 #: How long a timed-out sandbox probe's tree kill, and then the read of what is
 #: left in its pipes, may each take on Windows (:func:`_run_sandbox_probe`).
+#: The kill is a Job Object's, a single call; the bound is for the ``taskkill``
+#: fallback of a probe that got no job.
 SANDBOX_PROBE_KILL_S = 1.0
 
 #: The advisory readers' probe budget (`status`, `init`, the next-step block:
@@ -3359,13 +3361,20 @@ def _run_sandbox_probe_tree(
     pipes to their end with no timeout at all, so a grandchild still holding
     them (``sh -c`` → ``sleep``, a CLI's own helper) held the probe for as long
     as it lived: 5.3 s against a 0.2 s budget on the Windows CI (Windows port,
-    round seven). A timed-out probe's whole tree is killed instead
-    (``process_control.taskkill_tree``) and its pipes are read for at most
-    :data:`SANDBOX_PROBE_KILL_S` more, then let go unclosed — a close would
-    wait on the read that holds them. ``None`` on a timeout, as before.
+    round seven). A timed-out probe's whole tree is killed instead and its
+    pipes are read for at most :data:`SANDBOX_PROBE_KILL_S` more, then let go
+    unclosed — a close would wait on the read that holds them. ``None`` on a
+    timeout, as before.
+
+    The probe runs in a Job Object (``process_control.popen_tree``), so the
+    kill is one ``TerminateJobObject`` call that reaches exactly its tree
+    (round-8 review): ``taskkill /T``, now only the fallback for a probe that
+    got no job, walks parent pids and can reach an unrelated orphan, and
+    within :data:`SANDBOX_PROBE_KILL_S` on a loaded runner it can time out
+    having killed nothing past the direct child.
     """
     try:
-        proc = subprocess.Popen(
+        proc, job = process_control.popen_tree(
             list(command),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -3381,7 +3390,7 @@ def _run_sandbox_probe_tree(
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        process_control.taskkill_tree(proc.pid, timeout=SANDBOX_PROBE_KILL_S)
+        process_control.end_tree(proc.pid, job, timeout=SANDBOX_PROBE_KILL_S)
         try:
             proc.kill()
         except OSError:  # pragma: no cover - already gone
@@ -3394,10 +3403,14 @@ def _run_sandbox_probe_tree(
     except BaseException as exc:
         # What `run` does on any other way out: no child left, and an OSError
         # is "could not be run", like the spawn's.
-        proc.kill()
+        if job is None or not job.terminate():
+            proc.kill()
         if isinstance(exc, (OSError, subprocess.SubprocessError)):
             return None
         raise
+    finally:
+        if job is not None:
+            job.close()
     return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
 
@@ -6981,9 +6994,11 @@ def _spawn_in_context(
     # task nobody is reading, and its own post-kill drain is unbounded on
     # Windows: a timed-out task wedges the whole batch instead of failing on
     # rung 2. On the jail the leader is the wrapper, which `exec`s codex: the
-    # PID and the group recorded here are codex's own.
+    # PID and the group recorded here are codex's own. Windows has no groups:
+    # there the child starts in a Job Object of its own, and the job is what
+    # the timeout kills (`process_control.popen_tree`).
     try:
-        proc = subprocess.Popen(
+        proc, job = process_control.popen_tree(
             argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -7010,7 +7025,7 @@ def _spawn_in_context(
         # Read the group now, while the child is alive: `os.getpgid` stops
         # answering the moment the leader is reaped, and the group — the thing
         # that still holds the tool children — outlives it. `None` on Windows,
-        # where `kill_tree` walks the tree instead.
+        # where the job stands in for it.
         pgid = process_control.process_group_id(proc.pid)
         try:
             stdout, stderr = proc.communicate(input=stdin_text, timeout=timeout)
@@ -7019,14 +7034,14 @@ def _spawn_in_context(
             capture.stderr = _decode(stderr)
             capture.exit_code = proc.returncode
         except subprocess.TimeoutExpired as exc:
-            _kill_timed_out(proc, pgid)
+            _kill_timed_out(proc, pgid, job)
             stdout, stderr = _drain_after_kill(proc, exc)
             capture.duration = time.time() - start
             capture.timed_out = True
             capture.stdout = stdout
             capture.stderr = stderr
         except OSError as exc:
-            _kill_timed_out(proc, pgid)
+            _kill_timed_out(proc, pgid, job)
             _drain_after_kill(proc, None)
             capture.duration = time.time() - start
             capture.launch_error = str(exc)
@@ -7039,13 +7054,15 @@ def _spawn_in_context(
             # state, which a still-running codex could otherwise write the plan
             # into or rewrite behind it. Then re-raise, so the signal still ends
             # the run; a teardown failure never masks it.
-            _kill_timed_out(proc, pgid)
+            _kill_timed_out(proc, pgid, job)
             try:
                 _drain_after_kill(proc, None)
             except Exception:  # noqa: BLE001 - the interrupt is what propagates
                 pass
             raise
     finally:
+        if job is not None:
+            job.close()
         if context is not None:
             with _JAIL_SUMMARY_LOCK:
                 _JAILED_CHILDREN["live"] -= 1
@@ -7130,7 +7147,9 @@ def _read_jailed_outcome(
             )
 
 
-def _kill_timed_out(proc: Any, pgid: Optional[int]) -> None:
+def _kill_timed_out(
+    proc: Any, pgid: Optional[int], job: Optional["process_control.TreeJob"] = None,
+) -> None:
     """SIGTERM → SIGKILL the child *and its group*, through the one facade.
 
     ``start_time=None`` is how an unverified kill is *requested* (see
@@ -7139,7 +7158,8 @@ def _kill_timed_out(proc: Any, pgid: Optional[int]) -> None:
     corroborate and nothing to recycle. The verdict is advisory — the child is
     an unreaped zombie until :func:`_drain_after_kill` collects it, so the probe
     that decides it cannot see the difference; what matters is that the signals
-    reached the group.
+    reached the group. *job* is the child's Windows Job Object, the group's
+    stand-in there (``None`` elsewhere).
     """
     try:
         process_control.kill_tree(
@@ -7148,8 +7168,11 @@ def _kill_timed_out(proc: Any, pgid: Optional[int]) -> None:
             pgid=pgid,
             escalate_after_s=TIMEOUT_KILL_GRACE_S,
             poll_interval_s=0.05,
+            job=job,
         )
     except Exception:  # noqa: BLE001 - teardown must never mask the timeout
+        if job is not None and job.terminate():
+            return
         try:
             proc.kill()
         except OSError:
@@ -7175,7 +7198,9 @@ def _drain_after_kill(
             # communicate's reader threads can still hold the streams' locks.
             # close() waits for those reads, defeating TIMEOUT_DRAIN_S even
             # after the tree kill was attempted. Let the readers release the
-            # pipes when the remaining writer exits, as the probe does.
+            # pipes when the remaining writer exits, as the probe does. With
+            # the child's Job Object terminated no writer is left; only a
+            # child that got no job (`popen_tree`) can still have one.
             return (
                 _decode(getattr(exc, "stdout", None)),
                 _decode(getattr(exc, "stderr", None)),
