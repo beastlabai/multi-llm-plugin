@@ -166,8 +166,8 @@ export MLLM_E2E_MATRIX_TIMEOUT_S
         e2e-clean e2e-prune \
         opencode-stage opencode-package opencode-package-check-ci \
         opencode-package-check opencode-publish opencode-bump opencode-latest-check \
-        opencode-print-registry opencode-check-bump opencode-registry-absent \
-        opencode-publish-first \
+        opencode-print-registry opencode-check-bump opencode-registry-check \
+        opencode-registry-absent opencode-publish-first \
         codex-regen codex-package codex-package-check-ci codex-package-check \
         codex-gate-reset codex-gate-pinned codex-gate-minimum codex-gate-ceiling \
         codex-gate-derived codex-publish
@@ -203,6 +203,8 @@ help:
 	@echo "                                    (a release older than the pin also needs ALLOW_DOWNGRADE=1)"
 	@echo "  make opencode-latest-check        exit 1 when npm has a newer opencode than the pin"
 	@echo "  make opencode-check-bump          the shared-version check: HEAD against every codex-v*/opencode-v* tag and npm's versions"
+	@echo "  make opencode-registry-check SPEC=n@v TAG=t ENVIRONMENT=ci-runner|container|vm OUT=f [REHEARSAL_REGISTRY=url]"
+	@echo "                                    the registry-install probe: the bytes npm serves, installed by OpenCode"
 	@echo
 	@echo "Codex plugin, checked in at $(CODEX_PKG)/multi-llm (see $(CODEX_PKG)/README.md)"
 	@echo
@@ -909,6 +911,29 @@ opencode-print-registry:
 # over the legal edit. The full gate and the publish preflights call it.
 opencode-check-bump:
 	uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/build.py --check-bump --registry $(OPENCODE_REGISTRY)
+
+# THE REGISTRY-INSTALL PROBE, one implementation for two records (plans/
+# opencode-plugin-publish.md, step 0's bootstrap job and step 5): what npm SERVES
+# for SPEC, installed by the pinned OpenCode from $(OPENCODE_REGISTRY) into a
+# fresh home, compared with the candidate rebuilt from TAG's commit before the
+# first tool call, then driven through `multi_llm` (packaging/opencode/
+# registry_check.py). ENVIRONMENT=ci-runner writes the bootstrap record (seven
+# criteria, the workflow run from $$GITHUB_RUN_ID or WORKFLOW_RUN_ID);
+# container drives a stock container from this host and adds the warm-offline
+# run on its committed image with --network none; vm runs here and waits for
+# the VM's interface to be detached. OUT is the record; its supporting output
+# goes beside it. REHEARSAL_REGISTRY=http://127.0.0.1:<port> (a
+# `registry_stub.py serve` of the gated tarball) makes the run a REHEARSAL: the
+# record says so and is never release evidence. OPENCODE, PREVIOUS_PIN and REPO
+# pass through. `--frozen --no-dev`: the probe needs only the runtime lock.
+opencode-registry-check:
+	@test -n "$(SPEC)" -a -n "$(TAG)" -a -n "$(ENVIRONMENT)" -a -n "$(OUT)" || { \
+	  echo "usage: make opencode-registry-check SPEC=<name@version> TAG=opencode-v<version> ENVIRONMENT=ci-runner|container|vm OUT=<record.json> [REHEARSAL_REGISTRY=http://127.0.0.1:<port>] [WORKFLOW_RUN_ID=n] [OPENCODE=bin] [PREVIOUS_PIN=spec] [REPO=path]"; exit 1; }
+	uv run --frozen --no-dev --project skills/multi-llm -- python $(OPENCODE_PKG)/registry_check.py \
+	  --spec "$(SPEC)" --registry $(OPENCODE_REGISTRY) --tag "$(TAG)" --environment "$(ENVIRONMENT)" \
+	  --out "$(OUT)" $(if $(REHEARSAL_REGISTRY),--rehearsal-registry "$(REHEARSAL_REGISTRY)") \
+	  $(if $(WORKFLOW_RUN_ID),--workflow-run-id "$(WORKFLOW_RUN_ID)") $(if $(OPENCODE),--opencode "$(OPENCODE)") \
+	  $(if $(PREVIOUS_PIN),--previous-pin "$(PREVIOUS_PIN)") $(if $(REPO),--repo "$(REPO)")
 
 
 # --------------------------------------------------------------------------- #

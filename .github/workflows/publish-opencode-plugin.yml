@@ -414,16 +414,21 @@ jobs:
           stub_dir="${RUNNER_TEMP}/opencode-registry-stub"
           mkdir -p "${stub_dir}"
           # Left running for the steps below; the runner reaps it at job end.
-          nohup uv run --project skills/multi-llm -- python packaging/opencode/registry_stub.py \
-            --tarball "${TARBALL}" --url-file "${stub_dir}/url" > "${stub_dir}/stub.log" 2>&1 &
+          # Stdlib only; it binds 127.0.0.1 on a free port and writes the port
+          # once it listens.
+          nohup uv run --project skills/multi-llm --frozen --no-dev -- python \
+            packaging/opencode/registry_stub.py serve --tarball "${TARBALL}" \
+            --port-file "${stub_dir}/port" --log "${stub_dir}/requests.jsonl" \
+            > "${stub_dir}/stub.log" 2>&1 &
           echo "$!" > "${stub_dir}/pid"
           for _ in $(seq 1 60); do
-            if [ -s "${stub_dir}/url" ]; then break; fi
+            if [ -s "${stub_dir}/port" ]; then break; fi
             sleep 1
           done
-          url="$(cat "${stub_dir}/url" 2>/dev/null || true)"
-          if ! [[ "${url}" =~ ^http://127\.0\.0\.1:[0-9]+/?$ ]]; then
-            echo "REFUSING: the registry stub did not report a 127.0.0.1 URL within 60 s (got '${url}')." >&2
+          port="$(cat "${stub_dir}/port" 2>/dev/null || true)"
+          url="http://127.0.0.1:${port}"
+          if ! [[ "${port}" =~ ^[0-9]+$ ]]; then
+            echo "REFUSING: the registry stub did not report a port within 60 s (got '${port}')." >&2
             cat "${stub_dir}/stub.log" >&2 || true
             exit 1
           fi
@@ -524,10 +529,11 @@ jobs:
       # `warm_offline_operation`: no Docker daemon, no way to cut one process
       # off the network). It compares the candidate's digest with the extracted
       # registry files and the OpenCode-installed payload before the first tool
-      # call, and writes the record whether or not it passes. Its temporary
-      # tree is the fresh probe root; the gate's pinned OpenCode is first on its
-      # PATH. In a rehearsal the stub's URL is passed explicitly, and the
-      # probe accepts it only as a rehearsal.
+      # call, and writes the record whether or not it passes. Its root is made
+      # inside the fresh probe root (--tmp-parent); the binary is the gate's
+      # pinned OpenCode (--opencode); the record names this run
+      # (--workflow-run-id). In a rehearsal the stub's URL is passed
+      # explicitly, and the probe accepts it only as a rehearsal.
       - name: 'Bootstrap: the registry-install probe'
         id: bootstrap_probe
         if: steps.route.outputs.path == 'bootstrap'
@@ -545,17 +551,22 @@ jobs:
           set -euo pipefail
           records="${RUNNER_TEMP}/opencode-bootstrap"
           mkdir -p "${records}"
-          record="${records}/$(date -u +%Y%m%dT%H%M%SZ)-opencode-bootstrap-check.json"
+          # A rehearsal's record is named as one, so no copy of it can pass for
+          # a real bootstrap record by its file name either.
+          suffix=""
+          if [ "${REHEARSAL}" = "true" ]; then suffix="-rehearsal"; fi
+          record="${records}/$(date -u +%Y%m%dT%H%M%SZ)-opencode-bootstrap-check${suffix}.json"
           # Named before the probe runs, so a failing probe's record still
           # reaches the validator's log and the artifact.
           echo "record=${record}" >> "${GITHUB_OUTPUT}"
           rehearsal_flags=()
           if [ "${REHEARSAL}" = "true" ]; then rehearsal_flags=(--rehearsal-registry "${STUB_URL}"); fi
-          PATH="$(dirname "${HOST_BIN}"):${PATH}" \
-            uv run --project skills/multi-llm -- env TMPDIR="${PROBE_ROOT}" \
+          uv run --project skills/multi-llm --frozen --no-dev -- \
             python packaging/opencode/registry_check.py \
             --spec "${NAME}@${VERSION}" --registry "${REGISTRY}" --tag "${TAG}" \
-            --environment ci-runner --out "${record}" "${rehearsal_flags[@]}"
+            --environment ci-runner --out "${record}" \
+            --opencode "${HOST_BIN}" --tmp-parent "${PROBE_ROOT}" \
+            --workflow-run-id "${GITHUB_RUN_ID}" "${rehearsal_flags[@]}"
 
       # The bootstrap profile of the one registry-record validator, against the
       # integrity the registry serves and this run's rebuilt digest. A real
@@ -603,6 +614,12 @@ jobs:
               exit 1
             fi
             echo "the rehearsal record is refused as release evidence, as it must be"
+            # ...and is otherwise the record a real run would write: the same
+            # validator, holding everything but the rehearsal flag and the
+            # stub's loopback registry to the bootstrap profile.
+            uv run --project skills/multi-llm --frozen --no-dev -- python packaging/opencode/registry_record.py \
+              validate --profile bootstrap "${RECORD}" --tag "${TAG}" --integrity "${INTEGRITY}" \
+              --digest "${DIGEST}" --rehearsal-structure-only
           elif [ "${status}" -ne 0 ]; then
             exit "${status}"
           fi

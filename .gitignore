@@ -59,13 +59,14 @@ skills/multi-llm/tests/container/runs/*
 # the tag: row 8 runs only on the maintainer's machine, and this record is how
 # its evidence reaches CI) and the opencode release network-check records (the
 # canonical registry-install check after each npm publication, which the
-# capabilities promotion and RECORDED_SMOKES cite). Bootstrap records stay
+# capabilities promotion and RECORDED_SMOKES cite; named exactly, so a
+# `...-network-check-rehearsal.json` stays ignored). Bootstrap records stay
 # workflow artifacts and match none of these.
 skills/multi-llm/tests/container/records/*
 !skills/multi-llm/tests/container/records/record.schema.json
 !skills/multi-llm/tests/container/records/*-codex-release-network-check*.json
 !skills/multi-llm/tests/container/records/*-opencode-release-gate.json
-!skills/multi-llm/tests/container/records/*-opencode-release-network-check*.json
+!skills/multi-llm/tests/container/records/*-opencode-release-network-check.json
 **/creds/
 *.credentials.json
 .env
