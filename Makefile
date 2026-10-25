@@ -43,6 +43,16 @@ PYTEST := uv run --project skills/multi-llm -- pytest skills/multi-llm/tests
 # `npm ci`-installed INTO the image, this one is a package we publish. They share
 # nothing but the word.
 OPENCODE_PKG   := packaging/opencode
+# THE ONE REGISTRY. Every place npm is consulted on the release path — the
+# `npm whoami` check, row 9's absence probe, the bootstrap and step-5
+# registry-install probes, both publish paths and the post-publish integrity read
+# — passes this explicitly, and the workflow reads it from here
+# (`make -s opencode-print-registry`) rather than spelling it again. npm's registry
+# is configurable (a user `.npmrc`, `npm_config_registry`, a scoped registry), so
+# an inherited setting could otherwise make a gate accept `E404` from a different
+# server than the one publication targets. packaging/opencode/registry.py reads
+# this line; nothing else may define the URL.
+OPENCODE_REGISTRY := https://registry.npmjs.org
 # `ALLOW_DIRTY=1` stages from a tree with uncommitted or untracked changes. The
 # build refuses one by default, and that default is correct: a build that ships
 # local state is a build nobody can reproduce, and npm makes the result immutable
@@ -126,6 +136,7 @@ export MLLM_E2E_MATRIX_TIMEOUT_S
         e2e-clean e2e-prune \
         opencode-stage opencode-package opencode-package-check-ci \
         opencode-package-check opencode-publish opencode-bump opencode-latest-check \
+        opencode-print-registry \
         codex-regen codex-package codex-package-check-ci codex-package-check \
         codex-gate-reset codex-gate-pinned codex-gate-minimum codex-gate-ceiling \
         codex-gate-derived codex-publish
@@ -783,6 +794,10 @@ opencode-bump:
 
 opencode-latest-check:
 	uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/bump.py check
+
+# The single registry, for the workflow and anything else outside this file.
+opencode-print-registry:
+	@echo $(OPENCODE_REGISTRY)
 
 
 # --------------------------------------------------------------------------- #

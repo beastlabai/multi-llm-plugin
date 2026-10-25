@@ -52,12 +52,20 @@ plan_review_output.json
 skills/multi-llm/tests/container/runs/*
 !skills/multi-llm/tests/container/runs/README.md
 # ...and the run records: every harness run writes fresh ones, so they are local
-# only. Two exceptions are read by something: the schema (harness.py validates
-# against it) and the codex release network-check records (the publish-codex-plugin
-# workflow requires one on the default branch).
+# only. The exceptions are read by something: the schema (harness.py validates
+# against it), the codex release network-check records (the publish-codex-plugin
+# workflow requires one on the default branch), the opencode release-gate
+# records (publish-opencode-plugin.yml's `verify` job refuses without one naming
+# the tag: row 8 runs only on the maintainer's machine, and this record is how
+# its evidence reaches CI) and the opencode release network-check records (the
+# canonical registry-install check after each npm publication, which the
+# capabilities promotion and RECORDED_SMOKES cite). Bootstrap records stay
+# workflow artifacts and match none of these.
 skills/multi-llm/tests/container/records/*
 !skills/multi-llm/tests/container/records/record.schema.json
 !skills/multi-llm/tests/container/records/*-codex-release-network-check*.json
+!skills/multi-llm/tests/container/records/*-opencode-release-gate.json
+!skills/multi-llm/tests/container/records/*-opencode-release-network-check*.json
 **/creds/
 *.credentials.json
 .env
@@ -127,8 +135,10 @@ packaging/opencode/LICENSE
 # The pre-publish gate's stamp. Safe host-agnostically: no packaging route ever
 # commits one, because a stamp attests to the machine that wrote it.
 packaging/*/.package-check.stamp
-# ...and the per-tier evidence the codex gate writes for it (packaging/codex/release_gate.py).
+# ...and the per-tier evidence the codex gate writes for it (packaging/codex/release_gate.py),
+# and the per-row session evidence the opencode gate writes (packaging/opencode/release_gate.py).
 packaging/codex/.gate/
+packaging/opencode/.gate/
 
 # aider's repo-map cache, dropped at the root by the chain-aider container row
 # when it runs against this tree. A per-machine index of the repo, not a source
