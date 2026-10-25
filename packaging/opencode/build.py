@@ -356,6 +356,103 @@ def _not_shipped(relative: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# A packed tarball, as the stamp and the publish preflight bind it
+# ---------------------------------------------------------------------------
+
+#: The prefix npm writes every member of a packed tarball under.
+TARBALL_PREFIX = "package/"
+
+
+def integrity_of(data: bytes) -> str:
+    """npm's ``dist.integrity`` spelling of *data*: ``sha512-<base64>``.
+
+    The registry computes this over the uploaded file's bytes, so a tarball
+    published as a file (``npm publish <file>.tgz``) reads back with exactly the
+    value this returns for the file.
+    """
+    import base64
+    import hashlib
+
+    return "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode("ascii")
+
+
+def tarball_facts(tarball: Path) -> Dict[str, Any]:
+    """What a packed ``.tgz`` is: its integrity, its inventory, its tree digest.
+
+    Returns ``{"path", "integrity", "sha256", "files", "digest",
+    "recorded_digest"}``:
+
+    * ``integrity`` — :func:`integrity_of` over the file, comparable with
+      ``npm view <spec> dist.integrity`` as it stands;
+    * ``files`` — the sorted member paths with npm's ``package/`` prefix
+      removed, regular files only;
+    * ``digest`` — this builder's own tree-digest rule (:func:`tree_digest`
+      with :func:`_not_shipped`) over the extracted package, which equals
+      ``dist/tree.sha256`` of the build that was packed;
+    * ``recorded_digest`` — the ``dist/tree.sha256`` the tarball carries, or
+      ``None`` when it carries none.
+
+    Raises :class:`PayloadError` for a member outside ``package/``, an absolute
+    or ``..`` path, a link or device member, or a file that is not a gzip tar —
+    an archive this function cannot account for is never described as one.
+    Extraction happens in a private temporary directory that is removed before
+    returning.
+    """
+    import hashlib
+    import tarfile
+    import tempfile
+
+    path = Path(tarball)
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise PayloadError(f"{path}: cannot read the tarball ({exc})") from exc
+    files: List[str] = []
+    with tempfile.TemporaryDirectory(prefix="mllm-tarball-") as scratch:
+        root = Path(scratch)
+        try:
+            archive = tarfile.open(path, mode="r:gz")
+        except (tarfile.TarError, OSError) as exc:
+            raise PayloadError(f"{path}: not a gzip tarball ({exc})") from exc
+        with archive:
+            for member in archive.getmembers():
+                name = member.name
+                parts = name.split("/")
+                if name.startswith("/") or ".." in parts or not name.startswith(TARBALL_PREFIX):
+                    raise PayloadError(
+                        f"{path}: member {name!r} is not under {TARBALL_PREFIX!r}"
+                    )
+                if member.isdir():
+                    continue
+                if not member.isfile():
+                    raise PayloadError(
+                        f"{path}: member {name!r} is a link or device, which no "
+                        "build of this package produces"
+                    )
+                relative = name[len(TARBALL_PREFIX):]
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source = archive.extractfile(member)
+                if source is None:
+                    raise PayloadError(f"{path}: member {name!r} has no content")
+                with source:
+                    target.write_bytes(source.read())
+                files.append(relative)
+        digest = tree_digest(root, exclude=_not_shipped)
+        recorded_path = root / "dist" / DIGEST_NAME
+        recorded = (recorded_path.read_text(encoding="utf-8").strip()
+                    if recorded_path.is_file() else None)
+    return {
+        "path": str(path),
+        "integrity": integrity_of(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "files": sorted(files),
+        "digest": digest,
+        "recorded_digest": recorded,
+    }
+
+
+# ---------------------------------------------------------------------------
 # The publish gate's stamp
 # ---------------------------------------------------------------------------
 
