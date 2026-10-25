@@ -92,6 +92,15 @@ STAMP_NAME = ".package-check.stamp"
 #: packages never write here; their CLIs write to the ``--out`` path the
 #: Makefile hands them, and :func:`record_row` is what brings that file in.
 EVIDENCE_DIR = PACKAGE_DIR / ".gate"
+#: Where ``export-record`` writes by default: inside the gitignored evidence
+#: directory, NOT ``RECORDS_DIR``. ``records/`` lies under the payload prefix
+#: ``skills/multi-llm/``, so an untracked record there makes the tree dirty and
+#: ``build.py --check-stamp`` — and with it ``opencode-publish-first`` — refuse
+#: the very candidate the gate just stamped. The record is committed to the
+#: default branch only after the fast-forward (plan step 2), in a commit of its
+#: own; the export prints the copy-and-commit lines for that step.
+EXPORT_SUBDIR = "export"
+EXPORT_DIR = EVIDENCE_DIR / EXPORT_SUBDIR
 SESSION_NAME = "session.json"
 IMAGE_NAME = "image.json"
 #: Sub-directories :func:`begin_session` empties too: raw CLI output, step
@@ -1314,7 +1323,7 @@ def build_record(evidence: Mapping[str, Any], stamp: Mapping[str, Any],
     }
 
 
-def export_record(*, directory: Path = EVIDENCE_DIR, records_dir: Path = RECORDS_DIR,
+def export_record(*, directory: Path = EVIDENCE_DIR, records_dir: Optional[Path] = None,
                   stamp_path: Optional[Path] = None, tarball: Optional[Path] = None,
                   now: Optional[datetime.datetime] = None) -> Path:
     """Write ``<UTC>-opencode-release-gate.json`` from the session that
@@ -1358,7 +1367,7 @@ def export_record(*, directory: Path = EVIDENCE_DIR, records_dir: Path = RECORDS
         if private and private != "/" and private in text:
             raise GateError(f"the record would carry the local path {private}; it is "
                             "committed, so it must name none")
-    records = Path(records_dir)
+    records = Path(records_dir) if records_dir else Path(directory) / EXPORT_SUBDIR
     records.mkdir(parents=True, exist_ok=True)
     path = records / f"{record['exported_at']}{RECORD_SUFFIX}"
     if path.exists():
@@ -1724,7 +1733,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     row8.add_argument("--since", required=True, help="YYYYmmddTHHMMSSZ, before the run")
     sub.add_parser("stamp-check", help="what --write-stamp would refuse, now")
     sub.add_parser("summary", help="describe the evidence on disk")
-    sub.add_parser("export-record", help="write the release-gate record from this session")
+    export = sub.add_parser("export-record", help="write the release-gate record from this session")
+    export.add_argument("--into", type=Path, default=None,
+                        help=f"where to write it (default: {EXPORT_DIR}, gitignored)")
     validate = sub.add_parser("validate-record", help="the workflow's record validator")
     for flag in ("--tag", "--sha", "--version", "--digest", "--host-version", "--registry"):
         validate.add_argument(flag, required=True)
@@ -1799,9 +1810,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             for line in describe(load_evidence(directory)):
                 print(line)
         elif args.command == "export-record":
-            path = export_record(directory=directory)
-            print(f"wrote {path}; commit it to the default branch after the fast-forward "
-                  "(plan step 2)")
+            path = export_record(directory=directory,
+                                 records_dir=args.into)
+            target = RECORDS_DIR.relative_to(REPO_ROOT).as_posix()
+            print(f"wrote {path} (validated). After the fast-forward (plan step 2), from a "
+                  f"checkout of the default branch at the candidate:\n"
+                  f"    cp {path} {target}/\n"
+                  f"    git add {target}/{path.name}\n"
+                  f"    git commit -m \"Record the opencode release gate for "
+                  f"<tag>\" && git push origin HEAD\n"
+                  "Then check the tag's commit out again before `make opencode-publish-first`.")
         elif args.command == "validate-record":
             path, record = validate_records(
                 tag=args.tag, sha=args.sha, version=args.version, digest=args.digest,
