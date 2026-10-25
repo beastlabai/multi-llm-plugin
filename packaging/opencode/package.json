@@ -19,6 +19,6 @@
     "prepack": "uv run --project ../../skills/multi-llm -- python build.py"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "1.18.23"
+    "@opencode-ai/plugin": "1.19.4"
   }
 }

@@ -77,6 +77,16 @@ PINS: Tuple[Tuple[str, Path, str], ...] = (
      r'^    "opencode": "(\d+\.\d+\.\d+)",$'),
     ("engines.opencode", Path("packaging") / "opencode" / "package.json",
      r'^    "opencode": ">=(\d+\.\d+\.\d+) <2\.0\.0"$'),
+    # The plugin SDK's types, the reference for the plugin API the source's
+    # comments rely on (`ToolContext`'s fields, the toast variant enum). Nothing
+    # compiles against it and consumers never install devDependencies, but
+    # package.json ships in the tarball, so a stale value publishes a plugin
+    # API version older than the `engines` floor. OpenCode publishes
+    # `@opencode-ai/plugin` at every host version, so the host pin owns it,
+    # exact. Moving it is half the review: diff the SDK's published types
+    # between the old and new versions and recheck the source's uses of them.
+    ("plugin SDK devDependency", Path("packaging") / "opencode" / "package.json",
+     r'^    "@opencode-ai/plugin": "(\d+\.\d+\.\d+)"$'),
     ("package README floor", Path("packaging") / "opencode" / "README.md",
      r"Requires \*\*OpenCode (\d+\.\d+\.\d+) or newer\*\*"),
     ("package README best-effort line", Path("packaging") / "opencode" / "README.md",

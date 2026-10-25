@@ -474,6 +474,105 @@ def ask_class(host_id: str, base: Optional[str] = None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# The package route's install pin — which version a generated page names
+# ---------------------------------------------------------------------------
+
+class PackagePinError(NeedsHuman):
+    """``package.version`` / ``package.public_version`` disagree with the
+    provenance row, or with each other."""
+
+
+def _release_precedence(version: str) -> Tuple[Tuple[int, ...], int, Tuple[Any, ...]]:
+    """SemVer precedence for the schema's version pattern, as a sortable key.
+
+    Build metadata is ignored, a pre-release sorts below its release, and
+    pre-release identifiers compare as SemVer orders them: numeric below
+    alphanumeric, and a shorter list below a longer one it prefixes.
+    """
+    core = version.split("+", 1)[0]
+    numbers, _, pre = core.partition("-")
+    release = tuple(int(part) for part in numbers.split("."))
+    if not pre:
+        return (release, 1, ())
+    identifiers = tuple(
+        (0, int(item), "") if item.isdigit() else (1, 0, item)
+        for item in pre.split(".")
+    )
+    return (release, 0, identifiers)
+
+
+def package_spec_version(host: Dict[str, Any]) -> Optional[str]:
+    """The version a generated install paragraph pins for *host*'s package, or
+    ``None`` when the route pins none (``update: reinstall``).
+
+    TWO VERSIONS, BECAUSE THE CANDIDATE IS NOT THE RELEASE. ``package.version``
+    copies the shared version, so it moves at every bump, while the published
+    package is still the previous version. A paragraph built from it at
+    ``verified`` would recommend a spec the registry does not serve yet, from the
+    bump through publication and the registry check, and for as long as either
+    fails. On this host that failure is silent: the plugin stays listed, the
+    exit code is 0, and nothing loads. So:
+
+    * before ``provenance.package`` is ``verified``, the paragraph is the
+      "not yet published" one and names the candidate, ``version``;
+    * at ``verified`` it is the recommendation and names ``public_version``, the
+      last version whose registry record validated, which moves only after
+      that check passes.
+
+    The schema pairs ``public_version`` with the provenance row, but no JSON
+    Schema keyword compares two versions, so the ordering half is checked here:
+    a public pin newer than the candidate means one of them was hand-edited
+    past the other. The pairing is re-checked as well, so a caller that never
+    ran the schema (the renderer, in a checkout without the dev extra) still
+    refuses. Not part of :func:`load`'s runtime floor: ``package`` governs
+    generated documentation only, and a malformed one must never be able to
+    stop a dispatch.
+    """
+    package = host.get("package") or {}
+    provenance = (host.get("provenance") or {}).get("package", "unknown")
+    version = package.get("version")
+    public = package.get("public_version")
+    pinned = package.get("update") == "pinned-spec"
+    if public is None:
+        if pinned and provenance == "verified":
+            raise PackagePinError(
+                f"ERROR: package '{package.get('name')}' is `verified` but has no "
+                "`public_version`.\n"
+                "       A verified paragraph recommends a spec, and the only "
+                "version it may name is the\n"
+                "       last one whose registry record validated. Set "
+                "`public_version` to that version."
+            )
+        return version
+    if provenance != "verified":
+        raise PackagePinError(
+            f"ERROR: package '{package.get('name')}' carries `public_version: "
+            f"{public}` while its provenance is `{provenance}`.\n"
+            "       No registry install has been verified, so there is no public "
+            "version to name.\n"
+            "       Remove it; it is set in the same edit that promotes "
+            "`provenance.package`."
+        )
+    if not pinned or version is None:
+        raise PackagePinError(
+            f"ERROR: package '{package.get('name')}' carries `public_version` on "
+            f"an `update: {package.get('update')}` route with "
+            f"`version: {version}`.\n"
+            "       Only a `pinned-spec` route has a pin to recommend."
+        )
+    if _release_precedence(public) > _release_precedence(version):
+        raise PackagePinError(
+            f"ERROR: package '{package.get('name')}' has `public_version: "
+            f"{public}` newer than `version: {version}`.\n"
+            "       `version` is the candidate and follows the shared version; "
+            "`public_version` trails it\n"
+            "       and moves only after that version's registry record "
+            "validates."
+        )
+    return public
+
+
+# ---------------------------------------------------------------------------
 # Verb resolution — one fixed phrasing per enum value
 # ---------------------------------------------------------------------------
 # These strings ARE the shim's answer to each capability verb. `install-host`
