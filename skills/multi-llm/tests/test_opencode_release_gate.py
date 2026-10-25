@@ -1061,6 +1061,28 @@ def _validate(tmp_path: Path, records: dict, record: dict, **override) -> subpro
 
 
 class TestExport:
+    def test_the_default_export_stays_out_of_the_payload_prefix(self, tmp_path, monkeypatch, built):
+        """records/ lies under skills/multi-llm/, the prefix the payload's
+        dirty-tree refusal covers: an untracked record written there made
+        `--check-stamp` and `opencode-publish-first` refuse the candidate the
+        gate had just stamped (measured on the first green full gate). So the
+        default lands in the gitignored evidence directory, and the record
+        reaches records/ only in the post-fast-forward commit."""
+        run = GateRun(tmp_path, monkeypatch, built)
+        run.full()
+        run.stamp()
+        path = gate.export_record(directory=run.dir,
+                                  stamp_path=run.package / pkg_build.STAMP_NAME,
+                                  tarball=run.tarball)
+        assert path.parent == run.dir / gate.EXPORT_SUBDIR
+        assert gate.EXPORT_DIR == gate.EVIDENCE_DIR / gate.EXPORT_SUBDIR
+        assert not gate.EXPORT_DIR.resolve().is_relative_to(
+            (gate.REPO_ROOT / "skills" / "multi-llm").resolve())
+        ignored = subprocess.run(
+            ["git", "check-ignore", "-q", str(gate.EXPORT_DIR / "x-opencode-release-gate.json")],
+            cwd=gate.REPO_ROOT)
+        assert ignored.returncode == 0, "the export directory must be gitignored"
+
     def test_the_exported_record_validates(self, exported, tmp_path):
         record, name = exported
         assert re.fullmatch(r"\d{8}T\d{6}Z-opencode-release-gate\.json", name)
