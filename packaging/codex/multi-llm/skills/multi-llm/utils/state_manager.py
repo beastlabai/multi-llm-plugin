@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from .git_utils import get_current_head, get_branch_name
+from .git_utils import get_branch_name, head_or_empty_tree
 from .judge_vocab import upgrade_legacy
 from .schema_validator import validate_state_file
 
@@ -1158,7 +1158,11 @@ class StateManager:
             "plan_hash": self._compute_plan_hash(),
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
-            "head_at_start": get_current_head(),
+            # The diff base code review and apply-code-fixes fall back to.
+            # Before the first commit it is the empty tree (every file is
+            # new), not a refusal: a new state used to raise `GitError` here,
+            # and with it every mode on a plain `git init`.
+            "head_at_start": head_or_empty_tree(),
             "branch_name": get_branch_name() or "unknown",
             "review_phase_completed": False,
             "tracked_files": [],

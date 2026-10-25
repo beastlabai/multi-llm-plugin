@@ -436,7 +436,7 @@ class TestRecordHeadBeforeImplement:
         """Test that head_before_implement is recorded when not already in state."""
         mock_state_manager.get.side_effect = lambda key, *args: None
 
-        with patch('implement_orchestrator.get_current_head', return_value='abc123') as mock_head:
+        with patch('implement_orchestrator.head_or_empty_tree', return_value='abc123') as mock_head:
             # Inline the logic under test (it's embedded in run_implement, not a separate function)
             if mock_state_manager.get("head_before_implement") is None:
                 mock_state_manager.set("head_before_implement", mock_head())
@@ -449,7 +449,7 @@ class TestRecordHeadBeforeImplement:
         """Test that head_before_implement is not overwritten on resume."""
         mock_state_manager.get.side_effect = lambda key, *args: 'existing_sha' if key == 'head_before_implement' else None
 
-        with patch('implement_orchestrator.get_current_head') as mock_head:
+        with patch('implement_orchestrator.head_or_empty_tree') as mock_head:
             if mock_state_manager.get("head_before_implement") is None:
                 mock_state_manager.set("head_before_implement", mock_head())
                 mock_state_manager.save()
@@ -458,20 +458,20 @@ class TestRecordHeadBeforeImplement:
         mock_state_manager.set.assert_not_called()
 
     def test_handles_git_error_gracefully(self, mock_state_manager):
-        """Test graceful handling when get_current_head fails."""
+        """Test graceful handling when head_or_empty_tree fails."""
         mock_state_manager.get.side_effect = lambda key, *args: None
 
-        with patch('implement_orchestrator.get_current_head', side_effect=Exception("Git error")):
+        with patch('implement_orchestrator.head_or_empty_tree', side_effect=Exception("Git error")):
             # Replicate the try/except from the orchestrator
             if mock_state_manager.get("head_before_implement") is None:
                 try:
-                    from implement_orchestrator import get_current_head
-                    mock_state_manager.set("head_before_implement", get_current_head())
+                    from implement_orchestrator import head_or_empty_tree
+                    mock_state_manager.set("head_before_implement", head_or_empty_tree())
                     mock_state_manager.save()
                 except Exception:
                     pass
 
-        # set should not be called since get_current_head raised
+        # set should not be called since head_or_empty_tree raised
         mock_state_manager.set.assert_not_called()
 
 
