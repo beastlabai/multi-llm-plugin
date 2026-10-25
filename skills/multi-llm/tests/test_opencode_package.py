@@ -8102,16 +8102,20 @@ class TestPublishGate:
         assert len(messages) == 3, "two refusals share a message"
 
     def test_the_publish_recipe_checks_the_stamp_before_npm(self):
-        """The refusal happens **before** npm is invoked at all."""
+        """The refusal happens **before** npm is invoked at all.
+
+        ``opencode-publish`` no longer reaches npm: it refuses and names the two
+        guarded paths. The laptop one, ``opencode-publish-first``, checks the
+        stamp among its preflights, all of which run before the upload
+        (``test_opencode_first_release.py`` grades the order and each refusal).
+        """
         recipes = _makefile_recipes(REPO_ROOT / "Makefile")
-        body = recipes["opencode-publish"]
-        check_at = next(
-            i for i, line in enumerate(body) if "--check-stamp" in line
+        assert not any(
+            re.search(r"\bnpm\s+publish\b", line) for line in recipes["opencode-publish"]
         )
-        npm_at = next(
-            i for i, line in enumerate(body) if re.search(r"\bnpm\s+publish\b", line)
-        )
-        assert check_at < npm_at
+        assert any("first_release.py" in line for line in recipes["opencode-publish-first"])
+        source = (PACKAGE_DIR / "first_release.py").read_text(encoding="utf-8")
+        assert source.index('"--check-stamp"') < source.index('"npm", "publish"')
 
     def test_the_publish_recipe_never_allows_a_dirty_tree(self):
         """``ALLOW_DIRTY`` is a development convenience and must not reach here.

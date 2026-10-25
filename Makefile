@@ -136,7 +136,8 @@ export MLLM_E2E_MATRIX_TIMEOUT_S
         e2e-clean e2e-prune \
         opencode-stage opencode-package opencode-package-check-ci \
         opencode-package-check opencode-publish opencode-bump opencode-latest-check \
-        opencode-print-registry opencode-check-bump \
+        opencode-print-registry opencode-check-bump opencode-registry-absent \
+        opencode-publish-first \
         codex-regen codex-package codex-package-check-ci codex-package-check \
         codex-gate-reset codex-gate-pinned codex-gate-minimum codex-gate-ceiling \
         codex-gate-derived codex-publish
@@ -165,7 +166,9 @@ help:
 	@echo "  make opencode-package             build, pack, then sweep the tarball for secrets"
 	@echo "  make opencode-package-check-ci    A4 rows 1-6: no Docker, no registry, no opencode binary"
 	@echo "  make opencode-package-check       the FULL gate: rows 7-9 too; stamps only if all ran"
-	@echo "  make opencode-publish             refuses unless the full gate passed on these exact bytes"
+	@echo "  make opencode-registry-absent [OUT=f] row 9: the version must be absent from the single registry"
+	@echo "  make opencode-publish-first [DRY_RUN=1] the laptop FIRST release: uploads the gated tarball"
+	@echo "  make opencode-publish             refuses: names the two guarded publish paths"
 	@echo "  make opencode-bump VERSION=x.y.z  move every opencode pin to one release; re-capture its fixtures (\$$0)"
 	@echo "                                    (a release older than the pin also needs ALLOW_DOWNGRADE=1)"
 	@echo "  make opencode-latest-check        exit 1 when npm has a newer opencode than the pin"
@@ -709,15 +712,15 @@ opencode-package-check-ci:
 #     7 step refuses for exactly this reason, so neither path can publish on a
 #     row that has never executed anywhere.
 #
-# ROW 9 IS HERE IN FULL: the version must be ABSENT from the registry, decided on
-# npm's error CODE rather than on its exit status. Three outcomes, not two — exit
-# 0 is "already published", `E404` is the green answer (and the right green for a
-# name never published at all), and a network failure, an E429, a registry outage
-# or an expired token also exit non-zero. Read as a two-way test those all come
-# back "absent" and the gate stamps on a probe that never answered. Never `npm
-# publish --dry-run`, which never contacts the registry at all. The publishing
-# job carries its own copy of this probe because it consumes no stamp (below):
-# the two tiers cannot share one run, only its reasoning.
+# ROW 9 RUNS IN FULL, through its one entry point (`opencode-registry-absent`,
+# below): the version must be ABSENT from the single registry, decided on npm's
+# error CODE rather than on its exit status, because a network failure, an E429
+# or an expired token also exit non-zero and must not read as absence. The
+# publishing workflow's jobs and the laptop first-release target run the same
+# script. The tiers still run separately, since CI consumes no stamp (below), but
+# they share the script, not only its reasoning: no recipe here or step there
+# keeps an `npm view` absence check of its own, and
+# test_opencode_registry_absent.py fails on one that does.
 #
 # THE STAMP NEVER TRAVELS. It is gitignored and is never uploaded as a CI
 # artifact, because a stamp from another machine attests to that machine's rows,
@@ -741,23 +744,7 @@ opencode-package-check: opencode-package-check-ci
 	  exit 1; }
 	$(MAKE) opencode-package
 	$(PYTEST) -m container -q -k opencode
-	@name="$$(node -p "require('./$(OPENCODE_PKG)/package.json').name")"; \
-	version="$$(node -p "require('./$(OPENCODE_PKG)/package.json').version")"; \
-	status=0; probe="$$(npm view "$$name@$$version" version --json 2>/dev/null)" || status=$$?; \
-	if [ "$$status" -eq 0 ]; then \
-	  echo "make: REFUSING (row 9): $$name@$$version is already on the registry, and" >&2; \
-	  echo "      npm forbids republishing a version. Bump $(OPENCODE_PKG)/package.json." >&2; \
-	  exit 1; \
-	fi; \
-	code="$$(printf '%s' "$$probe" | node -e 'let raw = ""; process.stdin.on("data", (chunk) => { raw += chunk; }); process.stdin.on("end", () => { let code = ""; try { code = JSON.parse(raw).error.code || ""; } catch { code = ""; } process.stdout.write(String(code)); });')" || code=""; \
-	if [ "$$code" != "E404" ]; then \
-	  echo "make: REFUSING (row 9): could not determine whether $$name@$$version is on" >&2; \
-	  echo "      the registry. npm exited $$status reporting code '$${code:-<none>}';" >&2; \
-	  echo "      only E404 is a green answer. That is an UNKNOWN, not an absence —" >&2; \
-	  echo "      re-run once the registry answers." >&2; \
-	  exit 1; \
-	fi; \
-	echo "row 9: $$name@$$version is absent from the registry (E404)"
+	$(MAKE) --no-print-directory opencode-registry-absent
 	@echo "make: REFUSING (row 7): no clean-\$$HOME install probe is wired, so nothing" >&2; \
 	echo "      here has confirmed that the packed tarball resolves from a clean home" >&2; \
 	echo "      and mutates command[\"multi-llm\"] plus the multi_llm tool id — presence" >&2; \
@@ -768,16 +755,48 @@ opencode-package-check: opencode-package-check-ci
 	$(OPENCODE_BUILD) --write-stamp "$$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	@echo "opencode-package-check: full gate green; stamp written to $(OPENCODE_STAMP)"
 
-# Refuses BEFORE npm is invoked at all, on any of four conditions, each named
-# separately so "the gate is red" is never the same message as "you edited a file
-# since". The gate is worth nothing if the publish command can skip it.
-#
-# It publishes the DIRECTORY, never a pre-built .tgz: measured, `npm publish
-# <tarball>` runs no lifecycle scripts at all, so the `prepack` backstop does not
-# exist on that path.
+# Row 9's one entry point (packaging/opencode/registry_absent.mjs): the version
+# in $(OPENCODE_PKG)/package.json must be ABSENT from $(OPENCODE_REGISTRY), and
+# only npm's `E404` says so. Exit 0 is "already published" and every other code
+# is an unknown; both refuse. The script re-reads OPENCODE_REGISTRY from this
+# file and refuses any other `--registry`, so the URL is still written once.
+# `OUT=<file>` keeps the row-9 evidence JSON for `release_gate.py record 9`.
+opencode-registry-absent:
+	node $(OPENCODE_PKG)/registry_absent.mjs --registry $(OPENCODE_REGISTRY) $(if $(OUT),--out "$(OUT)")
+
+# THE LAPTOP FIRST RELEASE, and only that. npm's trusted publishing still needs
+# an existing package (`npm trust`: "The package you're configuring must already
+# exist", rechecked 2026-10-25), so the first version is uploaded from the
+# maintainer's machine, authenticated interactively and WITHOUT provenance; every
+# later version goes through the workflow dispatch, with it. first_release.py
+# refuses, naming the condition, unless the tree is clean, the full stamp binds
+# the gated tarball, the annotated `opencode-v<version>` tag names HEAD, HEAD is
+# on origin/master, every required check run on that SHA succeeded (`test (<os>)`
+# per test.yml matrix leg, plus `package`), the shared-version bump check and
+# row 9 pass, and the gated tarball still recomputes to the stamp. Then it
+# uploads THAT FILE with `--ignore-scripts`, never the directory, and reads
+# `dist.integrity` back from a fresh cache until it equals the gated one.
+# `DRY_RUN=1` runs every preflight and prints the upload without running it.
+# No ALLOW_DIRTY here, and the script strips MULTI_LLM_ALLOW_DIRTY from its children.
+opencode-publish-first:
+	uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/first_release.py $(if $(DRY_RUN),--dry-run)
+
+# NO LONGER A PUBLISH PATH. This target used to run the upload in the package
+# directory with `--provenance`, and that shipped the wrong bytes: the
+# manifest's `prepack` hook rebuilt dist/ there and npm uploaded whatever that
+# rebuild produced, while `--check-stamp` had compared a separate rebuild a
+# moment earlier. Nothing compared the uploaded tarball with the gated one. Both
+# guarded paths now upload the exact tarball the full gate packed, scanned and
+# loaded (`npm pack` once, then the file, with `--ignore-scripts`); the `prepack`
+# hook stays only as the backstop for a hand-typed bare `npm pack`. Measured: a
+# tarball upload runs no lifecycle scripts, so nothing can repack it.
 opencode-publish:
-	uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/build.py --check-stamp
-	cd $(OPENCODE_PKG) && npm publish --provenance --access public
+	@echo "make: REFUSING: opencode-publish no longer uploads anything. The two guarded paths:" >&2; \
+	echo "      * the FIRST release, from this machine: make opencode-publish-first" >&2; \
+	echo "        (DRY_RUN=1 to run its preflights only)" >&2; \
+	echo "      * every later release: the publish-opencode-plugin workflow dispatch" >&2; \
+	echo "        (mode: publish, tag: opencode-v<version>), with provenance" >&2; \
+	exit 1
 
 # THE SUPPORTED OPENCODE IS ITS NEWEST RELEASE, AND ONLY THAT ONE. It is the
 # adapter's min_version and verified_version at once, and engines.opencode, the
