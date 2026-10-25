@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/beastlabai/multi-llm-plugin/blob/master/packaging/opencode/release-gate-record.schema.json",
+  "title": "OpenCode release-gate record",
+  "description": "skills/multi-llm/tests/container/records/<UTC>-opencode-release-gate.json: the evidence of one full local `make opencode-package-check` session, exported by `release_gate.py export-record` from the session that authorized the stamp. It is how row 8 (the package-route container scenarios, which CI cannot run) reaches the publishing workflow, whose `verify` job runs `release_gate.py validate-record` against it. Never written by hand. Validated by release_gate.schema_errors, which implements exactly the keywords used here (release_gate.SCHEMA_KEYWORDS), because the verify job runs under `uv run --frozen --no-dev`, where jsonschema is absent.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "kind", "exported_at", "tag", "sha", "version", "candidate_digest",
+    "tarball", "registry", "host_version", "image", "posture", "session",
+    "rehearsal", "rows", "row8", "scenarios"
+  ],
+  "properties": {
+    "schema": {"const": 1},
+    "kind": {"const": "opencode-release-gate"},
+    "exported_at": {"type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z$",
+                    "description": "Equals the file name's <UTC> prefix, so a renamed file cannot pose as the newest."},
+    "tag": {"type": "string", "pattern": "^opencode-v[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$",
+            "description": "The candidate commit the gate session began at."},
+    "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "candidate_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$",
+                         "description": "dist/tree.sha256 of the clean candidate build."},
+    "tarball": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "integrity", "sha256", "file_count"],
+      "description": "The gated tarball: the file `make opencode-package` packed and scanned and row 7 loaded.",
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z0-9.-]+\\.tgz$"},
+        "integrity": {"type": "string", "pattern": "^sha512-[A-Za-z0-9+/]+=*$"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "file_count": {"type": "integer", "minimum": 1}
+      }
+    },
+    "registry": {"type": "string", "pattern": "^https://[A-Za-z0-9.-]+(:[0-9]+)?$"},
+    "host_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+                     "description": "The pinned OpenCode release rows 7 and 8 ran."},
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "tag", "payload_digest", "opencode_installed", "installed_versions"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$",
+               "description": "The immutable image id the gate built and ran row 8 on."},
+        "tag": {"type": ["string", "null"]},
+        "payload_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$",
+                           "description": "/opt/mllm/opencode-plugin/dist/tree.sha256, read out of the image id."},
+        "opencode_installed": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+        "installed_versions": {"type": "object",
+                               "description": "The image's /opt/mllm/lock/cli-versions.installed.json."}
+      }
+    },
+    "posture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pass", "posture_yaml_sha256", "posture_yaml_matches_head", "scenarios"],
+      "description": "The container posture assertions on the same image id: each scenario's in-container half (posture-inside.json) and docker-inspect half (posture-host.json), with tests/container/posture.yaml unchanged from the candidate commit.",
+      "properties": {
+        "pass": {"type": "boolean"},
+        "posture_yaml_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "posture_yaml_matches_head": {"type": "boolean"},
+        "scenarios": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["inside", "host_captured", "mismatches"],
+            "properties": {
+              "inside": {"type": "boolean"},
+              "host_captured": {"type": "boolean"},
+              "mismatches": {"type": "array", "items": {"type": "string"}}
+            }
+          }
+        }
+      }
+    },
+    "session": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "rehearsal": {"const": false},
+    "rows": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["1", "2", "3", "4", "5", "5b", "6", "7", "8", "9"],
+      "description": "The stamp's checked summary: every gate row of plans/opencode-plugin-publish.md step 0, graded pass in this session.",
+      "properties": {
+        "1": {"const": "pass"}, "2": {"const": "pass"}, "3": {"const": "pass"},
+        "4": {"const": "pass"}, "5": {"const": "pass"}, "5b": {"const": "pass"},
+        "6": {"const": "pass"}, "7": {"const": "pass"}, "8": {"const": "pass"},
+        "9": {"const": "pass"}
+      }
+    },
+    "row8": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ran", "run_id", "since"],
+      "description": "Row 8 ran locally, in the full gate: CI never reruns it, and this record is its only authorization.",
+      "properties": {
+        "ran": {"const": "local"},
+        "run_id": {"type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z$"},
+        "since": {"type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z$"}
+      }
+    },
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["row", "session", "scenario", "grader", "pass", "run_id", "record",
+                     "outcome", "graded", "image_id", "verify_record"],
+        "properties": {
+          "row": {"type": "string", "pattern": "^opencode-package-gate-[a-z-]+$"},
+          "session": {"type": "string", "minLength": 1},
+          "scenario": {"type": "string", "minLength": 1},
+          "grader": {"type": "string"},
+          "pass": {"type": "boolean"},
+          "run_id": {"type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z$"},
+          "record": {"type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z-opencode-package-gate-[a-z-]+\\.json$"},
+          "outcome": {"type": "string"},
+          "graded": {"type": "boolean"},
+          "image_id": {"type": ["string", "null"]},
+          "verify_record": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["exit", "verdict", "output"],
+            "properties": {
+              "exit": {"type": ["integer", "null"]},
+              "verdict": {"enum": ["MATCH", "MISSING", "MISMATCH", "error"]},
+              "output": {"type": "string"}
+            }
+          }
+        }
+      }
+    }
+  }
+}

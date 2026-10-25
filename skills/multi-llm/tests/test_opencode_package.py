@@ -399,6 +399,27 @@ class TestManifest:
             "stream fixtures were never captured from"
         )
 
+    def test_engines_floor_is_the_container_pin(self):
+        """Row 6 exactly: the floor **equals** the container's opencode pin.
+
+        The row above holds the floor at or below the pin and at or above the
+        parser-fixture pin; under the support policy (the newest release is the
+        only supported one) those collapse to one release, and this is the
+        equality the gate grades. The whole spec is matched, so a ceiling other
+        than ``<2.0.0`` or a second clause fails too.
+        """
+        spec = json.loads(MANIFEST.read_text(encoding="utf-8"))["engines"]["opencode"]
+        match = re.fullmatch(r">=([0-9]+\.[0-9]+\.[0-9]+) <2\.0\.0", spec)
+        assert match, f"engines.opencode is {spec!r}, not `>=<pin> <2.0.0`"
+        container = json.loads(
+            (SKILL_ROOT / "tests" / "container" / "package.json").read_text("utf-8")
+        )
+        pinned = container["dependencies"]["opencode-ai"]
+        assert match.group(1) == pinned, (
+            f"engines floor {match.group(1)} is not the container's opencode-ai pin "
+            f"{pinned}; `make opencode-bump` moves both"
+        )
+
 
 def _version(text: str):
     return tuple(int(part) for part in text.split(".")[:3])
@@ -954,6 +975,48 @@ class TestBuildArtifacts:
             (built_package / "dist" / "cli-surface.json").read_text("utf-8")
         )
         assert surface["uv"]["default_run_args"] == ["--frozen", "--no-dev"]
+
+    def test_the_no_dev_sync_installs_one_package(self, built_package, tmp_path):
+        """Row 5b's second half: what that argv installs, asked of uv itself.
+
+        The argv row above proves the flags are composed; this one proves what
+        they buy against the *staged* lockfile — the runtime dependency and
+        nothing from the dev group — with ``--dry-run --offline``, so uv
+        resolves the plan from the lock without fetching or writing anything.
+        The expected set is read from ``pyproject.toml``'s ``dependencies``,
+        never typed here.
+        """
+        import tomllib
+
+        uv = unattended.find_uv()
+        if uv is None:
+            _unavailable("uv is not installed")
+        staged = built_package / "skills" / "multi-llm"
+        env = dict(os.environ)
+        env["UV_CACHE_DIR"] = str(tmp_path / "uv-cache")
+        env["UV_PROJECT_ENVIRONMENT"] = str(tmp_path / "venv")
+        result = subprocess.run(
+            [uv, "sync", *unattended.DEFAULT_UV_RUN_ARGS, "--dry-run", "--offline",
+             "--project", str(staged)],
+            capture_output=True, text=True, env=env, timeout=300,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        output = result.stdout + result.stderr
+        planned = sorted(
+            re.match(r"\s*\+\s*([A-Za-z0-9_.-]+)==", line).group(1).lower()
+            for line in output.splitlines() if re.match(r"\s*\+\s*\S+==", line)
+        )
+        runtime = tomllib.loads(
+            (SKILL_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        )["project"]["dependencies"]
+        expected = sorted(
+            re.match(r"[A-Za-z0-9_.-]+", spec).group(0).lower() for spec in runtime
+        )
+        assert planned == expected and len(planned) == 1, (
+            f"`uv sync --frozen --no-dev` would install {planned}, the runtime "
+            f"dependencies are {expected}:\n{output}"
+        )
+        assert not (tmp_path / "venv").exists(), "the dry run created the venv"
 
     def test_package_is_built_before_every_pack(self):
         """Every Makefile recipe reaching npm runs ``build.py`` first.
@@ -8001,15 +8064,19 @@ class TestRouteStaging:
 
 class TestPublishGate:
     """``make opencode-publish`` refuses unless the full gate passed on **these
-    exact bytes** — and each refusal names which of the four it was.
+    exact bytes** — and each refusal names which condition it was.
 
     A gate is worth nothing if the publish command can skip it, and a refusal
     nobody can act on is nearly as bad: "the gate is red" must never be the same
-    message as "you edited a file since".
+    message as "you edited a file since". The stamp is schema 2 since the gate
+    began reading evidence: these rows stamp from a complete gate session
+    (``GateRun``, every row written through ``release_gate.py``'s own graders in
+    a temp tree), and ``test_opencode_release_gate.py`` carries the gate's own
+    refusals.
     """
 
     @pytest.fixture
-    def staged(self, tmp_path):
+    def staged(self, tmp_path, monkeypatch):
         """A full staged package in a temp directory, with its stamp.
 
         ``allow_dirty`` is passed explicitly, never through the environment:
@@ -8017,11 +8084,12 @@ class TestPublishGate:
         so a developer who exported it once cannot stamp — and therefore publish
         — from a dirty tree.
         """
-        destination = tmp_path / "pkg"
-        pkg_build.write_stamp(
-            destination, timestamp="20260101T000000Z", allow_dirty=True
-        )
-        return destination
+        from tests.test_opencode_release_gate import GateRun
+
+        run = GateRun(tmp_path, monkeypatch)
+        run.full()
+        run.stamp()
+        return run.package
 
     def test_a_matching_full_stamp_permits_a_publish(self, staged):
         assert pkg_build.check_stamp(staged, allow_dirty=True) is None
@@ -8038,7 +8106,14 @@ class TestPublishGate:
         guard. Patching the clean check to always refuse makes the assertion the
         one the docstring claims: ``write_stamp`` *reached* the clean check,
         which happens only when the env var failed to turn ``allow_dirty`` on.
+        A gate session is begun first, because the stamp refuses a missing one
+        before it builds anything.
         """
+        from tests.test_opencode_release_gate import gate
+
+        monkeypatch.setattr(gate, "dirty_paths", lambda root=None: [])
+        evidence = tmp_path / "gate"
+        gate.begin_session(evidence)
         reached = []
 
         def refuse(root, prefix):
@@ -8050,14 +8125,15 @@ class TestPublishGate:
         monkeypatch.setattr(payload, "assert_clean", refuse)
         monkeypatch.setenv(pkg_build.ALLOW_DIRTY_ENV, "1")
         with pytest.raises(payload.PayloadError, match="dirty tree"):
-            pkg_build.write_stamp(tmp_path / "nope", timestamp="x")
+            pkg_build.write_stamp(tmp_path / "nope", timestamp="x", evidence_dir=evidence)
         assert reached, (
             "write_stamp never ran the clean check, so the environment "
             "variable reached it after all"
         )
 
     def test_publish_is_gated_on_the_a4_check(self, staged, tmp_path):
-        """Four refusal cases, each with its own reason."""
+        """Missing, CI-tier, schema-1, partial, stale and wrong-version stamps,
+        each with its own reason."""
         stamp_path = staged / pkg_build.STAMP_NAME
 
         # 1. No stamp at all.
@@ -8067,15 +8143,28 @@ class TestPublishGate:
         assert reason and "no " in reason and pkg_build.STAMP_NAME in reason
 
         # 2. A stamp the CI tier wrote. It can never authorize a publish: that
-        #    tier runs rows 1-6 and deliberately writes no stamp at all, so a
-        #    `tier: ci` stamp means someone made one by hand.
+        #    tier runs rows 1-6 and 5b and deliberately writes no stamp at all,
+        #    so a `tier: ci` stamp means someone made one by hand.
         stamp_path.write_text(
             json.dumps({**stamp, "tier": "ci"}), encoding="utf-8"
         )
         reason = pkg_build.check_stamp(staged, allow_dirty=True)
         assert reason and "tier=" in reason and "ci" in reason
 
-        # 3. A digest that differs from a fresh build — an edit landed after the
+        # 3. A schema-1 stamp: the digest-only shape written before the gate
+        #    read any evidence.
+        legacy = {key: stamp[key] for key in ("tier", "digest", "version", "stamped_at")}
+        stamp_path.write_text(json.dumps(legacy), encoding="utf-8")
+        reason = pkg_build.check_stamp(staged, allow_dirty=True)
+        assert reason and "digest-only" in reason
+
+        # 4. A partial stamp: a row it does not record as passed.
+        partial = {row: "pass" for row in stamp["rows"] if row != "8"}
+        stamp_path.write_text(json.dumps({**stamp, "rows": partial}), encoding="utf-8")
+        reason = pkg_build.check_stamp(staged, allow_dirty=True)
+        assert reason and "rows 8" in reason
+
+        # 5. A digest that differs from a fresh build — an edit landed after the
         #    gate ran. Keyed on the staged CONTENT, not on a git tree hash, which
         #    would miss both the generated files and an uncommitted edit.
         stamp_path.write_text(
@@ -8084,22 +8173,22 @@ class TestPublishGate:
         reason = pkg_build.check_stamp(staged, allow_dirty=True)
         assert reason and "changed since the gate ran" in reason
 
-        # 4. A version that differs from the manifest's.
+        # 6. A version that differs from the manifest's.
         stamp_path.write_text(
             json.dumps({**stamp, "version": "99.99.99"}), encoding="utf-8"
         )
         reason = pkg_build.check_stamp(staged, allow_dirty=True)
         assert reason and "99.99.99" in reason
 
-        # And each of the four is a *different* message.
+        # And each is a *different* message.
         messages = set()
-        for mutation in ({"tier": "ci"}, {"digest": "1" * 64},
-                         {"version": "98.0.0"}):
+        for mutation in ({"tier": "ci"}, {"schema": 1}, {"rows": partial},
+                         {"digest": "1" * 64}, {"version": "98.0.0"}):
             stamp_path.write_text(
                 json.dumps({**stamp, **mutation}), encoding="utf-8"
             )
             messages.add(pkg_build.check_stamp(staged, allow_dirty=True))
-        assert len(messages) == 3, "two refusals share a message"
+        assert len(messages) == 5, "two refusals share a message"
 
     def test_the_publish_recipe_checks_the_stamp_before_npm(self):
         """The refusal happens **before** npm is invoked at all.
