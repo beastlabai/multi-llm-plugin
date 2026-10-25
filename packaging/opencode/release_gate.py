@@ -676,6 +676,10 @@ def row7_problems(raw: Any, *, host_version: str, registry: str,
                             "extracted gated tarball")
         for call in ("init", "status"):
             result = project.get(call)
+            if isinstance(result, Mapping) and isinstance(skill_dir, str) and skill_dir:
+                probe = _sibling("probe", "opencode_probe")
+                problems += [f"row 7: {kind} project: {call}: {p}" for p in
+                             probe.invocation_problems(result, Path(skill_dir))]
             documented = ROW7_DOCUMENTED_RESULTS[call]
             outcome = ((result.get("exit"), (result.get("result") or {}).get("state"))
                        if isinstance(result, Mapping)
@@ -1624,10 +1628,26 @@ def _kill(child: "subprocess.Popen[bytes]", grace: float) -> None:
             pass
 
     signal_group(signal.SIGTERM)
+    if os.name == "posix":
+        # The leader may exit immediately while a descendant is still
+        # unwinding (or ignoring TERM). Give the whole group its grace before
+        # KILL, including time for a probe to sweep its detached children.
+        deadline = time.monotonic() + grace
+        while True:
+            child.poll()  # Reap the leader so it cannot alone keep the group alive.
+            try:
+                os.killpg(child.pid, 0)
+            except ProcessLookupError:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.05, remaining))
+        signal_group(signal.SIGKILL)
     try:
         child.wait(timeout=grace)
     except subprocess.TimeoutExpired:
-        signal_group(signal.SIGKILL if os.name == "posix" else signal.SIGTERM)
+        child.kill()
         try:
             child.wait(timeout=grace)
         except subprocess.TimeoutExpired:

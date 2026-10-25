@@ -688,6 +688,32 @@ class TestAMismatchFailsBeforeTheFirstToolCall:
                    result["criteria"][rc.TREE]["evidence"]["problems"])
         assert host.tool_calls == []
 
+    @pytest.mark.parametrize("script", [None, "different.py", "/elsewhere/multi_llm.py"])
+    @pytest.mark.parametrize("label, criterion", [("init", rc.INIT),
+                                                  ("status-before-restart", rc.RESTART),
+                                                  ("status-after-restart", rc.RESTART)])
+    def test_a_call_must_run_the_installed_dispatcher(self, tmp_path, candidate_and_tarball,
+                                                     script, label, criterion):
+        candidate, tarball = candidate_and_tarball
+
+        class WrongDispatcher(FakeHost):
+            def tool_call(self, *args, **kwargs):
+                call = super().tool_call(*args, **kwargs)
+                if args[-1] != label:
+                    return call
+                argv = call["outcome"]["argv"]
+                index = argv.index("--") + 2
+                if script is None:
+                    del argv[index:]
+                else:
+                    argv[index] = str(Path(argv[index]).parent / script)
+                return call
+
+        result = self._run(tmp_path, candidate, WrongDispatcher(tarball))
+        assert result["criteria"][criterion]["pass"] is False
+        assert any("dispatcher script" in p for p in
+                   result["criteria"][criterion]["evidence"]["problems"])
+
 
 # --------------------------------------------------------------------------- #
 # The bootstrap job's invocation: the probe root is --tmp-parent's
@@ -805,8 +831,9 @@ class TestTheSupportingOutputSurvivesARefusal:
             "--opencode", str(binary), "--tmp-parent", str(tmp_path),
             "--workflow-run-id", "7", "--rehearsal-registry", STUB, "--repo", str(fixture["repo"])])
 
+    @pytest.mark.parametrize("previous_pass", [False, True])
     def test_a_refusal_mid_probe_keeps_its_diagnostics(self, tmp_path, monkeypatch, capsys,
-                                                       candidate_and_tarball):
+                                                       candidate_and_tarball, previous_pass):
         candidate, tarball = candidate_and_tarball
         fixture = _tagged_repo(tmp_path / "tag")
         monkeypatch.setattr(rc, "rebuild_candidate", _fake_rebuild(candidate))
@@ -819,6 +846,9 @@ class TestTheSupportingOutputSurvivesARefusal:
                 return bounded
 
         args = self._args(fixture, tmp_path)
+        if previous_pass:
+            assert rc.check(args, steps=FakeHost(tarball).steps()) == 0
+            assert Path(args.out).exists()
         assert rc.check(args, steps=WrongPin(tarball).steps()) == 1
         err = capsys.readouterr().err
         assert "not the pin" in err and "supporting output" in err

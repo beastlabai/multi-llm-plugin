@@ -156,14 +156,16 @@ def fake_docker(images: dict, contents: dict, calls: list | None = None):
 
 
 def _project(kind: str) -> dict:
+    skill_dir = str(Path("/tmp/probe/extracted/package/skills/multi-llm").resolve())
+    invocation = {"skill_dir": skill_dir, "script": str(Path(skill_dir) / "multi_llm.py")}
     return {"kind": kind, "command_registered": True,
-            "command_skill_dir": "/tmp/probe/extracted/package/skills/multi-llm",
+            "command_skill_dir": skill_dir,
             "command_inside_payload": True, "tool_registered": True,
-            "init": {"ok": True, "exit": 0, "result": {"mode": "init", "state": "done"},
+            "init": {**invocation, "ok": True, "exit": 0, "result": {"mode": "init", "state": "done"},
                      "files_created": [".multi-llm/config.yaml"]},
             # What status answers in a project whose only run was init, measured
             # on the real probe: exit 2, "no run recorded".
-            "status": {"ok": True, "exit": 2,
+            "status": {**invocation, "ok": True, "exit": 2,
                        "result": {"mode": "status", "state": "nothing-to-do"}}}
 
 
@@ -587,7 +589,7 @@ class TestRow7:
     def test_a_status_that_found_a_finished_run_is_documented_too(self, run):
         run.begin()
         done = _project("committed")
-        done["status"] = {"ok": True, "exit": 0, "result": {"mode": "status", "state": "done"}}
+        done["status"].update(ok=True, exit=0, result={"mode": "status", "state": "done"})
         run.row7(projects=[done, _project("no-commit")])
         assert (run.dir / "row-7.json").exists()
 
@@ -611,6 +613,16 @@ class TestRow7:
         elsewhere["command_skill_dir"] = "/home/someone/checkout/skills/multi-llm"
         with pytest.raises(gate.GateError, match="outside the probe's own root"):
             run.row7(projects=[elsewhere, _project("no-commit")])
+
+    @pytest.mark.parametrize("call", ["init", "status"])
+    @pytest.mark.parametrize("key", ["skill_dir", "script"])
+    @pytest.mark.parametrize("value", [None, "/another/payload"])
+    def test_each_call_must_prove_the_payload_it_ran(self, run, call, key, value):
+        run.begin()
+        broken = _project("no-commit")
+        broken[call][key] = value
+        with pytest.raises(gate.GateError, match=f"no-commit project: {call}:"):
+            run.row7(projects=[_project("committed"), broken])
 
     def test_another_tarball_is_refused(self, run, tmp_path):
         run.begin()
@@ -1404,6 +1416,50 @@ class TestStep:
         assert inspect.signature(gate.run_step).parameters["grace"].default is None
         source = inspect.getsource(gate.run_step)
         assert "step_grace_s()" in source and "10.0" not in source
+
+    @pytest.mark.skipif(os.name != "posix", reason="the release gate uses POSIX process groups")
+    @pytest.mark.parametrize("cooperative", [False, True])
+    def test_a_parent_exiting_on_term_does_not_end_the_group_sweep(self, tmp_path, cooperative):
+        """The launcher exits first; its child still needs either grace or KILL."""
+        marker = tmp_path / "descendant.pid"
+        swept = tmp_path / "swept"
+        descendant = textwrap.dedent(f"""
+            import os, signal, sys, time
+            from pathlib import Path
+            def finish(*_args):
+                time.sleep(0.3)
+                Path({str(swept)!r}).write_text("done")
+                sys.exit(0)
+            signal.signal(signal.SIGTERM, finish if {cooperative!r} else signal.SIG_IGN)
+            Path({str(marker)!r}).write_text(str(os.getpid()))
+            time.sleep(60)
+        """)
+        parent = textwrap.dedent(f"""
+            import subprocess, sys, time
+            subprocess.Popen([sys.executable, "-c", {descendant!r}],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(60)
+        """)
+        try:
+            assert gate.run_step("descendant", [sys.executable, "-c", parent], timeout=2,
+                                 grace=0.8, directory=tmp_path) == 124
+            pid = int(marker.read_text())
+            for _ in range(50):
+                status = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
+                                        capture_output=True, text=True, timeout=5).stdout.strip()
+                if not status or status.startswith("Z"):
+                    break
+                time.sleep(0.02)
+            else:
+                pytest.fail("the TERM-ignoring descendant outlived the step's group sweep")
+            if cooperative:
+                assert swept.read_text() == "done", "the descendant lost its shutdown grace"
+        finally:
+            if marker.exists():
+                try:
+                    os.kill(int(marker.read_text()), 9)
+                except ProcessLookupError:
+                    pass
 
     @pytest.mark.skipif(os.name != "posix", reason="sessions and SIGTERM dispositions are "
                         "POSIX; the gate runs on Linux")

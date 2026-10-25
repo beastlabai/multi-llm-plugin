@@ -1002,9 +1002,10 @@ def assess_call(events: Sequence[Mapping[str, Any]], entries: Sequence[Mapping[s
             outcome = json.loads(returned)
         except ValueError:
             problems.append("the returned result is not the plugin's JSON")
-        if outcome is not None and not isinstance(outcome, dict):
-            outcome = None
-            problems.append("the returned result is not a JSON object")
+        else:
+            if not isinstance(outcome, dict):
+                outcome = None
+                problems.append("the returned result is not a JSON object")
     return {
         "advertised": advertised, "served_call": served, "tool_status": state.get("status"),
         "tool_input": state.get("input"), "output": output, "returned": returned,
@@ -1296,6 +1297,28 @@ def _project_dir(outcome: Optional[Mapping[str, Any]]) -> Optional[str]:
     return None
 
 
+def _dispatcher_script(outcome: Mapping[str, Any]) -> Optional[str]:
+    """The script in the tool's ``uv ... -- python <script>`` invocation."""
+    argv = outcome.get("argv")
+    if isinstance(argv, list) and "--" in argv:
+        index = argv.index("--") + 2
+        if index < len(argv) and isinstance(argv[index], str):
+            return argv[index]
+    return None
+
+
+def invocation_problems(graded: Mapping[str, Any], skill_dir: Path) -> List[str]:
+    """Both the uv project and dispatcher must be the expected payload's own."""
+    problems = []
+    for key, expected, label in (("skill_dir", Path(skill_dir), "the tool ran skill dir"),
+                                 ("script", Path(skill_dir) / "multi_llm.py", "the dispatcher script is")):
+        observed = graded.get(key)
+        if not isinstance(observed, str) or not Path(observed).is_absolute() \
+                or os.path.realpath(observed) != os.path.realpath(expected):
+            problems.append(f"{label} {observed!r}, not the payload's {expected}")
+    return problems
+
+
 def _error_text(outcome: Optional[Mapping[str, Any]]) -> Optional[str]:
     if not outcome:
         return None
@@ -1310,22 +1333,24 @@ def grade_call(call: Mapping[str, Any], *, mode: str, want_exit: int, want_state
                surface: Mapping[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
     """``call`` (:func:`drive_scripted_call`) against ``mode``'s documented result."""
     problems = list(call["problems"])
-    outcome = call.get("outcome") or {}
+    outcome = call.get("outcome")
+    if not isinstance(outcome, dict):
+        problems.append("the tool returned no JSON object result")
+        outcome = {}
     result = outcome.get("result") if isinstance(outcome.get("result"), dict) else None
-    if call.get("outcome") is not None:
-        if outcome.get("ok") is not True:
-            problems.append(f"the tool reported ok={outcome.get('ok')!r}, state {outcome.get('state')!r}, "
-                            f"exit {outcome.get('exit')!r}")
-        if outcome.get("exit") != want_exit:
-            problems.append(f"the dispatcher exited {outcome.get('exit')!r}, not {want_exit}")
-        if result is None:
-            problems.append(f"the result carries no {surface['dispatcher']['result_marker']} payload")
-        else:
-            if result.get("mode") != mode:
-                problems.append(f"the result is mode {result.get('mode')!r}, not {mode}")
-            if result.get("state") != want_state or result.get("exit") != want_exit:
-                problems.append(f"the result is state {result.get('state')!r} exit "
-                                f"{result.get('exit')!r}, not {want_state} exit {want_exit}")
+    if outcome.get("ok") is not True:
+        problems.append(f"the tool reported ok={outcome.get('ok')!r}, state {outcome.get('state')!r}, "
+                        f"exit {outcome.get('exit')!r}")
+    if outcome.get("exit") != want_exit:
+        problems.append(f"the dispatcher exited {outcome.get('exit')!r}, not {want_exit}")
+    if result is None:
+        problems.append(f"the result carries no {surface['dispatcher']['result_marker']} payload")
+    else:
+        if result.get("mode") != mode:
+            problems.append(f"the result is mode {result.get('mode')!r}, not {mode}")
+        if result.get("state") != want_state or result.get("exit") != want_exit:
+            problems.append(f"the result is state {result.get('state')!r} exit "
+                            f"{result.get('exit')!r}, not {want_state} exit {want_exit}")
     evidence = {
         "ok": not problems,
         "exit": outcome.get("exit"),
@@ -1335,11 +1360,12 @@ def grade_call(call: Mapping[str, Any], *, mode: str, want_exit: int, want_state
         "tool_advertised": call["advertised"],
         "returned_to_model": call.get("returned") is not None,
         "returned_identical": call["returned_identical"],
-        "skill_dir": _project_dir(call.get("outcome")),
+        "skill_dir": _project_dir(outcome),
+        "script": _dispatcher_script(outcome),
     }
     if problems:
         evidence["problems"] = problems
-        evidence["error"] = _error_text(call.get("outcome"))
+        evidence["error"] = _error_text(outcome)
     return evidence, problems
 
 
@@ -1368,10 +1394,14 @@ def run_project(kind: str, root: Path, iso: IsolatedEnv, package_dir: Path, bina
         created = sorted(_files(project) - before)
     init, problems = grade_call(init_call, mode="init", want_exit=codes["ok"], want_state=states["ok"],
                                 surface=surface)
+    init_invocation = invocation_problems(init, Path(skill_dir))
+    problems += init_invocation
     init["files_created"] = created
     if PROVIDERS_FILE not in created:
         problems.append(f"init created no {PROVIDERS_FILE} in the project")
-        init["ok"] = False
+    init["ok"] = not problems
+    if problems:
+        init["problems"] = problems
     failures += [f"{kind}: init: {p}" for p in problems]
 
     call_id = f"call_mllm_row7_status_{kind.replace('-', '_')}"
@@ -1381,9 +1411,13 @@ def run_project(kind: str, root: Path, iso: IsolatedEnv, package_dir: Path, bina
                                           call_id=call_id, mode="status", diag=diag, label="status")
     status, problems = grade_call(status_call, mode="status", want_exit=codes["nothing_to_do"],
                                   want_state=states["nothing_to_do"], surface=surface)
+    status_invocation = invocation_problems(status, Path(skill_dir))
+    problems += status_invocation
     if status_call.get("outcome") and NO_RUN_LINE not in str(status_call["outcome"].get("output") or ""):
         problems.append(f"status did not report {NO_RUN_LINE!r} for a plan with no run")
-        status["ok"] = False
+    status["ok"] = not problems
+    if problems:
+        status["problems"] = problems
     failures += [f"{kind}: status: {p}" for p in problems]
 
     if debug.error:
@@ -1404,9 +1438,9 @@ def run_project(kind: str, root: Path, iso: IsolatedEnv, package_dir: Path, bina
     # uv argv (`--project <dir>`), and any path the template does name must be
     # inside the payload as well.
     observed = init["skill_dir"] or status["skill_dir"]
-    inside = bool(observed) and os.path.realpath(observed) == skill_dir and command["skill_paths_inside"]
-    if not inside:
-        failures.append(f"{kind}: the tool ran skill dir {observed!r}, not the payload's {skill_dir}")
+    inside = not init_invocation and not status_invocation and command["skill_paths_inside"]
+    if not command["skill_paths_inside"]:
+        failures.append(f"{kind}: the command names skill paths outside the payload")
     tool_registered = bool(init_call["advertised"] and status_call["advertised"])
 
     entry.update({

@@ -994,8 +994,6 @@ def _grade(call: Mapping[str, Any], mode: str, surface: Mapping[str, Any]) -> Tu
             graded["ok"] = False
     argv = (call.get("outcome") or {}).get("argv")
     graded["uv"] = argv[0] if isinstance(argv, list) and argv else None
-    graded["script"] = argv[argv.index("--") + 2] if isinstance(argv, list) and "--" in argv \
-        and len(argv) > argv.index("--") + 2 else None
     bounded = call.get("bounded")
     if bounded is not None and hasattr(bounded, "argv"):
         graded["run"] = _bounded_view(bounded)
@@ -1303,6 +1301,7 @@ def run_criteria(ctx: Context, steps: Optional[Steps] = None) -> Dict[str, Any]:
         manifest_after = json.loads((Path(after_restart["location"]) / "package.json")
                                     .read_text(encoding="utf-8")).get("version")
     problems += [f"before the restart: status: {p}" for p in base_problems]
+    problems += [f"before the restart: {p}" for p in _ran_from(baseline, skill_dir)]
     problems += [f"after the restart: status: {p}" for p in restart_problems]
     problems += [f"after the restart: {p}" for p in _command_problems(restart_command, ctx.spec)]
     problems += [f"after the restart: {p}" for p in _ran_from(restarted, skill_dir)]
@@ -1373,14 +1372,7 @@ def _command_problems(command: Mapping[str, Any], spec: str) -> List[str]:
 
 def _ran_from(graded: Mapping[str, Any], skill_dir: Path) -> List[str]:
     """The call ran the installed payload: uv's ``--project`` and the script."""
-    problems = []
-    observed = graded.get("skill_dir")
-    if not observed or os.path.realpath(observed) != os.path.realpath(str(skill_dir)):
-        problems.append(f"the tool ran skill dir {observed!r}, not the installed {skill_dir}")
-    script = graded.get("script")
-    if script and not _is_under(Path(script), skill_dir):
-        problems.append(f"the dispatcher script {script} is not inside the installed payload")
-    return problems
+    return _probe().invocation_problems(graded, skill_dir)
 
 
 def run_upgrade(ctx: Context, steps: Steps, run: _Run) -> Dict[str, Any]:
@@ -2096,6 +2088,13 @@ def check(args: argparse.Namespace, steps: Optional[Steps] = None,
         scratch = Path(tempfile.mkdtemp(prefix="mllm-regcheck-", dir=parent)).resolve()
         if _is_under(scratch, repo):
             raise CheckError(f"the probe's root {scratch} lies inside the checkout {repo}")
+        # A rerun replaces both the record and its diagnostics. If it refuses
+        # before building a new record, an earlier green one must not survive
+        # beside this attempt's failed supporting output.
+        try:
+            out.unlink(missing_ok=True)
+        except OSError as exc:
+            raise CheckError(f"could not invalidate the previous record {out}: {exc}") from exc
         support = _support_dir(out)
         _rmtree(support)
         support.mkdir(parents=True, exist_ok=True)
