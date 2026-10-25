@@ -136,7 +136,7 @@ export MLLM_E2E_MATRIX_TIMEOUT_S
         e2e-clean e2e-prune \
         opencode-stage opencode-package opencode-package-check-ci \
         opencode-package-check opencode-publish opencode-bump opencode-latest-check \
-        opencode-print-registry \
+        opencode-print-registry opencode-check-bump \
         codex-regen codex-package codex-package-check-ci codex-package-check \
         codex-gate-reset codex-gate-pinned codex-gate-minimum codex-gate-ceiling \
         codex-gate-derived codex-publish
@@ -169,6 +169,7 @@ help:
 	@echo "  make opencode-bump VERSION=x.y.z  move every opencode pin to one release; re-capture its fixtures (\$$0)"
 	@echo "                                    (a release older than the pin also needs ALLOW_DOWNGRADE=1)"
 	@echo "  make opencode-latest-check        exit 1 when npm has a newer opencode than the pin"
+	@echo "  make opencode-check-bump          the shared-version check: HEAD against every codex-v*/opencode-v* tag and npm's versions"
 	@echo
 	@echo "Codex plugin, checked in at $(CODEX_PKG)/multi-llm (see $(CODEX_PKG)/README.md)"
 	@echo
@@ -798,6 +799,22 @@ opencode-latest-check:
 # The single registry, for the workflow and anything else outside this file.
 opencode-print-registry:
 	@echo $(OPENCODE_REGISTRY)
+
+# THE SHARED-VERSION BUMP CHECK, OpenCode's entry point (plans/
+# opencode-plugin-publish.md, step 2; Codex's `--check-bump` runs the same one).
+# The version is pyproject.toml's, shared by all three distributions, so HEAD's
+# version must either be released already WITH THIS SAME shared payload, or be
+# newer than every codex-v* and opencode-v* tag and every version npm lists for
+# the package. Reads git and the registry; writes nothing. A shallow or tagless
+# clone is refused, never read as "no releases" — run it from a full clone with
+# every tag.
+#
+# Deliberately in NO `tests` workflow leg and not in `opencode-package-check-ci`:
+# after V is released, `master` may change shipped bytes while still saying V.
+# This check refuses a RELEASE from that state, and must not turn `master` red
+# over the legal edit. The full gate and the publish preflights call it.
+opencode-check-bump:
+	uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/build.py --check-bump --registry $(OPENCODE_REGISTRY)
 
 
 # --------------------------------------------------------------------------- #
