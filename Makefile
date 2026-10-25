@@ -865,7 +865,9 @@ opencode-registry-absent:
 # the gated tarball, the annotated `opencode-v<version>` tag names HEAD, HEAD is
 # on origin/master, every required check run on that SHA succeeded (`test (<os>)`
 # per test.yml matrix leg, plus `package`), the shared-version bump check and
-# row 9 pass, and the gated tarball still recomputes to the stamp. Then it
+# row 9 pass, it IS the first release (npm lists no version of the package at
+# all, and HEAD's capabilities name no `public_version`), and the gated tarball
+# still recomputes to the stamp. Then it
 # uploads THAT FILE with `--ignore-scripts`, never the directory, and reads
 # `dist.integrity` back from a fresh cache until it equals the gated one.
 # `DRY_RUN=1` runs every preflight and prints the upload without running it.

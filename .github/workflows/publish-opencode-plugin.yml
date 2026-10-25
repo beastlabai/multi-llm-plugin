@@ -1150,6 +1150,12 @@ jobs:
           echo "dir=${upload}" >> "${GITHUB_OUTPUT}"
           echo "packed ${tarball}, extracted digest ${digest}"
 
+      # `--prefix` names the upload directory as npm's project root, as every
+      # other release-deciding npm call here and on the laptop path does. A cwd
+      # alone does not: npm walks up from it to the first `package.json` or
+      # `node_modules` and reads the `.npmrc` there as project config, above
+      # the user and global files (measured on npm 10.9.3 and 11.5.1). The
+      # directory holds the tarball alone, which the pack step checked.
       - name: Publish the packed tarball, with provenance
         timeout-minutes: 10
         env:
@@ -1160,4 +1166,4 @@ jobs:
         run: |
           set -euo pipefail
           cd "${UPLOAD}"
-          npm publish "./${NAME}-${VERSION}.tgz" --provenance --ignore-scripts --access public --registry "${REGISTRY}"
+          npm publish "./${NAME}-${VERSION}.tgz" --provenance --ignore-scripts --access public --registry "${REGISTRY}" --prefix "${UPLOAD}"
