@@ -1590,6 +1590,24 @@ def validate_records(*, tag: str, sha: str, version: str, digest: str,
 # One bounded gate step, with its log kept
 # ---------------------------------------------------------------------------
 
+#: Added to the probes' worst-case exit sweep to make a step's grace: the
+#: interpreter's own unwind and ``uv run`` relaying the signal, which the
+#: sweep bound does not count.
+STEP_GRACE_MARGIN_S = 10.0
+
+
+def step_grace_s() -> float:
+    """How long a step's process group gets between SIGTERM and SIGKILL.
+
+    Derived, not typed: the row-7 probe (``probe.py``) sweeps what it started
+    on an exit signal, one child after another, each given ``KILL_GRACE_S``
+    (``probe.SWEEP_BOUND_S`` in all), and a SIGKILL landing mid-sweep kills the
+    sweeper while a child that ignored SIGTERM, in a session of its own, lives
+    on. So the grace is that bound plus :data:`STEP_GRACE_MARGIN_S`; when the
+    probe's sweep grows, this grows with it."""
+    return float(_sibling("probe", "opencode_probe").SWEEP_BOUND_S) + STEP_GRACE_MARGIN_S
+
+
 def _kill(child: "subprocess.Popen[bytes]", grace: float) -> None:
     """The child's whole process group, TERM then KILL. It leads its own
     session (``start_new_session``), so every descendant that did not leave it
@@ -1618,7 +1636,7 @@ def _kill(child: "subprocess.Popen[bytes]", grace: float) -> None:
 
 def run_step(name: str, argv: Sequence[str], *, timeout: float,
              capture: Optional[Path] = None, directory: Path = EVIDENCE_DIR,
-             grace: float = 10.0) -> int:
+             grace: Optional[float] = None) -> int:
     """Run one gate step under a wall-clock bound, its output tee'd to
     ``.gate/logs/<name>.log``.
 
@@ -1631,7 +1649,13 @@ def run_step(name: str, argv: Sequence[str], *, timeout: float,
     stopped by). ``capture`` keeps the last non-empty stdout line — the
     host-install path, the image id — for the recipe's next line, since each
     recipe line is its own shell.
+
+    **A grace the probes' sweep fits in.** On the bound the group gets SIGTERM,
+    then :func:`step_grace_s` (unless ``grace`` is given) before SIGKILL, so a
+    probe interrupted mid-row finishes sweeping the children it started in
+    sessions of their own instead of dying half-way through.
     """
+    grace = step_grace_s() if grace is None else grace
     logs = Path(directory) / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     log_path = logs / f"{name}.log"

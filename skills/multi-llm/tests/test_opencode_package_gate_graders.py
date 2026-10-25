@@ -56,6 +56,11 @@ QUESTION = "What does this plan change?"
 #: wrapper / uv / python and their group, and its three polls.
 HOST, WRAPPER, UV_PID, WORKER, GROUP = 39, 109, 110, 113, 108
 POLL_PIDS = (126, 155, 165)
+#: The detach launch's own chain under the host, for the handshake race: the
+#: plugin's uv wrapper, the real uv, the launcher's python, and the double
+#: spawn's intermediate, a fork of the launcher whose `setsid` made it the
+#: worker group's leader (so its pid IS the group's).
+L_WRAPPER, L_UV, LAUNCHER, INTERMEDIATE = 101, 102, 104, GROUP
 #: The cancellation bundle's: `opencode serve`, the attached client, the
 #: worker's three and its group, the held provider, and the tool's abort.
 SERVE, CLIENT, C_WRAPPER, C_UV, C_WORKER, C_GROUP = 39, 51, 118, 119, 122, 117
@@ -269,6 +274,35 @@ def detached_spec(scenario: str) -> dict:
     spec["artifacts"] = {
         f"{Path(PLAN_DIR).name}/ask/what-does-this-plan-change-8a3c7cf7/{name}":
         "# answer\nThe plan adds session auth.\n" for name in (ANSWER, "answers.md")}
+    return spec
+
+
+def _launcher_args() -> str:
+    return (f"/opt/mllm/skill/.venv/bin/python {PAYLOAD_SKILL_DIR}/multi_llm.py ask {PLAN} "
+            f"--host opencode --yes --exec-subagents --detach --quick")
+
+
+def handshake_race(spec: dict) -> dict:
+    """The detach bundle with one 0.1 s sample landing inside the detach
+    handshake: the worker's wrapper first seen under the intermediate (a fork of
+    the launcher, gone by the next sample), its chain then still running through
+    the launcher and the plugin's uv into opencode; reparented to init after.
+    The wrapper's child is caught in that sample too. Only the samples after
+    the handshake count, so this grades green."""
+    launcher = _launcher_args()
+    spec["processes"]["processes"] += [
+        proc(L_WRAPPER, HOST, L_WRAPPER, f"python3 {UV} run --frozen -- python {launcher}",
+             first_seen=1.4, last_seen=1.9),
+        proc(L_UV, L_WRAPPER, L_WRAPPER, f"/opt/mllm/real/uv run -- python {launcher}",
+             first_seen=1.4, last_seen=1.9),
+        proc(LAUNCHER, L_UV, L_WRAPPER, launcher, first_seen=1.5, last_seen=1.9),
+        proc(INTERMEDIATE, LAUNCHER, GROUP, launcher, first_seen=1.607, last_seen=1.607),
+    ]
+    before = [INTERMEDIATE, LAUNCHER, L_UV, L_WRAPPER, HOST, 1]
+    process(spec, WRAPPER).update(first_ppid=INTERMEDIATE, first_chain=before,
+                                  ancestors_seen=sorted(set(before)))
+    process(spec, UV_PID).update(first_chain=[WRAPPER, *before],
+                                 ancestors_seen=sorted({WRAPPER, *before}))
     return spec
 
 
@@ -619,6 +653,25 @@ def detach_mutations() -> dict[str, list[Mutation]]:
             Mutation("the samples never measured the worker's chain",
                      lambda s: [process(s, pid).pop("ancestors_seen")
                                 for pid in (WRAPPER, UV_PID, WORKER)]),
+            # The handshake race is excused only for the double spawn's own
+            # intermediate, briefly, with the worker then outside opencode.
+            Mutation("the first parent outlived the handshake: the worker sat in "
+                     "opencode's tree for seconds",
+                     lambda s: process(handshake_race(s), INTERMEDIATE).update(
+                         last_seen=4.1, last_alive=4.1)),
+            Mutation("the first parent was the launcher itself, not a fork of it",
+                     lambda s: process(handshake_race(s), WRAPPER).update(
+                         first_ppid=LAUNCHER,
+                         first_chain=[LAUNCHER, L_UV, L_WRAPPER, HOST, 1],
+                         ancestors_seen=sorted({LAUNCHER, L_UV, L_WRAPPER, HOST, 1}))),
+            Mutation("after the handshake the worker's parent is opencode itself",
+                     lambda s: process(handshake_race(s), WRAPPER).update(ppid=HOST)),
+            Mutation("a worker's child ends up reparented to opencode",
+                     lambda s: process(handshake_race(s), UV_PID).update(ppid=HOST)),
+            Mutation("a worker process first seen under the launcher's uv, not the worker",
+                     lambda s: process(handshake_race(s), UV_PID).update(
+                         first_ppid=L_UV, first_chain=[L_UV, L_WRAPPER, HOST, 1],
+                         ancestors_seen=sorted({L_UV, L_WRAPPER, HOST, 1, WRAPPER}))),
         ],
     }
 
@@ -848,6 +901,32 @@ def test_mutation_fails_its_check(scenario, check, index, tmp_path):
     assert failed - {check} <= mutation.collateral, (
         f"{mutation.name!r} also failed {sorted(failed - {check} - mutation.collateral)},"
         " which it does not declare")
+
+
+def test_a_sample_inside_the_detach_handshake_is_not_opencodes_tree(tmp_path):
+    """The false failure the round-2 review found: a 0.1 s sample landing in
+    the intermediate's few-millisecond lifetime saw opencode on the worker's
+    chain. Only samples from the worker's first sighting under its final parent
+    count, so the row passes, and its observed ancestry says what was excused."""
+    spec = handshake_race(good_spec("detach"))
+    out = write_bundle(spec, tmp_path / row_id("detach"))
+    checks, observed, _ = grade_bundle(out, "detach")
+    assert checks["worker_outside_opencode_tree_in_every_sample"] is True
+    assert all(checks.values()), sorted(name for name, ok in checks.items() if not ok)
+    entries = {e["pid"]: e for e in observed["worker_ancestry"]}
+    assert entries[WRAPPER]["handshake_excused"]["intermediate"] == INTERMEDIATE
+    assert entries[WRAPPER]["handshake_excused"]["launcher"] == LAUNCHER
+    assert {e["root"] for e in entries.values()} == {WRAPPER}
+    assert all(e["final_chain"][-1] == 1 and not e["opencode_in_final_chain"]
+               for e in entries.values())
+
+
+def test_without_the_race_no_sample_is_excused(tmp_path):
+    """The ordinary bundle (every worker first seen under its final parent)
+    grades exactly as before: nothing excused, every sample counted."""
+    out = write_bundle(good_spec("detach"), tmp_path / row_id("detach"))
+    _checks, observed, _ = grade_bundle(out, "detach")
+    assert all(e["handshake_excused"] is None for e in observed["worker_ancestry"])
 
 
 def test_registry_entry_gone_by_the_end_is_not_stray(tmp_path):

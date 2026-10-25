@@ -399,6 +399,48 @@ class TestRegistry:
         with pytest.raises(release_history.ReleaseHistoryError, match="did not answer"):
             release_history._run_npm(release_history.npm_view_argv(PACKAGE, REGISTRY), 0.5)  # noqa: SLF001
 
+    @pytest.mark.skipif(os.name == "nt", reason="the stand-in npm is a POSIX script")
+    def test_the_real_runner_uses_none_of_the_callers_npm_configuration(
+        self, tmp_path, monkeypatch,
+    ):
+        """No user, global, environment or PROJECT layer of the caller's: empty
+        files on the command line, no ``npm_config_*``, and npm's cwd an empty
+        scratch directory that ``--prefix`` pins as its project root, so a
+        ``.npmrc`` beside the caller's ``package.json`` is never read."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        log = tmp_path / "npm.json"
+        npm = bin_dir / "npm"
+        npm.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, sys\n"
+            "configs = {a.split('=', 1)[0]: open(a.split('=', 1)[1]).read()\n"
+            "           for a in sys.argv[1:] if a.startswith(('--userconfig=', '--globalconfig='))}\n"
+            f"json.dump({{'argv': sys.argv[1:], 'cwd': os.getcwd(), 'entries': os.listdir('.'),\n"
+            "           'configs': configs,\n"
+            "           'env': [k for k in os.environ if k.lower().startswith('npm_config_')]},\n"
+            f"          open({str(log)!r}, 'w'))\n"
+            "print(json.dumps(['0.1.1']))\n", encoding="utf-8")
+        npm.chmod(0o755)
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "package.json").write_text("{}", encoding="utf-8")
+        (project / ".npmrc").write_text("https-proxy=http://127.0.0.1:9/\n", encoding="utf-8")
+        monkeypatch.chdir(project)
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+        monkeypatch.setenv("npm_config_https_proxy", "http://127.0.0.1:9/")
+        monkeypatch.setenv("NPM_CONFIG_USERCONFIG", str(project / ".npmrc"))
+        assert release_history.npm_versions(PACKAGE, REGISTRY).versions == ("0.1.1",)
+        seen = json.loads(log.read_text(encoding="utf-8"))
+        argv = seen["argv"]
+        assert argv[:3] == ["view", PACKAGE, "versions"]
+        assert f"--prefix={seen['cwd']}" in argv
+        assert os.path.realpath(seen["cwd"]) != os.path.realpath(project)
+        assert not {"package.json", "node_modules", ".npmrc"} & set(seen["entries"])
+        assert seen["configs"] == {"--userconfig": "", "--globalconfig": ""}
+        assert seen["env"] == []
+        assert not Path(seen["cwd"]).exists(), "the scratch directory was not removed"
+
     def test_npm_missing_is_an_unknown(self, monkeypatch):
         monkeypatch.setattr(release_history.shutil, "which", lambda name: None)
         with pytest.raises(release_history.ReleaseHistoryError, match="not on PATH"):

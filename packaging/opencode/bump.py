@@ -42,24 +42,29 @@ none of its own, so a bump moves what the gate tests with everything else. It
 refuses unless every pin agrees, writes a scratch manifest and lockfile holding
 only ``opencode-ai`` and its platform packages, copied from the container
 lockfile's entries with their ``resolved`` and ``integrity`` values, and runs
-``npm ci`` there against the single registry (``Makefile`` ``OPENCODE_REGISTRY``),
-so npm refuses any tarball whose hash differs from the committed one. Never a
-global install. Then what ``npm ci`` left is checked before anything runs it
+``npm ci --ignore-scripts`` there against the single registry (``Makefile``
+``OPENCODE_REGISTRY``), so npm refuses any tarball whose hash differs from the
+committed one. Never a global install, and no install script: ``opencode-ai``'s
+``postinstall`` links a platform binary into the wrapper and runs it
+(``--version``), and when that fails it fetches a platform package of its own
+with no committed integrity and runs THAT, all before anything here could look
+at it. So nothing runs until what ``npm ci`` left is checked
 (:func:`verify_installed`): every package npm's own record of the install
 (``node_modules/.package-lock.json``) lists came from the single registry with
-the committed integrity, nothing else sits in ``node_modules``, and the binary
-is byte for byte one of those verified platform packages' — ``opencode-ai``'s
-install script falls back to a fresh ``npm install`` of a platform package,
-with no committed integrity, when the linked one is missing or fails its own
-``--version``, and this is what catches that. The installed binary's
-``--version``, read in an isolated home with autoupdate disabled exactly as
-:func:`find_binary` reads it, must equal the pin, or nothing is printed but the
-refusal. The binary's absolute path is the last stdout line, and the only one:
-npm's own output goes to stderr.
+the committed integrity, and nothing else sits in ``node_modules``. The binary
+is then a verified platform package's own ``bin/opencode``, chosen in the
+order the ``postinstall`` would have tried them (:func:`platform_candidates`);
+the wrapper's ``bin/opencode.exe``, and the ``.bin/opencode`` link to it, stay
+``opencode-ai``'s placeholder script ("postinstall was not run") and are never
+used. That binary's ``--version``, read in an isolated home with autoupdate
+disabled exactly as :func:`find_binary` reads it, must equal the pin, or nothing
+is printed but the refusal. Its absolute path is the last stdout line, and the
+only one: npm's own output goes to stderr.
 
 ``verify-install --prefix <dir>`` is that check alone, against the subset
-lockfile the prefix holds: the registry-install probe's container installs the
-pin with ``npm ci`` itself and runs it there.
+lockfile the prefix holds, and prints the chosen binary's path last: the
+registry-install probe's container installs the pin with ``npm ci
+--ignore-scripts`` itself and runs it there.
 
 ``tests/test_opencode_version_pins.py`` reads :func:`read_pins` and fails the
 build when any two pins disagree.
@@ -77,7 +82,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from platform import machine as _machine
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 REPO = Path(__file__).resolve().parents[2]
 SKILL = Path("skills") / "multi-llm"
@@ -137,6 +143,9 @@ LOCKFILE = CONTAINER / "package-lock.json"
 #: and a blackholed registry never answers; ``--fetch-retries=0`` ends the first
 #: at once, ``--fetch-timeout`` bounds a slow response, and the overall budget
 #: is the backstop for a connect that hangs (npm's timeout does not cover it).
+#: :func:`cmd_check` runs it from an empty scratch directory named as
+#: ``--prefix`` as well, so no project ``.npmrc`` steers it (the release path's
+#: rule, ``registry_absent.mjs``; this one only advises).
 NPM_VIEW_ARGV = ("npm", "view", NPM_PACKAGE, "version",
                  "--fetch-retries=0", "--fetch-timeout=10000")
 NPM_VIEW_BUDGET_S = 20
@@ -327,10 +336,11 @@ def cmd_set(version: str, binary: Optional[str], root: Path = REPO,
 def cmd_check(root: Path = REPO) -> int:
     pin = read_pins(root)["adapter verified_version"]
     try:
-        done = subprocess.run(
-            list(NPM_VIEW_ARGV), capture_output=True, text=True,
-            stdin=subprocess.DEVNULL, timeout=NPM_VIEW_BUDGET_S,
-        )
+        with tempfile.TemporaryDirectory(prefix="opencode-latest-check-") as scratch:
+            done = subprocess.run(
+                [*NPM_VIEW_ARGV, f"--prefix={scratch}"], capture_output=True, text=True,
+                stdin=subprocess.DEVNULL, timeout=NPM_VIEW_BUDGET_S, cwd=scratch,
+            )
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"opencode-latest-check: could not ask npm: {exc}", file=sys.stderr)
         return 2
@@ -360,9 +370,10 @@ INSTALL_MARKER = ".mllm-opencode-pin"
 #: any value npm accepts. Not an opencode release (those live in PINS alone).
 INSTALL_MANIFEST_VERSION = "0.0.0"
 
-#: ``npm ci``'s budget. Two tarballs (the wrapper and one ~50 MB platform
-#: binary) plus the wrapper's install script; a hung registry connection is the
-#: case this bounds, which npm's own fetch timeout does not cover.
+#: ``npm ci``'s budget. The wrapper and every platform tarball npm keeps for
+#: this machine (four on linux-x64, measured, each a whole ~200 MB binary
+#: unpacked); a hung registry connection is the case this bounds, which npm's
+#: own fetch timeout does not.
 NPM_CI_BUDGET_S = 900
 
 
@@ -447,12 +458,6 @@ def install_subset(lock: Dict, version: str, registry: Optional[str] = None) -> 
     return manifest, scratch_lock
 
 
-def installed_binary(prefix: Path) -> Path:
-    """Where ``npm ci`` under ``prefix`` links the ``opencode`` command."""
-    name = "opencode.cmd" if os.name == "nt" else "opencode"
-    return (prefix / "node_modules" / ".bin" / name).absolute()
-
-
 #: npm's own record of what ``npm ci`` installed, under the prefix.
 HIDDEN_LOCKFILE = Path("node_modules") / ".package-lock.json"
 
@@ -470,29 +475,92 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _wrapper_target(prefix: Path) -> Path:
-    """The file ``opencode-ai``'s manifest names as its ``opencode`` command."""
-    manifest_path = prefix / "node_modules" / NPM_PACKAGE / "package.json"
+#: ``postinstall.mjs``'s ``platformMap`` and ``archMap``, keyed by what Python
+#: reports (``sys.platform``, ``platform.machine()``) rather than Node.
+_SYSTEMS = {"linux": "linux", "darwin": "darwin", "win32": "windows"}
+_ARCHES = {"x86_64": "x64", "amd64": "x64", "x64": "x64",
+           "aarch64": "arm64", "arm64": "arm64", "armv7l": "arm", "arm": "arm"}
+
+
+def _supports_avx2(system: str, arch: str) -> bool:
+    """``postinstall.mjs``'s ``supportsAvx2()``: ``/proc/cpuinfo`` on Linux,
+    ``sysctl -n hw.optional.avx2_0`` on macOS. On Windows it asks PowerShell;
+    here the answer is no, which puts the ``-baseline`` build first, the one
+    every x64 CPU runs (the release path is Linux)."""
+    if arch != "x64":
+        return False
+    if system == "linux":
+        try:
+            cpuinfo = Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        return re.search(r"(^|\s)avx2(\s|$)", cpuinfo, re.I) is not None
+    if system == "darwin":
+        try:
+            done = subprocess.run(["sysctl", "-n", "hw.optional.avx2_0"], capture_output=True,
+                                  text=True, stdin=subprocess.DEVNULL, timeout=1.5)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return done.returncode == 0 and done.stdout.strip() == "1"
+    return False
+
+
+def _is_musl(system: str) -> bool:
+    """``postinstall.mjs``'s ``isMusl()``: ``/etc/alpine-release``, else
+    ``ldd --version`` naming musl on either stream (musl's ``ldd`` prints its
+    banner on stderr)."""
+    if system != "linux":
+        return False
+    if Path("/etc/alpine-release").exists():
+        return True
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        bin_field = manifest["bin"]
-        rel = bin_field if isinstance(bin_field, str) else bin_field["opencode"]
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise BumpError(f"{manifest_path} names no opencode command ({exc})") from exc
-    return manifest_path.parent / rel
+        done = subprocess.run(["ldd", "--version"], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "musl" in f"{done.stdout or ''}{done.stderr or ''}".lower()
 
 
-def verify_installed(prefix: Path, binary: Path, subset_lock: Dict, registry: str) -> Dict[str, str]:
-    """What ``npm ci`` left under ``prefix`` is the committed subset, and
-    ``binary`` is one of its verified platform packages' own file.
+def platform_candidates(system: Optional[str] = None, arch: Optional[str] = None, *,
+                        avx2: Optional[bool] = None, musl: Optional[bool] = None) -> List[str]:
+    """The platform packages ``opencode-ai``'s ``postinstall.mjs`` tries, in its
+    order (``packageNames()``, read from the pinned release): ``opencode-<os>-<arch>``,
+    the ``-baseline`` build first on an x64 CPU without AVX2, the ``-musl``
+    builds first under musl. The install script never runs here (``npm ci
+    --ignore-scripts``), so this makes its choice without executing anything it
+    would have fetched. Each argument defaults to this machine; the suite
+    passes them.
+    """
+    raw_system = sys.platform if system is None else system
+    system = _SYSTEMS.get(raw_system, raw_system)
+    raw_arch = (_machine() if arch is None else arch).lower()
+    arch = _ARCHES.get(raw_arch, raw_arch)
+    base = f"opencode-{system}-{arch}"
+    baseline = arch == "x64" and not (_supports_avx2(system, arch) if avx2 is None else avx2)
+    if system == "linux":
+        if _is_musl(system) if musl is None else musl:
+            if arch == "x64":
+                return ([f"{base}-baseline-musl", f"{base}-musl", f"{base}-baseline", base]
+                        if baseline else
+                        [f"{base}-musl", f"{base}-baseline-musl", base, f"{base}-baseline"])
+            return [f"{base}-musl", base]
+        if arch == "x64":
+            return ([f"{base}-baseline", base, f"{base}-baseline-musl", f"{base}-musl"]
+                    if baseline else
+                    [base, f"{base}-baseline", f"{base}-musl", f"{base}-baseline-musl"])
+        return [base, f"{base}-musl"]
+    if arch == "x64":
+        return [f"{base}-baseline", base] if baseline else [base, f"{base}-baseline"]
+    return [base]
+
+
+def verify_installed(prefix: Path, subset_lock: Dict, registry: str,
+                     candidates: Optional[List[str]] = None) -> Dict[str, Any]:
+    """What ``npm ci --ignore-scripts`` left under ``prefix`` is the committed
+    subset; returns the binary to run, a verified platform package's own file.
 
     ``npm ci`` verifies each tarball it downloads against the lockfile's
-    ``integrity``, and that is all it vouches for. ``opencode-ai``'s install
-    script then links a platform package's binary to ``bin/opencode.exe``, and
-    when that binary is missing or fails its own ``--version`` it runs ``npm
-    install --no-save`` of the platform package into a temporary prefix and
-    copies the binary out of THAT: a fetch with no committed integrity, from
-    whatever registry npm's configuration names there. So, refusing by file:
+    ``integrity``, and that is all it vouches for. So, refusing by file:
 
     * npm's record of the install, ``node_modules/.package-lock.json``, lists
       only packages of the subset, each ``resolved`` under ``registry`` and
@@ -500,13 +568,22 @@ def verify_installed(prefix: Path, binary: Path, subset_lock: Dict, registry: st
       workflow's pinned npm 11 lists the platform packages it skipped too,
       measured: each entry is held to the same);
     * every package directory in ``node_modules`` is one that record lists;
-    * ``binary`` (its symlinks resolved; on Windows, the wrapper's ``bin``
-      target behind the ``.cmd`` shim) is the same file as, or byte-identical
-      to, ``bin/opencode`` in one of those verified platform packages.
+    * the binary is ``bin/opencode`` (``opencode.exe`` on Windows) of the first
+      package in ``candidates`` (:func:`platform_candidates` by default: the
+      install script's own order) that the record verified and that holds one,
+      a regular file whose symlinks, if any, stay inside that package.
 
-    Returns which package that is, how it matched, and the binary's sha256.
+    Nothing of the wrapper's is used. With its install script off, its
+    ``bin/opencode.exe``, and the ``.bin/opencode`` link npm makes to it, is
+    the placeholder script it ships ("postinstall was not run"); what the script
+    would have linked there, or fetched with no committed integrity when the
+    link failed its ``--version``, is exactly what this choice replaces, and
+    nothing has run yet when it is made.
+
+    Returns the binary's absolute path, its package, the order it was chosen
+    from, and its sha256.
     """
-    prefix = Path(prefix)
+    prefix = Path(prefix).absolute()
     hidden_path = prefix / HIDDEN_LOCKFILE
     try:
         hidden = json.loads(hidden_path.read_text(encoding="utf-8")).get("packages") or {}
@@ -548,33 +625,28 @@ def verify_installed(prefix: Path, binary: Path, subset_lock: Dict, registry: st
         raise BumpError(f"{modules} holds {', '.join(stray)}, which {hidden_path} does not list: "
                         "npm ci did not put it there")
 
-    target = _wrapper_target(prefix) if os.name == "nt" else Path(os.path.realpath(binary))
-    if not target.is_file():
-        raise BumpError(f"{binary} resolves to {target}, which is not a file")
+    order = list(platform_candidates() if candidates is None else candidates)
     wrapper_key = f"node_modules/{NPM_PACKAGE}"
-    candidates = [(key, prefix / key / "bin" / _platform_binary_name())
-                  for key in verified if key != wrapper_key]
-    target_size = target.stat().st_size
-    target_sha = None
-    for key, candidate in candidates:
-        if not candidate.is_file():
+    platforms = [key for key in verified if key != wrapper_key]
+    for name in order:
+        key = f"node_modules/{name}"
+        if key not in platforms:
             continue
-        if os.path.samefile(target, candidate):
-            how = "same file (hard link or symlink)"
-        else:
-            if candidate.stat().st_size != target_size:
-                continue
-            target_sha = target_sha or _sha256_file(target)
-            if _sha256_file(candidate) != target_sha:
-                continue
-            how = "byte-identical copy"
-        return {"binary": str(target), "platform_package": key, "how": how,
-                "sha256": target_sha or _sha256_file(target)}
+        package_dir = prefix / key
+        binary = package_dir / "bin" / _platform_binary_name()
+        if not binary.is_file():
+            continue
+        real = os.path.realpath(binary)
+        if os.path.commonpath([real, os.path.realpath(package_dir)]) != os.path.realpath(package_dir):
+            raise BumpError(f"{binary} resolves to {real}, outside {key}: refusing to run it")
+        return {"binary": str(binary), "platform_package": key, "chosen_from": order,
+                "sha256": _sha256_file(Path(real))}
     raise BumpError(
-        f"{target} is not the binary of any platform package npm ci installed and verified "
-        f"({', '.join(key.split('/', 1)[1] for key in verified if key != wrapper_key) or 'none'}): "
-        f"{NPM_PACKAGE}'s install script fell back to a download with no committed integrity, "
-        "or something replaced the binary. Refusing to run it."
+        f"no platform package {NPM_PACKAGE}'s install script would try on this machine "
+        f"({', '.join(order) or 'none'}) is installed, verified and holds "
+        f"bin/{_platform_binary_name()} under {modules} (verified: "
+        f"{', '.join(key.split('/', 1)[1] for key in platforms) or 'none'}). Refusing to "
+        "run anything."
     )
 
 
@@ -593,23 +665,37 @@ def _single_registry(url: Optional[str]) -> str:
 
 
 def _npm_ci(prefix: Path, registry: str) -> None:
-    """``npm ci`` in ``prefix`` with nothing of the caller's npm configuration.
+    """``npm ci --ignore-scripts`` in ``prefix``, with nothing of the caller's
+    npm configuration.
 
     The registry is a command-line flag, which outranks every other layer, and
     the user config is an empty file: a maintainer's ``.npmrc`` could otherwise
-    carry ``ignore-scripts`` (no platform binary gets linked), a scoped registry
-    or a proxy setting this gate never chose. Inherited ``npm_config_*``
-    variables are dropped for the same reason, since npm's environment layer
-    outranks the user file. The install script runs: linking the platform binary
-    is what it does, and it is part of what the gate tests.
+    carry a scoped registry or a proxy setting this gate never chose. Inherited
+    ``npm_config_*`` variables are dropped for the same reason, since npm's
+    environment layer outranks the user file.
+
+    The project layer is the prefix's own, and empty. ``npm ci`` runs in the
+    prefix, which holds the scratch ``package.json``, so npm's walk up from its
+    cwd stops there at once and the project file is ``<prefix>/.npmrc``, which
+    nothing writes. ``--prefix`` names it on the command line too, because the
+    walk does not always stop at the first ``package.json``: an ancestor whose
+    ``package.json`` lists the prefix among its ``workspaces`` moves the
+    project root up to itself, its ``.npmrc`` with it (measured on this
+    machine's npm 10 and the publish job's pinned npm 11), while a command-line
+    prefix is the root outright.
+
+    ``--ignore-scripts``: ``opencode-ai``'s ``postinstall`` runs the binary it
+    links, and when that fails fetches an unverified one and runs that, before
+    :func:`verify_installed` could refuse anything. The binary is chosen
+    afterwards, from the verified platform packages, instead.
     """
     empty_rc = prefix / ".npmrc-empty"
     empty_rc.write_text("", encoding="utf-8")
     env = {key: value for key, value in os.environ.items()
            if not key.lower().startswith("npm_config_")}
     subprocess.run(
-        ["npm", "ci", "--no-audit", "--no-fund", f"--registry={registry}",
-         f"--userconfig={empty_rc}"],
+        ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund", f"--registry={registry}",
+         f"--userconfig={empty_rc}", f"--prefix={prefix}"],
         cwd=str(prefix), env=env, check=True, stdin=subprocess.DEVNULL,
         stdout=sys.stderr, timeout=NPM_CI_BUDGET_S,
     )
@@ -637,31 +723,32 @@ def cmd_install(prefix: Path, registry: Optional[str] = None, root: Path = REPO,
     (prefix / "package.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     (prefix / "package-lock.json").write_text(json.dumps(scratch_lock, indent=2) + "\n",
                                               encoding="utf-8")
-    print(f"opencode-install: npm ci {NPM_PACKAGE}@{version} under {prefix} "
+    print(f"opencode-install: npm ci --ignore-scripts {NPM_PACKAGE}@{version} under {prefix} "
           f"from {url} (not global)", file=sys.stderr)
     npm_ci(prefix, url)
 
-    binary = installed_binary(prefix)
-    if not binary.exists():
-        raise BumpError(f"npm ci finished but {binary} does not exist")
-    # Before anything runs it: the binary is a verified platform package's own.
-    matched = verify_installed(prefix, binary, scratch_lock, url)
-    print(f"opencode-install: {binary} is {matched['platform_package']}'s binary "
-          f"({matched['how']}, sha256 {matched['sha256']})", file=sys.stderr)
-    answered = version_reader(str(binary))
+    # Before anything runs: the subset as committed, and the binary a verified
+    # platform package's own.
+    matched = verify_installed(prefix, scratch_lock, url)
+    binary = matched["binary"]
+    print(f"opencode-install: {binary} is {matched['platform_package']}'s binary, first of "
+          f"{', '.join(matched['chosen_from'])} installed (sha256 {matched['sha256']})",
+          file=sys.stderr)
+    answered = version_reader(binary)
     if answered != version:
         raise BumpError(
             f"{binary} answers --version {answered!r}, not the pin {version}: "
             "refusing to hand the gate a different host than the one the "
             "repository claims"
         )
-    print(str(binary))
+    print(binary)
     return 0
 
 
 def cmd_verify_install(prefix: Path, registry: Optional[str] = None) -> int:
     """:func:`verify_installed` on a prefix ``npm ci`` already ran in, against
-    the subset lockfile it holds (``npm ci`` never rewrites that file)."""
+    the subset lockfile it holds (``npm ci`` never rewrites that file). The
+    chosen binary's path is the last stdout line."""
     url = _single_registry(registry)
     prefix = Path(prefix).absolute()
     lock_path = prefix / "package-lock.json"
@@ -669,10 +756,10 @@ def cmd_verify_install(prefix: Path, registry: Optional[str] = None) -> int:
         scratch_lock = json.loads(lock_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise BumpError(f"{lock_path}: the subset lockfile is unreadable ({exc})") from exc
-    binary = installed_binary(prefix)
-    matched = verify_installed(prefix, binary, scratch_lock, url)
-    print(f"opencode-install: {binary} is {matched['platform_package']}'s binary "
-          f"({matched['how']}, sha256 {matched['sha256']})")
+    matched = verify_installed(prefix, scratch_lock, url)
+    print(f"opencode-install: {matched['binary']} is {matched['platform_package']}'s binary "
+          f"(sha256 {matched['sha256']})")
+    print(matched["binary"])
     return 0
 
 

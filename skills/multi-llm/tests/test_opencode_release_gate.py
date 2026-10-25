@@ -1391,6 +1391,82 @@ class TestStep:
         else:
             pytest.fail("the grandchild outlived the step's bound")
 
+    def test_the_grace_is_the_probes_sweep_bound_plus_a_margin(self):
+        """Imported from the probe, never re-typed: a sweep that grows moves
+        the grace with it."""
+        import inspect
+
+        probe = gate._sibling("probe", "opencode_probe")
+        assert probe.SWEEP_BOUND_S == probe.SWEEP_STAGES * probe.KILL_GRACE_S
+        assert probe.SWEEP_STAGES >= 2  # the bounded child's session, then the stub model
+        assert gate.STEP_GRACE_MARGIN_S > 0
+        assert gate.step_grace_s() == probe.SWEEP_BOUND_S + gate.STEP_GRACE_MARGIN_S
+        assert inspect.signature(gate.run_step).parameters["grace"].default is None
+        source = inspect.getsource(gate.run_step)
+        assert "step_grace_s()" in source and "10.0" not in source
+
+    @pytest.mark.skipif(os.name != "posix", reason="sessions and SIGTERM dispositions are "
+                        "POSIX; the gate runs on Linux")
+    def test_a_probe_interrupted_at_its_bound_finishes_its_whole_sweep(self, tmp_path):
+        """The probe's worst case, with its real constants: ``SWEEP_STAGES``
+        children, each in a session of its own and each ignoring SIGTERM for
+        longer than ``KILL_GRACE_S``, swept one after the other by the probe's
+        own code (``run_bounded``'s sweep first, then the next, as the stub
+        model's comes after the ``opencode run`` it served). The step's SIGKILL
+        must not land before the last one is killed: the sweeper would die and
+        that child, outside the step's group, would outlive the gate."""
+        script = textwrap.dedent(f"""
+            import os, subprocess, sys
+            sys.path.insert(0, {str(PACKAGE_DIR)!r})
+            import probe
+            probe.install_exit_handlers()
+            STUBBORN = ("import os, signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                        "open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(600)")
+            root = {str(tmp_path)!r}
+            held = []
+            try:
+                for index in range(1, probe.SWEEP_STAGES):
+                    held.append(subprocess.Popen(
+                        [sys.executable, "-c", STUBBORN, os.path.join(root, f"held-{{index}}.pid")],
+                        start_new_session=True))
+                probe.run_bounded(
+                    [sys.executable, "-c", STUBBORN, os.path.join(root, "bounded.pid")],
+                    cwd=root, env=dict(os.environ), budget_s=600,
+                    stdout=os.path.join(root, "bounded.out"), stderr=os.path.join(root, "bounded.err"))
+            finally:
+                with probe.held_exit_signals():
+                    for proc in reversed(held):
+                        probe._stop(proc)
+                open(os.path.join(root, "swept"), "w").write("done")
+        """)
+        probe = gate._sibling("probe", "opencode_probe")
+        try:
+            started = time.monotonic()
+            done = self._step(tmp_path, sys.executable, "-c", script, timeout=3)
+            elapsed = time.monotonic() - started
+            assert done.returncode == 124, done.stdout + done.stderr
+            pids = [int(p.read_text()) for p in sorted(tmp_path.glob("*.pid"))]
+            assert len(pids) == probe.SWEEP_STAGES, "not every child started before the bound"
+            # The sweep really took the stages' graces: SIGTERM was ignored.
+            assert elapsed >= 3 + probe.SWEEP_BOUND_S - 1, elapsed
+            assert (tmp_path / "swept").exists(), (
+                "the step's SIGKILL landed mid-sweep: the probe never finished it")
+            for pid in pids:
+                for _ in range(50):
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.1)
+                else:
+                    pytest.fail(f"pid {pid} ignored SIGTERM and outlived the step")
+        finally:
+            for path in tmp_path.glob("*.pid"):
+                try:
+                    os.kill(int(path.read_text()), 9)
+                except (ProcessLookupError, ValueError):
+                    pass
+
     def test_the_child_reads_no_terminal(self, tmp_path):
         done = self._step(tmp_path, sys.executable, "-c",
                           "import sys; print(repr(sys.stdin.read()))")
