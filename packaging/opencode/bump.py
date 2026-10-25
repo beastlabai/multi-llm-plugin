@@ -35,6 +35,20 @@ container image and the recorded CLI surface are rebuilt and re-seeded by hand
 pin, 1 when npm has a newer one (printing the bump command), 2 when npm could not
 be asked.
 
+``install --prefix <dir>`` is how the release gate gets **the** opencode it
+probes (row 7), on the laptop and in CI alike, and it is under this file's
+discipline on purpose: it reads the version through :func:`read_pins` and names
+none of its own, so a bump moves what the gate tests with everything else. It
+refuses unless every pin agrees, writes a scratch manifest and lockfile holding
+only ``opencode-ai`` and its platform packages, copied from the container
+lockfile's entries with their ``resolved`` and ``integrity`` values, and runs
+``npm ci`` there against the single registry (``Makefile`` ``OPENCODE_REGISTRY``),
+so npm refuses any tarball whose hash differs from the committed one. Never a
+global install. The installed binary's ``--version``, read in an isolated home
+with autoupdate disabled exactly as :func:`find_binary` reads it, must equal the
+pin, or nothing is printed but the refusal. The binary's absolute path is the
+last stdout line, and the only one: npm's own output goes to stderr.
+
 ``tests/test_opencode_version_pins.py`` reads :func:`read_pins` and fails the
 build when any two pins disagree.
 """
@@ -320,6 +334,180 @@ def cmd_check(root: Path = REPO) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# install: the pinned binary the release gate probes
+# ---------------------------------------------------------------------------
+
+#: The scratch manifest's name, and the marker ``install`` leaves in its prefix.
+#: A prefix that already holds a ``package.json`` without the marker is somebody
+#: else's project, and ``npm ci`` would replace its ``node_modules``: refused.
+INSTALL_NAME = "mllm-opencode-pin"
+INSTALL_MARKER = ".mllm-opencode-pin"
+#: The scratch manifest's own version: a private package nobody publishes, so
+#: any value npm accepts. Not an opencode release (those live in PINS alone).
+INSTALL_MANIFEST_VERSION = "0.0.0"
+
+#: ``npm ci``'s budget. Two tarballs (the wrapper and one ~50 MB platform
+#: binary) plus the wrapper's install script; a hung registry connection is the
+#: case this bounds, which npm's own fetch timeout does not cover.
+NPM_CI_BUDGET_S = 900
+
+
+def pinned_version(root: Path = REPO) -> str:
+    """The one opencode release every pin names, or :class:`BumpError` naming each pin.
+
+    The gate installs what the repository claims to support, so a half-landed
+    bump is refused here rather than resolved by picking one of its values.
+    """
+    pins = read_pins(root)
+    values = sorted(set(pins.values()))
+    if len(values) != 1:
+        detail = "; ".join(f"{name} = {value}" for name, value in sorted(pins.items()))
+        raise BumpError(
+            f"the opencode pins disagree ({', '.join(values)}), so there is no one "
+            f"release to install: {detail}. Finish the bump first "
+            f"(make opencode-bump VERSION=<x.y.z>)."
+        )
+    return values[0]
+
+
+def install_subset(lock: Dict, version: str) -> Tuple[Dict, Dict]:
+    """The scratch ``(package.json, package-lock.json)`` for ``opencode-ai@version`` alone.
+
+    Copied out of the container lockfile, never resolved: the wrapper's entry
+    and the entry of every platform package its ``optionalDependencies`` name,
+    each verbatim, ``resolved`` and ``integrity`` included. ``npm ci`` installs
+    exactly a lockfile, verifies every tarball against its ``integrity`` and
+    skips the platform entries whose ``os``/``cpu`` do not match, so what lands
+    is the committed bytes for this machine or nothing. Every other CLI in that
+    lockfile stays out: the gate needs one binary, not the image's toolchain.
+
+    Refused, by name: no wrapper entry, a wrapper whose version is not the pin,
+    a wrapper with a hard dependency (a subset without its entry could not
+    install), a platform package the lockfile names but does not carry, or any
+    entry without a ``sha512-`` integrity and a ``resolved`` URL to check.
+    """
+    packages = lock.get("packages") or {}
+    root_key = f"node_modules/{NPM_PACKAGE}"
+    wrapper = packages.get(root_key)
+    if not isinstance(wrapper, dict):
+        raise BumpError(f"{LOCKFILE} has no {root_key} entry")
+    if wrapper.get("version") != version:
+        raise BumpError(f"{LOCKFILE} {root_key} is {wrapper.get('version')!r}, not the pin {version}")
+    if wrapper.get("dependencies"):
+        raise BumpError(
+            f"{LOCKFILE} {root_key} now has hard dependencies "
+            f"({', '.join(sorted(wrapper['dependencies']))}); this subset carries "
+            "only its platform packages, so extend install_subset deliberately"
+        )
+    subset: Dict[str, Dict] = {root_key: wrapper}
+    for name, wanted in sorted((wrapper.get("optionalDependencies") or {}).items()):
+        key = f"node_modules/{name}"
+        platform = packages.get(key)
+        if not isinstance(platform, dict):
+            raise BumpError(f"{LOCKFILE} names the platform package {name} but carries no {key} entry")
+        if platform.get("version") != wanted:
+            raise BumpError(f"{LOCKFILE} {key} is {platform.get('version')!r}, not {wanted}")
+        subset[key] = platform
+    for key, entry in subset.items():
+        if not str(entry.get("integrity") or "").startswith("sha512-") or not entry.get("resolved"):
+            raise BumpError(
+                f"{LOCKFILE} {key} carries no sha512 integrity and resolved URL, "
+                "so npm could not verify what it downloads"
+            )
+    dependencies = {NPM_PACKAGE: version}
+    own = {"name": INSTALL_NAME, "version": INSTALL_MANIFEST_VERSION}
+    manifest = {**own, "private": True, "dependencies": dependencies}
+    scratch_lock = {
+        **own, "lockfileVersion": lock.get("lockfileVersion", 3), "requires": True,
+        "packages": {"": {**own, "dependencies": dependencies}, **subset},
+    }
+    return manifest, scratch_lock
+
+
+def installed_binary(prefix: Path) -> Path:
+    """Where ``npm ci`` under ``prefix`` links the ``opencode`` command."""
+    name = "opencode.cmd" if os.name == "nt" else "opencode"
+    return (prefix / "node_modules" / ".bin" / name).absolute()
+
+
+def _single_registry(url: Optional[str]) -> str:
+    """``url`` checked against ``Makefile`` ``OPENCODE_REGISTRY`` (the default)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "opencode_registry", Path(__file__).resolve().parent / "registry.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        return module.require_single(url) if url else module.single_registry()
+    except module.RegistryError as exc:
+        raise BumpError(str(exc)) from exc
+
+
+def _npm_ci(prefix: Path, registry: str) -> None:
+    """``npm ci`` in ``prefix`` with nothing of the caller's npm configuration.
+
+    The registry is a command-line flag, which outranks every other layer, and
+    the user config is an empty file: a maintainer's ``.npmrc`` could otherwise
+    carry ``ignore-scripts`` (no platform binary gets linked), a scoped registry
+    or a proxy setting this gate never chose. Inherited ``npm_config_*``
+    variables are dropped for the same reason, since npm's environment layer
+    outranks the user file. The install script runs: linking the platform binary
+    is what it does, and it is part of what the gate tests.
+    """
+    empty_rc = prefix / ".npmrc-empty"
+    empty_rc.write_text("", encoding="utf-8")
+    env = {key: value for key, value in os.environ.items()
+           if not key.lower().startswith("npm_config_")}
+    subprocess.run(
+        ["npm", "ci", "--no-audit", "--no-fund", f"--registry={registry}",
+         f"--userconfig={empty_rc}"],
+        cwd=str(prefix), env=env, check=True, stdin=subprocess.DEVNULL,
+        stdout=sys.stderr, timeout=NPM_CI_BUDGET_S,
+    )
+
+
+def cmd_install(prefix: Path, registry: Optional[str] = None, root: Path = REPO,
+                npm_ci: Callable[[Path, str], None] = _npm_ci,
+                version_reader: Callable[[str], str] = None) -> int:
+    """Install the pinned opencode under ``prefix``; print its path last."""
+    version_reader = version_reader or _read_version
+    version = pinned_version(root)
+    url = _single_registry(registry)
+    lock = json.loads((root / LOCKFILE).read_text(encoding="utf-8"))
+    manifest, scratch_lock = install_subset(lock, version)
+
+    prefix = Path(prefix).absolute()
+    if (prefix / "package.json").exists() and not (prefix / INSTALL_MARKER).exists():
+        raise BumpError(
+            f"{prefix} already holds a package.json that this command did not "
+            "write; npm ci would replace its node_modules. Name an empty or "
+            "previously used --prefix."
+        )
+    prefix.mkdir(parents=True, exist_ok=True)
+    (prefix / INSTALL_MARKER).write_text(f"{NPM_PACKAGE}@{version}\n", encoding="utf-8")
+    (prefix / "package.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    (prefix / "package-lock.json").write_text(json.dumps(scratch_lock, indent=2) + "\n",
+                                              encoding="utf-8")
+    print(f"opencode-install: npm ci {NPM_PACKAGE}@{version} under {prefix} "
+          f"from {url} (not global)", file=sys.stderr)
+    npm_ci(prefix, url)
+
+    binary = installed_binary(prefix)
+    if not binary.exists():
+        raise BumpError(f"npm ci finished but {binary} does not exist")
+    answered = version_reader(str(binary))
+    if answered != version:
+        raise BumpError(
+            f"{binary} answers --version {answered!r}, not the pin {version}: "
+            "refusing to hand the gate a different host than the one the "
+            "repository claims"
+        )
+    print(str(binary))
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -329,13 +517,26 @@ def main(argv: Optional[List[str]] = None) -> int:
     set_parser.add_argument("--allow-downgrade", action="store_true",
                             help="accept a VERSION older than the current pin")
     sub.add_parser("check", help="exit 1 when npm has a newer opencode than the pin")
+    install_parser = sub.add_parser(
+        "install", help="npm ci the pinned opencode under PREFIX; print its path last")
+    install_parser.add_argument("--prefix", required=True, type=Path,
+                                help="scratch directory (never a global install)")
+    install_parser.add_argument("--registry", default=None,
+                                help="must be Makefile OPENCODE_REGISTRY (the default)")
     args = parser.parse_args(argv)
     try:
         if args.command == "check":
             return cmd_check()
+        if args.command == "install":
+            return cmd_install(args.prefix, args.registry)
         return cmd_set(args.version, args.bin, allow_downgrade=args.allow_downgrade)
     except (BumpError, subprocess.CalledProcessError) as exc:
         print(f"opencode-bump: {exc}", file=sys.stderr)
+        return 1
+    except (OSError, subprocess.SubprocessError) as exc:
+        # `install` only: npm missing, `npm ci` past its budget, a binary that
+        # cannot be executed or never answers `--version`. A refusal, not a trace.
+        print(f"opencode-bump: {args.command}: {exc}", file=sys.stderr)
         return 1
 
 

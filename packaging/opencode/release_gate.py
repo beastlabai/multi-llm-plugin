@@ -575,6 +575,26 @@ def _is_true(value: Any) -> bool:
     return value is True
 
 
+#: Each row-7 call's documented results, as ``(exit, MULTI_LLM_RESULT state)``.
+#: Not "exit 0": the uniform exit codes make 2 "nothing to do", and that is
+#: exactly what ``status`` answers for a project whose only run so far was
+#: ``init`` ("no run recorded"). A status that found a finished run says
+#: ``(0, "done")``. Anything else — 1, 3, an ``error`` state — is a failure.
+ROW7_DOCUMENTED_RESULTS: Dict[str, frozenset] = {
+    "init": frozenset({(0, "done")}),
+    "status": frozenset({(0, "done"), (2, "nothing-to-do")}),
+}
+
+
+def _is_under(path: str, root: str) -> bool:
+    """Is ``path`` ``root`` itself or inside it, compared resolved?"""
+    try:
+        Path(path).resolve().relative_to(Path(root).resolve())
+    except ValueError:
+        return False
+    return True
+
+
 def row7_problems(raw: Any, *, host_version: str, registry: str,
                   tarball: Optional[Mapping[str, Any]], tarball_path: Path) -> List[str]:
     """Why ``probe.py row7 --out``'s file cannot be row 7's evidence.
@@ -634,14 +654,26 @@ def row7_problems(raw: Any, *, host_version: str, registry: str,
         for flag in ("command_registered", "command_inside_payload", "tool_registered"):
             if not _is_true(project.get(flag)):
                 problems.append(f"row 7: {kind} project: {flag} is {project.get(flag)!r}")
-        if not isinstance(project.get("command_skill_dir"), str) or not project.get("command_skill_dir"):
+        skill_dir = project.get("command_skill_dir")
+        if not isinstance(skill_dir, str) or not skill_dir:
             problems.append(f"row 7: {kind} project: no command_skill_dir")
+        elif isinstance(raw.get("probe_root"), str) and raw.get("probe_root") and not \
+                _is_under(skill_dir, raw["probe_root"]):
+            problems.append(f"row 7: {kind} project: the tool ran the skill at {skill_dir}, "
+                            f"outside the probe's own root {raw['probe_root']} — not the "
+                            "extracted gated tarball")
         for call in ("init", "status"):
             result = project.get(call)
+            documented = ROW7_DOCUMENTED_RESULTS[call]
+            outcome = ((result.get("exit"), (result.get("result") or {}).get("state"))
+                       if isinstance(result, Mapping)
+                       and isinstance(result.get("result"), Mapping) else None)
             if not isinstance(result, Mapping) or not _is_true(result.get("ok")) \
-                    or result.get("exit") != 0:
-                problems.append(f"row 7: {kind} project: {call} did not succeed "
-                                f"({json.dumps(result)[:300]})")
+                    or outcome not in documented \
+                    or (result.get("result") or {}).get("mode") != call:
+                problems.append(f"row 7: {kind} project: {call} did not return its "
+                                f"documented result (one of {sorted(documented)}): "
+                                f"{json.dumps(result)[:300]}")
         created = (project.get("init") or {}).get("files_created") \
             if isinstance(project.get("init"), Mapping) else None
         if not isinstance(created, list) or not created:
