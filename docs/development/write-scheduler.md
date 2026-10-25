@@ -233,7 +233,8 @@ inside an untracked tree anyway; `--touched` is the authoritative signal.
 `finalize_tracking` **replaces** `tracked_files` rather than unioning it, so re-running
 `util finalize-tracking --touched …` repairs a bad list (each entry's `action` is
 `created`/`deleted`/`modified` read off
-`head_before_implement`'s tree, else `HEAD`'s, and the baseline —
+`head_before_implement`'s tree, else `HEAD`'s (the empty tree when `HEAD` has no commit yet),
+and the baseline —
 `_file_actions`, 2026-10-05; it was always `modified`, so a created
 `index.html` read as an edit), and it prints at most 20 paths (state.json holds the rest).
 

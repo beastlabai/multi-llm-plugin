@@ -39,7 +39,13 @@ from utils import (
     list_untracked_files,
     subtract_baseline,
 )
-from utils.git_utils import get_project_root_from_dir, ignored_paths, paths_in_commit
+from utils.git_utils import (
+    GitError,
+    get_project_root_from_dir,
+    head_or_empty_tree,
+    ignored_paths,
+    paths_in_commit,
+)
 from utils.metrics import StateLockTimeout, state_file_lock
 from utils.output_handler import workflow_file_entries
 from utils.state_manager import compute_plan_hash, mark_phase_completed_in_state
@@ -732,8 +738,9 @@ GONE = "gone"
 def _path_states(paths, *, base_ref=None, baseline=()) -> Optional[Dict[str, str]]:
     """What each repo-relative path is now, against the implement baseline.
 
-    * in the base tree (``head_before_implement``, else ``HEAD``) — still on
-      disk ``modified``, gone ``deleted``;
+    * in the base tree (``head_before_implement``, else ``HEAD``, else the
+      empty tree when HEAD has no commit yet) — still on disk ``modified``,
+      gone ``deleted``;
     * not in it and on disk — ``created`` unless ``pre_existing_changes``
       covers it (it existed before the phase began: ``modified``);
     * not in it and not on disk — ``deleted`` when the baseline names the
@@ -751,7 +758,13 @@ def _path_states(paths, *, base_ref=None, baseline=()) -> Optional[Dict[str, str
     if toplevel is None:
         return None
     in_base = None
-    for ref in (base_ref, "HEAD"):
+    try:
+        # Before the first commit there is no `HEAD` tree to ask, but the
+        # answer is not unknown: nothing is committed, so every path is new.
+        head = head_or_empty_tree()
+    except GitError:
+        head = "HEAD"
+    for ref in (base_ref, head):
         if ref:
             in_base = paths_in_commit(str(ref), paths)
             if in_base is not None:

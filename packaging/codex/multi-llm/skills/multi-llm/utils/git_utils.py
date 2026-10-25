@@ -552,16 +552,19 @@ def paths_in_commit(
 ) -> Optional[Set[str]]:
     """The subset of repo-root-relative *paths* present in *ref*'s tree.
 
-    ``None`` when *ref* does not resolve to a commit (an unborn ``HEAD``, a
+    ``None`` when *ref* does not resolve to a tree (an unborn ``HEAD``, a
     pruned ``head_before_implement``), so the caller can tell "absent from
-    the tree" from "no tree to ask". One ``git cat-file --batch-check`` over
+    the tree" from "no tree to ask". A commit's tree, or a tree itself: the
+    empty tree a repository with no commit records as its base
+    (:func:`head_or_empty_tree`) holds no path, so every file reads as new
+    rather than as unknown. One ``git cat-file --batch-check`` over
     ``<sha>:<path>`` lines: exact paths, never pathspec patterns (a ``*`` in a
     filename is a filename). A path holding a newline cannot be asked and is
     reported absent.
     """
     candidates = [path for path in paths if path and "\n" not in path]
     stdout, _, rc = _run_git(
-        "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}",
+        "rev-parse", "--verify", "--quiet", f"{ref}^{{tree}}",
         check=False, cwd=cwd,
     )
     sha = stdout.strip()
@@ -888,8 +891,112 @@ def get_file_diff(file_path: str, base_ref: Optional[str] = None) -> str:
     return stdout
 
 def get_current_head() -> str:
-    """Get current HEAD commit hash."""
+    """Get current HEAD commit hash.
+
+    Strict: raises :class:`GitError` when HEAD names no commit, which includes
+    a repository whose first commit has not been made yet. A caller that wants
+    a *diff base* — "the tree as of now", which exists in every repository —
+    reads :func:`head_or_empty_tree` instead.
+    """
     stdout, _, _ = _run_git("rev-parse", "HEAD")
+    return stdout.strip()
+
+
+# ---------------------------------------------------------------------------
+# A repository with no commit (an unborn HEAD)
+# ---------------------------------------------------------------------------
+
+#: git's empty tree in a SHA-1 repository (``git hash-object -t tree
+#: /dev/null``). Only :func:`empty_tree_id`'s fallback for a git that cannot
+#: be asked: a SHA-256 repository's empty tree is ``6ef19b41…``, so the id is
+#: read from the repository whenever it can be.
+EMPTY_TREE_SHA1 = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+
+def head_is_unborn(cwd: Optional[str] = None) -> bool:
+    """Whether HEAD names a branch that has no commit yet.
+
+    A plain ``git init`` before its first commit, and ``git checkout
+    --orphan`` in a repository that has history elsewhere: ``rev-parse
+    --verify HEAD`` fails while ``symbolic-ref HEAD`` still names the branch.
+    A first-time user's project is exactly this (a new project, ``git init``,
+    no commit), and every mode that opens ``state.json`` used to exit 1 on it
+    with ``GitError: git rev-parse HEAD failed``, because the new state
+    recorded ``head_at_start`` through :func:`get_current_head` (found by the
+    Codex network rehearsal; plans/opencode-plugin-publish.md, "A new Git
+    repository is a separate case"). Anything else that fails the first
+    check — not a repository, a detached HEAD whose object is gone — is not
+    unborn, and the caller's own git call reports it.
+    """
+    _, _, code = _run_git("rev-parse", "--verify", "--quiet", "HEAD", check=False, cwd=cwd)
+    if code == 0:
+        return False
+    _, _, code = _run_git("symbolic-ref", "--quiet", "HEAD", check=False, cwd=cwd)
+    return code == 0
+
+
+def empty_tree_id(cwd: Optional[str] = None) -> str:
+    """The id of git's empty tree in this repository's object format.
+
+    What a diff "against HEAD" means when HEAD is unborn: ``git diff <empty
+    tree>`` shows every file the index holds as added, exactly what ``git diff
+    HEAD`` shows for a file added since a commit, and ``git show <empty
+    tree>:<path>`` says the path is absent, as it is for a new file. git knows
+    the empty tree without storing it, so the id resolves (``rev-parse
+    --verify``) in a repository that has never written an object. Asked of git
+    (``hash-object -t tree --stdin`` on no input, which writes nothing) because
+    the id depends on the object format; :data:`EMPTY_TREE_SHA1` only when git
+    cannot answer.
+    """
+    try:
+        result = subprocess.run(
+            git_argv("hash-object", "-t", "tree", "--stdin", cwd=cwd),
+            input="",
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **({"cwd": cwd} if cwd is not None else {}),
+        )
+    except OSError:
+        return EMPTY_TREE_SHA1
+    tree = result.stdout.strip()
+    return tree if result.returncode == 0 and tree else EMPTY_TREE_SHA1
+
+
+def is_empty_tree(ref: Optional[str], cwd: Optional[str] = None) -> bool:
+    """Whether *ref* is spelled as the empty tree's id (either object format).
+
+    git is asked only for a 64-character ref, the one shape a SHA-256
+    repository's empty tree can have, so ``HEAD~1`` or a commit id costs no
+    spawn.
+    """
+    if not ref:
+        return False
+    if ref == EMPTY_TREE_SHA1:
+        return True
+    return len(ref) == 64 and ref == empty_tree_id(cwd)
+
+
+def head_or_empty_tree(cwd: Optional[str] = None) -> str:
+    """HEAD's commit, or the empty tree's id when HEAD is unborn.
+
+    The diff base "as of now": what ``state.json`` records as ``head_at_start``
+    and ``head_before_implement``, which code review and apply-code-fixes later
+    diff against and :func:`paths_in_commit` reads a tree from. Before the first
+    commit nothing is committed, so the honest base is the empty tree and every
+    file reads as new — never a refusal, and never an invented commit. Raises
+    :class:`GitError` as :func:`get_current_head` does for every other HEAD
+    that names no commit (outside a repository, a broken ref).
+    """
+    stdout, _, code = _run_git(
+        "rev-parse", "--verify", "--quiet", "HEAD^{commit}", check=False, cwd=cwd,
+    )
+    if code == 0 and stdout.strip():
+        return stdout.strip()
+    if head_is_unborn(cwd):
+        return empty_tree_id(cwd)
+    stdout, _, _ = _run_git("rev-parse", "HEAD", cwd=cwd)
     return stdout.strip()
 
 def get_branch_name() -> Optional[str]:
@@ -924,14 +1031,17 @@ def validate_git_ref(ref: str) -> str:
     """Validate a git ref using git rev-parse --verify.
 
     If the ref is invalid, falls back to HEAD~1. If HEAD~1 is also invalid
-    (or the original ref was already HEAD~1), returns an empty string.
+    (or the original ref was already HEAD~1), returns an empty string. Before
+    the first commit (:func:`head_is_unborn`) an invalid ref falls back to the
+    empty tree instead, the one base that exists there.
 
     Args:
         ref: The git ref to validate (e.g., a commit hash, branch name, HEAD~1).
 
     Returns:
-        The validated ref if valid, 'HEAD~1' as fallback, or empty string
-        if both the ref and HEAD~1 are invalid.
+        The validated ref if valid, the empty tree's id when HEAD is unborn,
+        'HEAD~1' as fallback, or empty string if both the ref and HEAD~1 are
+        invalid.
     """
     if not ref:
         return ""
@@ -947,10 +1057,28 @@ def validate_git_ref(ref: str) -> str:
         )
         return ref
     except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    # Before the first commit no ref resolves, `HEAD~1` least of all, and
+    # the empty base used to leave every diff empty. The honest base is the
+    # empty tree: nothing is committed, so every file is new.
+    try:
+        unborn = head_is_unborn()
+    except OSError:
+        unborn = False
+    if unborn:
+        tree = empty_tree_id()
         print(
-            f"Warning: git ref '{ref}' is invalid, falling back to HEAD~1",
+            f"Warning: git ref '{ref}' does not resolve and HEAD has no commit "
+            f"yet; diffing against the empty tree ({tree}), so every file is new",
             file=sys.stderr,
         )
+        return tree
+
+    print(
+        f"Warning: git ref '{ref}' is invalid, falling back to HEAD~1",
+        file=sys.stderr,
+    )
 
     # If the ref was already HEAD~1, don't redundantly retry it
     if ref == "HEAD~1":
@@ -2301,6 +2429,11 @@ def _render_review_scope(
         base_line = "- Base ref: (none: neither the requested ref nor HEAD~1 resolves)"
     elif base_commit:
         base_line = f"- Base ref: `{base_ref}` (commit `{base_commit}`)"
+    elif is_empty_tree(base_ref):
+        base_line = (
+            f"- Base ref: `{base_ref}` (the empty tree: the repository had no "
+            f"commit, so every file is new)"
+        )
     else:
         base_line = f"- Base ref: `{base_ref}` (does not resolve to a commit)"
     lines = [

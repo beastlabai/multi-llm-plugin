@@ -211,6 +211,7 @@ from utils.git_utils import (
     count_review_groups,
     get_project_root,
     get_project_root_from_dir,
+    is_empty_tree,
     list_worktree_untracked_files,
     load_review_scope,
     order_review_paths,
@@ -4588,6 +4589,12 @@ async def main(argv: Optional[List[str]] = None) -> int:
     # reviewed).
     if base_ref:
         try:
+            if is_empty_tree(base_ref):
+                # `git log` names no commit for a tree, so say what it is.
+                print(
+                    "Base ref is the empty tree: the repository had no commit "
+                    "when this workflow started, so every file under review is new"
+                )
             log_out, _, log_rc = _run_git(
                 "log", "-1", "--format=%h %s", base_ref, check=False
             )
