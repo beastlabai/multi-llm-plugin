@@ -48,7 +48,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shutil
 import sys
 import tempfile
@@ -63,7 +62,7 @@ for _path in (str(SKILL_DIR), str(REPO_ROOT / "packaging"), str(PACKAGE_DIR)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
-from common import payload, surface  # noqa: E402
+from common import payload, release_history, surface  # noqa: E402
 from common.payload import (  # noqa: E402,F401
     PayloadError, scan_tree, target_module_paths, tree_digest,
 )
@@ -610,11 +609,9 @@ def _show(checkout: Path, ref: str, path: str) -> str:
 
 
 def _version_in(pyproject_text: str) -> str:
-    section = re.search(r"^\[project\]\s*$(.*?)(?=^\[|\Z)", pyproject_text, re.M | re.S)
-    match = section and re.search(r'^version\s*=\s*"([^"]+)"\s*$', section.group(1), re.M)
-    if not match:
-        raise PayloadError("pyproject.toml declares no [project] version")
-    return match.group(1)
+    # The shared release-history check parses the same file at every tag; one
+    # parse, so the build and the check can never read two versions out of it.
+    return release_history.version_in(pyproject_text)
 
 
 def release_record(ref: str, root: Optional[Path] = None) -> Tuple[str, str]:
@@ -659,7 +656,7 @@ def bump_ahead_problem(
     digest, version = release_record(newest, root)
     plugin = Path(tree) if tree else PLUGIN_DIR
     current = (plugin / DIGEST_RELATIVE).read_text(encoding="utf-8").strip()
-    owner = project_version()
+    owner = project_version(Path(root) / "skills" / "multi-llm" if root else None)
     if current != digest and owner == version:
         return (
             f"the plugin digest moved since {newest} ({digest} -> {current}) but "
@@ -711,8 +708,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--check-bump", action="store_true",
         help=(
             "exit non-zero if the committed digest moved since the newest "
-            "codex-v* tag under an unmoved version (A4 row 10)"
+            "codex-v* tag under an unmoved version (A4 row 10), or if the "
+            "shared-version release-history check over every codex-v*/opencode-v* "
+            "tag and npm's version list refuses HEAD. Reads the registry"
         ),
+    )
+    parser.add_argument(
+        "--repo", type=Path, default=None,
+        help=(
+            "with --check-bump: the clone whose tags, HEAD and checked-in tree "
+            "are read (default: this one)"
+        ),
+    )
+    parser.add_argument(
+        "--registry", default=None,
+        help="with --check-bump: must be the single registry (default: it)",
     )
     parser.add_argument(
         "--print-version", action="store_true",
@@ -725,16 +735,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(project_version())
             return 0
         if args.check_bump:
-            problems = list(bump_history_problems())
-            ahead = bump_ahead_problem()
+            repo = args.repo
+            problems = list(bump_history_problems(repo))
+            ahead = bump_ahead_problem(repo, Path(repo) / PLUGIN_RELATIVE if repo else None)
             if ahead:
                 problems.append(ahead)
-            if problems:
-                for line in problems:
-                    print(f"REFUSING: {line}", file=sys.stderr)
-                return 1
-            print("bump discipline holds")
-            return 0
+            # The own-tree rules above read codex-v* tags alone, so they would
+            # pass a codex-v0.1.1 cut from bytes other than npm's 0.1.1. The
+            # shared check holds HEAD to every family's releases; both run, and
+            # every refusal of either is printed.
+            shared = release_history.check(repo or REPO_ROOT, registry=args.registry)
+            return release_history.print_report(
+                shared, extra=problems, ok="bump discipline holds",
+            )
         if args.check_stamp:
             reason = check_stamp()
             if reason:

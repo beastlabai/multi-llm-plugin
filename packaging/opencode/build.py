@@ -33,7 +33,9 @@ build cannot accidentally produce a second tarball nobody publishes. The tarball
 secret sweep is *exposed* here (:func:`scan_tarball`) and called by
 ``make opencode-package`` **after** ``npm pack`` — same module, one step later in
 the sequence, because what npm writes is what ships and a ``prepack`` hook runs
-too early to see a tarball.
+too early to see a tarball. The one npm call it does make is a read:
+``--check-bump`` asks the registry for the package's version list
+(:func:`check_bump`), and packs nothing.
 
 **It is an importable module with a thin ``__main__``**, and that is a design
 requirement rather than a test-time convenience: ``dist/`` is gitignored and CI
@@ -63,6 +65,7 @@ for _path in (str(SKILL_DIR), str(REPO_ROOT / "packaging")):
         sys.path.insert(0, _path)
 
 from common import payload, surface  # noqa: E402
+from common import release_history  # noqa: E402
 from common.payload import (  # noqa: F401  (re-exported for the Make targets)
     PayloadError, scan_tarball, scan_tree, target_module_paths, tree_digest,
 )
@@ -453,6 +456,33 @@ def tarball_facts(tarball: Path) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# The shared-version bump check (plans/opencode-plugin-publish.md, step 2)
+# ---------------------------------------------------------------------------
+
+def check_bump(
+    *, repo: Optional[Path] = None, candidate: str = "HEAD",
+    registry: Optional[str] = None,
+) -> "release_history.Report":
+    """OpenCode's entry point for the release-history check both families run.
+
+    The version is ``pyproject.toml``'s, shared with the Claude and Codex
+    distributions, so "is this version new?" has no OpenCode-only answer: the
+    check reads every ``codex-v*`` and ``opencode-v*`` tag and npm's list for
+    this package, and holds *candidate*'s shared-payload digest to theirs
+    (:mod:`common.release_history`). This package's own bytes outside the
+    payload (``dist/``, ``package.json``) are npm's no-reuse rule's to police.
+
+    *repo* is the clone whose history is read (default: this one), which is how
+    the suite points the real CLI at a fixture history. It never packs, writes
+    or fetches; a shallow or tagless clone is refused rather than read as one
+    with no releases.
+    """
+    return release_history.check(
+        repo or REPO_ROOT, candidate=candidate, registry=registry,
+    )
+
+
+# ---------------------------------------------------------------------------
 # The publish gate's stamp
 # ---------------------------------------------------------------------------
 
@@ -587,7 +617,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "because what npm writes is what ships."
         ),
     )
+    parser.add_argument(
+        "--check-bump", action="store_true",
+        help=(
+            "the shared-version release-history check (`make opencode-check-bump`): "
+            "exit non-zero unless the candidate's version is released with this "
+            "same shared payload or newer than every codex-v*/opencode-v* tag and "
+            "npm version. Reads git and the registry; writes nothing"
+        ),
+    )
+    parser.add_argument(
+        "--repo", type=Path, default=None,
+        help="with --check-bump: the clone whose history is read (default: this one)",
+    )
+    parser.add_argument(
+        "--candidate", default="HEAD",
+        help="with --check-bump: the commit to check (default: HEAD)",
+    )
+    parser.add_argument(
+        "--registry", default=None,
+        help="with --check-bump: must be the single registry (default: it)",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
+
+    if args.check_bump:
+        try:
+            report = check_bump(
+                repo=args.repo, candidate=args.candidate, registry=args.registry,
+            )
+        except PayloadError as exc:
+            print(f"REFUSING: {exc}", file=sys.stderr)
+            return 1
+        return release_history.print_report(report)
 
     # Both stamp branches call ``build()`` and therefore ``payload.stage()``,
     # whose dirty-tree refusal is a ``PayloadError``. Caught here for the same
