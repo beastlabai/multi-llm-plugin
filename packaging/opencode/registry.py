@@ -26,7 +26,7 @@ from typing import Optional
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MAKEFILE = REPO_ROOT / "Makefile"
 
-_DEFINITION = re.compile(r"^OPENCODE_REGISTRY\s*:=\s*(\S+)\s*$", re.M)
+_DEFINITION = re.compile(r"^OPENCODE_REGISTRY[ \t]*:=[ \t]*(\S+)[ \t]*$", re.M)
 _URL = re.compile(r"https://[A-Za-z0-9.-]+(?::\d+)?/?")
 
 
