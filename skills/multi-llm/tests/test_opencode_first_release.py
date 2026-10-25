@@ -166,6 +166,9 @@ class World:
         self.row9 = "absent"
         self.publish = 0
         self.views = [(1, _npm_error("E404"))]     # then the last entry repeats
+        self.versions = (1, _npm_error("E404"))     # `npm view <name> versions`
+        self.capabilities = yaml.safe_dump({"hosts": {"opencode": {"package": {
+            "registry": "npm", "name": NAME, "version": VERSION}}}})
         self.view_count = 0
         self.config = dict(CLEAN_CONFIG)
         self.config_text = _config_text({
@@ -215,6 +218,8 @@ class World:
             if rest[0] == "publish":
                 assert capture is False, "the upload must keep the terminal for npm's 2FA"
                 return (self.publish, "")
+            if rest[:3] == ["view", NAME, "versions"]:
+                return self.versions
             if rest[0] == "view":
                 answer = self.views[min(self.view_count, len(self.views) - 1)]
                 self.view_count += 1
@@ -247,6 +252,8 @@ class World:
             return (0, MASTER + "\n")
         if rest == ["show", f"{HEAD}:.github/workflows/test.yml"]:
             return (0, self.test_yml)
+        if rest == ["show", f"{HEAD}:skills/multi-llm/hosts/capabilities.yaml"]:
+            return (0, self.capabilities)
         raise AssertionError(f"unexpected git call {rest}")
 
     def _gh(self, rest):
@@ -368,7 +375,7 @@ class TestGreenPath:
     ):
         world.views = [(1, _npm_error("E404"))] * 3 + [_good_views(gated)[1]]
         assert release.run(dry_run=False) == 0
-        reads = world.argvs(["npm", "view"])
+        reads = world.argvs(["npm", "view", SPEC])
         assert len(reads) == 4
         caches = [r[r.index("--cache") + 1] for r in reads]
         assert len(set(caches)) == 4 and not any(Path(c).exists() for c in caches)
@@ -674,6 +681,62 @@ class TestOtherPreflights:
 # The gated tarball, recomputed immediately before the upload
 # ---------------------------------------------------------------------------
 
+class TestFirstReleaseOnly:
+    """The laptop path is the first release and nothing else. Found by the Docker
+    dress rehearsal (2026-10-25): with 0.1.1 published and promoted, a 0.1.2
+    dry run refused only what a gate run and a CI run supply, because row 9
+    reads "this version is missing from an existing package" as absent too."""
+
+    @pytest.mark.parametrize("listing", [json.dumps(["0.1.1"]) + "\n", '"0.1.1"\n'])
+    def test_a_package_npm_already_lists_refuses(self, release, world, listing):
+        world.versions = (0, listing)
+        assert release.run(dry_run=False) == 1
+        _refused(release, "first-release")
+        message = next(e for e in release.errors if e.startswith("REFUSING (first-release)"))
+        assert "0.1.1" in message and "workflow dispatch" in message
+        assert not world.published
+
+    def test_a_promoted_public_version_refuses_even_with_nothing_on_npm(self, release, world):
+        world.capabilities = yaml.safe_dump({"hosts": {"opencode": {"package": {
+            "name": NAME, "version": VERSION, "public_version": "0.1.0"}}}})
+        assert release.run(dry_run=False) == 1
+        _refused(release, "first-release")
+        assert any("public_version 0.1.0" in e and "later release" in e for e in release.errors)
+        assert not world.published
+
+    @pytest.mark.parametrize("answer", [
+        (1, _npm_error("E403")),
+        (1, _npm_error("ECONNRESET")),
+        (1, json.dumps({"error": {"code": "E404", "summary": f"Not Found - GET {SINGLE}/-/whoami"}})),
+        (0, "not json\n"),
+        (124, "", "npm: no answer within 90 s"),
+    ])
+    def test_anything_but_e404_on_the_package_is_an_unknown_and_refuses(
+        self, release, world, answer,
+    ):
+        world.versions = answer
+        assert release.run(dry_run=False) == 1
+        _refused(release, "first-release")
+        assert not world.published
+
+    def test_unreadable_capabilities_refuse(self, release, world):
+        world.capabilities = "hosts: [unclosed\n"
+        assert release.run(dry_run=False) == 1
+        _refused(release, "first-release")
+
+    def test_the_read_runs_on_none_of_the_callers_configuration(self, release, world, gated):
+        world.views = _good_views(gated)
+        assert release.run(dry_run=False) == 0
+        (read,) = world.npm_calls("view", NAME, "versions")
+        argv, fresh = read["argv"], str(read["cwd"])
+        assert argv[argv.index("--registry") + 1] == SINGLE
+        assert read["inherit_npm_config"] is False
+        assert f"--prefix={fresh}" in argv
+        assert f"--userconfig={Path(fresh) / 'npmrc-user'}" in argv
+        assert f"--globalconfig={Path(fresh) / 'npmrc-global'}" in argv
+        assert "--prefer-online" in argv and not Path(fresh).exists()
+
+
 class TestGatedTarball:
 
     def test_a_missing_gated_tarball_refuses(self, release, world, gated):
@@ -869,7 +932,7 @@ class TestNpmConfiguration:
     ):
         world.views = [(1, _npm_error("E404"))] + [_good_views(gated)[1]]
         assert release.run(dry_run=False) == 0
-        reads = world.npm_calls("view")
+        reads = world.npm_calls("view", SPEC)
         assert len(reads) == 2
         for read in reads:
             argv, fresh = read["argv"], str(read["cwd"])
@@ -989,7 +1052,7 @@ class TestAfterTheUpload:
         assert f'--registry={SINGLE} --cache "$d/c" --prefix "$d"' in message
         assert gated["facts"]["integrity"] in message
         # Bounded: 60 s at a 10 s interval.
-        assert len(world.argvs(["npm", "view"])) == 7
+        assert len(world.argvs(["npm", "view", SPEC])) == 7
         (path,) = list(release.evidence_dir.glob("*.json"))
         assert json.loads(path.read_text(encoding="utf-8"))["confirmation"]["state"] == "expired"
 
@@ -1004,7 +1067,7 @@ class TestAfterTheUpload:
         world.publish = 1
         assert release.run(dry_run=False) == first_release.EXIT_PUBLISH_FAILED
         assert "inspect the registry before retrying" in release.errors[-1]
-        assert world.argvs(["npm", "view"]) == []
+        assert world.argvs(["npm", "view", SPEC]) == []
         (path,) = list(release.evidence_dir.glob("*.json"))
         evidence = json.loads(path.read_text(encoding="utf-8"))
         assert evidence["publish"]["exit"] == 1 and evidence["confirmation"] is None

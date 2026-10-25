@@ -36,6 +36,13 @@ never the same message as "the macOS leg failed":
 * ``bump-check`` — ``build.py --check-bump`` (the shared-version check that reads
   both families' tags and npm's version list). A ``build.py`` without that flag
   refuses: the check is a precondition, not an option;
+* ``first-release`` — this IS the first release. npm lists no version of the
+  package at all (``release_history.npm_versions``: only ``E404`` on the
+  package name is "none", anything else is an unknown and refuses), and HEAD's
+  capabilities name no ``public_version``, which is how step 5 defines a later
+  release (``registry_check.release_kind``). Row 9 cannot say this: once the
+  package exists, a missing version is ``E404`` too. Every later version goes
+  through the workflow dispatch, which signs provenance;
 * ``npm-config`` — the configuration the upload will run under, read with
   ``npm config list --json`` from the upload's own scratch directory with the
   upload's own flags, sets no ``proxy``, ``https-proxy``, ``cafile`` or ``ca``,
@@ -138,6 +145,9 @@ RECORD_SUFFIX = "-opencode-release-gate.json"
 
 #: The CI workflow whose jobs are the required check runs, and the two jobs.
 TEST_WORKFLOW = ".github/workflows/test.yml"
+#: Where ``public_version`` lives: set once a version's registry install is
+#: verified, so its presence at HEAD makes this a later release.
+CAPABILITIES = "skills/multi-llm/hosts/capabilities.yaml"
 TEST_JOB = "test"
 PACKAGE_JOB = "package"
 
@@ -410,6 +420,24 @@ class Release:
             raise Refusal(condition, f"{what} failed ({_tail(done)})")
         return done
 
+    def _isolated_npm(self, argv: Sequence[str], timeout: float) -> Tuple[Completed, List[str]]:
+        """A public npm read on none of the caller's npm configuration: row 9's
+        isolation. A fresh directory per read holds the cache and two empty
+        config files and is npm's cwd and pinned project root, and no inherited
+        ``npm_config_*`` reaches it. A read needs no token, and a proxy in any
+        layer could otherwise serve the answer the release expects. Returns the
+        answer and the argv as evidence records it (the directory elided)."""
+        with tempfile.TemporaryDirectory(prefix="mllm-npm-view-") as fresh:
+            user_rc, global_rc = Path(fresh) / "npmrc-user", Path(fresh) / "npmrc-global"
+            user_rc.write_text("", encoding="utf-8")
+            global_rc.write_text("", encoding="utf-8")
+            isolated = [*argv, "--cache", str(Path(fresh) / "cache"),
+                        f"--userconfig={user_rc}", f"--globalconfig={global_rc}",
+                        f"--prefix={fresh}"]
+            done = self.runner(isolated, timeout=timeout, cwd=Path(fresh),
+                               inherit_npm_config=False)
+        return done, [str(a).replace(fresh, "<fresh tmp>") for a in isolated]
+
     def _git(self, *args: str, condition: str) -> str:
         return self._run(["git", *args], condition, f"`git {' '.join(args)}`").stdout.strip()
 
@@ -592,6 +620,35 @@ class Release:
                           "bump check is not in this tree, and the release cannot skip it")
         raise Refusal("bump-check", f"`build.py --check-bump` refused ({_tail(done)})")
 
+    def check_first_release(self) -> None:
+        import yaml
+        from build import release_history
+
+        later = (f"this target uploads the FIRST version only, without provenance; every "
+                 f"later version goes through the publish-opencode-plugin workflow dispatch "
+                 f"(mode: publish, tag: {self.facts['tag']}), which signs it")
+        text = self._git("show", f"{self.facts['head']}:{CAPABILITIES}", condition="first-release")
+        try:
+            capabilities = yaml.safe_load(text) or {}
+        except yaml.YAMLError as exc:
+            raise Refusal("first-release", f"{CAPABILITIES} at HEAD is not YAML ({exc})")
+        package = (((capabilities.get("hosts") or {}).get("opencode") or {}).get("package")
+                   if isinstance(capabilities, dict) else None)
+        public = package.get("public_version") if isinstance(package, dict) else None
+        if public is not None:
+            raise Refusal("first-release", f"{CAPABILITIES} at HEAD names public_version "
+                          f"{public}, so {self.facts['spec']} is a later release: {later}")
+        try:
+            answer = release_history.npm_versions(
+                self.facts["name"], self.facts["registry"],
+                runner=lambda argv, timeout: self._isolated_npm(argv, timeout)[0])
+        except release_history.ReleaseHistoryError as exc:
+            raise Refusal("first-release", str(exc))
+        if not answer.absent:
+            listed = ", ".join(answer.versions) or "no version, but the package exists"
+            raise Refusal("first-release", f"{self.facts['registry']} already has "
+                          f"{self.facts['name']} ({listed}): {later}")
+
     def check_npm_config(self) -> None:
         scratch = self.npm_scratch()
         flags = self.upload_flags()
@@ -682,6 +739,7 @@ class Release:
         ("origin-master", "check_origin_master"),
         ("required-checks", "check_required_runs"),
         ("bump-check", "check_bump"),
+        ("first-release", "check_first_release"),
         ("npm-config", "check_npm_config"),
         ("npm-auth", "check_npm_auth"),
         ("gated-tarball", "check_gated_tarball"),
@@ -753,25 +811,12 @@ class Release:
         attempts = 0
         while True:
             attempts += 1
-            # Row 9's isolation: a fresh directory per read holding the cache and
-            # two empty config files, npm's cwd and pinned project root, and no
-            # inherited npm_config_*. A public read needs no token, and a proxy
-            # in any layer could otherwise serve the integrity the gate expects.
-            with tempfile.TemporaryDirectory(prefix="mllm-npm-view-") as fresh:
-                user_rc, global_rc = Path(fresh) / "npmrc-user", Path(fresh) / "npmrc-global"
-                user_rc.write_text("", encoding="utf-8")
-                global_rc.write_text("", encoding="utf-8")
-                argv = ["npm", "view", self.facts["spec"], "dist.integrity", "--json",
-                        f"--registry={self.facts['registry']}",
-                        "--cache", str(Path(fresh) / "cache"),
-                        f"--userconfig={user_rc}", f"--globalconfig={global_rc}",
-                        f"--prefix={fresh}",
-                        "--prefer-online", "--no-update-notifier", *NPM_FETCH_FLAGS]
-                done = self.runner(argv, timeout=150.0, cwd=Path(fresh),
-                                   inherit_npm_config=False)
+            done, argv = self._isolated_npm(
+                ["npm", "view", self.facts["spec"], "dist.integrity", "--json",
+                 f"--registry={self.facts['registry']}", "--prefer-online",
+                 "--no-update-notifier", *NPM_FETCH_FLAGS], 150.0)
             read_at = _utc()
-            record = {"argv": [a.replace(fresh, "<fresh tmp>") for a in argv],
-                      "read_at": read_at, "exit": done.returncode,
+            record = {"argv": argv, "read_at": read_at, "exit": done.returncode,
                       "output": done.stdout.strip(), "attempts": attempts}
             if done.returncode == 0:
                 try:

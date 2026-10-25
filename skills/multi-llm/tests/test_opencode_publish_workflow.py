@@ -789,8 +789,11 @@ class TestPublish:
         line = commands[0][1].strip()
         assert re.match(r'npm publish "\./\$\{NAME\}-\$\{VERSION\}\.tgz" ', line), line
         for flag in ("--provenance", "--ignore-scripts", "--access public",
-                     '--registry "${REGISTRY}"'):
+                     '--registry "${REGISTRY}"', '--prefix "${UPLOAD}"'):
             assert flag in line, flag
+        # The prefix is the directory the upload runs in, which holds the
+        # tarball alone: npm's project root, so no `.npmrc` above it applies.
+        assert 'cd "${UPLOAD}"' in code(step("publish", "Publish the packed tarball, with provenance"))
         pack = code(step("publish", "Pack once, with --ignore-scripts, and bind the tarball to the digest"))
         assert "npm pack --ignore-scripts --pack-destination" in pack
         assert re.search(r"build\.py \\\n\s+--scan-tarball", pack) and "tarball_facts" in pack
