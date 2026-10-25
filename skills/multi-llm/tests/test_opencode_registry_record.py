@@ -417,8 +417,11 @@ class TestCriteria:
         record["criteria"][2]["pass"] = False
         _has(check(record, first), f"{rr.FIRST_RELEASE_CRITERIA[2]} did not pass")
 
-    @pytest.mark.parametrize("evidence", [None, "", {}, []])
+    @pytest.mark.parametrize("evidence", [None, "", {}, [], False, 0, 0.0, "x", ["output"]])
     def test_a_criterion_without_its_evidence_is_rejected(self, first, evidence):
+        """``false`` and ``0`` compare unequal to every empty value, so a
+        membership test let them through; and a bare string or list is not the
+        object the probe preserves. Only a non-empty object is evidence."""
         record = make(first)
         record["criteria"][0]["evidence"] = evidence
         _has(check(record, first), "no supporting evidence")

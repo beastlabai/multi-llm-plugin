@@ -492,7 +492,12 @@ def check_bump(
 #: this one's. CI consumes no stamps at all: its jobs re-run the rows they can
 #: (1-7 and 9), and row 8 — which needs a Docker daemon the runners do not have
 #: — reaches CI only through the release-gate record exported from the same
-#: session that authorized this stamp (``release_gate.py export-record``).
+#: session that authorized this stamp (``release_gate.py export-record``, into
+#: the gitignored ``.gate/export/``). It is copied into
+#: ``tests/container/records/`` and committed in the default branch's own commit
+#: after the fast-forward, never in the tag's tree; the tag's commit is then
+#: checked out again, clean, before ``make opencode-publish-first`` reads this
+#: stamp.
 STAMP_NAME = ".package-check.stamp"
 
 #: The tier a stamp must carry to authorize a publish. A `-ci` run writes no

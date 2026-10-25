@@ -96,11 +96,19 @@ NOTFOUND = (1, _error(
 STUB_SOURCE = """#!{python}
 import json, os, sys
 log = os.environ["STUB_NPM_LOG"]
+configs = {{}}
+for arg in sys.argv[1:]:
+    for flag in ("--userconfig=", "--globalconfig="):
+        if arg.startswith(flag):
+            path = arg[len(flag):]
+            configs[flag.strip("-=")] = open(path).read() if os.path.isfile(path) else None
 with open(log, "a", encoding="utf-8") as handle:
     handle.write(json.dumps({{
         "argv": sys.argv[1:],
         "npm_config_registry": os.environ.get("npm_config_registry"),
         "npm_config_userconfig": os.environ.get("npm_config_userconfig"),
+        "npm_config_env": sorted(k for k in os.environ if k.lower().startswith("npm_config_")),
+        "configs": configs,
     }}) + "\\n")
 with open(os.environ["STUB_NPM_FIXTURE"], encoding="utf-8") as handle:
     fixture = json.load(handle)
@@ -259,8 +267,42 @@ class TestSingleRegistry:
         assert len(caches) == 1
         assert not Path(caches[0].split("=", 1)[1]).exists(), "the fresh cache was not removed"
 
+    def test_npm_reads_no_npmrc_of_the_callers(self, stub_npm, tmp_path):
+        """An empty user AND global config on the command line, beside the
+        fresh cache and removed with it, and no inherited ``npm_config_*``
+        variable, which would outrank those empty files: a ``proxy`` or a
+        ``cafile`` the caller's configuration carries could otherwise make an
+        ``E404`` come from a server that is not the registry."""
+        npmrc = tmp_path / "user.npmrc"
+        npmrc.write_text("proxy=http://127.0.0.1:9/\ncafile=/nonexistent.pem\n", encoding="utf-8")
+        done = stub_npm.run(E404, env={"npm_config_userconfig": str(npmrc),
+                                       "npm_config_globalconfig": str(npmrc),
+                                       "npm_config_proxy": "http://127.0.0.1:9/",
+                                       "NPM_CONFIG_CAFILE": "/nonexistent.pem"})
+        assert done.returncode == 0, done.stderr
+        (call,) = stub_npm.calls()
+        argv = call["argv"]
+        assert call["configs"] == {"userconfig": "", "globalconfig": ""}
+        assert call["npm_config_env"] == []
+        paths = [Path(a.split("=", 1)[1]) for a in argv
+                 if a.startswith(("--cache=", "--userconfig=", "--globalconfig="))]
+        assert len(paths) == 3 and len({p.parent for p in paths}) == 1, paths
+        assert not paths[0].parent.exists(), "the scratch directory was not removed"
+
     def test_a_trailing_slash_is_the_same_registry(self, stub_npm):
         assert stub_npm.run(E404, registry=SINGLE + "/").returncode == 0
+
+    @pytest.mark.parametrize("given", [
+        SINGLE + "//", " " + SINGLE, SINGLE + " ", "\t" + SINGLE + "/", SINGLE + "/\n",
+    ])
+    def test_only_one_trailing_slash_and_no_whitespace(self, stub_npm, tmp_path, given):
+        """registry.py's rule: one trailing slash is npm's other spelling;
+        anything looser is not the single registry."""
+        out = tmp_path / "row9.json"
+        done = stub_npm.run(E404, "--out", str(out), registry=given)
+        assert done.returncode == 1, done.stdout
+        assert "is not the release path's single registry" in done.stderr
+        assert stub_npm.calls() == []
 
     @pytest.mark.parametrize("other", [
         "https://registry.yarnpkg.com", "http://registry.npmjs.org",
@@ -325,6 +367,22 @@ class TestSingleRegistry:
         stub_npm.run(E404, env=env)
         (call,) = stub_npm.calls()
         assert f"--registry={SINGLE}" in call["argv"]
+
+
+@pytest.mark.parametrize("given, accepted", [
+    (SINGLE, True), (SINGLE + "/", True),
+    (SINGLE + "//", False), (" " + SINGLE, False), (SINGLE + " ", False),
+    (SINGLE + "/ ", False), ("\n" + SINGLE, False), (SINGLE.upper(), False),
+])
+def test_registry_py_accepts_one_trailing_slash_and_nothing_looser(given, accepted):
+    if accepted:
+        assert registry_module.require_single(given) == SINGLE
+    else:
+        with pytest.raises(registry_module.RegistryError, match="single registry"):
+            registry_module.require_single(given)
+    assert registry_module.normalize("https://x.example/") == "https://x.example"
+    assert registry_module.normalize("https://x.example//") == "https://x.example/"
+    assert registry_module.normalize(" https://x.example") == " https://x.example"
 
 
 def test_both_parsers_read_the_makefile_the_same_way(tmp_path):
@@ -406,6 +464,56 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, *_):
         pass
+
+
+@needs_node
+@posix_only
+def test_a_proxy_in_the_users_npmrc_cannot_answer_for_the_registry(tmp_path):
+    """The finding behind the empty ``--userconfig``/``--globalconfig``: a user
+    ``.npmrc`` naming a proxy that answers ``E404`` to everything must not make
+    row 9 pass. The real npm; the pass-through points the explicit flag at stub
+    A (*published*), the home ``.npmrc`` routes through stub B (``E404``). B
+    must see nothing, and the control shows the same ``.npmrc`` does reach B
+    when npm reads it."""
+    real_npm = shutil.which("npm")
+    if real_npm is None:
+        pytest.skip("needs the real npm to prove what it reads")
+    published, proxy = _Registry(published=True), _Registry(published=False)
+    try:
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        shim = bin_dir / "npm"
+        shim.write_text(PASSTHROUGH_SOURCE.format(python=sys.executable, npm=real_npm),
+                        encoding="utf-8")
+        shim.chmod(0o755)
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / ".npmrc").write_text(f"proxy={proxy.url}/\nhttps-proxy={proxy.url}/\n",
+                                     encoding="utf-8")
+        environ = {k: v for k, v in os.environ.items()
+                   if not k.lower().startswith("npm_config_")
+                   and k.upper() not in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")}
+        environ.update({"PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
+                        "PASSTHROUGH_REGISTRY": published.url, "HOME": str(home)})
+        control = subprocess.run(
+            [real_npm, "view", SPEC, "version", "--json", "--no-update-notifier",
+             f"--registry={published.url}", f"--cache={tmp_path / 'control-cache'}",
+             "--fetch-retries=0"],
+            env=environ, capture_output=True, text=True, timeout=120)
+        if not proxy.hits:
+            pytest.skip("this npm does not send a loopback request through the configured "
+                        f"proxy, so the case cannot be staged here: {control.stdout[-300:]}")
+        assert json.loads(control.stdout)["error"]["code"] == "E404"
+        proxy.hits.clear()
+        out = tmp_path / "row9.json"
+        done = subprocess.run([NODE, str(SCRIPT), "--registry", SINGLE, "--out", str(out)],
+                              env=environ, capture_output=True, text=True, timeout=180)
+        assert done.returncode == 1, done.stdout + done.stderr
+        assert _evidence(out)["outcome"] == "published", done.stdout + done.stderr
+        assert proxy.hits == [], f"the configured proxy answered for the registry: {proxy.hits}"
+    finally:
+        published.shutdown()
+        proxy.shutdown()
 
 
 PASSTHROUGH_SOURCE = """#!{python}
@@ -538,6 +646,42 @@ def test_the_makefile_reaches_row_9_only_through_the_entry_point():
         for line in body:
             assert not ABSENCE_QUERY.search(line), f"{target} keeps its own absence probe: {line}"
             assert not CODE_PARSE.search(line), f"{target} parses npm's error code itself: {line}"
+
+
+def _make_absent(tmp_path, *args, env=None):
+    """``make opencode-registry-absent`` with ``node`` a stand-in recording its argv."""
+    if not shutil.which("make") or not sys.platform.startswith("linux"):
+        pytest.skip("needs GNU make on Linux, where the release path runs")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    ran = tmp_path / "node-ran"
+    (bin_dir / "node").write_text(f"#!/bin/sh\necho \"$@\" > '{ran}'\n", encoding="utf-8")
+    (bin_dir / "node").chmod(0o755)
+    environ = {k: v for k, v in os.environ.items()
+               if k not in ("PACKAGE_JSON", "MAKEFLAGS", "MFLAGS", "MAKELEVEL")}
+    environ["PATH"] = f"{bin_dir}{os.pathsep}{environ.get('PATH', '')}"
+    environ.update(env or {})
+    done = subprocess.run(["make", "--no-print-directory", "opencode-registry-absent", *args],
+                          cwd=REPO_ROOT, env=environ, capture_output=True, text=True, timeout=120)
+    return done, (ran.read_text() if ran.exists() else None)
+
+
+def test_package_json_reaches_the_entry_point_only_from_the_command_line(tmp_path):
+    """The canary's question (another manifest's version) is an explicit
+    ``PACKAGE_JSON=`` on make's command line. An exported one would point row 9
+    at a different version, so it is refused by name and nothing runs."""
+    manifest = tmp_path / "package.json"
+    manifest.write_text(json.dumps({"name": MANIFEST["name"], "version": "0.0.0"}))
+    done, ran = _make_absent(tmp_path, f"PACKAGE_JSON={manifest}", "OUT=x.json")
+    assert done.returncode == 0, done.stderr
+    assert f"--package-json {manifest}" in ran and f"--registry {SINGLE}" in ran
+    done, ran = _make_absent(tmp_path, "OUT=x.json")
+    assert done.returncode == 0 and "--package-json" not in ran
+    (tmp_path / "node-ran").unlink()
+    done, ran = _make_absent(tmp_path, "OUT=x.json", env={"PACKAGE_JSON": str(manifest)})
+    assert done.returncode != 0
+    assert f"PACKAGE_JSON={manifest} comes from the environment" in done.stderr
+    assert ran is None
 
 
 def _workflow_runs(path: Path):

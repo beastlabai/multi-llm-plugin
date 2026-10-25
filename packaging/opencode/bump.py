@@ -44,10 +44,22 @@ only ``opencode-ai`` and its platform packages, copied from the container
 lockfile's entries with their ``resolved`` and ``integrity`` values, and runs
 ``npm ci`` there against the single registry (``Makefile`` ``OPENCODE_REGISTRY``),
 so npm refuses any tarball whose hash differs from the committed one. Never a
-global install. The installed binary's ``--version``, read in an isolated home
-with autoupdate disabled exactly as :func:`find_binary` reads it, must equal the
-pin, or nothing is printed but the refusal. The binary's absolute path is the
-last stdout line, and the only one: npm's own output goes to stderr.
+global install. Then what ``npm ci`` left is checked before anything runs it
+(:func:`verify_installed`): every package npm's own record of the install
+(``node_modules/.package-lock.json``) lists came from the single registry with
+the committed integrity, nothing else sits in ``node_modules``, and the binary
+is byte for byte one of those verified platform packages' — ``opencode-ai``'s
+install script falls back to a fresh ``npm install`` of a platform package,
+with no committed integrity, when the linked one is missing or fails its own
+``--version``, and this is what catches that. The installed binary's
+``--version``, read in an isolated home with autoupdate disabled exactly as
+:func:`find_binary` reads it, must equal the pin, or nothing is printed but the
+refusal. The binary's absolute path is the last stdout line, and the only one:
+npm's own output goes to stderr.
+
+``verify-install --prefix <dir>`` is that check alone, against the subset
+lockfile the prefix holds: the registry-install probe's container installs the
+pin with ``npm ci`` itself and runs it there.
 
 ``tests/test_opencode_version_pins.py`` reads :func:`read_pins` and fails the
 build when any two pins disagree.
@@ -56,6 +68,7 @@ build when any two pins disagree.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -371,7 +384,7 @@ def pinned_version(root: Path = REPO) -> str:
     return values[0]
 
 
-def install_subset(lock: Dict, version: str) -> Tuple[Dict, Dict]:
+def install_subset(lock: Dict, version: str, registry: Optional[str] = None) -> Tuple[Dict, Dict]:
     """The scratch ``(package.json, package-lock.json)`` for ``opencode-ai@version`` alone.
 
     Copied out of the container lockfile, never resolved: the wrapper's entry
@@ -385,7 +398,11 @@ def install_subset(lock: Dict, version: str) -> Tuple[Dict, Dict]:
     Refused, by name: no wrapper entry, a wrapper whose version is not the pin,
     a wrapper with a hard dependency (a subset without its entry could not
     install), a platform package the lockfile names but does not carry, or any
-    entry without a ``sha512-`` integrity and a ``resolved`` URL to check.
+    entry without a ``sha512-`` integrity and a ``resolved`` URL to check. With
+    ``registry``, also an entry whose ``resolved`` is not under it: ``npm ci``
+    fetches a lockfile URL on another host from that host, ``--registry``
+    notwithstanding. (:func:`verify_installed` checks the same of what npm
+    actually recorded, after the install.)
     """
     packages = lock.get("packages") or {}
     root_key = f"node_modules/{NPM_PACKAGE}"
@@ -415,6 +432,11 @@ def install_subset(lock: Dict, version: str) -> Tuple[Dict, Dict]:
                 f"{LOCKFILE} {key} carries no sha512 integrity and resolved URL, "
                 "so npm could not verify what it downloads"
             )
+        if registry is not None and not str(entry["resolved"]).startswith(registry.rstrip("/") + "/"):
+            raise BumpError(
+                f"{LOCKFILE} {key} resolves to {entry['resolved']}, not under the single "
+                f"registry {registry}: npm ci would fetch it from there"
+            )
     dependencies = {NPM_PACKAGE: version}
     own = {"name": INSTALL_NAME, "version": INSTALL_MANIFEST_VERSION}
     manifest = {**own, "private": True, "dependencies": dependencies}
@@ -429,6 +451,131 @@ def installed_binary(prefix: Path) -> Path:
     """Where ``npm ci`` under ``prefix`` links the ``opencode`` command."""
     name = "opencode.cmd" if os.name == "nt" else "opencode"
     return (prefix / "node_modules" / ".bin" / name).absolute()
+
+
+#: npm's own record of what ``npm ci`` installed, under the prefix.
+HIDDEN_LOCKFILE = Path("node_modules") / ".package-lock.json"
+
+
+def _platform_binary_name() -> str:
+    """What a platform package's ``bin/`` holds (``postinstall.mjs``'s ``sourceBinary``)."""
+    return "opencode.exe" if os.name == "nt" else "opencode"
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _wrapper_target(prefix: Path) -> Path:
+    """The file ``opencode-ai``'s manifest names as its ``opencode`` command."""
+    manifest_path = prefix / "node_modules" / NPM_PACKAGE / "package.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        bin_field = manifest["bin"]
+        rel = bin_field if isinstance(bin_field, str) else bin_field["opencode"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise BumpError(f"{manifest_path} names no opencode command ({exc})") from exc
+    return manifest_path.parent / rel
+
+
+def verify_installed(prefix: Path, binary: Path, subset_lock: Dict, registry: str) -> Dict[str, str]:
+    """What ``npm ci`` left under ``prefix`` is the committed subset, and
+    ``binary`` is one of its verified platform packages' own file.
+
+    ``npm ci`` verifies each tarball it downloads against the lockfile's
+    ``integrity``, and that is all it vouches for. ``opencode-ai``'s install
+    script then links a platform package's binary to ``bin/opencode.exe``, and
+    when that binary is missing or fails its own ``--version`` it runs ``npm
+    install --no-save`` of the platform package into a temporary prefix and
+    copies the binary out of THAT: a fetch with no committed integrity, from
+    whatever registry npm's configuration names there. So, refusing by file:
+
+    * npm's record of the install, ``node_modules/.package-lock.json``, lists
+      only packages of the subset, each ``resolved`` under ``registry`` and
+      with the committed ``integrity`` (npm 10 lists what it installed; the
+      workflow's pinned npm 11 lists the platform packages it skipped too,
+      measured: each entry is held to the same);
+    * every package directory in ``node_modules`` is one that record lists;
+    * ``binary`` (its symlinks resolved; on Windows, the wrapper's ``bin``
+      target behind the ``.cmd`` shim) is the same file as, or byte-identical
+      to, ``bin/opencode`` in one of those verified platform packages.
+
+    Returns which package that is, how it matched, and the binary's sha256.
+    """
+    prefix = Path(prefix)
+    hidden_path = prefix / HIDDEN_LOCKFILE
+    try:
+        hidden = json.loads(hidden_path.read_text(encoding="utf-8")).get("packages") or {}
+    except (OSError, ValueError, AttributeError) as exc:
+        raise BumpError(f"{hidden_path}: npm's record of the install is unreadable ({exc})") from exc
+    committed = subset_lock.get("packages") or {}
+    prefix_url = registry.rstrip("/") + "/"
+    verified: List[str] = []
+    for key, entry in sorted(hidden.items()):
+        if not key:
+            continue
+        if not isinstance(entry, dict):
+            raise BumpError(f"{hidden_path}: {key} is not an entry")
+        if key not in committed:
+            raise BumpError(f"{hidden_path}: {key} is installed but is not in the committed "
+                            "subset npm ci was given")
+        resolved = str(entry.get("resolved") or "")
+        if not resolved.startswith(prefix_url):
+            raise BumpError(f"{hidden_path}: {key} came from {resolved or '<nowhere recorded>'}, "
+                            f"not the single registry {registry}")
+        if entry.get("integrity") != committed[key].get("integrity"):
+            raise BumpError(f"{hidden_path}: {key} was installed with integrity "
+                            f"{entry.get('integrity')!r}, not the committed "
+                            f"{committed[key].get('integrity')!r}")
+        verified.append(key)
+    modules = prefix / "node_modules"
+    present: List[str] = []
+    for child in sorted(modules.iterdir()) if modules.is_dir() else []:
+        # `.bin`, npm's record itself, any cache npm keeps there: no package
+        # name starts with a dot, so nothing there is a package Node loads.
+        if child.name.startswith("."):
+            continue
+        if child.name.startswith("@") and child.is_dir():
+            present += [f"node_modules/{child.name}/{inner.name}" for inner in sorted(child.iterdir())]
+        else:
+            present.append(f"node_modules/{child.name}")
+    stray = [key for key in present if key not in verified]
+    if stray:
+        raise BumpError(f"{modules} holds {', '.join(stray)}, which {hidden_path} does not list: "
+                        "npm ci did not put it there")
+
+    target = _wrapper_target(prefix) if os.name == "nt" else Path(os.path.realpath(binary))
+    if not target.is_file():
+        raise BumpError(f"{binary} resolves to {target}, which is not a file")
+    wrapper_key = f"node_modules/{NPM_PACKAGE}"
+    candidates = [(key, prefix / key / "bin" / _platform_binary_name())
+                  for key in verified if key != wrapper_key]
+    target_size = target.stat().st_size
+    target_sha = None
+    for key, candidate in candidates:
+        if not candidate.is_file():
+            continue
+        if os.path.samefile(target, candidate):
+            how = "same file (hard link or symlink)"
+        else:
+            if candidate.stat().st_size != target_size:
+                continue
+            target_sha = target_sha or _sha256_file(target)
+            if _sha256_file(candidate) != target_sha:
+                continue
+            how = "byte-identical copy"
+        return {"binary": str(target), "platform_package": key, "how": how,
+                "sha256": target_sha or _sha256_file(target)}
+    raise BumpError(
+        f"{target} is not the binary of any platform package npm ci installed and verified "
+        f"({', '.join(key.split('/', 1)[1] for key in verified if key != wrapper_key) or 'none'}): "
+        f"{NPM_PACKAGE}'s install script fell back to a download with no committed integrity, "
+        "or something replaced the binary. Refusing to run it."
+    )
 
 
 def _single_registry(url: Optional[str]) -> str:
@@ -476,7 +623,7 @@ def cmd_install(prefix: Path, registry: Optional[str] = None, root: Path = REPO,
     version = pinned_version(root)
     url = _single_registry(registry)
     lock = json.loads((root / LOCKFILE).read_text(encoding="utf-8"))
-    manifest, scratch_lock = install_subset(lock, version)
+    manifest, scratch_lock = install_subset(lock, version, registry=url)
 
     prefix = Path(prefix).absolute()
     if (prefix / "package.json").exists() and not (prefix / INSTALL_MARKER).exists():
@@ -497,6 +644,10 @@ def cmd_install(prefix: Path, registry: Optional[str] = None, root: Path = REPO,
     binary = installed_binary(prefix)
     if not binary.exists():
         raise BumpError(f"npm ci finished but {binary} does not exist")
+    # Before anything runs it: the binary is a verified platform package's own.
+    matched = verify_installed(prefix, binary, scratch_lock, url)
+    print(f"opencode-install: {binary} is {matched['platform_package']}'s binary "
+          f"({matched['how']}, sha256 {matched['sha256']})", file=sys.stderr)
     answered = version_reader(str(binary))
     if answered != version:
         raise BumpError(
@@ -505,6 +656,23 @@ def cmd_install(prefix: Path, registry: Optional[str] = None, root: Path = REPO,
             "repository claims"
         )
     print(str(binary))
+    return 0
+
+
+def cmd_verify_install(prefix: Path, registry: Optional[str] = None) -> int:
+    """:func:`verify_installed` on a prefix ``npm ci`` already ran in, against
+    the subset lockfile it holds (``npm ci`` never rewrites that file)."""
+    url = _single_registry(registry)
+    prefix = Path(prefix).absolute()
+    lock_path = prefix / "package-lock.json"
+    try:
+        scratch_lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise BumpError(f"{lock_path}: the subset lockfile is unreadable ({exc})") from exc
+    binary = installed_binary(prefix)
+    matched = verify_installed(prefix, binary, scratch_lock, url)
+    print(f"opencode-install: {binary} is {matched['platform_package']}'s binary "
+          f"({matched['how']}, sha256 {matched['sha256']})")
     return 0
 
 
@@ -523,12 +691,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 help="scratch directory (never a global install)")
     install_parser.add_argument("--registry", default=None,
                                 help="must be Makefile OPENCODE_REGISTRY (the default)")
+    verify_parser = sub.add_parser(
+        "verify-install", help="check what npm ci left under PREFIX (install's own check)")
+    verify_parser.add_argument("--prefix", required=True, type=Path,
+                               help="a prefix npm ci ran in with the subset lockfile")
+    verify_parser.add_argument("--registry", default=None,
+                               help="must be Makefile OPENCODE_REGISTRY (the default)")
     args = parser.parse_args(argv)
     try:
         if args.command == "check":
             return cmd_check()
         if args.command == "install":
             return cmd_install(args.prefix, args.registry)
+        if args.command == "verify-install":
+            return cmd_verify_install(args.prefix, args.registry)
         return cmd_set(args.version, args.bin, allow_downgrade=args.allow_downgrade)
     except (BumpError, subprocess.CalledProcessError) as exc:
         print(f"opencode-bump: {exc}", file=sys.stderr)

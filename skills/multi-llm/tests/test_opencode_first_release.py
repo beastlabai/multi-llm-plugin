@@ -371,6 +371,27 @@ class TestGitBinding:
         assert release.run(dry_run=False) == first_release.EXIT_REFUSED
         _refused(release, "clean-tree")
         assert not world.published
+        refusal = next(line for line in release.errors if line.startswith("REFUSING (clean-tree)"))
+        assert "release-gate record" not in refusal
+
+    @pytest.mark.parametrize("status", [
+        "?? skills/multi-llm/tests/container/records/20261025T120000Z-opencode-release-gate.json\n",
+        " M Makefile\n M skills/multi-llm/tests/container/records/"
+        "20261025T120000Z-opencode-release-gate.json\n",
+    ])
+    def test_a_record_in_the_tree_says_where_it_belongs(self, release, world, status):
+        """The gate exports to the gitignored .gate/export/; a record copied into
+        records/ belongs in the default branch's commit after the fast-forward,
+        and the refusal says so, and how to come back to the tag."""
+        world.status = status
+        assert release.run(dry_run=False) == first_release.EXIT_REFUSED
+        _refused(release, "clean-tree")
+        refusal = next(line for line in release.errors if line.startswith("REFUSING (clean-tree)"))
+        assert "default branch's own commit after the fast-forward" in refusal
+        tag = release.facts["tag"]
+        assert f"check {tag}'s commit out again" in refusal
+        assert "make opencode-publish-first" in refusal
+        assert not world.published
 
     def test_a_lightweight_tag_refuses(self, release, world):
         world.tag_type = "commit"

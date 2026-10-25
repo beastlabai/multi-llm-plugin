@@ -34,10 +34,14 @@ is the one executable contract that replaced both. It owns five things:
   --write-stamp`` runs before writing anything, and :func:`stamp_summary` is the
   checked summary it embeds.
 * **The release-gate record.** :func:`export_record` writes
-  ``tests/container/records/<UTC>-opencode-release-gate.json`` from the session
-  that authorized the stamp — the one way row 8's local evidence reaches CI,
-  whose runners have no Docker daemon — and :func:`validate_records` is the one
-  validator the publishing workflow's ``verify`` job and the suite both run.
+  ``<UTC>-opencode-release-gate.json`` from the session that authorized the
+  stamp into the gitignored ``.gate/export/`` — the one way row 8's local
+  evidence reaches CI, whose runners have no Docker daemon. The maintainer
+  copies it into ``tests/container/records/`` and commits it in the default
+  branch's own commit after the fast-forward (plan step 2), never in the tag's
+  tree, then checks the tag's commit out again before ``make
+  opencode-publish-first``. :func:`validate_records` is the one validator the
+  publishing workflow's ``verify`` job and the suite both run.
 
 **Stdlib only**, and that is a requirement rather than a preference: the
 ``verify`` job runs ``validate-record`` under ``uv run --frozen --no-dev``, which
@@ -96,9 +100,11 @@ EVIDENCE_DIR = PACKAGE_DIR / ".gate"
 #: directory, NOT ``RECORDS_DIR``. ``records/`` lies under the payload prefix
 #: ``skills/multi-llm/``, so an untracked record there makes the tree dirty and
 #: ``build.py --check-stamp`` — and with it ``opencode-publish-first`` — refuse
-#: the very candidate the gate just stamped. The record is committed to the
-#: default branch only after the fast-forward (plan step 2), in a commit of its
-#: own; the export prints the copy-and-commit lines for that step.
+#: the very candidate the gate just stamped. :func:`dirty_paths` exempts nothing
+#: under ``records/`` either. The record is copied there and committed in the
+#: default branch's own commit after the fast-forward (plan step 2); the tag's
+#: commit is then checked out again before ``make opencode-publish-first``. The
+#: export prints the copy-and-commit lines for that step.
 EXPORT_SUBDIR = "export"
 EXPORT_DIR = EVIDENCE_DIR / EXPORT_SUBDIR
 SESSION_NAME = "session.json"
@@ -346,19 +352,17 @@ def head_sha(root: Path = REPO_ROOT) -> str:
     return sha
 
 
-def _own_export(path: str) -> bool:
-    return path.startswith("skills/multi-llm/tests/container/records/") \
-        and path.endswith(RECORD_SUFFIX)
-
-
 def dirty_paths(root: Path = REPO_ROOT) -> List[str]:
     """Every tracked change and untracked, unignored path, as ``git status``
-    shows them — minus the release-gate records this gate exports, which are
-    its own output and land in a later commit by design (plan step 0).
+    shows them, with no exemption.
 
     The whole tree, not the payload prefixes ``build.py`` guards: an
     uncommitted edit to this module, the Makefile or a row's test changes what
-    the gate *checks* without changing a shipped byte.
+    the gate *checks* without changing a shipped byte. That includes
+    ``tests/container/records/``: the gate exports its record into the
+    gitignored ``.gate/export/`` (:data:`EXPORT_DIR`), so nothing of its own
+    ever lands there uncommitted, and a record file that is dirty there, a
+    hand-edited committed one above all, is a change like any other.
     """
     try:
         done = subprocess.run(
@@ -380,8 +384,7 @@ def dirty_paths(root: Path = REPO_ROOT) -> List[str]:
         status, path = token[:2], token[3:]
         if status[0] in "RC":
             index += 1  # a rename's or copy's source path follows
-        if not _own_export(path):
-            paths.append(f"{status} {path}")
+        paths.append(f"{status} {path}")
     return paths
 
 
@@ -1540,7 +1543,8 @@ def validate_records(*, tag: str, sha: str, version: str, digest: str,
     a fresh record — never edit one to match.
     """
     problems: List[str] = []
-    registry = str(registry).strip().rstrip("/")
+    # `registry.normalize`: one trailing slash, nothing more forgiving.
+    registry = _sibling("registry", "opencode_registry").normalize(str(registry))
     try:
         expected_registry = single_registry()
         if registry != expected_registry:

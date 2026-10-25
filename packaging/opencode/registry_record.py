@@ -494,8 +494,14 @@ def validate_record(
             errors.append(f"{label}: pass {verdict!r} is not a boolean")
         elif verdict is not True:
             errors.append(f"{label} did not pass")
-        if criterion.get("evidence") in (None, "", [], {}):
-            errors.append(f"{label}: no supporting evidence preserved")
+        # A non-empty object, which is what the probe writes for every
+        # criterion, a failing or unattempted one included. `in (None, "", [],
+        # {})` let `false` and `0` through as "evidence": they compare unequal
+        # to every member, and neither preserves any output.
+        evidence = criterion.get("evidence")
+        if not isinstance(evidence, dict) or not evidence:
+            errors.append(f"{label}: no supporting evidence preserved (evidence is "
+                          f"{evidence!r}, not a non-empty object)")
         if "network_proof" in criterion and label != OFFLINE:
             errors.append(f"{label}: network_proof belongs to {OFFLINE} only")
         if label == OFFLINE and verdict is True:

@@ -70,6 +70,15 @@ of its own (``setsid``): no controlling terminal to be stopped by, and one kill
 reaches the ``uv`` and Python processes the plugin starts in process groups of
 their own.
 
+**A SIGTERM ends the children too** (:func:`install_exit_handlers`). The gate
+bounds this probe with ``release_gate.py step``, which on its budget signals
+the probe's process group, and a child in a session of its own is not in that
+group. Python's default SIGTERM ends the interpreter at once, no ``finally``
+run, so ``opencode run`` and the ``uv`` under it outlived the probe. ``main``
+therefore turns SIGTERM and SIGINT into ``SystemExit``, every ``finally``
+sweep runs, and :func:`run_bounded` holds the signal across the moments a
+child exists but could not yet be swept (its spawn, and the sweep itself).
+
 **The no-commit project is graded on the committed project's terms.** Until the
 shared runtime handles a repository without a ``HEAD``, its calls fail and the
 probe fails with them. The plan's decision is to fix the runtime; adding a
@@ -95,6 +104,7 @@ registry-install probe to reuse: :func:`isolated_env` and :func:`materialize`,
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -383,6 +393,82 @@ def real_home() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Exit signals
+# ---------------------------------------------------------------------------
+
+#: The signals :func:`install_exit_handlers` turns into ``SystemExit``.
+EXIT_SIGNALS = ("SIGTERM", "SIGINT")
+#: :func:`held_exit_signals`' nesting depth and the signal it deferred.
+_HELD: Dict[str, Any] = {"depth": 0, "pending": None}
+
+
+def _ignore_signal(_signum: int, _frame: Any) -> None:
+    """A second exit signal, while the first one's sweeps run: nothing."""
+
+
+def _raise_exit(signum: int) -> None:
+    """``SystemExit(128 + signum)``, the shell's spelling of "killed by it".
+
+    Once: every later exit signal is swallowed, so a second SIGTERM (``uv run``
+    forwards the one it got, and the step's ``killpg`` reaches both) cannot
+    interrupt the sweeps the first one started. Swallowed by a Python handler,
+    not ``SIG_IGN``: an ignored disposition survives ``exec``, so a ``docker rm
+    -f`` started during the sweeps would inherit it and shrug off its own
+    SIGTERM.
+    """
+    for name in EXIT_SIGNALS:
+        try:
+            signal.signal(getattr(signal, name), _ignore_signal)
+        except ValueError:  # not the main thread; the handler below only runs there
+            pass
+    raise SystemExit(128 + signum)
+
+
+def _on_exit_signal(signum: int, _frame: Any) -> None:
+    if _HELD["depth"]:
+        _HELD["pending"] = signum
+        return
+    _raise_exit(signum)
+
+
+def install_exit_handlers() -> None:
+    """SIGTERM and SIGINT raise ``SystemExit`` in this process, from now on.
+
+    For the probes' ``main`` (this one and ``registry_check.py``'s), never on
+    import. With the default handlers a SIGTERM ends the interpreter on the
+    spot and no ``finally`` runs, so every child :func:`run_bounded` started in
+    a session of its own (``opencode run``, and the ``uv`` and Python under it)
+    survives the probe; as an exception it unwinds through each
+    :func:`run_bounded` and :class:`StubModel`, and each sweeps what it started.
+    """
+    for name in EXIT_SIGNALS:
+        signal.signal(getattr(signal, name), _on_exit_signal)
+
+
+@contextlib.contextmanager
+def held_exit_signals() -> Iterable[None]:
+    """Defer an exit signal until the block ends, then raise it.
+
+    Around the moments an exception would orphan a child: between a fork and
+    the handle being bound (nothing could sweep a child it has no pid for), and
+    during a sweep (a ``SystemExit`` inside ``wait`` would abandon it half
+    done). Main thread only, which is where Python runs signal handlers;
+    harmless when no handler is installed.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    _HELD["depth"] += 1
+    try:
+        yield
+    finally:
+        _HELD["depth"] -= 1
+        if not _HELD["depth"] and _HELD["pending"] is not None:
+            signum, _HELD["pending"] = _HELD["pending"], None
+            _raise_exit(signum)
+
+
+# ---------------------------------------------------------------------------
 # Bounded children
 # ---------------------------------------------------------------------------
 
@@ -460,26 +546,37 @@ def _stop(proc: "subprocess.Popen[bytes]") -> None:
 
 def run_bounded(argv: Sequence[str], *, cwd: Path, env: Mapping[str, str], budget_s: float,
                 stdout: Path, stderr: Path, stop: Optional[Callable[[], bool]] = None,
-                poll_s: float = 0.2) -> Bounded:
+                poll_s: float = 0.2, append: bool = False) -> Bounded:
     """Run ``argv`` to its end, its budget, or ``stop()`` returning true.
 
     stdin is ``/dev/null`` and both streams go to files, so nothing can block on
-    a pipe nobody drains. The child leads a new session; at the budget (or the
-    stop, or this process being interrupted) the whole session is sent SIGTERM,
-    then SIGKILL after :data:`KILL_GRACE_S`. A child that exited on its own
-    still has its session swept, so a straggler it left cannot outlive the probe.
+    a pipe nobody drains (``stderr`` equal to ``stdout`` merges them into that
+    one file; ``append`` adds to the files instead of replacing them). The
+    child leads a new session; at the budget (or the stop, or this process
+    being interrupted, an exit signal included once
+    :func:`install_exit_handlers` ran) the whole session is sent SIGTERM, then
+    SIGKILL after :data:`KILL_GRACE_S`. A child that exited on its own still
+    has its session swept, so a straggler it left cannot outlive the probe.
     """
+    stdout = Path(stdout)
+    stderr = Path(stderr)
+    merged = stderr == stdout
     stdout.parent.mkdir(parents=True, exist_ok=True)
     stderr.parent.mkdir(parents=True, exist_ok=True)
     kwargs: Dict[str, Any] = (
         {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
         else {"start_new_session": True})
+    mode = "ab" if append else "wb"
     start = time.monotonic()
     reason: Optional[str] = None
-    with open(stdout, "wb") as out, open(stderr, "wb") as err:
-        proc = subprocess.Popen(list(argv), cwd=str(cwd), env=dict(env),
-                                stdin=subprocess.DEVNULL, stdout=out, stderr=err, **kwargs)
+    proc: Optional["subprocess.Popen[bytes]"] = None
+    with open(stdout, mode) as out, \
+            (contextlib.nullcontext(subprocess.STDOUT) if merged else open(stderr, mode)) as err:
         try:
+            with held_exit_signals():
+                proc = subprocess.Popen(list(argv), cwd=str(cwd), env=dict(env),
+                                        stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                                        **kwargs)
             while proc.poll() is None:
                 if time.monotonic() - start > budget_s:
                     reason = "budget"
@@ -492,10 +589,12 @@ def run_bounded(argv: Sequence[str], *, cwd: Path, env: Mapping[str, str], budge
             reason = "interrupted"
             raise
         finally:
-            if proc.poll() is None:
-                _stop(proc)
-            elif os.name != "nt":
-                _signal_session(proc.pid, signal.SIGKILL)
+            if proc is not None:
+                with held_exit_signals():
+                    if proc.poll() is None:
+                        _stop(proc)
+                    elif os.name != "nt":
+                        _signal_session(proc.pid, signal.SIGKILL)
     killed = reason is not None
     return Bounded(argv=tuple(argv), returncode=None if killed else proc.returncode,
                    killed=killed, reason=reason, elapsed_s=round(time.monotonic() - start, 2),
@@ -760,10 +859,11 @@ class StubModel:
         out = open(self.diag / f"{self.label}.stub-stdout.txt", "wb")
         err = open(self.diag / f"{self.label}.stub-stderr.txt", "wb")
         self._streams = [out, err]
-        self._proc = subprocess.Popen(
-            [self.python, str(self.server), "--port", "0", "--port-file", str(port_file),
-             "--log", str(self.log), "--scenario", str(scenario_path)],
-            env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=err)
+        with held_exit_signals():
+            self._proc = subprocess.Popen(
+                [self.python, str(self.server), "--port", "0", "--port-file", str(port_file),
+                 "--log", str(self.log), "--scenario", str(scenario_path)],
+                env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=err)
         deadline = time.monotonic() + STUB_START_BUDGET_S
         while True:
             if port_file.exists():
@@ -781,17 +881,18 @@ class StubModel:
             time.sleep(0.05)
 
     def __exit__(self, *_exc: Any) -> None:
-        proc, self._proc = self._proc, None
-        if proc is not None and proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=KILL_GRACE_S)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-        for stream in self._streams:
-            stream.close()
-        self._streams = []
+        with held_exit_signals():
+            proc, self._proc = self._proc, None
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=KILL_GRACE_S)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+            for stream in self._streams:
+                stream.close()
+            self._streams = []
 
     def entries(self) -> List[Dict[str, Any]]:
         if not self.log.exists():
@@ -1453,6 +1554,9 @@ def row7(tarball: Path, opencode: str, registry: str, out: Path, keep: bool = Fa
                                  + ": OpenCode's background install did not finish in time")
     except ProbeError as exc:
         failures.append(str(exc))
+    except SystemExit as exc:  # an exit signal (install_exit_handlers): swept, then named
+        failures.append(f"the probe was interrupted (exit {exc.code}) before it finished")
+        raise
     except Exception as exc:  # noqa: BLE001 - the evidence must still be written
         failures.append(f"the probe itself failed: {type(exc).__name__}: {exc}")
         raise
@@ -1489,6 +1593,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     r7.add_argument("--out", required=True, type=Path, help="where the row-7 evidence JSON goes")
     r7.add_argument("--keep", action="store_true", help="keep probe_root after a pass")
     args = parser.parse_args(argv)
+    install_exit_handlers()
     try:
         return row7(args.tarball, args.opencode, args.registry, args.out, keep=args.keep)
     except Exception:  # noqa: BLE001 - the evidence is written; this is the diagnostic

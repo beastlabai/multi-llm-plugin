@@ -52,8 +52,16 @@ def single_registry(makefile: Optional[Path] = None) -> str:
 
 
 def normalize(url: str) -> str:
-    """``url`` with any trailing slash removed — npm writes both spellings."""
-    return str(url).strip().rstrip("/")
+    """``url`` with ONE trailing slash removed — npm writes both spellings.
+
+    Nothing more forgiving than that. Surrounding whitespace, or a second
+    trailing slash, is left in place, so the value compares unequal to the
+    single registry and is refused as another one: a caller that hands over
+    ``" https://registry.npmjs.org//"`` has built its URL by some route this
+    release path never chose, and the comparison is not where to repair it.
+    """
+    text = str(url)
+    return text[:-1] if text.endswith("/") else text
 
 
 def require_single(url: str, makefile: Optional[Path] = None) -> str:

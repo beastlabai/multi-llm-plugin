@@ -801,8 +801,13 @@ opencode-package-check-ci:
 # from another machine attests to that machine's rows. CI consumes no stamps: its
 # jobs re-run rows 1-7 and 9, and row 8 — which needs a Docker daemon the runners
 # do not have — reaches CI only as the release-gate record exported at the end,
-# from the session that authorized the stamp, and committed to the default branch
-# after the fast-forward (plan step 2).
+# from the session that authorized the stamp, into the gitignored
+# $(OPENCODE_GATE_DIR)/export/ (never records/, where an untracked file would
+# make the tree dirty and the stamp refuse). It is copied into
+# $(CONTAINER_DIR)/records/ and committed in the default branch's own commit after
+# the fast-forward (plan step 2), never in the tag's tree; the tag's commit is
+# then checked out again before `make opencode-publish-first`. `export-record`
+# prints those lines.
 opencode-package-check:
 	@$(OPENCODE_GATE) begin $(if $(ALLOW_DIRTY),--allow-dirty,)
 	$(OPENCODE_GATE_STEP) ci-rows --timeout 3600 -- $(MAKE) --no-print-directory opencode-package-check-ci
@@ -838,8 +843,18 @@ opencode-package-check:
 # is an unknown; both refuse. The script re-reads OPENCODE_REGISTRY from this
 # file and refuses any other `--registry`, so the URL is still written once.
 # `OUT=<file>` keeps the row-9 evidence JSON for `release_gate.py record 9`.
+# `PACKAGE_JSON=<file>` asks about another manifest's name and version: the
+# workflow's canary, `opencode-multi-llm@0.0.0`, which must answer E404 under the
+# job's own npm setup. Honoured only from this make command line: an exported
+# PACKAGE_JSON would quietly point row 9 at a different version (`record 9`
+# would catch it in the full gate, a workflow's row 9 would not), so one from
+# anywhere else is refused by name.
 opencode-registry-absent:
-	node $(OPENCODE_PKG)/registry_absent.mjs --registry $(OPENCODE_REGISTRY) $(if $(OUT),--out "$(OUT)")
+	@if [ -n "$(PACKAGE_JSON)" ]; then case "$(origin PACKAGE_JSON)" in "command line") ;; *) \
+	  echo "make: REFUSING: PACKAGE_JSON=$(PACKAGE_JSON) comes from the $(origin PACKAGE_JSON), not this make command line; row 9 asks about $(OPENCODE_PKG)/package.json unless PACKAGE_JSON=<file> is passed explicitly. Unset it." >&2; \
+	  exit 1 ;; esac; fi
+	node $(OPENCODE_PKG)/registry_absent.mjs --registry $(OPENCODE_REGISTRY) $(if $(OUT),--out "$(OUT)") \
+	  $(if $(and $(filter command line,$(origin PACKAGE_JSON)),$(PACKAGE_JSON)),--package-json "$(PACKAGE_JSON)")
 
 # THE LAPTOP FIRST RELEASE, and only that. npm's trusted publishing still needs
 # an existing package (`npm trust`: "The package you're configuring must already
@@ -924,14 +939,21 @@ opencode-check-bump:
 # the VM's interface to be detached. OUT is the record; its supporting output
 # goes beside it. REHEARSAL_REGISTRY=http://127.0.0.1:<port> (a
 # `registry_stub.py serve` of the gated tarball) makes the run a REHEARSAL: the
-# record says so and is never release evidence. OPENCODE, PREVIOUS_PIN and REPO
-# pass through. `--frozen --no-dev`: the probe needs only the runtime lock.
+# record says so and is never release evidence. It is honoured ONLY from this
+# make command line ($(origin) `command line`): an export left over from a
+# rehearsal would otherwise turn step 5's real run into another rehearsal, so a
+# value from the environment (or anywhere else) is refused by name. OPENCODE,
+# PREVIOUS_PIN and REPO pass through. `--frozen --no-dev`: the probe needs only
+# the runtime lock.
 opencode-registry-check:
 	@test -n "$(SPEC)" -a -n "$(TAG)" -a -n "$(ENVIRONMENT)" -a -n "$(OUT)" || { \
 	  echo "usage: make opencode-registry-check SPEC=<name@version> TAG=opencode-v<version> ENVIRONMENT=ci-runner|container|vm OUT=<record.json> [REHEARSAL_REGISTRY=http://127.0.0.1:<port>] [WORKFLOW_RUN_ID=n] [OPENCODE=bin] [PREVIOUS_PIN=spec] [REPO=path]"; exit 1; }
+	@if [ -n "$(REHEARSAL_REGISTRY)" ]; then case "$(origin REHEARSAL_REGISTRY)" in "command line") ;; *) \
+	  echo "make: REFUSING: REHEARSAL_REGISTRY=$(REHEARSAL_REGISTRY) comes from the $(origin REHEARSAL_REGISTRY), not this make command line; a leftover export would turn this run into a rehearsal. Unset it, or pass REHEARSAL_REGISTRY=<url> on the command line for a rehearsal." >&2; \
+	  exit 1 ;; esac; fi
 	uv run --frozen --no-dev --project skills/multi-llm -- python $(OPENCODE_PKG)/registry_check.py \
 	  --spec "$(SPEC)" --registry $(OPENCODE_REGISTRY) --tag "$(TAG)" --environment "$(ENVIRONMENT)" \
-	  --out "$(OUT)" $(if $(REHEARSAL_REGISTRY),--rehearsal-registry "$(REHEARSAL_REGISTRY)") \
+	  --out "$(OUT)" $(if $(and $(filter command line,$(origin REHEARSAL_REGISTRY)),$(REHEARSAL_REGISTRY)),--rehearsal-registry "$(REHEARSAL_REGISTRY)") \
 	  $(if $(WORKFLOW_RUN_ID),--workflow-run-id "$(WORKFLOW_RUN_ID)") $(if $(OPENCODE),--opencode "$(OPENCODE)") \
 	  $(if $(PREVIOUS_PIN),--previous-pin "$(PREVIOUS_PIN)") $(if $(REPO),--repo "$(REPO)")
 

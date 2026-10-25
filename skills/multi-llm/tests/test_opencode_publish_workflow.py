@@ -261,12 +261,25 @@ def _all_steps():
 
 
 ROW9_JOBS = ("gate", "verify", "publish")
+#: The gate's canary: row 9's entry point, asked about a version never published.
+CANARY_NAME = "Row 9's canary: a version never published answers E404"
 
 
 def _row9(job_id: str) -> dict:
-    found = [s for s in steps(job_id) if ENTRY_POINT.search(code(s))]
+    """The job's row 9 proper: its one call of the entry point other than the
+    gate's canary, which asks about another version on purpose."""
+    found = [s for s in steps(job_id) if ENTRY_POINT.search(code(s))
+             and s.get("name") != CANARY_NAME]
     assert len(found) == 1, f"{job_id} runs row 9's entry point {len(found)} times"
     return found[0]
+
+
+def _npm_setup(job_id: str) -> tuple:
+    """The job's setup-node step and its pinned-npm step, as written."""
+    node = [s for s in steps(job_id) if _uses(s) == "actions/setup-node"]
+    npm = [s for s in steps(job_id) if s.get("name") == "Install the pinned npm"]
+    assert len(node) == 1 and len(npm) == 1, job_id
+    return node[0], npm[0]
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +488,15 @@ class TestRehearsalInputs:
         for job_id in ("verify", "publish"):
             assert re.search(r"\binputs\.tag\b", yaml.safe_dump(JOBS[job_id]))
 
+    def test_the_release_tag_pattern_is_the_record_schemas(self):
+        """One shape of release tag everywhere: plain x.y.z. The workflow's
+        pattern admitting a prerelease the release-gate record's schema (and
+        so ``validate-record``) refuses would only defer the refusal."""
+        schema = json.loads((PACKAGE_DIR / "release-gate-record.schema.json").read_text("utf-8"))
+        assert WORKFLOW_ENV["RELEASE_TAG_PATTERN"] == schema["properties"]["tag"]["pattern"]
+        for tag in ("opencode-v0.1.1-rc.1", "opencode-v1.0.0-beta", "opencode-v1.0"):
+            assert not re.fullmatch(WORKFLOW_ENV["RELEASE_TAG_PATTERN"], tag), tag
+
     def test_the_bootstrap_tag_is_written_once(self):
         assert re.fullmatch(WORKFLOW_ENV["RELEASE_TAG_PATTERN"], BOOTSTRAP_TAG)
         assert TEXT.count(BOOTSTRAP_TAG) == 1
@@ -504,7 +526,6 @@ class TestRoute:
         ("opencode-v0.1.2", "normal"),
         ("opencode-v0.1.10", "normal"),
         ("opencode-v1.0.0", "normal"),
-        (BOOTSTRAP_TAG + "-rc.1", "normal"),
         ("opencode-v0.1.11", "normal"),
     ])
     def test_a_real_push_routes_only_the_bootstrap_tag_to_bootstrap(self, shell, tag, path):
@@ -540,6 +561,10 @@ class TestRoute:
         (_dispatch(mode="rehearse", as_tag="opencode-v0.1.2\nx", path="normal"),
          "is not an opencode-v"),
         (_push("opencode-vfoo"), "is not an opencode-v"),
+        # Plain x.y.z only, as the record schema and release_gate admit: a
+        # prerelease tag is refused here, not routed on to be refused later.
+        (_push(BOOTSTRAP_TAG + "-rc.1"), "is not an opencode-v"),
+        (_push("opencode-v1.0.0-beta"), "is not an opencode-v"),
         ({"github": {"event_name": "push", "ref_type": "branch", "ref_name": "master"},
           "inputs": {}}, "this job gates tags"),
     ])
@@ -791,13 +816,92 @@ class TestRow9AndNpm:
     def test_every_row_9_job_has_the_same_npm_setup(self):
         setups = []
         for job_id in ROW9_JOBS:
-            node = [s for s in steps(job_id) if _uses(s) == "actions/setup-node"]
-            npm = [s for s in steps(job_id) if s.get("name") == "Install the pinned npm"]
-            assert len(node) == 1 and len(npm) == 1, job_id
             assert index(job_id, lambda s: _uses(s) == "actions/setup-node") < \
                 index(job_id, lambda s: s is _row9(job_id)), job_id
-            setups.append((node[0], npm[0]))
+            setups.append(_npm_setup(job_id))
         assert all(pair == setups[0] for pair in setups)
+
+
+class TestTheRow9Canary:
+    """Plan step 0's `.npmrc` case, recorded on every gate run: under the job's
+    exact npm setup, a version never published must answer ``E404``, or row 9
+    and the bootstrap probe would both fail closed on the real tag."""
+
+    def test_it_runs_on_every_path_rehearsal_or_not(self):
+        canary = step("gate", CANARY_NAME)
+        assert "if" not in canary
+        for path in ("normal", "bootstrap"):
+            for rehearsal in ("true", "false"):
+                assert CANARY_NAME in _gate_runs(path, rehearsal), (path, rehearsal)
+
+    def test_it_runs_before_row_9_and_the_bootstrap_probe(self):
+        at = index("gate", lambda s: s.get("name") == CANARY_NAME)
+        assert at < index("gate", lambda s: s is _row9("gate"))
+        assert at < index("gate", lambda s: s.get("name") == "Bootstrap: the registry-install probe")
+
+    def test_its_npm_setup_is_the_row_9_jobs(self):
+        """The same setup-node and pinned-npm steps as every row-9 job, run
+        before it in its own job, and nothing of its own that npm would read:
+        no env but the package's name, no npm flag or config of its own, row
+        9's entry point for the question."""
+        assert _npm_setup("gate") == _npm_setup("verify") == _npm_setup("publish")
+        at = index("gate", lambda s: s.get("name") == CANARY_NAME)
+        assert index("gate", lambda s: _uses(s) == "actions/setup-node") < at
+        assert index("gate", lambda s: s.get("name") == "Install the pinned npm") < at
+        canary = step("gate", CANARY_NAME)
+        assert set(canary.get("env") or {}) == {"NAME"}
+        assert canary["env"]["NAME"] == "${{ steps.facts.outputs.name }}"
+        body = code(canary)
+        assert not re.search(r"(?i)npm_config|NODE_AUTH_TOKEN|\.npmrc|--userconfig|--registry",
+                             body)
+        assert not re.search(r"(?m)(?:^|[;&|(]\s*)npm\s", body), "an npm call of its own"
+        assert 'make opencode-registry-absent PACKAGE_JSON="${canary}/package.json" OUT="${out}"' \
+            in body
+        assert _row9("gate")["run"].startswith("make opencode-registry-absent ")
+
+    def test_it_asks_about_version_0_0_0_and_keeps_the_answer(self):
+        body = code(step("gate", CANARY_NAME))
+        assert '"version": "0.0.0"' in body
+        assert 'out="${RUNNER_TEMP}/opencode-evidence/row9-canary.json"' in body
+        assert 'tee -a "${GITHUB_STEP_SUMMARY}"' in body
+        assert isinstance(step("gate", CANARY_NAME)["timeout-minutes"], int)
+
+    @needs_shell
+    @pytest.mark.parametrize("answer, status, passes", [
+        ("E404", 0, True),
+        ("E401", 1, False),        # a placeholder token's answer
+        ("ECONNREFUSED", 1, False),
+        ("E401", 0, False),        # an exit 0 that disagrees with the code still refuses
+        (None, 1, False),          # no evidence at all
+    ])
+    def test_its_own_shell_requires_e404(self, shell, answer, status, passes):
+        """The step's own bash, with ``make`` a stand-in that writes the
+        evidence the entry point would and exits as it would."""
+        seen = shell.root / "make-args.json"
+        (shell.bin / "make").write_text(
+            "#!/bin/sh\n"
+            f'exec "{sys.executable}" - "$@" <<\'PY\'\n'
+            "import json, sys\n"
+            "args = dict(a.split('=', 1) for a in sys.argv[2:])\n"
+            f"json.dump({{'argv': sys.argv[1:], 'manifest': json.load(open(args['PACKAGE_JSON']))}}, "
+            f"open({str(seen)!r}, 'w'))\n"
+            + (f"json.dump({{'row': '9', 'code': {answer!r}}}, open(args['OUT'], 'w'))\n"
+               if answer else "")
+            + f"sys.exit({status})\n"
+            "PY\n", encoding="utf-8")
+        (shell.bin / "make").chmod(0o755)
+        done, _ = shell.run(step("gate", CANARY_NAME), env={"NAME": "opencode-multi-llm"},
+                            cwd=shell.root)
+        made = json.loads(seen.read_text(encoding="utf-8"))
+        assert made["argv"][0] == "opencode-registry-absent"
+        assert made["manifest"] == {"name": "opencode-multi-llm", "version": "0.0.0"}
+        summary = (shell.root / "summary.md").read_text(encoding="utf-8")
+        assert f"answered {answer or '<no evidence>'}" in summary
+        if passes:
+            assert done.returncode == 0, done.stderr
+        else:
+            assert done.returncode != 0
+            assert "not E404" in done.stderr
 
     def test_no_job_writes_an_auth_npmrc(self):
         """No `registry-url`, so setup-node writes no `.npmrc` and exports no

@@ -92,7 +92,7 @@
           ]
         },
         "pass": {"type": "boolean"},
-        "evidence": {"description": "The criterion's supporting output, preserved."},
+        "evidence": {"type": "object", "description": "The criterion's supporting output, preserved: a non-empty object (registry_record.py refuses an empty one)."},
         "network_proof": {"$ref": "#/$defs/network_proof"}
       }
     },
