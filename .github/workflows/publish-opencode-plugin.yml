@@ -15,9 +15,10 @@
 #            the gate on the tag's commit and validates the committed
 #            release-gate record (row 8's evidence) against that rebuild. Every
 #            piece of third-party code the gate executes runs here: the OpenCode
-#            binary and its install scripts, the cold `uv` installs, the
-#            scripted stub model and the plugin. No job that runs any of it can
-#            request an OIDC token. It outputs the commit and the digest.
+#            binary (installed with its install script off), the cold `uv`
+#            installs, the scripted stub model and the plugin. No job that runs
+#            any of it can request an OIDC token. It outputs the commit and the
+#            digest.
 #   publish  `needs: verify`. The only job holding `id-token: write`, behind
 #            the `npm-publish` environment. It rebuilds, refuses a digest that
 #            is not verify's before anything else, reruns row 9, packs once with
@@ -525,11 +526,15 @@ jobs:
           if [ "${REHEARSAL}" = "true" ]; then source="${STUB_URL}"; fi
           deadline=$(( $(date +%s) + 900 ))
           while :; do
-            cache="$(mktemp -d)"
+            # From an empty directory named as --prefix: npm's project root,
+            # so no `.npmrc` in the checkout (or above it) is read as project
+            # config, which would outrank the runner's own (registry_absent.mjs).
+            scratch="$(mktemp -d)"
             integrity=""
-            integrity="$(npm view "${spec}" dist.integrity --registry "${source}" --cache "${cache}" \
+            integrity="$(cd "${scratch}" && npm view "${spec}" dist.integrity --registry "${source}" \
+              --cache "${scratch}/cache" --prefix "${scratch}" \
               --prefer-online --no-update-notifier 2> "${RUNNER_TEMP}/opencode-npm-view.err")" || integrity=""
-            rm -rf "${cache}"
+            rm -rf "${scratch}"
             if [[ "${integrity}" =~ ^sha512- ]]; then break; fi
             if [ "$(date +%s)" -ge "${deadline}" ]; then
               echo "REFUSING: ${spec} is not served by ${source} after 15 minutes." >&2

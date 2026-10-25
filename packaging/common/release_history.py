@@ -57,6 +57,7 @@ from __future__ import annotations
 import functools
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -423,20 +424,43 @@ class RegistryAnswer:
 
 
 def _run_npm(argv: Sequence[str], timeout: float) -> "subprocess.CompletedProcess[str]":
-    """Run npm. ``shutil.which`` first so Windows finds ``npm.cmd``. From an
-    empty scratch directory, so no project ``.npmrc`` applies; ``--registry``
-    on the command line already outranks a user or environment one."""
+    """Run npm on none of the caller's npm configuration, as row 9's
+    ``registry_absent.mjs`` does. ``shutil.which`` first so Windows finds
+    ``npm.cmd``.
+
+    ``--registry`` on the command line outranks every layer for the registry,
+    but not for how npm reaches it: a ``proxy``, ``https-proxy``, ``cafile`` or
+    ``strict-ssl=false`` in any ``.npmrc`` could hand the answer to a server
+    that is not the registry, and an ``E404`` from it would read as "no
+    versions". So, in one scratch directory: an empty user and global file on
+    the command line, no inherited ``npm_config_*`` (the environment layer
+    outranks those files), and that directory as npm's cwd AND ``--prefix``. The
+    flag is what pins npm's project root, so no project ``.npmrc`` applies: a
+    cwd alone still lets npm walk up to the first ``package.json`` or
+    ``node_modules`` above it and read the ``.npmrc`` there (measured on npm
+    10.9.3 and 11.5.1). Added here rather than in :func:`npm_view_argv`, which
+    is the question; this is where it is asked from.
+    """
     binary = shutil.which(argv[0])
     if binary is None:
         raise ReleaseHistoryError(
             f"{argv[0]} is not on PATH, so npm's version list cannot be read and "
             "the history is incomplete"
         )
+    env = {key: value for key, value in os.environ.items()
+           if not key.lower().startswith("npm_config_")}
     with tempfile.TemporaryDirectory(prefix="mllm-npm-view-") as scratch:
+        user, global_ = os.path.join(scratch, "npmrc-user"), os.path.join(scratch, "npmrc-global")
+        for path in (user, global_):
+            with open(path, "w", encoding="utf-8"):
+                pass
+        isolated = [binary, *argv[1:], f"--userconfig={user}", f"--globalconfig={global_}",
+                    f"--prefix={scratch}"]
         try:
             return subprocess.run(
-                [binary, *argv[1:]], capture_output=True, text=True, encoding="utf-8",
+                isolated, capture_output=True, text=True, encoding="utf-8",
                 errors="replace", stdin=subprocess.DEVNULL, timeout=timeout, cwd=scratch,
+                env=env,
             )
         except subprocess.TimeoutExpired as exc:
             raise ReleaseHistoryError(

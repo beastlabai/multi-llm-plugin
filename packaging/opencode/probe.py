@@ -170,6 +170,16 @@ RUN_BUDGET_S = 600
 DISCOVERY_BUDGET_S = 90
 STUB_START_BUDGET_S = 20
 KILL_GRACE_S = 5
+#: The longest an interrupted probe's exit sweep takes, which is what a caller
+#: that interrupts it must wait out before its own SIGKILL (``release_gate.py``'s
+#: step runner derives its grace from this). The sweeps run one after another,
+#: innermost first, each giving its child :data:`KILL_GRACE_S` after SIGTERM:
+#: the bounded child's session (:func:`run_bounded`, an ``opencode run`` and
+#: everything it started), then the stub model (:meth:`StubModel.__exit__`).
+#: Nothing else a probe holds open needs one: the recording registry is a
+#: thread of this process.
+SWEEP_STAGES = 2
+SWEEP_BOUND_S = SWEEP_STAGES * KILL_GRACE_S
 
 #: Inherited variables that can select configuration, data or caches for one of
 #: the children (OpenCode, npm, Bun, uv, git, Python, Node, this skill). None

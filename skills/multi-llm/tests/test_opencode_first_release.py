@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -65,6 +66,26 @@ def _check_run(name: str, index: int, *, status="completed", conclusion="success
 
 def _npm_error(code: str) -> str:
     return json.dumps({"error": {"code": code, "summary": f"{code} - GET {SINGLE}/{NAME}"}})
+
+
+#: ``npm config list --json`` under the upload's flags, nothing configured: the
+#: shape npm 10.9.3 and 11.5.1 print (measured), the keys the preflight reads.
+CLEAN_CONFIG = {"access": "public", "registry": SINGLE + "/", "prefix": "<scratch>",
+                "proxy": None, "https-proxy": None, "strict-ssl": True, "ca": None,
+                "cafile": None, "auth-type": "web"}
+
+
+def _config_text(layers: dict) -> str:
+    """``npm config list``'s text: ``{'"user" config from /h/.npmrc': {key: value}}``,
+    each value already in npm's display form."""
+    lines = []
+    for header, settings in layers.items():
+        lines += [f"; {header}", ""]
+        lines += [f"{key} = {value}" for key, value in settings.items()]
+        lines.append("")
+    lines += ["; node bin location = /usr/bin/node", "; npm version = 10.9.3",
+              "; Run `npm config ls -l` to show all defaults."]
+    return "\n".join(lines) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -146,10 +167,18 @@ class World:
         self.publish = 0
         self.views = [(1, _npm_error("E404"))]     # then the last entry repeats
         self.view_count = 0
+        self.config = dict(CLEAN_CONFIG)
+        self.config_text = _config_text({
+            '"user" config from /home/maintainer/.npmrc': {
+                "//registry.npmjs.org/:_authToken": "(protected)"},
+            '"cli" config from command line options': {
+                "access": '"public"', "ignore-scripts": "true",
+                "registry": f'"{SINGLE}/"'}})
 
-    def __call__(self, argv, *, capture=True, timeout=None):
+    def __call__(self, argv, *, capture=True, timeout=None, cwd=None, inherit_npm_config=True):
         argv = [str(a) for a in argv]
-        self.calls.append({"argv": argv, "capture": capture})
+        self.calls.append({"argv": argv, "capture": capture, "cwd": cwd,
+                           "inherit_npm_config": inherit_npm_config})
         done = self._answer(argv, capture)
         code, out, err = done if len(done) == 3 else (*done, "")
         return first_release.Completed(argv, code, out, err)
@@ -190,6 +219,10 @@ class World:
                 answer = self.views[min(self.view_count, len(self.views) - 1)]
                 self.view_count += 1
                 return answer
+            if rest[:2] == ["config", "list"]:
+                if "--json" in rest:
+                    return (0, json.dumps(self.config, indent=2) + "\n")
+                return (0, self.config_text)
         raise AssertionError(f"unexpected call {argv}")
 
     def _git(self, rest):
@@ -238,6 +271,9 @@ class World:
 
     def argvs(self, prefix):
         return [c["argv"] for c in self.calls if c["argv"][:len(prefix)] == prefix]
+
+    def npm_calls(self, *words):
+        return [c for c in self.calls if c["argv"][:1 + len(words)] == ["npm", *words]]
 
     @property
     def published(self) -> bool:
@@ -294,9 +330,13 @@ class TestGreenPath:
     def test_it_uploads_the_gated_file_and_confirms_the_integrity(self, release, world, gated):
         world.views = _good_views(gated)
         assert release.run(dry_run=False) == first_release.EXIT_OK, release.errors
-        (publish,) = world.argvs(["npm", "publish"])
-        assert publish == ["npm", "publish", str(gated["tarball"]), "--ignore-scripts",
-                           "--access", "public", f"--registry={SINGLE}"]
+        (call,) = world.npm_calls("publish")
+        publish = call["argv"]
+        assert publish[:-1] == ["npm", "publish", str(gated["tarball"]), "--ignore-scripts",
+                                "--access", "public", f"--registry={SINGLE}"]
+        # npm's project root pinned to the empty scratch directory it runs in.
+        assert publish[-1] == f"--prefix={call['cwd']}"
+        assert not Path(call["cwd"]).exists(), "the upload's scratch directory was left behind"
         # Row 9 is the last thing before the upload.
         order = [c["argv"][0] if c["argv"][0] != "npm" else f"npm {c['argv'][1]}"
                  for c in world.calls]
@@ -700,8 +740,12 @@ class TestPublishArgv:
         (lambda a, g: a + ["--registry=https://r.example"], "single registry"),
         (lambda a, g: [x for x in a if x not in ("--access", "public")], "--access public"),
         (lambda a, g: ["npm", "pack"] + a[2:], "not an `npm publish"),
+        (lambda a, g: [x for x in a if not x.startswith("--prefix")], "project root"),
+        (lambda a, g: a + ["--prefix=/home/maintainer/project"], "project root"),
+        (lambda a, g: [a[0], a[1], os.path.relpath(a[2])] + a[3:], "relative path"),
     ], ids=["directory", "scripts", "provenance", "provenance-value", "other-registry",
-            "two-registries", "access", "not-publish"])
+            "two-registries", "access", "not-publish", "no-prefix", "two-prefixes",
+            "relative-tarball"])
     def test_an_unguarded_argv_is_refused_before_npm_runs(
         self, release, world, gated, monkeypatch, mutate, why,
     ):
@@ -733,6 +777,195 @@ class TestPublishArgv:
 
 
 # ---------------------------------------------------------------------------
+# npm's configuration: the upload's, held to the defaults; the reads', emptied
+# ---------------------------------------------------------------------------
+
+USER_RC = '"user" config from /home/maintainer/.npmrc'
+PROJECT_RC = '"project" config from /home/maintainer/src/.npmrc'
+ENV_RC = '"env" config from environment'
+
+
+class TestNpmConfiguration:
+    """The upload must keep the maintainer's user config (the token lives
+    there), so it cannot be emptied as row 9 and the confirming read empty
+    theirs. Instead every npm call runs in one empty scratch directory pinned as
+    npm's project root, and the ``npm-config`` preflight reads the configuration
+    the upload will run under and refuses anything that can reach or trust a
+    server other than the registry, naming the setting and the layer."""
+
+    def test_the_preflight_reads_exactly_what_the_upload_runs_under(self, release, world, gated):
+        world.views = _good_views(gated)
+        assert release.run(dry_run=False) == 0
+        (listing,) = [c for c in world.npm_calls("config", "list") if "--json" in c["argv"]]
+        (whoami,) = world.npm_calls("whoami")
+        (publish,) = world.npm_calls("publish")
+        scratch = publish["cwd"]
+        assert listing["cwd"] == whoami["cwd"] == scratch
+        assert listing["argv"][4:] == publish["argv"][3:], "not the upload's own flags"
+        assert f"--prefix={scratch}" in whoami["argv"] and f"--registry={SINGLE}" in whoami["argv"]
+        # Clean: the text listing (sources) is only read to name a refusal.
+        assert not [c for c in world.npm_calls("config", "list") if "--json" not in c["argv"]]
+        # The token-bearing user config is the maintainer's own: never emptied here.
+        assert not any(a.startswith(("--userconfig", "--globalconfig"))
+                       for c in (listing, whoami, publish) for a in c["argv"])
+        assert listing["inherit_npm_config"] and publish["inherit_npm_config"]
+        order = [c for c, _ in first_release.Release.PREFLIGHTS]
+        assert order.index("npm-config") < order.index("npm-auth")
+
+    @pytest.mark.parametrize("key, value, display, layer, why", [
+        ("https-proxy", "http://127.0.0.1:8443/", '"http://127.0.0.1:8443/"', PROJECT_RC,
+         "must be unset"),
+        ("proxy", "http://proxy.corp:3128/", '"http://proxy.corp:3128/"', USER_RC,
+         "must be unset"),
+        ("strict-ssl", False, "false", ENV_RC, "must stay true"),
+        ("cafile", "/etc/ssl/mitm.pem", '"/etc/ssl/mitm.pem"', USER_RC, "must be unset"),
+        ("ca", ["-----BEGIN CERTIFICATE-----"], '["-----BEGIN CERTIFICATE-----"]', PROJECT_RC,
+         "must be unset"),
+        ("registry", "http://127.0.0.1:4873/", '"http://127.0.0.1:4873/"', ENV_RC,
+         "must be the single registry"),
+        ("@beastlabai:registry", "https://npm.pkg.github.com/", '"https://npm.pkg.github.com/"',
+         USER_RC, "must be the single registry"),
+    ], ids=["https-proxy", "proxy", "strict-ssl", "cafile", "ca", "registry", "scoped-registry"])
+    def test_a_setting_that_can_steer_the_upload_refuses_and_names_its_layer(
+        self, release, world, key, value, display, layer, why,
+    ):
+        world.config[key] = value
+        world.config_text = _config_text({layer: {key: display}})
+        assert release.run(dry_run=False) == first_release.EXIT_REFUSED
+        _refused(release, "npm-config")
+        message = next(e for e in release.errors if e.startswith("REFUSING (npm-config)"))
+        assert f"{key} = {json.dumps(value)}" in message and why in message
+        assert f"set in the {layer}" in message
+        assert not world.published
+
+    def test_a_layer_npm_did_not_name_is_still_a_refusal(self, release, world):
+        world.config["https-proxy"] = "http://127.0.0.1:8443/"
+        assert release.run(dry_run=False) == 1
+        message = next(e for e in release.errors if e.startswith("REFUSING (npm-config)"))
+        assert "from a layer `npm config list` did not name" in message
+
+    @pytest.mark.parametrize("value", [SINGLE, SINGLE + "/"])
+    def test_a_scoped_registry_naming_the_single_one_passes(self, release, world, gated, value):
+        world.config["@beastlabai:registry"] = value
+        world.views = _good_views(gated)
+        assert release.run(dry_run=False) == 0, release.errors
+
+    @pytest.mark.parametrize("stdout", ["", "npm error code E401", "[]"])
+    def test_an_unreadable_listing_refuses(self, release, world, stdout, monkeypatch):
+        world.config = None
+        honest = world._answer
+
+        def answer(argv, capture):
+            if argv[:3] == ["npm", "config", "list"] and "--json" in argv:
+                return (0, stdout)
+            return honest(argv, capture)
+
+        monkeypatch.setattr(world, "_answer", answer)
+        assert release.run(dry_run=False) == 1
+        _refused(release, "npm-config")
+
+    def test_the_confirming_read_runs_on_none_of_the_callers_configuration(
+        self, release, world, gated,
+    ):
+        world.views = [(1, _npm_error("E404"))] + [_good_views(gated)[1]]
+        assert release.run(dry_run=False) == 0
+        reads = world.npm_calls("view")
+        assert len(reads) == 2
+        for read in reads:
+            argv, fresh = read["argv"], str(read["cwd"])
+            assert read["inherit_npm_config"] is False
+            assert f"--prefix={fresh}" in argv
+            assert f"--userconfig={Path(fresh) / 'npmrc-user'}" in argv
+            assert f"--globalconfig={Path(fresh) / 'npmrc-global'}" in argv
+            assert argv[argv.index("--cache") + 1] == str(Path(fresh) / "cache")
+            assert not Path(fresh).exists()
+        assert reads[0]["cwd"] != reads[1]["cwd"]
+        (path,) = list(release.evidence_dir.glob("*.json"))
+        recorded = json.loads(path.read_text(encoding="utf-8"))["confirmation"]["argv"]
+        assert "--prefix=<fresh tmp>" in recorded and str(reads[-1]["cwd"]) not in " ".join(recorded)
+
+    def test_the_runner_can_drop_every_inherited_npm_setting(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("npm_config_https_proxy", "http://127.0.0.1:9/")
+        monkeypatch.setenv("NPM_CONFIG_CAFILE", "/x.pem")
+        probe = [sys.executable, "-c",
+                 "import json, os; print(json.dumps([sorted(os.environ), os.getcwd()]))"]
+        kept, cwd = json.loads(first_release.Runner()(probe, cwd=tmp_path).stdout)
+        assert {"npm_config_https_proxy", "NPM_CONFIG_CAFILE"} <= set(kept)
+        assert os.path.realpath(cwd) == os.path.realpath(tmp_path)
+        dropped, _ = json.loads(first_release.Runner()(probe, inherit_npm_config=False).stdout)
+        assert not [k for k in dropped if k.lower().startswith("npm_config_")]
+
+
+needs_npm = pytest.mark.skipif(shutil.which("npm") is None or os.name == "nt",
+                               reason="needs the real npm (POSIX) to read its own layers")
+
+
+@needs_npm
+class TestNpmConfigAgainstTheRealNpm:
+    """The preflight on the real npm's own answer, offline (``npm config list``
+    makes no request). The home holds a token and maybe a proxy; above the
+    scratch directory (``TMPDIR``) sits a planted project whose ``.npmrc``
+    names a different proxy and turns ``strict-ssl`` off. The pinned project
+    root must keep that file out, and the user layer's proxy must be refused
+    with its file named."""
+
+    PLANTED = "https-proxy=http://127.0.0.1:9/\nstrict-ssl=false\n"
+    TOKEN = "//registry.npmjs.org/:_authToken=npm_notARealTokenForTheSuite\n"
+
+    def _release(self, tmp_path, monkeypatch, home_rc):
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / ".npmrc").write_text(home_rc, encoding="utf-8")
+        project = tmp_path / "project"
+        (project / "tmp").mkdir(parents=True)
+        (project / "package.json").write_text("{}", encoding="utf-8")
+        (project / ".npmrc").write_text(self.PLANTED, encoding="utf-8")
+        monkeypatch.setattr(tempfile, "tempdir", str(project / "tmp"))
+        monkeypatch.setenv("HOME", str(home))
+        for key in list(os.environ):
+            if key.lower().startswith("npm_config_"):
+                monkeypatch.delenv(key)
+        errors: list = []
+        release = first_release.Release(out=lambda line: None, err=errors.append)
+        release.facts["registry"] = SINGLE
+        return release, home
+
+    def test_a_proxy_in_the_users_npmrc_is_refused_and_its_file_named(self, tmp_path, monkeypatch):
+        release, home = self._release(tmp_path, monkeypatch,
+                                      self.TOKEN + "https-proxy=http://127.0.0.1:8/\n")
+        try:
+            with pytest.raises(first_release.Refusal) as caught:
+                release.check_npm_config()
+        finally:
+            release.close()
+        message = caught.value.message
+        assert caught.value.condition == "npm-config"
+        assert 'https-proxy = "http://127.0.0.1:8/" (must be unset)' in message
+        assert f'set in the "user" config from {home / ".npmrc"}' in message
+        assert "127.0.0.1:9" not in message and "strict-ssl" not in message, (
+            "the planted project file above the scratch directory was read")
+        assert "notARealToken" not in message
+
+    def test_a_clean_configuration_passes_although_a_project_above_plants_one(
+        self, tmp_path, monkeypatch,
+    ):
+        release, _ = self._release(tmp_path, monkeypatch, self.TOKEN)
+        try:
+            # Control: from the same scratch directory, without the pin, npm
+            # walks up to the planted project and reads its .npmrc.
+            scratch = release.npm_scratch()
+            control = subprocess.run(["npm", "config", "get", "https-proxy"], cwd=scratch,
+                                     capture_output=True, text=True, timeout=120)
+            assert control.stdout.strip() == "http://127.0.0.1:9/", control.stdout + control.stderr
+            release.check_npm_config()
+        finally:
+            release.close()
+        assert release.facts["npm_config"]["https-proxy"] is None
+        assert release.facts["npm_config"]["strict-ssl"] is True
+        assert registry.normalize(release.facts["npm_config"]["registry"]) == SINGLE
+
+
+# ---------------------------------------------------------------------------
 # After the upload
 # ---------------------------------------------------------------------------
 
@@ -752,7 +985,8 @@ class TestAfterTheUpload:
         assert release.run(dry_run=False) == first_release.EXIT_UNCONFIRMED
         message = release.errors[-1]
         assert message.startswith("NOT YET CONFIRMED") and "Repeat the read by hand" in message
-        assert f'--registry={SINGLE} --cache "$(mktemp -d)"' in message
+        assert f'd="$(mktemp -d)" && cd "$d" && npm view {SPEC} dist.integrity ' in message
+        assert f'--registry={SINGLE} --cache "$d/c" --prefix "$d"' in message
         assert gated["facts"]["integrity"] in message
         # Bounded: 60 s at a 10 s interval.
         assert len(world.argvs(["npm", "view"])) == 7

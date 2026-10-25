@@ -933,6 +933,72 @@ class TestTheContainersPinnedInstall:
         with pytest.raises(rc.CheckError, match=r"\.package-lock\.json"):
             rc.verify_pin(prefix, ctx)
 
+    def test_the_container_installs_the_pin_without_its_install_script(self):
+        """``bump._npm_ci``'s flags: no ``postinstall`` runs a binary before
+        ``verify_installed`` chose one, and the prefix is npm's project root."""
+        script = rc.pin_install_script(SINGLE)
+        (ci,) = [line for line in script.splitlines() if line.startswith("npm ci ")]
+        assert "--ignore-scripts" in ci.split()
+        assert f"--prefix={rc.PIN_PREFIX}" in ci.split()
+        assert f"--registry={SINGLE}" in ci.split()
+
+    def test_both_phases_run_the_binary_verify_pin_chose(self, tmp_path, monkeypatch,
+                                                         candidate_and_tarball):
+        """The host cannot know the container's CPU or libc, so the binary is
+        chosen inside, by ``verify_installed``, in each phase alike."""
+        candidate, _ = candidate_and_tarball
+        facts = tmp_path / "facts.json"
+        facts.write_text(json.dumps(rc._facts(_context(tmp_path, candidate, environment="container"))))
+        chosen = f"{rc.PIN_PREFIX}/node_modules/opencode-linux-x64/bin/opencode"
+        seen = []
+        monkeypatch.setattr(rc, "verify_pin", lambda prefix, ctx: {
+            "binary": chosen, "platform_package": "node_modules/opencode-linux-x64",
+            "chosen_from": ["opencode-linux-x64"], "sha256": "0" * 64})
+
+        def criteria(ctx, steps=None):
+            seen.append(("install", ctx.binary))
+            return {"criteria": {}, "failures": [], "state": {"env": {}}, "details": {},
+                    "measured": {}, "variables_set": {}}
+
+        def offline(ctx, state, steps=None):
+            seen.append(("offline", ctx.binary))
+            return {"before": {}, "after": {}}
+
+        monkeypatch.setattr(rc, "run_criteria", criteria)
+        monkeypatch.setattr(rc, "offline_operation", offline)
+        monkeypatch.setenv("MLLM_REGISTRY_CHECK_PHASE_TEST", "1")
+        out = tmp_path / "out" / "install.json"
+        assert rc.container_phase(["--phase", "install", "--facts", str(facts),
+                                   "--out", str(out)]) == 0
+        assert json.loads(out.read_text())["details"]["pinned_install"]["binary"] == chosen
+        state = out.with_name("install-state.json")
+        assert rc.container_phase(["--phase", "offline", "--facts", str(facts), "--state",
+                                   str(state), "--out", str(tmp_path / "out" / "offline.json")]) == 0
+        assert seen == [("install", chosen), ("offline", chosen)]
+
+    def test_the_probes_npm_reads_pin_their_project_root(self, tmp_path, candidate_and_tarball):
+        """Every npm read the probe makes runs in its own npm scratch directory,
+        named as ``--prefix``: no ``.npmrc`` beside a ``package.json`` above the
+        probe root can become project config."""
+        candidate, tarball = candidate_and_tarball
+        host = FakeHost(tarball)
+        calls = []
+        honest = host.run
+
+        def run(argv, *, cwd, **kwargs):
+            # `npm --version` is a measurement of the tool, not a registry read.
+            if str(argv[0]) == "npm" and list(map(str, argv[1:])) != ["--version"]:
+                calls.append((list(map(str, argv)), Path(cwd)))
+            return honest(argv, cwd=cwd, **kwargs)
+
+        host.run = run
+        rc.run_criteria(_context(tmp_path, candidate), host.steps())
+        assert {argv[1] for argv, _ in calls} >= {"view", "pack"}
+        for argv, cwd in calls:
+            prefixes = [a.split("=", 1)[1] for a in argv if a.startswith("--prefix=")]
+            assert prefixes == [str(cwd)], argv
+            assert not {"package.json", "node_modules", ".npmrc"} & {p.name for p in cwd.iterdir()}
+
     def test_the_pin_install_reads_only_the_single_registry(self, tmp_path, monkeypatch):
         """The subset the container installs is refused, before Docker runs,
         when a committed URL is not under the single registry."""

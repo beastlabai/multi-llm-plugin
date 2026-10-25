@@ -671,8 +671,12 @@ class TestBootstrapBranch:
         poll = step("gate", "Bootstrap: wait until the registry serves the version")
         assert isinstance(poll["timeout-minutes"], int) and poll["timeout-minutes"] <= 30
         assert "deadline=" in code(poll)
-        assert re.search(r'npm view "\$\{spec\}" dist\.integrity --registry "\$\{source\}" '
-                         r'--cache "\$\{cache\}"', code(poll))
+        assert re.search(r'npm view "\$\{spec\}" dist\.integrity --registry "\$\{source\}" ',
+                         code(poll))
+        # From an empty directory pinned as npm's project root: no `.npmrc` in
+        # the checkout, or above it, is read as project config.
+        assert 'cd "${scratch}" && npm view' in code(poll)
+        assert '--cache "${scratch}/cache" --prefix "${scratch}"' in code(poll)
 
     def test_the_rebuild_is_frozen_no_dev_from_the_tags_commit(self):
         rebuild = code(step("gate", BOOTSTRAP_STEPS[3]))

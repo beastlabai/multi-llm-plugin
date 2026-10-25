@@ -36,6 +36,15 @@ never the same message as "the macOS leg failed":
 * ``bump-check`` — ``build.py --check-bump`` (the shared-version check that reads
   both families' tags and npm's version list). A ``build.py`` without that flag
   refuses: the check is a precondition, not an option;
+* ``npm-config`` — the configuration the upload will run under, read with
+  ``npm config list --json`` from the upload's own scratch directory with the
+  upload's own flags, sets no ``proxy``, ``https-proxy``, ``cafile`` or ``ca``,
+  keeps ``strict-ssl`` on, and names no registry, scoped or not, but the single
+  one. Each refusal names the setting and the layer that set it (npm's
+  ``npm config list`` headers: ``"user" config from ~/.npmrc``, ``"env"``…).
+  The upload needs the maintainer's own user config, where the auth token
+  lives, so it cannot be emptied as the reads below empty it; it is held to
+  this instead;
 * ``npm-auth`` — ``npm whoami`` against the single registry, so a doomed upload
   is refused before it starts rather than half-way through a prompt;
 * ``gated-tarball`` — the file at the stamp's path still recomputes, through
@@ -44,20 +53,33 @@ never the same message as "the macOS leg failed":
 * ``row-9`` — ``registry_absent.mjs``, last, immediately before the upload.
 
 **What it uploads: the exact tarball the gate built, scanned and loaded.**
-``npm publish <gated>.tgz --ignore-scripts --access public --registry=<single>``.
-Never the directory: the manifest's ``prepack`` hook would rebuild ``dist/``
-there and npm would upload whatever that rebuild produced, bytes no gate
-checked. Measured, a tarball upload runs no lifecycle scripts, and
-``--ignore-scripts`` keeps any other script from repacking it. The argv is
-checked before it runs (:func:`check_publish_argv`).
+``npm publish <gated>.tgz --ignore-scripts --access public --registry=<single>
+--prefix=<scratch>``, run in that scratch directory. Never the directory: the
+manifest's ``prepack`` hook would rebuild ``dist/`` there and npm would upload
+whatever that rebuild produced, bytes no gate checked. Measured, a tarball
+upload runs no lifecycle scripts, and ``--ignore-scripts`` keeps any other
+script from repacking it. The argv is checked before it runs
+(:func:`check_publish_argv`).
+
+**No project's npm configuration.** npm reads a third file beside the user and
+global ones, the PROJECT's ``.npmrc``, found by walking up from npm's cwd to the
+first ``package.json`` or ``node_modules`` (else the cwd itself): run from the
+repository, the checkout's ``.npmrc`` or any ancestor's would steer the upload,
+the ``whoami`` and the confirming read. Every npm call here therefore runs in an
+empty scratch directory named as ``--prefix``, which pins npm's project root to
+it outright (measured on npm 10.9.3 and 11.5.1: a cwd alone still walks up;
+``registry_absent.mjs`` carries the measurement).
 
 **After the upload.** npm's exit status is not confirmation: the registry and its
 CDN can lag. The target polls ``npm view <spec> dist.integrity`` with the
-explicit registry and a fresh cache, for a bounded time, until the version is
-visible, and requires it to equal the gated integrity. An expired poll is "not
-yet confirmed", not a mismatch: repeat the read by hand (step 4) before pushing
-the tag. A different integrity is a mismatch after publication: do not push the
-tag, follow Recovery. Either way the version is permanently consumed.
+explicit registry, a fresh cache and none of the caller's npm configuration (an
+empty user and global file, no inherited ``npm_config_*``, the project root
+pinned: row 9's isolation, since a proxy could otherwise serve the integrity it
+expects), for a bounded time, until the version is visible, and requires it to
+equal the gated integrity. An expired poll is "not yet confirmed", not a
+mismatch: repeat the read by hand (step 4) before pushing the tag. A different
+integrity is a mismatch after publication: do not push the tag, follow
+Recovery. Either way the version is permanently consumed.
 
 **Evidence.** A JSON file under ``packaging/opencode/.gate/release/``
 (gitignored): the tag object ID, the commit SHA, every required check run's ID
@@ -83,13 +105,14 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = PACKAGE_DIR.parent.parent
@@ -138,6 +161,13 @@ POLL_INTERVAL = 10.0
 #: exports, and anything that would turn provenance on behind the argv's back.
 SCRUBBED_ENV = ("MULTI_LLM_ALLOW_DIRTY", "npm_config_provenance", "NPM_CONFIG_PROVENANCE")
 
+#: The settings the ``npm-config`` preflight holds to their defaults (``None``
+#: unset, ``strict-ssl`` true): each one can route the upload to, or accept a
+#: certificate from, a server that is not the registry. ``registry`` and every
+#: ``@scope:registry`` must be the single registry instead.
+NPM_CONFIG_UNSET = ("proxy", "https-proxy", "cafile", "ca")
+_SCOPED_REGISTRY = re.compile(r"^@[^:/\s]+:registry$")
+
 EXIT_OK, EXIT_REFUSED, EXIT_USAGE = 0, 1, 2
 EXIT_PUBLISH_FAILED, EXIT_UNCONFIRMED, EXIT_MISMATCH = 3, 4, 5
 
@@ -163,14 +193,21 @@ class Runner:
     """
 
     def __call__(self, argv: Sequence[str], *, capture: bool = True,
-                 timeout: Optional[float] = 120.0) -> Completed:
+                 timeout: Optional[float] = 120.0, cwd: Optional[Path] = None,
+                 inherit_npm_config: bool = True) -> Completed:
+        """``cwd`` defaults to the repository (git, gh, ``build.py``); every npm
+        call names its scratch directory. ``inherit_npm_config=False`` drops
+        every inherited ``npm_config_*`` variable, for the reads that run on
+        none of the caller's configuration."""
         argv = [str(a) for a in argv]
         scrubbed = {name.lower() for name in SCRUBBED_ENV}
-        env = {k: v for k, v in os.environ.items() if k.lower() not in scrubbed}
+        env = {k: v for k, v in os.environ.items() if k.lower() not in scrubbed
+               and (inherit_npm_config or not k.lower().startswith("npm_config_"))}
         env.update(GIT_TERMINAL_PROMPT="0", GH_PROMPT_DISABLED="1")
         try:
             done = subprocess.run(
-                argv, cwd=REPO_ROOT, env=env, text=True, timeout=timeout,
+                argv, cwd=REPO_ROOT if cwd is None else cwd, env=env, text=True,
+                timeout=timeout,
                 stdin=subprocess.DEVNULL if capture else None,
                 capture_output=capture,
             )
@@ -203,6 +240,57 @@ def _tail(done: Completed) -> str:
 
 def _utc() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ---------------------------------------------------------------------------
+# The configuration the upload runs under
+# ---------------------------------------------------------------------------
+
+_LAYER_HEADER = re.compile(r'^; "([^"]+)" config from (.+)$')
+_SETTING = re.compile(r"^([^;\s][^=]*?) = (.*)$")
+
+
+def npm_config_sources(listing: str) -> Dict[str, str]:
+    """``{key: '"<layer>" config from <source>'}`` from ``npm config list``'s
+    text: each layer's header, then its settings, a setting another layer
+    overrides commented out (``; key = v ; overridden by cli``). Only the layer
+    whose value is in effect is kept. Defaults are not listed; nothing here
+    needs them. Tokens print as ``(protected)`` and are never read."""
+    sources: Dict[str, str] = {}
+    layer: Optional[str] = None
+    for line in listing.splitlines():
+        header = _LAYER_HEADER.match(line.strip())
+        if header:
+            layer = f'"{header.group(1)}" config from {header.group(2).strip()}'
+            continue
+        setting = _SETTING.match(line.strip())
+        if setting and layer:
+            sources[setting.group(1).strip()] = layer
+    return sources
+
+
+def npm_config_problems(effective: Dict[str, Any], single: str) -> List[Tuple[str, str]]:
+    """``(key, what is wrong)`` for each setting in ``npm config list --json``'s
+    effective configuration that could make the upload talk to, or trust,
+    something other than the single registry."""
+    problems = []
+    for key in NPM_CONFIG_UNSET:
+        value = effective.get(key)
+        if value not in (None, False, "", []):
+            problems.append((key, f"{key} = {json.dumps(value)} (must be unset)"))
+    strict = effective.get("strict-ssl", True)
+    if strict is not True and str(strict).lower() != "true":
+        problems.append(("strict-ssl", f"strict-ssl = {json.dumps(strict)} (must stay true)"))
+    registries = {key: value for key, value in effective.items()
+                  if key == "registry" or _SCOPED_REGISTRY.match(str(key))}
+    for key, value in sorted(registries.items()):
+        if registry.normalize(str(value or "")) != single:
+            problems.append((key, f"{key} = {json.dumps(value)} (must be the single "
+                                  f"registry {single})"))
+    if "registry" not in registries:
+        problems.append(("registry", f"registry is not listed (expected the single "
+                                     f"registry {single})"))
+    return problems
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +381,26 @@ class Release:
     def __post_init__(self) -> None:
         self.facts: Dict[str, Any] = {}
         self.refusals: List[Refusal] = []
+        self._npm_scratch: Optional[Path] = None
+
+    def npm_scratch(self) -> Path:
+        """The upload's npm directory, made once: cwd and ``--prefix`` of
+        ``npm config list``, ``npm whoami`` and ``npm publish``, so the
+        preflight reads exactly the configuration the upload gets. Empty: no
+        ``package.json``, ``node_modules`` or ``.npmrc``, ever."""
+        if self._npm_scratch is None:
+            self._npm_scratch = Path(tempfile.mkdtemp(prefix="mllm-npm-release-"))
+        return self._npm_scratch
+
+    def close(self) -> None:
+        if self._npm_scratch is not None:
+            shutil.rmtree(self._npm_scratch, ignore_errors=True)
+            self._npm_scratch = None
+
+    def upload_flags(self) -> List[str]:
+        """The upload's flags, which the ``npm-config`` preflight reads under too."""
+        return ["--ignore-scripts", "--access", "public", f"--registry={self.facts['registry']}",
+                f"--prefix={self.npm_scratch()}"]
 
     # -- plumbing ----------------------------------------------------------
 
@@ -484,9 +592,35 @@ class Release:
                           "bump check is not in this tree, and the release cannot skip it")
         raise Refusal("bump-check", f"`build.py --check-bump` refused ({_tail(done)})")
 
+    def check_npm_config(self) -> None:
+        scratch = self.npm_scratch()
+        flags = self.upload_flags()
+        listed = self._run(["npm", "config", "list", "--json", *flags], "npm-config",
+                           "`npm config list --json`", timeout=120.0, cwd=scratch)
+        try:
+            effective = json.loads(listed.stdout)
+        except ValueError as exc:
+            raise Refusal("npm-config", f"`npm config list --json` printed no JSON ({exc})")
+        if not isinstance(effective, dict):
+            raise Refusal("npm-config", "`npm config list --json` printed no object")
+        problems = npm_config_problems(effective, self.facts["registry"])
+        if problems:
+            text = self._run(["npm", "config", "list", *flags], "npm-config",
+                             "`npm config list`", timeout=120.0, cwd=scratch).stdout
+            sources = npm_config_sources(text)
+            named = [f"{what}, set in the {sources[key]}" if key in sources
+                     else f"{what}, from a layer `npm config list` did not name"
+                     for key, what in problems]
+            raise Refusal("npm-config", "the upload would run under npm configuration that can "
+                          "reach or trust a server other than the registry: " + "; ".join(named)
+                          + ". Remove those settings (or run with them unset) and retry")
+        self.facts["npm_config"] = {key: effective.get(key) for key in
+                                    ("registry", "strict-ssl", *NPM_CONFIG_UNSET)}
+
     def check_npm_auth(self) -> None:
+        scratch = self.npm_scratch()
         done = self.runner(["npm", "whoami", f"--registry={self.facts['registry']}",
-                            *NPM_FETCH_FLAGS], timeout=150.0)
+                            f"--prefix={scratch}", *NPM_FETCH_FLAGS], timeout=150.0, cwd=scratch)
         if done.returncode != 0:
             raise Refusal("npm-auth", f"not logged in to {self.facts['registry']} "
                           f"({_tail(done)}). Run: npm login --registry={self.facts['registry']}")
@@ -548,6 +682,7 @@ class Release:
         ("origin-master", "check_origin_master"),
         ("required-checks", "check_required_runs"),
         ("bump-check", "check_bump"),
+        ("npm-config", "check_npm_config"),
         ("npm-auth", "check_npm_auth"),
         ("gated-tarball", "check_gated_tarball"),
         ("row-9", "check_row9"),
@@ -570,13 +705,14 @@ class Release:
     # -- the upload ----------------------------------------------------------
 
     def publish_argv(self) -> List[str]:
-        return ["npm", "publish", self.facts["tarball"]["path"], "--ignore-scripts",
-                "--access", "public", f"--registry={self.facts['registry']}"]
+        return ["npm", "publish", self.facts["tarball"]["path"], *self.upload_flags()]
 
     def check_publish_argv(self, argv: Sequence[str]) -> None:
         """The upload's argv, refused unless it is exactly the guarded shape: the
-        gated FILE, lifecycle scripts off, public, the single registry, and no
-        provenance token at all (the laptop cannot sign one)."""
+        gated FILE (an absolute path, since npm runs in its scratch directory),
+        lifecycle scripts off, public, the single registry, npm's project root
+        pinned to that empty scratch directory, and no provenance token at all
+        (the laptop cannot sign one)."""
         problems = []
         if list(argv[:2]) != ["npm", "publish"] or len(argv) < 3:
             problems.append("not an `npm publish <file>`")
@@ -595,6 +731,14 @@ class Release:
             problems.append(f"does not name exactly the single registry {self.facts['registry']}")
         if "public" not in argv or "--access" not in argv:
             problems.append("is not --access public")
+        if len(argv) >= 3 and not Path(str(argv[2])).is_absolute():
+            problems.append(f"names the tarball by a relative path ({argv[2]!r})")
+        scratch = self.npm_scratch()
+        if f"--prefix={scratch}" not in argv or sum(str(a).startswith("--prefix") for a in argv) != 1:
+            problems.append(f"does not pin npm's project root to its scratch directory {scratch}")
+        elif {"package.json", "node_modules", ".npmrc"} & {p.name for p in scratch.iterdir()}:
+            problems.append(f"its scratch directory {scratch} is no longer empty of npm "
+                            "project files")
         if problems:
             raise Refusal("publish-argv", f"refusing to run {shlex.join(map(str, argv))}: "
                           + "; ".join(problems))
@@ -609,13 +753,24 @@ class Release:
         attempts = 0
         while True:
             attempts += 1
-            with tempfile.TemporaryDirectory(prefix="mllm-npm-cache-") as cache:
+            # Row 9's isolation: a fresh directory per read holding the cache and
+            # two empty config files, npm's cwd and pinned project root, and no
+            # inherited npm_config_*. A public read needs no token, and a proxy
+            # in any layer could otherwise serve the integrity the gate expects.
+            with tempfile.TemporaryDirectory(prefix="mllm-npm-view-") as fresh:
+                user_rc, global_rc = Path(fresh) / "npmrc-user", Path(fresh) / "npmrc-global"
+                user_rc.write_text("", encoding="utf-8")
+                global_rc.write_text("", encoding="utf-8")
                 argv = ["npm", "view", self.facts["spec"], "dist.integrity", "--json",
-                        f"--registry={self.facts['registry']}", "--cache", cache,
+                        f"--registry={self.facts['registry']}",
+                        "--cache", str(Path(fresh) / "cache"),
+                        f"--userconfig={user_rc}", f"--globalconfig={global_rc}",
+                        f"--prefix={fresh}",
                         "--prefer-online", "--no-update-notifier", *NPM_FETCH_FLAGS]
-                done = self.runner(argv, timeout=150.0)
+                done = self.runner(argv, timeout=150.0, cwd=Path(fresh),
+                                   inherit_npm_config=False)
             read_at = _utc()
-            record = {"argv": [a if a != cache else "<fresh tmp>" for a in argv],
+            record = {"argv": [a.replace(fresh, "<fresh tmp>") for a in argv],
                       "read_at": read_at, "exit": done.returncode,
                       "output": done.stdout.strip(), "attempts": attempts}
             if done.returncode == 0:
@@ -660,12 +815,19 @@ class Release:
         return path
 
     def run(self, *, dry_run: bool) -> int:
+        try:
+            return self._run_release(dry_run=dry_run)
+        finally:
+            self.close()
+
+    def _run_release(self, *, dry_run: bool) -> int:
         ok = self.preflight()
         if not ok and dry_run and "registry" in self.facts:
             tarball = ((self.facts.get("stamp") or {}).get("tarball") or {}).get("path")
             self.out("dry run: once every preflight passes, the upload would be:\n  npm publish "
                      + (shlex.quote(tarball) if tarball else "<the gated .tgz the stamp names>")
-                     + f" --ignore-scripts --access public --registry={self.facts['registry']}")
+                     + f" --ignore-scripts --access public --registry={self.facts['registry']} "
+                     "--prefix=<an empty scratch directory, also its cwd>")
         if not ok:
             self.err(f"first release: {len(self.refusals)} precondition(s) failed; nothing "
                      "was uploaded.")
@@ -681,7 +843,7 @@ class Release:
             return EXIT_OK
 
         started = _utc()
-        done = self.runner(argv, capture=False, timeout=1800.0)
+        done = self.runner(argv, capture=False, timeout=1800.0, cwd=self.npm_scratch())
         publish = {"argv": argv, "started_at": started, "finished_at": _utc(),
                    "exit": done.returncode}
         if done.returncode != 0:
@@ -702,8 +864,9 @@ class Release:
             self.err(f"NOT YET CONFIRMED: {self.facts['spec']} was uploaded but was not visible "
                      f"within {self.poll_seconds:.0f} s. Repeat the read by hand (step 4) until "
                      f"it prints {confirmation['expected']}, then push the tag:\n"
-                     f"  npm view {self.facts['spec']} dist.integrity "
-                     f"--registry={self.facts['registry']} --cache \"$(mktemp -d)\"\n"
+                     f"  (d=\"$(mktemp -d)\" && cd \"$d\" && npm view {self.facts['spec']} "
+                     f"dist.integrity --registry={self.facts['registry']} --cache \"$d/c\" "
+                     f"--prefix \"$d\")\n"
                      f"evidence: {path}")
             return EXIT_UNCONFIRMED
         self.err(f"MISMATCH AFTER PUBLICATION: the registry serves {confirmation['served']!r} "

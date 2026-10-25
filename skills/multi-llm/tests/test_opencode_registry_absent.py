@@ -8,13 +8,15 @@ the Makefile and the publishing workflow reach row 9 only through this script.
 
 **Where the fixtures come from.** Measured 2026-10-25 on npm 10.9.3 (and the
 publish job's pin, 11.5.1, which prints the same ``--json`` body on stdout):
-``npm view opencode-multi-llm@0.1.0 version --json`` against npmjs for ``E404``,
-``npm view opencode-ai@1.19.4`` for a published version, a localhost stub
-answering 401 for ``E401``, port 9 for ``ECONNREFUSED`` and ``.invalid`` for
-``ENOTFOUND``. Only stdout is replayed: the script never reads stderr.
+``npm view opencode-multi-llm@0.1.0 version --json`` against npmjs for ``E404``
+(a name never published), ``npm view express@0.0.0 version --json`` for the
+later-release ``E404`` (the package exists, the version does not: no URL in the
+summary), ``npm view opencode-ai@1.19.4`` for a published version, a localhost
+stub answering 401 for ``E401``, port 9 for ``ECONNREFUSED`` and ``.invalid``
+for ``ENOTFOUND``. Only stdout is replayed: the script never reads stderr.
 
-**Offline.** Nothing here reaches a real registry. The one row that runs the
-real ``npm`` points it at two localhost stubs and skips, by name, without npm.
+**Offline.** Nothing here reaches a real registry. The rows that run the real
+``npm`` point it at localhost stubs and skip, by name, without npm.
 POSIX only for the runtime rows: the stub is a shebang script, and the script
 spawns ``npm`` without a shell, which on Windows cannot start npm's ``.cmd``
 shim. The release path runs on Linux.
@@ -69,6 +71,15 @@ E404 = (1, _error(
     f"'{SPEC}' is not in this registry.\n\nNote that you can also install from a\n"
     "tarball, folder, http url, or git url.",
 ))
+#: The later-release shape: once the package exists, a missing version is
+#: ``E404`` with no URL to bind (npm 11.5.1's ``detail``; 10.9.3 says "is not in
+#: this registry"). Absent on the code alone.
+E404_VERSION = (1, _error(
+    "E404", f"No match found for version {MANIFEST['version']}",
+    f"The requested resource '{SPEC}' could not be found or you do not have permission "
+    "to access it.\n\nNote that you can also install from a\ntarball, folder, http url, "
+    "or git url.",
+))
 AUTH = (1, _error(
     "E401", "Unable to authenticate, your authentication token seems to be invalid.",
     "To correct this please try logging in again with:\n  npm login",
@@ -109,6 +120,8 @@ with open(log, "a", encoding="utf-8") as handle:
         "npm_config_userconfig": os.environ.get("npm_config_userconfig"),
         "npm_config_env": sorted(k for k in os.environ if k.lower().startswith("npm_config_")),
         "configs": configs,
+        "cwd": os.getcwd(),
+        "cwd_entries": sorted(os.listdir(".")),
     }}) + "\\n")
 with open(os.environ["STUB_NPM_FIXTURE"], encoding="utf-8") as handle:
     fixture = json.load(handle)
@@ -177,9 +190,11 @@ class TestThreeOutcomes:
     """Only ``E404`` passes. Each row also checks the evidence the script writes,
     because the gate records that file, not the exit status."""
 
-    def test_e404_is_the_only_green_answer(self, stub_npm, tmp_path):
+    @pytest.mark.parametrize("fixture", [E404, E404_VERSION],
+                             ids=["never-published", "later-release"])
+    def test_e404_is_the_only_green_answer(self, stub_npm, tmp_path, fixture):
         out = tmp_path / "row9.json"
-        done = stub_npm.run(E404, "--out", str(out))
+        done = stub_npm.run(fixture, "--out", str(out))
         assert done.returncode == 0, done.stderr
         assert f"registry {SINGLE} answered code E404" in done.stdout
         assert _evidence(out) == {
@@ -232,6 +247,12 @@ class TestThreeOutcomes:
         assert done.returncode == 1
         assert "not from the single registry" in done.stderr
         assert _evidence(out)["outcome"] == "unknown"
+
+    def test_the_later_release_e404_names_no_url_to_bind(self):
+        """The URL binding is the whole-package shape's alone: the later-release
+        summary has no ``GET``, which is why it passes on the code."""
+        summary = json.loads(E404_VERSION[1])["error"]["summary"]
+        assert "GET" not in summary and "http" not in summary
 
     def test_a_killed_or_missing_npm_is_an_unknown(self, tmp_path):
         """No npm on PATH at all: an unknown, never an absence."""
@@ -288,6 +309,25 @@ class TestSingleRegistry:
                  if a.startswith(("--cache=", "--userconfig=", "--globalconfig="))]
         assert len(paths) == 3 and len({p.parent for p in paths}) == 1, paths
         assert not paths[0].parent.exists(), "the scratch directory was not removed"
+
+    def test_npm_runs_in_its_scratch_with_the_project_root_pinned(self, stub_npm):
+        """npm's project layer outranks both empty files, and npm finds the
+        project by walking up from its cwd. So npm runs in the scratch directory,
+        which holds no ``package.json``, ``node_modules`` or ``.npmrc``, and gets
+        ``--prefix`` naming it: the flag, not the cwd, is what pins the root (the
+        real-npm rows below show both halves)."""
+        done = stub_npm.run(E404)
+        assert done.returncode == 0, done.stderr
+        (call,) = stub_npm.calls()
+        argv = call["argv"]
+        prefixes = [a.split("=", 1)[1] for a in argv if a.startswith("--prefix=")]
+        assert len(prefixes) == 1, argv
+        scratch = Path(prefixes[0])
+        cache = Path(next(a for a in argv if a.startswith("--cache=")).split("=", 1)[1])
+        assert cache.parent == scratch
+        assert os.path.realpath(call["cwd"]) == os.path.realpath(scratch)
+        assert not {"package.json", "node_modules", ".npmrc"} & set(call["cwd_entries"])
+        assert not scratch.exists(), "the scratch directory was not removed"
 
     def test_a_trailing_slash_is_the_same_registry(self, stub_npm):
         assert stub_npm.run(E404, registry=SINGLE + "/").returncode == 0
@@ -511,6 +551,113 @@ def test_a_proxy_in_the_users_npmrc_cannot_answer_for_the_registry(tmp_path):
         assert done.returncode == 1, done.stdout + done.stderr
         assert _evidence(out)["outcome"] == "published", done.stdout + done.stderr
         assert proxy.hits == [], f"the configured proxy answered for the registry: {proxy.hits}"
+    finally:
+        published.shutdown()
+        proxy.shutdown()
+
+
+def _passthrough_environ(tmp_path: Path, home: Path, registry_url: str) -> dict:
+    """The real npm's environment for a stub row: the pass-through shim first on
+    PATH, no inherited ``npm_config_*``, proxy variable or ``TMPDIR``, and a
+    fresh HOME."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    shim = bin_dir / "npm"
+    shim.write_text(PASSTHROUGH_SOURCE.format(python=sys.executable, npm=shutil.which("npm")),
+                    encoding="utf-8")
+    shim.chmod(0o755)
+    environ = {k: v for k, v in os.environ.items()
+               if not k.lower().startswith("npm_config_")
+               and k.upper() not in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+                                     "TMPDIR")}
+    environ.update({"PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
+                    "PASSTHROUGH_REGISTRY": registry_url, "HOME": str(home)})
+    return environ
+
+
+@needs_node
+@posix_only
+@pytest.mark.parametrize("layout", ["cwd", "ancestor", "home", "tmpdir"])
+def test_a_project_npmrc_cannot_steer_row_9(tmp_path, layout):
+    """npm's PROJECT layer (``<project root>/.npmrc``) outranks the empty user
+    and global files, and npm finds the project root by walking up from its cwd
+    to the first ``package.json`` or ``node_modules``, else the cwd itself. A
+    planted ``.npmrc`` routes npm through stub B, a proxy answering 404 to
+    everything, with ``strict-ssl=false`` beside it (the reviewer's demonstration,
+    over plain HTTP):
+
+    * ``cwd`` — in the caller's own directory (the repository root under make);
+    * ``ancestor`` — beside a ``package.json`` above the caller's directory;
+    * ``home`` — ``~/.npmrc`` beside ``~/node_modules``: npm skips that file as
+      project config only while it IS the user file, and row 9 moves the user
+      file to an empty one;
+    * ``tmpdir`` — beside a ``package.json`` above ``TMPDIR``, so above the
+      script's own scratch directory: the case a scratch cwd alone leaves open
+      and ``--prefix`` closes.
+
+    The real npm; the shim points the explicit flag at stub A (*published*). Each
+    layout's control runs the same npm read, with the same empty user and global
+    files but no ``--prefix``, from where npm would otherwise have run, and must
+    reach B, so the row proves the pin rather than a file npm ignored anyway.
+    """
+    if shutil.which("npm") is None:
+        pytest.skip("needs the real npm to prove what it reads")
+    published, proxy = _Registry(published=True), _Registry(published=False)
+    try:
+        planted = f"proxy={proxy.url}/\nhttps-proxy={proxy.url}/\nstrict-ssl=false\n"
+        home = tmp_path / "home"
+        home.mkdir()
+        environ = _passthrough_environ(tmp_path, home, published.url)
+        caller = tmp_path / "caller"
+        caller.mkdir()
+        if layout == "cwd":
+            (caller / ".npmrc").write_text(planted, encoding="utf-8")
+            control_cwd = caller
+        elif layout == "ancestor":
+            project = tmp_path / "project"
+            caller = project / "packages" / "deep"
+            caller.mkdir(parents=True)
+            (project / "package.json").write_text("{}", encoding="utf-8")
+            (project / ".npmrc").write_text(planted, encoding="utf-8")
+            control_cwd = caller
+        elif layout == "home":
+            (home / "node_modules").mkdir()
+            (home / ".npmrc").write_text(planted, encoding="utf-8")
+            caller = home / "work"
+            caller.mkdir()
+            control_cwd = caller
+        else:
+            project = tmp_path / "project"
+            (project / "tmp").mkdir(parents=True)
+            (project / "package.json").write_text("{}", encoding="utf-8")
+            (project / ".npmrc").write_text(planted, encoding="utf-8")
+            environ["TMPDIR"] = str(project / "tmp")
+            # Where the script's mkdtemp lands: an empty directory, as its own is.
+            control_cwd = project / "tmp" / "mllm-row9-npm-control"
+            control_cwd.mkdir()
+        # Two files: npm refuses one file loaded as both ("double-loading config").
+        empty_user, empty_global = tmp_path / "empty-user.npmrc", tmp_path / "empty-global.npmrc"
+        empty_user.write_text("", encoding="utf-8")
+        empty_global.write_text("", encoding="utf-8")
+        control = subprocess.run(
+            [shutil.which("npm"), "view", SPEC, "version", "--json", "--no-update-notifier",
+             f"--registry={published.url}", f"--cache={tmp_path / 'control-cache'}",
+             f"--userconfig={empty_user}", f"--globalconfig={empty_global}",
+             "--fetch-retries=0"],
+            cwd=control_cwd, env=environ, capture_output=True, text=True, timeout=120)
+        if not proxy.hits:
+            pytest.skip("this npm does not send a loopback request through the configured "
+                        f"proxy, so the case cannot be staged here: {control.stdout[-300:]}")
+        assert json.loads(control.stdout)["error"]["code"] == "E404"
+        proxy.hits.clear()
+        out = tmp_path / "row9.json"
+        done = subprocess.run([NODE, str(SCRIPT), "--registry", SINGLE, "--out", str(out)],
+                              cwd=caller, env=environ, capture_output=True, text=True,
+                              timeout=180)
+        assert done.returncode == 1, done.stdout + done.stderr
+        assert _evidence(out)["outcome"] == "published", done.stdout + done.stderr
+        assert proxy.hits == [], f"the planted project .npmrc answered for the registry: {proxy.hits}"
+        assert any(hit.startswith(f"/{MANIFEST['name']}") for hit in published.hits)
     finally:
         published.shutdown()
         proxy.shutdown()

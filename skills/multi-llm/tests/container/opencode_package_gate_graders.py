@@ -36,6 +36,14 @@ CHECKOUT_SKILL_DIR = "/opt/mllm/skill"
 #: The fan-out's own opencode goes through `/opt/mllm/bin` and is the worker's
 #: descendant, never its ancestor.
 HOST_OPENCODE = "/opt/mllm/real/opencode"
+#: How long the detach handshake may keep a worker under its first parent. The
+#: double spawn (`utils/process_control.py`, `_spawn_detached_posix`) forks an
+#: intermediate in a new session, which forks the worker, writes its pid to the
+#: launcher and exits: milliseconds, during which the worker's ppid chain still
+#: runs through the launcher into opencode's tree. A 0.1 s sample can land
+#: there. A "first parent" alive a second past the worker's first sighting is
+#: no such intermediate, whatever its argv says.
+DETACH_HANDSHAKE_S = 1.0
 
 SCENARIOS = ("init-status", "detach", "supervision", "completion",
              "cancellation")
@@ -228,6 +236,88 @@ class Bundle:
             if self.gate.get(key):
                 pids.add(self.gate[key])
         return pids
+
+
+def worker_ancestry(bundle: "Bundle", workers: list[dict]) -> list[dict]:
+    """Per worker process: whether opencode was on its ppid chain in a sample
+    that counts, measured from the samples' own record.
+
+    What counts is every sample from the worker tree's first sighting under its
+    FINAL parent onward, i.e. after the detach handshake. The driver records,
+    per worker, the union of every sample's chain (`ancestors_seen`) and the
+    chain at its first sighting (`first_chain`), not each sample's, so the
+    pre-handshake samples are taken out the only way that record allows:
+
+    * the tree's root is the worker process whose parent (as first seen) is no
+      worker; its descendants' chains run through it;
+    * when the root was first seen under a parent it later lost, and that
+      parent was the double spawn's intermediate — a fork of its own parent
+      (the same argv), alive no longer than `DETACH_HANDSHAKE_S` past the
+      root's first sighting and gone by the end — the root's `first_chain` is
+      the pre-handshake chain, and its pids are excused from every worker's
+      union (they are the launcher's tree: opencode, the plugin's uv, the
+      launcher, the intermediate);
+    * whatever remains of each union must hold no opencode pid, and so must
+      each worker's chain under its final parent, read from the table (a
+      final parent inside opencode's tree, a subreaper say, would otherwise
+      hide behind the excused pids).
+
+    Otherwise no sample is excused, which is the rule unchanged: a worker that
+    was ever a plain descendant of opencode — first seen there, reparented
+    later or never — still fails. Only the recorded fields are read, so older
+    bundles grade the same way they did, unless the handshake race is in them.
+    """
+    worker_pids = {w["pid"] for w in workers}
+    table = {p["pid"]: p for p in bundle.processes}
+    opencode = bundle.host_opencode_pids()
+
+    def first_parent(process: dict):
+        return process.get("first_ppid", process.get("ppid"))
+
+    def latest_chain(pid) -> list:
+        chain, seen = [], set()
+        while pid and pid not in seen:
+            seen.add(pid)
+            chain.append(pid)
+            pid = (table.get(pid) or {}).get("ppid")
+        return chain
+
+    results = []
+    for worker in workers:
+        root, seen = worker, {worker["pid"]}
+        while first_parent(root) in worker_pids and first_parent(root) not in seen:
+            seen.add(first_parent(root))
+            root = table[first_parent(root)]
+        excused: set = set()
+        handshake = None
+        if first_parent(root) != root.get("ppid"):
+            intermediate = table.get(first_parent(root)) or {}
+            launcher = table.get(first_parent(intermediate)) if intermediate else None
+            last_alive = intermediate.get("last_alive")
+            if (launcher is not None and intermediate.get("args")
+                    and intermediate.get("args") == launcher.get("args")
+                    and isinstance(last_alive, (int, float))
+                    and isinstance(root.get("first_seen"), (int, float))
+                    and last_alive - root["first_seen"] <= DETACH_HANDSHAKE_S
+                    and not bundle.alive_at_end(intermediate)
+                    and isinstance(root.get("first_chain"), list)
+                    and root["first_chain"][:1] == [intermediate.get("pid")]):
+                excused = set(root["first_chain"])
+                handshake = {"root": root["pid"], "intermediate": intermediate.get("pid"),
+                             "launcher": launcher.get("pid"),
+                             "alive_after_first_sighting_s": round(
+                                 last_alive - root["first_seen"], 3)}
+        union = worker.get("ancestors_seen")
+        counted = set(union) - excused if isinstance(union, list) else set()
+        final = latest_chain(worker.get("ppid"))
+        results.append({
+            "pid": worker["pid"], "root": root["pid"], "handshake_excused": handshake,
+            "opencode_in_counted_samples": sorted(opencode & counted),
+            "final_chain": final, "opencode_in_final_chain": sorted(opencode & set(final)),
+            "ok": ((worker.get("samples_alive") or 0) >= 1 and isinstance(union, list)
+                   and not opencode & counted and not opencode & set(final)),
+        })
+    return results
 
 
 def watch_complete(watch: dict | None) -> bool:
@@ -477,7 +567,7 @@ def grade_detach(result: harness.RowResult) -> tuple[dict, dict, None]:
     workers = bundle.workers(run_id)
     host_pid = bundle.gate.get("host_pid")
     host = next((p for p in bundle.processes if p.get("pid") == host_pid), {})
-    opencode_pids = bundle.host_opencode_pids()
+    ancestry = worker_ancestry(bundle, workers)
     scripted = bundle.scripted_calls(claim["leg"])
     observed.update({
         "scripted_extra_flags": [(c.get("arguments") or {}).get("extra_flags")
@@ -489,7 +579,8 @@ def grade_detach(result: harness.RowResult) -> tuple[dict, dict, None]:
         "claimed_log": terminal.get("log"),
         "run_record": run,
         "host": {k: host.get(k) for k in ("pid", "pgid", "sid", "args")},
-        "host_opencode_pids": sorted(opencode_pids),
+        "host_opencode_pids": sorted(bundle.host_opencode_pids()),
+        "worker_ancestry": ancestry,
         "workers": [{k: w.get(k) for k in ("pid", "ppid", "first_ppid", "pgid",
                                             "sid", "state", "args", "first_seen",
                                             "last_alive", "samples_alive",
@@ -518,18 +609,15 @@ def grade_detach(result: harness.RowResult) -> tuple[dict, dict, None]:
         "worker_in_its_own_process_group": bool(workers) and bool(host) and all(
             w.get("pgid") == run.get("pgid") and w.get("pgid") != host.get("pgid")
             and w.get("sid") == w.get("pgid") for w in workers),
-        # Measured in every sample a worker process was alive in, from that
-        # sample's own process table: no opencode host process anywhere on its
-        # ppid chain, from the first sighting on. The latest chain alone stops
-        # at init once the double spawn's intermediate is gone, whatever it
-        # was before. The plugin's own children (the launch, the polls) ARE
-        # opencode's, which is exactly what the worker must not be.
+        # Measured in every sample a worker process was alive in after the
+        # detach handshake, from that sample's own process table: no opencode
+        # host process anywhere on its ppid chain (`worker_ancestry`). The
+        # latest chain alone stops at init once the double spawn's
+        # intermediate is gone, whatever it was before. The plugin's own
+        # children (the launch, the polls) ARE opencode's, which is exactly
+        # what the worker must not be.
         "worker_outside_opencode_tree_in_every_sample": (
-            bool(workers) and bool(host_pid)
-            and all((w.get("samples_alive") or 0) >= 1
-                    and isinstance(w.get("ancestors_seen"), list)
-                    and not opencode_pids & set(w["ancestors_seen"])
-                    for w in workers)),
+            bool(workers) and bool(host_pid) and all(entry["ok"] for entry in ancestry)),
     })
     return checks, observed, None
 

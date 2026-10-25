@@ -100,12 +100,14 @@ make for itself (this machine restricts unprivileged user namespaces, so no
   network; ``apt-get`` adds git, CA certificates and Python (3.11, Debian's,
   plus ``python3-yaml`` for the stub model's scenario loader), uv is the
   pinned release fetched by URL and checked against its sha256 before it
-  runs, and OpenCode is ``npm ci`` of the pinned install's lockfile subset
-  (``bump.install_subset``), checked by ``bump.verify_installed`` as the
-  install phase starts (every installed package from the single registry
-  with the committed integrity, the binary byte-identical to a verified
-  platform package's, never a copy the install script fetched on its own)
-  and by ``--version``;
+  runs, and OpenCode is ``npm ci --ignore-scripts`` of the pinned install's
+  lockfile subset (``bump.install_subset``), checked by
+  ``bump.verify_installed`` as each phase starts (every installed package
+  from the single registry with the committed integrity, nothing else in
+  ``node_modules``), which also chooses the binary the phase runs: a verified
+  platform package's own ``bin/opencode``, in the order ``opencode-ai``'s
+  install script would have tried them, the script itself never run; then
+  ``--version``;
 * ``docker cp`` of the probe KIT only (:data:`KIT_FILES`: this script, the
   row-7 probe library, the pinned install's check, the stub model and its
   scenario matcher, the payload digest module) and a facts file, never the
@@ -259,7 +261,7 @@ _LOOPBACK = re.compile(r"^lo[0-9]*$")
 #: ``registry_record`` comes along because it is where the criteria sets are
 #: defined; its PyYAML import (the tag read) never runs inside. ``bump`` is the
 #: pinned install's own check (:func:`bump.verify_installed`), run inside on
-#: what ``npm ci`` put down there.
+#: what ``npm ci`` put down there, and the one that chooses the binary.
 KIT_FILES = (
     "packaging/opencode/registry_check.py",
     "packaging/opencode/probe.py",
@@ -690,12 +692,19 @@ def npm_error_code(stdout: str, stderr: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
-def _npm_argv(*words: str, registry: str, cache: Path, userconfig: Path,
+def _npm_argv(*words: str, registry: str, cache: Path, userconfig: Path, prefix: Path,
               flags: Sequence[str] = NPM_FETCH_FLAGS) -> List[str]:
     """npm with only the probe's own settings: the registry and a fresh cache on
-    the command line (they outrank every other layer), an empty user file."""
+    the command line (they outrank every other layer), an empty user file (the
+    isolated environment names an empty global one), and ``--prefix`` naming
+    the probe's own npm scratch directory, which holds no ``package.json``,
+    ``node_modules`` or ``.npmrc``. That flag is what pins npm's project root:
+    without it npm walks up from its cwd to the first ``package.json`` or
+    ``node_modules`` and reads the ``.npmrc`` there, above the empty files
+    (measured on npm 10.9.3 and 11.5.1; ``registry_absent.mjs`` says how)."""
     return ["npm", *words, f"--registry={registry}", f"--cache={cache}",
-            f"--userconfig={userconfig}", "--no-update-notifier", *flags]
+            f"--userconfig={userconfig}", f"--prefix={prefix}", "--no-update-notifier",
+            *flags]
 
 
 # ---------------------------------------------------------------------------
@@ -890,7 +899,7 @@ def network_snapshot(ctx: Context, env: Mapping[str, str], steps: Steps, diag: P
     userconfig = scratch / "npmrc-empty"
     userconfig.write_text("", encoding="utf-8")
     argv = _npm_argv("view", ctx.spec, "version", "--json", registry=ctx.single_registry,
-                     cache=cache, userconfig=userconfig, flags=NPM_PROOF_FLAGS)
+                     cache=cache, userconfig=userconfig, prefix=scratch, flags=NPM_PROOF_FLAGS)
     bounded = steps.run(argv, cwd=scratch, env=env, budget_s=NPM_BUDGET_S,
                         stdout=diag / f"{label}.npm-view.json",
                         stderr=diag / f"{label}.npm-view.stderr.txt")
@@ -1061,7 +1070,8 @@ def run_criteria(ctx: Context, steps: Optional[Steps] = None) -> Dict[str, Any]:
         index = len(attempts) + 1
         cache = scratch / f"view-cache-{index}"
         argv = _npm_argv("view", ctx.spec, "version", "dist", "--json", "--prefer-online",
-                         registry=ctx.read_registry, cache=cache, userconfig=userconfig)
+                         registry=ctx.read_registry, cache=cache, userconfig=userconfig,
+                         prefix=scratch)
         bounded = steps.run(argv, cwd=scratch, env=iso.env, budget_s=NPM_BUDGET_S,
                             stdout=diag / f"npm-view-{index}.json",
                             stderr=diag / f"npm-view-{index}.stderr.txt")
@@ -1102,8 +1112,9 @@ def run_criteria(ctx: Context, steps: Optional[Steps] = None) -> Dict[str, Any]:
     download_dir = root / "registry-artifact"
     download_dir.mkdir(parents=True, exist_ok=True)
     argv = _npm_argv("pack", ctx.spec, "--json", f"--pack-destination={download_dir}",
-                     registry=ctx.read_registry, cache=scratch / "pack-cache", userconfig=userconfig)
-    bounded = steps.run(argv, cwd=download_dir, env=iso.env, budget_s=NPM_BUDGET_S,
+                     registry=ctx.read_registry, cache=scratch / "pack-cache", userconfig=userconfig,
+                     prefix=scratch)
+    bounded = steps.run(argv, cwd=scratch, env=iso.env, budget_s=NPM_BUDGET_S,
                         stdout=diag / "npm-pack.json", stderr=diag / "npm-pack.stderr.txt")
     tarballs = sorted(download_dir.glob("*.tgz"))
     download = {"argv": [a if not a.startswith("--cache=") else "--cache=<fresh>" for a in argv],
@@ -1656,12 +1667,16 @@ def setup_script(base: Mapping[str, str]) -> str:
 
 
 def pin_install_script(single: str) -> str:
-    """``npm ci`` of the lockfile subset, from the single registry, with empty npm config."""
+    """``npm ci --ignore-scripts`` of the lockfile subset, from the single
+    registry, with empty npm config and the prefix as npm's project root
+    (``bump._npm_ci``'s flags, for the same reasons: no install script runs a
+    binary before ``verify_installed`` chose it)."""
     return "\n".join([
         "set -euo pipefail",
         f"cd {PIN_PREFIX}",
         ": > .npmrc-empty",
-        f"npm ci --no-audit --no-fund --registry={single} --userconfig={PIN_PREFIX}/.npmrc-empty "
+        f"npm ci --ignore-scripts --no-audit --no-fund --registry={single} "
+        f"--userconfig={PIN_PREFIX}/.npmrc-empty --prefix={PIN_PREFIX} "
         f"--cache={PIN_PREFIX}/.npm-cache",
         f"rm -rf {PIN_PREFIX}/.npm-cache",
         f"chmod -R a+rX {PIN_PREFIX}",
@@ -1895,16 +1910,17 @@ def _context_from_facts(facts: Mapping[str, Any]) -> Context:
                    interval_s=float(facts["interval_s"]))
 
 
-def verify_pin(prefix: Path, ctx: Context) -> Dict[str, str]:
+def verify_pin(prefix: Path, ctx: Context) -> Dict[str, Any]:
     """``bump.verify_installed`` on the container's ``npm ci`` of the pin, before
-    the binary runs for the probe: refuses (``CheckError``) a binary that is not
-    a verified platform package's own, or a package from elsewhere. The subset
-    lockfile is the host's (``npm ci`` never rewrites it); the registry is the
-    single one the host already checked."""
+    anything of it runs: refuses (``CheckError``) a package from elsewhere, one
+    outside the subset, or no verified platform binary; else returns the one to
+    run (``binary``), chosen in the container because the choice depends on its
+    CPU and libc. The subset lockfile is the host's (``npm ci`` never rewrites
+    it); the registry is the single one the host already checked."""
     bump = _bump()
     try:
         lock = json.loads((prefix / "package-lock.json").read_text(encoding="utf-8"))
-        return bump.verify_installed(prefix, Path(ctx.binary), lock, ctx.single_registry)
+        return bump.verify_installed(prefix, lock, ctx.single_registry)
     except (OSError, ValueError, bump.BumpError) as exc:
         raise CheckError(f"the pinned OpenCode under {prefix}: {exc}") from exc
 
@@ -1922,8 +1938,12 @@ def container_phase(argv: Sequence[str], steps: Optional[Steps] = None) -> int:
             raise CheckError("container-phase runs inside the probe's container only")
         facts = json.loads(args.facts.read_text(encoding="utf-8"))
         ctx = _context_from_facts(facts)
+        # Both phases: the offline one runs from a commit of this container,
+        # so the same check makes the same choice there.
+        pin = verify_pin(Path(facts["pin_prefix"]), ctx) if facts.get("pin_prefix") else None
+        if pin is not None:
+            ctx = replace(ctx, binary=pin["binary"])
         if args.phase == "install":
-            pin = verify_pin(Path(facts["pin_prefix"]), ctx) if facts.get("pin_prefix") else None
             result = run_criteria(ctx, steps)
             if pin is not None:
                 result["details"]["pinned_install"] = pin
@@ -1957,8 +1977,8 @@ def _install_host_binary(single: str, root: Path) -> str:
     ``bump.py install`` (the gate's own installer) as a child whose ``HOME``
     is fresh: npm's default cache is ``$HOME/.npm``, so nothing it downloads
     comes from, or goes into, the invoking user's cache. Bounded by
-    ``probe.run_bounded``: ``npm ci`` runs ``opencode-ai``'s install script,
-    which can start an ``npm install`` of its own.
+    ``probe.run_bounded``, so a hung registry connection ends with the budget.
+    The path it prints last is a verified platform package's own binary.
     """
     prefix = root / "opencode-host"
     home = root / "opencode-host-home"
@@ -2098,7 +2118,8 @@ def check(args: argparse.Namespace, steps: Optional[Steps] = None,
                                  "pinned OpenCode itself, from the lockfile")
             ctx = Context(spec=args.spec, name=name, version=version, read_registry=read_registry,
                           single_registry=single, rehearsal=rehearsal, environment=args.environment,
-                          candidate=candidate, binary=f"{PIN_PREFIX}/node_modules/.bin/opencode",
+                          # Chosen inside, by `verify_pin`, from what npm put there.
+                          candidate=candidate, binary=PIN_PREFIX,
                           opencode_pin=pin, probe_root=Path(WORK) / "probe-root",
                           previous_pin=previous, poll_s=args.poll_seconds)
             lock = json.loads((REPO_ROOT / _bump().LOCKFILE).read_text(encoding="utf-8"))

@@ -33,7 +33,12 @@
  * `--json` puts the code on STDOUT as `.error.code`. Measured 2026-10-25 on npm
  * 10.9.3 and 11.5.1 (the publish job's pin) for `E404`, `E401`, `ECONNREFUSED`
  * and `ENOTFOUND`; stderr carries only the human-readable `npm error` lines and
- * is never parsed. Never `npm publish --dry-run`, which does not ask.
+ * is never parsed. `E404` has two shapes: a name never published says `Not
+ * Found - GET <url> - Not found`, and a missing version of a package that
+ * exists (every release after the first) says `No match found for version
+ * <v>` (measured with `npm view express@0.0.0 version --json`, both npms; only
+ * the `detail` wording differs). Never `npm publish --dry-run`, which does not
+ * ask.
  *
  * ONE REGISTRY, CHECKED, NEVER INHERITED. npm's registry is configurable — a
  * user `.npmrc`, `npm_config_registry`, a scoped registry — and an inherited
@@ -51,7 +56,10 @@
  *     `test_opencode_registry_absent.py`). A scoped name would escape that —
  *     `@scope:registry` outranks `--registry` — so a scoped name is refused.
  *   * When npm's `E404` names the URL it fetched (`Not Found - GET <url>`), that
- *     URL must lie under the single registry, or the answer is `unknown`.
+ *     URL must lie under the single registry, or the answer is `unknown`. Only
+ *     the whole-package shape names one: once the package exists, a missing
+ *     VERSION is `E404` with `No match found for version <v>` and no URL at
+ *     all (measured, above), so that binding cannot apply there.
  *
  * NOTHING OF THE CALLER'S npm CONFIGURATION. `--registry` alone does not make
  * the answer the single registry's: a user or global `.npmrc` can still carry
@@ -63,6 +71,23 @@
  * inherited `npm_config_*` variable, which would otherwise outrank those empty
  * files. The standard proxy variables (`HTTPS_PROXY` …) still pass: they say
  * how this machine reaches the network at all, as row 7's isolation keeps them.
+ *
+ * NOR A PROJECT'S. npm has a third file layer, the project's `.npmrc`, and it
+ * outranks both empty files. npm finds the project by walking up from its cwd
+ * to the first directory holding a `package.json` or a `node_modules`, and
+ * falls back to the cwd itself, so the caller's directory (the repository root
+ * under `make`), any ancestor of it, and — now that the user file is moved —
+ * a home holding `~/node_modules` or `~/package.json` each had their `.npmrc`
+ * read as project config (npm skips `~/.npmrc` there only while it IS the user
+ * file). Reviewed and reproduced: a cwd `.npmrc` naming a proxy that answers
+ * 404 to everything turned row 9 green. So npm runs in the scratch directory
+ * below, which holds neither, with `--prefix=<that directory>`. Measured on
+ * npm 10.9.3 and 11.5.1, alike: a command-line `--prefix` IS the project root
+ * (npm skips the walk entirely), while a cwd alone is not enough — from an
+ * empty scratch dir npm still walks up, so a `package.json` and `.npmrc` above
+ * it (a `TMPDIR` inside a checkout) were still read. Both are passed: the
+ * flag pins the root, the cwd keeps nothing else npm resolves against the
+ * caller's directory.
  *
  * BOUNDED. A fresh `--cache` per probe (no packument served from an earlier
  * read, nothing written to the caller's cache), `--fetch-retries 2` with short
@@ -194,13 +219,14 @@ function readManifest(path) {
 }
 
 /** npm's argv for the probe. Exported for nothing but the suite's reading. */
-export function npmArgv(name, version, registry, { cache, userconfig, globalconfig }) {
+export function npmArgv(name, version, registry, { cache, userconfig, globalconfig, prefix }) {
   return [
     "view", `${name}@${version}`, "version", "--json",
     `--registry=${registry}`,
     `--cache=${cache}`,
     `--userconfig=${userconfig}`,
     `--globalconfig=${globalconfig}`,
+    `--prefix=${prefix}`,
     "--prefer-online",
     "--no-update-notifier",
     ...FETCH_FLAGS,
@@ -209,8 +235,13 @@ export function npmArgv(name, version, registry, { cache, userconfig, globalconf
 
 /**
  * Decide the outcome from what npm did. Pure, so the three-way rule has one
- * spelling: `published` on exit 0, `absent` on exactly `E404` from the single
- * registry, `unknown` on everything else.
+ * spelling: `published` on exit 0, `absent` on exactly `E404`, `unknown` on
+ * everything else. An `E404` that names the URL it fetched must name one under
+ * the single registry; only the whole-package shape does (`Not Found - GET
+ * <url>`, a name never published). A missing version of a package that exists
+ * is `No match found for version <v>`, with no URL to check, and is accepted
+ * on the code alone: which server answered is what the argv and the empty
+ * config layers above settle, not this summary.
  */
 export function classify({ status, stdout, registry }) {
   if (status === 0) {
@@ -229,6 +260,8 @@ export function classify({ status, stdout, registry }) {
     return { outcome: "unknown", code, why: `npm reported code ${code ?? "<none>"}; only E404 is a green answer` };
   }
   const summary = typeof parsed.error.summary === "string" ? parsed.error.summary : "";
+  // The whole-package shape only. The later-release shape (`No match found
+  // for version X`) carries no `GET`, so nothing here binds it to a server.
   const fetched = /\bGET\s+(\S+)/.exec(summary);
   if (fetched && !fetched[1].startsWith(`${registry}/`)) {
     return {
@@ -281,13 +314,16 @@ function main(argv) {
   }
 
   const spec = `${evidence.name}@${evidence.version}`;
-  // One fresh directory: the cache and the two empty config files, removed
-  // together whatever npm did.
+  // One fresh directory: npm's cwd and project root, its cache and the two
+  // empty config files, removed together whatever npm did. Nothing here is a
+  // `package.json` or a `node_modules`, and no `.npmrc` is written, so the
+  // project layer `--prefix` pins it to is empty too.
   const scratch = mkdtempSync(join(tmpdir(), "mllm-row9-npm-"));
   const paths = {
     cache: join(scratch, "cache"),
     userconfig: join(scratch, "npmrc-user"),
     globalconfig: join(scratch, "npmrc-global"),
+    prefix: scratch,
   };
   const env = Object.fromEntries(
     Object.entries(process.env).filter(([key]) => !key.toLowerCase().startsWith("npm_config_")),
@@ -298,6 +334,7 @@ function main(argv) {
     writeFileSync(paths.globalconfig, "", "utf8");
     child = spawnSync("npm", npmArgv(evidence.name, evidence.version, registry, paths), {
       encoding: "utf8",
+      cwd: scratch,
       env,
       stdio: ["ignore", "pipe", "pipe"],
       timeout: KILL_AFTER_MS,
