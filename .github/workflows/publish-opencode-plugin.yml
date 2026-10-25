@@ -1,182 +1,1100 @@
-# Publish `opencode-multi-llm` to npm, with provenance.
+# Publish `opencode-multi-llm` to npm. A tag push gates and publishes nothing;
+# an upload happens only when a maintainer dispatches one, from the default
+# branch, and approves it in a protected environment.
+#
+# THREE JOBS, AND ONLY ONE OF THEM CAN PUBLISH (plans/opencode-plugin-publish.md,
+# step 0; the shape is the Codex workflow's gate/promote split):
+#
+#   gate     every `opencode-v*` tag push, and a `mode: rehearse` dispatch, which
+#            runs this same job and nothing else. Tag and version agree, the
+#            shared-version check, rows 1-6 and 5b, a clean build and pack of
+#            the candidate, the pinned OpenCode, row 7, then row 9 (or, for the
+#            one bootstrap tag below, the registry-install probe in its place).
+#            `contents: read` and nothing more, so a tag push cannot publish.
+#   verify   `mode: publish` only, and only from the default branch. It reruns
+#            the gate on the tag's commit and validates the committed
+#            release-gate record (row 8's evidence) against that rebuild. Every
+#            piece of third-party code the gate executes runs here: the OpenCode
+#            binary and its install scripts, the cold `uv` installs, the
+#            scripted stub model and the plugin. No job that runs any of it can
+#            request an OIDC token. It outputs the commit and the digest.
+#   publish  `needs: verify`. The only job holding `id-token: write`, behind
+#            the `npm-publish` environment. It rebuilds, refuses a digest that
+#            is not verify's before anything else, reruns row 9, packs once with
+#            `--ignore-scripts` and uploads that tarball. No OpenCode, no test,
+#            no probe, no stub, no plugin code: the builder's locked runtime
+#            dependencies are the only third-party code left in it.
 #
 # WHY TRUSTED PUBLISHING. Publishing through npm's OIDC trusted publisher means
 # no long-lived `NPM_TOKEN` secret ever exists in this repository, and it is what
-# makes `--provenance` work at all.
+# makes `--provenance` work at all. The publisher is bound to this file and to
+# the `npm-publish` environment (plan step 6), so an OIDC token from any other
+# job or workflow cannot publish, and every publication waits for an approval.
 #
-# WHY THE FIRST RELEASE IS PROBABLY NOT THIS WORKFLOW. A trusted publisher is
-# configured **on an existing npm package**, and npm has no PyPI-style pending
-# publisher, so a package that has never been published cannot have one attached.
-# The first publish is therefore a local `npm publish --access public` from the
-# maintainer's machine, with CI taking over from the second release. That
-# ordering works either way, which is why it is the assumed one. Re-check it at
-# the pre-publish gate: if npm ships first-publish OIDC before this runs, the
-# local step collapses into a single CI publish.
+# WHY THE FIRST RELEASE IS PROBABLY NOT THE PUBLISH JOB. A trusted publisher is
+# configured **on an existing npm package**, and npm still has no pending
+# publisher (`npm trust`: "The package you're configuring must already exist",
+# rechecked 2026-10-25). So on the laptop path the first version is uploaded
+# from the maintainer's machine (`make opencode-publish-first`), and its tag
+# push then verifies the bytes npm serves (the bootstrap path, BOOTSTRAP_TAG
+# below) instead of demanding an absence that can no longer hold. Every later
+# version goes through `mode: publish`. If step 4's recheck finds first-version
+# OIDC supported, the first release is one normal dispatch too, and a candidate
+# that still carries the bootstrap path needs a new commit without it (step 4).
 #
-# FOUR SAFEGUARDS, and a tag-push workflow without them will happily try to
-# publish on a tag that has nothing to do with this package.
+# WHY ROW 8 ARRIVES AS A RECORD. The runners have no Docker daemon, so row 8
+# (the package-route container scenarios) runs only in the maintainer's full
+# gate. A sentence in CI's evidence saying it ran is an assertion, not an
+# authorization: `verify` instead requires the newest committed
+# `<UTC>-opencode-release-gate.json` naming the tag to validate against the
+# tag's commit, its version, this run's rebuilt digest, the pinned host and the
+# single registry, through the one validator the suite runs unchanged.
+#
+# FOUR SAFEGUARDS, numbered where each one lives: 1 a tag pattern of its own,
+# 2 the tag equals the version, 3 a pinned npm, and 4, once "the gate runs in
+# this job", now: the gate runs in this run, on this SHA, bound by the digest.
 
 name: publish opencode plugin
 
 on:
   push:
     # 1. A TAG PATTERN OF ITS OWN. This repository's tags are not reserved for
-    #    the npm package, so a `v*` or unfiltered trigger would make every
-    #    unrelated tag attempt a publish — and the first thing it would hit is
-    #    npm's OIDC error rather than a clear refusal.
+    #    the npm package (`codex-v*` shares the version number), so a `v*` or
+    #    unfiltered trigger would gate every unrelated tag.
     tags:
       - 'opencode-v*'
+  workflow_dispatch:
+    inputs:
+      # `rehearse` is the default, so a dispatch that does not ask for
+      # `publish` cannot publish.
+      mode:
+        description: "rehearse: run the gate job alone on this commit. publish: verify the tag, then upload it (default branch only)"
+        required: true
+        type: choice
+        options:
+          - rehearse
+          - publish
+        default: rehearse
+      tag:
+        description: "publish: the opencode-v<version> tag to verify and upload"
+        required: false
+        type: string
+      as_tag:
+        description: "rehearse: the opencode-v<version> tag this commit stands in for"
+        required: false
+        type: string
+      path:
+        description: "rehearse: normal (row 9 against the registry) or bootstrap (the registry-install probe against a localhost stub)"
+        required: false
+        type: choice
+        options:
+          - normal
+          - bootstrap
+        default: normal
 
-permissions:
-  id-token: write
-  contents: read
+# Nothing at workflow level: every job declares its own, and only `publish` asks
+# for `id-token: write`. A workflow-level grant would reach every job, including
+# the ones that run the OpenCode binary and the plugin.
+permissions: {}
+
+env:
+  # THE ONE TAG THAT TAKES THE BOOTSTRAP PATH, written once. The gate's route
+  # step and the static test both read it here. Bootstrap is never an input on a
+  # real run: a tag push has no inputs, and any selectable bypass would let an
+  # existing version skip row 9.
+  #
+  # RETIREMENT. Once the bootstrap run has passed, remove this value, the
+  # bootstrap steps, the rehearsal's `bootstrap` choice and their fixtures from
+  # this file on `master` before the next release tag, and turn the static test
+  # into "no tag skips row 9". The pushed tag keeps its own copy of this file,
+  # so re-running that tag's run still finds the bootstrap path.
+  BOOTSTRAP_TAG: opencode-v0.1.1
+  # What a release tag looks like, checked before any tag reaches git, a
+  # checkout or a probe. Tag/version equality then binds it to package.json.
+  RELEASE_TAG_PATTERN: '^opencode-v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+  # 3. A PINNED npm, NOT `latest`. npm documents trusted publishing for npm
+  #    11.5.1+ on Node 22.14.0+ (https://docs.npmjs.com/trusted-publishers/).
+  #    This pin is that floor, and it is the npm row 9's `--json` body was
+  #    measured on (packaging/opencode/registry_absent.mjs). `latest` is the
+  #    bare-version install the supply-chain rule forbids, and an npm too old
+  #    for OIDC fails *at publish time*, which is the most expensive place to
+  #    find out. No publish has run through this workflow yet: after the first
+  #    CI publish, record here the npm and Node versions it actually used.
+  NPM_VERSION: '11.5.1'
+  NODE_VERSION: '22'
+  NODE_FLOOR: '22.14.0'
 
 jobs:
-  publish:
+  gate:
+    if: github.event_name == 'push' || inputs.mode == 'rehearse'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 180
     steps:
-      # ACTIONS PINNED BY COMMIT SHA, NOT BY TAG. This job holds `id-token:
-      # write` and ends in `npm publish --provenance`, so whatever these three
-      # actions run is what signs the release. `@v4`/`@v5` are mutable refs the
-      # action owner can move at any time, which makes a retag the one remaining
-      # way to change what gets signed without changing anything in this
-      # repository — the same reason safeguard 3 below refuses `npm@latest`.
-      #
-      # The trailing comment is the human-readable tag each SHA was resolved
-      # from; it is a label, not a constraint, so bump the SHA and the comment
-      # together and never the comment alone.
+      # ACTIONS PINNED BY COMMIT SHA, NOT BY TAG. `@v4`/`@v5` are mutable refs
+      # the action owner can move at any time, and the publish job's actions are
+      # what sign the release, so a retag would be the one remaining way to
+      # change what gets signed without changing anything in this repository.
+      # These are the same SHAs `tests.yml` pins. The trailing comment is the
+      # tag each SHA was resolved from; it is a label, not a constraint, so bump
+      # the SHA and the comment together and never the comment alone.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          # The staging step refuses a dirty tree and needs history to say so.
-          fetch-depth: 1
+          # Full history and every tag: the shared-version check reads every
+          # codex-v*/opencode-v* tag and refuses a shallow or tagless clone, and
+          # the staging step needs real history to say the tree is clean.
+          fetch-depth: 0
+          # Nothing in this workflow pushes. Without the persisted token no
+          # later step could, even by mistake.
+          persist-credentials: false
+
+      # No uv cache in this workflow. The Actions cache is shared across
+      # workflows and branches, so a restored cache is bytes no job of this run
+      # produced. And the plan wants the `uv` installs cold.
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          enable-cache: false
+
+      # THE SAME npm SETUP IN EVERY JOB THAT RUNS ROW 9, and it writes no
+      # `.npmrc`. `registry-url` would make setup-node write one whose auth
+      # token is `${NODE_AUTH_TOKEN}`, with a placeholder token exported until a
+      # real one exists. Row 9's `npm view` would then send that placeholder to
+      # the registry, and an `E401` in place of `E404` fails row 9 closed on the
+      # real tag. So no job here sets `registry-url`: every npm call passes the
+      # single registry explicitly, which is all a read needs, and the publish
+      # job's OIDC exchange needs no `.npmrc` either. npm 11.5.1 calls `oidc()`
+      # unconditionally before its credentials check, and stores the exchanged
+      # token in its own config for the registry it publishes to
+      # (lib/commands/publish.js, lib/utils/oidc.js, read 2026-10-25). No
+      # rehearsal runs the publish job's row 9, which is why the setup is
+      # identical everywhere and the static test holds it so.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install the pinned npm
+        run: |
+          set -euo pipefail
+          npm install -g --ignore-scripts "npm@${NPM_VERSION}"
+          actual="$(npm --version)"
+          if [ "${actual}" != "${NPM_VERSION}" ]; then
+            echo "REFUSING: npm is ${actual} after installing the pinned ${NPM_VERSION}." >&2
+            exit 1
+          fi
+          node_version="$(node -p 'process.versions.node')"
+          if ! printf '%s\n%s\n' "${NODE_FLOOR}" "${node_version}" | sort -V -C; then
+            echo "REFUSING: Node ${node_version} is older than ${NODE_FLOOR}, trusted publishing's floor." >&2
+            exit 1
+          fi
+          echo "node ${node_version}, npm ${actual}"
+
+      # WHICH TAG, AND WHICH PATH AFTER ROW 7. A tag push names its own tag,
+      # and only BOOTSTRAP_TAG takes the bootstrap path. A rehearsal names the
+      # tag it stands in for (`as_tag`) and chooses the path explicitly, so both
+      # paths can be rehearsed on one candidate without editing a version
+      # string. `as_tag` and `path` are read here and nowhere else, and only
+      # through the `mode == 'rehearse'` guard, so a push or a publish dispatch
+      # sees them empty whatever was typed.
+      - name: Which tag, and which path after row 7
+        id: route
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          MODE: ${{ inputs.mode }}
+          AS_TAG: ${{ inputs.mode == 'rehearse' && inputs.as_tag || '' }}
+          REHEARSE_PATH: ${{ inputs.mode == 'rehearse' && inputs.path || '' }}
+        run: |
+          set -euo pipefail
+          case "${EVENT_NAME}" in
+            push)
+              if [ "${REF_TYPE}" != "tag" ]; then
+                echo "REFUSING: a push of ${REF_TYPE} ${REF_NAME}; this job gates tags." >&2
+                exit 1
+              fi
+              tag="${REF_NAME}"
+              rehearsal=false
+              if [ "${tag}" = "${BOOTSTRAP_TAG}" ]; then
+                path=bootstrap
+              else
+                path=normal
+              fi
+              ;;
+            workflow_dispatch)
+              if [ "${MODE}" != "rehearse" ]; then
+                echo "REFUSING: the gate job runs on a tag push or mode: rehearse, not mode: ${MODE:-<none>}." >&2
+                exit 1
+              fi
+              if [ -z "${AS_TAG}" ]; then
+                echo "REFUSING: mode: rehearse needs as_tag, the tag this commit stands in for." >&2
+                exit 1
+              fi
+              tag="${AS_TAG}"
+              rehearsal=true
+              case "${REHEARSE_PATH}" in
+                normal|bootstrap) path="${REHEARSE_PATH}" ;;
+                *)
+                  echo "REFUSING: path '${REHEARSE_PATH}' is neither normal nor bootstrap." >&2
+                  exit 1
+                  ;;
+              esac
+              ;;
+            *)
+              echo "REFUSING: event ${EVENT_NAME} does not run the gate." >&2
+              exit 1
+              ;;
+          esac
+          if ! [[ "${tag}" =~ ${RELEASE_TAG_PATTERN} ]]; then
+            echo "REFUSING: '${tag}' is not an opencode-v<version> tag." >&2
+            exit 1
+          fi
+          {
+            echo "tag=${tag}"
+            echo "path=${path}"
+            echo "rehearsal=${rehearsal}"
+          } >> "${GITHUB_OUTPUT}"
+          # A rehearsal records its ref and SHA: they go in the release evidence.
+          echo "gate: ${tag}, path ${path}, rehearsal ${rehearsal}, on ${GITHUB_REF} at ${GITHUB_SHA}" \
+            | tee -a "${GITHUB_STEP_SUMMARY}"
+
+      - name: The single registry, and the package's name and version
+        id: facts
+        run: |
+          set -euo pipefail
+          registry="$(make -s opencode-print-registry)"
+          name="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["name"])' packaging/opencode/package.json)"
+          version="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["version"])' packaging/opencode/package.json)"
+          {
+            echo "registry=${registry}"
+            echo "name=${name}"
+            echo "version=${version}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "${name}@${version}, single registry ${registry}"
+
+      # 2. TAG EQUALS VERSION, ASSERTED, NOT ASSUMED. Without this,
+      #    `opencode-v1.0.1` on a tree still carrying 1.0.0 gates the wrong
+      #    number. In a rehearsal, `as_tag` stands in for the pushed tag.
+      - name: Tag must equal package.json's version
+        env:
+          TAG: ${{ steps.route.outputs.tag }}
+          VERSION: ${{ steps.facts.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "${TAG}" != "opencode-v${VERSION}" ]; then
+            echo "REFUSING: tag ${TAG} says ${TAG#opencode-v}, package.json says ${VERSION}." >&2
+            exit 1
+          fi
+          echo "tag and manifest agree on ${VERSION}"
+
+      # The rehearsal's candidate commit stands in for the tag wherever a step
+      # resolves one: the shared-version check reads tags, the probe rebuilds
+      # from the tag's commit, and the validator binds the record to it. A
+      # local lightweight tag on the dispatched commit gives them exactly what a
+      # real push would. It is never pushed (`contents: read`, no persisted
+      # token). A tag of that name that already names another commit refuses.
+      - name: 'Rehearsal: the dispatched commit stands in for the tag'
+        if: steps.route.outputs.rehearsal == 'true'
+        env:
+          TAG: ${{ steps.route.outputs.tag }}
+        run: |
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          if existing="$(git rev-parse -q --verify "refs/tags/${TAG}^{commit}")"; then
+            if [ "${existing}" != "${head}" ]; then
+              echo "REFUSING: ${TAG} already names ${existing}, not the dispatched commit ${head}." >&2
+              exit 1
+            fi
+            echo "${TAG} already names the dispatched commit ${head}"
+          else
+            git tag "${TAG}" "${head}"
+            echo "local stand-in tag ${TAG} -> ${head} (never pushed)"
+          fi
+
+      - name: Shared-version check
+        timeout-minutes: 10
+        run: make opencode-check-bump
+
+      - name: Package gate (rows 1-6 and 5b)
+        timeout-minutes: 60
+        run: make opencode-package-check-ci
+
+      - name: Build, pack and sweep the candidate
+        id: candidate
+        timeout-minutes: 15
+        env:
+          NAME: ${{ steps.facts.outputs.name }}
+          VERSION: ${{ steps.facts.outputs.version }}
+        run: |
+          set -euo pipefail
+          make opencode-package
+          tarball="${GITHUB_WORKSPACE}/packaging/opencode/${NAME}-${VERSION}.tgz"
+          if [ ! -f "${tarball}" ]; then
+            echo "REFUSING: make opencode-package left no ${tarball}." >&2
+            exit 1
+          fi
+          digest="$(cat packaging/opencode/dist/tree.sha256)"
+          if ! [[ "${digest}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "REFUSING: dist/tree.sha256 holds '${digest}', not a digest." >&2
+            exit 1
+          fi
+          {
+            echo "tarball=${tarball}"
+            echo "digest=${digest}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "candidate ${tarball}, digest ${digest}"
+
+      # The CI probe's OpenCode is the repository's pin, installed from the
+      # committed container lockfile with npm's integrity checks, under a
+      # scratch prefix. This file names no OpenCode version: `bump.py install`
+      # reads it through `read_pins()`, refuses unless every pin agrees and
+      # refuses a binary whose `--version` is not the pin. Its last stdout line
+      # is the binary.
+      - name: The pinned OpenCode, from the container lockfile
+        id: host
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          prefix="${RUNNER_TEMP}/opencode-host"
+          mkdir -p "${RUNNER_TEMP}/opencode-evidence"
+          log="${RUNNER_TEMP}/opencode-evidence/host-install.log"
+          uv run --project skills/multi-llm -- python packaging/opencode/bump.py install --prefix "${prefix}" \
+            | tee "${log}"
+          bin="$(tail -n 1 "${log}")"
+          case "${bin}" in
+            "${prefix}"/*) ;;
+            *)
+              echo "REFUSING: the install's last line '${bin}' is not a binary under ${prefix}." >&2
+              exit 1
+              ;;
+          esac
+          if [ ! -x "${bin}" ]; then
+            echo "REFUSING: ${bin} is not an executable." >&2
+            exit 1
+          fi
+          echo "bin=${bin}" >> "${GITHUB_OUTPUT}"
+
+      - name: Clean-install probe of the candidate tarball (row 7)
+        timeout-minutes: 30
+        env:
+          TARBALL: ${{ steps.candidate.outputs.tarball }}
+          HOST_BIN: ${{ steps.host.outputs.bin }}
+          REGISTRY: ${{ steps.facts.outputs.registry }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/opencode-evidence"
+          uv run --project skills/multi-llm -- python packaging/opencode/probe.py row7 \
+            --tarball "${TARBALL}" --opencode "${HOST_BIN}" --registry "${REGISTRY}" \
+            --out "${RUNNER_TEMP}/opencode-evidence/row7.json"
+
+      # Row 9 has one implementation, packaging/opencode/registry_absent.mjs,
+      # reached through its make target, here and in the other two jobs:
+      # exactly E404 from the single registry is absence, exit 0 is "already
+      # published", anything else is an unknown, and both refuse.
+      - name: Version must be absent from the registry (row 9)
+        if: steps.route.outputs.path == 'normal'
+        timeout-minutes: 5
+        run: make opencode-registry-absent OUT="${RUNNER_TEMP}/opencode-evidence/row9.json"
+
+      # THE BOOTSTRAP PATH: exactly BOOTSTRAP_TAG on a real push, or
+      # `path: bootstrap` in a rehearsal. In place of row 9, it verifies the
+      # bytes npm serves for a version the laptop path already uploaded,
+      # through the same registry-install probe step 5 runs. It skips only the
+      # absence check and the upload; every row before it ran above. A
+      # rehearsal serves the packed candidate from a localhost registry stub,
+      # and its record (`rehearsal: true`) must be refused as release evidence.
+      - name: 'Bootstrap rehearsal: serve the packed candidate from a localhost registry stub'
+        id: stub
+        if: steps.route.outputs.path == 'bootstrap' && steps.route.outputs.rehearsal == 'true'
+        timeout-minutes: 5
+        env:
+          TARBALL: ${{ steps.candidate.outputs.tarball }}
+        run: |
+          set -euo pipefail
+          stub_dir="${RUNNER_TEMP}/opencode-registry-stub"
+          mkdir -p "${stub_dir}"
+          # Left running for the steps below; the runner reaps it at job end.
+          nohup uv run --project skills/multi-llm -- python packaging/opencode/registry_stub.py \
+            --tarball "${TARBALL}" --url-file "${stub_dir}/url" > "${stub_dir}/stub.log" 2>&1 &
+          echo "$!" > "${stub_dir}/pid"
+          for _ in $(seq 1 60); do
+            if [ -s "${stub_dir}/url" ]; then break; fi
+            sleep 1
+          done
+          url="$(cat "${stub_dir}/url" 2>/dev/null || true)"
+          if ! [[ "${url}" =~ ^http://127\.0\.0\.1:[0-9]+/?$ ]]; then
+            echo "REFUSING: the registry stub did not report a 127.0.0.1 URL within 60 s (got '${url}')." >&2
+            cat "${stub_dir}/stub.log" >&2 || true
+            exit 1
+          fi
+          echo "url=${url}" >> "${GITHUB_OUTPUT}"
+          echo "rehearsal registry stub at ${url}"
+
+      # A runner is a fresh VM per job, and the probe gets a fresh root under
+      # the runner's temp directory, outside the checkout, which only rebuilds
+      # the candidate and runs the probe and is never on the plugin path. The
+      # probe makes its isolated home, XDG dirs, npm and uv caches and OpenCode
+      # home under it.
+      - name: 'Bootstrap: a fresh probe root outside the checkout'
+        id: probe_root
+        if: steps.route.outputs.path == 'bootstrap'
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d "${RUNNER_TEMP}/opencode-bootstrap-probe.XXXXXXXX")"
+          python3 - "${root}" "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}/opencode-evidence/bootstrap-probe-root.json" <<'PY'
+          import json, os, sys
+          root, workspace = (os.path.realpath(p) for p in sys.argv[1:3])
+          out = sys.argv[3]
+          if os.path.commonpath([root, workspace]) == workspace:
+              sys.exit(f"REFUSING: the probe root {root} lies inside the checkout {workspace}.")
+          if os.listdir(root):
+              sys.exit(f"REFUSING: the probe root {root} is not empty.")
+          os.makedirs(os.path.dirname(out), exist_ok=True)
+          with open(out, "w", encoding="utf-8") as handle:
+              json.dump({"probe_root": root, "outside_checkout": True, "empty_at_start": True}, handle)
+          PY
+          echo "root=${root}" >> "${GITHUB_OUTPUT}"
+          echo "probe root ${root} (empty, outside ${GITHUB_WORKSPACE})"
+
+      # Bounded, because the runner can reach a CDN edge that has not caught up
+      # with the laptop's confirming read. An expired poll is propagation lag,
+      # not a mismatch: re-run this run unchanged once a clean-cache read serves
+      # the version (plan step 4). The integrity it reads is what the record
+      # must name. A visibility read, not an absence check: it asks for
+      # `dist.integrity` and treats any failure as "not yet".
+      - name: 'Bootstrap: wait until the registry serves the version'
+        id: served
+        if: steps.route.outputs.path == 'bootstrap'
+        timeout-minutes: 20
+        env:
+          NAME: ${{ steps.facts.outputs.name }}
+          VERSION: ${{ steps.facts.outputs.version }}
+          REGISTRY: ${{ steps.facts.outputs.registry }}
+          REHEARSAL: ${{ steps.route.outputs.rehearsal }}
+          STUB_URL: ${{ steps.stub.outputs.url }}
+        run: |
+          set -euo pipefail
+          spec="${NAME}@${VERSION}"
+          source="${REGISTRY}"
+          if [ "${REHEARSAL}" = "true" ]; then source="${STUB_URL}"; fi
+          deadline=$(( $(date +%s) + 900 ))
+          while :; do
+            cache="$(mktemp -d)"
+            integrity=""
+            integrity="$(npm view "${spec}" dist.integrity --registry "${source}" --cache "${cache}" \
+              --prefer-online --no-update-notifier 2> "${RUNNER_TEMP}/opencode-npm-view.err")" || integrity=""
+            rm -rf "${cache}"
+            if [[ "${integrity}" =~ ^sha512- ]]; then break; fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "REFUSING: ${spec} is not served by ${source} after 15 minutes." >&2
+              cat "${RUNNER_TEMP}/opencode-npm-view.err" >&2 || true
+              echo "Propagation lag is not a mismatch: re-run this run once a clean-cache read serves it." >&2
+              exit 1
+            fi
+            sleep 30
+          done
+          echo "integrity=${integrity}" >> "${GITHUB_OUTPUT}"
+          echo "${source} serves ${spec} with ${integrity}"
+
+      - name: 'Bootstrap: rebuild the candidate from the tag''s commit (--frozen --no-dev)'
+        id: bootstrap_rebuild
+        if: steps.route.outputs.path == 'bootstrap'
+        timeout-minutes: 15
+        env:
+          TAG: ${{ steps.route.outputs.tag }}
+          CANDIDATE_DIGEST: ${{ steps.candidate.outputs.digest }}
+        run: |
+          set -euo pipefail
+          tagged="$(git rev-parse -q --verify "refs/tags/${TAG}^{commit}")" || {
+            echo "REFUSING: ${TAG} does not resolve." >&2; exit 1; }
+          if [ "$(git rev-parse HEAD)" != "${tagged}" ]; then
+            echo "REFUSING: the checkout is not ${TAG}'s commit ${tagged}." >&2
+            exit 1
+          fi
+          uv run --project skills/multi-llm --frozen --no-dev -- python packaging/opencode/build.py
+          digest="$(cat packaging/opencode/dist/tree.sha256)"
+          if [ "${digest}" != "${CANDIDATE_DIGEST}" ]; then
+            echo "REFUSING: the --frozen --no-dev rebuild is ${digest}, the candidate was ${CANDIDATE_DIGEST}." >&2
+            exit 1
+          fi
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+
+      # The one registry-install probe step 5 runs too, with the label
+      # `ci-runner` and the seven criteria a runner can attempt (no
+      # `warm_offline_operation`: no Docker daemon, no way to cut one process
+      # off the network). It compares the candidate's digest with the extracted
+      # registry files and the OpenCode-installed payload before the first tool
+      # call, and writes the record whether or not it passes. Its temporary
+      # tree is the fresh probe root; the gate's pinned OpenCode is first on its
+      # PATH. In a rehearsal the stub's URL is passed explicitly, and the
+      # probe accepts it only as a rehearsal.
+      - name: 'Bootstrap: the registry-install probe'
+        id: bootstrap_probe
+        if: steps.route.outputs.path == 'bootstrap'
+        timeout-minutes: 45
+        env:
+          TAG: ${{ steps.route.outputs.tag }}
+          NAME: ${{ steps.facts.outputs.name }}
+          VERSION: ${{ steps.facts.outputs.version }}
+          REGISTRY: ${{ steps.facts.outputs.registry }}
+          REHEARSAL: ${{ steps.route.outputs.rehearsal }}
+          STUB_URL: ${{ steps.stub.outputs.url }}
+          PROBE_ROOT: ${{ steps.probe_root.outputs.root }}
+          HOST_BIN: ${{ steps.host.outputs.bin }}
+        run: |
+          set -euo pipefail
+          records="${RUNNER_TEMP}/opencode-bootstrap"
+          mkdir -p "${records}"
+          record="${records}/$(date -u +%Y%m%dT%H%M%SZ)-opencode-bootstrap-check.json"
+          # Named before the probe runs, so a failing probe's record still
+          # reaches the validator's log and the artifact.
+          echo "record=${record}" >> "${GITHUB_OUTPUT}"
+          rehearsal_flags=()
+          if [ "${REHEARSAL}" = "true" ]; then rehearsal_flags=(--rehearsal-registry "${STUB_URL}"); fi
+          PATH="$(dirname "${HOST_BIN}"):${PATH}" \
+            uv run --project skills/multi-llm -- env TMPDIR="${PROBE_ROOT}" \
+            python packaging/opencode/registry_check.py \
+            --spec "${NAME}@${VERSION}" --registry "${REGISTRY}" --tag "${TAG}" \
+            --environment ci-runner --out "${record}" "${rehearsal_flags[@]}"
+
+      # The bootstrap profile of the one registry-record validator, against the
+      # integrity the registry serves and this run's rebuilt digest. A real
+      # record must pass. A rehearsal record must be REFUSED, as rehearsal
+      # evidence; that is itself a regression case, so a validator that
+      # accepted one fails this step.
+      - name: 'Bootstrap: validate the record (bootstrap profile)'
+        if: steps.route.outputs.path == 'bootstrap'
+        timeout-minutes: 10
+        env:
+          TAG: ${{ steps.route.outputs.tag }}
+          RECORD: ${{ steps.bootstrap_probe.outputs.record }}
+          INTEGRITY: ${{ steps.served.outputs.integrity }}
+          DIGEST: ${{ steps.bootstrap_rebuild.outputs.digest }}
+          REHEARSAL: ${{ steps.route.outputs.rehearsal }}
+          PROBE_ROOT: ${{ steps.probe_root.outputs.root }}
+        run: |
+          set -euo pipefail
+          # The payload OpenCode resolved must lie under the probe root: the
+          # checkout and the runner's own caches are never on the plugin path.
+          python3 - "${RECORD}" "${PROBE_ROOT}" <<'PY'
+          import json, os, sys
+          record = json.load(open(sys.argv[1], encoding="utf-8"))
+          root = os.path.realpath(sys.argv[2])
+          location = record.get("payload_location")
+          if not isinstance(location, str) or not location:
+              sys.exit("REFUSING: the record names no payload_location.")
+          resolved = os.path.realpath(location)
+          if os.path.commonpath([root, resolved]) != root:
+              sys.exit(f"REFUSING: the payload ran from {resolved}, outside the probe root {root}.")
+          print(f"payload {resolved} lies under the probe root {root}")
+          PY
+          status=0
+          output="$(uv run --project skills/multi-llm --frozen --no-dev -- python packaging/opencode/registry_record.py \
+            validate --profile bootstrap "${RECORD}" --tag "${TAG}" --integrity "${INTEGRITY}" \
+            --digest "${DIGEST}" 2>&1)" || status=$?
+          printf '%s\n' "${output}"
+          if [ "${REHEARSAL}" = "true" ]; then
+            if [ "${status}" -eq 0 ]; then
+              echo "REFUSING: the bootstrap validator accepted a rehearsal record as release evidence." >&2
+              exit 1
+            fi
+            if ! grep -q 'rehearsal evidence' <<< "${output}"; then
+              echo "REFUSING: the rehearsal record was refused, but not as rehearsal evidence." >&2
+              exit 1
+            fi
+            echo "the rehearsal record is refused as release evidence, as it must be"
+          elif [ "${status}" -ne 0 ]; then
+            exit "${status}"
+          fi
+
+      # The bootstrap record is a workflow artifact and nothing else: it is
+      # never committed, and never stands in for step 5's canonical record. The
+      # run attempt is in the name because a lagging registry is re-run with
+      # "Re-run failed jobs", and each attempt's record is kept.
+      - name: Keep the bootstrap record
+        if: always() && steps.route.outputs.path == 'bootstrap'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: opencode-bootstrap-check${{ steps.route.outputs.rehearsal == 'true' && '-rehearsal' || '' }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/opencode-bootstrap/
+          if-no-files-found: warn
+
+      - name: Keep the gate's evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: opencode-${{ github.job }}-evidence-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/opencode-evidence/
+            ${{ runner.temp }}/opencode-registry-stub/stub.log
+            packaging/opencode/.gate/junit/
+          if-no-files-found: warn
+
+  verify:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'publish'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 180
+    outputs:
+      sha: ${{ steps.handoff.outputs.sha }}
+      digest: ${{ steps.handoff.outputs.digest }}
+    steps:
+      # The release-gate record is committed to the default branch, so it is
+      # read there and nowhere else: a dispatch from another branch would read
+      # that branch's records, and that branch's copy of this job. The
+      # `npm-publish` environment admits `master` alone too.
+      - name: Dispatched from the default branch, for an opencode tag
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DEFAULT_BRANCH}" ] || [ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ]; then
+            echo "REFUSING: dispatched from ${GITHUB_REF}; mode: publish runs from refs/heads/${DEFAULT_BRANCH:-<default branch>} only." >&2
+            exit 1
+          fi
+          if ! [[ "${TAG}" =~ ${RELEASE_TAG_PATTERN} ]]; then
+            echo "REFUSING: tag '${TAG}' is not an opencode-v<version> tag." >&2
+            exit 1
+          fi
+          echo "publish ${TAG}, dispatched from ${GITHUB_REF} at ${GITHUB_SHA}"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
 
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          enable-cache: false
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
+          node-version: ${{ env.NODE_VERSION }}
 
-      # 3. A PINNED npm, NOT `latest`. OIDC support landed in the 11.5.x line, so
-      #    treat >= 11.5.1 as the floor to CONFIRM at implementation time rather
-      #    than as a measured fact — and record the version actually verified to
-      #    publish with OIDC here, the way every other tool in this repository is
-      #    pinned. `latest` is the bare-`@version` install the supply-chain rule
-      #    exists to forbid, and an npm too old for OIDC fails *at publish time*,
-      #    on a tag, which is the most expensive place to discover it.
-      #
-      #    UNVERIFIED: no publish has been run through this workflow yet. Confirm
-      #    the floor and replace this pin with the version that worked before the
-      #    second release relies on it.
-      - name: Install a pinned npm
-        run: npm install -g npm@11.5.1
-
-      # 2. TAG EQUALS VERSION, ASSERTED, NOT ASSUMED. Without this,
-      #    `opencode-v1.0.1` on a tree still carrying 1.0.0 republishes nothing
-      #    and reports success — or worse, publishes a number nobody meant. The
-      #    version field is already the one owner of the number and is already
-      #    asserted equal to the pinned spec in the generated docs; this closes
-      #    the one surface that test cannot see, the tag.
-      - name: Tag must equal package.json's version
+      - name: Install the pinned npm
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME#opencode-v}"
-          declared="$(node -p "require('./packaging/opencode/package.json').version")"
-          if [ "$tag" != "$declared" ]; then
-            echo "REFUSING: tag ${GITHUB_REF_NAME} says ${tag}, package.json says ${declared}." >&2
+          npm install -g --ignore-scripts "npm@${NPM_VERSION}"
+          actual="$(npm --version)"
+          if [ "${actual}" != "${NPM_VERSION}" ]; then
+            echo "REFUSING: npm is ${actual} after installing the pinned ${NPM_VERSION}." >&2
             exit 1
           fi
-          echo "tag and manifest agree on ${declared}"
+          node_version="$(node -p 'process.versions.node')"
+          if ! printf '%s\n%s\n' "${NODE_FLOOR}" "${node_version}" | sort -V -C; then
+            echo "REFUSING: Node ${node_version} is older than ${NODE_FLOOR}, trusted publishing's floor." >&2
+            exit 1
+          fi
+          echo "node ${node_version}, npm ${actual}"
 
-      # 4. THE GATE RUNS IN THIS JOB, IMMEDIATELY BEFORE `npm publish`. Not "it
-      #    ran on the PR": the tag can point at a different commit, and rows 7
-      #    and 9 never ran on the PR at all.
-      #
-      #    This job re-runs every row it can — the plain-CI and package rows,
-      #    then row 7 (a clean-$HOME tarball install, which needs the `opencode`
-      #    binary and network, both available here) and row 9 (the version must
-      #    be absent from the registry). Row 8, the offline container row, is the
-      #    one row this job cannot run: the runners have no Docker daemon. It is
-      #    a recorded local pre-publish step.
-      #
-      #    CI consumes no stamp. The stamp is a LOCAL mechanism, gitignored and
-      #    never uploaded, because a stamp from another machine attests to that
-      #    machine's rows rather than to this one's.
-      - name: Package gate (rows 1-6)
+      - name: The single registry, and the package's name and version
+        id: facts
+        run: |
+          set -euo pipefail
+          registry="$(make -s opencode-print-registry)"
+          name="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["name"])' packaging/opencode/package.json)"
+          version="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["version"])' packaging/opencode/package.json)"
+          {
+            echo "registry=${registry}"
+            echo "name=${name}"
+            echo "version=${version}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "${name}@${version}, single registry ${registry}"
+
+      # The checkout is the tag's commit, the tag names this version, and the
+      # commit is on the default branch the record was committed to (plan step
+      # 2 fast-forwards `master` to the candidate before the tag exists).
+      - name: Resolve the tag to its commit
+        id: tag
+        env:
+          TAG: ${{ inputs.tag }}
+          VERSION: ${{ steps.facts.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "${TAG}" != "opencode-v${VERSION}" ]; then
+            echo "REFUSING: tag ${TAG} says ${TAG#opencode-v}, its package.json says ${VERSION}." >&2
+            exit 1
+          fi
+          sha="$(git rev-parse -q --verify "refs/tags/${TAG}^{commit}")" || {
+            echo "REFUSING: tag ${TAG} does not resolve." >&2; exit 1; }
+          if [ "$(git rev-parse HEAD)" != "${sha}" ]; then
+            echo "REFUSING: the checkout is not ${TAG}'s commit ${sha}." >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${sha}" "${GITHUB_SHA}"; then
+            echo "REFUSING: ${TAG}'s commit ${sha} is not on the dispatched default-branch commit ${GITHUB_SHA}." >&2
+            exit 1
+          fi
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+          echo "${TAG} is ${sha}"
+
+      - name: Rebuild the candidate from this commit (--frozen --no-dev)
+        id: rebuild
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          uv run --project skills/multi-llm --frozen --no-dev -- python packaging/opencode/build.py
+          digest="$(cat packaging/opencode/dist/tree.sha256)"
+          if ! [[ "${digest}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "REFUSING: dist/tree.sha256 holds '${digest}', not a digest." >&2
+            exit 1
+          fi
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+          echo "rebuilt candidate digest ${digest}"
+
+      # The record lands on the default branch after the tag's commit, so the
+      # tag's checkout does not carry it. It is read from the commit this run
+      # was dispatched on, `GITHUB_SHA`, the one the step above refused unless
+      # it was the default branch's. `git archive` takes committed blobs at
+      # exactly that commit. It is not `origin/master` as it stands by the time
+      # this step runs, so a record pushed mid-run cannot change the answer, and
+      # no second working tree exists whose code anything could run. The tag's
+      # own validator judges it below, with the schema the record was exported
+      # under.
+      - name: Read the release-gate records committed on the default branch
+        id: records
+        run: |
+          set -euo pipefail
+          records="skills/multi-llm/tests/container/records"
+          if ! git cat-file -e "${GITHUB_SHA}:${records}" 2>/dev/null; then
+            echo "REFUSING: the dispatched commit ${GITHUB_SHA} has no ${records}/." >&2
+            exit 1
+          fi
+          out="${RUNNER_TEMP}/default-branch-records"
+          rm -rf "${out}"
+          mkdir -p "${out}"
+          git archive --format=tar "${GITHUB_SHA}" -- "${records}" | tar -x -C "${out}"
+          echo "dir=${out}/${records}" >> "${GITHUB_OUTPUT}"
+          echo "records committed at ${GITHUB_SHA}:"
+          ls -1 "${out}/${records}"
+
+      # Row 8, which only the maintainer's full gate can run, reaches CI here
+      # and nowhere else. The newest committed record naming the tag must
+      # validate against the tag's commit, its package.json, this rebuild, the
+      # pinned host and the single registry; an older one is never a fallback.
+      # One validator, `release_gate.py validate-record`, which the suite runs
+      # unchanged; nothing here re-decides any of it.
+      - name: The release-gate record validates against this rebuild
+        id: record
+        timeout-minutes: 10
+        env:
+          TAG: ${{ inputs.tag }}
+          SHA: ${{ steps.tag.outputs.sha }}
+          VERSION: ${{ steps.facts.outputs.version }}
+          DIGEST: ${{ steps.rebuild.outputs.digest }}
+          REGISTRY: ${{ steps.facts.outputs.registry }}
+          RECORDS: ${{ steps.records.outputs.dir }}
+        run: |
+          set -euo pipefail
+          host="$(uv run --project skills/multi-llm --frozen --no-dev -- python -c \
+            'import sys; sys.path.insert(0, "packaging/opencode"); import release_gate; print(release_gate.host_pin())')"
+          uv run --project skills/multi-llm --frozen --no-dev -- python packaging/opencode/release_gate.py \
+            validate-record --tag "${TAG}" --sha "${SHA}" --version "${VERSION}" --digest "${DIGEST}" \
+            --host-version "${host}" --registry "${REGISTRY}" --records-dir "${RECORDS}"
+          echo "digest=${DIGEST}" >> "${GITHUB_OUTPUT}"
+
+      # The gate, rerun right before publication on the tag's commit: the tag
+      # push ran it too, and this job trusts no earlier run.
+      - name: Shared-version check
+        timeout-minutes: 10
+        run: make opencode-check-bump
+
+      - name: Package gate (rows 1-6 and 5b)
+        timeout-minutes: 60
         run: make opencode-package-check-ci
 
-      # Row 9: npm forbids republishing a version, so a botched release costs a
-      # number permanently. `npm view` is the probe — `E404` is the green answer,
-      # and it is also the correct green for a name that has never been published
-      # at all. Never `npm publish --dry-run`, which does not check this.
-      #
-      # THREE OUTCOMES, NOT TWO, and this is the whole reason the probe is not a
-      # bare `if npm view ...`. Exit 0 means the version is there: refuse. `E404`
-      # means it is not: proceed. Everything else — a network error, an E429, a
-      # registry outage, an expired auth token — is npm declining to answer, and
-      # every one of those also exits non-zero. Read as a two-way test they all
-      # come back "absent" and the job publishes on a probe that never ran, which
-      # is the failure this gate exists to prevent.
-      #
-      # So the probe asks npm for its error CODE rather than for its exit status.
-      # `--json` puts that code on stdout as `.error.code` — measured on npm 10
-      # and 11, for both a name that has never been published and a name whose
-      # requested version is missing — and anything that is not exactly `E404`
-      # refuses.
-      - name: Version must be absent from the registry (row 9)
+      - name: Build, pack and sweep the candidate
+        id: candidate
+        timeout-minutes: 15
+        env:
+          NAME: ${{ steps.facts.outputs.name }}
+          VERSION: ${{ steps.facts.outputs.version }}
         run: |
           set -euo pipefail
-          name="$(node -p "require('./packaging/opencode/package.json').name")"
-          version="$(node -p "require('./packaging/opencode/package.json').version")"
-
-          probe_status=0
-          probe_json="$(npm view "${name}@${version}" version --json 2>/dev/null)" || probe_status=$?
-
-          if [ "${probe_status}" -eq 0 ]; then
-            echo "REFUSING: ${name}@${version} is already on the registry. npm forbids republishing a version." >&2
+          make opencode-package
+          tarball="${GITHUB_WORKSPACE}/packaging/opencode/${NAME}-${VERSION}.tgz"
+          if [ ! -f "${tarball}" ]; then
+            echo "REFUSING: make opencode-package left no ${tarball}." >&2
             exit 1
           fi
-
-          # Not `grep E404` over the output: a substring match would also accept
-          # an unrelated message that happens to quote the code.
-          code="$(printf '%s' "${probe_json}" | node -e '
-            let raw = "";
-            process.stdin.on("data", (chunk) => { raw += chunk; });
-            process.stdin.on("end", () => {
-              let code = "";
-              try { code = JSON.parse(raw).error.code || ""; } catch { code = ""; }
-              process.stdout.write(String(code));
-            });
-          ')" || code=""
-
-          if [ "${code}" != "E404" ]; then
-            echo "REFUSING: could not determine whether ${name}@${version} is on the registry." >&2
-            echo "npm exited ${probe_status} reporting code '${code:-<none>}'; only E404 is a green answer." >&2
-            echo "This is an UNKNOWN, not an absence — re-run once the registry answers." >&2
-            if [ -n "${probe_json}" ]; then
-              printf '%s\n' "${probe_json}" >&2
-            fi
+          digest="$(cat packaging/opencode/dist/tree.sha256)"
+          if ! [[ "${digest}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "REFUSING: dist/tree.sha256 holds '${digest}', not a digest." >&2
             exit 1
           fi
+          {
+            echo "tarball=${tarball}"
+            echo "digest=${digest}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "candidate ${tarball}, digest ${digest}"
 
-          echo "${name}@${version} is not on the registry (E404)"
-
-      # Row 7: install the packed tarball into a clean $HOME and confirm a
-      # MUTATED KEY plus the tool id. Presence in `plugin[]` proves nothing —
-      # every failure on this route exits 0 with an empty log.
-      #
-      # NOT YET WIRED: this needs the `opencode` binary installed in the job and
-      # a scripted probe of `opencode debug config`. It is the one gate row this
-      # file declares but does not yet run, and it must be added before the
-      # second release depends on this workflow.
-      - name: Row 7 — clean-$HOME install probe
+      - name: The pinned OpenCode, from the container lockfile
+        id: host
+        timeout-minutes: 15
         run: |
-          echo "NOT IMPLEMENTED: row 7 needs the opencode binary and a debug-config probe." >&2
-          echo "Until it is wired, run it locally and record the result before tagging." >&2
-          exit 1
+          set -euo pipefail
+          prefix="${RUNNER_TEMP}/opencode-host"
+          mkdir -p "${RUNNER_TEMP}/opencode-evidence"
+          log="${RUNNER_TEMP}/opencode-evidence/host-install.log"
+          uv run --project skills/multi-llm -- python packaging/opencode/bump.py install --prefix "${prefix}" \
+            | tee "${log}"
+          bin="$(tail -n 1 "${log}")"
+          case "${bin}" in
+            "${prefix}"/*) ;;
+            *)
+              echo "REFUSING: the install's last line '${bin}' is not a binary under ${prefix}." >&2
+              exit 1
+              ;;
+          esac
+          if [ ! -x "${bin}" ]; then
+            echo "REFUSING: ${bin} is not an executable." >&2
+            exit 1
+          fi
+          echo "bin=${bin}" >> "${GITHUB_OUTPUT}"
 
-      # `npm publish` on the DIRECTORY, never a pre-built .tgz: measured,
-      # `npm publish <tarball>` runs no lifecycle scripts at all, so the
-      # `prepack` build backstop does not exist on that path.
-      - name: Publish
-        run: cd packaging/opencode && npm publish --provenance --access public
+      - name: Clean-install probe of the candidate tarball (row 7)
+        timeout-minutes: 30
+        env:
+          TARBALL: ${{ steps.candidate.outputs.tarball }}
+          HOST_BIN: ${{ steps.host.outputs.bin }}
+          REGISTRY: ${{ steps.facts.outputs.registry }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/opencode-evidence"
+          uv run --project skills/multi-llm -- python packaging/opencode/probe.py row7 \
+            --tarball "${TARBALL}" --opencode "${HOST_BIN}" --registry "${REGISTRY}" \
+            --out "${RUNNER_TEMP}/opencode-evidence/row7.json"
+
+      - name: Version must be absent from the registry (row 9)
+        timeout-minutes: 5
+        run: make opencode-registry-absent OUT="${RUNNER_TEMP}/opencode-evidence/row9.json"
+
+      # What publish receives: the tag's commit and the digest the record
+      # validated against. Row 7 loaded those bytes, and every build since
+      # reproduced them. Set only here, after every check above, so publish
+      # cannot start on a digest this job did not finish gating.
+      - name: Hand publish the commit and the digest
+        id: handoff
+        env:
+          SHA: ${{ steps.tag.outputs.sha }}
+          VALIDATED: ${{ steps.record.outputs.digest }}
+          CANDIDATE: ${{ steps.candidate.outputs.digest }}
+        run: |
+          set -euo pipefail
+          now="$(cat packaging/opencode/dist/tree.sha256)"
+          if [ "${CANDIDATE}" != "${VALIDATED}" ] || [ "${now}" != "${VALIDATED}" ]; then
+            echo "REFUSING: the record validated ${VALIDATED}, row 7 loaded ${CANDIDATE}, the tree now holds ${now}." >&2
+            exit 1
+          fi
+          {
+            echo "sha=${SHA}"
+            echo "digest=${VALIDATED}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "verified ${SHA} with candidate digest ${VALIDATED}"
+
+      - name: Keep the gate's evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: opencode-${{ github.job }}-evidence-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/opencode-evidence/
+            ${{ runner.temp }}/opencode-registry-stub/stub.log
+            packaging/opencode/.gate/junit/
+          if-no-files-found: warn
+
+  publish:
+    needs: verify
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'publish'
+    runs-on: ubuntu-latest
+    # The protected environment the trusted publisher is bound to (plan steps 1
+    # and 6): the maintainer approves each publication after reviewing
+    # verify's run, and only `master` may deploy to it.
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
+    # One publication at a time; never cancel one in flight.
+    concurrency:
+      group: opencode-npm-publish
+      cancel-in-progress: false
+    timeout-minutes: 30
+    steps:
+      - name: Dispatched from the default branch, for an opencode tag
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DEFAULT_BRANCH}" ] || [ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ]; then
+            echo "REFUSING: dispatched from ${GITHUB_REF}; mode: publish runs from refs/heads/${DEFAULT_BRANCH:-<default branch>} only." >&2
+            exit 1
+          fi
+          if ! [[ "${TAG}" =~ ${RELEASE_TAG_PATTERN} ]]; then
+            echo "REFUSING: tag '${TAG}' is not an opencode-v<version> tag." >&2
+            exit 1
+          fi
+          echo "publish ${TAG}, dispatched from ${GITHUB_REF} at ${GITHUB_SHA}"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.verify.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The tags were fetched afresh for this job, so a tag moved since verify
+      # resolved it is seen here.
+      - name: The tag still names verify's commit
+        env:
+          TAG: ${{ inputs.tag }}
+          SHA: ${{ needs.verify.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if ! [[ "${SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "REFUSING: verify handed over '${SHA}', not a commit." >&2
+            exit 1
+          fi
+          now="$(git rev-parse -q --verify "refs/tags/${TAG}^{commit}")" || {
+            echo "REFUSING: tag ${TAG} no longer resolves." >&2; exit 1; }
+          if [ "${now}" != "${SHA}" ]; then
+            echo "REFUSING: ${TAG} now names ${now}; verify gated ${SHA}." >&2
+            exit 1
+          fi
+          if [ "$(git rev-parse HEAD)" != "${SHA}" ]; then
+            echo "REFUSING: the checkout is not ${SHA}." >&2
+            exit 1
+          fi
+          echo "${TAG} still names ${SHA}"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          enable-cache: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install the pinned npm
+        run: |
+          set -euo pipefail
+          npm install -g --ignore-scripts "npm@${NPM_VERSION}"
+          actual="$(npm --version)"
+          if [ "${actual}" != "${NPM_VERSION}" ]; then
+            echo "REFUSING: npm is ${actual} after installing the pinned ${NPM_VERSION}." >&2
+            exit 1
+          fi
+          node_version="$(node -p 'process.versions.node')"
+          if ! printf '%s\n%s\n' "${NODE_FLOOR}" "${node_version}" | sort -V -C; then
+            echo "REFUSING: Node ${node_version} is older than ${NODE_FLOOR}, trusted publishing's floor." >&2
+            exit 1
+          fi
+          echo "node ${node_version}, npm ${actual}"
+
+      - name: Rebuild the candidate from this commit (--frozen --no-dev)
+        id: rebuild
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          uv run --project skills/multi-llm --frozen --no-dev -- python packaging/opencode/build.py
+          digest="$(cat packaging/opencode/dist/tree.sha256)"
+          if ! [[ "${digest}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "REFUSING: dist/tree.sha256 holds '${digest}', not a digest." >&2
+            exit 1
+          fi
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+          echo "rebuilt candidate digest ${digest}"
+
+      # 4. THE GATE RAN IN THIS RUN, ON THIS SHA, BOUND BY THE DIGEST. Not "it
+      #    ran on the PR", and not "it ran on the tag push": the tag can point
+      #    at a different commit, and rows 7 and 9 never run on a PR at all.
+      #    verify reran the gate on this commit and validated row 8's record
+      #    against its rebuild. This job runs none of it, so what binds the two
+      #    is the digest: a rebuild that is not verify's refuses here, before
+      #    anything else runs.
+      - name: The rebuilt digest is verify's
+        env:
+          VERIFIED: ${{ needs.verify.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if ! [[ "${VERIFIED}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "REFUSING: verify handed over '${VERIFIED}', not a digest." >&2
+            exit 1
+          fi
+          rebuilt="$(cat packaging/opencode/dist/tree.sha256)"
+          if [ "${rebuilt}" != "${VERIFIED}" ]; then
+            echo "REFUSING: this rebuild is ${rebuilt}; verify gated ${VERIFIED}. Nothing was published." >&2
+            exit 1
+          fi
+          echo "rebuilt digest ${rebuilt} is the one verify gated"
+
+      - name: The single registry, and the package's name and version
+        id: facts
+        run: |
+          set -euo pipefail
+          registry="$(make -s opencode-print-registry)"
+          name="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["name"])' packaging/opencode/package.json)"
+          version="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["version"])' packaging/opencode/package.json)"
+          {
+            echo "registry=${registry}"
+            echo "name=${name}"
+            echo "version=${version}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "${name}@${version}, single registry ${registry}"
+
+      # Immediately before the upload: npm forbids republishing a version, so a
+      # botched release costs a number permanently.
+      - name: Version must be absent from the registry (row 9)
+        timeout-minutes: 5
+        run: make opencode-registry-absent OUT="${RUNNER_TEMP}/opencode-evidence/row9.json"
+
+      # PACK ONCE, THEN UPLOAD THAT FILE. A tarball upload runs no lifecycle
+      # scripts (measured), so nothing can repack it, while the directory's
+      # `prepack` hook would rebuild dist/ and ship bytes no digest compared.
+      # `--ignore-scripts` keeps the pack itself from running that hook. The
+      # packed file is then held to the same digest by the builder's own
+      # extractor, and swept for credentials, before it is uploaded.
+      - name: Pack once, with --ignore-scripts, and bind the tarball to the digest
+        id: pack
+        timeout-minutes: 10
+        env:
+          NAME: ${{ steps.facts.outputs.name }}
+          VERSION: ${{ steps.facts.outputs.version }}
+          VERIFIED: ${{ needs.verify.outputs.digest }}
+        run: |
+          set -euo pipefail
+          upload="${RUNNER_TEMP}/opencode-upload"
+          rm -rf "${upload}"
+          mkdir -p "${upload}"
+          (cd packaging/opencode && npm pack --ignore-scripts --pack-destination "${upload}")
+          packed="$(ls -A "${upload}")"
+          if [ "${packed}" != "${NAME}-${VERSION}.tgz" ]; then
+            echo "REFUSING: npm pack left '${packed}' in ${upload}, not ${NAME}-${VERSION}.tgz alone." >&2
+            exit 1
+          fi
+          tarball="${upload}/${packed}"
+          uv run --project skills/multi-llm --frozen --no-dev -- python packaging/opencode/build.py \
+            --scan-tarball "${tarball}"
+          digest="$(uv run --project skills/multi-llm --frozen --no-dev -- python -c \
+            'import sys; sys.path.insert(0, "packaging/opencode"); import build; print(build.tarball_facts(sys.argv[1])["digest"])' \
+            "${tarball}")"
+          if [ "${digest}" != "${VERIFIED}" ]; then
+            echo "REFUSING: the packed tarball extracts to ${digest}; verify gated ${VERIFIED}." >&2
+            exit 1
+          fi
+          echo "dir=${upload}" >> "${GITHUB_OUTPUT}"
+          echo "packed ${tarball}, extracted digest ${digest}"
+
+      - name: Publish the packed tarball, with provenance
+        timeout-minutes: 10
+        env:
+          UPLOAD: ${{ steps.pack.outputs.dir }}
+          NAME: ${{ steps.facts.outputs.name }}
+          VERSION: ${{ steps.facts.outputs.version }}
+          REGISTRY: ${{ steps.facts.outputs.registry }}
+        run: |
+          set -euo pipefail
+          cd "${UPLOAD}"
+          npm publish "./${NAME}-${VERSION}.tgz" --provenance --ignore-scripts --access public --registry "${REGISTRY}"
