@@ -52,6 +52,16 @@ list and an ``npm view`` against the single registry failing with a NETWORK
 error code (not ``E404``, not an auth error, not npm's own ``ENOTCACHED``)
 before and after, with the installed payload's location and digest unchanged.
 
+**Rehearsal records, structure only.** ``--rehearsal-structure-only`` checks a
+record the registry-install probe wrote against a localhost registry stub
+(``rehearsal: true``) for everything above EXCEPT what makes it a rehearsal:
+``rehearsal`` must then be ``true``, ``registry`` and ``installed_registry`` may
+be the loopback stub (``http://127.0.0.1:<port>``), a bootstrap rehearsal run
+outside a workflow may have a ``null`` run ID, and the file must not carry a
+release record's name. It exists so a rehearsal can prove the probe writes the
+right shape; it never makes a rehearsal release evidence, and says so every
+time it runs.
+
 Stdlib plus PyYAML, the skill's one runtime dependency, so the workflow can run
 it under ``--no-dev``. ``jsonschema`` is a dev extra: the schema is applied here
 by a small interpreter of exactly the keywords the schema uses, and the suite
@@ -117,6 +127,10 @@ NETWORK_ERROR_CODES = frozenset({
     "ENETUNREACH", "ENETDOWN", "EHOSTUNREACH", "ETIMEDOUT", "ESOCKETTIMEDOUT",
 })
 _LOOPBACK = re.compile(r"^lo\d*$")
+#: The localhost registry stub a rehearsal reads from; nothing else is admitted.
+_REHEARSAL_REGISTRY = re.compile(r"^http://127\.0\.0\.1:[0-9]{1,5}/?$")
+#: Printed by every structure-only check, passing or not.
+REHEARSAL_NOTICE = "a rehearsal is never release evidence"
 _VERSION = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$")
 
 
@@ -331,18 +345,31 @@ def _network_proof_errors(proof: Any, single: str) -> List[str]:
 def validate_record(
     record: Any, *, profile: str, tag: Optional[str] = None, repo: Path = REPO_ROOT,
     file_name: Optional[str] = None, integrity: Optional[str] = None,
-    digest: Optional[str] = None,
+    digest: Optional[str] = None, rehearsal_structure_only: bool = False,
 ) -> List[str]:
-    """Every reason *record* is not valid evidence under *profile*; ``[]`` if it is."""
+    """Every reason *record* is not valid evidence under *profile*; ``[]`` if it is.
+
+    With *rehearsal_structure_only*, every reason a REHEARSAL record is not
+    the right shape for *profile* (module docstring); ``[]`` then never means
+    release evidence.
+    """
     if profile not in PROFILES:
         return [f"unknown profile {profile!r}; expected one of {PROFILES}"]
     if not isinstance(record, dict):
         return ["the record is not a JSON object"]
     schema = load_schema()
     _assert_supported(schema)
+    rehearsal_only = bool(rehearsal_structure_only)
+    if rehearsal_only:
+        schema = json.loads(json.dumps(schema))
+        schema["properties"]["rehearsal"] = {"const": True}
     errors = schema_errors(record, schema)
 
-    if file_name is not None:
+    if rehearsal_only and file_name is not None:
+        if _FILE_NAME.match(file_name) and file_name.endswith(SUFFIXES[profile]):
+            errors.append(f"{file_name} carries a release record's name; a rehearsal record "
+                          "must not (name it ...-rehearsal.json, outside the records directory)")
+    elif file_name is not None:
         if file_name.endswith("-rehearsal.json"):
             errors.append(f"{file_name} is a rehearsal record by name")
         elif not (_FILE_NAME.match(file_name) and file_name.endswith(SUFFIXES[profile])):
@@ -355,11 +382,17 @@ def validate_record(
                       f"profile (expected {' or '.join(ENVIRONMENTS[profile])})")
     run_id = record.get("workflow_run_id")
     if profile == "bootstrap":
-        if not isinstance(run_id, int) or isinstance(run_id, bool) or run_id < 1:
+        if rehearsal_only and run_id is None:
+            pass  # a bootstrap rehearsal outside a workflow has no run to name
+        elif not isinstance(run_id, int) or isinstance(run_id, bool) or run_id < 1:
             errors.append(f"a bootstrap record names its workflow run; workflow_run_id is {run_id!r}")
     elif run_id is not None:
         errors.append(f"a {profile} record is not a workflow run's; workflow_run_id is {run_id!r}")
-    if record.get("rehearsal") is not False:
+    if rehearsal_only:
+        if record.get("rehearsal") is not True:
+            errors.append("--rehearsal-structure-only checks rehearsal records only; this one says "
+                          f"\"rehearsal\": {record.get('rehearsal')!r}")
+    elif record.get("rehearsal") is not False:
         errors.append(f"rehearsal evidence (\"rehearsal\": {record.get('rehearsal')!r}) is never "
                       "release evidence")
 
@@ -367,6 +400,8 @@ def validate_record(
     single = registry.single_registry()
     for key in ("registry", "installed_registry"):
         value = record.get(key)
+        if rehearsal_only and isinstance(value, str) and _REHEARSAL_REGISTRY.match(value):
+            continue
         if not isinstance(value, str) or registry.normalize(value) != single:
             errors.append(f"{key} {value!r} is not the single registry {single}")
 
@@ -470,7 +505,7 @@ def validate_record(
 
 def validate(path: Path, *, profile: str, tag: Optional[str] = None,
              repo: Path = REPO_ROOT, integrity: Optional[str] = None,
-             digest: Optional[str] = None) -> List[str]:
+             digest: Optional[str] = None, rehearsal_structure_only: bool = False) -> List[str]:
     """:func:`validate_record` on a file, its name included."""
     path = Path(path)
     try:
@@ -478,7 +513,8 @@ def validate(path: Path, *, profile: str, tag: Optional[str] = None,
     except (OSError, ValueError) as exc:
         return [f"{path}: unreadable ({exc})"]
     return validate_record(record, profile=profile, tag=tag, repo=repo, file_name=path.name,
-                           integrity=integrity, digest=digest)
+                           integrity=integrity, digest=digest,
+                           rehearsal_structure_only=rehearsal_structure_only)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -497,16 +533,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     check.add_argument("--integrity", default=None,
                        help="the gated tarball's integrity, when the caller has it")
     check.add_argument("--digest", default=None, help="the candidate digest, when known")
+    check.add_argument("--rehearsal-structure-only", action="store_true",
+                       help="check a rehearsal record's structure only; never release evidence")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
+    rehearsal = args.rehearsal_structure_only
     errors = validate(args.record, profile=args.profile, tag=args.tag, repo=args.repo,
-                      integrity=args.integrity, digest=args.digest)
+                      integrity=args.integrity, digest=args.digest,
+                      rehearsal_structure_only=rehearsal)
+    if rehearsal:
+        print(f"NOTE: --rehearsal-structure-only: {REHEARSAL_NOTICE}", file=sys.stderr)
     if errors:
-        print(f"REFUSING ({args.profile}): {args.record}", file=sys.stderr)
+        print(f"REFUSING ({args.profile}{', rehearsal structure' if rehearsal else ''}): "
+              f"{args.record}", file=sys.stderr)
         for error in errors:
             print(f"  - {error}", file=sys.stderr)
         return 1
     record = json.loads(args.record.read_text(encoding="utf-8"))
+    if rehearsal:
+        print(f"structurally valid {args.profile} REHEARSAL record: {args.record} — "
+              f"{record['spec']} at {record['tag']} ({record['sha']}), "
+              f"{len(record['criteria'])} criteria pass; {REHEARSAL_NOTICE}")
+        return 0
     print(f"valid {args.profile} record: {args.record} — {record['spec']} at {record['tag']} "
           f"({record['sha']}), {record['release_kind']} release, "
           f"{len(record['criteria'])} criteria pass")

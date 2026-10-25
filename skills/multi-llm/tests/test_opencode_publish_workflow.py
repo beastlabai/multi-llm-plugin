@@ -628,8 +628,13 @@ class TestBootstrapBranch:
         assert re.search(r'if \[ "\$\{REHEARSAL\}" = "true" \]; then '
                          r'rehearsal_flags=\(--rehearsal-registry "\$\{STUB_URL\}"\)', probe)
         assert probe.count("--rehearsal-registry") == 1
-        assert "-opencode-bootstrap-check.json" in probe
-        assert 'TMPDIR="${PROBE_ROOT}"' in probe
+        assert 'record="${records}/$(date -u +%Y%m%dT%H%M%SZ)-opencode-bootstrap-check${suffix}.json"' in probe
+        assert re.search(r'if \[ "\$\{REHEARSAL\}" = "true" \]; then suffix="-rehearsal"; fi', probe)
+        # The probe makes its root inside the fresh, checked-empty probe root,
+        # runs the gate's pinned binary, and names this run.
+        assert '--tmp-parent "${PROBE_ROOT}"' in probe
+        assert '--opencode "${HOST_BIN}"' in probe
+        assert '--workflow-run-id "${GITHUB_RUN_ID}"' in probe
 
     def test_the_probe_root_is_fresh_and_outside_the_checkout(self):
         root = code(step("gate", "Bootstrap: a fresh probe root outside the checkout"))
@@ -1155,7 +1160,9 @@ class TestBootstrapValidation:
             probe_root / "home" / ".cache" / "opencode" / "packages" / "node_modules"
             / "opencode-multi-llm")
         record.update(changes)
-        path = probe_root.parent / "records" / "20261026T100000Z-opencode-bootstrap-check.json"
+        # Named as the workflow names it: a rehearsal's record says so.
+        suffix = "-rehearsal" if record.get("rehearsal") is True else ""
+        path = probe_root.parent / "records" / f"20261026T100000Z-opencode-bootstrap-check{suffix}.json"
         path.parent.mkdir(exist_ok=True)
         path.write_text(json.dumps(record), encoding="utf-8")
         return path
