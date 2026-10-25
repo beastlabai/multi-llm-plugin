@@ -739,7 +739,7 @@ artifact, and `runs/` and `records/` are gitignored.
 > retries or a host's native subagent batches can overshoot inside that window.
 > The only limit that actually holds is enforced by the party doing the billing.
 
-### Two install routes on `opencode`, and only one of them has ever been graded
+### Two install routes on `opencode`, and both are graded
 
 Every row above that installs anything installs it the same way (`claude-code`
 installs nothing — the plugin *is* the skill there): `install-host <host>` renders
@@ -748,7 +748,9 @@ opencode — and that file is the whole install. It is one of the two routes tha
 ship. The other is the npm package `opencode-multi-llm`, which registers the same
 `/multi-llm` command *and* a model-callable `multi_llm` tool out of a plugin
 module, and which `capabilities.yaml` says the documentation will recommend once
-it is published. Until 2026-09-19 nothing in this lane had ever run it.
+it is published. Until 2026-09-19 nothing in this lane had ever run it; the
+credentialed package rows below run it since, and the five offline release-gate
+rows (row 8, further down) grade it at $0 on every full gate.
 
 They are not two spellings of one install, which is why the new rows are not a
 duplicate of the two beside them. The file shim is a prose runbook the model
@@ -838,6 +840,42 @@ failure mode that once shipped a modes table pointing at a module the payload di
 not contain. The staged `dist/` and `skills/` are build output — `make e2e-image`
 stages them before it builds, and `context_manifest.txt` marks them `# optional`
 so the clean-checkout build-context guard still passes.
+
+### The opencode package gate: row 8's five offline rows
+
+The two rows above need a credential and a model's turn, so neither can be a
+release gate. `tests/test_container_opencode_package_gate.py` is the offline
+coverage `plans/opencode-plugin-publish.md`'s row 8 requires: five host rows,
+`--creds none --route package --probe gate-<scenario>` under `--network none`,
+one per scenario, each with its own record and its own grader.
+
+| Row | What its grader establishes |
+| --- | --- |
+| `opencode-package-gate-init-status` | `command["multi-llm"]` is the payload's own `dist/command.md`, resolved against `/opt/mllm/opencode-plugin/skills/multi-llm`; `init` succeeds and creates `.multi-llm/providers.yaml`; `status` answers its documented result |
+| `opencode-package-gate-detach` | the tool appends `--detach`, claims the run id the launch banner printed, and the worker runs in its own session and process group, never a child of `opencode run` |
+| `opencode-package-gate-supervision` | `status --wait --run-id <claimed>` polls, non-terminal (exit 2) before terminal (exit 0), and the reported `polls` equals the polls the receipts and the process samples saw |
+| `opencode-package-gate-completion` | one terminal result naming the claimed run, its per-model `answer_*.md` under the plan's dir, nothing written outside it |
+| `opencode-package-gate-cancellation` | `POST /session/<id>/abort` while the tool polls a claimed run with a live provider; the tool dispatches `status --abort --run-id <claimed>`, the run records `aborted`, nothing in the worker's group survives, and the tool's report names the run and its log |
+
+The host is the real `opencode run --command multi-llm -- <args>` with the
+payload declared in its own `opencode.json`; its model is a second stub
+(`hoststub`, port 8096) scripted to make one `multi_llm` call per leg, and the
+fan-out is the provider lane's own `opencode:stub/stub-model`. Every grader also
+checks that each dispatcher invocation ran `uv run --project
+/opt/mllm/opencode-plugin/skills/multi-llm`, so a file shim or the checkout copy
+fails it, and writes `gate-grader.json` (and `gate-observed.json`) into the
+bundle before the session-end re-emit digests it. The driver, and the two rig
+accommodations it records — a slowed provider so a run outlives a poll, and a
+`tool.execute.after` tap because opencode drops an aborted call's late return —
+are in `opencode_package_gate.py`'s docstring.
+
+```bash
+make e2e-image
+MLLM_E2E_RUNS_KEEP=0 uv run --project skills/multi-llm -- pytest \
+  skills/multi-llm/tests/test_container_opencode_package_gate.py \
+  -m "container and not live and not live_provider" -q -rs -p no:xdist
+make e2e-verify-record REC=skills/multi-llm/tests/container/records/<UTC>-opencode-package-gate-<scenario>.json
+```
 
 ### The codex package route: seed, probes, and one credentialed row
 

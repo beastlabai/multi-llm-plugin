@@ -2397,8 +2397,11 @@ def credential_mode(row: Row, result: RowResult) -> str:
     # host: `discovery.json` is the listing tier's verdict, `invocation.json` the
     # documented-invocation probe's. A row that reached either is `discovery-only`
     # rather than a quiet zero — the distinction the census exists to keep.
+    # Row 8's package-gate scenarios (`opencode-gate.json`) are the third: the
+    # host ran its installed plugin against a scripted stub model.
     if ((result.out_dir / "discovery.json").is_file()
-            or (result.out_dir / "invocation.json").is_file()):
+            or (result.out_dir / "invocation.json").is_file()
+            or (result.out_dir / "opencode-gate.json").is_file()):
         return "discovery-only"
     return row.creds if row.creds in ("openrouter", "fallback", "none") else "none"
 
