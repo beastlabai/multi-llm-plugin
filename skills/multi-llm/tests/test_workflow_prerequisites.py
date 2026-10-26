@@ -1587,6 +1587,23 @@ class _JailHost:
             monkeypatch.delenv(name, raising=False)
         self.wrapper = FakeWrapper(self.root / "wrapper", monkeypatch)
         self._registry = registry
+        # The advisory reader's 1 s budget covers the version read, the
+        # standard probe and the rung walk: three launches of the mock, which
+        # a loaded Windows runner can overrun (PR #7's Windows leg, 2c69ec34),
+        # and an overrun rightly draws no warning. Rows that expect a warning
+        # test which runner it resolves, not the budget, so they get a
+        # generous one. A row that patches ADVISORY_PROBE_BUDGET_S (the hang
+        # rows) is a budget row and is left exactly as before: the call takes
+        # the default bound at definition time.
+        real_refusal = executor.repo_wide_write_refusal
+        default_budget = executor.ADVISORY_PROBE_BUDGET_S
+
+        def refusal(spec, **kwargs):
+            if executor.ADVISORY_PROBE_BUDGET_S == default_budget:
+                kwargs.setdefault("budget_s", 30.0)
+            return real_refusal(spec, **kwargs)
+
+        monkeypatch.setattr(executor, "repo_wide_write_refusal", refusal)
         executor.reset_version_cache()
         self.reset()
 
