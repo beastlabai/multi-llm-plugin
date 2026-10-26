@@ -1403,6 +1403,39 @@ class TestStep:
         else:
             pytest.fail("the grandchild outlived the step's bound")
 
+    @pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX; the gate "
+                        "runs on Linux")
+    def test_eperm_from_an_unreaped_group_keeps_the_sweep_waiting(self, monkeypatch):
+        """macOS answers ``killpg(pgid, 0)`` with EPERM, not ESRCH, while the
+        group's last members have exited but are not yet reaped. The row above
+        failed on it twice in PR #7's master run on 4d106893: the probe's
+        PermissionError escaped the step. The sweep reads it as a group still
+        ending and polls on to the group's own end, with no KILL."""
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                 start_new_session=True)
+        real_killpg = os.killpg
+        probes, sent = [], []
+
+        def darwin_killpg(pgid, sig):
+            if sig == 0:
+                probes.append(pgid)
+                if len(probes) <= 3:
+                    raise PermissionError(1, "Operation not permitted")
+            else:
+                sent.append(sig)
+            return real_killpg(pgid, sig)
+
+        monkeypatch.setattr(gate.os, "killpg", darwin_killpg)
+        try:
+            gate._kill(child, grace=10.0)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+        assert child.returncode is not None
+        assert len(probes) >= 4, probes  # past the EPERM answers, to ESRCH
+        assert sent == [gate.signal.SIGTERM], sent
+
     def test_the_grace_is_the_probes_sweep_bound_plus_a_margin(self):
         """Imported from the probe, never re-typed: a sweep that grows moves
         the grace with it."""

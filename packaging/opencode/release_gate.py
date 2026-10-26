@@ -1639,6 +1639,12 @@ def _kill(child: "subprocess.Popen[bytes]", grace: float) -> None:
                 os.killpg(child.pid, 0)
             except ProcessLookupError:
                 return
+            except PermissionError:
+                # macOS answers EPERM, not ESRCH, while the group's last
+                # members have exited but their new parent (launchd) has not
+                # reaped them yet. Keep polling: they are gone in moments, and
+                # a member that really refuses the signal meets the KILL below.
+                pass
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
