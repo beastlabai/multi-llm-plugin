@@ -709,8 +709,11 @@ class TestFirstReleaseOnly:
         ``release_history.npm_versions`` adds runs through this target's
         isolated reads, as the list does."""
         world.versions = (0, json.dumps(["0.0.0-stage"]) + "\n")
-        world.stub = (0, json.dumps({"name": NAME, "version": "0.0.0-stage",
-                                     "stub": True}) + "\n")
+        created = "2026-10-26T17:37:54.319Z"
+        world.stub = (0, json.dumps({
+            "name": NAME, "version": "0.0.0-stage", "stub": True,
+            "time": {"created": created, "0.0.0-stage": created},
+            "dist-tags": {"latest": "0.1.1"}}) + "\n")
         assert release.run(dry_run=False) == 1
         _refused(release, "first-release")
         message = next(e for e in release.errors if e.startswith("REFUSING (first-release)"))

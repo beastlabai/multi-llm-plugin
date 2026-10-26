@@ -20,12 +20,12 @@
     },
     "environment": {
       "enum": ["container", "vm", "ci-runner"],
-      "description": "`container` or `vm` for the release profile (the only environments that can cut the network for warm_offline_operation); `ci-runner` for the bootstrap profile only."
+      "description": "`container` or `vm` for the release profile (the only environments that can cut the network for warm_offline_operation); `ci-runner` for the bootstrap profile only, whose workflow path was retired after opencode-v0.1.1."
     },
     "workflow_run_id": {
       "type": ["integer", "null"],
       "minimum": 1,
-      "description": "The GitHub Actions run that produced a bootstrap record; null for a step-5 record."
+      "description": "The GitHub Actions run that would have produced a bootstrap record (that workflow path was retired after opencode-v0.1.1); null for a step-5 record."
     },
     "rehearsal": {
       "const": false,

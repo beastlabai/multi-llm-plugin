@@ -10,7 +10,7 @@ Run it through ``make opencode-registry-check`` or as::
         [--rehearsal-registry http://127.0.0.1:<port>] [--workflow-run-id N] \\
         [--opencode <binary>] [--previous-pin <name>@<version>] [--repo <path>] [--keep]
 
-**One probe, two records** (publishing plan, step 0's bootstrap job and step 5).
+**One probe, two records** (publishing plan, step 5, and step 0's bootstrap job, now retired).
 Step 5 runs it with ``container`` (or ``vm``) and writes the canonical
 ``<UTC>-opencode-release-network-check.json``. ``--environment ci-runner``
 writes ``<UTC>-opencode-bootstrap-check.json``, the record of the laptop path's

@@ -22,8 +22,9 @@ what publication actually produced. Its shape is
   ``container`` or ``vm``, the only places the network can be cut, and the
   criteria are exactly the release kind's: the eight below for a first
   release, those eight plus ``upgrade_runs_new_payload`` for a later one.
-* ``bootstrap`` — the laptop path's ``opencode-v<first>`` tag-push check,
-  ``<UTC>-opencode-bootstrap-check.json``, a workflow artifact.
+* ``bootstrap`` — the retired check the laptop path's ``opencode-v<first>``
+  tag push was meant to run, ``<UTC>-opencode-bootstrap-check.json``, a
+  workflow artifact when it existed.
   ``environment: "ci-runner"``, a workflow run ID, the first-release kind, and
   exactly SEVEN criteria: the eight without ``warm_offline_operation``, which a
   runner cannot attempt (no Docker daemon, no defined way to cut one process

@@ -128,8 +128,9 @@ NPM_VIEW_BUDGET_S = 90
 #: ``"description": "Temporary package placeholder for staged publishing"``,
 #: and ``"stub": true`` in its manifest. The maintainer leaves it on npm.
 #: Matching this name only opens the question: :func:`npm_is_stub` asks the
-#: registry, and a ``0.0.0-stage`` whose manifest is not a stub stays a version
-#: no tag names.
+#: registry, which must also confirm two facts it sets itself (published at the
+#: package's creation, named by no dist-tag). A ``0.0.0-stage`` that fails any
+#: of the three stays a version no tag names.
 NPM_STUB_VERSION = "0.0.0-stage"
 
 #: semver.org's grammar, ``+build`` accepted. Tag names and npm's list are both
@@ -534,16 +535,29 @@ def _npm_error(
     return code, summary
 
 
+def _npm_detail(done: "subprocess.CompletedProcess[str]", summary: str) -> str:
+    """The parenthesised detail for a refusal: npm's own summary, or failing
+    that, the last line of stderr. A runner that turns a timeout into exit 124
+    says so only there (``npm: no answer within 90 s``). Message text only:
+    what counts as ``E404`` still reads ``.error`` alone."""
+    if summary:
+        return f" ({summary.splitlines()[0]})"
+    lines = [line.strip() for line in (done.stderr or "").splitlines() if line.strip()]
+    return f" ({lines[-1][:200]})" if lines else ""
+
+
 def npm_is_stub(
     package: str, version: str, registry: str, *, runner: Optional[NpmRunner] = None,
 ) -> bool:
-    """Whether the registry's own manifest of *package*@*version* says
-    ``"stub": true``, npm's mark for its staged-publishing placeholder.
+    """Whether the registry's manifest of *package*@*version* is npm's
+    staged-publishing placeholder: ``"stub": true``, confirmed by what the
+    registry itself records (:func:`_registry_marks_stub`).
 
     Three outcomes, as in :func:`npm_versions`. If npm exits 0 with the
-    manifest of that exact name and version, that is the answer: ``True`` for
-    the JSON ``true`` alone. Any other value, or no ``stub`` key, is ``False``,
-    and the version stays under the tag rule. Everything else raises,
+    manifest of that exact name and version, that is the answer. ``True``
+    needs the JSON ``true`` alone, plus a publish time equal to the package's
+    creation and no dist-tag naming it. Anything less is ``False``, and the
+    version stays under the tag rule. Everything else raises,
     ``E404`` included: npm has just listed the version, so a manifest it
     cannot produce is not evidence of anything. If that were read as "a stub",
     a probe that never answered would excuse a version. If it were read as
@@ -558,16 +572,39 @@ def npm_is_stub(
                 f"`{' '.join(argv)}` exited 0 but printed no manifest of "
                 f"{package}@{version}: {stdout[:200]!r}"
             )
-        return parsed.get("stub") is True
+        return _registry_marks_stub(parsed, version)
     code, summary = _npm_error(done, parsed)
     raise ReleaseHistoryError(
         f"npm could not read {package}@{version}'s manifest on {registry}: exit "
-        f"{done.returncode}, code {code or '<none>'}"
-        + (f" ({summary.splitlines()[0]})" if summary else "")
+        f"{done.returncode}, code {code or '<none>'}{_npm_detail(done, summary)}"
         + f". npm lists {version}, and only that manifest's \"stub\": true makes it "
         "npm's staged-publishing placeholder rather than a version no tag names. "
         "Re-run once the registry answers."
     )
+
+
+def _registry_marks_stub(manifest: Dict[str, object], version: str) -> bool:
+    """Whether *manifest* is npm's placeholder and not a publish that copies it.
+
+    ``"stub": true`` is the published ``package.json`` echoed back, so anyone
+    holding a publish token could write it. Two facts only the registry sets
+    must agree with it. First, *version* was published at the package's
+    creation (``time[version] == time.created``): the placeholder appears the
+    instant the first publish creates the package, and any later publish of
+    that version would carry a later time. Second, no dist-tag names it, so no
+    unpinned install can resolve to it. A manifest missing either fact is not
+    a stub: the version stays under the tag rule and refuses.
+    """
+    if manifest.get("stub") is not True:
+        return False
+    times = manifest.get("time")
+    if not isinstance(times, dict):
+        return False
+    created = times.get("created")
+    if not isinstance(created, str) or not created or times.get(version) != created:
+        return False
+    tags = manifest.get("dist-tags")
+    return isinstance(tags, dict) and version not in tags.values()
 
 
 def npm_versions(
@@ -615,8 +652,7 @@ def npm_versions(
         return RegistryAnswer(package, registry, (), absent=True)
     raise ReleaseHistoryError(
         f"npm could not list {package} versions on {registry}: exit {done.returncode}, "
-        f"code {code or '<none>'}"
-        + (f" ({summary.splitlines()[0]})" if summary else "")
+        f"code {code or '<none>'}{_npm_detail(done, summary)}"
         + ". Only E404 on the package name means it has none; anything else is an "
         "unknown, not an empty list. Re-run once the registry answers."
     )

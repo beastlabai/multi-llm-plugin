@@ -1,7 +1,8 @@
 """The registry-install record's validator, ``packaging/opencode/registry_record.py``.
 
 **What is graded.** Both profiles (``release`` for the canonical step-5 record,
-``bootstrap`` for the laptop path's tag-push check), every refusal the plan
+``bootstrap`` for the laptop path's tag-push check, whose workflow path was
+retired after ``opencode-v0.1.1``), every refusal the plan
 lists, and the first-release exception decided from the tag's commit: each
 fixture repository below is a real git repository with an annotated tag whose
 ``capabilities.yaml`` either has ``hosts.opencode.package.public_version`` (a

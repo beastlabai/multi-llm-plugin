@@ -931,7 +931,7 @@ opencode-check-bump:
 	uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/build.py --check-bump --registry $(OPENCODE_REGISTRY)
 
 # THE REGISTRY-INSTALL PROBE, one implementation for two records (plans/
-# opencode-plugin-publish.md, step 0's bootstrap job and step 5): what npm SERVES
+# opencode-plugin-publish.md, step 5, and step 0's retired bootstrap job): what npm SERVES
 # for SPEC, installed by the pinned OpenCode from $(OPENCODE_REGISTRY) into a
 # fresh home, compared with the candidate rebuilt from TAG's commit before the
 # first tool call, then driven through `multi_llm` (packaging/opencode/
