@@ -434,7 +434,10 @@ class TestRegistry:
         seen = json.loads(log.read_text(encoding="utf-8"))
         argv = seen["argv"]
         assert argv[:3] == ["view", PACKAGE, "versions"]
-        assert f"--prefix={seen['cwd']}" in argv
+        # Compared resolved: macOS reports a /var/... scratch directory's
+        # cwd as /private/var/..., its real path.
+        prefixes = [a.split("=", 1)[1] for a in argv if a.startswith("--prefix=")]
+        assert [os.path.realpath(p) for p in prefixes] == [os.path.realpath(seen["cwd"])]
         assert os.path.realpath(seen["cwd"]) != os.path.realpath(project)
         assert not {"package.json", "node_modules", ".npmrc"} & set(seen["entries"])
         assert seen["configs"] == {"--userconfig": "", "--globalconfig": ""}
