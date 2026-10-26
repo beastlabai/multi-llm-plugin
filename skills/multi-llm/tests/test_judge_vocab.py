@@ -369,8 +369,18 @@ def _resumed_orchestrator(plan_path: Path):
     return orch
 
 
+#: The summary report's wall-clock line, the one thing two back-to-back passes
+#: may honestly disagree on: a slow runner straddles a second boundary (Windows
+#: CI, 2026-10-26: ``13:58:22`` against ``13:58:23``, all else identical). Only
+#: the stamp's digits are masked, and only in its exact rendered format.
+_GENERATED_STAMP = re.compile(
+    r"^(\*\*Generated\*\*: )\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", re.MULTILINE)
+_GENERATED_MASK = "**Generated**: <GENERATED>"
+
+
 def _normalized(text: str, root: Path) -> str:
-    return text.replace(str(root), "<ROOT>")
+    text = text.replace(str(root), "<ROOT>")
+    return _GENERATED_STAMP.sub(r"\1<GENERATED>", text)
 
 
 class TestAnEarlierRunLoadsTheSame:
@@ -417,6 +427,11 @@ class TestAnEarlierRunLoadsTheSame:
         assert "Decided by the judge agent (3)" in out
         assert "source: judge agent (salvaged)" in out
         assert "## Decided by the judge agent (3)" in summary
+        # The mask fired exactly once, on the report's stamp, and never on the
+        # stdout half, which stays compared as printed. A reworded or
+        # reformatted stamp fails here instead of reopening the flake.
+        assert summary.count(_GENERATED_MASK) == 1
+        assert "<GENERATED>" not in out
 
     def test_the_pre_mark_audit_reads_an_old_config_and_old_records(self):
         results = {}
