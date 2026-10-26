@@ -168,6 +168,7 @@ class World:
         self.publish = 0
         self.views = [(1, _npm_error("E404"))]     # then the last entry repeats
         self.versions = (1, _npm_error("E404"))     # `npm view <name> versions`
+        self.stub = None                            # `npm view <name>@0.0.0-stage`
         self.capabilities = yaml.safe_dump({"hosts": {"opencode": {"package": {
             "registry": "npm", "name": NAME, "version": VERSION}}}})
         self.view_count = 0
@@ -221,6 +222,9 @@ class World:
                 return (self.publish, "")
             if rest[:3] == ["view", NAME, "versions"]:
                 return self.versions
+            if rest[:2] == ["view", f"{NAME}@0.0.0-stage"]:
+                assert self.stub is not None, f"an unexpected stub probe {argv}"
+                return self.stub
             if rest[0] == "view":
                 answer = self.views[min(self.view_count, len(self.views) - 1)]
                 self.view_count += 1
@@ -697,6 +701,24 @@ class TestFirstReleaseOnly:
         _refused(release, "first-release")
         message = next(e for e in release.errors if e.startswith("REFUSING (first-release)"))
         assert "0.1.1" in message and "workflow dispatch" in message
+        assert not world.published
+
+    def test_a_package_npm_lists_only_its_stub_for_still_exists(self, release, world):
+        """npm's staged-publishing stub is no release, but it is the package:
+        the name is taken and the first release is over. The stub probe that
+        ``release_history.npm_versions`` adds runs through this target's
+        isolated reads, as the list does."""
+        world.versions = (0, json.dumps(["0.0.0-stage"]) + "\n")
+        world.stub = (0, json.dumps({"name": NAME, "version": "0.0.0-stage",
+                                     "stub": True}) + "\n")
+        assert release.run(dry_run=False) == 1
+        _refused(release, "first-release")
+        message = next(e for e in release.errors if e.startswith("REFUSING (first-release)"))
+        assert f"already has {NAME}" in message and "workflow dispatch" in message
+        (probe,) = world.npm_calls("view", f"{NAME}@0.0.0-stage")
+        argv, fresh = probe["argv"], str(probe["cwd"])
+        assert argv[argv.index("--registry") + 1] == SINGLE
+        assert probe["inherit_npm_config"] is False and f"--prefix={fresh}" in argv
         assert not world.published
 
     def test_a_promoted_public_version_refuses_even_with_nothing_on_npm(self, release, world):

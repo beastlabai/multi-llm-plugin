@@ -11,7 +11,8 @@ digest) and tags it the way a release history would be tagged.
 
 **Both real CLIs are driven, in subprocesses.** Each run is a fresh interpreter
 that loads :mod:`common.release_history`, replaces its one npm runner
-(``_run_npm``) with the row's canned registry answer, then runs the builder's
+(``_run_npm``) with the row's canned registry answers (the version list, and
+the stub probe when npm lists ``0.0.0-stage``), then runs the builder's
 ``__main__`` with ``--check-bump --repo <fixture>``. ``--repo`` is a real CLI
 option (the clone whose history is read); the npm stand-in is the test's alone
 and no environment variable reaches it, so nothing a release path inherits can
@@ -168,12 +169,55 @@ def failed(code: str, summary: str) -> Dict[str, object]:
             "stderr": f"npm error code {code}\n"}
 
 
+STUB = release_history.NPM_STUB_VERSION
+STUB_SPEC = f"{PACKAGE}@{STUB}"
+_UNSET = object()
+
+
+def manifest(version: str = STUB, *, stub: object = True, **fields: object) -> Dict[str, object]:
+    """What ``npm view <name>@<version> --json`` printed for the real stub
+    (npm 10.9.3, 2026-10-26), trimmed to the fields that identify it. Pass
+    ``stub=_UNSET`` to drop the mark, or any other value to replace it."""
+    body: Dict[str, object] = {
+        "_id": f"{PACKAGE}@{version}", "name": PACKAGE,
+        "dist-tags": {"latest": "0.1.1"}, "versions": [STUB, "0.1.1"],
+        "time": {"created": "2026-10-26T17:37:54.319Z", STUB: "2026-10-26T17:37:54.319Z",
+                 "0.1.1": "2026-10-26T17:42:15.266Z"},
+        "description": "Temporary package placeholder for staged publishing",
+        "license": "MIT", "version": version,
+        "dist": {"fileCount": 2, "unpackedSize": 340},
+    }
+    if stub is not _UNSET:
+        body["stub"] = stub
+    body.update(fields)
+    return {"exit": 0, "stdout": json.dumps(body, indent=2) + "\n", "stderr": ""}
+
+
+def missing_version(version: str = STUB) -> Dict[str, object]:
+    """``E404`` for a version a package that exists does not have, verbatim
+    in shape (measured 2026-10-26 on ``opencode-multi-llm@0.0.0-nostage``)."""
+    error = {"code": "E404", "summary": f"No match found for version {version}",
+             "detail": f"'{PACKAGE}@{version}' is not in this registry."}
+    return {"exit": 1, "stdout": json.dumps({"error": error}, indent=2) + "\n",
+            "stderr": "npm error code E404\n"}
+
+
+def with_probe(answer: Dict[str, object], probe: Dict[str, object]) -> Dict[str, object]:
+    """*answer* for ``npm view <name> versions``, *probe* for the stub probe
+    ``npm view <name>@0.0.0-stage``."""
+    return {**answer, "probe": probe}
+
+
 def runner(answer: Dict[str, object], calls: Optional[List] = None):
+    """The list question gets *answer*. Any other spec gets ``answer["probe"]``,
+    and a row that set none fails on the call it did not expect."""
     def run(argv: Sequence[str], timeout: float):
         if calls is not None:
             calls.append((tuple(argv), timeout))
+        canned = answer if argv[2] == PACKAGE else answer.get("probe")
+        assert isinstance(canned, dict), f"an npm call the row did not expect: {argv}"
         return subprocess.CompletedProcess(
-            list(argv), answer["exit"], answer["stdout"], answer["stderr"])
+            list(argv), canned["exit"], canned["stdout"], canned["stderr"])
     return run
 
 
@@ -186,7 +230,12 @@ from common import release_history
 def answer(argv, timeout):
     with open(spec["log"], "a", encoding="utf-8") as handle:
         handle.write(json.dumps({"argv": list(argv), "timeout": timeout}) + "\n")
-    return subprocess.CompletedProcess(list(argv), spec["exit"], spec["stdout"], spec["stderr"])
+    canned = spec if argv[2] == spec["package"] else spec.get("probe")
+    if not isinstance(canned, dict):
+        sys.stderr.write(f"driver: an npm call the row did not expect: {list(argv)}\n")
+        raise SystemExit(99)
+    return subprocess.CompletedProcess(
+        list(argv), canned["exit"], canned["stdout"], canned["stderr"])
 
 release_history._run_npm = answer
 sys.argv = [spec["builder"], *spec["args"]]
@@ -225,7 +274,7 @@ def cli(tmp_path):
         spec.write_text(json.dumps({
             "packaging": str(PACKAGING), "builder": str(ENTRY_POINTS[entry]),
             "args": ["--check-bump", "--repo", str(repo), *extra],
-            "log": str(log), **answer,
+            "log": str(log), "package": PACKAGE, **answer,
         }), encoding="utf-8")
         done = subprocess.run(
             [sys.executable, str(driver), str(spec)], cwd=str(tmp_path),
@@ -450,6 +499,90 @@ class TestRegistry:
             release_history.npm_versions(PACKAGE, REGISTRY)
 
 
+class TestNpmStub:
+    """npm's staged-publishing placeholder, ``0.0.0-stage``. It is held out of
+    the list only when the registry's manifest for that exact version says
+    ``"stub": true``, and on nothing less."""
+
+    NOW = with_probe(listed(STUB, "0.1.1"), manifest())
+
+    def test_a_confirmed_stub_is_held_out_of_the_versions(self):
+        answer = release_history.npm_versions(PACKAGE, REGISTRY, runner=runner(self.NOW))
+        assert answer.versions == ("0.1.1",) and answer.stubs == (STUB,)
+        assert not answer.absent
+
+    def test_the_probe_asks_with_the_list_s_registry_flags_and_budget(self):
+        calls: List = []
+        release_history.npm_versions(PACKAGE, REGISTRY, runner=runner(self.NOW, calls))
+        (listing, budget), (probe, probe_budget) = calls
+        assert probe == ("npm", "view", STUB_SPEC, "--registry", REGISTRY,
+                         *release_history.NPM_VIEW_FLAGS)
+        assert probe[3:] == listing[4:]
+        assert probe_budget == budget == release_history.NPM_VIEW_BUDGET_S
+
+    @pytest.mark.parametrize("mark", [_UNSET, False, "true", 1, None, {"stub": True}],
+                             ids=["no-stub-key", "false", "string-true", "one", "null", "object"])
+    def test_a_0_0_0_stage_the_registry_does_not_mark_stays_a_version(self, mark):
+        """The name alone is never proof: ``1`` and ``"true"`` are not JSON ``true``."""
+        calls: List = []
+        answer = release_history.npm_versions(
+            PACKAGE, REGISTRY,
+            runner=runner(with_probe(listed(STUB, "0.1.1"), manifest(stub=mark)), calls))
+        assert answer.versions == (STUB, "0.1.1") and answer.stubs == ()
+        assert [argv[2] for argv, _ in calls] == [PACKAGE, STUB_SPEC], "decided without asking"
+
+    def test_only_the_exact_stub_version_is_ever_asked_about(self):
+        """A near miss is a version like any other: no probe, no exemption."""
+        calls: List = []
+        near = ("0.0.0-stage.1", "0.0.1-stage", "0.0.0-stagex")
+        answer = release_history.npm_versions(
+            PACKAGE, REGISTRY,
+            runner=runner(with_probe(listed(STUB, *near, "0.1.1"), manifest()), calls))
+        assert answer.versions == (*near, "0.1.1") and answer.stubs == (STUB,)
+        assert [argv[2] for argv, _ in calls] == [PACKAGE, STUB_SPEC]
+
+    @pytest.mark.parametrize("probe, needle", [
+        (failed("E500", f"500 Internal Server Error - GET {REGISTRY}/{PACKAGE}"), "code E500"),
+        (failed("E503", f"503 Service Unavailable - GET {REGISTRY}/{PACKAGE}"), "code E503"),
+        (failed("E403", f"403 Forbidden - GET {REGISTRY}/{PACKAGE}"), "code E403"),
+        (failed("E429", f"429 Too Many Requests - GET {REGISTRY}/{PACKAGE}"), "code E429"),
+        (failed("ECONNREFUSED", "FetchError: connect ECONNREFUSED"), "code ECONNREFUSED"),
+        ({"exit": 1, "stdout": "", "stderr": "npm error code ETIMEDOUT\n"}, "code ETIMEDOUT"),
+        (missing_version(), "code E404"),
+        ({"exit": 0, "stdout": "not json\n", "stderr": ""}, "printed no manifest"),
+        ({"exit": 0, "stdout": "", "stderr": ""}, "printed no manifest"),
+        ({"exit": 0, "stdout": "true\n", "stderr": ""}, "printed no manifest"),
+        ({"exit": 0, "stdout": "[" + manifest()["stdout"] + "]", "stderr": ""},
+         "printed no manifest"),
+        (manifest("0.1.1"), "printed no manifest"),
+        (manifest(name="another-package"), "printed no manifest"),
+    ], ids=["E500", "E503", "E403", "E429", "ECONNREFUSED", "stderr-only", "E404-no-match",
+            "not-json", "empty", "bare-true", "a-list", "another-version", "another-name"])
+    def test_a_probe_npm_does_not_answer_is_an_unknown(self, probe, needle):
+        with pytest.raises(release_history.ReleaseHistoryError, match=re.escape(needle)) as exc:
+            release_history.npm_versions(
+                PACKAGE, REGISTRY, runner=runner(with_probe(listed(STUB, "0.1.1"), probe)))
+        assert STUB_SPEC in str(exc.value)
+
+    @pytest.mark.skipif(os.name == "nt", reason="the stand-in npm is a POSIX shell script")
+    def test_a_probe_that_hangs_is_an_unknown(self, tmp_path, monkeypatch):
+        """Through the real runner: the list answers at once, the probe never
+        does, and the budget the list runs under ends it."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        npm = bin_dir / "npm"
+        npm.write_text(
+            "#!/bin/sh\n"
+            f'if [ "$2" = "{STUB_SPEC}" ]; then exec sleep 5; fi\n'
+            f"printf '[\"{STUB}\", \"0.1.1\"]\\n'\n", encoding="utf-8")
+        npm.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+        monkeypatch.setattr(release_history, "NPM_VIEW_BUDGET_S", 1)
+        with pytest.raises(release_history.ReleaseHistoryError, match="did not answer") as exc:
+            release_history.npm_versions(PACKAGE, REGISTRY)
+        assert STUB_SPEC in str(exc.value)
+
+
 # ===========================================================================
 # The histories the plan names, through both real CLIs
 # ===========================================================================
@@ -568,6 +701,90 @@ class TestNpmVersionWithoutATag:
         history.commit("0.1.1", "b", tag="codex-v0.1.1")
         _refused(cli("opencode", history.root, listed("0.1.1")),
                  "no opencode-v0.1.1 tag names it")
+
+
+class TestNpmStagedPublishingStub:
+    """The registry since 0.1.1's first publish (2026-10-26): npm lists
+    ``0.0.0-stage`` and ``0.1.1``, and only 0.1.1 has a tag."""
+
+    NOW = with_probe(listed(STUB, "0.1.1"), manifest())
+    LINE = (f"  npm: {STUB} is npm's staged-publishing placeholder (\"stub\": true), "
+            "not a release; ignored")
+
+    @pytest.fixture
+    def history(self, tmp_path):
+        h = History(tmp_path / "repo")
+        h.commit("0.1.0", "a", tag="codex-v0.1.0")
+        h.commit("0.1.1", "b", tag="opencode-v0.1.1")
+        return h
+
+    @BOTH
+    def test_the_stub_is_reported_not_refused(self, history, cli, entry):
+        history.commit("0.1.2", "c")
+        result = cli(entry, history.root, self.NOW)
+        _passed(result)
+        assert f"  npm: {PACKAGE} lists 0.1.1\n{self.LINE}\n" in result.stdout
+        assert "0.1.2 is newer than every released version (newest: 0.1.1)" in result.stdout
+        assert [call["argv"][2] for call in result.npm] == [PACKAGE, STUB_SPEC]
+
+    @BOTH
+    def test_master_after_the_release_keeps_only_the_digest_refusal(self, history, cli, entry):
+        """This repository's own state: a shared edit after opencode-v0.1.1
+        that still says 0.1.1."""
+        history.commit("0.1.1", "c")
+        result = cli(entry, history.root, self.NOW)
+        assert result.code == 1 and len(result.refusals) == 1, result
+        assert result.refusals[0].startswith(
+            "opencode-v0.1.1 carries 0.1.1 with another shared-payload digest"), result
+        assert self.LINE in result.stdout
+
+    @BOTH
+    @pytest.mark.parametrize("mark", [_UNSET, False, "true"],
+                             ids=["no-stub-key", "false", "string-true"])
+    def test_a_0_0_0_stage_the_registry_does_not_mark_is_still_refused(
+        self, history, cli, entry, mark,
+    ):
+        history.commit("0.1.2", "c")
+        result = cli(entry, history.root, with_probe(listed(STUB, "0.1.1"), manifest(stub=mark)))
+        _refused(result, f"npm lists {STUB_SPEC} on {REGISTRY}",
+                 f"no opencode-v{STUB} tag names it")
+        assert [call["argv"][2] for call in result.npm] == [PACKAGE, STUB_SPEC], \
+            "decided without asking the registry"
+        assert "staged-publishing placeholder" not in result.stdout
+
+    @BOTH
+    @pytest.mark.parametrize("probe, code", [
+        (failed("E500", f"500 Internal Server Error - GET {REGISTRY}/{PACKAGE}"), "E500"),
+        (failed("E429", f"429 Too Many Requests - GET {REGISTRY}/{PACKAGE}"), "E429"),
+        (failed("ECONNREFUSED", "FetchError: connect ECONNREFUSED"), "ECONNREFUSED"),
+        (missing_version(), "E404"),
+    ], ids=["E500", "E429", "ECONNREFUSED", "E404-no-match"])
+    def test_a_stub_probe_npm_does_not_answer_refuses(self, history, cli, entry, probe, code):
+        history.commit("0.1.2", "c")
+        result = cli(entry, history.root, with_probe(listed(STUB, "0.1.1"), probe))
+        _refused(result, f"npm could not read {STUB_SPEC}'s manifest on {REGISTRY}",
+                 f"code {code}")
+        assert self.LINE not in result.stdout
+
+    @BOTH
+    def test_any_other_untagged_version_is_still_refused(self, history, cli, entry):
+        history.commit("0.1.3", "c")
+        result = cli(entry, history.root,
+                     with_probe(listed(STUB, "0.0.0-stage.1", "0.1.1", "0.1.2"), manifest()))
+        _refused(result, f"npm lists {PACKAGE}@0.0.0-stage.1 on",
+                 f"npm lists {PACKAGE}@0.1.2 on")
+        assert not [r for r in result.refusals if f"{STUB_SPEC} on" in r], result
+        assert self.LINE in result.stdout
+
+    @BOTH
+    def test_the_stub_is_no_version_to_compare_with(self, history, cli, entry):
+        """A candidate declaring 0.0.0-stage is unreleased and older than the
+        newest release, not "a version npm lists but no tag names"."""
+        history.commit(STUB, "c")
+        result = cli(entry, history.root, self.NOW)
+        _refused(result, f"the candidate's version {STUB} is unreleased but older than "
+                         "the newest release 0.1.1 (opencode-v0.1.1)")
+        assert not [r for r in result.refusals if "npm lists" in r], result
 
 
 class TestRegistryErrors:
