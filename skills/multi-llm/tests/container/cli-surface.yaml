@@ -124,6 +124,12 @@
 #     every failure it measured exits 1 (2.24.1, 2.26.0); whether 2.26.1 now
 #     exits 2 or 3 where it exited 1 was not re-measured here.
 #
+# RE-SEEDED 2026-10-25 for one pin move, opencode 1.19.3 -> 1.19.4 (`make
+# opencode-bump`, the newest release being the only supported one), probed with
+# seed_cli_surface.py against the rebuilt pinned image: the help digest and the
+# derived options are unchanged and `missing_options` is empty, so only the row's
+# version moved.
+#
 # Captured 2026-08-14 against the pinned image, offline. `options` is derived from
 # each adapter's own build_command()/build_agent_command() across every profile it
 # declares — never hand-listed — so the contract cannot drift from what we
@@ -511,7 +517,7 @@ clis:
 
   - cli: opencode
     binary: opencode
-    version: "1.19.3"
+    version: "1.19.4"
     probe: ok
     help_invocation: "opencode run --help"
     help_sha256: 177277faec689a9ed77962dd130d68c045f279ee104ddebd9ab59d1ec22217ec

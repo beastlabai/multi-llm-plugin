@@ -441,11 +441,23 @@ _WRITE_POSTURE_FORMS: Dict[str, str] = {
 }
 
 
-def _format_keywords(host_id: str, package: Dict[str, Any]) -> Dict[str, str]:
-    """Every keyword a registry row's templates may name, from the block's cells."""
+def _format_keywords(host_id: str, host: Dict[str, Any]) -> Dict[str, str]:
+    """Every keyword a registry row's templates may name, from the block's cells.
+
+    The spec's version is :func:`caps.package_spec_version`'s answer, never a
+    cell read here: the candidate ``version`` before the route is verified, the
+    trailing ``public_version`` once it is, so a bump never puts an unpublished
+    version into a recommendation. A pin that disagrees with its provenance row
+    refuses the render rather than rendering a plausible wrong spec.
+    """
+    package = host["package"]
+    try:
+        pinned = caps.package_spec_version(host)
+    except caps.PackagePinError as exc:
+        raise SystemExit(f"host '{host_id}': {exc}") from exc
     spec = package["name"]
-    if package.get("version"):
-        spec = f"{spec}@{package['version']}"
+    if pinned:
+        spec = f"{spec}@{pinned}"
     return {
         "config_key": package["config_key"],
         "spec": spec,
@@ -470,8 +482,11 @@ def _package_section(host_id: str, host: Dict[str, Any]) -> List[str]:
     hand-written ones. At ``documented`` it names the route and says plainly
     that no published install has been verified; at ``verified`` the same
     paragraph reads as the recommended install. Flipping it is a provenance edit
+    (with ``public_version`` set in the same edit, which the schema requires)
     and a re-render, never a prose rewrite — and the two generated pages are
-    byte-compared, so a hand edit is a CI failure.
+    byte-compared, so a hand edit is a CI failure. The pinned spec follows the
+    same row: the candidate ``version`` under the unpublished notice, the last
+    registry-checked ``public_version`` under the recommendation.
 
     **This function holds no registry-specific sentence.** Each one is a
     template in the registry's :data:`_REGISTRY_FORMS` row, so the npm prose
@@ -490,7 +505,7 @@ def _package_section(host_id: str, host: Dict[str, Any]) -> List[str]:
             "letting the paragraph render empty."
         )
     provenance = host["provenance"].get("package", "unknown")
-    keywords = _format_keywords(host_id, package)
+    keywords = _format_keywords(host_id, host)
 
     verified = provenance == "verified"
     lines = [

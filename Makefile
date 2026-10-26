@@ -43,6 +43,16 @@ PYTEST := uv run --project skills/multi-llm -- pytest skills/multi-llm/tests
 # `npm ci`-installed INTO the image, this one is a package we publish. They share
 # nothing but the word.
 OPENCODE_PKG   := packaging/opencode
+# THE ONE REGISTRY. Every place npm is consulted on the release path — the
+# `npm whoami` check, row 9's absence probe, the bootstrap and step-5
+# registry-install probes, both publish paths and the post-publish integrity read
+# — passes this explicitly, and the workflow reads it from here
+# (`make -s opencode-print-registry`) rather than spelling it again. npm's registry
+# is configurable (a user `.npmrc`, `npm_config_registry`, a scoped registry), so
+# an inherited setting could otherwise make a gate accept `E404` from a different
+# server than the one publication targets. packaging/opencode/registry.py reads
+# this line; nothing else may define the URL.
+OPENCODE_REGISTRY := https://registry.npmjs.org
 # `ALLOW_DIRTY=1` stages from a tree with uncommitted or untracked changes. The
 # build refuses one by default, and that default is correct: a build that ships
 # local state is a build nobody can reproduce, and npm makes the result immutable
@@ -55,7 +65,37 @@ OPENCODE_PKG   := packaging/opencode
 export MULTI_LLM_ALLOW_DIRTY := $(if $(ALLOW_DIRTY),1,)
 OPENCODE_DIRTY := $(if $(ALLOW_DIRTY),--allow-dirty,)
 OPENCODE_BUILD := uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/build.py $(OPENCODE_DIRTY)
+# The build with every spelling of the dirty opt-in removed — `env` rather than
+# a bare `VAR=` prefix so it also works as the argv of a gate step, which runs
+# without a shell.
+OPENCODE_BUILD_CLEAN := env MULTI_LLM_ALLOW_DIRTY= uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/build.py
 OPENCODE_STAMP := $(OPENCODE_PKG)/.package-check.stamp
+# The tarball `npm pack` writes for this version, `<name>-<version>.tgz`, named
+# from the manifest when the recipe runs. Exact, never `ls -t | head -1`: a stale
+# tarball of another version sitting beside it must not be the one that is
+# scanned, loaded by row 7 and bound by the stamp.
+OPENCODE_TARBALL = $(OPENCODE_PKG)/$$(node -p "const m = require('./$(OPENCODE_PKG)/package.json'); m.name + '-' + m.version + '.tgz'")
+# The release gate's one executable contract (packaging/opencode/release_gate.py):
+# the rows of plans/opencode-plugin-publish.md step 0, the session their evidence
+# is written under, row 8's image binding, what --write-stamp requires, and the
+# release-gate record CI validates. Its evidence lives under OPENCODE_GATE_DIR
+# (gitignored). `step` runs one gate step under a wall-clock bound, in its own
+# session with no terminal (so a timeout kills the whole process group, and
+# `opencode run` is not wedged the way a plain `timeout N` wedges it), and keeps
+# its output in $(OPENCODE_GATE_DIR)/logs/<step>.log.
+OPENCODE_GATE := uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/release_gate.py
+OPENCODE_GATE_DIR := $(OPENCODE_PKG)/.gate
+OPENCODE_GATE_STEP := $(OPENCODE_GATE) step
+# The image the full gate builds for row 8, under its own tag: `mllm-e2e:local`
+# is whatever the last `make e2e-image` staged, dirty tree included.
+OPENCODE_GATE_IMAGE := mllm-e2e:opencode-gate
+# Row 8: the package-route scenarios and nothing else. Every key unset, no live or
+# credentialed tier selected; MLLM_E2E_RUNS_KEEP=0 keeps the lane from pruning
+# the bundles check-row8 is about to verify.
+OPENCODE_GATE_PYTEST := env -u OPENROUTER_API_KEY -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
+    -u OPENAI_API_KEY MLLM_E2E_RUNS_KEEP=0 uv run --project skills/multi-llm -- pytest \
+    skills/multi-llm/tests/test_container_opencode_package_gate.py -q -rs \
+    -m "container and not live and not live_provider"
 # The package rows only. `$(PYTEST)` already names the whole tests directory, so
 # appending files to it would collect the entire suite *and* those files — which
 # is the `test` job's work, done a second time in a job that exists to grade the
@@ -126,6 +166,8 @@ export MLLM_E2E_MATRIX_TIMEOUT_S
         e2e-clean e2e-prune \
         opencode-stage opencode-package opencode-package-check-ci \
         opencode-package-check opencode-publish opencode-bump opencode-latest-check \
+        opencode-print-registry opencode-check-bump opencode-registry-check \
+        opencode-registry-absent opencode-publish-first \
         codex-regen codex-package codex-package-check-ci codex-package-check \
         codex-gate-reset codex-gate-pinned codex-gate-minimum codex-gate-ceiling \
         codex-gate-derived codex-publish
@@ -152,12 +194,17 @@ help:
 	@echo
 	@echo "  make opencode-stage               stage the plugin payload the image COPYs (build input only)"
 	@echo "  make opencode-package             build, pack, then sweep the tarball for secrets"
-	@echo "  make opencode-package-check-ci    A4 rows 1-6: no Docker, no registry, no opencode binary"
-	@echo "  make opencode-package-check       the FULL gate: rows 7-9 too; stamps only if all ran"
-	@echo "  make opencode-publish             refuses unless the full gate passed on these exact bytes"
+	@echo "  make opencode-package-check-ci    rows 1-6 and 5b, graded test by test: no Docker, no registry, no opencode binary"
+	@echo "  make opencode-package-check       the FULL gate: rows 7-9 too, in one session; stamps and exports its record only if all passed"
+	@echo "  make opencode-registry-absent [OUT=f] row 9: the version must be absent from the single registry"
+	@echo "  make opencode-publish-first [DRY_RUN=1] the laptop FIRST release: uploads the gated tarball"
+	@echo "  make opencode-publish             refuses: names the two guarded publish paths"
 	@echo "  make opencode-bump VERSION=x.y.z  move every opencode pin to one release; re-capture its fixtures (\$$0)"
 	@echo "                                    (a release older than the pin also needs ALLOW_DOWNGRADE=1)"
 	@echo "  make opencode-latest-check        exit 1 when npm has a newer opencode than the pin"
+	@echo "  make opencode-check-bump          the shared-version check: HEAD against every codex-v*/opencode-v* tag and npm's versions"
+	@echo "  make opencode-registry-check SPEC=n@v TAG=t ENVIRONMENT=ci-runner|container|vm OUT=f [REHEARSAL_REGISTRY=url]"
+	@echo "                                    the registry-install probe: the bytes npm serves, installed by OpenCode"
 	@echo
 	@echo "Codex plugin, checked in at $(CODEX_PKG)/multi-llm (see $(CODEX_PKG)/README.md)"
 	@echo
@@ -191,14 +238,23 @@ e2e-preflight:
 # docker on a missing build-context path — which reads as a broken Dockerfile
 # rather than as a missing prior step.
 #
-# `--allow-dirty` unconditionally, and ONLY here: the payload has to match the
-# working tree the image is being built from, which is the whole point of a test
-# image, and refusing a dirty tree would make the container lane unrunnable
-# during development. `opencode-publish` re-runs build.py with no such flag and
-# checks its own stamp, so this cannot loosen a publish.
+# `--allow-dirty` BY DEFAULT, through OPENCODE_STAGE_DIRTY: the payload has to
+# match the working tree the image is being built from, which is the whole point
+# of a test image, and refusing a dirty tree would make the container lane
+# unrunnable during development. A plain `make e2e-image` keeps that path.
+#
+# THE FULL GATE OVERRIDES IT. Row 8 grades the package inside the image, and an
+# image staged from a dirty tree is not the candidate, so `opencode-package-check`
+# builds its image with `OPENCODE_STAGE_DIRTY=$(OPENCODE_DIRTY)` — empty unless
+# ALLOW_DIRTY is set — and the stage below then refuses a dirty tree like any
+# clean build. That alone does not bind the image (a clean `git status` cannot see
+# ignored files), which is why the gate also reads the payload digest back out of
+# the image id (`release_gate.py image`). MULTI_LLM_ALLOW_DIRTY is blanked on the
+# line, so the exported opt-in cannot re-enable what the flag left off.
+OPENCODE_STAGE_DIRTY ?= --allow-dirty
 opencode-stage:
-	@uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/build.py --allow-dirty >/dev/null
-	@echo "opencode-stage: payload staged at $(OPENCODE_PKG)/{dist,skills}"
+	@MULTI_LLM_ALLOW_DIRTY= uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/build.py $(OPENCODE_STAGE_DIRTY) >/dev/null
+	@echo "opencode-stage: payload staged at $(OPENCODE_PKG)/{dist,skills}$(if $(OPENCODE_STAGE_DIRTY),, from a clean tree)"
 
 # --------------------------------------------------------------------------- #
 # Pinned build: the gate you run before a release.
@@ -663,109 +719,178 @@ e2e-clean:
 opencode-package:
 	$(OPENCODE_BUILD)
 	cd $(OPENCODE_PKG) && npm pack
-	$(OPENCODE_BUILD) --scan-tarball $$(ls -t $(OPENCODE_PKG)/*.tgz | head -1)
+	$(OPENCODE_BUILD) --scan-tarball "$(OPENCODE_TARBALL)"
 
-# Rows 1-6: everything that needs no Docker, no registry and no `opencode`
-# binary. This is what the PR package job runs. It writes NO stamp — a CI-tier
-# run can never authorize a publish.
+# Rows 1-6 and 5b: everything that needs no Docker, no registry and no `opencode`
+# binary. This is what the PR package job runs, and the full gate's first step.
+# It writes NO stamp — a CI-tier run can never authorize a publish.
+#
+# GRADED ROW BY ROW, NOT BY EXIT CODE. Both pytest selections write junit XML, and
+# `release_gate.py grade-ci` reads it against the node ids each row declares: a
+# row passes only when every one of its tests is present and passed. A skip, a
+# deselection (the test is simply absent from the file) and an empty selection
+# each fail the row by name, where pytest would have exited 0 or 5. Both
+# selections always run and the grader always reads both, so a red run still
+# names every row it cost; the recipe then fails if any of the three did. Inside a
+# full-gate session for HEAD the grader also writes each row's evidence; anywhere
+# else (the PR job's fresh clone) it grades only.
 opencode-package-check-ci:
 	$(OPENCODE_BUILD)
 	cd $(OPENCODE_PKG) && npm pack --dry-run
-	MLLM_REQUIRE_PACKAGE_ROWS=1 $(PYTEST) -m "package and not container" -q
-	$(PACKAGE_PYTEST) -m "not live and not container and not package" -q
-	@echo "opencode-package-check-ci: rows 1-6 green (no stamp written)"
+	@mkdir -p $(OPENCODE_GATE_DIR)/junit
+	@rm -f $(OPENCODE_GATE_DIR)/junit/ci-package-rows.xml $(OPENCODE_GATE_DIR)/junit/ci-plain-rows.xml
+	rc=0; \
+	MLLM_REQUIRE_PACKAGE_ROWS=1 $(PYTEST) -m "package and not container" -q \
+	  --junitxml=$(OPENCODE_GATE_DIR)/junit/ci-package-rows.xml || rc=$$?; \
+	$(PACKAGE_PYTEST) -m "not live and not container and not package" -q \
+	  --junitxml=$(OPENCODE_GATE_DIR)/junit/ci-plain-rows.xml || rc=$$?; \
+	$(OPENCODE_GATE) grade-ci --junit $(OPENCODE_GATE_DIR)/junit/ci-package-rows.xml \
+	  --junit $(OPENCODE_GATE_DIR)/junit/ci-plain-rows.xml || rc=$$?; \
+	exit $$rc
+	@echo "opencode-package-check-ci: rows 1-6 and 5b graded green (no stamp written)"
 
-# The full gate: the CI tier first, then the three rows that need a Docker
-# daemon, the `opencode` binary and network — 7, 8 and 9. On success it writes
-# the stamp.
+# The full gate: every row of plans/opencode-plugin-publish.md step 0 — the CI
+# rows (1-6, 5b), the clean-install probe (7), the package-route container
+# scenarios (8) and the registry-absence check (9) — then bump discipline, then
+# the stamp, then the release-gate record.
 #
-# IT STAMPS ONLY WHAT IT RAN, and that is the whole contract. The stamp is what
-# authorizes `opencode-publish`, and npm makes a published version permanent, so
-# a stamp written after a SUBSET of the rows is an authorization nobody earned —
-# worse than no gate, because it reads like one. Two of the three rows are not
-# wired yet, and each REFUSES below, by name and by number, rather than being
-# quietly absent:
+# IT STAMPS ONLY WHAT IT RAN, IN THIS RUN. The stamp is what authorizes
+# `opencode-publish-first`, and npm makes a published version permanent, so a stamp
+# written after a SUBSET of the rows is an authorization nobody earned. Recipe
+# order is not what enforces that: `begin` opens a gate SESSION (earlier evidence
+# deleted, a fresh id beside the candidate commit), every row's grader writes its
+# evidence under that id, and `--write-stamp` refuses unless every row passed in
+# this session over these bytes, this commit, the pinned host and the gated
+# tarball. A zero pytest exit never satisfies a row on its own.
 #
-#   * ROW 8 needs a package-ROUTE container row. `-m container -k opencode`
-#     selects whatever opencode rows exist, and every one of them today is a
-#     file-shim row: green there says the shim works and says nothing at all
-#     about the published package. So the guard asks `host_matrix.yaml` for the
-#     row itself (the plugin row of the plan's Phase 4b), never the run for a
-#     count — a run of the wrong rows is not a smaller version of the right one.
-#   * ROW 7 needs a scripted clean-HOME install of the packed tarball, and its
-#     tool-id leg needs a real `opencode run`. The publishing workflow's own row
-#     7 step refuses for exactly this reason, so neither path can publish on a
-#     row that has never executed anywhere.
+# SERIAL BY CONSTRUCTION, like codex-package-check: recipe lines, never
+# prerequisites, so `make -j` cannot reorder the reset after a row, build the
+# image before the candidate, or race row 8 against a rebuild. Each step runs
+# through `release_gate.py step` with a wall-clock bound, and keeps its output in
+# $(OPENCODE_GATE_DIR)/logs/<step>.log for when it fails.
 #
-# ROW 9 IS HERE IN FULL: the version must be ABSENT from the registry, decided on
-# npm's error CODE rather than on its exit status. Three outcomes, not two — exit
-# 0 is "already published", `E404` is the green answer (and the right green for a
-# name never published at all), and a network failure, an E429, a registry outage
-# or an expired token also exit non-zero. Read as a two-way test those all come
-# back "absent" and the gate stamps on a probe that never answered. Never `npm
-# publish --dry-run`, which never contacts the registry at all. The publishing
-# job carries its own copy of this probe because it consumes no stamp (below):
-# the two tiers cannot share one run, only its reasoning.
+#   * ROW 7 is wired: the pinned OpenCode, installed from the container lockfile
+#     under a scratch prefix (`bump.py install`; its last stdout line is the
+#     binary), loads the gated tarball extracted as a directory in an isolated
+#     home and runs init and status through the real tool, in a committed and a
+#     no-commit project (`probe.py row7`). `record 7` then re-reads what the probe
+#     says it did: the pinned host, the single registry, the gated tarball's
+#     integrity and digest, both projects green.
+#   * ROW 8 runs on the image the gate builds itself, staged from the clean
+#     candidate (OPENCODE_STAGE_DIRTY=$(OPENCODE_DIRTY) — never a literal
+#     `--allow-dirty`), under its own tag. `image` resolves it to its immutable id,
+#     reads the payload digest out of that id and refuses one built from other
+#     bytes — and an inherited MLLM_E2E_IMAGE that names another image, before row
+#     8 runs. The gate then sets MLLM_E2E_IMAGE to that id itself, unsets every
+#     provider key, and runs the package-route scenario module (init/status,
+#     detached launch, supervision, completion, cancellation, each with its own
+#     grader). `check-row8` refuses a scenario missing, skipped, ungraded or
+#     failing, a record from another image or another run, and a bundle
+#     `make e2e-verify-record` does not MATCH.
+#   * ROW 9 is the shared entry point (`opencode-registry-absent`, Node built-ins
+#     only), decided on npm's error CODE: only E404 is absence; exit 0 is
+#     "already published" and anything else is an unknown. The publishing
+#     workflow's jobs run the same script: the two tiers still run separately,
+#     but they share one implementation rather than two hand-kept copies.
 #
-# THE STAMP NEVER TRAVELS. It is gitignored and is never uploaded as a CI
-# artifact, because a stamp from another machine attests to that machine's rows,
-# not to this one's. CI does not consume stamps at all: the publishing job
-# re-runs the gate inline.
-opencode-package-check: opencode-package-check-ci
-	@command -v opencode >/dev/null 2>&1 || { \
-	  echo "make: the full gate needs the opencode binary (row 7); run opencode-package-check-ci instead"; exit 1; }
-	@command -v docker >/dev/null 2>&1 || { \
-	  echo "make: the full gate needs a Docker daemon (row 8); run opencode-package-check-ci instead"; exit 1; }
-	@uv run --project skills/multi-llm -- python -c \
-	  'import sys; sys.path.insert(0, "skills/multi-llm"); \
-	   from tests.container.harness import load_host_matrix; \
-	   rows = (load_host_matrix().get("opencode") or {}).get("rows") or []; \
-	   sys.exit(0 if any(r.get("route") == "package" for r in rows) else 1)' || { \
-	  echo "make: REFUSING (row 8): host_matrix.yaml declares no opencode row with" >&2; \
-	  echo "      'route: package', so the container rows below can only re-run the" >&2; \
-	  echo "      file-shim route. A green file-route run is no evidence about the" >&2; \
-	  echo "      published package, and this gate does not stamp rows it never ran." >&2; \
-	  echo "      Land the plugin row first (plan Phase 4b), then re-run this gate." >&2; \
-	  exit 1; }
-	$(MAKE) opencode-package
-	$(PYTEST) -m container -q -k opencode
-	@name="$$(node -p "require('./$(OPENCODE_PKG)/package.json').name")"; \
-	version="$$(node -p "require('./$(OPENCODE_PKG)/package.json').version")"; \
-	status=0; probe="$$(npm view "$$name@$$version" version --json 2>/dev/null)" || status=$$?; \
-	if [ "$$status" -eq 0 ]; then \
-	  echo "make: REFUSING (row 9): $$name@$$version is already on the registry, and" >&2; \
-	  echo "      npm forbids republishing a version. Bump $(OPENCODE_PKG)/package.json." >&2; \
-	  exit 1; \
-	fi; \
-	code="$$(printf '%s' "$$probe" | node -e 'let raw = ""; process.stdin.on("data", (chunk) => { raw += chunk; }); process.stdin.on("end", () => { let code = ""; try { code = JSON.parse(raw).error.code || ""; } catch { code = ""; } process.stdout.write(String(code)); });')" || code=""; \
-	if [ "$$code" != "E404" ]; then \
-	  echo "make: REFUSING (row 9): could not determine whether $$name@$$version is on" >&2; \
-	  echo "      the registry. npm exited $$status reporting code '$${code:-<none>}';" >&2; \
-	  echo "      only E404 is a green answer. That is an UNKNOWN, not an absence —" >&2; \
-	  echo "      re-run once the registry answers." >&2; \
-	  exit 1; \
-	fi; \
-	echo "row 9: $$name@$$version is absent from the registry (E404)"
-	@echo "make: REFUSING (row 7): no clean-\$$HOME install probe is wired, so nothing" >&2; \
-	echo "      here has confirmed that the packed tarball resolves from a clean home" >&2; \
-	echo "      and mutates command[\"multi-llm\"] plus the multi_llm tool id — presence" >&2; \
-	echo "      in plugin[] proves nothing. Wire the probe here, or run the plan's A6" >&2; \
-	echo "      probe by hand and record it; until then this gate writes no stamp and" >&2; \
-	echo "      opencode-publish stays refused, which is the point." >&2; \
-	exit 1
-	$(OPENCODE_BUILD) --write-stamp "$$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-	@echo "opencode-package-check: full gate green; stamp written to $(OPENCODE_STAMP)"
+# ALLOW_DIRTY=1 IS A REHEARSAL. Every row may run from a dirty tree, and the
+# session says so; `--write-stamp` and `export-record` then both refuse it by
+# name, so a rehearsal can never authorize a publish or reach CI.
+#
+# THE STAMP NEVER TRAVELS. It is gitignored and never uploaded, because a stamp
+# from another machine attests to that machine's rows. CI consumes no stamps: its
+# jobs re-run rows 1-7 and 9, and row 8 — which needs a Docker daemon the runners
+# do not have — reaches CI only as the release-gate record exported at the end,
+# from the session that authorized the stamp, into the gitignored
+# $(OPENCODE_GATE_DIR)/export/ (never records/, where an untracked file would
+# make the tree dirty and the stamp refuse). It is copied into
+# $(CONTAINER_DIR)/records/ and committed in the default branch's own commit after
+# the fast-forward (plan step 2), never in the tag's tree; the tag's commit is
+# then checked out again before `make opencode-publish-first`. `export-record`
+# prints those lines.
+opencode-package-check:
+	@$(OPENCODE_GATE) begin $(if $(ALLOW_DIRTY),--allow-dirty,)
+	$(OPENCODE_GATE_STEP) ci-rows --timeout 3600 -- $(MAKE) --no-print-directory opencode-package-check-ci
+	$(OPENCODE_GATE_STEP) candidate --timeout 900 -- $(MAKE) --no-print-directory opencode-package
+	$(OPENCODE_GATE_STEP) host-install --timeout 900 --capture $(OPENCODE_GATE_DIR)/raw/opencode-bin.txt -- \
+	  uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/bump.py install --prefix $(abspath $(OPENCODE_GATE_DIR))/host
+	$(OPENCODE_GATE_STEP) row7-probe --timeout 1800 -- \
+	  uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/probe.py row7 --tarball "$(OPENCODE_TARBALL)" \
+	  --opencode "$$(cat $(OPENCODE_GATE_DIR)/raw/opencode-bin.txt)" --registry $(OPENCODE_REGISTRY) \
+	  --out $(OPENCODE_GATE_DIR)/raw/row7.json
+	$(OPENCODE_GATE_STEP) row7-record --timeout 300 -- $(OPENCODE_GATE) record 7 --from $(OPENCODE_GATE_DIR)/raw/row7.json
+	$(OPENCODE_GATE_STEP) image-build --timeout 3600 -- \
+	  $(MAKE) --no-print-directory e2e-image IMAGE=$(OPENCODE_GATE_IMAGE) OPENCODE_STAGE_DIRTY=$(OPENCODE_DIRTY)
+	$(OPENCODE_GATE_STEP) image-bind --timeout 600 --capture $(OPENCODE_GATE_DIR)/raw/image-id.txt -- \
+	  $(OPENCODE_GATE) image --image $(OPENCODE_GATE_IMAGE)
+	@date -u +%Y%m%dT%H%M%SZ > $(OPENCODE_GATE_DIR)/raw/row8-since.txt
+	$(OPENCODE_GATE_STEP) row8-run --timeout 5400 -- \
+	  env MLLM_E2E_IMAGE="$$(cat $(OPENCODE_GATE_DIR)/raw/image-id.txt)" $(OPENCODE_GATE_PYTEST)
+	$(OPENCODE_GATE_STEP) row8-check --timeout 900 -- \
+	  $(OPENCODE_GATE) check-row8 --since "$$(cat $(OPENCODE_GATE_DIR)/raw/row8-since.txt)"
+	$(OPENCODE_GATE_STEP) check-bump --timeout 600 -- $(MAKE) --no-print-directory opencode-check-bump
+	$(OPENCODE_GATE_STEP) row9-probe --timeout 300 -- \
+	  $(MAKE) --no-print-directory opencode-registry-absent OUT=$(OPENCODE_GATE_DIR)/raw/row9.json
+	$(OPENCODE_GATE_STEP) row9-record --timeout 300 -- $(OPENCODE_GATE) record 9 --from $(OPENCODE_GATE_DIR)/raw/row9.json
+	$(OPENCODE_GATE_STEP) stamp --timeout 900 -- $(OPENCODE_BUILD_CLEAN) --write-stamp "$$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	$(OPENCODE_GATE_STEP) export --timeout 300 -- $(OPENCODE_GATE) export-record
+	@$(OPENCODE_GATE) summary
+	@echo "opencode-package-check: full gate green; stamp written to $(OPENCODE_STAMP), release-gate record exported"
 
-# Refuses BEFORE npm is invoked at all, on any of four conditions, each named
-# separately so "the gate is red" is never the same message as "you edited a file
-# since". The gate is worth nothing if the publish command can skip it.
-#
-# It publishes the DIRECTORY, never a pre-built .tgz: measured, `npm publish
-# <tarball>` runs no lifecycle scripts at all, so the `prepack` backstop does not
-# exist on that path.
+# Row 9's one entry point (packaging/opencode/registry_absent.mjs): the version
+# in $(OPENCODE_PKG)/package.json must be ABSENT from $(OPENCODE_REGISTRY), and
+# only npm's `E404` says so. Exit 0 is "already published" and every other code
+# is an unknown; both refuse. The script re-reads OPENCODE_REGISTRY from this
+# file and refuses any other `--registry`, so the URL is still written once.
+# `OUT=<file>` keeps the row-9 evidence JSON for `release_gate.py record 9`.
+# `PACKAGE_JSON=<file>` asks about another manifest's name and version: the
+# workflow's canary, `opencode-multi-llm@0.0.0`, which must answer E404 under the
+# job's own npm setup. Honoured only from this make command line: an exported
+# PACKAGE_JSON would quietly point row 9 at a different version (`record 9`
+# would catch it in the full gate, a workflow's row 9 would not), so one from
+# anywhere else is refused by name.
+opencode-registry-absent:
+	@if [ -n "$(PACKAGE_JSON)" ]; then case "$(origin PACKAGE_JSON)" in "command line") ;; *) \
+	  echo "make: REFUSING: PACKAGE_JSON=$(PACKAGE_JSON) comes from the $(origin PACKAGE_JSON), not this make command line; row 9 asks about $(OPENCODE_PKG)/package.json unless PACKAGE_JSON=<file> is passed explicitly. Unset it." >&2; \
+	  exit 1 ;; esac; fi
+	node $(OPENCODE_PKG)/registry_absent.mjs --registry $(OPENCODE_REGISTRY) $(if $(OUT),--out "$(OUT)") \
+	  $(if $(and $(filter command line,$(origin PACKAGE_JSON)),$(PACKAGE_JSON)),--package-json "$(PACKAGE_JSON)")
+
+# THE LAPTOP FIRST RELEASE, and only that. npm's trusted publishing still needs
+# an existing package (`npm trust`: "The package you're configuring must already
+# exist", rechecked 2026-10-25), so the first version is uploaded from the
+# maintainer's machine, authenticated interactively and WITHOUT provenance; every
+# later version goes through the workflow dispatch, with it. first_release.py
+# refuses, naming the condition, unless the tree is clean, the full stamp binds
+# the gated tarball, the annotated `opencode-v<version>` tag names HEAD, HEAD is
+# on origin/master, every required check run on that SHA succeeded (`test (<os>)`
+# per test.yml matrix leg, plus `package`), the shared-version bump check and
+# row 9 pass, it IS the first release (npm lists no version of the package at
+# all, and HEAD's capabilities name no `public_version`), and the gated tarball
+# still recomputes to the stamp. Then it
+# uploads THAT FILE with `--ignore-scripts`, never the directory, and reads
+# `dist.integrity` back from a fresh cache until it equals the gated one.
+# `DRY_RUN=1` runs every preflight and prints the upload without running it.
+# No ALLOW_DIRTY here, and the script strips MULTI_LLM_ALLOW_DIRTY from its children.
+opencode-publish-first:
+	uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/first_release.py $(if $(DRY_RUN),--dry-run)
+
+# NO LONGER A PUBLISH PATH. This target used to run the upload in the package
+# directory with `--provenance`, and that shipped the wrong bytes: the
+# manifest's `prepack` hook rebuilt dist/ there and npm uploaded whatever that
+# rebuild produced, while `--check-stamp` had compared a separate rebuild a
+# moment earlier. Nothing compared the uploaded tarball with the gated one. Both
+# guarded paths now upload the exact tarball the full gate packed, scanned and
+# loaded (`npm pack` once, then the file, with `--ignore-scripts`); the `prepack`
+# hook stays only as the backstop for a hand-typed bare `npm pack`. Measured: a
+# tarball upload runs no lifecycle scripts, so nothing can repack it.
 opencode-publish:
-	uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/build.py --check-stamp
-	cd $(OPENCODE_PKG) && npm publish --provenance --access public
+	@echo "make: REFUSING: opencode-publish no longer uploads anything. The two guarded paths:" >&2; \
+	echo "      * the FIRST release, from this machine: make opencode-publish-first" >&2; \
+	echo "        (DRY_RUN=1 to run its preflights only)" >&2; \
+	echo "      * every later release: the publish-opencode-plugin workflow dispatch" >&2; \
+	echo "        (mode: publish, tag: opencode-v<version>), with provenance" >&2; \
+	exit 1
 
 # THE SUPPORTED OPENCODE IS ITS NEWEST RELEASE, AND ONLY THAT ONE. It is the
 # adapter's min_version and verified_version at once, and engines.opencode, the
@@ -783,6 +908,56 @@ opencode-bump:
 
 opencode-latest-check:
 	uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/bump.py check
+
+# The single registry, for the workflow and anything else outside this file.
+opencode-print-registry:
+	@echo $(OPENCODE_REGISTRY)
+
+# THE SHARED-VERSION BUMP CHECK, OpenCode's entry point (plans/
+# opencode-plugin-publish.md, step 2; Codex's `--check-bump` runs the same one).
+# The version is pyproject.toml's, shared by all three distributions, so HEAD's
+# version must either be released already WITH THIS SAME shared payload, or be
+# newer than every codex-v* and opencode-v* tag and every version npm lists for
+# the package. Reads git and the registry; writes nothing. A shallow or tagless
+# clone is refused, never read as "no releases" — run it from a full clone with
+# every tag.
+#
+# Deliberately in NO `tests` workflow leg and not in `opencode-package-check-ci`:
+# after V is released, `master` may change shipped bytes while still saying V.
+# This check refuses a RELEASE from that state, and must not turn `master` red
+# over the legal edit. The full gate and the publish preflights call it.
+opencode-check-bump:
+	uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/build.py --check-bump --registry $(OPENCODE_REGISTRY)
+
+# THE REGISTRY-INSTALL PROBE, one implementation for two records (plans/
+# opencode-plugin-publish.md, step 0's bootstrap job and step 5): what npm SERVES
+# for SPEC, installed by the pinned OpenCode from $(OPENCODE_REGISTRY) into a
+# fresh home, compared with the candidate rebuilt from TAG's commit before the
+# first tool call, then driven through `multi_llm` (packaging/opencode/
+# registry_check.py). ENVIRONMENT=ci-runner writes the bootstrap record (seven
+# criteria, the workflow run from $$GITHUB_RUN_ID or WORKFLOW_RUN_ID);
+# container drives a stock container from this host and adds the warm-offline
+# run on its committed image with --network none; vm runs here and waits for
+# the VM's interface to be detached. OUT is the record; its supporting output
+# goes beside it. REHEARSAL_REGISTRY=http://127.0.0.1:<port> (a
+# `registry_stub.py serve` of the gated tarball) makes the run a REHEARSAL: the
+# record says so and is never release evidence. It is honoured ONLY from this
+# make command line ($(origin) `command line`): an export left over from a
+# rehearsal would otherwise turn step 5's real run into another rehearsal, so a
+# value from the environment (or anywhere else) is refused by name. OPENCODE,
+# PREVIOUS_PIN and REPO pass through. `--frozen --no-dev`: the probe needs only
+# the runtime lock.
+opencode-registry-check:
+	@test -n "$(SPEC)" -a -n "$(TAG)" -a -n "$(ENVIRONMENT)" -a -n "$(OUT)" || { \
+	  echo "usage: make opencode-registry-check SPEC=<name@version> TAG=opencode-v<version> ENVIRONMENT=ci-runner|container|vm OUT=<record.json> [REHEARSAL_REGISTRY=http://127.0.0.1:<port>] [WORKFLOW_RUN_ID=n] [OPENCODE=bin] [PREVIOUS_PIN=spec] [REPO=path]"; exit 1; }
+	@if [ -n "$(REHEARSAL_REGISTRY)" ]; then case "$(origin REHEARSAL_REGISTRY)" in "command line") ;; *) \
+	  echo "make: REFUSING: REHEARSAL_REGISTRY=$(REHEARSAL_REGISTRY) comes from the $(origin REHEARSAL_REGISTRY), not this make command line; a leftover export would turn this run into a rehearsal. Unset it, or pass REHEARSAL_REGISTRY=<url> on the command line for a rehearsal." >&2; \
+	  exit 1 ;; esac; fi
+	uv run --frozen --no-dev --project skills/multi-llm -- python $(OPENCODE_PKG)/registry_check.py \
+	  --spec "$(SPEC)" --registry $(OPENCODE_REGISTRY) --tag "$(TAG)" --environment "$(ENVIRONMENT)" \
+	  --out "$(OUT)" $(if $(and $(filter command line,$(origin REHEARSAL_REGISTRY)),$(REHEARSAL_REGISTRY)),--rehearsal-registry "$(REHEARSAL_REGISTRY)") \
+	  $(if $(WORKFLOW_RUN_ID),--workflow-run-id "$(WORKFLOW_RUN_ID)") $(if $(OPENCODE),--opencode "$(OPENCODE)") \
+	  $(if $(PREVIOUS_PIN),--previous-pin "$(PREVIOUS_PIN)") $(if $(REPO),--repo "$(REPO)")
 
 
 # --------------------------------------------------------------------------- #

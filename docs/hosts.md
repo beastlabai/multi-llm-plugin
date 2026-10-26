@@ -118,10 +118,10 @@ A second route on `opencode`, and the one this documentation will recommend once
 Add it to the host config (`~/.config/opencode/opencode.json`) and restart:
 
 ```json
-{ "plugin": ["opencode-multi-llm@0.1.0"] }
+{ "plugin": ["opencode-multi-llm@0.1.1"] }
 ```
 
-Needs opencode 1.19.3 or newer. Upgrading is bumping the pin and restarting: the cache key is the literal spec string and the installer early-returns when the package directory already exists, so an **unpinned** entry resolves once and never again. It provides a slash command and a model-callable tool, and you invoke it as `/multi-llm <the same arguments the Claude Code skill takes>`, or by calling the `multi_llm` tool directly.
+Needs opencode 1.19.4 or newer. Upgrading is bumping the pin and restarting: the cache key is the literal spec string and the installer early-returns when the package directory already exists, so an **unpinned** entry resolves once and never again. It provides a slash command and a model-callable tool, and you invoke it as `/multi-llm <the same arguments the Claude Code skill takes>`, or by calling the `multi_llm` tool directly.
 
 ## What differs from Claude Code
 
