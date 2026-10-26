@@ -19,6 +19,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -387,7 +388,9 @@ class TestGreenPath:
         assert release.run(dry_run=True) == 0
         assert not world.published
         assert not release.evidence_dir.exists()
-        assert any(f"npm publish {gated['tarball']}" in line and "--ignore-scripts" in line
+        # As ``shlex.join`` prints it: a Windows path's backslashes get quoted.
+        upload = f"npm publish {shlex.quote(str(gated['tarball']))}"
+        assert any(upload in line and "--ignore-scripts" in line
                    for line in release.lines)
         ran = {c["argv"][0] if c["argv"][0] != sys.executable else c["argv"][2]
                for c in world.calls}
@@ -953,7 +956,9 @@ class TestNpmConfiguration:
         probe = [sys.executable, "-c",
                  "import json, os; print(json.dumps([sorted(os.environ), os.getcwd()]))"]
         kept, cwd = json.loads(first_release.Runner()(probe, cwd=tmp_path).stdout)
-        assert {"npm_config_https_proxy", "NPM_CONFIG_CAFILE"} <= set(kept)
+        # Windows folds environment names to upper case; POSIX keeps both spellings.
+        fold = str.upper if os.name == "nt" else str
+        assert {fold("npm_config_https_proxy"), fold("NPM_CONFIG_CAFILE")} <= {fold(k) for k in kept}
         assert os.path.realpath(cwd) == os.path.realpath(tmp_path)
         dropped, _ = json.loads(first_release.Runner()(probe, inherit_npm_config=False).stdout)
         assert not [k for k in dropped if k.lower().startswith("npm_config_")]

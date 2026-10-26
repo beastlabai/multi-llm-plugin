@@ -67,6 +67,8 @@ NAME = "opencode-multi-llm"
 VERSION = "0.1.1"
 SPEC = f"{NAME}@{VERSION}"
 STUB = "http://127.0.0.1:43210"
+#: Where uv puts the venv's interpreter, the path the cold-install criterion reads.
+VENV_PYTHON = Path("Scripts/python.exe") if os.name == "nt" else Path("bin/python")
 
 
 # --------------------------------------------------------------------------- #
@@ -189,7 +191,7 @@ class FakeHost:
             dest = Path(next(a.split("=", 1)[1] for a in argv if a.startswith("--pack-destination=")))
             shutil.copyfile(self.served, dest / f"{NAME}-{VERSION}.tgz")
             out = json.dumps([{"filename": f"{NAME}-{VERSION}.tgz", "integrity": self.integrity}])
-        elif "-c" in argv and Path(argv[0]).name == "python":
+        elif "-c" in argv and Path(argv[0]).name == VENV_PYTHON.name:
             out = json.dumps({"python": "3.11.2", "dists": ["pyyaml"]})
         stdout.parent.mkdir(parents=True, exist_ok=True)
         stdout.write_text(out, encoding="utf-8")
@@ -240,8 +242,8 @@ class FakeHost:
         if mode == "init":
             (Path(project) / ".multi-llm").mkdir(exist_ok=True)
             (Path(project) / ".multi-llm" / "providers.yaml").write_text("x: 1\n")
-            (skill / ".venv" / "bin").mkdir(parents=True, exist_ok=True)
-            (skill / ".venv" / "bin" / "python").write_text("")
+            (skill / ".venv" / VENV_PYTHON).parent.mkdir(parents=True, exist_ok=True)
+            (skill / ".venv" / VENV_PYTHON).write_text("")
             (Path(env["UV_CACHE_DIR"]) / "wheels-v6").mkdir(parents=True, exist_ok=True)
             (skill / "__pycache__").mkdir(exist_ok=True)
             (skill / "__pycache__" / "multi_llm.cpython-311.pyc").write_bytes(b"runtime state")
@@ -1060,12 +1062,13 @@ class TestTheUpgrade:
         assert upgrade["pass"] is True, upgrade["evidence"].get("problems")
         evidence = upgrade["evidence"]
         assert evidence["before"]["version"] == "0.1.0"
-        assert evidence["before"]["location"].endswith(f"packages/{self.PREVIOUS}/node_modules/{NAME}")
+        before = Path(evidence["before"]["location"]).as_posix()
+        assert before.endswith(f"packages/{self.PREVIOUS}/node_modules/{NAME}")
         assert evidence["after"]["version"] == VERSION
         assert evidence["after"]["digest"] == candidate["digest"]
-        assert evidence["ran_from"] == evidence["after"]["location"] + "/skills/multi-llm"
+        assert Path(evidence["ran_from"]) == Path(evidence["after"]["location"]) / "skills" / "multi-llm"
         # Its own home: the upgrade never touches the first installation's.
-        assert "/upgrade/env/" in evidence["before"]["location"]
+        assert "/upgrade/env/" in before
         assert host.tool_calls[-2:] == [f"status {self.PREVIOUS}", "status"]
         assert [n for n in rc.criteria_for("container", "later") if n not in result["criteria"]] == \
             [rc.OFFLINE]
@@ -1256,12 +1259,15 @@ class TestTheKit:
         assert sorted(manifest) == sorted(rc.KIT_FILES)
         assert not (kit / "packaging/opencode/build.py").exists()
         assert not (kit / "skills/multi-llm/multi_llm.py").exists()
-        code = textwrap.dedent(f"""\
-            import importlib.util, json, sys, tempfile
+        # The kit's path travels as an argument, not inside the source: a
+        # Windows path's backslashes would be string escapes there.
+        code = textwrap.dedent("""\
+            import importlib.util, json, os, sys, tempfile
             from pathlib import Path
-            spec = importlib.util.spec_from_file_location("rc", "{kit}/packaging/opencode/registry_check.py")
+            kit = Path(sys.argv[1])
+            spec = importlib.util.spec_from_file_location("rc", kit / "packaging/opencode/registry_check.py")
             rc = importlib.util.module_from_spec(spec); sys.modules["rc"] = rc; spec.loader.exec_module(rc)
-            assert str(rc.REPO_ROOT) == "{kit}", rc.REPO_ROOT
+            assert os.path.realpath(rc.REPO_ROOT) == os.path.realpath(kit), rc.REPO_ROOT
             assert rc.criteria_for("container", "first")[-1] == "same_pin_restart_matches"
             probe = rc._probe()
             scenario = probe.scripted_call_scenario("multi_llm", probe.STATUS_ARGS, "c1")
@@ -1269,13 +1275,14 @@ class TestTheKit:
             with probe.StubModel(scenario, diag, "kit") as stub:
                 assert stub.port
             bump = rc._bump()
-            assert str(bump.REPO) == "{kit}" and callable(bump.verify_installed)
+            assert os.path.realpath(bump.REPO) == os.path.realpath(kit) and callable(bump.verify_installed)
             (diag / "f").write_text("x")
-            print(json.dumps({{"digest": rc.inventory_digest(diag, ["f"]),
-                               "build_loaded": "opencode_build" in sys.modules}}))
+            print(json.dumps({"digest": rc.inventory_digest(diag, ["f"]),
+                              "build_loaded": "opencode_build" in sys.modules}))
             """)
-        done = subprocess.run([sys.executable, "-c", code], cwd=str(tmp_path), capture_output=True,
-                              text=True, timeout=120, env={**os.environ, "PYTHONPATH": ""})
+        done = subprocess.run([sys.executable, "-c", code, str(kit)], cwd=str(tmp_path),
+                              capture_output=True, text=True, timeout=120,
+                              env={**os.environ, "PYTHONPATH": ""})
         assert done.returncode == 0, done.stderr
         result = json.loads(done.stdout.strip().splitlines()[-1])
         assert result["build_loaded"] is False and len(result["digest"]) == 64
