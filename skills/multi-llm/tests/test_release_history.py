@@ -531,6 +531,31 @@ class TestNpmStub:
         assert answer.versions == (STUB, "0.1.1") and answer.stubs == ()
         assert [argv[2] for argv, _ in calls] == [PACKAGE, STUB_SPEC], "decided without asking"
 
+    CREATED = "2026-10-26T17:37:54.319Z"
+
+    @pytest.mark.parametrize("fields", [
+        {"time": {"created": CREATED, STUB: "2026-10-27T09:00:00.000Z", "0.1.1": CREATED}},
+        {"time": {"created": CREATED, "0.1.1": "2026-10-26T17:42:15.266Z"}},
+        {"time": {STUB: CREATED}},
+        {"time": {"created": "", STUB: ""}},
+        {"time": None},
+        {"time": CREATED},
+        {"dist-tags": {"latest": STUB}},
+        {"dist-tags": {"latest": "0.1.1", "next": STUB}},
+        {"dist-tags": None},
+    ], ids=["published-after-creation", "no-publish-time", "no-creation-time", "empty-times",
+            "time-null", "time-not-an-object", "latest-names-it", "another-tag-names-it",
+            "dist-tags-null"])
+    def test_a_stub_mark_the_registry_does_not_back_stays_a_version(self, fields):
+        """``"stub": true`` is the publisher's own ``package.json``, echoed
+        back. A ``0.0.0-stage`` published after the package was created, or
+        one a dist-tag names, carries the mark and is still not npm's
+        placeholder: it stays a version no tag names."""
+        answer = release_history.npm_versions(
+            PACKAGE, REGISTRY,
+            runner=runner(with_probe(listed(STUB, "0.1.1"), manifest(**fields))))
+        assert answer.versions == (STUB, "0.1.1") and answer.stubs == ()
+
     def test_only_the_exact_stub_version_is_ever_asked_about(self):
         """A near miss is a version like any other: no probe, no exemption."""
         calls: List = []
@@ -556,8 +581,13 @@ class TestNpmStub:
          "printed no manifest"),
         (manifest("0.1.1"), "printed no manifest"),
         (manifest(name="another-package"), "printed no manifest"),
+        # A runner that turns its timeout into exit 124 says so only on stderr
+        # (first_release.Runner): the refusal must still name it.
+        ({"exit": 124, "stdout": "", "stderr": "npm: no answer within 90 s\n"},
+         "code <none> (npm: no answer within 90 s)"),
     ], ids=["E500", "E503", "E403", "E429", "ECONNREFUSED", "stderr-only", "E404-no-match",
-            "not-json", "empty", "bare-true", "a-list", "another-version", "another-name"])
+            "not-json", "empty", "bare-true", "a-list", "another-version", "another-name",
+            "exit-124-timeout"])
     def test_a_probe_npm_does_not_answer_is_an_unknown(self, probe, needle):
         with pytest.raises(release_history.ReleaseHistoryError, match=re.escape(needle)) as exc:
             release_history.npm_versions(
