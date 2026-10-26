@@ -1,0 +1,541 @@
+{
+  "candidate_digest": "dfdf456eb8c472c0f9d186e579f05ebbc1a42b7b085c7476f12bd5b521f16b35",
+  "exported_at": "20261026T025255Z",
+  "host_version": "1.19.4",
+  "image": {
+    "id": "sha256:959918101aa3a0ff240bfcf2965babb44779d76b29d5e25b20a2e09c93df6e92",
+    "installed_versions": {
+      "base_image": {
+        "amd64_manifest_digest": "sha256:ea11b74b986d520137cdef9a5346e447a00f275ecc4abc0055b7151226231e09",
+        "debian_version": "12.15",
+        "digest": "sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d",
+        "ref": "docker.io/library/node:22-bookworm-slim"
+      },
+      "clis": [
+        {
+          "binary": "fx",
+          "enforced": true,
+          "exit": 0,
+          "expected": "0.0.14",
+          "id": "fx",
+          "install": "archive",
+          "installed": "0.0.14",
+          "status": "ok"
+        },
+        {
+          "binary": "codex",
+          "enforced": true,
+          "exit": 0,
+          "expected": "0.163.0",
+          "id": "codex",
+          "install": "npm",
+          "installed": "0.163.0",
+          "status": "ok"
+        },
+        {
+          "binary": "claude",
+          "enforced": true,
+          "exit": 0,
+          "expected": "2.1.308",
+          "id": "claude-code",
+          "install": "npm",
+          "installed": "2.1.308",
+          "status": "ok"
+        },
+        {
+          "binary": "gemini",
+          "enforced": true,
+          "exit": 0,
+          "expected": "0.65.0",
+          "id": "gemini",
+          "install": "npm",
+          "installed": "0.65.0",
+          "status": "ok"
+        },
+        {
+          "binary": "opencode",
+          "enforced": true,
+          "exit": 0,
+          "expected": "1.19.4",
+          "id": "opencode",
+          "install": "npm",
+          "installed": "1.19.4",
+          "status": "ok"
+        },
+        {
+          "binary": "cline",
+          "enforced": true,
+          "exit": 0,
+          "expected": "3.0.73",
+          "id": "cline",
+          "install": "npm",
+          "installed": "3.0.73",
+          "status": "ok"
+        },
+        {
+          "binary": "kilocode",
+          "enforced": true,
+          "exit": 0,
+          "expected": "7.8.15",
+          "id": "kilocode",
+          "install": "npm",
+          "installed": "7.8.15",
+          "status": "ok"
+        },
+        {
+          "binary": "kimi",
+          "enforced": true,
+          "exit": 0,
+          "expected": "2.3.0",
+          "id": "kimi",
+          "install": "npm",
+          "installed": "2.3.0",
+          "status": "ok"
+        },
+        {
+          "binary": "copilot",
+          "enforced": true,
+          "exit": 0,
+          "expected": "1.0.102",
+          "id": "copilot",
+          "install": "npm",
+          "installed": "1.0.102",
+          "status": "ok"
+        },
+        {
+          "binary": "qwen",
+          "enforced": true,
+          "exit": 0,
+          "expected": "0.26.0",
+          "id": "qwen-code",
+          "install": "npm",
+          "installed": "0.26.0",
+          "status": "ok"
+        },
+        {
+          "binary": "pi",
+          "enforced": true,
+          "exit": 0,
+          "expected": "1.4.0",
+          "id": "pi",
+          "install": "npm",
+          "installed": "1.4.0",
+          "status": "ok"
+        },
+        {
+          "binary": "aider",
+          "enforced": true,
+          "exit": 0,
+          "expected": "0.86.2",
+          "id": "aider",
+          "install": "pypi",
+          "installed": "0.86.2",
+          "status": "ok"
+        },
+        {
+          "binary": "vibe",
+          "enforced": true,
+          "exit": 0,
+          "expected": "3.0.1",
+          "id": "vibe",
+          "install": "pypi",
+          "installed": "3.0.1",
+          "status": "ok"
+        },
+        {
+          "binary": "goose",
+          "enforced": true,
+          "exit": 0,
+          "expected": "1.55.0",
+          "id": "goose",
+          "install": "archive",
+          "installed": "1.55.0",
+          "status": "ok"
+        },
+        {
+          "binary": "grok",
+          "enforced": true,
+          "exit": 0,
+          "expected": "1.0.67",
+          "id": "grok",
+          "install": "download",
+          "installed": "1.0.67",
+          "status": "ok"
+        },
+        {
+          "binary": "muse",
+          "enforced": true,
+          "exit": 0,
+          "expected": "1.4.11-R6667.1",
+          "id": "muse",
+          "install": "download",
+          "installed": "1.4.11-R6667.1",
+          "status": "ok"
+        },
+        {
+          "binary": "cursor-agent",
+          "enforced": true,
+          "exit": 0,
+          "expected": "2026.10.19-6bbf2c4",
+          "id": "cursor-agent",
+          "install": "archive",
+          "installed": "2026.10.19-6bbf2c4",
+          "status": "ok"
+        },
+        {
+          "binary": "agy",
+          "enforced": true,
+          "exit": 0,
+          "expected": "1.4.5",
+          "id": "agy",
+          "install": "archive",
+          "installed": "1.4.5",
+          "status": "ok"
+        },
+        {
+          "binary": "omp",
+          "enforced": true,
+          "exit": 0,
+          "expected": "18.12.6",
+          "id": "omp",
+          "install": "download",
+          "installed": "18.12.6",
+          "status": "ok"
+        }
+      ],
+      "mode": "pinned",
+      "path_shape": [
+        {
+          "binary": "fx",
+          "id": "fx",
+          "path": "/opt/mllm/bin/fx",
+          "status": "ok"
+        },
+        {
+          "binary": "codex",
+          "id": "codex",
+          "path": "/opt/mllm/bin/codex",
+          "status": "ok"
+        },
+        {
+          "binary": "claude",
+          "id": "claude-code",
+          "path": "/opt/mllm/bin/claude",
+          "status": "ok"
+        },
+        {
+          "binary": "gemini",
+          "id": "gemini",
+          "path": "/opt/mllm/bin/gemini",
+          "status": "ok"
+        },
+        {
+          "binary": "opencode",
+          "id": "opencode",
+          "path": "/opt/mllm/bin/opencode",
+          "status": "ok"
+        },
+        {
+          "binary": "cline",
+          "id": "cline",
+          "path": "/opt/mllm/bin/cline",
+          "status": "ok"
+        },
+        {
+          "binary": "kilocode",
+          "id": "kilocode",
+          "path": "/opt/mllm/bin/kilocode",
+          "status": "ok"
+        },
+        {
+          "binary": "kimi",
+          "id": "kimi",
+          "path": "/opt/mllm/bin/kimi",
+          "status": "ok"
+        },
+        {
+          "binary": "copilot",
+          "id": "copilot",
+          "path": "/opt/mllm/bin/copilot",
+          "status": "ok"
+        },
+        {
+          "binary": "qwen",
+          "id": "qwen-code",
+          "path": "/opt/mllm/bin/qwen",
+          "status": "ok"
+        },
+        {
+          "binary": "pi",
+          "id": "pi",
+          "path": "/opt/mllm/bin/pi",
+          "status": "ok"
+        },
+        {
+          "binary": "aider",
+          "id": "aider",
+          "path": "/opt/mllm/bin/aider",
+          "status": "ok"
+        },
+        {
+          "binary": "vibe",
+          "id": "vibe",
+          "path": "/opt/mllm/bin/vibe",
+          "status": "ok"
+        },
+        {
+          "binary": "goose",
+          "id": "goose",
+          "path": "/opt/mllm/bin/goose",
+          "status": "ok"
+        },
+        {
+          "binary": "grok",
+          "id": "grok",
+          "path": "/opt/mllm/bin/grok",
+          "status": "ok"
+        },
+        {
+          "binary": "muse",
+          "id": "muse",
+          "path": "/opt/mllm/bin/muse",
+          "status": "ok"
+        },
+        {
+          "binary": "cursor-agent",
+          "id": "cursor-agent",
+          "path": "/opt/mllm/bin/cursor-agent",
+          "status": "ok"
+        },
+        {
+          "binary": "agy",
+          "id": "agy",
+          "path": "/opt/mllm/bin/agy",
+          "status": "ok"
+        },
+        {
+          "binary": "omp",
+          "id": "omp",
+          "path": "/opt/mllm/bin/omp",
+          "status": "ok"
+        }
+      ],
+      "platform": "linux/amd64",
+      "toolchain": [
+        {
+          "binary": "node",
+          "enforced": true,
+          "exit": 0,
+          "expected": "22.23.4",
+          "id": "node",
+          "install": "base",
+          "installed": "22.23.4",
+          "status": "ok"
+        },
+        {
+          "binary": "npm",
+          "enforced": true,
+          "exit": 0,
+          "expected": "10.9.9",
+          "id": "npm",
+          "install": "base",
+          "installed": "10.9.9",
+          "status": "ok"
+        },
+        {
+          "binary": "uv",
+          "enforced": true,
+          "exit": 0,
+          "expected": "0.13.5",
+          "id": "uv",
+          "install": "download",
+          "installed": "0.13.5",
+          "status": "ok"
+        },
+        {
+          "binary": "python3",
+          "enforced": false,
+          "exit": 0,
+          "expected": "3.11.2",
+          "id": "python3",
+          "install": "base",
+          "installed": "3.11.2",
+          "status": "ok"
+        },
+        {
+          "binary": "git",
+          "enforced": false,
+          "exit": 0,
+          "expected": "2.39.5",
+          "id": "git",
+          "install": "base",
+          "installed": "2.39.5",
+          "status": "ok"
+        },
+        {
+          "binary": "ps",
+          "enforced": false,
+          "exit": 0,
+          "expected": "4.0.2",
+          "id": "procps",
+          "install": "base",
+          "installed": "4.0.2",
+          "status": "ok"
+        }
+      ]
+    },
+    "opencode_installed": "1.19.4",
+    "payload_digest": "dfdf456eb8c472c0f9d186e579f05ebbc1a42b7b085c7476f12bd5b521f16b35",
+    "tag": "mllm-e2e:opencode-gate"
+  },
+  "kind": "opencode-release-gate",
+  "posture": {
+    "pass": true,
+    "posture_yaml_matches_head": true,
+    "posture_yaml_sha256": "094a764a1a8409c29a29a6c760185f81937de59d0c6efdb983bcafaf15f68e5e",
+    "scenarios": {
+      "opencode-package-gate-cancellation": {
+        "host_captured": true,
+        "inside": true,
+        "mismatches": []
+      },
+      "opencode-package-gate-completion": {
+        "host_captured": true,
+        "inside": true,
+        "mismatches": []
+      },
+      "opencode-package-gate-detach": {
+        "host_captured": true,
+        "inside": true,
+        "mismatches": []
+      },
+      "opencode-package-gate-init-status": {
+        "host_captured": true,
+        "inside": true,
+        "mismatches": []
+      },
+      "opencode-package-gate-supervision": {
+        "host_captured": true,
+        "inside": true,
+        "mismatches": []
+      }
+    }
+  },
+  "registry": "https://registry.npmjs.org",
+  "rehearsal": false,
+  "row8": {
+    "ran": "local",
+    "run_id": "20261026T025140Z",
+    "since": "20261026T025140Z"
+  },
+  "rows": {
+    "1": "pass",
+    "2": "pass",
+    "3": "pass",
+    "4": "pass",
+    "5": "pass",
+    "5b": "pass",
+    "6": "pass",
+    "7": "pass",
+    "8": "pass",
+    "9": "pass"
+  },
+  "scenarios": [
+    {
+      "graded": true,
+      "grader": "grade_init_status",
+      "image_id": "sha256:959918101aa3a0ff240bfcf2965babb44779d76b29d5e25b20a2e09c93df6e92",
+      "outcome": "pass",
+      "pass": true,
+      "record": "20261026T025140Z-opencode-package-gate-init-status.json",
+      "row": "opencode-package-gate-init-status",
+      "run_id": "20261026T025140Z",
+      "scenario": "init-status",
+      "session": "d09fa4f053344bf1b3a6d52be1feeead",
+      "verify_record": {
+        "exit": 0,
+        "output": "verify-record: MATCH \u2014 27 files, aggregate e0098865cb56173c\u2026",
+        "verdict": "MATCH"
+      }
+    },
+    {
+      "graded": true,
+      "grader": "grade_detach",
+      "image_id": "sha256:959918101aa3a0ff240bfcf2965babb44779d76b29d5e25b20a2e09c93df6e92",
+      "outcome": "pass",
+      "pass": true,
+      "record": "20261026T025140Z-opencode-package-gate-detach.json",
+      "row": "opencode-package-gate-detach",
+      "run_id": "20261026T025140Z",
+      "scenario": "detach",
+      "session": "d09fa4f053344bf1b3a6d52be1feeead",
+      "verify_record": {
+        "exit": 0,
+        "output": "verify-record: MATCH \u2014 39 files, aggregate c22b8c353298fadb\u2026",
+        "verdict": "MATCH"
+      }
+    },
+    {
+      "graded": true,
+      "grader": "grade_supervision",
+      "image_id": "sha256:959918101aa3a0ff240bfcf2965babb44779d76b29d5e25b20a2e09c93df6e92",
+      "outcome": "pass",
+      "pass": true,
+      "record": "20261026T025140Z-opencode-package-gate-supervision.json",
+      "row": "opencode-package-gate-supervision",
+      "run_id": "20261026T025140Z",
+      "scenario": "supervision",
+      "session": "d09fa4f053344bf1b3a6d52be1feeead",
+      "verify_record": {
+        "exit": 0,
+        "output": "verify-record: MATCH \u2014 39 files, aggregate 75ead616717cd6bc\u2026",
+        "verdict": "MATCH"
+      }
+    },
+    {
+      "graded": true,
+      "grader": "grade_completion",
+      "image_id": "sha256:959918101aa3a0ff240bfcf2965babb44779d76b29d5e25b20a2e09c93df6e92",
+      "outcome": "pass",
+      "pass": true,
+      "record": "20261026T025140Z-opencode-package-gate-completion.json",
+      "row": "opencode-package-gate-completion",
+      "run_id": "20261026T025140Z",
+      "scenario": "completion",
+      "session": "d09fa4f053344bf1b3a6d52be1feeead",
+      "verify_record": {
+        "exit": 0,
+        "output": "verify-record: MATCH \u2014 39 files, aggregate c90407852cf8f864\u2026",
+        "verdict": "MATCH"
+      }
+    },
+    {
+      "graded": true,
+      "grader": "grade_cancellation",
+      "image_id": "sha256:959918101aa3a0ff240bfcf2965babb44779d76b29d5e25b20a2e09c93df6e92",
+      "outcome": "pass",
+      "pass": true,
+      "record": "20261026T025140Z-opencode-package-gate-cancellation.json",
+      "row": "opencode-package-gate-cancellation",
+      "run_id": "20261026T025140Z",
+      "scenario": "cancellation",
+      "session": "d09fa4f053344bf1b3a6d52be1feeead",
+      "verify_record": {
+        "exit": 0,
+        "output": "verify-record: MATCH \u2014 38 files, aggregate d749bb851fd28951\u2026",
+        "verdict": "MATCH"
+      }
+    }
+  ],
+  "schema": 1,
+  "session": "d09fa4f053344bf1b3a6d52be1feeead",
+  "sha": "4d1068938689fb3a1d5fbc98cfe53068c1e12dc5",
+  "tag": "opencode-v0.1.1",
+  "tarball": {
+    "file_count": 199,
+    "integrity": "sha512-XjxHpcySLlsWfUQdlApgEM82ojLfJg1SD9pkAbkGPw5pv0j0+29iQJtxGb9vEQLaQNZw8VJMSs+CSpDfswCFoQ==",
+    "name": "opencode-multi-llm-0.1.1.tgz",
+    "sha256": "18087c693586b709d2a3a6f43ae0a8f855aed5d493ec66b9e0d18529231251a2"
+  },
+  "version": "0.1.1"
+}
