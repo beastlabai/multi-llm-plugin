@@ -11,13 +11,15 @@ Run it through ``make opencode-registry-check`` or as::
         [--opencode <binary>] [--previous-pin <name>@<version>] [--repo <path>] [--keep]
 
 **One probe, two records** (publishing plan, step 0's bootstrap job and step 5).
-The laptop path's ``opencode-v<first>`` tag-push job runs it with
-``--environment ci-runner`` and writes ``<UTC>-opencode-bootstrap-check.json``;
-step 5 runs it with ``container`` (or ``vm``) and writes the canonical
-``<UTC>-opencode-release-network-check.json``. Only the environment, and which
-criteria can be attempted there, differ. Both records are
-``registry-record.schema.json``'s shape and are validated by
-``registry_record.py`` before this script reports success.
+Step 5 runs it with ``container`` (or ``vm``) and writes the canonical
+``<UTC>-opencode-release-network-check.json``. ``--environment ci-runner``
+writes ``<UTC>-opencode-bootstrap-check.json``, the record of the laptop path's
+first-release tag push; the workflow's bootstrap path it was written for was
+retired after ``opencode-v0.1.1``, and that record covers a first release
+only, so every later tag refuses it. Only the environment, and which criteria can be
+attempted there, differ. Both records are ``registry-record.schema.json``'s
+shape and are validated by ``registry_record.py`` before this script reports
+success.
 
 **What it proves, in order, each step's output preserved:**
 
@@ -85,8 +87,8 @@ left behind. ``npm_config_registry`` carries the registry, the setting
 OpenCode 1.19.4's bundled installer honours (measured by row 7). The probe's
 own npm reads use caches of their own, so they never warm OpenCode's. The
 project is a plain ``git init`` with no commit. The root is made inside
-``--tmp-parent`` whenever it is given (the bootstrap job hands it a fresh,
-checked-empty directory, and its guard later requires the payload under that
+``--tmp-parent`` whenever it is given (the retired bootstrap job handed it a
+fresh, checked-empty directory, and its guard required the payload under that
 directory), else in ``$RUNNER_TEMP`` on a runner, else the system temp; on a
 runner it lies outside the checkout, which only rebuilds the candidate.
 
@@ -1997,10 +1999,11 @@ def probe_parent(tmp_parent: Optional[Path], environment: str,
     """Where the probe's root is made: ``--tmp-parent`` whenever it is given.
 
     Then ``$RUNNER_TEMP`` on a runner, then the system temp (``None``). The
-    flag must win: ``$RUNNER_TEMP`` is set on every runner, and the bootstrap
-    job passes ``--tmp-parent`` a fresh, checked-empty directory precisely so
-    its guard can require the payload under it. Preferring the variable rooted
-    the probe in a sibling of that directory, and the guard refused every run.
+    flag must win: ``$RUNNER_TEMP`` is set on every runner, and the retired
+    bootstrap job passed ``--tmp-parent`` a fresh, checked-empty directory
+    precisely so its guard could require the payload under it. Preferring the
+    variable rooted the probe in a sibling of that directory, and the guard
+    refused every run.
     """
     if tmp_parent is not None:
         return str(tmp_parent)

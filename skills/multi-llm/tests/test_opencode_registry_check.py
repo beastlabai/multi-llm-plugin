@@ -1,9 +1,9 @@
 """The registry-install probe, ``packaging/opencode/registry_check.py``, offline.
 
 The probe itself needs the pinned ``opencode``, npm, a registry (or the
-localhost stub) and, for the container environment, Docker; it runs in the
-bootstrap job, in step 5 and in rehearsals, never here. What this file grades
-is everything that decides whether a green record means what it says:
+localhost stub) and, for the container environment, Docker; it runs in step 5
+and in rehearsals, never here. What this file grades is everything that
+decides whether a green record means what it says:
 
 * the refusals: a registry other than the single one, and a rehearsal registry
   that is not loopback, both refuse before anything runs; so does a rehearsal
@@ -31,7 +31,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -44,7 +43,6 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[3]
 PACKAGE_DIR = REPO / "packaging" / "opencode"
-WORKFLOW = REPO / ".github" / "workflows" / "publish-opencode-plugin.yml"
 CHECK_PATH = PACKAGE_DIR / "registry_check.py"
 RECORD_SCRIPT = PACKAGE_DIR / "registry_record.py"
 
@@ -718,21 +716,8 @@ class TestAMismatchFailsBeforeTheFirstToolCall:
 
 
 # --------------------------------------------------------------------------- #
-# The bootstrap job's invocation: the probe root is --tmp-parent's
+# On a runner: the probe root is --tmp-parent's
 # --------------------------------------------------------------------------- #
-
-def _workflow_guard() -> str:
-    """The bootstrap job's own payload-location guard: the heredoc of its
-    validate step, read out of the workflow, never retyped."""
-    import yaml
-
-    gate = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["gate"]["steps"]
-    validate = next(s for s in gate if s.get("name") == "Bootstrap: validate the record "
-                                                          "(bootstrap profile)")
-    match = re.search(r"<<'PY'\n(.*?)\nPY$", validate["run"], re.S | re.M)
-    assert match and "outside the probe root" in match.group(1)
-    return match.group(1)
-
 
 def _fake_rebuild(candidate):
     def rebuild(repo, sha, scratch, **_kwargs):
@@ -744,10 +729,12 @@ def _fake_rebuild(candidate):
 
 
 class TestTheProbeRootOnARunner:
-    """The bootstrap job hands ``--tmp-parent`` a fresh, checked-empty
-    directory under ``$RUNNER_TEMP`` and later refuses a payload outside it.
-    The probe preferred ``$RUNNER_TEMP`` (always set on a runner) over the
-    flag, rooted itself in a sibling, and the guard refused every run."""
+    """``--tmp-parent`` wins over ``$RUNNER_TEMP`` (always set on a runner):
+    the retired bootstrap job handed the probe a fresh, checked-empty
+    directory there and refused a payload outside it, and a probe that
+    preferred the variable rooted itself in a sibling and was refused every
+    run. No workflow runs the probe now; the ``ci-runner`` environment keeps
+    the rule."""
 
     def test_tmp_parent_wins_whenever_it_is_given(self, tmp_path):
         given = tmp_path / "given"
@@ -757,9 +744,9 @@ class TestTheProbeRootOnARunner:
         assert rc.probe_parent(None, "ci-runner", {}) is None
         assert rc.probe_parent(None, "vm", {"RUNNER_TEMP": "/rt"}) is None
 
-    def _workflow_args(self, fixture, record, binary, probe_root):
-        """The bootstrap probe step's own flags (a rehearsal's, so the fake
-        registry is admitted)."""
+    def _runner_args(self, fixture, record, binary, probe_root):
+        """A ``ci-runner`` rehearsal's flags (a rehearsal, so the fake
+        registry is admitted), as the retired bootstrap job passed them."""
         return rc.build_parser().parse_args([
             "--spec", SPEC, "--registry", SINGLE, "--tag", fixture["tag"],
             "--environment", "ci-runner", "--out", str(record),
@@ -767,12 +754,12 @@ class TestTheProbeRootOnARunner:
             "--workflow-run-id", "4242", "--rehearsal-registry", STUB,
             "--repo", str(fixture["repo"])])
 
-    def test_the_bootstrap_jobs_invocation_passes_the_jobs_own_guard(
+    def test_the_probe_and_its_payload_stay_under_tmp_parent(
             self, tmp_path, monkeypatch, candidate_and_tarball):
         candidate, tarball = candidate_and_tarball
         fixture = _tagged_repo(tmp_path / "tag")
         runner_temp = tmp_path / "runner-temp"
-        probe_root = runner_temp / "opencode-bootstrap-probe.AbCd1234"
+        probe_root = runner_temp / "opencode-probe.AbCd1234"
         probe_root.mkdir(parents=True)
         monkeypatch.setenv("RUNNER_TEMP", str(runner_temp))
         monkeypatch.setenv("GITHUB_ACTIONS", "true")
@@ -781,9 +768,9 @@ class TestTheProbeRootOnARunner:
         binary = tmp_path / "bin" / "opencode"
         binary.parent.mkdir()
         binary.write_text("")
-        record_path = (runner_temp / "opencode-bootstrap"
+        record_path = (runner_temp / "records"
                        / "20261025T000000Z-opencode-bootstrap-check-rehearsal.json")
-        args = self._workflow_args(fixture, record_path, binary, probe_root)
+        args = self._runner_args(fixture, record_path, binary, probe_root)
 
         assert rc.check(args, steps=FakeHost(tarball).steps()) == 0
         record = json.loads(record_path.read_text(encoding="utf-8"))
@@ -793,10 +780,6 @@ class TestTheProbeRootOnARunner:
         assert location.is_relative_to(probe_root.resolve()), location
         assert not any(p.name.startswith("mllm-regcheck-") for p in runner_temp.iterdir()), \
             "the probe rooted itself in $RUNNER_TEMP beside --tmp-parent"
-        guard = subprocess.run([sys.executable, "-", str(record_path), str(probe_root)],
-                               input=_workflow_guard(), capture_output=True, text=True, timeout=60)
-        assert guard.returncode == 0, guard.stderr
-        assert "lies under the probe root" in guard.stdout
 
     def test_without_tmp_parent_a_runner_roots_it_in_runner_temp(self, tmp_path, monkeypatch,
                                                                  candidate_and_tarball):
@@ -810,7 +793,7 @@ class TestTheProbeRootOnARunner:
         binary.parent.mkdir()
         binary.write_text("")
         record_path = tmp_path / "out" / "20261025T000000Z-opencode-bootstrap-check-rehearsal.json"
-        args = self._workflow_args(fixture, record_path, binary, probe_root=None)
+        args = self._runner_args(fixture, record_path, binary, probe_root=None)
         args.tmp_parent = None
         args.keep = True
         assert rc.check(args, steps=FakeHost(tarball).steps()) == 0

@@ -29,7 +29,10 @@ what publication actually produced. Its shape is
   runner cannot attempt (no Docker daemon, no defined way to cut one process
   off the network). A record carrying that criterion is refused rather than
   trusted, so a bootstrap record never passes the release profile and a green
-  bootstrap never stands in for step 5.
+  bootstrap never stands in for step 5. The workflow's bootstrap path was
+  retired after ``opencode-v0.1.1``, whose evidence is its step-5 record; no
+  job writes this profile's record now, and since it admits a first release
+  only, no later tag can.
 
 **The first-release exception is decided from the tag's commit,** never from the
 version number: ``git show <tag>:skills/multi-llm/hosts/capabilities.yaml``,

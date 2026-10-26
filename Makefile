@@ -44,8 +44,8 @@ PYTEST := uv run --project skills/multi-llm -- pytest skills/multi-llm/tests
 # nothing but the word.
 OPENCODE_PKG   := packaging/opencode
 # THE ONE REGISTRY. Every place npm is consulted on the release path — the
-# `npm whoami` check, row 9's absence probe, the bootstrap and step-5
-# registry-install probes, both publish paths and the post-publish integrity read
+# `npm whoami` check, row 9's absence probe, step 5's registry-install
+# probe, both publish paths and the post-publish integrity read
 # — passes this explicitly, and the workflow reads it from here
 # (`make -s opencode-print-registry`) rather than spelling it again. npm's registry
 # is configurable (a user `.npmrc`, `npm_config_registry`, a scoped registry), so
@@ -936,10 +936,12 @@ opencode-check-bump:
 # fresh home, compared with the candidate rebuilt from TAG's commit before the
 # first tool call, then driven through `multi_llm` (packaging/opencode/
 # registry_check.py). ENVIRONMENT=ci-runner writes the bootstrap record (seven
-# criteria, the workflow run from $$GITHUB_RUN_ID or WORKFLOW_RUN_ID);
-# container drives a stock container from this host and adds the warm-offline
-# run on its committed image with --network none; vm runs here and waits for
-# the VM's interface to be detached. OUT is the record; its supporting output
+# criteria, the workflow run from $$GITHUB_RUN_ID or WORKFLOW_RUN_ID), the
+# record of the workflow's bootstrap path, retired after opencode-v0.1.1; it
+# covers a first release only, so every later tag refuses it. container
+# drives a stock container from this host and adds the warm-offline run on its
+# committed image with --network none; vm runs here and waits for the VM's
+# interface to be detached. OUT is the record; its supporting output
 # goes beside it. REHEARSAL_REGISTRY=http://127.0.0.1:<port> (a
 # `registry_stub.py serve` of the gated tarball) makes the run a REHEARSAL: the
 # record says so and is never release evidence. It is honoured ONLY from this

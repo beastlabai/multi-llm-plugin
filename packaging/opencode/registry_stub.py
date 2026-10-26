@@ -59,8 +59,9 @@ and verify a version, and a generated document makes every one of those fields
 a computation over the file the stub was handed.
 
 Stdlib only, importable without side effects: the probe and the suite use
-:class:`RegistryStub` in-process, and the workflow's ``path: bootstrap``
-rehearsal runs ``serve`` in the background.
+:class:`RegistryStub` in-process, and a step-5 rehearsal (``make
+opencode-registry-check REHEARSAL_REGISTRY=http://127.0.0.1:<port>``) runs
+``serve`` beside it.
 """
 
 from __future__ import annotations
