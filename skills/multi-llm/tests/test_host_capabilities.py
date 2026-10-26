@@ -661,6 +661,13 @@ class TestConservativeResolution:
     #: (records/20261023T132656Z-codex-release-network-check.json, six of six),
     #: plus the published `--ref release` line re-run after promotion. It
     #: promotes `package` and nothing else.
+    #:
+    #: opencode 1.19.4, 2026-10-26, the first npm release (opencode-v0.1.1,
+    #: f4f024c7): `package` on step 5's registry install check, which installed
+    #: `opencode-multi-llm@0.1.1` from registry.npmjs.org into a stock container
+    #: with empty caches and passed all eight first-release criteria
+    #: (records/20261026T175524Z-opencode-release-network-check.json). It
+    #: promotes `package` and nothing else.
     RECORDED_SMOKES = {
         "claude-code": {"next_command.skill"},
         "codex": {
@@ -670,7 +677,7 @@ class TestConservativeResolution:
         "opencode": {
             "shim", "installable", "install_paths", "reload", "arguments",
             "headless_invocation", "detach", "multi_turn", "invocation",
-            "next_command.default", "next_command.package",
+            "next_command.default", "next_command.package", "package",
         },
     }
 

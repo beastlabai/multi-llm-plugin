@@ -492,19 +492,20 @@ hosts:
     # package declaring a different one would ship a payload that disagrees with
     # it — and `test_version_source_is_singular` asserts the chain.
     #
-    # `public_version` is ABSENT ON PURPOSE, and the absence is a claim: no
-    # registry install has been verified. It is the last version whose registry
-    # install check passed, the one the generated paragraph tells a user to pin
-    # once `provenance.package` below is `verified`. `version` is the candidate
-    # and moves at every bump, so a recommendation built from it would name a
-    # version npm does not serve yet. The schema forbids `public_version` until
-    # that row is `verified` and requires it from then on, never newer than
-    # `version`. It is set in the edit that promotes the row, and after that it
+    # `public_version` is the last version whose registry install check passed,
+    # the one the generated paragraph and the hand-written README and
+    # docs/hosts.md pins tell a user to pin. `version` is the candidate and moves
+    # at every bump, so a recommendation built from it would name a version npm
+    # does not serve yet. The schema requires `public_version` while
+    # `provenance.package` below is `verified`, never newer than `version`. It
+    # was set in the edit that promoted that row (0.1.1, backed by
+    # records/20261026T175524Z-opencode-release-network-check.json), and it
     # moves only once the next version's registry record validates.
     package:
       registry: npm
       name: opencode-multi-llm
       version: "0.1.1"
+      public_version: "0.1.1"
       config_key: plugin
       provides: [command, tool]
       min_host_version: "1.19.4"   # the one supported opencode release (the
@@ -662,25 +663,25 @@ hosts:
       reload: verified
       arguments: verified
       headless_invocation: verified
-      # `documented` until a real registry install is observed. Nothing is on a
-      # registry yet, so every claim here is host docs plus a local build — and
-      # the generated "Install via npm" paragraph is written to say exactly
-      # that. Promoting this to `verified` and re-rendering is what turns the
-      # same paragraph into a recommendation.
-      #
-      # THE CONTAINER LANE NOW EXERCISES THIS ROUTE AND IT STILL DOES NOT PROMOTE
-      # IT. Since 2026-09-19 two `route: package` rows
-      # (`opencode-package-ask`, `opencode-package-review-plan`) install the
-      # plugin from `/opt/mllm/opencode-plugin` and pass against a real model, and
-      # `harness.candidate_promotions` duly prints `package documented → verified`
-      # after each. It is declined on purpose: those rows install a LOCAL
-      # DIRECTORY, and the sentence above makes a *registry* install the
-      # criterion. Promoting on local-build evidence would re-render the generated
-      # paragraph into "install via npm" for a package npm does not carry.
-      # What the rows do earn is narrower and lives where it is measured: the
-      # plugin loads, injects its command and dispatches. The day
-      # `opencode-publish` succeeds, one registry-spec row promotes this line.
-      package: documented
+      # PROMOTED BY THE FIRST RELEASE'S REGISTRY CHECK (opencode-v0.1.1,
+      # f4f024c7, 2026-10-26). The criterion was always a *registry* install,
+      # never a local build, which is why the container lane's `route: package`
+      # rows (a LOCAL DIRECTORY at `/opt/mllm/opencode-plugin`, since
+      # 2026-09-19) never promoted it. `make opencode-registry-check
+      # ENVIRONMENT=container` installed `opencode-multi-llm@0.1.1` from
+      # registry.npmjs.org into a stock node:22-bookworm-slim container with
+      # opencode 1.19.4 and empty caches, and passed all eight first-release
+      # criteria: the spec resolves with the gated integrity, the installed
+      # tree equals the candidate rebuilt from the tag, `/multi-llm` resolves
+      # the installed skill, the `multi_llm` tool runs `init` from that payload,
+      # first use installs the runtime dependencies, a warm `status` runs with
+      # the network cut, and a restart on the same pin serves the same payload
+      # (records/20261026T175524Z-opencode-release-network-check.json, validated
+      # by `registry_record.py validate --profile release`). What it does NOT
+      # cover: macOS and Windows (Linux only, as packaging/opencode/README.md
+      # says), and an upgrade from an earlier npm version (there is none yet;
+      # the next release's record carries `upgrade_runs_new_payload`).
+      package: verified
       invocation: verified
       # PROMOTED BY T10 (plans/next-phase-command.md), opencode 1.18.33,
       # container rows `opencode-next-command` / `opencode-package-next-command`.

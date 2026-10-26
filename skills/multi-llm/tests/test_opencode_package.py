@@ -6906,6 +6906,9 @@ class TestPackageBlock:
         block["registry"] = "codex-marketplace"
         block["update"] = "reinstall"
         block.pop("version", None)
+        # A reinstall route has no pin to recommend; the npm block carries one
+        # once its route is verified.
+        block.pop("public_version", None)
         # The other registry-conditional keys a marketplace block requires.
         block.update(repo="owner/repo", ref="release", sparse=["."],
                      write_posture="refuses-under-readonly")
@@ -7414,7 +7417,10 @@ class TestThePublicPin:
             "opencode", verified, readme=f'{{ "plugin": ["{name}@{public}"] }}'
         )
 
+        # Pre-promotion, whatever state the committed row is in now.
         documented = json.loads(json.dumps(base))
+        documented["provenance"]["package"] = "documented"
+        documented["package"].pop("public_version", None)
         documented["package"]["version"] = ahead
         silent = f'{{ "plugin": ["{name}@{ahead}"] }}'
         assert any(

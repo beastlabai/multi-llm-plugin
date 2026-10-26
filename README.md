@@ -12,7 +12,7 @@ Orchestrate **plan reviews, task generation, implementation, and code reviews ac
 
 `multi-llm` fans a single workflow out to several CLI-based LLMs ([Cursor Agent](https://cursor.com/docs/cli/overview), [Gemini CLI](https://geminicli.com/docs/get-started/), [Grok Build](https://docs.x.ai/build), [Codex](https://developers.openai.com/codex/cli), [OpenCode](https://opencode.ai/docs/cli/), [Kilocode](https://kilo.ai/docs/cli), [Cline](https://docs.cline.bot/), [goose](https://block.github.io/goose/), [Aider](https://aider.chat/), [Antigravity CLI](https://antigravity.google/docs/cli/using), [Pi](https://pi.dev/docs/latest/usage), [Muse Code](https://dev.meta.ai/docs/muse-code/extending), [Kimi Code](https://code.kimi.com/docs), [Qwen Code](https://qwenlm.github.io/qwen-code-docs/), [GitHub Copilot CLI](https://docs.github.com/en/copilot/concepts/agents/about-copilot-cli), [Mistral Vibe](https://docs.mistral.ai/vibe/), [oh-my-pi](https://github.com/can1357/oh-my-pi), [Vercel fx](https://github.com/vercel-labs/fx), and [Claude Code](https://code.claude.com/docs/en/) itself), validates and consolidates their suggestions, and hands the host structured instructions to apply the results. The orchestrators never modify your code directly - they produce JSON that the host executes through its own tools, so every change stays reviewable.
 
-It installs as a **Claude Code plugin**, and the same workflow runs inside **Codex** and **OpenCode** too - as a Codex plugin, or through `install-host`, which writes a native entry point into either one (the OpenCode npm package is not published yet; until it is, `install-host opencode` is the OpenCode route). See [Installation](#1-installation) and [docs/hosts.md](docs/hosts.md).
+It installs as a **Claude Code plugin**, and the same workflow runs inside **Codex** and **OpenCode** too: on Codex as a Codex plugin, on OpenCode as the [`opencode-multi-llm`](https://www.npmjs.com/package/opencode-multi-llm) npm package. For either host, `install-host` is an alternative that writes a native entry point (a small command file) instead. See [Installation](#1-installation) and [docs/hosts.md](docs/hosts.md).
 
 ---
 
@@ -80,22 +80,42 @@ A `$` mention asks the model to use the skill, and the model then calls the `mul
 
 ### 1.3 OpenCode
 
-Installs as the `opencode-multi-llm` npm package: a `/multi-llm` command plus a `multi_llm` tool. Needs opencode 1.19.4 or newer and `uv` on `PATH`.
+Installs from npm as [`opencode-multi-llm`](https://www.npmjs.com/package/opencode-multi-llm): a `/multi-llm` command plus a `multi_llm` tool. Needs opencode 1.19.4 or newer and `uv` on `PATH`. Linux is verified; macOS and Windows are untested on this route.
 
-> **This route is not yet published.** Until the package is on npm, the entry below resolves to nothing, and OpenCode fails silently. Until then, use the file route, `install-host opencode`, described in [docs/hosts.md](docs/hosts.md).
+1. **Add the package** to the `plugin` list in `~/.config/opencode/opencode.json` (create the file if you have none). Keep the exact version in the entry:
 
-Add the package to `~/.config/opencode/opencode.json` and restart OpenCode:
+   ```json
+   { "plugin": ["opencode-multi-llm@0.1.1"] }
+   ```
 
-```json
-{ "plugin": ["opencode-multi-llm@0.1.1"] }
+2. **Restart OpenCode.** The first start downloads the package, and the first `/multi-llm` builds its Python environment (just `pyyaml`), so both need the network.
+
+3. **Check that it loaded.** On this route a failure is silent: the entry stays listed and nothing reports an error. So check for the command the package adds:
+
+   ```bash
+   opencode debug config | jq '.command["multi-llm"] != null'   # true = loaded
+   ```
+
+4. **Run `--init` once per repository,** then use it. `--init` writes `<git-root>/.multi-llm/providers.yaml`, where you choose your providers and models (1.4):
+
+   ```text
+   /multi-llm --init
+   /multi-llm plans/my-feature.md
+   /multi-llm --review-code plans/my-feature.md
+   ```
+
+   Headless, use OpenCode's own separator: `opencode run --command multi-llm -- "plans/my-feature.md"`.
+
+**Coming from the file route** (`install-host opencode`)? Remove the old command file, then add the package as above. Run the removal from the same checkout or plugin install you ran `install-host` from (`$SKILL`, as in [docs/hosts.md](docs/hosts.md)); `--dry-run` lists the files first:
+
+```bash
+uv run --frozen --no-dev --project "$SKILL" -- python "$SKILL/multi_llm.py" uninstall-host opencode --dry-run
+uv run --frozen --no-dev --project "$SKILL" -- python "$SKILL/multi_llm.py" uninstall-host opencode
 ```
 
-```text
-/multi-llm --init
-/multi-llm plans/my-feature.md
-```
+If you forget, nothing breaks: the package's command replaces the file's at startup. But the file stays on disk, and `install-host opencode --check` reports `BOTH routes`.
 
-**Update.** Bump the pinned version and restart. OpenCode resolves an entry once and caches it under that exact string, so an unpinned entry never updates. Local builds, troubleshooting and uninstalling are in [docs/hosts.md](docs/hosts.md#opencode-npm-route).
+**Update.** When a new version is out, change the pin to it and restart OpenCode. Always pin: OpenCode caches a plugin under the exact string in `plugin`, so an unpinned name or a version range resolves once and never updates. Uninstalling, troubleshooting and local builds are in [docs/hosts.md](docs/hosts.md#opencode-npm-route).
 
 ### 1.4 Configure providers (required before first use)
 

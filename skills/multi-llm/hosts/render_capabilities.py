@@ -336,6 +336,14 @@ _REGISTRY_FORMS: Dict[str, Dict[str, Any]] = {
             "it loads nothing unless that directory happens to be an unpacked "
             "package itself."
         ),
+        # The package's own copy of the provider config lives in the
+        # spec-keyed npm cache, which a pin bump replaces, so the pointer is
+        # `--init`, never the installed file.
+        "configure": (
+            "Then configure providers once per repository: `/multi-llm --init` "
+            "writes `<git-root>/.multi-llm/providers.yaml`, outside the "
+            "package cache, where no upgrade touches it."
+        ),
     },
     "codex-marketplace": {
         "config": (

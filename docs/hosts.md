@@ -111,9 +111,9 @@ Headless, the argument list needs the host's own separator: `opencode run --comm
 /multi-llm --review-code plans/my-feature.md
 ```
 
-**`opencode` — install via npm (not yet published)** — documented
+**`opencode` — install via npm** — verified
 
-A second route on `opencode`, and the one this documentation will recommend once it is published. **No published install has been verified yet**, so a config entry naming this spec resolves to nothing today — and on this host that failure is silent: the plugin stays listed, the exit code is 0, and the debug log is empty. Until then, use the `install-host` route above, or build the package and name its **directory** — `npm pack`'s `.tgz` is not an installable spec on this host: MEASURED 2026-09-19 against opencode 1.18.31, a config entry naming a tarball resolves to the archive's *containing directory* and never opens the archive, so it loads nothing unless that directory happens to be an unpacked package itself.
+The recommended route on `opencode`: one config edit, no shell bootstrap, and no baked path that goes stale on an update — the plugin resolves its own location at every startup.
 
 Add it to the host config (`~/.config/opencode/opencode.json`) and restart:
 
@@ -122,6 +122,8 @@ Add it to the host config (`~/.config/opencode/opencode.json`) and restart:
 ```
 
 Needs opencode 1.19.4 or newer. Upgrading is bumping the pin and restarting: the cache key is the literal spec string and the installer early-returns when the package directory already exists, so an **unpinned** entry resolves once and never again. It provides a slash command and a model-callable tool, and you invoke it as `/multi-llm <the same arguments the Claude Code skill takes>`, or by calling the `multi_llm` tool directly.
+
+Then configure providers once per repository: `/multi-llm --init` writes `<git-root>/.multi-llm/providers.yaml`, outside the package cache, where no upgrade touches it.
 
 ## What differs from Claude Code
 
@@ -201,15 +203,20 @@ python3 --version             # if this fails the server never started, and that
 
 ## OpenCode npm route
 
-The README has the one config line. **No published install has been verified yet.** Until `opencode-multi-llm` is on npm, an `opencode.json` entry naming it resolves to nothing, and on OpenCode that failure is silent: the plugin stays listed, the exit code is 0, and the debug log is empty. Use `install-host opencode` until then, or run a local build.
+The README has the install steps; this section covers what they don't. The route is published: [`opencode-multi-llm`](https://www.npmjs.com/package/opencode-multi-llm) is on npm (first release 0.1.1). `install-host opencode`, the file route above, remains the alternative.
 
-**Local build: name the directory, never the `.tgz`.** `make opencode-package` builds, packs and secret-sweeps the package into `packaging/opencode/`. Point `plugin[]` at that **directory** (or a `file://` URL of it) and restart:
+**Floors.**
+- **opencode 1.19.4 or newer, enforced.** The package's `engines` field makes an older opencode refuse it with a compatibility error. Each release supports the opencode release that was newest when it was cut; `opencode upgrade` moves an older host there.
+- **`uv` on `PATH`,** any version. It supplies Python 3.10 or newer itself.
+- **Platforms.** Linux is verified: the 0.1.1 release was installed from npm into a fresh container and checked end to end. macOS and Windows are untested on this route.
 
-```json
-{ "plugin": ["/abs/path/to/packaging/opencode"] }
-```
+**Configuration.** Once per repository, run `/multi-llm --init`. It writes `<git-root>/.multi-llm/providers.yaml`, outside the package cache, where no upgrade touches it. Configure through that file, never through the copy inside the installed package.
 
-OpenCode never opens a tarball. A `.tgz` spec resolves to the directory that contains it, so it loads only when that directory happens to be an unpacked package.
+**First run.**
+- The first start after an install or a pin change downloads the package from npm.
+- The first `/multi-llm` after that builds the package's venv (`pyyaml` alone).
+
+Both need the network; the venv build can use a warm `~/.cache/uv` instead.
 
 **Checking that it loaded.** Every failure on this route exits 0, so neither the `plugin[]` entry nor an exit code proves anything. Check for the key the plugin adds:
 
@@ -217,9 +224,35 @@ OpenCode never opens a tarball. A `.tgz` spec resolves to the directory that con
 opencode debug config | jq '.command["multi-llm"] != null'   # true = loaded
 ```
 
-**First run.** The first `/multi-llm` after an install or upgrade needs the network or a warm `~/.cache/uv`, because it builds the package's venv (`pyyaml` alone).
+**When it does nothing.** The plugin stays listed and the debug log is empty, whatever the cause. In practice it's one of these:
+- **The spec names a version npm doesn't have**, a typo or a version not released yet. Copy the pin from the README.
+- **The first start had no network.**
 
-**Upgrade and uninstall.** To upgrade, bump the pinned version and restart. There is no `opencode plugin update`, and an unpinned entry stays on the version it first resolved to. To uninstall, delete the `plugin` entry. The cache directory `~/.cache/opencode/packages/<spec>` stays on disk, and a later reinstall of the same spec silently reuses it, so `rm -rf` it first, while online. Coming from the file route, remove the old command with `uninstall-host opencode --global`. The package's own page, with cache and `MULTI_LLM_UV_RUN_ARGS` details, is [`packaging/opencode/README.md`](../packaging/opencode/README.md).
+An opencode older than 1.19.4 isn't silent: it refuses the package with a compatibility error.
+
+If you have a checkout or the Claude Code plugin, `install-host opencode --check` says which routes are installed. When the entry resolved to nothing, it prints `a package route is DECLARED but did not resolve`.
+
+**A `0.0.0-stage` version on npm** is npm's own placeholder from the package's first publish, not a release. Never pin it.
+
+**Upgrade.** Bump the pinned version and restart. There is no `opencode plugin update`, and an unpinned entry stays on the version it first resolved to. Each pin installs into its own cache directory, `~/.cache/opencode/packages/<spec>`. Keep the old one until the new version works, then delete it if you like.
+
+**Coming from the file route.** Remove the old command with `uninstall-host opencode`, which covers both scopes by default; `--dry-run` lists the files first. Then add the pin and restart.
+
+If both routes stay installed, the package's command replaces the file's wholesale at startup, so the file is inert rather than a conflict. Removing it is still the clean state:
+- `install-host --all` keeps re-rendering a shim it finds on disk;
+- `install-host opencode --check` prints a `BOTH routes` note naming the removal command.
+
+**Uninstall.** Delete the `plugin` entry. The cache directory `~/.cache/opencode/packages/<spec>` stays on disk, and a later reinstall of the same spec silently reuses it, so `rm -rf` it first, while online. Your `.multi-llm/providers.yaml` is not touched.
+
+**Local build: name the directory, never the `.tgz`.** To try an unreleased change, `make opencode-package` builds, packs and secret-sweeps the package into `packaging/opencode/`. Point `plugin[]` at that **directory** (or a `file://` URL of it) and restart:
+
+```json
+{ "plugin": ["/abs/path/to/packaging/opencode"] }
+```
+
+OpenCode never opens a tarball. A `.tgz` spec resolves to the directory that contains it, so it loads only when that directory happens to be an unpacked package.
+
+The package's own page, with cache and `MULTI_LLM_UV_RUN_ARGS` details, is [`packaging/opencode/README.md`](../packaging/opencode/README.md), also shown on [npm](https://www.npmjs.com/package/opencode-multi-llm).
 
 ## Linux sandboxed CLIs
 
