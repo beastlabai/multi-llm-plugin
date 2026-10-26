@@ -8,8 +8,8 @@
 #   gate     every `opencode-v*` tag push, and a `mode: rehearse` dispatch, which
 #            runs this same job and nothing else. Tag and version agree, the
 #            shared-version check, rows 1-6 and 5b, a clean build and pack of
-#            the candidate, the pinned OpenCode, row 7, then row 9 (or, for the
-#            one bootstrap tag below, the registry-install probe in its place).
+#            the candidate, the pinned OpenCode, row 7, then row 9, on every
+#            tag and every rehearsal: no tag and no input skips it.
 #            `contents: read` and nothing more, so a tag push cannot publish.
 #   verify   `mode: publish` only, and only from the default branch. It reruns
 #            the gate on the tag's commit and validates the committed
@@ -32,16 +32,13 @@
 # the `npm-publish` environment (plan step 6), so an OIDC token from any other
 # job or workflow cannot publish, and every publication waits for an approval.
 #
-# WHY THE FIRST RELEASE IS PROBABLY NOT THE PUBLISH JOB. A trusted publisher is
-# configured **on an existing npm package**, and npm still has no pending
-# publisher (`npm trust`: "The package you're configuring must already exist",
-# rechecked 2026-10-25). So on the laptop path the first version is uploaded
-# from the maintainer's machine (`make opencode-publish-first`), and its tag
-# push then verifies the bytes npm serves (the bootstrap path, BOOTSTRAP_TAG
-# below) instead of demanding an absence that can no longer hold. Every later
-# version goes through `mode: publish`. If step 4's recheck finds first-version
-# OIDC supported, the first release is one normal dispatch too, and a candidate
-# that still carries the bootstrap path needs a new commit without it (step 4).
+# THE FIRST RELEASE, FOR THE RECORD. npm configures a trusted publisher only on
+# a package that already exists, so `opencode-v0.1.1` was uploaded from the
+# maintainer's machine (`make opencode-publish-first`), and its tag push took a
+# one-off bootstrap path that verified the bytes npm served in place of row 9.
+# That path was retired after 0.1.1; step 5's committed record
+# (records/20261026T175524Z-opencode-release-network-check.json) stands as that
+# release's evidence, and every later version goes through `mode: publish`.
 #
 # WHY ROW 8 ARRIVES AS A RECORD. The runners have no Docker daemon, so row 8
 # (the package-route container scenarios) runs only in the maintainer's full
@@ -84,14 +81,6 @@ on:
         description: "rehearse: the opencode-v<version> tag this commit stands in for"
         required: false
         type: string
-      path:
-        description: "rehearse: normal (row 9 against the registry) or bootstrap (the registry-install probe against a localhost stub)"
-        required: false
-        type: choice
-        options:
-          - normal
-          - bootstrap
-        default: normal
 
 # Nothing at workflow level: every job declares its own, and only `publish` asks
 # for `id-token: write`. A workflow-level grant would reach every job, including
@@ -99,17 +88,6 @@ on:
 permissions: {}
 
 env:
-  # THE ONE TAG THAT TAKES THE BOOTSTRAP PATH, written once. The gate's route
-  # step and the static test both read it here. Bootstrap is never an input on a
-  # real run: a tag push has no inputs, and any selectable bypass would let an
-  # existing version skip row 9.
-  #
-  # RETIREMENT. Once the bootstrap run has passed, remove this value, the
-  # bootstrap steps, the rehearsal's `bootstrap` choice and their fixtures from
-  # this file on `master` before the next release tag, and turn the static test
-  # into "no tag skips row 9". The pushed tag keeps its own copy of this file,
-  # so re-running that tag's run still finds the bootstrap path.
-  BOOTSTRAP_TAG: opencode-v0.1.1
   # What a release tag looks like, checked before any tag reaches git, a
   # checkout or a probe. Tag/version equality then binds it to package.json.
   # Plain x.y.z, no prerelease suffix: the versions here are the shared
@@ -195,14 +173,14 @@ jobs:
           fi
           echo "node ${node_version}, npm ${actual}"
 
-      # WHICH TAG, AND WHICH PATH AFTER ROW 7. A tag push names its own tag,
-      # and only BOOTSTRAP_TAG takes the bootstrap path. A rehearsal names the
-      # tag it stands in for (`as_tag`) and chooses the path explicitly, so both
-      # paths can be rehearsed on one candidate without editing a version
-      # string. `as_tag` and `path` are read here and nowhere else, and only
-      # through the `mode == 'rehearse'` guard, so a push or a publish dispatch
-      # sees them empty whatever was typed.
-      - name: Which tag, and which path after row 7
+      # WHICH TAG THIS RUN GATES. A tag push names its own tag; a rehearsal
+      # names the tag it stands in for (`as_tag`), so a candidate can be
+      # rehearsed without editing a version string. Nothing here chooses what
+      # runs after row 7: every run, push or rehearsal, ends in row 9. `as_tag`
+      # is read here and nowhere else, and only through the `mode ==
+      # 'rehearse'` guard, so a push or a publish dispatch sees it empty
+      # whatever was typed.
+      - name: Which tag this run gates
         id: route
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -210,7 +188,6 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           MODE: ${{ inputs.mode }}
           AS_TAG: ${{ inputs.mode == 'rehearse' && inputs.as_tag || '' }}
-          REHEARSE_PATH: ${{ inputs.mode == 'rehearse' && inputs.path || '' }}
         run: |
           set -euo pipefail
           case "${EVENT_NAME}" in
@@ -221,11 +198,6 @@ jobs:
               fi
               tag="${REF_NAME}"
               rehearsal=false
-              if [ "${tag}" = "${BOOTSTRAP_TAG}" ]; then
-                path=bootstrap
-              else
-                path=normal
-              fi
               ;;
             workflow_dispatch)
               if [ "${MODE}" != "rehearse" ]; then
@@ -238,13 +210,6 @@ jobs:
               fi
               tag="${AS_TAG}"
               rehearsal=true
-              case "${REHEARSE_PATH}" in
-                normal|bootstrap) path="${REHEARSE_PATH}" ;;
-                *)
-                  echo "REFUSING: path '${REHEARSE_PATH}' is neither normal nor bootstrap." >&2
-                  exit 1
-                  ;;
-              esac
               ;;
             *)
               echo "REFUSING: event ${EVENT_NAME} does not run the gate." >&2
@@ -257,11 +222,10 @@ jobs:
           fi
           {
             echo "tag=${tag}"
-            echo "path=${path}"
             echo "rehearsal=${rehearsal}"
           } >> "${GITHUB_OUTPUT}"
           # A rehearsal records its ref and SHA: they go in the release evidence.
-          echo "gate: ${tag}, path ${path}, rehearsal ${rehearsal}, on ${GITHUB_REF} at ${GITHUB_SHA}" \
+          echo "gate: ${tag}, rehearsal ${rehearsal}, on ${GITHUB_REF} at ${GITHUB_SHA}" \
             | tee -a "${GITHUB_STEP_SUMMARY}"
 
       - name: The single registry, and the package's name and version
@@ -293,17 +257,17 @@ jobs:
           fi
           echo "tag and manifest agree on ${VERSION}"
 
-      # ROW 9'S CANARY, ON EVERY PATH: normal and bootstrap, rehearsal or not.
-      # Row 9 and the bootstrap probe both read npm's answer for a version the
-      # registry does not have, and only `E404` is that answer. So this step
-      # asks, through row 9's own entry point and under exactly this job's npm
-      # setup (the setup-node and pinned-npm steps above, the same as every
-      # row-9 job's, and no `env` of its own that npm reads), about the package's
-      # name at 0.0.0, a version it never published, and requires `E404`. An
-      # `E401` from a placeholder token, a proxy's answer, any other code: row 9
-      # would fail closed on the real tag, and the bootstrap probe with it, so it
-      # fails here, before a tag is spent finding out (plan step 0, the `.npmrc`
-      # case). The code lands in the job's evidence and its summary.
+      # ROW 9'S CANARY, ON EVERY RUN, rehearsal or not. Row 9 reads npm's
+      # answer for a version the registry does not have, and only `E404` is
+      # that answer. So this step asks, through row 9's own entry point and
+      # under exactly this job's npm setup (the setup-node and pinned-npm steps
+      # above, the same as every row-9 job's, and no `env` of its own that npm
+      # reads), about the package's name at 0.0.0, a version it never
+      # published, and requires `E404`. An `E401` from a placeholder token, a
+      # proxy's answer, any other code: row 9 would fail closed on the real
+      # tag, so it fails here, before a tag is spent finding out (plan step 0,
+      # the `.npmrc` case). The code lands in the job's evidence and its
+      # summary.
       - name: "Row 9's canary: a version never published answers E404"
         timeout-minutes: 5
         env:
@@ -325,16 +289,15 @@ jobs:
           echo "row 9 canary: ${NAME}@0.0.0 (never published) answered ${answered} under this job's npm setup" \
             | tee -a "${GITHUB_STEP_SUMMARY}"
           if [ "${status}" -ne 0 ] || [ "${answered}" != "E404" ]; then
-            echo "REFUSING: a version that was never published answered ${answered}, not E404. Row 9 and the bootstrap probe would fail closed on the real tag; fix the npm setup before tagging." >&2
+            echo "REFUSING: a version that was never published answered ${answered}, not E404. Row 9 would fail closed on the real tag; fix the npm setup before tagging." >&2
             exit 1
           fi
 
       # The rehearsal's candidate commit stands in for the tag wherever a step
-      # resolves one: the shared-version check reads tags, the probe rebuilds
-      # from the tag's commit, and the validator binds the record to it. A
-      # local lightweight tag on the dispatched commit gives them exactly what a
-      # real push would. It is never pushed (`contents: read`, no persisted
-      # token). A tag of that name that already names another commit refuses.
+      # resolves one: the shared-version check reads every tag. A local
+      # lightweight tag on the dispatched commit gives it exactly what a real
+      # push would. It is never pushed (`contents: read`, no persisted token).
+      # A tag of that name that already names another commit refuses.
       - name: 'Rehearsal: the dispatched commit stands in for the tag'
         if: steps.route.outputs.rehearsal == 'true'
         env:
@@ -432,255 +395,12 @@ jobs:
       # Row 9 has one implementation, packaging/opencode/registry_absent.mjs,
       # reached through its make target, here and in the other two jobs:
       # exactly E404 from the single registry is absence, exit 0 is "already
-      # published", anything else is an unknown, and both refuse.
+      # published", anything else is an unknown, and both refuse. No `if:`:
+      # it runs on every tag push and every rehearsal, so no tag and no input
+      # lets a version npm already serves past it.
       - name: Version must be absent from the registry (row 9)
-        if: steps.route.outputs.path == 'normal'
         timeout-minutes: 5
         run: make opencode-registry-absent OUT="${RUNNER_TEMP}/opencode-evidence/row9.json"
-
-      # THE BOOTSTRAP PATH: exactly BOOTSTRAP_TAG on a real push, or
-      # `path: bootstrap` in a rehearsal. In place of row 9, it verifies the
-      # bytes npm serves for a version the laptop path already uploaded,
-      # through the same registry-install probe step 5 runs. It skips only the
-      # absence check and the upload; every row before it ran above. A
-      # rehearsal serves the packed candidate from a localhost registry stub,
-      # and its record (`rehearsal: true`) must be refused as release evidence.
-      - name: 'Bootstrap rehearsal: serve the packed candidate from a localhost registry stub'
-        id: stub
-        if: steps.route.outputs.path == 'bootstrap' && steps.route.outputs.rehearsal == 'true'
-        timeout-minutes: 5
-        env:
-          TARBALL: ${{ steps.candidate.outputs.tarball }}
-        run: |
-          set -euo pipefail
-          stub_dir="${RUNNER_TEMP}/opencode-registry-stub"
-          mkdir -p "${stub_dir}"
-          # Left running for the steps below; the runner reaps it at job end.
-          # Stdlib only; it binds 127.0.0.1 on a free port and writes the port
-          # once it listens.
-          nohup uv run --project skills/multi-llm --frozen --no-dev -- python \
-            packaging/opencode/registry_stub.py serve --tarball "${TARBALL}" \
-            --port-file "${stub_dir}/port" --log "${stub_dir}/requests.jsonl" \
-            > "${stub_dir}/stub.log" 2>&1 &
-          echo "$!" > "${stub_dir}/pid"
-          for _ in $(seq 1 60); do
-            if [ -s "${stub_dir}/port" ]; then break; fi
-            sleep 1
-          done
-          port="$(cat "${stub_dir}/port" 2>/dev/null || true)"
-          url="http://127.0.0.1:${port}"
-          if ! [[ "${port}" =~ ^[0-9]+$ ]]; then
-            echo "REFUSING: the registry stub did not report a port within 60 s (got '${port}')." >&2
-            cat "${stub_dir}/stub.log" >&2 || true
-            exit 1
-          fi
-          echo "url=${url}" >> "${GITHUB_OUTPUT}"
-          echo "rehearsal registry stub at ${url}"
-
-      # A runner is a fresh VM per job, and the probe gets a fresh root under
-      # the runner's temp directory, outside the checkout, which only rebuilds
-      # the candidate and runs the probe and is never on the plugin path. The
-      # probe makes its isolated home, XDG dirs, npm and uv caches and OpenCode
-      # home under it.
-      - name: 'Bootstrap: a fresh probe root outside the checkout'
-        id: probe_root
-        if: steps.route.outputs.path == 'bootstrap'
-        run: |
-          set -euo pipefail
-          root="$(mktemp -d "${RUNNER_TEMP}/opencode-bootstrap-probe.XXXXXXXX")"
-          python3 - "${root}" "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}/opencode-evidence/bootstrap-probe-root.json" <<'PY'
-          import json, os, sys
-          root, workspace = (os.path.realpath(p) for p in sys.argv[1:3])
-          out = sys.argv[3]
-          if os.path.commonpath([root, workspace]) == workspace:
-              sys.exit(f"REFUSING: the probe root {root} lies inside the checkout {workspace}.")
-          if os.listdir(root):
-              sys.exit(f"REFUSING: the probe root {root} is not empty.")
-          os.makedirs(os.path.dirname(out), exist_ok=True)
-          with open(out, "w", encoding="utf-8") as handle:
-              json.dump({"probe_root": root, "outside_checkout": True, "empty_at_start": True}, handle)
-          PY
-          echo "root=${root}" >> "${GITHUB_OUTPUT}"
-          echo "probe root ${root} (empty, outside ${GITHUB_WORKSPACE})"
-
-      # Bounded, because the runner can reach a CDN edge that has not caught up
-      # with the laptop's confirming read. An expired poll is propagation lag,
-      # not a mismatch: re-run this run unchanged once a clean-cache read serves
-      # the version (plan step 4). The integrity it reads is what the record
-      # must name. A visibility read, not an absence check: it asks for
-      # `dist.integrity` and treats any failure as "not yet".
-      - name: 'Bootstrap: wait until the registry serves the version'
-        id: served
-        if: steps.route.outputs.path == 'bootstrap'
-        timeout-minutes: 20
-        env:
-          NAME: ${{ steps.facts.outputs.name }}
-          VERSION: ${{ steps.facts.outputs.version }}
-          REGISTRY: ${{ steps.facts.outputs.registry }}
-          REHEARSAL: ${{ steps.route.outputs.rehearsal }}
-          STUB_URL: ${{ steps.stub.outputs.url }}
-        run: |
-          set -euo pipefail
-          spec="${NAME}@${VERSION}"
-          source="${REGISTRY}"
-          if [ "${REHEARSAL}" = "true" ]; then source="${STUB_URL}"; fi
-          deadline=$(( $(date +%s) + 900 ))
-          while :; do
-            # From an empty directory named as --prefix: npm's project root,
-            # so no `.npmrc` in the checkout (or above it) is read as project
-            # config, which would outrank the runner's own (registry_absent.mjs).
-            scratch="$(mktemp -d)"
-            integrity=""
-            integrity="$(cd "${scratch}" && npm view "${spec}" dist.integrity --registry "${source}" \
-              --cache "${scratch}/cache" --prefix "${scratch}" \
-              --prefer-online --no-update-notifier 2> "${RUNNER_TEMP}/opencode-npm-view.err")" || integrity=""
-            rm -rf "${scratch}"
-            if [[ "${integrity}" =~ ^sha512- ]]; then break; fi
-            if [ "$(date +%s)" -ge "${deadline}" ]; then
-              echo "REFUSING: ${spec} is not served by ${source} after 15 minutes." >&2
-              cat "${RUNNER_TEMP}/opencode-npm-view.err" >&2 || true
-              echo "Propagation lag is not a mismatch: re-run this run once a clean-cache read serves it." >&2
-              exit 1
-            fi
-            sleep 30
-          done
-          echo "integrity=${integrity}" >> "${GITHUB_OUTPUT}"
-          echo "${source} serves ${spec} with ${integrity}"
-
-      - name: 'Bootstrap: rebuild the candidate from the tag''s commit (--frozen --no-dev)'
-        id: bootstrap_rebuild
-        if: steps.route.outputs.path == 'bootstrap'
-        timeout-minutes: 15
-        env:
-          TAG: ${{ steps.route.outputs.tag }}
-          CANDIDATE_DIGEST: ${{ steps.candidate.outputs.digest }}
-        run: |
-          set -euo pipefail
-          tagged="$(git rev-parse -q --verify "refs/tags/${TAG}^{commit}")" || {
-            echo "REFUSING: ${TAG} does not resolve." >&2; exit 1; }
-          if [ "$(git rev-parse HEAD)" != "${tagged}" ]; then
-            echo "REFUSING: the checkout is not ${TAG}'s commit ${tagged}." >&2
-            exit 1
-          fi
-          uv run --project skills/multi-llm --frozen --no-dev -- python packaging/opencode/build.py
-          digest="$(cat packaging/opencode/dist/tree.sha256)"
-          if [ "${digest}" != "${CANDIDATE_DIGEST}" ]; then
-            echo "REFUSING: the --frozen --no-dev rebuild is ${digest}, the candidate was ${CANDIDATE_DIGEST}." >&2
-            exit 1
-          fi
-          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
-
-      # The one registry-install probe step 5 runs too, with the label
-      # `ci-runner` and the seven criteria a runner can attempt (no
-      # `warm_offline_operation`: no Docker daemon, no way to cut one process
-      # off the network). It compares the candidate's digest with the extracted
-      # registry files and the OpenCode-installed payload before the first tool
-      # call, and writes the record whether or not it passes. Its root is made
-      # inside the fresh probe root (--tmp-parent); the binary is the gate's
-      # pinned OpenCode (--opencode); the record names this run
-      # (--workflow-run-id). In a rehearsal the stub's URL is passed
-      # explicitly, and the probe accepts it only as a rehearsal.
-      - name: 'Bootstrap: the registry-install probe'
-        id: bootstrap_probe
-        if: steps.route.outputs.path == 'bootstrap'
-        timeout-minutes: 45
-        env:
-          TAG: ${{ steps.route.outputs.tag }}
-          NAME: ${{ steps.facts.outputs.name }}
-          VERSION: ${{ steps.facts.outputs.version }}
-          REGISTRY: ${{ steps.facts.outputs.registry }}
-          REHEARSAL: ${{ steps.route.outputs.rehearsal }}
-          STUB_URL: ${{ steps.stub.outputs.url }}
-          PROBE_ROOT: ${{ steps.probe_root.outputs.root }}
-          HOST_BIN: ${{ steps.host.outputs.bin }}
-        run: |
-          set -euo pipefail
-          records="${RUNNER_TEMP}/opencode-bootstrap"
-          mkdir -p "${records}"
-          # A rehearsal's record is named as one, so no copy of it can pass for
-          # a real bootstrap record by its file name either.
-          suffix=""
-          if [ "${REHEARSAL}" = "true" ]; then suffix="-rehearsal"; fi
-          record="${records}/$(date -u +%Y%m%dT%H%M%SZ)-opencode-bootstrap-check${suffix}.json"
-          # Named before the probe runs, so a failing probe's record still
-          # reaches the validator's log and the artifact.
-          echo "record=${record}" >> "${GITHUB_OUTPUT}"
-          rehearsal_flags=()
-          if [ "${REHEARSAL}" = "true" ]; then rehearsal_flags=(--rehearsal-registry "${STUB_URL}"); fi
-          uv run --project skills/multi-llm --frozen --no-dev -- \
-            python packaging/opencode/registry_check.py \
-            --spec "${NAME}@${VERSION}" --registry "${REGISTRY}" --tag "${TAG}" \
-            --environment ci-runner --out "${record}" \
-            --opencode "${HOST_BIN}" --tmp-parent "${PROBE_ROOT}" \
-            --workflow-run-id "${GITHUB_RUN_ID}" "${rehearsal_flags[@]}"
-
-      # The bootstrap profile of the one registry-record validator, against the
-      # integrity the registry serves and this run's rebuilt digest. A real
-      # record must pass. A rehearsal record must be REFUSED, as rehearsal
-      # evidence; that is itself a regression case, so a validator that
-      # accepted one fails this step.
-      - name: 'Bootstrap: validate the record (bootstrap profile)'
-        if: steps.route.outputs.path == 'bootstrap'
-        timeout-minutes: 10
-        env:
-          TAG: ${{ steps.route.outputs.tag }}
-          RECORD: ${{ steps.bootstrap_probe.outputs.record }}
-          INTEGRITY: ${{ steps.served.outputs.integrity }}
-          DIGEST: ${{ steps.bootstrap_rebuild.outputs.digest }}
-          REHEARSAL: ${{ steps.route.outputs.rehearsal }}
-          PROBE_ROOT: ${{ steps.probe_root.outputs.root }}
-        run: |
-          set -euo pipefail
-          # The payload OpenCode resolved must lie under the probe root: the
-          # checkout and the runner's own caches are never on the plugin path.
-          python3 - "${RECORD}" "${PROBE_ROOT}" <<'PY'
-          import json, os, sys
-          record = json.load(open(sys.argv[1], encoding="utf-8"))
-          root = os.path.realpath(sys.argv[2])
-          location = record.get("payload_location")
-          if not isinstance(location, str) or not location:
-              sys.exit("REFUSING: the record names no payload_location.")
-          resolved = os.path.realpath(location)
-          if os.path.commonpath([root, resolved]) != root:
-              sys.exit(f"REFUSING: the payload ran from {resolved}, outside the probe root {root}.")
-          print(f"payload {resolved} lies under the probe root {root}")
-          PY
-          status=0
-          output="$(uv run --project skills/multi-llm --frozen --no-dev -- python packaging/opencode/registry_record.py \
-            validate --profile bootstrap "${RECORD}" --tag "${TAG}" --integrity "${INTEGRITY}" \
-            --digest "${DIGEST}" 2>&1)" || status=$?
-          printf '%s\n' "${output}"
-          if [ "${REHEARSAL}" = "true" ]; then
-            if [ "${status}" -eq 0 ]; then
-              echo "REFUSING: the bootstrap validator accepted a rehearsal record as release evidence." >&2
-              exit 1
-            fi
-            if ! grep -q 'rehearsal evidence' <<< "${output}"; then
-              echo "REFUSING: the rehearsal record was refused, but not as rehearsal evidence." >&2
-              exit 1
-            fi
-            echo "the rehearsal record is refused as release evidence, as it must be"
-            # ...and is otherwise the record a real run would write: the same
-            # validator, holding everything but the rehearsal flag and the
-            # stub's loopback registry to the bootstrap profile.
-            uv run --project skills/multi-llm --frozen --no-dev -- python packaging/opencode/registry_record.py \
-              validate --profile bootstrap "${RECORD}" --tag "${TAG}" --integrity "${INTEGRITY}" \
-              --digest "${DIGEST}" --rehearsal-structure-only
-          elif [ "${status}" -ne 0 ]; then
-            exit "${status}"
-          fi
-
-      # The bootstrap record is a workflow artifact and nothing else: it is
-      # never committed, and never stands in for step 5's canonical record. The
-      # run attempt is in the name because a lagging registry is re-run with
-      # "Re-run failed jobs", and each attempt's record is kept.
-      - name: Keep the bootstrap record
-        if: always() && steps.route.outputs.path == 'bootstrap'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: opencode-bootstrap-check${{ steps.route.outputs.rehearsal == 'true' && '-rehearsal' || '' }}-attempt-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/opencode-bootstrap/
-          if-no-files-found: warn
 
       - name: Keep the gate's evidence
         if: always()
@@ -689,7 +409,6 @@ jobs:
           name: opencode-${{ github.job }}-evidence-attempt-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/opencode-evidence/
-            ${{ runner.temp }}/opencode-registry-stub/stub.log
             packaging/opencode/.gate/junit/
           if-no-files-found: warn
 
@@ -965,7 +684,6 @@ jobs:
           name: opencode-${{ github.job }}-evidence-attempt-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/opencode-evidence/
-            ${{ runner.temp }}/opencode-registry-stub/stub.log
             packaging/opencode/.gate/junit/
           if-no-files-found: warn
 

@@ -1,8 +1,8 @@
 """The OpenCode publishing workflow, ``.github/workflows/publish-opencode-plugin.yml``, offline.
 
 **What is graded.** The gate/verify/publish split the plan's step 0 requires
-(plans/opencode-plugin-publish.md, the workflow-split, ``fetch-depth`` and
-bootstrap bullets, and the regression list after them), in three ways:
+(plans/opencode-plugin-publish.md, the workflow-split and ``fetch-depth``
+bullets, and the regression list after them), in three ways:
 
 * **Statically**, from the parsed YAML, the way
   ``test_the_publish_workflow_is_split_and_unprivileged`` grades the Codex
@@ -12,14 +12,16 @@ bootstrap bullets, and the regression list after them), in three ways:
   tag push, a ``mode: rehearse`` dispatch and a ``mode: publish`` dispatch, with
   a small evaluator of exactly the expression subset the file uses (it refuses
   anything else, so a new construct fails here loudly instead of being guessed
-  at). That is what shows which jobs a run reaches and which path the gate takes.
+  at). That is what shows which jobs a run reaches, and that every gate run,
+  whatever its tag, ends in row 9: the one-off bootstrap path that let
+  ``opencode-v0.1.1``'s tag push skip it is retired, and no tag or input may
+  bring an exception back.
 * **By running the jobs' own shell steps**, extracted from the YAML and never
   retyped, the way ``TestPromoteGate`` runs the Codex promote job's heredoc:
-  the route selection, the default-branch refusal, the tag resolution, the
+  the tag selection, the default-branch refusal, the tag resolution, the
   committed-record read, the release-gate record check through
-  ``release_gate.py validate-record``, publish's digest comparison and the
-  bootstrap record's validation through ``registry_record.py``. ``uv`` is a
-  shim that runs this interpreter, so the validators run unchanged.
+  ``release_gate.py validate-record`` and publish's digest comparison. ``uv``
+  is a shim that runs this interpreter, so the validator runs unchanged.
 
 **Offline.** Nothing here reaches GitHub, npm or a registry, or starts an
 OpenCode binary. The shell rows need ``bash`` and ``git`` and skip, by name, on
@@ -57,7 +59,12 @@ JOBS = DOCUMENT["jobs"]
 #: PyYAML reads the bare key ``on`` as the boolean ``True``.
 TRIGGERS = DOCUMENT[True] if True in DOCUMENT else DOCUMENT["on"]
 WORKFLOW_ENV = {key: str(value) for key, value in DOCUMENT["env"].items()}
-BOOTSTRAP_TAG = WORKFLOW_ENV["BOOTSTRAP_TAG"]
+#: The tag whose push once took the retired bootstrap path in place of row 9.
+#: It is an ordinary tag now, graded as every other one is.
+FORMER_BOOTSTRAP_TAG = "opencode-v0.1.1"
+#: The workflow's text without its comment lines, shell comments in ``run``
+#: blocks included: what the runner actually reads.
+UNCOMMENTED = "\n".join(line for line in TEXT.splitlines() if not line.lstrip().startswith("#"))
 
 needs_shell = pytest.mark.skipif(
     os.name == "nt" or shutil.which("bash") is None or shutil.which("git") is None,
@@ -195,13 +202,11 @@ def _dispatch(**inputs) -> dict:
 #: ignored the mode guard would be caught taking the wrong value.
 EVENTS = {
     "tag push": _push("opencode-v0.1.2"),
-    "bootstrap tag push": _push(BOOTSTRAP_TAG),
-    "rehearse": _dispatch(mode="rehearse", as_tag="opencode-v0.1.2", path="normal",
-                          tag="opencode-v9.9.9"),
-    "rehearse bootstrap": _dispatch(mode="rehearse", as_tag=BOOTSTRAP_TAG, path="bootstrap",
-                                    tag="opencode-v9.9.9"),
-    "publish": _dispatch(mode="publish", tag="opencode-v0.1.2", as_tag=BOOTSTRAP_TAG,
-                         path="bootstrap"),
+    "former bootstrap tag push": _push(FORMER_BOOTSTRAP_TAG),
+    "rehearse": _dispatch(mode="rehearse", as_tag="opencode-v0.1.2", tag="opencode-v9.9.9"),
+    "rehearse the former bootstrap tag": _dispatch(mode="rehearse", as_tag=FORMER_BOOTSTRAP_TAG,
+                                                   tag="opencode-v9.9.9"),
+    "publish": _dispatch(mode="publish", tag="opencode-v0.1.2", as_tag=FORMER_BOOTSTRAP_TAG),
 }
 
 
@@ -380,15 +385,14 @@ class TestTriggers:
         assert inputs["mode"]["type"] == "choice"
         assert inputs["mode"]["options"] == ["rehearse", "publish"]
         assert inputs["mode"]["default"] == "rehearse"
-        assert inputs["path"]["options"] == ["normal", "bootstrap"]
-        assert inputs["path"]["default"] == "normal"
-        assert set(inputs) == {"mode", "tag", "as_tag", "path"}
+        # No `path` input: a rehearsal has one path, the one every tag takes.
+        assert set(inputs) == {"mode", "tag", "as_tag"}
 
     @pytest.mark.parametrize("event, jobs", [
         ("tag push", {"gate"}),
-        ("bootstrap tag push", {"gate"}),
+        ("former bootstrap tag push", {"gate"}),
         ("rehearse", {"gate"}),
-        ("rehearse bootstrap", {"gate"}),
+        ("rehearse the former bootstrap tag", {"gate"}),
         ("publish", {"verify", "publish"}),
     ])
     def test_each_event_reaches_exactly_its_jobs(self, event, jobs):
@@ -399,8 +403,8 @@ class TestTriggers:
         default = TRIGGERS["workflow_dispatch"]["inputs"]["mode"]["default"]
         assert reached(_dispatch(mode=default)) == {"gate"}
 
-    @pytest.mark.parametrize("event", ["tag push", "bootstrap tag push", "rehearse",
-                                       "rehearse bootstrap"])
+    @pytest.mark.parametrize("event", ["tag push", "former bootstrap tag push", "rehearse",
+                                       "rehearse the former bootstrap tag"])
     def test_no_tag_push_or_rehearsal_holds_id_token_or_publishes(self, event):
         for job_id in reached(EVENTS[event]):
             assert "id-token" not in (JOBS[job_id].get("permissions") or {}), job_id
@@ -440,9 +444,7 @@ class TestPermissions:
                     yield from holders(item, f"{where}[{i}]")
 
         assert list(holders(DOCUMENT)) == ["/jobs/publish/permissions"]
-        uncommented = "\n".join(line for line in TEXT.splitlines()
-                                if not line.lstrip().startswith("#"))
-        assert uncommented.count("id-token") == 1
+        assert UNCOMMENTED.count("id-token") == 1
 
     def test_publish_needs_verify_and_declares_the_environment(self):
         assert JOBS["publish"]["needs"] == "verify"
@@ -451,37 +453,37 @@ class TestPermissions:
 
 
 # ===========================================================================
-# The rehearsal inputs, and the bootstrap tag
+# The rehearsal inputs, and the tag a run gates
 # ===========================================================================
 
-GUARD = re.compile(r"\$\{\{\s*inputs\.mode == 'rehearse' && inputs\.(as_tag|path) \|\| ''\s*\}\}")
+GUARD = re.compile(r"\$\{\{\s*inputs\.mode == 'rehearse' && inputs\.as_tag \|\| ''\s*\}\}")
+ROUTE_NAME = "Which tag this run gates"
 
 
 class TestRehearsalInputs:
-    def test_as_tag_and_path_are_read_only_through_the_rehearse_guard(self):
-        """Every read of ``as_tag`` or ``path`` is the guarded form, in the gate's
-        route step and nowhere else; nothing reads ``github.event.inputs``."""
+    def test_as_tag_is_read_only_through_the_rehearse_guard(self):
+        """Every read of ``as_tag`` is the guarded form, in the gate's route
+        step and nowhere else; nothing reads ``github.event.inputs``."""
         assert "github.event.inputs" not in TEXT
         expressions = re.findall(r"\$\{\{.*?\}\}", TEXT)
-        readers = [e for e in expressions if re.search(r"\binputs\.(as_tag|path)\b", e)]
+        readers = [e for e in expressions if re.search(r"\binputs\.as_tag\b", e)]
         assert readers and all(GUARD.fullmatch(e) for e in readers), readers
-        route = step("gate", "Which tag, and which path after row 7")
+        route = step("gate", ROUTE_NAME)
         route_values = [str(v) for v in route["env"].values()]
         assert sorted(e for e in readers) == sorted(v for v in route_values if GUARD.fullmatch(v))
         for job_id in ("verify", "publish"):
-            assert not re.search(r"\binputs\.(as_tag|path)\b", yaml.safe_dump(JOBS[job_id]))
+            assert not re.search(r"\binputs\.as_tag\b", yaml.safe_dump(JOBS[job_id]))
 
     @pytest.mark.parametrize("event", list(EVENTS))
-    def test_the_guard_hides_them_outside_a_rehearsal(self, event):
-        route = step("gate", "Which tag, and which path after row 7")
+    def test_the_guard_hides_it_outside_a_rehearsal(self, event):
+        route = step("gate", ROUTE_NAME)
         context = EVENTS[event]
         values = {k: evaluate(str(v), context) for k, v in route["env"].items()
                   if GUARD.fullmatch(str(v))}
         if context["inputs"].get("mode") == "rehearse":
-            assert values == {"AS_TAG": context["inputs"]["as_tag"],
-                              "REHEARSE_PATH": context["inputs"]["path"]}
+            assert values == {"AS_TAG": context["inputs"]["as_tag"]}
         else:
-            assert values == {"AS_TAG": "", "REHEARSE_PATH": ""}
+            assert values == {"AS_TAG": ""}
 
     def test_only_verify_and_publish_read_the_tag_input(self):
         assert not re.search(r"\binputs\.tag\b", yaml.safe_dump(JOBS["gate"]))
@@ -497,12 +499,23 @@ class TestRehearsalInputs:
         for tag in ("opencode-v0.1.1-rc.1", "opencode-v1.0.0-beta", "opencode-v1.0"):
             assert not re.fullmatch(WORKFLOW_ENV["RELEASE_TAG_PATTERN"], tag), tag
 
-    def test_the_bootstrap_tag_is_written_once(self):
-        assert re.fullmatch(WORKFLOW_ENV["RELEASE_TAG_PATTERN"], BOOTSTRAP_TAG)
-        assert TEXT.count(BOOTSTRAP_TAG) == 1
-        readers = [(job_id, s.get("name")) for job_id, s in _all_steps()
-                   if "BOOTSTRAP_TAG" in code(s)]
-        assert readers == [("gate", "Which tag, and which path after row 7")]
+    def test_no_tag_or_input_skips_row_9(self):
+        """The bootstrap path is retired, and nothing that could select an
+        exception to row 9 is left: no named tag, no ``path`` input or output,
+        no step condition or name about bootstrap, and row 9 unconditional in
+        every job that runs it. Comments may tell the history; the runner
+        reads none of them."""
+        assert "BOOTSTRAP_TAG" not in TEXT and "BOOTSTRAP_TAG" not in WORKFLOW_ENV
+        assert not re.search(r"(?i)bootstrap", UNCOMMENTED), \
+            [line for line in UNCOMMENTED.splitlines() if re.search(r"(?i)bootstrap", line)]
+        for needle in ("REHEARSE_PATH", "inputs.path", "outputs.path"):
+            assert needle not in TEXT, needle
+        assert "path" not in TRIGGERS["workflow_dispatch"]["inputs"]
+        for job_id, s in _all_steps():
+            assert not re.search(r"(?i)bootstrap", f"{s.get('name', '')} {s.get('if', '')}"), \
+                (job_id, s.get("name"))
+        for job_id in ROW9_JOBS:
+            assert "if" not in _row9(job_id), job_id
 
     def test_no_shell_interpolates_an_expression(self):
         """Every input reaches a shell through ``env``, never spliced into the
@@ -515,55 +528,50 @@ class TestRehearsalInputs:
 class TestRoute:
     """The gate's route step, run under each event."""
 
-    ROUTE = ("gate", "Which tag, and which path after row 7")
+    ROUTE = ("gate", ROUTE_NAME)
 
     def _route(self, shell, context, **env):
         done, outputs = shell.run(step(*self.ROUTE), env=env, cwd=shell.root, context=context)
         return done, outputs
 
-    @pytest.mark.parametrize("tag, path", [
-        (BOOTSTRAP_TAG, "bootstrap"),
-        ("opencode-v0.1.2", "normal"),
-        ("opencode-v0.1.10", "normal"),
-        ("opencode-v1.0.0", "normal"),
-        ("opencode-v0.1.11", "normal"),
+    @pytest.mark.parametrize("tag", [
+        FORMER_BOOTSTRAP_TAG,
+        "opencode-v0.1.2",
+        "opencode-v0.1.10",
+        "opencode-v1.0.0",
+        "opencode-v0.1.11",
     ])
-    def test_a_real_push_routes_only_the_bootstrap_tag_to_bootstrap(self, shell, tag, path):
+    def test_a_real_push_gates_its_own_tag(self, shell, tag):
+        """Every tag the same way, the one that once took the bootstrap path
+        included: the step chooses a tag, never a path."""
         done, outputs = self._route(shell, _push(tag))
         assert done.returncode == 0, done.stderr
-        assert outputs == {"tag": tag, "path": path, "rehearsal": "false"}
+        assert outputs == {"tag": tag, "rehearsal": "false"}
 
-    @pytest.mark.parametrize("smuggled", ["bootstrap", "normal"])
-    def test_a_push_ignores_any_path_value(self, shell, smuggled):
-        """A push has no inputs; even values forced into the step's env do not
-        move a non-bootstrap tag off row 9, or the bootstrap tag onto it."""
-        done, outputs = self._route(shell, _push("opencode-v0.1.2"), REHEARSE_PATH=smuggled,
-                                    AS_TAG=BOOTSTRAP_TAG)
-        assert done.returncode == 0 and outputs["path"] == "normal"
-        assert outputs["tag"] == "opencode-v0.1.2"
-        done, outputs = self._route(shell, _push(BOOTSTRAP_TAG), REHEARSE_PATH="normal")
-        assert done.returncode == 0 and outputs["path"] == "bootstrap"
-
-    @pytest.mark.parametrize("path", ["normal", "bootstrap"])
-    def test_a_rehearsal_takes_its_explicit_path_and_as_tag(self, shell, path):
-        done, outputs = self._route(shell, _dispatch(mode="rehearse", as_tag="opencode-v0.1.2",
-                                                     path=path))
+    def test_a_push_ignores_smuggled_rehearsal_values(self, shell):
+        """A push has no inputs; even values forced into the step's env, the
+        retired path variable included, do not move it off its own tag."""
+        done, outputs = self._route(shell, _push("opencode-v0.1.2"), AS_TAG=FORMER_BOOTSTRAP_TAG,
+                                    REHEARSE_PATH="bootstrap")
         assert done.returncode == 0, done.stderr
-        assert outputs == {"tag": "opencode-v0.1.2", "path": path, "rehearsal": "true"}
+        assert outputs == {"tag": "opencode-v0.1.2", "rehearsal": "false"}
+
+    @pytest.mark.parametrize("as_tag", ["opencode-v0.1.2", FORMER_BOOTSTRAP_TAG])
+    def test_a_rehearsal_takes_its_as_tag(self, shell, as_tag):
+        done, outputs = self._route(shell, _dispatch(mode="rehearse", as_tag=as_tag))
+        assert done.returncode == 0, done.stderr
+        assert outputs == {"tag": as_tag, "rehearsal": "true"}
         assert "rehearsal true, on refs/heads/master" in (shell.root / "summary.md").read_text()
 
     @pytest.mark.parametrize("context, expected", [
-        (_dispatch(mode="rehearse", path="normal"), "needs as_tag"),
-        (_dispatch(mode="rehearse", as_tag="opencode-v0.1.2", path="sideways"),
-         "neither normal nor bootstrap"),
+        (_dispatch(mode="rehearse"), "needs as_tag"),
         (_dispatch(mode="publish", tag="opencode-v0.1.2"), "not mode: publish"),
-        (_dispatch(mode="rehearse", as_tag="v0.1.2", path="normal"), "is not an opencode-v"),
-        (_dispatch(mode="rehearse", as_tag="opencode-v0.1.2\nx", path="normal"),
-         "is not an opencode-v"),
+        (_dispatch(mode="rehearse", as_tag="v0.1.2"), "is not an opencode-v"),
+        (_dispatch(mode="rehearse", as_tag="opencode-v0.1.2\nx"), "is not an opencode-v"),
         (_push("opencode-vfoo"), "is not an opencode-v"),
         # Plain x.y.z only, as the record schema and release_gate admit: a
         # prerelease tag is refused here, not routed on to be refused later.
-        (_push(BOOTSTRAP_TAG + "-rc.1"), "is not an opencode-v"),
+        (_push(FORMER_BOOTSTRAP_TAG + "-rc.1"), "is not an opencode-v"),
         (_push("opencode-v1.0.0-beta"), "is not an opencode-v"),
         ({"github": {"event_name": "push", "ref_type": "branch", "ref_name": "master"},
           "inputs": {}}, "this job gates tags"),
@@ -575,124 +583,56 @@ class TestRoute:
 
 
 # ===========================================================================
-# The gate job: its order, and the path each run takes after row 7
+# The gate job: its order, and row 9 on every run
 # ===========================================================================
 
-def _gate_runs(path: str, rehearsal: str) -> list:
-    context = {**_push("x"), "steps": {"route": {"outputs": {"path": path,
-                                                             "rehearsal": rehearsal}}}}
+def _gate_runs(rehearsal: str) -> list:
+    context = {**_push("x"), "steps": {"route": {"outputs": {"rehearsal": rehearsal}}}}
     return [s.get("name") or _uses(s) for s in steps("gate")
             if _truthy(evaluate(str(s.get("if", "true")), context))]
 
 
-BOOTSTRAP_STEPS = [
-    "Bootstrap rehearsal: serve the packed candidate from a localhost registry stub",
-    "Bootstrap: a fresh probe root outside the checkout",
-    "Bootstrap: wait until the registry serves the version",
-    "Bootstrap: rebuild the candidate from the tag's commit (--frozen --no-dev)",
-    "Bootstrap: the registry-install probe",
-    "Bootstrap: validate the record (bootstrap profile)",
-    "Keep the bootstrap record",
-]
 ROW9_NAME = "Version must be absent from the registry (row 9)"
+STAND_IN_NAME = "Rehearsal: the dispatched commit stands in for the tag"
 
 
 class TestGate:
     def test_the_gate_runs_in_the_plans_order(self):
         names = [s.get("name") or _uses(s) for s in steps("gate")]
-        order = ["actions/checkout", "Install the pinned npm",
-                 "Which tag, and which path after row 7",
+        order = ["actions/checkout", "Install the pinned npm", ROUTE_NAME,
                  "Tag must equal package.json's version",
                  "Shared-version check", "Package gate (rows 1-6 and 5b)",
                  "Build, pack and sweep the candidate",
                  "The pinned OpenCode, from the container lockfile",
                  "Clean-install probe of the candidate tarball (row 7)", ROW9_NAME,
-                 BOOTSTRAP_STEPS[0]]
+                 "Keep the gate's evidence"]
         positions = [names.index(name) for name in order]
         assert positions == sorted(positions), names
+        # Nothing runs between row 9 and the evidence upload: no step can
+        # stand in for row 9 after it, or follow a skipped one.
+        assert names[-2:] == [ROW9_NAME, "Keep the gate's evidence"], names
 
-    def test_a_normal_path_runs_row_9_and_no_bootstrap_step(self):
+    def test_row_9_runs_on_every_tag_push_and_every_rehearsal(self):
+        assert "if" not in step("gate", ROW9_NAME)
         for rehearsal in ("true", "false"):
-            ran = _gate_runs("normal", rehearsal)
-            assert ROW9_NAME in ran
-            assert not set(BOOTSTRAP_STEPS) & set(ran), ran
+            assert ROW9_NAME in _gate_runs(rehearsal), rehearsal
 
-    def test_the_bootstrap_path_runs_the_probe_in_place_of_row_9(self):
-        ran = _gate_runs("bootstrap", "false")
-        assert ROW9_NAME not in ran
-        assert [n for n in ran if n in BOOTSTRAP_STEPS] == BOOTSTRAP_STEPS[1:]
-        rehearsed = _gate_runs("bootstrap", "true")
-        assert [n for n in rehearsed if n in BOOTSTRAP_STEPS] == BOOTSTRAP_STEPS
-        assert ROW9_NAME not in rehearsed
-
-    def test_only_row_9_and_the_bootstrap_steps_read_the_path(self):
-        readers = {s.get("name") for s in steps("gate") if "outputs.path" in str(s.get("if", ""))}
-        assert readers == {ROW9_NAME, *BOOTSTRAP_STEPS}
-
-    def test_every_other_gate_step_runs_on_every_path(self):
-        always = [n for n in _gate_runs("normal", "false") if n != ROW9_NAME]
-        assert always == [n for n in _gate_runs("bootstrap", "false") if n not in BOOTSTRAP_STEPS]
-        assert "Clean-install probe of the candidate tarball (row 7)" in always
+    def test_only_the_stand_in_tag_depends_on_the_rehearsal(self):
+        """A rehearsal runs exactly what a tag push runs, plus the local
+        stand-in tag; no other gate step has a condition but the evidence
+        upload's ``always()``."""
+        conditional = {s.get("name"): s["if"] for s in steps("gate") if "if" in s}
+        assert conditional == {STAND_IN_NAME: "steps.route.outputs.rehearsal == 'true'",
+                               "Keep the gate's evidence": "always()"}
+        assert [n for n in _gate_runs("true") if n != STAND_IN_NAME] == _gate_runs("false")
+        assert "Clean-install probe of the candidate tarball (row 7)" in _gate_runs("false")
 
     def test_the_stand_in_tag_is_a_rehearsals_alone_and_never_pushed(self):
-        stand_in = step("gate", "Rehearsal: the dispatched commit stands in for the tag")
+        stand_in = step("gate", STAND_IN_NAME)
         assert stand_in["if"] == "steps.route.outputs.rehearsal == 'true'"
         assert 'git tag "${TAG}" "${head}"' in code(stand_in)
         for job_id, s in _all_steps():
             assert not re.search(r"\bgit\s+(push|commit)\b", code(s)), (job_id, s.get("name"))
-
-
-class TestBootstrapBranch:
-    def test_the_probe_is_the_one_registry_install_entry_point(self):
-        probe = code(step("gate", "Bootstrap: the registry-install probe"))
-        assert "packaging/opencode/registry_check.py" in probe
-        for flag in ('--spec "${NAME}@${VERSION}"', '--registry "${REGISTRY}"', '--tag "${TAG}"',
-                     "--environment ci-runner", '--out "${record}"'):
-            assert flag in probe, flag
-        # The stub's URL reaches the probe in a rehearsal, and only there.
-        assert re.search(r'if \[ "\$\{REHEARSAL\}" = "true" \]; then '
-                         r'rehearsal_flags=\(--rehearsal-registry "\$\{STUB_URL\}"\)', probe)
-        assert probe.count("--rehearsal-registry") == 1
-        assert 'record="${records}/$(date -u +%Y%m%dT%H%M%SZ)-opencode-bootstrap-check${suffix}.json"' in probe
-        assert re.search(r'if \[ "\$\{REHEARSAL\}" = "true" \]; then suffix="-rehearsal"; fi', probe)
-        # The probe makes its root inside the fresh, checked-empty probe root,
-        # runs the gate's pinned binary, and names this run.
-        assert '--tmp-parent "${PROBE_ROOT}"' in probe
-        assert '--opencode "${HOST_BIN}"' in probe
-        assert '--workflow-run-id "${GITHUB_RUN_ID}"' in probe
-
-    def test_the_probe_root_is_fresh_and_outside_the_checkout(self):
-        root = code(step("gate", "Bootstrap: a fresh probe root outside the checkout"))
-        assert 'mktemp -d "${RUNNER_TEMP}/' in root
-        assert "lies inside the checkout" in root and "is not empty" in root
-        assert "empty_at_start" in root
-
-    def test_the_visibility_poll_is_bounded_and_reads_the_explicit_registry(self):
-        poll = step("gate", "Bootstrap: wait until the registry serves the version")
-        assert isinstance(poll["timeout-minutes"], int) and poll["timeout-minutes"] <= 30
-        assert "deadline=" in code(poll)
-        assert re.search(r'npm view "\$\{spec\}" dist\.integrity --registry "\$\{source\}" ',
-                         code(poll))
-        # From an empty directory pinned as npm's project root: no `.npmrc` in
-        # the checkout, or above it, is read as project config.
-        assert 'cd "${scratch}" && npm view' in code(poll)
-        assert '--cache "${scratch}/cache" --prefix "${scratch}"' in code(poll)
-
-    def test_the_rebuild_is_frozen_no_dev_from_the_tags_commit(self):
-        rebuild = code(step("gate", BOOTSTRAP_STEPS[3]))
-        assert "uv run --project skills/multi-llm --frozen --no-dev -- python " \
-               "packaging/opencode/build.py" in rebuild
-        assert "refs/tags/${TAG}^{commit}" in rebuild
-
-    def test_the_record_is_validated_with_the_bootstrap_profile_and_uploaded(self):
-        check = code(step("gate", "Bootstrap: validate the record (bootstrap profile)"))
-        assert re.search(r"--frozen --no-dev -- python packaging/opencode/registry_record\.py"
-                         r" \\\n\s+validate --profile bootstrap", check)
-        assert '--integrity "${INTEGRITY}"' in check and '--digest "${DIGEST}"' in check
-        upload = step("gate", "Keep the bootstrap record")
-        assert _uses(upload) == "actions/upload-artifact"
-        assert upload["with"]["path"].endswith("/opencode-bootstrap/")
-        assert "github.run_attempt" in upload["with"]["name"]
 
 
 # ===========================================================================
@@ -832,19 +772,17 @@ class TestRow9AndNpm:
 class TestTheRow9Canary:
     """Plan step 0's `.npmrc` case, recorded on every gate run: under the job's
     exact npm setup, a version never published must answer ``E404``, or row 9
-    and the bootstrap probe would both fail closed on the real tag."""
+    would fail closed on the real tag."""
 
-    def test_it_runs_on_every_path_rehearsal_or_not(self):
+    def test_it_runs_on_every_run_rehearsal_or_not(self):
         canary = step("gate", CANARY_NAME)
         assert "if" not in canary
-        for path in ("normal", "bootstrap"):
-            for rehearsal in ("true", "false"):
-                assert CANARY_NAME in _gate_runs(path, rehearsal), (path, rehearsal)
+        for rehearsal in ("true", "false"):
+            assert CANARY_NAME in _gate_runs(rehearsal), rehearsal
 
-    def test_it_runs_before_row_9_and_the_bootstrap_probe(self):
+    def test_it_runs_before_row_9(self):
         at = index("gate", lambda s: s.get("name") == CANARY_NAME)
         assert at < index("gate", lambda s: s is _row9("gate"))
-        assert at < index("gate", lambda s: s.get("name") == "Bootstrap: the registry-install probe")
 
     def test_its_npm_setup_is_the_row_9_jobs(self):
         """The same setup-node and pinned-npm steps as every row-9 job, run
@@ -917,11 +855,9 @@ class TestTheRow9Canary:
         for job_id, s in _all_steps():
             if _uses(s) == "actions/setup-node":
                 assert set(s["with"]) == {"node-version"}, (job_id, s["with"])
-        uncommented = "\n".join(line for line in TEXT.splitlines()
-                                if not line.lstrip().startswith("#"))
         for needle in ("NODE_AUTH_TOKEN", "_authToken", ".npmrc", "registry-url", "NPM_TOKEN",
                        "secrets."):
-            assert needle not in uncommented, needle
+            assert needle not in UNCOMMENTED, needle
 
     def test_npm_and_node_are_pinned_at_or_above_the_trusted_publishing_floor(self):
         def key(version):
@@ -1240,114 +1176,3 @@ class TestFacts:
         for job_id in ("verify", "publish"):
             assert step(job_id, "The single registry, and the package's name and version") == \
                 step("gate", "The single registry, and the package's name and version")
-
-
-@needs_shell
-class TestBootstrapValidation:
-    """The bootstrap branch's validation step, run against fixture records in a
-    fixture repository whose annotated tag decides the release kind, with the
-    one registry-record validator copied beside it."""
-
-    VALIDATE = "Bootstrap: validate the record (bootstrap profile)"
-
-    @pytest.fixture
-    def world(self, tmp_path):
-        from tests.test_opencode_registry_record import _make_repo
-
-        fixture = _make_repo(tmp_path / "fixture", "0.1.1")
-        repo = fixture["repo"]
-        for name in ("registry_record.py", "registry.py", "registry-record.schema.json"):
-            shutil.copy2(PACKAGE_DIR / name, repo / "packaging" / "opencode" / name)
-        shutil.copy2(REPO_ROOT / "Makefile", repo / "Makefile")
-        probe_root = tmp_path / "probe-root"
-        probe_root.mkdir()
-        return fixture, probe_root
-
-    def _record(self, fixture, probe_root, **changes):
-        from tests.test_opencode_registry_record import make
-
-        record = make(fixture, "bootstrap")
-        record["payload_location"] = str(
-            probe_root / "home" / ".cache" / "opencode" / "packages" / "node_modules"
-            / "opencode-multi-llm")
-        record.update(changes)
-        # Named as the workflow names it: a rehearsal's record says so.
-        suffix = "-rehearsal" if record.get("rehearsal") is True else ""
-        path = probe_root.parent / "records" / f"20261026T100000Z-opencode-bootstrap-check{suffix}.json"
-        path.parent.mkdir(exist_ok=True)
-        path.write_text(json.dumps(record), encoding="utf-8")
-        return path
-
-    def _validate(self, shell, world, path, rehearsal: bool, **env):
-        from tests.test_opencode_registry_record import DIGEST, INTEGRITY
-
-        fixture, probe_root = world
-        return shell.run(step("gate", self.VALIDATE), cwd=fixture["repo"], env={
-            "TAG": fixture["tag"], "RECORD": str(path), "INTEGRITY": INTEGRITY,
-            "DIGEST": DIGEST, "REHEARSAL": "true" if rehearsal else "false",
-            "PROBE_ROOT": str(probe_root), **env})
-
-    def test_a_genuine_bootstrap_record_validates(self, shell, world):
-        done, _ = self._validate(shell, world, self._record(*world), False)
-        assert done.returncode == 0, done.stdout + done.stderr
-        assert "valid bootstrap record" in done.stdout
-        calls = [c for c in shell.uv_calls() if "registry_record.py" in c]
-        assert calls and all("--frozen --no-dev" in c for c in calls)
-
-    def test_a_record_that_fails_the_profile_fails_the_step(self, shell, world):
-        done, _ = self._validate(shell, world, self._record(*world), False,
-                                 INTEGRITY="sha512-other")
-        assert done.returncode != 0 and "is not the gated" in done.stdout
-
-    def test_a_rehearsal_record_must_be_refused_as_rehearsal_evidence(self, shell, world):
-        fixture, probe_root = world
-        path = self._record(fixture, probe_root, rehearsal=True,
-                            installed_registry="http://127.0.0.1:4873/")
-        done, _ = self._validate(shell, world, path, True)
-        assert done.returncode == 0, done.stdout + done.stderr
-        assert "rehearsal evidence" in done.stdout
-        assert "refused as release evidence, as it must be" in done.stdout
-
-    def test_a_validator_that_accepts_a_rehearsal_fails_the_step(self, shell, world):
-        done, _ = self._validate(shell, world, self._record(*world), True)
-        assert done.returncode != 0
-        assert "accepted a rehearsal record as release evidence" in done.stderr
-
-    def test_a_rehearsal_refused_for_another_reason_fails_the_step(self, shell, world):
-        """Refused, but not because it is a rehearsal: the stub's record must
-        fail as one, or the regression case proves nothing."""
-        fixture, probe_root = world
-        path = self._record(fixture, probe_root)
-        done, _ = self._validate(shell, world, path, True, INTEGRITY="sha512-other")
-        assert done.returncode != 0 and "not as rehearsal evidence" in done.stderr
-
-    @pytest.mark.parametrize("location", ["/opt/elsewhere/node_modules/opencode-multi-llm", None])
-    def test_a_payload_outside_the_probe_root_refuses(self, shell, world, location):
-        fixture, probe_root = world
-        path = self._record(fixture, probe_root, payload_location=location)
-        done, _ = self._validate(shell, world, path, False)
-        assert done.returncode != 0
-        assert ("outside the probe root" if location else "names no payload_location") in done.stderr
-
-
-@needs_shell
-class TestProbeRoot:
-    ROOT = "Bootstrap: a fresh probe root outside the checkout"
-
-    def test_a_fresh_root_under_the_runner_temp_is_recorded(self, shell, tmp_path):
-        workspace = tmp_path / "workspace"
-        workspace.mkdir()
-        done, outputs = shell.run(step("gate", self.ROOT), cwd=workspace, env={})
-        assert done.returncode == 0, done.stderr
-        root = Path(outputs["root"])
-        assert root.parent == shell.runner_temp and root.is_dir()
-        evidence = json.loads((shell.runner_temp / "opencode-evidence"
-                               / "bootstrap-probe-root.json").read_text(encoding="utf-8"))
-        assert evidence == {"probe_root": os.path.realpath(root), "outside_checkout": True,
-                            "empty_at_start": True}
-
-    def test_a_root_inside_the_checkout_refuses(self, shell, tmp_path):
-        done, outputs = shell.run(step("gate", self.ROOT), cwd=shell.root,
-                                  env={"GITHUB_WORKSPACE": str(shell.root)})
-        assert done.returncode != 0 and outputs == {}
-        assert "lies inside the checkout" in done.stderr
