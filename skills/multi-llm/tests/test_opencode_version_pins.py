@@ -2,7 +2,8 @@
 
 The policy (2026-10-02): the newest opencode release is the adapter's
 ``min_version`` **and** ``verified_version``, and that one version is also the
-package's ``engines.opencode`` floor and README, the container's ``opencode-ai``
+package's ``engines.opencode`` floor, its ``@opencode-ai/plugin`` SDK
+devDependency and README, the container's ``opencode-ai``
 pin (``package.json``, ``package-lock.json``, ``cli-versions.lock``), the mock
 CLI's ``--version`` and the name of every committed opencode capture.
 ``make opencode-bump VERSION=<x.y.z>`` (``packaging/opencode/bump.py``) moves

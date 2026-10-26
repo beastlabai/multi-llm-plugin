@@ -48,6 +48,14 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+# Row 8's five package-gate scenarios (plans/opencode-plugin-publish.md). Its own
+# module, beside this one in /opt/mllm/rig, where the rig dir is `sys.path[0]`;
+# imported as a package sibling when the host-side suite imports this file.
+try:
+    import opencode_package_gate
+except ImportError:  # pragma: no cover - the host-side package import
+    from . import opencode_package_gate
+
 HERE = Path(__file__).resolve().parent
 SKILL_DIR = Path(os.environ.get("MLLM_SKILL_DIR", "/opt/mllm/skill"))
 RIG_DIR = Path(os.environ.get("MLLM_RIG_DIR", "/opt/mllm/rig"))
@@ -6253,12 +6261,16 @@ def main(argv=None) -> int:
                              "— what is under test is argument delivery, not "
                              "model output.")
     parser.add_argument("--probe", default=None,
-                        choices=list(CODEX_PACKAGE_PROBES),
-                        help="host lane, --creds none --route package --host "
-                             "codex: which zero-quota package-route probe this "
-                             "row runs (plans/codex-native-plugin.md Phase 1). "
-                             "Writes probe-<name>.json; the answer is recorded, "
-                             "never judged here.")
+                        choices=[*CODEX_PACKAGE_PROBES,
+                                 *opencode_package_gate.GATE_PROBES],
+                        help="host lane, --creds none --route package: which "
+                             "zero-quota package-route probe this row runs. "
+                             "--host codex: plans/codex-native-plugin.md Phase "
+                             "1, writing probe-<name>.json. --host opencode: "
+                             "row 8's `gate-*` scenarios "
+                             "(plans/opencode-plugin-publish.md), writing "
+                             "opencode-gate.json. The answer is recorded, never "
+                             "judged here.")
     parser.add_argument("--stub-port", type=int,
                         default=int(os.environ.get("MLLM_STUB_PORT", "8099")))
     parser.add_argument("--scenario", default=None)
@@ -6290,14 +6302,16 @@ def main(argv=None) -> int:
     plan = WORKSPACE / "plans" / "auth-feature.md"
     exit_code = 1
 
-    if args.probe and not (args.lane == "host" and args.host == "codex"
+    probe_host = ("opencode" if args.probe in opencode_package_gate.GATE_PROBES
+                  else "codex")
+    if args.probe and not (args.lane == "host" and args.host == probe_host
                            and args.route == "package" and args.creds == "none"):
         # A probe is a zero-quota package-route row by definition. Refused
         # rather than ignored: a `--probe` that silently fell through to the
         # discovery tier would record a green row that probed nothing.
         raise SystemExit(
             f"entrypoint: --probe {args.probe!r} runs only on the host lane with "
-            f"--host codex --route package --creds none")
+            f"--host {probe_host} --route package --creds none")
 
     # The documented-invocation probe's marker and fact ladder are minted BEFORE
     # the stub starts, because the stub is the thing that has to carry them: a
@@ -6665,6 +6679,22 @@ def main(argv=None) -> int:
                     # the second one.
                     log(f"host row complete (host exit {record['exit']})")
                     return 0
+
+                if (args.creds == "none" and args.route == "package"
+                        and args.host == "opencode" and args.probe):
+                    # Row 8's package-gate scenarios. The wiring step above
+                    # wrote the package declaration; the leg points the host's
+                    # model at its own scripted stub and drives a real
+                    # `opencode run` through the installed plugin. 0 unless the
+                    # leg could not be driven at all — the verdict is
+                    # test_container_opencode_package_gate.py's.
+                    return opencode_package_gate.run(
+                        args.probe, opencode_package_gate.GateContext(
+                            out=OUT, home=Path.home(), workspace=WORKSPACE,
+                            real_dir=REAL_DIR, plugin_dir=OPENCODE_PLUGIN_DIR,
+                            plan=plan, stub_cls=Stub, log=log,
+                            census=_workspace_census,
+                            plan_output_dir=plan_output_dir))
 
                 if (args.creds == "none" and args.route == "package"
                         and args.host == "codex"):

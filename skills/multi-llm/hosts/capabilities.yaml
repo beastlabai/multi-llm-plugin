@@ -491,13 +491,23 @@ hosts:
     # `skills/multi-llm/pyproject.toml` — which ships *inside* the tarball, so a
     # package declaring a different one would ship a payload that disagrees with
     # it — and `test_version_source_is_singular` asserts the chain.
+    #
+    # `public_version` is ABSENT ON PURPOSE, and the absence is a claim: no
+    # registry install has been verified. It is the last version whose registry
+    # install check passed, the one the generated paragraph tells a user to pin
+    # once `provenance.package` below is `verified`. `version` is the candidate
+    # and moves at every bump, so a recommendation built from it would name a
+    # version npm does not serve yet. The schema forbids `public_version` until
+    # that row is `verified` and requires it from then on, never newer than
+    # `version`. It is set in the edit that promotes the row, and after that it
+    # moves only once the next version's registry record validates.
     package:
       registry: npm
       name: opencode-multi-llm
-      version: "0.1.0"
+      version: "0.1.1"
       config_key: plugin
       provides: [command, tool]
-      min_host_version: "1.19.3"   # the one supported opencode release (the
+      min_host_version: "1.19.4"   # the one supported opencode release (the
                                     # newest; `make opencode-bump` moves it with
                                     # every other pin), never a lower one that
                                     # might work: `engines` is a hard gate, and

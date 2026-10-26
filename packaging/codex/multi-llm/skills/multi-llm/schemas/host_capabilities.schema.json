@@ -160,7 +160,12 @@
               "pattern": "^(@[a-z0-9-][a-z0-9._-]*/)?[a-z0-9-][a-z0-9._-]*$"
             },
             "version": {
-              "description": "The published version, required exactly when `update` is `pinned-spec` \u2014 that route is literally 'the pin is the upgrade', so the pin must exist. A `reinstall` route has no number to give and must not be forced to invent one. It is a COPY, not a source: the number is owned by skills/multi-llm/pyproject.toml and `test_version_source_is_singular` asserts they agree. It exists here so the generated 'Install via' paragraph can render the pinned spelling rather than a hand-typed version in a byte-compared document.",
+              "description": "The published version, required exactly when `update` is `pinned-spec` \u2014 that route is literally 'the pin is the upgrade', so the pin must exist. A `reinstall` route has no number to give and must not be forced to invent one. It is a COPY, not a source: the number is owned by skills/multi-llm/pyproject.toml and `test_version_source_is_singular` asserts they agree. It exists here so the generated 'Install via' paragraph can render the pinned spelling rather than a hand-typed version in a byte-compared document, until `provenance.package` is `verified`; from then on the paragraph pins `public_version`, and this keeps naming the candidate.",
+              "type": "string",
+              "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+([-+][0-9A-Za-z.-]+)?$"
+            },
+            "public_version": {
+              "description": "The last version whose registry install check passed: the version a user is told to pin, kept apart from `version` because `version` is the CANDIDATE. `version` follows the shared version at every bump, so a recommendation built from it would name a version the registry does not serve yet, from the bump through publication and the registry check, and for as long as either fails. This one moves only after that version's registry record validates. It is the release boundary for a `pinned-spec` route, so it is legal on no other one, and it moves as a pair with `provenance.package`: forbidden until that row is `verified`, required once it is (the host-level `allOf` below). It must never be newer than `version`. No JSON Schema keyword compares two versions, so that half is `utils/host_capabilities.package_spec_version`'s, which the renderer calls and the tests assert. The generated install paragraph renders the pinned spec from this value at `verified` and from `version` before it.",
               "type": "string",
               "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+([-+][0-9A-Za-z.-]+)?$"
             },
@@ -247,6 +252,25 @@
               },
               "then": {
                 "required": [
+                  "version"
+                ]
+              }
+            },
+            {
+              "$comment": "A public pin needs a pinned route and a candidate it trails: a `reinstall` or `range` route has no number to recommend.",
+              "if": {
+                "required": [
+                  "public_version"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "update": {
+                    "const": "pinned-spec"
+                  }
+                },
+                "required": [
+                  "update",
                   "version"
                 ]
               }
@@ -725,6 +749,57 @@
                 "required": [
                   "package"
                 ]
+              }
+            }
+          }
+        },
+        {
+          "$comment": "`package.public_version` moves as a pair with `provenance.package`. On a `pinned-spec` route it is required once that row is `verified`, because the generated paragraph then recommends a spec and the only version it may name is one a registry install was observed to serve. Before then it is forbidden: no such install exists yet, and the paragraph says so with the candidate `version`. Every other route forbids it at any provenance (the package-level rule says why). Whether it trails `version` is not expressible here: see the property's description.",
+          "if": {
+            "required": [
+              "package",
+              "provenance"
+            ],
+            "properties": {
+              "package": {
+                "required": [
+                  "update"
+                ],
+                "properties": {
+                  "update": {
+                    "const": "pinned-spec"
+                  }
+                }
+              },
+              "provenance": {
+                "required": [
+                  "package"
+                ],
+                "properties": {
+                  "package": {
+                    "const": "verified"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "package": {
+                "required": [
+                  "public_version"
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "package": {
+                "not": {
+                  "required": [
+                    "public_version"
+                  ]
+                }
               }
             }
           }

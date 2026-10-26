@@ -36,7 +36,7 @@ from utils import (
     get_relative_output_path,
     get_modified_files,
     get_staged_files,
-    get_current_head,
+    head_or_empty_tree,
 )
 from utils import metrics as metrics_mod
 from utils.stream_bootstrap import bootstrap_streams
@@ -2527,10 +2527,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Record pre-existing changes (before implementation modifies anything)
     record_pre_existing_changes(state)
 
-    # Record HEAD before implementation so code-review diffs exclude pre-impl commits
+    # Record HEAD before implementation so code-review diffs exclude pre-impl
+    # commits. Before the first commit that is the empty tree: everything
+    # implement leaves is new, and a resume must not mistake the missing value
+    # for a first run (`record_pre_existing_changes` re-takes its baseline then).
     if state.get("head_before_implement") is None:
         try:
-            state.set("head_before_implement", get_current_head())
+            state.set("head_before_implement", head_or_empty_tree())
             state.save()
         except Exception as e:
             print(f"Warning: Could not record head_before_implement: {e}")

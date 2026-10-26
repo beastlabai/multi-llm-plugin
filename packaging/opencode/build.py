@@ -33,7 +33,9 @@ build cannot accidentally produce a second tarball nobody publishes. The tarball
 secret sweep is *exposed* here (:func:`scan_tarball`) and called by
 ``make opencode-package`` **after** ``npm pack`` — same module, one step later in
 the sequence, because what npm writes is what ships and a ``prepack`` hook runs
-too early to see a tarball.
+too early to see a tarball. The one npm call it does make is a read:
+``--check-bump`` asks the registry for the package's version list
+(:func:`check_bump`), and packs nothing.
 
 **It is an importable module with a thin ``__main__``**, and that is a design
 requirement rather than a test-time convenience: ``dist/`` is gitignored and CI
@@ -63,6 +65,7 @@ for _path in (str(SKILL_DIR), str(REPO_ROOT / "packaging")):
         sys.path.insert(0, _path)
 
 from common import payload, surface  # noqa: E402
+from common import release_history  # noqa: E402
 from common.payload import (  # noqa: F401  (re-exported for the Make targets)
     PayloadError, scan_tarball, scan_tree, target_module_paths, tree_digest,
 )
@@ -97,7 +100,7 @@ DIST_FILES: Tuple[str, ...] = (
 #: ``.tgz`` — and a digest over that superset attests to bytes npm never packs
 #: while making the publish gate's key environment-dependent: a ``.pyc`` is
 #: interpreter-version-specific, so a Python-minor switch between the gate and
-#: ``make opencode-publish`` would produce a spurious "staged tree has changed".
+#: ``make opencode-publish-first`` would produce a spurious "staged tree has changed".
 SHIPPED_TREES: Tuple[str, ...] = ("dist/", "skills/")
 SHIPPED_FILES: Tuple[str, ...] = ("LICENSE", "README.md", "package.json")
 
@@ -145,7 +148,7 @@ SURFACE_SCHEMA_VERSION = surface.SURFACE_SCHEMA_VERSION
 #: recipe cannot reach it, and without this a developer's local pack refuses on
 #: their own uncommitted work while the recipe that called it had already been
 #: told to allow it. It is deliberately a named opt-in rather than a fallback:
-#: ``make opencode-publish`` neither sets nor forwards it, so a dirty publish is
+#: ``make opencode-publish-first`` neither sets nor forwards it, so a dirty publish is
 #: refused however it was reached.
 #:
 #: Read by *exact* spelling — ``=1`` and nothing else — rather than as "any
@@ -356,51 +359,275 @@ def _not_shipped(relative: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# A packed tarball, as the stamp and the publish preflight bind it
+# ---------------------------------------------------------------------------
+
+#: The prefix npm writes every member of a packed tarball under.
+TARBALL_PREFIX = "package/"
+
+
+def integrity_of(data: bytes) -> str:
+    """npm's ``dist.integrity`` spelling of *data*: ``sha512-<base64>``.
+
+    The registry computes this over the uploaded file's bytes, so a tarball
+    published as a file (``npm publish <file>.tgz``) reads back with exactly the
+    value this returns for the file.
+    """
+    import base64
+    import hashlib
+
+    return "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode("ascii")
+
+
+def tarball_facts(tarball: Path) -> Dict[str, Any]:
+    """What a packed ``.tgz`` is: its integrity, its inventory, its tree digest.
+
+    Returns ``{"path", "integrity", "sha256", "files", "digest",
+    "recorded_digest"}``:
+
+    * ``integrity`` — :func:`integrity_of` over the file, comparable with
+      ``npm view <spec> dist.integrity`` as it stands;
+    * ``files`` — the sorted member paths with npm's ``package/`` prefix
+      removed, regular files only;
+    * ``digest`` — this builder's own tree-digest rule (:func:`tree_digest`
+      with :func:`_not_shipped`) over the extracted package, which equals
+      ``dist/tree.sha256`` of the build that was packed;
+    * ``recorded_digest`` — the ``dist/tree.sha256`` the tarball carries, or
+      ``None`` when it carries none.
+
+    Raises :class:`PayloadError` for a member outside ``package/``, an absolute
+    or ``..`` path, a link or device member, or a file that is not a gzip tar —
+    an archive this function cannot account for is never described as one.
+    Extraction happens in a private temporary directory that is removed before
+    returning.
+    """
+    import hashlib
+    import tarfile
+    import tempfile
+
+    path = Path(tarball)
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise PayloadError(f"{path}: cannot read the tarball ({exc})") from exc
+    files: List[str] = []
+    with tempfile.TemporaryDirectory(prefix="mllm-tarball-") as scratch:
+        root = Path(scratch)
+        try:
+            archive = tarfile.open(path, mode="r:gz")
+        except (tarfile.TarError, OSError) as exc:
+            raise PayloadError(f"{path}: not a gzip tarball ({exc})") from exc
+        with archive:
+            for member in archive.getmembers():
+                name = member.name
+                parts = name.split("/")
+                if name.startswith("/") or ".." in parts or not name.startswith(TARBALL_PREFIX):
+                    raise PayloadError(
+                        f"{path}: member {name!r} is not under {TARBALL_PREFIX!r}"
+                    )
+                if member.isdir():
+                    continue
+                if not member.isfile():
+                    raise PayloadError(
+                        f"{path}: member {name!r} is a link or device, which no "
+                        "build of this package produces"
+                    )
+                relative = name[len(TARBALL_PREFIX):]
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source = archive.extractfile(member)
+                if source is None:
+                    raise PayloadError(f"{path}: member {name!r} has no content")
+                with source:
+                    target.write_bytes(source.read())
+                files.append(relative)
+        digest = tree_digest(root, exclude=_not_shipped)
+        recorded_path = root / "dist" / DIGEST_NAME
+        recorded = (recorded_path.read_text(encoding="utf-8").strip()
+                    if recorded_path.is_file() else None)
+    return {
+        "path": str(path),
+        "integrity": integrity_of(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "files": sorted(files),
+        "digest": digest,
+        "recorded_digest": recorded,
+    }
+
+
+# ---------------------------------------------------------------------------
+# The shared-version bump check (plans/opencode-plugin-publish.md, step 2)
+# ---------------------------------------------------------------------------
+
+def check_bump(
+    *, repo: Optional[Path] = None, candidate: str = "HEAD",
+    registry: Optional[str] = None,
+) -> "release_history.Report":
+    """OpenCode's entry point for the release-history check both families run.
+
+    The version is ``pyproject.toml``'s, shared with the Claude and Codex
+    distributions, so "is this version new?" has no OpenCode-only answer: the
+    check reads every ``codex-v*`` and ``opencode-v*`` tag and npm's list for
+    this package, and holds *candidate*'s shared-payload digest to theirs
+    (:mod:`common.release_history`). This package's own bytes outside the
+    payload (``dist/``, ``package.json``) are npm's no-reuse rule's to police.
+
+    *repo* is the clone whose history is read (default: this one), which is how
+    the suite points the real CLI at a fixture history. It never packs, writes
+    or fetches; a shallow or tagless clone is refused rather than read as one
+    with no releases.
+    """
+    return release_history.check(
+        repo or REPO_ROOT, candidate=candidate, registry=registry,
+    )
+
+
+# ---------------------------------------------------------------------------
 # The publish gate's stamp
 # ---------------------------------------------------------------------------
 
 #: Where the full gate records that it passed. Gitignored, and **it never
 #: travels**: it is not committed and is never uploaded as a CI artifact, because
 #: a stamp from another machine attests to that machine's rows rather than to
-#: this one's. CI consumes no stamps at all — the publishing job re-runs the gate
-#: inline, which is why the two mechanisms are spelled out separately rather than
-#: one being made to serve both.
+#: this one's. CI consumes no stamps at all: its jobs re-run the rows they can
+#: (1-7 and 9), and row 8 — which needs a Docker daemon the runners do not have
+#: — reaches CI only through the release-gate record exported from the same
+#: session that authorized this stamp (``release_gate.py export-record``, into
+#: the gitignored ``.gate/export/``). It is copied into
+#: ``tests/container/records/`` and committed in the default branch's own commit
+#: after the fast-forward, never in the tag's tree; the tag's commit is then
+#: checked out again, clean, before ``make opencode-publish-first`` reads this
+#: stamp.
 STAMP_NAME = ".package-check.stamp"
 
 #: The tier a stamp must carry to authorize a publish. A `-ci` run writes no
 #: stamp at all, and a stamp claiming any other tier is refused by name.
 FULL_TIER = "full"
 
+#: The stamp's shape. Schema 1 was ``{tier, digest, version, stamped_at}``: a
+#: digest-only stamp ``--write-stamp`` wrote without reading any gate evidence,
+#: so recipe ordering was all that stood between it and rows nobody ran.
+#: Schema 2 embeds the gate session's checked summary and binds the candidate
+#: commit, the host, the image, the registry and the gated tarball; a schema-1
+#: stamp is refused by name.
+STAMP_SCHEMA = 2
+
+#: The bindings a schema-2 stamp must carry, each re-checked by
+#: :func:`check_stamp` against what is true now.
+STAMP_BINDINGS: Tuple[str, ...] = (
+    "digest", "version", "session", "candidate_sha", "host_version", "image_id",
+    "registry", "tarball", "rows",
+)
+TARBALL_BINDINGS: Tuple[str, ...] = ("path", "integrity", "sha256", "files", "digest")
+
+
+def _gate():
+    """``packaging/opencode/release_gate.py``, loaded by path as
+    ``opencode_release_gate``: the codex route has a ``release_gate`` too, and
+    one pytest session imports both under their bare names."""
+    import importlib.util
+
+    name = "opencode_release_gate"
+    path = (PACKAGE_DIR / "release_gate.py").resolve()
+    main = sys.modules.get("__main__")
+    if getattr(main, "__file__", None) and Path(main.__file__).resolve() == path:
+        return main
+    module = sys.modules.get(name)
+    if module is None:
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def _manifest_at(out: Path) -> Dict[str, Any]:
+    source = out / "package.json"
+    if not source.is_file():
+        source = PACKAGE_DIR / "package.json"
+    return json.loads(source.read_text(encoding="utf-8"))
+
 
 def write_stamp(
     destination: Optional[Path] = None, *, timestamp: str = "",
-    allow_dirty: bool = False,
+    allow_dirty: bool = False, evidence_dir: Optional[Path] = None,
+    tarball: Optional[Path] = None,
 ) -> Path:
-    """Record that the full gate passed **on these exact bytes**.
+    """Record that the full gate passed **on these exact bytes**, in one session.
 
     Keyed on ``dist/tree.sha256`` — a digest over the staged content — rather
     than on a git tree hash, which is the wrong key twice over: the thing being
     published is the *staged* tree, which includes generated files ``.gitignore``
     excludes, and a git hash would miss uncommitted edits entirely.
 
+    **It reads the gate's evidence before it writes anything**, and refuses
+    unless the running session (``release_gate.py begin``) holds a passing row
+    for every row of the plan's table — 1-6 and 5b graded node by node, row 7's
+    probe on the pinned host and the gated tarball, row 8's five scenarios on
+    the image the session built and bound, row 9's ``E404`` from the single
+    registry — over this digest, this version and the commit checked out now.
+    A rehearsal session (``ALLOW_DIRTY=1``, or a dirty tree at ``begin``) and a
+    missing session refuse first, by name, before the rebuild. Calling it
+    directly, with no gate run, therefore refuses: the stamp is the gate's
+    record, so it cannot exist for rows that never ran.
+
+    ``tarball`` is the gated tarball (default: the ``<name>-<version>.tgz``
+    ``make opencode-package`` packed). The stamp binds its path, integrity,
+    sha256, inventory and tree digest, so a later pack that overwrites it, or
+    an upload of any other file, fails :func:`check_stamp`.
+
     ``allow_dirty`` is a parameter and **not** read from the environment here,
     unlike ``main``'s flag. The environment variable exists for one reason — npm
     invokes ``prepack`` with a fixed command line, so a flag cannot reach it —
     and this function is not on that path. Reading it here would mean a developer
     who exported it once could stamp, and therefore publish, from a dirty tree.
+    It relaxes the build's clean-input check and the whole-tree one, for the
+    suite's temp-directory stamps; it never makes a rehearsal session count.
     """
+    gate = _gate()
+    directory = Path(evidence_dir) if evidence_dir else gate.EVIDENCE_DIR
+    evidence = gate.load_evidence(directory)
+    early = gate.session_problems(evidence.get("session"))
+    if early:
+        raise PayloadError("\n".join(early))
     out = Path(destination) if destination else PACKAGE_DIR
     report = build(destination=out, allow_dirty=allow_dirty)
-    manifest = json.loads((out / "package.json").read_text(encoding="utf-8")) \
-        if (out / "package.json").is_file() \
-        else json.loads((PACKAGE_DIR / "package.json").read_text(encoding="utf-8"))
+    version = _manifest_at(out)["version"]
+    gated = Path(tarball) if tarball else gate.gated_tarball()
+    facts = tarball_facts(gated) if gated.is_file() else None
+    try:
+        problems = gate.evidence_problems(
+            evidence, digest=report["digest"], version=version,
+            head=gate.head_sha(), host_version=gate.host_pin(),
+            registry=gate.single_registry(), tarball=facts,
+            dirty=() if allow_dirty else gate.dirty_paths(),
+        )
+    except gate.GateError as exc:
+        problems = [str(exc)]
+    if problems:
+        raise PayloadError(
+            "the release gate's evidence does not authorize a stamp over these "
+            "bytes:\n" + "\n".join(f"    {line}" for line in problems)
+            + "\nRun `make opencode-package-check`; it writes this evidence and "
+            "the stamp."
+        )
+    summary = gate.stamp_summary(evidence)
     stamp = out / STAMP_NAME
     stamp.write_text(
         json.dumps({
+            "schema": STAMP_SCHEMA,
             "tier": FULL_TIER,
             "digest": report["digest"],
-            "version": manifest["version"],
+            "version": version,
             "stamped_at": timestamp,
+            "session": summary["session"],
+            "candidate_sha": summary["candidate_sha"],
+            "host_version": evidence["rows"]["7"]["opencode_version"],
+            "image_id": summary["image"]["id"],
+            "registry": evidence["rows"]["9"]["registry"],
+            "tarball": {key: facts[key] for key in TARBALL_BINDINGS},
+            "rows": summary["rows"],
+            "gate": summary,
         }, indent=2) + "\n",
         encoding="utf-8",
     )
@@ -412,10 +639,15 @@ def check_stamp(
 ) -> Optional[str]:
     """``None`` if a publish may proceed, else the reason it may not.
 
-    Four conditions, **each named separately**, so "the gate is red" is never the
+    Every condition is **named separately**, so "the gate is red" is never the
     same message as "you edited a file since". A gate is worth nothing if the
     publish command can skip it, and a refusal nobody can act on is nearly as
-    bad.
+    bad. In order: no stamp; unreadable; not the full tier; a schema-1
+    (digest-only) stamp; a row the stamp does not record as passed, or a
+    binding it lacks; the clean rebuild's digest; the version; the candidate
+    commit (HEAD now); the pinned host; the single registry; and the gated
+    tarball — present, with the stamped integrity, sha256, inventory and tree
+    digest recomputed now.
     """
     out = Path(destination) if destination else PACKAGE_DIR
     stamp_path = out / STAMP_NAME
@@ -428,11 +660,37 @@ def check_stamp(
         stamp = json.loads(stamp_path.read_text(encoding="utf-8"))
     except ValueError as exc:
         return f"{stamp_path} is not readable JSON ({exc}). Re-run the full gate."
+    if not isinstance(stamp, dict):
+        return f"{stamp_path} is not a JSON object. Re-run the full gate."
     if stamp.get("tier") != FULL_TIER:
         return (
             f"the stamp says tier={stamp.get('tier')!r}. Only a full "
             "`make opencode-package-check` authorizes a publish; the CI tier "
-            "runs rows 1-6 and deliberately writes no stamp."
+            "runs rows 1-6 and 5b and deliberately writes no stamp."
+        )
+    if stamp.get("schema") != STAMP_SCHEMA:
+        return (
+            f"the stamp is schema {stamp.get('schema', 1)!r}, a digest-only stamp "
+            "written before the gate read any evidence; it names no session, "
+            "rows, host, image or tarball. Re-run `make opencode-package-check`."
+        )
+    gate = _gate()
+    rows = stamp.get("rows") if isinstance(stamp.get("rows"), dict) else {}
+    missing_rows = [row for row in gate.ROW_IDS if rows.get(row) != "pass"]
+    if missing_rows:
+        return (
+            f"the stamp does not record rows {', '.join(missing_rows)} as passed; "
+            "it is partial or was written by hand. Re-run "
+            "`make opencode-package-check`."
+        )
+    tarball = stamp.get("tarball") if isinstance(stamp.get("tarball"), dict) else {}
+    missing = [key for key in STAMP_BINDINGS if not stamp.get(key)] + [
+        f"tarball.{key}" for key in TARBALL_BINDINGS if not tarball.get(key)
+    ]
+    if missing:
+        return (
+            f"the stamp lacks {', '.join(missing)}; it was not written by the "
+            "evidence-bound gate. Re-run `make opencode-package-check`."
         )
     fresh = build(destination=out, allow_dirty=allow_dirty)["digest"]
     if stamp.get("digest") != fresh:
@@ -441,13 +699,55 @@ def check_stamp(
             f"{stamp.get('digest')}, now {fresh}). Re-run "
             "`make opencode-package-check`."
         )
-    manifest = json.loads((out / "package.json").read_text(encoding="utf-8")) \
-        if (out / "package.json").is_file() \
-        else json.loads((PACKAGE_DIR / "package.json").read_text(encoding="utf-8"))
-    if stamp.get("version") != manifest["version"]:
+    version = _manifest_at(out)["version"]
+    if stamp.get("version") != version:
         return (
             f"the stamp is for version {stamp.get('version')!r} but package.json "
-            f"says {manifest['version']!r}."
+            f"says {version!r}."
+        )
+    try:
+        head = gate.head_sha()
+        host = gate.host_pin()
+        registry = gate.single_registry()
+    except gate.GateError as exc:
+        return str(exc)
+    if stamp.get("candidate_sha") != head:
+        return (
+            f"the stamp is for commit {stamp.get('candidate_sha')}, HEAD is "
+            f"{head}: the gate ran on another candidate. Re-run it here."
+        )
+    if stamp.get("host_version") != host:
+        return (
+            f"the stamp's rows ran opencode {stamp.get('host_version')!r}, the "
+            f"pinned host is now {host}. Re-run the gate on the new pin."
+        )
+    if stamp.get("registry") != registry:
+        return (
+            f"the stamp's row 9 asked {stamp.get('registry')!r}, the single "
+            f"registry is {registry}."
+        )
+    gated = Path(str(tarball["path"]))
+    if not gated.is_file():
+        return (
+            f"the gated tarball {gated} is missing: a publish uploads the file "
+            "the gate packed, scanned and loaded, and no other."
+        )
+    try:
+        now = tarball_facts(gated)
+    except PayloadError as exc:
+        return f"the gated tarball {gated} is unreadable: {exc}"
+    for key, label in (("integrity", "integrity"), ("sha256", "sha256"),
+                       ("files", "file inventory"), ("digest", "tree digest")):
+        if now[key] != tarball.get(key):
+            return (
+                f"the gated tarball {gated} no longer has the stamped {label} "
+                "(it was repacked or replaced since the gate ran). Re-run "
+                "`make opencode-package-check`."
+            )
+    if tarball.get("digest") != stamp.get("digest"):
+        return (
+            f"the stamped tarball's tree digest {tarball.get('digest')} is not "
+            f"the stamped candidate digest {stamp.get('digest')}."
         )
     return None
 
@@ -474,13 +774,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument(
         "--write-stamp", metavar="TIMESTAMP", default=None,
-        help="record that the full gate passed on the freshly staged bytes",
+        help=(
+            "record that the full gate passed on the freshly staged bytes; "
+            "refuses unless this gate session's evidence covers every row"
+        ),
     )
     parser.add_argument(
         "--check-stamp", action="store_true",
         help=(
             "exit non-zero unless the full gate passed on these exact bytes, "
-            "naming which of the four conditions failed"
+            "this commit, host, registry and gated tarball, naming which "
+            "condition failed"
         ),
     )
     parser.add_argument(
@@ -490,15 +794,48 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "because what npm writes is what ships."
         ),
     )
+    parser.add_argument(
+        "--check-bump", action="store_true",
+        help=(
+            "the shared-version release-history check (`make opencode-check-bump`): "
+            "exit non-zero unless the candidate's version is released with this "
+            "same shared payload or newer than every codex-v*/opencode-v* tag and "
+            "npm version. Reads git and the registry; writes nothing"
+        ),
+    )
+    parser.add_argument(
+        "--repo", type=Path, default=None,
+        help="with --check-bump: the clone whose history is read (default: this one)",
+    )
+    parser.add_argument(
+        "--candidate", default="HEAD",
+        help="with --check-bump: the commit to check (default: HEAD)",
+    )
+    parser.add_argument(
+        "--registry", default=None,
+        help="with --check-bump: must be the single registry (default: it)",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
+
+    if args.check_bump:
+        try:
+            report = check_bump(
+                repo=args.repo, candidate=args.candidate, registry=args.registry,
+            )
+        except PayloadError as exc:
+            print(f"REFUSING: {exc}", file=sys.stderr)
+            return 1
+        return release_history.print_report(report)
 
     # Both stamp branches call ``build()`` and therefore ``payload.stage()``,
     # whose dirty-tree refusal is a ``PayloadError``. Caught here for the same
     # reason the ``build`` branch catches it: a refusal is this tool's most
-    # likely outcome on the publish path — `make opencode-publish` from a dirty
+    # likely outcome on the publish path — `make opencode-publish-first` from a dirty
     # skill tree hits it, and so does the gate's final ``--write-stamp``, which
     # ignores $MULTI_LLM_ALLOW_DIRTY by design — and a gate that answers with a
-    # traceback instead of a named line is a gate nobody can act on.
+    # traceback instead of a named line is a gate nobody can act on. The
+    # evidence refusals (no session, a rehearsal, a row missing) are raised as
+    # the same ``PayloadError`` for the same reason.
     if args.check_stamp:
         try:
             reason = check_stamp(args.destination)

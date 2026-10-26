@@ -643,26 +643,64 @@ def _write_receipt(receipt_dir: Path, argv: list[str], captured: list[str],
                                  ("run_id", "state", "exit_code")}
                     break
 
+    receipt = {
+        "row_id": os.environ.get("MLLM_ROW_ID"),
+        "seq": None,
+        "argv": collapse_prompt(redact_argv(argv)),
+        "cwd": os.getcwd(),
+        "exit": code,
+        # A dispatcher invocation that emitted NO line writes a receipt
+        # with result: null, which is itself a finding rather than a
+        # silent gap — every mode emits one.
+        "result": payload,
+        "run": run_block,
+        "started_at": round(started, 3),
+        "ended_at": round(time.time(), 3),
+    }
+    # Only on a launch that printed one, so every other receipt keeps its shape.
+    banner = launch_banner(captured)
+    if banner is not None:
+        receipt["banner"] = banner
+
     fd, seq = _claim_receipt_slot(receipt_dir)
+    receipt["seq"] = seq
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(
-            {
-                "row_id": os.environ.get("MLLM_ROW_ID"),
-                "seq": seq,
-                "argv": collapse_prompt(redact_argv(argv)),
-                "cwd": os.getcwd(),
-                "exit": code,
-                # A dispatcher invocation that emitted NO line writes a receipt
-                # with result: null, which is itself a finding rather than a
-                # silent gap — every mode emits one.
-                "result": payload,
-                "run": run_block,
-                "started_at": round(started, 3),
-                "ended_at": round(time.time(), 3),
-            },
-            indent=2,
-            sort_keys=True,
-        ))
+        handle.write(json.dumps(receipt, indent=2, sort_keys=True))
+
+
+def launch_banner(captured: list[str]) -> dict | None:
+    """A detached launch's banner fields, ``{name: value}``, or ``None``.
+
+    The banner is the ONLY place a launch names its run id — the result line
+    carries none — and it is what the OpenCode plugin claims a run from. Kept so
+    a row can show that the run the host's tool claimed is the run the
+    dispatcher's banner named (plans/opencode-plugin-publish.md, row 8's
+    detached launch). Read with the product's own headline and field list
+    (`utils.detach`), like the result line above; a product that cannot be
+    imported records no banner rather than a guessed one.
+    """
+    lines = [line.rstrip("\r\n") for line in captured]
+    if not any(line.lstrip().startswith("===") for line in lines):
+        return None   # no headline-shaped line: skip the import on every receipt
+    try:
+        from utils.detach import BANNER_FIELDS, BANNER_HEADLINE  # type: ignore
+    except Exception:  # noqa: BLE001 - a receipt is evidence, never a failure path
+        return None
+    try:
+        start = next(i for i, line in enumerate(lines)
+                     if line.strip() == BANNER_HEADLINE)
+    except StopIteration:
+        return None
+    field = re.compile(r"^\s*(%s):\s*(.+?)\s*$"
+                       % "|".join(re.escape(name) for name in BANNER_FIELDS))
+    fields: dict = {}
+    for line in lines[start + 1:]:
+        match = field.match(line)
+        if match:
+            fields.setdefault(match.group(1), match.group(2))
+        elif fields:
+            break
+    return fields or None
 
 
 def _claim_receipt_slot(receipt_dir: Path) -> tuple[int, int]:

@@ -686,6 +686,9 @@ COPY skills/multi-llm/tests/container/stub_server.py    /opt/mllm/rig/stub_serve
 COPY skills/multi-llm/tests/container/wrapper.py        /opt/mllm/rig/wrapper.py
 COPY skills/multi-llm/tests/container/seed_workspace.py /opt/mllm/rig/seed_workspace.py
 COPY skills/multi-llm/tests/container/seed_cli_surface.py /opt/mllm/rig/seed_cli_surface.py
+# Row 8 of plans/opencode-plugin-publish.md: the opencode package-gate scenarios,
+# imported by entrypoint.py (`--probe gate-*`), so it sits beside it.
+COPY skills/multi-llm/tests/container/opencode_package_gate.py /opt/mllm/rig/opencode_package_gate.py
 # The credentialed provider lane (harness-expansion.md §7.4). It is NOT reached
 # through entrypoint.py: the lane bypasses the PATH wrapper on purpose -- the
 # wrapper's whole job is to scrub the vendor credential and point the CLI at the

@@ -139,3 +139,15 @@ phase folders and its own temp/lock files — fix round 8) are left out of the c
 each drop printed once (`Left out N of the workflow's own file(s)`). Implement's first run (no `head_before_implement`
 yet) re-takes the dirty-tree baseline an apply phase recorded at its own start, before it edited the
 plan (`record_pre_existing_changes`).
+
+**The diff base exists before the first commit.** `head_at_start` (a new `state.json`) and
+`head_before_implement` are `git_utils.head_or_empty_tree()`: `HEAD`'s commit, or git's empty tree
+when `HEAD` is unborn (`head_is_unborn`: a plain `git init`, or `git checkout --orphan`). Nothing is
+committed then, so every file is new: `validate_git_ref` falls back to the empty tree rather than to
+`HEAD~1` and then no base at all, `paths_in_commit` reads a tree (the empty one holds no path, so a
+file implement made is `created`), and `review-scope.md` names its base as the empty tree. A first-time
+user's project is exactly this repository, and every mode that opened the state used to exit 1 on it
+with `GitError: git rev-parse HEAD failed`. It is fixed here, in the shared runtime, never by an
+initial-commit prerequisite; `tests/test_no_commit_repository.py` runs every mode the tool exposes in
+such a repository, and nothing in it commits. `get_current_head()` stays strict for callers that mean
+a commit.
