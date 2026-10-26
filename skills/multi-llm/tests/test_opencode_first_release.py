@@ -808,7 +808,10 @@ class TestPublishArgv:
         (lambda a, g: ["npm", "pack"] + a[2:], "not an `npm publish"),
         (lambda a, g: [x for x in a if not x.startswith("--prefix")], "project root"),
         (lambda a, g: a + ["--prefix=/home/maintainer/project"], "project root"),
-        (lambda a, g: [a[0], a[1], os.path.relpath(a[2])] + a[3:], "relative path"),
+        # Relative to the tarball's grandparent, not the cwd: on Windows the
+        # temp directory and the checkout can sit on different drives.
+        (lambda a, g: [a[0], a[1], os.path.relpath(a[2], os.path.dirname(os.path.dirname(a[2])))]
+         + a[3:], "relative path"),
     ], ids=["directory", "scripts", "provenance", "provenance-value", "other-registry",
             "two-registries", "access", "not-publish", "no-prefix", "two-prefixes",
             "relative-tarball"])
