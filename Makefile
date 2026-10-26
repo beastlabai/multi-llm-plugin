@@ -918,7 +918,8 @@ opencode-print-registry:
 # The version is pyproject.toml's, shared by all three distributions, so HEAD's
 # version must either be released already WITH THIS SAME shared payload, or be
 # newer than every codex-v* and opencode-v* tag and every version npm lists for
-# the package. Reads git and the registry; writes nothing. A shallow or tagless
+# the package (npm's own 0.0.0-stage stub, `"stub": true`, is reported and
+# skipped). Reads git and the registry; writes nothing. A shallow or tagless
 # clone is refused, never read as "no releases" — run it from a full clone with
 # every tag.
 #

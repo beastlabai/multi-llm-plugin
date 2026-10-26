@@ -41,6 +41,13 @@ released and therefore in every complete history. Codex's own rules still pass
 that state vacuously (an empty ``release_tags()`` is "nothing to compare"); this
 is the check that does not.
 
+**npm's staged-publishing stub is not a release.** A package's first direct
+``npm publish`` leaves ``<name>@0.0.0-stage`` beside the real version: a
+placeholder the registry itself marks ``"stub": true``. No tag names it, and
+none ever will, so it is held out of npm's list. The registry's manifest for
+that exact version says so (:func:`npm_is_stub`), never the name alone
+(:data:`NPM_STUB_VERSION`).
+
 **It is out of the ``tests`` workflow on purpose.** After V is released,
 ``master`` may change shipped bytes while still saying V (the post-release
 policy); that is unreleased development, and this check refuses a release from
@@ -114,6 +121,16 @@ NPM_VIEW_FLAGS: Tuple[str, ...] = (
     "--fetch-timeout=20000",
 )
 NPM_VIEW_BUDGET_S = 90
+
+#: npm's staged-publishing placeholder. ``opencode-multi-llm``'s first publish
+#: (a direct ``npm publish`` of 0.1.1, 2026-10-26) also created this version,
+#: published at the package's creation time: two files, 340 bytes,
+#: ``"description": "Temporary package placeholder for staged publishing"``,
+#: and ``"stub": true`` in its manifest. The maintainer leaves it on npm.
+#: Matching this name only opens the question: :func:`npm_is_stub` asks the
+#: registry, and a ``0.0.0-stage`` whose manifest is not a stub stays a version
+#: no tag names.
+NPM_STUB_VERSION = "0.0.0-stage"
 
 #: semver.org's grammar, ``+build`` accepted. Tag names and npm's list are both
 #: held to it; a name that is not a version cannot be compared with one.
@@ -415,12 +432,19 @@ def read_releases(
 
 @dataclass(frozen=True)
 class RegistryAnswer:
-    """npm's version list for the package, or its documented absence."""
+    """npm's version list for the package, or its documented absence.
+
+    ``versions`` holds the releases: npm's list minus ``stubs``, the
+    staged-publishing placeholders the registry confirmed
+    (:func:`npm_is_stub`). Every rule reads ``versions``, so a stub is never
+    tag-checked and never compared.
+    """
 
     package: str
     registry: str
     versions: Tuple[str, ...]
     absent: bool
+    stubs: Tuple[str, ...] = ()
 
 
 def _run_npm(argv: Sequence[str], timeout: float) -> "subprocess.CompletedProcess[str]":
@@ -472,6 +496,80 @@ def npm_view_argv(package: str, registry: str) -> Tuple[str, ...]:
     return ("npm", "view", package, "versions", "--registry", registry, *NPM_VIEW_FLAGS)
 
 
+def npm_manifest_argv(package: str, version: str, registry: str) -> Tuple[str, ...]:
+    """``npm view <package>@<version>``: that one version's whole manifest,
+    asked with :func:`npm_view_argv`'s registry and flags."""
+    return ("npm", "view", f"{package}@{version}", "--registry", registry, *NPM_VIEW_FLAGS)
+
+
+def _npm_view(
+    argv: Sequence[str], runner: Optional[NpmRunner],
+) -> Tuple["subprocess.CompletedProcess[str]", str, object]:
+    """Run one ``npm view … --json`` within :data:`NPM_VIEW_BUDGET_S`: the
+    answer, its stripped stdout, and that stdout parsed (``None`` when it is
+    empty or not JSON)."""
+    run = runner if runner is not None else _run_npm
+    done = run(argv, NPM_VIEW_BUDGET_S)
+    stdout = (done.stdout or "").strip()
+    try:
+        parsed = json.loads(stdout) if stdout else None
+    except ValueError:
+        parsed = None
+    return done, stdout, parsed
+
+
+def _npm_error(
+    done: "subprocess.CompletedProcess[str]", parsed: object,
+) -> Tuple[Optional[str], str]:
+    """A failed ``npm view --json``'s error code and summary. ``--json`` puts
+    them on stdout as ``.error``. An npm that printed no JSON leaves only
+    stderr's ``npm error code`` line."""
+    error = parsed.get("error") if isinstance(parsed, dict) else None
+    error = error if isinstance(error, dict) else {}
+    code = error.get("code")
+    if not code:
+        stderr_code = re.search(r"npm (?:error|ERR!) code (\S+)", done.stderr or "")
+        code = stderr_code.group(1) if stderr_code else None
+    summary = " ".join(str(error.get(key) or "") for key in ("summary", "detail")).strip()
+    return code, summary
+
+
+def npm_is_stub(
+    package: str, version: str, registry: str, *, runner: Optional[NpmRunner] = None,
+) -> bool:
+    """Whether the registry's own manifest of *package*@*version* says
+    ``"stub": true``, npm's mark for its staged-publishing placeholder.
+
+    Three outcomes, as in :func:`npm_versions`. If npm exits 0 with the
+    manifest of that exact name and version, that is the answer: ``True`` for
+    the JSON ``true`` alone. Any other value, or no ``stub`` key, is ``False``,
+    and the version stays under the tag rule. Everything else raises,
+    ``E404`` included: npm has just listed the version, so a manifest it
+    cannot produce is not evidence of anything. If that were read as "a stub",
+    a probe that never answered would excuse a version. If it were read as
+    "not a stub", the refusal would blame a tag for what is a registry outage.
+    """
+    argv = npm_manifest_argv(package, version, registry)
+    done, stdout, parsed = _npm_view(argv, runner)
+    if done.returncode == 0:
+        if (not isinstance(parsed, dict) or parsed.get("name") != package
+                or parsed.get("version") != version):
+            raise ReleaseHistoryError(
+                f"`{' '.join(argv)}` exited 0 but printed no manifest of "
+                f"{package}@{version}: {stdout[:200]!r}"
+            )
+        return parsed.get("stub") is True
+    code, summary = _npm_error(done, parsed)
+    raise ReleaseHistoryError(
+        f"npm could not read {package}@{version}'s manifest on {registry}: exit "
+        f"{done.returncode}, code {code or '<none>'}"
+        + (f" ({summary.splitlines()[0]})" if summary else "")
+        + f". npm lists {version}, and only that manifest's \"stub\": true makes it "
+        "npm's staged-publishing placeholder rather than a version no tag names. "
+        "Re-run once the registry answers."
+    )
+
+
 def npm_versions(
     package: str, registry: str, *, runner: Optional[NpmRunner] = None,
 ) -> RegistryAnswer:
@@ -483,15 +581,16 @@ def npm_versions(
     network error, ``E403``/``E429``/``E5xx``, a timeout, output that does not
     parse, is npm declining to answer, and it raises: read as "no versions" it
     would let a version npm already holds look unreleased.
+
+    One listed version gets a second question. If npm lists
+    :data:`NPM_STUB_VERSION`, :func:`npm_is_stub` asks for its manifest, with
+    the same runner, flags, registry and budget. When the manifest says
+    ``"stub": true``, the version moves into ``stubs`` and out of
+    ``versions``. When it does not, the version stays in ``versions``. A
+    probe npm does not answer raises, like the list itself.
     """
     argv = npm_view_argv(package, registry)
-    run = runner if runner is not None else _run_npm
-    done = run(argv, NPM_VIEW_BUDGET_S)
-    stdout = (done.stdout or "").strip()
-    try:
-        parsed = json.loads(stdout) if stdout else None
-    except ValueError:
-        parsed = None
+    done, stdout, parsed = _npm_view(argv, runner)
     if done.returncode == 0:
         listed = [parsed] if isinstance(parsed, str) else parsed
         if not isinstance(listed, list) or not all(isinstance(v, str) for v in listed):
@@ -503,13 +602,15 @@ def npm_versions(
             raise ReleaseHistoryError(
                 f"{registry} lists {package} versions that are not semver: {', '.join(bad)}"
             )
-        return RegistryAnswer(package, registry, tuple(listed), absent=False)
-    error = parsed.get("error") if isinstance(parsed, dict) else None
-    code = error.get("code") if isinstance(error, dict) else None
-    if not code:
-        stderr_code = re.search(r"npm (?:error|ERR!) code (\S+)", done.stderr or "")
-        code = stderr_code.group(1) if stderr_code else None
-    summary = " ".join(str((error or {}).get(key) or "") for key in ("summary", "detail")).strip()
+        stubs = tuple(
+            v for v in listed
+            if v == NPM_STUB_VERSION and npm_is_stub(package, v, registry, runner=runner)
+        )
+        return RegistryAnswer(
+            package, registry, tuple(v for v in listed if v not in stubs),
+            absent=False, stubs=stubs,
+        )
+    code, summary = _npm_error(done, parsed)
     if code == "E404" and package in summary:
         return RegistryAnswer(package, registry, (), absent=True)
     raise ReleaseHistoryError(
@@ -573,8 +674,9 @@ def check(
 
     Refuses when two tags carrying one version have different shared-payload
     digests, or a tag's name differs from its commit's ``pyproject.toml``
-    version; when npm lists a version no ``opencode-v*`` tag names; and when the
-    candidate breaks the version-choice rule. Also when the history cannot be
+    version; when npm lists a version no ``opencode-v*`` tag names (npm's own
+    staged-publishing stub is reported, not refused); and when the candidate
+    breaks the version-choice rule. Also when the history cannot be
     read: a shallow or tagless clone, an unreadable tag, a registry that does
     not answer. *runner* stands in for npm (the suite's stub registry).
     """
@@ -623,6 +725,7 @@ def check(
             )
 
     # 2. npm's list: every version it holds was published from an opencode-v* tag.
+    # A confirmed stub is in npm.stubs, not npm.versions: one line, no rule.
     npm: Optional[RegistryAnswer] = None
     try:
         npm = npm_versions(name, url, runner=runner)
@@ -633,6 +736,11 @@ def check(
             report.lines.append(f"  npm: {name} is not on {url} (E404): no versions")
         else:
             report.lines.append(f"  npm: {name} lists {', '.join(npm.versions) or 'none'}")
+        for stub in npm.stubs:
+            report.lines.append(
+                f"  npm: {stub} is npm's staged-publishing placeholder (\"stub\": true), "
+                "not a release; ignored"
+            )
         tagged = {release_version(r.version) for r in releases if r.family == "opencode"}
         for version in npm.versions:
             if release_version(version) not in tagged:
@@ -663,6 +771,8 @@ def check(
         )
         return report
 
+    # Every tag and npm's releases. Not npm.stubs: a placeholder is never a
+    # version the candidate equals or must be newer than.
     released: Dict[str, List[Release]] = {key: list(items) for key, items in by_version.items()}
     for listed in (npm.versions if npm is not None else ()):
         released.setdefault(release_version(listed), [])
