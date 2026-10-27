@@ -1,6 +1,6 @@
 # Workflow orchestration
 
-Read when changing task generation, full or composite workflows, ask mode, or implementation bookkeeping.
+Read when changing task generation, full or composite workflows, commit reviews, ask mode, or implementation bookkeeping.
 
 Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes retain detailed contracts and regression history from that guide. Paths beginning with `docs/`, `packaging/`, or `plans/` are repository-relative; other implementation paths are relative to `skills/multi-llm/`. Dated incidents explain the rules; verify version-specific claims against current code.
 
@@ -9,6 +9,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Task generation](#task-generation)
 - [Full workflow state machine](#full-workflow-state-machine)
 - [Improve-plan and improve-code](#improve-plan-and-improve-code)
+- [Commit reviews](#commit-reviews)
 - [Ask mode](#ask-mode)
 - [Implementation artifacts and state](#implementation-artifacts-and-state)
 
@@ -270,6 +271,211 @@ with its status and abort commands, never joined, `--force` included, and
 (`full` gets neither). `--interactive` is exit 3 before
 `--yes` is implied. Legacy: no frozen copy; with `MULTI_LLM_LEGACY_INSTRUCTIONS=1` both serve
 the current core with no notice, and `test_every_served_mode_has_a_frozen_copy` exempts exactly these two.
+
+## Commit reviews
+
+**`--review-commits`, `--apply-commit-fixes` and `--improve-commits` are front doors over the code
+phases, not a phase of their own** (`plans/review-commits.md`). Each turns a range into a review-code or
+apply-code-fixes run on a generated **commit brief**, `<commit_reviews_dir>/<slug>.md`, which stands in
+for the plan, so the output dir, `state.json`, locks, `status`, run records, `--reaggregate`, resume lines
+and the recorded-mode check see only review-code or apply-code-fixes. A `commit-review` phase was
+rejected: apply's `review_subdir`, all-of `PHASE_PREREQUISITES`, `REVIEW_PHASE_BY_WRITE_KIND`,
+`OUTPUT_TYPE_TO_PHASE`, the literal `code-review/grouped.json` reads and `next_phase`'s ordering would
+all have had to learn it, where sharing the phase costs one rendering hook (`utils/commit_spelling.py`,
+keyed on `Mode.commit_view_of`). None of the three rows is `is_workflow_phase`, so `full` never runs
+them. `utils/commit_range.py` owns the grammar and every rendered line (block, fix block, drift line,
+result payload, read rule); `utils/commit_review.py` the path layer and the front-door core the three
+doors and `util commit-brief` share; `utils/commit_brief.py` the header bytes, identity, snapshot and
+restart archive; `utils/commit_apply.py` the apply guard.
+
+The core (`commit_review.prepare` for steps 1 to 6, `front_door` adds 7):
+
+1. resolve the range to two full SHAs (`resolve_range`; a brief path reads `commit_range` back through
+   `resolve_recorded`; a no-argument apply picks the review on record, `commit_apply.select_review`);
+2. print the commit block, with the `[SCOPE_DRIFT]` line computed here on review-commits and
+   improve-commits so it lands before any detach boundary;
+3. build the brief header and compare its identity hash with the recorded one;
+4. take ownership of the state the run changes;
+5. write or reuse the brief (archiving a replaced round first) and print `[COMMIT_BRIEF] <path>`;
+6. record `commit_range` through `StateManager.record_commit_range` under `state_file_lock`, creating
+   `state.json` when there is none;
+7. re-record the invocation and call the fronted `main` in-process.
+
+**Steps 1 to 3 only read**, so a second invocation with another `--focus` cannot change a run in flight
+before it is refused or re-attached; the one earlier write is the brief's empty output and phase dirs,
+with a new folder's `.gitignore`. Ownership is the dir's `.lock` with no live detached run recorded
+there (`detach.classify_run`): `<slug>/code-review/` for a header rewrite, whichever door asks;
+`apply-fixes/` for the guard's writes; the run dir and both step dirs for improve-commits. In the
+foreground the lock is taken non-blocking with `ImproveWorkflow.run_mode`'s retry; review-commits and
+apply-commit-fixes hold it through the fronted `main`, which runs without `--internal-worker` and never
+takes it. improve-commits holds the review dir's lock through `entry_point` too, handed to the composite
+with `improve_workflow.holding`: its preflight does not count it as another run's, and `run_mode` runs
+the review step under it instead of taking it again, so the round stays owned through the apply step.
+`util commit-brief` holds it for steps 4 to 6 only. A refusal is the live-run exit 3 plus
+`brief and state left unchanged`. **Under `--detach` the launcher publishes nothing:** it writes the
+header, `commit_range` and any new context-plan snapshot to `<phase dir>/.commit-stage-<hex>.json`,
+names it with the hidden `--commit-stage` (dropped from replay like `--revs`), and the worker applies
+it right after `_acquire_lock` (`commit_review.apply_stage`), before the phase reads the brief. A refused or re-attached
+launch deletes its stage and a worker that loses the lock applies nothing; a brief that does not exist yet
+is the exception, created by the launcher with an exclusive create. The restart's synthesised
+`--force --rerun-all` never takes over a live run: in `detach.launch` only a typed `--force` does, which
+the stage records as `typed_force`.
+
+**What step 7 records.** Three readers take the invocation record as it stands: `maybe_detach`'s mode
+check, the detached child's argv (`detach.build_worker_argv`) and `_emit_user_next_step`, which answers
+only for a workflow phase or a composite. So review-commits records as `review-code` and
+apply-commit-fixes as `apply-code-fixes`: the normalized argv minus the front-door-only tokens (the range,
+`--focus`, `--context-plan`), plus `--plan-file <brief>` (and `--base-ref <base> --head-ref <head>` on the
+review), the restart's `--force --rerun-all` and, under `--detach`, the stage flag, recorded only once the
+brief and `commit_range` (or the stage) are in place. improve-commits records as itself, because
+`entry_point` crosses its boundary as the row's own `MODE_NAME` and its run dir is
+`<slug>/improve-commits/`; the argv carries the pinned range and no `--base-ref`/`--head-ref`, and the
+`--internal-worker` child re-enters the front door, which is idempotent there (no block, ownership,
+header or write; base and head from the stage) and synthesises them again. Because the doors synthesise
+`--plan-file`, `--base-ref` and `--head-ref`, a typed one is `[COMMIT_FLAG_CONFLICT]` (exit 3, checked on
+the typed tokens before `_normalize_positionals`), and the rendering hook keeps all three out of every
+printed command, which names the commit mode and the pinned `<base12>..<head12>` (a root range's brief
+path) instead.
+
+**`commit_range` is written before the phase, never during it.** One writer outside the phase (step 6, or
+the worker's stage) serves every door, and the phase carries the record unchanged through
+`_load_or_create`/`save()` (its `--force` pops only `phases_completed["code-review"]`). The phase writes
+its own fields through the `StateManager` it already holds, since a second instance saved later would put
+an old record back: review-code sets `reviewed_header_sha256` and deletes `guard` when a round starts
+(never when it only resumes missing models), and apply writes `guard`.
+
+**The brief.** The slug is `<base12>-<head12>`, or `root-<head12>` for a range starting at the root commit
+(no `..` in a filename, and never the folder's own name, which `find_output_dir`'s double-nesting guard
+would catch). The folder comes only from `provider_registry.get_commit_reviews_dir`, joined to the anchor's
+git root; its validation, self-ignoring `.gitignore` and `[COMMIT_REVIEWS_NOT_IGNORED]` are in
+[docs/configuration.md](../configuration.md#good-to-know). The header sits between
+`<!-- multi-llm:commit-brief v1 -->`, always line 1 (`is_commit_brief` reads it), and
+`<!-- /multi-llm:commit-brief -->`; a rewrite keeps everything below the closing marker byte for byte, and
+there is no `TASKS_FILE` marker. Commit text is data: each message is fenced one backtick longer than its
+longest backtick run, every other `<!--` is written `<!- -`, and the caps (`BRIEF_MAX_COMMITS = 100`, 2048
+bytes per message, 32 KiB of messages, 100 stat lines) each leave a marker naming the git command that
+prints what was cut. The fencing and the caps are presentation only: neither enters the identity below.
+
+- **Identity, not text.** `header_sha256` is the SHA-256 of the canonical JSON of
+  `{base, head, focus, plan, plan_sha256}` (`commit_brief.header_identity`), with `plan` repo-relative in
+  git's form and `plan_sha256` the snapshot's. The phrase, window, table, messages and stat are not in it,
+  so `last 2 commits`, `-2`, the pinned spelling and the brief path reach one review, and `phrase`/`window`
+  stay as first resolved. An omitted `--focus` or `--context-plan` inherits the record and only a typed,
+  different value (`""` clears) changes the identity; replays never carry either flag. apply-commit-fixes
+  never rewrites the header: a differing typed value prints `[COMMIT_REVIEW_KEPT]`.
+- **The context plan is frozen** as `<slug>/context-plan.md`, written from the one read that sets
+  `plan_snapshot` and `plan_sha256`. Every reader names the snapshot (the prompt's `{plan_block}`, both
+  validation legs, revalidation), validation's `inputs` gain `context_plan_sha256`, and an inherited plan
+  whose live file moved on prints `[CONTEXT_PLAN_CHANGED]` and continues on the snapshot. Fresh review,
+  resume and reaggregate refuse a missing or changed snapshot. Validation and revalidation task files
+  record `context_plan_file` relative to the phase directory; executor dispatch rechecks its raw-byte
+  hash even when given a document already in memory. Explicitly repeating `--context-plan <path>`
+  restores a damaged snapshot from the user's file, including when the identity is unchanged.
+- **A restart archives the replaced round.** A changed identity rewrites the header only after step 4 and
+  passes `--force --rerun-all` with `[COMMIT_REVIEW_RESTARTED]`. First, `commit_brief.archive_round`
+  renames every entry of `<slug>/code-review/` except `RESTART_KEEP` (`.lock`, `.status.lock`,
+  `.status.json`, `orchestrator-run.log`), the stage file and earlier archives into
+  `restarted-<YYYYmmdd-HHMMSS>[.<µs>]/`, which the phase's non-recursive globs never read. `--rerun-all`
+  alone would leave an old-set-only model's `<model>.json`, which `retire_result_from_another_scope`
+  misses because a changed focus keeps the scope id, and apply would read the old `user_selections.json`
+  against new groups. No decision is carried over, not even by group hash (reworded findings rehash,
+  positional `G<g>S<s>` keys name other findings): `[COMMIT_REVIEW_ARCHIVED]` and
+  `[COMMIT_DECISIONS_DROPPED]` (counted with apply's own readers) say what moved. Move first, header
+  second, so a crash between them leaves the old identity and the next typed change restarts again.
+  A `state.json` that exists but gives no record (it does not parse, is `[]`, or holds no range) is
+  treated the same way when the header would change: nothing says which header the old round
+  answers, so it is archived and restarted, and step 6 still prints `[STATE_REPLACED]`. Under
+  `--detach`, `[COMMIT_REVIEW_RESTARTED]` and `[COMMIT_DECISIONS_DROPPED]` print only after the launch,
+  once a worker has consumed the stage; a refused launch restarted nothing and says nothing.
+- **Briefs are never under review.** `commit_review.commit_review_artifact(path, folder)` matches
+  `<folder>/<slug>.md` and anything under `<folder>/<slug>/` by string, and `_drop_workflow_paths` and
+  `finalize_tracking._drop_workflow_files` drop those on every mode, whatever the run's plan.
+
+**Two commits, drift and the pinned-head read rule.** review-code's `--head-ref` diffs `base..head`
+everywhere (`SCOPE_SOURCE_COMMIT_RANGE`, `head_ref=` threaded through `git_utils`; `None` stays
+byte-identical). A root range's base is the computed, never-abbreviated empty-tree id, and
+`commit_range.diff_base` is the one converter. `pinned_endpoints(state)` reads `commit_range`, else the
+`head_ref` record of a direct `review-code <plan> --base-ref A --head-ref B` run, and every endpoint reader
+keys on it; recorded SHAs re-resolve strictly (`resolve_recorded`, `[RANGE_UNRESOLVED]`), never through
+`validate_git_ref`'s `HEAD~1` fallback.
+
+- **Drift is `git_utils.paths_changed_since(head, paths)`, the one change test**, shared with the apply
+  guard so the drift list and the guard's skips never disagree about a file. Three reads, each one call
+  over all the paths: `git diff --name-only --no-renames -z <head> --` (later commits, staged and unstaged
+  edits, mode-only changes, deletions; no rename pairing, so every path is listed under its own name),
+  `paths_in_commit(<head>, …)` plus an `lstat` (absent at `head` but present on disk, a non-regular
+  entry), and `ls-files -v -z` (skip-worktree `S`, assume-unchanged lowercase). A failing read marks every
+  path changed. The front door runs it at step 2 over the range's scope narrowed by `--files` /
+  `--files-from <file>` (never `--files-from -`), prints `[SCOPE_DRIFT]` in the block and records
+  `commit_range.drifted`; the fronted review-code reads that and never recomputes, and a direct run checks
+  in its own pre-flight and records `head_ref.drifted`. Drift warns; the run continues.
+- **The pinned-head read rule** (`commit_range.pinned_head_read_rule`, followed by `DATA_UNDER_REVIEW`):
+  every code read a model makes goes to `head` (`git show <head>:<path>`, `git show <base>:<path>` for a
+  path the range deleted or renamed, `git ls-tree`, `git grep`), never `cat`, `rg` or a file-read tool on
+  the working tree, whatever drift found, because drift sees only the scope files and only at launch. It
+  renders in the review prompt's `{diff_access}` (both templates), both validation legs and the
+  revalidation tasks. It is an instruction, not enforced at read time; Python's own reads use `head`
+  (excerpts through `read_at_commit`, report context through `capture_file_snapshots_at`, blame), and
+  attribution blames a drifted file's group only when its `anchor_text` is there at `head`
+  (`model-drifted` otherwise).
+- **Pinned attributes.** Diffs, hunks, range statistics and rename detection use
+  `git --attr-source=<head>` (Git 2.41+) so later `.gitattributes` cannot hide a text diff or
+  change its counts. Older Git uses a temporary private index loaded from `head` and an empty
+  worktree; the real index and checkout stay untouched. `_linguist_generated` uses
+  `git check-attr --source=<head>` (Git 2.40+). On an unknown-option failure it uses the same
+  pinned attribute fallback, with one warning naming the Git version. Other classification
+  failures classify nothing by attribute, with one warning.
+
+**The apply guard** (`commit_apply.take_guard`) is keyed on `pinned_endpoints`, so it runs for
+`--apply-commit-fixes`, improve-commits' apply step on both legs, a plain `apply-code-fixes <brief>` and
+`apply-code-fixes <plan>` after a direct `--head-ref` review. Its hook in `utils/apply_orchestrator_base.py`
+sits right after `filter_items`, before the no-items exit, human decisions and batching, and prints
+`[COMMIT_FIXES]` from the decision it saves under the pinned record's `guard`, which `status` and the result
+line's `commit_fixes` read too. A new review round removes `guard`, so the next apply decides afresh.
+
+- **Per group, never partly applied.** A group naming the context plan is skipped first
+  (`context plan <path> is read-only in this review`), then one with a fix file `paths_changed_since`
+  marks, then one naming a protected path. A symlinked context plan keeps the link's own name, so the
+  in-repository targets of its chain are saved with their disk ids (`guard.context_plan_targets`,
+  `commit_apply.context_plan_paths`): a fix naming one is skipped as the context plan, and both write legs
+  watch and deny them like the plan. Granularity is the whole file: a fix is prose a model carries
+  out, not a patch to `git apply --check`.
+- **Expectations, never approvals.** `guard.expect[path]` is the content a passed file must still have:
+  `{"kind": "head", "blob": <id> | null}` from `git_utils.blobs_in_commit` (`null` is absent at `head`, so
+  a creation or restoration fix can land), re-pinned after each completed batch to
+  `{"kind": "batch", "sha256": …, "task_id": …}` (the executor's audit `sha256_after`; natively
+  `util batch-done --status completed`). A blob id and a SHA-256 are compared only with their own kind.
+- **Every batch is re-checked right before dispatch**, since it can start long after the first decision
+  (after judging, earlier batches, a stopped batch or a `--resume`): `commit_apply.recheck_files` runs in
+  `write_batch_scheduler._dispatch_one`, in `util write-prompt` natively, and over every group left on a
+  `--resume`. A failing batch is not dispatched (`[COMMIT_FIXES_STALE]`; natively no prompt, exit 0), its
+  groups naming a failing file are skipped, those files join the protected set, the batch's other groups
+  are held back `failed` through `_refuse_before_dispatch` for a `--resume` to re-batch, and the run goes
+  on.
+- **The protected set** (`guard.protected`, `{path: blob id | null}`) is every path that differs from
+  `head` anywhere in the repository (`git diff --name-only <head>` plus untracked, non-ignored files
+  and skip-worktree/assume-unchanged entries, whose disk copy `git diff` never reads, bar a sparse
+  checkout's absent ones; workflow paths left out), taken once and reused on `--resume`, because a
+  batch writes repo-wide and a fix in unchanged `a.py` can still edit drifted `b.py`. `code_only_rule`
+  names it (20 paths, the rest in `apply-fixes/protected_paths.txt`), a fix naming one is skipped, and
+  after each batch the blob ids are compared: the executor's exact-path deny layer in `WritePolicy`
+  fails the batch and restores the
+  pre-batch snapshot, and natively `util batch-done` refuses with `[COMMIT_PROTECTED_WRITE]`, naming the
+  copies the guard kept in `apply-fixes/protected/`. Like the executor's rollback store, the guard never
+  copies a path `driver.write_paths.deny` names (`commit_apply.copy_protected`), so a credential in the
+  protected set is not duplicated into the run's artifacts: it stays watched, and its way back is by hand.
+  On the executor that comparison does not depend on the
+  post-run undeclared-write sweep (which is skipped over `SWEEP_MAX_FILES`): after every batch the protected
+  paths and the context plan are re-hashed against their ids from just before that batch, and an offender is
+  restored from the snapshot, else from the guard's copy, else deleted when it was absent. The ids are taken
+  per batch, so a user's own edit between batches is never rolled back. Natively the same window runs from
+  `util write-prompt`, which records the watched ids in `guard.bound[<task id>]` as it binds the prompt,
+  to `util batch-done`, which compares with them (the saved ids when the prompt was not bound through it)
+  and names the guard's copy as the way back only when it holds what the path held before the batch. A
+  `--resume` drops the bind records and refreshes the context plan's saved id and copy. A watched path
+  that cannot be read is named once in `[COMMIT_FIXES]` (`guard.unreadable`) and its groups skipped; only
+  a move into or out of readability counts as a change. The runner's `repo-wide` grant is
+  unchanged: this is a detective deny layer, not a narrower sandbox.
 
 ## Ask mode
 

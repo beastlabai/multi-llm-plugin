@@ -287,3 +287,27 @@ def join_clauses(parts: Any, separator: str = CLAUSE_SEPARATOR) -> str:
         return ""
     return separator.join(
         [without_closing_mark(part) for part in kept[:-1]] + [kept[-1]])
+
+
+def drop_said_clauses(text: Any, said: Any) -> str:
+    """*text* without the clauses *said* already carries word for word
+    (:func:`plain_line`, closing mark aside): *text* as it is when it repeats
+    none, ``""`` when it repeats every one.
+
+    A composite joins the notice each of its phases recorded as if it were the
+    only one, and two phases word one fact alike: implement's and
+    apply-code-fixes' "Nothing ran this repository's tests: …", which a stop's
+    error may end with too (Fable review of D2, 2026-10-27). Split where
+    :func:`join_clauses` joins, so a part that repeats one clause of an
+    earlier one keeps the rest.
+    """
+    whole = str(text or "").strip()
+    seen = plain_line(said)
+    clauses = [clause for clause in whole.split(CLAUSE_SEPARATOR) if clause.strip()]
+    kept = [
+        clause for clause in clauses
+        if plain_line(without_closing_mark(clause)) not in seen
+    ]
+    if len(kept) == len(clauses):
+        return whole
+    return with_closing_mark(join_clauses(kept)) if kept else ""

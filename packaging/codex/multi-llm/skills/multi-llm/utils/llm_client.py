@@ -2944,6 +2944,12 @@ GENERATE_READ_SCOPES = ("none", "cwd", "any")
 #: point it at ("the ``review-scope.md`` block below") instead of a path.
 INLINE_MANIFEST_LABEL = "review-scope.md"
 
+#: What the inline branch calls a commit review's frozen context plan
+#: (``commit_range.plan_snapshot``, plans/review-commits.md §2.4): the
+#: snapshot's own file name (``commit_brief.CONTEXT_PLAN_SNAPSHOT``), so the
+#: commit template's ``{plan_block}`` can point an inline lane at the block.
+INLINE_CONTEXT_PLAN_LABEL = "context-plan.md"
+
 #: Shared by the three path texts. Deliberately names no command: only the
 #: ``True`` text may.
 _MANIFEST_SENTENCE = (
@@ -3020,6 +3026,107 @@ DIFF_ACCESS_UNMEASURED_PARTIAL = (
     "if they were the change."
 )
 
+# A review pinned to a commit (``--head-ref``: a direct two-commit run, or a
+# commit brief; plans/review-commits.md §2.5). The change is `git diff <base>
+# <head>`, so the working tree is never the reviewed content, for any file, and
+# nothing below says it is: the shell text's third command reads a file at the
+# head commit (`git show`), never with `cat`. The block opens by naming the
+# change as `<base7>..<head7>`, says it ends at the head commit and not at the
+# working tree, names the files that changed on disk since that commit, and
+# closes with the pinned-head read rule (with the §2.6 trust sentence), so
+# `code_review.txt`'s fixed "everything since it" is corrected on a direct run.
+# `{sides}` is `<base> <head>` as git takes them, `{head}` the head commit's
+# 12-character prefix.
+
+#: ``runs_shell_in_generate is True`` on a pinned review.
+DIFF_ACCESS_PINNED_SHELL_TEXT = (
+    "The diff files in {diff_dir} are the authoritative record of the change. "
+    + _MANIFEST_SENTENCE
+    + " Read the manifest first, then each entry's diff file, with your file "
+    "tools.\n"
+    "\n"
+    "You can also run shell commands. `git diff {sides}`, `git show` and "
+    "`git log` are an optional cross-check of the diff files, never a "
+    "replacement for reading them:\n"
+    "1. **All changes at once:** `git diff {sides} -- <file1> <file2> ...`\n"
+    "2. **One file's changes:** `git diff {sides} -- path/to/file`\n"
+    "3. **A file as the head commit holds it:** `git show {head}:path/to/file`\n"
+    "\n"
+    "`git diff {sides} -- <path>` is required for any file the manifest "
+    "marks `omitted`: it has no diff file, so that command's output is the only "
+    "record of its change you can review."
+)
+
+#: The shell state's partial-coverage sentence on a pinned review.
+DIFF_ACCESS_PINNED_SHELL_PARTIAL = (
+    "Diff coverage for this change is partial: git produced no diff file for "
+    "the files the manifest marks `omitted`. Run `git diff {sides} -- "
+    "<path>` for each of them and review it from that output; if the command "
+    "fails, list the file as not reviewed. Do not review their working-tree "
+    "contents as if they were the change."
+)
+
+#: What a lane with no shell (or an unmeasured one) is told on a pinned review:
+#: the read rule's commands need a shell, and its alternative is never the disk.
+DIFF_ACCESS_PINNED_NO_SHELL_NOTE = (
+    "Without a shell you cannot run the commands below: review from the diff "
+    "files and the manifest alone, and read no other file from the working "
+    "tree, which may not hold the reviewed code."
+)
+
+#: How many changed-on-disk files the opening names before "… and <k> more"
+#: (the `[SCOPE_DRIFT]` line names the same ten).
+_PINNED_DRIFT_NAMED = 10
+
+
+def _pinned_opening(
+    base_ref: str, head: str, *, root: bool, drifted: Sequence[str],
+) -> str:
+    """The pinned block's first paragraph: which change, where it ends, what
+    drifted. Built by concatenation, never ``str.format``: a drifted path may
+    hold braces."""
+    h7, h12 = head[:7], head[:12]
+    if root:
+        text = (
+            f"The change under review is `root..{h7}`: every commit up to and "
+            f"including `{h7}`, as `git diff {base_ref} {h12}` (the empty tree "
+            f"against that commit). It ends at commit `{h7}`, not at the working "
+            f"tree. The range starts at the repository's first commit, so the "
+            f"diff shows each whole file as new."
+        )
+    else:
+        text = (
+            f"The change under review is `{base_ref[:7]}..{h7}`: the net diff "
+            f"`git diff {base_ref[:12]} {h12}`, ending at commit `{h7}`, not at "
+            f"the working tree."
+        )
+    names = [str(path) for path in drifted if path]
+    if names:
+        shown = ", ".join(f"`{name}`" for name in names[:_PINNED_DRIFT_NAMED])
+        if len(names) > _PINNED_DRIFT_NAMED:
+            shown += f" … and {len(names) - _PINNED_DRIFT_NAMED} more"
+        text += (
+            f" {len(names)} reviewed file(s) have changed since `{h7}` and "
+            f"differ on disk from it, so their working-tree copies are not the "
+            f"reviewed code: {shown}."
+        )
+    return text
+
+
+def _pinned_rule(base_ref: str, head: str, *, root: bool) -> str:
+    """``commit_range.pinned_head_read_rule`` for this pair (imported here, not
+    at module load: ``commit_range`` reaches ``cli_common``)."""
+    from .commit_range import pinned_head_read_rule
+
+    return pinned_head_read_rule(None if root else base_ref, head)
+
+
+def _is_root_base(base_ref: str, cwd: Union[str, Path]) -> bool:
+    """Whether *base_ref* is the repository's empty-tree id (a root range)."""
+    from .git_utils import is_empty_tree_id
+
+    return bool(base_ref) and is_empty_tree_id(base_ref, str(cwd))
+
 #: The inline branch's opening, by read scope. It names no path: the lane
 #: cannot open the phase dir, so every block below is labelled with the name
 #: the manifest uses for it, never an address.
@@ -3029,11 +3136,18 @@ _INLINE_HEAD_BY_SCOPE = {
     "cwd": "The review's artifacts sit outside the directory you can read, so "
     "everything you need is inline below:",
 }
-_INLINE_HEAD_TAIL = (
-    " the plan, the scope manifest (`" + INLINE_MANIFEST_LABEL + "`) and one "
+_INLINE_HEAD_TAIL_REST = (
+    " the scope manifest (`" + INLINE_MANIFEST_LABEL + "`) and one "
     "diff per in-scope source and test file. The diffs are the authoritative "
     "record of the change. Each block is labelled with the name the manifest "
     "uses for it; the labels are names, not files you can open."
+)
+_INLINE_HEAD_TAIL = " the plan," + _INLINE_HEAD_TAIL_REST
+#: The same tail when a commit review has a context plan: its frozen snapshot
+#: is one more block, right after the plan's.
+_INLINE_HEAD_TAIL_CONTEXT_PLAN = (
+    " the plan, the context plan's frozen snapshot (`"
+    + INLINE_CONTEXT_PLAN_LABEL + "`)," + _INLINE_HEAD_TAIL_REST
 )
 
 #: The inline branch's shell sentence, by ``runs_shell_in_generate``. Only the
@@ -3119,6 +3233,10 @@ def _render_inline_diff_access(
     plan_path: str,
     base_ref: str,
     partial: bool,
+    head_ref: Optional[str] = None,
+    pinned_opening: str = "",
+    pinned_rule: str = "",
+    context_plan_path: Optional[str] = None,
 ) -> DiffAccess:
     """The bounded inline branch, or an explicit unsupported outcome.
 
@@ -3128,6 +3246,17 @@ def _render_inline_diff_access(
     :data:`INLINE_DIFF_CAP_BYTES` and the coverage is complete: a partial
     inline review would read as a review of the whole change. A missing
     manifest, plan or cited diff file is a reason, never an exception.
+
+    With *context_plan_path* (a commit review's frozen context plan,
+    plans/review-commits.md §2.4) the snapshot's text is one more block, the
+    :data:`INLINE_CONTEXT_PLAN_LABEL` one right after the plan, and it counts
+    against the cap like the rest: a lane that cannot open the snapshot is
+    shown it, or is not dispatched at all, never left to judge the range
+    without it. An unreadable snapshot is a reason too.
+
+    On a pinned review (*head_ref*) the block opens with *pinned_opening*, its
+    shell sentence names ``git diff <base> <head>``, and *pinned_rule* follows
+    the shell sentence, ahead of the payload; all of it counts against the cap.
     """
     reasons: List[str] = []
     blocks: List[str] = []
@@ -3137,6 +3266,13 @@ def _render_inline_diff_access(
         reasons.append(f"plan file not readable: {plan_path}")
     else:
         blocks.append(_inline_block("plan", plan_text))
+
+    if context_plan_path is not None:
+        context_text = _read_inline_text(context_plan_path)
+        if context_text is None:
+            reasons.append(f"context plan snapshot not readable: {context_plan_path}")
+        else:
+            blocks.append(_inline_block(INLINE_CONTEXT_PLAN_LABEL, context_text))
 
     manifest = _read_inline_text(scope_file)
     if manifest is None:
@@ -3175,10 +3311,21 @@ def _render_inline_diff_access(
         reasons.append("diff coverage is partial")
 
     head = _INLINE_HEAD_BY_SCOPE.get(read_scope, _INLINE_HEAD_BY_SCOPE["none"])
-    shell_sentence = _INLINE_SHELL_BY_STATE.get(runs_shell, _INLINE_SHELL_BY_STATE[None])
-    text = "\n\n".join(
-        [head + _INLINE_HEAD_TAIL, shell_sentence.format(base_ref=base_ref)] + blocks
+    head += (
+        _INLINE_HEAD_TAIL if context_plan_path is None else _INLINE_HEAD_TAIL_CONTEXT_PLAN
     )
+    shell_sentence = _INLINE_SHELL_BY_STATE.get(runs_shell, _INLINE_SHELL_BY_STATE[None])
+    if head_ref is None:
+        text = "\n\n".join(
+            [head, shell_sentence.format(base_ref=base_ref)] + blocks
+        )
+    else:
+        sentence = shell_sentence.format(base_ref=f"{base_ref} {head_ref}")
+        if runs_shell is not True:
+            sentence += " " + DIFF_ACCESS_PINNED_NO_SHELL_NOTE
+        text = "\n\n".join(
+            [pinned_opening, head, sentence, pinned_rule] + blocks
+        )
     size = len(text.encode("utf-8"))
     if size > INLINE_DIFF_CAP_BYTES:
         reasons.append(
@@ -3201,6 +3348,9 @@ def render_diff_access(
     coverage: str,
     plan_path: Union[str, Path],
     anchor: Optional[Union[str, Path]] = None,
+    head_ref: Optional[str] = None,
+    drifted: Sequence[str] = (),
+    context_plan_path: Optional[Union[str, Path]] = None,
 ) -> DiffAccess:
     """Decide how ``model_spec``'s lane reaches the change, and render the block.
 
@@ -3226,7 +3376,24 @@ def render_diff_access(
       :data:`INLINE_DIFF_CAP_BYTES`, otherwise ``mode="unsupported"`` with an
       empty ``text`` and the reason, so the caller dispatches nothing.
 
-    Never raises for a missing manifest, diff or plan file.
+    ``head_ref`` pins the review to a commit (``review-code --head-ref``, a
+    commit brief; plans/review-commits.md §2.5): ``base_ref`` is then the base
+    commit, or the empty-tree id on a root range. The block opens by naming
+    the change as ``<base7>..<head7>`` ending at the head commit, not at the
+    working tree, and names *drifted* (the reviewed files that differ on disk
+    from it) as changed since that commit; every command reads ``git diff
+    <base> <head>`` and a file's content through ``git show <head>:<path>``;
+    nothing says the disk is the reviewed content; and the pinned-head read
+    rule closes it. ``None`` renders today's text byte for byte.
+
+    ``context_plan_path`` is a commit review's frozen context-plan snapshot
+    (``commit_range.plan_snapshot``, plans/review-commits.md §2.4), absolute.
+    The paths branch leaves it to the prompt's ``{plan_block}``, which names
+    it; the inline branch carries its text as one more block, counted against
+    the cap, so an inline lane checks the range against the same plan every
+    other reviewer reads, or is not dispatched (too large, or unreadable).
+
+    Never raises for a missing manifest, diff, plan or snapshot file.
     """
     provider_name, _ = parse_model_spec(model_spec, anchor=anchor)
     provider = get_provider(provider_name)
@@ -3245,10 +3412,28 @@ def render_diff_access(
     # whole diff set, so coverage is partial; the command text still has to
     # read as a command with a slot in it rather than `git diff  -- <path>`.
     ref = base_ref or "<base_ref>"
+    context_plan = (
+        os.path.abspath(str(context_plan_path)) if context_plan_path is not None else None
+    )
 
     reads = read_scope == "any" or (
         read_scope == "cwd" and _lies_within(phase_dir, cwd)
     )
+    if head_ref is not None:
+        return _render_pinned_diff_access(
+            reads=reads,
+            read_scope=read_scope,
+            runs_shell=shell,
+            partial=partial,
+            scope_file=scope_file,
+            diff_dir=diff_dir,
+            plan_path=str(plan_path),
+            base_ref=ref,
+            head_ref=head_ref,
+            drifted=drifted,
+            root=_is_root_base(base_ref, cwd),
+            context_plan_path=context_plan,
+        )
     if not reads:
         return _render_inline_diff_access(
             read_scope=read_scope,
@@ -3258,6 +3443,7 @@ def render_diff_access(
             plan_path=str(plan_path),
             base_ref=ref,
             partial=partial,
+            context_plan_path=context_plan,
         )
 
     if shell is True:
@@ -3270,6 +3456,65 @@ def render_diff_access(
         text = text + "\n\n" + extra
     rendered = text.format(scope_file=scope_file, diff_dir=diff_dir, base_ref=ref)
     return DiffAccess("paths", rendered, read_scope, shell, 0, "")
+
+
+def _render_pinned_diff_access(
+    *,
+    reads: bool,
+    read_scope: str,
+    runs_shell: Optional[bool],
+    partial: bool,
+    scope_file: str,
+    diff_dir: str,
+    plan_path: str,
+    base_ref: str,
+    head_ref: str,
+    drifted: Sequence[str],
+    root: bool,
+    context_plan_path: Optional[str] = None,
+) -> DiffAccess:
+    """:func:`render_diff_access` for a review pinned to *head_ref*.
+
+    The same branch decision (paths, inline or unsupported) and the same
+    per-state texts, with the head commit as the new side: the opening names
+    the change and the drifted files, the body's commands take ``<base>
+    <head>``, and the pinned-head read rule follows. Only the template parts
+    go through ``str.format``; the opening and the rule are concatenated, as
+    paths and commit text may hold braces.
+    """
+    opening = _pinned_opening(base_ref, head_ref, root=root, drifted=drifted)
+    rule = _pinned_rule(base_ref, head_ref, root=root)
+    if not reads:
+        return _render_inline_diff_access(
+            read_scope=read_scope,
+            runs_shell=runs_shell,
+            scope_file=scope_file,
+            diff_dir=diff_dir,
+            plan_path=plan_path,
+            base_ref=base_ref,
+            partial=partial,
+            head_ref=head_ref,
+            pinned_opening=opening,
+            pinned_rule=rule,
+            context_plan_path=context_plan_path,
+        )
+    if runs_shell is True:
+        text, extra = DIFF_ACCESS_PINNED_SHELL_TEXT, DIFF_ACCESS_PINNED_SHELL_PARTIAL
+    elif runs_shell is False:
+        text, extra = DIFF_ACCESS_NO_SHELL_TEXT, DIFF_ACCESS_NO_SHELL_PARTIAL
+    else:
+        text, extra = DIFF_ACCESS_UNMEASURED_TEXT, DIFF_ACCESS_UNMEASURED_PARTIAL
+    if partial:
+        text = text + "\n\n" + extra
+    body = text.format(
+        scope_file=scope_file, diff_dir=diff_dir, base_ref=base_ref,
+        sides=f"{base_ref} {head_ref}", head=head_ref[:12],
+    )
+    parts = [opening, body]
+    if runs_shell is not True:
+        parts.append(DIFF_ACCESS_PINNED_NO_SHELL_NOTE)
+    parts.append(rule)
+    return DiffAccess("paths", "\n\n".join(parts), read_scope, runs_shell, 0, "")
 
 
 #: The ``{working_limits}`` block the review templates carry just above their

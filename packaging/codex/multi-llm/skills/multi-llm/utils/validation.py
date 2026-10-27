@@ -36,7 +36,7 @@ try:
     from .cli_common import (
         current_replay_flags, durable_reaggregate_fields, retry_command,
     )
-    from .subagent_prompts import build_validation_prompt
+    from .subagent_prompts import build_validation_prompt, code_review_validation_guidance
     from .subagent_tasks import (
         PromptBudget,
         TaskFileError,
@@ -71,7 +71,7 @@ except ImportError:
     from utils.cli_common import (
         current_replay_flags, durable_reaggregate_fields, retry_command,
     )
-    from utils.subagent_prompts import build_validation_prompt
+    from utils.subagent_prompts import build_validation_prompt, code_review_validation_guidance
     from utils.subagent_tasks import (
         PromptBudget,
         TaskFileError,
@@ -2417,6 +2417,9 @@ def prepare_batched_validation_tasks(
     runner_read_refusal: Optional[Any] = None,
     phase: Optional[str] = None,
     publish: bool = True,
+    head_ref: Optional[str] = None,
+    context_plan_sha256: Optional[str] = None,
+    context_plan_file: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Prepare batched validation tasks for sequential subagent processing.
@@ -2490,6 +2493,16 @@ def prepare_batched_validation_tasks(
             (defaults to the phase dir's basename).
         publish: Publish ``validation_context`` for this round (the
             materialization caller of :func:`publish_validation_context`).
+        head_ref: The commit a review pinned to two commits ends at
+            (``review-code --head-ref``, plans/review-commits.md §2.5). Then
+            ``inputs.diff_base`` records ``<base_ref>..<head_ref>``, the pair
+            the excerpts were read from; ``None`` keeps ``base_ref`` alone.
+        context_plan_sha256: A commit review's ``commit_range.plan_sha256``
+            (§2.4 "The context plan is frozen"), recorded as
+            ``inputs.context_plan_sha256`` so a resume or reaggregate whose
+            snapshot no longer hashes to it is refused. ``None`` adds no key.
+        context_plan_file: The frozen snapshot's path, recorded relative to the
+            phase directory so executor resumes can verify that raw-byte hash.
 
     Returns:
         Dict with:
@@ -2503,6 +2516,13 @@ def prepare_batched_validation_tasks(
           :func:`resolved_reaggregate_command`, never persisted (D1c)
     """
     grouped_file = str(Path(output_dir) / "grouped.json")
+    context_provenance: Dict[str, str] = {}
+    if context_plan_file and context_plan_sha256:
+        try:
+            source = os.path.relpath(os.path.abspath(context_plan_file), os.path.abspath(output_dir))
+        except ValueError:  # another drive on Windows
+            source = os.path.abspath(context_plan_file)
+        context_provenance["context_plan_file"] = source
     bound_plan = context_document if (
         context_document is not None and context_document.label == "plan"
     ) else None
@@ -2518,8 +2538,11 @@ def prepare_batched_validation_tasks(
         plan_file=None if bound_plan is not None else plan_file,
         grouped_file=grouped_file,
         tasks_file=None if bound_tasks is not None else tasks_file,
-        diff_base=base_ref,
+        diff_base=(
+            f"{base_ref}..{head_ref}" if base_ref and head_ref else base_ref
+        ),
         reviewed_code=reviewed_code,
+        context_plan_sha256=context_plan_sha256,
     )
     if bound_plan is not None:
         inputs["plan_sha256"] = content_hash(bound_plan.text)
@@ -2530,6 +2553,7 @@ def prepare_batched_validation_tasks(
         if publish:
             publish_validation_context(output_dir, [], phase=phase)
         empty = make_task_file(kind=kind, tasks=[], inputs=inputs, task_list_key="batches", extra={
+            **context_provenance,
             "context_contract": CONTEXT_CONTRACT,
             "total_batches": 0,
             "batching_stats": estimate_validation_batching_stats([]),
@@ -2734,6 +2758,7 @@ def prepare_batched_validation_tasks(
     # rebuilds it at print time from the *running* skill dir — the same split
     # `.status.json` already makes via `cli_common.durable_reaggregate_fields`.
     extra: Dict[str, Any] = {
+        **context_provenance,
         "context_contract": CONTEXT_CONTRACT,
         "total_batches": len(batch_tasks),
         "batching_stats": stats,
@@ -2975,6 +3000,49 @@ def merge_batched_validation_results(
     return merged_results
 
 
+def pinned_validation_guidance(plan_file: Optional[str]) -> str:
+    """The code-review validation guidance for a plan whose review is pinned.
+
+    Reads the plan's ``state.json`` (computed beside the plan, never created)
+    and, when ``utils.commit_range.pinned_endpoints`` finds a ``commit_range``
+    or ``head_ref`` record, returns
+    :func:`~utils.subagent_prompts.code_review_validation_guidance` with the
+    pinned-head read rule (and the frozen context plan's snapshot, on a commit
+    brief that has one). ``""`` when nothing is pinned or the state cannot be
+    read, so an unpinned round's prompts are unchanged. Only reads: a
+    revalidation materializes against the review on record, and must not be
+    the thing that writes the run's state.
+    """
+    if not plan_file:
+        return ""
+    try:
+        from .commit_range import display_range, pinned_endpoints, pinned_head_read_rule
+        from .output_handler import output_dir_path
+    except ImportError:  # pragma: no cover - flat import layout
+        from utils.commit_range import display_range, pinned_endpoints, pinned_head_read_rule
+        from utils.output_handler import output_dir_path
+    try:
+        document = json.loads(
+            (output_dir_path(Path(plan_file)) / "state.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(document, dict):
+        return ""
+    pinned = pinned_endpoints(document)
+    if pinned is None or not pinned.head:
+        return ""
+    record = document.get("commit_range")
+    record = record if isinstance(record, dict) else {}
+    return code_review_validation_guidance(
+        read_rule=pinned_head_read_rule(pinned.base, pinned.head),
+        head=pinned.head,
+        change=display_range(pinned.base, pinned.head),
+        plan_snapshot=record.get("plan_snapshot") or None,
+        plan_sha256=record.get("plan_sha256") or None,
+    )
+
+
 def prepare_batched_revalidation_tasks(
     groups: List[Dict[str, Any]],
     validation_results: List[Dict[str, Any]],
@@ -2990,6 +3058,7 @@ def prepare_batched_revalidation_tasks(
     context_kind: Optional[str] = None,
     runner_read_refusal: Optional[Any] = None,
     phase: Optional[str] = None,
+    extra_instructions: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Prepare batched revalidation tasks for items that failed validation.
@@ -3021,6 +3090,15 @@ def prepare_batched_revalidation_tasks(
             else ``plan``.
         runner_read_refusal: As for :func:`prepare_batched_validation_tasks`.
         phase: The phase name the published ``validation_context`` carries.
+        extra_instructions: Phase guidance appended to every batch prompt, as
+            for :func:`prepare_batched_validation_tasks`. ``None`` derives it:
+            a ``diff`` round (a code review's findings) whose plan state pins
+            the review to a commit gets :func:`pinned_validation_guidance`, so
+            its revalidators read the reviewed code at ``head`` as the review's
+            own validators did (plans/review-commits.md §2.5); anything else
+            gets none, as before. apply-code-fixes passes it explicitly
+            (``get_revalidation_instructions``), because its batches carry
+            the plan fallback as their context, not a ``diff``.
 
     Returns:
         Dict with batches and metadata, or empty batches if nothing to revalidate
@@ -3030,6 +3108,10 @@ def prepare_batched_revalidation_tasks(
     )
     if context_document is not None:
         context = context_document.text
+    if extra_instructions is None:
+        extra_instructions = (
+            pinned_validation_guidance(plan_file) if kind_of_context == "diff" else ""
+        )
     original_sources: List[Dict[str, Any]] = []
     try:
         with open(os.path.join(output_dir, "validation_tasks.json"), "r", encoding="utf-8") as handle:
@@ -3081,6 +3163,20 @@ def prepare_batched_revalidation_tasks(
         )
 
     # Create batched tasks for the subset
+    # Revalidation reads the same frozen context plan, including when invoked
+    # from apply-code-fixes. Carry its expected hash and source into the task file.
+    try:
+        from .commit_report import context_plan_path, run_commit_range
+        from .git_utils import get_project_root
+    except ImportError:  # pragma: no cover - flat import layout
+        from utils.commit_report import context_plan_path, run_commit_range
+        from utils.git_utils import get_project_root
+
+    commit_record = run_commit_range(plan_file)
+    context_plan_file = (
+        context_plan_path(commit_record, repo_root=get_project_root(plan_file))
+        if commit_record else None
+    )
     batched_tasks = prepare_batched_validation_tasks(
         groups=items_to_revalidate,
         context=context,
@@ -3091,6 +3187,9 @@ def prepare_batched_revalidation_tasks(
         orchestrator=orchestrator,
         base_ref=base_ref,
         kind="revalidation",
+        context_plan_file=context_plan_file,
+        context_plan_sha256=(commit_record or {}).get("plan_sha256"),
+        extra_instructions=extra_instructions,
         # The block says which document it carries: the diff a code-fix
         # revalidation judges is labelled a diff, and the plan fallback a plan.
         context_label={

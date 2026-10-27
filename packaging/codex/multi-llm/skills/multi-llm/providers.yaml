@@ -1300,12 +1300,22 @@ git_env:
 # `**/*.lock` or `dist/**` to `generated`, and `[]` switches a rule off.
 # A malformed value (not a list of relative glob strings, or an unknown key)
 # is a config error at load time, never a silent fallback to these defaults.
+#
+# commit_reviews_dir is where --review-commits, --apply-commit-fixes and
+# --improve-commits keep each range's commit brief (<slug>.md) and its report
+# folder (<slug>/), relative to the repository root whichever layer sets it.
+# A folder the plugin creates gets a `.gitignore` holding `*`; delete that file
+# (or point the key at a tracked folder) to commit reviews. Briefs and report
+# folders under it are never code under review. An absolute path, a `..`
+# segment, `.` or an empty string is a config error at load time, and a
+# symlinked component resolving outside the repository is refused at use.
 code_review:
   collapse_paths:
     generated: []
     fixtures:
       - "**/tests/fixtures/**"
       - "**/tests/golden/**"
+  commit_reviews_dir: plans/commit-reviews
 
 # env_allowlist: off | on   (default: off — and it SHIPS off)
 #

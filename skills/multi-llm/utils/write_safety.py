@@ -53,6 +53,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shutil
 import stat
@@ -584,18 +585,30 @@ class PolicyHit:
     *outside* a path outside the repository, which no rule can allow.
     *path* is repo-relative, or, outside the repository, as the task
     declared it (never resolved to an absolute path).
+
+    *protected* is the rule text of :attr:`WritePolicy.exact_deny` when that
+    layer refuses the path (plans/review-commits.md §2.7, "The commit write
+    policy": ``changed since reviewed commit <head7>``), ``""`` otherwise. No
+    ``driver.write_paths`` change lets such a write through, so the way
+    forward never offers one (:func:`policy_allow_clause`).
     """
 
     path: str
     deny: Tuple[str, ...] = ()
     allowed: bool = True
     outside: bool = False
+    protected: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         """The stop record's entry (``policy_rules``)."""
         if self.outside:
             return {"path": self.path, "outside": True}
-        return {"path": self.path, "deny": list(self.deny), "allowed": self.allowed}
+        entry: Dict[str, Any] = {
+            "path": self.path, "deny": list(self.deny), "allowed": self.allowed,
+        }
+        if self.protected:
+            entry["protected"] = self.protected
+        return entry
 
     @classmethod
     def from_dict(cls, data: Any) -> Optional["PolicyHit"]:
@@ -609,6 +622,7 @@ class PolicyHit:
             path=str(data["path"]),
             deny=tuple(str(p) for p in deny) if isinstance(deny, list) else (),
             allowed=bool(data.get("allowed", True)),
+            protected=str(data.get("protected") or ""),
         )
 
 
@@ -659,7 +673,10 @@ def policy_allow_clause(refused: Sequence[Any]) -> Optional[str]:
     entries = list(refused or ())
     plain = [str(e) for e in entries if isinstance(e, str) and str(e)]
     hits = policy_hits(e for e in entries if not isinstance(e, str))
-    if any(hit.outside for hit in hits):
+    if any(hit.outside or hit.protected for hit in hits):
+        # Neither a path outside the repository nor one the commit review
+        # protects (§2.7) is a driver.write_paths matter: no rule change
+        # lets the write through (:func:`policy_outside_note` says why).
         return None
     where = f"driver.write_paths ({POLICY_FILE})"
     if plain or not hits:
@@ -726,15 +743,66 @@ def policy_allow_clause(refused: Sequence[Any]) -> Optional[str]:
 def policy_outside_note(refused: Sequence[Any]) -> str:
     """Why no policy change can let a task run (fix round 21): ``../x is
     outside the repository, so no driver.write_paths rule can allow it``,
-    naming each such file as the task declared it."""
-    outside = [hit.path for hit in policy_hits(
-        e for e in (refused or ()) if not isinstance(e, str)) if hit.outside]
-    one = len(outside) <= 1
-    return (
-        f"{describe_paths(outside)} {'is' if one else 'are'} outside the "
-        f"repository, so no driver.write_paths rule can allow "
-        f"{'it' if one else 'them'}"
-    )
+    naming each such file as the task declared it.
+
+    A file the commit review protects (:attr:`PolicyHit.protected`,
+    plans/review-commits.md §2.7) gets :func:`protected_note`'s clause
+    instead, after the outside one when there are both; with neither the
+    note reads exactly as before."""
+    hits = policy_hits(e for e in (refused or ()) if not isinstance(e, str))
+    outside = [hit.path for hit in hits if hit.outside]
+    protected = [hit for hit in hits if hit.protected and not hit.outside]
+    parts: List[str] = []
+    if outside or not protected:
+        one = len(outside) <= 1
+        parts.append(
+            f"{describe_paths(outside)} {'is' if one else 'are'} outside the "
+            f"repository, so no driver.write_paths rule can allow "
+            f"{'it' if one else 'them'}"
+        )
+    if protected:
+        parts.append(protected_note(protected))
+    return "; ".join(parts)
+
+
+#: The exact-path deny layer's rule text for the commit review's context
+#: plan (plans/review-commits.md §2.7, "The user's context plan is
+#: protected"): read-only whether or not it differs from the reviewed head.
+CONTEXT_PLAN_RULE = "the context plan, read-only in this review"
+
+
+def protected_note(hits: Sequence[Any]) -> str:
+    """The clause naming the files the commit review protects (§2.7, "The
+    commit write policy"): ``the commit review protects src/b.py, which
+    changed since reviewed commit abc1234: this apply never writes it, so
+    make that change by hand, or review a range that ends at HEAD``. One
+    clause per distinct rule text (one reviewed head in practice). The
+    context plan (:data:`CONTEXT_PLAN_RULE`) gets its own ways forward."""
+    by_rule: Dict[str, List[str]] = {}
+    for hit in policy_hits(e for e in (hits or ()) if not isinstance(e, str)):
+        if hit.protected:
+            by_rule.setdefault(hit.protected, []).append(hit.path)
+    clauses: List[str] = []
+    for rule, paths in by_rule.items():
+        one = len(paths) == 1
+        if rule == CONTEXT_PLAN_RULE:
+            clauses.append(
+                f"{describe_paths(paths)} {'is' if one else 'are'} the context "
+                f"plan this commit review checks the commits against, read-only "
+                f"in this review: this apply never writes "
+                f"{'it' if one else 'them'}, so edit {'it' if one else 'them'} "
+                f"by hand, or review again with --context-plan \"\" so "
+                f"{'it is an ordinary file' if one else 'they are ordinary files'}"
+            )
+            continue
+        clauses.append(
+            f"the commit review protects {describe_paths(paths)}, which "
+            f"{rule}: this apply never writes {'it' if one else 'them'}, so "
+            f"make that change by hand, or review a range that ends at HEAD "
+            f"so the review reads {'it' if one else 'them'} as "
+            f"{'it is' if one else 'they are'} now"
+        )
+    return "; ".join(clauses)
 
 
 def policy_skip_clause(task_id: str, *, alone: bool = False) -> str:
@@ -760,13 +828,36 @@ def policy_way_forward(refused: Sequence[Any], *, then: str = "resume") -> str:
     return f"Your call: {clause}, then {then}."
 
 
+def _exact_key(path: str) -> str:
+    """*path* as an :attr:`WritePolicy.exact_deny` key: forward slashes, no
+    leading ``./``, normalized, never resolved (a symlink is its own path)."""
+    text = str(path).replace(os.sep, "/")
+    while text.startswith("./"):
+        text = text[2:]
+    return posixpath.normpath(text) if text else ""
+
+
 @dataclass
 class WritePolicy:
-    """``driver.write_paths``, resolved against the pinned repo root (D3l)."""
+    """``driver.write_paths``, resolved against the pinned repo root (D3l).
+
+    *exact_deny* is a second deny layer of exact repo-relative paths, each
+    with the rule text a refusal names. It is the commit review's protected
+    set (plans/review-commits.md §2.7, "The commit write policy": every path
+    that differed from the reviewed ``head`` when the apply guard ran, plus
+    the fix files a pre-dispatch re-check found changed since), so a fix
+    batch that writes one fails exactly as a ``driver.write_paths`` deny hit
+    does: refused before dispatch when declared, failed, restored and the
+    loop stopped when observed after the run. It is not part of the user's
+    configuration and never comes from it (:meth:`load` leaves it empty);
+    the scheduler adds it from the guard (:meth:`deny_exact`). Empty, every
+    answer here is what it was before the layer existed.
+    """
 
     root: str
     allow: List[str] = field(default_factory=list)
     deny: List[str] = field(default_factory=list)
+    exact_deny: Dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def load(cls, root: str, *, anchor: Optional[str] = None) -> "WritePolicy":
@@ -779,8 +870,61 @@ class WritePolicy:
     def __post_init__(self) -> None:
         self._allow = [_glob_to_regex(p) for p in self.allow]
         self._deny = [_glob_to_regex(p) for p in self.deny]
+        self.exact_deny = {
+            _exact_key(path): str(rule)
+            for path, rule in dict(self.exact_deny or {}).items()
+            if _exact_key(path)
+        }
 
-    def denied(self, path: str) -> Optional[str]:
+    def deny_exact(self, paths: Iterable[str], rule: str) -> List[str]:
+        """Add *paths* (repo-relative, git's form) to the exact-path deny
+        layer with *rule* as their refusal's text; the keys newly added. A
+        path already in the layer keeps its first rule."""
+        added: List[str] = []
+        for path in paths or ():
+            key = _exact_key(path)
+            if key and key not in self.exact_deny:
+                self.exact_deny[key] = str(rule)
+                added.append(key)
+        return added
+
+    def exact_match(self, path: str) -> Optional[Tuple[str, str]]:
+        """``(key, rule text)`` of the :attr:`exact_deny` entry that refuses
+        *path*, or ``None``.
+
+        Matched first on the path as given (made repo-relative without
+        resolving it, so a protected symlink is refused by its own name),
+        then on its resolved repo-relative form (so an absolute path through
+        a symlinked checkout matches too). *key* is the entry's own path,
+        which is what a hit is named by (:meth:`hit`): resolving a protected
+        symlink a batch re-pointed names its target, often the batch's own
+        fix file, and the restore would then undo that file and leave the
+        link as the batch left it."""
+        if not self.exact_deny:
+            return None
+        text = str(path)
+        keys = []
+        if os.path.isabs(text):
+            try:
+                keys.append(_exact_key(os.path.relpath(text, self.root)))
+            except ValueError:  # pragma: no cover - another drive on Windows
+                pass
+        else:
+            keys.append(_exact_key(text))
+        keys.append(_exact_key(relative_to_root(text, self.root)))
+        for key in keys:
+            rule = self.exact_deny.get(key)
+            if rule:
+                return key, rule
+        return None
+
+    def exact_rule(self, path: str) -> Optional[str]:
+        """The :attr:`exact_deny` rule text that refuses *path*, or ``None``
+        (:meth:`exact_match`)."""
+        matched = self.exact_match(path)
+        return matched[1] if matched else None
+
+    def denied(self, path: str, *, exact: bool = True) -> Optional[str]:
         """The deny-side rule ``path`` hits, or ``None``: the deny list alone.
 
         A path outside the pinned root counts as denied here too — nothing
@@ -791,6 +935,12 @@ class WritePolicy:
         ["src/**"]`` an ignored ``logs/run.jsonl`` failed :meth:`violation` on
         the allow side, stayed in the sweep and became the policy violation
         #22 was fixed for), while :meth:`violation` keeps asking both.
+
+        *exact* (the default) also asks the :attr:`exact_deny` layer, after
+        the deny patterns; ``exact=False`` asks ``driver.write_paths`` alone,
+        which is what decides whether an executor artifact may hold a copy
+        of the file's bytes (a protected file is ordinary code, and its
+        rollback point is what lets the post-run check restore it).
         """
         relative = relative_to_root(path, self.root)
         if _outside_root(relative):
@@ -798,16 +948,19 @@ class WritePolicy:
         for pattern, matcher in zip(self.deny, self._deny):
             if matcher.match(relative):
                 return f"driver.write_paths.deny pattern {pattern!r}"
+        if exact:
+            return self.exact_rule(path)
         return None
 
-    def violation(self, path: str) -> Optional[str]:
+    def violation(self, path: str, *, exact: bool = True) -> Optional[str]:
         """The rule ``path`` violates, or ``None`` when the policy permits it.
 
         Deny wins: a path matched by both lists is denied, because the deny list is
         the statement of what a code-editing batch has no business touching and an
         ``allow: ["**"]`` default would otherwise neutralize it entirely.
+        *exact* is :meth:`denied`'s.
         """
-        denied = self.denied(path)
+        denied = self.denied(path, exact=exact)
         if denied is not None:
             return denied
         relative = relative_to_root(path, self.root)
@@ -824,7 +977,13 @@ class WritePolicy:
     def hit(self, path: str) -> Optional[PolicyHit]:
         """``path``'s :class:`PolicyHit`, or ``None`` when the policy permits
         it: every deny pattern that covers it and whether ``allow`` matches
-        it, so the way forward names each rule to change (fix round 21)."""
+        it, so the way forward names each rule to change (fix round 21).
+
+        A hit the :attr:`exact_deny` layer refuses is named by the entry it
+        matched (:meth:`exact_match`), never by the resolved path: the
+        executor restores what a violation names, so a protected symlink is
+        restored as the link itself, from what the guard kept of it, and
+        its target is left alone (review R2, item 3)."""
         relative = relative_to_root(path, self.root)
         if _outside_root(relative):
             return PolicyHit(path=str(path), outside=True)
@@ -833,9 +992,12 @@ class WritePolicy:
             if matcher.match(relative)
         )
         allowed = any(matcher.match(relative) for matcher in self._allow)
-        if not deny and allowed:
+        matched = self.exact_match(path)
+        protected = matched[1] if matched else ""
+        if not deny and allowed and not protected:
             return None
-        return PolicyHit(path=relative, deny=deny, allowed=allowed)
+        return PolicyHit(path=matched[0] if matched else relative, deny=deny,
+                         allowed=allowed, protected=protected)
 
     def check(self, paths: Iterable[str], *, when: str) -> None:
         """Raise :class:`PolicyViolation` naming every offender and its rule.
@@ -856,9 +1018,13 @@ class WritePolicy:
             return
         detail = "; ".join(f"{path} ({rule})" for path, rule in offenders)
         named = [path for path, _ in offenders]
+        checked = (
+            "driver.write_paths and the commit review's protected paths are"
+            if any(hit.protected for hit in hits) else "driver.write_paths is"
+        )
         raise PolicyViolation(
             f"Write policy violation ({when}): {detail}. Repo root: {self.root}. "
-            f"driver.write_paths is checked before dispatch and after the run. "
+            f"{checked} checked before dispatch and after the run. "
             f"{policy_way_forward(hits)}",
             paths=named,
             rule=offenders[0][1],
@@ -866,7 +1032,12 @@ class WritePolicy:
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"root": self.root, "allow": list(self.allow), "deny": list(self.deny)}
+        record: Dict[str, Any] = {
+            "root": self.root, "allow": list(self.allow), "deny": list(self.deny),
+        }
+        if self.exact_deny:
+            record["protected"] = dict(sorted(self.exact_deny.items()))
+        return record
 
 
 # ---------------------------------------------------------------------------
@@ -1399,6 +1570,56 @@ class TaskSnapshot:
                 except OSError as exc:
                     report[relative] = f"skipped: {exc}"
         return report
+
+
+def restore_path(root: str, relative: str, source: Optional[str]) -> str:
+    """Put repo-relative *relative* back from *source* (a file or symlink the
+    caller has checked holds what belongs there), or delete it when *source*
+    is ``None``: the commit write policy's restore for a watched path the
+    pre-batch snapshot holds no bytes for (``commit_apply.restore_watched``).
+
+    The same rules as :meth:`TaskSnapshot.restore`: every component below the
+    pinned root is revalidated no-follow (:func:`_revalidated_target`), the
+    entry itself is replaced (``os.replace``) or unlinked, never written
+    through, and a directory now at the path is never removed. Returns
+    ``"restored"``, ``"deleted"``, ``"deleted (already absent)"`` or
+    ``"skipped: <why>"``.
+    """
+    try:
+        target = _revalidated_target(root, relative, create_parents=source is not None)
+    except WriteSafetyError as exc:
+        return f"skipped: {exc.message}"
+    except OSError as exc:
+        return f"skipped: {exc}"
+    if target is None:
+        return "deleted (already absent)"
+    if source is None:
+        try:
+            if stat.S_ISDIR(os.lstat(str(target)).st_mode):
+                return "skipped: a directory is at the path now"
+            os.unlink(str(target))
+        except FileNotFoundError:
+            return "deleted (already absent)"
+        except OSError as exc:
+            return f"skipped: {exc}"
+        return "deleted"
+    try:
+        if os.path.islink(source):
+            tmp = target.with_name(f".{target.name}.restore.{os.getpid()}.tmp")
+            os.symlink(os.readlink(source), str(tmp))
+            try:
+                os.replace(str(tmp), str(target))
+            except BaseException:
+                try:
+                    os.unlink(str(tmp))
+                except OSError:
+                    pass
+                raise
+        else:
+            _replace_with_payload(Path(source), target)
+    except OSError as exc:
+        return f"skipped: {exc}"
+    return "restored"
 
 
 def _short(digest: Optional[str]) -> str:

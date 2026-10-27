@@ -3040,7 +3040,7 @@ class TestDiffAccessBlock:
         with patch.dict(provider_registry._PROVIDERS, {"stub": provider}):
             yield provider
 
-    def render(self, spec, art, *, coverage="complete", cwd=None):
+    def render(self, spec, art, *, coverage="complete", cwd=None, **extra):
         from utils.llm_client import render_diff_access
 
         return render_diff_access(
@@ -3052,6 +3052,7 @@ class TestDiffAccessBlock:
             base_ref=self.BASE_REF,
             coverage=coverage,
             plan_path=str(art.plan),
+            **extra,
         )
 
     # -- the three shell-state texts ---------------------------------------
@@ -3366,6 +3367,78 @@ class TestDiffAccessBlock:
             "the manifest names 1 diff file(s) that do not exist: "
             "2-tests-test_x.py.diff"
         )
+
+    # -- a commit review's context plan (plans/review-commits.md §2.4) -------
+
+    CONTEXT_PLAN_TEXT = "# Context plan\n\nfrob() must log every call.\n"
+
+    def snapshot(self, art, text=None):
+        path = art.repo / "plans" / "commit-reviews" / "x" / "context-plan.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self.CONTEXT_PLAN_TEXT if text is None else text, encoding="utf-8")
+        return path
+
+    @pytest.mark.parametrize("head_ref", [None, "d" * 40])
+    def test_inline_carries_the_context_plan_snapshot_after_the_plan(self, art, head_ref):
+        """An inline lane cannot open the snapshot the other reviewers read, so
+        its text travels in the payload, never just its path."""
+        snapshot = self.snapshot(art)
+        pinned = {"head_ref": head_ref} if head_ref else {}
+        without = self.render("qwen-code:qwen/qwen3.8-27b", art, **pinned)
+
+        access = self.render("qwen-code:qwen/qwen3.8-27b", art,
+                             context_plan_path=str(snapshot), **pinned)
+
+        assert (access.mode, access.reason) == ("inline", "")
+        text = access.text
+        assert ("===== BEGIN context-plan.md =====\n"
+                + self.CONTEXT_PLAN_TEXT.rstrip("\n")
+                + "\n===== END context-plan.md =====") in text
+        order = [
+            text.index("===== BEGIN plan ====="),
+            text.index("===== BEGIN context-plan.md ====="),
+            text.index("===== BEGIN review-scope.md ====="),
+        ]
+        assert order == sorted(order)
+        assert "the context plan's frozen snapshot (`context-plan.md`)" in text
+        assert "context plan" not in without.text
+        assert str(art.root) not in text
+        # It counts against the cap like every other block.
+        assert access.inline_bytes == len(text.encode("utf-8")) > without.inline_bytes
+
+    def test_a_context_plan_past_the_cap_is_unsupported(self, art):
+        from utils.llm_client import INLINE_DIFF_CAP_BYTES
+
+        snapshot = self.snapshot(art, "x" * INLINE_DIFF_CAP_BYTES)
+        assert self.render("qwen-code:qwen/qwen3.8-27b", art).mode == "inline"
+
+        access = self.render("qwen-code:qwen/qwen3.8-27b", art,
+                             context_plan_path=str(snapshot))
+
+        assert (access.mode, access.text) == ("unsupported", "")
+        assert access.inline_bytes > INLINE_DIFF_CAP_BYTES
+        assert access.reason == (
+            f"inline context {access.inline_bytes} B exceeds the "
+            f"{INLINE_DIFF_CAP_BYTES} B cap"
+        )
+
+    def test_an_unreadable_context_plan_is_unsupported_not_skipped(self, art):
+        gone = art.repo / "plans" / "commit-reviews" / "x" / "context-plan.md"
+
+        access = self.render("qwen-code:qwen/qwen3.8-27b", art, context_plan_path=str(gone))
+
+        assert (access.mode, access.text) == ("unsupported", "")
+        assert access.reason == f"context plan snapshot not readable: {gone}"
+
+    @pytest.mark.parametrize("shell", [True, False, None])
+    def test_a_lane_that_reads_files_is_unchanged_by_a_context_plan(self, art, stub, shell):
+        """The path lanes read the snapshot by the path `{plan_block}` names."""
+        stub.runs_shell_in_generate = shell
+        snapshot = self.snapshot(art)
+
+        access = self.render("stub:m", art, context_plan_path=str(snapshot))
+
+        assert access == self.render("stub:m", art)
 
     # -- hygiene -------------------------------------------------------------
 

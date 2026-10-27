@@ -25,7 +25,7 @@ import pytest
 
 from implement_orchestrator import check_findings_notice
 from utils import cli_common, status_file
-from utils.text_clip import join_clauses
+from utils.text_clip import drop_said_clauses, join_clauses
 from utils.write_batch_scheduler import write_result_notice
 
 TESTS_LINE = (
@@ -60,6 +60,28 @@ class TestJoinClauses:
     def test_the_last_clause_keeps_its_closing_stop(self):
         assert join_clauses([TESTS_LINE, DECLINED_REASON]).endswith("MAX_SPEED'.")
         assert ".;" not in join_clauses([TESTS_LINE, DECLINED_REASON])
+
+
+class TestAClauseSaidAlreadyIsNotSaidAgain:
+    """Fable review of D2 (2026-10-27): a composite joins its phases' notices,
+    and implement and apply-code-fixes both end theirs with the same tests
+    line, which a stop's error may carry too."""
+
+    CHECK = 'not a clean finish: 1 batch(es) applied their edits, but ... ("pytest").'
+
+    def test_a_part_that_repeats_one_clause_keeps_the_rest(self):
+        assert drop_said_clauses(join_clauses([self.CHECK, TESTS_LINE]), TESTS_LINE) == (
+            self.CHECK)
+
+    def test_a_repeated_part_is_dropped_whole_and_a_new_one_kept_as_it_is(self):
+        earlier = join_clauses([DECLINED_REASON, TESTS_LINE])
+        assert drop_said_clauses(TESTS_LINE, earlier) == ""
+        assert drop_said_clauses(self.CHECK, earlier) == self.CHECK
+        assert drop_said_clauses(self.CHECK, None) == self.CHECK
+
+    def test_the_kept_clauses_end_their_sentence(self):
+        assert drop_said_clauses(
+            join_clauses([TESTS_LINE, "one more"]), TESTS_LINE) == "one more."
 
 
 class TestTheWorkersOwnNotice:

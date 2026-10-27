@@ -1146,6 +1146,58 @@
       }
     }
 
+    /* Commit review (plans/review-commits.md §2.10): rendered only when the
+       generator passed reportData.commitRange. */
+    .commit-range-header {
+      margin-top: 0.75rem;
+      font-size: 0.8125rem;
+      color: var(--text-secondary);
+    }
+
+    .commit-block {
+      margin: 0 0 0.5rem 0;
+      padding: 0.5rem 0.75rem;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+      font-size: 0.75rem;
+      white-space: pre-wrap;
+      overflow-x: auto;
+    }
+
+    .commit-meta {
+      margin: 0.125rem 0;
+    }
+
+    .introduced-by {
+      font-size: 0.8125rem;
+      color: var(--text-secondary);
+      margin-top: 0.25rem;
+    }
+
+    .introduced-by code {
+      font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+    }
+
+    .introduced-by-model {
+      color: var(--text-muted);
+      font-style: italic;
+    }
+
+    .badge-drift {
+      background: #FEF3C7;
+      color: #92400E;
+      border: 1px solid #F59E0B;
+    }
+
+    /* A path absent at `head` on a pinned review (plans/review-commits.md §2.5) */
+    .file-absent-label {
+      color: var(--text-muted);
+      font-style: italic;
+      font-weight: normal;
+    }
+
     /* Scrollbar Styling */
     ::-webkit-scrollbar {
       width: 8px;
@@ -1190,8 +1242,11 @@
           <span id="meta-failed-wrap" class="meta-failed" style="display:none"><strong>Failed:</strong> <span id="meta-failed">-</span></span>
           <span><strong>Groups:</strong> <span id="meta-groups">-</span></span>
           <span><strong>Phase:</strong> <span id="meta-phase">-</span></span>
-          <span><strong>Plan:</strong> <a id="meta-plan-link" href="#">-</a></span>
+          <span><strong><!--MLLM:document-label--></strong> <a id="meta-plan-link" href="#">-</a></span>
         </div>
+
+        <!-- A commit review's block, focus and context plan; hidden otherwise. -->
+        <div class="commit-range-header" id="commit-range-header" style="display:none"></div>
 
         <div class="filter-controls">
           <div class="filter-group">
@@ -1228,6 +1283,13 @@
             </div>
           </div>
 
+          <!-- A commit review's commit chips and "Group by commit"; hidden otherwise. -->
+          <div class="filter-group" id="commit-filter-group" style="display:none">
+            <span class="filter-label">Commit</span>
+            <div class="filter-options" id="commit-filters"></div>
+            <button class="filter-btn" id="group-by-commit" type="button">Group by commit</button>
+          </div>
+
           <div class="filter-group">
             <span class="filter-label">Sort</span>
             <select class="filter-select" id="sort-order" onchange="applySorting()">
@@ -1250,7 +1312,7 @@
           <details class="action-help">
             <summary>How to use these buttons?</summary>
             <div class="action-help-content">
-              <p><strong>Export Selections (JSON):</strong> Downloads a <code>user_selections.json</code> file containing your skipped items and edited descriptions. Place this file in the same directory as <code>report.md</code> (the phase output directory). When you run the apply-suggestions, apply-code-fixes, or apply-task-suggestions command, it will automatically read your selections and skip the items you marked.</p>
+              <p><strong>Export Selections (JSON):</strong> Downloads a <code>user_selections.json</code> file containing your skipped items and edited descriptions. Place this file in the same directory as <code>report.md</code> (the phase output directory). When you run the <!--MLLM:apply-commands--> command, it will automatically read your selections and skip the items you marked.</p>
               <p><strong>Copy as Text:</strong> Copies a text summary of your selections to the clipboard. You can paste this into a file or share it. This is useful for quick reference or when you prefer a simpler workflow.</p>
               <p><strong>Note:</strong> Your selections are automatically saved in your browser's local storage, so they persist if you refresh the page. The export is only needed when you want the orchestrator to use your selections.</p>
             </div>
@@ -1309,6 +1371,11 @@
     // sectionContexts and logSnippets are now accessed from reportData
     // Read-only mode: suppresses skip/approve controls for phases like review-tasks
     const isReadOnly = (reportData && reportData.readOnly) || false;
+
+    // Commit review state (plans/review-commits.md §2.10): '' shows every
+    // commit's findings; a SHA or 'unattributed' shows only those.
+    var commitFilter = '';
+    var groupByCommit = false;
 
     // State
     let selections = {
@@ -1539,7 +1606,7 @@
       var models = getUniqueModels();
       modelDropdown.innerHTML = models.map(function(model) {
         return '<label class="multi-select-option">' +
-          '<input type="checkbox" value="' + escapeHtml(model) + '" checked>' +
+          '<input type="checkbox" value="' + escapeAttr(model) + '" checked>' +
           escapeHtml(model) +
           '</label>';
       }).join('');
@@ -1549,7 +1616,7 @@
       var categories = getUniqueCategories();
       categoryFilter.innerHTML = '<option value="">All Categories</option>' +
         categories.map(function(cat) {
-          return '<option value="' + escapeHtml(cat) + '">' + escapeHtml(cat) + '</option>';
+          return '<option value="' + escapeAttr(cat) + '">' + escapeHtml(cat) + '</option>';
         }).join('');
     }
 
@@ -1657,7 +1724,7 @@
               refHtml += '</span>';
             } else if (fileRef) {
               // Code review: show file:line reference
-              refHtml = '<span class="file-ref">File: <code>' + escapeHtml(fileRef) + '</code></span>';
+              refHtml = '<span class="file-ref">File: <code>' + escapeHtml(fileRef) + '</code>' + fileLabelHtml(fileRef) + '</span>';
             }
 
             var detailsHtml = '';
@@ -1672,9 +1739,9 @@
 
             suggestionsHtml += '<div class="suggestion-item' + (isSuggestionSkipped ? ' skipped' : '') + '"' +
               ' data-suggestion-id="' + suggestionId + '"' +
-              ' data-model="' + escapeHtml(suggestion.model || '') + '"' +
-              ' data-importance="' + escapeHtml(suggestion.importance || group.importance || '') + '"' +
-              ' data-category="' + escapeHtml(suggestion.category || group.category || '') + '">' +
+              ' data-model="' + escapeAttr(suggestion.model || '') + '"' +
+              ' data-importance="' + escapeAttr(suggestion.importance || group.importance || '') + '"' +
+              ' data-category="' + escapeAttr(suggestion.category || group.category || '') + '">' +
               '<div class="suggestion-header">' +
               '<span class="suggestion-id">' + suggestionDisplayLabel + ':</span>' +
               '<span class="suggestion-title">' + escapeHtml(suggestion.title || suggestion.summary || 'Untitled') + '</span>';
@@ -1780,9 +1847,10 @@
         html += '<div class="group-card' + (isGroupSkipped ? ' skipped' : '') + '"' +
           ' data-group-id="' + groupHashKey + '"' +
           ' data-original-index="' + groupNum + '"' +
-          ' data-importance="' + escapeHtml(maxImportance) + '"' +
-          ' data-category="' + escapeHtml(group.category || '') + '"' +
-          ' data-validation="' + escapeHtml(validationStatus) + '"' +
+          ' data-importance="' + escapeAttr(maxImportance) + '"' +
+          ' data-category="' + escapeAttr(group.category || '') + '"' +
+          ' data-validation="' + escapeAttr(validationStatus) + '"' +
+          (reportData.commitRange ? ' data-commit="' + escapeAttr(commitKeyOf(group)) + '"' : '') +
           ' data-models="' + groupModels.join(',') + '">' +
           '<div class="group-header" onclick="toggleGroup(\'' + groupHashKey + '\')">' +
           '<div class="group-header-top">' +
@@ -1804,6 +1872,7 @@
                 '<option value="judge_decide"' + (selections.validation_overrides[groupHashKey] === 'judge_decide' ? ' selected' : '') + '>Let the agent decide</option>' : '') +
               '</select>' : '')) +
           '</div>' +
+          introducedByHtml(group) +
           '<div class="group-badges">';
 
         if (maxImportance) {
@@ -1815,6 +1884,8 @@
         if (validationStatus) {
           html += '<span class="badge ' + getValidationBadgeClass(validationStatus) + '">' + validationStatus + '</span>';
         }
+
+        html += driftBadgeHtml(group);
 
         html += modelBadgesHtml +
           '</div></div>' +
@@ -1984,8 +2055,9 @@
         var modelMatch = selectedModels.length === 0 || models.some(function(m) {
           return selectedModels.indexOf(m) !== -1;
         });
+        var commitMatch = !commitFilter || card.dataset.commit === commitFilter;
 
-        card.style.display = (importanceMatch && validationMatch && categoryMatch && modelMatch) ? '' : 'none';
+        card.style.display = (importanceMatch && validationMatch && categoryMatch && modelMatch && commitMatch) ? '' : 'none';
       });
     }
 
@@ -2124,6 +2196,10 @@
         }
 
         cards.sort((a, b) => {
+            if (groupByCommit) {
+                const commitOrder = commitRankOf(a.dataset.commit) - commitRankOf(b.dataset.commit);
+                if (commitOrder !== 0) return commitOrder;
+            }
             if (value === 'original') {
                 return (parseInt(a.dataset.originalIndex) || 0) - (parseInt(b.dataset.originalIndex) || 0);
             }
@@ -2163,6 +2239,128 @@
         } catch (e) { /* localStorage unavailable, default to priority */ }
     })();
 
+    // Commit review (plans/review-commits.md §2.10). Everything below reads
+    // reportData.commitRange, which the generator stores only for a commit
+    // review, so a plan's report renders none of it.
+    function commitKeyOf(group) {
+      return (group && group.introducedBy) ? group.introducedBy : 'unattributed';
+    }
+
+    function commitRankOf(key) {
+      var cr = reportData && reportData.commitRange;
+      var commits = (cr && cr.commits) || [];
+      for (var i = 0; i < commits.length; i++) {
+        if (commits[i].sha === key) return i;
+      }
+      return commits.length + (key === 'unattributed' ? 1 : 0);
+    }
+
+    function introducedByHtml(group) {
+      if (!reportData.commitRange || !group || !group.introducedBy) return '';
+      var source = group.introducedBySource || '';
+      if (source === 'none' || !source) return '';
+      var html = '<div class="introduced-by">Introduced by <code>' +
+        escapeHtml(group.introducedByShort || String(group.introducedBy).substring(0, 7)) + '</code>';
+      if (group.introducedBySubject) html += ' \u2014 ' + escapeHtml(group.introducedBySubject);
+      if (source === 'model' || source === 'model-drifted') {
+        html += ' <span class="introduced-by-model" title="The reviewing model named this commit; git blame did not measure it">(model)</span>';
+      }
+      return html + '</div>';
+    }
+
+    function groupFiles(group) {
+      var files = [];
+      (group.suggestions || []).forEach(function(s) {
+        var ref = s.fileRef || '';
+        var path = ref.replace(/:\d+(-\d+)?$/, '');
+        if (path && files.indexOf(path) === -1) files.push(path);
+      });
+      return files;
+    }
+
+    // A path absent at `head` on a pinned review: its header carries the same
+    // words as its validation excerpt (plans/review-commits.md §2.5), "deleted
+    // in <range>", "renamed to <new> in <range>" or "absent at <head7>". The
+    // generator stores them as fileContexts[path].label; a plan's report has none.
+    function fileLabelHtml(fileRef) {
+      var path = String(fileRef || '').replace(/:\d+(-\d+)?$/, '');
+      var entry = ((reportData && reportData.fileContexts) || {})[path];
+      var label = (entry && !Array.isArray(entry)) ? entry.label : '';
+      if (!label) return '';
+      return ' <span class="file-absent-label">(' + escapeHtml(label) + ')</span>';
+    }
+
+    function driftBadgeHtml(group) {
+      var cr = reportData && reportData.commitRange;
+      if (!cr || !cr.drifted || !cr.drifted.length || !group) return '';
+      var hit = groupFiles(group).some(function(path) { return cr.drifted.indexOf(path) !== -1; });
+      if (!hit) return '';
+      var head7 = String(cr.head || '').substring(0, 7);
+      return '<span class="badge badge-drift" title="This file differs on disk from ' + escapeAttr(head7) +
+        ': a skip or apply decision on it is skipped anyway by the apply\'s guard">changed on disk since ' +
+        escapeHtml(head7) + '</span>';
+    }
+
+    function renderCommitHeader() {
+      var cr = reportData && reportData.commitRange;
+      var el = document.getElementById('commit-range-header');
+      if (!cr || !el) return;
+      var html = '<pre class="commit-block">' + escapeHtml((cr.blockLines || []).join('\n')) + '</pre>';
+      if (cr.focus) {
+        html += '<div class="commit-meta"><strong>Focus:</strong> ' + escapeHtml(cr.focus) + '</div>';
+      }
+      if (cr.plan) {
+        html += '<div class="commit-meta"><strong>Context plan:</strong> <code>' + escapeHtml(cr.plan) +
+          '</code> (read-only; snapshot <code>' + escapeHtml(cr.planSnapshot || 'none') +
+          '</code>, SHA-256 <code>' + escapeHtml(cr.planSha256 || 'unknown') + '</code>)</div>';
+      }
+      el.innerHTML = html;
+      el.style.display = '';
+    }
+
+    function renderCommitFilter() {
+      var cr = reportData && reportData.commitRange;
+      var wrap = document.getElementById('commit-filter-group');
+      var chips = document.getElementById('commit-filters');
+      if (!cr || !wrap || !chips) return;
+      var counts = {};
+      (reportData.groups || []).forEach(function(group) {
+        var key = commitKeyOf(group);
+        counts[key] = (counts[key] || 0) + 1;
+      });
+      var html = '';
+      (cr.commits || []).forEach(function(c) {
+        if (!counts[c.sha]) return;
+        html += '<button class="filter-btn commit-chip" type="button" data-commit="' + escapeAttr(c.sha) +
+          '" title="' + escapeAttr(c.subject || '') + '">' + escapeHtml(c.short || String(c.sha).substring(0, 7)) +
+          ' (' + counts[c.sha] + ')</button>';
+      });
+      if (counts.unattributed) {
+        html += '<button class="filter-btn commit-chip" type="button" data-commit="unattributed">unattributed (' +
+          counts.unattributed + ')</button>';
+      }
+      chips.innerHTML = html;
+      wrap.style.display = '';
+      chips.querySelectorAll('.commit-chip').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          var key = btn.getAttribute('data-commit');
+          commitFilter = (commitFilter === key) ? '' : key;
+          chips.querySelectorAll('.commit-chip').forEach(function(other) {
+            other.classList.toggle('active', other.getAttribute('data-commit') === commitFilter);
+          });
+          applyFilters();
+        });
+      });
+      var toggle = document.getElementById('group-by-commit');
+      if (toggle) {
+        toggle.addEventListener('click', function() {
+          groupByCommit = !groupByCommit;
+          toggle.classList.toggle('active', groupByCommit);
+          applySorting();
+        });
+      }
+    }
+
     // Initialize
     function init() {
       if (!reportData) {
@@ -2180,6 +2378,8 @@
       // failed has no groups, and its warning must still show.
       renderNotices();
       renderGroups();
+      renderCommitHeader();
+      renderCommitFilter();
       autoResizeAllTextareas();
 
       // Hide interactive controls in read-only mode (e.g., review-tasks)

@@ -706,8 +706,9 @@ def test_surface_schema_version_matches():
     assert SURFACE["schema_version"] == surface_mod.SURFACE_SCHEMA_VERSION
     assert isinstance(SURFACE["tool_name"], str) and SURFACE["tool_name"]
     assert isinstance(SURFACE["tool_description"], str) and SURFACE["tool_description"]
+    # Schema v6: the optional `revs` beside the four required properties.
     assert set(SURFACE["argument_descriptions"]) == {"mode", "plan", "question",
-                                                     "extra_flags"}
+                                                     "extra_flags", "revs"}
     assert all(SURFACE["argument_descriptions"].values())
 
 
@@ -2888,8 +2889,14 @@ class TestResumeCommand:
 # ===========================================================================
 
 #: Every phase the surface knows, read from the surface (never retyped), so a
-#: phase added later is covered the day it lands.
-PHASE_ROWS = [row for row in SURFACE["modes"] if row.get("phase")]
+#: phase added later is covered the day it lands. The commit modes take no
+#: plan (a typed one is refused before any spawn): their run is named by its
+#: pinned range, which `TestACommitRunIsNamedByItsPinnedRange` holds for both
+#: ways a failure reaches the user.
+REVS_KIND = SURFACE["positional_kinds"]["revs"]
+PHASE_ROWS = [row for row in SURFACE["modes"]
+              if row.get("phase") and REVS_KIND not in row["positionals"]]
+RANGE_ROWS = [row for row in SURFACE["modes"] if REVS_KIND in row["positionals"]]
 TYPED_PLAN = "plans/p.md"
 
 
@@ -2968,6 +2975,332 @@ class TestTheTypedPlanSurvivesEveryFailure:
             dict(REVIEW, plan=TYPED_PLAN), [launch_step(), done])
         assert envelope["next"]["mode"] == "generate-tasks"
         assert envelope["next"]["plan"] == TYPED_PLAN
+
+
+# ===========================================================================
+# The commit modes' range (plans/review-commits.md §2.9, "Tool routes")
+# ===========================================================================
+
+from utils import commit_range as range_mod  # noqa: E402
+
+REVS_SHAPE = SURFACE["revs"]
+FULL_BASE = "a1b2c3d4e5f6" + "0" * 28
+FULL_HEAD = "e4f5a6b7c8d9" + "1" * 28
+PINNED = "a1b2c3d4e5f6..e4f5a6b7c8d9"
+BRIEF = "plans/commit-reviews/a1b2c3d4e5f6-e4f5a6b7c8d9.md"
+ROOT_BRIEF = "plans/commit-reviews/root-e4f5a6b7c8d9.md"
+PHRASE = "last 2 commits"
+WRITE_META = turn_meta(sandbox_mode="workspace-write")
+
+
+def range_record(*, base=FULL_BASE, brief=BRIEF, drifted=()) -> dict:
+    """The launch's result-line ``commit_range``, built and rendered by the
+    owner (``utils/commit_range.py``) exactly as the front door builds it, the
+    block it printed riding along as ``lines``."""
+    commits = (
+        range_mod.Commit(sha=FULL_HEAD, date="2026-10-24", ct=2, subject="Second",
+                         author="a", merge=False),
+        range_mod.Commit(sha="c3d4e5f6a7b8" + "2" * 28, date="2026-10-23", ct=1,
+                         subject="First", author="a", merge=False),
+    )
+    cr = range_mod.CommitRange(base=base, head=FULL_HEAD, commits=commits,
+                               phrase=PHRASE, window=None, kind="last")
+    size = range_mod.RangeSize.of(2, 3, 10, 2)
+    record = range_mod.result_payload(cr, size=size, brief=brief, brief_on_disk=True,
+                                      drifted=drifted)
+    record[REVS_SHAPE["lines_key"]] = range_mod.render_commit_block(cr, size=size)
+    return record
+
+
+def fixes_record() -> tuple:
+    """``[COMMIT_FIXES]`` as ``status`` prints it and its result-line record."""
+    block = range_mod.FixBlock(to_apply=2, per_commit=[(FULL_HEAD, 2, "Second")],
+                               unattributed=0, skipped_changed=1,
+                               changed_files=["b.py"], head=FULL_HEAD)
+    lines = range_mod.render_fix_block(block)
+    return lines, {"to_apply": 2, REVS_SHAPE["lines_key"]: lines}
+
+
+def commit_launch(record=None, *, run_id="RID-C", mode="review-commits") -> dict:
+    """A commit front door's launch: the block it printed, the brief line, the
+    banner, and the result line carrying ``commit_range``."""
+    record = range_record() if record is None else record
+    return {"exit": 0, "stdout": [
+        *record[REVS_SHAPE["lines_key"]],
+        "[COMMIT_BRIEF] " + str(record.get("brief")),
+        DISPATCHER["banner"]["headline"], "run_id: " + run_id, "pid: 4242",
+        "log: /tmp/c.log",
+        result_line(mode=mode, next=None, commit_range=record)]}
+
+
+def range_call(mode="review-commits", revs=PHRASE, **extra) -> dict:
+    call = {"mode": mode, "revs": revs, "plan": "", "question": "", "extra_flags": []}
+    call.update(extra)
+    return call
+
+
+def _absolute_brief(harness, brief=BRIEF) -> str:
+    return os.path.normpath(os.path.join(os.path.realpath(harness.workspace), brief))
+
+
+class TestTheCommitModesRange:
+    """`revs` is the commit modes' one range argument: composed right after the
+    mode word, never resolved as a file, and `plan` keeps one meaning."""
+
+    @pytest.mark.parametrize("row", RANGE_ROWS, ids=[row["name"] for row in RANGE_ROWS])
+    @pytest.mark.parametrize("revs", ["", PHRASE])
+    def test_a_plan_on_a_commit_mode_is_refused_before_any_spawn(
+            self, harness, row, revs):
+        envelope = _refused(harness, range_call(row["name"], revs, plan="docs/x.md"),
+                            meta=WRITE_META)
+        assert envelope["state"] == STATES["error"]
+        message = envelope["message"]
+        assert message == REVS_SHAPE["plan_refusal"].replace("{mode}", row["name"])
+        # Both ways forward: the range's argument, and the context flag.
+        assert '"revs"' in message and "--context-plan" in message
+
+    @pytest.mark.parametrize("revs, words", [
+        (PHRASE, ["last", "2", "commits"]),
+        ("-2", ["-2"]),
+        (PINNED, [PINNED]),
+        ("  this   branch ", ["this", "branch"]),
+        ("", []),
+        # A brief path stays one element, a space and all.
+        ("plans/commit reviews/root-e4f5a6b7c8d9.md",
+         ["plans/commit reviews/root-e4f5a6b7c8d9.md"]),
+        # A word inside it starting with one "-" is the path's, not a flag.
+        ("plans/commit reviews -old/root-e4f5a6b7c8d9.md",
+         ["plans/commit reviews -old/root-e4f5a6b7c8d9.md"]),
+    ])
+    def test_revs_reaches_the_argv_right_after_the_mode(self, harness, revs, words):
+        _, _, calls, _ = harness.run(range_call(revs=revs), [launch_step(), poll_step(0)])
+        assert dispatcher_argv(calls[0]) == (
+            ["review-commits", *words] + SURFACE["baked_flags"]
+            + [SURFACE["detach_flag"]])
+
+    def test_a_left_out_revs_is_head(self, harness):
+        call = range_call()
+        del call["revs"]
+        _, _, calls, _ = harness.run(call, [launch_step(), poll_step(0)])
+        assert dispatcher_argv(calls[0]) == (
+            ["review-commits"] + SURFACE["baked_flags"] + [SURFACE["detach_flag"]])
+
+    def test_a_range_is_never_resolved_as_a_file(self, harness):
+        _, _, calls, _ = harness.run(range_call(revs="main..HEAD"),
+                                     [launch_step(), poll_step(0)])
+        argv = dispatcher_argv(calls[0])
+        assert argv[1] == "main..HEAD"
+        assert not any(str(harness.workspace) in token for token in argv)
+
+    @pytest.mark.parametrize("revs", ["--quick", "last 2 --internal-worker", "-2h",
+                                      "--2", "- 2",
+                                      # Kept whole as a brief path, yet refused.
+                                      "HEAD~3..HEAD --context-plan docs/x.md"])
+    def test_a_flag_inside_revs_is_refused(self, harness, revs):
+        envelope = _refused(harness, range_call(revs=revs))
+        flag = next(word for word in revs.split() if word.startswith("-"))
+        assert '"revs" holds "{}"'.format(flag) in envelope["message"]
+
+    def test_a_range_on_a_mode_that_takes_none_is_refused(self, harness):
+        envelope = _refused(harness, dict(REVIEW, revs=PHRASE))
+        assert '"revs" must be ""' in envelope["message"]
+
+    @pytest.mark.parametrize("revs", [2, None, ["last", "2"]])
+    def test_revs_must_be_a_string(self, harness, revs):
+        envelope = _refused(harness, range_call(revs=revs))
+        assert envelope["message"].startswith('"revs" must be a string')
+
+    def test_the_range_shaped_worked_example_dispatches_its_context_plan(self, harness):
+        block = SURFACE["tool_description"].split("\nExamples:\n", 1)[1]
+        (example,) = [json.loads(line) for line in block.splitlines()
+                      if '"revs"' in line]
+        assert example["plan"] == "" and example["revs"] == PHRASE
+        _, _, calls, _ = harness.run(example, [launch_step(), poll_step(0)])
+        assert dispatcher_argv(calls[0]) == (
+            [example["mode"], "last", "2", "commits"] + SURFACE["baked_flags"]
+            + [SURFACE["detach_flag"], "--context-plan", "docs/x.md"])
+
+    def test_the_tool_lists_revs_as_an_optional_string(self, harness):
+        client = harness.client()
+        listed = client.response(client.request("tools/list"))["result"]["tools"][0]
+        schema = listed["inputSchema"]
+        assert schema["properties"]["revs"] == {
+            "type": "string", "description": SURFACE["argument_descriptions"]["revs"]}
+        assert "revs" not in schema["required"]
+        client.close()
+
+
+class TestACommitRunIsNamedByItsPinnedRange:
+    """Every tool call this server builds for a commit run (the re-attach, the
+    abort, the `--blocked` lookup and its options) names the range the launch
+    pinned (the result line's `commit_range`), never the phrase the call typed:
+    `last 2 commits` typed again after a new commit is another range."""
+
+    def _handoff(self, harness, row, record=None):
+        handoff, _, calls, _ = harness.run(
+            range_call(row["name"]),
+            [commit_launch(record, mode=row["name"])] + [poll_step(2, sleep=0.2)] * 50,
+            meta=WRITE_META, extra_env={"MLLM_TEST_POLL_BUDGET_MS": "1000"})
+        return handoff, calls
+
+    @pytest.mark.parametrize("row", RANGE_ROWS, ids=[row["name"] for row in RANGE_ROWS])
+    def test_a_handoff_hands_back_the_pinned_range(self, harness, row):
+        handoff, calls = self._handoff(harness, row)
+        assert handoff["state"] == STATES["running"]
+        assert handoff["next"]["plan"] == PINNED
+        assert handoff["abort_command"]["plan"] == PINNED
+        assert PHRASE not in json.dumps([handoff["next"], handoff["abort_command"]])
+        # Inside the server the polls name the brief the launch printed.
+        polls = [c for c in calls if dispatcher_argv(c)[0] == DISPATCHER["poll"][0]]
+        assert polls and all(dispatcher_argv(c)[1] == _absolute_brief(harness)
+                             for c in polls)
+
+    def test_a_root_range_is_named_by_its_brief(self, harness):
+        handoff, _ = self._handoff(harness, RANGE_ROWS[0],
+                                   range_record(base=None, brief=ROOT_BRIEF))
+        assert handoff["next"]["plan"] == ROOT_BRIEF
+        assert handoff["abort_command"]["plan"] == ROOT_BRIEF
+
+    def test_a_brief_printed_from_the_repository_root_is_polled_there(
+            self, harness, tmp_path):
+        repo = Path(os.path.realpath(tmp_path)) / "repo"
+        sub = repo / "sub"
+        sub.mkdir(parents=True)
+        launch = commit_launch()
+        launch["stdout"][-1] = result_line(mode="review-commits", next=None,
+                                           commit_range=range_record(),
+                                           ran_from_root=str(repo))
+        _, _, calls, _ = harness.run(range_call(), [launch, poll_step(0)],
+                                     roots=[str(sub)])
+        polls = [c for c in calls if dispatcher_argv(c)[0] == DISPATCHER["poll"][0]]
+        assert polls and dispatcher_argv(polls[0])[1] == str(repo / BRIEF)
+
+    @pytest.mark.parametrize("row", RANGE_ROWS, ids=[row["name"] for row in RANGE_ROWS])
+    def test_a_failure_in_the_launching_call(self, harness, row):
+        failed = poll_step(CODES["needs_human"], mode=row["name"], phase=row["phase"],
+                           error="the review stopped")
+        envelope, _, _, _ = harness.run(
+            range_call(row["name"]), [commit_launch(mode=row["name"]), failed],
+            meta=WRITE_META,
+            extra_env={"STUB_RESUME_EXTRA": json.dumps({"flags": ["--resume"]})})
+        (asked,) = harness.resume_calls()
+        # The lookup reads a file: the brief, which names the pinned range.
+        assert dispatcher_argv(asked)[2:5] == [
+            BRIEF, DISPATCHER["resume"]["option"], row["name"]]
+        assert envelope["resume_command"]
+        assert envelope["options"][0] == {
+            "mode": row["name"], "revs": PINNED, "plan": "", "question": "",
+            "extra_flags": ["--resume"]}
+        assert PHRASE not in json.dumps(envelope["options"])
+
+    @pytest.mark.parametrize("row", RANGE_ROWS, ids=[row["name"] for row in RANGE_ROWS])
+    def test_a_failure_after_the_handoff_and_the_reattach(self, harness, row):
+        handoff, _ = self._handoff(harness, row)
+        failed = poll_step(CODES["needs_human"], mode=row["name"], phase=row["phase"])
+        live = {"exit": 2, "stdout": [result_line(
+            state=STATES["nothing_to_do"], exit=2,
+            next="uv run -- python multi_llm.py status {} --view run --wait "
+                 "--run-id RID-C".format(word(_absolute_brief(harness))))]}
+        envelope, _, calls, _ = harness.run(handoff["next"], [live, failed],
+                                            meta=WRITE_META)
+        # The pinned range is passed on, never joined to the anchor as a path:
+        # `status` maps it to the brief by name.
+        assert [dispatcher_argv(c)[1] for c in calls] == [PINNED, PINNED]
+        (asked,) = harness.resume_calls()
+        assert dispatcher_argv(asked)[2] == PINNED
+        assert PHRASE not in json.dumps(envelope.get("options"))
+
+    def test_a_launch_that_pinned_nothing_asks_nothing(self, harness):
+        refused = {"exit": CODES["needs_human"], "stdout": [
+            "[RANGE_UNRECOGNIZED] last 2 comits",
+            result_line(mode="review-commits", state=STATES["needs_human"],
+                        exit=CODES["needs_human"], error="[RANGE_UNRECOGNIZED]")]}
+        envelope, _, _, _ = harness.run(range_call(revs="last 2 comits"), [refused])
+        assert harness.resume_calls() == []
+        assert envelope["state"] == STATES["needs_human"]
+        assert "commit_blocks" not in envelope
+
+
+class TestACommitFollowUpMapsBackToRevs:
+    def test_a_printed_follow_up_becomes_revs_and_keeps_its_flags(self, harness):
+        done = poll_step(0, next=(
+            "uv run -- python multi_llm.py apply-commit-fixes {} --focus 'x y' "
+            "--context-plan docs/x.md --host codex --yes".format(PINNED)))
+        envelope, _, _, _ = harness.run(range_call(), [commit_launch(), done])
+        assert envelope["next"] == {
+            "mode": "apply-commit-fixes", "revs": PINNED, "plan": "", "question": "",
+            "extra_flags": ["--focus", "x y", "--context-plan", "docs/x.md"]}
+
+    @pytest.mark.parametrize("tail, revs, extra", [
+        ("-2 --quick", "-2", ["--quick"]),
+        ("last 2 commits", PHRASE, []),
+        ("--quick -2", "", ["--quick", "-2"]),
+        ("'plans/commit reviews/root-e4f5a6b7c8d9.md'",
+         "plans/commit reviews/root-e4f5a6b7c8d9.md", []),
+    ])
+    def test_the_parse_follows_the_dispatchers_split(self, tail, revs, extra):
+        module = _server_module()
+        parsed = module.parse_dispatcher_command(
+            "uv run -- python /s/multi_llm.py review-commits " + tail, SURFACE)
+        assert parsed == {"mode": "review-commits", "revs": revs, "plan": "",
+                          "question": "", "extra_flags": extra}
+        # And the user's spelling of it puts the range right after the mode.
+        spelled = module.user_spelling(parsed, SURFACE)
+        assert spelled.startswith(DISPATCHER["user_command"]["template"].replace(
+            DISPATCHER["user_command"]["args_slot"], "--review-commits"))
+
+    def test_a_plan_mode_s_follow_up_is_unchanged(self):
+        parsed = _server_module().parse_dispatcher_command(
+            "uv run -- python /s/multi_llm.py review-code plans/p.md --quick", SURFACE)
+        assert parsed == {"mode": "review-code", "plan": "plans/p.md", "question": "",
+                          "extra_flags": ["--quick"]}
+
+
+class TestTheCommitBlocksAreRelayedOnce:
+    """§2.3 "Relay": the launch printed the block before it detached, and a
+    tool route renders it into the result from the result line's
+    `commit_range` (and `[COMMIT_FIXES]` from `commit_fixes`), in the form the
+    CLI printed, once."""
+
+    def test_the_commit_block_comes_from_the_launch_s_result_line(self, harness):
+        record = range_record(drifted=["a.py"])
+        envelope, _, _, _ = harness.run(range_call(),
+                                        [commit_launch(record), poll_step(0)])
+        assert envelope["commit_blocks"] == "\n".join(record["lines"])
+        assert envelope["commit_blocks"].startswith("[COMMIT_RANGE] a1b2c3d..e4f5a6b")
+        keys = list(envelope)
+        assert keys.index("commit_blocks") == keys.index("message") + 1
+
+    def test_the_fixes_block_comes_from_the_terminal_poll_and_leaves_output(
+            self, harness):
+        lines, record = fixes_record()
+        done = {"exit": 0, "stdout": ["status view", *lines, result_line(
+            exit=0, commit_fixes=record)]}
+        envelope, _, _, _ = harness.run(range_call("apply-commit-fixes"),
+                                        [commit_launch(mode="apply-commit-fixes"), done],
+                                        meta=WRITE_META)
+        block = range_record()["lines"]
+        assert envelope["commit_blocks"] == "\n".join(block + lines)
+        assert "[COMMIT_FIXES]" not in envelope["output"]
+        assert "status view" in envelope["output"]
+        assert "lines" not in envelope["result"]["commit_fixes"]
+
+    def test_a_launch_that_stopped_after_its_block_relays_it_once(self, harness):
+        record = range_record()
+        stopped = {"exit": CODES["needs_human"], "stdout": [
+            *record["lines"], "ERROR: a run is live on this brief",
+            result_line(mode="review-commits", state=STATES["needs_human"],
+                        exit=CODES["needs_human"], error="a run is live",
+                        commit_range=record)]}
+        envelope, _, _, _ = harness.run(range_call(), [stopped])
+        assert envelope["commit_blocks"] == "\n".join(record["lines"])
+        assert record["lines"][0] not in envelope["output"]
+        assert "ERROR: a run is live on this brief" in envelope["output"]
+        assert "lines" not in envelope["result"]["commit_range"]
+
+    def test_a_plan_mode_carries_no_block(self, harness):
+        envelope, _, _, _ = harness.run(REVIEW, [launch_step(), poll_step(0)])
+        assert "commit_blocks" not in envelope
 
 
 def codex_cut(text: str, keep: int = 2000) -> str:

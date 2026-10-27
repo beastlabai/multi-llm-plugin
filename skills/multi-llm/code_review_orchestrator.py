@@ -23,14 +23,16 @@ Usage:
 
 import argparse
 import asyncio
+import contextlib
+import hashlib
 import json
 import os
 import posixpath
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -63,6 +65,11 @@ from utils.cli_common import (
     record_next,
 )
 from utils.report_parser import issue_numbering_footer
+# plans/review-commits.md §2.6/§2.10: a commit brief's run (its state records
+# `commit_range`) gets the commit template, attribution and report header.
+from utils import commit_report
+from utils import commit_spelling
+from utils.commit_attribution import attribute_review_groups
 from utils.state_manager import (
     load_groups_payload,
     match_issues_to_suggestions,
@@ -158,7 +165,10 @@ from utils.validation import (
     prepare_batched_validation_tasks,
     resolved_reaggregate_command,
 )
-from utils.subagent_prompts import CODE_REVIEW_VALIDATION_GUIDANCE
+from utils.subagent_prompts import (
+    CODE_REVIEW_VALIDATION_GUIDANCE,
+    code_review_validation_guidance,
+)
 from utils.subagent_tasks import (
     TaskFileError,
     build_inputs,
@@ -197,6 +207,7 @@ from utils.llm_client import (
     sandbox_record_word,
 )
 from utils.git_utils import (
+    attribute_source_args,
     DIFF_COVERAGE_COMPLETE,
     DIFF_COVERAGE_PARTIAL,
     REVIEW_DIFF_DIRNAME,
@@ -207,20 +218,38 @@ from utils.git_utils import (
     WRITTEN_BY_REAGGREGATE,
     capture_file_context,
     capture_file_snapshots,
+    capture_file_snapshots_at,
     classify_review_paths,
     count_review_groups,
     get_project_root,
     get_project_root_from_dir,
+    git_path,
     is_empty_tree,
+    is_empty_tree_id,
     list_worktree_untracked_files,
     load_review_scope,
     order_review_paths,
+    paths_changed_since,
+    paths_in_commit,
+    rename_map,
     validate_git_ref,
     write_review_diff,
     _run_git,
 )
 from utils.html_report_generator import generate_html_report, write_html_report, model_label, served_model_label, VALIDATION_ORDER, UNKNOWN_STATUS_RANK
 from utils.html_report_generator import failed_models_line
+from utils.commit_review import commit_review_artifact, commit_reviews_folder_rel
+from utils.commit_range import (
+    RangeError,
+    display_range,
+    pinned_endpoints,
+    pinned_head_read_rule,
+    pinned_record,
+    render_drift_line,
+    resolve_base_strict,
+    resolve_commit_strict,
+    resolve_recorded,
+)
 
 
 def derive_prefix(plan_path: Path) -> str:
@@ -313,6 +342,28 @@ def warn_stem_attribution(
     print("\n".join(lines), file=sys.stderr)
 
 
+#: Name fragments of the phase dir's ``*.json`` files that are not a model's
+#: result, for :func:`leftover_model_results`.
+_NOT_A_MODEL_RESULT = ('grouped', 'validation', 'salvage', 'issues', 'fix_tasks',
+                       'state', '.status', 'report_data')
+
+
+def leftover_model_results(phase_dir: Any) -> List[str]:
+    """The per-model result files in *phase_dir* (``<stem>.json``), sorted.
+
+    What the partial-completion guard refuses a plain re-run over when no
+    ``grouped.json`` is beside them, and what ``improve_workflow.read_records``
+    reads as a fan-out cut off before grouping, which its review step resumes
+    with ``--force`` (Fable review 2026-10-27, finding 1).
+    """
+    import glob as glob_module
+
+    return sorted(
+        f for f in glob_module.glob(str(Path(phase_dir) / "*.json"))
+        if not any(ex in os.path.basename(f) for ex in _NOT_A_MODEL_RESULT)
+    )
+
+
 def save_model_result(
     prefix: str,
     model: str,
@@ -382,6 +433,13 @@ Examples:
         help='Path to the implementation plan markdown file'
     )
 
+    # A commit front door's `--detach` stage (plans/review-commits.md §2.1):
+    # the detached worker applies it right after its lock
+    # (`utils/detach.RunHandle`). Hidden: only a front door writes it, and
+    # replay drops it.
+    parser.add_argument('--commit-stage', dest='commit_stage', default=None,
+                        help=argparse.SUPPRESS)
+
     parser.add_argument(
         '--models',
         nargs='+',
@@ -400,6 +458,22 @@ Examples:
         '--base-ref',
         type=str,
         help='Git ref to compare against (default: from state file)'
+    )
+
+    # plans/review-commits.md §2.5: a two-commit review. A real flag, because
+    # the commit front doors synthesise it and every replay (a resume line, a
+    # detached child) carries it, as the full SHA the run resolved.
+    parser.add_argument(
+        '--head-ref',
+        type=str,
+        default=None,
+        metavar='REV',
+        help='Review `git diff <base-ref> <head-ref>`, two commits, instead of '
+             'the base against the working tree. Both refs resolve strictly '
+             '(no HEAD~1 fallback; an empty-tree --base-ref reviews a range '
+             'from the root commit), every model reads code at the head '
+             'commit, and the pair is recorded as head_ref in state.json, so '
+             '--reaggregate and a later apply-code-fixes use it.'
     )
 
     # Decision 11.1 of the review-scope plan: an exact scope for an implementer
@@ -513,7 +587,10 @@ def load_code_review_prompt() -> str:
 
 
 #: Where a review's scope came from (:attr:`ReviewScope.source`), in the order
-#: :func:`resolve_review_scope` tries them.
+#: :func:`resolve_review_scope` tries them. ``commit_range`` is a review pinned
+#: to two commits (``--head-ref``, plans/review-commits.md §2.5): ``git diff
+#: --name-only <base> <head>``, which ``--files`` narrows and never widens.
+SCOPE_SOURCE_COMMIT_RANGE = "commit_range"
 SCOPE_SOURCE_FILES_FLAG = "files_flag"
 SCOPE_SOURCE_TRACKED = "tracked_files"
 SCOPE_SOURCE_GIT_DIFF = "git_diff"
@@ -547,11 +624,19 @@ class ReviewScope(NamedTuple):
     ``task_ids`` maps each path to its tracked entry's ``task_id``; only the
     ``tracked_files`` branch fills it. ``paths`` carries no order a caller may
     rely on — ``utils.git_utils.order_review_paths`` sets the review order.
+
+    On :data:`SCOPE_SOURCE_COMMIT_RANGE` (a review pinned to two commits),
+    ``narrowed`` says a ``--files`` list (typed or recorded) was intersected
+    with the range's diff, and ``not_in_range`` names the listed paths the
+    range did not change, each reported ``no diff: not changed in <range>``.
+    Both keep their defaults on every other source.
     """
 
     paths: List[str]
     source: str
     task_ids: Dict[str, str]
+    not_in_range: Tuple[str, ...] = ()
+    narrowed: bool = False
 
 
 def review_git_root(project_root: Optional[str]) -> Optional[str]:
@@ -575,16 +660,482 @@ def review_git_root(project_root: Optional[str]) -> Optional[str]:
     return project_root or get_project_root_from_dir()
 
 
+# ---------------------------------------------------------------------------
+# Two-commit reviews: `--head-ref` and the pinned records
+# (plans/review-commits.md §2.4, §2.5)
+# ---------------------------------------------------------------------------
+#
+# A review pinned to two commits diffs `<base> <head>`, never the working tree.
+# Three things can pin one: a commit brief's `commit_range` (written by a front
+# door before this phase runs), the `head_ref` a direct `--head-ref` round
+# recorded, and the refs typed on this command line. They are read in that
+# order by :func:`resolve_pinned_range`, the one place every endpoint reader of
+# this orchestrator goes through: the fan-out's base ref, `--reaggregate`, the
+# validation excerpts and the report. Nothing here tests `base` for truth (a
+# root range's base is `None`, diffed against the empty tree), and nothing
+# falls back to `head_before_implement`, `head_at_start` or `HEAD~1` once a
+# record is present: a recorded SHA that no longer names a commit is exit 3
+# (`[RANGE_UNRESOLVED]`), before anything is written.
+
+#: Where a :class:`PinnedRange` came from.
+PIN_COMMIT_RANGE = "commit_range"   # a commit brief's record (a fronted run)
+PIN_HEAD_REF = "head_ref"           # a direct round's record, read back
+PIN_TYPED = "typed"                 # this command line's --head-ref (a direct run)
+
+#: The refusal for a typed pair that is not the pair on record.
+HEAD_REF_MISMATCH = "[HEAD_REF_MISMATCH]"
+
+
+class PinnedRange(NamedTuple):
+    """A review pinned to two commits, resolved strictly.
+
+    ``base`` and ``head`` are full SHAs; ``base`` is ``None`` on a root range,
+    whose ``base_ref`` (the old side every git call takes) is the repository's
+    empty-tree id; otherwise ``base_ref == base``. ``source`` is one of
+    :data:`PIN_COMMIT_RANGE`, :data:`PIN_HEAD_REF` or :data:`PIN_TYPED`.
+    ``drifted`` lists the reviewed files that differ on disk from ``head``
+    (``commit_range.drifted`` on a fronted run, this run's own drift check on
+    a direct one). ``not_in_range`` and ``narrowed`` are copied from the
+    resolved :class:`ReviewScope` so the scope-source line can say them.
+    """
+
+    base: Optional[str]
+    head: str
+    base_ref: str
+    source: str
+    drifted: Tuple[str, ...] = ()
+    not_in_range: Tuple[str, ...] = ()
+    narrowed: bool = False
+
+    @property
+    def display(self) -> str:
+        """``<base7>..<head7>`` (``root..<head7>``): what a user reads."""
+        return display_range(self.base, self.head)
+
+    @property
+    def fronted(self) -> bool:
+        """Whether a commit brief's ``commit_range`` pins this review."""
+        return self.source == PIN_COMMIT_RANGE
+
+
+def _recorded_drift(record: Mapping[str, Any]) -> Tuple[str, ...]:
+    return tuple(str(path) for path in (record.get("drifted") or ()) if path)
+
+
+def _range_recovery(brief: str) -> str:
+    return (
+        f"Re-run --review-commits <range> on the commits as they are now: it "
+        f"resolves to new SHAs, and so to a new brief, because the review in "
+        f"{brief} can no longer be resumed, reaggregated or applied."
+    )
+
+
+def _direct_recovery(plan_path: Any) -> str:
+    return (
+        f"Run a new review on commits that exist: review-code {plan_path} "
+        f"--base-ref <rev> --head-ref <rev>."
+    )
+
+
+def _refuse_another_pair(
+    recorded: Any,
+    typed_base: Optional[str],
+    typed_head: Optional[str],
+    *,
+    cwd: str,
+    what: str,
+    remedy: str,
+) -> None:
+    """Exit-3 :class:`RangeError` when a typed ref resolves elsewhere than the
+    pair on record (*recorded* is a ``commit_range.Resolved``). A typed ref
+    that does not resolve at all is "elsewhere" too: the pair on record is
+    named either way, so the user can type it back."""
+    mismatched: List[str] = []
+    if typed_head is not None:
+        try:
+            head = resolve_commit_strict(typed_head, cwd=cwd)
+        except RangeError:
+            head = None
+        if head != recorded.head:
+            mismatched.append(f"--head-ref {typed_head}")
+    if typed_base is not None:
+        try:
+            base = resolve_base_strict(typed_base, cwd=cwd)
+        except RangeError:
+            base = None
+        if base != recorded.base_ref:
+            mismatched.append(f"--base-ref {typed_base}")
+    if not mismatched:
+        return
+    pair = display_range(recorded.base, recorded.head)
+    raise RangeError(
+        HEAD_REF_MISMATCH,
+        f"{HEAD_REF_MISMATCH} {' and '.join(mismatched)} resolve(s) elsewhere than "
+        f"the pair {what} recorded: --base-ref {recorded.base_ref} --head-ref "
+        f"{recorded.head} ({pair})\n  {remedy}",
+    )
+
+
+def _replays_record(
+    record: Mapping[str, Any], typed_base: Optional[str], typed_head: str, cwd: str,
+) -> bool:
+    """Whether the typed refs are the recorded SHAs as written (a replayed
+    resume line or detached child), so a pruned one is reported as the
+    record's ``[RANGE_UNRESOLVED]`` rather than as a bad typed ref."""
+    if typed_head != record.get("head"):
+        return False
+    if typed_base is None:
+        return True
+    recorded_base = record.get("base")
+    if recorded_base is None:
+        return is_empty_tree_id(typed_base, cwd)
+    return typed_base == recorded_base
+
+
+def resolve_pinned_range(
+    state: Optional[Mapping[str, Any]],
+    args: Any,
+    *,
+    cwd: str,
+    plan_path: Any,
+    reaggregate: bool = False,
+) -> Optional[PinnedRange]:
+    """The two commits this review is pinned to, or ``None`` for a review of
+    the working tree. Raises :class:`RangeError` (exit 3) — print its
+    ``message`` and exit with its ``exit_code`` before writing anything.
+
+    In order (§2.5 "One reader"):
+
+    1. ``commit_range`` (a commit brief): both SHAs re-resolved strictly
+       (``[RANGE_UNRESOLVED]`` naming ``--review-commits``); a typed
+       ``--base-ref``/``--head-ref`` must resolve to the same pair.
+    2. A typed ``--head-ref`` (a direct run). Replaying the recorded
+       ``head_ref`` SHAs re-resolves that record (``[RANGE_UNRESOLVED]``
+       naming ``review-code <plan> --base-ref … --head-ref …``); otherwise both
+       refs resolve through the strict resolvers (``[RANGE_BAD_REF]``), an
+       empty-tree ``--base-ref`` included. With no ``--base-ref`` the base is
+       the recorded ``head_ref``'s, else the state's ``head_before_implement``
+       resolved strictly too, else ``[RANGE_BAD_REF]`` (never
+       ``head_at_start``, stamped from the current ``HEAD``). On
+       ``--reaggregate`` a recorded ``head_ref`` wins, and a typed ref
+       resolving elsewhere is :data:`HEAD_REF_MISMATCH`.
+    3. ``--reaggregate`` with a recorded ``head_ref``: that pair, which is the
+       review on record.
+
+    A fan-out without ``--head-ref`` on a plan whose state holds only a
+    ``head_ref`` is a review of the working tree (``None``): its round deletes
+    the record, so the record always describes the review on record.
+    """
+    doc: Mapping[str, Any] = state if isinstance(state, Mapping) else {}
+    typed_head = getattr(args, "head_ref", None) or None
+    typed_base = getattr(args, "base_ref", None) or None
+
+    # The one reader (`commit_range`, else `head_ref`): its source decides
+    # which record pins the review, and the live record is what is resolved.
+    endpoints = pinned_endpoints(doc)
+    live = pinned_record(doc)
+    if endpoints is not None and endpoints.source == PIN_COMMIT_RANGE and live is not None:
+        commit_range = live
+        brief = str(commit_range.get("brief") or plan_path)
+        resolved = resolve_recorded(
+            commit_range, cwd=cwd, label=brief, recovery=_range_recovery(brief),
+        )
+        _refuse_another_pair(
+            resolved, typed_base, typed_head, cwd=cwd,
+            what=f"the commit brief {brief}",
+            remedy="A commit brief reviews one range: drop the refs, or review "
+                   "another range with --review-commits <range>.",
+        )
+        return PinnedRange(
+            resolved.base, resolved.head, resolved.base_ref, PIN_COMMIT_RANGE,
+            drifted=endpoints.drifted,
+        )
+
+    record = live if endpoints is not None and endpoints.source == PIN_HEAD_REF else None
+    remedy = (
+        "--reaggregate regroups the review on record: drop the refs or pass the "
+        "recorded pair. To review another pair, run a new round: review-code "
+        f"{plan_path} --base-ref <rev> --head-ref <rev>."
+    )
+    if typed_head is None:
+        if reaggregate and record is not None:
+            resolved = resolve_recorded(
+                record, cwd=cwd, label=str(plan_path),
+                recovery=_direct_recovery(plan_path),
+            )
+            _refuse_another_pair(
+                resolved, typed_base, None, cwd=cwd,
+                what=f"{plan_path}'s head_ref", remedy=remedy,
+            )
+            return PinnedRange(
+                resolved.base, resolved.head, resolved.base_ref, PIN_HEAD_REF,
+                drifted=_recorded_drift(record),
+            )
+        return None
+
+    if record is not None and (
+        reaggregate or _replays_record(record, typed_base, typed_head, cwd)
+    ):
+        resolved = resolve_recorded(
+            record, cwd=cwd, label=str(plan_path),
+            recovery=_direct_recovery(plan_path),
+        )
+        _refuse_another_pair(
+            resolved, typed_base, typed_head, cwd=cwd,
+            what=f"{plan_path}'s head_ref", remedy=remedy,
+        )
+        return PinnedRange(
+            resolved.base, resolved.head, resolved.base_ref,
+            PIN_HEAD_REF if reaggregate else PIN_TYPED,
+            drifted=_recorded_drift(record) if reaggregate else (),
+        )
+
+    head = resolve_commit_strict(typed_head, cwd=cwd)
+    if typed_base is not None:
+        base_ref = resolve_base_strict(typed_base, cwd=cwd)
+    elif record is not None:
+        base_ref = resolve_recorded(
+            record, cwd=cwd, label=str(plan_path),
+            recovery=_direct_recovery(plan_path),
+        ).base_ref
+    else:
+        # Never `head_at_start`: `StateManager` stamps it from the current
+        # `HEAD`, so on a plan whose state was created at the reviewed tip the
+        # pair would silently be `head..head` or inverted (§2.2, §2.5). Only
+        # implement's own `head_before_implement` names where a change starts.
+        fallback = doc.get("head_before_implement")
+        if not fallback:
+            raise RangeError(
+                "[RANGE_BAD_REF]",
+                "[RANGE_BAD_REF] --head-ref needs a base: pass --base-ref <rev> "
+                "(the commit the change starts after)",
+            )
+        base_ref = resolve_base_strict(str(fallback), cwd=cwd)
+    base = None if is_empty_tree_id(base_ref, cwd) else base_ref
+    return PinnedRange(base, head, base_ref, PIN_TYPED)
+
+
+def pin_recorded_refs(pinned: PinnedRange) -> bool:
+    """Rewrite this invocation's recorded argv so it carries the pinned pair
+    as full SHAs (``--base-ref <base> --head-ref <head>``), never as typed.
+
+    The record (``cli_common.invocation()``) is what a detached child, a
+    resume line and a next command replay, so after this a moved branch
+    cannot change which commits they review (§2.5 "Record and replay"). Every
+    spelling argparse binds to either flag (``--head-ref=x``, ``--head x``) is
+    replaced in place; a missing one is appended. Only a ``review-code``
+    record is touched. True when the record changed.
+    """
+    record = cli_common.invocation()
+    if not record or record.get("mode") != "review-code":
+        return False
+    argv = [str(token) for token in (record.get("argv") or [])]
+    wanted = {"--base-ref": pinned.base_ref, "--head-ref": pinned.head}
+    out: List[str] = []
+    seen: set = set()
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        name, separator, _ = token.partition("=")
+        flag = next(
+            (
+                full for full in wanted
+                if name.startswith("--") and cli_common._flag_matches(name, full)
+            ),
+            None,
+        )
+        if flag is None:
+            out.append(token)
+            index += 1
+            continue
+        out.extend([flag, wanted[flag]])
+        seen.add(flag)
+        index += 1 if separator else 2
+    for flag, value in wanted.items():
+        if flag not in seen:
+            out.extend([flag, value])
+    if out == argv:
+        return False
+    record["argv"] = out
+    return True
+
+
+def landed_stage(args: Any) -> bool:
+    """Whether a commit front door's stage may have landed during this run's
+    detach boundary: a worker whose argv names one (the hidden
+    ``--commit-stage``, plans/review-commits.md §2.1). The worker applies it
+    right after ``_acquire_lock``, inside ``maybe_detach`` — after this phase's
+    pre-flight loaded ``state``, read the brief and resolved the pair."""
+    return bool(getattr(args, "commit_stage", None))
+
+
+def refresh_pinned_after_stage(
+    state: Any,
+    pinned: Optional[PinnedRange],
+    args: Any,
+    *,
+    cwd: str,
+    plan_path: Any,
+) -> Optional[PinnedRange]:
+    """The pinned pair re-resolved from *state* once it has been reloaded past
+    a landed stage: the stage may have brought the brief's ``commit_range``
+    (a new brief has none before it) with its own drift list. The scope's
+    ``--files`` narrowing is kept, and a direct run keeps its own drift check.
+    Raises :class:`RangeError` like :func:`resolve_pinned_range`."""
+    refreshed = resolve_pinned_range(
+        getattr(state, "state", None), args, cwd=cwd, plan_path=plan_path,
+    )
+    if refreshed is None or pinned is None:
+        return refreshed
+    refreshed = refreshed._replace(
+        not_in_range=pinned.not_in_range, narrowed=pinned.narrowed,
+    )
+    if not refreshed.fronted:
+        refreshed = refreshed._replace(drifted=pinned.drifted)
+    return refreshed
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def round_starts(
+    phase_dir: Any, model_specs: Sequence[str], scope_id: Optional[str],
+    *, rerun_all: bool,
+) -> bool:
+    """Whether this fan-out starts a new round rather than resuming one.
+
+    A resume reuses at least one model's result: a ``<stem>.json`` the scope
+    ledger ties to this run's scope id, which ``run_all_reviews`` answers from
+    disk. ``--rerun-all`` reuses none, and neither does a run whose scope
+    moved (another pair, another ``--files``), so each of those starts one.
+    """
+    if rerun_all:
+        return True
+    ledger = read_scope_ledger(phase_dir)
+    for spec in model_specs:
+        stem = sanitize_model_name(spec)
+        result = Path(phase_dir) / f"{stem}.json"
+        try:
+            reusable = result.is_file() and result.stat().st_size > 0
+        except OSError:
+            reusable = False
+        if reusable and (scope_id is None or ledger.get(stem) == scope_id):
+            return False
+    return True
+
+
+def record_round_start(state: Any, pinned: Optional[PinnedRange]) -> bool:
+    """The pinned records a new round writes, on *state* in memory.
+
+    Through the ``StateManager`` the phase already holds and saves (§2.1 "The
+    phase writes through the instance it saves with"):
+
+    - a commit brief (``commit_range`` present): ``reviewed_header_sha256``
+      takes ``header_sha256`` and ``guard`` is deleted, so the next apply
+      takes a fresh decision against this round's groups;
+    - a direct ``--head-ref`` round: ``head_ref`` becomes ``{base, head,
+      drifted, resolved_at}`` (full SHAs; no ``guard``);
+    - a round with neither: ``head_ref`` is deleted.
+
+    True when the document changed; the caller saves.
+    """
+    doc = getattr(state, "state", None)
+    if not isinstance(doc, dict):
+        return False
+    before = json.dumps(
+        {key: doc.get(key) for key in ("commit_range", "head_ref")},
+        sort_keys=True, default=str,
+    )
+    commit_range = doc.get("commit_range")
+    if isinstance(commit_range, dict):
+        commit_range["reviewed_header_sha256"] = commit_range.get("header_sha256")
+        commit_range.pop("guard", None)
+    elif pinned is not None:
+        doc["head_ref"] = {
+            "base": pinned.base,
+            "head": pinned.head,
+            "drifted": list(pinned.drifted),
+            "resolved_at": _utc_now(),
+        }
+    else:
+        doc.pop("head_ref", None)
+    after = json.dumps(
+        {key: doc.get(key) for key in ("commit_range", "head_ref")},
+        sort_keys=True, default=str,
+    )
+    return before != after
+
+
+def drift_check(
+    pinned: PinnedRange, paths: Sequence[str], *, repo_root: Optional[str],
+    staged: bool = False,
+) -> PinnedRange:
+    """The drift list for this review, and the ``[SCOPE_DRIFT]`` line.
+
+    A fronted run's list is the front door's (``commit_range.drifted``):
+    neither recomputed nor printed here, since the commit block already said
+    it. *staged* (the run carries a front door's hidden ``--commit-stage``,
+    :func:`landed_stage`) is a fronted run too, even while the pair reads as
+    typed: on a new brief its ``commit_range`` is still only in the stage,
+    which lands in the worker's detach boundary, after this pre-flight. The
+    front door printed the line already, and the landed record brings the list
+    (:func:`refresh_pinned_after_stage`). A direct run checks its own scope
+    with the one change test (``git_utils.paths_changed_since``, §2.5
+    "Drift"), in the pre-flight, so the line reaches the caller's terminal
+    before any detach.
+    """
+    if pinned.fronted or staged:
+        return pinned
+    drifted = sorted(paths_changed_since(pinned.head, list(paths), cwd=repo_root))
+    line = render_drift_line(drifted, len(paths), pinned.head)
+    if line:
+        print(line)
+    return pinned._replace(drifted=tuple(drifted))
+
+
+def _context_plan(state: Optional[Mapping[str, Any]]) -> Tuple[Optional[str], Optional[str]]:
+    """``(plan_snapshot, plan_sha256)`` of a commit brief's frozen context plan."""
+    record = (state or {}).get("commit_range") if state else None
+    if not isinstance(record, Mapping):
+        return None, None
+    snapshot = record.get("plan_snapshot") or None
+    digest = record.get("plan_sha256") or None
+    return (str(snapshot) if snapshot else None), (str(digest) if digest else None)
+
+
+def context_plan_snapshot_sha256(snapshot: str, repo_root: Optional[str]) -> str:
+    """The SHA-256 of the context plan's snapshot as it is now, ``""`` when
+    it cannot be read (so a missing snapshot is a changed one)."""
+    path = Path(snapshot)
+    if not path.is_absolute():
+        path = Path(repo_root or os.getcwd()) / path
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
 def resolve_review_scope(
     state: Any,
     base_ref: Optional[str],
     *,
     anchor: Optional[str] = None,
     repo_root: Optional[str] = None,
+    head_ref: Optional[str] = None,
 ) -> ReviewScope:
     """The files under review, labelled with the branch that picked them.
 
-    Tried in order, first non-empty wins:
+    With ``head_ref`` (a review pinned to two commits, plans/review-commits.md
+    §2.5) the range decides, ahead of everything below: ``git diff
+    --name-only <base_ref> <head_ref>`` minus the workflow's own paths is the
+    universe, and a ``--files`` list (typed, or recorded as
+    ``review_scope_files``) is intersected with it, never widening it; a
+    listed path the range did not change is named ``no diff: not changed in
+    <range>``. The baseline subtraction, the untracked announcement and the
+    ``--base-ref HEAD`` hint are all for a working-tree guess, so none runs.
+
+    Otherwise tried in order, first non-empty wins:
 
     1. ``review_scope_files`` — the exact list a ``--files``/``--files-from``
        fan-out recorded (decision 11.1 of the review-scope plan);
@@ -612,6 +1163,11 @@ def resolve_review_scope(
     (:func:`review_git_root`) is where that classification's ``git
     check-attr`` runs.
     """
+    if head_ref is not None:
+        return _commit_range_scope(
+            state, base_ref or "", head_ref, anchor=anchor, repo_root=repo_root,
+        )
+
     recorded = state.get(REVIEW_SCOPE_FILES_KEY)
     if isinstance(recorded, list):
         explicit = list(dict.fromkeys(
@@ -637,7 +1193,7 @@ def resolve_review_scope(
         if isinstance(entry, dict) and entry.get("path")
     ]
     kept_paths = set(_drop_workflow_paths(
-        [entry["path"] for entry in entries], workflow,
+        [entry["path"] for entry in entries], workflow, repo_root=repo_root,
     ))
     entries = [entry for entry in entries if entry["path"] in kept_paths]
     if entries:
@@ -667,7 +1223,7 @@ def resolve_review_scope(
         changed_files = get_files_changed_since_ref(base_ref)
     except Exception:
         changed_files = []
-    changed_files = _drop_workflow_paths(changed_files, workflow)
+    changed_files = _drop_workflow_paths(changed_files, workflow, repo_root=repo_root)
 
     # Filter out pre-existing changes that were present before implementation.
     # Through `subtract_baseline`, so a baseline entry that is an untracked
@@ -695,6 +1251,65 @@ def resolve_review_scope(
     return ReviewScope(changed_files, SCOPE_SOURCE_GIT_DIFF, {})
 
 
+def _range_text_of(
+    base_ref: str, head_ref: str, repo_root: Optional[str],
+) -> Tuple[str, bool]:
+    """``<base7>..<head7>`` (``root..<head7>`` for an empty-tree base), and
+    whether *base_ref* is the empty tree: callers key on that flag, never on
+    the display text."""
+    root = is_empty_tree_id(base_ref, repo_root)
+    return display_range(None if root else base_ref, head_ref), root
+
+
+def _commit_range_scope(
+    state: Any,
+    base_ref: str,
+    head_ref: str,
+    *,
+    anchor: Optional[str],
+    repo_root: Optional[str],
+) -> ReviewScope:
+    """:data:`SCOPE_SOURCE_COMMIT_RANGE`: the range's own diff, narrowed by
+    ``--files`` (see :func:`resolve_review_scope`)."""
+    workflow = review_workflow_entries(state, anchor, repo_root)
+    shown, root = _range_text_of(base_ref, head_ref, repo_root)
+    try:
+        universe = get_files_changed_since_ref(base_ref, head_ref, cwd=repo_root)
+    except Exception as exc:  # noqa: BLE001 - the review goes on with no files
+        print(
+            f"Warning: git diff --name-only {base_ref} {head_ref} failed ({exc}); "
+            f"the review of {shown} has no files to review.",
+            file=sys.stderr,
+        )
+        universe = []
+    universe = _drop_workflow_paths(universe, workflow, repo_root=repo_root)
+
+    recorded = state.get(REVIEW_SCOPE_FILES_KEY)
+    named = list(dict.fromkeys(
+        item for item in (recorded if isinstance(recorded, list) else [])
+        if isinstance(item, str) and item.strip()
+    ))
+    if not named:
+        # The empty tree is spelled whole: git knows it only by its full id.
+        base = base_ref if root else base_ref[:12]
+        print(
+            f"Using the {len(universe)} file(s) changed in {shown} "
+            f"(`git diff --name-only {base} {head_ref[:12]}`)"
+        )
+        return ReviewScope(universe, SCOPE_SOURCE_COMMIT_RANGE, {})
+    in_range = set(universe)
+    paths = [path for path in named if path in in_range]
+    outside = tuple(path for path in named if path not in in_range)
+    print(
+        f"Using {len(paths)} of the {len(named)} file(s) given with --files "
+        f"(state.json {REVIEW_SCOPE_FILES_KEY}): the ones {shown} changed "
+        f"({len(universe)} file(s) in the range)"
+    )
+    for path in outside:
+        print(f"  - {path}: no diff: not changed in {shown}")
+    return ReviewScope(paths, SCOPE_SOURCE_COMMIT_RANGE, {}, outside, True)
+
+
 def review_workflow_entries(
     state: Any, anchor: Optional[str], repo_root: Optional[str],
 ) -> List[str]:
@@ -717,18 +1332,33 @@ def review_workflow_entries(
     return workflow_file_entries(plan, root=root, output_dirs=folders)
 
 
-def _drop_workflow_paths(paths: List[str], workflow: List[str]) -> List[str]:
-    """*paths* without the workflow's own files, saying once what went."""
-    if not workflow or not paths:
+def _drop_workflow_paths(
+    paths: List[str], workflow: List[str], *, repo_root: Optional[str] = None,
+) -> List[str]:
+    """*paths* without the workflow's own files, saying once what went.
+
+    Besides this run's *workflow* entries, every commit review's brief and
+    report folder goes as a class (``commit_review.commit_review_artifact``,
+    plans/review-commits.md §2.4), on every mode and whatever plan the run
+    has: a range holding a commit of another review's files, or a diff across
+    one, would otherwise review them. The folder is read for *repo_root*
+    (the cwd's repository when None); when the accessor refuses it, nothing
+    extra is dropped.
+    """
+    if not paths:
         return list(paths)
-    kept = subtract_baseline(paths, workflow)
+    kept = subtract_baseline(paths, workflow) if workflow else list(paths)
+    root = repo_root or get_project_root_from_dir()
+    folder = commit_reviews_folder_rel(root) if root else None
+    if folder:
+        kept = [path for path in kept if not commit_review_artifact(path, folder)]
     kept_set = set(kept)
     dropped = sorted({path for path in paths if path not in kept_set})
     if dropped:
         print(
             f"Left out {len(dropped)} of the workflow's own file(s) (the plan, "
-            f"its task list and its output folder are never code under "
-            f"review): {', '.join(dropped[:5])}"
+            f"its task list, its output folder and commit reviews are never "
+            f"code under review): {', '.join(dropped[:5])}"
             f"{', …' if len(dropped) > 5 else ''}"
         )
     return kept
@@ -837,13 +1467,43 @@ def resolve_changed_files(state: Any, base_ref: Optional[str]) -> List[str]:
     return resolve_review_scope(state, base_ref).paths
 
 
-def describe_scope_source(source: Optional[str], base_ref: Optional[str]) -> str:
+def describe_scope_source(
+    source: Optional[str],
+    base_ref: Optional[str],
+    pinned: Optional[PinnedRange] = None,
+) -> str:
     """The review prompt's one-line account of where the file list came from.
 
     Rendered into ``prompt_context["scope_source"]``, which is how the prompt
     tells a reviewer why its list looks the way it does — including why it is
-    empty.
+    empty. On a review pinned to two commits (*pinned*) the line names the
+    range and says the change ends at the head commit, not the working tree,
+    plus any ``--files`` narrowing and the listed paths the range did not
+    change (the manifest's ``Scope source`` line carries the same text).
     """
+    if source == SCOPE_SOURCE_COMMIT_RANGE:
+        if pinned is None:
+            return (
+                f"`git diff --name-only {base_ref} <head>` (the files the "
+                f"commits under review changed)"
+            )
+        base = pinned.base_ref if pinned.base is None else pinned.base[:12]
+        text = (
+            f"`git diff --name-only {base} {pinned.head[:12]}`: every file the "
+            f"commits `{pinned.display}` changed (the change ends at commit "
+            f"`{pinned.head[:7]}`, not at the working tree)"
+        )
+        if pinned.narrowed:
+            text += ", narrowed to the ones given with --files"
+        if pinned.not_in_range:
+            text += (
+                f"; given with --files but not changed in {pinned.display}, so "
+                f"not reviewed: " + ", ".join(
+                    f"`{path}` (no diff: not changed in {pinned.display})"
+                    for path in pinned.not_in_range
+                )
+            )
+        return text
     if source == SCOPE_SOURCE_FILES_FLAG:
         return "given with --files (the exact scope the user named)"
     if source == SCOPE_SOURCE_TRACKED:
@@ -1154,6 +1814,7 @@ def build_reviewed_code_excerpt(
     project_root: Optional[str] = None,
     context_lines: int = REVIEWED_CODE_CONTEXT_LINES,
     budget: Optional[int] = None,
+    pinned: Optional[PinnedRange] = None,
 ) -> str:
     """The code these issues are about, as the line windows they cite.
 
@@ -1184,9 +1845,15 @@ def build_reviewed_code_excerpt(
     :func:`_fit_reviewed_code_sections` (the budget), so a caller that needs
     the dropped list — :func:`build_validation_secondary_context` names it on
     stderr — can read the files once and fit them twice.
+
+    ``pinned`` reads every window at the review's head commit instead of disk
+    (plans/review-commits.md §2.5), so the excerpt — and the
+    ``reviewed_code_sha256`` hashed from it — is the same on every reaggregate
+    whatever the working tree holds by then.
     """
     sections = _reviewed_code_sections(
-        groups, project_root=project_root, context_lines=context_lines
+        groups, project_root=project_root, context_lines=context_lines,
+        **({"pinned": pinned} if pinned is not None else {}),
     )
     return _fit_reviewed_code_sections(sections, budget)[0]
 
@@ -1196,11 +1863,18 @@ def _reviewed_code_sections(
     *,
     project_root: Optional[str],
     context_lines: int,
+    pinned: Optional[PinnedRange] = None,
 ) -> List[Tuple[str, str]]:
-    """``(path, rendered section)`` per cited file, files read once, in path order."""
+    """``(path, rendered section)`` per cited file, files read once, in path order.
+
+    ``pinned`` reads them at the head commit (:func:`_pinned_code_sections`).
+    """
     windows = _issue_line_windows(groups, context_lines)
     if not windows:
         return []
+    if pinned is not None:
+        root = Path(project_root) if project_root else Path.cwd()
+        return _pinned_code_sections(windows, root=root, pinned=pinned)
 
     # With no git root (a plan outside a repository) the run's own working
     # directory is the only boundary there is, and a code review always runs
@@ -1236,6 +1910,208 @@ def _reviewed_code_sections(
             blocks.append(f"```\n{body}\n```")
         if blocks:
             sections.append((path, f"### {path}\n\n" + "\n\n".join(blocks)))
+    return sections
+
+
+#: A unified-diff hunk header: ``@@ -<old start>[,<count>] +<new>… @@``.
+_HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@")
+
+#: What :func:`absent_at_head` calls a path the head commit does not hold.
+ABSENT_DELETED = "deleted"        # present at base, deleted by the range
+ABSENT_RENAMED = "renamed"        # present at base, renamed away by the range
+ABSENT_UNLABELLED = "absent"      # present at base; the rename lookup failed
+ABSENT_BOTH = "absent-both"       # at neither end: nothing to show
+
+
+def pinned_git_name(path: str) -> Optional[str]:
+    """A cited path in git's form for a read at a commit, or ``None``.
+
+    ``path`` is model output. An absolute path is refused, as on the disk
+    branch (the prompt asks for a relative one), and so is any path that
+    climbs out of the repository; the rest go through ``git_path``
+    (plans/review-commits.md §2.5, "Paths in git's form") and are normalised.
+    Lexical only: the working tree is never consulted, so the answer is the
+    same however it has moved since ``head``.
+    """
+    text = str(path or "").strip()
+    if not text or "\n" in text or "\0" in text or os.path.isabs(text):
+        return None
+    name = posixpath.normpath(git_path(text))
+    if name in (".", "..") or name.startswith("../") or name.startswith("/"):
+        return None
+    return name
+
+
+def absent_at_head(
+    names: Sequence[str], pinned: PinnedRange, *, cwd: Optional[str],
+) -> Dict[str, Tuple[str, Optional[str]]]:
+    """``{name: (kind, new path)}`` for git-form *names* absent at ``head``.
+
+    One ``paths_in_commit`` at the base (a root range has none) and, when any
+    name is there, one ``rename_map`` over the whole range, used for the label
+    only (§2.5 "Deleted or renamed: the label"). ``kind`` is
+    :data:`ABSENT_RENAMED` (with its new path), :data:`ABSENT_DELETED`,
+    :data:`ABSENT_UNLABELLED` (present at base, the rename lookup failed) or
+    :data:`ABSENT_BOTH`.
+    """
+    if not names:
+        return {}
+    if pinned.base is None:
+        return {name: (ABSENT_BOTH, None) for name in names}
+    at_base = paths_in_commit(pinned.base, names, cwd=cwd)
+    if at_base is None:
+        return {name: (ABSENT_UNLABELLED, None) for name in names}
+    renames = (
+        rename_map(pinned.base_ref, pinned.head, cwd=cwd)
+        if any(name in at_base for name in names) else {}
+    )
+    kinds: Dict[str, Tuple[str, Optional[str]]] = {}
+    for name in names:
+        if name not in at_base:
+            kinds[name] = (ABSENT_BOTH, None)
+        elif renames is None:
+            kinds[name] = (ABSENT_UNLABELLED, None)
+        elif name in renames:
+            kinds[name] = (ABSENT_RENAMED, renames[name])
+        else:
+            kinds[name] = (ABSENT_DELETED, None)
+    return kinds
+
+
+def absent_label(kind: str, new: Optional[str], pinned: PinnedRange) -> str:
+    """The words a path absent at ``head`` is labelled with, in the excerpt's
+    header and the report's: ``deleted in <range>``, ``renamed to <new> in
+    <range>``, or ``absent at <head7>``."""
+    if kind == ABSENT_DELETED:
+        return f"deleted in {pinned.display}"
+    if kind == ABSENT_RENAMED and new:
+        return f"renamed to {new} in {pinned.display}"
+    return f"absent at {pinned.head[:7]}"
+
+
+def _removed_lines(
+    pinned: PinnedRange, name: str, *, cwd: Optional[str],
+) -> Optional[Dict[int, str]]:
+    """``{line number at base: text}`` for the lines ``git diff --no-renames
+    <base> <head> -- <name>`` removes; for a path absent at ``head`` that is
+    the whole file as ``base`` had it. ``None`` when the diff fails."""
+    try:
+        stdout, _, rc = _run_git(
+            *attribute_source_args(pinned.head), "--literal-pathspecs", "diff", "--no-renames", "--no-color",
+            pinned.base_ref, pinned.head, "--", name, check=False, cwd=cwd,
+        )
+    except (OSError, ValueError):
+        return None
+    if rc != 0:
+        return None
+    removed: Dict[int, str] = {}
+    old_line: Optional[int] = None
+    for line in stdout.split("\n"):
+        header = _HUNK_HEADER.match(line)
+        if header:
+            old_line = int(header.group(1))
+            continue
+        if old_line is None:
+            continue  # the file header, before the first hunk
+        if line.startswith("-"):
+            removed[old_line] = line[1:].rstrip("\r")
+            old_line += 1
+        elif line.startswith(" "):
+            old_line += 1
+    return removed
+
+
+def _pinned_code_sections(
+    windows: Dict[str, List[Tuple[int, int]]],
+    *,
+    root: Path,
+    pinned: PinnedRange,
+) -> List[Tuple[str, str]]:
+    """The cited windows read at the review's head commit, never from disk.
+
+    Every read is immutable — ``head``, or for a path the range removed,
+    ``base`` — so the excerpt is byte-identical on every reaggregate however
+    the working tree moves (plans/review-commits.md §2.5, "Validation
+    excerpts"). One ``paths_in_commit`` and one ``git cat-file --batch`` over
+    the cited paths at ``head``; a path absent there keeps its slot:
+
+    - deleted or renamed away (present at ``base``): the cited windows of the
+      removal, numbered as at ``base``, under ``### <path> (deleted in
+      <range>; lines as at <base7>)`` (``renamed to <new> in <range>`` for a
+      rename, ``absent at <head7>`` when the rename lookup failed);
+    - absent at both ends: ``(absent at <base7> and <head7>; no code to
+      show)``;
+    - a ``git diff`` that fails, or a file ``head`` holds that cannot be shown
+      as text: ``(not readable at <head7>)``.
+    """
+    cwd = str(root)
+    head7 = pinned.head[:7]
+    base7 = "root" if pinned.base is None else pinned.base[:7]
+    names = {path: pinned_git_name(path) for path in windows}
+    asked = sorted({name for name in names.values() if name})
+    present = paths_in_commit(pinned.head, asked, cwd=cwd) if asked else set()
+    snapshots = (
+        capture_file_snapshots_at(pinned.head, sorted(present), cwd=cwd)
+        if present else {}
+    )
+    absent = [name for name in asked if present is not None and name not in present]
+    kinds = absent_at_head(absent, pinned, cwd=cwd)
+
+    def numbered(lines: List[Tuple[int, str]]) -> str:
+        body = "\n".join(f"{number}: {text}" for number, text in lines)
+        return f"```\n{body}\n```"
+
+    sections: List[Tuple[str, str]] = []
+    for path in sorted(windows):
+        name = names[path]
+        if name is None:
+            sections.append((path, f"### {path}\n\n(outside the repository; not shown)"))
+            continue
+        if present is None:
+            sections.append((path, f"### {path}\n\n(not readable at {head7})"))
+            continue
+        if name in present:
+            lines_at_head = snapshots.get(name)
+            if lines_at_head is None:
+                sections.append((path, f"### {path}\n\n(not readable at {head7})"))
+                continue
+            blocks = []
+            for start, end in windows[path]:
+                cut = [
+                    (number, lines_at_head[number - 1])
+                    for number in range(max(1, start), min(end, len(lines_at_head)) + 1)
+                ]
+                if cut:
+                    blocks.append(numbered(cut))
+            if blocks:
+                sections.append((path, f"### {path}\n\n" + "\n\n".join(blocks)))
+            continue
+        kind, new = kinds.get(name, (ABSENT_UNLABELLED, None))
+        if kind == ABSENT_BOTH:
+            if pinned.base is None:
+                note = (
+                    f"(absent at {head7}, and the range starts at the repository's "
+                    f"first commit; no code to show)"
+                )
+            else:
+                note = f"(absent at {base7} and {head7}; no code to show)"
+            sections.append((path, f"### {path}\n\n{note}"))
+            continue
+        removed = _removed_lines(pinned, name, cwd=cwd)
+        if removed is None:
+            sections.append((path, f"### {path}\n\n(not readable at {head7})"))
+            continue
+        header = f"### {path} ({absent_label(kind, new, pinned)}; lines as at {base7})"
+        blocks = []
+        for start, end in windows[path]:
+            cut = [(number, removed[number]) for number in range(start, end + 1)
+                   if number in removed]
+            if cut:
+                blocks.append(numbered(cut))
+        if blocks:
+            sections.append((path, header + "\n\n" + "\n\n".join(blocks)))
+        else:
+            sections.append((path, f"{header}\n\n(no line at the cited lines)"))
     return sections
 
 
@@ -1413,6 +2289,7 @@ def build_validation_secondary_context(
     *,
     project_root: Optional[str] = None,
     cut_report: Optional[Dict[str, Any]] = None,
+    pinned: Optional[PinnedRange] = None,
 ) -> Tuple[str, str]:
     """``(secondary_context, reviewed_code)`` for a code-review validation batch.
 
@@ -1460,6 +2337,10 @@ def build_validation_secondary_context(
     validator to it, and codex reads outside its cwd. Computed here, in the one
     function both validation sites call, so both get the same containment and
     the same text.
+
+    ``pinned`` (a review pinned to two commits) reads the windows at the head
+    commit, and ``open_paths`` are then the dropped files' repository-relative
+    names, for a validator to read at that commit, never on disk.
     """
     raw_record = build_implementation_record(plan_path)
     record = excerpt_context_reported(
@@ -1472,13 +2353,17 @@ def build_validation_secondary_context(
     code_budget = VALIDATION_CONTEXT_LIMIT - len(record_part) - len(code_heading) - 2
 
     sections = _reviewed_code_sections(
-        groups, project_root=project_root, context_lines=REVIEWED_CODE_CONTEXT_LINES
+        groups, project_root=project_root, context_lines=REVIEWED_CODE_CONTEXT_LINES,
+        **({"pinned": pinned} if pinned is not None else {}),
     )
     reviewed_code, _ = _fit_reviewed_code_sections(sections, None)
     embedded = reviewed_code
     # The same root `_reviewed_code_sections` confines its reads to.
     root = Path(project_root) if project_root else Path.cwd()
-    inside = {path: _readable_inside_repo(path, root) for path, _ in sections}
+    if pinned is None:
+        inside = {path: _readable_inside_repo(path, root) for path, _ in sections}
+    else:
+        inside = {path: pinned_git_name(path) for path, _ in sections}
     if len(embedded) > code_budget:
         # Re-cut by whole files rather than letting the caller's shared excerpt
         # slice the last file mid-window. The files were read once, above; only
@@ -1507,6 +2392,11 @@ def build_validation_secondary_context(
         open_paths: List[str] = []
         for path in dropped:
             on_disk = inside.get(path)
+            if pinned is not None:
+                # A name to read at `head`; the disk is never the reviewed code.
+                if on_disk and on_disk not in open_paths:
+                    open_paths.append(on_disk)
+                continue
             if on_disk and os.path.isfile(on_disk) and on_disk not in open_paths:
                 open_paths.append(on_disk)
         cut_report["open_paths"] = open_paths
@@ -1517,8 +2407,21 @@ def build_validation_secondary_context(
     return "\n\n".join(parts), reviewed_code
 
 
-def validation_extra_instructions(cut_report: Dict[str, Any]) -> str:
+def validation_extra_instructions(
+    cut_report: Dict[str, Any],
+    *,
+    pinned: Optional[PinnedRange] = None,
+    plan_snapshot: Optional[str] = None,
+    plan_sha256: Optional[str] = None,
+) -> str:
     """``extra_instructions`` for a code-review validation batch.
+
+    On a review pinned to two commits (*pinned*) the guidance states the
+    pinned-head read rule, with the §2.6 trust sentence, for every file
+    (``subagent_prompts.code_review_validation_guidance``), and the dropped
+    files are named for a read at the head commit; a commit brief's frozen
+    context plan (*plan_snapshot*) is named by its snapshot, never the user's
+    file. With neither, the text is exactly what it was.
 
     :data:`CODE_REVIEW_VALIDATION_GUIDANCE`, then — only when the reviewed-code
     block dropped files a validator can open (``cut_report["open_paths"]``, see
@@ -1530,10 +2433,32 @@ def validation_extra_instructions(cut_report: Dict[str, Any]) -> str:
     materialize the same prompt.
     """
     open_paths = [p for p in cut_report.get("open_paths") or [] if p]
+    if pinned is None and not plan_snapshot:
+        guidance = CODE_REVIEW_VALIDATION_GUIDANCE
+    else:
+        guidance = code_review_validation_guidance(
+            read_rule=(
+                pinned_head_read_rule(pinned.base, pinned.head)
+                if pinned is not None else None
+            ),
+            head=pinned.head if pinned is not None else None,
+            change=pinned.display if pinned is not None else None,
+            plan_snapshot=plan_snapshot,
+            plan_sha256=plan_sha256,
+        )
     if not open_paths:
-        return CODE_REVIEW_VALIDATION_GUIDANCE
+        return guidance
+    if pinned is not None:
+        head = pinned.head[:12]
+        return (
+            f"{guidance}\n\n"
+            "These files were dropped from the reviewed-code block only for its "
+            f"budget. Read each at commit `{head}` (`git show {head}:<path>`) at "
+            "the lines the findings cite before judging them: "
+            + ", ".join(f"`{path}`" for path in open_paths)
+        )
     return (
-        f"{CODE_REVIEW_VALIDATION_GUIDANCE}\n\n"
+        f"{guidance}\n\n"
         "These files were dropped from the reviewed-code block only for its "
         "budget. Open each at the lines the findings cite before judging them: "
         + ", ".join(f"`{path}`" for path in open_paths)
@@ -1943,6 +2868,7 @@ def reaggregate_review_scope(
     result_stems: Dict[str, str],
     *,
     repo_root: Optional[str] = None,
+    pinned: Optional[PinnedRange] = None,
 ) -> Dict[str, Any]:
     """The reaggregate's half of D2.2: report the scope that was reviewed.
 
@@ -1953,7 +2879,9 @@ def reaggregate_review_scope(
     pair is read back and left untouched. Each loaded result is then checked
     against the scope ledger; one tied to another set, or to none, is named in
     the report, and its findings stay. ``repo_root`` (:func:`review_git_root`)
-    is where a regeneration's git runs, as on the fan-out.
+    is where a regeneration's git runs, as on the fan-out. A pinned review
+    (*pinned*) regenerates the two-commit set (``head_ref``), so the pair is
+    the same whatever the tree holds now.
     """
     header = load_review_scope(phase_dir)
     if header is None:
@@ -1966,9 +2894,13 @@ def reaggregate_review_scope(
         diff_set = write_review_diff(
             base_ref, changed_files, phase_dir,
             get_collapse_paths(anchor=str(plan_path)),
-            scope_source=describe_scope_source(scope_source, base_ref),
+            scope_source=describe_scope_source(
+                scope_source, base_ref,
+                **({"pinned": pinned} if pinned is not None else {}),
+            ),
             written_by=WRITTEN_BY_REAGGREGATE,
             cwd=repo_root,
+            **({"head_ref": pinned.head} if pinned is not None else {}),
         )
         scope_id, header_base_ref, base_commit = (
             diff_set.scope_id, diff_set.base_ref, diff_set.base_commit,
@@ -2147,6 +3079,23 @@ def emit_salvage_task(
         print(f"Warning: could not materialize salvage task: {task_error}")
 
 
+#: The issue fields a salvage subagent rebuilds a code reviewer's answer with.
+SALVAGE_ISSUE_FIELDS = ("title", "desc", "importance", "file", "line_range", "type",
+                        "anchor_text")
+
+
+def salvage_issue_fields(commit_record: Optional[Mapping[str, Any]]) -> List[str]:
+    """The salvage request's ``expected_schema.fields``. A commit review's
+    reviewers also answer ``introduced_by`` (plans/review-commits.md §2.6,
+    ``schemas/code_review_issues.schema.json``): a repaired answer without it
+    would drop every claim that slot made, and attribution falls back to the
+    claim. Any other run keeps the fields it always had."""
+    fields = list(SALVAGE_ISSUE_FIELDS)
+    if commit_record is not None:
+        fields.append("introduced_by")
+    return fields
+
+
 async def run_single_review(
     model_spec: str,
     plan_path: Path,
@@ -2165,6 +3114,7 @@ async def run_single_review(
     scope_id: Optional[str] = None,
     diff_coverage: Optional[str] = None,
     run_model_specs: Optional[List[str]] = None,
+    pinned: Optional[PinnedRange] = None,
 ) -> Tuple[bool, Optional[List[Dict]], Optional[str]]:
     """
     Run a single model code review using agent exploration with file-based output.
@@ -2200,6 +3150,10 @@ async def run_single_review(
             (:func:`utils.git_utils.write_review_diff`). ``None`` — a direct
             call — renders the scope placeholders as "none written" and skips
             the diff-access decision, so the slot dispatches as it always did.
+        pinned: The two commits a pinned review (``--head-ref``) is of: the
+            ``{diff_access}`` block names ``<base7>..<head7>`` ending at the
+            head commit, the drifted files and the pinned-head read rule, and
+            ``{scope_source}`` names the range. ``None`` renders today's text.
         diff_dir: Absolute path of the ``diff/`` beside it.
         scope_id: That set's scope id. At attempt start a ``<stem>.json``
             the scope ledger ties to another id is retired to
@@ -2369,6 +3323,15 @@ async def run_single_review(
     # it like any other lost reviewer, rather than handed a prompt it cannot
     # act on — which is how two cursor-agent lanes once "reviewed" a change
     # they never saw.
+    #
+    # A commit brief's run (its state records `commit_range`) with a context
+    # plan hands the frozen snapshot over too (§2.4 "Everyone reads the
+    # snapshot"): an inline lane cannot open it, so its text is one more block
+    # of the bounded payload, and a lane it does not fit is not dispatched.
+    commit_record = commit_report.run_commit_range(plan_path)
+    context_plan = commit_report.context_plan_path(
+        commit_record, repo_root=project_root or os.getcwd()
+    )
     diff_access = None
     if scope_file is not None and diff_dir is not None:
         diff_access = render_diff_access(
@@ -2381,6 +3344,11 @@ async def run_single_review(
             coverage=diff_coverage or DIFF_COVERAGE_PARTIAL,
             plan_path=str(plan_path.absolute()),
             anchor=str(plan_path),
+            context_plan_path=context_plan,
+            **(
+                {"head_ref": pinned.head, "drifted": list(pinned.drifted)}
+                if pinned is not None else {}
+            ),
         )
         if diff_access.mode == "unsupported":
             detail = (
@@ -2420,8 +3388,14 @@ async def run_single_review(
         changed_files or [], task_ids=task_ids, full_scope_ref=full_scope_ref
     )
 
-    # Load prompt template
-    prompt_template = load_code_review_prompt()
+    # Load prompt template. A commit brief's run (its state records
+    # `commit_range`, read above) gets `commit_review.txt`; every other run, a
+    # direct `--head-ref` one included, keeps `code_review.txt` (§2.6
+    # "Loading").
+    prompt_template = (
+        load_code_review_prompt() if commit_record is None
+        else load_prompt(commit_report.review_prompt_name(commit_record))
+    )
 
     # Derive prefix from plan path (same as in main())
     prefix = derive_prefix(plan_path)
@@ -2440,7 +3414,7 @@ async def run_single_review(
         "tracked_files_list": tracked_files_list,
         # Where the list came from (tracked files, the `git diff` fallback,
         # `--files`, or nothing).
-        "scope_source": describe_scope_source(scope_source, base_ref),
+        "scope_source": describe_scope_source(scope_source, base_ref, pinned),
         "base_ref": base_ref,
         "prefix": prefix,
         "implementation_record": build_implementation_record(plan_path),
@@ -2448,6 +3422,19 @@ async def run_single_review(
         "diff_dir": diff_dir_text,
         "diff_access": diff_access_text,
     }
+    if commit_record is not None:
+        # The commit template's own slots (§2.6). The block's pointer names
+        # the brief by the path this lane can open, or the `git log` command
+        # when it cannot open the brief at all.
+        inline_lane = diff_access is not None and diff_access.mode == "inline"
+        prompt_context.update(commit_report.commit_prompt_context(
+            commit_record,
+            brief_text=plan_text,
+            brief_pointer=None if inline_lane else str(plan_path.absolute()),
+            repo_root=project_root,
+            scope_total=len(changed_files or []),
+            inline=inline_lane,
+        ))
 
     # Determine timeout: use provided override, or get provider-specific default
     effective_timeout = (
@@ -2721,7 +3708,7 @@ async def run_single_review(
                 "raw_output": raw_content,
                 "expected_type": "array",
                 "expected_schema": {
-                    "fields": ["title", "desc", "importance", "file", "line_range", "type", "anchor_text"],
+                    "fields": salvage_issue_fields(commit_record),
                     "importance_values": ["high", "medium", "low"],
                     "type_values": ["bug", "missing", "improvement", "style", "scope"]
                 },
@@ -2816,7 +3803,7 @@ async def run_single_review(
             "raw_output": raw_content,
             "expected_type": "array",
             "expected_schema": {
-                "fields": ["title", "desc", "importance", "file", "line_range", "type", "anchor_text"],
+                "fields": salvage_issue_fields(commit_record),
                 "importance_values": ["high", "medium", "low"],
                 "type_values": ["bug", "missing", "improvement", "style", "scope"]
             },
@@ -2870,6 +3857,7 @@ async def run_all_reviews(
     diff_dir: Optional[str] = None,
     scope_id: Optional[str] = None,
     diff_coverage: Optional[str] = None,
+    pinned: Optional[PinnedRange] = None,
 ) -> Dict[str, Tuple[bool, Optional[List[Dict]], Optional[str]]]:
     """
     Run code review across all models using agent exploration.
@@ -2901,6 +3889,9 @@ async def run_all_reviews(
             only when the scope ledger records this id for its stem;
             otherwise ``[SCOPE_CHANGED]`` and the model re-runs. ``None``
             reuses every result, as before the ledger existed.
+        pinned: The two commits of a pinned review, forwarded to each
+            :func:`run_single_review` (only when set, so a stand-in written for
+            an unpinned run need not accept it).
         served_models: Optional §3.6 attribution collector, forwarded to each
             :func:`run_single_review` (see its docstring)
         usage: Optional per-slot usage collector, forwarded the same way
@@ -2959,6 +3950,7 @@ async def run_all_reviews(
     )
     if tracker_out is not None:
         tracker_out.append(tracker)
+    pinned_kwargs: Dict[str, Any] = {"pinned": pinned} if pinned is not None else {}
 
     async def run_with_semaphore(model_spec: str, index: int) -> Tuple[str, Tuple[bool, Optional[List[Dict]], Optional[str]]]:
         provider_name, model_name = parse_model_spec(model_spec, anchor=str(plan_path))
@@ -3071,6 +4063,7 @@ async def run_all_reviews(
                             diff_dir=diff_dir, scope_id=scope_id,
                             diff_coverage=diff_coverage,
                             run_model_specs=list(model_specs),
+                            **pinned_kwargs,
                         )
             else:
                 async with semaphore:
@@ -3082,6 +4075,7 @@ async def run_all_reviews(
                         diff_dir=diff_dir, scope_id=scope_id,
                         diff_coverage=diff_coverage,
                         run_model_specs=list(model_specs),
+                        **pinned_kwargs,
                     )
         except Exception as exc:
             # F5, 2026-09-20: two lanes, one event, two different answers. A
@@ -3238,9 +4232,17 @@ def generate_review_report(
     usage: Optional[Dict[str, Dict[str, Any]]] = None,
     failed_models: Optional[Dict[str, str]] = None,
     requested_models: Optional[int] = None,
+    commit_review: Optional[Dict[str, Any]] = None,
     review_scope: Optional[Dict[str, Any]] = None,
+    pinned: Optional[PinnedRange] = None,
+    repo_root: Optional[str] = None,
 ) -> str:
     """Generate a markdown review report.
+
+    ``pinned`` (a review pinned to two commits) hands the HTML report the
+    head commit and *repo_root*: its hunks are ``base..head``, its context is
+    the files as ``head`` holds them, never the disk, and a path absent at
+    ``head`` carries its label (:func:`pinned_report_kwargs`).
 
     ``review_scope`` is :func:`review_scope_record`'s account of the scope
     manifest the reviewers were pointed at (review-scope plan D2.2): rendered
@@ -3261,6 +4263,14 @@ def generate_review_report(
     per issue, because a cost repeated under every finding is noise. Empty for
     a fan-out of duration-only adapters, which leaves the report as it was.
 
+    ``commit_review`` is a commit review's report payload
+    (:func:`utils.commit_report.report_context`, plans/review-commits.md
+    §2.10): the header labels the brief "Commit brief" and carries the commit
+    block with the focus and context plan under it, each finding whose group
+    was attributed gets an "Introduced by" line, and the HTML report gets the
+    commit filter, the drift badges and the apply command its export help
+    names. ``None`` (every plan's review) leaves the report as it was.
+
     ``failed_models`` is the caller's authoritative failure map (model ->
     reason): main()'s post-salvage map, including any model F11 seeded for
     never returning at all, or the reaggregate's read-back of
@@ -3280,14 +4290,22 @@ def generate_review_report(
     size of the requested set — main()'s ``len(model_specs)``, the
     reaggregate's recorded requested set — never succeeded plus failed.
     """
+    # "Commit brief", never "Plan", for a commit review (§2.8), through the
+    # one owner of the word.
+    document = (
+        commit_review.get("documentLabel") if commit_review
+        else commit_report.label_title(None)
+    )
     lines = [
         "# Code Review Report",
         "",
-        f"**Plan:** {plan_path.name}",
+        f"**{document}:** {plan_path.name}",
         f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"**Files Changed:** {len(changed_files)}",
         "",
     ]
+    if commit_review:
+        lines.extend(commit_report.report_header_lines(commit_review))
 
     # Collect all issues
     all_issues = []
@@ -3460,6 +4478,22 @@ def generate_review_report(
                 issue_siblings[id(issue)] = [n for n in sorted(numbers) if n != mine]
                 issue_group_models[id(issue)] = model_count
 
+    # §2.10: each finding names the commit its group was attributed to
+    # (`introduced_by`, decided by `utils/commit_attribution.py`), with the
+    # subject from `commit_range.commits`; an unattributed one shows nothing.
+    issue_introduced: Dict[int, str] = {}
+    if commit_review and validated_groups:
+        commit_placement = match_issues_to_suggestions(all_issues, validated_groups)
+        for idx, issue in enumerate(all_issues, 1):
+            location = commit_placement.get(idx)
+            if not location or not 0 < location[0] <= len(validated_groups):
+                continue
+            introduced = commit_report.group_introduced_by_line(
+                validated_groups[location[0] - 1], commit_review
+            )
+            if introduced:
+                issue_introduced[id(issue)] = introduced
+
     # Group by importance
     high = [i for i in all_issues if i.get("importance") == "high"]
     medium = [i for i in all_issues if i.get("importance") == "medium"]
@@ -3488,6 +4522,7 @@ def generate_review_report(
                 served_models=served_models,
                 siblings=issue_siblings.get(id(issue)),
                 group_model_count=issue_group_models.get(id(issue), 0),
+                introduced_by=issue_introduced.get(id(issue)),
             ))
     else:
         lines.append("_No high priority issues._")
@@ -3505,6 +4540,7 @@ def generate_review_report(
                 served_models=served_models,
                 siblings=issue_siblings.get(id(issue)),
                 group_model_count=issue_group_models.get(id(issue), 0),
+                introduced_by=issue_introduced.get(id(issue)),
             ))
     else:
         lines.append("_No medium priority issues._")
@@ -3522,6 +4558,7 @@ def generate_review_report(
                 served_models=served_models,
                 siblings=issue_siblings.get(id(issue)),
                 group_model_count=issue_group_models.get(id(issue), 0),
+                introduced_by=issue_introduced.get(id(issue)),
             ))
     else:
         lines.append("_No low priority issues._")
@@ -3570,6 +4607,8 @@ def generate_review_report(
             html_content = generate_html_report(
                 groups=validated_groups or [],
                 plan_path=plan_path,
+                # §2.10: the commit header, filter, badges and export help.
+                commit_review=commit_review,
                 phase_dir=phase_dir,
                 phase_type="code-review",
                 models=successful_models,
@@ -3580,6 +4619,7 @@ def generate_review_report(
                 usage=usage,
                 requested_models=requested_models,
                 salvage_requested=salvage_requested,
+                **pinned_report_kwargs(validated_groups or [], pinned, repo_root),
             )
             write_html_report(html_content, phase_dir)
             print(f"HTML report written to: {phase_dir / 'report.html'}")
@@ -3591,6 +4631,41 @@ def generate_review_report(
     return "\n".join(lines)
 
 
+def pinned_report_kwargs(
+    groups: List[Any], pinned: Optional[PinnedRange], repo_root: Optional[str],
+) -> Dict[str, Any]:
+    """``generate_html_report``'s pinned-review keywords; ``{}`` when unpinned.
+
+    ``head_ref`` and ``repo_root`` (the report reads its hunks and snapshots at
+    the head commit), and ``file_labels``: for each cited file absent at
+    ``head``, the label its validation excerpt carries (``deleted in
+    <range>``, ``renamed to <new> in <range>``, ``absent at <head7>``).
+    """
+    if pinned is None:
+        return {}
+    files = sorted({
+        str(suggestion.get("file")).strip()
+        for group in groups
+        for suggestion in (
+            (group.to_dict() if hasattr(group, "to_dict") else group).get("suggestions")
+            or []
+        )
+        if isinstance(suggestion, dict) and suggestion.get("file")
+    })
+    names = {path: pinned_git_name(path) for path in files}
+    asked = sorted({name for name in names.values() if name})
+    labels: Dict[str, str] = {}
+    present = paths_in_commit(pinned.head, asked, cwd=repo_root) if asked else set()
+    if present is not None:
+        kinds = absent_at_head(
+            [name for name in asked if name not in present], pinned, cwd=repo_root,
+        )
+        for path, name in names.items():
+            if name in kinds:
+                labels[path] = absent_label(*kinds[name], pinned)
+    return {"head_ref": pinned.head, "repo_root": repo_root, "file_labels": labels}
+
+
 def _format_issue(
     index: int,
     issue: Dict,
@@ -3599,6 +4674,7 @@ def _format_issue(
     served_models: Optional[Dict[str, Dict[str, Any]]] = None,
     siblings: Optional[List[int]] = None,
     group_model_count: int = 0,
+    introduced_by: Optional[str] = None,
 ) -> List[str]:
     """Format a single issue for the report.
 
@@ -3618,6 +4694,11 @@ def _format_issue(
             verdict, which is why the badge says so when there are siblings.
         group_model_count: Distinct models behind this issue's group, for the
             agreement phrase.
+        introduced_by: A commit review's "Introduced by `<sha7>` — <subject>"
+            line for this issue's group (plans/review-commits.md §2.10). It
+            sits above the metadata line, so the description the parser reads
+            after that line is unchanged, and its subject is escaped so it
+            cannot pass for a checkbox.
     """
     file_ref = issue.get("file", "unknown")
     line_range = issue.get("line_range")
@@ -3668,6 +4749,9 @@ def _format_issue(
         )
         lines.append(f"_Same finding as {refs} ({agreement}); marking any marks all._")
 
+    if introduced_by:
+        lines.append(introduced_by)
+
     lines.extend([
         f"**Validation:** {validation_str} | **File:** `{file_ref}` | **Type:** {issue.get('type', 'unknown')} | **Model:** {served_model_label(issue.get('model', 'unknown'), served_models)}",
         "",
@@ -3687,6 +4771,39 @@ def _format_issue(
     return lines
 
 
+def pinned_validation_kwargs(
+    pinned: Optional[PinnedRange],
+    plan_snapshot: Optional[str],
+    plan_sha256: Optional[str],
+    repo_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """``prepare_batched_validation_tasks``'s pinned keywords; ``{}`` when the
+    review is neither pinned nor carries a frozen context plan."""
+    kwargs: Dict[str, Any] = {}
+    if pinned is not None:
+        kwargs["head_ref"] = pinned.head
+    if plan_snapshot and plan_sha256:
+        kwargs["context_plan_sha256"] = plan_sha256
+        kwargs["context_plan_file"] = os.path.join(repo_root or os.getcwd(), plan_snapshot)
+    return kwargs
+
+
+def pinned_guidance_kwargs(
+    pinned: Optional[PinnedRange],
+    plan_snapshot: Optional[str],
+    plan_sha256: Optional[str],
+) -> Dict[str, Any]:
+    """:func:`validation_extra_instructions`' pinned keywords; ``{}`` when
+    there is nothing to pin, so the unpinned call is unchanged."""
+    kwargs: Dict[str, Any] = {}
+    if pinned is not None:
+        kwargs["pinned"] = pinned
+    if plan_snapshot:
+        kwargs["plan_snapshot"] = plan_snapshot
+        kwargs["plan_sha256"] = plan_sha256
+    return kwargs
+
+
 async def reaggregate_from_existing_files(
     prefix: str,
     out_dir: Path,
@@ -3694,6 +4811,7 @@ async def reaggregate_from_existing_files(
     args: argparse.Namespace,
     template_style: str = 'pr',
     base_ref: Optional[str] = None,
+    pinned: Optional[PinnedRange] = None,
 ) -> None:
     """Re-aggregate all model results after salvage operations complete.
 
@@ -3710,6 +4828,13 @@ async def reaggregate_from_existing_files(
         base_ref: Optional explicit base git ref for diff context.
             When provided, takes priority over ``args.base_ref`` and
             the state's ``head_at_start``.
+        pinned: The review on record's two commits (``commit_range`` or
+            ``head_ref``, :func:`resolve_pinned_range`, resolved by ``main``
+            before anything was written). The base is then that pair's, never
+            ``head_before_implement``/``head_at_start``/``HEAD~1``; the scope,
+            a regenerated diff set, the validation excerpts and the report are
+            all read at its head, so ``reviewed_code_sha256`` is stable however
+            the working tree moved.
     """
     import glob as glob_module
 
@@ -3862,23 +4987,33 @@ async def reaggregate_from_existing_files(
     project_root = get_project_root(str(plan_path))
 
     # Resolve base_ref for validation context.
-    # Priority: explicit parameter > args.base_ref > state head_before_implement > head_at_start > fallback
-    if base_ref is None:
-        args_base_ref = getattr(args, 'base_ref', None)
-        state_base_ref = state.get('head_before_implement') or state.get('head_at_start')
-        if args_base_ref:
-            base_ref = args_base_ref
-        elif state_base_ref:
-            base_ref = state_base_ref
-        else:
-            base_ref = 'HEAD~1'
-            print(
-                "Warning: head_at_start not found in state; falling back to HEAD~1. "
-                "This may produce incorrect diffs if the branch has advanced since "
-                "the original review.",
-                file=sys.stderr,
-            )
-    base_ref = validate_git_ref(base_ref)
+    # Priority: the pinned pair on record > explicit parameter > args.base_ref
+    # > state head_before_implement > head_at_start > fallback
+    if pinned is not None:
+        base_ref = pinned.base_ref
+        print(
+            f"Git base reference: {base_ref} (the review on record is "
+            f"{pinned.display}, head {pinned.head})"
+        )
+    else:
+        if base_ref is None:
+            args_base_ref = getattr(args, 'base_ref', None)
+            state_base_ref = state.get('head_before_implement') or state.get('head_at_start')
+            if args_base_ref:
+                base_ref = args_base_ref
+            elif state_base_ref:
+                base_ref = state_base_ref
+            else:
+                base_ref = 'HEAD~1'
+                print(
+                    "Warning: head_at_start not found in state; falling back to HEAD~1. "
+                    "This may produce incorrect diffs if the branch has advanced since "
+                    "the original review.",
+                    file=sys.stderr,
+                )
+        base_ref = validate_git_ref(base_ref)
+    pinned_kw: Dict[str, Any] = {"pinned": pinned} if pinned is not None else {}
+    plan_snapshot, plan_sha256 = _context_plan(getattr(state, "state", None))
 
     # The same resolution as `resolve_changed_files` (the same printed lines),
     # kept whole because a regenerated scope manifest names its source (D2.2).
@@ -3886,12 +5021,24 @@ async def reaggregate_from_existing_files(
     # subdirectory the command happened to be invoked from.
     git_root = review_git_root(project_root)
     reaggregate_scope = resolve_review_scope(
-        state, base_ref, anchor=str(plan_path), repo_root=git_root
+        state, base_ref, anchor=str(plan_path), repo_root=git_root,
+        **({"head_ref": pinned.head} if pinned is not None else {}),
     )
     changed_files = reaggregate_scope.paths
     print(f"Files to review: {len(changed_files)}")
+    if pinned is not None:
+        pinned = pinned._replace(
+            not_in_range=reaggregate_scope.not_in_range,
+            narrowed=reaggregate_scope.narrowed,
+        )
+        pinned_kw = {"pinned": pinned}
 
-    with intent_to_add_untracked(changed_files, cwd=git_root):
+    # Two commits need no intent-to-add marking: the working tree is not in
+    # their diff (plans/review-commits.md §2.5).
+    with (
+        contextlib.nullcontext() if pinned is not None
+        else intent_to_add_untracked(changed_files, cwd=git_root)
+    ):
         # The scope the loaded results reviewed (D2.2): read back from the
         # fan-out's manifest, or — when the pair is missing or incomplete —
         # regenerated from the current tree, inside this block so a new file's
@@ -3900,6 +5047,7 @@ async def reaggregate_from_existing_files(
         scope_record = reaggregate_review_scope(
             phase_dir, plan_path, base_ref, changed_files,
             reaggregate_scope.source, result_stems, repo_root=git_root,
+            **pinned_kw,
         )
 
         # Save raw issues as JSON
@@ -4005,6 +5153,11 @@ async def reaggregate_from_existing_files(
 
         if reuse_bound_grouping:
             print("Using existing grouped.json (preserves validation alignment)")
+            # §2.6 on a reaggregate: attributed again in memory for the
+            # report; the bound file keeps its bytes (and its own pass's fields).
+            commit_attribution_pass = attribute_review_groups(
+                grouped, state, repo_root=git_root or project_root
+            )
         else:
             raw_grouped = group_similar_suggestions(all_issues)
             # The two branches are made to agree on shape *here* rather than at
@@ -4019,6 +5172,10 @@ async def reaggregate_from_existing_files(
             grouped = [g.to_dict() if hasattr(g, 'to_dict') else g for g in raw_grouped]
             # Stamp stable content-based hashes on groups and suggestions
             stamp_stable_ids(grouped)
+            # §2.6: the regrouped file carries the attribution (off the hash).
+            commit_attribution_pass = attribute_review_groups(
+                grouped, state, repo_root=git_root or project_root
+            )
             # D7: a re-group orphans any verdicts on disk, so they leave with it.
             retire_stale_validation(str(phase_dir), reason="grouped.json rewritten by reaggregate")
             with open(grouped_path, 'w', encoding='utf-8') as f:
@@ -4062,7 +5219,15 @@ async def reaggregate_from_existing_files(
                         # names the ref the diff was taken against and sits
                         # still for any edit on the near side of it.
                         reviewed_code=build_reviewed_code_excerpt(
-                            grouped, project_root=project_root
+                            grouped, project_root=project_root, **pinned_kw,
+                        ),
+                        # A commit brief's frozen context plan: its snapshot
+                        # as it is now, against what the round recorded.
+                        **(
+                            {"context_plan_sha256": context_plan_snapshot_sha256(
+                                plan_snapshot, git_root,
+                            )}
+                            if plan_snapshot and plan_sha256 else {}
                         ),
                     ),
                 )
@@ -4101,9 +5266,10 @@ async def reaggregate_from_existing_files(
             cut_report: Dict[str, Any] = {}
             secondary, reviewed_code = build_validation_secondary_context(
                 grouped, plan_path, project_root=project_root,
-                cut_report=cut_report,
+                cut_report=cut_report, **pinned_kw,
             )
             batched_tasks = prepare_batched_validation_tasks(
+                **pinned_validation_kwargs(pinned, plan_snapshot, plan_sha256, git_root),
                 groups=[g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
                 # No `Plan file:` line: the block names the bound
                 # snapshot, and a second path — the live plan — would
@@ -4120,7 +5286,10 @@ async def reaggregate_from_existing_files(
                 # The guidance, plus the dropped files to open when the
                 # reviewed-code block lost any (T7.4) — outside every block
                 # a context budget can cut.
-                extra_instructions=validation_extra_instructions(cut_report),
+                extra_instructions=validation_extra_instructions(
+                    cut_report,
+                    **pinned_guidance_kwargs(pinned, plan_snapshot, plan_sha256),
+                ),
                 context_document=plan_document,
                 secondary_document=reviewed_code_document(secondary, cut_report),
                 runner_read_refusal=materialization_read_refusal(args, str(plan_path)),
@@ -4211,6 +5380,11 @@ async def reaggregate_from_existing_files(
         # run sandboxed.
         report = generate_review_report(
             plan_path, results, changed_files, validated_groups_for_report,
+            # §2.10: the commit header from the record, never from git.
+            commit_review=commit_report.report_context(
+                state, commit_attribution_pass, changed_files,
+                repo_root=git_root or project_root,
+            ),
             phase_dir=phase_dir, base_ref=base_ref, template_style=template_style,
             served_models=recorded_served_models(str(phase_dir)),
             # …and what each slot spent, off the same checkpoint: `{model}.json`
@@ -4225,6 +5399,7 @@ async def reaggregate_from_existing_files(
             ),
             # D2.2: the scope read back (or regenerated) above.
             review_scope=scope_record,
+            **({"pinned": pinned, "repo_root": git_root} if pinned is not None else {}),
         )
 
         # Save report
@@ -4274,6 +5449,24 @@ async def reaggregate_from_existing_files(
         report_progress(str(phase_dir), step="complete")
 
 
+def _plan_file_label(plan_path: Path, args: Any = None) -> str:
+    """``Plan file`` as today, or ``Commit brief`` when the plan's
+    ``state.json`` records a ``commit_range``: the phase's own lines never call
+    a commit brief a plan (plans/review-commits.md §2.8, "'Commit brief',
+    never 'plan'"), through the one owner of the word,
+    ``commit_review.document_label``. *args* carrying a front door's stage
+    (:func:`landed_stage`) is a commit brief too: a detached launch of a new
+    brief has its ``commit_range`` only in that stage until the worker's
+    boundary, after this label prints. Read-only; no state is a plan."""
+    from utils.commit_review import document_label, read_commit_range
+
+    record = read_commit_range(plan_path)
+    if record is None and landed_stage(args):
+        record = {}
+    word = document_label({"commit_range": record})
+    return "Plan file" if word == "plan" else word.capitalize()
+
+
 async def main(argv: Optional[List[str]] = None) -> int:
     """Main entry point."""
     # Line buffering + UTF-8/replace stream encoding (Windows-safe output);
@@ -4286,7 +5479,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
     # uv --directory which changes the working directory)
     plan_path = Path(args.plan_file).resolve()
     if not plan_path.exists():
-        print(f"ERROR: Plan file not found: {args.plan_file}")
+        print(f"ERROR: {_plan_file_label(plan_path, args)} not found: {args.plan_file}")
         print(f"       Resolved path: {plan_path}")
         sys.exit(1)
 
@@ -4307,7 +5500,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
     # Handle --reaggregate mode: skip model invocation, just re-process existing results
     if args.reaggregate:
         print("=== REAGGREGATE MODE ===")
-        print(f"Plan file: {plan_path}")
+        print(f"{_plan_file_label(plan_path, args)}: {plan_path}")
         print(f"Output directory: {out_dir}")
         # `--files`/`--files-from` are not re-read here: the results on disk
         # were reviewed against the scope their fan-out recorded, so that is
@@ -4339,6 +5532,25 @@ async def main(argv: Optional[List[str]] = None) -> int:
             print(f"ERROR: Output directory does not exist: {out_dir}")
             sys.exit(1)
 
+        # The review on record's two commits, when state pins them (a commit
+        # brief's `commit_range`, a direct round's `head_ref`): resolved
+        # strictly here, before the detach boundary and before anything is
+        # written, so a pruned SHA is `[RANGE_UNRESOLVED]` exit 3 on the
+        # caller's terminal and never a `HEAD~1` stand-in, and a typed ref
+        # that resolves elsewhere is refused (plans/review-commits.md §2.4,
+        # §2.5).
+        try:
+            reaggregate_pinned = resolve_pinned_range(
+                getattr(get_or_create_state(plan_path), "state", None), args,
+                cwd=review_git_root(get_project_root(str(plan_path))) or os.getcwd(),
+                plan_path=plan_path, reaggregate=True,
+            )
+        except RangeError as exc:
+            print(exc.message)
+            sys.exit(exc.exit_code)
+        if reaggregate_pinned is not None:
+            pin_recorded_refs(reaggregate_pinned)
+
         # The stale guard the fan-out path applies below, applied here too. A
         # review completed before the latest implement judged an earlier state
         # of the code (2026-10-02: the empty repository); the fan-out takes
@@ -4353,7 +5565,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
                   "so its results judge an earlier state of the code; "
                   "--reaggregate would only re-stamp them.")
             print("  Re-run the review instead: "
-                  + cli_common.retry_command(
+                  + commit_spelling.spell_retry_command(
                       "review-code", plan_path, "--force",
                       flags=cli_common.current_replay_flags(mode="review-code"),
                   ))
@@ -4373,6 +5585,18 @@ async def main(argv: Optional[List[str]] = None) -> int:
         )
         if detach_outcome is not None:
             sys.exit(detach_outcome)
+        # A front door's stage lands inside that boundary (§2.1): the pair and
+        # its drift list come from the state it left, not the one read above.
+        if landed_stage(args):
+            try:
+                reaggregate_pinned = resolve_pinned_range(
+                    getattr(get_or_create_state(plan_path), "state", None), args,
+                    cwd=review_git_root(get_project_root(str(plan_path))) or os.getcwd(),
+                    plan_path=plan_path, reaggregate=True,
+                )
+            except RangeError as exc:
+                print(exc.message)
+                sys.exit(exc.exit_code)
 
         # T5: this path has no fan-out at all, and it is not short — it
         # regroups, re-materializes or merges a validation round (dispatching it
@@ -4399,6 +5623,10 @@ async def main(argv: Optional[List[str]] = None) -> int:
             await reaggregate_from_existing_files(
                 prefix, out_dir, plan_path, args,
                 template_style=args.report_style,
+                **(
+                    {"pinned": reaggregate_pinned}
+                    if reaggregate_pinned is not None else {}
+                ),
             )
         except SystemExit:
             refused = True
@@ -4409,11 +5637,36 @@ async def main(argv: Optional[List[str]] = None) -> int:
 
     # Guard against re-running already-completed phase (expensive LLM calls)
     state_guard = get_or_create_state(plan_path)
+    # A review pinned to two commits (`--head-ref`, or a commit brief's
+    # `commit_range`): both ends resolved strictly, never through
+    # `validate_git_ref`'s `HEAD~1` fallback, and a recorded SHA that no longer
+    # names a commit is `[RANGE_UNRESOLVED]` exit 3 — all before this phase
+    # writes anything, `state.json` included (plans/review-commits.md §2.4,
+    # §2.5). The recorded invocation then carries the pair as full SHAs, so a
+    # detached child, a resume line and a next command replay the same pair
+    # after a branch moves.
+    try:
+        pinned = resolve_pinned_range(
+            getattr(state_guard, "state", None), args,
+            cwd=review_git_root(get_project_root(str(plan_path))) or os.getcwd(),
+            plan_path=plan_path,
+        )
+    except RangeError as exc:
+        print(exc.message)
+        sys.exit(exc.exit_code)
+    if pinned is not None:
+        pin_recorded_refs(pinned)
+    # A `--detach` launcher writes no state before the boundary: its launch can
+    # still be refused (the detached ceiling, a run that appeared since), and a
+    # refusal must leave state.json as it found it. The worker runs this same
+    # pre-flight and saves (review fix 3, A1).
+    detach_launcher = bool(getattr(args, "detach", False)) and not getattr(
+        args, "internal_worker", False)
     # First run on this plan: materialize `state.json` now, for the same
     # reason `review_orchestrator_base` does (the instructions' `util metrics
     # start --state-file` runs before the phase completes, and a standalone
     # review-code on a fresh plan used to find no file).
-    if not state_guard.state_file.exists():
+    if not state_guard.state_file.exists() and not detach_launcher:
         state_guard.save()
     if not args.force and state_guard.phase_completion_is_stale("code-review"):
         # Implement completed after this review did, so the review judged an
@@ -4425,12 +5678,20 @@ async def main(argv: Optional[List[str]] = None) -> int:
               "re-running it (as --force)")
         args.force = True
     if state_guard.is_phase_completed("code-review") and not args.force:
-        # Fix round 28 (live run 12 #11): said as done, never as an error.
+        # Fix round 28 (live run 12 #11): said as done, never as an error. A
+        # commit review says it as the mode the user typed, of its commit
+        # brief (plans/review-commits.md §2.8).
+        from utils.commit_review import document_label
+        from utils.commit_spelling import commit_view, spell_mode
+
         sys.exit(report_already_completed(
-            "review-code", get_phase_dir(plan_path, 'code-review')))
+            spell_mode("review-code", commit_view(state_guard.state)),
+            get_phase_dir(plan_path, 'code-review'),
+            document=document_label(state_guard.state)))
     elif args.force and state_guard.is_phase_completed("code-review"):
         state_guard.state.get("phases_completed", {}).pop("code-review", None)
-        state_guard.save()
+        if not detach_launcher:
+            state_guard.save()
         print("NOTE: Cleared previous phase completion (--force mode)")
 
     # Secondary guard: detect partial completion (validation_tasks.json, grouped.json, etc.)
@@ -4483,11 +5744,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
             sys.exit(3)
         else:
             # Check for per-model result files
-            import glob as glob_module
-            model_files = [
-                f for f in glob_module.glob(str(phase_dir_check / "*.json"))
-                if not any(ex in os.path.basename(f) for ex in ['grouped', 'validation', 'salvage', 'issues', 'fix_tasks', 'state', '.status', 'report_data'])
-            ]
+            model_files = leftover_model_results(phase_dir_check)
             if model_files:
                 print("ERROR: Partial completion detected for 'code-review'.")
                 print(f"  Found {len(model_files)} per-model result file(s) but no grouped.json.")
@@ -4543,7 +5800,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
         available = get_all_model_specs(anchor=str(plan_path))
         print(f"Available models: {', '.join(available[:10])}...")
 
-    print(f"Plan file: {plan_path}")
+    print(f"{_plan_file_label(plan_path, args)}: {plan_path}")
     print(f"Output directory: {out_dir}")
     print(f"Models: {', '.join(model_specs)}")
     if args.timeout:
@@ -4579,15 +5836,29 @@ async def main(argv: Optional[List[str]] = None) -> int:
 
     # Get the git base reference - this is the commit when implementation started
     # Used by agents to run: git diff <base_ref> -- <file>
-    base_ref = args.base_ref or state.get("head_before_implement") or state.get("head_at_start") or "HEAD~1"
-    base_ref = validate_git_ref(base_ref)
-    print(f"Git base reference: {base_ref or '(empty - validation will lack diff context)'}")
+    if pinned is not None:
+        # The pinned pair, resolved strictly above: never `head_before_implement`,
+        # `head_at_start` or `HEAD~1`, and never a `validate_git_ref` fallback.
+        base_ref = pinned.base_ref
+        print(f"Git base reference: {base_ref}")
+        # "as committed", not "two commits": a one-commit range is one commit,
+        # and a root range's base is the empty tree, no commit at all.
+        print(
+            f"Git head reference: {pinned.head} (reviewing {pinned.display} as "
+            f"committed, not the working tree)"
+        )
+    else:
+        base_ref = args.base_ref or state.get("head_before_implement") or state.get("head_at_start") or "HEAD~1"
+        base_ref = validate_git_ref(base_ref)
+        print(f"Git base reference: {base_ref or '(empty - validation will lack diff context)'}")
 
     # Best-effort base-ref staleness visibility. Wrapped so it can NEVER fail the
     # run: surface the resolved commit, and warn if the base ref lags behind HEAD
     # (a common foot-gun when only the latest uncommitted work was meant to be
-    # reviewed).
-    if base_ref:
+    # reviewed). Skipped for a pinned review: its `is-ancestor <base> HEAD` and
+    # `rev-list <base>..HEAD` are about an implement base, and two commits are
+    # reviewed whatever HEAD is.
+    if base_ref and pinned is None:
         try:
             if is_empty_tree(base_ref):
                 # `git log` names no commit for a tree, so say what it is.
@@ -4626,15 +5897,31 @@ async def main(argv: Optional[List[str]] = None) -> int:
     # main resolved it and then handed the reviewers the raw — and, on the
     # fallback, empty — `tracked_files` instead (review-scope plan §2.1).
     review_scope = resolve_review_scope(
-        state, base_ref, anchor=str(plan_path), repo_root=git_root
+        state, base_ref, anchor=str(plan_path), repo_root=git_root,
+        **({"head_ref": pinned.head} if pinned is not None else {}),
     )
     # One read of `code_review.collapse_paths` for the prompt's order and the
     # diff set's groups, so the two classify every path alike.
     collapse_paths = get_collapse_paths(anchor=str(plan_path))
     changed_files = order_review_paths(
-        review_scope.paths, collapse_paths, cwd=git_root
+        review_scope.paths, collapse_paths, cwd=git_root,
+        # `.gitattributes` as the head commit has it, as the manifest reads it.
+        **({"source": pinned.head} if pinned is not None else {}),
     )
     print(f"Files to review: {len(changed_files)}")
+    if pinned is not None:
+        pinned = pinned._replace(
+            not_in_range=review_scope.not_in_range, narrowed=review_scope.narrowed,
+        )
+        # `[SCOPE_DRIFT]` must reach the caller's terminal, so a direct run
+        # checks here, before its detach boundary; a fronted run's list is
+        # the front door's (`commit_range.drifted`), neither recomputed nor
+        # printed (plans/review-commits.md §2.5 "Drift"), a staged launch's
+        # included: its record arrives with the stage, past the boundary.
+        pinned = drift_check(pinned, changed_files, repo_root=git_root,
+                             staged=landed_stage(args))
+    pinned_kw: Dict[str, Any] = {"pinned": pinned} if pinned is not None else {}
+    plan_snapshot, plan_sha256 = _context_plan(getattr(state, "state", None))
     print("Running code review in agent exploration mode...")
     print("")
 
@@ -4669,6 +5956,45 @@ async def main(argv: Optional[List[str]] = None) -> int:
     )
     if detach_outcome is not None:
         sys.exit(detach_outcome)
+
+    # A detached worker takes its lock inside `maybe_detach`, and a commit
+    # front door's stage (the new header, `commit_range`, a context-plan
+    # snapshot; plans/review-commits.md §2.1) is applied there — after the
+    # pre-flight above loaded `state`, read the brief and resolved the pair.
+    # Saved as loaded, `state` would put the old `commit_range` back (or, on a
+    # new brief, drop it) and the validation snapshot would bind the old
+    # header. So everything derived from either is derived again: `state`
+    # reloaded, its staged `--files` record redone, the pair (and a fronted
+    # run's drift list and context plan) re-resolved, the brief re-read.
+    if landed_stage(args):
+        state.reload()
+        scope_record_moved = stage_scope_files_record(state, scope_files)
+        try:
+            pinned = refresh_pinned_after_stage(
+                state, pinned, args, cwd=git_root or os.getcwd(), plan_path=plan_path,
+            )
+        except RangeError as exc:
+            print(exc.message)
+            sys.exit(exc.exit_code)
+        pinned_kw = {"pinned": pinned} if pinned is not None else {}
+        plan_snapshot, plan_sha256 = _context_plan(getattr(state, "state", None))
+        if plan_bytes is not None:
+            try:
+                plan_bytes = plan_path.read_bytes()
+                decode_document(plan_bytes, str(plan_path))
+            except ValidationContextError as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                sys.exit(exc.exit_code)
+
+    if plan_snapshot and plan_sha256 and (
+        context_plan_snapshot_sha256(plan_snapshot, git_root) != plan_sha256
+    ):
+        print(
+            f"[CONTEXT_PLAN_SNAPSHOT_CHANGED] {plan_snapshot} is missing or differs from "
+            "the frozen context plan. Restore the snapshot, or re-run --review-commits "
+            "with --context-plan <path> to capture it again.", file=sys.stderr,
+        )
+        sys.exit(EXIT_NEEDS_HUMAN)
 
     # The fan-out starts here, so its `--files` scope is recorded here — or a
     # previous run's is cleared — for a later `--reaggregate` to resolve the
@@ -4811,7 +6137,12 @@ async def main(argv: Optional[List[str]] = None) -> int:
     # collector idiom, and the same reason, as `served_models` and `usage`
     # above: `run_all_reviews`' return value is destructured by every caller.
     fanout_trackers: List[FanoutProgress] = []
-    with intent_to_add_untracked(changed_files, cwd=git_root):
+    # Two commits need no intent-to-add marking: the working tree is not in
+    # their diff (plans/review-commits.md §2.5).
+    with (
+        contextlib.nullcontext() if pinned is not None
+        else intent_to_add_untracked(changed_files, cwd=git_root)
+    ):
         # The scope manifest and one whole diff per source or test file, the
         # FIRST thing inside this block (D2.2): inside it because `git diff`
         # shows a new untracked file only once it is intent-to-add, and before
@@ -4825,9 +6156,21 @@ async def main(argv: Optional[List[str]] = None) -> int:
         # the manifest called that complete coverage with no net change.
         diff_set = write_review_diff(
             base_ref, changed_files, detach_phase_dir, collapse_paths,
-            scope_source=describe_scope_source(review_scope.source, base_ref),
+            scope_source=describe_scope_source(review_scope.source, base_ref, pinned),
             cwd=git_root,
+            **({"head_ref": pinned.head} if pinned is not None else {}),
         )
+
+        # A new round (not a resume of the missing models) records which
+        # review is on record, through this phase's own `state`, the instance
+        # it saves at the end (plans/review-commits.md §2.1): a commit brief's
+        # `reviewed_header_sha256` (and its apply guard cleared), a direct
+        # round's `head_ref`, or — a round with neither — no `head_ref`.
+        if round_starts(
+            detach_phase_dir, model_specs, diff_set.scope_id,
+            rerun_all=bool(getattr(args, "rerun_all", False)),
+        ) and record_round_start(state, pinned):
+            state.save()
 
         # A model whose spec changed since the last run (`codex:x` becoming
         # `codex:x:high`) has no slot in this run to retire its old files, and a
@@ -4855,6 +6198,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
             diff_dir=diff_set.diff_dir,
             scope_id=diff_set.scope_id,
             diff_coverage=diff_set.coverage,
+            **pinned_kw,
         )
 
         # Get the phase directory for code review outputs
@@ -4999,7 +6343,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
                 phase_dir=str(phase_dir),
                 # D2 row 5: shape 3 by construction (no reviewer produced a
                 # result), so --force stays a command — with the caller's flags.
-                retry_command=cli_common.retry_command(
+                retry_command=commit_spelling.spell_retry_command(
                     "review-code", plan_path, "--force",
                     flags=cli_common.current_replay_flags(mode="review-code"),
                 ),
@@ -5125,6 +6469,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
 
             # Group similar issues and validate
             validated_groups_for_report = None
+            commit_attribution_pass = None
             if all_issues:
                 # Add source_model field for grouping
                 for issue in all_issues:
@@ -5135,6 +6480,11 @@ async def main(argv: Optional[List[str]] = None) -> int:
                 # Stamp stable content-based hashes on groups and suggestions
                 grouped_list = [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped]
                 stamp_stable_ids(grouped_list)
+                # §2.6: a commit review names the commit behind each group, as
+                # sibling fields written before grouped.json (off the hash).
+                commit_attribution_pass = attribute_review_groups(
+                    grouped_list, state, repo_root=git_root or project_root
+                )
                 grouped_path = get_output_paths(plan_path, "code_review_grouped", phase='code-review')
                 # D7: the previous run's verdicts belong to the grouping this write
                 # replaces; retired in the same step so no later reaggregate finds them.
@@ -5169,7 +6519,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
                     cut_report: Dict[str, Any] = {}
                     secondary, reviewed_code = build_validation_secondary_context(
                         grouped_list, plan_path, project_root=project_root,
-                        cut_report=cut_report,
+                        cut_report=cut_report, **pinned_kw,
                     )
                     # `grouped_list`, not `grouped`: it already carries the stable
                     # `group_hash`/`display_label` `stamp_stable_ids` stamped above
@@ -5180,6 +6530,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
                     # joins on; the decisions overlay then matches nothing and
                     # reports success anyway.
                     batched_tasks = prepare_batched_validation_tasks(
+                        **pinned_validation_kwargs(pinned, plan_snapshot, plan_sha256, git_root),
                         groups=grouped_list,
                         # No `Plan file:` line: the block names the bound
                         # snapshot, and a second path — the live plan — would
@@ -5197,7 +6548,8 @@ async def main(argv: Optional[List[str]] = None) -> int:
                         # Same builder as the `--reaggregate` site, so both
                         # materialize the same instruction (T7.4).
                         extra_instructions=validation_extra_instructions(
-                            cut_report
+                            cut_report,
+                            **pinned_guidance_kwargs(pinned, plan_snapshot, plan_sha256),
                         ),
                         context_document=plan_document,
                         secondary_document=reviewed_code_document(
@@ -5236,7 +6588,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
                     # Fully resolved: a skill-dir placeholder no shell expands is
                     # the bug. Still starts with `uv run`, so Claude Code's
                     # Bash(uv:*) allow rule keeps matching.
-                    reaggregate_cmd = cli_common.retry_command(
+                    reaggregate_cmd = commit_spelling.spell_retry_command(
                         'review-code', plan_path, '--reaggregate',
                         flags=cli_common.current_replay_flags(mode='review-code'),
                     )
@@ -5263,9 +6615,9 @@ async def main(argv: Optional[List[str]] = None) -> int:
                         validated_groups = validated_groups_for_report
                     else:
                         # The plan as the user typed it (fix round 14).
-                        reaggregate_cmd = cli_common.retry_command(
-                            'review-code', cli_common.typed_plan_for(plan_path),
-                            '--reaggregate',
+                        reaggregate_cmd = commit_spelling.spell_retry_command(
+                            'review-code', plan_path, '--reaggregate',
+                            typed_plan=cli_common.typed_plan_for(plan_path),
                             flags=cli_common.current_replay_flags(mode='review-code'),
                         )
                         print("\nAfter validation completes, run:")
@@ -5315,6 +6667,11 @@ async def main(argv: Optional[List[str]] = None) -> int:
             # passed in rather than left for the function to re-derive.
             report = generate_review_report(
                 plan_path, results, changed_files, validated_groups_for_report,
+                # §2.10: the commit header, "Introduced by" lines and filter.
+                commit_review=commit_report.report_context(
+                    state, commit_attribution_pass, changed_files,
+                    repo_root=git_root or project_root,
+                ),
                 phase_dir=phase_dir, base_ref=base_ref, template_style=args.report_style,
                 served_models=served_models or None,
                 usage=usage or None,
@@ -5336,6 +6693,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
                     # same id) is the one the reviewers were shown.
                     results_match=True,
                 ),
+                **({"pinned": pinned, "repo_root": git_root} if pinned is not None else {}),
             )
 
             # Save report
@@ -5460,8 +6818,9 @@ async def main(argv: Optional[List[str]] = None) -> int:
 
         # Print the reaggregate command for the host to use after salvage.
         # Fully resolved (see above) and still `uv run …`-prefixed.
-        salvage_reaggregate_cmd = cli_common.retry_command(
-            'review-code', cli_common.typed_plan_for(plan_path), '--reaggregate',
+        salvage_reaggregate_cmd = commit_spelling.spell_retry_command(
+            'review-code', plan_path, '--reaggregate',
+            typed_plan=cli_common.typed_plan_for(plan_path),
             flags=cli_common.current_replay_flags(mode='review-code'),
         )
         print("")

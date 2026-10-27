@@ -38,15 +38,15 @@ cat "{{uv_missing_file}}"
 
 ## 2. Map the user's flag to a mode word
 
-Flags are position-independent, and the mode flag is the mode word without its
-`--` (`--review-code` → `review-code`, `--full` → `full`, and so on). **No mode
-flag means `{DEFAULT_MODE}`.** The first positional is the plan path; for `--ask` the
-next single quoted argument is the question, and `--init` takes no plan path.
-Everything else the user typed passes through verbatim — never add a flag they did
-not type, never re-join an unquoted multi-word question, never re-type a path you
-could copy, and never infer a plan path from the conversation. One substitution:
-`--interactive` replaces the baked `--yes` below, never both (exit 3). A missing
+Flags are position-independent, and the mode flag is the mode word without its `--` (`--review-code` → `review-code`, `--full` → `full`, and so on). **No mode
+flag means `{DEFAULT_MODE}`.** The first positional is the plan path; for `--ask` the next single quoted argument is the question, and `--init` takes no plan path.
+Everything else the user typed passes through verbatim — never add a flag they did not type, never re-join an unquoted multi-word question, never re-type a path you
+could copy, and never infer a plan path from the conversation. One substitution: `--interactive` replaces the baked `--yes` below, never both (exit 3). A missing
 plan path or an empty question is an error: show the usage and stop.
+
+**The three commit modes** (`--review-commits`, `--apply-commit-fixes`, `--improve-commits`) take no plan path, so `"<plan-path>"` never holds a plan there: it holds their optional
+**range** (none means `HEAD`) or a commit brief's path, the bare words right after the mode flag, as typed. Bare words are joined into one range (`last 2 commits` needs no quotes, unlike
+`--ask`'s question), and a `-N` there is a range. One range per call, in that slot only and never after a flag (`[RANGE_AFTER_FLAGS]`); a context plan goes in `--context-plan <path>` among the flags, never in that slot. After the launch, every command you spell takes the brief `[COMMIT_BRIEF]` names as its plan path; a command the run prints keeps the pinned range it prints.
 
 ## 3. Load the mode's core instructions, then execute them step by step
 

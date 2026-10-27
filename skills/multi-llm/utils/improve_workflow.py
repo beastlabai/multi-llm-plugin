@@ -1,4 +1,4 @@
-"""``--improve-plan`` and ``--improve-code``: one review, then its apply, unattended.
+"""``--improve-plan``, ``--improve-code`` and ``--improve-commits``: one review, then its apply, unattended.
 
 Each composite runs two phases that already exist, in the order its ``modes.py``
 row's ``sequence`` names them: ``review-plan`` then ``apply-suggestions``, or
@@ -7,6 +7,16 @@ row's ``sequence`` names them: ``review-plan`` then ``apply-suggestions``, or
 ``full``'s state machine with the composite's own identity, steps and flags.
 The native leg (Claude Code and the file shims) is an instruction core that
 loads each phase's core in turn, planned by ``util improve-steps``.
+
+Which composites exist, which of them takes a review scope and which step
+method runs each word are read off the mode table (each composite row's
+``sequence``), never listed here, so a composite is added by adding its row.
+``improve-commits`` is ``improve-code``'s sequence behind a commit front door
+(plans/review-commits.md §2.8): its front door resolves the range, writes the
+commit brief that stands in for the plan, and hands :func:`entry_point`
+``--plan-file <brief> --base-ref <base> --head-ref <head>``. Everything that
+differs for it keys on the row's range positional (:func:`pins_commit_range`)
+or on the brief's ``commit_range`` record, never on its name.
 
 Every rule both legs follow lives here, once, as a function of the mode word,
 the parsed flags and :class:`Records`, the state read once before step 1:
@@ -28,6 +38,7 @@ mode, so a third composite gets them by adding a row.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -35,7 +46,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 import check_workflow_prerequisites as prereq
 import full_workflow_orchestrator as fwo
@@ -70,15 +81,57 @@ CONSOLIDATE = "consolidate"
 #: true only in ``review_plan_orchestrator``).
 _CONSOLIDATING_REVIEWS = ("review-plan",)
 
-#: The review that takes a scope (``--files``/``--files-from``/``--base-ref``).
-_SCOPED_REVIEW = "review-code"
 
-#: Which inherited ``FullWorkflow`` step runs each sequence word.
+def _is_review_then_apply(row: "mode_table.Mode") -> bool:
+    """A composite of two steps, a review then the apply of its findings.
+
+    ``full`` is a composite too, but it runs the whole workflow through its own
+    driver (``runs_workflow``), so it is never one of these.
+    """
+    return row.is_composite and not row.runs_workflow and len(row.sequence) == 2
+
+
+#: Every review-then-apply composite row, in table order: ``improve-plan``,
+#: ``improve-code``, ``improve-commits``. Read off the table, so a composite is
+#: added by adding its row; ``util improve-steps``' ``--mode`` choices are
+#: these rows' names.
+COMPOSITE_ROWS: Tuple["mode_table.Mode", ...] = tuple(
+    row for row in mode_table.MODES if _is_review_then_apply(row)
+)
+
+
+def _derive_scoped_review() -> str:
+    """The review that takes a scope (``--files``/``--files-from``/``--base-ref``).
+
+    review-code's: the review of the code the workflow ends on, i.e. the first
+    step of every composite whose apply is the workflow's last phase (the last
+    word of the ``runs_workflow`` row's ``sequence``, ``apply-code-fixes``).
+    improve-code and improve-commits both run it first, so both are scoped
+    composites; improve-plan's review takes no scope. Exactly one review may
+    answer, so a row that broke the pairing fails at import, not in a run.
+    """
+    workflow = next(row for row in mode_table.MODES if row.runs_workflow)
+    reviews = {
+        row.sequence[0] for row in COMPOSITE_ROWS
+        if row.sequence[-1] == workflow.sequence[-1]
+    }
+    if len(reviews) != 1:  # pragma: no cover - table-guarded
+        raise RuntimeError(f"no single scoped review in the mode table: {sorted(reviews)}")
+    return reviews.pop()
+
+
+#: The review that takes a scope (``--files``/``--files-from``/``--base-ref``):
+#: ``review-code``, derived from the table (:func:`_derive_scoped_review`).
+_SCOPED_REVIEW = _derive_scoped_review()
+
+#: Which inherited ``FullWorkflow`` step runs each sequence word: ``step_`` and
+#: the word in snake case, for every word of every composite's ``sequence``
+#: (``review-code`` → ``step_review_code``). A word with no such method fails
+#: the step build, and ``tests/test_improve_commits.py`` holds every entry to
+#: one.
 _STEP_METHODS: Dict[str, str] = {
-    "review-plan": "step_review_plan",
-    "apply-suggestions": "step_apply_suggestions",
-    "review-code": "step_review_code",
-    "apply-code-fixes": "step_apply_code_fixes",
+    word: "step_" + word.replace("-", "_")
+    for row in COMPOSITE_ROWS for word in row.sequence
 }
 
 #: ``detach.classify_run`` verdicts that mean a run is still writing its dir.
@@ -108,7 +161,7 @@ def _row(mode: str) -> "mode_table.Mode":
     driver, so it is refused here rather than half-planned.
     """
     row = mode_table.resolve(str(mode))
-    if row is None or not row.is_composite or row.runs_workflow or len(row.sequence) != 2:
+    if row is None or not _is_review_then_apply(row):
         raise ValueError(f"{mode!r} is not a review-then-apply composite mode")
     return row
 
@@ -116,6 +169,30 @@ def _row(mode: str) -> "mode_table.Mode":
 def _reviews_code(mode: str) -> bool:
     """Whether *mode*'s review takes a scope (its first step is review-code)."""
     return _row(mode).sequence[0] == _SCOPED_REVIEW
+
+
+def pins_commit_range(mode: str) -> bool:
+    """Whether a commit front door pins *mode*'s range (``improve-commits``).
+
+    Read off the row: its positional is a range (``modes.POS_REVS``), not a
+    plan, so its front door resolves the range, records ``commit_range`` in the
+    brief's ``state.json`` and synthesises ``--plan-file``, ``--base-ref`` and
+    ``--head-ref`` on every call, a resume included (plans/review-commits.md
+    §2.1). Those three are therefore never the user's: no continuation
+    carries them, and the user reads the steps as the commit modes
+    (``commit_spelling.step_word`` keys on the same positional).
+    """
+    return tuple(_row(mode).positionals) == (mode_table.POS_REVS,)
+
+
+def _step_word(mode: str, word: str) -> str:
+    """A sequence word as a line the user reads spells it: the commit mode on a
+    composite whose range a front door pins (``review-code`` →
+    ``review-commits``), else the word itself (``commit_spelling.step_word``,
+    the row-keyed mapping of plans/review-commits.md §2.8)."""
+    from .commit_spelling import step_word
+
+    return step_word(_row(mode).name, word)
 
 
 def step_indices(mode: str) -> List[Tuple[str, str]]:
@@ -258,6 +335,12 @@ class Records:
             which every fan-out writes when it starts (display only).
         leftover_validation: Whether ``{review dir}/validation.json`` is on
             disk (a retired ``validation.<stamp>.stale.json`` does not count).
+        leftover_results: improve-code and improve-commits only: per-model
+            result files in the code review's dir with no ``grouped.json``
+            beside them, what a fan-out stopped before grouping leaves
+            (``code_review_orchestrator.leftover_model_results``). review-code
+            refuses a plain re-run over them (exit 3), so the step resumes with
+            ``--force``.
         apply_started: ``is_phase_started`` of the apply: a start newer than
             its completion, or with none beside it.
         apply_word: ``completed`` or ``skipped``, the word of the apply's
@@ -277,6 +360,14 @@ class Records:
             not run on the review files on disk now
             (``full_workflow_orchestrator.consolidation_skip_reason``), ``None``
             when it would.
+        header_changed: A composite whose range a front door pins
+            (:func:`pins_commit_range`) only: the brief's
+            ``commit_range.header_sha256`` differs from the
+            ``reviewed_header_sha256`` the review on record answered (a changed
+            ``--focus`` or context plan, plans/review-commits.md §2.4), so the
+            review starts a new round, as under ``--force``. ``False`` when no
+            round has started yet (no ``reviewed_header_sha256``), and on every
+            other composite.
     """
 
     mode: str
@@ -287,6 +378,7 @@ class Records:
     review_stale: bool = False
     review_started: bool = False
     leftover_validation: bool = False
+    leftover_results: bool = False
     apply_started: bool = False
     apply_word: Optional[str] = None
     apply_word_at: Optional[str] = None
@@ -296,6 +388,24 @@ class Records:
     recorded_scope: Optional[Tuple[str, ...]] = None
     recorded_base_ref: Optional[str] = None
     consolidation_skip: Optional[str] = None
+    header_changed: bool = False
+
+
+def _header_changed(mode: str, document: Dict[str, Any]) -> bool:
+    """:attr:`Records.header_changed` from the ``state.json`` document.
+
+    Read only on a composite whose range a front door pins, so improve-plan
+    and improve-code plan exactly as they did, on a commit brief too.
+    """
+    if not pins_commit_range(mode):
+        return False
+    record = document.get("commit_range")
+    if not isinstance(record, dict):
+        return False
+    reviewed = record.get("reviewed_header_sha256")
+    if not isinstance(reviewed, str) or not reviewed:
+        return False
+    return record.get("header_sha256") != reviewed
 
 
 def _stamp_text(value: Any) -> str:
@@ -374,6 +484,23 @@ def _recorded_base_ref(mode: str, plan: Path) -> Optional[str]:
     return (header.base_ref or None) if header is not None else None
 
 
+def _leftover_results(mode: str, review_dir: Path) -> bool:
+    """:attr:`Records.leftover_results`: per-model files, no ``grouped.json``.
+
+    Fable review, finding 1 (2026-10-27): a fan-out stopped before grouping (on
+    Claude Code, at the background launch's time limit) leaves only per-model
+    files. ``--resume`` handed the review step ``--yes`` alone, review-code's
+    partial-completion guard refused it (exit 3, "Run: --reaggregate"), and the
+    composite's stop named ``[IMPROVE_RERUN]`` again: a loop. review-plan has no
+    such guard and resumes a plain re-run, so only the code review reads this.
+    """
+    if not _reviews_code(mode) or (review_dir / "grouped.json").exists():
+        return False
+    import code_review_orchestrator as review_code
+
+    return bool(review_code.leftover_model_results(review_dir))
+
+
 def read_records(
     mode: str, plan_path: Union[str, Path], args: argparse.Namespace
 ) -> Records:
@@ -396,6 +523,7 @@ def read_records(
         mode=row.name,
         review_started=os.path.isfile(status_file.status_path(str(review_dir))),
         leftover_validation=(review_dir / "validation.json").is_file(),
+        leftover_results=_leftover_results(row.name, review_dir),
         requested_scope=requested,
         recorded_base_ref=_recorded_base_ref(row.name, plan),
         consolidation_skip=(
@@ -436,6 +564,7 @@ def read_records(
         apply_predates_review=state.completion_predates(apply_phase, paired),
         apply_in_progress=prereq.apply_phase_in_progress(state, apply_phase),
         recorded_scope=recorded_scope,
+        header_changed=_header_changed(row.name, document),
     )
 
 
@@ -448,15 +577,28 @@ def scope_flags_typed(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "files", None)) or getattr(args, "files_from", None) is not None
 
 
+def new_round(args: argparse.Namespace, records: Records) -> bool:
+    """Whether the review starts a new round: ``--force``, or a changed commit brief.
+
+    :attr:`Records.header_changed` is the commit-brief half (improve-commits):
+    the header the review on record answered is not the brief's now, which is
+    what the front door's restart passes ``--force`` for, so the native leg
+    (which never meets the front door) and a re-run after a restart that was
+    cut off before its round began both start the round too. It is never
+    true on improve-plan or improve-code.
+    """
+    return bool(getattr(args, "force", False)) or records.header_changed
+
+
 def scope_changed(mode: str, args: argparse.Namespace, records: Records) -> bool:
     """A completed code review whose recorded scope differs from the typed one.
 
     Compared as sets: ``order_review_paths`` sets the review order, so the order
     typed changes nothing. No scope on record is the default scope, which any
-    typed list differs from. Never under ``--force``, where the round is new and
+    typed list differs from. Never on a new round (:func:`new_round`), where
     nothing is compared, and never for ``--files-from -``, which is not read.
     """
-    if not _reviews_code(mode) or getattr(args, "force", False):
+    if not _reviews_code(mode) or new_round(args, records):
         return False
     if not records.review_completed or records.requested_scope is None:
         return False
@@ -471,7 +613,8 @@ def skip_reason(
     *step* is a word of the mode's ``sequence``. Pure: it reads ``--force``
     and *records* and nothing else.
 
-    A review runs unless it is completed, the round is not new, and (code
+    A review runs unless it is completed, the round is not new
+    (:func:`new_round`: ``--force``, or a changed commit brief), and (code
     review) no typed scope differs from the one on record. A review on record
     only as skipped therefore runs, unlike under ``full``: its skip holds no
     findings, and the command's first half is that review.
@@ -484,7 +627,7 @@ def skip_reason(
     """
     review, apply = _row(mode).sequence
     if step == review:
-        if not records.review_completed or getattr(args, "force", False):
+        if not records.review_completed or new_round(args, records):
             return None
         if scope_changed(mode, args, records):
             return None
@@ -526,13 +669,17 @@ def step_flags(
     or an ``--internal-*`` token, and never ``--interactive``.
 
     review: ``--yes``; ``--models …``, else ``--quick``; ``--force
-    --rerun-all`` on a new round. review-code also gets the typed ``--files``
-    (in the order typed), ``--files-from`` and ``--base-ref``; ``--force``
-    alone for a changed scope, or over a ``validation.json`` with no
-    completion on record (its secondary guard would otherwise auto-heal the
-    earlier round's results); and, with no scope flag typed, the recorded
-    ``review_scope_files`` when it resumes an unfinished review. A stale code
-    review gets no force: it forces itself.
+    --rerun-all`` on a new round (:func:`new_round`). review-code also gets
+    the typed ``--files`` (in the order typed), ``--files-from``,
+    ``--base-ref`` and ``--head-ref`` (the last only ever the front door's,
+    on improve-commits); ``--force`` alone for a changed scope, over a
+    ``validation.json`` with no completion on record (its secondary guard
+    would otherwise auto-heal the earlier round's results), or over
+    per-model results with no ``grouped.json`` (:attr:`Records.leftover_results`:
+    the guard would refuse the re-run, and ``--force`` resumes it, each kept
+    file a ``[SKIP]``); and, with no
+    scope flag typed, the recorded ``review_scope_files`` when it resumes an
+    unfinished review. A stale code review gets no force: it forces itself.
 
     consolidation: ``--consolidate --yes``.
 
@@ -540,11 +687,15 @@ def step_flags(
     1 is passed over, typed or inferred from the apply in progress (after a
     review that ran, the apply starts a new cycle); never ``--force`` or
     ``--fresh``. apply-code-fixes also gets ``--base-ref``: the typed one, else,
-    when step 1 is passed over, the one the code review on record used.
+    when step 1 is passed over, the one the code review on record used. The
+    improve-commits front door passes its pinned base (the empty-tree id on a
+    root range) on every call, and ``util improve-steps`` sets the same from
+    ``commit_range``, so on that composite the first branch always answers
+    (plans/review-commits.md §2.8); the rule itself names no mode.
     """
     row = _row(mode)
     review, apply = row.sequence
-    force = bool(getattr(args, "force", False))
+    fresh_round = new_round(args, records)
     if step == CONSOLIDATE and review in _CONSOLIDATING_REVIEWS:
         return ["--consolidate", "--yes"]
     if step == review:
@@ -553,13 +704,14 @@ def step_flags(
             flags += ["--models", *args.models]
         elif getattr(args, "quick", False):
             flags += ["--quick"]
-        if force:
+        if fresh_round:
             flags += ["--force", "--rerun-all"]
         if review != _SCOPED_REVIEW:
             return flags
-        if not force and (
+        if not fresh_round and (
             scope_changed(mode, args, records)
             or (records.leftover_validation and not records.review_on_record)
+            or (records.leftover_results and not records.review_on_record)
         ):
             flags += ["--force"]
         for path in getattr(args, "files", None) or []:
@@ -568,7 +720,7 @@ def step_flags(
             flags += ["--files-from", args.files_from]
         if (
             not scope_flags_typed(args)
-            and not force
+            and not fresh_round
             and not records.review_stale
             and records.recorded_scope
             and skip_reason(mode, review, args, records) is None
@@ -577,6 +729,8 @@ def step_flags(
                 flags += ["--files", path]
         if getattr(args, "base_ref", None):
             flags += ["--base-ref", args.base_ref]
+        if getattr(args, "head_ref", None):
+            flags += ["--head-ref", args.head_ref]
         return flags
     if step == apply:
         flags = ["--yes", AGENT_DECIDE_FLAG, "--no-confirm"]
@@ -628,6 +782,14 @@ def continuation_flags(mode: str, args: argparse.Namespace) -> List[str]:
     list it never mentions, and on a route that composes ``--detach`` a
     review it runs refuses ``-`` (:func:`files_from_stdin_refused`).
     :func:`continuation_stdin_note` is the line that says so.
+
+    On a composite whose range a front door pins (:func:`pins_commit_range`,
+    improve-commits) the parsed ``--base-ref`` and ``--head-ref`` are the
+    front door's, never typed (it refuses typed ones, so a command holding
+    one would fail), and are left out; the range itself is the command's
+    positional, which :func:`continuation_args` spells as the pinned range.
+    ``--focus`` and ``--context-plan`` never reach this parser: the brief
+    inherits them (plans/review-commits.md §2.8, "The continuation").
     """
     flags: List[str] = []
     if getattr(args, "models", None):
@@ -640,10 +802,57 @@ def continuation_flags(mode: str, args: argparse.Namespace) -> List[str]:
         files_from = getattr(args, "files_from", None)
         if files_from is not None and files_from != "-":
             flags += ["--files-from", files_from]
-        if getattr(args, "base_ref", None):
+        if getattr(args, "base_ref", None) and not pins_commit_range(mode):
             flags += ["--base-ref", args.base_ref]
     flags.append("--resume")
     return flags
+
+
+def continuation_args(
+    mode: str,
+    plan: Union[str, Path],
+    args: argparse.Namespace,
+    *,
+    plan_arg: Optional[Union[str, Path]] = None,
+) -> Tuple[str, List[str]]:
+    """``(mode word, [plan or range, *flags])``: the continuation as a command.
+
+    *plan* is the plan (or commit brief) path, read for its ``commit_range``;
+    *plan_arg* is how the command spells it (default *plan*). The flags are
+    :func:`continuation_flags`. On a composite whose range a front door pins,
+    the brief's ``commit_range`` turns the positional into the pinned
+    ``<base12>..<head12>`` (the brief, as spelled, for a root range) and drops
+    every flag a front door owns, through ``commit_spelling.spell_args``, the
+    one owner of that mapping: so the row-14 stop, ``[IMPROVE_RERUN]`` and a
+    detached run's resume line read ``--improve-commits <base12>..<head12>
+    --resume`` plus the typed selectors. With no ``commit_range`` yet (a new
+    brief whose stage a worker has not applied) the brief path stands as the
+    range, which the front door also takes. Every other composite comes back
+    as ``(mode, [plan_arg, *flags])``, unchanged.
+    """
+    from . import commit_spelling
+
+    flags = continuation_flags(mode, args)
+    shown = plan if plan_arg is None else plan_arg
+    view = (
+        commit_spelling.commit_view(plan, plan=shown)
+        if pins_commit_range(mode) else None
+    )
+    return commit_spelling.spell_args(_row(mode).name, shown, flags, view)
+
+
+def continuation_command(
+    mode: str,
+    plan: Union[str, Path],
+    args: argparse.Namespace,
+    *,
+    base: Optional[Path] = None,
+) -> str:
+    """:func:`continuation_args` as the dispatcher command a stop names."""
+    from .cli_common import dispatcher_command
+
+    word, rest = continuation_args(mode, plan, args)
+    return dispatcher_command(word, *rest, base=base)
 
 
 def continuation_stdin_note(mode: str, args: argparse.Namespace) -> Optional[str]:
@@ -713,8 +922,9 @@ class StepPlan:
         reason: The text in the line's parentheses, or ``None`` (a ``1b`` that
             reads ``run``).
         fresh: Whether the step is a review that must start over
-            (``[IMPROVE_STEP_FRESH]``): a new round, a stale code review, a
-            changed scope, or a leftover ``validation.json``.
+            (``[IMPROVE_STEP_FRESH]``): a new round (``--force`` or a changed
+            commit brief), a stale code review, a changed scope, or a leftover
+            ``validation.json``.
         flags: :func:`step_flags`; the caller appends its cross-cutting tail.
     """
 
@@ -730,13 +940,16 @@ def _review_reason(mode: str, args: argparse.Namespace, records: Records) -> str
     """Why step 1 runs, in the planner's words."""
     if getattr(args, "force", False):
         return "new round, --force"
+    if records.header_changed:
+        return "commit brief changed"
     if scope_changed(mode, args, records):
         return "review scope changed"
     if records.review_stale:
         return "reviewed before the latest implement"
     if records.review_skipped and not records.review_on_record:
         return "on record only as skipped"
-    if records.review_on_record or records.review_started or records.leftover_validation:
+    if (records.review_on_record or records.review_started
+            or records.leftover_validation or records.leftover_results):
         return "review unfinished"
     return "not reviewed yet"
 
@@ -792,7 +1005,7 @@ def plan_steps(mode: str, args: argparse.Namespace, records: Records) -> List[St
                                       False, flags))
             else:
                 fresh = bool(
-                    getattr(args, "force", False)
+                    new_round(args, records)
                     or records.review_stale
                     or scope_changed(mode, args, records)
                     or records.leftover_validation
@@ -834,9 +1047,15 @@ def _display_dir(path: Union[str, Path]) -> str:
 
 
 def interactive_refusal(mode: str) -> str:
-    """The one-line ``--interactive`` refusal, naming the two phases to run instead."""
+    """The one-line ``--interactive`` refusal, naming the two phases to run instead.
+
+    Each phase as the user types it (:func:`_step_word`): improve-commits names
+    ``--review-commits`` and ``--apply-commit-fixes``. Built from the row at
+    parse time, before any state is read, which is why the mapping is keyed on
+    the row and not on a ``commit_range``.
+    """
     row = _row(mode)
-    first, second = row.sequence
+    first, second = (_step_word(row.name, word) for word in row.sequence)
     return (
         f"ERROR: {row.name} runs unattended and does not take --interactive (-i). "
         f"Run --{first} --interactive, then --{second}."
@@ -848,6 +1067,7 @@ def already_complete_line(mode: str, args: argparse.Namespace, records: Records)
 
     Only meaningful when :func:`nothing_to_do` holds. An apply on record only as
     skipped prints ``skipped`` and its ``skipped_at``, never ``completed``.
+    Each step is named as the user types it (:func:`_step_word`).
     """
     row = _row(mode)
     review, apply = row.sequence
@@ -855,10 +1075,10 @@ def already_complete_line(mode: str, args: argparse.Namespace, records: Records)
     for word in row.sequence:
         said = skip_reason(mode, word, args, records)
         stamp = records.review_completed_at if word == review else records.apply_word_at
-        parts.append(f"{word} {said} {stamp or '(no date)'}")
+        parts.append(f"{_step_word(row.name, word)} {said} {stamp or '(no date)'}")
     return (
         f"[ALREADY_COMPLETE] {row.name}: {', '.join(parts)}; nothing to do. "
-        f"--force runs {review} again."
+        f"--force runs {_step_word(row.name, review)} again."
     )
 
 
@@ -978,6 +1198,50 @@ def _age_of(run: Dict[str, Any]) -> Optional[float]:
     return detach.heartbeat_age(run) if run else None
 
 
+#: Phase-dir locks this process already holds for the composite it runs, by
+#: lock path (:func:`_held_key`). Set only inside :func:`holding`: the
+#: improve-commits front door's code-review lock, which it holds through
+#: :func:`entry_point` (plans/review-commits.md §2.1, "It holds the lock
+#: through the fronted phase's main").
+_HELD_LOCKS: Dict[str, process_control.PhaseLock] = {}
+
+
+def _held_key(directory: Union[str, Path]) -> str:
+    return os.path.normcase(os.path.realpath(detach.lock_path(str(directory))))
+
+
+def _held_lock(directory: Union[str, Path]) -> Optional[process_control.PhaseLock]:
+    """The lock :func:`holding` handed over for *directory*, while still held."""
+    lock = _HELD_LOCKS.get(_held_key(directory))
+    return lock if lock is not None and lock.held else None
+
+
+@contextlib.contextmanager
+def holding(directory: Union[str, Path],
+            lock: process_control.PhaseLock) -> Iterator[process_control.PhaseLock]:
+    """Run the composite with *lock*, which this process holds on *directory*.
+
+    For the block, :func:`_inspect` (so :func:`preflight`'s live-owner check)
+    does not count that lock as another run's, and
+    :meth:`ImproveWorkflow.run_mode` runs the step whose dir it is under it
+    instead of taking it again (the OS lock refuses this process a second
+    take on another descriptor), and leaves it held. So the round stays owned
+    from the front door's steps 4 to 6 through the apply step that reads it,
+    and no other invocation rewrites or archives it in between. The caller
+    releases the lock.
+    """
+    key = _held_key(directory)
+    previous = _HELD_LOCKS.get(key)
+    _HELD_LOCKS[key] = lock
+    try:
+        yield lock
+    finally:
+        if previous is None:
+            _HELD_LOCKS.pop(key, None)
+        else:
+            _HELD_LOCKS[key] = previous
+
+
 def _inspect(
     plan_file: str, phase: str, directory: Path, *, own_run_id: Optional[str] = None
 ) -> Optional[LiveOwner]:
@@ -986,7 +1250,8 @@ def _inspect(
     ``classify_run`` with ``close_out=False`` writes nothing and creates no
     lock file. A dead holder owns nothing: its verdict is ``failed``, and the
     OS dropped its lock. A step lock held by *own_run_id* (this composite's own
-    detached run, which a ``--detach`` launch answers for itself) is skipped.
+    detached run, which a ``--detach`` launch answers for itself) is skipped,
+    and so is a lock this process holds for the composite (:func:`holding`).
     """
     if not directory.is_dir():
         return None
@@ -1010,6 +1275,8 @@ def _inspect(
             ),
         )
     if not view.get("lock_held"):
+        return None
+    if _held_lock(directory) is not None:
         return None
     payload = process_control.read_lock_holder(detach.lock_path(str(directory))) or {}
     run_id = payload.get("run_id")
@@ -1131,36 +1398,68 @@ def build_parser(mode: str, *, raising: bool = False) -> argparse.ArgumentParser
     ``--consolidate`` and no ``--review-tasks``: the namespace carries both as
     ``False`` (``set_defaults``), the two attributes ``FullWorkflow``'s
     inherited steps read without a default.
+
+    A composite whose range a front door pins (:func:`pins_commit_range`,
+    improve-commits) also takes ``--head-ref`` and the hidden
+    ``--commit-stage``: only its front door passes them, with ``--plan-file``
+    and ``--base-ref`` (plans/review-commits.md §2.5, "Which parsers take
+    ``--head-ref``"). On improve-code ``--head-ref`` stays argparse's usage
+    error. ``--focus`` and ``--context-plan`` are the front door's and never
+    reach this parser. Its help names the steps as the commit modes.
     """
     row = _row(mode)
     review, apply = row.sequence
     scoped = review == _SCOPED_REVIEW
+    pinned = pins_commit_range(row.name)
     run = dispatcher_prefix()
-    plan = "plans/my-plan.md"
-    lines = [
-        "",
-        f"Runs {review}, then {apply}, both unattended:",
-        f"  {review}: --yes, plus --models or --quick when given"
-        + (",\n    and the scope flags --files, --files-from and --base-ref" if scoped else ""),
-    ]
-    if review in _CONSOLIDATING_REVIEWS:
-        lines.append("  consolidation: when the review recommends it (--consolidate --yes)")
-    lines.append(
-        f"  {apply}: --yes --agent-decide --no-confirm"
-        + (", plus --base-ref" if scoped else "")
-    )
-    lines += [
-        "",
-        "Re-running continues where the last run stopped; a finished run exits 2",
-        "with [ALREADY_COMPLETE]. --force starts a new review round.",
-        "",
-        "Examples:",
-        f"  {run} {row.name} {plan}",
-        f"  {run} {row.name} {plan} --quick",
-    ]
-    if scoped:
-        lines.append(f"  {run} {row.name} {plan} --files src/app.py --base-ref HEAD~1")
-    lines.append(f"  {run} {row.name} {plan} --force")
+    if pinned:
+        shown_review, shown_apply = (_step_word(row.name, word) for word in row.sequence)
+        lines = [
+            "",
+            f"Runs {shown_review}, then {shown_apply}, both unattended, on the commit",
+            "brief the front door writes for the range:",
+            f"  {shown_review}: --yes, plus --models or --quick when given, and the",
+            "    scope flags --files and --files-from; the range's --base-ref and",
+            "    --head-ref come from the front door",
+            f"  {shown_apply}: --yes --agent-decide --no-confirm, plus the range's base",
+            "",
+            "Re-running continues where the last run stopped; a finished run exits 2",
+            "with [ALREADY_COMPLETE]. --force, or another --focus or --context-plan,",
+            "starts a new review round.",
+            "",
+            "Examples:",
+            f"  {run} {row.name}",
+            f"  {run} {row.name} last 2 commits --quick",
+            f"  {run} {row.name} main...HEAD --files src/app.py",
+            f"  {run} {row.name} last 2 commits --force",
+        ]
+    else:
+        plan = "plans/my-plan.md"
+        lines = [
+            "",
+            f"Runs {review}, then {apply}, both unattended:",
+            f"  {review}: --yes, plus --models or --quick when given"
+            + (",\n    and the scope flags --files, --files-from and --base-ref"
+               if scoped else ""),
+        ]
+        if review in _CONSOLIDATING_REVIEWS:
+            lines.append("  consolidation: when the review recommends it (--consolidate --yes)")
+        lines.append(
+            f"  {apply}: --yes --agent-decide --no-confirm"
+            + (", plus --base-ref" if scoped else "")
+        )
+        lines += [
+            "",
+            "Re-running continues where the last run stopped; a finished run exits 2",
+            "with [ALREADY_COMPLETE]. --force starts a new review round.",
+            "",
+            "Examples:",
+            f"  {run} {row.name} {plan}",
+            f"  {run} {row.name} {plan} --quick",
+        ]
+        if scoped:
+            lines.append(f"  {run} {row.name} {plan} --files src/app.py --base-ref HEAD~1")
+        lines.append(f"  {run} {row.name} {plan} --force")
     parser_class = _RaisingParser if raising else argparse.ArgumentParser
     parser = parser_class(
         prog=f"{row.target_module}.py",
@@ -1170,7 +1469,9 @@ def build_parser(mode: str, *, raising: bool = False) -> argparse.ArgumentParser
         epilog="\n".join(lines) + "\n",
     )
     parser.add_argument(
-        "--plan-file", required=True, help="Path to the plan markdown file"
+        "--plan-file", required=True,
+        help=("The commit brief (the front door passes it)" if pinned
+              else "Path to the plan markdown file"),
     )
     parser.add_argument(
         "--models",
@@ -1217,8 +1518,19 @@ def build_parser(mode: str, *, raising: bool = False) -> argparse.ArgumentParser
             "--base-ref",
             type=str,
             default=None,
-            help="Git ref the review diffs against, and the apply's diff context. "
-                 "An apply-only re-run without it reuses the review's own ref.",
+            help=("The range's base, which the front door passes on every call "
+                  "(the empty-tree id for a range from the root commit): the "
+                  "review's diff base and the apply's." if pinned else
+                  "Git ref the review diffs against, and the apply's diff context. "
+                  "An apply-only re-run without it reuses the review's own ref."),
+        )
+    if pinned:
+        parser.add_argument(
+            "--head-ref",
+            type=str,
+            default=None,
+            help="The range's head, which the front door passes on every call: "
+                 "the commit the review reads (review-code --head-ref).",
         )
     parser.add_argument(
         AGENT_DECIDE_FLAG,
@@ -1233,6 +1545,11 @@ def build_parser(mode: str, *, raising: bool = False) -> argparse.ArgumentParser
         action="store_true",
         help="Accepted and implied: nothing is confirmed in an unattended run.",
     )
+    if pinned:
+        # The front door's `--detach` stage (plans/review-commits.md §2.1),
+        # applied by the composite's worker right after its run-dir lock.
+        parser.add_argument("--commit-stage", dest="commit_stage", default=None,
+                            help=argparse.SUPPRESS)
     parser.set_defaults(consolidate=False, review_tasks=False)
     return parser
 
@@ -1342,6 +1659,13 @@ class ImproveWorkflow(fwo.FullWorkflow):
 
     # -- the hooks -----------------------------------------------------------
     def steps(self) -> List[fwo.Step]:
+        """One step per :func:`step_indices` entry.
+
+        Its label (``Step 2: apply-code-fixes``) is what the run's log, its
+        summary and the row-14 stop name, so it spells the word as the user
+        types it (:func:`_step_word`: ``Step 2: apply-commit-fixes`` on
+        improve-commits). The phase word and the step method stay the phase's.
+        """
         steps = []
         for index, word in step_indices(self.row.name):
             if word == CONSOLIDATE:
@@ -1349,7 +1673,8 @@ class ImproveWorkflow(fwo.FullWorkflow):
                                       self.step_consolidate, skippable=False))
             else:
                 steps.append(fwo.Step(
-                    mode_table.phase_for(word), f"Step {index}: {word}",
+                    mode_table.phase_for(word),
+                    f"Step {index}: {_step_word(self.row.name, word)}",
                     getattr(self, _STEP_METHODS[word]),
                 ))
         return steps
@@ -1369,13 +1694,30 @@ class ImproveWorkflow(fwo.FullWorkflow):
         return nothing_to_do(self.row.name, self.args, self.records)
 
     def resume_flags(self) -> List[str]:
+        """:func:`continuation_flags`: never a flag the front door synthesised."""
         return continuation_flags(self.row.name, self.args)
+
+    def resume_command(self) -> str:
+        """The row-14 command in the composite's own spelling (:func:`continuation_command`).
+
+        For improve-plan and improve-code it is ``full``'s own command,
+        ``dispatcher_command(MODE_NAME, plan, *resume_flags())``. For
+        improve-commits the plan argument is the pinned range read from the
+        brief's ``commit_range`` (``--improve-commits <base12>..<head12>
+        --resume``), never the brief path the front door handed this run.
+        """
+        return continuation_command(self.row.name, self.plan_path, self.args)
 
     def _phase_failed(self, step: fwo.Step, detail: str, code: Optional[int]) -> int:
         """``full``'s row-14 stop, then :func:`continuation_stdin_note` for a stop in the review.
 
         Only there: the command it names runs the review again, which a stop
-        in the apply's does not.
+        in the apply's does not. The step it names is :meth:`steps`' label, so
+        an improve-commits stop names ``apply-commit-fixes``; the command is
+        built by ``FullWorkflow._phase_failed`` from :meth:`resume_flags`,
+        which carries none of the front door's flags, and the commit spelling
+        of its plan argument is that method's hook (plans/review-commits.md
+        §2.8); :meth:`resume_command` is the command it must come to.
         """
         exit_code = super()._phase_failed(step, detail, code)
         if step.phase == self.row.sequence_phases[0]:
@@ -1426,9 +1768,15 @@ class ImproveWorkflow(fwo.FullWorkflow):
         taking and dropping it (``process_control.lock_is_free``). A lock it
         still cannot take (a run launched after the composite's own check)
         stops the step with the live-run refusal and exit 3.
+
+        A dir whose lock this process already holds for the composite (the
+        improve-commits front door's code-review lock, :func:`holding`) runs
+        its step under that lock, which stays held when the step returns.
         """
         phase = mode_table.phase_for(mode_word) or mode_word
         step_dir = get_phase_dir(self.plan_path, phase)
+        if _held_lock(step_dir) is not None:
+            return super().run_mode(mode_word, extra)
         lock = process_control.PhaseLock(detach.lock_path(str(step_dir)))
         payload = self._step_lock_payload(mode_word)
         refused: Optional[process_control.LockUnavailable] = None
@@ -1608,7 +1956,10 @@ class ImproveWorkflow(fwo.FullWorkflow):
 # ---------------------------------------------------------------------------
 
 def entry_point(mode: str, argv: Optional[Sequence[str]] = None) -> int:
-    """``improve_plan_orchestrator.main`` / ``improve_code_orchestrator.main``.
+    """``improve_plan_orchestrator.main`` / ``improve_code_orchestrator.main``,
+    and the fronted main of the improve-commits front door
+    (``utils/commit_review.py``), which calls it with ``--plan-file <brief>
+    --base-ref <base> --head-ref <head>`` recorded as ``improve-commits``.
 
     In order: parse; refuse ``--interactive`` (before the workflow sets
     ``--yes``, so the user never meets a conflict with a flag they did not
@@ -1631,7 +1982,8 @@ def entry_point(mode: str, argv: Optional[Sequence[str]] = None) -> int:
 
     plan_path = Path(os.path.abspath(args.plan_file))
     if not plan_path.is_file():
-        print(f"ERROR: Plan file not found: {args.plan_file}", file=sys.stderr)
+        label = "Commit brief" if pins_commit_range(mode) else "Plan file"
+        print(f"ERROR: {label} not found: {args.plan_file}", file=sys.stderr)
         print(f"       Resolved path: {plan_path}", file=sys.stderr)
         return EXIT_ERROR
 
