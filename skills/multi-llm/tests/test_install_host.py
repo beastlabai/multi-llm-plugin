@@ -394,11 +394,16 @@ class TestInstalledShimPassesTheShippedGuard:
 #: rendered *shape* and so owes ``SHIM_VERSION`` a bump.
 PINNED_SHIM_VERSION = 4
 
+#: Re-pinned with SHIM_VERSION unmoved for plans/review-commits.md §2.9: step 2
+#: gained the commit modes' range rule, prose beside the plan rule, with no new
+#: step, slot or command form. Re-pinned again, unmoved, when that rule's last
+#: sentence stopped claiming every later command takes the brief: a follow-up the
+#: run prints keeps its pinned range (PD-4, 2026-10-27). One sentence of prose.
 PINNED_TEMPLATE_SHA256 = {
     "codex":
-        "5bc7587dd0e9ba35ef14e9b66f137ac9f8ed36cc16c2a4e74d7bdc5abaa96f4b",
+        "ddc676b407dd92679ac231c86e4bcbdee6287ba417a7bdcd2aa53722bbb4f170",
     "opencode":
-        "531a7bb722d3494c22a73aff6a3e0ba05ade9fa94cea22783edfd4c71ab025a2",
+        "31034c4256edf0461ada764c8f78438eaf0853810e30978a61a421543bce7327",
 }
 
 

@@ -2,14 +2,17 @@
 
 import functools
 import hashlib
+import io
 import json
 import os
 import posixpath
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from datetime import datetime
@@ -203,6 +206,58 @@ def git_argv(*args: str, cwd: Optional[str] = None) -> List[str]:
     return argv + rest
 
 
+def attribute_source_args(source: Optional[str]) -> List[str]:
+    """Pin attributes as well as blobs for a two-commit read."""
+    return [f"--attr-source={source}"] if source is not None else []
+
+
+def _run_git_process(args: Sequence[str], *, cwd: Optional[str] = None,
+                     **kwargs: Any) -> subprocess.CompletedProcess:
+    """Run hardened git, with a private-index fallback for pre-2.41 git.
+
+    Two commits alone do not pin a diff: working-tree attributes can mark a
+    text file binary or change its hunk boundaries. ``--attr-source`` fixes
+    that. Older git reads the same attributes from a temporary index populated
+    from the source tree and an empty worktree. Neither the real index nor the
+    checkout is modified, and each call owns its environment and temporary files.
+    """
+    where = {"cwd": cwd} if cwd is not None else {}
+    argv = git_argv(*args, cwd=cwd)
+    result = subprocess.run(argv, **where, **kwargs)
+    source_arg = next((arg for arg in args if arg.startswith("--attr-source=")), None)
+    error = result.stderr or ""
+    if isinstance(error, bytes):
+        error = error.decode("utf-8", errors="replace")
+    if source_arg is None or result.returncode != 129 or not (
+        "unknown option" in error and "attr-source" in error
+    ):
+        return result
+
+    git_dir, _, rc = _run_git("rev-parse", "--absolute-git-dir", check=False, cwd=cwd)
+    if rc != 0:
+        return result
+    source = source_arg.partition("=")[2]
+    with tempfile.TemporaryDirectory(prefix="multi-llm-attributes-") as scratch:
+        env = dict(kwargs.get("env") or os.environ)
+        env.update(GIT_DIR=git_dir.strip(), GIT_WORK_TREE=scratch,
+                   GIT_INDEX_FILE=os.path.join(scratch, "index"))
+        env.pop("GIT_ATTR_SOURCE", None)
+        prepared = subprocess.run(
+            git_argv("read-tree", source, cwd=cwd), cwd=scratch, env=env,
+            capture_output=True, stdin=subprocess.DEVNULL,
+            timeout=kwargs.get("timeout", 60),
+        )
+        if prepared.returncode != 0:
+            # Preserve the caller's text/bytes contract on this failure too.
+            if kwargs.get("text") or kwargs.get("encoding"):
+                prepared.stdout = prepared.stdout.decode("utf-8", errors="replace")
+                prepared.stderr = prepared.stderr.decode("utf-8", errors="replace")
+            return prepared
+        options = dict(kwargs, env=env)
+        return subprocess.run([arg for arg in argv if arg != source_arg],
+                              cwd=scratch, **options)
+
+
 def _run_git(
     *args: str, check: bool = True, cwd: Optional[str] = None
 ) -> Tuple[str, str, int]:
@@ -216,14 +271,12 @@ def _run_git(
     # text output. Rejected alternatives: surrogateescape (lone surrogates
     # raise UnicodeEncodeError on downstream UTF-8 re-encode) and
     # backslashreplace (noisier in model-visible output).
-    where: Dict[str, str] = {"cwd": cwd} if cwd is not None else {}
-    result = subprocess.run(
-        git_argv(*args, cwd=cwd),
+    result = _run_git_process(
+        args, cwd=cwd,
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
-        **where,
     )
     if check and result.returncode != 0:
         raise GitError(f"git {' '.join(args)} failed: {result.stderr}")
@@ -559,7 +612,39 @@ def paths_in_commit(
     filename is a filename). A path holding a newline cannot be asked and is
     reported absent.
     """
-    candidates = [path for path in paths if path and "\n" not in path]
+    answers = _batch_check_in_commit(ref, paths, "%(objecttype)", cwd=cwd)
+    if answers is None:
+        return None
+    return {path for path, _answer in answers}
+
+
+def _batch_check_in_commit(
+    ref: str, paths: Iterable[str], fmt: str, *, cwd: Optional[str] = None,
+) -> Optional[List[Tuple[str, str]]]:
+    """``[(path, answer)]`` for each of *paths* present in *ref*'s tree, where
+    *answer* is ``git cat-file --batch-check=<fmt>``'s line for it.
+
+    The one reader behind :func:`paths_in_commit` and :func:`blobs_in_commit`,
+    so both follow the same rules: ``None`` when *ref* is no commit (or the
+    batch call fails), one call over ``<sha>:<path>`` lines, exact paths,
+    and a path holding a newline (which cannot be asked) reported absent.
+
+    Each path is encoded with ``surrogateescape``, the inverse of
+    :func:`_run_git_for_paths`'s decode (and of how ``subprocess`` encodes a
+    path argument), so a file name that is not valid UTF-8 reaches git as the
+    very bytes that name it; a lossy encode would ask git about a ``?`` name
+    and read a file present at *ref* as absent. A string no bytes can carry
+    (a lone surrogate outside that escape range) names no file git could
+    hold, so it is reported absent too.
+    """
+    candidates: List[Tuple[str, bytes]] = []
+    for path in paths:
+        if not path or "\n" in path:
+            continue
+        try:
+            candidates.append((path, path.encode("utf-8", "surrogateescape")))
+        except UnicodeEncodeError:
+            continue
     stdout, _, rc = _run_git(
         "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}",
         check=False, cwd=cwd,
@@ -568,23 +653,374 @@ def paths_in_commit(
     if rc != 0 or not sha:
         return None
     if not candidates:
-        return set()
+        return []
     where: Dict[str, str] = {"cwd": cwd} if cwd is not None else {}
+    prefix = f"{sha}:".encode("ascii")
     result = subprocess.run(
-        git_argv("cat-file", "--batch-check=%(objecttype)", cwd=cwd),
-        input="".join(f"{sha}:{path}\n" for path in candidates),
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-        **where,
+        git_argv("cat-file", f"--batch-check={fmt}", cwd=cwd),
+        input=b"".join(prefix + raw + b"\n" for _path, raw in candidates),
+        capture_output=True, **where,
     )
     if result.returncode != 0:
         return None
     answers = result.stdout.splitlines()
     if len(answers) != len(candidates):
         return None
-    return {
-        path for path, answer in zip(candidates, answers)
-        if not answer.endswith(" missing")
-    }
+    return [
+        (path, answer.decode("utf-8", errors="replace"))
+        for (path, _raw), answer in zip(candidates, answers)
+        if not answer.endswith(b" missing")
+    ]
+
+
+def blobs_in_commit(
+    ref: str, paths: Iterable[str], *, cwd: Optional[str] = None,
+) -> Optional[Dict[str, str]]:
+    """``{path: object id}`` for each of *paths* present in *ref*'s tree.
+
+    The sibling of :func:`paths_in_commit` the apply guard saves its ``head``
+    expectations from (plans/review-commits.md §2.7): one ``git cat-file
+    --batch-check=%(objectname)`` call over the same ``<sha>:<path>`` lines,
+    under the same rules, so its keys are always that function's set (or both
+    are ``None`` when *ref* is no commit). A path missing from the dict is
+    absent at *ref*. Each id is what ``git rev-parse <ref>:<path>`` prints: a
+    blob's id for a file or symlink, the tree's for a directory.
+    """
+    answers = _batch_check_in_commit(ref, paths, "%(objectname)", cwd=cwd)
+    if answers is None:
+        return None
+    return {path: answer.strip() for path, answer in answers}
+
+
+def read_at_commit(
+    ref: str, path: str, *, cwd: Optional[str] = None,
+) -> Optional[bytes]:
+    """The bytes of *path* as commit *ref* holds it; ``None`` when absent.
+
+    ``git cat-file blob <ref>:<path>``: the blob exactly as stored, with no
+    textconv, filter or eol conversion, which is what ``git show <ref>:<path>``
+    prints for a file. *path* goes through :func:`git_path` first (relative to
+    the repository at *cwd*), so a Windows ``pkg\\mod.py`` or an absolute path
+    reads ``pkg/mod.py`` (plans/review-commits.md §2.5, "Paths in git's
+    form"). ``None`` for a path absent at *ref*, a directory or submodule
+    there, a *ref* that does not resolve, and a failed call: Python's reads at
+    ``head`` treat each as "nothing to show", never as an error.
+    """
+    if not path or "\n" in path:
+        return None
+    name = git_path(path, cwd=cwd)
+    where: Dict[str, str] = {"cwd": cwd} if cwd is not None else {}
+    try:
+        result = subprocess.run(
+            git_argv("cat-file", "blob", f"{ref}:{name}", cwd=cwd),
+            capture_output=True, stdin=subprocess.DEVNULL, **where,
+        )
+    except (OSError, ValueError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+#: The empty-tree id per repository (keyed by the realpath of the cwd asked).
+_EMPTY_TREE_IDS: Dict[str, str] = {}
+
+
+def empty_tree_id(cwd: Optional[str] = None) -> str:
+    """The repository's empty-tree id, computed, never written as a literal.
+
+    ``git hash-object -t tree --stdin`` on empty input: ``4b825dc…`` in a
+    SHA-1 repository, its own id in a SHA-256 one. Git knows this tree
+    without storing it, but only by its full id, so the id is never
+    abbreviated (plans/review-commits.md §2.2, "Root ranges and the empty
+    tree"). Raises :class:`GitError` outside a repository.
+    """
+    key = os.path.realpath(cwd or os.getcwd())
+    cached = _EMPTY_TREE_IDS.get(key)
+    if cached:
+        return cached
+    where: Dict[str, str] = {"cwd": cwd} if cwd is not None else {}
+    result = subprocess.run(
+        git_argv("hash-object", "-t", "tree", "--stdin", cwd=cwd),
+        input="", capture_output=True, text=True, encoding="utf-8",
+        errors="replace", **where,
+    )
+    tree = result.stdout.strip()
+    if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", tree):
+        raise GitError(f"git hash-object -t tree failed: {result.stderr.strip()}")
+    _EMPTY_TREE_IDS[key] = tree
+    return tree
+
+
+def is_empty_tree_id(ref: Optional[str], cwd: Optional[str] = None) -> bool:
+    """True when *ref* is exactly the repository's full empty-tree id."""
+    if not ref:
+        return False
+    try:
+        return ref == empty_tree_id(cwd)
+    except GitError:
+        return False
+
+
+def git_path(
+    path: Union[str, Path],
+    repo_root: Optional[Union[str, Path]] = None,
+    *,
+    cwd: Optional[str] = None,
+) -> str:
+    """*path* as git names it: repository-relative, with forward slashes.
+
+    An absolute path is made relative to *repo_root* (when ``None``, the root
+    of the repository at *cwd*, itself the process's cwd by default; looked
+    up only for an absolute path, so a relative one costs no git call). Then
+    ``as_posix()``: on Windows ``\\`` is a separator (``PureWindowsPath``), on
+    POSIX it is a legal name character and is left alone (``PurePosixPath``).
+    A leading ``./`` is dropped. Paths outside the root are returned as given,
+    made posix, so the caller's own lookup fails on them rather than this
+    helper guessing (plans/review-commits.md §2.5, "Paths in git's form").
+    """
+    from pathlib import PurePosixPath, PureWindowsPath
+
+    text = str(path)
+    pure = PureWindowsPath(text) if os.name == "nt" else PurePosixPath(text)
+    if pure.is_absolute():
+        root = repo_root
+        if root is None:
+            root = get_project_root_from_dir(cwd or os.getcwd())
+        if root:
+            try:
+                # The directories are resolved, the last component is not: a
+                # symlink the repository tracks is named by its own path, never
+                # by its target's, and a root reached through a symlinked
+                # directory (macOS's temp dir) still matches its real spelling.
+                head, tail = os.path.split(text)
+                real = os.path.join(os.path.realpath(head), tail)
+                real_root = os.path.realpath(str(root))
+                relative = os.path.relpath(real, real_root)
+                if relative != os.pardir and not relative.startswith(os.pardir + os.sep):
+                    pure = (PureWindowsPath(relative) if os.name == "nt"
+                            else PurePosixPath(relative))
+            except ValueError:  # another drive on Windows
+                pass
+    posix = pure.as_posix()
+    while posix.startswith("./"):
+        posix = posix[2:]
+    return posix
+
+
+def paths_changed_since(
+    head: str, paths: Iterable[str], *, cwd: Optional[str] = None,
+) -> Set[str]:
+    """The subset of *paths* whose disk entry is not what commit *head* holds.
+
+    THE change test of a commit review: §2.5's drift check runs it over the
+    scope files and §2.7's apply guard over the fix files, so the drift list
+    and the apply's skips never disagree about a file (plans/review-commits.md
+    §2.5 "Drift", §2.7 "What it compares"). It compares as git sees a file —
+    the content after the path's clean filters (eol, ``ident``, LFS), the mode
+    and the kind — and hashes nothing itself, so a CRLF checkout of an
+    unchanged file under ``* text=auto`` matches. Three reads, each one call
+    over all the paths, can mark a path changed:
+
+    1. ``git diff --name-only --no-renames -z <head> -- <paths>``: later
+       commits, staged and unstaged edits, a mode-only change, a changed kind,
+       a deletion on disk. ``--no-renames`` because ``--name-only`` names a
+       detected rename by its new path only, so a scope file moved onto
+       another scope path the range deleted would go unlisted; without
+       pairing every path is listed under its own name.
+    2. :func:`paths_in_commit` plus an ``lstat`` of each path: a path absent
+       at *head* but present on disk in any form (untracked, ignored, added
+       with ``git add -N``, a directory) is changed, and so is any path whose
+       disk entry is neither a regular file nor a symlink (a directory, a
+       submodule, a socket). A path absent at *head* and absent on disk
+       matches, so a fix may restore a deleted file or create a new one.
+    3. ``git ls-files -v -z -- <paths>``: an entry tagged ``S``
+       (skip-worktree) or with a lowercase tag (assume-unchanged), whose disk
+       copy ``git diff`` never reads.
+
+    *paths* are repository-relative and *cwd* is the repository root (the
+    process's cwd when ``None``). Each path is put in git's form
+    (:func:`git_path`) before it is asked about, and the result holds the
+    strings as given. A read that fails marks every path changed, with one
+    warning on stderr: the guard must never let a fix through on a question
+    git did not answer. A path holding a newline cannot be asked about at
+    *head*, so it is changed whenever it exists on disk.
+    """
+    given = [path for path in dict.fromkeys(paths) if path]
+    if not given:
+        return set()
+    by_name: Dict[str, List[str]] = {}
+    for path in given:
+        by_name.setdefault(git_path(path, cwd=cwd), []).append(path)
+    names = list(by_name)
+    changed_names: Set[str] = set()
+
+    def fail(what: str, detail: str) -> Set[str]:
+        print(
+            f"Warning: {what} failed ({detail}); every one of the {len(given)} "
+            f"path(s) is treated as changed since {head[:12]}",
+            file=sys.stderr,
+        )
+        return set(given)
+
+    # 1. The drift primitive.
+    for chunk in _argv_chunks(names):
+        stdout, stderr, rc = _run_git_for_paths(
+            "--literal-pathspecs", "diff", "--name-only", "--no-renames", "-z", head,
+            "--", *chunk, cwd=cwd,
+        )
+        if rc != 0:
+            return fail(f"git diff --name-only {head[:12]}", _first_line(stderr, rc))
+        changed_names.update(name for name in stdout.split("\0") if name in by_name)
+
+    # 2. Presence at `head` against the disk entry's kind.
+    try:
+        present = paths_in_commit(head, names, cwd=cwd)
+    except (OSError, ValueError) as exc:
+        return fail(f"git cat-file at {head[:12]}", f"git could not run ({exc})")
+    if present is None:
+        return fail(f"git cat-file at {head[:12]}", "no such commit, or the call failed")
+    base = cwd if cwd is not None else os.getcwd()
+    for name in names:
+        try:
+            info = os.lstat(os.path.join(base, name))
+        except (FileNotFoundError, NotADirectoryError):
+            continue  # absent on disk: matches when absent at head too
+        except OSError:
+            changed_names.add(name)  # cannot tell what is there: not head's
+            continue
+        if name not in present:
+            changed_names.add(name)
+        elif not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+            changed_names.add(name)
+
+    # 3. Index entries whose disk copy git diff never reads.
+    for chunk in _argv_chunks(names):
+        stdout, stderr, rc = _run_git_for_paths(
+            "--literal-pathspecs", "ls-files", "-v", "-z", "--", *chunk, cwd=cwd,
+        )
+        if rc != 0:
+            return fail("git ls-files -v", _first_line(stderr, rc))
+        for record in stdout.split("\0"):
+            tag, _, name = record.partition(" ")
+            if name in by_name and (tag == "S" or (tag.isalpha() and tag.islower())):
+                changed_names.add(name)
+
+    return {path for name in changed_names for path in by_name[name]}
+
+
+#: The argv budget of one path-carrying git call: far under Linux's limits and
+#: under Windows' 32 767-character command line, which a few hundred long
+#: paths would otherwise pass.
+_ARGV_CHUNK_CHARS = 24000
+
+
+def _argv_chunks(names: Sequence[str]) -> Iterator[List[str]]:
+    """*names* in runs of at most :data:`_NUMSTAT_CHUNK` paths and
+    :data:`_ARGV_CHUNK_CHARS` characters: one run, so one git call, for any
+    scope a review normally has; more only where one call could not carry it."""
+    chunk: List[str] = []
+    size = 0
+    for name in names:
+        cost = len(name) + 3
+        if chunk and (len(chunk) >= _NUMSTAT_CHUNK or size + cost > _ARGV_CHUNK_CHARS):
+            yield chunk
+            chunk, size = [], 0
+        chunk.append(name)
+        size += cost
+    if chunk:
+        yield chunk
+
+
+def _first_line(stderr: str, rc: int) -> str:
+    lines = (stderr or "").strip().splitlines()
+    return lines[0] if lines else f"exit {rc}"
+
+
+def _run_git_for_paths(*args: str, cwd: Optional[str] = None) -> Tuple[str, str, int]:
+    """:func:`_run_git` for a call that prints paths: stdout is decoded with
+    ``surrogateescape``, the inverse of how ``subprocess`` encodes a path
+    argument, so a file name that is not valid UTF-8 comes back as the very
+    string that names it (``_run_git``'s lossy decode would hide it from a
+    membership test). A git that will not start is ``("", why, -1)``,
+    never a raise."""
+    try:
+        result = _run_git_process(
+            args, cwd=cwd, capture_output=True, stdin=subprocess.DEVNULL,
+        )
+    except (OSError, ValueError) as exc:
+        return "", f"git could not run ({exc})", -1
+    return (
+        result.stdout.decode("utf-8", errors="surrogateescape"),
+        result.stderr.decode("utf-8", errors="replace"),
+        result.returncode,
+    )
+
+
+def rename_map(
+    base_ref: str, head: str, *, cwd: Optional[str] = None,
+) -> Optional[Dict[str, str]]:
+    """``{old path: new path}`` for every rename between *base_ref* and *head*.
+
+    One ``git diff -M --name-status -z <base> <head>``, not limited to any
+    scope, so both sides of a rename are seen. It labels a path absent at
+    *head* (``renamed to <new>`` rather than ``deleted``) and nothing else:
+    the scope stays the ``--name-only`` list (plans/review-commits.md §2.5,
+    "Paths absent at ``head``"). ``None`` when the call fails, so the caller
+    falls back to ``absent at <head7>``. An empty-tree *base_ref* (a root
+    range) has no renames.
+    """
+    stdout, _, rc = _run_git_for_paths(
+        *attribute_source_args(head), "diff", "-M", "--name-status", "-z", base_ref, head, cwd=cwd,
+    )
+    if rc != 0:
+        return None
+    fields = stdout.split("\0")
+    renames: Dict[str, str] = {}
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        if not status:
+            index += 1
+            continue
+        if status[0] in ("R", "C"):
+            if index + 2 >= len(fields):
+                break
+            if status[0] == "R":
+                renames[fields[index + 1]] = fields[index + 2]
+            index += 3
+        else:
+            index += 2
+    return renames
+
+
+def deleting_commit(
+    base: Optional[str], head: str, path: str, *, cwd: Optional[str] = None,
+) -> Optional[str]:
+    """The commit in ``<base>..<head>`` that deleted *path*, or ``None``.
+
+    ``git log -1 --diff-filter=D --format=%H <base>..<head> -- <path>`` (the
+    newest such commit), for the fix prompt's ``git show <deleting>^:<path>``
+    on a file absent at ``head`` (plans/review-commits.md §2.7, "Historical
+    context for a deleted file"). ``--no-renames`` so a path renamed away
+    counts as deleted by the commit that moved it. A root range (*base*
+    ``None``, or the empty-tree id) has no ``<base>..`` side. ``None`` when no
+    range commit deleted the path, or when the call fails.
+    """
+    if not path or "\n" in path:
+        return None
+    if base is None or is_empty_tree_id(base, cwd):
+        revisions = head
+    else:
+        revisions = f"{base}..{head}"
+    stdout, _, rc = _run_git_for_paths(
+        "--literal-pathspecs", "log", "-1", "--no-renames", "--diff-filter=D",
+        "--format=%H", revisions, "--", git_path(path, cwd=cwd), cwd=cwd,
+    )
+    sha = stdout.strip()
+    if rc != 0 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
+        return None
+    return sha
 
 
 def ignored_paths(paths: Iterable[str], *, cwd: Optional[str] = None) -> Set[str]:
@@ -912,9 +1348,33 @@ def get_diff_since_ref(base_ref: str) -> str:
     stdout, _, _ = _run_git("diff", base_ref)
     return stdout
 
-def get_files_changed_since_ref(base_ref: str) -> List[str]:
-    """Get list of files changed since a reference commit."""
-    stdout, _, _ = _run_git("diff", "--name-only", base_ref)
+def get_files_changed_since_ref(
+    base_ref: str, head_ref: Optional[str] = None, *, cwd: Optional[str] = None,
+) -> List[str]:
+    """Get list of files changed since a reference commit.
+
+    ``head_ref=None`` is ``git diff --name-only <base>``: the base against the
+    working tree, as always. With a head it is ``git diff --name-only -z <base>
+    <head>``, the two commits alone, whatever the working tree holds
+    (plans/review-commits.md §2.5). Git's default rename detection is kept on
+    purpose: a rename is listed under its new path only, which is the path the
+    scope reviews. ``-z`` there hands back every path raw (decoded as
+    :func:`_numstat_counts` decodes them), so a non-ASCII name is not C-quoted
+    into a path no later diff matches. ``base_ref`` may be the empty-tree id
+    (a root range), which lists every file at ``head``. Raises
+    :class:`GitError` when git fails, either way.
+    """
+    where: Dict[str, str] = {"cwd": cwd} if cwd is not None else {}
+    if head_ref is not None:
+        stdout, stderr, rc = _run_git_for_paths(
+            *attribute_source_args(head_ref), "diff", "--name-only", "-z", base_ref, head_ref, cwd=cwd,
+        )
+        if rc != 0:
+            raise GitError(
+                f"git diff --name-only -z {base_ref} {head_ref} failed: {stderr}"
+            )
+        return [f for f in stdout.split("\0") if f]
+    stdout, _, _ = _run_git("diff", "--name-only", base_ref, **where)
     # Same rule as get_staged_files: one unquoted path per line, so the only
     # thing safe to drop is the line separator.
     return [f for f in stdout.split("\n") if f]
@@ -1369,6 +1829,8 @@ def _split_diff_by_file(raw_diff: str) -> Dict[str, str]:
 def capture_diff_hunks(
     base_ref: str,
     file_paths: List[str],
+    head_ref: Optional[str] = None,
+    cwd: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Capture structured diff hunks for specified files against a base ref.
 
@@ -1376,9 +1838,17 @@ def capture_diff_hunks(
     into structured per-file data consumed by the PR-style report template.
 
     Args:
-        base_ref: Git ref to diff against (commit SHA, branch name, HEAD~N).
+        base_ref: Git ref to diff against (commit SHA, branch name, HEAD~N),
+            or the empty-tree id on a root range, where every file is added.
         file_paths: List of file paths to capture diffs for.  Only files in
             this list are processed (scoped to suggestion-referenced files).
+        head_ref: The commit a commit review ends at. With it the diff is
+            ``git diff base_ref head_ref -- <files>``: two commits, whatever
+            the working tree holds, so there is no "includes uncommitted
+            changes" notice (plans/review-commits.md §2.5). ``None`` diffs
+            against the working tree, as always.
+        cwd: Where git runs; a caller passes the repository root, since the
+            paths are root-relative. ``None`` is the process's cwd.
 
     Returns:
         A dict with:
@@ -1389,7 +1859,8 @@ def capture_diff_hunks(
     Edge cases handled:
       - Binary files → ``{binary: true}``
       - Renamed files → ``old_path`` and ``new_path`` included
-      - Deleted files → ``deleted: true``, content retrieved via ``git show``
+      - Deleted files → ``deleted: true``, content retrieved via ``git show
+        <base_ref>:<path>`` (the content the change removed)
       - Invalid base_ref → empty dict with warning
       - Git not available → empty dict with notice
       - 10-second timeout enforced
@@ -1403,40 +1874,45 @@ def capture_diff_hunks(
 
     result: Dict[str, Any] = {}
     notices: List[str] = []
+    where: Dict[str, str] = {"cwd": cwd} if cwd is not None else {}
 
-    # --- Check for uncommitted changes ---
-    try:
-        status_result = subprocess.run(
-            git_argv("status", "--porcelain"),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=_GIT_TIMEOUT_SECONDS,
-        )
-        if status_result.returncode == 0 and status_result.stdout.strip():
-            notices.append("Diff includes uncommitted changes")
-    except FileNotFoundError:
-        result["_notices"] = ["Git not available -- code context shown from file content only."]
-        print(
-            "Warning: git is not available (not installed or not in PATH)",
-            file=sys.stderr,
-        )
-        return result
-    except subprocess.TimeoutExpired:
-        notices.append("git status timed out")
-    except OSError:
-        result["_notices"] = ["Git not available -- code context shown from file content only."]
-        print(
-            "Warning: git is not available (OS error)",
-            file=sys.stderr,
-        )
-        return result
+    # --- Check for uncommitted changes (a two-commit diff has none) ---
+    if head_ref is None:
+        try:
+            status_result = subprocess.run(
+                git_argv("status", "--porcelain", cwd=cwd),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=_GIT_TIMEOUT_SECONDS,
+                **where,
+            )
+            if status_result.returncode == 0 and status_result.stdout.strip():
+                notices.append("Diff includes uncommitted changes")
+        except FileNotFoundError:
+            result["_notices"] = ["Git not available -- code context shown from file content only."]
+            print(
+                "Warning: git is not available (not installed or not in PATH)",
+                file=sys.stderr,
+            )
+            return result
+        except subprocess.TimeoutExpired:
+            notices.append("git status timed out")
+        except OSError:
+            result["_notices"] = ["Git not available -- code context shown from file content only."]
+            print(
+                "Warning: git is not available (OS error)",
+                file=sys.stderr,
+            )
+            return result
 
     # --- Run git diff ---
+    sides = [base_ref] if head_ref is None else [base_ref, head_ref]
     try:
-        diff_result = subprocess.run(
-            git_argv("diff", base_ref, "--", *file_paths),
+        diff_result = _run_git_process(
+            [*attribute_source_args(head_ref), "diff", *sides, "--", *file_paths],
+            cwd=cwd,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -1464,8 +1940,11 @@ def capture_diff_hunks(
 
     if diff_result.returncode != 0:
         # Invalid base_ref or other git error
+        what = f"base_ref '{base_ref}'" if head_ref is None else (
+            f"'{base_ref}..{head_ref}'"
+        )
         print(
-            f"Warning: git diff failed for base_ref '{base_ref}': "
+            f"Warning: git diff failed for {what}: "
             f"{diff_result.stderr.strip()}",
             file=sys.stderr,
         )
@@ -1509,16 +1988,20 @@ def capture_diff_hunks(
         result[fpath] = parsed
 
     # --- Handle deleted files: retrieve last-known content ---
+    # From the old side, `base_ref`, whether the new side is the working tree
+    # or `head_ref`: that is the content the change removed. The path is put
+    # in git's form first (a relative POSIX path is unchanged by it).
     for fpath in file_paths:
         if fpath in result and isinstance(result[fpath], dict) and result[fpath].get("deleted"):
             try:
                 show_result = subprocess.run(
-                    git_argv("show", f"{base_ref}:{fpath}"),
+                    git_argv("show", f"{base_ref}:{git_path(fpath, cwd=cwd)}", cwd=cwd),
                     capture_output=True,
                     text=True,
                     encoding="utf-8",
                     errors="replace",
                     timeout=_GIT_TIMEOUT_SECONDS,
+                    **where,
                 )
                 if show_result.returncode == 0:
                     result[fpath]["last_known_content"] = show_result.stdout
@@ -1564,6 +2047,81 @@ def capture_file_snapshots(
                 ]
         except (OSError, IOError):
             continue
+    return snapshots
+
+
+def capture_file_snapshots_at(
+    ref: str, paths: Iterable[str], *, cwd: Optional[str] = None,
+) -> Dict[str, List[str]]:
+    """:func:`capture_file_snapshots` read at commit *ref* instead of disk.
+
+    The same shape — ``{path: lines}``, keyed by each path as given, lines
+    split as a text-mode read splits them (universal newlines) with line
+    endings stripped, binary files (a NUL byte in the first 8 KB) left out —
+    so a commit review hands the report the code it reviewed, not whatever
+    the working tree holds by the time the report is written
+    (plans/review-commits.md §2.5, "HTML report"). A path absent at *ref*
+    (deleted or renamed by the range), a directory or submodule there, and
+    every path when *ref* is no commit are left out, just as an unreadable
+    file is today. One ``git cat-file --batch`` call over all the paths, each
+    put in git's form (:func:`git_path`) first; *cwd* is the repository root.
+    """
+    wanted: Dict[str, List[str]] = {}
+    for path in dict.fromkeys(paths):
+        if path and "\n" not in path:
+            wanted.setdefault(git_path(path, cwd=cwd), []).append(path)
+    if not wanted:
+        return {}
+    try:
+        stdout, _, rc = _run_git(
+            "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}",
+            check=False, cwd=cwd,
+        )
+    except (OSError, ValueError):
+        return {}
+    sha = stdout.strip()
+    if rc != 0 or not sha:
+        return {}
+    names = list(wanted)
+    where: Dict[str, str] = {"cwd": cwd} if cwd is not None else {}
+    try:
+        result = subprocess.run(
+            git_argv("cat-file", "--batch", cwd=cwd),
+            input="".join(f"{sha}:{name}\n" for name in names).encode(
+                "utf-8", errors="surrogateescape"
+            ),
+            capture_output=True, **where,
+        )
+    except (OSError, ValueError):
+        return {}
+    if result.returncode != 0:
+        return {}
+    snapshots: Dict[str, List[str]] = {}
+    data = result.stdout
+    offset = 0
+    for name in names:
+        newline = data.find(b"\n", offset)
+        if newline < 0:
+            break
+        header = data[offset:newline].decode("utf-8", errors="replace")
+        offset = newline + 1
+        if header.endswith(" missing"):
+            continue
+        fields = header.split()
+        if len(fields) < 3 or not fields[2].isdigit():
+            break  # not git's answer shape: trust nothing after it
+        kind, size = fields[1], int(fields[2])
+        body = data[offset:offset + size]
+        offset += size + 1  # the content, then git's own LF after it
+        if kind != "blob" or b"\x00" in body[:8192]:
+            continue
+        text = body.decode("utf-8", errors="replace")
+        lines = [
+            line.rstrip("\n").rstrip("\r")
+            for line in io.StringIO(text, newline=None).readlines()
+        ]
+        for path in wanted[name]:
+            snapshots[path] = list(lines)
     return snapshots
 
 
@@ -1814,7 +2372,26 @@ def _resolved_collapse_globs(
     return resolved
 
 
-def _linguist_generated(paths: Sequence[str], cwd: Optional[str] = None) -> Set[str]:
+def _check_attr_rejects_source(result: "subprocess.CompletedProcess[str]") -> bool:
+    """Whether a ``check-attr --source`` call failed only because this git
+    predates the option (Git 2.40): exit 129 with ``unknown option`` on stderr,
+    as git's option parser reports it. Nothing else qualifies, so a bad
+    ``--source`` value (exit 128) keeps the any-failure rule."""
+    return result.returncode == 129 and "unknown option" in (result.stderr or "")
+
+
+def _git_version_text(cwd: Optional[str]) -> str:
+    """``git version 2.39.2`` or the like, for a warning; never raises."""
+    try:
+        stdout, _, rc = _run_git("--version", check=False, cwd=cwd)
+    except (OSError, ValueError):
+        return "an unknown git version"
+    return stdout.strip() if rc == 0 and stdout.strip() else "an unknown git version"
+
+
+def _linguist_generated(
+    paths: Sequence[str], cwd: Optional[str] = None, *, source: Optional[str] = None,
+) -> Set[str]:
     """The paths carrying the ``linguist-generated`` attribute, in one git call.
 
     ``--stdin -z`` rather than one argument per path: a large scope (1 040 paths
@@ -1827,12 +2404,26 @@ def _linguist_generated(paths: Sequence[str], cwd: Optional[str] = None) -> Set[
     A failed call — outside a repository, or no ``git`` at all — marks nothing
     generated and prints one warning. It never raises: the attribute is one of
     four rules, and the other three still classify every path.
+
+    ``source`` (a commit review's ``head``) reads ``.gitattributes`` as that
+    commit has it, through ``check-attr --source=<head>`` (plans/review-commits.md
+    §2.5). The option dates from Git 2.40; an older git fails the whole call on
+    it (exit 129, ``unknown option``), and the any-failure rule would then
+    classify nothing by attribute on every commit review. On that failure
+    alone the call uses ``--attr-source`` (Git 2.41+) or a private index loaded
+    from the pinned tree, with one warning naming the git version. It never
+    falls back to the working tree's attributes. Any other failure keeps the
+    rule above.
     """
     if not paths:
         return set()
+    attr_args: List[str] = ["check-attr"]
+    if source is not None:
+        attr_args.append(f"--source={source}")
+    attr_args += ["--stdin", "-z", "linguist-generated"]
     try:
         result = subprocess.run(
-            git_argv("check-attr", "--stdin", "-z", "linguist-generated", cwd=cwd),
+            git_argv(*attr_args, cwd=cwd),
             input="\0".join(paths) + "\0",
             capture_output=True,
             text=True,
@@ -1840,6 +2431,22 @@ def _linguist_generated(paths: Sequence[str], cwd: Optional[str] = None) -> Set[
             errors="replace",
             cwd=cwd,
         )
+        if source is not None and _check_attr_rejects_source(result):
+            print(
+                f"Warning: git check-attr --source needs Git 2.40 or later and "
+                f"this is {_git_version_text(cwd)}; reading linguist-generated "
+                f"attributes from {source[:7]} through the pinned attribute fallback",
+                file=sys.stderr,
+            )
+            result = _run_git_process(
+                [*attribute_source_args(source), "check-attr", "--stdin", "-z", "linguist-generated"],
+                input="\0".join(paths) + "\0",
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                cwd=cwd,
+            )
     except (OSError, ValueError) as exc:
         print(
             f"Warning: git check-attr linguist-generated could not run ({exc}); "
@@ -1872,6 +2479,7 @@ def classify_review_paths(
     collapse_paths: Optional[Mapping[str, Sequence[str]]] = None,
     *,
     cwd: Optional[str] = None,
+    source: Optional[str] = None,
 ) -> Dict[str, str]:
     """Put every review path in exactly one group; the first matching rule wins.
 
@@ -1898,12 +2506,17 @@ def classify_review_paths(
     that cwd IS the root: from a subdirectory git reads each path relative to
     it, and ``check-attr`` answers for files that do not exist.
 
+    ``source`` is a commit review's ``head``: the attributes are then read as
+    that commit has them (``check-attr --source``, with the pre-2.40 fallback
+    :func:`_linguist_generated` describes). ``None`` reads the working tree's,
+    as always.
+
     Returns ``{path: group}`` keyed by each distinct, non-empty input path as
     given; the order is the input's.
     """
     unique = [path for path in dict.fromkeys(paths) if path]
     globs = _resolved_collapse_globs(collapse_paths)
-    by_attribute = _linguist_generated(unique, cwd=cwd)
+    by_attribute = _linguist_generated(unique, cwd=cwd, source=source)
     groups: Dict[str, str] = {}
     for path in unique:
         normalized = _normalized_review_path(path)
@@ -1925,6 +2538,7 @@ def order_review_paths(
     collapse_paths: Optional[Mapping[str, Sequence[str]]] = None,
     *,
     cwd: Optional[str] = None,
+    source: Optional[str] = None,
 ) -> List[str]:
     """The review order: source, tests, fixtures, generated; by path within each.
 
@@ -1934,9 +2548,12 @@ def order_review_paths(
     Sorting within each group makes the result a function of the *set* of
     paths, so every permutation of the same input — and so every run over the
     same scope — renders the same list. Duplicates and empty strings are
-    dropped.
+    dropped. ``source`` is :func:`classify_review_paths`' (a commit review's
+    ``head``).
     """
-    return _review_order(classify_review_paths(paths, collapse_paths, cwd=cwd))
+    return _review_order(
+        classify_review_paths(paths, collapse_paths, cwd=cwd, source=source)
+    )
 
 
 def _review_order(groups: Mapping[str, str]) -> List[str]:
@@ -2129,6 +2746,10 @@ class ReviewDiffSet(NamedTuple):
     written_by: str
     written: bool
     failure: Optional[str]
+    #: The commit a two-commit review ends at (``--head-ref``), as given, and
+    #: what it resolved to; both ``None`` for a diff against the working tree.
+    head_ref: Optional[str] = None
+    head_commit: Optional[str] = None
 
 
 class ReviewScopeHeader(NamedTuple):
@@ -2145,6 +2766,10 @@ class ReviewScopeHeader(NamedTuple):
     diff_files: List[str]
     #: The byte size the manifest records for each of ``diff_files``.
     diff_sizes: Dict[str, int]
+    #: The manifest's ``Head ref`` line, read back: the ref and its commit, or
+    #: ``None`` when the set diffs against the working tree (no such line).
+    head_ref: Optional[str] = None
+    head_commit: Optional[str] = None
 
 
 def review_diff_slug(path: str) -> str:
@@ -2179,8 +2804,8 @@ def _git_diff_output(
     holding ``*`` or ``:(`` means that file and nothing else.
     """
     try:
-        proc = subprocess.run(
-            git_argv("--literal-pathspecs", *args, cwd=cwd),
+        proc = _run_git_process(
+            ["--literal-pathspecs", *args],
             capture_output=True,
             stdin=subprocess.DEVNULL,
             cwd=cwd,
@@ -2205,6 +2830,28 @@ def _resolve_base_commit(base_ref: str, cwd: Optional[str]) -> Optional[str]:
     return out.decode("utf-8", errors="replace").strip() or None
 
 
+_FULL_OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+def _is_empty_tree_base(base_ref: str, cwd: Optional[str]) -> bool:
+    """Whether *base_ref* is the repository's empty-tree id: a root range's
+    base (plans/review-commits.md §2.2). Only a full-length id is asked about,
+    so any other ref costs no git call and keeps today's path exactly."""
+    return bool(base_ref) and bool(_FULL_OBJECT_ID.fullmatch(base_ref)) and (
+        is_empty_tree_id(base_ref, cwd)
+    )
+
+
+def _range_text(
+    base_ref: str, base_commit: Optional[str], empty_tree: bool,
+    head_ref: str, head_commit: Optional[str],
+) -> str:
+    """``<base7>..<head7>`` (``root..<head7>`` on a root range), as a user
+    reads a range; display only, never typed back."""
+    base = "root" if empty_tree else (base_commit or base_ref)[:7]
+    return f"{base}..{(head_commit or head_ref)[:7]}"
+
+
 _Counts = Tuple[Optional[int], Optional[int]]
 
 
@@ -2226,7 +2873,8 @@ def _scope_bytes(text: str) -> bytes:
 
 
 def _numstat_counts(
-    base_ref: str, paths: Sequence[str], cwd: Optional[str]
+    base_ref: str, paths: Sequence[str], cwd: Optional[str],
+    head_ref: Optional[str] = None,
 ) -> Tuple[Dict[str, _Counts], Optional[str]]:
     """``{path: (added, deleted)}`` for the scope, or the first failure.
 
@@ -2235,13 +2883,16 @@ def _numstat_counts(
     was given — so a path that is not valid UTF-8 keys its row under the very
     string the scope holds rather than a lossy stand-in :func:`_entry_counts`
     would never find. A binary (or ``-diff``) path reports ``-`` for both
-    counts, kept as ``None``.
+    counts, kept as ``None``. ``head_ref`` makes it ``base head``: two
+    commits, not the base against the working tree.
     """
     counts: Dict[str, _Counts] = {}
+    sides = [base_ref] if head_ref is None else [base_ref, head_ref]
     for start in range(0, len(paths), _NUMSTAT_CHUNK):
         chunk = list(paths[start:start + _NUMSTAT_CHUNK])
         out, error = _git_diff_output(
-            ["diff", "--numstat", "-z", *_DIFF_FLAGS, base_ref, "--", *chunk], cwd
+            [*attribute_source_args(head_ref), "diff", "--numstat", "-z", *_DIFF_FLAGS,
+             *sides, "--", *chunk], cwd
         )
         if error is not None:
             return counts, error
@@ -2296,18 +2947,31 @@ def _render_review_scope(
     reviewed_total: int,
     entries: Sequence[Dict[str, Any]],
     collapsed: Sequence[Dict[str, Any]],
+    head_ref: Optional[str] = None,
+    head_commit: Optional[str] = None,
+    empty_tree: bool = False,
 ) -> str:
     if not base_ref:
         base_line = "- Base ref: (none: neither the requested ref nor HEAD~1 resolves)"
+    elif empty_tree:
+        base_line = (
+            f"- Base ref: `{base_ref}` (empty tree: the range starts at the root commit)"
+        )
     elif base_commit:
         base_line = f"- Base ref: `{base_ref}` (commit `{base_commit}`)"
     else:
         base_line = f"- Base ref: `{base_ref}` (does not resolve to a commit)"
+    ref_lines = [base_line]
+    if head_ref is not None:
+        ref_lines.append(
+            f"- Head ref: `{head_ref}` (commit `{head_commit}`)" if head_commit
+            else f"- Head ref: `{head_ref}` (does not resolve to a commit)"
+        )
     lines = [
         "# Review scope",
         "",
         f"- Scope id: `{scope_id}`",
-        base_line,
+        *ref_lines,
         f"- Scope source: {scope_source or 'not recorded'}",
         f"- Written: {datetime.now().isoformat(timespec='seconds')}",
         f"- Written by: {written_by}",
@@ -2324,18 +2988,37 @@ def _render_review_scope(
         )
         for path, reason in omitted:
             lines.append(f"- {_code_span(path)}: {reason}")
-    lines.extend([
-        "",
-        "Every path under review is listed below, grouped as source, tests, "
-        "fixtures and generated. Each source and test entry names its diff file "
-        "(relative to this file) with its size, or says on its own line why it "
-        "has none. The diff files are the authoritative record of the change: "
-        "each is one file's whole unified diff against the base ref, with both "
-        "sides of every hunk, removed lines and deleted files included. A file's "
-        "current contents show only the new side, so never review them in place "
-        "of its diff. Fixture and generated paths are collapsed to one line per "
-        "directory and get no diff file.",
-    ])
+    if head_ref is None:
+        lines.extend([
+            "",
+            "Every path under review is listed below, grouped as source, tests, "
+            "fixtures and generated. Each source and test entry names its diff file "
+            "(relative to this file) with its size, or says on its own line why it "
+            "has none. The diff files are the authoritative record of the change: "
+            "each is one file's whole unified diff against the base ref, with both "
+            "sides of every hunk, removed lines and deleted files included. A file's "
+            "current contents show only the new side, so never review them in place "
+            "of its diff. Fixture and generated paths are collapsed to one line per "
+            "directory and get no diff file.",
+        ])
+    else:
+        # A two-commit set: the new side is `head`, never the working tree,
+        # which may hold other bytes (plans/review-commits.md §2.5).
+        head7 = (head_commit or head_ref)[:7]
+        lines.extend([
+            "",
+            "Every path under review is listed below, grouped as source, tests, "
+            "fixtures and generated. Each source and test entry names its diff file "
+            "(relative to this file) with its size, or says on its own line why it "
+            "has none. The diff files are the authoritative record of the change: "
+            "each is one file's whole unified diff from the base ref to the head "
+            f"ref, commit `{head7}`, with both sides of every hunk, removed lines "
+            "and deleted files included. The new side is each file as that commit "
+            f"holds it (`git show {head7}:<path>`), not the working tree, which may "
+            "differ from it, so never review a file's working-tree contents in "
+            "place of its diff. Fixture and generated paths are collapsed to one "
+            "line per directory and get no diff file.",
+        ])
 
     def group_heading(title: str, count: int, suffix: str = "") -> None:
         noun = "file" if count == 1 else "files"
@@ -2354,7 +3037,8 @@ def _render_review_scope(
                     f"{head} — {status}: `{entry['diff']}`, {entry['size']} bytes"
                 )
             elif status == DIFF_STATUS_OMITTED and base_ref:
-                command = f"git diff {base_ref} -- {shlex.quote(entry['path'])}"
+                sides = base_ref if head_ref is None else f"{base_ref} {head_ref}"
+                command = f"git diff {sides} -- {shlex.quote(entry['path'])}"
                 lines.append(
                     f"{head} — {status}. With a shell, {_code_span(command)} "
                     f"shows it"
@@ -2394,6 +3078,7 @@ def _render_review_scope(
 
 _SCOPE_ID_LINE = re.compile(r"^- Scope id: `([0-9a-f]+)`\s*$")
 _BASE_REF_LINE = re.compile(r"^- Base ref: (.*)$")
+_HEAD_REF_LINE = re.compile(r"^- Head ref: (.*)$")
 _WRITTEN_BY_LINE = re.compile(r"^- Written by: (.+?)\s*$")
 _COVERAGE_LINE = re.compile(r"^Diff coverage: (complete|partial)\b")
 _OMITTED_LINE = re.compile(r"^- (`+) ?(.*?) ?\1: (.+?)\s*$")
@@ -2418,6 +3103,10 @@ def read_review_scope(scope_file: Union[str, Path]) -> Optional[ReviewScopeHeade
     files are read off the numbered entries alone, each with the size its entry
     records. Decoded with ``surrogateescape``, as :func:`write_review_diff`
     encoded it, so a path that is not valid UTF-8 reads back as given.
+
+    A two-commit set's ``Head ref`` line reads back as ``head_ref`` and
+    ``head_commit``; a root range's base (the empty-tree id) reads back as
+    that ``base_ref`` with no ``base_commit``.
     """
     try:
         text = Path(scope_file).read_text(encoding="utf-8", errors="surrogateescape")
@@ -2425,6 +3114,8 @@ def read_review_scope(scope_file: Union[str, Path]) -> Optional[ReviewScopeHeade
         return None
     scope_id = base_ref = written_by = coverage = None
     base_commit: Optional[str] = None
+    head_ref: Optional[str] = None
+    head_commit: Optional[str] = None
     omitted: List[Tuple[str, str]] = []
     in_coverage = False
     for line in text.splitlines():
@@ -2442,6 +3133,12 @@ def read_review_scope(scope_file: Union[str, Path]) -> Optional[ReviewScopeHeade
             base_ref = ref.group(1) if ref else ""
             commit = re.search(r"commit `([0-9a-f]+)`", value)
             base_commit = commit.group(1) if commit else None
+        elif head_ref is None and (match := _HEAD_REF_LINE.match(line)):
+            value = match.group(1)
+            ref = re.match(r"`([^`]*)`", value)
+            head_ref = ref.group(1) if ref else ""
+            commit = re.search(r"commit `([0-9a-f]+)`", value)
+            head_commit = commit.group(1) if commit else None
         elif written_by is None and (match := _WRITTEN_BY_LINE.match(line)):
             written_by = match.group(1)
         elif coverage is None and (match := _COVERAGE_LINE.match(line)):
@@ -2467,6 +3164,8 @@ def read_review_scope(scope_file: Union[str, Path]) -> Optional[ReviewScopeHeade
         omitted=omitted,
         diff_files=diff_files,
         diff_sizes=diff_sizes,
+        head_ref=head_ref,
+        head_commit=head_commit,
     )
 
 
@@ -2569,6 +3268,7 @@ def write_review_diff(
     scope_source: Optional[str] = None,
     written_by: str = WRITTEN_BY_FANOUT,
     cwd: Optional[str] = None,
+    head_ref: Optional[str] = None,
 ) -> ReviewDiffSet:
     """Write ``review-scope.md`` and ``diff/`` for a code review into ``out_dir``.
 
@@ -2608,14 +3308,27 @@ def write_review_diff(
     cwd, is right only at the root — from a subdirectory git reads every path
     relative to it, each diff comes back empty, and the manifest would record
     ``no net change`` under ``complete`` coverage for files that did change.
+
+    ``head_ref`` makes it a two-commit set (plans/review-commits.md §2.5):
+    ``--numstat``, every per-path diff and the omitted-file command take
+    ``base head``, so the working tree never enters it; ``.gitattributes`` is
+    read as ``head`` has it (``check-attr --source``); a path with no diff
+    reads ``no net change in <base7>..<head7>``; the manifest gains a ``Head
+    ref`` line and says the new side is ``head``, not the working tree; and
+    the scope id fingerprints both commits. ``None`` is the diff against the
+    working tree, byte for byte as before. A ``base_ref`` that is the
+    empty-tree id (a root range, §2.2) is not resolved as a commit: every file
+    shows as added, and the manifest's ``Base ref`` line says the range starts
+    at the root commit.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     scope_file = out / REVIEW_SCOPE_FILENAME
     diff_dir = out / REVIEW_DIFF_DIRNAME
     base_ref = base_ref or ""
+    empty_tree = _is_empty_tree_base(base_ref, cwd)
 
-    groups = classify_review_paths(paths, collapse_paths, cwd=cwd)
+    groups = classify_review_paths(paths, collapse_paths, cwd=cwd, source=head_ref)
     ordered = _review_order(groups)
     reviewed = [
         path for path in ordered
@@ -2624,7 +3337,12 @@ def write_review_diff(
 
     failure: Optional[str] = None
     base_commit: Optional[str] = None
+    head_commit: Optional[str] = None
     counts: Dict[str, _Counts] = {}
+    # The diff's two sides as git takes them: `base` alone (against the
+    # working tree), or `base head`.
+    sides: List[str] = [base_ref] if head_ref is None else [base_ref, head_ref]
+    sides_text = " ".join(sides)
     if not base_ref:
         failure = (
             "git diff: no base ref (neither the requested ref nor HEAD~1 "
@@ -2632,16 +3350,27 @@ def write_review_diff(
             "nothing to diff against"
         )
     else:
-        base_commit = _resolve_base_commit(base_ref, cwd)
+        # The empty tree is no commit, and `^{commit}` would only say so.
+        base_commit = None if empty_tree else _resolve_base_commit(base_ref, cwd)
+        if head_ref is not None:
+            head_commit = _resolve_base_commit(head_ref, cwd)
         if ordered:
-            counts, numstat_error = _numstat_counts(base_ref, ordered, cwd)
+            counts, numstat_error = _numstat_counts(
+                base_ref, ordered, cwd, head_ref=head_ref
+            )
             if numstat_error is not None:
                 failure = (
-                    f"git diff --numstat {base_ref} -- <{len(ordered)} paths>: "
+                    f"git diff --numstat {sides_text} -- <{len(ordered)} paths>: "
                     f"{numstat_error}"
                 )
     if failure is not None:
         print(f"[DIFF_FAILED] {failure}")
+    if head_ref is None:
+        no_change_status = f"no diff: no net change since {base_ref}"
+    else:
+        no_change_status = "no diff: no net change in " + _range_text(
+            base_ref, base_commit, empty_tree, head_ref, head_commit
+        )
 
     width = len(str(len(reviewed))) if reviewed else 1
     entries: List[Dict[str, Any]] = []
@@ -2659,16 +3388,16 @@ def write_review_diff(
         else:
             entry["counts"] = _entry_counts(path, counts)
             data, error = _git_diff_output(
-                ["diff", *_DIFF_FLAGS, base_ref, "--", path], cwd
+                [*attribute_source_args(head_ref), "diff", *_DIFF_FLAGS, *sides, "--", path], cwd
             )
             if error is not None:
                 entry["status"] = DIFF_STATUS_OMITTED
                 omitted.append((path, DIFF_OMITTED_REASON))
                 path_failures.append(
-                    f"git diff {base_ref} -- {shlex.quote(path)}: {error}"
+                    f"git diff {sides_text} -- {shlex.quote(path)}: {error}"
                 )
             elif not data:
-                entry["status"] = f"no diff: no net change since {base_ref}"
+                entry["status"] = no_change_status
             else:
                 name = f"{str(number).zfill(width)}-{review_diff_slug(path)}.diff"
                 entry.update(
@@ -2703,13 +3432,19 @@ def write_review_diff(
     # whenever there is one; a scope of only fixtures (or nothing) lacks
     # nothing, and its `Diff failed:` line still says what git refused.
     coverage = DIFF_COVERAGE_PARTIAL if omitted else DIFF_COVERAGE_COMPLETE
-    fingerprint = [
+    fingerprint: List[Any] = [
         base_commit or failure or base_ref,
         [
             [row["path"], row["group"], row["status"], row["counts"], row.get("sha256")]
             for row in [*entries, *collapsed]
         ],
     ]
+    if head_ref is not None:
+        # Both commits: the same diff bytes between another pair of commits
+        # (a later head, the same base) are another review. A diff against
+        # the working tree keeps its two-element fingerprint, so its scope id
+        # is the one it always had.
+        fingerprint.insert(1, head_commit or head_ref)
     scope_id = hashlib.sha256(
         _scope_bytes(json.dumps(fingerprint, ensure_ascii=False))
     ).hexdigest()[:_SCOPE_ID_CHARS]
@@ -2737,6 +3472,8 @@ def write_review_diff(
             written_by=recorded_by,
             written=written,
             failure=failure,
+            head_ref=head_ref,
+            head_commit=head_commit,
         )
 
     existing = load_review_scope(out)
@@ -2766,6 +3503,9 @@ def write_review_diff(
         reviewed_total=len(reviewed),
         entries=entries,
         collapsed=collapsed,
+        head_ref=head_ref,
+        head_commit=head_commit,
+        empty_tree=empty_tree,
     )
     # The replacement order is the whole of the guarantee that a manifest on
     # disk only ever names files that exist and that this call wrote: with the

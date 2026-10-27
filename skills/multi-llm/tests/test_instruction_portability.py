@@ -231,6 +231,14 @@ PLACEHOLDER_MANIFEST = {
     # same less step 1b, which code review has no pass for (3 commands, 6).
     "instructions/improve-code.md": (0, 6),
     "instructions/improve-plan.md": (0, 10),
+    # The three commit cores (plans/review-commits.md §2.9) load the code phase
+    # cores too, so each names only its own commands. review-commits and
+    # apply-commit-fixes: the front-door launch, `util instructions <phase>` and
+    # the closing `util next-command` (3 commands, 6 sites). improve-commits:
+    # improve-code's three plus section 0's `util commit-brief` (4, 8).
+    "instructions/review-commits.md": (0, 6),
+    "instructions/apply-commit-fixes.md": (0, 6),
+    "instructions/improve-commits.md": (0, 8),
     # 24 -> 20: the skill's own pytest invocation (a dogfooding special case) and
     # the inline `python -c` that inserted the summary reference are gone — the
     # latter is `util finalize-tracking --plan-file --summary-file-relative`.
@@ -1290,11 +1298,13 @@ class TestLegacyInstructionHatch:
     LEGACY = SKILL_ROOT / "legacy"
 
     #: The modes that postdate the rewrite (plans/improve-plan-and-improve-code.md
-    #: §2.4): there is no pre-refactor text to freeze, and a frozen copy of the
-    #: new core would go stale the first time the real one is fixed. The runtime
-    #: already serves the current core for them (`_legacy_instruction_path`
-    #: returns None when no copy exists), so the exemption is test-side only.
-    NO_FROZEN_COPY = {"improve-plan", "improve-code"}
+    #: §2.4, and the three commit modes of plans/review-commits.md §2.9): there
+    #: is no pre-refactor text to freeze, and a frozen copy of the new core would
+    #: go stale the first time the real one is fixed. The runtime already serves
+    #: the current core for them (`_legacy_instruction_path` returns None when no
+    #: copy exists), so the exemption is test-side only.
+    NO_FROZEN_COPY = {"improve-plan", "improve-code", "review-commits",
+                      "apply-commit-fixes", "improve-commits"}
 
     def test_every_served_mode_has_a_frozen_copy(self):
         without_copy = set()
@@ -1393,14 +1403,32 @@ class TestLegacyInstructionHatch:
 # The composite cores (plans/improve-plan-and-improve-code.md §2.4)
 # ===========================================================================
 
-class TestTheCompositeCores:
-    """`improve-plan.md` and `improve-code.md` load the phase cores they run, so
-    the rules that are theirs alone are pinned here: an inner phase's next-step
-    block is never acted on, and the closing lookup walks on from the core's own
-    mode word, never the other composite's."""
+#: Every composite core but the whole workflow (`full` runs its phases in
+#: Python and names no closing lookup of this shape), read from the table so a
+#: new composite row is held to the rules below with no edit here.
+_COMPOSITE_CORES = sorted(
+    m.name for m in mode_table.MODES if m.is_composite and not m.runs_workflow
+)
 
-    #: Each composite core, and the one it must never be mistaken for.
-    OTHER = {"improve-plan": "improve-code", "improve-code": "improve-plan"}
+
+class TestTheCompositeCores:
+    """`improve-plan.md`, `improve-code.md` and `improve-commits.md` load the
+    phase cores they run, so the rules that are theirs alone are pinned here: an
+    inner phase's next-step block is never acted on, and the closing lookup walks
+    on from the core's own mode word, never another composite's."""
+
+    COMPOSITES = _COMPOSITE_CORES
+
+    #: Each composite core, and the ones it must never be mistaken for.
+    OTHER = {
+        mode: tuple(other for other in _COMPOSITE_CORES if other != mode)
+        for mode in _COMPOSITE_CORES
+    }
+
+    def test_the_composite_set_is_the_three_improve_cores(self):
+        """Not vacuous, and not silently grown: a fourth composite gets its own
+        core and its own review of these rules."""
+        assert self.COMPOSITES == ["improve-code", "improve-commits", "improve-plan"]
 
     @staticmethod
     def _raw(mode):
@@ -1432,7 +1460,8 @@ class TestTheCompositeCores:
         argv = shlex.split(lookups[0])
         assert argv[argv.index("--after") + 1] == mode
         assert argv[argv.index("--host") + 1] == "<host-id>"
-        assert f"--after {self.OTHER[mode]}" not in raw
+        for other in self.OTHER[mode]:
+            assert f"--after {other}" not in raw, other
 
     @pytest.mark.parametrize("mode", sorted(OTHER))
     def test_step_1_plans_with_the_util_for_its_own_mode(self, mode):
@@ -1448,6 +1477,260 @@ class TestTheCompositeCores:
         assert argv[argv.index("--host") + 1] == "<host-id>"
         # The core never filters a flag: the util's refusal is the one rule.
         assert "`--interactive` and `-i` included" in raw
+
+    # -- improve-commits: the native preparation entrypoint ----------------
+    # plans/review-commits.md §2.8 "The native path's preparation entrypoint"
+    # and "The shared planner reads the brief": on the native leg nothing but
+    # `util commit-brief` resolves the range, prints the commit block and
+    # writes the brief, so it runs before the planner, and the planner reads
+    # the brief it named rather than the words the user typed.
+
+    @staticmethod
+    def _util_calls(text, name):
+        return [
+            (line_no, command) for line_no, command in _command_units(text)
+            if f" util {name} " in command or command.endswith(f" util {name}")
+        ]
+
+    def test_improve_commits_prepares_the_brief_before_it_plans(self):
+        raw = self._raw("improve-commits")
+        briefs = self._util_calls(raw, "commit-brief")
+        plans = self._util_calls(raw, "improve-steps")
+        assert len(briefs) == 1 and len(plans) == 1, (briefs, plans)
+        assert briefs[0][0] < plans[0][0], (
+            "util commit-brief must run before util improve-steps: the planner "
+            "reads the brief and the commit_range it records"
+        )
+        # Its own section, ahead of improve-code's section 1.
+        section0 = raw[raw.index("### 0. Prepare the commit brief"):
+                       raw.index("### 1. Plan the steps")]
+        assert " util commit-brief " in section0
+        # Every token the user typed, and nothing composed: no plan path, no
+        # mode flag, no host the user did not type.
+        argv = shlex.split(briefs[0][1])
+        tail = argv[argv.index("commit-brief") + 1:]
+        assert tail == ["<every", "token", "the", "user", "typed>"], tail
+        flat = " ".join(section0.split())
+        assert "every token the user typed but the mode flag, exactly as typed" in flat
+        assert "the range words (the bare words right after the mode flag) first" in flat
+        # Its exits stop the core before any step, as the planner's do.
+        assert "stop before any step runs" in flat
+
+    def test_improve_commits_hands_the_planner_the_commit_brief(self):
+        raw = self._raw("improve-commits")
+        (_, plan_call), = self._util_calls(raw, "improve-steps")
+        argv = shlex.split(plan_call)
+        brief = argv[argv.index("improve-steps") + 1]
+        assert brief == "$PLAN_PATH", argv
+        # ...and `$PLAN_PATH` is defined as the `[COMMIT_BRIEF]` path, never the
+        # range the user typed; the planner's other tokens are the ones the
+        # util handed back.
+        flat = " ".join(raw.split())
+        assert "`$PLAN_PATH` is the path after `[COMMIT_BRIEF]`" in flat
+        assert "`$PLAN_PATH` is the `[COMMIT_BRIEF]` path." in flat
+        assert argv[-1] == "[COMMIT_REMAINING_FLAGS]>", argv
+        assert "<the tokens after [COMMIT_REMAINING_FLAGS]>" in plan_call
+
+    def test_improve_commits_relays_both_blocks_once(self):
+        flat = " ".join(self._raw("improve-commits").split())
+        assert "**Relay the commit block verbatim and once**" in flat
+        assert "**Relay the `[COMMIT_FIXES]` block verbatim and once.**" in flat
+        assert "**`[COMMIT_BRIEF]` is read, not relayed.**" in flat
+
+
+# ===========================================================================
+# The commit phase cores (plans/review-commits.md §2.9)
+# ===========================================================================
+
+class TestTheCommitPhaseCores:
+    """`review-commits.md` and `apply-commit-fixes.md` run their front door
+    with the user's tokens, relay its blocks, and then load the code phase core
+    they front with the `[COMMIT_BRIEF]` path as its plan path, so validation,
+    reaggregate and the report stay single-sourced in that core."""
+
+    #: Each commit phase core, the phase core it loads, and where it picks
+    #: that core up.
+    FRONTED = {
+        "review-commits": ("review-code", "### 3. Continue from the step after its fan-out launch"),
+        "apply-commit-fixes": ("apply-code-fixes", "### 3. Continue from its step 2a"),
+    }
+
+    @staticmethod
+    def _raw(mode):
+        return (SKILL_ROOT / "instructions" / f"{mode}.md").read_text(encoding="utf-8")
+
+    def test_the_rows_name_these_cores(self):
+        for mode, (fronted, _) in self.FRONTED.items():
+            row = mode_table.resolve(mode)
+            assert row.instruction_file == f"{mode}.md"
+            assert row.commit_view_of == fronted
+
+    @pytest.mark.parametrize("mode", sorted(FRONTED))
+    def test_step_1_runs_the_front_door_with_the_users_tokens(self, mode):
+        raw = self._raw(mode)
+        step1 = raw[raw.index("### 1. Run the front door"):raw.index("### 2.")]
+        launches = [command for _, command in _command_units(step1)
+                    if " multi_llm.py\" " in command or "multi_llm.py\" " in command]
+        assert len(launches) == 1, launches
+        argv = shlex.split(launches[0])
+        script = next(i for i, word in enumerate(argv) if word.endswith("multi_llm.py"))
+        assert argv[script + 1] == mode, argv
+        # The user's tokens straight after the mode word (the range first), and
+        # the host after them.
+        assert argv[script + 2:script + 7] == ["<the", "tokens", "the", "user", "typed>"], argv
+        assert argv[argv.index("--host") + 1] == "<host-id>"
+        flat = " ".join(step1.split())
+        assert "every token the user typed but the mode flag, exactly as typed" in flat
+        assert "the range words (the bare words right after the mode flag) first" in flat
+        # A run that stopped before the brief has nothing to hand over.
+        assert "A run that prints no `[COMMIT_BRIEF]` stopped before writing anything" in flat
+
+    @pytest.mark.parametrize("mode", sorted(FRONTED))
+    def test_then_it_loads_the_fronted_core_on_the_brief(self, mode):
+        fronted, resume_heading = self.FRONTED[mode]
+        raw = self._raw(mode)
+        step2 = raw[raw.index("### 2."):raw.index("### 3.")]
+        loads = [command for _, command in _command_units(step2)
+                 if " util instructions " in command]
+        assert len(loads) == 1, loads
+        assert shlex.split(loads[0])[-1] == fronted
+        flat = " ".join(step2.split())
+        assert "`$PLAN_PATH` is the path `[COMMIT_BRIEF]` printed" in flat
+        assert resume_heading in raw
+        assert raw.index("### 1. Run the front door") < raw.index("### 2.") < raw.index(resume_heading)
+
+    @pytest.mark.parametrize("mode", sorted(FRONTED))
+    def test_the_blocks_are_relayed_once_and_the_brief_is_read(self, mode):
+        flat = " ".join(self._raw(mode).split())
+        assert "verbatim and once" in flat
+        assert "`[COMMIT_BRIEF] <path>`" in flat and "read, not relayed" in flat
+        if mode == "apply-commit-fixes":
+            assert "[COMMIT_FIXES]" in flat and "**Relay each of the two blocks verbatim and once**" in flat
+        else:
+            assert "**Relay the commit block verbatim and once**" in flat
+            # review-commits never prints the apply's block.
+            assert "[COMMIT_FIXES]" not in flat
+
+    @pytest.mark.parametrize("mode", sorted(FRONTED))
+    def test_the_closing_lookup_walks_on_from_the_fronted_phase(self, mode):
+        """`--after review-commits` names no workflow phase, so the lookup
+        would answer nothing; the fronted phase's word, on the brief, answers
+        and is spelled back as the commit mode."""
+        fronted, _ = self.FRONTED[mode]
+        raw = self._raw(mode)
+        step4 = raw[raw.index("### 4. Report"):]
+        lookups = [command for _, command in _command_units(step4)
+                   if " util next-command " in command]
+        assert len(lookups) == 1, lookups
+        argv = shlex.split(lookups[0])
+        assert argv[argv.index("next-command") + 1] == "$PLAN_PATH"
+        assert argv[argv.index("--after") + 1] == fronted
+        assert argv[argv.index("--host") + 1] == "<host-id>"
+        assert f"--after {mode}" not in raw
+
+    def test_review_commits_says_where_a_background_launch_s_output_is(self):
+        """No phase dir is named before `[COMMIT_BRIEF]`, so a host whose
+        *run detached* is its own background mechanism cannot redirect into
+        `{plan}/code-review/orchestrator-run.log` at launch."""
+        flat = " ".join(self._raw("review-commits").split())
+        assert "**With `--detach`:** add it." in flat
+        assert "give it **no redirect**" in flat
+        assert ("Wherever review-code's core reads `{plan}/code-review/orchestrator-run.log`, "
+                "read this output instead.") in flat
+        # PD-1: the redirect is the one thing the bullet overrides; the
+        # launch's own timeout still comes from the host's answer.
+        assert "as your host's *run detached* answer says, its timeout included" in flat
+
+    @pytest.mark.parametrize("mode", ["review-commits", "improve-commits"])
+    def test_review_codes_follow_ups_run_as_the_run_prints_them(self, mode):
+        """PD-4 (2026-10-27): review-code prints its follow-ups on a brief in
+        the commit spelling (`review-commits <base12>..<head12> … --reaggregate`,
+        plans/review-commits.md §2.8), the result line's `next` carries it and
+        every shim says to run `next` as printed, while `review-commits.md` §3
+        said the reaggregate commands "stay review-code's" and never to put the
+        range after `--review-commits`. The Claude Code host obeyed the mode
+        file. Both cores that run review-code on a brief now name the printed
+        form, and the form they name is pinned to what the hook prints."""
+        from utils import commit_spelling
+
+        view = commit_spelling.CommitView(brief="b.md", base="a" * 40, head="c" * 40)
+        word, rest = commit_spelling.spell_args(
+            "review-code", "b.md", ["--plan-file", "b.md", "--reaggregate"], view)
+        assert (word, rest) == ("review-commits", ["a" * 12 + ".." + "c" * 12, "--reaggregate"])
+
+        flat = " ".join(self._raw(mode).split())
+        assert "follow-ups run as printed.**" in flat.lower(), mode
+        for fragment in (
+            "`review-commits <base12>..<head12> … --reaggregate`",
+            "`[REAGGREGATE_AFTER_SALVAGE]` after salvage",
+            "spells or rebuilds its own `review-code --plan-file \"$PLAN_PATH\"` form",
+            "use the printed line instead, verbatim",
+            "not relayed a second time",
+        ):
+            assert fragment in flat, f"{mode}.md lost {fragment!r}"
+        for gone in ("Commands stay review-code's",
+                     "Never put the range or the brief after `--review-commits` there"):
+            assert gone not in flat, f"{mode}.md still says {gone!r}"
+        if mode == "review-commits":
+            assert "a phrase is resolved afresh" in flat
+        # Fable finding 4: "run its `next`" beside "never run the inner block".
+        # The reaggregate's own next step is named as the one never run.
+        assert "--apply-commit-fixes" in flat and "never run it" in flat
+        assert {
+            "review-commits": "is the user's to type, and section 4's lookup gives it; never run it",
+            "improve-commits": "is still the inner phase's block below: never run it",
+        }[mode] in flat
+
+    def test_a_relaunch_nothing_printed_takes_the_brief_path(self):
+        """Fable finding 3: after a stop at the host's time limit nothing prints
+        a command, and the *run detached* answer offers a `--force` relaunch or
+        a `--reaggregate`. On this mode the range words may be a phrase, which
+        is resolved afresh, so the composed command takes the brief path: a
+        range in its own right (`commit_review._resolve`, `_from_brief`)."""
+        flat = " ".join(self._raw("review-commits").split())
+        assert ("**A relaunch nothing printed** (the `--force` resume or the "
+                "`--reaggregate` your host's *run detached* answer offers after a "
+                "stopped run) is section 1's command with the brief path "
+                "`[COMMIT_BRIEF]` printed in place of the range words") in flat
+        from utils import commit_review
+
+        source = Path(commit_review.__file__).read_text(encoding="utf-8")
+        assert "return _from_brief(path, typed.brief_arg, root)" in source
+
+    def test_a_stopped_apply_gets_its_command_from_the_blocked_lookup(self):
+        """The apply's stop says only to re-invoke with `--resume`; the
+        spelled command comes from `util next-command <brief> --blocked
+        apply-commit-fixes` (its `[RESUME_COMMAND]`), so the core sends the
+        host there instead of claiming the stop names it."""
+        raw = self._raw("apply-commit-fixes")
+        step4 = " ".join(raw[raw.index("### 4. Report"):].split())
+        assert "the stop's own output only says to re-invoke with `--resume`" in step4
+        assert ("Get it from the same lookup with `--blocked apply-commit-fixes` in place "
+                "of `--after apply-code-fixes`") in step4
+        assert "`[RESUME_COMMAND]` line is the command that continues the run" in step4
+        assert "its own output names the way to continue" not in step4
+
+    def test_apply_commit_fixes_runs_in_the_foreground(self):
+        """It is apply-code-fixes' orchestrator call, which that core runs in
+        the foreground: no poll loop to hand over to."""
+        flat = " ".join(self._raw("apply-commit-fixes").split())
+        assert "**in the foreground**" in flat
+        assert "This call is apply-code-fixes' orchestrator call (its step 2)" in flat
+
+    def test_the_host_written_summary_calls_the_brief_the_commit_brief(self):
+        """Live run 2026-10-26 (Claude Code, phases 02, 05, 06): the host wrote
+        apply-code-fixes' step 8 template as it stands, `**Plan**: <brief>`.
+        Both commit cores that run that step relabel the line, as the
+        `--exec-subagents` leg writes it (plans/review-commits.md §2.8)."""
+        assert "**Plan**: /path/to/plan.md" in self._raw("apply-code-fixes")
+        raw = self._raw("apply-commit-fixes")
+        step3 = " ".join(raw[raw.index("### 3."):raw.index("### 4.")].split())
+        assert ("Its template's `**Plan**: /path/to/plan.md` line is "
+                "`**Commit brief**: $PLAN_PATH`") in step3
+        assert step3.index("**Step 8's summary") < step3.index("**Step 9's section")
+        row = next(line for line in self._raw("improve-commits").splitlines()
+                   if line.startswith("| `apply-code-fixes.md` |"))
+        assert "its `**Plan**:` line written `**Commit brief**:`" in row
 
 
 # ===========================================================================
@@ -1643,6 +1926,27 @@ INVOCATION_LINE_ALLOWLIST = {
         AllowedInvocationLine(
             "/multi-llm:multi-llm --improve-plan <plan_path> [--quick | --models "
             "provider:model ...] [--force] [--resume]",
+            "usage", _USAGE),
+    ),
+    # The three commit cores (plans/review-commits.md §2.9): a range, never a
+    # plan path, in the positional slot.
+    "instructions/review-commits.md": (
+        AllowedInvocationLine(
+            "/multi-llm:multi-llm --review-commits [<range>] [--quick | --models "
+            'provider:model ...] [--focus "<text>"] [--context-plan <path>] '
+            "[--files <path> (repeatable) | --files-from <file>] [--force]",
+            "usage", _USAGE),
+    ),
+    "instructions/apply-commit-fixes.md": (
+        AllowedInvocationLine(
+            "/multi-llm:multi-llm --apply-commit-fixes [<range>] [options]",
+            "usage", _USAGE),
+    ),
+    "instructions/improve-commits.md": (
+        AllowedInvocationLine(
+            "/multi-llm:multi-llm --improve-commits [<range>] [--quick | --models "
+            'provider:model ...] [--focus "<text>"] [--context-plan <path>] '
+            "[--files <path> (repeatable) | --files-from <file>] [--force] [--resume]",
             "usage", _USAGE),
     ),
     "instructions/init-config.md": (
@@ -2672,6 +2976,55 @@ class TestLayerTwoPollLoop:
             f"nothing; sentence: {sentence}"
         )
         assert "milliseconds here" in sentence, sentence
+
+    @pytest.mark.parametrize("rel", sorted(FAN_OUT_POLL))
+    def test_the_launch_timeout_is_pointed_at_not_promised_away(self, rel):
+        """PD-1 (2026-10-27): "a detached run is not subject to your host's
+        shell-command cap" was true of `--detach` and false of Claude Code's
+        background mechanism, which stops a launch that names no timeout at
+        its default deadline: ten minutes in a headless session, measured as a
+        `--review-commits` fan-out killed at 599.7 s (exit 143, `next` null).
+        The claim stays for the cap it is about; each core now says the
+        mechanism has a limit of its own and points at the host's *run
+        detached* answer for the number, never stating one (D5)."""
+        flat = " ".join((SKILL_ROOT / rel).read_text(encoding="utf-8").split())
+        for fragment in (
+            "A host's own background mechanism has a time limit of its own",
+            "give that launch call the longest timeout the mechanism takes, as "
+            "your host's *run detached* answer states",
+        ):
+            assert fragment in flat, f"{rel} lost {fragment!r}"
+        assert "7200000" not in flat, (
+            f"{rel} hard-codes the launch timeout; the number is the shim's (D5)")
+
+    def test_the_place_the_launch_pointer_names_states_the_number(self):
+        """The four cores' launch pointer resolves to the `native` sentence,
+        rendered from `NATIVE_LAUNCH_TIMEOUT_MS`, so the number is never typed."""
+        from utils import host_capabilities as caps
+
+        sentence = caps.verb_sentence("claude-code", "detach")
+        assert (f"give that launch call a timeout of its own, the longest the "
+                f"parameter takes: {caps.NATIVE_LAUNCH_TIMEOUT_MS} here, in "
+                "milliseconds") in sentence, sentence
+
+    def test_resume_detection_does_not_reaggregate_away_unfinished_models(self):
+        """Fable's second pass, finding 1: case (d) read every per-model-files,
+        no-`grouped.json` dir as "aggregation failed. Run `--reaggregate`",
+        which reports a fan-out cut off mid-run without the models that never
+        finished. It now splits on `models_requested`, and the re-run it names
+        is the one review-code's guard lets by."""
+        flat = " ".join((SKILL_ROOT / "references" / "resume-detection.md")
+                        .read_text(encoding="utf-8").split())
+        for fragment in (
+            "Compare the files with `models_requested`",
+            "If every requested model has its file: run `--reaggregate`.",
+            "If some have none: run the orchestrator again with the same models.",
+            "a `--reaggregate` would report without them",
+            "On review-code add `--force`",
+            "a composite's flags line already carries it",
+        ):
+            assert fragment in flat, f"resume-detection.md lost {fragment!r}"
+        assert "Models ran but aggregation failed" not in flat
 
     def test_the_five_rules_do_not_drift_between_the_four_cores(self):
         """Same paragraph, five slots — and the rules are none of the slots."""

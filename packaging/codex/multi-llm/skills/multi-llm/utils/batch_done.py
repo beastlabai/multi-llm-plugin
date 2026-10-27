@@ -94,12 +94,29 @@ a check (``--human-task <check>=done``; ``split_accepted_findings``, fix
 round 22) is printed as ``[BATCH_CHECK_ACCEPTED]`` and never recorded as the
 task's own failing check; anything else it reports still is.
 
+After a commit review (plans/review-commits.md §2.7, "The commit write
+policy") an apply-code-fixes ``--status completed`` record re-hashes the
+apply guard's protected set first, against the ids ``util write-prompt``
+read when it bound the batch's prompt (the batch's own window, as on the
+executor): a batch that changed a protected path is refused with exit 3 and
+``[COMMIT_PROTECTED_WRITE] <task id>: <paths>`` naming the copies the guard
+kept (``apply-fixes/protected/``) as the way back when they hold what the
+path held before the batch, and nothing is recorded. A record whose
+repository root ``git_utils.pin_repo_root`` cannot pin (a ``GIT_DIR`` or
+``GIT_WORK_TREE`` in the environment, a disagreeing ``core.worktree``, no
+``.git`` entry above the phase dir) is refused with exit 3 too, nothing
+recorded: the check cannot run without it. Otherwise the batch's own fix files are
+re-pinned to the bytes it left, so a later batch on them passes ``util
+write-prompt``'s re-check by their sha256 (:func:`_commit_completion`).
+Without a guard nothing of this runs.
+
 Import is side-effect free: argparse and all I/O live inside :func:`main`.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import shlex
 import sys
 from datetime import datetime
@@ -129,16 +146,24 @@ try:
         set_task_check_tree_in_state,
         update_task_status_in_state,
     )
+    from .git_utils import pin_repo_root
     from .stream_bootstrap import bootstrap_streams
     from .subagent_executor import (
         CHECK_NOTE_MAX_CHARS, DECLINED_SECTION_HEADING, SKIPPED_SECTION_HEADING,
         check_findings_from, declined_reason,
     )
+    from .write_safety import file_sha256
     from .text_clip import clip, with_closing_mark
     from .subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set
     from .write_phase_bridge import WRITE_TASK_FILENAME
     from .write_batch_scheduler import (
         BATCH_CHECK_MARKER,
+        batch_fixes_for,
+        commit_group_files,
+        commit_guard_of,
+        commit_head7,
+        load_commit_apply,
+        load_orchestrator_batches,
         check_findings_line,
         HALF_APPLIED_PREFIX,
         accepted_findings_for,
@@ -188,16 +213,24 @@ except ImportError:  # pragma: no cover - direct script invocation
         set_task_check_tree_in_state,
         update_task_status_in_state,
     )
+    from utils.git_utils import pin_repo_root  # type: ignore
     from utils.stream_bootstrap import bootstrap_streams  # type: ignore
     from utils.subagent_executor import (  # type: ignore
         CHECK_NOTE_MAX_CHARS, DECLINED_SECTION_HEADING, SKIPPED_SECTION_HEADING,
         check_findings_from, declined_reason,
     )
+    from utils.write_safety import file_sha256  # type: ignore
     from utils.text_clip import clip, with_closing_mark  # type: ignore
     from utils.subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set  # type: ignore
     from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
     from utils.write_batch_scheduler import (  # type: ignore
         BATCH_CHECK_MARKER,
+        batch_fixes_for,
+        commit_group_files,
+        commit_guard_of,
+        commit_head7,
+        load_commit_apply,
+        load_orchestrator_batches,
         check_findings_line,
         HALF_APPLIED_PREFIX,
         accepted_findings_for,
@@ -235,6 +268,7 @@ __all__ = [
     "CHECK_RESULTS",
     "MARKER",
     "OWN_CHECK_NOT_RECORDED_MARKER",
+    "ProtectedWriteRefused",
     "RESUME_REFUSED_MARKER",
     "STATUSES",
     "record_batch",
@@ -312,6 +346,211 @@ COULD_NOT_RUN_REASON = (
     "its check could not run (the reply said check.could_not_run); fix the "
     "cause and run implement with --resume"
 )
+
+
+class ProtectedWriteRefused(WritePromptError):
+    """A ``--status completed`` record refused because the batch changed a
+    path the commit review protects (plans/review-commits.md §2.7, "The
+    commit write policy"): exit 3, *lines* printed to stdout, nothing
+    recorded."""
+
+    def __init__(self, lines: List[str]) -> None:
+        super().__init__("\n".join(lines))
+        self.lines = list(lines)
+
+
+def _protected_write_lines(
+    phase_dir: Path, task_id: str, written: List[str], guard: Dict[str, Any],
+    marker: str, *, before: Optional[Dict[str, Optional[str]]] = None,
+    copy_held: Optional[Any] = None,
+) -> List[str]:
+    """``[COMMIT_PROTECTED_WRITE] <task id>: <paths>``, then the way back:
+    the copy the guard kept of each file (``protected_copies``) when that
+    copy is what the file held before the batch, or, for one absent then,
+    its deletion; else "by hand".
+
+    *before* is each path's id before the batch (its bind-time id, else the
+    one the guard saved). *copy_held* (``commit_apply.copy_holding``, given
+    ``(path, id)``) says whether the guard's copy holds that id; without it
+    the copy is taken to hold the saved id, as it was when it was taken."""
+    head7 = commit_head7(guard)
+    protected = guard.get("protected") if isinstance(guard.get("protected"), dict) else {}
+    copies = str(guard.get("protected_copies") or "").rstrip("/")
+    # The context plan is watched beside the protected set when it is not in
+    # it (`commit_apply.watched_ids`), saved under its own key, and so is
+    # each in-repository target of a symlinked one (`context_plan_targets`).
+    plan = guard.get("context_plan")
+    targets = guard.get("context_plan_targets")
+    targets = targets if isinstance(targets, dict) else {}
+    plans = [path for path in written if path not in protected
+             and ((isinstance(plan, str) and path == plan) or path in targets)]
+    one = len(written) == 1
+    back: List[str] = []
+    for path in written:
+        if path not in plans:
+            saved = protected.get(path)
+        else:
+            saved = guard.get("context_plan_id") if path == plan else targets.get(path)
+        was = before[path] if before is not None and path in before else saved
+        if was is None:
+            back.append(f"delete {path} (it did not exist before the batch)")
+        elif copies and was not in ("directory", "unreadable") \
+                and not str(was).startswith("special:") \
+                and (copy_held(path, was) if copy_held is not None else was == saved):
+            # A file's bytes (or a symlink) were copied when it was protected
+            # (`commit_apply.copy_protected`); a directory never is, and a
+            # copy older than an edit made since is never offered.
+            back.append(f"copy {copies}/{path} back over {path}")
+        else:
+            back.append(f"put {path} back as it was before the batch, by hand")
+    others = [path for path in written if path not in plans]
+    if not plans:
+        why = (
+            f"{', '.join(written)} changed since "
+            f"reviewed commit {head7}, so this apply never writes "
+            f"{'it' if one else 'them'} (the commit review's protected set), and "
+        )
+    else:
+        through = (f" (through the symlink {plan})"
+                   if any(path != plan for path in plans) else "")
+        why = (
+            (f"{', '.join(others)} changed since reviewed commit {head7} (the "
+             f"commit review's protected set), and " if others else "")
+            + f"{', '.join(plans)} {'is' if len(plans) == 1 else 'are'} the "
+            f"context plan this review checks the commits against{through}, "
+            f"read-only in this review, so this apply never writes "
+            f"{'it' if one else 'them'}, and "
+        )
+    return [
+        f"{marker} {task_id}: {', '.join(written)}",
+        f"{task_id} was not recorded: {why}"
+        f"{'it' if one else 'they'} changed while the batch ran. Stop the loop "
+        f"here, as for a partial application. The way back is the copy the "
+        f"guard kept: {'; '.join(back)} (unless the change is your own, made "
+        f"while the batch ran). Then record the batch with util batch-done "
+        f"--phase-dir \"{phase_dir}\" --task-id {task_id} --status failed "
+        f"--partial --reason \"it wrote {', '.join(written)}, protected since "
+        f"reviewed commit {head7}\", list it in the phase's summary.md as "
+        f"failed, and report that its fix needs a protected file changed: the "
+        f"user makes that change by hand, or reviews a range that ends at HEAD"
+        + (f" (the context plan: or reviews again with --context-plan \"\")"
+           if plans else "")
+        + ".",
+    ]
+
+
+def _unpinned_root_refusal(
+    phase_dir: Path, task_id: str, guard: Dict[str, Any], problem: Optional[str],
+) -> str:
+    """Why a guarded ``--status completed`` record is refused when
+    ``git_utils.pin_repo_root`` pins no repository root: the protected-set
+    check (§2.7) runs against that root, so without it the batch's writes
+    cannot be checked, and *problem* (or the missing ``.git`` entry) is named
+    with the way forward."""
+    cause = problem or (
+        f"no .git entry was found above {phase_dir}, so no repository holds it"
+    )
+    return (
+        f"{task_id} was not recorded: a completed batch of this apply is "
+        f"recorded only after the paths protected since reviewed commit "
+        f"{commit_head7(guard)} (the commit review's protected set) are "
+        f"re-hashed, and that needs the repository root, which cannot be "
+        f"pinned: {cause}. Stop the loop here, as for a partial application. "
+        f"Put that right (the batch may have made the change itself), then run "
+        f"this util batch-done call again: it checks the protected set then and "
+        f"records the batch only when none of it changed while the batch ran. "
+        f"If it cannot be put right, record the batch with util batch-done "
+        f"--phase-dir \"{phase_dir}\" --task-id {task_id} --status failed "
+        f"--partial --reason \"its writes could not be checked against the "
+        f"protected set\" and report it."
+    )
+
+
+def _commit_completion(
+    state: Dict[str, Any], phase_dir: Path, task_id: str, task: Dict[str, Any],
+    kind: str,
+) -> None:
+    """A ``--status completed`` record's half of the commit write policy
+    (§2.7), on the state dict about to be written; no-op without a guard.
+
+    The protected set's (and the context plan's, ``commit_apply.
+    watched_ids``) current blob ids are compared with the ones ``util
+    write-prompt`` read when it bound this batch's prompt
+    (``commit_apply.bound_baseline``; the saved ones for a path it did not
+    read, or when the prompt was not bound through it), so only a change
+    made while the batch ran counts, as on the executor: a user's edit
+    between batches, or between a stop and its ``--resume``, is theirs
+    (``commit_apply.protected_violations``). A changed one raises
+    :class:`ProtectedWriteRefused` before anything is recorded, the bind
+    record kept for a retry. Otherwise the record is consumed and the
+    batch's own fix files that have an expectation (its primary file and
+    every file its fixes name in the phase's ``orchestrator_output.json``)
+    are hashed and re-pinned to the bytes it left
+    (``commit_apply.repin_after_batch``, which takes only those that changed
+    since ``head`` or since their last batch), in the guard this record then
+    writes under ``state_file_lock``. Only its own files: a
+    file another batch declares that moved meanwhile (an edit made while
+    this batch ran) keeps its expectation, so its batch's ``util
+    write-prompt`` still stops it.
+
+    The check needs the repository root ``git_utils.pin_repo_root`` pins.
+    When it cannot pin one (it raises, names a redirect such as a
+    ``GIT_DIR`` or a ``core.worktree`` a batch planted, or finds no ``.git``
+    entry above the phase dir), the record is refused with
+    :class:`WritePromptError` before anything is recorded, the bind record
+    kept for the retry once the cause is put right: a guarded completion is
+    never taken on trust.
+    """
+    guard = commit_guard_of(state, kind)
+    if guard is None:
+        return
+    try:
+        root, problem = pin_repo_root(str(phase_dir))
+    except Exception as exc:  # noqa: BLE001 - refused below, never skipped
+        root, problem = None, f"pinning it failed ({type(exc).__name__}: {exc})"
+    if root is None or problem:
+        raise WritePromptError(_unpinned_root_refusal(phase_dir, task_id, guard, problem))
+    commit_apply = load_commit_apply()
+    baseline = commit_apply.bound_baseline(guard, task_id)
+    written = [
+        str(path) for path in
+        commit_apply.protected_violations(guard, cwd=root, baseline=baseline) or ()
+    ]
+    if written:
+        watched = commit_apply.watched_ids(guard)
+        raise ProtectedWriteRefused(_protected_write_lines(
+            phase_dir, task_id, written, guard,
+            getattr(commit_apply, "PROTECTED_MARKER", "[COMMIT_PROTECTED_WRITE]"),
+            before={path: (baseline[path] if baseline is not None and path in baseline
+                           else watched.get(path)) for path in written},
+            copy_held=lambda path, was: commit_apply.copy_holding(
+                guard, path, was, cwd=root) is not None,
+        ))
+    commit_apply.drop_bound(guard, task_id)
+    expect = guard.get("expect")
+    if not isinstance(expect, dict):
+        return
+    groups = commit_group_files(
+        task, repo_root=root,
+        fixes=batch_fixes_for(task, load_orchestrator_batches(phase_dir)),
+    )
+    own = {path for files in groups.values() for path in files}
+    hashed = {
+        path: file_sha256(os.path.join(root, path))
+        for path in sorted(own) if path in expect
+    }
+    if hashed:
+        commit_apply.repin_after_batch(guard, task_id, hashed, cwd=root)
+
+
+def _commit_release(state: Dict[str, Any], task_id: str, kind: str) -> None:
+    """A record other than ``completed`` consumes the batch's bind-time ids
+    (``commit_apply.drop_bound``) in the guard this record then writes: one
+    bind verifies one dispatch. No-op without a guard."""
+    guard = commit_guard_of(state, kind)
+    if guard is None:
+        return
+    load_commit_apply().drop_bound(guard, task_id)
 
 
 def _processed_phase_word(phase_dir: Path) -> str:
@@ -591,6 +830,15 @@ def record_batch(
         state = _read_state(target)
         if not isinstance(state, dict):
             raise WritePromptError(f"{target} is not a JSON object.")
+        if status == "completed":
+            # plans/review-commits.md §2.7: a batch that wrote a protected
+            # path, or whose repository root cannot be pinned for that
+            # check, is refused (nothing recorded); else its fix files are
+            # re-pinned. No-op without an apply guard.
+            _commit_completion(state, phase_dir, task_id, task, kind)
+        else:
+            # Any record of the batch consumes its bind-time ids.
+            _commit_release(state, task_id, kind)
 
         update_task_status_in_state(state, task_id, status, reason)
         blocked: List[str] = []
@@ -1387,6 +1635,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             partial=args.partial,
             note=args.note,
         )
+    except ProtectedWriteRefused as exc:
+        # The marker and its way back go to stdout, where the host reads
+        # every other line of the loop's (§2.7).
+        for line in exc.lines:
+            print(line)
+        return int(getattr(exc, "exit_code", 3) or 3)
     except WritePromptError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return int(getattr(exc, "exit_code", 3) or 3)

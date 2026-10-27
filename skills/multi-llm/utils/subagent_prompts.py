@@ -54,6 +54,7 @@ __all__ = [
     "TASK_AUTHORING_RULES",
     "REFERENCE_SECTIONS",
     "build_validation_prompt",
+    "code_review_validation_guidance",
     "build_consolidation_prompt",
     "build_salvage_prompt",
     "build_human_decision_judge_prompt",
@@ -189,6 +190,78 @@ location.
 - When an issue has no `file`/`line_range`, try the description plus the context
   above; if the missing location makes the claim unverifiable, answer
   "needs-human-decision" and say that the location metadata was absent.'''
+
+
+#: :data:`CODE_REVIEW_VALIDATION_GUIDANCE` for a review pinned to a commit
+#: (``review-code --head-ref``, a commit brief; plans/review-commits.md §2.5).
+#: The same bounds and the same capability-neutral shape, but a location is
+#: read at the head commit, never in the working tree, which may hold other
+#: bytes: the excerpts above were read there too. ``{head}`` is the head
+#: commit's 12-character prefix and ``{change}`` the range as a user reads it.
+_PINNED_CODE_REVIEW_VALIDATION_GUIDANCE = '''Each issue record carries `file` and `line_range` when the finding has a
+location. The change under review is `{change}`: it ends at commit `{head}`, not
+at the working tree, and every line number in the records and in the context
+above is a line of the file as that commit (or, for a file the range removed,
+its base) holds it.
+
+- If you can read the repository, read those locations at commit `{head}` as the
+  rule below says, never from the working tree, and compare what the code
+  actually does against what the issue claims. Keep the effort bounded: at most
+  5 files per group (prefer explicitly named files, then the narrowest line
+  ranges, breaking ties by importance HIGH > MEDIUM > LOW), and at most ~200
+  lines around each referenced range.
+- If you cannot read the repository, judge from the records and the context above
+  alone.
+- When an issue has no `file`/`line_range`, try the description plus the context
+  above; if the missing location makes the claim unverifiable, answer
+  "needs-human-decision" and say that the location metadata was absent.
+
+Wherever this prompt says to open the repository, read it, or check a claim
+against existing code, it means reading it at commit `{head}`:
+
+{read_rule}'''
+
+
+def code_review_validation_guidance(
+    *,
+    read_rule: Optional[str] = None,
+    head: Optional[str] = None,
+    change: Optional[str] = None,
+    plan_snapshot: Optional[str] = None,
+    plan_sha256: Optional[str] = None,
+) -> str:
+    """The code-review validation guidance, pinned to a commit when asked.
+
+    Pure, like every generator here: the caller renders *read_rule*
+    (``utils.commit_range.pinned_head_read_rule``, which already ends with the
+    §2.6 trust sentence) and passes the head commit and the range's display
+    spelling (*change*). With neither, and no *plan_snapshot*, this returns
+    :data:`CODE_REVIEW_VALIDATION_GUIDANCE` unchanged, so an unpinned review's
+    prompts and goldens do not move. Both validation legs (Lane B's executor
+    and a host's native subagents) run the same materialized prompt, so this
+    one text reaches both, and the revalidation tasks of a pinned run too
+    (``utils.validation.pinned_validation_guidance``).
+
+    *plan_snapshot* is a commit review's frozen context plan
+    (``commit_range.plan_snapshot``, repository-relative, §2.4 "The context
+    plan is frozen"): the guidance names that copy, never the user's file,
+    which may have changed since the review began.
+    """
+    if read_rule and head:
+        text = _PINNED_CODE_REVIEW_VALIDATION_GUIDANCE.format(
+            head=head[:12], change=change or head[:12], read_rule=read_rule.strip(),
+        )
+    else:
+        text = CODE_REVIEW_VALIDATION_GUIDANCE
+    if plan_snapshot:
+        digest = f" (sha256 `{plan_sha256[:12]}`)" if plan_sha256 else ""
+        text += (
+            "\n\nThe review was also checked against a context plan. Its frozen "
+            f"copy is `{plan_snapshot}`{digest}, relative to the repository root: "
+            "read that file for any claim about the context plan, never the "
+            "plan's original path, which may have changed since the review."
+        )
+    return text
 
 
 class ContextSource(TypedDict, total=False):

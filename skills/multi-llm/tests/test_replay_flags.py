@@ -190,6 +190,20 @@ class TestReplayFlags:
             "ask", _argv("--question-file=/tmp/q.txt", "--quick")
         ) == ["--quick"]
 
+    @pytest.mark.parametrize("tokens", [
+        ["--revs", "last two days"], ["--revs=-2"], ["--revs", "-2"],
+        ["--commit-stage", "/r/plans/commit-reviews/x/code-review/.stage-1.json"],
+        ["--commit-stage=/s.json"],
+    ])
+    def test_a_commit_range_and_its_stage_are_never_recorded(self, tokens):
+        """plans/review-commits.md §2.2: a phrase names another range
+        tomorrow, so no replay carries the words as typed (records carry the
+        pinned range), and the hidden detach stage is one launch's file."""
+        for mode in ("review-commits", "apply-commit-fixes", "improve-commits",
+                     "review-code"):
+            assert replay_flags(mode, [*tokens, "--quick", "--host", "codex"]) == [
+                "--quick", "--host", "codex"]
+
     def test_a_long_question_replays_from_the_stored_text_never_the_temp_file(
         self, tmp_path
     ):
@@ -790,7 +804,8 @@ class TestResumeVerbAgreesWithThePhase:
         assert "--reaggregate" not in tokens
         assert tokens[-4:] == ["--host", "opencode", "--skip-prerequisites", "--yes"]
 
-    @pytest.mark.parametrize("mode", ["review-plan", "review-tasks", "review-code"])
+    @pytest.mark.parametrize("mode", ["review-plan", "review-tasks", "review-code",
+                                      "review-commits"])
     def test_the_review_phases_keep_reaggregate_which_re_dispatches_there(self, mode):
         assert self._resume(mode)[-1] == "--reaggregate"
 
@@ -841,7 +856,7 @@ class TestTheWritePhasesResumeWithResume:
         view = {"run": {"mode": mode, "replay_flags": list(flags)}, "progress": {}}
         return run_status._resume_command(view, Path(PLAN)).split()
 
-    @pytest.mark.parametrize("mode", WRITE_MODES)
+    @pytest.mark.parametrize("mode", WRITE_MODES + ("apply-commit-fixes",))
     def test_the_verb_is_resume_and_never_force(self, mode):
         tokens = self._resume(mode, ["--host", "opencode", "--detach"])
         assert tokens[-1] == "--resume"
@@ -882,7 +897,8 @@ class TestTheWritePhasesResumeWithResume:
         assert "--claude-decide" not in command
 
     @pytest.mark.parametrize("mode", [
-        "apply-suggestions", "apply-task-suggestions", "apply-code-fixes"])
+        "apply-suggestions", "apply-task-suggestions", "apply-code-fixes",
+        "apply-commit-fixes"])
     @pytest.mark.parametrize("unattended", [["--yes"], ["--detach"]])
     def test_the_judge_flag_yes_implies_is_not_replayed(self, mode, unattended):
         """OpenCode racing run 4: the tool route composes `--yes`, which

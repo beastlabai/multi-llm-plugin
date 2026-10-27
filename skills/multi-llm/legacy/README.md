@@ -29,9 +29,10 @@ Nothing else changes: same dispatcher, same modes, same exit codes, same
 `MULTI_LLM_RESULT` line. The escape hatch is a *read-path* switch, not a second
 implementation.
 
-`improve-plan` and `improve-code` postdate the rewrite and have no frozen copy here:
-with the variable set they serve the current core, exactly as without it, and print
-no notice.
+`improve-plan`, `improve-code`, `review-commits`, `apply-commit-fixes` and
+`improve-commits` postdate the rewrite and have no frozen copy here: with the
+variable set they serve the current core, exactly as without it, and print no
+notice.
 
 ## Boundaries
 

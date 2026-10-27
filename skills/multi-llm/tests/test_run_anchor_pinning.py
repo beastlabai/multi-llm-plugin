@@ -5,7 +5,10 @@ Three properties, one file:
 1. **Every plan-file mode pins.** Parametrized over ``modes.MODES`` rather than
    over a literal roster (M0.a's rule), so a mode added to the table later is
    either covered here on the day it arrives or listed in ``EXEMPT`` with a
-   reason. The exemptions are declared, never implicit.
+   reason. The exemptions are declared, never implicit. A commit mode
+   (``POS_REVS``) takes a range rather than a plan and pins through the phase
+   it fronts, on the commit brief the dispatcher hands it as ``--plan-file``;
+   that is driven here too, from the table.
 2. **The six pinners agree on one spelling.** ``set_run_anchor`` compares
    strings, so two pre-flights that normalize a symlinked plan path differently
    pin two different strings and the second one raises mid-run. ``full`` runs
@@ -114,6 +117,19 @@ def _plan_modes() -> List[mode_table.Mode]:
 
 def _pinning_modes() -> List[mode_table.Mode]:
     return [m for m in _plan_modes() if m.name not in EXEMPT]
+
+
+def _front_doors() -> List[mode_table.Mode]:
+    """The commit modes (plans/review-commits.md §2.1): a range, not a plan."""
+    return [m for m in mode_table.MODES if mode_table.POS_REVS in m.positionals]
+
+
+def _fronted(door: mode_table.Mode) -> mode_table.Mode:
+    """The phase mode a front door runs first on its brief: the row it fronts
+    (``commit_view_of``), or a composite's first step."""
+    word = door.commit_view_of or (door.sequence[0] if door.sequence else None)
+    assert word, f"{door.name} fronts no mode"
+    return mode_table.resolve(word)
 
 
 def test_every_declared_exemption_is_still_a_mode():
@@ -304,7 +320,9 @@ def test_every_plan_mode_pins_the_run_anchor(mode, plan_file, pins, capsys):
 
 
 @pytest.mark.parametrize(
-    "composite", [m for m in mode_table.MODES if m.is_composite],
+    "composite",
+    [m for m in mode_table.MODES
+     if m.is_composite and mode_table.POS_PLAN in m.positionals],
     ids=lambda m: m.name,
 )
 def test_every_composite_pins_through_the_sub_mode_it_dispatches(
@@ -322,6 +340,45 @@ def test_every_composite_pins_through_the_sub_mode_it_dispatches(
         _drive(composite, [str(plan_file)], pins)
 
     assert registry.get_run_anchor() == os.path.realpath(str(plan_file))
+
+
+@pytest.mark.parametrize("door", _front_doors(), ids=lambda m: m.name)
+def test_every_front_door_pins_through_the_phase_it_fronts(
+    door, tmp_path, pins, monkeypatch
+):
+    """A commit front door owns no pin and takes no plan: it resolves its
+    range to a commit brief and calls the phase it fronts in-process with
+    ``--plan-file <brief>`` (improve-commits through its composite, whose
+    first step is review-code). Driven from the table: the brief path a user
+    types (a root range's pinned spelling) goes through the dispatcher's own
+    normalization, which makes it that ``--plan-file``, and the fronted
+    phase's real pre-flight pins exactly that brief. The front door's own
+    reads before that call (the commit-reviews folder) pass an explicit
+    anchor, as ``status``'s runner line does.
+
+    ``utils.commit_review.is_commit_brief`` is the brief rule's one owner and
+    another task's module; a stand-in that accepts this file keeps the row
+    about the pin.
+    """
+    import types
+
+    import utils
+
+    brief = tmp_path / "plans" / "commit-reviews" / "root-e4f5a6b7c8d9.md"
+    _write_plan(brief.parent, brief.name)
+    stand_in = types.ModuleType("utils.commit_review")
+    stand_in.is_commit_brief = lambda path, *, cwd=None: (
+        os.path.realpath(str(path)) == os.path.realpath(str(brief)))
+    monkeypatch.setitem(sys.modules, "utils.commit_review", stand_in)
+    monkeypatch.setattr(utils, "commit_review", stand_in, raising=False)
+
+    argv = multi_llm._normalize_positionals(door, [str(brief)], [])
+    assert argv == ["--plan-file", str(brief)]
+    fronted = _fronted(door)
+    assert fronted.name in {m.name for m in _pinning_modes()}
+    with pytest.raises(_Pinned):
+        _drive_flags(fronted, argv, pins)
+    assert registry.get_run_anchor() == os.path.realpath(str(brief))
 
 
 # ---------------------------------------------------------------------------

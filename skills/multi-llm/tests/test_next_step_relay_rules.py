@@ -174,15 +174,18 @@ class TestTheStopNamesThePhaseNotTheToolsArgv:
         text = modes.NEEDS_HUMAN_MESSAGE["template"]
         # Fix round 22 (live run 9, OpenCode accept 01): "which phase was
         # running" came back as "Phase running: implement" for a stopped one.
-        assert "Report to the user which phase stopped, on which plan" in text
+        # A commit mode's refusal before any phase has a range, not a plan
+        # (commit modes' live run, 2026-10-26).
+        assert ("Report to the user which phase stopped, on which plan or commit "
+                "range, that line whole") in text
         assert "was running" not in text
         assert "Never quote `argv` or its flags to the user" in text
         for flag in ("--exec-subagents", "--detach"):
             assert flag in text
 
     def test_the_file_routes_rule_asks_for_the_phase_and_plan_too(self):
-        assert "report to the user which phase stopped, on which plan" in (
-            modes.NEEDS_HUMAN_RULE)
+        assert ("report to the user which phase stopped, on which plan or commit "
+                "range, the last error line") in modes.NEEDS_HUMAN_RULE
         assert "was running" not in modes.NEEDS_HUMAN_RULE
 
     def test_no_host_facing_text_asks_for_argv(self):
