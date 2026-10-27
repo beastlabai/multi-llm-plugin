@@ -13,6 +13,14 @@ to the detailed contracts and regression history under
 
 ---
 
+## Where things live
+
+The workflow contract lives in the host-neutral instruction core under [`skills/multi-llm/instructions/`](../skills/multi-llm/instructions/); [`skills/multi-llm/SKILL.md`](../skills/multi-llm/SKILL.md) is the Claude Code entry shim over it, [`docs/hosts.md`](hosts.md) and [`skills/multi-llm/references/host-capabilities.md`](../skills/multi-llm/references/host-capabilities.md) are the generated host documents, and [`skills/multi-llm/AGENTS.md`](../skills/multi-llm/AGENTS.md) has the architecture notes.
+
+**Relocatable paths.** The skill references its own bundled files through `${CLAUDE_SKILL_DIR}`, so it works wherever Claude Code installs the plugin; a shim installed into another host by `install-host` bakes the same directory in, which is why a plugin update needs one `install-host --all`. The Codex plugin and the OpenCode npm package carry their own copy of the skill and need no such step.
+
+---
+
 ## Test suite
 
 ```bash

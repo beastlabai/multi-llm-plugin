@@ -76,9 +76,9 @@ EXTERNAL_SCHEMES = ("http://", "https://", "mailto:")
 #: The table's one row that is not a ``docs/`` page, named
 #: rather than pattern-matched so a second such row is a decision, not a drift.
 #: The table's omissions are choices too, recorded here so they read as such:
-#: ``TODO.md`` is reached from ``## Roadmap`` instead, and
+#: ``TODO.md`` is reached from ``## Roadmap and contributing`` instead, and
 #: ``skills/multi-llm/SKILL.md`` / ``skills/multi-llm/CLAUDE.md`` are
-#: skill-internal entry points, linked from ``## How it works`` and
+#: skill-internal entry points, linked from ``docs/development.md`` and
 #: ``## Your project repository`` where they mean something.
 TABLE_NON_DOCS_ROWS = ("skills/multi-llm/AGENTS.md",)
 
@@ -177,7 +177,7 @@ def _documentation_table_rows() -> list[tuple[int, str, str]]:
     for number, line in _outside_fences(README.read_text(encoding="utf-8")):
         heading = HEADING_RE.match(line)
         if heading:
-            # The README numbers its headings: `## 8. Documentation`.
+            # The README numbers its headings: `## 6. Documentation`.
             title = re.sub(r"^\d+(?:\.\d+)*\.?\s+", "", heading.group(2).strip())
             in_section = title == "Documentation"
             in_body = False

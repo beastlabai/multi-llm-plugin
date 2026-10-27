@@ -47,6 +47,10 @@ prints the path), so you can port any custom settings into the regenerated file.
 - **Precedence (low → high):** base `providers.yaml` → project-local
   `.multi-llm/providers.yaml` → `MULTI_LLM_PROVIDERS_CONFIG=/path.yaml` env override.
   Each layer is deep-merged over the one below.
+- **Which models a run uses.** A model is referenced as `provider:model` (e.g.
+  `codex:gpt-5.5`); a bare model name uses `default_provider`. Selection
+  priority, highest first: `--models`, then `--interactive`, then `--quick`,
+  then `defaults.models` from YAML, then interactive fallback.
 - **Lists replace, they don't append.** Set `defaults.models` and you get exactly
   that list. Omitting or blanking a key inherits the base; an explicit empty list
   `[]` is the only way to clear one — and an empty `defaults.models`/`quick_models`
