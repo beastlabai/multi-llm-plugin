@@ -1148,6 +1148,13 @@ def _build_group_data(
     if display_hash is not None:
         result["displayHash"] = display_hash
 
+    # A commit review's attribution (plans/review-commits.md §2.6): sibling
+    # fields of the group, present only when the attribution pass ran, so a
+    # plan's report data is unchanged.
+    if "introduced_by_source" in group:
+        result["introducedBy"] = group.get("introduced_by")
+        result["introducedBySource"] = group.get("introduced_by_source")
+
     return result
 
 
@@ -1492,8 +1499,12 @@ def generate_html_report(
     file_snapshots: Optional[Dict[str, list]] = None,
     served_models: Optional[Dict[str, Dict[str, Any]]] = None,
     usage: Optional[Dict[str, Dict[str, Any]]] = None,
+    commit_review: Optional[Mapping[str, Any]] = None,
     requested_models: Optional[int] = None,
     salvage_requested: Optional[Sequence[str]] = None,
+    head_ref: Optional[str] = None,
+    repo_root: Optional[str] = None,
+    file_labels: Optional[Dict[str, str]] = None,
 ) -> str:
     """Generate complete HTML report and return the HTML string.
 
@@ -1555,6 +1566,29 @@ def generate_html_report(
             is what keeps a duration-only adapter from being reported as a free
             run.  Adds ``reportData.usageTotal`` (the columnwise sum over the
             models that reported) and its rendered label.
+        commit_review: A commit review's report payload
+            (``utils.commit_report.report_payload``, plans/review-commits.md
+            §2.10): stored as ``reportData.commitRange`` with the attribution
+            per group, so the header's commit block, the commit filter, the
+            "Introduced by" lines, the drift badges and the export help's
+            apply command render from ``report_data.json`` alone (a
+            regenerated report calls no git). ``None`` adds nothing.
+        head_ref: The commit a pinned review ends at (``review-code
+            --head-ref``, a commit brief; plans/review-commits.md §2.5). The
+            diff hunks are then ``capture_diff_hunks(base_ref, files,
+            head_ref, cwd=repo_root)`` — two commits, no "uncommitted changes"
+            notice — the snapshots default to the files as that commit holds
+            them (``capture_file_snapshots_at``), and the context chain never
+            reads the disk for a file missing from the snapshots (a path absent
+            at ``head``): the diff data (a deleted file's
+            ``last_known_content``), then ``anchor_text``, then nothing, so a
+            file recreated on disk since ``head`` never shows working-tree
+            bytes as the reviewed code. ``None`` keeps today's chain.
+        repo_root: Where those git reads run (the paths are root-relative).
+        file_labels: ``{path: label}`` for the paths absent at ``head``
+            (``deleted in <range>``, ``renamed to <new> in <range>``, ``absent
+            at <head7>``), carried on the file's ``fileContexts`` entry as
+            ``label``, the same words the validation excerpt's header uses.
 
     Returns:
         Complete HTML string for the report
@@ -1737,29 +1771,61 @@ def generate_html_report(
     # diff capture with an invalid (empty) ref.
     if not base_ref:
         base_ref = None
+    # Collect file paths referenced by suggestions
+    referenced_files: List[str] = []
+    seen_files: Set[str] = set()
+    for group in groups_data:
+        for sugg in group.get("suggestions", []):
+            file_ref = sugg.get("fileRef", "")
+            fpath = _extract_file_path(file_ref)
+            if fpath and fpath not in seen_files:
+                seen_files.add(fpath)
+                referenced_files.append(fpath)
     resolved_diff_data: Optional[Dict[str, Any]] = None
     if diff_data is not None:
         # Use pre-computed diff data directly
         resolved_diff_data = diff_data
     elif base_ref is not None:
-        # Collect file paths referenced by suggestions
-        referenced_files: List[str] = []
-        seen_files: Set[str] = set()
-        for group in groups_data:
-            for sugg in group.get("suggestions", []):
-                file_ref = sugg.get("fileRef", "")
-                fpath = _extract_file_path(file_ref)
-                if fpath and fpath not in seen_files:
-                    seen_files.add(fpath)
-                    referenced_files.append(fpath)
         if referenced_files:
             try:
                 from .git_utils import capture_diff_hunks
-                resolved_diff_data = capture_diff_hunks(base_ref, referenced_files)
+                if head_ref is None:
+                    resolved_diff_data = capture_diff_hunks(base_ref, referenced_files)
+                else:
+                    resolved_diff_data = capture_diff_hunks(
+                        base_ref, referenced_files, head_ref=head_ref, cwd=repo_root,
+                    )
             except Exception as exc:
                 import warnings
                 warnings.warn(f"Failed to capture diff hunks: {exc}")
                 resolved_diff_data = None
+
+    # A pinned review's context is the reviewed code: the files as `head`
+    # holds them, read once here unless the caller handed snapshots in.
+    if head_ref is not None and file_snapshots is None and referenced_files:
+        try:
+            from .git_utils import capture_file_snapshots_at
+            file_snapshots = capture_file_snapshots_at(
+                head_ref, referenced_files, cwd=repo_root,
+            )
+        except Exception as exc:
+            import warnings
+            warnings.warn(f"Failed to read files at {head_ref[:12]}: {exc}")
+            file_snapshots = {}
+
+    def _file_context(
+        fpath: str, line_range: List[int], context_lines: int = 5,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """``capture_file_context``, which never falls back to the disk on a
+        pinned review: a path missing from the head snapshots has no file
+        context there (it is absent at `head`), whatever the disk holds."""
+        if head_ref is not None and (not file_snapshots or fpath not in file_snapshots):
+            return None
+        from .git_utils import capture_file_context
+        return capture_file_context(
+            fpath, line_range, context_lines=context_lines,
+            file_snapshots=file_snapshots,
+        )
 
     # --- File contexts fallback chain ---
     # For each file referenced by suggestions, try:
@@ -1783,11 +1849,7 @@ def generate_html_report(
             line_range = sugg.get("lineRange")
             if line_range and isinstance(line_range, (list, tuple)) and len(line_range) >= 1:
                 try:
-                    from .git_utils import capture_file_context
-                    ctx = capture_file_context(
-                        fpath, list(line_range),
-                        file_snapshots=file_snapshots,
-                    )
+                    ctx = _file_context(fpath, list(line_range))
                     if ctx is not None:
                         file_contexts[fpath] = {
                             "source": "file",
@@ -1842,12 +1904,7 @@ def generate_html_report(
         all_ends = [r[1] if len(r) > 1 else r[0] for r in ranges]
         merged_range = [min(all_starts), max(all_ends)]
         try:
-            from .git_utils import capture_file_context
-            ctx = capture_file_context(
-                fpath, merged_range,
-                context_lines=5,
-                file_snapshots=file_snapshots,
-            )
+            ctx = _file_context(fpath, merged_range, context_lines=5)
             if ctx is not None:
                 if fpath in file_contexts:
                     file_contexts[fpath]["lines"] = ctx
@@ -1859,6 +1916,12 @@ def generate_html_report(
                     }
         except Exception:
             pass
+
+    # A path absent at `head` says why in its context's header: the same words
+    # as its validation excerpt (plans/review-commits.md §2.5).
+    for fpath, label in (file_labels or {}).items():
+        if fpath in file_contexts and label:
+            file_contexts[fpath]["label"] = label
 
     # --- Plan section ordering (narrative order from markdown) ---
     section_order = extract_plan_section_order(plan_content)
@@ -2052,6 +2115,10 @@ def generate_html_report(
         if total_label:
             report_data["usageTotalLabel"] = total_label
 
+    # A commit review's header, filter, badges and export help (§2.10).
+    if commit_review:
+        report_data[COMMIT_RANGE_KEY] = commit_range_report_data(commit_review, groups_data)
+
     # Conditionally add diff data and file contexts
     if resolved_diff_data is not None:
         report_data["diffData"] = resolved_diff_data
@@ -2085,12 +2152,103 @@ def generate_html_report(
     return html
 
 
+#: ``report_data.json``'s key for a commit review's payload.
+COMMIT_RANGE_KEY = "commitRange"
+
+#: The apply commands the flat report's export help names for a plan's review
+#: (every review phase shares that template). A commit review passes its own
+#: list (``commitRange.applyCommands``) instead, plans/review-commits.md §2.10.
+DEFAULT_APPLY_COMMANDS: Tuple[str, ...] = (
+    "apply-suggestions", "apply-code-fixes", "apply-task-suggestions",
+)
+
+#: The label the flat report's header gives the anchor document of a plan's
+#: review; a commit review passes ``commitRange.documentLabel`` (§2.8).
+DEFAULT_DOCUMENT_LABEL = "Plan"
+
+#: Template slots the generator fills before the data goes in. Each is an
+#: HTML comment, so a template read without the generator renders nothing.
+SLOT_DOCUMENT_LABEL = "<!--MLLM:document-label-->"
+SLOT_APPLY_COMMANDS = "<!--MLLM:apply-commands-->"
+SLOT_EXPORT_HELP = "<!--MLLM:export-help-->"
+
+
+def commit_range_report_data(
+    commit_review: Mapping[str, Any], groups_data: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """``reportData.commitRange``: the payload plus the attribution per group
+    (``{groupHash: {introducedBy, source}}``). Each group's data also gains
+    the attributed commit's short SHA and subject, read from the payload's
+    ``commits`` (every commit of the range), never from git."""
+    subjects = {
+        str(c.get("sha")): c for c in commit_review.get("commits") or ()
+        if isinstance(c, Mapping)
+    }
+    attribution: Dict[str, Dict[str, Any]] = {}
+    for group in groups_data:
+        if "introducedBySource" not in group:
+            continue
+        sha = group.get("introducedBy")
+        if sha:
+            group["introducedByShort"] = str(sha)[:7]
+            group["introducedBySubject"] = str((subjects.get(sha) or {}).get("subject") or "")
+        if group.get("groupHash"):
+            attribution[str(group["groupHash"])] = {
+                "introducedBy": sha, "source": group.get("introducedBySource"),
+            }
+    data = dict(commit_review)
+    data["attribution"] = attribution
+    return data
+
+
+def _join_commands(commands: Sequence[str]) -> str:
+    """``a``, ``a or b``, ``a, b, or c``: the export help's wording."""
+    items = [str(c) for c in commands if c]
+    if len(items) <= 1:
+        return items[0] if items else ""
+    if len(items) == 2:
+        return f"{items[0]} or {items[1]}"
+    return ", ".join(items[:-1]) + f", or {items[-1]}"
+
+
+def _fill_template_slots(template: str, report_data: Mapping[str, Any]) -> str:
+    """Fill the label and export-help slots from *report_data*.
+
+    A plan's review gets exactly the text the templates used to carry
+    (``Plan:``, the three apply commands, no PR-template help); a commit
+    review gets ``Commit brief:`` and its own apply command, from the payload
+    the generator stored, so a regenerated report says the same."""
+    import html as _html
+
+    commit = report_data.get(COMMIT_RANGE_KEY)
+    commit = commit if isinstance(commit, Mapping) else None
+    label = (commit or {}).get("documentLabel") or DEFAULT_DOCUMENT_LABEL
+    commands = list((commit or {}).get("applyCommands") or DEFAULT_APPLY_COMMANDS)
+    joined = _html.escape(_join_commands(commands), quote=False)
+    help_html = ""
+    if commit:
+        help_html = (
+            '<span class="export-help" id="export-help">Export saves '
+            '<code>user_selections.json</code>: put it next to <code>report.md</code>, '
+            f'then run <code>{joined}</code> to apply what you kept.</span>'
+        )
+    return (
+        template
+        .replace(SLOT_DOCUMENT_LABEL, _html.escape(f"{label}:", quote=False))
+        .replace(SLOT_APPLY_COMMANDS, joined)
+        .replace(SLOT_EXPORT_HELP, help_html)
+    )
+
+
 def _embed_report_data(report_data: Dict[str, Any], template: str) -> str:
     """Embed ``report_data`` as JSON into ``template`` at the data placeholder.
 
     Shared by initial generation and post-apply regeneration so both paths
-    escape and inject the data identically.
+    escape and inject the data identically. The template's slots
+    (:func:`_fill_template_slots`) are filled first, before any data is in
+    it, so text inside the data can never be taken for a slot.
     """
+    template = _fill_template_slots(template, report_data)
     # Escape sequences that would break out of the surrounding <script> tag:
     #   </script>, </ in general, and <!-- (HTML comment opener inside JS).
     # \/ is valid JSON (RFC 8259 §7), so this stays parseable.
@@ -2553,10 +2711,39 @@ def _load_report_template(template_style: str) -> str:
     return template_path.read_text(encoding="utf-8")
 
 
+def _overlay_guard_skips(report_data: Dict[str, Any], guard: Optional[Dict[str, Any]]) -> int:
+    """Badge each group the commit apply guard skipped (plans/review-commits.md
+    §2.7, §2.10): ``guardSkip: {reason, files, label}`` on the group, where
+    the label reads "skipped: file changed since ``<head7>``" or "skipped:
+    context plan". A replacement, like the decision overlay: a stamp from an
+    earlier overlay that this guard does not name is dropped. Returns the
+    number of groups stamped."""
+    skipped = (guard or {}).get("skipped") or {}
+    head = str((guard or {}).get("head") or "")
+    stamped = 0
+    for group in report_data.get("groups", []):
+        group.pop("guardSkip", None)
+        entry = skipped.get(group.get("groupHash") or "")
+        if not isinstance(entry, dict):
+            continue
+        reason = str(entry.get("reason") or "")
+        label = ("skipped: context plan" if reason == "context_plan"
+                 else f"skipped: file changed since {head[:7]}")
+        group["guardSkip"] = {
+            "reason": reason,
+            "files": [str(f) for f in entry.get("files") or []],
+            "label": label,
+        }
+        stamped += 1
+    return stamped
+
+
 def regenerate_report_with_human_decisions(
     phase_dir: Path,
     human_decisions: Dict[str, Dict[str, Any]],
     template_style: Optional[str] = None,
+    *,
+    guard: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[Path], int]:
     """Re-render ``{phase_dir}/report.html`` with human decisions overlaid.
 
@@ -2580,6 +2767,9 @@ def regenerate_report_with_human_decisions(
         return None, 0
     report_data = upgrade_legacy(json.loads(sidecar.read_text(encoding="utf-8")))
     matched = _overlay_human_decisions(report_data, human_decisions or {})
+    # The commit guard's skips, read from the saved guard beside the
+    # decisions (*guard*: the pinned record's ``guard``, None on a plan's run).
+    _overlay_guard_skips(report_data, guard)
     style = template_style or report_data.get("templateStyle", "pr")
     template = _load_report_template(style)
     html = _embed_report_data(report_data, template)
@@ -2619,6 +2809,25 @@ def _read_human_decisions_from_state(
     state = upgrade_legacy(json.loads(Path(state_file).read_text(encoding="utf-8")))
     key_phase = _APPLY_PHASE_STATE_KEYS.get(apply_phase, apply_phase)
     return state.get(f"human_decisions_{key_phase}", {}) or {}
+
+
+def _read_guard_from_state(state_file: Path) -> Optional[Dict[str, Any]]:
+    """The commit apply guard saved in a state.json file (the pinned record's
+    ``guard``, plans/review-commits.md §2.7), or None."""
+    try:
+        state = json.loads(Path(state_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(state, dict):
+        return None
+    # `commit_range.pinned_record`'s order, spelled here because this module
+    # also runs as a direct script, where the package import is unavailable.
+    for key in ("commit_range", "head_ref"):
+        record = state.get(key)
+        if isinstance(record, dict):
+            guard = record.get("guard")
+            return guard if isinstance(guard, dict) else None
+    return None
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -2666,7 +2875,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         decisions = _read_human_decisions_from_state(
             Path(args.state_file), args.apply_phase
         )
-        if not decisions and (phase_dir / "report_data.json").exists():
+        guard = _read_guard_from_state(Path(args.state_file))
+        if (not decisions and not (guard or {}).get("skipped")
+                and (phase_dir / "report_data.json").exists()):
             # Live run 8 (Claude Code racing 05/08): a phase that decided
             # nothing by hand or by judge re-rendered the report anyway and
             # printed "0 of 0 human decision(s) matched", which the host
@@ -2680,7 +2891,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             return 0
         result, matched = regenerate_report_with_human_decisions(
-            phase_dir, decisions, args.template_style
+            phase_dir, decisions, args.template_style, guard=guard
         )
         if result is None:
             print(

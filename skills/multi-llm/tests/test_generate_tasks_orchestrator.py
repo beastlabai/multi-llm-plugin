@@ -930,7 +930,7 @@ def scripted_runner(monkeypatch):
         prompt = kwargs.get("prompt") or ""
         if "You are decomposing" not in prompt:
             return executor._Capture(
-                stdout=_codex_stream(executor.NESTED_PROBE_TOKEN),
+                stdout=_codex_stream(executor.NESTED_PROBE_MARKER),
                 exit_code=0, duration=0.01, argv=["codex", "exec"],
             )
         prompts.append(prompt)

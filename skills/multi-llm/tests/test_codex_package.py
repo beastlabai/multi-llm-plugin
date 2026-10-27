@@ -339,6 +339,9 @@ NOT_FORWARDED = frozenset({
     "MULTI_LLM_TEST_FAST_BACKOFF",
     # The parent->worker handshake; an inherited stale one is a bug.
     "MULTI_LLM_DETACHED_WORKER",
+    # The launcher supplies its own log per worker and the dispatcher consumes
+    # it before pre-flight; forwarding a host value could target a stale log.
+    "MULTI_LLM_WORKER_LOG",
     # The same handshake's typed plan (plans/next-phase-command.md T5):
     # `detach.child_env` sets it per launch for the worker alone, which pops it.
     # The server spawns invokers, never workers, so a forwarded one could only
@@ -579,11 +582,11 @@ class TestPluginSkill:
     def test_the_needs_human_rule_is_the_owner_s_text(self, skill):
         """Filled with ``modes.NEEDS_HUMAN_RULE`` itself, not a retyped copy."""
         template = (SKILL_ROOT / codex_build.SKILL_TEMPLATE).read_text(encoding="utf-8")
-        assert template.count(cli_common.NEEDS_HUMAN_RULE_TOKEN) == 1
+        assert template.count(cli_common.NEEDS_HUMAN_RULE_PLACEHOLDER) == 1
         assert mode_table.NEEDS_HUMAN_WORK_SENTENCE not in " ".join(template.split())
         flat = " ".join(skill.split())
         assert mode_table.NEEDS_HUMAN_RULE in flat
-        assert cli_common.NEEDS_HUMAN_RULE_TOKEN not in skill
+        assert cli_common.NEEDS_HUMAN_RULE_PLACEHOLDER not in skill
 
     def test_carries_no_dispatcher_word(self, skill):
         bare, cli = _mode_spellings()

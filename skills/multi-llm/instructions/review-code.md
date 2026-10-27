@@ -206,7 +206,7 @@ to bare `python`.
 
    **IMPORTANT**: Pass `$PLAN_PATH` as given — the orchestrator resolves it to an OS-native absolute path itself (do NOT wrap it in `$(realpath ...)`; on Git for Windows that emits a POSIX `/c/...` path a native process cannot use). Use `--project` (not `--directory`).
 
-   **Run detached.** A detached run is not subject to your host's shell-command cap, so the orchestrator survives long multi-model runs. `PYTHONUNBUFFERED=1` is required so Python streams output to the log instead of block-buffering it (block-buffering leaves the log empty for minutes when stdout is a non-TTY pipe) — and it is what puts each `[PROGRESS]` ticker line in the log *while* the run is still going, instead of all at once at the end. Launching is not the end of this step: poll while it runs (below), and when the loop ends read all markers and output paths **from `{plan}/code-review/orchestrator-run.log`**, not from terminal stdout.
+   **Run detached.** A detached run is not subject to your host's shell-command cap, so the orchestrator survives long multi-model runs. A host's own background mechanism has a time limit of its own, though: give that launch call the longest timeout the mechanism takes, as your host's *run detached* answer states, or the run is stopped mid-fan-out. `PYTHONUNBUFFERED=1` is required so Python streams output to the log instead of block-buffering it (block-buffering leaves the log empty for minutes when stdout is a non-TTY pipe) — and it is what puts each `[PROGRESS]` ticker line in the log *while* the run is still going, instead of all at once at the end. Launching is not the end of this step: poll while it runs (below), and when the loop ends read all markers and output paths **from `{plan}/code-review/orchestrator-run.log`**, not from terminal stdout.
 
    **Say which models, before the loop starts.** The launch says a fan-out began; it
    does not say what it is over. Make **one** non-waiting status call — no `--wait`,
@@ -401,8 +401,9 @@ to bare `python`.
      with a sample) and, above 200 source and test files, `[SCOPE_LARGE]` with
      its remedy. Relay a `[SCOPE_FALLBACK]` or `[SCOPE_LARGE]` line to the user:
      the review is over a guessed scope.
-   - `Left out N of the workflow's own file(s) …` - the plan, its task list and
-     its output folder are never reviewed as code, whichever source named them.
+   - `Left out N of the workflow's own file(s) …` - the plan, its task list, its
+     output folder and commit reviews are never code under review, whichever
+     source named them.
    - `Files to review: N` - the resolved scope every reviewer is given, source
      files first
    - `Review scope written (scope <id>, coverage complete|partial, …)` - the

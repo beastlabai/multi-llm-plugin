@@ -438,7 +438,7 @@ def faked_opencode(monkeypatch, tmp_path):
 
     def debug_config(binary, env, cwd, diag, **_kw):
         config = json.loads((cwd / "opencode.json").read_text())
-        body = probe.expected_template(Path(config["plugin"][0]), build.SKILL_DIR_TOKEN)
+        body = probe.expected_template(Path(config["plugin"][0]), build.SKILL_DIR_PLACEHOLDER)
         return probe.DebugConfig(None, {
             "plugin": [f"file://{config['plugin'][0]}"],
             "command": {"multi-llm": {"template": body, "description": "d"}}}, None)
@@ -566,7 +566,7 @@ class TestNeverATarballInPlugin:
 class TestTheCommandCheck:
     def test_the_payloads_body_resolved_against_the_payload_passes(self, tmp_path):
         package = _fake_package(tmp_path)
-        template = probe.expected_template(package, build.SKILL_DIR_TOKEN)
+        template = probe.expected_template(package, build.SKILL_DIR_PLACEHOLDER)
         verdict = probe.check_command({"plugin": [f"file://{package}"],
                                        "command": {"multi-llm": {"template": template}}}, package)
         assert verdict["registered"] and verdict["matches_payload"]
@@ -829,7 +829,7 @@ class TestTheScenarioArmsTheRealStub:
     def test_the_two_calls_carry_every_property_the_tool_requires(self):
         for args in (probe.INIT_ARGS, probe.STATUS_ARGS):
             assert set(args) == set(SURFACE["argument_descriptions"])
-            assert args["question"] == "" and args["extra_flags"] == []
+            assert args["question"] == "" and args["revs"] == "" and args["extra_flags"] == []
         assert probe.INIT_ARGS["plan"] == ""
         assert probe.STATUS_ARGS["plan"] == probe.PLAN
 

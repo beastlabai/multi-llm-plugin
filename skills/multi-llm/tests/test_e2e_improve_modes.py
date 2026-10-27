@@ -60,7 +60,13 @@ was handed.
 * zero findings and every-finding-invalid: the apply is recorded completed, exit 0,
   the re-run exits 2;
 * a ``needs-human-decision`` item is decided by the judge agent, nobody is asked
-  (stdin is ``/dev/null``).
+  (stdin is ``/dev/null``);
+* ``improve-commits`` on a commit range, through its front door (plans/review-
+  commits.md §2.8): the pinned ``--base-ref``/``--head-ref`` each real phase is
+  handed, the steps named as the commit modes, a stop in the apply after its
+  first batch and the continuation that finishes it, ``[ALREADY_COMPLETE]``, a
+  typed ``--focus`` that starts a new round, and ``--detach`` from a phrase with
+  no brief on disk (a root range's child included).
 
 Usage:
     uv run --project skills/multi-llm -- pytest tests/test_e2e_improve_modes.py -v
@@ -1115,6 +1121,12 @@ class TestADetachedImprovePlan:
         step = poll.result["user_next_step"]
         assert step["phase"] == "generate-tasks", step
         assert step["command"].endswith(f"--generate-tasks {PLAN_REL}"), step
+        # D2: and the review's counts and the worker's artifacts, which the
+        # steps recorded on the worker's line, never in the dir polled.
+        worker = parse_result_line(log)
+        assert poll.result["validation_counts"] == worker["validation_counts"], worker
+        assert set(worker["artifacts"]) <= set(poll.result["artifacts"]), (
+            poll.result["artifacts"], worker["artifacts"])
 
 
 # --------------------------------------------------------------------------- #
@@ -1195,3 +1207,378 @@ class TestTheJudgeDecides:
         # the run's summary says who decided
         assert "judge" in (apply_dir / "summary.md").read_text(encoding="utf-8").lower()
         assert "Decided by the judge agent" in run.stdout
+
+
+# --------------------------------------------------------------------------- #
+# 11. improve-commits: a commit range, behind its front door
+# --------------------------------------------------------------------------- #
+
+#: The first line of ``prompts/commit_review.txt``: the reviewer's commit prompt.
+COMMIT_REVIEW_PROMPT = "You are reviewing the code changes made by a range of git commits"
+COMMITS_FOLDER = "plans/commit-reviews"
+#: The two commits ``CommitWorld`` makes on top of ``init``, in order.
+COMMITS = (("security: rate limiter", "src/security.py"),
+           ("auth: login records attempts", "src/auth.py"))
+#: What a command a commit mode prints never holds (plans/review-commits.md §2.8).
+FRONT_DOOR_TOKENS = ("--plan-file", "--base-ref", "--head-ref", "--focus",
+                     "--context-plan", "--commit-stage", "--revs", "last", "commits")
+
+
+class CommitWorld(World):
+    """``World`` with ``WORKING_DIFF`` committed as two commits (``COMMITS``), or,
+    with *root_only*, nothing on top of the root commit ``init``; the commit
+    review prompt is answered from the same code-review fixture."""
+
+    def __init__(self, tmp_path: Path, *, root_only: bool = False):
+        super().__init__(tmp_path)
+        if not root_only:
+            for message, rel in COMMITS:
+                (self.repo / rel).write_text(WORKING_DIFF[rel], encoding="utf-8")
+                _git(self.repo, "add", "-A")
+                _git(self.repo, "commit", "-q", "-m", message)
+        self.committed = {rel: (self.repo / rel).read_bytes() for rel in WORKING_DIFF}
+        self.root_only = root_only
+        self.set_commit_review_answers()
+
+    def set_commit_review_answers(self, code_review: Optional[Path] = None) -> None:
+        self.scenario.write_text(yaml.safe_dump({
+            "name": "improve commits",
+            "on_unmatched": "fail",
+            "prompts": [{"pattern": COMMIT_REVIEW_PROMPT, "fixture": str(
+                code_review or RESPONSES / "code_review" / "container_issues.json")}],
+        }, sort_keys=False), encoding="utf-8")
+
+    def rev(self, rev: str) -> str:
+        return subprocess.run(["git", "rev-parse", rev], cwd=self.repo, capture_output=True,
+                              text=True, check=True).stdout.strip()
+
+    @property
+    def base(self) -> Optional[str]:
+        return None if self.root_only else self.rev("HEAD~2")
+
+    @property
+    def head(self) -> str:
+        return self.rev("HEAD")
+
+    @property
+    def empty_tree(self) -> str:
+        return subprocess.run(["git", "hash-object", "-t", "tree", "--stdin"], cwd=self.repo,
+                              input="", capture_output=True, text=True,
+                              check=True).stdout.strip()
+
+    @property
+    def brief_rel(self) -> str:
+        slug = "root" if self.base is None else self.base[:12]
+        return f"{COMMITS_FOLDER}/{slug}-{self.head[:12]}.md"
+
+    @property
+    def pinned(self) -> str:
+        """The range a printed command names: ``<base12>..<head12>``, or the brief."""
+        return self.brief_rel if self.base is None else f"{self.base[:12]}..{self.head[:12]}"
+
+    @property
+    def out(self) -> Path:
+        return self.repo / self.brief_rel[:-len(".md")]
+
+    def improve(self, *flags: str, words=("last", "2", "commits"), **kwargs) -> Run:
+        """``improve-commits <words> --models <one reviewer> --yes --exec-subagents <flags>``."""
+        return self.run("improve-commits", *words[1:], "--models", MODEL, "--yes",
+                        "--exec-subagents", *flags, plan=words[0], **kwargs)
+
+    def bytes_of(self) -> Dict[str, bytes]:
+        return {rel: (self.repo / rel).read_bytes() for rel in WORKING_DIFF}
+
+
+def _commit_marked(world: CommitWorld, tasks: List[dict]) -> Dict[str, bytes]:
+    """Each source file as committed, plus one marker per batch in *tasks* that touched it."""
+    expected = {rel: world.committed[rel].decode("utf-8") for rel in WORKING_DIFF}
+    for task in tasks:
+        for rel in task["files_touched"]:
+            expected[rel] += CODE_MARKER.format(id=task["expected_ids"][0])
+    return {rel: text.encode("utf-8") for rel, text in expected.items()}
+
+
+def _write_ids(call: dict) -> List[str]:
+    """The expected ids a write batch's prompt spells (the plugin's own pattern)."""
+    import re
+
+    return re.findall(r"(?:suggestion|fix|task) \d+ = `([^`]+)`", call["prompt"])
+
+
+def _poll_terminal(run_dir: Path) -> dict:
+    from utils import status_file
+
+    deadline = time.monotonic() + 60 * PERF_SCALE
+    run: dict = {}
+    while time.monotonic() < deadline:
+        run = status_file.read_run(str(run_dir))
+        if run.get("state") in status_file.TERMINAL_RUN_STATES:
+            return run
+        time.sleep(0.2)
+    log = run_dir / "orchestrator-run.log"
+    raise AssertionError((run, log.read_text()[-2000:] if log.exists() else "no log"))
+
+
+class TestImproveCommits:
+
+    def test_review_commits_then_apply_commit_fixes_on_the_pinned_refs(self, tmp_path):
+        world = CommitWorld(tmp_path)
+        run = world.improve()
+        assert run.exit_code == 0, run.explain()
+
+        # -- the record: the brief's two phases, its own run record ----------------
+        state = world.state()
+        assert set(state["phases_completed"]) == {"code-review", "apply-code-fixes"}, state
+        assert state["improve_commits"]["steps"] == {
+            "code-review": "done", "apply-code-fixes": "done"}
+        record = state["commit_range"]
+        assert (record["base"], record["head"]) == (world.base, world.head)
+        assert record["reviewed_header_sha256"] == record["header_sha256"]
+        assert not (world.out / "improve-code").exists()
+
+        # -- each real phase got the pinned refs; the apply the pinned base ----------
+        steps = run.step_flags()
+        assert list(steps) == ["review-code", "apply-code-fixes"], steps
+        review, apply = steps["review-code"], steps["apply-code-fixes"]
+        assert review[review.index("--base-ref"):review.index("--base-ref") + 4] == [
+            "--base-ref", world.base, "--head-ref", world.head], review
+        assert apply[:3] == ["--yes", "--agent-decide", "--no-confirm"]
+        assert apply[apply.index("--base-ref") + 1] == world.base, apply
+        assert "--head-ref" not in apply and "--resume" not in apply
+
+        # -- the steps are named as the commit modes ---------------------------------
+        assert "=== Step 1: review-commits ===" in run.stdout
+        assert "=== Step 2: apply-commit-fixes ===" in run.stdout
+
+        # -- one commit review, then the fix batches edited the committed files ------
+        reviews = world.calls_of("review")
+        assert len(reviews) == 1 and reviews[0]["prompt"].startswith(COMMIT_REVIEW_PROMPT)
+        report = world.report("apply-fixes")
+        assert report["exit"] == 0 and report["tasks"]
+        assert all(task["write_outcome"] == "applied" for task in report["tasks"])
+        assert world.bytes_of() == _commit_marked(world, report["tasks"])
+
+        result = run.result
+        assert (result["mode"], result["phase"], result["state"], result["exit"]) == (
+            "improve-commits", "improve-commits", "done", 0)
+        assert result["commit_range"]["head"] == world.head
+
+    def test_a_stop_after_the_first_batch_and_the_way_back(self, tmp_path):
+        """§4 T7's partial-failure test: fail step 2 after its first batch, then
+        follow the continuation, re-run the finished run, and change the focus."""
+        world = CommitWorld(tmp_path)
+        stopped = world.improve("--focus", "X", env=world.env(IMPROVE_E2E_FAIL_CALL="2"))
+
+        # -- the stop: exit 3, naming apply-commit-fixes --------------------------
+        assert stopped.exit_code == 3, stopped.explain()
+        assert (stopped.result["state"], stopped.result["exit"]) == ("needs-human", 3)
+        assert "ERROR: Step 2: apply-commit-fixes did not complete" in stopped.stderr
+        # the phase's own stop line is the result's error (it names the batch)
+        assert "apply-fix-batch-1" in stopped.result["error"], stopped.result["error"]
+        # the continuation: the composite, --resume and the typed selector only
+        tokens = shlex.split(stopped.result["next"])
+        after = tokens[tokens.index("improve-commits") + 1:]
+        assert after[1:] == ["--models", MODEL, "--resume"], after
+        for token in FRONT_DOOR_TOKENS + ("X",):
+            assert token not in after, (token, after)
+        assert "user_next_step" not in stopped.result, "a stop owes no next phase"
+
+        # -- what stays on disk: the review, and the first batch's edits -----------
+        state = world.state()
+        assert set(state["phases_completed"]) == {"code-review"}
+        assert state["improve_commits"]["failed_phase"] == "apply-code-fixes"
+        report = world.report("apply-fixes")
+        assert [task["status"] for task in report["tasks"]] == ["ok", "batch_failed"]
+        assert world.bytes_of() == _commit_marked(world, report["tasks"][:1])
+        brief = world.repo / world.brief_rel
+        brief_before, record_before = brief.read_bytes(), state["commit_range"]
+        reviews, validations = len(world.calls_of("review")), len(world.calls_of("validate"))
+        writes = len(world.calls_of("write"))
+        landed, failed = report["tasks"]
+
+        # -- following the continuation: no model, the recorded batch kept ---------
+        resumed = world.run("improve-commits", "--models", MODEL, "--yes",
+                            "--exec-subagents", "--resume", plan=world.pinned)
+        assert resumed.exit_code == 0, resumed.explain()
+        steps = resumed.step_flags()
+        assert list(steps) == ["apply-code-fixes"], "the completed review was run again"
+        apply = steps["apply-code-fixes"]
+        assert apply.count("--resume") == 1 and apply[apply.index("--base-ref") + 1] == world.base
+        assert (len(world.calls_of("review")), len(world.calls_of("validate"))) == (
+            reviews, validations)
+        redispatched = [_write_ids(call) for call in world.calls_of("write")[writes:]]
+        assert redispatched, "no batch was dispatched"
+        assert all(not set(ids) & set(landed["expected_ids"]) for ids in redispatched), (
+            "the recorded batch was dispatched again")
+        assert failed["expected_ids"] in redispatched, "the stopped batch was not run again"
+        for rel in landed["files_touched"]:
+            text = (world.repo / rel).read_bytes().decode("utf-8")
+            assert text.count(CODE_MARKER.format(id=landed["expected_ids"][0])) == 1, rel
+        assert brief.read_bytes() == brief_before
+        record = world.state()["commit_range"]
+        for key in ("header_sha256", "reviewed_header_sha256", "focus", "base", "head"):
+            assert record[key] == record_before[key], key
+        assert record["focus"] == "X"
+        assert set(world.state()["phases_completed"]) == {"code-review", "apply-code-fixes"}
+
+        # -- a second re-run: nothing to do, named as the commit modes -------------
+        calls = len(world.calls())
+        again = world.run("improve-commits", "--models", MODEL, "--yes",
+                          "--exec-subagents", "--resume", plan=world.pinned)
+        assert again.exit_code == 2, again.explain()
+        line = next(line for line in again.stdout.splitlines()
+                    if line.startswith("[ALREADY_COMPLETE] "))
+        assert line.startswith("[ALREADY_COMPLETE] improve-commits: review-commits completed ")
+        assert ", apply-commit-fixes completed " in line
+        assert line.endswith("--force runs review-commits again."), line
+        assert len(world.calls()) == calls
+
+        # -- a typed --focus Y: a new round; the new apply leaves round one's files --
+        edited = {rel for task in world.report("apply-fixes")["tasks"]
+                  for rel in task["files_touched"]}
+        refocused = world.run("improve-commits", "--focus", "Y", "--models", MODEL,
+                              "--yes", "--exec-subagents", plan=world.pinned)
+        assert "[COMMIT_REVIEW_RESTARTED]" in refocused.stdout, refocused.explain()
+        assert len(world.calls_of("review")) == reviews + 1, "the review was not run again"
+        review = refocused.step_flags()["review-code"]
+        assert review.count("--force") == 1 and review.count("--rerun-all") == 1, review
+        assert "--resume" not in refocused.step_flags()["apply-code-fixes"]
+        assert world.state()["commit_range"]["focus"] == "Y"
+        fixes = refocused.result.get("commit_fixes") or {}
+        assert set(fixes.get("changed_files") or ()) == edited, (fixes, refocused.explain())
+        assert fixes.get("skipped_changed"), fixes
+
+    def test_a_file_edited_by_hand_after_the_stop_is_skipped_and_named(self, tmp_path):
+        world = CommitWorld(tmp_path)
+        assert world.improve(env=world.env(IMPROVE_E2E_FAIL_CALL="2")).exit_code == 3
+        assert world.report("apply-fixes")["tasks"][1]["status"] == "batch_failed"
+        hand = world.committed["src/auth.py"] + b"# edited by hand\n"
+        (world.repo / "src/auth.py").write_bytes(hand)
+        resumed = world.run("improve-commits", "--models", MODEL, "--yes",
+                            "--exec-subagents", "--resume", plan=world.pinned)
+        assert resumed.exit_code == 0, resumed.explain()
+        fixes = resumed.result["commit_fixes"]
+        assert "src/auth.py" in fixes["changed_files"], fixes
+        assert any("src/auth.py" in line for line in fixes["lines"]), fixes["lines"]
+        assert "[COMMIT_FIXES]" in resumed.stdout
+        assert (world.repo / "src/auth.py").read_bytes() == hand, "the hand edit was overwritten"
+
+    @pytest.mark.parametrize("by_hand", [False, True], ids=["untouched", "edited by hand"])
+    def test_the_continuation_applies_every_batch_left(self, tmp_path, by_hand):
+        world = CommitWorld(tmp_path)
+        assert world.improve(env=world.env(IMPROVE_E2E_FAIL_CALL="2")).exit_code == 3
+        if by_hand:
+            hand = world.committed["src/auth.py"] + b"# edited by hand\n"
+            (world.repo / "src/auth.py").write_bytes(hand)
+        resumed = world.run("improve-commits", "--models", MODEL, "--yes",
+                            "--exec-subagents", "--resume", plan=world.pinned)
+        assert resumed.exit_code == 0, resumed.explain()
+        fixes = resumed.result["commit_fixes"]
+        final = world.report("apply-fixes")
+        if by_hand:
+            # the hand-edited file's group is skipped and named, and only it
+            assert fixes["changed_files"] == ["src/auth.py"], fixes
+            assert (world.repo / "src/auth.py").read_bytes() == hand
+            applied = [task for task in final["tasks"] if task["write_outcome"] == "applied"]
+            assert world.bytes_of()["src/security.py"] == _commit_marked(
+                world, applied)["src/security.py"]
+        else:
+            assert fixes["skipped_changed"] == 0, fixes
+            assert [task["write_outcome"] for task in final["tasks"]] == (
+                ["applied"] * len(final["tasks"]))
+            assert len(final["tasks"]) == 3, "the fixture's three batches"
+            assert world.bytes_of() == _commit_marked(world, final["tasks"])
+
+    def test_detached_from_a_phrase_with_no_brief_on_disk(self, tmp_path):
+        from utils import improve_workflow
+
+        world = CommitWorld(tmp_path)
+        assert not (world.repo / COMMITS_FOLDER).exists()
+        env = world.env(MULTI_LLM_UV=str(_stub_uv(world.tmp_path)))
+        launch = world.improve("--detach", env=env)
+
+        # -- the launch: not refused at the recorded-mode check ---------------------
+        assert launch.exit_code == 0, launch.explain()
+        assert "run_id:" in launch.stdout, launch.explain()
+        # Printed once; the result line also carries the block's lines in
+        # `commit_range.lines` for the tool routes, so it is left out here.
+        printed = "\n".join(
+            line for line in launch.stdout.splitlines()
+            if not line.startswith("MULTI_LLM_RESULT")
+        )
+        assert printed.count("[COMMIT_RANGE] ") == 1
+        assert f"[COMMIT_BRIEF] {world.brief_rel}" in launch.stdout
+        assert "--phase improve-commits" in launch.result["next"], launch.result
+
+        # -- the run lives in <slug>/improve-commits/ ----------------------------
+        run_dir = world.out / "improve-commits"
+        run = _poll_terminal(run_dir)
+        log = (run_dir / "orchestrator-run.log").read_text(encoding="utf-8")
+        assert run.get("state") == "done" and run.get("exit_code") == 0, (run, log[-2000:])
+        assert run.get("mode") == "improve-commits", run
+        # the child re-entered improve-commits: no second block, the stage's refs
+        assert "[COMMIT_RANGE] " not in log, "the child printed a second block"
+        assert "=== Step 1: review-commits ===" in log
+        assert "=== Step 2: apply-commit-fixes ===" in log
+        review_line = next(line for line in log.splitlines()
+                           if line.startswith("$ ") and " review-code " in line)
+        tokens = shlex.split(review_line[2:])
+        assert tokens[tokens.index("--models") + 1] == MODEL
+        assert tokens[tokens.index("--base-ref") + 1] == world.base
+        assert tokens[tokens.index("--head-ref") + 1] == world.head
+        state = world.state()
+        assert state["commit_range"]["phrase"] == "last 2 commits"
+        assert set(state["phases_completed"]) == {"code-review", "apply-code-fixes"}
+        assert not list(run_dir.glob(".commit-stage-*")), "the stage was not consumed"
+        # its continuation, from the run record, carries the typed selector only
+        assert improvement_continuation(improve_workflow, run) == ["--models", MODEL, "--resume"]
+
+        # -- D2: the poll a tool route relays carries what the worker's line did ----
+        # The steps ran in the worker's process, so only its report can hand
+        # their notice and counts to the run dir; the live test's host got
+        # neither and said it applied a no-op fix.
+        worker = parse_result_line(log)
+        assert worker["notice"] and worker["validation_counts"], worker
+        poll = world.run("status", "--view", "run", "--run-id", run["run_id"],
+                         plan=world.pinned, env=env)
+        assert poll.exit_code == 0, poll.explain()
+        assert poll.result["phase"] == worker["phase"] == "improve-commits", poll.result
+        assert poll.result["notice"] == worker["notice"], (poll.result, worker)
+        assert poll.result["validation_counts"] == worker["validation_counts"]
+        assert set(worker["artifacts"]) <= set(poll.result["artifacts"]), (
+            poll.result["artifacts"], worker["artifacts"])
+
+    def test_a_drifted_scope_file_is_named_in_the_launchers_block(self, tmp_path):
+        world = CommitWorld(tmp_path)
+        (world.repo / "src/auth.py").write_text("# edited by hand\n", encoding="utf-8")
+        env = world.env(MULTI_LLM_UV=str(_stub_uv(world.tmp_path)))
+        launch = world.improve("--detach", env=env)
+        assert launch.exit_code == 0, launch.explain()
+        block = launch.stdout[launch.stdout.index("[COMMIT_RANGE] "):
+                              launch.stdout.index("[COMMIT_RANGE_END]")]
+        assert "[SCOPE_DRIFT]" in block and "src/auth.py" in block, block
+        _poll_terminal(world.out / "improve-commits")
+
+    def test_a_root_ranges_detached_child_passes_the_flag_scan(self, tmp_path):
+        """The child's argv names the brief as ``--plan-file`` (a root range has
+        no pinned SHA spelling), which the dispatcher's
+        ``[COMMIT_FLAG_CONFLICT]`` scan must let through for a worker."""
+        world = CommitWorld(tmp_path, root_only=True)
+        env = world.env(MULTI_LLM_UV=str(_stub_uv(world.tmp_path)))
+        launch = world.improve("--detach", words=("HEAD",), env=env)
+        assert launch.exit_code == 0, launch.explain()
+        assert f"[COMMIT_BRIEF] {world.brief_rel}" in launch.stdout
+        run_dir = world.out / "improve-commits"
+        run = _poll_terminal(run_dir)
+        log = (run_dir / "orchestrator-run.log").read_text(encoding="utf-8")
+        assert "[COMMIT_FLAG_CONFLICT]" not in log, log[-2000:]
+        assert run.get("state") == "done" and run.get("exit_code") == 0, (run, log[-2000:])
+        apply_line = next(line for line in log.splitlines()
+                          if line.startswith("$ ") and " apply-code-fixes " in line)
+        tokens = shlex.split(apply_line[2:])
+        assert tokens[tokens.index("--base-ref") + 1] == world.empty_tree
+
+
+def improvement_continuation(improve_workflow, run: dict) -> List[str]:
+    """``improve_workflow.recorded_continuation`` of a run record's ``replay_flags``."""
+    return improve_workflow.recorded_continuation("improve-commits", run.get("replay_flags"))

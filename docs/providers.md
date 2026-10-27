@@ -51,7 +51,7 @@ GLM (Z.ai) is a worked example, because GLM models are already first-class here 
 
 ```bash
 export ANTHROPIC_BASE_URL=https://openrouter.ai/api   # the bare /api origin - Claude Code appends /v1/messages itself
-export ANTHROPIC_AUTH_TOKEN="$OPENROUTER_API_KEY"
+export ANTHROPIC_AUTH_TOKEN="${OPENROUTER_API_KEY}"
 export ANTHROPIC_API_KEY=                             # present AND empty - this is what keeps the run off your own Anthropic account
 # then select a GLM slug, e.g.:  --models claude-code:z-ai/glm-5.2
 ```

@@ -3153,7 +3153,7 @@ class TestNestedExecPreflight:
     def test_an_unknown_host_is_probed_once_and_recorded(self, monkeypatch):
         """`unknown` in the data means "go and find out", not "assume allowed"."""
         state, spawned = self._probe(
-            monkeypatch, stdout=executor.NESTED_PROBE_TOKEN, exit_code=0
+            monkeypatch, stdout=executor.NESTED_PROBE_MARKER, exit_code=0
         )
         assert state == "allowed"
         assert len(spawned) == 1
@@ -3235,7 +3235,7 @@ class TestNestedExecPreflight:
         self._probe(monkeypatch, stdout="something that is not the token",
                     exit_code=0)
         answered = capsys.readouterr().err
-        assert executor.NESTED_PROBE_TOKEN in answered
+        assert executor.NESTED_PROBE_MARKER in answered
         assert "none of it carried the probe's token" in answered
         assert "was inconclusive" not in answered, (
             "the token miss must not borrow the zero-byte/non-zero-exit wording"
@@ -3339,7 +3339,7 @@ class TestNestedExecPreflight:
         # depends on what came back, and that dependency belongs on the page.
         monkeypatch.setenv(
             "MOCK_LLM_CONFIG",
-            json.dumps({"response": executor.NESTED_PROBE_TOKEN}),
+            json.dumps({"response": executor.NESTED_PROBE_MARKER}),
         )
         executor.reset_version_cache()
         started = time.monotonic()
@@ -6563,13 +6563,13 @@ class TestTheVerdictQuotesWhatMatched:
         assert "prose prose prose prose" not in reason
 
     def test_a_secret_beside_the_match_is_redacted(self):
-        secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-        stderr = f"aws_secret_access_key={secret} then 429 too many requests"
+        aws_example_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        stderr = f"aws_secret_access_key={aws_example_key} then 429 too many requests"
         verdict = executor._classify_failed_run(
             registry.get_provider("claude-code"), self._Capture("", stderr)
         )
         assert verdict[0] == executor.STATUS_RATE_LIMITED
-        assert secret not in verdict[1]
+        assert aws_example_key not in verdict[1]
 
 
 class TestHostSinksNeverSeeTheReadonlyChildsConfigContent:

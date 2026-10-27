@@ -419,7 +419,7 @@ _SKILL_DIR_TOKENS = (
 #: package it never needed. Rendering the flags from the one owner,
 #: :func:`utils.unattended.uv_run_args`, is what stops the runbook text and
 #: :func:`dispatcher_prefix` from disagreeing about them.
-UV_RUN_FLAGS_TOKEN = "{UV_RUN_FLAGS}"
+UV_RUN_FLAGS_PLACEHOLDER = "{UV_RUN_FLAGS}"
 
 #: The third template token: the mode a bare argument text resolves to.
 #:
@@ -429,7 +429,7 @@ UV_RUN_FLAGS_TOKEN = "{UV_RUN_FLAGS}"
 #: copies that a change to the constant leaves behind. Rendering them here is what
 #: makes the constant's "every surface renders from it" true of the file route as
 #: well as of ``dist/cli-surface.json``.
-DEFAULT_MODE_TOKEN = "{DEFAULT_MODE}"
+DEFAULT_MODE_PLACEHOLDER = "{DEFAULT_MODE}"
 
 #: The fourth template token: the decision rule for exit 3.
 #:
@@ -439,16 +439,16 @@ DEFAULT_MODE_TOKEN = "{DEFAULT_MODE}"
 #: through this token, never as a literal — so the file routes cannot drift
 #: from the plugin's own exit-3 message, which is composed from the same
 #: constant's sibling.
-NEEDS_HUMAN_RULE_TOKEN = "{NEEDS_HUMAN_RULE}"
+NEEDS_HUMAN_RULE_PLACEHOLDER = "{NEEDS_HUMAN_RULE}"
 
 
 def render_instruction_text(text: str, base: Union[str, Path]) -> str:
     """Substitute every template placeholder in instruction/shim text.
 
     Four tokens, one rule: ``{SKILL_DIR}`` (and its host-expanded spellings)
-    becomes *base*, :data:`UV_RUN_FLAGS_TOKEN` becomes the ``uv run`` flag list,
-    :data:`DEFAULT_MODE_TOKEN` becomes ``modes.DEFAULT_MODE`` and
-    :data:`NEEDS_HUMAN_RULE_TOKEN` becomes ``modes.NEEDS_HUMAN_RULE``. The skill
+    becomes *base*, :data:`UV_RUN_FLAGS_PLACEHOLDER` becomes the ``uv run`` flag list,
+    :data:`DEFAULT_MODE_PLACEHOLDER` becomes ``modes.DEFAULT_MODE`` and
+    :data:`NEEDS_HUMAN_RULE_PLACEHOLDER` becomes ``modes.NEEDS_HUMAN_RULE``. The skill
     dir is an argument so a test can render against a fixture path containing a
     space; the others are read from their owners rather than passed, for the
     same reason :func:`dispatcher_prefix` reads the flag list — a caller given
@@ -463,9 +463,9 @@ def render_instruction_text(text: str, base: Union[str, Path]) -> str:
     rendered = text
     for token in _SKILL_DIR_TOKENS:
         rendered = rendered.replace(token, str(base))
-    rendered = rendered.replace(UV_RUN_FLAGS_TOKEN, " ".join(uv_run_args()))
-    rendered = rendered.replace(DEFAULT_MODE_TOKEN, _modes().DEFAULT_MODE)
-    return rendered.replace(NEEDS_HUMAN_RULE_TOKEN, _modes().NEEDS_HUMAN_RULE)
+    rendered = rendered.replace(UV_RUN_FLAGS_PLACEHOLDER, " ".join(uv_run_args()))
+    rendered = rendered.replace(DEFAULT_MODE_PLACEHOLDER, _modes().DEFAULT_MODE)
+    return rendered.replace(NEEDS_HUMAN_RULE_PLACEHOLDER, _modes().NEEDS_HUMAN_RULE)
 
 
 # ---------------------------------------------------------------------------
@@ -639,6 +639,17 @@ class ResultContext:
         #: server names the plan the way the dispatcher read it; ``None`` when
         #: the command ran where it was typed.
         self.ran_from_root: Optional[str] = None
+        #: The commit range a commit front door acts on, as the tool routes
+        #: render the commit block from it (plans/review-commits.md §2.3,
+        #: "Relay"): ``{brief, base, head, commits, more, full_list, window,
+        #: drifted, size}`` plus ``selected`` on a no-argument apply, built by
+        #: ``commit_range.result_payload``. ``None`` on every other run.
+        self.commit_range: Optional[Dict[str, Any]] = None
+        #: The apply guard's decision as the ``[COMMIT_FIXES]`` block shows
+        #: it, read from the saved ``commit_range.guard`` (§2.3), so a
+        #: detached apply's terminal ``status`` poll carries it too. ``None``
+        #: on every run that applied no commit review.
+        self.commit_fixes: Optional[Dict[str, Any]] = None
         self._emitted = False
 
     # -- recording ------------------------------------------------------
@@ -850,6 +861,31 @@ class ResultContext:
         """
         self.user_resume = copy.deepcopy(obj) if obj is not None else None
 
+    def set_commit_range(self, payload: Optional[Dict[str, Any]]) -> None:
+        """Record the commit range a commit front door acts on.
+
+        ``MULTI_LLM_RESULT`` is one JSON line a host parses, and a tool route
+        has no agent reading the printed ``[COMMIT_RANGE]`` block, so its
+        server renders the block from this key instead
+        (plans/review-commits.md §2.3, "Relay"). The commit list is capped
+        as the block is (``commits`` holds the 20 newest, ``more`` counts the
+        rest, ``full_list`` names where they are), so ``this branch`` over
+        hundreds of commits stays one readable line. Stored as a copy;
+        ``None`` leaves every other run's line byte-for-byte what it was.
+        """
+        self.commit_range = copy.deepcopy(payload) if payload is not None else None
+
+    def set_commit_fixes(self, payload: Optional[Dict[str, Any]]) -> None:
+        """Record the ``[COMMIT_FIXES]`` decision of a commit review's apply.
+
+        Read from the saved guard decision rather than from the printed
+        block, so a foreground apply, improve-commits' apply step and the
+        terminal ``status`` poll of a detached apply all carry the same
+        object (plans/review-commits.md §2.3). Stored as a copy; ``None``
+        leaves every other run's line byte-for-byte what it was.
+        """
+        self.commit_fixes = copy.deepcopy(payload) if payload is not None else None
+
     # -- emitting -------------------------------------------------------
     def payload(self, exit_code: int) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -896,6 +932,13 @@ class ResultContext:
             payload["user_next_step"] = copy.deepcopy(self.user_next_step)
         if self.user_resume is not None:
             payload["user_resume"] = copy.deepcopy(self.user_resume)
+        # The commit modes' two blocks, for the tool routes to render
+        # (plans/review-commits.md §2.3): present only when set, on any exit,
+        # since a refusal after resolution still printed the commit block.
+        if self.commit_range is not None:
+            payload["commit_range"] = copy.deepcopy(self.commit_range)
+        if self.commit_fixes is not None:
+            payload["commit_fixes"] = copy.deepcopy(self.commit_fixes)
         # Gated on the word the line carries, not the exit code: under
         # `status --exit-zero` the verdict's word stays (`keep_state_word`)
         # while the code is 0, and the stop's headline the poll relays as
@@ -1112,6 +1155,20 @@ def record_user_resume(obj: Optional[Dict[str, Any]]) -> None:
         _ACTIVE.set_user_resume(obj)
 
 
+def record_commit_range_result(payload: Optional[Dict[str, Any]]) -> None:
+    """Record the result line's ``commit_range``, if a dispatcher run is
+    active; else a no-op (:meth:`ResultContext.set_commit_range`)."""
+    if _ACTIVE is not None:
+        _ACTIVE.set_commit_range(payload)
+
+
+def record_commit_fixes_result(payload: Optional[Dict[str, Any]]) -> None:
+    """Record the result line's ``commit_fixes``, if a dispatcher run is
+    active; else a no-op (:meth:`ResultContext.set_commit_fixes`)."""
+    if _ACTIVE is not None:
+        _ACTIVE.set_commit_fixes(payload)
+
+
 # ---------------------------------------------------------------------------
 # The invocation record (what a detached child re-executes)
 # ---------------------------------------------------------------------------
@@ -1242,12 +1299,14 @@ _REPLAY_YES = _option_table(("yes",))
 
 #: The modes whose ``--yes`` already means ``--agent-decide`` (D6 row 10): the
 #: apply phases set it in ``apply_orchestrator_base.apply_unattended_defaults``,
-#: ``full`` hands it to them under ``--yes`` (``apply_flags``), and the two
+#: ``full`` hands it to them under ``--yes`` (``apply_flags``), and the
 #: review-then-apply composites give their apply step ``--agent-decide``
-#: always (``improve_workflow.step_flags``).
+#: always (``improve_workflow.step_flags``). The commit modes join under the
+#: same rules (plans/review-commits.md §2.8): ``apply-commit-fixes`` runs
+#: apply-code-fixes, and ``improve-commits`` is a review-then-apply composite.
 YES_IMPLIES_JUDGE_MODES: FrozenSet[str] = frozenset({
     "apply-suggestions", "apply-task-suggestions", "apply-code-fixes", "full",
-    "improve-plan", "improve-code",
+    "improve-plan", "improve-code", "apply-commit-fixes", "improve-commits",
 })
 
 
@@ -1285,10 +1344,22 @@ def drop_implied_judge_flag(mode: str, tokens: Iterable[str]) -> List[str]:
 #: field, never from the argv — the long form names a temp file the dispatcher
 #: already unlinked, and the short form would make free text durable.
 #: ``POS_HOST`` is forwarded as a positional and is not a flag at all.
+#:
+#: ``POS_REVS`` becomes ``--revs "<joined words>"`` (or ``--plan-file`` for a
+#: commit brief's path), and a replay never carries the words as typed: a
+#: phrase such as ``last two days`` names another range tomorrow, so every
+#: record and command carries the pinned ``<base12>..<head12>`` instead
+#: (plans/review-commits.md §2.2, "Ranges are pinned once resolved"). The
+#: hidden ``--commit-stage <file>`` names one detached launch's staged brief
+#: header and ``commit_range``, which the worker applies once and deletes
+#: (§2.1, "Under ``--detach``"), so it is dropped the same way. Both take one
+#: value.
 _REPLAY_DROP_POSITIONAL: Dict[str, Tuple[Tuple[str, ...], bool]] = {
     "plan_file": (("--plan-file",), True),
     "question": (("--question",), True),
     "question_file": (("--question-file",), True),
+    "revs": (("--revs",), True),
+    "commit_stage": (("--commit-stage",), True),
 }
 
 
@@ -1436,7 +1507,8 @@ def replay_flags(mode: str, argv: Sequence[str]) -> List[str]:
     * the two re-entry flags (``--internal-run-id`` with its value), with
       ``--internal-worker`` replayed as the ``--detach`` it stands for;
     * the positional-derived flags, which every replay re-emits from its own
-      arguments (``--plan-file``, ``--question``, ``--question-file``);
+      arguments (``--plan-file``, ``--question``, ``--question-file``, the
+      commit modes' ``--revs``), and the hidden ``--commit-stage``;
     * the dispatcher's own injections for this mode (``modes.injected_flags``
       and every alias's ``alias_flags``), which the replay's mode word
       re-derives;

@@ -1277,3 +1277,95 @@ class TestTheReportIsTheInstances:
         out = capsys.readouterr().out
         assert "\n## Other Summary\n" in out
         assert f"### Output files\n\n- {plan}\n" in out
+
+
+class TestEachStepsResultIsKept:
+    """D2 (live test 2026-10-26): a detached composite's poll reads its steps'
+    results from its own run dir, as the steps returned them. Every phase
+    records its notice as if it were the only one, so the step results are
+    told apart in this process and the notices joined, never replaced."""
+
+    COUNTS = {"valid": 3, "invalid": 1, "needs_human_decision": 0, "validation_failed": 0}
+
+    def _run(self, tmp_path, monkeypatch, capsys, recorded, *, detached=True):
+        from types import SimpleNamespace
+
+        from utils import cli_common, detach
+
+        def run_mode(self, mode_word, extra):
+            notice, counts = recorded.get(mode_word, (None, None))
+            if notice:
+                cli_common.record_notice(notice)
+            if counts:
+                cli_common.record_validation_counts(counts)
+            manager = StateManager(self.plan_path)
+            manager.mark_phase_completed(mode_table.phase_for(mode_word) or mode_word)
+            manager.save()
+            return 0
+
+        plan = _plan(tmp_path)
+        _complete(plan, "generate-tasks")
+        monkeypatch.setattr(fwo.FullWorkflow, "run_mode", run_mode)
+        workflow = _workflow(plan, "--yes")
+        ctx = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            if detached:
+                monkeypatch.setattr(detach, "_ACTIVE", SimpleNamespace(
+                    phase_dir=str(workflow.run_dir), run_id="run-full-1"))
+            assert workflow.run() == 0
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+        return workflow, ctx
+
+    def test_full_keeps_each_step_s_own_and_joins_the_notices(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from utils import status_file
+        from utils.text_clip import join_clauses
+
+        workflow, ctx = self._run(tmp_path, monkeypatch, capsys, {
+            "review-plan": ("Validation saw an excerpt of the plan.", self.COUNTS),
+            "implement": ("Nothing ran this repository's tests.", None),
+            "review-code": (None, dict(self.COUNTS, valid=2)),
+        })
+        assert ctx.notice == join_clauses([
+            "Validation saw an excerpt of the plan.",
+            "Nothing ran this repository's tests.",
+        ]), "the implement step's notice replaced the review's"
+        assert workflow.step_results == [
+            {"phase": "review-plan", "notice": "Validation saw an excerpt of the plan.",
+             "validation_counts": self.COUNTS},
+            {"phase": "implement", "notice": "Nothing ran this repository's tests."},
+            {"phase": "code-review", "validation_counts": dict(self.COUNTS, valid=2)},
+        ], "a step that recorded nothing is not kept, and counts are only their own"
+        record = status_file.read_status(str(workflow.run_dir))["step_results"]
+        assert record["run_id"] == "run-full-1" and record["phase"] == "full"
+        assert record["steps"] == workflow.step_results
+
+    def test_a_clause_an_earlier_step_said_is_not_said_again(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Fable review of D2: implement and apply-code-fixes word the tests
+        line alike; the line says it once, each record keeps its own."""
+        from utils.text_clip import join_clauses
+
+        tests_line = "Nothing ran this repository's tests: verify_command is not set."
+        check = 'not a clean finish: 1 batch(es) applied their edits ("pytest")'
+        workflow, ctx = self._run(tmp_path, monkeypatch, capsys, {
+            "implement": (tests_line, None),
+            "review-code": (join_clauses([check, tests_line]), None),
+        })
+        assert ctx.notice == join_clauses([tests_line, check + "."]), ctx.notice
+        assert workflow.step_results[-1]["notice"] == join_clauses([check, tests_line])
+
+    def test_a_foreground_run_records_nothing_in_its_run_dir(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        workflow, ctx = self._run(tmp_path, monkeypatch, capsys, {
+            "implement": ("Nothing ran this repository's tests.", None),
+        }, detached=False)
+        from utils import status_file
+
+        assert ctx.notice == "Nothing ran this repository's tests."
+        assert "step_results" not in status_file.read_status(str(workflow.run_dir))

@@ -457,7 +457,34 @@ def _tasks_file_named_by(plan_path: str) -> Optional[str]:
     return os.path.normpath(os.path.join(os.path.dirname(plan_path), raw))
 
 
-def code_only_rule(plan_path: str, tasks_path: Optional[str] = None) -> str:
+#: How many protected paths ``code_only_rule`` names before pointing at the
+#: full list (``commit_apply.PROTECTED_NAMED_MAX``; kept here too so this
+#: module never imports the commit guard).
+PROTECTED_PATHS_NAMED = 20
+
+#: The fixed opening and closing of the protected-path clause
+#: :func:`code_only_rule` appends on a commit review's apply, which
+#: :func:`without_protected_clause` finds it by. The paths and the reviewed
+#: commit between them are the only part that varies.
+PROTECTED_CLAUSE_OPEN = (
+    " Do NOT edit these files either, whatever a fix says: they changed "
+    "since the reviewed commit"
+)
+PROTECTED_CLAUSE_CLOSE = (
+    "A fix that cannot be applied without changing one of them is declined, "
+    "naming the file."
+)
+
+
+def code_only_rule(
+    plan_path: str,
+    tasks_path: Optional[str] = None,
+    *,
+    context_plan: Optional[str] = None,
+    protected: Sequence[str] = (),
+    protected_head: Optional[str] = None,
+    protected_list: Optional[str] = None,
+) -> str:
     """The rule appended to every fix-batch prompt's instructions.
 
     A code-fix phase leaves the plan alone. The 2026-10-02 Codex run's judge
@@ -478,24 +505,98 @@ def code_only_rule(plan_path: str, tasks_path: Optional[str] = None) -> str:
     forbids outright was declined as "requires a plan decision". A fix the
     plan or its task list already decides against is declined quoting that
     decision; "needs a plan decision" is for a fix nothing there decides.
+
+    On a commit review's apply (plans/review-commits.md §2.7) two more kinds
+    of file are off limits, and without them the text is unchanged:
+
+    - *context_plan*, the ``--context-plan`` file the commits are checked
+      against, wherever it is and whether or not the range changed it: making
+      it fit the code is the human call this rule leaves to the user. It joins
+      the files not to edit and the decline sentence ("this run's plan, its
+      task list or the context plan").
+    - *protected*, every path that differs from the reviewed commit
+      *protected_head* (later commits, uncommitted edits): a fix landing there
+      would edit code nobody reviewed. The first 20 are named, and
+      *protected_list* (the file holding all of them) when there are more.
     """
-    protected = f"this run's plan (`{plan_path}`)"
+    files = f"this run's plan (`{plan_path}`)"
     if tasks_path:
-        protected += f" or its task list (`{tasks_path}`)"
+        files += f" or its task list (`{tasks_path}`)"
     else:
-        protected += " or the task list generated from it"
-    return (
-        f"Do NOT edit {protected} (not to record an \"approved deviation\", not "
+        files += " or the task list generated from it"
+    if context_plan:
+        files += (
+            f", or the context plan this review checks the commits against "
+            f"(`{context_plan}`)"
+        )
+        moved = "this run's plan, its task list or the context plan"
+        deciders = "the plan, its task list or the context plan"
+    else:
+        moved = "this run's plan or task list"
+        deciders = "the plan or its task list"
+    rule = (
+        f"Do NOT edit {files} (not to record an \"approved deviation\", not "
         "to make the plan match the code). Every other file a fix names is "
         "yours to change, markdown included: a fix on a README, a doc or another "
         "plan in the diff is applied like any code fix. If a fix can only be "
-        "satisfied by changing this run's plan or task list, or that plan should "
-        "be what moves, make no edit for that fix and decline it. When the plan "
-        "or its task list already decides against the fix (a rule it states, "
+        f"satisfied by changing {moved}, or that plan should "
+        f"be what moves, make no edit for that fix and decline it. When {deciders} "
+        "already decides against the fix (a rule it states, "
         "such as \"do not add X\"), quote that decision as the reason; report "
         "it as \"not applied: needs a plan decision\" only when they do not "
         "decide it."
     )
+    if protected:
+        paths = list(protected)
+        named = ", ".join(f"`{path}`" for path in paths[:PROTECTED_PATHS_NAMED])
+        if len(paths) > PROTECTED_PATHS_NAMED:
+            rest = len(paths) - PROTECTED_PATHS_NAMED
+            named += f" … and {rest} more"
+            if protected_list:
+                named += f" (every one is listed in `{protected_list}`)"
+        since = f" {protected_head[:7]}" if protected_head else ""
+        rule += (
+            f"{PROTECTED_CLAUSE_OPEN}{since} (later commits or edits not yet "
+            f"committed), so an edit there would land on code nobody reviewed: "
+            f"{named}. {PROTECTED_CLAUSE_CLOSE}"
+        )
+    return rule
+
+
+def without_protected_clause(prompt: str) -> str:
+    """*prompt* with the protected-path clause of :func:`code_only_rule`
+    taken out, or unchanged when it holds none.
+
+    The write executor's resume binding (``WriteBatchScheduler.
+    _task_fingerprint``, D2g) hashes a commit review's fix prompts through
+    this. The clause lists the guard's protected set, and that set grows
+    between a stopped apply and its ``--resume`` whenever the guard's re-check
+    protects a file edited by hand since (plans/review-commits.md §2.7, §2.8).
+    The list only forbids later writes. It was never an input the batch's
+    edits were derived from, so a batch that had already completed must not
+    read as made from changed inputs and be dispatched a second time. The
+    batches still to run get the grown list in their prompts, and the
+    executor's deny layer enforces it.
+
+    The clause is the last thing :func:`code_only_rule` writes, and the rule
+    follows every fix description, so the last opening phrase is taken: text
+    a fix description quotes cannot widen what is removed.
+    """
+    start = prompt.rfind(PROTECTED_CLAUSE_OPEN)
+    if start < 0:
+        return prompt
+    end = prompt.find(PROTECTED_CLAUSE_CLOSE, start)
+    if end < 0:
+        return prompt
+    return prompt[:start] + prompt[end + len(PROTECTED_CLAUSE_CLOSE):]
+
+
+def _commit_notes_block(notes: Sequence[str]) -> str:
+    """The "Reviewed commits" section of a commit review's fix prompt, or ""."""
+    lines = [str(note) for note in notes if note]
+    if not lines:
+        return ""
+    return "\n## Reviewed commits\n\n" + "\n\n".join(lines) + "\n"
 
 
 def format_fix_batch_prompt(
@@ -504,6 +605,12 @@ def format_fix_batch_prompt(
     base_ref: str = "HEAD~1",
     output_dir: Optional[str] = None,
     tasks_path: Optional[str] = None,
+    *,
+    context_plan: Optional[str] = None,
+    protected: Sequence[str] = (),
+    protected_head: Optional[str] = None,
+    protected_list: Optional[str] = None,
+    commit_notes: Sequence[str] = (),
 ) -> str:
     """
     Format a batch of fixes into a prompt for a subagent.
@@ -521,6 +628,12 @@ def format_fix_batch_prompt(
             entries) the section is omitted, exactly as before.
         tasks_path: This run's task list, named in :func:`code_only_rule`.
             Optional — read off the plan's ``TASKS_FILE`` marker when omitted.
+        context_plan, protected, protected_head, protected_list: A commit
+            review's off-limits files, passed to :func:`code_only_rule`.
+        commit_notes: A commit review's lines about the reviewed range (the
+            root-range line, each absent-at-``head`` file's history, the
+            trust sentence), printed as a "Reviewed commits" section before
+            the instructions. Empty on a plan's run: no section.
 
     Raises:
         ValueError: If the batch contains no fixes.
@@ -533,7 +646,12 @@ def format_fix_batch_prompt(
     implementation_record = _implementation_record_block(
         output_dir, [f.get("file", "") for f in fixes]
     )
-    rule = code_only_rule(plan_path, tasks_path or _tasks_file_named_by(plan_path))
+    rule = code_only_rule(
+        plan_path, tasks_path or _tasks_file_named_by(plan_path),
+        context_plan=context_plan, protected=protected,
+        protected_head=protected_head, protected_list=protected_list,
+    )
+    commit_section = _commit_notes_block(commit_notes)
 
     if len(fixes) == 1:
         # Single fix - use detailed format
@@ -562,7 +680,7 @@ def format_fix_batch_prompt(
 (Review these to avoid redoing work — do NOT re-apply these changes)
 
 {{prior_changes_context}}
-
+{commit_section}
 ## Instructions
 1. Use `git diff {base_ref} -- {file_path}` to see recent changes{'' if base_ref else ' (skip this step — no base_ref available)'}
 2. Read the file and locate the issue using line numbers or anchor text
@@ -607,6 +725,8 @@ Return: Brief summary of what you changed."""
 
 {prior_changes_context}
 """)
+    if commit_section:
+        prompt_parts.append(commit_section)
 
     prompt_parts.append(f"""---
 

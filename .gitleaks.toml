@@ -15,9 +15,9 @@
 #    `api_key` / `refresh_token` is red on content we cannot delete and would not
 #    want to:
 #      * `skills/multi-llm/tests/fixtures/e2e/responses/code_review/
-#        mixed_importance.json` ships an `API_KEY = "sk-1234…"` assignment as the
-#        anchor text of a review finding — the fixture is *about* a hardcoded
-#        key (spelled elided here on purpose: the full 13-character literal
+#        mixed_importance.json` ships an API-key assignment as the anchor text
+#        of a review finding — the fixture is *about* a hardcoded key
+#        (described here instead of quoted: the full 13-character literal
 #        clears `generic-api-key`'s entropy floor when it sits next to the
 #        identifier, so writing it out would make this very file a finding);
 #      * `skills/multi-llm/tests/fixtures/e2e/plans/auth-feature.md` specifies a

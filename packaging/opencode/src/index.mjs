@@ -94,7 +94,7 @@ const DEGRADED_TOOL_NAME = "multi_llm"
  * only this file's: the package lands in whatever cache directory npm gives it,
  * so a path baked at build time is a path that is wrong on every machine.
  */
-const SKILL_DIR_TOKEN = "{SKILL_DIR}"
+const SKILL_DIR_PLACEHOLDER = "{SKILL_DIR}"
 
 /**
  * Bumped in lockstep with `packaging/common/surface.py`'s
@@ -103,8 +103,26 @@ const SKILL_DIR_TOKEN = "{SKILL_DIR}"
  * 5: `dispatcher.route_env` (the route signal's name and value, set on every
  * child this file spawns, so a finished phase's next command is spelled for
  * this route) and each mode row's `optional_why`.
+ * 6: the commit modes' range: `positional_kinds.revs`, the optional `revs`
+ * argument's description, and the `revs` block this file composes and reads
+ * a range with (plans/review-commits.md §2.9).
  */
-const SUPPORTED_SURFACE_VERSION = 5
+const SUPPORTED_SURFACE_VERSION = 6
+
+/**
+ * Schema v6's optional fifth argument: the commit modes' range. Registered
+ * beside the four, written into a handed-back call only for a mode that takes
+ * a range, and read as `""` when left out, as a left-out `question` is.
+ */
+const REVS = "revs"
+
+/**
+ * The result key a commit run's blocks are relayed in, right after `message`
+ * (plans/review-commits.md §2.3, "Relay"): the commit block and any
+ * `[COMMIT_FIXES]` block, as the run printed them, moved out of `output` and
+ * out of the parsed result so the model reads each line once.
+ */
+const COMMIT_BLOCKS_KEY = "commit_blocks"
 
 // ---------------------------------------------------------------------------
 // The generated surface
@@ -141,6 +159,24 @@ function loadSurface() {
       )
       return null
     }
+    // Schema v6's range: refused whole when it is not all there, never
+    // half-used, since a range mode's words would otherwise be dropped.
+    const revs = surface.revs
+    if (
+      !isNonEmptyString(surface.positional_kinds?.revs) ||
+      !isNonEmptyString(revs?.count_word) || !isNonEmptyString(revs?.brief_suffix) ||
+      !isNonEmptyString(revs?.plan_refusal) || !isNonEmptyString(revs?.range_key) ||
+      !isNonEmptyString(revs?.fixes_key) || !isNonEmptyString(revs?.lines_key) ||
+      !Number.isInteger(revs?.pinned?.sha_chars) ||
+      !isNonEmptyString(revs?.pinned?.separator) ||
+      !isNonEmptyString(revs?.pinned?.pattern)
+    ) {
+      warn(
+        `cli-surface.json declares no usable revs block. The package is ` +
+          `inconsistent; reinstall it.`,
+      )
+      return null
+    }
     return surface
   } catch (error) {
     warn(`cannot read the generated CLI surface: ${describe(error)}`)
@@ -167,8 +203,9 @@ function describe(error) {
 // ---------------------------------------------------------------------------
 
 /**
- * The tool's argument schema: four required strings/arrays whose descriptions
- * are the surface's `argument_descriptions`, byte for byte.
+ * The tool's argument schema: the four strings/arrays of the shared contract
+ * and (schema v6) the optional `revs`, whose descriptions are the surface's
+ * `argument_descriptions`, byte for byte.
  *
  * Only the JSON-Schema *types* are this file's — they are the shape `execute`
  * validates, not words a model reads. The description text (the mode
@@ -196,6 +233,7 @@ function toolArgs(surface) {
       items: { type: "string" },
       description: text("extra_flags"),
     },
+    [REVS]: { type: "string", description: text(REVS) },
   }
 }
 
@@ -269,12 +307,67 @@ function withAbsentQuestion(args) {
   return args
 }
 
+/** Whether *row* declares the commit modes' range (schema v6). */
+function takesRevs(row, surface) {
+  return row.positionals.includes(surface.positional_kinds.revs)
+}
+
+/**
+ * The argv words a `revs` value travels as, right after the mode word.
+ *
+ * The dispatcher joins every leading bare word of a range mode into its one
+ * range, a `-N` count word included (`multi_llm._split_positionals`), so
+ * `last 2 commits` goes as three words and arrives as the range the user
+ * typed, and `-2 main..HEAD` as two, which the grammar refuses whole rather
+ * than reading the second as a flag. One exception keeps a value whole: a
+ * commit brief's path (it ends in the surface's `brief_suffix`), which the
+ * dispatcher turns into `--plan-file` only as one word, so a path holding a
+ * space reaches it unsplit. Nothing here is resolved as a file: `A..B` is not
+ * a path. The codex server's `revs_words` is its port.
+ */
+function revsWords(revs, surface) {
+  const text = typeof revs === "string" ? revs.trim() : ""
+  if (!text) return []
+  if (text.endsWith(surface.revs.brief_suffix) && !text.startsWith("-")) {
+    return [text]
+  }
+  return text.split(/\s+/)
+}
+
+/**
+ * The first `revs` word the dispatcher would read as a flag, or null: one
+ * starting with `-` that is not the surface's `count_word` (`-2`). Any other
+ * one ends the leading bare-word run, so it would arrive as a flag the call
+ * never put in `extra_flags`, a reserved one included.
+ *
+ * A value kept whole as a brief path (`revsWords`) is one argv word and
+ * carries no flag, but a `--` word spelled inside it is refused too:
+ * `HEAD~3..HEAD --context-plan docs/x.md`, the shape the plan refusal
+ * invites, would otherwise reach the range grammar as one bare
+ * `[RANGE_UNRECOGNIZED]` and never hear "send it in extra_flags". Only the
+ * long-option spelling counts there, as a brief path may hold a word that
+ * starts with one `-` (`reviews -old/x.md`). The codex server's
+ * `flag_like_revs_word` is its port.
+ */
+function flagLikeRevsWord(revs, surface) {
+  const count = new RegExp(`^(?:${surface.revs.count_word})$`)
+  const text = typeof revs === "string" ? revs.trim() : ""
+  return (
+    revsWords(revs, surface).find(
+      (token) => token.startsWith("-") && !count.test(token),
+    ) ??
+    (text ? text.split(/\s+/) : []).find((token) => token.startsWith("--")) ??
+    null
+  )
+}
+
 /** `{ ok: true, mode }` or `{ ok: false, error }`. Never throws. */
 function validateArgs(args, surface) {
   if (args === null || typeof args !== "object" || Array.isArray(args)) {
     return fail(`arguments must be an object, got ${typeName(args)}.`)
   }
   const { mode, plan, question, extra_flags: extraFlags } = args
+  const revs = args[REVS] === undefined ? "" : args[REVS]
 
   if (typeof mode !== "string" || mode.length === 0) {
     return fail(
@@ -308,6 +401,44 @@ function validateArgs(args, surface) {
       `"extra_flags" must be an array of strings (use [] for none), got ` +
         `${typeName(extraFlags)}.`,
     )
+  }
+  if (typeof revs !== "string") {
+    return fail(
+      `"revs" must be a string: the commit range for a mode that takes one, ` +
+        `"" (or the key left out) otherwise. Got ${typeName(revs)}.`,
+    )
+  }
+  const kinds = Object.values(surface.positional_kinds)
+  const unknown = row.positionals.filter((kind) => !kinds.includes(kind))
+  if (unknown.length) {
+    // Never dropped: a positional this plugin cannot compose would reach the
+    // dispatcher missing, or as the wrong kind.
+    return fail(
+      `mode "${row.name}" declares a positional this plugin cannot compose ` +
+        `(${unknown.join(", ")}); the package is inconsistent, reinstall it.`,
+    )
+  }
+  const ranging = takesRevs(row, surface)
+  if (ranging && plan !== "") {
+    // `plan` keeps one meaning: a range mode declares no plan positional, and
+    // the surface's message names the range's argument and the context flag.
+    return fail(surface.revs.plan_refusal.split("{mode}").join(row.name))
+  }
+  if (!ranging && revs !== "") {
+    return fail(
+      `mode "${row.name}" declares no range positional, so "revs" must be "" ` +
+        `(or the key left out).`,
+    )
+  }
+  if (ranging) {
+    const flag = flagLikeRevsWord(revs, surface)
+    if (flag !== null) {
+      return fail(
+        `"revs" holds "${flag}", which the dispatcher would read as a flag and ` +
+          `not as part of the range. Send flags in extra_flags; the only range ` +
+          `word that may begin with "-" is a commit count.`,
+      )
+    }
   }
 
   // Arity is the mode's own declaration, never a JS judgement. This is what
@@ -598,14 +729,24 @@ function composeDispatcherArgv(row, values, surface) {
   // flag one already contributes.
   const argv = [values.word ?? row.name]
   for (const kind of row.positionals) {
-    if (kind === surface.positional_kinds.plan && values.plan) {
+    if (kind === surface.positional_kinds.plan) {
       // The user's own spelling when the caller kept one (`planArg`), else the
       // resolved path: the dispatcher runs in the anchor, so a relative plan
       // names the same file, and it is the spelling the run records as
       // `plan_arg` and a finished phase's next command is printed with.
-      argv.push(values.planArg || values.plan)
-    } else if (kind === surface.positional_kinds.question && values.question) {
-      argv.push(values.question)
+      if (values.plan) argv.push(values.planArg || values.plan)
+    } else if (kind === surface.positional_kinds.question) {
+      if (values.question) argv.push(values.question)
+    } else if (kind === surface.positional_kinds.revs) {
+      // The range as typed, its words right after the mode and never resolved
+      // as a file; none means HEAD (`revsWords`).
+      argv.push(...revsWords(values.revs, surface))
+    } else {
+      // `validateArgs` refuses such a row first; a kind this plugin cannot
+      // compose is never dropped from the argv in silence.
+      throw new TypeError(
+        `mode ${row.name} declares a positional this plugin cannot compose: ${kind}`,
+      )
     }
   }
   argv.push(...surface.baked_flags)
@@ -772,9 +913,12 @@ async function resolveSessionModel(client, ctx, budgetMs = SESSION_MODEL_BUDGET_
  * becoming the empty string, so the positional still reaches the dispatcher and
  * the refusal names what the user typed instead of a missing argument.
  */
-function normalizePlan(plan, anchor) {
+function normalizePlan(plan, anchor, surface = null) {
   const spelled = planSpelling(plan)
   if (!spelled) return ""
+  // A pinned range (a commit run's re-attach or abort) is passed on as it is:
+  // it names a brief by name, and joined to the anchor it would name nothing.
+  if (isPinnedRange(spelled, surface)) return spelled
   if (path.isAbsolute(spelled)) return spelled
   return path.resolve(anchor, spelled)
 }
@@ -802,7 +946,8 @@ function planFromRoot(result, values, anchor, surface) {
   const typed = values?.planArg
   if (
     typeof root !== "string" || !path.isAbsolute(root) ||
-    typeof typed !== "string" || !typed || path.isAbsolute(typed)
+    typeof typed !== "string" || !typed || path.isAbsolute(typed) ||
+    isPinnedRange(typed, surface)
   ) {
     return
   }
@@ -816,6 +961,20 @@ function planFromRoot(result, values, anchor, surface) {
   const prefix = base.endsWith(path.sep) ? base : base + path.sep
   if (here !== base && !here.startsWith(prefix)) return
   values.plan = path.resolve(base, typed)
+}
+
+/**
+ * Whether *plan* is a pinned range (`<base12>..<head12>`, the surface's
+ * `revs.pinned.pattern`), which `status` maps to its brief by name: a re-attach
+ * or abort call names a commit run that way, and it is never a path to resolve
+ * against the workspace.
+ */
+function isPinnedRange(plan, surface) {
+  const pattern = surface?.revs?.pinned?.pattern
+  return (
+    typeof plan === "string" && typeof pattern === "string" &&
+    new RegExp(`^(?:${pattern})$`).test(plan)
+  )
 }
 
 /**
@@ -1603,6 +1762,11 @@ async function runWorkflow({
     // Fix round 27: the plan the dispatcher read, before any poll, abort or
     // option names it.
     planFromRoot(launch.result, cycleValues, anchor, surface)
+    // A range mode's run is named by the range the launch pinned, never by the
+    // phrase the call typed.
+    if (takesRevs(cycleRow, surface)) {
+      pinCommitRange(launch.result, cycleValues, anchor, surface)
+    }
     // The run in view when this cycle began, which is what a launch that
     // claimed nothing still has to report: on the first cycle that is no run at
     // all, and on a continuation it is the finished run that spawned it.
@@ -1856,6 +2020,7 @@ async function runWorkflow({
       // plan this call was typed with, the continuation keeps the user's
       // spelling so its own next-phase command does too.
       planArg: samePlanFile(args.plan, values.plan) ? values.planArg : undefined,
+      revs: args[REVS] ?? "",
       question: args.question,
       extraFlags: args.extra_flags,
     })
@@ -2069,10 +2234,124 @@ function abortArgs(values, runId, surface) {
   const [word, ...flags] = surface.dispatcher.abort
   return {
     mode: word,
-    plan: values.plan,
+    // A range mode's run by its pinned range (`pinCommitRange`), which
+    // `status` maps to the brief by name: never the phrase the call typed.
+    plan: values.pinned || values.plan,
     question: "",
     extra_flags: [...flags, surface.dispatcher.run_id_option, runId],
   }
+}
+
+/**
+ * The directory the dispatcher ran from: the repository root its result line
+ * names (the surface's `dispatcher.ran_from_root_key`) when it is absolute and
+ * holds the anchor, as `planFromRoot` accepts it, else the anchor. A relative
+ * path the dispatcher printed is relative to it.
+ */
+function dispatcherCwd(result, anchor, surface) {
+  const key = surface?.dispatcher?.ran_from_root_key
+  const root = key && result && typeof result === "object" ? result[key] : null
+  if (typeof root !== "string" || !path.isAbsolute(root)) return anchor
+  let here
+  try {
+    here = realPath(anchor)
+  } catch {
+    return anchor
+  }
+  const base = path.resolve(root)
+  const prefix = base.endsWith(path.sep) ? base : base + path.sep
+  return here === base || here.startsWith(prefix) ? base : anchor
+}
+
+/**
+ * Name a range mode's run by the range its launch resolved.
+ *
+ * The launch's result line carries `commit_range` (the surface's
+ * `revs.range_key`): the full `base` and `head`, and the `brief` path as the
+ * dispatcher printed it, relative to the directory it ran from. From it,
+ * *values* gains `pinned`, the spelling every tool call handed back names the
+ * run by (`<base12>..<head12>`, shaped by the surface's `revs.pinned`; the
+ * brief path for a root range, which has no base), and the brief as the plan
+ * the polls and the abort dispatch name absolutely (`plan`) and as printed
+ * (`planArg`, which the `--blocked` lookup takes: `util next-command` reads a
+ * file). The typed phrase names none of them, so a later call never resolves
+ * `last 2 commits` again against a moved `HEAD` (plans/review-commits.md
+ * §2.8, §2.9). The record is kept for the block (`attachCommitBlocks`). A
+ * launch without the key pins nothing. The codex server's `pin_commit_range`
+ * is its port.
+ */
+function pinCommitRange(result, values, anchor, surface) {
+  const shape = surface.revs
+  const record = result && typeof result === "object" ? result[shape.range_key] : null
+  if (!record || typeof record !== "object" || Array.isArray(record)) return
+  values.commitRange = record
+  const brief = isNonEmptyString(record.brief) ? record.brief : null
+  const { sha_chars: chars, separator } = shape.pinned
+  if (isNonEmptyString(record.base) && isNonEmptyString(record.head)) {
+    values.pinned =
+      record.base.slice(0, chars) + separator + record.head.slice(0, chars)
+  } else if (brief) {
+    values.pinned = brief
+  }
+  if (brief) {
+    values.plan = path.isAbsolute(brief)
+      ? brief
+      : path.resolve(dispatcherCwd(result, anchor, surface), brief)
+    values.planArg = brief
+  }
+}
+
+/**
+ * The commit run's blocks, relayed once in `commit_blocks`.
+ *
+ * A tool route renders the commit block and the `[COMMIT_FIXES]` block from
+ * the result line (plans/review-commits.md §2.3, "Relay"): the launch printed
+ * the first before it detached and the terminal poll answers for the run, so
+ * the block is in no `output` this call keeps. Each record (the surface's
+ * `revs.range_key` and `revs.fixes_key`) carries its block as the run printed
+ * it (`revs.lines_key`), which is what is relayed: this file composes none of
+ * it. The commit block comes from the terminal payload when it has one (a
+ * launch that stopped after printing it), else from the launch this call
+ * watched; `[COMMIT_FIXES]` from the terminal payload (`status` reads it off
+ * the saved guard). Moved, not copied: the lines leave the parsed result, and
+ * a block the terminal child also printed leaves `output`. The codex server's
+ * `attach_commit_blocks` is its port.
+ */
+function attachCommitBlocks(outcome, values, surface) {
+  const shape = surface.revs
+  const linesKey = shape.lines_key
+  const payload =
+    outcome?.result && typeof outcome.result === "object" ? outcome.result : {}
+  const isLines = (value) =>
+    Array.isArray(value) && value.length > 0 &&
+    value.every((line) => typeof line === "string")
+  const blocks = []
+  for (const [key, fallback] of [
+    [shape.range_key, values?.commitRange],
+    [shape.fixes_key, null],
+  ]) {
+    const record = payload[key]
+    let lines = record && typeof record === "object" ? record[linesKey] : undefined
+    if (record && typeof record === "object") delete record[linesKey]
+    if (!Array.isArray(lines) && fallback && typeof fallback === "object") {
+      lines = fallback[linesKey]
+    }
+    if (isLines(lines)) blocks.push(redactCommand([...lines], null, surface))
+  }
+  if (!blocks.length) return
+  if (typeof outcome.output === "string") {
+    const kept = outcome.output.split("\n")
+    for (const block of blocks) {
+      for (let index = 0; index + block.length <= kept.length; index += 1) {
+        if (block.every((line, offset) => kept[index + offset] === line)) {
+          kept.splice(index, block.length)
+          break
+        }
+      }
+    }
+    outcome.output = kept.join("\n").replace(/^\n+|\n+$/g, "")
+  }
+  outcome[COMMIT_BLOCKS_KEY] = blocks.flat().join("\n")
 }
 
 /** S4 — the terminal result, and what happens to `next`. */
@@ -2559,6 +2838,7 @@ function userSpelling(args, surface) {
   const row = resolveMode(args.mode, surface)
   if (!spell || typeof spell.template !== "string" || !row?.user_flag) return null
   const words = [row.user_flag]
+  for (const word of revsWords(args[REVS], surface)) words.push(quoteForReader(word))
   if (args.plan) words.push(quoteForReader(args.plan))
   if (args.question) words.push(quoteForReader(args.question))
   for (const flag of args.extra_flags ?? []) words.push(quoteForReader(flag))
@@ -2708,7 +2988,11 @@ function unparseableCall() {
  * Parse `uv run … multi_llm.py <mode> <positionals> <flags>` back into args.
  *
  * Deliberately narrow: it takes only what it can name, and anything it cannot is
- * reported rather than executed.
+ * reported rather than executed. On a mode that takes a range, the leading
+ * bare words (a `-N` count word included, as the dispatcher splits them) are
+ * the range: they are joined into `revs`, `plan` stays empty, and every flag
+ * from the first one on (`--focus`, `--context-plan` and their values among
+ * them) stays in `extra_flags` as printed.
  */
 function parseDispatcherCommand(command, surface) {
   const tokens = splitPosix(command)
@@ -2721,11 +3005,13 @@ function parseDispatcherCommand(command, surface) {
   const row = resolveMode(rest[0], surface)
   if (!row) return null
 
+  const ranging = takesRevs(row, surface)
+  const count = ranging ? new RegExp(`^(?:${surface.revs.count_word})$`) : null
   const positionals = []
   const flags = []
   let seenFlag = false
   for (const token of rest.slice(1)) {
-    if (token.startsWith("-")) seenFlag = true
+    if (token.startsWith("-") && !(!seenFlag && count?.test(token))) seenFlag = true
     if (seenFlag) flags.push(token)
     else positionals.push(token)
   }
@@ -2748,6 +3034,12 @@ function parseDispatcherCommand(command, surface) {
     const inline = token.includes("=")
     const next = flags[index + 1]
     if (!inline && next !== undefined && !next.startsWith("-")) index += 1
+  }
+  if (ranging) {
+    return {
+      mode: row.name, [REVS]: positionals.join(" "), plan: "", question: "",
+      extra_flags: kept,
+    }
   }
   const args = {
     mode: row.name,
@@ -2803,6 +3095,7 @@ function splitPosix(text) {
 
 function describeCall(args, surface) {
   const parts = [args.mode]
+  if (args[REVS]) parts.push(args[REVS])
   if (args.plan) parts.push(args.plan)
   if (args.extra_flags.length) parts.push(...args.extra_flags)
   return `call ${surface.tool_name} with ${parts.join(" ")}`
@@ -2925,6 +3218,9 @@ async function fetchResumeCommand({
   values, surface, ctx, env, uv, anchor, outcome = null,
 }) {
   const resume = surface.dispatcher.resume
+  // A range mode's run is asked about by the brief its launch pinned
+  // (`pinCommitRange`), never by the phrase the call typed; one that pinned
+  // nothing has no plan here and is asked nothing.
   const plan = values.planArg || values.plan
   const word = blockedWord(values, outcome, surface)
   if (!resume || !plan || !word) return null
@@ -2950,8 +3246,9 @@ async function fetchResumeCommand({
   }
   const step = child.result?.[resume.result_key]
   const command = step?.command
+  // `revs`: what a call on a range mode names the run by, its pinned range.
   return typeof command === "string" && command.trim()
-    ? { ...step, command, word, plan }
+    ? { ...step, command, word, plan, revs: values.pinned || plan }
     : null
 }
 
@@ -3031,9 +3328,13 @@ function attachAnswers(step, outcome, surface) {
       ? [...value]
       : null
   const callFor = (extraFlags) => {
-    const args = {
-      mode: row.name, plan: step.plan, question: "", extra_flags: extraFlags,
-    }
+    // A call on a range mode names the run by its pinned range, `plan` empty.
+    const args = takesRevs(row, surface)
+      ? {
+          mode: row.name, [REVS]: step.revs ?? "", plan: "", question: "",
+          extra_flags: extraFlags,
+        }
+      : { mode: row.name, plan: step.plan, question: "", extra_flags: extraFlags }
     return { tool: surface.tool_name, args, human: describeCall(args, surface) }
   }
   const lead = []
@@ -3145,7 +3446,7 @@ function injectCommand(cfg, surface) {
 
 /** Resolve every `{SKILL_DIR}` in a generated artifact to this package's tree. */
 function resolveSkillDir(text) {
-  return text.split(SKILL_DIR_TOKEN).join(SKILL_DIR)
+  return text.split(SKILL_DIR_PLACEHOLDER).join(SKILL_DIR)
 }
 
 /**
@@ -3522,8 +3823,11 @@ async function execute(args, ctx, surface, client) {
     const values = {
       // The word as sent, so an alias reaches the dispatcher unexpanded.
       word: args.mode,
-      plan: normalizePlan(args.plan, anchor),
+      plan: normalizePlan(args.plan, anchor, surface),
       planArg: planSpelling(args.plan),
+      // The range as typed, never resolved here: the dispatcher resolves it,
+      // and the launch's result line pins it (`pinCommitRange`).
+      revs: args[REVS] ?? "",
       question: args.question,
       // What `validateArgs` forwards: a restated flag this tool composes with
       // the same meaning is dropped here, quietly (run 6, #10a/#14).
@@ -3541,6 +3845,7 @@ async function execute(args, ctx, surface, client) {
       row, values, surface, ctx, client, env, uv, anchor, relayState,
     })
     handBackTyped(outcome, values, surface)
+    attachCommitBlocks(outcome, values, surface)
     // Numbers, not a sentence (`relayCounts`): what the mid-run channel was
     // asked to do, on the one surface a user can hand back.
     const relays = relayCounts(relayState)
@@ -3688,6 +3993,10 @@ function wayForwardFirst(outcome) {
     if (outcome[key] != null) ordered[key] = outcome[key]
   }
   if ("message" in outcome) ordered.message = outcome.message
+  // A commit run's blocks, right under the message they belong to.
+  if (outcome[COMMIT_BLOCKS_KEY] != null) {
+    ordered[COMMIT_BLOCKS_KEY] = outcome[COMMIT_BLOCKS_KEY]
+  }
   for (const [key, value] of Object.entries(outcome)) {
     if (!(key in ordered) && !LAST_KEYS.includes(key)) ordered[key] = value
   }
@@ -3749,6 +4058,7 @@ function rowNeedsInstructions(row, outcome, surface) {
 const __testing = {
   PACKAGE_DIR,
   SKILL_DIR,
+  attachCommitBlocks,
   composeDispatcherArgv,
   composeSpawnArgv,
   capTitleLine,
@@ -3766,7 +4076,9 @@ const __testing = {
   fetchResumeCommand,
   finishOutcome,
   parseDispatcherCommand,
+  pinCommitRange,
   quoteForReader,
+  revsWords,
   splitExtraFlags,
   toolCallsFor,
   userSpelling,

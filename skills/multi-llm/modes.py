@@ -31,6 +31,15 @@ from typing import Dict, Optional, Tuple
 POS_PLAN = "<plan>"
 POS_QUESTION = "<question>"
 POS_HOST = "<host>"
+#: The commit modes' range (plans/review-commits.md §2.2). Spelled in square
+#: brackets because, unlike the three kinds above, it is optional: no words
+#: means ``HEAD``. It is also the only kind that spans several bare words, so
+#: ``--review-commits last 2 commits`` needs no quotes: the dispatcher joins
+#: every leading bare word into the one value (a ``-N`` word included) and
+#: hands it on as ``--revs``, or as ``--plan-file`` when it is one commit
+#: brief's path (``multi_llm._normalize_positionals``). ``--help`` and the
+#: package surfaces render the spelling as it is written here.
+POS_REVS = "[<range>]"
 
 
 @dataclass(frozen=True)
@@ -41,6 +50,8 @@ class Mode:
         name: The mode word (``argv[1]``).
         positionals: Positional kinds, in order. Normalized by the dispatcher
             into the flags the target's own argparse parser already accepts.
+            :data:`POS_REVS` is the one kind that is optional and joins every
+            leading bare word into its one value.
         summary: One-line ``--help`` text.
         target_module: Dotted module path, imported lazily. ``None`` for modes
             whose implementation has not landed yet.
@@ -110,6 +121,20 @@ class Mode:
             means, never one that starts "optional" itself (fix round 22: a
             host printed "Optional, before that: optional: have the models
             review…").
+        commit_view_of: The phase mode a commit front door fronts
+            (plans/review-commits.md §2.1): ``review-code`` on
+            ``review-commits``, ``apply-code-fixes`` on ``apply-commit-fixes``.
+            Such a front door resolves its range to a commit brief, then
+            re-records the invocation as that mode and calls its ``main``, so
+            every run record, resume line and next step of the review names
+            the fronted mode. This column is the one owner of the mapping
+            back: wherever a command is rendered for a brief whose
+            ``state.json`` holds ``commit_range``, the fronted word is spelled
+            as the row that names it here (§2.8). ``None`` on every other row,
+            ``improve-commits`` included: that composite is recorded as
+            itself (its own run dir, ``--mode improve-commits``) and never as
+            ``improve-code``, so nothing maps back for it, and its steps come
+            from its own ``sequence``.
     """
 
     name: str
@@ -128,6 +153,7 @@ class Mode:
     runs_workflow: bool = False
     sequence: Tuple[str, ...] = ()
     optional_why: Optional[str] = None
+    commit_view_of: Optional[str] = None
 
     @property
     def is_composite(self) -> bool:
@@ -296,6 +322,47 @@ MODES: Tuple[Mode, ...] = (
         supports_detach=True,
         sequence=("review-code", "apply-code-fixes"),
     ),
+    # The three commit modes (plans/review-commits.md §2.1): front doors that
+    # resolve a commit range to a commit brief and run the code phases on it.
+    # None is a workflow phase, so `full` never runs them and `full.sequence`
+    # stays the workflow rows. Each core runs its front door (or, natively on
+    # improve-commits, `util commit-brief`) and then loads the code phase cores
+    # it fronts with `util instructions <phase>`, so validation, reaggregate and
+    # the report stay single-sourced (plans/review-commits.md §2.9).
+    Mode(
+        name="review-commits",
+        positionals=(POS_REVS,),
+        summary="Review a commit range (HEAD by default) with every model, "
+                "then group + validate.",
+        target_module="review_commits_orchestrator",
+        # The fronted phase: the run is review-code's on the commit brief.
+        phase="code-review",
+        instruction_file="review-commits.md",
+        supports_detach=True,
+        commit_view_of="review-code",
+    ),
+    Mode(
+        name="apply-commit-fixes",
+        positionals=(POS_REVS,),
+        summary="Apply a commit review's validated fixes as uncommitted edits.",
+        target_module="apply_commit_fixes_orchestrator",
+        phase="apply-code-fixes",
+        instruction_file="apply-commit-fixes.md",
+        supports_detach=True,
+        commit_view_of="apply-code-fixes",
+    ),
+    Mode(
+        name="improve-commits",
+        positionals=(POS_REVS,),
+        summary="Review a commit range with every model, then apply the "
+                "validated fixes (unattended).",
+        target_module="improve_commits_orchestrator",
+        phase="improve-commits",       # run dir only, as `improve-code`
+        instruction_file="improve-commits.md",
+        supports_detach=True,
+        # The code words: every sequence word is a workflow-phase row.
+        sequence=("review-code", "apply-code-fixes"),
+    ),
     Mode(
         name="full",
         positionals=(POS_PLAN,),
@@ -436,7 +503,7 @@ def alias_expansion(word: str) -> str:
 #: every surface now renders from it: ``dist/cli-surface.json`` (what the
 #: model-facing tool definition is assembled from), and both places every shim
 #: template states it — its step-2 prose and its worked example — through
-#: ``cli_common.DEFAULT_MODE_TOKEN``.
+#: ``cli_common.DEFAULT_MODE_PLACEHOLDER``.
 #:
 #: One surface cannot render, and is pinned instead: Claude Code's ``SKILL.md`` is
 #: ``installable: false`` and is read by the host verbatim (it expands
@@ -576,6 +643,19 @@ TOOL_NOTICE_LINE = (
     "outside any fenced block. " + NOTICE_PLACEMENT
 )
 
+#: What a host does with a commit mode's blocks on a tool route
+#: (plans/review-commits.md §2.3, "Relay"). The CLI prints the commit block
+#: (and ``[COMMIT_FIXES]`` on an apply) before any model runs, and the cores
+#: relay them verbatim and once; both servers lift those lines out of the
+#: output into one ``commit_blocks`` string, so the tool description has to say
+#: the same thing the cores say.
+TOOL_COMMIT_BLOCKS_LINE = (
+    "A commit mode's result (review-commits, apply-commit-fixes, "
+    "improve-commits) can carry `commit_blocks`: the commits the run acts on, "
+    "and on an apply the fixes it will apply and skip. Relay it verbatim and "
+    "once, as soon as you read it, before anything else from the result."
+)
+
 #: What every host does with the write policy at a stop (fix round 20, live
 #: run 8 #4; a user decision, 2026-10-07: permissive). Round 18 told hosts
 #: never to suggest loosening ``driver.write_paths`` after a Claude Code host
@@ -686,7 +766,7 @@ NEEDS_HUMAN_WORK_SENTENCE = (
 #: supported route loads renders it: both ``hosts/*/shim.md.tmpl``, the
 #: opencode plugin's ``hosts/opencode/plugin-command.md.tmpl`` and the codex
 #: plugin's ``hosts/codex/plugin-skill.md.tmpl`` through
-#: ``cli_common.NEEDS_HUMAN_RULE_TOKEN``, and Claude Code's ``SKILL.md`` — read
+#: ``cli_common.NEEDS_HUMAN_RULE_PLACEHOLDER``, and Claude Code's ``SKILL.md`` — read
 #: verbatim by its host, so nothing substitutes a token there — as a literal
 #: held to this constant by ``test_needs_human_rule_has_one_owner``, the same
 #: shape :data:`DEFAULT_MODE` uses. It also owns the ``next`` clause, because
@@ -705,10 +785,13 @@ NEEDS_HUMAN_WORK_SENTENCE = (
 #: (the needs-human message's `argv`, run-7 #13); it asks for the phase and
 #: the plan. Fix round 22: "which phase was running" came back as "Phase
 #: running: implement" for a phase that had stopped (OpenCode, live run 9).
+#: "Or commit range" (commit modes' live run, 2026-10-26): a commit mode's
+#: refusal before any phase (`[RANGE_DIVERGED]`) has a range and no plan, and
+#: OpenCode reported "on which plan" all the same.
 NEEDS_HUMAN_RULE = (
     "Run `next` verbatim when it is not `null` on `0` and `2`. On `3` stop: "
-    "report to the user which phase stopped, on which plan, the last "
-    "error line it printed, "
+    "report to the user which phase stopped, on which plan or commit range, "
+    "the last error line it printed, "
     "whole (on a stop it says what stopped, what it reported, what did not "
     "run and whether anything ran the repository's tests), "
     "and the options its output names (`next` included); do not run a "
@@ -752,9 +835,10 @@ NEEDS_HUMAN_RULE = (
 NEEDS_HUMAN_MESSAGE = {
     "template": (
         "Stop here: this run is blocked and needs a human. {phase} {error} "
-        "Report to the user which phase stopped, on which plan, that line whole, word "
-        "for word (on a stop it says what stopped, what the task reported, what "
-        "did not run and whether anything ran the repository's tests), and the "
+        "Report to the user which phase stopped, on which plan or commit range, "
+        "that line whole, word for word (on a stop it says what stopped, what the "
+        "task reported, what did not run and whether anything ran the "
+        "repository's tests), and the "
         "`options`; an `options` entry is a tool call for you, never a command "
         "for the user to type, so do not print one as a command. The "
         "dispatcher's output is included as it was rendered, except that every "
@@ -1073,10 +1157,14 @@ def phase_from_selector(word: str) -> Optional[str]:
 
 # The non-mode part of `argument-hint` — everything after the mode alternation.
 # A literal because it describes flags, not modes; the mode list itself is
-# rendered so a new row cannot be forgotten here.
+# rendered so a new row cannot be forgotten here. The commit modes take an
+# optional range where the others take a plan (`POS_REVS`), and add two flags
+# of their own.
 ARGUMENT_HINT_TRAILER = (
-    ' <plan_path> ["<question>" (required for --ask)] '
+    f' <plan_path>|{POS_REVS} (<range>: --*-commits only) '
+    '["<question>" (required for --ask)] '
     "[--models provider:model ...] [--interactive] [--quick] [--yes] [--force] "
+    '[--focus "<text>"|--context-plan PATH (--*-commits only)] '
     "[--dir PATH|--gitignore|--template-only (--init only)]"
 )
 

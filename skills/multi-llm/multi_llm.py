@@ -18,7 +18,11 @@ Grammar (one line, no shell preprocessing)::
   ``--plan-file`` + ``--question`` (falling back to ``--question-file``, written
   *here* and never by the driving agent, when the question outgrows the argv
   budget); ``install-host`` takes ``<host>``; ``init`` takes none. An extra
-  positional is exit 3, never silently dropped.
+  positional is exit 3, never silently dropped. The commit modes take an
+  optional ``[<range>]`` instead, every leading bare word (``-N`` included)
+  joined into one ``--revs`` value, or ``--plan-file`` for a commit brief's
+  path; they refuse a typed ``--plan-file``, ``--base-ref`` or ``--head-ref``
+  (``[COMMIT_FLAG_CONFLICT]``), which their front door synthesises.
 * **Everything after the positionals is forwarded verbatim** to that mode's own
   argparse parser, which stays the single source of truth for its options.
   ``multi_llm.py <mode> --help`` prints that parser's help.
@@ -51,6 +55,7 @@ Grammar (one line, no shell preprocessing)::
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tempfile
 import traceback
@@ -77,6 +82,7 @@ from utils.cli_common import (
     flag_value,
     invocation,
     invocation_plan_arg,
+    record_error,
     record_invocation,
     render_instruction_text,
     skill_dir,
@@ -140,8 +146,13 @@ UTIL_COMMANDS: Dict[str, Tuple[Optional[str], str, str]] = {
                      "Print a plan's next workflow command (read-only; "
                      "--after <mode>, --host <id>)."),
     "improve-steps": ("utils.improve_steps", "main",
-                      "Plan an --improve-plan/--improve-code run: each step's "
-                      "decision and flags (read-only; the native leg's planner)."),
+                      "Plan an --improve-plan/--improve-code/--improve-commits "
+                      "run: each step's decision and flags (read-only; the "
+                      "native leg's planner)."),
+    "commit-brief": ("utils.commit_review", "commit_brief_main",
+                     "Resolve a commit range, print its commit block and write "
+                     "or reuse its commit brief (a commit mode's preparation, "
+                     "launching nothing)."),
     "check-tasks": ("utils.tasks_graph_check", "main",
                     "Report inconsistencies in a tasks.md's task graph (advisory)."),
     "check-reply": ("utils.check_reply", "main",
@@ -155,6 +166,10 @@ UTIL_COMMANDS: Dict[str, Tuple[Optional[str], str, str]] = {
                    "native leg's per-batch progress record)."),
     "instructions": (None, "", "Print a mode's core instruction file with every path resolved."),
 }
+
+#: The ``util`` command that is a commit front door's steps 1 to 6 on their
+#: own (plans/review-commits.md §2.8): the native leg's preparation entrypoint.
+COMMIT_BRIEF_UTIL = "commit-brief"
 
 
 #: The instruction-refactor escape hatch. Set to ``1`` and ``util instructions``
@@ -217,6 +232,21 @@ def render_help() -> str:
     ]
     for alias in sorted(mode_table.ALIASES):
         lines.append(f"  {alias} -> {mode_table.alias_expansion(alias)}")
+    revs_modes = [m.name for m in mode_table.MODES if _takes_revs(m)]
+    if revs_modes:
+        import textwrap
+
+        lines.append("")
+        lines += textwrap.wrap(
+            f"The commit modes ({', '.join(revs_modes)}) take an optional "
+            f"{mode_table.POS_REVS}, HEAD (the last commit) when omitted: git "
+            "revision syntax (A..B, A...B, a commit), one phrase (last 2 "
+            "commits, -2, this branch, since <rev>, last two days), a commit "
+            "brief's path, or the pinned <base12>..<head12> a run printed. "
+            "Its words are joined, so it needs no quotes; it goes right after "
+            "the mode word, before any flag, and a run takes one range.",
+            width=78,
+        )
     lines += [
         "",
         "cross-cutting flags (accepted by every mode, and by each orchestrator",
@@ -276,11 +306,19 @@ def render_util_help() -> str:
         "line) and sets MULTI_LLM_RESULT.user_next_step: a command for the user to",
         "type, never a follow-up for the caller. It reads state.json as recorded.",
         "",
-        "`util improve-steps <plan> --mode improve-plan|improve-code [flags...]`",
-        "prints the steps a native --improve-plan or --improve-code run takes, each",
-        "step's run/skip decision and its exact flags, and the command that continues",
-        "the run; exit 2 with [ALREADY_COMPLETE] when nothing is left to do. --json",
-        "prints the same facts as one object. Read-only, like next-command.",
+        "`util improve-steps <plan> --mode improve-plan|improve-code|improve-commits [flags...]`",
+        "prints the steps a native --improve-plan, --improve-code or --improve-commits",
+        "run takes, each step's run/skip decision and its exact flags, and the command",
+        "that continues the run; exit 2 with [ALREADY_COMPLETE] when nothing is left",
+        "to do. --json prints the same facts as one object. Read-only, like",
+        "next-command. An --improve-commits run names the commit brief as its plan.",
+        "",
+        "`util commit-brief [<range>] [--focus \"<text>\"] [--context-plan <path>]",
+        "[flags...]` takes the tokens a commit mode was typed with, range words",
+        "included: it resolves the range, prints the commit block, writes or reuses",
+        "the commit brief and records the range, then prints [COMMIT_BRIEF] <path>",
+        "and [COMMIT_REMAINING_FLAGS] <the tokens it did not consume>. It launches",
+        "nothing: the native leg's preparation before `util improve-steps <brief>`.",
     ]
     return "\n".join(lines)
 
@@ -299,16 +337,48 @@ def _unknown_mode_message(word: str) -> str:
 # Grammar
 # ---------------------------------------------------------------------------
 
-def _split_positionals(rest: Sequence[str]) -> Tuple[List[str], List[str]]:
+#: A ``-N`` range word (plans/review-commits.md §2.2): a hyphen and ASCII
+#: digits, nothing else. ``-h``, ``-2h``, ``--2``, ``-2.5`` and a lone ``-``
+#: are not one; they end the leading run as any flag does.
+_RANGE_COUNT_WORD = re.compile(r"-[0-9]+")
+
+#: What a commit brief's path ends in (:func:`_names_a_commit_brief` asks no
+#: other word). Its one spelling: the generated CLI surface reads it as
+#: ``revs.brief_suffix``, so a server keeps a ``revs`` value ending in it as
+#: one argv element and a brief path holding a space reaches this dispatcher
+#: as the one word it turns into ``--plan-file``.
+_COMMIT_BRIEF_SUFFIX = ".md"
+
+
+def _takes_revs(mode: Optional["mode_table.Mode"]) -> bool:
+    """Whether *mode* takes the commit modes' range (``POS_REVS``)."""
+    return mode is not None and mode_table.POS_REVS in mode.positionals
+
+
+def _split_positionals(
+    rest: Sequence[str], mode: Optional["mode_table.Mode"] = None,
+) -> Tuple[List[str], List[str]]:
     """Leading bare words are positionals; everything from the first flag on is
     forwarded verbatim.
 
     Deliberately not argparse: ``parse_known_args`` can reorder or swallow the
     residual argv, and the residual has to reach the target's own parser exactly
     as the user typed it.
+
+    On a mode that takes a range (``POS_REVS``), a token that fully matches
+    ``-[0-9]+`` continues the leading run instead of ending it: ``-2`` is the
+    range ``last 2``, never a flag. Only the leading run is scanned, so in
+    ``--review-commits --quick -2`` the ``-2`` is forwarded as typed (the front
+    door refuses it as a range word after a flag), and every other mode splits
+    as it always has: ``--review-code -2`` forwards ``-2``. This is the one
+    place that decides what is positional, and it runs before any parser.
     """
+    revs = _takes_revs(mode)
     index = 0
-    while index < len(rest) and not rest[index].startswith("-"):
+    while index < len(rest):
+        token = rest[index]
+        if token.startswith("-") and not (revs and _RANGE_COUNT_WORD.fullmatch(token)):
+            break
         index += 1
     return list(rest[:index]), list(rest[index:])
 
@@ -319,6 +389,11 @@ def _normalize_positionals(
     cleanup: List[Path],
 ) -> List[str]:
     """Turn a mode's positionals into the flags its target already parses."""
+    if _takes_revs(mode):
+        # Ahead of the length check: `last 2 commits` is three words for the
+        # range's one slot, and the extra-positional error never fires on a
+        # commit mode (the range grammar is what refuses a bad range).
+        return _revs_flags(positionals)
     if len(positionals) > len(mode.positionals):
         expected = " ".join(mode.positionals) or "(none)"
         raise DispatchError(
@@ -342,6 +417,125 @@ def _normalize_positionals(
         else:  # pragma: no cover - guarded by the table
             raise DispatchError(f"ERROR: unhandled positional kind {kind!r}")
     return normalized
+
+
+def _revs_flags(words: Sequence[str]) -> List[str]:
+    """The range words of a commit mode, as the flag its front door parses.
+
+    Zero words emit nothing, which means ``HEAD``. One word that is a commit
+    brief's path (:func:`_names_a_commit_brief`) becomes ``--plan-file``: a
+    root range's pinned spelling, and the re-attach a tool route builds, name
+    the brief. Anything else is joined with single spaces into one ``--revs``
+    value, since revisions never contain spaces (``last 2 commits`` needs no
+    quotes). So a markdown path is never a plan on these modes: a plan or a
+    README goes to the range grammar, which refuses it naming
+    ``--context-plan`` (plans/review-commits.md §2.2).
+    """
+    if not words:
+        return []
+    if len(words) == 1 and _names_a_commit_brief(words[0]):
+        return ["--plan-file", words[0]]
+    return ["--revs", " ".join(words)]
+
+
+def _names_a_commit_brief(word: str) -> bool:
+    """Whether *word* is a commit brief's path: it ends in
+    :data:`_COMMIT_BRIEF_SUFFIX` (``.md``), names an existing file and
+    ``commit_review.is_commit_brief`` accepts it.
+
+    One helper decides what a brief is (its marker on line 1, or a
+    ``<commit_reviews_dir>/<slug>.md`` path); this only finds the file. A
+    relative path that names nothing from here but a file at the root of the
+    repository the cwd is in is asked about there: a brief path spelled from
+    the root and typed in a subdirectory then becomes ``--plan-file``, and
+    :func:`_run_from_repository_root` moves the command to the root as it
+    would for a plan (live run 11's shape).
+    """
+    if not word.endswith(_COMMIT_BRIEF_SUFFIX):
+        return False
+    from utils import commit_review
+
+    if os.path.isfile(word):
+        return bool(commit_review.is_commit_brief(word))
+    root = _root_holding(word)
+    if root is None:
+        return False
+    return bool(commit_review.is_commit_brief(os.path.join(root, word), cwd=root))
+
+
+def _root_holding(path: str) -> Optional[str]:
+    """The root of the repository the cwd is in, when relative *path* names a
+    file there and stays inside it; else ``None``."""
+    if not _relative([path]):
+        return None
+    try:
+        from utils.git_utils import pin_repo_root
+
+        root, problem = pin_repo_root(os.getcwd())
+    except Exception:  # noqa: BLE001 - a convenience: the word stays a range
+        return None
+    if root is None or problem:
+        return None
+    candidate = os.path.join(root, path)
+    if not (
+        os.path.isfile(candidate)
+        and _inside(os.path.normpath(candidate), root)
+        and _inside(os.path.realpath(candidate), root)
+    ):
+        return None
+    return root
+
+
+#: The flags a commit front door synthesises for the phase it fronts, which a
+#: user may never type there (plans/review-commits.md §2.1, "Flags the front
+#: doors own"), each with the commit spelling that replaces it.
+COMMIT_OWNED_FLAGS: Tuple[Tuple[str, str], ...] = (
+    ("--plan-file",
+     "there is no plan by default: the commit messages are the stated intent. "
+     "Add a plan as read-only context with `--context-plan <path>`, or name a "
+     "commit brief by its path as the range (`{door} <brief>`)."),
+    ("--base-ref",
+     "the range names its base: type it right after the mode word, before any "
+     "flag, as `{door} C..HEAD` (the commits after C up to HEAD) or "
+     "`{door} A..B`."),
+    ("--head-ref",
+     "the range names its end: type it right after the mode word, before any "
+     "flag, as `{door} A..B` (the commits after A up to B)."),
+)
+
+#: The hidden flag a detached worker carries; its argv is the plugin's own.
+_WORKER_FLAG = INTERNAL_FLAG_PREFIX + "worker"
+
+
+def _reject_commit_owned_flags(door: str, tokens: Sequence[str]) -> None:
+    """``[COMMIT_FLAG_CONFLICT] <flag>`` for a typed ``--plan-file``,
+    ``--base-ref`` or ``--head-ref`` on a commit front door, exit 3.
+
+    A front door synthesises all three for the phase it fronts, so a typed
+    one would be overridden silently or win by argparse's last-one rule.
+    Checked on the tokens as typed, before :func:`_normalize_positionals`
+    turns a brief path into the door's own ``--plan-file``, so a root range's
+    printed command (a commit mode and its brief path) passes, and before the
+    front door's step 1, so nothing is written. An argparse abbreviation
+    (``--plan``) is refused like the full spelling, as the parser would bind
+    it. *door* is how the user names the command (``--review-commits``,
+    ``util commit-brief``). A detached worker's argv is skipped by the
+    caller: the plugin built it, and a root range's brief is already
+    ``--plan-file`` there.
+    """
+    for token in tokens:
+        if token == "--":
+            return
+        head = token.split("=", 1)[0]
+        for flag, instead in COMMIT_OWNED_FLAGS:
+            if not flag_present([head], flag):
+                continue
+            typed = "" if head == flag else f" (typed as {head})"
+            marker = f"[COMMIT_FLAG_CONFLICT] {flag}{typed}"
+            print(marker)
+            reason = f"{door} takes no {flag}: {instead.format(door=door)}"
+            record_error(f"{marker}: {reason}")
+            raise DispatchError(f"ERROR: {reason}")
 
 
 def _question_flags(question: str, cleanup: List[Path]) -> List[str]:
@@ -567,7 +761,7 @@ def _run_mode(word: str, rest: Sequence[str], ctx: ResultContext) -> int:
     assert mode.target_module is not None  # every available mode has a target
     cleanup: List[Path] = []
     try:
-        positionals, flags = _split_positionals(rest)
+        positionals, flags = _split_positionals(rest, mode)
         if flag_present(flags, "--help", "-h"):
             # Forward to the target's own parser: it is the source of truth.
             return _call_target(
@@ -577,6 +771,10 @@ def _run_mode(word: str, rest: Sequence[str], ctx: ResultContext) -> int:
         # entry, and an unknown id must fail as itself rather than as a confusing
         # consequence.
         _validate_host(flags)
+        if _takes_revs(mode) and not flag_present(flags, _WORKER_FLAG):
+            # On the tokens as typed, before the brief path becomes the
+            # door's own `--plan-file` below.
+            _reject_commit_owned_flags(f"--{mode.name}", flags)
         _reject_incompatible_flags(mode, flags)
         # D6 row 15 then row 1, both before anything is created: an empty or
         # unrecognized decision value and a missing `uv` are the two failures a
@@ -642,6 +840,11 @@ def _run_util(rest: Sequence[str], ctx: ResultContext) -> int:
         return _run_util_instructions(args, ctx)
     module_path, attr, _summary = UTIL_COMMANDS[name]
     assert module_path is not None
+    if name == COMMIT_BRIEF_UTIL and not flag_present(args, "--help", "-h"):
+        # The front doors' preparation half takes the same typed tokens, so
+        # it refuses the same three flags (plans/review-commits.md §2.8).
+        _reject_commit_owned_flags(
+            f"{mode_table.UTIL_NAMESPACE} {COMMIT_BRIEF_UTIL}", args)
     if not flag_present(args, "--help", "-h"):
         _run_from_repository_root(
             _util_input_paths(name, args),
@@ -664,9 +867,12 @@ def _run_util(rest: Sequence[str], ctx: ResultContext) -> int:
 # so on one line.
 
 #: A mode's options whose value is an existing file the command reads (a plan
-#: positional is ``--plan-file`` by now).
+#: positional is ``--plan-file`` by now, and so is a commit brief's path; a
+#: commit mode's ``--context-plan`` is a plan read as context, and the hidden
+#: ``--commit-stage`` the staged header a detached worker applies).
 _MODE_INPUT_PATH_OPTIONS: Tuple[str, ...] = (
     "--plan-file", "--question-file", "--tasks-file", "--files-from",
+    "--context-plan", "--commit-stage",
 )
 
 #: A mode's options whose value is a path the command creates, so it need not
@@ -682,10 +888,11 @@ _MODE_OUTPUT_PATH_OPTIONS: Tuple[str, ...] = ("--out-dir", "--output")
 #: in the repository (``--output-file`` is the orchestrator output
 #: ``util decisions`` reads, and ``--output-dir`` the plan folder
 #: ``prior-changes`` reads and appends to; ``--files-from`` is the scope list
-#: ``improve-steps`` reads, as the mode route reads review-code's).
+#: ``improve-steps`` reads, as the mode route reads review-code's;
+#: ``--context-plan`` is the plan ``commit-brief`` reads as context).
 _UTIL_INPUT_PATH_OPTIONS: Tuple[str, ...] = (
     "--plan-file", "--state-file", "--phase-dir", "--output-dir", "--tasks-file",
-    "--output-file", "--project-root", "--files-from",
+    "--output-file", "--project-root", "--files-from", "--context-plan",
 )
 
 #: A ``util`` command's options whose value is a path it creates:
@@ -697,7 +904,8 @@ _UTIL_OUTPUT_PATH_OPTIONS: Tuple[str, ...] = ("--output",)
 _UTIL_PATH_POSITIONAL: Dict[str, Tuple[str, ...]] = {
     "next-command": ("--after", "--blocked", "--host"),
     "improve-steps": ("--mode", "--host", "--models", "--files", "--files-from",
-                      "--base-ref", "--max-detached", "--internal-run-id"),
+                      "--base-ref", "--head-ref", "--max-detached",
+                      "--internal-run-id"),
     "check-tasks": (),
     "backup": (),
 }
@@ -1148,11 +1356,15 @@ def _sweep_live_clis_on_interrupt() -> None:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if _WORKER_FLAG in argv:
+        from utils.detach import prepare_worker_output
+
+        prepare_worker_output()
     # Line buffering + UTF-8/replace stream encoding, once per invocation: there
     # is exactly one process per invocation, so this covers every mode and every
     # in-process continuation.
     bootstrap_streams()
-    argv = list(sys.argv[1:] if argv is None else argv)
     ctx = activate_result(ResultContext())
     crash: Optional[str] = None
     exit_code = EXIT_ERROR
@@ -1264,6 +1476,13 @@ def _emit_user_next_step(ctx: ResultContext, exit_code: int) -> None:
     argv holds it absolute, takes the run record's ``plan_arg`` (else its
     ``plan_file``). The block goes to stderr when the invocation asked for JSON
     output.
+
+    A commit review's front doors record the phase they front (``review-code``,
+    ``apply-code-fixes``) or ``improve-commits`` with its pinned range
+    (plans/review-commits.md §2.1, "What step 7 records"), so the gate below
+    passes as for any phase, and the builder spells the answer back in the
+    commit spelling (§2.8): after ``review-commits``, ``--apply-commit-fixes
+    <base12>..<head12>`` under a why naming both reports.
     """
     record = invocation()
     if not record or ctx.next:
@@ -1328,10 +1547,21 @@ def _typed_plan(argv: Sequence[str]) -> Tuple[Optional[str], Optional[str]]:
     ``--plan-file`` value as received, or a continuation's recovered one); a
     detached worker, whose argv holds the plan absolute, takes its run record's
     ``plan_arg`` (else its ``plan_file``) instead.
+
+    ``improve-commits`` is recorded with its pinned range, not a plan
+    (``--revs <base12>..<head12>``, plans/review-commits.md §2.1, "What step
+    7 records"): the plan is the brief that spelling names
+    (``commit_review.brief_for_pinned``), and the typed spelling is the
+    pinned range itself, which every command printed for it carries (§2.8).
     """
     plan_file = flag_value(argv, "--plan-file")
     plan_arg = invocation_plan_arg() or plan_file
     plan_path = os.path.abspath(plan_file) if plan_file else None
+    if plan_file is None:
+        pinned = flag_value(argv, "--revs")
+        brief = _brief_for_pinned(pinned) if pinned else None
+        if brief is not None:
+            plan_arg, plan_path = plan_arg or pinned, brief
     worker = flag_present(argv, "--internal-worker")
     detach = sys.modules.get("utils.detach") if worker else None
     handle = detach.active_run() if detach is not None else None
@@ -1341,12 +1571,30 @@ def _typed_plan(argv: Sequence[str]) -> Tuple[Optional[str], Optional[str]]:
     return plan_arg, plan_path
 
 
+def _brief_for_pinned(text: str) -> Optional[str]:
+    """The brief a commit review's pinned ``<base12>..<head12>`` names
+    (``commit_review.brief_for_pinned``: by name, no git call beyond the
+    root), absolute, or ``None`` for any other text or outside a repository."""
+    try:
+        from utils.commit_review import brief_for_pinned
+
+        brief = brief_for_pinned(str(text))
+    except Exception:  # noqa: BLE001 - not a pinned range here
+        return None
+    return os.path.abspath(str(brief)) if brief is not None else None
+
+
 def _continuation_target(command: str) -> Optional[Tuple["mode_table.Mode", str]]:
     """``(mode, plan)`` of a printed continuation command, else ``None``.
 
     A continuation is a dispatcher command (``… multi_llm.py <mode> <plan> …``,
     or ``--plan-file <plan>``) carrying one of
     :data:`utils.cli_common.CONTINUATION_VERBS`; its *mode* is a workflow phase.
+
+    A continuation in the commit spelling (plans/review-commits.md §2.8:
+    ``review-commits <base12>..<head12> --reaggregate``, or the brief path on
+    a root range) names the phase its front door fronts
+    (``Mode.commit_view_of``) and the brief its range names.
     """
     import shlex
 
@@ -1364,12 +1612,17 @@ def _continuation_target(command: str) -> Optional[Tuple["mode_table.Mode", str]
     if script is None or script + 1 >= len(tokens):
         return None
     mode = mode_table.resolve(tokens[script + 1])
+    fronts = mode.commit_view_of if mode is not None else None
+    if fronts:
+        mode = mode_table.resolve(fronts)
     if mode is None or not mode.is_workflow_phase or not mode.phase:
         return None
     rest = tokens[script + 2:]
     plan = flag_value(rest, "--plan-file")
     if plan is None and rest and not rest[0].startswith("-"):
         plan = rest[0]
+        if fronts and not os.path.isfile(plan):
+            plan = _brief_for_pinned(plan) or ""
     if not plan:
         return None
     return mode, plan

@@ -1894,6 +1894,231 @@ class TestCodeReviewCollapsePathsBlock:
         assert "code_review.collapse_paths.generated" in str(exc.value)
 
 
+def _git_repo(path: Path) -> Path:
+    """An empty git repository at *path*; returns git's own (real) root."""
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    return Path(os.path.realpath(path))
+
+
+@pytest.mark.config_override
+class TestCodeReviewCommitReviewsDir:
+    """`code_review.commit_reviews_dir` (plans/review-commits.md §2.4).
+
+    `code_review:` is a CLOSED block validated merged, so the key has to be
+    registered, not only shipped: a base carrying it with `CODE_REVIEW_KEYS`
+    lacking it would fail every project that overrides `collapse_paths`. The
+    value is joined to the anchor's git root, whichever layer set it, and
+    `get_commit_reviews_dir` is its one reader.
+    """
+
+    #: The block the shipped base carries, on the fixed test base.
+    SHIPPED_BLOCK = {
+        "collapse_paths": {
+            "generated": [],
+            "fixtures": ["**/tests/fixtures/**", "**/tests/golden/**"],
+        },
+        "commit_reviews_dir": "plans/commit-reviews",
+    }
+
+    @pytest.fixture
+    def shipped_base(self, monkeypatch):
+        """FIXED_BASE plus the shipped `code_review:` block; real discovery."""
+        base = copy.deepcopy(FIXED_BASE)
+        base["code_review"] = copy.deepcopy(self.SHIPPED_BLOCK)
+        monkeypatch.setattr(registry, "_load_base_config", lambda: copy.deepcopy(base))
+        _reset_cache()
+        yield registry
+        _reset_cache()
+
+    @staticmethod
+    def _project(repo: Path, body: str) -> Path:
+        return _write_yaml(repo / ".multi-llm" / "providers.yaml", body)
+
+    def test_the_key_is_registered_beside_collapse_paths(self):
+        assert registry.CODE_REVIEW_KEYS == ("collapse_paths", "commit_reviews_dir")
+        assert registry.DEFAULT_COMMIT_REVIEWS_DIR == "plans/commit-reviews"
+
+    def test_the_shipped_base_carries_the_default_and_passes_its_validator(self):
+        shipped = registry._load_base_config()["code_review"]
+        assert shipped["commit_reviews_dir"] == registry.DEFAULT_COMMIT_REVIEWS_DIR
+        registry.validate_code_review_block(shipped)
+
+    def test_a_project_override_setting_the_key_loads(self, shipped_base, tmp_path):
+        repo = _git_repo(tmp_path / "repo")
+        self._project(repo, "code_review:\n  commit_reviews_dir: reviews/commits\n")
+
+        config = load_config(anchor=str(repo))
+
+        assert config["code_review"]["commit_reviews_dir"] == "reviews/commits"
+        assert registry.get_commit_reviews_dir(anchor=str(repo)) == (
+            repo / "reviews" / "commits"
+        )
+
+    def test_an_override_of_only_collapse_paths_still_loads_over_the_real_base(
+        self, tmp_path
+    ):
+        """The real shipped base, not a fixture copy: its new key must not make
+        an existing project's `collapse_paths` override illegal."""
+        repo = _git_repo(tmp_path / "repo")
+        self._project(
+            repo, 'code_review:\n  collapse_paths:\n    generated: ["**/*.lock"]\n',
+        )
+        _reset_cache()
+
+        config = load_config(anchor=str(repo))
+
+        assert config["code_review"]["collapse_paths"]["generated"] == ["**/*.lock"]
+        assert config["code_review"]["commit_reviews_dir"] == "plans/commit-reviews"
+        assert registry.get_commit_reviews_dir(anchor=str(repo)) == (
+            repo / "plans" / "commit-reviews"
+        )
+
+    def test_a_null_value_keeps_the_base_folder(self, shipped_base, tmp_path):
+        repo = _git_repo(tmp_path / "repo")
+        self._project(repo, "code_review:\n  commit_reviews_dir:\n")
+
+        assert registry.get_commit_reviews_dir(anchor=str(repo)) == (
+            repo / "plans" / "commit-reviews"
+        )
+
+    def test_a_fixture_base_with_no_key_falls_back_to_the_default(
+        self, monkeypatch, tmp_path
+    ):
+        _patch_base_only(monkeypatch)
+        assert "code_review" not in FIXED_BASE
+        repo = _git_repo(tmp_path / "repo")
+
+        assert registry.get_commit_reviews_dir(anchor=str(repo)) == (
+            repo / "plans" / "commit-reviews"
+        )
+
+    def test_a_spelling_with_dot_segments_or_backslashes_names_the_same_folder(
+        self, shipped_base, tmp_path
+    ):
+        repo = _git_repo(tmp_path / "repo")
+        self._project(repo, "code_review:\n  commit_reviews_dir: ./reviews\\commits/\n")
+
+        assert registry.get_commit_reviews_dir(anchor=str(repo)) == (
+            repo / "reviews" / "commits"
+        )
+
+    @pytest.mark.parametrize(
+        "value, reason",
+        [
+            ("/abs", "an absolute path"),
+            ("C:\\x", "an absolute path"),
+            ("../x", "parent-traversal"),
+            ("a/../b", "parent-traversal"),
+            ("", "an empty string"),
+            (".", "the repository root itself"),
+            (["plans/commit-reviews"], "expected a string"),
+            ({"dir": "x"}, "expected a string"),
+        ],
+        ids=["absolute", "drive-prefix", "parent", "inner-parent", "empty", "dot",
+             "list", "mapping"],
+    )
+    @pytest.mark.parametrize("permissive", [False, True], ids=["strict", "permissive"])
+    def test_a_refused_value_fails_the_load_naming_the_key(
+        self, shipped_base, monkeypatch, tmp_path, value, reason, permissive
+    ):
+        repo = _git_repo(tmp_path / "repo")
+        self._project(
+            repo, yaml.safe_dump({"code_review": {"commit_reviews_dir": value}}),
+        )
+        if permissive:
+            monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE", "1")
+        _reset_cache()
+
+        with pytest.raises(ConfigError) as exc:
+            load_config(anchor=str(repo))
+        message = str(exc.value)
+        assert f"code_review.commit_reviews_dir is {value!r} —" in message
+        assert reason in message
+        _reset_cache()
+        with pytest.raises(ConfigError, match=r"code_review\.commit_reviews_dir"):
+            registry.get_commit_reviews_dir(anchor=str(repo))
+
+    @_requires_symlinks
+    def test_a_folder_symlinked_out_of_the_repository_is_refused(
+        self, shipped_base, tmp_path
+    ):
+        repo = _git_repo(tmp_path / "repo")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        os.symlink(str(outside), str(repo / "reviews"))
+        self._project(repo, "code_review:\n  commit_reviews_dir: reviews\n")
+
+        with pytest.raises(ConfigError) as exc:
+            registry.get_commit_reviews_dir(anchor=str(repo))
+        message = str(exc.value)
+        assert "code_review.commit_reviews_dir is 'reviews' —" in message
+        assert os.path.realpath(outside) in message
+        assert "outside the repository" in message
+        assert list(outside.iterdir()) == []
+
+    @_requires_symlinks
+    def test_a_symlinked_parent_resolving_out_is_refused_for_the_default(
+        self, monkeypatch, tmp_path
+    ):
+        _patch_base_only(monkeypatch)
+        repo = _git_repo(tmp_path / "repo")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        os.symlink(str(outside), str(repo / "plans"))
+
+        with pytest.raises(ConfigError) as exc:
+            registry.get_commit_reviews_dir(anchor=str(repo))
+        assert os.path.join(os.path.realpath(outside), "commit-reviews") in str(exc.value)
+
+    @_requires_symlinks
+    def test_a_folder_symlinked_at_the_root_itself_is_refused(
+        self, shipped_base, tmp_path
+    ):
+        repo = _git_repo(tmp_path / "repo")
+        os.symlink(str(repo), str(repo / "reviews"))
+        self._project(repo, "code_review:\n  commit_reviews_dir: reviews\n")
+
+        with pytest.raises(ConfigError, match="the repository root itself"):
+            registry.get_commit_reviews_dir(anchor=str(repo))
+
+    def test_an_env_config_outside_the_repository_resolves_under_the_root(
+        self, shipped_base, monkeypatch, tmp_path
+    ):
+        """Never relative to the cwd or to the config file's folder, and the
+        same folder from a subdirectory, the root, or a brief path whose folder
+        does not exist yet."""
+        repo = _git_repo(tmp_path / "repo")
+        (repo / "src" / "pkg").mkdir(parents=True)
+        elsewhere = tmp_path / "elsewhere"
+        config = _write_yaml(
+            elsewhere / "cfg.yaml", "code_review:\n  commit_reviews_dir: reviews/commits\n",
+        )
+        monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(config))
+        monkeypatch.chdir(elsewhere)
+        _reset_cache()
+
+        expected = repo / "reviews" / "commits"
+        assert registry.get_commit_reviews_dir(anchor=str(repo / "src" / "pkg")) == expected
+        assert registry.get_commit_reviews_dir(anchor=str(repo)) == expected
+        assert registry.get_commit_reviews_dir(
+            anchor=str(expected / "0123456789ab-fedcba987654.md")
+        ) == expected
+        monkeypatch.chdir(repo / "src")
+        _reset_cache()
+        assert registry.get_commit_reviews_dir() == expected
+        assert not (elsewhere / "reviews").exists()
+
+    def test_outside_any_repository_is_a_config_error(self, shipped_base, tmp_path):
+        loose = tmp_path / "loose"
+        loose.mkdir()
+
+        with pytest.raises(ConfigError) as exc:
+            registry.get_commit_reviews_dir(anchor=str(loose))
+        assert "code_review.commit_reviews_dir" in str(exc.value)
+        assert "not in a git repository" in str(exc.value)
+
+
 @pytest.mark.config_override
 class TestInitConfigScaffolder:
     """init_config.py scaffolding + packaging guard (template path / gitignore).
@@ -2624,8 +2849,9 @@ ANCHORED_ACCESSORS = frozenset({
     # ...and the `progress:` block's two.
     "get_progress_interval",
     "get_progress_poll",
-    # ...and the `code_review:` block's one.
+    # ...and the `code_review:` block's two.
     "get_collapse_paths",
+    "get_commit_reviews_dir",
 })
 
 #: Directories that are not this skill's runtime source.
