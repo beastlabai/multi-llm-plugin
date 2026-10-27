@@ -150,6 +150,10 @@ UV_STUB = r'''#!{python}
 """Replay one scripted dispatcher outcome per child, recording every argv."""
 import json, os, signal, subprocess, sys, time
 
+# Match the real dispatcher's stream bootstrap, including under cp1252.
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 log = os.environ["STUB_LOG"]
 argv = sys.argv[1:]
 record = {{"argv": argv, "cwd": os.getcwd(), "pid": os.getpid(),
@@ -3146,7 +3150,7 @@ class TestACommitRunIsNamedByItsPinnedRange:
     @pytest.mark.parametrize("row", RANGE_ROWS, ids=[row["name"] for row in RANGE_ROWS])
     def test_a_handoff_hands_back_the_pinned_range(self, harness, row):
         handoff, calls = self._handoff(harness, row)
-        assert handoff["state"] == STATES["running"]
+        assert handoff["state"] == STATES["running"], handoff
         assert handoff["next"]["plan"] == PINNED
         assert handoff["abort_command"]["plan"] == PINNED
         assert PHRASE not in json.dumps([handoff["next"], handoff["abort_command"]])
@@ -3265,7 +3269,8 @@ class TestTheCommitBlocksAreRelayedOnce:
     def test_the_commit_block_comes_from_the_launch_s_result_line(self, harness):
         record = range_record(drifted=["a.py"])
         envelope, _, _, _ = harness.run(range_call(),
-                                        [commit_launch(record), poll_step(0)])
+                                        [commit_launch(record), poll_step(0)],
+                                        extra_env={"PYTHONIOENCODING": "cp1252"})
         assert envelope["commit_blocks"] == "\n".join(record["lines"])
         assert envelope["commit_blocks"].startswith("[COMMIT_RANGE] a1b2c3d..e4f5a6b")
         keys = list(envelope)

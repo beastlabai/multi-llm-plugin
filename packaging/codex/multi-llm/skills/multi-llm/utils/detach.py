@@ -113,6 +113,10 @@ LOCK_NAME = ".lock"
 #: in-process test or a hand-run ``--internal-worker`` does neither.
 WORKER_ENV = "MULTI_LLM_DETACHED_WORKER"
 
+#: One-shot transport for restoring a worker's output before pre-flight, when
+#: a Windows uv/.cmd trampoline did not preserve the launcher's log handles.
+WORKER_LOG_ENV = "MULTI_LLM_WORKER_LOG"
+
 #: The launcher's replay flags (``cli_common.replay_flags`` over the
 #: pre-``build_worker_argv`` argv), shipped to the worker as a JSON list (D2).
 #: Computed in :func:`launch` rather than by the worker because the worker's own
@@ -211,6 +215,18 @@ class DetachError(Exception):
 
 def log_path(phase_dir: str) -> str:
     return os.path.join(str(phase_dir), LOG_NAME)
+
+
+def prepare_worker_output() -> None:
+    """Restore launched-worker output before the dispatcher prints anything.
+
+    Called only for ``--internal-worker``. Consume the transport so provider
+    children cannot reopen this log; run ownership and jobs still begin at the
+    detach boundary, after pre-flight.
+    """
+    log = os.environ.pop(WORKER_LOG_ENV, None)
+    if log and os.environ.get(WORKER_ENV) == "1":
+        process_control.redirect_output_to_log(log)
 
 
 def lock_path(phase_dir: str) -> str:
@@ -2128,6 +2144,7 @@ def launch(
         plan_arg=_invoker_plan_arg(argv),
     )
     log = log_path(phase_dir)
+    env[WORKER_LOG_ENV] = log
     try:
         # On Windows the worker starts inside the run's named Job Object, and
         # `run_job` is this launcher's handle on it (`None` elsewhere, and

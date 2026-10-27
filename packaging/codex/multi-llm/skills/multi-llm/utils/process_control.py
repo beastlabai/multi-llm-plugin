@@ -2745,6 +2745,31 @@ def _rebind_std_streams() -> None:
     sys.stderr = open(2, "w", encoding="utf-8", errors="replace", closefd=False)
 
 
+def redirect_output_to_log(log_path: Optional[str]) -> None:
+    """Restore a worker's log descriptors without taking run ownership.
+
+    The dispatcher calls this before pre-flight if a launcher supplied the log
+    path. It is also the late fallback in :func:`enter_detached_worker`.
+    """
+    if log_path and not _stdio_already_on(log_path):
+        try:
+            fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        except OSError:
+            fd = None
+        if fd is not None:
+            try:
+                sys.stdout.flush()
+                sys.stderr.flush()
+            except (AttributeError, ValueError):
+                pass
+            os.dup2(fd, 1)
+            os.dup2(fd, 2)
+            if fd > 2:
+                os.close(fd)
+            if IS_WINDOWS:
+                _rebind_std_streams()
+
+
 def enter_detached_worker(log_path: Optional[str], run_id: Optional[str] = None) -> None:
     """Worker-side setup: own the log, own the process group, own the tree.
 
@@ -2786,23 +2811,7 @@ def enter_detached_worker(log_path: Optional[str], run_id: Optional[str] = None)
     nests inside any job the worker is already in. Without a *run_id* (a
     worker started some other way) nothing about the jobs changes.
     """
-    if log_path and not _stdio_already_on(log_path):
-        try:
-            fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-        except OSError:
-            fd = None
-        if fd is not None:
-            try:
-                sys.stdout.flush()
-                sys.stderr.flush()
-            except (AttributeError, ValueError):
-                pass
-            os.dup2(fd, 1)
-            os.dup2(fd, 2)
-            if fd > 2:
-                os.close(fd)
-            if IS_WINDOWS:
-                _rebind_std_streams()
+    redirect_output_to_log(log_path)
     if IS_WINDOWS:  # pragma: no cover - Windows
         if run_id is not None:
             # First, so a job the worker creates itself holds the reaper's.

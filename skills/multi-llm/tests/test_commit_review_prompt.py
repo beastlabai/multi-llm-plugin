@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import string
 import sys
@@ -237,7 +238,7 @@ class TestWhatThePromptSays:
                              plan_sha256="f" * 64)
         text = render(record)
         assert "## Context Plan (read-only)" in text
-        assert "/work/plans/commit-reviews/x/context-plan.md" in text
+        assert os.path.join("/work", "plans/commit-reviews/x/context-plan.md") in text
         assert "f" * 64 in text
         assert "docs/requirements.md" not in text
         # An inline lane cannot open the snapshot: it is pointed at the

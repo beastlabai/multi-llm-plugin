@@ -31,6 +31,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -99,7 +100,7 @@ class Repo:
     def write(self, path: str, text: str) -> None:
         target = self.root / path
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
+        target.write_text(text, encoding="utf-8", newline="\n")
 
     def commit(self, message: str) -> str:
         self._tick += 1
@@ -139,6 +140,7 @@ def new_repo(tmp_path: Path) -> Repo:
     (tmp_path / "home").mkdir(exist_ok=True)
     repo = Repo(root)
     repo.git("init", "-q", "-b", "main")
+    repo.git("config", "core.autocrlf", "false")
     repo.write("plans/feature.md", "# Feature\n\nChange a.py and b.py.\n")
     return repo
 
@@ -776,7 +778,7 @@ class TestDirectRun:
         continuation = next(
             line for line in out.splitlines() if "--reaggregate" in line
         )
-        assert f"review-code {ranged.plan} " in continuation
+        assert f"review-code {shlex.quote(str(ranged.plan))} " in continuation
         assert f"--base-ref {ranged.base} --head-ref {ranged.head}" in continuation
         tasks_path = ranged.phase_dir() / "validation_tasks.json"
         tasks = json.loads(tasks_path.read_text(encoding="utf-8"))
@@ -989,6 +991,9 @@ class TestGolden:
             "--skip-validation",
         ), reviewer) == 0
         prompt = reviewer.prompts[0].replace(str(ranged.root), "<ROOT>")
+        # Only native path separators vary; keep the rest of the prompt exact.
+        if os.sep != "/":
+            prompt = prompt.replace(os.sep, "/")
         assert "PROMPT_FORMAT_ERROR" not in prompt
         access = diff_access_of(prompt)
         assert f"`{ranged.base[:7]}..{ranged.head[:7]}`" in access
