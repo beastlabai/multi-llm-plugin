@@ -111,6 +111,40 @@ prints the path), so you can port any custom settings into the regenerated file.
   and `fixtures: ["**/tests/fixtures/**", "**/tests/golden/**"]`; a project can
   add, say, `**/*.lock` or `dist/**` so a huge machine-written file is never
   handed to reviewers as a diff. A malformed value is rejected at load.
+- **`code_review.commit_reviews_dir` is where commit reviews live.**
+  `--review-commits`, `--apply-commit-fixes` and `--improve-commits` write each
+  range's commit brief to `<dir>/<slug>.md` (the slug is `<base12>-<head12>`,
+  or `root-<head12>` for a range that starts at the first commit) and its
+  `state.json`, phase folders and reports to `<dir>/<slug>/`. The default is
+  `plans/commit-reviews`.
+  - **Relative to the repository root**, whichever layer sets it: never to the
+    current directory or to the config file's folder, so a
+    `MULTI_LLM_PROVIDERS_CONFIG` file kept elsewhere and a run started from a
+    subdirectory name the same folder.
+  - **Refused at load**, in permissive mode too, naming the key and the value:
+    anything that is not a string, an empty string, an absolute path (a
+    leading `/`, or a drive prefix such as `C:`; `\` is read as `/`), a path
+    with a `..` segment, and `.` (the repository root itself). `null` keeps the
+    default. A folder that a symlinked component resolves outside the
+    repository is refused too, naming the resolved path, before a commit mode
+    writes anything.
+  - **A new folder ignores itself.** When the plugin creates the folder, it
+    writes `<dir>/.gitignore` holding `*`, so briefs and reports never show in
+    `git status` and a `git add -A` cannot stage them. Only the folder itself
+    gets one, never a parent created with it such as `plans/`.
+  - **To commit reviews, delete that `.gitignore`**, or point the key at a
+    tracked folder. The plugin never writes a `.gitignore` into a folder it did
+    not create and never restores one you deleted. While the folder exists and
+    git does not ignore the brief (a tracked brief counts as not ignored), a
+    commit mode prints `[COMMIT_REVIEWS_NOT_IGNORED] <dir> is not ignored by
+    git: …` before it writes anything, naming `<dir>/` as the entry to add to
+    `.gitignore` if committing them is not intended, and the run continues.
+  - **Briefs and report folders are never code under review.** Every review,
+    whatever its mode or plan, leaves `<dir>/<slug>.md` and everything under
+    `<dir>/<slug>/` out of its scope and out of `tracked_files`, also when a
+    reviewed range holds a commit that added them, and its `Left out N of the
+    workflow's own file(s)` line names them. Anything else you keep in the
+    folder (a README, notes, a script) is reviewed like any other file.
 
 ## Safety
 

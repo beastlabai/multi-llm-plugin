@@ -684,12 +684,78 @@ _ASK = {
 # second during the wait share one line that names only the second) — copy the
 # newly terminal row's spec and state word out of the table, which is a copy and
 # not the recount the counts rule forbids.
+#
+# PD-1 (2026-10-27): the sentence sized every poll's call timeout and never the
+# launch's, and on this host the launch is a tool call with a deadline of its
+# own. Claude Code's Bash tool stops a `run_in_background` command "after
+# reaching its background time limit", and a launch that names no `timeout` gets
+# the tool's default: 1800000 in an interactive session, max(600000,
+# `BASH_DEFAULT_TIMEOUT_MS`) in a single-shot `claude -p` one (read from 2.1.311's
+# bundle; the tool description renders both numbers for the session it is in).
+# Measured on 2.1.310: a timeout-less `sleep 700` was stopped at 600.9 s, and a
+# live `--review-commits` fan-out launched that way was stopped at 599.7 s with
+# one slot still out. The dispatcher's result line read `"exit":143,
+# "next":null`, and the host, whose deadline notice from the tool said to "start
+# it again with `run_in_background` and a longer `timeout`", improvised a
+# `review-code --force` that re-ran both models. The cores' "a detached run is
+# not subject to your host's shell-command cap" was true of `--detach` alone.
+#
+# The launch names the **maximum** rather than a figure sized from the run's
+# budget. The host cannot know that budget when it launches (the roster that
+# shows each slot's budget prints after the launch); the dispatcher bounds every
+# slot itself and exits on its own, so this deadline is a backstop the run never
+# means to reach; and a deadline that is too long costs nothing, because the
+# completion notification arrives when the process exits. The tool takes the
+# number in milliseconds and clamps a background request to its maximum rather
+# than refusing it (`min(timeout, max)`, reported as `timeout_clamped`). That
+# maximum is 7200000 in the code; a server-side flag may only lower it and only
+# `BASH_MAX_TIMEOUT_MS` raises it. And at the maximum the tool's own deadline
+# notice reads "do not restart it", which agrees with the sentence's "rather
+# than retrying" instead of contradicting it.
+#
+# Milliseconds, and Claude Code's number alone: safe for the reason the poll's
+# worked value is, `tests/test_host_capabilities.py` failing if a second host
+# ever resolves *run detached* to `native`.
+#
+# Fable review, finding 3 (2026-10-27): the maximum is still a ceiling, and a run
+# past it was left with "report … rather than retrying" and nothing to offer.
+# Probed with no model call, on a copy of the run-1 phase dir the kill left:
+# - `status … --view run` reads `running in foreground (2/2 models, no detached
+#   run record)` and names no command; its `models:` table calls codex `done`.
+# - That `done` slot left no `<model>.json`. A result the provider wrote itself
+#   (`source: file`) lands in the phase dir during the slot, but one held for
+#   `save_model_result` (`stdout_fallback`, codex's here) is written only after
+#   the whole fan-out returns, so a kill loses it. The scope ledger is written at
+#   attempt start, so a file result that did land stays reusable.
+# - The launch made again without `--force` over a dir holding a result exits 3
+#   ("Partial completion detected … Run: --reaggregate"), `next` null. That guard
+#   is review-code's alone (and so the commit modes'): review-plan, review-tasks
+#   and ask re-run plainly and `[SKIP]` what is there, so the parenthetical names
+#   review-code (Fable's second pass, finding 2).
+# - With `--force` it resumes: `[SKIP] codex:gpt-6-luna:high - already has
+#   results`, then validation as usual. And `--reaggregate` reports with what is
+#   there, naming the rest `[MODEL_FAILED] … no result file and no recorded
+#   failure`. Both went through the commit front door with the brief path as the
+#   range.
+# So the sentence names both, offered rather than run, and tells the host to
+# say which models really have a file. A composite's own continuation wins:
+# its review step now resumes with `--force` over such a dir
+# (`improve_workflow.Records.leftover_results`), where it used to loop on the
+# guard (Fable's second pass, finding 1).
+NATIVE_LAUNCH_TIMEOUT_MS = 7_200_000
+
 _DETACH = {
     "native": (
         f"**Run detached** — use your host's own background mechanism `{{tool}}`, "
         "redirecting stdout and stderr to the phase dir's `orchestrator-run.log` "
         "(`> … 2>&1`, the one dispatcher command that takes a redirect: every "
-        "foreground call runs bare). "
+        "foreground call runs bare), and give that launch call a timeout of its "
+        f"own, the longest the parameter takes: {NATIVE_LAUNCH_TIMEOUT_MS} here, "
+        f"in milliseconds ({NATIVE_LAUNCH_TIMEOUT_MS // 3_600_000} hours; a "
+        "session whose maximum is lower clamps it rather than refusing it). "
+        "Without one the mechanism stops the command at its default deadline, "
+        "as short as ten minutes, and a fan-out still running then dies "
+        "mid-run (exit `143`, `next` `null`). "
         "Never pass `--detach` on this host. Then make one **non-waiting** "
         "`status <plan> <selector> --host <this host's id> --view run --exit-zero` "
         "call — no "
@@ -743,8 +809,21 @@ _DETACH = {
         "the background mechanism reports "
         "the process exited; read the markers and output paths from "
         "`orchestrator-run.log` then, and report a non-zero exit status with "
-        "that path rather than retrying. The mode instruction names the selector "
-        "and the rest of the loop."
+        "that path rather than retrying. A stop at the mechanism's time limit "
+        "(exit `143`, `next` `null`, `status` still reading `running in "
+        "foreground`) names no way forward of its own, so offer the user each "
+        "of these and run none yourself: the launch, made again the same way "
+        "with `--force` added, which resumes, keeping each model whose result "
+        "file is in the phase dir (`[SKIP]`) and running the rest (without "
+        "it, review-code and the commit modes refuse a dir holding results, "
+        "exit `3`; never `--rerun-all`); and, on a review mode with at least "
+        "one such file, "
+        "its `--reaggregate`, which reports with those and lists the rest as "
+        "failed. Say which models have a file: a `done` row can have none, its "
+        "result held in memory for the fan-out's end. Where the mode "
+        "instruction names a continuation for a stopped run (a composite's "
+        "`[IMPROVE_RERUN]`), offer that instead. The mode instruction names "
+        "the selector and the rest of the loop."
     ),
     # R4 (2026-08-21): the previous wording ended "the foreground stays legal
     # for short calls", and codex-apply-executor read that as permission to skip

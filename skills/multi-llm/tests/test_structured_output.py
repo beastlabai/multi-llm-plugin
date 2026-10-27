@@ -648,6 +648,20 @@ class TestPhaseSchemaTable:
 
         assert set(so.PHASE_SCHEMA_FILE) >= set(modes.phase_names())
 
+    def test_the_commit_modes_add_only_their_composite_s_run_dir(self):
+        """plans/review-commits.md §2.8: the two front doors run `code-review`
+        and `apply-code-fixes`, which have rows; improve-commits declares its
+        own run-dir phase, which validates nothing, as the other composites'."""
+        import modes
+
+        phases = {modes.phase_for(word) for word in (
+            "review-commits", "apply-commit-fixes", "improve-commits")}
+        assert phases == {"code-review", "apply-code-fixes", "improve-commits"}
+        assert so.PHASE_SCHEMA_FILE["improve-commits"] is None
+        assert so.load_phase_schema("improve-commits") is None
+        for composite in ("full", "improve-plan", "improve-code", "improve-commits"):
+            assert so.PHASE_SCHEMA_FILE[composite] is None
+
     def test_the_free_text_phases_are_explicitly_out_of_scope(self):
         for phase in ("ask", "implement", "apply-suggestions",
                       "apply-task-suggestions", "apply-code-fixes"):

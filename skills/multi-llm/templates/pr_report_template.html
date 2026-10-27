@@ -1932,6 +1932,96 @@
     }
 
     /* ================================================================
+       COMMIT REVIEW (plans/review-commits.md §2.10): rendered only when
+       the generator passed reportData.commitRange
+       ================================================================ */
+    .commit-range-header {
+      padding: 0.25rem 0 0.5rem 0;
+      font-size: 0.8125rem;
+      color: var(--text-secondary);
+    }
+
+    .commit-range-header .commit-brief-line {
+      margin-bottom: 0.25rem;
+    }
+
+    .commit-block {
+      margin: 0 0 0.375rem 0;
+      padding: 0.5rem 0.75rem;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+      font-size: 0.75rem;
+      white-space: pre-wrap;
+      overflow-x: auto;
+    }
+
+    .commit-meta {
+      margin: 0.125rem 0;
+    }
+
+    .commit-filter-bar {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.375rem 1rem;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border-color);
+      flex-wrap: wrap;
+    }
+
+    .commit-filter-bar .batch-label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      margin-right: 0.25rem;
+    }
+
+    .introduced-by {
+      font-size: 0.8125rem;
+      color: var(--text-secondary);
+      padding: 0.25rem 0.75rem;
+    }
+
+    .introduced-by code {
+      font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+    }
+
+    .introduced-by-model {
+      color: var(--text-muted);
+      font-style: italic;
+    }
+
+    .commit-group-heading {
+      margin: 1rem 0 0.5rem 0;
+      font-weight: 600;
+      font-size: 0.875rem;
+      color: var(--text-secondary);
+    }
+
+    .badge-drift {
+      background: #FEF3C7;
+      color: #92400E;
+      border: 1px solid #F59E0B;
+    }
+
+    /* A path absent at `head` on a pinned review (plans/review-commits.md §2.5) */
+    .file-absent-label {
+      color: var(--text-muted);
+      font-style: italic;
+      font-weight: normal;
+    }
+
+    .export-help {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-left: 0.4rem;
+    }
+
+    /* ================================================================
        SCROLLBAR STYLING
        ================================================================ */
     ::-webkit-scrollbar {
@@ -1977,11 +2067,13 @@
             <span id="summary-toggle-icon">&#9660;</span> Summary
           </button>
           <button class="btn btn-primary" id="export-btn" onclick="exportSelections()">Export</button>
-          <span class="export-indicator" id="export-indicator" style="display:none"></span>
+          <span class="export-indicator" id="export-indicator" style="display:none"></span><!--MLLM:export-help-->
           <button class="btn" onclick="expandAllBlocks()">Expand All</button>
           <button class="btn" onclick="collapseAllBlocks()">Collapse All</button>
         </div>
       </div>
+      <!-- A commit review's brief, block, focus and context plan; hidden otherwise. -->
+      <div class="commit-range-header" id="commit-range-header" style="display:none"></div>
     </div>
   </header>
 
@@ -2020,6 +2112,9 @@
     <button class="btn-batch" onclick="batchUnskipAll()" title="Remove all skip states">Clear all skips</button>
     <span class="batch-count" id="batch-skip-count"></span>
   </div>
+
+  <!-- A commit review's commit chips and "Group by commit"; hidden otherwise. -->
+  <div class="commit-filter-bar" id="commit-filter-bar" style="display:none"></div>
 
   <!-- ================================================================
        THREE-PANEL LAYOUT
@@ -2102,6 +2197,10 @@
 
     let currentView = 'pr';
     let sortMode = 'natural'; // 'natural' (plan/file/task order) or 'priority'
+    // Commit review (plans/review-commits.md §2.10): '' shows every commit's
+    // findings; a SHA or 'unattributed' shows only those.
+    let commitFilter = '';
+    let groupByCommit = false;
 
     // ================================================================
     // Utilities
@@ -2116,6 +2215,17 @@
     function escapeAttr(str) {
       if (!str) return '';
       return escapeHtml(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    // A value inside a single-quoted JS string in an inline handler
+    // (onclick="f('…')"). The browser decodes the attribute's entities before
+    // the handler runs, so escapeAttr alone would hand a quote back to the JS
+    // parser: escape for the JS string first, then for the attribute.
+    function escapeJsAttr(str) {
+      if (str === null || str === undefined) return '';
+      return escapeAttr(String(str).replace(/\\/g, '\\\\').replace(/'/g, '\\\'')
+        .replace(/\r/g, '\\r').replace(/\n/g, '\\n')
+        .replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029'));
     }
 
     function getStorageKey() {
@@ -2455,7 +2565,7 @@
         var count = entry.suggestionCount || 0;
         var maxImp = (entry.maxImportance || 'low').toLowerCase();
         var dotClass = maxImp === 'high' ? 'dot-high' : maxImp === 'medium' ? 'dot-medium' : 'dot-low';
-        html += '<div class="sidebar-item" data-target="file-' + escapeHtml(filePath) + '" data-filter-text="' + escapeHtml(filePath.toLowerCase()) + '" onclick="scrollToBlock(\'file-' + escapeHtml(filePath) + '\')">' +
+        html += '<div class="sidebar-item" data-target="file-' + escapeAttr(filePath) + '" data-filter-text="' + escapeAttr(filePath.toLowerCase()) + '" onclick="scrollToBlock(\'file-' + escapeJsAttr(filePath) + '\')">' +
           '<span class="dot ' + dotClass + '"></span>' +
           '<span class="item-label mono">' + escapeHtml(filePath) + '</span>' +
           '<span class="count-badge">' + count + '</span>' +
@@ -2493,7 +2603,7 @@
           : 'dot-none';
         var itemClass = hasSuggestions ? 'sidebar-item' : 'sidebar-item sidebar-item-muted';
         var displayName = sectionRef.replace(/^###?\s*/, '').substring(0, 40);
-        html += '<div class="' + itemClass + '" data-target="section-' + escapeHtml(sectionRef) + '" data-filter-text="' + escapeHtml(sectionRef.toLowerCase()) + '" onclick="scrollToBlock(\'section-' + escapeHtml(sectionRef) + '\')">' +
+        html += '<div class="' + itemClass + '" data-target="section-' + escapeAttr(sectionRef) + '" data-filter-text="' + escapeAttr(sectionRef.toLowerCase()) + '" onclick="scrollToBlock(\'section-' + escapeJsAttr(sectionRef) + '\')">' +
           '<span class="dot ' + dotClass + '"></span>' +
           '<span class="item-label">' + escapeHtml(displayName) + '</span>' +
           (hasSuggestions ? '<span class="count-badge">' + count + '</span>' : '') +
@@ -2530,7 +2640,7 @@
         var itemClass = hasSuggestions ? 'sidebar-item' : 'sidebar-item sidebar-item-muted';
         var meta = entry.taskMetadata;
         var label = taskId + (meta && meta.title ? ': ' + meta.title.substring(0, 30) : '');
-        html += '<div class="' + itemClass + '" data-target="task-' + escapeHtml(taskId) + '" data-filter-text="' + escapeHtml(label.toLowerCase()) + '" onclick="scrollToBlock(\'task-' + escapeHtml(taskId) + '\')">' +
+        html += '<div class="' + itemClass + '" data-target="task-' + escapeAttr(taskId) + '" data-filter-text="' + escapeAttr(label.toLowerCase()) + '" onclick="scrollToBlock(\'task-' + escapeJsAttr(taskId) + '\')">' +
           '<span class="dot ' + dotClass + '"></span>' +
           '<span class="item-label">' + escapeHtml(label) + '</span>' +
           (hasSuggestions ? '<span class="count-badge">' + count + '</span>' : '') +
@@ -2643,6 +2753,7 @@
       // Default-collapse no-suggestion blocks, then restore user overrides
       applyDefaultCollapse();
       restoreCollapsedBlocks();
+      applyCommitFilter();
       setupScrollObserver();
       syncViewStates();
       // Persist preference
@@ -3410,7 +3521,7 @@
           var prefix = lineType === 'add' ? '+' : lineType === 'remove' ? '-' : ' ';
           var content = line.content != null ? line.content : '';
 
-          html += '<div class="' + lineClass + '" data-new-line="' + escapeHtml(newNum) + '">' +
+          html += '<div class="' + lineClass + '" data-new-line="' + escapeAttr(newNum) + '">' +
             '<div class="line-num-pair">' +
               '<span class="line-num">' + escapeHtml(oldNum) + '</span>' +
               '<span class="line-num">' + escapeHtml(newNum) + '</span>' +
@@ -3827,12 +3938,12 @@
         var ctx = findFirstContext(groups);
 
         // File block
-        html += '<div class="block" id="file-' + escapeHtml(filePath) + '">';
+        html += '<div class="block" id="file-' + escapeAttr(filePath) + '">';
 
         // Block header
         html += '<div class="block-header" onclick="toggleBlockCollapse(this.parentElement)">';
         html += '<span class="collapse-icon">&#9660;</span>';
-        html += '<span class="block-title mono">' + escapeHtml(filePath) + '</span>';
+        html += '<span class="block-title mono">' + escapeHtml(filePath) + fileLabelHtml(filePath) + '</span>';
         html += '<div class="block-meta">';
 
         // Diff stats
@@ -3843,6 +3954,9 @@
 
         // Summary badges
         html += renderBlockSummaryBadges(groups);
+
+        // A commit review's "changed on disk since <head7>" badge
+        html += driftBadgeHtml([filePath]);
 
         // Max importance badge
         if (maxImp === 'high') html += '<span class="badge badge-importance-high">HIGH</span>';
@@ -4083,7 +4197,7 @@
         var displayName = sectionRef.replace(/^###?\s*/, '');
 
         // Section block
-        html += '<div class="block' + (hasSuggestions ? '' : ' no-suggestions') + '" id="section-' + escapeHtml(sectionRef) + '">';
+        html += '<div class="block' + (hasSuggestions ? '' : ' no-suggestions') + '" id="section-' + escapeAttr(sectionRef) + '">';
 
         // Block header
         html += '<div class="block-header" onclick="toggleBlockCollapse(this.parentElement)">';
@@ -4149,7 +4263,7 @@
         html += '<div class="task-field-label">Dependencies</div>';
         html += '<div class="task-deps">';
         deps.forEach(function(dep) {
-          html += '<span class="dep-badge" onclick="scrollToBlock(\'task-' + escapeHtml(dep) + '\')">' + escapeHtml(dep) + '</span>';
+          html += '<span class="dep-badge" onclick="scrollToBlock(\'task-' + escapeJsAttr(dep) + '\')">' + escapeHtml(dep) + '</span>';
         });
         html += '</div>';
         html += '</div>';
@@ -4248,7 +4362,7 @@
         }
 
         // Task block
-        html += '<div class="block' + (hasSuggestions ? '' : ' no-suggestions') + '" id="task-' + escapeHtml(taskId) + '">';
+        html += '<div class="block' + (hasSuggestions ? '' : ' no-suggestions') + '" id="task-' + escapeAttr(taskId) + '">';
 
         // Block header
         html += '<div class="block-header" onclick="toggleBlockCollapse(this.parentElement)">';
@@ -4366,7 +4480,7 @@
 
       var label = 'CG' + (meta.displayIndex || '');
 
-      var html = '<div class="umbrella-banner" id="' + escapeHtml(bannerId) + '">';
+      var html = '<div class="umbrella-banner" id="' + escapeAttr(bannerId) + '">';
       html += '<div class="umbrella-banner-header" onclick="toggleUmbrellaCollapse(this)">';
       html += '<span class="collapse-icon">&#9660;</span>';
       html += '<span class="umbrella-banner-label">' + escapeHtml(label) + '</span>';
@@ -4420,11 +4534,18 @@
     }
 
     function renderHumanDecisionBadge(group) {
+      // The commit apply guard's skip (plans/review-commits.md §2.7) outranks
+      // any decision: the group was never batched.
+      var guard = group.guardSkip;
+      if (guard && guard.label) {
+        return '<span class="badge badge-judge-decision badge-decision-skipped" title="' +
+          escapeAttr((guard.files || []).join(', ')) + '">⚙ ' + escapeHtml(guard.label) + '</span>';
+      }
       var info = getHumanDecisionInfo(group);
       if (!info) return '';
       var label = decisionMaker(info) + ': ' + info.outcome;
-      return '<span class="badge badge-judge-decision badge-decision-' + escapeHtml(info.outcome) + '"' +
-        ' title="' + escapeHtml(info.reason) + '">⚙ ' + escapeHtml(label) + '</span>';
+      return '<span class="badge badge-judge-decision badge-decision-' + escapeAttr(info.outcome) + '"' +
+        ' title="' + escapeAttr(info.reason) + '">⚙ ' + escapeHtml(label) + '</span>';
     }
 
     function renderHumanDecisionDetail(group) {
@@ -4438,7 +4559,7 @@
         if (info.dropped) body += '<div class="hd-line"><strong>Dropped:</strong> ' + escapeHtml(info.dropped) + '</div>';
       }
       if (!body) body = '<div class="hd-line">No additional detail.</div>';
-      return '<details class="human-decision-section badge-decision-' + escapeHtml(info.outcome) + '">' +
+      return '<details class="human-decision-section badge-decision-' + escapeAttr(info.outcome) + '">' +
         '<summary>' + escapeHtml(summary) + '</summary>' +
         '<div class="human-decision-content">' + body + '</div>' +
         '</details>';
@@ -4488,8 +4609,9 @@
       var skippedClass = isGroupSkipped ? ' skipped' : '';
       // Prepend umbrella banner if this is the first group in a consolidated cluster
       var html = umbrellaHtml;
-      html += '<div class="inline-group' + consensusClass + skippedClass + '" data-group-id="' + escapeHtml(groupHashKey) + '"' +
-        ' data-validation="' + escapeHtml(vs) + '" data-importance="' + escapeHtml(maxImp) + '">';
+      html += '<div class="inline-group' + consensusClass + skippedClass + '" data-group-id="' + escapeAttr(groupHashKey) + '"' +
+        (reportData.commitRange ? ' data-commit="' + escapeAttr(commitKeyOf(group)) + '"' : '') +
+        ' data-validation="' + escapeAttr(vs) + '" data-importance="' + escapeAttr(maxImp) + '">';
 
       // Group bar
       html += '<div class="group-bar" onclick="togglePrGroupCollapse(this)">';
@@ -4525,7 +4647,7 @@
       // Skip control for group
       html += '<label class="skip-control" onclick="event.stopPropagation()">' +
         '<input type="checkbox"' + (isGroupSkipped ? ' checked' : '') +
-        ' onchange="togglePrGroupSkip(\'' + escapeHtml(groupHashKey) + '\', this.checked)">' +
+        ' onchange="togglePrGroupSkip(\'' + escapeJsAttr(groupHashKey) + '\', this.checked)">' +
         'Skip</label>';
 
       html += '</span>'; // group-bar-right
@@ -4533,6 +4655,9 @@
 
       // Group body (collapsible)
       html += '<div class="inline-group-body">';
+
+      // A commit review's "Introduced by" line
+      html += introducedByHtml(group);
 
       // Human/agent decision detail (post-apply)
       html += renderHumanDecisionDetail(group);
@@ -4552,8 +4677,8 @@
           typedClass = ' typed-suggestion type-' + sType;
         }
 
-        html += '<div class="inline-suggestion' + typedClass + (isSuggestionSkipped ? ' skipped' : '') + '" data-suggestion-id="' + escapeHtml(suggestionId) + '"' +
-          ' data-importance="' + escapeHtml((s.importance || 'low').toLowerCase()) + '">';
+        html += '<div class="inline-suggestion' + typedClass + (isSuggestionSkipped ? ' skipped' : '') + '" data-suggestion-id="' + escapeAttr(suggestionId) + '"' +
+          ' data-importance="' + escapeAttr((s.importance || 'low').toLowerCase()) + '">';
         html += '<div class="suggestion-meta">';
 
         // Suggestion label
@@ -4576,7 +4701,7 @@
         // Skip control for suggestion
         html += '<label class="skip-control suggestion-skip" onclick="event.stopPropagation()">' +
           '<input type="checkbox"' + (isSuggestionSkipped ? ' checked' : '') +
-          ' onchange="togglePrSuggestionSkip(\'' + escapeHtml(suggestionId) + '\', this.checked)">' +
+          ' onchange="togglePrSuggestionSkip(\'' + escapeJsAttr(suggestionId) + '\', this.checked)">' +
           'Skip</label>';
 
         html += '</div>'; // suggestion-meta
@@ -4584,15 +4709,15 @@
         // Editable description (click-to-edit pattern from report_template.html)
         if (displayDescription) {
           html += '<div class="description-rendered' + (isModified ? ' modified' : '') + '"' +
-            ' data-suggestion-id="' + escapeHtml(suggestionId) + '"' +
-            ' onclick="switchToEditPr(\'' + escapeHtml(suggestionId) + '\')">' +
+            ' data-suggestion-id="' + escapeAttr(suggestionId) + '"' +
+            ' onclick="switchToEditPr(\'' + escapeJsAttr(suggestionId) + '\')">' +
             renderMarkdown(displayDescription) +
             '<span class="edit-hint">Click to edit</span></div>';
           html += '<textarea class="description-editor hidden' + (isModified ? ' modified' : '') + '"' +
-            ' data-suggestion-id="' + escapeHtml(suggestionId) + '"' +
+            ' data-suggestion-id="' + escapeAttr(suggestionId) + '"' +
             ' data-original="' + escapeAttr(originalDescription) + '"' +
-            ' onblur="switchToViewPr(\'' + escapeHtml(suggestionId) + '\')"' +
-            ' oninput="handleDescriptionEditPr(\'' + escapeHtml(suggestionId) + '\', this)">' +
+            ' onblur="switchToViewPr(\'' + escapeJsAttr(suggestionId) + '\')"' +
+            ' oninput="handleDescriptionEditPr(\'' + escapeJsAttr(suggestionId) + '\', this)">' +
             escapeHtml(displayDescription) + '</textarea>';
         }
 
@@ -4629,7 +4754,7 @@
 
       // Validation override dropdown
       if (vs) {
-        html += '<select class="validation-override" onchange="setPrValidationOverride(\'' + escapeHtml(groupHashKey) + '\', this.value)">';
+        html += '<select class="validation-override" onchange="setPrValidationOverride(\'' + escapeJsAttr(groupHashKey) + '\', this.value)">';
         html += '<option value=""' + (!selections.validation_overrides[groupHashKey] ? ' selected' : '') + '>Validation: ' + escapeHtml(vs) + '</option>';
         html += '<option value="valid"' + (selections.validation_overrides[groupHashKey] === 'valid' ? ' selected' : '') + '>Override: valid</option>';
         html += '<option value="invalid"' + (selections.validation_overrides[groupHashKey] === 'invalid' ? ' selected' : '') + '>Override: invalid</option>';
@@ -4642,7 +4767,7 @@
 
       // "Skip all in this file/section" button (context-aware)
       if (blockContext) {
-        html += '<button class="btn" onclick="batchSkipInBlock(\'' + escapeHtml(blockContext) + '\')" style="font-size:0.6875rem;padding:0.1875rem 0.5rem;">' +
+        html += '<button class="btn" onclick="batchSkipInBlock(\'' + escapeJsAttr(blockContext) + '\')" style="font-size:0.6875rem;padding:0.1875rem 0.5rem;">' +
           'Skip all in ' + escapeHtml(blockContext.length > 30 ? '...' + blockContext.substring(blockContext.length - 27) : blockContext) + '</button>';
       }
 
@@ -4730,12 +4855,18 @@
       }
 
       var html = '';
+      var lastCommitKey = null;
 
-      groups.forEach(function(group, groupIndex) {
+      flatGroupOrder(groups).forEach(function(groupIndex) {
+        var group = groups[groupIndex];
         var groupNum = groupIndex + 1;
         var groupHashKey = group.groupHash || String(groupNum);
         var groupDisplayLabel = group.displayLabel || ('G' + groupNum);
         var isGroupSkipped = !!selections.skipped_groups[groupHashKey];
+        if (groupByCommit && reportData.commitRange && commitKeyOf(group) !== lastCommitKey) {
+          lastCommitKey = commitKeyOf(group);
+          html += commitHeadingHtml(lastCommitKey);
+        }
         var validationStatus = group.validationStatus || group.validation_status || '';
         var validationReason = group.validationReason || group.validation_reason || '';
         var validationConfidence = group.validationConfidence || group.validation_confidence || 0;
@@ -4777,7 +4908,8 @@
 
         // Card
         html += '<div class="flat-group-card' + (isGroupSkipped ? ' skipped' : '') + '"' +
-          ' data-group-id="' + escapeHtml(groupHashKey) + '">';
+          (reportData.commitRange ? ' data-commit="' + escapeAttr(commitKeyOf(group)) + '"' : '') +
+          ' data-group-id="' + escapeAttr(groupHashKey) + '">';
 
         // Header
         html += '<div class="flat-group-header" onclick="toggleFlatGroup(this)">';
@@ -4789,7 +4921,7 @@
         // Skip control for group
         html += '<label class="skip-control" onclick="event.stopPropagation()">' +
           '<input type="checkbox"' + (isGroupSkipped ? ' checked' : '') +
-          ' onchange="toggleFlatGroupSkip(\'' + escapeHtml(groupHashKey) + '\', this.checked)">' +
+          ' onchange="toggleFlatGroupSkip(\'' + escapeJsAttr(groupHashKey) + '\', this.checked)">' +
           'Skip</label>';
 
         html += '</div>'; // header-top
@@ -4809,8 +4941,11 @@
 
         if (isConsensus) html += '<span class="badge badge-consensus">Consensus (' + models.length + ')</span>';
 
+        html += driftBadgeHtml(groupFiles(group));
+
         html += modelBadgesHtml;
         html += '</div>'; // badges
+        html += introducedByHtml(group);
         html += '</div>'; // header
 
         // Validation section (expandable)
@@ -4867,7 +5002,7 @@
           // Skip control for suggestion
           html += '<label class="skip-control" onclick="event.stopPropagation()">' +
             '<input type="checkbox"' + (isSuggestionSkipped ? ' checked' : '') +
-            ' onchange="toggleFlatSuggestionSkip(\'' + escapeHtml(suggestionId) + '\', this.checked)">' +
+            ' onchange="toggleFlatSuggestionSkip(\'' + escapeJsAttr(suggestionId) + '\', this.checked)">' +
             'Skip</label>';
 
           html += '</div>'; // suggestion-header
@@ -4956,6 +5091,181 @@
 
       saveSelections();
       updateBatchSkipCount();
+    }
+
+    // ================================================================
+    // Commit review (plans/review-commits.md §2.10). Everything here reads
+    // reportData.commitRange, which the generator stores only for a commit
+    // review, so a plan's report renders none of it.
+    // ================================================================
+    function commitKeyOf(group) {
+      return (group && group.introducedBy) ? group.introducedBy : 'unattributed';
+    }
+
+    function commitRankOf(key) {
+      var cr = reportData && reportData.commitRange;
+      var commits = (cr && cr.commits) || [];
+      for (var i = 0; i < commits.length; i++) {
+        if (commits[i].sha === key) return i;
+      }
+      return commits.length + (key === 'unattributed' ? 1 : 0);
+    }
+
+    function commitEntry(sha) {
+      var cr = reportData && reportData.commitRange;
+      var commits = (cr && cr.commits) || [];
+      for (var i = 0; i < commits.length; i++) {
+        if (commits[i].sha === sha) return commits[i];
+      }
+      return null;
+    }
+
+    /** The flat view's group indexes: as given, or by commit, newest first. */
+    function flatGroupOrder(groups) {
+      var order = groups.map(function(_g, i) { return i; });
+      if (!groupByCommit || !reportData.commitRange) return order;
+      return order.sort(function(a, b) {
+        var byCommit = commitRankOf(commitKeyOf(groups[a])) - commitRankOf(commitKeyOf(groups[b]));
+        return byCommit !== 0 ? byCommit : a - b;
+      });
+    }
+
+    function commitHeadingHtml(key) {
+      if (key === 'unattributed') {
+        return '<div class="commit-group-heading">Unattributed</div>';
+      }
+      var entry = commitEntry(key) || {};
+      return '<div class="commit-group-heading"><code>' + escapeHtml(entry.short || String(key).substring(0, 7)) +
+        '</code> ' + escapeHtml(entry.subject || '') + '</div>';
+    }
+
+    function introducedByHtml(group) {
+      if (!reportData.commitRange || !group || !group.introducedBy) return '';
+      var source = group.introducedBySource || '';
+      if (source === 'none' || !source) return '';
+      var html = '<div class="introduced-by">Introduced by <code>' +
+        escapeHtml(group.introducedByShort || String(group.introducedBy).substring(0, 7)) + '</code>';
+      if (group.introducedBySubject) html += ' \u2014 ' + escapeHtml(group.introducedBySubject);
+      if (source === 'model' || source === 'model-drifted') {
+        html += ' <span class="introduced-by-model" title="The reviewing model named this commit; git blame did not measure it">(model)</span>';
+      }
+      return html + '</div>';
+    }
+
+    function groupFiles(group) {
+      var files = [];
+      ((group && group.suggestions) || []).forEach(function(s) {
+        var ref = s.fileRef || '';
+        var path = ref.replace(/:\d+(-\d+)?$/, '');
+        if (path && files.indexOf(path) === -1) files.push(path);
+      });
+      return files;
+    }
+
+    // A path absent at `head` on a pinned review: its header carries the same
+    // words as its validation excerpt (plans/review-commits.md §2.5), "deleted
+    // in <range>", "renamed to <new> in <range>" or "absent at <head7>". The
+    // generator stores them as fileContexts[path].label; a plan's report has none.
+    function fileLabelHtml(fileRef) {
+      var path = String(fileRef || '').replace(/:\d+(-\d+)?$/, '');
+      var entry = ((reportData && reportData.fileContexts) || {})[path];
+      var label = (entry && !Array.isArray(entry)) ? entry.label : '';
+      if (!label) return '';
+      return ' <span class="file-absent-label">(' + escapeHtml(label) + ')</span>';
+    }
+
+    function driftBadgeHtml(paths) {
+      var cr = reportData && reportData.commitRange;
+      if (!cr || !cr.drifted || !cr.drifted.length) return '';
+      var hit = (paths || []).some(function(path) { return cr.drifted.indexOf(path) !== -1; });
+      if (!hit) return '';
+      var head7 = String(cr.head || '').substring(0, 7);
+      return '<span class="badge badge-drift" title="This file differs on disk from ' + escapeAttr(head7) +
+        ': a skip or apply decision on it is skipped anyway by the apply\'s guard">changed on disk since ' +
+        escapeHtml(head7) + '</span>';
+    }
+
+    function renderCommitHeader() {
+      var cr = reportData && reportData.commitRange;
+      var el = document.getElementById('commit-range-header');
+      if (!cr || !el) return;
+      var html = '<div class="commit-brief-line"><strong>' + escapeHtml((cr.documentLabel || 'Commit brief') + ':') +
+        '</strong> <span class="mono">' + escapeHtml(cr.brief || reportData.planPath || '') + '</span></div>';
+      html += '<pre class="commit-block">' + escapeHtml((cr.blockLines || []).join('\n')) + '</pre>';
+      if (cr.focus) {
+        html += '<div class="commit-meta"><strong>Focus:</strong> ' + escapeHtml(cr.focus) + '</div>';
+      }
+      if (cr.plan) {
+        html += '<div class="commit-meta"><strong>Context plan:</strong> <code>' + escapeHtml(cr.plan) +
+          '</code> (read-only; snapshot <code>' + escapeHtml(cr.planSnapshot || 'none') +
+          '</code>, SHA-256 <code>' + escapeHtml(cr.planSha256 || 'unknown') + '</code>)</div>';
+      }
+      el.innerHTML = html;
+      el.style.display = '';
+    }
+
+    function renderCommitFilter() {
+      var cr = reportData && reportData.commitRange;
+      var bar = document.getElementById('commit-filter-bar');
+      if (!cr || !bar) return;
+      var counts = {};
+      (reportData.groups || []).forEach(function(group) {
+        var key = commitKeyOf(group);
+        counts[key] = (counts[key] || 0) + 1;
+      });
+      var html = '<span class="batch-label">Commit:</span>';
+      (cr.commits || []).forEach(function(c) {
+        if (!counts[c.sha]) return;
+        html += '<button class="btn-batch commit-chip" type="button" data-commit="' + escapeAttr(c.sha) +
+          '" title="' + escapeAttr(c.subject || '') + '">' + escapeHtml(c.short || String(c.sha).substring(0, 7)) +
+          ' (' + counts[c.sha] + ')</button>';
+      });
+      if (counts.unattributed) {
+        html += '<button class="btn-batch commit-chip" type="button" data-commit="unattributed">unattributed (' +
+          counts.unattributed + ')</button>';
+      }
+      html += '<span class="batch-separator"></span>' +
+        '<button class="btn-batch" type="button" id="group-by-commit">Group by commit</button>';
+      bar.innerHTML = html;
+      bar.style.display = '';
+      bar.querySelectorAll('.commit-chip').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          var key = btn.getAttribute('data-commit');
+          commitFilter = (commitFilter === key) ? '' : key;
+          bar.querySelectorAll('.commit-chip').forEach(function(other) {
+            other.classList.toggle('active', other.getAttribute('data-commit') === commitFilter);
+          });
+          applyCommitFilter();
+        });
+      });
+      var toggle = document.getElementById('group-by-commit');
+      if (toggle) {
+        toggle.addEventListener('click', function() {
+          groupByCommit = !groupByCommit;
+          toggle.classList.toggle('active', groupByCommit);
+          renderFlatView();
+          syncViewStates();
+          applyCommitFilter();
+          // The PR view is ordered by file and line; findings by commit are
+          // the flat view's.
+          if (groupByCommit && currentView !== 'flat') switchView('flat');
+        });
+      }
+    }
+
+    /** Show only the active commit's findings (every one when none is active). */
+    function applyCommitFilter() {
+      if (!reportData || !reportData.commitRange) return;
+      document.querySelectorAll('.inline-group[data-commit], .flat-group-card[data-commit]').forEach(function(el) {
+        var match = !commitFilter || el.getAttribute('data-commit') === commitFilter;
+        el.style.display = match ? '' : 'none';
+      });
+      document.querySelectorAll('#pr-view .block, #pr-view .global-section').forEach(function(block) {
+        var groups = block.querySelectorAll('.inline-group[data-commit]');
+        if (!groups.length) return;
+        var visible = Array.prototype.some.call(groups, function(g) { return g.style.display !== 'none'; });
+        block.style.display = (!commitFilter || visible) ? '' : 'none';
+      });
     }
 
     // ================================================================
@@ -5109,6 +5419,11 @@
 
       // Render flat view (always available as toggle target)
       renderFlatView();
+
+      // A commit review's header, commit filter and toggle
+      renderCommitHeader();
+      renderCommitFilter();
+      applyCommitFilter();
 
       // Default-collapse no-suggestion blocks, then restore user overrides
       applyDefaultCollapse();

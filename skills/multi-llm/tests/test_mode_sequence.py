@@ -110,3 +110,58 @@ def test_the_detach_walk_opens_only_the_driven_dirs(tmp_path):
     # Its own run dir is skipped; `implement/` holds no checkpoint; `ask/` is
     # not in the sequence.
     assert [Path(p).name for p in found] == ["code-review", "apply-fixes"]
+
+
+# ---------------------------------------------------------------------------
+# The commit modes (plans/review-commits.md §2.1, "The mode rows")
+# ---------------------------------------------------------------------------
+
+COMMIT_ROWS = [m for m in mode_table.MODES if mode_table.POS_REVS in m.positionals]
+
+
+def test_the_three_commit_rows_sit_after_improve_code():
+    names = mode_table.mode_names()
+    assert [m.name for m in COMMIT_ROWS] == [
+        "review-commits", "apply-commit-fixes", "improve-commits"]
+    start = names.index("improve-code") + 1
+    assert names[start:start + 3] == tuple(m.name for m in COMMIT_ROWS)
+
+
+@pytest.mark.parametrize("row", COMMIT_ROWS, ids=lambda m: m.name)
+def test_a_commit_row_takes_only_the_range_and_is_no_workflow_phase(row):
+    """`full` never runs them, so `full.sequence` stays the workflow rows."""
+    assert row.positionals == (mode_table.POS_REVS,)
+    assert not row.is_workflow_phase
+    assert row.name not in FULL.sequence
+    assert row.supports_detach and row.user_facing
+    assert row.name in mode_table.DETACH_MODES
+    assert row.target_module == row.name.replace("-", "_") + "_orchestrator"
+
+
+def test_commit_view_of_names_the_phase_mode_a_front_door_fronts():
+    views = {m.name: m.commit_view_of for m in mode_table.MODES if m.commit_view_of}
+    assert views == {"review-commits": "review-code",
+                     "apply-commit-fixes": "apply-code-fixes"}
+    for name, fronted in views.items():
+        row, phase_row = mode_table.resolve(name), mode_table.resolve(fronted)
+        assert phase_row.is_workflow_phase
+        # The front door runs the fronted phase, so it owns that phase word.
+        assert row.phase == phase_row.phase
+
+
+def test_improve_commits_is_recorded_as_itself():
+    """Its own run dir and `--mode improve-commits`, never `improve-code`, so
+    nothing maps back for it; its steps are the code words."""
+    row = mode_table.resolve("improve-commits")
+    assert row.commit_view_of is None
+    assert row.phase == "improve-commits"
+    assert row.is_composite and not row.runs_workflow
+    assert row.sequence == mode_table.resolve("improve-code").sequence
+    assert row.sequence_phases == ("code-review", "apply-code-fixes")
+    assert row.last_phase == "apply-code-fixes"
+
+
+def test_the_detach_walk_resolves_improve_commits_dirs():
+    assert detach._driven_dir_names("improve-commits") == (
+        "code-review", "apply-fixes")
+    assert detach._driven_dir_names("review-commits") == ()

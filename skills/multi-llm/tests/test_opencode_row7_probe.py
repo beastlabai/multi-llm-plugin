@@ -829,7 +829,7 @@ class TestTheScenarioArmsTheRealStub:
     def test_the_two_calls_carry_every_property_the_tool_requires(self):
         for args in (probe.INIT_ARGS, probe.STATUS_ARGS):
             assert set(args) == set(SURFACE["argument_descriptions"])
-            assert args["question"] == "" and args["extra_flags"] == []
+            assert args["question"] == "" and args["revs"] == "" and args["extra_flags"] == []
         assert probe.INIT_ARGS["plan"] == ""
         assert probe.STATUS_ARGS["plan"] == probe.PLAN
 

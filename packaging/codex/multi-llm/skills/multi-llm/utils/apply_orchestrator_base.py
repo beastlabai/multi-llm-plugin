@@ -555,6 +555,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     # ``write_phase_artifact()``: that early exit runs before `_load_inputs`
     # has resolved the tasks file.
     edits_the_plan: bool = False
+    # Whether this phase applies a review's fixes to code, and so runs the
+    # commit apply guard when state pins reviewed endpoints (`commit_range`, or
+    # `head_ref` after a direct `--head-ref` review; plans/review-commits.md
+    # §2.7). Only apply-code-fixes does: the other two phases edit the plan or
+    # its task list, never code a commit review judged at `head`.
+    guards_commit_fixes: bool = False
 
     # ------------------------------------------------------------------
     # Subclass validation
@@ -618,6 +624,13 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         self.prefix: str = ""
         self.out_dir: str = ""
         self.state: Optional[StateManager] = None
+        # The reviewed endpoints state pins, strictly re-resolved in `_setup`
+        # (`commit_range.Resolved`), the record they came from and the
+        # repository root the guard's git reads run in. All None on a run
+        # whose state pins nothing, which then behaves exactly as before.
+        self._pinned: Optional[Any] = None
+        self._pinned_source: Optional[str] = None
+        self._repo_root: Optional[str] = None
 
         # Data populated during _load_and_parse_inputs
         self.groups: List[Dict[str, Any]] = []
@@ -901,6 +914,21 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             )
         return sorted(decisions)
 
+    def _document_title(self, plan_word: str = "Plan") -> str:
+        """*plan_word* (``Plan``, ``Plan file``) as today, or ``Commit brief``
+        when the plan's ``state.json`` records a ``commit_range``: the phase's
+        own lines never call a commit brief a plan (plans/review-commits.md
+        §2.8), through the one owner of the word,
+        ``commit_review.document_label``. Read-only; no state is a plan."""
+        try:
+            from .commit_review import document_label, read_commit_range
+
+            word = document_label({"commit_range": read_commit_range(
+                os.path.abspath(str(self.args.plan_file)))})
+        except Exception:  # noqa: BLE001 - advisory: the plan's word stands
+            return plan_word
+        return plan_word if word == "plan" else word.capitalize()
+
     def _stop_user_commands(self) -> Dict[str, str]:
         """The stop's answer in this host's own spelling (fix round 18):
         ``skip``, the resume carrying ``--human-task {task_id}=skip``. Empty
@@ -940,6 +968,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
 
         # Step 2: Handle --skip (if supports_skip_flag)
         if self.supports_skip_flag and getattr(self.args, "skip", False):
+            # A state file this apply cannot trust is refused before it is
+            # loaded and saved over (here, `--mark-completed` and step 3a).
+            self._refuse_unusable_state()
             state = StateManager(Path(self.plan_path))
             state.mark_phase_skipped(self.phase_name, "User chose to skip")
             state.save()
@@ -975,6 +1006,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # word byte-for-byte. The stdout `message` below stays on `phase_name`:
         # it names the orchestrator the host invoked, not the state key.
         if getattr(self.args, "mark_completed", False):
+            self._refuse_unusable_state()
             state = StateManager(Path(self.plan_path))
             state.mark_phase_completed(
                 self.confirmation_phase_name or self.phase_name
@@ -1012,7 +1044,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # Step 3: Validate plan file exists
         if not os.path.isfile(self.plan_path):
             print(
-                f"ERROR: Plan file not found: {self.args.plan_file}",
+                f"ERROR: {self._document_title('Plan file')} not found: "
+                f"{self.args.plan_file}",
                 file=sys.stderr,
             )
             print(
@@ -1020,7 +1053,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 file=sys.stderr,
             )
             raise OrchestratorError(
-                f"Phase _setup, step 3: Plan file not found: {self.plan_path}",
+                f"Phase _setup, step 3: {self._document_title('Plan file')} not "
+                f"found: {self.plan_path}",
                 exit_code=1,
             )
 
@@ -1031,13 +1065,17 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # and stop, starting no run for an anchor to belong to.
         set_run_anchor(self.plan_path)
 
+        # Step 3a: a state file this apply cannot trust is refused before
+        # anything below loads it (step 10) and saves over it.
+        self._refuse_unusable_state()
+
         # Step 4: Derive prefix + output dir
         self.prefix = derive_prefix(self.plan_path)
         self.out_dir = find_output_dir(
             self.plan_path, guard_double_nesting=self.guard_double_nesting
         )
 
-        print(f"Plan: {self.plan_path}", file=sys.stderr)
+        print(f"{self._document_title()}: {self.plan_path}", file=sys.stderr)
         print(f"Output directory: {self.out_dir}", file=sys.stderr)
         print(f"Prefix: {self.prefix}", file=sys.stderr)
 
@@ -1118,6 +1156,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
 
         # Step 10: Initialize StateManager + handle --fresh
         self.state = StateManager(Path(self.plan_path))
+
+        # Step 10a: the reviewed endpoints, resolved strictly before anything
+        # is written (`--fresh` below), any model runs or any batch is built:
+        # a recorded SHA that no longer names a commit is exit 3
+        # `[RANGE_UNRESOLVED]`, never a `HEAD~1` fallback (§2.4).
+        self._resolve_pinned_endpoints()
 
         if getattr(self.args, "fresh", False) and not getattr(
             self.args, "resume", False
@@ -1650,6 +1694,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             dry_run=getattr(self.args, "dry_run", False),
         )
 
+        # Step 25a: the commit apply guard (plans/review-commits.md §2.7), on
+        # what filtering left to apply or decide, before the no-items exit,
+        # human decisions and batching, so both legs take the same decision
+        # and a run whose fixes it skips entirely still prints its block.
+        self._apply_commit_guard()
+
         print(f"\nFiltered {self.item_noun_plural}:", file=sys.stderr)
         print(f"  Valid (to apply): {len(self.valid)}", file=sys.stderr)
         print(f"  Needs human review: {len(self.needs_human)}", file=sys.stderr)
@@ -1716,7 +1766,14 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             # `reason`) and the `decision_source` that says who decided. The
             # marker is the key `apply_verdicts_to_work_set` stamps on the group.
             decision_source = str(g.get("decision_source") or "")
-            if is_judge_source(decision_source):
+            guard_skip = g.get("_guard_skip")
+            if isinstance(guard_skip, dict):
+                # The commit guard's skip (§2.7): the plugin's, decided before
+                # any judge or batch, so neither a validation nor a judge
+                # bucket. Its reason and files go everywhere a skip is listed.
+                skip_status = guard_skip.get("status") or "commit_guard"
+                reason = g.get("reason") or reason
+            elif is_judge_source(decision_source):
                 skip_status = JUDGE_SKIPPED_STATUS
                 reason = g.get("reason") or reason
             elif status == "skipped":
@@ -1755,7 +1812,256 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             # byte-identical output to the one it emitted before this key existed.
             if decision_source:
                 entry["decision_source"] = decision_source
+            if isinstance(guard_skip, dict):
+                entry["files"] = list(guard_skip.get("files") or [])
             self.formatted_skipped.append(entry)
+
+    # ==================================================================
+    # The commit apply guard (plans/review-commits.md §2.5, §2.7)
+    # ==================================================================
+
+    def _refuse_unusable_state(self) -> None:
+        """Exit 3, before anything is written, when the guard cannot be
+        keyed (plans/review-commits.md §2.7, "The guard is keyed on the
+        endpoints state pins").
+
+        ``StateManager`` replaces a ``state.json`` that does not parse with
+        a fresh initial state, so the apply would run with no guard, against
+        ``head_at_start`` rather than the reviewed base, and its first save
+        would overwrite the file. So, on apply-code-fixes only
+        (:attr:`guards_commit_fixes`):
+
+        - a ``state.json`` that exists but does not parse, or holds no JSON
+          object, is refused for any plan;
+        - a commit brief (``commit_review.is_commit_brief``) whose state is
+          missing or pins no endpoints is refused.
+
+        The file is only read here, never written. The front door's own
+        step-6 load may still replace an unparseable state (§2.1): by then a
+        review is recorded afresh, and its apply refuses an unreadable state
+        first (``commit_apply.require_completed_review``).
+        """
+        if not self.guards_commit_fixes:
+            return
+        from .commit_range import SLUG_PATTERN, pinned_endpoints, pinned_spelling
+        from .commit_review import is_commit_brief
+        from .output_handler import output_dir_path
+
+        plan = Path(self.plan_path)
+        state_file = output_dir_path(plan) / "state.json"
+        exists = state_file.exists()
+        document: Any = None
+        problem: Optional[str] = None
+        if exists:
+            try:
+                document = json.loads(state_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                problem = f"it does not parse ({' '.join(str(exc).split())[:160]})"
+            else:
+                if not isinstance(document, dict):
+                    problem = "it does not hold a JSON object"
+        try:
+            brief = is_commit_brief(plan)
+        except Exception:  # noqa: BLE001 - not a brief we can recognise
+            brief = False
+        if problem is None:
+            if not brief or pinned_endpoints(document) is not None:
+                return
+            problem = ("it records no reviewed commit range" if exists
+                       else "it does not exist")
+        shown = state_file
+        try:
+            shown = Path(os.path.relpath(state_file))
+        except ValueError:  # pragma: no cover - another drive on Windows
+            pass
+        if brief:
+            match = re.fullmatch(f"({SLUG_PATTERN})", plan.stem)
+            pinned = None
+            if match:
+                base12, head12 = plan.stem.split("-", 1)
+                pinned = pinned_spelling(None if base12 == "root" else base12, head12)
+            pinned = pinned or str(self.args.plan_file)
+            message = (
+                f"ERROR: this commit brief's state.json ({shown}) cannot be used: "
+                f"{problem}, so the reviewed range and the apply guard cannot be "
+                f"read, and apply-code-fixes would apply the fixes unguarded "
+                f"against the wrong base. Nothing was written. Restore the file, "
+                f"or review the range again: --review-commits {pinned}, then "
+                f"--apply-commit-fixes {pinned}."
+            )
+        else:
+            message = (
+                f"ERROR: {shown} cannot be used: {problem}. apply-code-fixes "
+                f"would start from an empty state and overwrite it. Nothing was "
+                f"written. Repair the file, or move it aside to start the phase "
+                f"over, then re-run."
+            )
+        print(message, file=sys.stderr)
+        from .cli_common import record_error
+
+        record_error(message)
+        raise OrchestratorError(
+            f"Phase _setup, step 3a: {state_file} cannot be used: {problem}",
+            exit_code=3,
+        )
+
+    def _resolve_pinned_endpoints(self) -> None:
+        """Resolve the endpoints state pins, strictly, once (§2.4).
+
+        Keyed on ``commit_range.pinned_endpoints``: ``commit_range`` (a
+        commit brief) or ``head_ref`` (a plan after a direct ``--head-ref``
+        review). A recorded SHA that no longer names a commit is exit 3
+        ``[RANGE_UNRESOLVED]`` naming the recovery, before the guard or any
+        batch, so no fix prompt is ever written against ``HEAD~1``. A run
+        whose state pins nothing is left exactly as it was.
+        """
+        if not self.guards_commit_fixes or self.state is None:
+            return
+        from .commit_range import RangeError, pinned_endpoints, pinned_record, resolve_recorded
+        from .git_utils import get_project_root_from_dir, git_path
+
+        endpoints = pinned_endpoints(self.state.state)
+        if endpoints is None:
+            return
+        root = get_project_root_from_dir(os.path.dirname(self.plan_path)) or os.getcwd()
+        label = git_path(self.plan_path, repo_root=root)
+        if endpoints.source == "commit_range":
+            recovery = (
+                "This review can no longer be resumed, reaggregated or applied: "
+                "review the commits as they are now with --review-commits <range>, "
+                "which resolves to new SHAs and so to a new commit brief."
+            )
+        else:
+            recovery = (
+                f"This review can no longer be applied: review the plan again on "
+                f"commits that exist with review-code {label} --base-ref <rev> "
+                f"--head-ref <rev>."
+            )
+        try:
+            resolved = resolve_recorded(
+                pinned_record(self.state.state), cwd=root, label=label, recovery=recovery,
+            )
+        except RangeError as exc:
+            print(exc.message)
+            from .cli_common import record_error
+
+            record_error(" ".join(exc.message.split("\n")))
+            raise OrchestratorError(
+                f"Phase _setup, step 10a: {exc.message.splitlines()[0]}",
+                exit_code=exc.exit_code,
+            ) from exc
+        self._pinned = resolved
+        self._pinned_source = endpoints.source
+        self._repo_root = root
+        typed = getattr(self.args, "base_ref", None)
+        if typed and typed != resolved.base_ref:
+            print(
+                f"NOTE: --base-ref {typed} is not used: this {endpoints.source} pins "
+                f"the reviewed range, so the fixes' base is its recorded base "
+                f"{resolved.base_ref[:12]}",
+                file=sys.stderr,
+            )
+
+    def _apply_commit_guard(self) -> None:
+        """Take the §2.7 guard decision over what filtering left, and print
+        ``[COMMIT_FIXES]``.
+
+        Every group it skips (the context plan, a fix file changed since the
+        reviewed ``head``, a protected path) moves from ``valid`` /
+        ``needs_human`` to ``skipped``, before human decisions and batching,
+        so the judge never sees it and no batch carries it. The decision is
+        saved to the pinned record's ``guard`` through this phase's own
+        ``StateManager`` (the one it saves with, §2.1), under
+        ``state_file_lock``. The block is printed once, here, and the result
+        line carries ``commit_fixes``. Not on a ``--detach`` launcher, whose
+        worker takes the decision (and prints the block into its log); both
+        dry runs decide and print but write nothing.
+        """
+        if self._pinned is None or self.state is None or self._is_detach_invoker():
+            return
+        from .cli_common import record_commit_fixes_result
+        from .commit_apply import GUARD_SKIP_STATUS, skip_reason, take_guard
+        from .commit_range import pinned_record
+        from .human_decisions import group_id_of
+
+        dry = bool(getattr(self.args, "dry_run", False)
+                   or getattr(self.args, "dry_run_subagents", False))
+        phase_dir = os.path.abspath(os.path.join(self.out_dir, self.phase_name))
+        resume = bool(getattr(self.args, "resume", False))
+        outcome = take_guard(
+            self.state.state,
+            list(self.valid) + list(self.needs_human),
+            cwd=self._repo_root or os.getcwd(),
+            plan_path=self.plan_path,
+            out_dir=self.out_dir,
+            phase_dir=phase_dir,
+            resume=resume,
+            persist=not dry,
+            completed=self._finished_group_ids() if resume else (),
+        )
+        if outcome is None:
+            return
+        if not dry:
+            record = pinned_record(self.state.state)
+            if record is not None:
+                record["guard"] = outcome.guard
+                from .metrics import state_file_lock
+
+                with state_file_lock(self.state.state_file):
+                    self.state.save()
+
+        head = str(outcome.guard.get("head") or "")
+        context_plan = outcome.guard.get("context_plan")
+        if outcome.skipped:
+            for work in (self.valid, self.needs_human):
+                kept = []
+                for group in work:
+                    entry = outcome.skipped.get(group_id_of(group))
+                    if entry is None:
+                        kept.append(group)
+                        continue
+                    reason = skip_reason(str(entry.get("reason")), head=head,
+                                         context_plan=context_plan)
+                    group["_guard_skip"] = {
+                        "status": GUARD_SKIP_STATUS,
+                        "reason": entry.get("reason"),
+                        "files": list(entry.get("files") or []),
+                    }
+                    group["reason"] = reason
+                    self.skipped.append(group)
+                    print(
+                        f"[commit guard] skipped {group_id_of(group)} "
+                        f"({reason}: {', '.join(entry.get('files') or [])})",
+                        file=sys.stderr,
+                    )
+                work[:] = kept
+        for line in outcome.lines:
+            print(line)
+        record_commit_fixes_result(outcome.payload)
+
+    def _finished_group_ids(self) -> Set[str]:
+        """The groups whose batch an earlier run of this phase finished, for
+        the apply guard's re-check on a ``--resume`` (``take_guard``'s
+        *completed*).
+
+        Every ``processed_<phase>`` record that keeps its item out of a
+        native resume (:func:`processed_record_counts`), the executor's own
+        records included: step 23 drops those items on the native leg, while
+        the executor leg keeps them in the work set so the scheduler can keep
+        their batch from its result file. The guard must then leave their
+        batch as it landed (plans/review-commits.md §2.8).
+        """
+        if self.state is None:
+            return set()
+        from .subagent_tasks import file_content_hash
+
+        review_stamp = file_content_hash(
+            os.path.join(self.out_dir, self.review_subdir, "grouped.json"))
+        return {
+            str(key)
+            for key, record in self.state.get_processed_items(self.phase_name).items()
+            if processed_record_counts(record, review_stamp=review_stamp)
+        }
 
     # ==================================================================
     # Phase 4 — _prepare_batches
@@ -1828,12 +2134,22 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # so its judging tasks need `inputs.tasks_sha256` too (F8).
         artifact = self.write_phase_artifact()
         tasks_file = artifact if artifact != self.plan_path else None
+        # On a pinned run the judge rules on findings built from commits and
+        # files read at `head`, all of it data under review (§2.6 "Trust
+        # boundary"): its task says so. Absent otherwise, so a plan's run keeps
+        # its prompt byte for byte.
+        trust_note: Optional[str] = None
+        if self._pinned is not None:
+            from .commit_range import DATA_UNDER_REVIEW
+
+            trust_note = DATA_UNDER_REVIEW
         try:
             document = build_judge_tasks(
                 items=items,
                 phase_dir=phase_dir,
                 plan_file=str(self.plan_path),
                 tasks_file=tasks_file,
+                **({"trust_note": trust_note} if trust_note else {}),
             )
             tasks_path = write_judge_tasks(document, phase_dir)
         except Exception as exc:  # noqa: BLE001 - must not fail the apply run
@@ -3322,6 +3638,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 batch_check_section,
                 verification_line,
             )
+        from .commit_spelling import commit_view
         from .subagent_executor import (
             DECLINED_SECTION_HEADING,
             SKIPPED_SECTION_HEADING,
@@ -3344,7 +3661,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         lines = [
             f"# Applied {nouns.title()} Report",
             "",
-            f"**Plan**: {self.plan_path}",
+            # `**Commit brief**:` on a commit review (plans/review-commits.md §2.8).
+            f"**{self._document_title()}**: {self.plan_path}",
         ]
         target = self.write_target_file()
         touched = self._touched_files()
@@ -3479,8 +3797,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 if reason:
                     lines.append(f"**Reason**: {reason}")
                 lines.append("")
-            # Fix round 14: the batches whose own check failed, whole.
-            section = batch_check_section(rows)
+            # Fix round 14: the batches whose own check failed, whole, in the
+            # commit modes' words on a commit review (§2.8).
+            section = batch_check_section(
+                rows, commit_review=commit_view(self.plan_path) is not None)
             if section:
                 lines += section[1:] + [""]
             for heading, entries in not_applied_sections.items():
@@ -3535,6 +3855,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     lines.append(f"**Group**: `{gid}`")
                 if item.get("reason"):
                     lines.append(f"**Reason**: {item['reason']}")
+                if item.get("files"):
+                    # A commit guard skip (§2.7): the files that caused it.
+                    lines.append(
+                        "**Files**: " + ", ".join(f"`{f}`" for f in item["files"])
+                    )
                 lines.append("")
 
         path = os.path.join(phase_dir, "summary.md")
@@ -3605,7 +3930,14 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if not (review_dir / "report_data.json").exists():
             return None
         decisions = self.state.get_all_human_decisions(self.phase_name)
-        if not decisions:
+        # The commit guard's skips badge their groups beside the decisions
+        # (plans/review-commits.md §2.10): read from the saved guard.
+        guard = None
+        if self._pinned is not None:
+            from .commit_apply import guard_record
+
+            guard = guard_record(self.state.state)
+        if not decisions and not (guard and guard.get("skipped")):
             return None
         try:
             from .html_report_generator import (
@@ -3617,7 +3949,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             )
         try:
             report_path, matched = regenerate_report_with_human_decisions(
-                review_dir, decisions
+                review_dir, decisions, **({"guard": guard} if guard else {})
             )
         except Exception as exc:  # noqa: BLE001 - an overlay must not fail a run
             self.logger.warning("decision overlay not regenerated: %s", exc)
@@ -4503,6 +4835,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 context_document.label if context_document is not None else None
             ),
             phase=os.path.basename(os.path.normpath(review_dir)),
+            extra_instructions=self.get_revalidation_instructions(),
         )
 
         if revalidation_tasks["items_to_revalidate"] == 0:
@@ -4559,6 +4892,16 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             "without --revalidate"
         )
         sys.exit(0)  # Exit — Claude Code handles revalidation
+
+    def get_revalidation_instructions(self) -> Optional[str]:
+        """Phase guidance appended to every revalidation batch prompt.
+
+        ``None`` (the default) lets ``prepare_batched_revalidation_tasks``
+        derive it from the context kind, as it always has. A subclass whose
+        revalidators must read code a particular way returns the text itself,
+        whatever document the batch carries as its context.
+        """
+        return None
 
     def get_revalidation_document(self, review_dir: str) -> Optional[Any]:
         """The document a revalidation judges, bound for this round (2.1b).

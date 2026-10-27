@@ -46,9 +46,11 @@ tasks listed. This checks the copy, and only the copy:
   … ``[NEXT_STEP_MARKDOWN_END]``, a success's or a stop's) holds the report
   to every command it fences too, beside the marker lines' (fix round 26),
   and a block reason asks for the section printed as given.
-* **A native ``--improve-plan`` / ``--improve-code`` run is held to its own
-  continuation, never to an inner phase's next step** (Fable review
-  2026-10-09). Its core first runs ``util improve-steps``, which ends with
+* **A native ``--improve-plan`` / ``--improve-code`` / ``--improve-commits``
+  run is held to its own continuation, never to an inner phase's next step**
+  (Fable review 2026-10-09; improve-commits' core runs the same planner on
+  the commit brief, plans/review-commits.md §2.8). Its core first runs
+  ``util improve-steps``, which ends with
   ``[IMPROVE_RERUN] <command>``, the composite's continuation in the host's
   spelling; each phase it then runs still prints its own standalone block
   (review-plan's ``--reaggregate`` names ``--apply-suggestions <plan>``), and
@@ -565,11 +567,12 @@ def _continuation_reason(block: Block) -> str:
     """A native composite's continuation the report lacks (Fable review
     2026-10-09). The command is the only thing held; the reason also says
     why an inner phase's block is no substitute, since the turn that ends a
-    stopped run holds review-plan's (or review-code's) bare apply command,
-    which is the wrong one to give."""
+    stopped run holds review-plan's (or review-code's, or review-commits')
+    bare apply command, which is the wrong one to give."""
     marker = IMPROVE_RERUN.strip()
     return "\n\n".join([
-        "multi-llm report check: this --improve-plan or --improve-code run's "
+        "multi-llm report check: this --improve-plan, --improve-code or "
+        "--improve-commits run's "
         f"next step is the {marker} command its `util improve-steps` call "
         "printed, and your final message does not carry it exactly. No "
         "closing lookup came after it (a stopped run makes none), and the "

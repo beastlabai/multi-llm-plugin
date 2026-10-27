@@ -165,6 +165,9 @@ _LAUNCHER_ONLY_VALUE_FLAGS: Tuple[str, ...] = ("--max-detached",)
 #: depend on that cwd still meaning the same thing.
 _PATH_FLAGS: Tuple[str, ...] = (
     "--plan-file", "--question-file", "--out-dir", "--tasks-file",
+    # A commit front door's launch stage (plans/review-commits.md §2.1): the
+    # worker applies it after its lock, from wherever it runs.
+    "--commit-stage",
 )
 
 #: Nested-session variables that must not leak into a detached run.
@@ -722,6 +725,12 @@ def classify_run(
         # site. Same reasoning as `consolidation_recommended` just above: a
         # detached run's caller never saw the bracketed marker's stdout.
         "high_priority_groups": status.get("high_priority_groups"),
+        # D2 (live test 2026-10-26): optional, written only by a detached
+        # composite's report (`record_step_results`) — `{run_id, phase, steps,
+        # artifacts}`, its steps' notices, counts and validation context.
+        # They ran in its process, so this is the only route their results
+        # reach a poll of its run dir by.
+        "step_results": status.get("step_results"),
         "run": dict(run),
         "run_state": run.get("state") if isinstance(run, dict) else None,
         # D4's refusal close-out: `{"state": "runner_rejected", "reason_code"}`
@@ -1181,8 +1190,12 @@ class RunHandle:
         detached: bool = True,
         replay_flags: Optional[Sequence[str]] = None,
         plan_arg: Optional[str] = None,
+        commit_stage: Optional[str] = None,
     ):
         self.phase_dir = str(phase_dir)
+        # A commit front door's `--detach` stage (`--commit-stage`), applied
+        # once this worker owns the dir (see `start`).
+        self.commit_stage: Optional[str] = str(commit_stage) if commit_stage else None
         self.run_id = run_id
         self.mode = mode
         self.plan_file = str(plan_file)
@@ -1209,6 +1222,7 @@ class RunHandle:
         """Take the dir, publish identity, start beating. Raises on conflict."""
         global _ACTIVE
         self._acquire_lock()
+        self._apply_commit_stage()
         identity = process_control.identity()
         # Recorded, never re-derived: after the double spawn the group leader is
         # the exited intermediate, so once this worker dies nothing can ask the
@@ -1292,6 +1306,33 @@ class RunHandle:
         _ACTIVE = self
         print(f"[DETACHED_RUN] run_id={self.run_id} pid={identity['pid']} "
               f"phase_dir={self.phase_dir}")
+
+    def _apply_commit_stage(self) -> None:
+        """Publish a commit front door's staged brief header, snapshot and
+        ``commit_range``, right after this worker won the dir's lock.
+
+        Under ``--detach`` the launcher publishes nothing (plans/review-commits.md
+        §2.1, "Ownership before any write"): it stages what it decided and names
+        the stage on this worker's argv. Applied here, before the run record is
+        claimed and before the phase goes on to read the brief, so a launch
+        that is refused, re-attaches, or loses the lock changes nothing. A
+        stage that cannot be applied stops the worker before it claims the
+        run: reviewing a brief other than the one the launcher decided would
+        be the silent failure.
+        """
+        if not self.commit_stage:
+            return
+        try:
+            from .commit_review import apply_stage
+
+            apply_stage(self.commit_stage)
+        except Exception as exc:  # noqa: BLE001 - any failure stops the worker
+            self._lock.release()
+            raise DetachError(
+                f"ERROR: could not apply the commit-review stage {self.commit_stage}: "
+                f"{exc}",
+                exit_code=EXIT_ERROR,
+            ) from exc
 
     def _acquire_lock(self) -> None:
         payload = {
@@ -1730,6 +1771,42 @@ def record_output_files(phase_dir: str, **paths: Any) -> None:
         status_file.update_status(phase_dir, {"output_files": existing})
 
 
+def record_step_results(
+    phase_dir: str, phase: str, steps: Sequence[Dict[str, Any]],
+    artifacts: Sequence[str],
+) -> None:
+    """Record a composite's step results in its run dir — detached runs only.
+
+    A composite's steps run in its process, so what each hands a caller (its
+    notice, its verdict counts, its ``validation_context``) is on the worker's
+    own result line and in the step's phase dir, never in the run dir a poll
+    pins; a detached ``improve-commits`` poll carried none of it (live test
+    2026-10-26, D2). The composite keeps each step's as the step returned and
+    records them, with its *phase* and the line's artifacts, under its own
+    ``run_id``: a later run in the same step dirs cannot change them, and a run
+    that never got this far (aborted, crashed) leaves an earlier run's record,
+    which ``status`` reads as no record at all.
+    """
+    handle = _ACTIVE
+    if handle is None or os.path.abspath(handle.phase_dir) != os.path.abspath(str(phase_dir)):
+        return
+    status_file.update_status(phase_dir, {"step_results": {
+        "run_id": handle.run_id,
+        "phase": phase,
+        "steps": [dict(step) for step in steps],
+        "artifacts": [str(path) for path in artifacts if path and os.path.exists(str(path))],
+    }})
+
+
+def recorded_step_results(view: Dict[str, Any]) -> Dict[str, Any]:
+    """*view*'s ``step_results`` when its own run recorded them, else ``{}``."""
+    record = view.get("step_results")
+    run = view.get("run") if isinstance(view.get("run"), dict) else {}
+    if isinstance(record, dict) and run.get("run_id") and record.get("run_id") == run["run_id"]:
+        return record
+    return {}
+
+
 def record_resolution(phase_dir: str, site: str, decision: str) -> None:
     """Record one auto-resolved decision point, for a detached run only."""
     handle = _ACTIVE
@@ -1870,6 +1947,13 @@ def launch(
     plan_file = os.path.abspath(str(plan_file))
     phase_dir = os.path.abspath(str(phase_dir))
     force = bool(getattr(args, "force", False))
+    if force and getattr(args, "commit_stage", None):
+        # A commit front door's restart adds `--force --rerun-all` to restart
+        # the round; only a `--force` the user typed takes a live run over
+        # (plans/review-commits.md §2.1), and the stage records which it was.
+        from .commit_review import stage_takes_over
+
+        force = stage_takes_over(getattr(args, "commit_stage", None))
     if_not_running = bool(getattr(args, "if_not_running", False))
     # The launcher's `--host`, carried into every poll command printed below —
     # it is the host the worker records, so the poll must select it too.
@@ -2351,6 +2435,7 @@ def begin_worker_run(
         detached=detached,
         replay_flags=replay,
         plan_arg=plan_arg,
+        commit_stage=getattr(args, "commit_stage", None),
     )
     handle.start()
     return handle

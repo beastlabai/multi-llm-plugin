@@ -24,6 +24,12 @@ The contract, briefly:
 * ``plan_arg`` is used verbatim — never resolved, rebased or relativized — and
   is quoted for the model that reads the command, never for a shell
   (:func:`quote_plan_arg`).
+* On a commit review (the plan's ``state.json`` holds ``commit_range``) a
+  command naming review-code, apply-code-fixes or improve-commits is spelled
+  as the commit mode with the pinned range instead, through
+  ``utils/commit_spelling`` (plans/review-commits.md §2.8,
+  :func:`commit_view_for`). A plan's run, and a direct ``--head-ref`` run, are
+  never mapped.
 """
 
 from __future__ import annotations
@@ -34,9 +40,12 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .text_clip import plain_line
+
+if TYPE_CHECKING:  # pragma: no cover - annotations only
+    from .commit_spelling import CommitView
 
 #: The four line kinds of the block (§2.2(2)). The text after a command
 #: marker and one space is the builder's ``command`` byte for byte; an
@@ -1038,6 +1047,152 @@ def recorded_route(
 
 
 # ---------------------------------------------------------------------------
+# The commit spelling (plans/review-commits.md §2.8)
+# ---------------------------------------------------------------------------
+#
+# The two phase front doors re-record as the code modes, so every command
+# built here from state would read `--apply-code-fixes <brief>`. The mapping
+# itself is `commit_spelling`'s; this module only decides, per printed
+# command, whether it applies.
+
+#: The why above ``--apply-commit-fixes`` after a commit review (§2.10): the
+#: user works through the two reports before applying, and the composite is
+#: the way to skip that step.
+COMMIT_REPORTS_WHY = (
+    "Read the review's two reports before applying: {md} and {html}. A finding "
+    "marked skipped, valid or invalid there, or an edited description, is what "
+    "the apply honours. --improve-commits would skip this reading step: it "
+    "applies the validated fixes unattended."
+)
+
+
+def brief_view(
+    plan_arg: Union[str, Path], plan_path: Optional[Union[str, Path]] = None,
+) -> Optional["CommitView"]:
+    """``commit_spelling.commit_view`` of the plan's ``state.json`` (*plan_path*,
+    else *plan_arg* made absolute), the brief spelled as *plan_arg*; ``None``
+    for a plan's run, a direct ``--head-ref`` run, or a state it cannot read."""
+    from .commit_spelling import commit_view
+
+    try:
+        source = plan_arg if plan_path is None else plan_path
+        return commit_view(os.path.abspath(str(source)), plan=str(plan_arg))
+    except Exception:  # noqa: BLE001 - advisory: the plan spelling stands
+        return None
+
+
+def spelled_view(mode_word: str, view: Optional["CommitView"]) -> Optional["CommitView"]:
+    """*view* when ``--<mode_word>`` is printed in the commit spelling, else ``None``.
+
+    Only a mode that takes a range reads the pinned spelling: the hook maps
+    ``review-code`` and ``apply-code-fixes`` to the front doors, and
+    ``improve-commits`` is one. A command naming any other mode on a brief
+    (``ask``, a fallback ``review-plan``) keeps the brief path, which that mode
+    takes as its plan.
+    """
+    if view is None:
+        return None
+    from .commit_spelling import spell_mode
+
+    modes = _skill_module("modes")
+    row = modes.resolve(str(mode_word))
+    spelled = modes.resolve(spell_mode(row.name if row is not None else str(mode_word), view))
+    if spelled is None or modes.POS_REVS not in tuple(spelled.positionals):
+        return None
+    return view
+
+
+def commit_view_for(
+    mode_word: str,
+    plan_arg: Union[str, Path],
+    plan_path: Optional[Union[str, Path]] = None,
+) -> Optional["CommitView"]:
+    """The ``CommitView`` a printed ``--<mode_word> <plan_arg> …`` is spelled
+    with, or ``None`` to print it as today (§2.8, "Spelling of commands").
+
+    Set only when the plan's ``state.json`` holds ``commit_range`` and the
+    mode, through the hook, takes a range (:func:`spelled_view`). A plan's
+    run and a direct ``review-code --head-ref`` run (``head_ref`` only) are
+    never mapped: their commands stay review-code's own and the plan is still
+    a plan (§2.5, "Printed commands").
+    """
+    return spelled_view(mode_word, brief_view(plan_arg, plan_path))
+
+
+def commit_mode_word(mode_word: str, view: Optional["CommitView"]) -> str:
+    """*mode_word* as a command printed for *view* names it (the hook's
+    ``spell_mode``), aliases resolved first; unchanged without a view."""
+    if view is None:
+        return str(mode_word)
+    from .commit_spelling import spell_mode
+
+    row = _skill_module("modes").resolve(str(mode_word))
+    return spell_mode(row.name if row is not None else str(mode_word), view)
+
+
+def commit_spelled_args(
+    mode_word: str, view: "CommitView", flags: Sequence[Any] = (),
+) -> str:
+    """``--<commit mode> <pinned> [flags…]``, the text a route's template
+    wraps: the hook's ``spell_args`` (the pinned range, or the brief path on
+    a root range, and none of the flags a front door synthesises or
+    consumes), each token through :func:`quote_plan_arg`."""
+    from .commit_spelling import spell_args
+
+    word, rest = spell_args(commit_mode_word(mode_word, view), None, flags, view)
+    return " ".join([f"--{word}", *(quote_plan_arg(str(token)) for token in rest)])
+
+
+def fronted_mode_word(mode_word: str) -> str:
+    """The phase mode a commit front door's word fronts (``apply-commit-fixes``
+    → ``apply-code-fixes``, through ``Mode.commit_view_of``), else *mode_word*:
+    what a lookup asked in the commit spelling reads state as."""
+    row = _skill_module("modes").resolve(str(mode_word))
+    if row is not None and row.commit_view_of:
+        return row.commit_view_of
+    return str(mode_word)
+
+
+def _pinned_brief(text: str) -> Optional[str]:
+    """The brief a pinned ``<base12>..<head12>`` names
+    (``commit_review.brief_for_pinned``, no git call beyond the root), or
+    ``None`` for other text or outside a repository."""
+    try:
+        from .commit_review import brief_for_pinned
+
+        brief = brief_for_pinned(str(text))
+    except Exception:  # noqa: BLE001 - not a pinned range here
+        return None
+    return str(brief) if brief is not None else None
+
+
+def _shown_path(path: Union[str, Path]) -> str:
+    """*path* relative to the cwd when it lies under it (``/``-separated),
+    else absolute, as the front door names a brief."""
+    text = os.path.abspath(str(path))
+    try:
+        shown = os.path.relpath(text)
+    except ValueError:  # Windows: another drive than the cwd's
+        return text
+    if shown == os.pardir or shown.startswith(os.pardir + os.sep):
+        return text
+    return shown.replace(os.sep, "/")
+
+
+def commit_reports_why(
+    plan_arg: Union[str, Path], plan_path: Optional[Union[str, Path]] = None,
+) -> str:
+    """:data:`COMMIT_REPORTS_WHY` naming the brief's ``code-review/report.md``
+    and ``report.html``, each as the front door names the brief."""
+    from .output_handler import phase_dir_path
+
+    source = Path(os.path.abspath(str(plan_arg if plan_path is None else plan_path)))
+    review = phase_dir_path(source, "code-review")
+    return COMMIT_REPORTS_WHY.format(
+        md=_shown_path(review / "report.md"), html=_shown_path(review / "report.html"))
+
+
+# ---------------------------------------------------------------------------
 # The builder
 # ---------------------------------------------------------------------------
 
@@ -1151,6 +1306,9 @@ def next_phase_commands(
         manual_gate_flags(implement_entry)
         if implement_entry.get("manual_gate") else []
     )
+    # plans/review-commits.md §2.8: a commit review's commands read as the
+    # commit modes, with the pinned range (read once; `None` for a plan).
+    commit_brief = brief_view(plan_arg, plan_path)
 
     def command_answer(answer: NextPhase) -> NextPhase:
         # Fix round 16: a command answer names the deferred manual tasks
@@ -1163,6 +1321,12 @@ def next_phase_commands(
         if (answer.phase == "implement" and gate_flags and not answer.why
                 and status_of("implement") == "in_progress"):
             answer = _replace(answer, why=manual_gate_why(implement_entry))
+        if (answer.phase == "apply-code-fixes" and not answer.why
+                and status_of("apply-code-fixes") != "in_progress"
+                and spelled_view("apply-code-fixes", commit_brief) is not None):
+            # §2.10: after a commit review, the reports come before the
+            # apply, and the composite is the way to skip reading them.
+            answer = _replace(answer, why=commit_reports_why(plan_arg, plan_path))
         answer = _with_manual_tasks(answer, phases, template=template, plan_arg=plan_arg)
         if (answer.manual_tasks_command
                 and answer.manual_tasks_command == answer.command):
@@ -1172,6 +1336,11 @@ def next_phase_commands(
 
     def command_for(phase: str) -> str:
         mode_word = _mode_word(modes, phase)
+        view = spelled_view(mode_word, commit_brief)
+        if view is not None:
+            # No implement on a commit brief, so `--resume` is the one flag.
+            resume = [RESUME_FLAG] if status_of(phase) == "in_progress" else []
+            return template.replace(ARGS_SLOT, commit_spelled_args(mode_word, view, resume))
         args = f"--{mode_word} {quote_plan_arg(plan_arg)}"
         if status_of(phase) == "in_progress":
             args += f" {RESUME_FLAG}"
@@ -1408,6 +1577,7 @@ def _prerequisites_unmet(plan_path: Path, phase: str) -> bool:
 def phase_command(
     plan_arg: str, host_id: str, route: Optional[str], mode_word: str,
     *flags: str,
+    plan_path: Optional[Union[str, Path]] = None,
 ) -> str:
     """``<host spelling> --<mode> <plan as typed> [flags…]``, from the same
     ``next_command`` template and the same quoting as :func:`resume_command`.
@@ -1424,12 +1594,22 @@ def phase_command(
     ``--files``/``--files-from`` paths, which may hold a space or a quote.
     Every token the other callers pass (``--resume``, ``--human-task``,
     ``T003=done``, ``{task_id}=skip``) has neither and comes back bare.
+
+    On a commit review (the plan's ``state.json``, read at *plan_path* else
+    at *plan_arg*, holds ``commit_range``) the command is spelled as the
+    commit mode with the pinned range and none of the flags a front door
+    synthesises (:func:`commit_spelled_args`, plans/review-commits.md §2.8):
+    ``[IMPROVE_RERUN]``, an apply stop's ``skip`` answer and the resume
+    answers all come through here.
     """
     modes = _skill_module("modes")
     mode = modes.resolve(mode_word)
     if mode is None:
         raise ValueError(f"unknown mode {mode_word!r}")
     template = _host_capabilities().next_command_template(host_id, route)
+    view = commit_view_for(mode.name, plan_arg, plan_path)
+    if view is not None:
+        return template.replace(ARGS_SLOT, commit_spelled_args(mode.name, view, flags))
     args = " ".join([
         f"--{mode.name}", quote_plan_arg(plan_arg),
         *(quote_plan_arg(str(flag)) for flag in flags),
@@ -1490,14 +1670,19 @@ def resume_command(
     one for a plan that does not exist. The same rule as
     :func:`next_phase_commands`'s ``command_for``: ``in_progress`` is the one
     status that spells ``--resume``.
+
+    A commit front door's word (``apply-commit-fixes``) answers as the phase
+    it fronts, and on a commit review the command is spelled back as the
+    commit mode with the pinned range (plans/review-commits.md §2.8).
     """
     modes = _skill_module("modes")
-    mode = modes.resolve(mode_word)
+    mode = modes.resolve(fronted_mode_word(mode_word))
     if mode is None or not mode.is_workflow_phase or not mode.phase:
         return None
     from .subagent_tasks import PHASE_BY_WRITE_KIND
 
     template = _host_capabilities().next_command_template(host_id, route)
+    view = commit_view_for(mode.name, plan_arg, plan_path)
     if mode.phase in RERUN_RESUME_PHASES:
         source = Path(os.path.abspath(str(plan_arg if plan_path is None else plan_path)))
         if phase_status is None:
@@ -1516,6 +1701,9 @@ def resume_command(
     phases: Dict[str, Dict[str, Any]] = workflow.get("phases") or {}
     if (phases.get(mode.phase) or {}).get("status") != "in_progress":
         return None
+    if view is not None:
+        return template.replace(ARGS_SLOT, commit_spelled_args(
+            mode.name, view, _resume_flags(phases, mode.phase)))
     args = " ".join(
         [f"--{mode.name}", quote_plan_arg(plan_arg)] + _resume_flags(phases, mode.phase))
     return template.replace(ARGS_SLOT, args)
@@ -2065,6 +2253,10 @@ def emit_resume(
     *stream* and raises :class:`AlreadyComplete`, with no ``user_resume``.
     ``user_resume.mode`` names the mode its command runs, which the tool
     routes build their option calls from.
+
+    On a commit review (plans/review-commits.md §2.8) a front door's word
+    is asked as the phase it fronts, and the command, ``mode``, ``flags``
+    and section are spelled back as the commit mode with the pinned range.
     """
     from . import cli_common
 
@@ -2075,7 +2267,7 @@ def emit_resume(
         source = plan_arg if plan_path is None else plan_path
         if not _state_file(os.path.abspath(str(source))).is_file():
             return None
-        asked = mode_word
+        asked = fronted_mode_word(mode_word)
         mode_word = _blocked_step(asked, source)
         route = resolve_route(host_id, stderr=err, recorded=recorded_route)
         # Read once here only for a phase whose resume reads it (fix round
@@ -2099,7 +2291,8 @@ def emit_resume(
             # review): the composite's own continuation, in its word.
             continuation = _composite_continuation(asked, source)
             mode_word = _composite_of(asked).name
-            command = phase_command(plan_arg, host_id, route, mode_word, *continuation)
+            command = phase_command(
+                plan_arg, host_id, route, mode_word, *continuation, plan_path=plan_path)
         if command is None:
             return None
         print(f"{RESUME_COMMAND_MARKER} {command}", file=out)
@@ -2121,16 +2314,24 @@ def emit_resume(
         return None
     modes = _skill_module("modes")
     mode = modes.resolve(mode_word)
+    # §2.8: the mode word the printed command runs, a commit mode on a commit
+    # review, and the flags it carries without the front doors' own.
+    view = commit_view_for(mode.name, plan_arg, plan_path) if mode is not None else None
+    shown_mode = commit_mode_word(mode.name, view) if mode is not None else mode_word
     if continuation is not None:
         # The composite's own continuation: no stop of its own on record, so
         # no answers, why or stop lines; the flags are the command's own, so
         # a tool route's first option is this very command.
+        if view is not None:
+            from .commit_spelling import strip_fronted_flags
+
+            continuation = strip_fronted_flags(continuation)
         resume = {
             "phase": mode.phase,
-            "mode": mode.name,
+            "mode": shown_mode,
             "command": command,
             "flags": list(continuation),
-            "markdown": render_resume_markdown(mode.name, command, None, []),
+            "markdown": render_resume_markdown(shown_mode, command, None, []),
         }
         cli_common.record_user_resume(resume)
         return command
@@ -2140,7 +2341,7 @@ def emit_resume(
         # The mode its command runs (§2.6): a composite asked about answers
         # with an inner phase's resume, and an option call built from the word
         # asked would hand `--human-task` to the composite's parser.
-        "mode": mode.name,
+        "mode": shown_mode,
         "command": command,
         # The flags the command carries after the plan, so a tool route
         # offers this very command as its first `options` entry (fix round
@@ -2184,8 +2385,7 @@ def emit_resume(
     if why:
         resume["why"] = why
     # Fix round 24: all of it as the report's closing section, ready to copy.
-    resume["markdown"] = render_resume_markdown(
-        mode.name if mode is not None else mode_word, command, why, answers or [])
+    resume["markdown"] = render_resume_markdown(shown_mode, command, why, answers or [])
     # Fix round 28 (live run 12 #5): the stop's own line as recorded, and the
     # same line without the ways forward this section carries, which the
     # servers relay in its place beside the section.
@@ -2376,7 +2576,8 @@ def resume_answers(
     source = plan_arg if plan_path is None else plan_path
     return [
         {
-            "command": phase_command(plan_arg, host_id, route, mode_word, *entry["flags"]),
+            "command": phase_command(
+                plan_arg, host_id, route, mode_word, *entry["flags"], plan_path=plan_path),
             "flags": entry["flags"],
             "why": entry["why"],
         }
@@ -2493,8 +2694,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 3
     plan_path = os.path.abspath(args.plan)
     if not os.path.isfile(plan_path):
+        # plans/review-commits.md §2.8/§2.9: a commit review's pinned
+        # `<base12>..<head12>` names its brief by name, as `status` maps it
+        # (the tool routes' `--blocked` lookup carries the pinned range).
+        brief = _pinned_brief(args.plan)
+        if brief is not None:
+            plan_path = brief
+    if not os.path.isfile(plan_path):
         print(f"ERROR: plan file not found: {plan_path}", file=sys.stderr)
         return 3
+    # A commit front door's word reads state as the phase it fronts; the
+    # commands printed are spelled back as the commit mode (§2.8).
+    if args.after is not None:
+        args.after = fronted_mode_word(args.after)
+    if args.blocked is not None:
+        args.blocked = fronted_mode_word(args.blocked)
     host_id = _host_capabilities().resolve_host_id(explicit=args.host)
     # Fix round 24: from a shell, the route the plan's run was started on.
     recorded = recorded_route(plan_path, host_id, args.blocked or args.after)

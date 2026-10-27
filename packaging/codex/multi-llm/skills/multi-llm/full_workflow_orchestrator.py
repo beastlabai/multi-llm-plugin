@@ -78,7 +78,7 @@ from utils.cli_common import (
 from utils.output_handler import get_output_dir, get_phase_dir
 from utils.state_manager import StateManager
 from utils.stream_bootstrap import bootstrap_streams
-from utils.text_clip import clip
+from utils.text_clip import clip, drop_said_clauses, join_clauses
 from utils import unattended as unattended_mod
 from utils.unattended import NeedsHuman
 
@@ -243,6 +243,9 @@ class FullWorkflow:
         self.unattended = bool(getattr(args, "yes", False))
         self.plan_dir = get_output_dir(self.plan_path)
         self.reports: List[StepReport] = []
+        #: What each step that ran recorded on the result line, in step order
+        #: (:meth:`_close_step_result`), for a detached caller's poll.
+        self.step_results: List[Dict[str, Any]] = []
         #: Phases whose apply step this run already auto-ran (D6a: at most once
         #: per phase per run — a second unmet re-check is exit 3, not a retry).
         self.auto_ran: List[str] = []
@@ -360,6 +363,47 @@ class FullWorkflow:
         ctx = active_result()
         if ctx is not None:
             ctx.error = None
+
+    @staticmethod
+    def _open_step_result() -> Optional[Dict[str, Any]]:
+        """The result line's notice, counts and validation context before a
+        step, its notice set aside so the step's own can be told apart."""
+        ctx = active_result()
+        if ctx is None:
+            return None
+        mark = {
+            "notice": ctx.notice,
+            "validation_counts": ctx.validation_counts,
+            "validation_context": ctx.validation_context,
+        }
+        ctx.notice = None
+        return mark
+
+    def _close_step_result(self, step: Step, mark: Optional[Dict[str, Any]]) -> None:
+        """Keep what *step* recorded on the result line (:attr:`step_results`),
+        and put its notice after the earlier steps'.
+
+        Joined, never replaced: a phase records its notice as if it were the
+        only one, so the apply's replaced the review's truncation sentence.
+        A clause an earlier step said word for word is not said again
+        (``text_clip.drop_said_clauses``); the record keeps the step's whole
+        notice, as it recorded it. The counts and validation context are the
+        step's own only when it recorded them (each record stores a new
+        object), and a step that recorded none of the three is not kept.
+        """
+        ctx = active_result()
+        if ctx is None or mark is None:
+            return
+        own = ctx.notice
+        ctx.notice = join_clauses(
+            [mark["notice"], drop_said_clauses(own, mark["notice"])]) or None
+        result: Dict[str, Any] = {"notice": own} if own else {}
+        for key in ("validation_counts", "validation_context"):
+            value = getattr(ctx, key)
+            if value and value is not mark[key]:
+                result[key] = dict(value)
+        if result:
+            self.step_results.append({"phase": step.phase or step.label, **result})
 
     # -- flag forwarding -----------------------------------------------
     def common_flags(self) -> List[str]:
@@ -840,12 +884,60 @@ class FullWorkflow:
         """
         return [*(["--yes"] if self.unattended else []), "--resume"]
 
+    def continuation_command(self) -> str:
+        """Row 14's re-invocation: ``<mode> <plan> <resume flags>``.
+
+        On a commit review (the brief's ``state.json`` holds
+        ``commit_range``; ``improve-commits``) it is spelled through the
+        commit spelling hook (plans/review-commits.md §2.8): the pinned
+        ``<base12>..<head12>`` (the brief path on a root range) in place of
+        the plan, and none of the flags its front door synthesises or
+        consumes. Every other run keeps ``dispatcher_command`` byte for byte.
+        """
+        from utils import next_phase
+        from utils.commit_spelling import spell_command
+
+        view = next_phase.commit_view_for(self.MODE_NAME, str(self.plan_path))
+        if view is None:
+            return dispatcher_command(self.MODE_NAME, self.plan_path, *self.resume_flags())
+        return spell_command(self.MODE_NAME, self.plan_path, *self.resume_flags(), view=view)
+
+    def _commit_spelled(self, command: Optional[str]) -> Optional[str]:
+        """*command*, a follow-up the stopped phase printed, in the commit
+        spelling when it is a dispatcher command naming this plan and the
+        plan is a commit brief (plans/review-commits.md §2.8: the stop prints
+        it and records it as ``next``); anything else comes back unchanged."""
+        if not command:
+            return command
+        import shlex
+
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            return command
+        script = next((index for index, token in enumerate(tokens)
+                       if os.path.basename(token) == "multi_llm.py"), None)
+        if script is None or script + 2 >= len(tokens):
+            return command
+        mode, plan, rest = tokens[script + 1], tokens[script + 2], tokens[script + 3:]
+        if plan.startswith("-") or (
+                os.path.realpath(plan) != os.path.realpath(str(self.plan_path))):
+            return command
+        from utils import next_phase
+        from utils.commit_spelling import spell_command
+
+        view = next_phase.commit_view_for(mode, plan)
+        if view is None:
+            return command
+        return spell_command(next_phase.commit_mode_word(mode, view), plan, *rest, view=view)
+
     def _phase_failed(self, step: Step, detail: str, code: Optional[int]) -> int:
-        """D6 row 14: exit 3, name the phase and the ``--resume`` re-invocation."""
-        resume = dispatcher_command(
-            self.MODE_NAME, self.plan_path, *self.resume_flags()
-        )
-        pending = self._pending_next()
+        """D6 row 14: exit 3, name the phase and the ``--resume`` re-invocation
+        (:meth:`continuation_command`), which is also the result line's
+        ``next``; on a commit brief a follow-up the phase printed reads in the
+        commit spelling too (:meth:`_commit_spelled`)."""
+        resume = self.continuation_command()
+        pending = self._commit_spelled(self._pending_next())
         head = f"{step.label} did not complete ("
         tail = "). The workflow stopped here; no later phase ran."
         lines = ["", f"ERROR: {head}{detail}{tail}"]
@@ -896,7 +988,11 @@ class FullWorkflow:
             print(f"\n=== {step.label} ===")
             self._record_progress(current=step.phase or step.label)
             self._clear_error()
-            outcome, detail, code = step.run()
+            mark = self._open_step_result()
+            try:
+                outcome, detail, code = step.run()
+            finally:
+                self._close_step_result(step, mark)
             self.reports.append(
                 StepReport(step.label, step.phase, outcome, detail, code)
             )
@@ -915,7 +1011,9 @@ class FullWorkflow:
     # ------------------------------------------------------------------
     def print_report(self) -> None:
         print(f"\n## {self.REPORT_TITLE}\n")
-        print(f"**Plan**: {self.plan_path}")
+        # "Commit brief", never "Plan", for a commit review's composite
+        # (plans/review-commits.md §2.8), through the one owner of the word.
+        print(f"**{self._document_title()}**: {self.plan_path}")
         print("")
         for report in self.reports:
             suffix = f" — {report.detail}" if report.detail else ""
@@ -926,8 +1024,38 @@ class FullWorkflow:
             for path in artifacts:
                 print(f"- {path}")
                 record_artifact(path)
+        self._record_step_results()
         print("")
         self._print_metrics()
+
+    def _record_step_results(self) -> None:
+        """Each step's result and the result line's artifacts, in this run dir.
+
+        A detached caller never reads the worker's line: its poll pins this
+        run dir and restates what this records there, under this run's id
+        (``detach.record_step_results``; live test 2026-10-26, D2: a detached
+        ``improve-commits`` handed back its log alone). Every step ran in this
+        process and recorded its artifacts on the line, so the whole list
+        goes. A no-op in the foreground.
+        """
+        from utils import detach
+
+        ctx = active_result()
+        if ctx is None or detach.active_run() is None:
+            return
+        detach.record_step_results(
+            str(self.run_dir), self.RUN_DIR_PHASE, self.step_results, ctx.artifacts)
+
+    def _document_title(self) -> str:
+        """``Plan``, or ``Commit brief`` when the plan's ``state.json``
+        records a ``commit_range`` (``commit_review.document_label``)."""
+        try:
+            from utils.commit_review import document_label, read_commit_range
+
+            return document_label(
+                {"commit_range": read_commit_range(self.plan_path)}).capitalize()
+        except Exception:  # noqa: BLE001 - advisory: the plan's word stands
+            return "Plan"
 
     def report_artifacts(self) -> List[str]:
         """The per-phase artifacts a reader is most likely to open next.
