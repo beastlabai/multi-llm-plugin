@@ -419,7 +419,7 @@ _SKILL_DIR_TOKENS = (
 #: package it never needed. Rendering the flags from the one owner,
 #: :func:`utils.unattended.uv_run_args`, is what stops the runbook text and
 #: :func:`dispatcher_prefix` from disagreeing about them.
-UV_RUN_FLAGS_TOKEN = "{UV_RUN_FLAGS}"
+UV_RUN_FLAGS_PLACEHOLDER = "{UV_RUN_FLAGS}"
 
 #: The third template token: the mode a bare argument text resolves to.
 #:
@@ -429,7 +429,7 @@ UV_RUN_FLAGS_TOKEN = "{UV_RUN_FLAGS}"
 #: copies that a change to the constant leaves behind. Rendering them here is what
 #: makes the constant's "every surface renders from it" true of the file route as
 #: well as of ``dist/cli-surface.json``.
-DEFAULT_MODE_TOKEN = "{DEFAULT_MODE}"
+DEFAULT_MODE_PLACEHOLDER = "{DEFAULT_MODE}"
 
 #: The fourth template token: the decision rule for exit 3.
 #:
@@ -439,16 +439,16 @@ DEFAULT_MODE_TOKEN = "{DEFAULT_MODE}"
 #: through this token, never as a literal — so the file routes cannot drift
 #: from the plugin's own exit-3 message, which is composed from the same
 #: constant's sibling.
-NEEDS_HUMAN_RULE_TOKEN = "{NEEDS_HUMAN_RULE}"
+NEEDS_HUMAN_RULE_PLACEHOLDER = "{NEEDS_HUMAN_RULE}"
 
 
 def render_instruction_text(text: str, base: Union[str, Path]) -> str:
     """Substitute every template placeholder in instruction/shim text.
 
     Four tokens, one rule: ``{SKILL_DIR}`` (and its host-expanded spellings)
-    becomes *base*, :data:`UV_RUN_FLAGS_TOKEN` becomes the ``uv run`` flag list,
-    :data:`DEFAULT_MODE_TOKEN` becomes ``modes.DEFAULT_MODE`` and
-    :data:`NEEDS_HUMAN_RULE_TOKEN` becomes ``modes.NEEDS_HUMAN_RULE``. The skill
+    becomes *base*, :data:`UV_RUN_FLAGS_PLACEHOLDER` becomes the ``uv run`` flag list,
+    :data:`DEFAULT_MODE_PLACEHOLDER` becomes ``modes.DEFAULT_MODE`` and
+    :data:`NEEDS_HUMAN_RULE_PLACEHOLDER` becomes ``modes.NEEDS_HUMAN_RULE``. The skill
     dir is an argument so a test can render against a fixture path containing a
     space; the others are read from their owners rather than passed, for the
     same reason :func:`dispatcher_prefix` reads the flag list — a caller given
@@ -463,9 +463,9 @@ def render_instruction_text(text: str, base: Union[str, Path]) -> str:
     rendered = text
     for token in _SKILL_DIR_TOKENS:
         rendered = rendered.replace(token, str(base))
-    rendered = rendered.replace(UV_RUN_FLAGS_TOKEN, " ".join(uv_run_args()))
-    rendered = rendered.replace(DEFAULT_MODE_TOKEN, _modes().DEFAULT_MODE)
-    return rendered.replace(NEEDS_HUMAN_RULE_TOKEN, _modes().NEEDS_HUMAN_RULE)
+    rendered = rendered.replace(UV_RUN_FLAGS_PLACEHOLDER, " ".join(uv_run_args()))
+    rendered = rendered.replace(DEFAULT_MODE_PLACEHOLDER, _modes().DEFAULT_MODE)
+    return rendered.replace(NEEDS_HUMAN_RULE_PLACEHOLDER, _modes().NEEDS_HUMAN_RULE)
 
 
 # ---------------------------------------------------------------------------

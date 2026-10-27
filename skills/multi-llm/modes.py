@@ -436,7 +436,7 @@ def alias_expansion(word: str) -> str:
 #: every surface now renders from it: ``dist/cli-surface.json`` (what the
 #: model-facing tool definition is assembled from), and both places every shim
 #: template states it — its step-2 prose and its worked example — through
-#: ``cli_common.DEFAULT_MODE_TOKEN``.
+#: ``cli_common.DEFAULT_MODE_PLACEHOLDER``.
 #:
 #: One surface cannot render, and is pinned instead: Claude Code's ``SKILL.md`` is
 #: ``installable: false`` and is read by the host verbatim (it expands
@@ -686,7 +686,7 @@ NEEDS_HUMAN_WORK_SENTENCE = (
 #: supported route loads renders it: both ``hosts/*/shim.md.tmpl``, the
 #: opencode plugin's ``hosts/opencode/plugin-command.md.tmpl`` and the codex
 #: plugin's ``hosts/codex/plugin-skill.md.tmpl`` through
-#: ``cli_common.NEEDS_HUMAN_RULE_TOKEN``, and Claude Code's ``SKILL.md`` — read
+#: ``cli_common.NEEDS_HUMAN_RULE_PLACEHOLDER``, and Claude Code's ``SKILL.md`` — read
 #: verbatim by its host, so nothing substitutes a token there — as a literal
 #: held to this constant by ``test_needs_human_rule_has_one_owner``, the same
 #: shape :data:`DEFAULT_MODE` uses. It also owns the ``next`` clause, because

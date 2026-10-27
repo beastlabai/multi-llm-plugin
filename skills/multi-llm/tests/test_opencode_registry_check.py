@@ -1214,7 +1214,7 @@ class TestTheReaders:
             tmp_path / f"packages/{SPEC}"
 
     def test_the_skill_dir_token_is_the_builds(self):
-        assert rc.SKILL_DIR_TOKEN == build.SKILL_DIR_TOKEN
+        assert rc.SKILL_DIR_PLACEHOLDER == build.SKILL_DIR_PLACEHOLDER
 
     def test_runtime_requirements(self, tmp_path):
         (tmp_path / "pyproject.toml").write_text('[project]\ndependencies = ["PyYAML>=6.0", '

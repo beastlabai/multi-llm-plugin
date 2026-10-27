@@ -8046,7 +8046,7 @@ class TestOmpProvider:
         `NEGATIVE_VALUE_TOKENS` the pair `--approval-mode yolo` reports the value
         element once and the flag element never (it is in neither
         `NEGATIVE_FLAG_TOKENS` nor `NEGATIVE_TOKEN_PREFIXES`). Both sides of the
-        machinery key on that one string, so a `token: "--approval-mode"` row
+        machinery key on that one string, so a row naming the flag as its token
         would fail in both directions at once — `yolo` unexcused, and
         `--approval-mode` "never emitted".
         """

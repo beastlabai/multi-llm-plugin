@@ -93,7 +93,7 @@ def test_uninstall_command_is_the_owners_line_with_the_default_flags(
     # as data); the owner joins a real skill dir natively. Same code, same joins.
     monkeypatch.setattr(cli_common, "Path", PurePosixPath)
     monkeypatch.setattr(host_install, "Path", PurePosixPath)
-    assert shipped == host_install.uninstall_line(host, surface.SKILL_DIR_TOKEN)
+    assert shipped == host_install.uninstall_line(host, surface.SKILL_DIR_PLACEHOLDER)
 
 
 def test_the_emitter_reads_no_environment():

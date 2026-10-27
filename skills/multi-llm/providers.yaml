@@ -930,7 +930,7 @@ read_only_modes:
     mechanism: null
     probed: null
     bypass_exception:
-      token: "--dangerously-skip-permissions"
+      token: --dangerously-skip-permissions
       profile: generate
       reason: >-
         agy 1.1.15's only known unattended mode, emitted by this adapter's

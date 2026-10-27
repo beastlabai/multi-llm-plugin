@@ -88,7 +88,7 @@ SKILL_TEMPLATE = "hosts/codex/plugin-skill.md.tmpl"
 
 #: The token passed as ``render``'s baked prefix. The template carries no slot
 #: for it, so this is belt-and-braces: nothing absolute can be baked (D2).
-SKILL_DIR_TOKEN = surface.SKILL_DIR_TOKEN
+SKILL_DIR_PLACEHOLDER = surface.SKILL_DIR_PLACEHOLDER
 
 #: The hand-written sources of the six non-payload files.
 MANIFEST_TEMPLATE = PACKAGE_DIR / "plugin.json.tmpl"
@@ -195,7 +195,7 @@ def skill_md(base: Optional[Path] = None) -> str:
         )
     template = template.replace(LONG_CALL_SLOT, surface.long_call_rule(HOST_ID))
     return host_install.render(
-        HOST_ID, base=str(root), skill=SKILL_DIR_TOKEN, template=template
+        HOST_ID, base=str(root), skill=SKILL_DIR_PLACEHOLDER, template=template
     )
 
 

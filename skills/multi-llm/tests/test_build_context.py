@@ -65,7 +65,7 @@ CONTAINER_DOCKERFILE_REL = "skills/multi-llm/tests/container/Dockerfile"
 
 #: Written into every plant so a leak is greppable in the export, not just
 #: inferrable from a path listing.
-SENTINEL = "sk-planted-build-context-canary-not-a-real-key"
+SENTINEL = "sk-planted-canary-abcdefghijklmnopqrstuvwxyz"
 
 #: The three secrets of C6b rule 1, keyed by their repo-root-relative path. The
 #: first two sit outside every allowlisted tree (so they prove `*` still holds);

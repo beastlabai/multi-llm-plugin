@@ -296,7 +296,7 @@ e2e-container: e2e-image
 e2e-container-host: e2e-image
 	@test -n "$${OPENROUTER_API_KEY:-}" || \
 	  echo "make: OPENROUTER_API_KEY unset: codex and claude-code run on the subscription when its credential file exists; opencode rows skip (named, in the census)."
-	OPENROUTER_API_KEY="$$OPENROUTER_API_KEY" $(PYTEST) -m "container and live and not live_native_phase and not live_next_command"
+	OPENROUTER_API_KEY=$$OPENROUTER_API_KEY $(PYTEST) -m "container and live and not live_native_phase and not live_next_command"
 
 # The claude-code PER-PHASE tier: one workflow phase per row, seeded by the
 # row's `pre_commands` leg so the host turn does exactly one phase natively.
@@ -326,7 +326,7 @@ e2e-container-host-phases: e2e-image
 	@test -n "$${OPENROUTER_API_KEY:-}" || { \
 	  echo "make: the host phase tier needs OPENROUTER_API_KEY (a DEDICATED key carrying a key-level spend limit)."; \
 	  echo "      It is the EXPENSIVE tier: budget ~\$$3-5 per green pass, and bring-up separately."; exit 1; }
-	OPENROUTER_API_KEY="$$OPENROUTER_API_KEY" \
+	OPENROUTER_API_KEY=$$OPENROUTER_API_KEY \
 	MLLM_E2E_BUDGET_USD="$${MLLM_E2E_BUDGET_USD:-6.00}" \
 	MLLM_E2E_MATRIX_TIMEOUT_S="$${MLLM_E2E_MATRIX_TIMEOUT_S:-3600}" \
 	  $(PYTEST) -m "container and live and live_native_phase"
@@ -342,7 +342,7 @@ e2e-container-host-phases: e2e-image
 e2e-container-host-next-command: e2e-image
 	@test -n "$${OPENROUTER_API_KEY:-}" || { \
 	  echo "make: the next-command tier needs OPENROUTER_API_KEY (a DEDICATED key carrying a key-level spend limit)."; exit 1; }
-	OPENROUTER_API_KEY="$$OPENROUTER_API_KEY" \
+	OPENROUTER_API_KEY=$$OPENROUTER_API_KEY \
 	MLLM_E2E_BUDGET_USD="$${MLLM_E2E_BUDGET_USD:-1.00}" \
 	  $(PYTEST) -m "container and live and live_next_command"
 
@@ -525,8 +525,9 @@ e2e-container-latest-host: e2e-preflight
 	@$(MAKE) --no-print-directory e2e-version-delta
 	@mkdir -p $(CONTAINER_DIR)/records
 	stamp="$$(mktemp)"; trap 'rm -f "$$stamp"' EXIT; \
+	OPENROUTER_API_KEY=$$OPENROUTER_API_KEY \
 	env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u OPENAI_API_KEY -u GEMINI_API_KEY \
-	  MLLM_E2E_IMAGE=$(IMAGE_LATEST) OPENROUTER_API_KEY="$$OPENROUTER_API_KEY" \
+	  MLLM_E2E_IMAGE=$(IMAGE_LATEST) \
 	  $(PYTEST) -m "container and live" -rs; \
 	if [ "$$(find $(CONTAINER_DIR)/records -name '*.json' -newer "$$stamp" | wc -l)" -eq 0 ]; then \
 	  echo "make: NOT-RUN — pytest exited green but not one host-lane row executed:"; \

@@ -94,7 +94,7 @@ const DEGRADED_TOOL_NAME = "multi_llm"
  * only this file's: the package lands in whatever cache directory npm gives it,
  * so a path baked at build time is a path that is wrong on every machine.
  */
-const SKILL_DIR_TOKEN = "{SKILL_DIR}"
+const SKILL_DIR_PLACEHOLDER = "{SKILL_DIR}"
 
 /**
  * Bumped in lockstep with `packaging/common/surface.py`'s
@@ -3145,7 +3145,7 @@ function injectCommand(cfg, surface) {
 
 /** Resolve every `{SKILL_DIR}` in a generated artifact to this package's tree. */
 function resolveSkillDir(text) {
-  return text.split(SKILL_DIR_TOKEN).join(SKILL_DIR)
+  return text.split(SKILL_DIR_PLACEHOLDER).join(SKILL_DIR)
 }
 
 /**
