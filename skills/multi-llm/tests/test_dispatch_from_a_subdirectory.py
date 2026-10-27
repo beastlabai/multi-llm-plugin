@@ -221,7 +221,7 @@ class TestTheCommitModesRunFromTheRootToo:
         [call] = seen
         assert call["cwd"] == str(root)
         assert call["argv"] == ["--plan-file", BRIEF, "--host", "claude-code"]
-        assert brief_rule == [(str(root / BRIEF), str(root))]
+        assert [(Path(path), Path(cwd)) for path, cwd in brief_rule] == [(root / BRIEF, root)]
         assert f"{NOTICE} {root}, where {BRIEF} is" in err
         assert os.getcwd() == str(here)
 

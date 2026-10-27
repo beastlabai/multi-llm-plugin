@@ -49,6 +49,14 @@ the boundary** — `process_control.spawn_detached` opens it append-only and dup
 in the intermediate, and `enter_detached_worker` (which `maybe_detach` reaches only at the
 *end* of pre-flight) compares `(st_dev, st_ino)` and reopens nothing.
 
+On Windows, a `.cmd` trampoline can lose those inherited handles before Python starts.
+The launcher also passes the log path in `MULTI_LLM_WORKER_LOG`; the dispatcher's
+`--internal-worker` entry consumes it and restores stdout/stderr before any pre-flight output,
+only when `MULTI_LLM_DETACHED_WORKER=1`. This restores logging alone: run ownership, locks,
+handshake and Job Object setup still happen at the detach boundary. The late reopen remains
+a fallback for workers started outside the dispatcher. The transport is removed before any
+provider child starts (`test_worker_preflight_recovers_output_lost_by_a_launcher`).
+
 Until 2026-09-16 the POSIX leg gave the worker `/dev/null` and the worker reopened the
 log itself, so every setup line an orchestrator prints on its way to the boundary went on the floor:
 a completed `apply-suggestions` log opened at `[DETACHED_RUN]` with no

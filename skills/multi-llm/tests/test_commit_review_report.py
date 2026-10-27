@@ -409,7 +409,7 @@ def _run_node(html: str, names, body: str) -> Any:
         pytest.skip("node is not on PATH; the static checks above still ran")
     script = (DOM_SHIM + f"var reportData = {json.dumps(_embedded(html))};\n"
               + "\n".join(_js_function(html, name) for name in names) + "\n" + body)
-    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True,
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, encoding="utf-8",
                             timeout=60)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)

@@ -1019,7 +1019,7 @@ class TestTheSharedFunctions:
         mark_stale(g, {"g1": ["a.py", "c.py"], "g2": ["c.py"]}, ["a.py"], cwd=str(repo))
         assert g["skipped"]["g1"] == {"reason": "changed", "files": ["a.py"]}
         assert "g2" not in g["skipped"]
-        assert g["protected"]["a.py"] == _git(repo, "hash-object", "a.py")
+        assert g["protected"]["a.py"] == _git(repo, "hash-object", "--no-filters", "a.py")
         assert "a.py" not in g["expect"]
         assert (repo / g["protected_copies"] / "a.py").read_text(encoding="utf-8") == "stale\n"
 
@@ -1451,7 +1451,7 @@ class TestTheContextPlanIsWatched:
                              phase_dir=str(phase_dir))
         g = outcome.guard
         assert "docs/x.md" not in g["protected"]
-        assert g["context_plan_id"] == _git(repo, "hash-object", "docs/x.md")
+        assert g["context_plan_id"] == _git(repo, "hash-object", "--no-filters", "docs/x.md")
         assert commit_apply.watched_ids(g)["docs/x.md"] == g["context_plan_id"]
         assert (repo / g["protected_copies"] / "docs/x.md").read_text() == "# x\n"
         assert protected_violations(g, cwd=str(repo)) == []
@@ -1515,7 +1515,7 @@ class TestTheContextPlanAcrossAResume:
         resumed = take_guard(state, groups, resume=True, **kw)
         g = resumed.guard
         assert resumed.reused
-        now = _git(repo, "hash-object", "docs/x.md")
+        now = _git(repo, "hash-object", "--no-filters", "docs/x.md")
         assert commit_apply.watched_ids(g)["docs/x.md"] == now
         assert (repo / g["protected_copies"] / "docs/x.md").read_text() == edited
         # The stopped run's bind records never stand for this run's batches.
@@ -1584,6 +1584,19 @@ class TestTheContextPlanAcrossAResume:
         copies = _guard(plan)["protected_copies"]
         assert f"copy {copies}/docs/x.md back over docs/x.md" in way_back
         assert (repo / copies / "docs" / "x.md").read_text(encoding="utf-8") == edited
+
+
+class TestRawFileIdentity:
+    def test_a_line_ending_only_write_is_detected_with_git_conversion_enabled(self, repo):
+        _git(repo, "config", "core.autocrlf", "true")
+        path = repo / "protected.txt"
+        path.write_bytes(b"one\r\n")
+        before = commit_apply.disk_blob_ids([path.name], cwd=str(repo))
+        filtered = _git(repo, "hash-object", path.name)
+        assert before[path.name] != filtered
+        path.write_bytes(b"one\n")
+        assert _git(repo, "hash-object", path.name) == filtered
+        assert protected_violations({"protected": before}, cwd=str(repo)) == [path.name]
 
 
 class TestAProtectedPathThatCannotBeHashed:
@@ -1790,7 +1803,7 @@ class TestASymlinkedContextPlan:
         assert outcome.skipped == {
             ids[0]: {"reason": "context_plan", "files": ["docs/plan.md"]}}
         assert g["context_plan"] == "docs/plan-link.md"
-        target_id = _git(repo, "hash-object", "docs/plan.md")
+        target_id = _git(repo, "hash-object", "--no-filters", "docs/plan.md")
         assert g["context_plan_targets"] == {"docs/plan.md": target_id}
         assert commit_apply.context_plan_paths(g) == ["docs/plan-link.md", "docs/plan.md"]
         assert commit_apply.watched_ids(g)["docs/plan.md"] == target_id
@@ -1829,7 +1842,7 @@ class TestASymlinkedContextPlan:
         state["commit_range"]["guard"] = first
         g = take_guard(state, groups, resume=True, **kw).guard
         assert g["context_plan_targets"] == {
-            "docs/plan.md": _git(repo, "hash-object", "docs/plan.md")}
+            "docs/plan.md": _git(repo, "hash-object", "--no-filters", "docs/plan.md")}
         assert protected_violations(g, cwd=str(repo)) == []
         assert (repo / g["protected_copies"] / "docs/plan.md").read_text() == edited
 

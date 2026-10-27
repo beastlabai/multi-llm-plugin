@@ -405,6 +405,38 @@ class TestRealDetachedWorker:
         # this file, so the reopen was correctly skipped.
         assert "already_on=True" in text
 
+    @pytest.mark.parametrize("launched", [False, True])
+    def test_worker_preflight_recovers_output_lost_by_a_launcher(self, tmp_path, launched):
+        """A shim can drop inherited stdout/stderr before Python starts.
+
+        Even a dispatcher refusal before the detach boundary must be logged;
+        a hand-started internal worker must not take over its terminal.
+        """
+        log = tmp_path / "worker.log"
+        env = dict(os.environ)
+        env[detach.WORKER_ENV] = "1" if launched else "0"
+        env[detach.WORKER_LOG_ENV] = str(log)
+        script = (
+            "import os, sys\n"
+            f"sys.path.insert(0, {str(SKILL_ROOT.resolve())!r})\n"
+            "import multi_llm\n"
+            "code = multi_llm.main(['no-such-mode', '--internal-worker'])\n"
+            f"assert {detach.WORKER_LOG_ENV!r} not in os.environ\n"
+            "sys.exit(code)\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script], cwd=tmp_path, env=env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+        assert result.returncode == 3
+        assert log.exists() is launched
+        if launched:
+            text = log.read_text(encoding="utf-8")
+            assert "no-such-mode" in text
+            assert "MULTI_LLM_RESULT:" in text
+            assert "[DETACHED_RUN]" not in text
+
     @POSIX_ONLY
     def test_worker_survives_its_launcher_and_has_no_controlling_terminal(
         self, tmp_path

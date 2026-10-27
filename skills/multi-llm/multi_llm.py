@@ -1356,11 +1356,15 @@ def _sweep_live_clis_on_interrupt() -> None:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if _WORKER_FLAG in argv:
+        from utils.detach import prepare_worker_output
+
+        prepare_worker_output()
     # Line buffering + UTF-8/replace stream encoding, once per invocation: there
     # is exactly one process per invocation, so this covers every mode and every
     # in-process continuation.
     bootstrap_streams()
-    argv = list(sys.argv[1:] if argv is None else argv)
     ctx = activate_result(ResultContext())
     crash: Optional[str] = None
     exit_code = EXIT_ERROR

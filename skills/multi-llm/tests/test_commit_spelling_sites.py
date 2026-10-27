@@ -587,14 +587,14 @@ class TestAPrintedCommandRunsAsTyped:
         command = run_status._resume_command(
             {"run": {"mode": "apply-code-fixes", "replay_flags": ["--plan-file", ROOT_REL]}},
             Path(ROOT_REL))
-        assert command == cli_common.dispatcher_command("apply-commit-fixes", ROOT_REL,
+        assert command == cli_common.dispatcher_command("apply-commit-fixes", str(Path(ROOT_REL)),
                                                         "--resume")
         code, seen, out, err = _dispatch_printed(command, monkeypatch, capsys)
         assert code == 0, err
         assert "[COMMIT_FLAG_CONFLICT]" not in out + err
         [call] = seen
         assert call["module"] == "apply_commit_fixes_orchestrator"
-        assert cli_common.flag_value(call["argv"], "--plan-file") == ROOT_REL
+        assert cli_common.flag_value(call["argv"], "--plan-file") == str(Path(ROOT_REL))
         assert "--revs" not in call["argv"] and "--resume" in call["argv"]
         assert os.path.realpath(ROOT_REL) == os.path.realpath(brief)
 
