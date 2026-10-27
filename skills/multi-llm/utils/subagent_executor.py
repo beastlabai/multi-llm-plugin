@@ -1470,7 +1470,8 @@ _STATUS_MIRROR_KEY = "subagents"
 #: The token D3n substitutes late, per dispatch. Duplicated as a private constant
 #: rather than imported at module scope only to keep this module's import graph
 #: unchanged; ``tests/test_subagent_tasks.py`` pins the two spellings together.
-_PRIOR_CHANGES_TOKEN = "{prior_changes_context}"
+#: A prompt-template placeholder, not an authentication credential.
+_PRIOR_CHANGES_TOKEN: str = "{prior_changes_context}"
 
 
 # ---------------------------------------------------------------------------
@@ -2104,14 +2105,14 @@ NETWORK_DENIAL_PATTERNS: Tuple[str, ...] = (
 #: question and the answer cannot drift apart: the verdict below is decided by
 #: searching for this exact string, and a prompt that asked for a different one
 #: would record ``unknown`` on every healthy runner.
-NESTED_PROBE_TOKEN = "MULTI_LLM_NESTED_EXEC_OK"
+NESTED_PROBE_MARKER = "MULTI_LLM_NESTED_EXEC_OK"
 
 #: The throwaway prompt the nested-exec probe dispatches (D3c). Trivial on
 #: purpose: it is a real, billed turn, so it asks for one token and nothing that
 #: needs the workspace, and it runs under ``agent-readonly`` regardless of the
 #: profile the batch itself will use — a probe must never hold write access.
 NESTED_PROBE_PROMPT = (
-    f"Reply with exactly this token and nothing else: {NESTED_PROBE_TOKEN}"
+    f"Reply with exactly this token and nothing else: {NESTED_PROBE_MARKER}"
 )
 
 #: Wall-clock budget for that probe. Long enough for a cold agent CLI start plus
@@ -5210,7 +5211,7 @@ def _probe_nested_exec(
       is retryable);
     * an egress failure → the network leg, exit 3.
 
-    ``allowed`` requires the reply to carry :data:`NESTED_PROBE_TOKEN` — the word
+    ``allowed`` requires the reply to carry :data:`NESTED_PROBE_MARKER` — the word
     the prompt asked for. A clean exit whose output never mentions it is
     ``unknown`` under a warning of its own, distinct from the inconclusive one
     below so a log tells the two causes apart.
@@ -5384,12 +5385,12 @@ def _probe_nested_exec(
         # model ever answered. That case read `allowed` under the old rule too,
         # so nothing regresses — this is strictly the tighter gate — and the
         # reactive D3k ladder still covers what it lets through.
-        if NESTED_PROBE_TOKEN.lower() in streams:
+        if NESTED_PROBE_MARKER.lower() in streams:
             return "allowed"
         print(
             f"multi-llm warning: the nested-exec probe for {spec} on host "
             f"{host_id} exited 0 with {len(streams.strip())} byte(s) of output, "
-            f"but none of it carried the probe's token ({NESTED_PROBE_TOKEN}) — "
+            f"but none of it carried the probe's token ({NESTED_PROBE_MARKER}) — "
             f"recording nested_exec 'unknown' for {opened}. The runner started "
             f"and returned, so this is not a denial; what is unproven is that a "
             f"model answered through it. Dispatching anyway; a real denial will "

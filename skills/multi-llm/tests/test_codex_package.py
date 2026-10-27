@@ -579,11 +579,11 @@ class TestPluginSkill:
     def test_the_needs_human_rule_is_the_owner_s_text(self, skill):
         """Filled with ``modes.NEEDS_HUMAN_RULE`` itself, not a retyped copy."""
         template = (SKILL_ROOT / codex_build.SKILL_TEMPLATE).read_text(encoding="utf-8")
-        assert template.count(cli_common.NEEDS_HUMAN_RULE_TOKEN) == 1
+        assert template.count(cli_common.NEEDS_HUMAN_RULE_PLACEHOLDER) == 1
         assert mode_table.NEEDS_HUMAN_WORK_SENTENCE not in " ".join(template.split())
         flat = " ".join(skill.split())
         assert mode_table.NEEDS_HUMAN_RULE in flat
-        assert cli_common.NEEDS_HUMAN_RULE_TOKEN not in skill
+        assert cli_common.NEEDS_HUMAN_RULE_PLACEHOLDER not in skill
 
     def test_carries_no_dispatcher_word(self, skill):
         bare, cli = _mode_spellings()

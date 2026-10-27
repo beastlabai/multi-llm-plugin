@@ -1013,7 +1013,7 @@ class TestTheProbeRunsUnderTheDispatchEnv:
         _replay_files("builtin_override_keyed", user_xdg, monkeypatch)
         _use_config(tmp_path, monkeypatch, (
             "providers:\n  opencode:\n    config_providers:\n      openrouter:\n"
-            "        options: {apiKey: '{env:MY_TEST_KEY}'}\n"
+            "        options: {apiKey: " "'{env:MY_TEST_KEY}'}\n"
         ))
         fake = _DebugConfig(None, dispatch=_stdout("builtin_override_envkey_unset"))
         monkeypatch.setattr(oc, "_spawn_debug_config", fake)

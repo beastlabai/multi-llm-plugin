@@ -772,7 +772,7 @@ def check_command(config: Optional[Mapping[str, Any]], package_dir: Path,
     ``plugin_specs``: the ``plugin[]`` entries OpenCode resolved, which must be
     the payload directory alone.
     """
-    token = token or _sibling("build").SKILL_DIR_TOKEN
+    token = token or _sibling("build").SKILL_DIR_PLACEHOLDER
     command = ((config or {}).get("command") or {}).get(COMMAND_NAME)
     template = command.get("template") if isinstance(command, dict) else None
     plugins = [str(p) for p in ((config or {}).get("plugin") or [])]

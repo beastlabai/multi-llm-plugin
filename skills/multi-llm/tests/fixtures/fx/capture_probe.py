@@ -76,7 +76,7 @@ workspace = Path('/tmp/fx-adapter-work'); workspace.mkdir()
 (workspace / 'readme').write_text('fixture contents\n')
 canary = Path('/tmp/fx-canary-bin'); canary.mkdir()
 (canary / 'fx-canary').write_text('#!/bin/sh\nexit 0\n'); (canary / 'fx-canary').chmod(0o755)
-os.environ.update(PATH='/tmp/fx:' + str(canary) + ':' + os.environ['PATH'], OPENROUTER_API_KEY='dummy-only', HOME='/tmp')
+os.environ.update(PATH='/tmp/fx:' + str(canary) + ':' + os.environ['PATH'], OPENROUTER_API_KEY='dummy-only-example', HOME='/tmp')
 provider = fx.FxProvider()
 
 

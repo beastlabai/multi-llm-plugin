@@ -759,13 +759,13 @@ class TestBuildArtifacts:
         template = (SKILL_ROOT / pkg_build.COMMAND_TEMPLATE).read_text(
             encoding="utf-8"
         )
-        assert template.count(cli_common.NEEDS_HUMAN_RULE_TOKEN) == 1
+        assert template.count(cli_common.NEEDS_HUMAN_RULE_PLACEHOLDER) == 1
         assert mode_table.NEEDS_HUMAN_WORK_SENTENCE not in " ".join(
             template.split()
         ), "the command template spells the rule by hand; render the token"
 
         body = " ".join(pkg_build.command_body().split())
-        assert cli_common.NEEDS_HUMAN_RULE_TOKEN not in body
+        assert cli_common.NEEDS_HUMAN_RULE_PLACEHOLDER not in body
         assert mode_table.NEEDS_HUMAN_RULE in body
         assert mode_table.NEEDS_HUMAN_WORK_SENTENCE in body
 
@@ -813,10 +813,10 @@ class TestBuildArtifacts:
             checked.append(host_id)
             source = path.read_text(encoding="utf-8")
             if entry["shim"]["template"]:
-                assert source.count(cli_common.DEFAULT_MODE_TOKEN) == 2, (
+                assert source.count(cli_common.DEFAULT_MODE_PLACEHOLDER) == 2, (
                     f"{relative} states the default-mode rule twice — the step-2 "
                     f"prose and the worked example — and both must be the "
-                    f"{cli_common.DEFAULT_MODE_TOKEN} token, not a literal"
+                    f"{cli_common.DEFAULT_MODE_PLACEHOLDER} token, not a literal"
                 )
                 assert default not in source, (
                     f"{relative} spells {default!r} by hand; render it from "

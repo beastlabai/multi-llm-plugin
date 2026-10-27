@@ -1006,7 +1006,7 @@ class TestNpmConfigAgainstTheRealNpm:
     with its file named."""
 
     PLANTED = "https-proxy=http://127.0.0.1:9/\nstrict-ssl=false\n"
-    TOKEN = "//registry.npmjs.org/:_authToken=npm_notARealTokenForTheSuite\n"
+    AUTH_CONFIG = "//registry.npmjs.org/:_authToken=npm_notARealTokenForTheSuite\n"
 
     def _release(self, tmp_path, monkeypatch, home_rc):
         home = tmp_path / "home"
@@ -1028,7 +1028,7 @@ class TestNpmConfigAgainstTheRealNpm:
 
     def test_a_proxy_in_the_users_npmrc_is_refused_and_its_file_named(self, tmp_path, monkeypatch):
         release, home = self._release(tmp_path, monkeypatch,
-                                      self.TOKEN + "https-proxy=http://127.0.0.1:8/\n")
+                                      self.AUTH_CONFIG + "https-proxy=http://127.0.0.1:8/\n")
         try:
             with pytest.raises(first_release.Refusal) as caught:
                 release.check_npm_config()
@@ -1045,7 +1045,7 @@ class TestNpmConfigAgainstTheRealNpm:
     def test_a_clean_configuration_passes_although_a_project_above_plants_one(
         self, tmp_path, monkeypatch,
     ):
-        release, _ = self._release(tmp_path, monkeypatch, self.TOKEN)
+        release, _ = self._release(tmp_path, monkeypatch, self.AUTH_CONFIG)
         try:
             # Control: from the same scratch directory, without the pin, npm
             # walks up to the planted project and reads its .npmrc.

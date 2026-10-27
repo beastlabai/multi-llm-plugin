@@ -79,7 +79,7 @@ HOST_ID = "opencode"
 #: The plugin resolves it from ``import.meta.dirname`` at startup, which is the
 #: whole point of the route: the skill tree and the entry point ship in the same
 #: directory, so there is no baked path to go stale.
-SKILL_DIR_TOKEN = surface.SKILL_DIR_TOKEN
+SKILL_DIR_PLACEHOLDER = surface.SKILL_DIR_PLACEHOLDER
 
 #: The digest file's own name inside ``dist/``. Written last, and it can never
 #: attest to itself.
@@ -187,7 +187,7 @@ def command_body(base: Optional[Path] = None) -> str:
     root = Path(base) if base else SKILL_DIR
     template = (root / COMMAND_TEMPLATE).read_text(encoding="utf-8")
     return host_install.render(
-        HOST_ID, base=str(root), skill=SKILL_DIR_TOKEN, template=template
+        HOST_ID, base=str(root), skill=SKILL_DIR_PLACEHOLDER, template=template
     )
 
 

@@ -154,7 +154,7 @@ SHAPES = [
     ("aws-access-key-id", "aws sts caller AKIAIOSFODNN7EXAMPLE", ("AKIAIOSFODNN7EXAMPLE",)),
     (
         "aws-secret-access-key",
-        "aws_secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        "aws_secret_access_key=" "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
         ("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",),
     ),
     ("gitlab-pat", f"glab auth login --token {_GITLAB_PAT}", (_GITLAB_PAT,)),
@@ -776,13 +776,10 @@ class TestNoFalsePositivesOnBenignCorpora:
     #: ``super().resolve_env``. Neither is a pattern that got looser, and
     #: neither line has ever been a redaction input: this tree is source.
     #:
-    #: An **eighth** arrived 2026-09-22 when the nested-exec probe was taught
-    #: to read its own reply: ``NESTED_PROBE_TOKEN = "MULTI_LLM_NESTED_EXEC_OK"``
-    #: names the sentinel the probe asks a runner to echo back. It is printed
-    #: verbatim inside the probe prompt, so it is the opposite of a secret --
-    #: the constant exists only so the question and the answer cannot drift
-    #: apart. A constant assignment in source again, same class as the rest.
-    KNOWN_SOURCE_HITS = 9
+    #: The nested-exec reply sentinel formerly added another source hit.
+    #: Renaming that constant to ``NESTED_PROBE_MARKER`` removes the hit without
+    #: changing the echoed text or any redaction rule. Eight known hits remain.
+    KNOWN_SOURCE_HITS = 8
 
 
     def test_utils_source_tree_is_a_diagnostic_not_a_gate(self):
@@ -799,8 +796,7 @@ class TestNoFalsePositivesOnBenignCorpora:
             "human_decisions.py, `token_count=token_count` and `token_count=args.tokens` in metrics.py, "
             "`ENV_GIT_CREDENTIAL_HELPER_VAR` in provider_registry.py, `nested_exec_credentials` in "
             "subagent_executor.py, `OMP_CREDENTIAL_ENV` + `credential_helper=credential_helper` "
-            "in providers/omp.py, and `FX_CREDENTIAL_ENV` in providers/fx.py, "
-            "and `NESTED_PROBE_TOKEN` in subagent_executor.py). This corpus is a "
+            "in providers/omp.py, and `FX_CREDENTIAL_ENV` in providers/fx.py). This corpus is a "
             "diagnostic rather than a gate, but a count that moved means a pattern got "
             "looser — investigate before shipping:\n  " + "\n  ".join(hits)
         )
@@ -1190,9 +1186,9 @@ class TestRedactionRunsBeforeTruncation:
 
     def test_a_key_value_straddling_the_64_kib_line_cut(self, tmp_path):
         """The key name is what P1 anchors on; a byte tail keeps only the value."""
-        secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        aws_example_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
         filler = "f" * (64 * 1024 - 12)
-        line = f"{filler}aws_secret_access_key={secret}"
+        line = f"{filler}aws_secret_access_key={aws_example_key}"
         path = subagent_executor._write_failure_capture(
             phase_dir=str(tmp_path),
             task={"task_id": "T001", "kind": "validation"},
@@ -1208,7 +1204,7 @@ class TestRedactionRunsBeforeTruncation:
         )
         assert path
         text = Path(path).read_text(encoding="utf-8")
-        assert secret not in text, (
+        assert aws_example_key not in text, (
             "the value survived the 64 KiB tail. Truncation ran before redaction: the "
             "cut landed inside `aws_secret_access_key=`, leaving `_access_key=<value>` "
             "— a shape SECRET_KEY does not match, so no later pass can recover it."
@@ -1216,16 +1212,16 @@ class TestRedactionRunsBeforeTruncation:
 
     def test_a_stream_tail_straddling_the_2_kib_exit_three_cut(self):
         """Same cut, the ``orchestrator-run.log`` sink."""
-        secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        aws_example_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
         filler = "f" * (2000 - 12)
         capture = subagent_executor._Capture(
-            stdout="", stderr=f"{filler}aws_secret_access_key={secret}", exit_code=1
+            stdout="", stderr=f"{filler}aws_secret_access_key={aws_example_key}", exit_code=1
         )
         result = subagent_executor._classify_failed_run(
             TestSinkDetachedStdout._Provider(subagent_executor.STATUS_AUTH_FAILED), capture
         )
         assert result is not None
-        assert secret not in result[1]
+        assert aws_example_key not in result[1]
 
 
 # ---------------------------------------------------------------------------

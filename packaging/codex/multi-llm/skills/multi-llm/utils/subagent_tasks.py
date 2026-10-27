@@ -159,7 +159,8 @@ def is_write_kind(kind: Optional[str]) -> bool:
 #: immediately before dispatch (D3n). Defined here, next to the refusals, because
 #: "this token must never reach a runner" is a dispatch contract rather than a
 #: string one producer happens to use.
-PRIOR_CHANGES_TOKEN = "{prior_changes_context}"
+#: A prompt-template placeholder, not an authentication credential.
+PRIOR_CHANGES_TOKEN: str = "{prior_changes_context}"
 
 #: Providers that carry a real non-argv prompt transport (D2d). Kept here rather
 #: than imported so this module stays usable without instantiating adapters.

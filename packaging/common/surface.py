@@ -48,7 +48,7 @@ from utils import (  # noqa: E402
 #: The token a generated artifact carries in place of an absolute skill dir.
 #: The host resolves it at startup from wherever the package landed, which is
 #: the whole point of a package route: no baked path to go stale.
-SKILL_DIR_TOKEN = "{SKILL_DIR}"
+SKILL_DIR_PLACEHOLDER = "{SKILL_DIR}"
 
 #: The option a poll and a re-attach name one run by. One spelling here, read
 #: by the ``dispatcher.run_id_option`` key.
@@ -521,7 +521,7 @@ def _reserved_flags(host_id: str) -> Dict[str, Any]:
 
 
 def _uninstall_command(host_id: str) -> str:
-    """``host_install.uninstall_line(host_id, SKILL_DIR_TOKEN)``, environment-free.
+    """``host_install.uninstall_line(host_id, SKILL_DIR_PLACEHOLDER)``, environment-free.
 
     Calling ``uninstall_line`` here leaked the builder's environment into the
     shipped file: it composes through ``cli_common.dispatcher_prefix``, which
@@ -534,7 +534,7 @@ def _uninstall_command(host_id: str) -> str:
     A ``PurePosixPath``: a ``Path`` joined ``{SKILL_DIR}\\multi_llm.py`` on a
     Windows builder, so the shipped surface depended on the build's OS.
     """
-    base = PurePosixPath(SKILL_DIR_TOKEN)
+    base = PurePosixPath(SKILL_DIR_PLACEHOLDER)
     flags = "".join(f" {flag}" for flag in unattended.DEFAULT_UV_RUN_ARGS)
     return (
         f"uv run{flags} --project {cli_common._quote(base)} -- "

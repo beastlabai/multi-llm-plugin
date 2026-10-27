@@ -158,16 +158,16 @@ def test_needs_human_rule_has_one_owner():
         source = path.read_text(encoding="utf-8")
         collapsed_source = " ".join(source.split())
         if entry["shim"]["template"]:
-            assert source.count(cli_common.NEEDS_HUMAN_RULE_TOKEN) == 1, (
+            assert source.count(cli_common.NEEDS_HUMAN_RULE_PLACEHOLDER) == 1, (
                 f"{path.name} must state the exit-3 rule exactly once, as the "
-                f"{cli_common.NEEDS_HUMAN_RULE_TOKEN} token"
+                f"{cli_common.NEEDS_HUMAN_RULE_PLACEHOLDER} token"
             )
             assert work not in collapsed_source, (
                 f"{path.name} spells the rule by hand; render it from "
                 "modes.NEEDS_HUMAN_RULE instead"
             )
         else:
-            assert cli_common.NEEDS_HUMAN_RULE_TOKEN not in source, (
+            assert cli_common.NEEDS_HUMAN_RULE_PLACEHOLDER not in source, (
                 f"{path.name} is read verbatim by its host; a token there "
                 "reaches the agent unsubstituted"
             )
@@ -180,7 +180,7 @@ def test_needs_human_rule_has_one_owner():
                 host_id, skill=FIXTURE_SKILL_DIR, template=source
             ).split()
         )
-        assert cli_common.NEEDS_HUMAN_RULE_TOKEN not in rendered
+        assert cli_common.NEEDS_HUMAN_RULE_PLACEHOLDER not in rendered
         assert rule in rendered, (
             f"{path.name}: the rendered exit-3 rule is not the one "
             "modes.NEEDS_HUMAN_RULE dictates"
