@@ -14,9 +14,9 @@ so a row with no mode behind it is left to review rather than refused here.
 The README is located the way ``tests/test_docs_links.py`` locates it (three
 levels up from this file), and the table is parsed rather than copied, so the
 guard follows the README it checks. Only the first table under the ``Modes``
-heading counts, outside code fences: the subsections below it carry tables of
-their own (``Review and apply in one command``, ``Options``) that name the same
-flags for other reasons.
+heading counts, outside code fences: a subsection below it carries a table of
+its own (``Common options``) that names some of the same flags for other
+reasons.
 """
 
 from __future__ import annotations
