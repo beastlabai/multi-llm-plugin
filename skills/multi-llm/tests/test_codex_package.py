@@ -339,6 +339,9 @@ NOT_FORWARDED = frozenset({
     "MULTI_LLM_TEST_FAST_BACKOFF",
     # The parent->worker handshake; an inherited stale one is a bug.
     "MULTI_LLM_DETACHED_WORKER",
+    # The launcher supplies its own log per worker and the dispatcher consumes
+    # it before pre-flight; forwarding a host value could target a stale log.
+    "MULTI_LLM_WORKER_LOG",
     # The same handshake's typed plan (plans/next-phase-command.md T5):
     # `detach.child_env` sets it per launch for the worker alone, which pops it.
     # The server spawns invokers, never workers, so a forwarded one could only
