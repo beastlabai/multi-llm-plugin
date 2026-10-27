@@ -570,6 +570,10 @@ class ApplyCodeFixesOrchestrator(ApplyOrchestratorBase[Dict[str, Any], CodeFixBa
     # artifact could name. (Each batch still snapshots its own declared set under
     # `{phase}/pre_batch/{task_id}/`, which is the restore point here.)
     has_single_write_target = False
+    # The commit apply guard runs here whenever state pins reviewed endpoints
+    # (plans/review-commits.md §2.7): a commit brief's `commit_range`, or a
+    # plan's `head_ref` after a direct `--head-ref` review.
+    guards_commit_fixes = True
 
     # Instance state populated by post_load_hook
     issue_to_group_map: Optional[Dict[int, Tuple[int, int]]] = None
@@ -633,6 +637,12 @@ Finalization (run by the host AFTER every batch has been applied and verified):
         )
         # Code fixes uses a smaller default batch size than the common parser
         parser.set_defaults(max_batch_size=3)
+        # A commit front door's `--detach` stage (plans/review-commits.md
+        # §2.1), applied by the detached worker right after its lock. Hidden.
+        from argparse import SUPPRESS
+
+        parser.add_argument("--commit-stage", dest="commit_stage", default=None,
+                            help=SUPPRESS)
         return parser.parse_args(argv)
 
     # ----------------------------------------------------------------
@@ -888,6 +898,23 @@ Finalization (run by the host AFTER every batch has been applied and verified):
         print("Warning: diff_context.txt not found, using plan content", file=sys.stderr)
         return super().get_revalidation_document(review_dir)
 
+    def get_revalidation_instructions(self) -> Optional[str]:
+        """The code-review validation guidance for a review pinned to two commits.
+
+        A commit review (``commit_range``) or a direct ``--head-ref`` one
+        (``head_ref``) judged its findings against code read at ``head``; its
+        revalidators must too, with the pinned-head read rule and the
+        data-under-review sentence beside it (plans/review-commits.md §2.5,
+        §2.6). That holds whatever document the batches carry as context: the
+        plan fallback is what they carry in practice, since nothing writes
+        ``diff_context.txt``, and the base derivation only reaches the
+        guidance for a ``diff``. ``""`` when nothing is pinned, which leaves an
+        unpinned revalidation's prompts as they were.
+        """
+        from utils.validation import pinned_validation_guidance
+
+        return pinned_validation_guidance(str(self.plan_path))
+
     def get_revalidation_context(self) -> str:
         """Return diff_context.txt contents for revalidation, falling back to plan."""
         code_review_dir = os.path.join(self.out_dir, self.review_subdir)
@@ -906,9 +933,21 @@ Finalization (run by the host AFTER every batch has been applied and verified):
         Used by the base class ``handle_revalidation()`` and by
         ``generate_batch_prompts()`` to provide diff context.
 
+        When state pins reviewed endpoints (``commit_range``, or ``head_ref``
+        after a direct ``--head-ref`` review), the base is their recorded
+        base, resolved strictly in ``_setup`` (the empty-tree id on a root
+        range): never ``head_before_implement``, ``head_at_start`` or
+        ``validate_git_ref``'s ``HEAD~1`` fallback (plans/review-commits.md
+        §2.4, §2.7). So ``git diff {base_ref} -- <file>`` in every fix prompt
+        is ``git diff base head -- <file>`` for each file the guard lets
+        through.
+
         Returns:
             A validated git ref string, or empty string.
         """
+        pinned = getattr(self, "_pinned", None)
+        if pinned is not None:
+            return pinned.base_ref
         base_ref = getattr(self.args, "base_ref", None)
         if not base_ref:
             base_ref = (
@@ -1012,8 +1051,20 @@ Finalization (run by the host AFTER every batch has been applied and verified):
         return md_validation_overrides, {}
 
     def format_item_for_output(self, group: Dict[str, Any], index: int) -> Dict[str, Any]:
-        """Format a grouped issue for output, including executor_role routing."""
-        return format_fix_for_output(group, index)
+        """Format a grouped issue for output, including executor_role routing.
+
+        On a pinned run (a commit review's apply) the fix also carries
+        ``files``: every distinct file its group's suggestions name, in git's
+        form, primary first. Those are the batch's declared targets the
+        pre-dispatch re-check and the protected-set check read (§2.7); a
+        plan's run keeps its shape byte for byte.
+        """
+        formatted = format_fix_for_output(group, index)
+        if getattr(self, "_pinned", None) is not None:
+            from utils.commit_apply import group_files
+
+            formatted["files"] = group_files(group, repo_root=self._repo_root)
+        return formatted
 
     def create_batches(self, items: List[Dict[str, Any]]) -> List[CodeFixBatch]:
         """Create batches from formatted fixes."""
@@ -1067,6 +1118,7 @@ Finalization (run by the host AFTER every batch has been applied and verified):
         # Store base_ref for use in build_output_json
         self._base_ref = base_ref
 
+        commit_prompt = self._commit_prompt_context()
         result = []
         for i, batch in enumerate(batches):
             # output_dir carries the implement phase's own prior_changes.jsonl
@@ -1080,6 +1132,7 @@ Finalization (run by the host AFTER every batch has been applied and verified):
                 # `out_dir` is set by `_setup()`; a prompt built before that
                 # (tests, or a caller that only formats) simply has no record.
                 output_dir=getattr(self, "out_dir", None),
+                **(commit_prompt(batch, base_ref) if commit_prompt else {}),
             )
             # `batch_index` matches the value `write_phase_bridge`'s
             # `_apply_code_fixes_task` assigns the same batch under
@@ -1089,6 +1142,73 @@ Finalization (run by the host AFTER every batch has been applied and verified):
             # position (minor, apply-code-fixes audit, 2026-09-16).
             result.append({**batch.to_dict(), "prompt": prompt, "batch_index": i})
         return result
+
+    def _commit_prompt_context(self):
+        """On a pinned run, a function giving each batch's commit-review
+        prompt arguments; ``None`` on a plan's run (prompts unchanged).
+
+        Each batch's prompt then names, in ``code_only_rule``, the context
+        plan (``commit_range.plan``) and the protected paths (the first 20,
+        and ``apply-fixes/protected_paths.txt`` holding them all when there
+        are more), and carries the reviewed range's notes: the root-range
+        line, the history of each fix file absent at ``head``
+        (``git show <deleting>^:<path>``), and the §2.6 trust sentence
+        (plans/review-commits.md §2.7).
+        """
+        pinned = getattr(self, "_pinned", None)
+        if pinned is None or self.state is None:
+            return None
+        from utils.commit_apply import (
+            PROTECTED_NAMED_MAX,
+            ROOT_RANGE_LINE,
+            deleted_file_history,
+            guard_record,
+            history_lines,
+            write_protected_list,
+        )
+        from utils.commit_range import DATA_UNDER_REVIEW, pinned_record
+        from utils.git_utils import git_path
+
+        root = self._repo_root or os.getcwd()
+        record = pinned_record(self.state.state) or {}
+        context_plan = None
+        if self._pinned_source == "commit_range" and record.get("plan"):
+            context_plan = git_path(str(record["plan"]), repo_root=root)
+        guard = guard_record(self.state.state) or {}
+        protected = sorted(guard.get("protected") or {})
+        protected_list = None
+        if len(protected) > PROTECTED_NAMED_MAX:
+            written = write_protected_list(
+                os.path.join(self.out_dir, self.phase_name), protected)
+            protected_list = git_path(written, repo_root=root)
+        # Files absent at `head` (deleting commit or None), asked once per file.
+        absent: Dict[str, Optional[str]] = {}
+        asked: Set[str] = set()
+
+        def arguments(batch: CodeFixBatch, base_ref: str) -> Dict[str, Any]:
+            files: List[str] = []
+            for fix in batch.fixes:
+                files.extend(fix.get("files") or [fix.get("file") or ""])
+            names = [name for name in dict.fromkeys(files) if name]
+            unknown = [name for name in names if name not in asked]
+            if unknown:
+                absent.update(deleted_file_history(pinned.base, pinned.head, unknown, cwd=root))
+                asked.update(unknown)
+            history = {name: absent[name] for name in names if name in absent}
+            notes: List[str] = []
+            if pinned.base is None:
+                notes.append(ROOT_RANGE_LINE.format(base_ref=base_ref))
+            notes.extend(history_lines(pinned.base, pinned.head, history))
+            notes.append(DATA_UNDER_REVIEW)
+            return {
+                "context_plan": context_plan,
+                "protected": protected,
+                "protected_head": pinned.head,
+                "protected_list": protected_list,
+                "commit_notes": notes,
+            }
+
+        return arguments
 
     def build_output_json(
         self,
@@ -1163,7 +1283,7 @@ Finalization (run by the host AFTER every batch has been applied and verified):
             print(f"\n{'='*60}")
             print("CODE FIXES TO APPLY (BATCHED)")
             print(f"{'='*60}")
-            print(f"Plan: {self.plan_path}")
+            print(f"{self._document_title()}: {self.plan_path}")
             print(f"Valid fixes: {len(self.valid)}")
             print(f"Batches: {len(batches)}")
             print(f"Needs human review: {len(self.needs_human)}")

@@ -3437,3 +3437,119 @@ class TestADeadSlotPromisesNoResultFile:
 
         assert success is True and len(issues) == 1
         assert "Output file: /out/kilocode.json (source: file)" in out
+
+
+# ---------------------------------------------------------------------------
+# A fan-out cut off mid-run: what is left, and the two ways forward
+# ---------------------------------------------------------------------------
+#
+# Fable review, finding 3 (2026-10-27). On Claude Code the background launch
+# carries the tool's maximum timeout, and a run past it is still stopped (exit
+# 143, `next` null) with `status` reading `running in foreground`. The *run
+# detached* sentence now offers the user two ways forward and tells the host to
+# say which models really have a result file. Each claim is pinned here on the
+# real `main()`, with only the provider call replaced.
+
+
+class TestAFanOutCutOffMidRun:
+    @staticmethod
+    def _cut_back_to_one_result(phase_dir: Path, kept: str, lost: str) -> None:
+        """What a kill mid-fan-out leaves: one model's file, no aggregate."""
+        (phase_dir / f"{cro.sanitize_model_name(lost)}.json").unlink()
+        for name in ("grouped.json", "issues.json"):
+            (phase_dir / name).unlink(missing_ok=True)
+        assert (phase_dir / f"{cro.sanitize_model_name(kept)}.json").is_file()
+
+    def test_a_done_slot_whose_result_was_held_in_memory_leaves_no_file(
+        self, tmp_path, capsys
+    ):
+        """`save_model_result` runs once the whole fan-out returns, so a stop
+        while another slot runs loses an answer that only lived in memory: the
+        sentence's "a `done` row can have none"."""
+        def reply(**kwargs):
+            if kwargs["model_spec"] == OPENCODE_SPEC:
+                time.sleep(0.3)
+                raise SystemExit(143)     # the stop, landing mid-fan-out
+            return _good_reply([_issue("Answered before the stop")])
+
+        plan = tmp_path / "auth-feature.md"
+        plan.write_text("# Plan\n\nDo the thing.\n", encoding="utf-8")
+        models = [GEMINI_SPEC, OPENCODE_SPEC]
+        with patch.object(cro, "parse_args", return_value=_review_args(plan, models)), \
+             patch.object(cro, "get_project_root", return_value=str(tmp_path)), \
+             patch.object(cro, "get_or_create_state", return_value=_review_state()), \
+             patch.object(cro, "resolve_models", return_value=models), \
+             patch.object(cro, "is_model_valid", return_value=True), \
+             patch.object(cro, "validate_git_ref", side_effect=lambda ref: ref or "HEAD~1"), \
+             patch.object(cro, "intent_to_add_untracked",
+                          side_effect=lambda files, **_: contextlib.nullcontext()), \
+             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
+             patch.object(cro, "invoke_with_file_output", side_effect=reply):
+            with pytest.raises(SystemExit):
+                asyncio.run(cro.main())
+        phase_dir = cro.get_phase_dir(plan, "code-review")
+        assert "Found 1 issues" in capsys.readouterr().out   # GEMINI's slot finished
+        assert not (phase_dir / f"{cro.sanitize_model_name(GEMINI_SPEC)}.json").exists()
+
+    def test_without_force_a_dir_holding_a_result_is_refused(self, tmp_path, capsys):
+        good = {GEMINI_SPEC: _good_reply([_issue("Kept")]),
+                OPENCODE_SPEC: _good_reply([_issue("Lost")])}
+        _plan, phase_dir, code = _run_cro_review(tmp_path, good)
+        assert code == 0
+        self._cut_back_to_one_result(phase_dir, GEMINI_SPEC, OPENCODE_SPEC)
+        capsys.readouterr()
+
+        with pytest.raises(SystemExit) as excinfo:
+            _run_cro_review(tmp_path, good)
+        assert excinfo.value.code == 3
+        assert "Partial completion detected" in capsys.readouterr().out
+
+    def test_force_resumes_keeping_the_result_file(self, tmp_path, capsys):
+        good = {GEMINI_SPEC: _good_reply([_issue("Kept")]),
+                OPENCODE_SPEC: _good_reply([_issue("Lost")])}
+        _plan, phase_dir, code = _run_cro_review(tmp_path, good)
+        assert code == 0
+        self._cut_back_to_one_result(phase_dir, GEMINI_SPEC, OPENCODE_SPEC)
+        capsys.readouterr()
+
+        # The kept model's canned reply would fail the run if it were consulted.
+        _plan, _dir, code = _run_cro_review(
+            tmp_path,
+            {GEMINI_SPEC: _hard_failure(KILOCODE_AUTH_FAILURE),
+             OPENCODE_SPEC: _good_reply([_issue("Re-run")])},
+            force=True,
+        )
+        out = capsys.readouterr().out
+        assert code == 0
+        assert f"[SKIP] {GEMINI_SPEC} - already has results" in out
+        assert (phase_dir / f"{cro.sanitize_model_name(OPENCODE_SPEC)}.json").is_file()
+
+    def test_a_composite_resume_now_gets_past_the_guard(self, tmp_path, capsys):
+        """Fable review, finding 1: the same cut-off dir under improve-code's
+        `--resume` looped. Its review step got `--yes` alone, the guard above
+        refused it, and the stop named `[IMPROVE_RERUN]` again. The step's flags
+        now carry `--force`, and the review they drive resumes."""
+        from utils import improve_workflow as iw
+
+        good = {GEMINI_SPEC: _good_reply([_issue("Kept")]),
+                OPENCODE_SPEC: _good_reply([_issue("Lost")])}
+        plan, phase_dir, code = _run_cro_review(tmp_path, good)
+        assert code == 0
+        self._cut_back_to_one_result(phase_dir, GEMINI_SPEC, OPENCODE_SPEC)
+        capsys.readouterr()
+
+        args = iw.parse_args("improve-code", ["--plan-file", str(plan), "--resume"])
+        flags = iw.step_flags("improve-code", "review-code", args,
+                              iw.read_records("improve-code", plan, args))
+        assert "--force" in flags and "--rerun-all" not in flags
+
+        _plan, _dir, code = _run_cro_review(
+            tmp_path,
+            {GEMINI_SPEC: _hard_failure(KILOCODE_AUTH_FAILURE),
+             OPENCODE_SPEC: _good_reply([_issue("Re-run")])},
+            force="--force" in flags, rerun_all="--rerun-all" in flags,
+        )
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "Partial completion detected" not in out
+        assert f"[SKIP] {GEMINI_SPEC} - already has results" in out

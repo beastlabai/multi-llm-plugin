@@ -10,6 +10,7 @@ The adversarial table is §4.5's list verbatim; each case also runs wrapped in
 from __future__ import annotations
 
 import json
+import re
 import shlex
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -17,6 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from utils import readonly_audit
+from utils.commit_range import pinned_head_read_rule
 from utils.providers import codex_stream_audit as audit_mod
 from utils.providers.codex import CodexProvider
 from utils.providers.codex_stream_audit import audit_codex_stream, classify_command
@@ -428,6 +430,10 @@ class TestTheClassifier:
         'if [ -f "$p" ]; then cat "$p"; fi; done',
         # The `&&` spelling of the same loop.
         'for p in /AGENTS.md ~/AGENTS.md; do [ -f "$p" ] && cat "$p"; done',
+        # A commit review's loop over its brief's diff files (commit-mode live
+        # test run 2, 2026-10-26); `cat <dir>/*.diff` reads the same and passes.
+        "for f in plans/commit-reviews/d06af8d8d531-ea3ee31558cb/code-review/diff/*.diff; "
+        "do sed -n '1,240p' \"$f\"; done",
     ])
     @pytest.mark.parametrize("wrap", [False, True], ids=["bare", "bash-lc"])
     def test_a_for_loop_over_a_shell_variable_stays_rejected(self, inner, wrap):
@@ -445,6 +451,108 @@ class TestTheClassifier:
         assert commands
         for command in commands:
             assert classify_command(command) is None, (command, classify_command(command))
+
+
+# --------------------------------------------------------------------------- #
+# Each git subcommand's own flag grammar, and the commit modes' read rule
+# --------------------------------------------------------------------------- #
+
+GIT_MUST_FAIL = [
+    # git reads `-nO<cmd>` as `-n -O<cmd>` and runs <cmd> on every matching
+    # file (probed on git 2.43): `-n` and `-G` are booleans in `git grep`.
+    "git grep -nOtouch foo",
+    "git grep -nO'touch x' foo",
+    "git grep -GOtouch foo",
+    "git grep -n -O foo",
+    "git grep --open-files-in-pager foo",
+    "git grep --textconv foo",
+    "git grep --no-index foo",
+    # git takes the `--` as `-L`'s line range, then writes x (probed too).
+    "git log -L -- --output=x",
+    "git show -L -- --output=x",
+    # `-n` still takes a value in `git log`, so a flag-like one is refused.
+    "git log -n --oneline",
+    "git ls-tree --output=x HEAD",
+    "git ls-tree --format --output=x HEAD",
+    "git ls-tree -rO HEAD",
+    "git -c core.pager=x ls-tree HEAD",
+    "git ls-tree -r HEAD > x",
+]
+
+GIT_MUST_PASS = [
+    # What run 2's codex reviewers ran (2026-10-26), each refused then.
+    "git ls-tree -r --name-only cf1b20dd4f58 -- inventory tests",
+    "git ls-tree --name-only cf1b20dd4f58",
+    "git grep -n -E 'to_csv|write_csv|summary\\(|low_stock' fd8dad42dda1 --",
+    "git grep -nE 'a|b' HEAD",
+    "git grep -nwi foo HEAD -- '*.py'",
+    "git grep -n --cached foo",
+    "git grep -n -e foo HEAD",
+    "git ls-tree -rtl --abbrev=12 --full-tree HEAD",
+    "git ls-tree --format='%(objectname) %(path)' -z HEAD -- d",
+    "git log -n 5 --oneline",
+    "git log -n5",
+    "git log -L 1,5:f",
+    "git log -L1,5:f --oneline",
+]
+
+
+class TestTheGitGrammar:
+
+    @pytest.mark.parametrize("inner", GIT_MUST_FAIL)
+    @pytest.mark.parametrize("wrap", [False, True], ids=["bare", "bash-lc"])
+    def test_fails_closed(self, inner, wrap):
+        command = _wrapped(inner) if wrap else inner
+        assert classify_command(command) is not None, command
+
+    @pytest.mark.parametrize("inner", GIT_MUST_PASS)
+    @pytest.mark.parametrize("wrap", [False, True], ids=["bare", "bash-lc"])
+    def test_read_only_commands_pass(self, inner, wrap):
+        command = _wrapped(inner) if wrap else inner
+        assert classify_command(command) is None, (command, classify_command(command))
+
+
+#: A sample for each placeholder the pinned-head read rule names.
+READ_RULE_SAMPLES = {
+    "<path>": "inventory/report.py",
+    "<dir>": "inventory",
+    "<pattern>": "'def summary'",
+    "<pathspec>": "'*.py'",
+}
+
+
+def _read_rule_commands(base, head):
+    """Every git command ``pinned_head_read_rule`` prescribes, placeholders filled."""
+    rule = pinned_head_read_rule(base, head)
+    commands = []
+    for span in re.findall(r"`([^`]+)`", rule):
+        if not span.startswith("git "):
+            continue  # `cat`, `rg`, … are the rule's forbidden list
+        for placeholder, sample in READ_RULE_SAMPLES.items():
+            span = span.replace(placeholder, sample)
+        assert not re.search(r"<[^<>]+>", span), f"no sample for a placeholder in {span!r}"
+        commands.append(span)
+    return commands
+
+
+class TestTheCommitReadRuleAuditsClean:
+    """PD-2 (commit-mode live test run 2, 2026-10-26): the read rule prescribed
+    `git ls-tree`, the audit refused it, and the non-clean verdict cost the
+    codex slot its unattributed-change exemption. The commands come from the
+    rule itself, so the two cannot drift apart again."""
+
+    @pytest.mark.parametrize("base", ["d06af8d8d531a26be469afddfed165c57aed5827", None],
+                             ids=["range", "root"])
+    def test_every_command_the_rule_prescribes_audits_clean(self, base):
+        commands = _read_rule_commands(base, "cf1b20dd4f586070d3a75279b5abf008e34ef5d2")
+        assert len(commands) >= 3, commands
+        for command in commands:
+            assert classify_command(_wrapped(command)) is None, (
+                command, classify_command(_wrapped(command)))
+        items = [_cmd_item(f"item_{n}", _wrapped(c)) for n, c in enumerate(commands)]
+        verdict = audit_codex_stream(_stream(*items, TURN_COMPLETED))
+        assert verdict.clean is True, verdict
+        assert verdict.actions == len(commands)
 
 
 # --------------------------------------------------------------------------- #

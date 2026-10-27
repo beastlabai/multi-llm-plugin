@@ -2777,6 +2777,178 @@ class TestStatusSurface:
         finally:
             cli_common.deactivate_result()
 
+    #: What a finished composite's two steps recorded, as its report keeps them.
+    STEP_COUNTS = {"valid": 2, "invalid": 0, "needs_human_decision": 0, "validation_failed": 0}
+    STEP_NOTICE = (
+        "not a clean finish: 1 batch(es) applied their edits, but their own report "
+        "says their check could not run: apply-fix-batch-0 (\"pytest is not "
+        "installed\"); Nothing ran this repository's tests: driver.verify_command "
+        "is not set."
+    )
+
+    def _composite_run(self, plan, mode, monkeypatch, *, run_id="run-c1", steps=None,
+                       ending=None):
+        """A finished detached *mode* run whose report recorded *steps* (the
+        review's counts and the apply's notice by default); its run dir and
+        the report artifact it recorded."""
+        from utils.output_handler import PHASE_DIRECTORIES
+
+        row = mode_table.resolve(mode)
+        run_dir = _phase_dir(plan, PHASE_DIRECTORIES.get(row.phase, row.phase))
+        review, apply = row.sequence_phases[0], row.sequence_phases[-1]
+        report = _phase_dir(plan, PHASE_DIRECTORIES.get(review, review)) / "report.html"
+        report.write_text("<html></html>", encoding="utf-8")
+        status_file.claim_run(str(run_dir), {
+            "run_id": run_id, "state": "running", "detached": True, "mode": mode,
+        })
+        handle = _HandleFor(run_dir)
+        handle.run_id = run_id
+        monkeypatch.setattr(detach, "_ACTIVE", handle)
+        detach.record_step_results(str(run_dir), row.phase, steps if steps is not None else [
+            {"phase": review, "validation_counts": self.STEP_COUNTS},
+            {"phase": apply, "notice": self.STEP_NOTICE},
+        ], [str(report)])
+        monkeypatch.setattr(detach, "_ACTIVE", None)
+        status_file.update_run(
+            str(run_dir), ending or {"state": "done", "exit_code": 0}, expect_run_id=run_id)
+        return run_dir, report
+
+    def _poll(self, plan, *selector):
+        ctx = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            run_status.main(["--plan-file", str(plan), "--view", "run", *selector])
+            return ctx.payload(0)
+        finally:
+            cli_common.deactivate_result()
+
+    @pytest.mark.parametrize("mode", [row.name for row in mode_table.MODES if row.is_composite])
+    def test_a_finished_composite_carries_its_steps_notice_and_counts(
+        self, tmp_path, capsys, monkeypatch, mode
+    ):
+        """D2 (live test 2026-10-26): a composite's steps run in its process and
+        record their notice and verdict counts on its result line and in their
+        own phase dirs, never in the run dir the poll pins, so a detached
+        `improve-commits` result carried neither, and its host said it applied
+        two fixes when one was a no-op and a check had failed. Its report
+        records them in its run dir. `full` is a composite of eight phases and
+        is read the same way."""
+        plan = _plan(tmp_path)
+        _run_dir, report = self._composite_run(plan, mode, monkeypatch)
+        payload = self._poll(plan, "--run-id", "run-c1")
+        capsys.readouterr()
+        assert payload["notice"].startswith(self.STEP_NOTICE[:-1]), payload
+        assert payload["validation_counts"] == self.STEP_COUNTS
+        assert payload["artifacts"][0] == str(report)
+        assert payload["phase"] == mode_table.resolve(mode).phase
+
+    def test_a_later_run_in_the_step_dirs_is_not_the_composite_s(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """Fable review of D2: the steps' phase dirs are shared. A standalone
+        review and apply run after the composite in the same dirs — and one
+        still live — say nothing about the composite's own run."""
+        plan = _plan(tmp_path)
+        self._composite_run(plan, "improve-code", monkeypatch)
+        review, apply = (_phase_dir(plan, name) for name in ("code-review", "apply-fixes"))
+        status_file.write_status(str(review), {
+            "phase": "code-review", "state": "complete",
+            "validation_counts": dict(self.STEP_COUNTS, valid=9),
+        })
+        status_file.write_status(str(apply), {"phase": "apply-code-fixes", "progress": {
+            "notes": ["3 fixes left unapplied."],
+            "write_subagents": {"tasks": [{
+                "task_id": "apply-fix-batch-4", "status": "ok",
+                "batch_check_findings": ["the later run's check failed"],
+            }], "unverified": "Nothing ran this repository's tests (the later run)."},
+        }})
+        status_file.claim_run(str(apply), {
+            "run_id": "run-standalone", "state": "running", "detached": True,
+            "mode": "apply-code-fixes", "pid": os.getpid(),
+        })
+        payload = self._poll(plan, "--run-id", "run-c1")
+        capsys.readouterr()
+        assert payload["validation_counts"] == self.STEP_COUNTS
+        assert payload["notice"].startswith(self.STEP_NOTICE[:-1]), payload
+        for later in ("later run", "3 fixes left unapplied", "apply-fix-batch-4"):
+            assert later not in payload["notice"]
+
+    def test_a_run_that_never_reached_its_report_is_read_from_its_own_dir(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """An aborted or crashed composite records no step results; the
+        earlier run's record left in the run dir is not this run's."""
+        plan = _plan(tmp_path)
+        run_dir, report = self._composite_run(plan, "improve-code", monkeypatch)
+        status_file.claim_run(str(run_dir), {
+            "run_id": "run-c2", "state": "aborted", "exit_code": 3, "detached": True,
+            "mode": "improve-code", "error": "aborted_by_request (SIGTERM)",
+        })
+        payload = self._poll(plan, "--run-id", "run-c2")
+        capsys.readouterr()
+        assert "validation_counts" not in payload
+        assert self.STEP_NOTICE[:20] not in (payload.get("notice") or "")
+        assert str(report) not in payload["artifacts"]
+        assert payload["phase"] is None
+
+    def test_each_step_keeps_its_own_bound(self, tmp_path, capsys, monkeypatch):
+        """One clip over every step's notice would cut the last step's: a
+        `full` run's implement and apply-code-fixes each carry up to the 1200
+        characters one phase's notice is sized to."""
+        plan = _plan(tmp_path)
+        implement = "implement: " + "x" * 1100 + " (implement's end)."
+        apply = "apply-code-fixes: " + "y" * 1100 + " (the apply's end)."
+        self._composite_run(plan, "full", monkeypatch, steps=[
+            {"phase": "implement", "notice": implement},
+            {"phase": "apply-code-fixes", "notice": apply},
+        ])
+        payload = self._poll(plan, "--run-id", "run-c1")
+        capsys.readouterr()
+        assert "(implement's end)" in payload["notice"]
+        assert "(the apply's end)" in payload["notice"]
+
+    TESTS_LINE = (
+        "Nothing ran this repository's tests: driver.verify_command is not set. "
+        "To have every code phase run them, add verify_command under driver: in "
+        ".multi-llm/providers.yaml, set to the command that runs your tests or "
+        "checks your build."
+    )
+    CHECK = 'not a clean finish: 1 batch(es) applied their edits, but ... ("pytest")'
+
+    def test_a_clause_two_steps_word_alike_is_said_once(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """Fable review of D2: a `full` run's implement and apply-code-fixes
+        both record the tests line when nothing ran the repository's tests."""
+        plan = _plan(tmp_path)
+        self._composite_run(plan, "full", monkeypatch, steps=[
+            {"phase": "implement", "notice": self.TESTS_LINE},
+            {"phase": "apply-code-fixes",
+             "notice": f"{self.CHECK}; {self.TESTS_LINE}"},
+        ])
+        notice = self._poll(plan, "--run-id", "run-c1")["notice"]
+        capsys.readouterr()
+        assert notice.count("Nothing ran this repository's tests") == 1, notice
+        assert self.CHECK in notice
+
+    def test_a_stop_s_error_is_not_said_again_by_its_step(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """Fix round 26's rule, clause by clause: the stopped step's notice
+        keeps its check finding and leaves out the tests line its error ends
+        with."""
+        plan = _plan(tmp_path)
+        self._composite_run(plan, "improve-code", monkeypatch, steps=[
+            {"phase": "apply-code-fixes",
+             "notice": f"{self.CHECK}; {self.TESTS_LINE}"},
+        ], ending={
+            "state": "failed", "exit_code": 3,
+            "error": f"apply-fix-batch-1 failed its own check. {self.TESTS_LINE}",
+        })
+        notice = self._poll(plan, "--run-id", "run-c1")["notice"]
+        capsys.readouterr()
+        assert self.CHECK in notice
+        assert "Nothing ran this repository's tests" not in notice, notice
+
     def test_high_priority_groups_renders_for_a_terminal_code_review_run(
         self, tmp_path, capsys
     ):
@@ -4435,7 +4607,8 @@ class TestPollLoopContract:
         assert detach.DETACH_MODES == (
             "review-plan", "apply-suggestions", "improve-plan", "generate-tasks",
             "review-tasks", "apply-task-suggestions", "implement", "review-code",
-            "apply-code-fixes", "improve-code", "full", "ask",
+            "apply-code-fixes", "improve-code", "review-commits",
+            "apply-commit-fixes", "improve-commits", "full", "ask",
         )
         for mode in detach.DETACH_MODES:
             assert mode_table.resolve(mode) is not None

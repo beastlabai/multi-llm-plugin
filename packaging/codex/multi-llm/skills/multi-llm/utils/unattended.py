@@ -143,7 +143,8 @@ ROWS: Tuple[Row, ...] = (
         site_id="model-selection",
         site="which models to fan out to",
         modes=("review-plan", "review-tasks", "review-code", "ask", "full",
-               "improve-plan", "improve-code"),
+               "improve-plan", "improve-code", "review-commits",
+               "improve-commits"),
         dispositions=(AUTO_SELECT, FAIL_CLOSED, EXPLICIT_FLAG),
         flags=("--models", "--quick"),
         enforced_in=("utils/interactive.py",),
@@ -153,7 +154,8 @@ ROWS: Tuple[Row, ...] = (
         site_id="partial-results-recovery",
         site="some models produced no result (partial / resume / rerun-all)",
         modes=("review-plan", "review-tasks", "review-code", "ask",
-               "improve-plan", "improve-code"),
+               "improve-plan", "improve-code", "review-commits",
+               "improve-commits"),
         dispositions=(AUTO_SELECT, FAIL_CLOSED),
         flags=("--force", "--reaggregate", "--rerun-all"),
         enforced_in=("utils/review_orchestrator_base.py", "ask_orchestrator.py",
@@ -229,7 +231,8 @@ ROWS: Tuple[Row, ...] = (
         site_id="needs-human-decision",
         site="needs-human-decision items (per item, or the batched UI)",
         modes=("apply-suggestions", "apply-task-suggestions", "apply-code-fixes",
-               "review-tasks", "full", "improve-plan", "improve-code"),
+               "review-tasks", "full", "improve-plan", "improve-code",
+               "apply-commit-fixes", "improve-commits"),
         dispositions=(AUTO_SELECT,),
         flags=(AGENT_DECIDE_FLAG, "--no-confirm"),
         enforced_in=("utils/apply_orchestrator_base.py",),
@@ -239,7 +242,8 @@ ROWS: Tuple[Row, ...] = (
         site_id="no-selections-confirmation",
         site="no user selections found — apply ALL valid items?",
         modes=("apply-suggestions", "apply-task-suggestions", "apply-code-fixes",
-               "full", "improve-plan", "improve-code"),
+               "full", "improve-plan", "improve-code", "apply-commit-fixes",
+               "improve-commits"),
         dispositions=(AUTO_SELECT,),
         flags=("--no-confirm",),
         enforced_in=("utils/filtering.py", "utils/apply_orchestrator_base.py"),
@@ -274,12 +278,14 @@ ROWS: Tuple[Row, ...] = (
         # The composites' continuation is `improve_workflow.continuation_flags`
         # (the executor leg's row-14 command, through `_phase_failed`, which
         # stays in full_workflow_orchestrator.py), and each native core's
-        # step 3 stops with the `[IMPROVE_RERUN]` it prints.
+        # step 3 stops with the `[IMPROVE_RERUN]` it prints: improve-commits'
+        # spells it as the pinned range (plans/review-commits.md §2.8).
         enforced_in=("full_workflow_orchestrator.py",
                      "instructions/full-workflow.md",
                      "utils/improve_workflow.py",
                      "instructions/improve-plan.md",
-                     "instructions/improve-code.md"),
+                     "instructions/improve-code.md",
+                     "instructions/improve-commits.md"),
     ),
     Row(
         number=15,

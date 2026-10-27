@@ -1176,6 +1176,11 @@ class StateManager:
         if self.state_file.exists():
             try:
                 self.state = self._read_upgraded()
+                if not isinstance(self.state, dict):
+                    # Parsed, but not a state (`[]`, a number): read as an
+                    # unparseable one is, rather than failing on `.get`
+                    # below (`record_commit_range` documents replacing it).
+                    raise json.JSONDecodeError("state.json is not a JSON object", "", 0)
 
                 # Check for plan changes. Deliberately set-only: the flag is
                 # cleared by whoever CONSUMES it, never by a bare load.
@@ -2072,6 +2077,68 @@ class StateManager:
         """
         self.state["plan_hash"] = self._compute_plan_hash()
         self.clear_plan_changed_flag()
+
+    def record_commit_range(
+        self, fields: Mapping[str, Any], *, refresh_plan_hash: bool = False,
+        clear_phases: Sequence[str] = (),
+    ) -> None:
+        """Replace only the given ``commit_range`` fields, and save.
+
+        The one writer of a commit front door's record (plans/review-commits.md
+        §2.1, "Who writes ``commit_range``"): step 6 of ``--review-commits``,
+        ``--apply-commit-fixes``, ``--improve-commits`` and ``util
+        commit-brief``, and a detached worker applying its launch's stage. A new
+        brief passes every field; an existing one passes what this entry
+        decided (a fresh ``resolved_at`` always, a rewritten header's
+        identity fields), so ``phrase``, ``window``, ``reviewed_header_sha256``
+        and ``guard``, which no front door passes, keep their recorded values.
+
+        Loaded fresh from disk, updated and saved under ``state_file_lock``,
+        so a concurrent locked writer of the same file (``util batch-done``,
+        ``util metrics``) neither loses its record nor drops this one. That
+        replaces this instance's in-memory state with the file's. With no file
+        yet, the ordinary initial state is built (``plan_hash``,
+        ``head_at_start``, ``branch_name``, …); an unparseable or non-object
+        file is replaced by one, which then carries the record.
+        *refresh_plan_hash* re-stamps ``plan_hash`` in the same save, for a
+        header the plugin rewrote (never a human ``plan_changed``).
+        *clear_phases* are popped from ``phases_completed`` in the same save:
+        a restart's archived round (``["code-review"]``) stops reading as a
+        completed review the moment it is recorded, whether or not the
+        restarted phase ever runs (§2.7, "Not candidates").
+        """
+        if self.read_only:
+            raise RuntimeError(
+                f"read-only StateManager for {self.plan_path} cannot record commit_range"
+            )
+        from .metrics import state_file_lock
+
+        # The lock lives beside the file; a folder that does not exist yet has
+        # nothing to lock, so it is made first.
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        with state_file_lock(self.state_file):
+            loaded: Any = None
+            if self.state_file.exists():
+                try:
+                    loaded = self._read_upgraded()
+                except (OSError, ValueError):
+                    loaded = None
+            if not isinstance(loaded, dict):
+                loaded = self._create_initial_state()
+            self.state = loaded
+            record = self.state.get("commit_range")
+            merged: Dict[str, Any] = dict(record) if isinstance(record, Mapping) else {}
+            merged.update(json.loads(json.dumps(dict(fields))))
+            if fields or isinstance(record, Mapping):
+                # A clear-only call (no fields) never invents an empty record.
+                self.state["commit_range"] = merged
+            phases = self.state.get("phases_completed")
+            if clear_phases and isinstance(phases, dict):
+                for phase in clear_phases:
+                    phases.pop(phase, None)
+            if refresh_plan_hash:
+                self.refresh_plan_hash()
+            self.save()
 
     def get_session_summary(self) -> Dict[str, Any]:
         """Get a summary of the current session state."""

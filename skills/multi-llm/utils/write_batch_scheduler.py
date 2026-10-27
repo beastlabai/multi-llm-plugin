@@ -36,6 +36,7 @@ import hashlib
 import inspect
 import json
 import os
+import posixpath
 import re
 import shutil
 import subprocess
@@ -146,6 +147,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from .subagent_prompts import build_nothing_changed_resend_prompt
     from .write_phase_bridge import WRITE_TASK_FILENAME
     from .write_safety import (
+        CONTEXT_PLAN_RULE,
         PRE_BATCH_DIRNAME,
         policy_allow_clause,
         policy_outside_note,
@@ -264,6 +266,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
     from utils.subagent_prompts import build_nothing_changed_resend_prompt  # type: ignore
     from utils.write_phase_bridge import WRITE_TASK_FILENAME
     from utils.write_safety import (
+        CONTEXT_PLAN_RULE,
         PRE_BATCH_DIRNAME,
         policy_allow_clause,
         policy_outside_note,
@@ -349,6 +352,19 @@ __all__ = [
     "verification_line",
     "verify_command_candidate",
     "with_result_contract",
+    "COMMIT_GUARD_KIND",
+    "ORCHESTRATOR_OUTPUT_FILENAME",
+    "batch_fixes_for",
+    "commit_group_files",
+    "commit_guard_of",
+    "commit_head7",
+    "commit_protected_rule",
+    "commit_recheck_failing",
+    "commit_stale_line",
+    "commit_stale_reason",
+    "commit_stale_split",
+    "load_commit_apply",
+    "load_orchestrator_batches",
 ]
 
 
@@ -430,6 +446,228 @@ CODE_WRITE_KINDS = frozenset({"apply_code_fixes", "implement"})
 CHECK_FINDINGS_MARKER = "[CHECK_FINDINGS]"
 
 
+# ---------------------------------------------------------------------------
+# The commit write policy's write legs (plans/review-commits.md §2.7: "Every
+# batch is re-checked immediately before it is dispatched" and "The commit
+# write policy"). The apply guard (``utils/commit_apply.py``) decides once,
+# before human decisions and batching, and saves under the pinned record
+# (``commit_range`` or ``head_ref``) the content each fix file must still
+# have and the protected set. These helpers are what the executor's
+# ``_dispatch_one``, ``util write-prompt`` and ``util batch-done`` share. Every
+# one of them is a no-op without a guard, and ``utils.commit_apply`` is only
+# imported once one exists, so a run on a plan is untouched by any of this.
+# ---------------------------------------------------------------------------
+
+#: The one write kind the apply guard governs: its groups are review fixes.
+COMMIT_GUARD_KIND = "apply_code_fixes"
+
+#: The phase output whose batches carry each fix's ``files`` on a commit
+#: review's apply (``ApplyCodeFixesOrchestrator.format_item_for_output``:
+#: every distinct file the fix's group names, in git's form, primary first).
+#: Both legs read a batch's fix files from it: the materialized write task
+#: carries only the batch's primary file (``declared_files``).
+ORCHESTRATOR_OUTPUT_FILENAME = "orchestrator_output.json"
+
+
+def commit_guard_of(state: Any, kind: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """The live apply guard (``<pinned record>.guard``) of a raw state dict,
+    to mutate in place, or ``None``: no dict, no pinned record
+    (``commit_range.pinned_record``), no guard in it, or a *kind* the guard
+    does not govern."""
+    if kind is not None and kind != COMMIT_GUARD_KIND:
+        return None
+    if not isinstance(state, dict) or not (
+        "commit_range" in state or "head_ref" in state
+    ):
+        return None
+    try:
+        from .commit_range import pinned_record
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.commit_range import pinned_record  # type: ignore
+    record = pinned_record(state)
+    guard = record.get("guard") if isinstance(record, Mapping) else None
+    return guard if isinstance(guard, dict) and guard else None
+
+
+def load_commit_apply() -> Any:
+    """``utils.commit_apply``, imported only once a guard exists."""
+    try:
+        from . import commit_apply
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils import commit_apply  # type: ignore
+    return commit_apply
+
+
+def commit_head7(guard: Mapping[str, Any]) -> str:
+    """The reviewed head's seven-character spelling every commit line uses."""
+    return str(guard.get("head") or "")[:7]
+
+
+def commit_protected_rule(guard: Mapping[str, Any]) -> str:
+    """The rule text of the protected set's deny layer: ``changed since
+    reviewed commit <head7>``."""
+    return f"changed since reviewed commit {commit_head7(guard)}"
+
+
+def load_orchestrator_batches(phase_dir: Union[str, Path]) -> Optional[List[Any]]:
+    """The ``batches`` of ``<phase_dir>/orchestrator_output.json``, or
+    ``None`` when the file is absent or cannot be read."""
+    try:
+        document = json.loads(
+            (Path(phase_dir) / ORCHESTRATOR_OUTPUT_FILENAME).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return None
+    batches = document.get("batches") if isinstance(document, dict) else None
+    return batches if isinstance(batches, list) else None
+
+
+def batch_fixes_for(
+    task: Mapping[str, Any], batches: Optional[Sequence[Any]],
+) -> Optional[List[Dict[str, Any]]]:
+    """The fixes of *task*'s batch in *batches* (``orchestrator_output.json``'s):
+    the batch at the task's ``batch_index`` when its member ids
+    (``code_fix_batcher.fix_member_ids``) are the task's ``expected_ids``,
+    else the first batch whose are; ``None`` when none matches (an output
+    from another run is never read as this one's)."""
+    if not batches:
+        return None
+    try:
+        from .code_fix_batcher import fix_member_ids
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.code_fix_batcher import fix_member_ids  # type: ignore
+    expected = [str(item) for item in task.get("expected_ids") or []]
+    index = task.get("batch_index")
+    ordered = list(batches)
+    if isinstance(index, int) and 0 <= index < len(ordered):
+        ordered.insert(0, ordered[index])
+    for batch in ordered:
+        fixes = batch.get("fixes") if isinstance(batch, Mapping) else None
+        if not isinstance(fixes, list) or not all(isinstance(f, dict) for f in fixes):
+            continue
+        if expected and fix_member_ids(fixes) == expected:
+            return fixes
+    return None
+
+
+def commit_group_files(
+    task: Mapping[str, Any], *, repo_root: Optional[str] = None,
+    fixes: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> Dict[str, List[str]]:
+    """``{group id: [fix files]}`` for one apply-code-fixes write task, each
+    file repo-relative in git's form (``git_utils.git_path``): the batch's
+    declared (primary) file, then every file the group's fix names in
+    *fixes* (:func:`batch_fixes_for`: its ``files``, else its ``file``).
+    Without *fixes* a group's fix files are the declared ones."""
+    def form(path: Any) -> str:
+        try:
+            name = _git_utils.git_path(str(path), repo_root)
+        except Exception:  # noqa: BLE001 - a name is still a name
+            name = str(path).replace(os.sep, "/")
+        # `..` resolved lexically, as the guard's own names are
+        # (`commit_apply._git_name`), so `docs/../a.py` meets its `a.py` key.
+        if name and not os.path.isabs(name) and ".." in name.split("/"):
+            name = posixpath.normpath(name)
+        return name
+
+    declared: List[str] = []
+    for path in declared_file_set(dict(task)):
+        name = form(path)
+        if name and name not in declared:
+            declared.append(name)
+    named: Dict[str, List[str]] = {}
+    if fixes:
+        try:
+            from .code_fix_batcher import fix_member_ids
+        except ImportError:  # pragma: no cover - direct-script import shim
+            from utils.code_fix_batcher import fix_member_ids  # type: ignore
+        for member_id, fix in zip(fix_member_ids([dict(f) for f in fixes]), fixes):
+            listed = fix.get("files")
+            if not isinstance(listed, (list, tuple)):
+                listed = [fix.get("file")]
+            named[str(member_id)] = [
+                str(path) for path in listed if isinstance(path, str) and path.strip()
+            ]
+    groups: Dict[str, List[str]] = {}
+    for group_id in task.get("expected_ids") or []:
+        group_id = str(group_id)
+        if not group_id:
+            continue
+        files = list(declared)
+        for path in named.get(group_id, ()):
+            name = form(path)
+            if name and name not in files:
+                files.append(name)
+        groups[group_id] = files
+    return groups
+
+
+def commit_recheck_failing(
+    guard: Mapping[str, Any], groups: Mapping[str, Sequence[str]], *,
+    repo_root: str, commit_apply: Any = None,
+) -> List[str]:
+    """The fix files of *groups* the pre-dispatch re-check fails, in the
+    batch's order: ``commit_apply.recheck_files``' answer over every fix
+    file the batch declares (each against its saved ``head`` or ``batch``
+    identity), plus each one in the saved protected set (§2.7, "Every
+    target, before dispatch": a fix that names a protected path is skipped
+    like a guard skip)."""
+    commit_apply = commit_apply or load_commit_apply()
+    files: List[str] = []
+    for group_files in groups.values():
+        for path in group_files:
+            if path not in files:
+                files.append(path)
+    if not files:
+        return []
+
+    def sha256_of(path: str) -> Optional[str]:
+        return file_sha256(path if os.path.isabs(path) else os.path.join(repo_root, path))
+
+    failing = {
+        str(path) for path in commit_apply.recheck_files(
+            guard, files, cwd=repo_root, file_sha256=sha256_of,
+        ) or ()
+    }
+    protected = guard.get("protected")
+    if isinstance(protected, Mapping):
+        failing |= {path for path in files if path in protected}
+    return [path for path in files if path in failing] + sorted(failing - set(files))
+
+
+def commit_stale_split(
+    groups: Mapping[str, Sequence[str]], failing: Sequence[str],
+) -> Tuple[List[str], List[str]]:
+    """``(skipped, held back)``: the groups that name a failing file, and
+    the batch's other groups, which are held back rather than lost."""
+    bad = set(failing)
+    skipped = [gid for gid, files in groups.items() if bad.intersection(files)]
+    return skipped, [gid for gid in groups if gid not in skipped]
+
+
+def commit_stale_line(
+    task_id: str, failing: Sequence[str], guard: Mapping[str, Any], *,
+    marker: str = "[COMMIT_FIXES_STALE]",
+) -> str:
+    """``[COMMIT_FIXES_STALE] <task id>: <files> changed since reviewed
+    commit <head7>``, both legs' line for a batch the re-check stops."""
+    return (
+        f"{marker} {task_id}: {', '.join(failing)} changed since reviewed "
+        f"commit {commit_head7(guard)}"
+    )
+
+
+def commit_stale_reason(
+    failing: Sequence[str], guard: Mapping[str, Any], *, held: bool,
+) -> str:
+    """The reason a stopped batch is recorded ``failed`` with: ``held back:
+    batched with <files>`` when some of its groups passed (a ``--resume``
+    re-batches them without the skipped ones), else the skip itself."""
+    if held:
+        return f"held back: batched with {', '.join(failing)}"
+    return f"skipped: {', '.join(failing)} {commit_protected_rule(guard)}"
+
+
 def check_findings_line(task_id: str, findings: Sequence[str]) -> str:
     """One ``[CHECK_FINDINGS]`` line: a check task that ran and reported
     *findings*. The executor prints it at the end of a run (or a stop); the
@@ -449,11 +687,16 @@ BATCH_CHECK_MARKER = "[BATCH_CHECK_FAILED]"
 
 def batch_check_section(
     rows: Sequence[Dict[str, Any]], *, heading: bool = True,
+    commit_review: bool = False,
 ) -> List[str]:
     """The ``## Check Findings`` lines for the code batches whose own check
     failed after their edits (fix round 14), or ``[]``. Shared by the
     implementation summary (under the check tasks' section when it has one:
-    *heading* ``False``) and the apply-code-fixes summary."""
+    *heading* ``False``) and the apply-code-fixes summary. *commit_review*
+    (an apply on a commit brief) names the commit modes rather than the
+    phases they front (plans/review-commits.md §2.8): its edits are
+    uncommitted, so they are reviewed once committed, as the new ``HEAD``
+    that both modes take with no range."""
     found = [
         row for row in rows
         if isinstance(row, dict) and row.get("status") == STATUS_OK
@@ -465,13 +708,18 @@ def batch_check_section(
     could_not = any(
         batch_check_could_not_run(row_batch_check_findings(row)) for row in found
     )
+    again = (
+        "commit the edits and run --review-commits and then "
+        "--apply-commit-fixes, which with no range take that commit"
+        if commit_review else "run review-code and then apply-code-fixes"
+    )
     lines += [
         "These batches applied their edits, and each one's own closing report "
         "says a check it ran failed"
         + (" or could not run" if could_not else "")
         + "; what it reported is listed under it, in its own words. The edits "
         "are kept: look at each failure before you go on — fix it by hand, or "
-        "run review-code and then apply-code-fixes.", "",
+        f"{again}.", "",
     ]
     for row in found:
         lines.append(
@@ -4536,6 +4784,20 @@ class WriteBatchScheduler:
         self.write_scope = write_scope_for_kind(kind)
         self.write_target = self._checked_write_target(write_target)
         self.policy = WritePolicy.load(self.repo_root, anchor=self.anchor)
+        #: plans/review-commits.md §2.7: the batches the pre-dispatch
+        #: re-check stopped (``task id -> their batch line``), which the loop
+        #: goes past instead of stopping on, and this phase's
+        #: ``orchestrator_output.json`` batches, whose fixes name every file
+        #: their groups do (read once, on the first batch a guard governs).
+        self._commit_stale: Dict[str, str] = {}
+        self._commit_batches: Optional[List[Any]] = None
+        #: The watched paths' disk ids read just before each dispatch
+        #: (``task id -> {path: id}``), for its post-run protected check.
+        self._commit_watch_before: Dict[str, Dict[str, Optional[str]]] = {}
+        # The apply guard's protected set joins the policy as an exact-path
+        # deny layer: the pre-dispatch check and the post-run sweep below then
+        # fail a batch that writes one, as for a driver.write_paths deny hit.
+        self._commit_protect(self._commit_guard())
         self.jail_request = self._build_jail_request()
         self.audit = AuditLog(self.phase_dir)
         #: Fix round 17: the phase dir the dispatched prompts are kept in,
@@ -5839,13 +6101,17 @@ class WriteBatchScheduler:
             self._block_dependents_of_checks(outcomes, result)
             self._record_batch_tracking(result)
             self._mirror_status(result)
-            if any(o.stops_the_loop for o in outcomes) or any(
-                not o.ok for o in outcomes
+            # plans/review-commits.md §2.7: a batch the commit re-check
+            # stopped was never dispatched and the loop goes on past it.
+            stale = getattr(self, "_commit_stale", None) or {}
+            stopping = [o for o in outcomes if o.task_id not in stale]
+            if any(o.stops_the_loop for o in stopping) or any(
+                not o.ok for o in stopping
             ):
                 result.stopped_at_batch = batch_index
                 result.exit_code = EXIT_NEEDS_HUMAN
                 self._record_stop(
-                    result, batch_index, [o for o in outcomes if not o.ok],
+                    result, batch_index, [o for o in stopping if not o.ok],
                 )
                 # Fix round 20: a stop short of the total says so on the
                 # `[ETA]` lines, rather than leaving "~0m 37s remaining"; fix
@@ -6367,7 +6633,11 @@ class WriteBatchScheduler:
                         for task in group
                     ]
                     outcomes.extend(future.result() for future in futures)
-            if any(o.stops_the_loop or not o.ok for o in outcomes):
+            stale = getattr(self, "_commit_stale", None) or {}
+            if any(
+                (o.stops_the_loop or not o.ok) and o.task_id not in stale
+                for o in outcomes
+            ):
                 # Verification gates the next dispatch (D3h): a partial
                 # application is never compounded by a concurrent one.
                 break
@@ -6489,6 +6759,9 @@ class WriteBatchScheduler:
                         ),
                     )
                     self._record_processed_items(task, outcome)
+                    # §2.7: its completion's identities, should the earlier
+                    # run have stopped before it saved them.
+                    self._commit_repin(task, outcome)
                     self.state.save()
             return outcome
 
@@ -6513,6 +6786,15 @@ class WriteBatchScheduler:
                 status=exc.status, profile=profile, reason=exc.message,
             ), batch_index, result)
         self._retire_foreign_result(task)
+
+        # plans/review-commits.md §2.7, "Every batch is re-checked immediately
+        # before it is dispatched": beside the D3l check below and before the
+        # snapshot, every fix file the batch declares is held to the content
+        # the apply guard saved for it. A batch that fails is never
+        # dispatched; the loop goes on to the next one. No-op without a guard.
+        stale = self._commit_recheck(task, batch_index, result)
+        if stale is not None:
+            return stale
 
         # D3l pre-dispatch: a batch whose DECLARED set is not wholly inside the
         # policy never starts a runner — and the check runs BEFORE the snapshot,
@@ -6563,6 +6845,9 @@ class WriteBatchScheduler:
         self._target_identity_before[task_id] = self._identity_of(
             self._identity_path()
         )
+        # §2.7: the protected set's (and context plan's) "before" for this
+        # dispatch's own post-run check, independent of the sweep below.
+        self._commit_watch_begin(task_id)
 
         try:
             self._begin_sweep(
@@ -6573,6 +6858,7 @@ class WriteBatchScheduler:
             # The census is this task's whole verdict and there is none: a
             # refusal, with nothing spawned (W1, adversarial review 2026-10-02).
             self._target_identity_before.pop(task_id, None)
+            self._commit_watch_before.pop(task_id, None)
             return self._refuse_before_dispatch(task, TaskOutcome(
                 task_id=task_id, kind=self.kind, runner=self.invoker,
                 status=STATUS_REJECTED, profile=profile, reason=exc.message,
@@ -6635,6 +6921,7 @@ class WriteBatchScheduler:
                 self._ignore_sources_before.pop(task_id, None)
                 self._sweep_overlap.pop(task_id, None)
             self._target_identity_before.pop(task_id, None)
+            self._commit_watch_before.pop(task_id, None)
         self._record_batch_effects(task, outcome, batch_index, result)
         return outcome
 
@@ -6933,6 +7220,234 @@ class WriteBatchScheduler:
         )
         return outcome
 
+    # -- the commit write policy (plans/review-commits.md §2.7) ---------
+
+    def _commit_guard(self) -> Optional[Dict[str, Any]]:
+        """The live apply guard of the state this run holds, or ``None`` (no
+        pinned record with a guard, or not an apply-code-fixes phase)."""
+        return commit_guard_of(
+            getattr(getattr(self, "state", None), "state", None),
+            getattr(self, "kind", None),
+        )
+
+    def _commit_protect(self, guard: Optional[Mapping[str, Any]]) -> None:
+        """Add the guard's protected set to :attr:`policy` as its exact-path
+        deny layer (``write_safety.WritePolicy.deny_exact``), with the rule
+        text ``changed since reviewed commit <head7>``, and the context plan
+        (``guard["context_plan"]``, §2.7: read-only in this review whether or
+        not it changed) with :data:`write_safety.CONTEXT_PLAN_RULE`, so a
+        batch that declares or writes it fails like a protected write. A
+        symlinked context plan's in-repository targets
+        (``guard["context_plan_targets"]``, ``commit_apply.
+        context_plan_paths``) hold its text, so they get the same rule: the
+        layer matches a path by its own name, never through the link.
+        Idempotent: run at construction and again whenever a re-check adds
+        files to the set."""
+        if guard is None:
+            return
+        protected = guard.get("protected")
+        if isinstance(protected, Mapping) and protected:
+            self.policy.deny_exact(
+                [str(path) for path in protected], commit_protected_rule(guard),
+            )
+        targets = guard.get("context_plan_targets")
+        names = [guard.get("context_plan")] + (
+            list(targets) if isinstance(targets, Mapping) else [])
+        plan_names = [
+            name for name in names
+            if isinstance(name, str) and name and not os.path.isabs(name)
+            and name != ".." and not name.startswith("../")
+        ]
+        if plan_names:
+            self.policy.deny_exact(plan_names, CONTEXT_PLAN_RULE)
+
+    def _commit_watch_begin(self, task_id: str) -> None:
+        """Read the disk ids of every path no batch may change (the
+        protected set and the context plan, ``commit_apply.watched_ids``)
+        just before *task_id* is dispatched, so its post-run check
+        (:meth:`_commit_watch_after`) counts only what moved during its own
+        window. No-op without a guard. Cost: one ``git hash-object`` call
+        over that set, whatever the tree's size."""
+        guard = self._commit_guard()
+        if guard is None:
+            return
+        commit_apply = load_commit_apply()
+        with self._effects_lock:
+            watched = list(commit_apply.watched_ids(guard))
+        if watched:
+            self._commit_watch_before[task_id] = commit_apply.disk_blob_ids(
+                watched, cwd=self.repo_root,
+            )
+
+    def _commit_watch_after(self, task_id: str) -> Tuple[List[str], Any, Optional[Dict[str, Any]]]:
+        """The watched paths *task_id*'s window changed: ``(paths,
+        commit_apply, guard copy)``, ``([], None, None)`` without a guard.
+
+        plans/review-commits.md §2.7, "Every observed write, after each
+        batch": the protected set's (and the context plan's) current disk
+        ids against the ones read before the batch (``commit_apply.
+        protected_violations``), on its own, so the check never depends on
+        the undeclared-write sweep. That sweep is abandoned on a tree over
+        ``SWEEP_MAX_FILES`` (a large repository) and keeps no bytes past
+        ``SWEEP_RETAIN_MAX_BYTES``; this one costs only the watched set. The
+        deny layer gains every watched path first, so ``policy.check`` names
+        each hit with its rule."""
+        guard = self._commit_guard()
+        if guard is None:
+            return [], None, None
+        commit_apply = load_commit_apply()
+        with self._effects_lock:
+            # A co-scheduled sibling's re-check can grow the protected set.
+            frozen = copy.deepcopy(guard)
+            self._commit_protect(guard)
+        hits = commit_apply.protected_violations(
+            frozen, cwd=self.repo_root,
+            baseline=self._commit_watch_before.get(task_id),
+        )
+        return [str(path) for path in hits or ()], commit_apply, frozen
+
+    def _commit_restore_watched(
+        self, task_id: str, report: Dict[str, str], commit_apply: Any,
+        guard: Optional[Mapping[str, Any]],
+    ) -> Dict[str, str]:
+        """*report* (``TaskSnapshot.restore``'s) with each watched path the
+        snapshot held no bytes for put back from what the guard kept
+        (``commit_apply.restore_watched``: deleted when it was absent before
+        the batch, else the guard's copy when that copy is what it held)."""
+        if commit_apply is None or guard is None:
+            return report
+        missing = [
+            path for path, state in report.items()
+            if state == "skipped: not in this task's snapshot"
+        ]
+        if not missing:
+            return report
+        fallback = commit_apply.restore_watched(
+            guard, missing, cwd=self.repo_root,
+            baseline=self._commit_watch_before.get(task_id),
+        )
+        return {**report, **fallback}
+
+    def _commit_groups(self, task: Mapping[str, Any]) -> Dict[str, List[str]]:
+        """``{group id: [fix files]}`` for *task* (:func:`commit_group_files`
+        over its batch's fixes in this phase's ``orchestrator_output.json``,
+        which the apply phase writes before the scheduler runs)."""
+        if getattr(self, "_commit_batches", None) is None:
+            self._commit_batches = load_orchestrator_batches(self.phase_dir) or []
+        return commit_group_files(
+            task, repo_root=self.repo_root,
+            fixes=batch_fixes_for(task, self._commit_batches),
+        )
+
+    def _commit_save_guard(self, commit_apply: Any, guard: Mapping[str, Any]) -> None:
+        """Save *guard* back to ``state.json`` under ``state_file_lock``
+        (``commit_apply.save_guard``). The guard is also this run's live
+        dict, so the state's next ``save()`` writes the same decision; a
+        failed save is named and the run goes on with it in memory."""
+        path = getattr(getattr(self, "state", None), "state_file", None)
+        if not path:
+            return
+        try:
+            commit_apply.save_guard(path, guard)
+        except Exception as exc:  # noqa: BLE001 - the in-memory guard still holds
+            self.log(
+                f"[write-subagents] could not save the apply guard to {path}: "
+                f"{exc}; it is saved with the next state write instead."
+            )
+
+    def _commit_recheck(
+        self, task: Dict[str, Any], batch_index: int, result: SchedulerResult,
+    ) -> Optional[TaskOutcome]:
+        """The pre-dispatch re-check of one batch, or ``None`` when it passes
+        (or no guard exists).
+
+        Every fix file the batch declares (each group's, not only the
+        primary one) is checked against the identity the guard saved for it
+        (``commit_apply.recheck_files``: ``head`` by git's three reads,
+        ``batch`` by the bytes' sha256), and against the protected set. A
+        batch that fails is not dispatched:
+
+        * its groups that name a failing file are skipped with ``file changed
+          since reviewed commit <head7>`` (``commit_apply.mark_stale``, which
+          also adds the failing files to the protected set), the guard is
+          saved back, and the deny layer gains the files before the next
+          batch;
+        * its other groups are held back: the batch is recorded ``failed``
+          with ``held back: batched with <file>`` through
+          :meth:`_refuse_before_dispatch`, which a ``--resume`` re-checks
+          and re-batches without the skipped groups (a batch every group of
+          which is skipped is recorded the same way, with the skip as its
+          reason). Every item of the batch is ``failed`` in
+          ``processed_<phase>``, which keeps it in a resume's work set; the
+          guard's saved skips then take the skipped ones out again and count
+          them (``commit_apply.take_guard``);
+        * its batch line is the ``[COMMIT_FIXES_STALE]`` line, and the loop
+          goes on to the next batch (:meth:`_run` does not stop on it).
+        """
+        guard = self._commit_guard()
+        if guard is None:
+            return None
+        commit_apply = load_commit_apply()
+        task_id = str(task.get("task_id", ""))
+        groups = self._commit_groups(task)
+        # Under the bookkeeping lock throughout: a co-scheduled sibling's
+        # completion re-pins (mutates) the same guard, and its `state.save()`
+        # serializes it, both under this lock.
+        with self._effects_lock:
+            self._commit_protect(guard)
+            failing = commit_recheck_failing(
+                guard, groups, repo_root=self.repo_root, commit_apply=commit_apply,
+            )
+            if not failing:
+                return None
+            skipped, held = commit_stale_split(groups, failing)
+            commit_apply.mark_stale(guard, groups, failing, cwd=self.repo_root)
+            self._commit_save_guard(commit_apply, guard)
+            self._commit_protect(guard)
+        line = commit_stale_line(
+            task_id, failing, guard,
+            marker=getattr(commit_apply, "STALE_MARKER", "[COMMIT_FIXES_STALE]"),
+        )
+        tail = [f"{len(skipped)} fix(es) skipped"] if skipped else []
+        if held:
+            tail.append(
+                f"{len(held)} held back, recorded failed (a --resume applies "
+                f"{'it' if len(held) == 1 else 'them'} in a new batch)"
+            )
+        self._commit_stale[task_id] = f"{line} — not dispatched: {', '.join(tail)}"
+        return self._refuse_before_dispatch(task, TaskOutcome(
+            task_id=task_id, kind=self.kind, runner=self.invoker,
+            status=STATUS_REJECTED, profile=profile_for_kind(self.kind),
+            reason=commit_stale_reason(failing, guard, held=bool(held)),
+        ), batch_index, result)
+
+    def _commit_repin(self, task: Dict[str, Any], outcome: TaskOutcome) -> None:
+        """Re-pin a completed batch's fix files to the bytes it left
+        (``commit_apply.repin_after_batch``, from the ``sha256_after`` of its
+        audit record), so a later batch on the same file, or a ``--resume``,
+        accepts them by their ``batch`` identity, and a hand edit made after
+        it fails. Only the batch's own fix files: a file another batch
+        declares that moved during this one's window (an edit made while it
+        ran) keeps its expectation, so its own batch is still re-checked
+        against it. Caller holds ``_effects_lock``; no-op without a guard."""
+        if not outcome.ok:
+            return
+        guard = self._commit_guard()
+        if guard is None:
+            return
+        own = {path for files in self._commit_groups(task).values() for path in files}
+        after = {
+            str(path): digest for path, digest in (outcome.sha256_after or {}).items()
+            if str(path) in own
+        }
+        if not after:
+            return
+        commit_apply = load_commit_apply()
+        if commit_apply.repin_after_batch(
+            guard, str(task.get("task_id", "")), after, cwd=self.repo_root,
+        ):
+            self._commit_save_guard(commit_apply, guard)
+
     def _check_findings_rerun(
         self, task: Dict[str, Any], output_path: str, result: SchedulerResult,
     ) -> Optional[bool]:
@@ -7129,6 +7644,9 @@ class WriteBatchScheduler:
             return
         undeclared = self._undeclared_writes(outcome.task_id, snapshot)
         observed = self._observed_with_undeclared(snapshot, undeclared)
+        # §2.7: a protected path this window changed is put back here too,
+        # before the byte comparison below reads the snapshot.
+        self._commit_protected_unclassified(outcome, snapshot)
         if not outcome.files_touched:
             outcome.files_touched = snapshot.changed()
         if not outcome.unrestorable:
@@ -7147,6 +7665,40 @@ class WriteBatchScheduler:
             observed,
             outcome.duration_seconds,
         )
+
+    def _commit_protected_unclassified(
+        self, outcome: TaskOutcome, snapshot: TaskSnapshot
+    ) -> None:
+        """plans/review-commits.md §2.7 on a dispatch that never reached
+        ``_classify`` (a timeout, a runner error, a reply that never parsed):
+        each watched path its window changed (:meth:`_commit_watch_after`) is
+        put back as ``_classify``'s policy branch puts it back, from the
+        pre-batch snapshot or else from what the guard kept, and its reason
+        names them. Its verdict stays its own: the loop stops on it either
+        way. No-op without a guard."""
+        watched, commit_apply, guard = self._commit_watch_after(outcome.task_id)
+        if not watched or guard is None:
+            return
+        report = self._commit_restore_watched(
+            outcome.task_id, snapshot.restore(watched), commit_apply, guard,
+        )
+        back = sorted(p for p, state in report.items() if not state.startswith("skipped:"))
+        left = sorted(p for p, state in report.items() if state.startswith("skipped:"))
+        many = len(watched) != 1
+        outcome.reason = (
+            f"{outcome.reason or outcome.status} It also changed "
+            f"{', '.join(watched)}, which the commit review protects (this apply "
+            f"never writes {'them' if many else 'it'})."
+            + (f" Put back as before the batch: {', '.join(back)}." if back else "")
+            + (
+                f" Not restored, because no rollback point exists "
+                f"({', '.join(left)}): left on disk as "
+                f"{'they are' if len(left) != 1 else 'it is'} now, so inspect "
+                f"{'them' if len(left) != 1 else 'it'} by hand."
+                if left else ""
+            )
+        )
+        self.audit.restored(task_id=outcome.task_id, report=report, force=False)
 
     def _partial_when_bytes_moved(
         self, outcome: TaskOutcome, snapshot: TaskSnapshot
@@ -7426,7 +7978,7 @@ class WriteBatchScheduler:
         for path in skipped:
             if path not in self._unretained_denied:
                 self._unretained_denied[path] = self.policy.violation(
-                    os.path.join(self.repo_root, path)) is not None
+                    os.path.join(self.repo_root, path), exact=False) is not None
         skipped = [path for path in skipped if not self._unretained_denied[path]]
         if skipped and not self._retain_warned:
             self._retain_warned = True
@@ -7451,7 +8003,7 @@ class WriteBatchScheduler:
     def _skip_reason(self, relative: str) -> str:
         """Why :meth:`_store_blob` kept no bytes for ``relative``."""
         absolute = os.path.join(self.repo_root, relative)
-        if self.policy.violation(absolute) is not None:
+        if self.policy.violation(absolute, exact=False) is not None:
             return "denied by driver.write_paths"
         try:
             size = os.stat(absolute).st_size
@@ -7471,7 +8023,11 @@ class WriteBatchScheduler:
         if size > MAX_SNAPSHOT_BYTES:
             return None
         absolute = os.path.join(self.repo_root, relative)
-        if self.policy.violation(absolute) is not None:
+        # `driver.write_paths` alone (`exact=False`): the commit review's
+        # protected files (plans/review-commits.md §2.7) are ordinary code,
+        # and their retained bytes are what the post-run check restores them
+        # from when a batch writes one.
+        if self.policy.violation(absolute, exact=False) is not None:
             return None
         digest = file_sha256(absolute)
         if digest is None:
@@ -8243,6 +8799,11 @@ class WriteBatchScheduler:
         changed = snapshot.changed()
         undeclared = self._undeclared_writes(outcome.task_id, snapshot)
         observed = self._observed_with_undeclared(snapshot, undeclared)
+        # plans/review-commits.md §2.7: under an apply guard, the protected
+        # set's (and the context plan's) own post-run check, which never
+        # depends on the sweep above: a large tree abandons the census, and
+        # a full rollback store keeps no bytes. Empty without a guard.
+        watched, commit_apply, watched_guard = self._commit_watch_after(outcome.task_id)
 
         # F9: recorded on the outcome itself — every branch below shares this
         # object, so both `write_batch_report.json` (`result.to_dict()`) and
@@ -8329,19 +8890,36 @@ class WriteBatchScheduler:
                     if stranded else ""
                 )
             )
+        swept = set(changed) | set(undeclared.paths)
         try:
-            self.policy.check(list(changed) + undeclared.paths, when="post-run")
+            self.policy.check(
+                list(changed) + undeclared.paths
+                + [path for path in watched if path not in swept],
+                when="post-run",
+            )
         except PolicyViolation as exc:
             report = snapshot.restore(exc.paths)
+            # A protected path the snapshot holds no bytes for is put back
+            # from what the guard kept (§2.7); no-op without a guard.
+            report = self._commit_restore_watched(
+                outcome.task_id, report, commit_apply, watched_guard,
+            )
+            from_guard_states = {
+                getattr(commit_apply, name, None)
+                for name in ("RESTORED_FROM_COPY", "DELETED_ABSENT_BEFORE")
+            } - {None}
             stranded = sorted(
                 path for path, state in report.items()
                 if state.startswith("skipped:")
             )
             outcome.status = STATUS_POLICY_VIOLATION
             outcome.write_outcome = WRITE_POLICY_VIOLATION
+            from_guard = sorted(
+                path for path, state in report.items() if state in from_guard_states
+            )
             restored = sorted(
                 path for path, state in report.items()
-                if not state.startswith("skipped:")
+                if not state.startswith("skipped:") and state not in from_guard_states
             )
             many = len(exc.paths) != 1
             # The message used to say two things at once: "restored from the
@@ -8361,6 +8939,13 @@ class WriteBatchScheduler:
                     f" Restored from the pre-batch snapshot: "
                     f"{', '.join(restored)}."
                     if restored else ""
+                )
+                + (
+                    f" Put back as {'it was' if len(from_guard) == 1 else 'they were'} "
+                    f"before the batch from what the commit review's guard kept "
+                    f"(its copy, or a deletion of a file that did not exist): "
+                    f"{', '.join(from_guard)}."
+                    if from_guard else ""
                 )
                 + (
                     # A path the sweep could not retain bytes for (a policy-denied
@@ -9886,6 +10471,9 @@ class WriteBatchScheduler:
                 # Fix round 22: an apply batch's items, as `util batch-done`
                 # records them on the native leg.
                 self._record_processed_items(task, outcome)
+                # plans/review-commits.md §2.7: a completed batch re-pins its
+                # fix files to the bytes it left (no-op without a guard).
+                self._commit_repin(task, outcome)
                 # Persists the metric recorded just above too: it is a mutation
                 # of this object's dict now, not a second writer's file (F4).
                 self.state.save()
@@ -9940,7 +10528,12 @@ class WriteBatchScheduler:
                 # Plan step 3: a failed batch whose write outcome reads
                 # "clean-failure" says which failure it was.
                 verdict = f"{verdict} ({outcome.status})"
-            if dispatched and not outcome.not_rerun:
+            stale_line = (getattr(self, "_commit_stale", None) or {}).get(task_id)
+            if stale_line is not None and not dispatched:
+                # plans/review-commits.md §2.7: the pre-dispatch re-check's
+                # `[COMMIT_FIXES_STALE]` line is this batch's line.
+                self.log(stale_line)
+            elif dispatched and not outcome.not_rerun:
                 self.log(
                     f"[write-subagents] batch {batch_index}: {task_id} "
                     f"{verdict} in "
@@ -10305,11 +10898,29 @@ class WriteBatchScheduler:
         ``prompt`` is the **raw** prompt — ``{prior_changes_context}`` is bound
         late and per dispatch — so the text hashed here is stable across runs
         of the same inputs.
+
+        Under a commit review's apply guard (:meth:`_commit_guard`) the
+        prompt's protected-path clause is left out
+        (``code_fix_batcher.without_protected_clause``). That clause lists
+        the guard's protected set, and a ``--resume`` grows the set whenever
+        its re-check protects a file edited by hand since the stop
+        (plans/review-commits.md §2.7, §2.8). Every prompt then changes, and a
+        batch the stopped run had completed would read as made from changed
+        inputs and be applied a second time. The list only forbids later
+        writes, so the batches still to run get it in their prompts and from
+        the deny layer. The rest of the prompt is hashed as before.
         """
+        prompt = str(task.get("prompt") or "")
+        if self._commit_guard() is not None:
+            try:
+                from .code_fix_batcher import without_protected_clause
+            except ImportError:  # pragma: no cover - direct-script import shim
+                from utils.code_fix_batcher import without_protected_clause  # type: ignore
+            prompt = without_protected_clause(prompt)
         payload = json.dumps(
             {
                 "kind": self.kind,
-                "prompt": str(task.get("prompt") or ""),
+                "prompt": prompt,
                 "expected_ids": [str(i) for i in (task.get("expected_ids") or [])],
                 "declared_files": sorted(declared_file_set(task)),
                 "batch_index": int(task.get("batch_index", 0)),

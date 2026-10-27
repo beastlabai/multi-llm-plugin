@@ -1432,8 +1432,8 @@ class TestArguments:
         assert mode_table.alias_flags("abort") == ("--abort",)
 
     def test_detach_only_for_detach_capable_modes(self, built_package):
-        """``--detach`` for each of the twelve, and for neither ``status`` nor
-        ``init``.
+        """``--detach`` for each of the fifteen (the twelve work modes and the
+        three commit modes), and for neither ``status`` nor ``init``.
 
         A mode with ``supports_detach`` False **rejects** ``--detach`` with exit
         3, so appending it unconditionally would break exactly the two modes the
@@ -1458,7 +1458,8 @@ class TestArguments:
         expected = {name: name in mode_table.DETACH_MODES for name in exposed}
         assert result == expected
         assert result["status"] is False and result["init"] is False
-        assert sum(result.values()) == 12, "the twelve work modes, and only those"
+        assert sum(result.values()) == 15, (
+            "the twelve work modes and the three commit modes, and only those")
 
     def test_argv_survives_shell_metacharacters(self, built_package):
         """Every value arrives at the child's ``sys.argv`` byte-for-byte.
@@ -1584,9 +1585,12 @@ class TestToolDefinition:
             description.index("Examples:")
         )
 
-        # Four properties, each a defined empty value; `mode` a plain string and
-        # not an enum, because the fallback schema has no `enum` to carry one.
-        assert set(definition["args"]) == {"mode", "plan", "question", "extra_flags"}
+        # Four properties, each a defined empty value, and (schema v6) the
+        # optional `revs`; `mode` a plain string and not an enum, because the
+        # fallback schema has no `enum` to carry one.
+        assert set(definition["args"]) == {
+            "mode", "plan", "question", "extra_flags", "revs"}
+        assert definition["args"]["revs"]["type"] == "string"
         assert definition["args"]["mode"]["type"] == "string"
         assert "enum" not in definition["args"]["mode"]
         assert definition["args"]["extra_flags"]["type"] == "array"
@@ -1645,8 +1649,18 @@ class TestToolDefinition:
         # An alias, unexpanded, carrying extra flags.
         aliases = set(mode_table.ALIASES)
         assert aliases & set(by_mode), "no alias among the worked examples"
+        # Schema v6: a range mode's example carries `revs` (and `plan` empty,
+        # the context plan in extra_flags); every other one the four keys.
+        ranging = {row.name for row in mode_table.user_facing_modes()
+                   if mode_table.POS_REVS in row.positionals}
+        assert ranging & set(by_mode), "no range mode among the worked examples"
         for example in examples:
-            assert set(example) == {"mode", "plan", "question", "extra_flags"}
+            keys = {"mode", "plan", "question", "extra_flags"}
+            if example["mode"] in ranging:
+                keys.add("revs")
+                assert example["plan"] == "" and example["revs"]
+                assert example["extra_flags"][0] == "--context-plan"
+            assert set(example) == keys
 
 
 # ===========================================================================
@@ -5661,8 +5675,14 @@ class TestResumeCommand:
 
 
 #: Every phase the surface knows, read from the surface (never retyped), so a
-#: phase added later is covered the day it lands.
-PHASE_ROWS = [row for row in pkg_build.cli_surface()["modes"] if row.get("phase")]
+#: phase added later is covered the day it lands. The commit modes take no
+#: plan (a typed one is refused before any spawn): their run is named by its
+#: pinned range, which `TestACommitRunIsNamedByItsPinnedRange` holds.
+REVS_KIND = pkg_build.cli_surface()["positional_kinds"]["revs"]
+PHASE_ROWS = [row for row in pkg_build.cli_surface()["modes"]
+              if row.get("phase") and REVS_KIND not in row["positionals"]]
+RANGE_ROWS = [row for row in pkg_build.cli_surface()["modes"]
+              if REVS_KIND in row["positionals"]]
 
 
 class TestTheTypedPlanSurvivesEveryFailure:
@@ -5736,6 +5756,314 @@ class TestTheTypedPlanSurvivesEveryFailure:
                             "extra_flags": []}, [self.LAUNCH, done])
         assert result["next"]["args"]["plan"] == self.PLAN
         assert absolute not in result["next"]["human"]
+
+
+# ===========================================================================
+# The commit modes' range (plans/review-commits.md §2.9, "Tool routes")
+# ===========================================================================
+
+from utils import commit_range as range_mod  # noqa: E402
+
+REVS_SHAPE = pkg_build.cli_surface()["revs"]
+FULL_BASE = "a1b2c3d4e5f6" + "0" * 28
+FULL_HEAD = "e4f5a6b7c8d9" + "1" * 28
+PINNED = "a1b2c3d4e5f6..e4f5a6b7c8d9"
+BRIEF = "plans/commit-reviews/a1b2c3d4e5f6-e4f5a6b7c8d9.md"
+ROOT_BRIEF = "plans/commit-reviews/root-e4f5a6b7c8d9.md"
+PHRASE = "last 2 commits"
+RESULT_DONE = 'MULTI_LLM_RESULT: {"state":"done","exit":0,"artifacts":[],"next":null}'
+
+
+def _range_record(*, base=FULL_BASE, brief=BRIEF) -> dict:
+    """The launch's result-line ``commit_range``, built and rendered by the
+    owner (``utils/commit_range.py``) as the front door builds it, the block it
+    printed riding along as ``lines``."""
+    commits = (
+        range_mod.Commit(sha=FULL_HEAD, date="2026-10-24", ct=2, subject="Second",
+                         author="a", merge=False),
+        range_mod.Commit(sha="c3d4e5f6a7b8" + "2" * 28, date="2026-10-23", ct=1,
+                         subject="First", author="a", merge=False),
+    )
+    cr = range_mod.CommitRange(base=base, head=FULL_HEAD, commits=commits,
+                               phrase=PHRASE, window=None, kind="last")
+    size = range_mod.RangeSize.of(2, 3, 10, 2)
+    record = range_mod.result_payload(cr, size=size, brief=brief, brief_on_disk=True)
+    record[REVS_SHAPE["lines_key"]] = range_mod.render_commit_block(cr, size=size)
+    return record
+
+
+def _commit_launch(record=None, mode="review-commits") -> dict:
+    record = _range_record() if record is None else record
+    return {"exit": 0, "stdout": [
+        *record[REVS_SHAPE["lines_key"]], "[COMMIT_BRIEF] " + str(record["brief"]),
+        "run_id: R", "log: /l",
+        "MULTI_LLM_RESULT: " + json.dumps({
+            "mode": mode, "state": "done", "exit": 0, "artifacts": [], "next": None,
+            REVS_SHAPE["range_key"]: record})]}
+
+
+def _range_call(mode="review-commits", revs=PHRASE, **extra) -> dict:
+    call = {"mode": mode, "revs": revs, "plan": "", "question": "", "extra_flags": []}
+    call.update(extra)
+    return call
+
+
+_PLAIN_LAUNCH = {"exit": 0, "stdout": ["run_id: R", "log: /l", RESULT_DONE]}
+_DONE = {"exit": 0, "stdout": [RESULT_DONE]}
+
+
+class TestTheCommitModesRange:
+    """`revs` is the commit modes' one range argument: composed right after the
+    mode word, never resolved as a file, and `plan` keeps one meaning."""
+
+    @pytest.mark.parametrize("row", RANGE_ROWS, ids=[row["name"] for row in RANGE_ROWS])
+    @pytest.mark.parametrize("revs", ["", PHRASE])
+    def test_a_plan_on_a_commit_mode_is_refused_before_any_spawn(
+        self, built_package, uv_stub, row, revs
+    ):
+        result, calls = uv_stub.run(
+            built_package, _range_call(row["name"], revs, plan="docs/x.md"), [_DONE])
+        assert calls == []
+        assert result["ok"] is False and result["state"] == "error"
+        assert result["message"] == REVS_SHAPE["plan_refusal"].replace(
+            "{mode}", row["name"])
+        assert '"revs"' in result["message"]
+        assert "--context-plan" in result["message"]
+
+    @pytest.mark.parametrize("revs, words", [
+        (PHRASE, ["last", "2", "commits"]),
+        ("-2", ["-2"]),
+        (PINNED, [PINNED]),
+        ("  this   branch ", ["this", "branch"]),
+        ("", []),
+        ("plans/commit reviews/root-e4f5a6b7c8d9.md",
+         ["plans/commit reviews/root-e4f5a6b7c8d9.md"]),
+        # A word inside it starting with one "-" is the path's, not a flag.
+        ("plans/commit reviews -old/root-e4f5a6b7c8d9.md",
+         ["plans/commit reviews -old/root-e4f5a6b7c8d9.md"]),
+    ])
+    def test_revs_reaches_the_argv_right_after_the_mode(
+        self, built_package, uv_stub, revs, words
+    ):
+        surface = pkg_build.cli_surface()
+        _, calls = uv_stub.run(built_package, _range_call(revs=revs),
+                               [_PLAIN_LAUNCH, _DONE])
+        assert _dispatcher_argv(calls[0]) == (
+            ["review-commits", *words, *surface["baked_flags"], surface["detach_flag"]])
+
+    def test_a_left_out_revs_is_head(self, built_package, uv_stub):
+        surface = pkg_build.cli_surface()
+        call = _range_call()
+        del call["revs"]
+        _, calls = uv_stub.run(built_package, call, [_PLAIN_LAUNCH, _DONE])
+        assert _dispatcher_argv(calls[0]) == (
+            ["review-commits", *surface["baked_flags"], surface["detach_flag"]])
+
+    @pytest.mark.parametrize("revs", ["--quick", "last 2 --internal-worker", "-2h",
+                                      "--2", "- 2",
+                                      # Kept whole as a brief path, yet refused.
+                                      "HEAD~3..HEAD --context-plan docs/x.md"])
+    def test_a_flag_inside_revs_is_refused(self, built_package, uv_stub, revs):
+        result, calls = uv_stub.run(built_package, _range_call(revs=revs), [_DONE])
+        flag = next(word for word in revs.split() if word.startswith("-"))
+        assert calls == [] and result["state"] == "error"
+        assert f'"revs" holds "{flag}"' in result["message"]
+
+    def test_a_range_on_a_mode_that_takes_none_is_refused(self, built_package, uv_stub):
+        result, calls = uv_stub.run(
+            built_package, {"mode": "review-plan", "revs": PHRASE, "plan": "p.md",
+                            "question": "", "extra_flags": []}, [_DONE])
+        assert calls == [] and '"revs" must be ""' in result["message"]
+
+    @pytest.mark.parametrize("revs", [2, None, ["last", "2"]])
+    def test_revs_must_be_a_string(self, built_package, uv_stub, revs):
+        result, calls = uv_stub.run(built_package, _range_call(revs=revs), [_DONE])
+        assert calls == [] and result["message"].startswith('"revs" must be a string')
+
+    def test_the_range_shaped_worked_example_dispatches_its_context_plan(
+        self, built_package, uv_stub
+    ):
+        surface = pkg_build.cli_surface()
+        block = surface["tool_description"].split("\nExamples:\n", 1)[1]
+        (example,) = [json.loads(line) for line in block.splitlines()
+                      if '"revs"' in line]
+        assert example["plan"] == "" and example["revs"] == PHRASE
+        _, calls = uv_stub.run(built_package, example, [_PLAIN_LAUNCH, _DONE])
+        assert _dispatcher_argv(calls[0]) == (
+            [example["mode"], "last", "2", "commits", *surface["baked_flags"],
+             surface["detach_flag"], "--context-plan", "docs/x.md"])
+
+
+class TestACommitRunIsNamedByItsPinnedRange:
+    """Every tool call this plugin builds for a commit run (the abort, the
+    `--blocked` lookup and its options) names the range the launch pinned (the
+    result line's `commit_range`), never the phrase the call typed."""
+
+    LIVE = {"exit": 2, "stdout": [
+        'MULTI_LLM_RESULT: {"state":"running","exit":2,"artifacts":[],"next":null}']}
+    ABORTED = {"exit": 0, "stdout": [
+        "aborted", 'MULTI_LLM_RESULT: {"mode":"status","state":"done","exit":0,'
+        '"artifacts":[],"next":null}']}
+
+    def _stopped(self, built_package, uv_stub, row, record=None):
+        return uv_stub.run(
+            built_package, _range_call(row["name"]),
+            [_commit_launch(record, row["name"]), self.LIVE, self.ABORTED],
+            extra_env={"MLLM_TEST_POLL_BUDGET_MS": "1"})
+
+    @pytest.mark.parametrize("row", RANGE_ROWS, ids=[row["name"] for row in RANGE_ROWS])
+    def test_a_stopped_run_hands_back_its_abort_by_the_pinned_range(
+        self, built_package, uv_stub, tmp_path, row
+    ):
+        result, calls = self._stopped(built_package, uv_stub, row)
+        assert result["ok"] is False and result["run_id"] == "R"
+        assert result["abort_command"]["args"]["plan"] == PINNED
+        assert PHRASE not in json.dumps(result["abort_command"])
+        # Inside the plugin the abort it dispatched names the brief absolutely.
+        abort = [_dispatcher_argv(c) for c in calls if "--abort" in _dispatcher_argv(c)]
+        assert abort and abort[0][1] == str(tmp_path / BRIEF)
+
+    def test_a_root_range_is_named_by_its_brief(self, built_package, uv_stub):
+        result, _ = self._stopped(built_package, uv_stub, RANGE_ROWS[0],
+                                  _range_record(base=None, brief=ROOT_BRIEF))
+        assert result["abort_command"]["args"]["plan"] == ROOT_BRIEF
+
+    @pytest.mark.parametrize("row", RANGE_ROWS, ids=[row["name"] for row in RANGE_ROWS])
+    def test_a_failed_run_is_asked_about_by_its_brief(
+        self, built_package, uv_stub, row
+    ):
+        failed = {"exit": 3, "stdout": ["MULTI_LLM_RESULT: " + json.dumps({
+            "mode": row["name"], "phase": row["phase"], "state": "needs-human",
+            "exit": 3, "artifacts": [], "next": None, "error": "stopped"})]}
+        result, _ = uv_stub.run(
+            built_package, _range_call(row["name"]),
+            [_commit_launch(mode=row["name"]), failed],
+            extra_env={"STUB_RESUME_EXTRA": json.dumps({"flags": ["--resume"]})})
+        (asked,) = [json.loads(line) for line in Path(
+            str(uv_stub.log_path) + ".resume").read_text(encoding="utf-8").splitlines()]
+        dispatcher = _dispatcher_argv(asked)
+        assert dispatcher[2] == BRIEF and dispatcher[3:5] == ["--blocked", row["name"]]
+        assert result["resume_command"]
+        assert result["options"][0]["args"] == {
+            "mode": row["name"], "revs": PINNED, "plan": "", "question": "",
+            "extra_flags": ["--resume"]}
+        assert PHRASE not in json.dumps(result["options"])
+
+    def test_a_status_call_naming_the_pinned_range_passes_it_on(
+        self, built_package, uv_stub
+    ):
+        surface = pkg_build.cli_surface()
+        call = {"mode": "status", "plan": PINNED, "question": "",
+                "extra_flags": [*surface["dispatcher"]["poll"][1:], "--run-id", "R"]}
+        _, calls = uv_stub.run(built_package, call, [_DONE])
+        assert _dispatcher_argv(calls[0])[:2] == ["status", PINNED]
+
+    def test_a_launch_that_pinned_nothing_asks_nothing(self, built_package, uv_stub):
+        refused = {"exit": 3, "stdout": [
+            "[RANGE_UNRECOGNIZED] last 2 comits",
+            'MULTI_LLM_RESULT: {"mode":"review-commits","state":"needs-human",'
+            '"exit":3,"artifacts":[],"next":null,"error":"[RANGE_UNRECOGNIZED]"}']}
+        result, _ = uv_stub.run(built_package, _range_call(revs="last 2 comits"),
+                                [refused])
+        resume = Path(str(uv_stub.log_path) + ".resume")
+        assert not resume.exists() or not resume.read_text(encoding="utf-8").strip()
+        assert result["state"] == "needs-human" and "commit_blocks" not in result
+
+
+class TestACommitFollowUpMapsBackToRevs:
+    @pytest.mark.parametrize("tail, revs, extra", [
+        ("-2 --quick", "-2", ["--quick"]),
+        ("last 2 commits", PHRASE, []),
+        ("--quick -2", "", ["--quick", "-2"]),
+        (PINNED + " --focus 'x y' --context-plan docs/x.md --host opencode --yes",
+         PINNED, ["--focus", "x y", "--context-plan", "docs/x.md"]),
+        ("'plans/commit reviews/root-e4f5a6b7c8d9.md'",
+         "plans/commit reviews/root-e4f5a6b7c8d9.md", []),
+    ])
+    def test_the_parse_follows_the_dispatchers_split(
+        self, built_package, tail, revs, extra
+    ):
+        got = node_json(f"""
+        const parsed = T.parseDispatcherCommand(
+          {json.dumps("uv run -- python /s/multi_llm.py review-commits " + tail)},
+          surface)
+        emit({{parsed, spelled: T.userSpelling(parsed, surface)}})
+        """, built_package)
+        assert got["parsed"] == {"mode": "review-commits", "revs": revs, "plan": "",
+                                 "question": "", "extra_flags": extra}
+        assert got["spelled"].startswith("/multi-llm --review-commits")
+
+    def test_an_unfollowed_next_comes_back_as_a_range_call(self, built_package, uv_stub):
+        done = {"exit": 0, "stdout": ["MULTI_LLM_RESULT: " + json.dumps({
+            "state": "done", "exit": 0, "artifacts": [],
+            "next": f"uv run -- python multi_llm.py apply-commit-fixes {PINNED}"})]}
+        result, _ = uv_stub.run(built_package, _range_call(), [_commit_launch(), done])
+        assert result["next"]["args"] == {
+            "mode": "apply-commit-fixes", "revs": PINNED, "plan": "", "question": "",
+            "extra_flags": []}
+        assert PINNED in result["next"]["human"]
+
+
+class TestTheCommitBlocksAreRelayedOnce:
+    """§2.3 "Relay": the launch printed the block before it detached, and a
+    tool route renders it into the result from the result line's
+    `commit_range` (and `[COMMIT_FIXES]` from `commit_fixes`), as printed, once."""
+
+    def test_the_commit_block_comes_from_the_launch_s_result_line(
+        self, built_package, uv_stub
+    ):
+        record = _range_record()
+        result, _ = uv_stub.run(built_package, _range_call(),
+                                [_commit_launch(record), _DONE])
+        assert result["commit_blocks"] == "\n".join(record["lines"])
+        # Right after the way forward and the message, ahead of the rest.
+        keys = list(result)
+        assert set(keys[:keys.index("commit_blocks")]) <= {
+            "ok", "state", "user_next_step", "resume_command", "resume_why",
+            "resume_answers", "resume_markdown", "no_command_reason", "next",
+            "abort_command", "options", "message"}
+
+    def test_the_fixes_block_comes_from_the_terminal_poll_and_leaves_output(
+        self, built_package, uv_stub
+    ):
+        block = range_mod.FixBlock(to_apply=2, per_commit=[(FULL_HEAD, 2, "Second")],
+                                   unattributed=0, skipped_changed=1,
+                                   changed_files=["b.py"], head=FULL_HEAD)
+        lines = range_mod.render_fix_block(block)
+        done = {"exit": 0, "stdout": ["status view", *lines, "MULTI_LLM_RESULT: "
+                                      + json.dumps({
+                                          "state": "done", "exit": 0, "artifacts": [],
+                                          "next": None, REVS_SHAPE["fixes_key"]: {
+                                              "to_apply": 2,
+                                              REVS_SHAPE["lines_key"]: lines}})]}
+        result, _ = uv_stub.run(built_package, _range_call("apply-commit-fixes"),
+                                [_commit_launch(mode="apply-commit-fixes"), done])
+        assert result["commit_blocks"] == "\n".join(_range_record()["lines"] + lines)
+        assert "[COMMIT_FIXES]" not in result["output"]
+        assert "status view" in result["output"]
+        assert "lines" not in result["result"]["commit_fixes"]
+
+    def test_a_launch_that_stopped_after_its_block_relays_it_once(
+        self, built_package, uv_stub
+    ):
+        record = _range_record()
+        stopped = {"exit": 3, "stdout": [
+            *record["lines"], "ERROR: a run is live on this brief",
+            "MULTI_LLM_RESULT: " + json.dumps({
+                "mode": "review-commits", "state": "needs-human", "exit": 3,
+                "artifacts": [], "next": None, "error": "a run is live",
+                REVS_SHAPE["range_key"]: record})]}
+        result, _ = uv_stub.run(built_package, _range_call(), [stopped])
+        assert result["commit_blocks"] == "\n".join(record["lines"])
+        assert record["lines"][0] not in result["output"]
+        assert "ERROR: a run is live on this brief" in result["output"]
+        assert "lines" not in result["result"]["commit_range"]
+
+    def test_a_plan_mode_carries_no_block(self, built_package, uv_stub):
+        result, _ = uv_stub.run(
+            built_package, {"mode": "review-plan", "plan": "p.md", "question": "",
+                            "extra_flags": []}, [_PLAIN_LAUNCH, _DONE])
+        assert "commit_blocks" not in result
 
 
 class TestTheWayForwardLeadsTheResult:

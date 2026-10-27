@@ -16,6 +16,11 @@ What is graded here and nowhere else:
   OpenCode's alone, the write-capable note codex's alone.
 * **``writes_worktree`` is derived**, from the executor's write-kind table and
   the mode table's ``sequence`` column, never from a hand list.
+* **Schema v6's commit range is generated, never typed**: ``revs`` joins the
+  positional kinds and the argument descriptions, the ``revs`` block carries
+  the count word, brief suffix, plan refusal, pinned shape and result-line keys
+  from their owners, and the range-shaped worked example teaches a range the
+  grammar accepts and a context flag the front door defines.
 * **Schema v5's route signal is generated, never guessed**:
   ``dispatcher.route_env`` is ``modes.ROUTE_ENV`` plus the one
   ``modes.TOOL_ROUTES`` member the host's ``next_command`` cell carries, and the
@@ -49,6 +54,9 @@ HOSTS = ("opencode", "codex")
 
 #: The four tool properties of D3 rule 1 — the same on both hosts.
 PROPERTIES = {"mode", "plan", "question", "extra_flags"}
+
+#: Schema v6's optional fifth property, the commit modes' range.
+REVS = "revs"
 
 
 @pytest.mark.parametrize("host", HOSTS)
@@ -120,10 +128,10 @@ def test_both_hosts_ship_one_schema_version():
     sys.path.insert(0, str(REPO_ROOT / "packaging" / "opencode"))
     import build as opencode_build  # noqa: E402
 
-    assert surface.SURFACE_SCHEMA_VERSION == 5
+    assert surface.SURFACE_SCHEMA_VERSION == 6
     assert opencode_build.SURFACE_SCHEMA_VERSION == surface.SURFACE_SCHEMA_VERSION
     for host in HOSTS:
-        assert surface.cli_surface(host)["schema_version"] == 5
+        assert surface.cli_surface(host)["schema_version"] == 6
     # The plugin's lockstep constant, compared rather than trusted.
     mjs = (REPO_ROOT / "packaging" / "opencode" / "src" / "index.mjs").read_text(
         encoding="utf-8"
@@ -159,7 +167,7 @@ def test_v4_keys_are_present_and_non_empty(host):
         assert row["summary"] in description
 
     described = rendered["argument_descriptions"]
-    assert set(described) == PROPERTIES
+    assert set(described) == PROPERTIES | {REVS}
     for name, text in described.items():
         assert isinstance(text, str) and text.strip(), name
     for flag in rendered["reserved_flags"]["exact"]:
@@ -241,6 +249,9 @@ def test_writes_worktree_is_derived_from_the_write_kinds():
     assert {n for n, r in rows.items() if r["writes_worktree"]} == {
         "apply-suggestions", "improve-plan", "apply-task-suggestions",
         "apply-code-fixes", "improve-code", "implement", "full",
+        # The commit modes (plans/review-commits.md §2.1): the apply front
+        # door's phase is apply-code-fixes, and improve-commits runs it.
+        "apply-commit-fixes", "improve-commits",
     }
 
 
@@ -265,8 +276,12 @@ def test_worked_examples_are_selected_by_shape(host):
     description = surface.cli_surface(host)["tool_description"]
     block = description.split("\nExamples:\n", 1)[1]
     examples = [json.loads(line) for line in block.splitlines()]
+    ranging = {row.name for row in mode_table.user_facing_modes()
+               if mode_table.POS_REVS in row.positionals}
     for example in examples:
-        assert set(example) == PROPERTIES
+        # `revs` is written only where the mode takes a range.
+        expected = PROPERTIES | ({REVS} if example["mode"] in ranging else set())
+        assert set(example) == expected, example
     by_mode = {e["mode"]: e for e in examples}
     assert by_mode[mode_table.DEFAULT_MODE]["plan"] == mode_table.EXAMPLE_PLAN_PATH
     assert by_mode["init"] == {
@@ -274,6 +289,100 @@ def test_worked_examples_are_selected_by_shape(host):
     }
     assert by_mode["ask"]["question"] == mode_table.EXAMPLE_QUESTION
     assert set(mode_table.ALIASES) & set(by_mode), "no alias example"
+    # Schema v6: the range-shaped one (plans/review-commits.md §2.9), the
+    # first mode declaring a range, with `plan` empty and the context plan
+    # in extra_flags.
+    first = next(row.name for row in mode_table.user_facing_modes()
+                 if mode_table.POS_REVS in row.positionals)
+    assert by_mode[first] == {
+        "mode": first, "revs": "last 2 commits", "plan": "", "question": "",
+        "extra_flags": ["--context-plan", "docs/x.md"],
+    }
+    assert list(by_mode[first])[:3] == ["mode", "revs", "plan"]
+
+
+# ---------------------------------------------------------------------------
+# Schema v6: the commit modes' range
+# ---------------------------------------------------------------------------
+
+def _range_modes():
+    return [row.name for row in mode_table.user_facing_modes()
+            if mode_table.POS_REVS in row.positionals]
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_revs_is_a_positional_kind_and_a_described_argument(host):
+    rendered = surface.cli_surface(host)
+    assert rendered["positional_kinds"] == {
+        "plan": mode_table.POS_PLAN, "question": mode_table.POS_QUESTION,
+        "revs": mode_table.POS_REVS,
+    }
+    revs = rendered["argument_descriptions"][REVS]
+    plan = rendered["argument_descriptions"]["plan"]
+    for name in _range_modes():
+        assert name in revs and name in plan
+        assert name not in plan.split("Modes taking a plan: ", 1)[1].split(".", 1)[0]
+    # `plan` keeps one meaning, and both say where the context plan goes.
+    for text in (revs, plan):
+        assert '["--context-plan", "<path>"]' in text
+    assert '"revs"' in plan
+
+
+def test_the_revs_block_is_read_from_its_owners(tmp_path):
+    import re
+
+    from utils import commit_range, commit_review
+
+    block = surface.cli_surface("codex")["revs"]
+    assert block == surface.cli_surface("opencode")["revs"]
+    assert block["count_word"] == multi_llm._RANGE_COUNT_WORD.pattern
+    assert re.fullmatch(block["count_word"], "-2")
+    assert not re.fullmatch(block["count_word"], "-2h")
+    pinned = block["pinned"]
+    base, head = "a" * 40, "b" * 40
+    assert (base[:pinned["sha_chars"]] + pinned["separator"]
+            + head[:pinned["sha_chars"]]) == commit_range.pinned_spelling(base, head)
+    assert (block["range_key"], block["fixes_key"], block["lines_key"]) == (
+        "commit_range", "commit_fixes", "lines")
+    # A brief path ends in the suffix the dispatcher asks about: its owner's
+    # one spelling, and the word `_names_a_commit_brief` really decides on.
+    suffix = block["brief_suffix"]
+    assert suffix and suffix == multi_llm._COMMIT_BRIEF_SUFFIX
+    brief = tmp_path / f"b{suffix}"
+    other = tmp_path / "b.txt"
+    for path in (brief, other):
+        path.write_text(commit_review.BRIEF_MARKER + "\n", encoding="utf-8")
+    assert multi_llm._names_a_commit_brief(str(brief))
+    assert not multi_llm._names_a_commit_brief(str(other))
+    refusal = block["plan_refusal"]
+    assert "{mode}" in refusal and '"revs"' in refusal
+    assert '["--context-plan", "<path>"]' in refusal
+
+
+def test_the_result_line_keys_are_the_ones_the_dispatcher_writes():
+    """``commit_range`` and ``commit_fixes`` (and the block lines inside them)
+    are the keys ``cli_common.ResultContext`` emits."""
+    from utils import cli_common
+
+    block = surface.cli_surface("codex")["revs"]
+    context = cli_common.ResultContext("review-commits")
+    context.set_commit_range({"brief": "b.md", block["lines_key"]: ["x"]})
+    context.set_commit_fixes({block["lines_key"]: ["y"]})
+    payload = context.payload(cli_common.EXIT_OK)
+    assert payload[block["range_key"]][block["lines_key"]] == ["x"]
+    assert payload[block["fixes_key"]][block["lines_key"]] == ["y"]
+
+
+def test_the_described_ranges_and_context_flag_are_checked(monkeypatch):
+    """A range the grammar stopped accepting, or a context flag the front door
+    stopped defining, fails the build instead of teaching a refused call."""
+    monkeypatch.setattr(surface, "_DESCRIBED_RANGES", ("not a range at all",))
+    with pytest.raises(RuntimeError, match="no longer accepts"):
+        surface.cli_surface("codex")
+    monkeypatch.undo()
+    monkeypatch.setattr(surface, "_CONTEXT_PLAN_FLAG", "--plan-context")
+    with pytest.raises(RuntimeError, match="no longer defines"):
+        surface.cli_surface("codex")
 
 
 # ---------------------------------------------------------------------------

@@ -18,7 +18,13 @@ c. If `{plan}/{phase}/validation_tasks.json` exists but NO `validation_batch_*.j
    -> Orchestrator completed but validation was interrupted. Skip to Validation Handling.
 
 d. If per-model `*.json` files exist in `{plan}/{phase}/` but no `grouped.json`:
-   -> Models ran but aggregation failed. Run `--reaggregate`.
+   -> The fan-out stopped before grouping. Compare the files with `models_requested` in
+   `{plan}/{phase}/.status.json`.
+   If every requested model has its file: run `--reaggregate`.
+   If some have none: run the orchestrator again with the same models. It keeps each
+   file (`[SKIP]`) and runs only the missing ones; a `--reaggregate` would report
+   without them. On review-code add `--force`, which a dir holding results needs
+   (exit 3 otherwise); a composite's flags line already carries it. Never `--rerun-all`.
 
 e. If none of the above: proceed to run the orchestrator.
 

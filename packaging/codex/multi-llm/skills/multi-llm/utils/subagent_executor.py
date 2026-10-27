@@ -10543,6 +10543,24 @@ def run_task_file(
         except TaskFileError as exc:
             raise ExecutorError(str(exc)) from exc
 
+    # A frozen context plan is read by path even when the caller has already
+    # materialized the document in memory. Bind it on both entry paths, and
+    # treat a missing snapshot (or old task file lacking provenance) as stale.
+    if (document.get("inputs") or {}).get("context_plan_sha256"):
+        try:
+            from .subagent_tasks import TaskFileError, check_task_file_inputs, file_bytes_sha256
+        except ImportError:  # pragma: no cover - flat import layout
+            from utils.subagent_tasks import TaskFileError, check_task_file_inputs, file_bytes_sha256
+
+        source = document.get("context_plan_file")
+        path = os.path.join(resolved_dir, source) if isinstance(source, str) and source else None
+        try:
+            check_task_file_inputs(document, task_file, resolved_dir, {
+                "context_plan_sha256": file_bytes_sha256(path),
+            })
+        except TaskFileError as exc:
+            raise ExecutorError(str(exc)) from exc
+
     tasks = [
         task for task in tasks_of(document)
         if task.get("executor_role") != "human"

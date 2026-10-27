@@ -608,11 +608,72 @@ class TestShim:
                 assert mode_table.resolve(word) is not None, (example, word)
             positionals = [tok for tok in argv if not tok.startswith("--")]
             mode = mode_table.resolve(words[0])
+            if mode.positionals == (mode_table.POS_REVS,):
+                # A commit mode's range (plans/review-commits.md §2.2): every
+                # bare word right after the mode flag joins into its one value,
+                # and a range word after any other flag is refused with
+                # `[RANGE_AFTER_FLAGS]`, so an example must keep them together
+                # there.
+                at = argv.index(f"--{mode.name}")
+                run = []
+                for tok in argv[at + 1:]:
+                    if tok.startswith("--"):
+                        break
+                    run.append(tok)
+                assert positionals == run, (
+                    f"{path.name}: example {example!r} puts a range word "
+                    f"after a flag ({positionals} != {run}); the range goes "
+                    "right after the mode flag"
+                )
+                continue
             assert len(positionals) <= len(mode.positionals), (
                 f"{path.name}: example {example!r} passes {len(positionals)} "
                 f"positional(s) but mode '{mode.name}' takes "
                 f"{len(mode.positionals)}"
             )
+
+    def test_the_commit_modes_range_rule_is_stated(self, host_id, path):
+        """plans/review-commits.md §2.9: beside the plan rule, every shim says
+        the commit modes take a range (or a brief path) in place of a plan,
+        that bare words are joined unlike `--ask`'s question, that `-N` is a
+        range, that the range goes right after the mode word and one per run
+        (`[RANGE_AFTER_FLAGS]`), that a plan goes in `--context-plan`, and that
+        the later commands take the `[COMMIT_BRIEF]` path."""
+        flat = " ".join(path.read_text(encoding="utf-8").split())
+        start = flat.index("**The three commit modes**")
+        rule = flat[start:start + 1200]
+        for mode in ("--review-commits", "--apply-commit-fixes", "--improve-commits"):
+            assert f"`{mode}`" in rule, mode
+        for needle in ("**range**", "`HEAD`", "unlike `--ask`'s question", "`-N`",
+                       "`[RANGE_AFTER_FLAGS]`", "`--context-plan <path>`",
+                       "`[COMMIT_BRIEF]`"):
+            assert needle in rule, needle
+        assert "one range" in rule.lower()
+        # PD-4 (2026-10-27): the brief is the plan path of every command the
+        # host spells, never of a printed follow-up. "Every command takes the
+        # brief" contradicted the commit-spelled `next` (`review-commits
+        # <base12>..<head12> … --reaggregate`, plans/review-commits.md §2.8).
+        assert "every command you spell takes the brief" in rule
+        assert "a command the run prints keeps the pinned range it prints" in rule
+        assert "every command takes the brief" not in rule.lower()
+        # Stated next to the plan rule, in the same section.
+        plan_rule = flat.index("The first positional is the")
+        assert plan_rule < start
+        next_section = flat.index("## ", plan_rule)
+        assert start < next_section, "the range rule left the plan rule's section"
+
+    def test_the_reference_shim_shows_the_commit_examples(self, host_id, path):
+        if host_id != "claude-code":
+            pytest.skip("the commit examples are the reference shim's (§2.9)")
+        examples = {
+            " ".join(shlex.split(example.split("#", 1)[0]))
+            for example in re.findall(
+                r"^/multi-llm(?::multi-llm)?\s+(.*)$",
+                path.read_text(encoding="utf-8"), re.M)
+        }
+        for expected in ("--review-commits", "--review-commits last 2 commits",
+                         "--improve-commits this branch"):
+            assert expected in examples, (expected, examples)
 
     # -- skill-dir resolution -------------------------------------------
     def test_the_skill_dir_resolves_absolute_even_with_a_space(self, host_id, path):
@@ -769,6 +830,21 @@ class TestReferenceShimSpecifics:
     def test_the_dispatcher_command_bakes_the_host(self):
         text = self.SKILL_MD.read_text(encoding="utf-8")
         assert "--host claude-code" in text
+
+    def test_the_description_triggers_on_commit_reviews(self):
+        """plans/review-commits.md §2.9: the phrases a user says about the
+        commits they made reach the skill."""
+        line = next(
+            l for l in self.SKILL_MD.read_text(encoding="utf-8").splitlines()
+            if l.startswith("description:")
+        )
+        for trigger in ("'review my last commit'", "'review the last N commits'",
+                        "'review this branch's commits'",
+                        "'fix the issues in my last commit'"):
+            assert trigger in line, trigger
+        # Skill descriptions are capped at 1024 characters.
+        description = line.split("description:", 1)[1].strip().strip('"')
+        assert len(description) <= 1024, len(description)
 
     def test_the_argument_hint_still_renders_from_the_mode_table(self):
         line = next(
