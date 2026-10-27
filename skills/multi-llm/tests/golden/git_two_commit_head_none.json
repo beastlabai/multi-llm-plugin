@@ -1,0 +1,632 @@
+{
+  "bad_base": {
+    "diffs": {
+      ".gitignore": "*\n"
+    },
+    "manifest": "# Review scope\n\n- Scope id: `58b6a369bffd`\n- Base ref: `no-such-ref` (does not resolve to a commit)\n- Scope source: not recorded\n- Written: <WRITTEN>\n- Written by: fan-out\n\nDiff failed: git diff --numstat no-such-ref -- <11 paths>: fatal: bad revision 'no-such-ref'\nDiff coverage: partial — 9 of 9 source and test files omitted\n- `blob.dat`: git diff failed\n- `docs/readme.md`: git diff failed\n- `src/app.py`: git diff failed\n- `src/gone.py`: git diff failed\n- `src/new.py`: git diff failed\n- `src/new_name.py`: git diff failed\n- `src/same.py`: git diff failed\n- `src/sp ace.py`: git diff failed\n- `tests/test_app.py`: git diff failed\n\nEvery path under review is listed below, grouped as source, tests, fixtures and generated. Each source and test entry names its diff file (relative to this file) with its size, or says on its own line why it has none. The diff files are the authoritative record of the change: each is one file's whole unified diff against the base ref, with both sides of every hunk, removed lines and deleted files included. A file's current contents show only the new side, so never review them in place of its diff. Fixture and generated paths are collapsed to one line per directory and get no diff file.\n\n## Source (8 files)\n\n1. `blob.dat` — omitted: git diff failed. With a shell, `git diff no-such-ref -- blob.dat` shows it\n2. `docs/readme.md` — omitted: git diff failed. With a shell, `git diff no-such-ref -- docs/readme.md` shows it\n3. `src/app.py` — omitted: git diff failed. With a shell, `git diff no-such-ref -- src/app.py` shows it\n4. `src/gone.py` — omitted: git diff failed. With a shell, `git diff no-such-ref -- src/gone.py` shows it\n5. `src/new.py` — omitted: git diff failed. With a shell, `git diff no-such-ref -- src/new.py` shows it\n6. `src/new_name.py` — omitted: git diff failed. With a shell, `git diff no-such-ref -- src/new_name.py` shows it\n7. `src/same.py` — omitted: git diff failed. With a shell, `git diff no-such-ref -- src/same.py` shows it\n8. `src/sp ace.py` — omitted: git diff failed. With a shell, `git diff no-such-ref -- 'src/sp ace.py'` shows it\n\n## Tests (1 file)\n\n9. `tests/test_app.py` — omitted: git diff failed. With a shell, `git diff no-such-ref -- tests/test_app.py` shows it\n\n## Fixtures (1 file, collapsed)\n\n- `tests/fixtures/data/` — 1 file — no diff: collapsed (fixtures)\n\n## Generated (1 file, collapsed)\n\n- `gen/` — 1 file — no diff: collapsed (generated)\n",
+    "result": {
+      "base_commit": null,
+      "base_ref": "no-such-ref",
+      "coverage": "partial",
+      "diff_dir": "<ROOT>/plans/bad_base/code-review/diff",
+      "failure": "git diff --numstat no-such-ref -- <11 paths>: fatal: bad revision 'no-such-ref'",
+      "omitted": [
+        [
+          "blob.dat",
+          "git diff failed"
+        ],
+        [
+          "docs/readme.md",
+          "git diff failed"
+        ],
+        [
+          "src/app.py",
+          "git diff failed"
+        ],
+        [
+          "src/gone.py",
+          "git diff failed"
+        ],
+        [
+          "src/new.py",
+          "git diff failed"
+        ],
+        [
+          "src/new_name.py",
+          "git diff failed"
+        ],
+        [
+          "src/same.py",
+          "git diff failed"
+        ],
+        [
+          "src/sp ace.py",
+          "git diff failed"
+        ],
+        [
+          "tests/test_app.py",
+          "git diff failed"
+        ]
+      ],
+      "scope_file": "<ROOT>/plans/bad_base/code-review/review-scope.md",
+      "scope_id": "58b6a369bffd",
+      "written": true,
+      "written_by": "fan-out"
+    },
+    "stdout": "[DIFF_FAILED] git diff --numstat no-such-ref -- <11 paths>: fatal: bad revision 'no-such-ref'\n[DIFF_PARTIAL] 9 of 9 source and test files have no diff file (git diff failed): blob.dat, docs/readme.md, src/app.py, src/gone.py, src/new.py … and 4 more; a reviewer that cannot run git diff cannot review them\nReview scope written (scope 58b6a369bffd, coverage partial, 0 diff file(s) for 9 source and test file(s)): <ROOT>/plans/bad_base/code-review/review-scope.md\n"
+  },
+  "changed": [
+    "blob.dat",
+    "docs/readme.md",
+    "gen/mirror.py",
+    "src/app.py",
+    "src/gone.py",
+    "src/new.py",
+    "src/new_name.py",
+    "src/sp ace.py",
+    "tests/fixtures/data/a.json",
+    "tests/test_app.py"
+  ],
+  "groups": {
+    "blob.dat": "source",
+    "docs/readme.md": "source",
+    "gen/mirror.py": "generated",
+    "src/app.py": "source",
+    "src/gone.py": "source",
+    "src/new.py": "source",
+    "src/new_name.py": "source",
+    "src/same.py": "source",
+    "src/sp ace.py": "source",
+    "tests/fixtures/data/a.json": "fixtures",
+    "tests/test_app.py": "tests"
+  },
+  "hunks": {
+    "_notices": [
+      "Diff includes uncommitted changes"
+    ],
+    "blob.dat": {
+      "binary": true,
+      "deleted": false,
+      "hunks": [],
+      "new_path": null,
+      "old_path": null
+    },
+    "docs/readme.md": {
+      "binary": false,
+      "deleted": false,
+      "hunks": [
+        {
+          "header": "@@ -1 +1,3 @@",
+          "lines": [
+            {
+              "content": "# Readme",
+              "new_line": 1,
+              "old_line": 1,
+              "type": "context"
+            },
+            {
+              "content": "",
+              "new_line": 2,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "Staged.",
+              "new_line": 3,
+              "old_line": null,
+              "type": "add"
+            }
+          ]
+        }
+      ],
+      "new_path": "docs/readme.md",
+      "old_path": "docs/readme.md"
+    },
+    "gen/mirror.py": {
+      "binary": false,
+      "deleted": false,
+      "hunks": [
+        {
+          "header": "@@ -1 +1 @@",
+          "lines": [
+            {
+              "content": "MIRROR = 1",
+              "new_line": null,
+              "old_line": 1,
+              "type": "remove"
+            },
+            {
+              "content": "MIRROR = 2",
+              "new_line": 1,
+              "old_line": null,
+              "type": "add"
+            }
+          ]
+        }
+      ],
+      "new_path": "gen/mirror.py",
+      "old_path": "gen/mirror.py"
+    },
+    "src/app.py": {
+      "binary": false,
+      "deleted": false,
+      "hunks": [
+        {
+          "header": "@@ -1,2 +1,6 @@",
+          "lines": [
+            {
+              "content": "def app():",
+              "new_line": 1,
+              "old_line": 1,
+              "type": "context"
+            },
+            {
+              "content": "    return 1",
+              "new_line": null,
+              "old_line": 2,
+              "type": "remove"
+            },
+            {
+              "content": "    return 2",
+              "new_line": 2,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "",
+              "new_line": 3,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "",
+              "new_line": 4,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "def more():",
+              "new_line": 5,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "    return 4",
+              "new_line": 6,
+              "old_line": null,
+              "type": "add"
+            }
+          ]
+        }
+      ],
+      "new_path": "src/app.py",
+      "old_path": "src/app.py"
+    },
+    "src/gone.py": {
+      "binary": false,
+      "deleted": true,
+      "hunks": [
+        {
+          "header": "@@ -1,3 +0,0 @@",
+          "lines": [
+            {
+              "content": "import os",
+              "new_line": null,
+              "old_line": 1,
+              "type": "remove"
+            },
+            {
+              "content": "",
+              "new_line": null,
+              "old_line": 2,
+              "type": "remove"
+            },
+            {
+              "content": "GONE = os.sep",
+              "new_line": null,
+              "old_line": 3,
+              "type": "remove"
+            }
+          ]
+        }
+      ],
+      "last_known_content": "import os\n\nGONE = os.sep\n",
+      "new_path": null,
+      "old_path": "src/gone.py"
+    },
+    "src/new.py": {
+      "binary": false,
+      "deleted": false,
+      "hunks": [
+        {
+          "header": "@@ -0,0 +1 @@",
+          "lines": [
+            {
+              "content": "NEW = 'brand new module'",
+              "new_line": 1,
+              "old_line": null,
+              "type": "add"
+            }
+          ]
+        }
+      ],
+      "new_path": "src/new.py",
+      "old_path": null
+    },
+    "src/new_name.py": {
+      "binary": false,
+      "deleted": false,
+      "hunks": [
+        {
+          "header": "@@ -0,0 +1,20 @@",
+          "lines": [
+            {
+              "content": "line 1",
+              "new_line": 1,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "line 2",
+              "new_line": 2,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "line 3",
+              "new_line": 3,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "line 4",
+              "new_line": 4,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "line 5",
+              "new_line": 5,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "line 6",
+              "new_line": 6,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "line 7",
+              "new_line": 7,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "line 8",
+              "new_line": 8,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "line 9",
+              "new_line": 9,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "line 10",
+              "new_line": 10,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "line 11",
+              "new_line": 11,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "line 12",
+              "new_line": 12,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "line 13",
+              "new_line": 13,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "line 14",
+              "new_line": 14,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "line 15",
+              "new_line": 15,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "line 16",
+              "new_line": 16,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "line 17",
+              "new_line": 17,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "line 18",
+              "new_line": 18,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "line 19",
+              "new_line": 19,
+              "old_line": null,
+              "type": "add"
+            },
+            {
+              "content": "line 20",
+              "new_line": 20,
+              "old_line": null,
+              "type": "add"
+            }
+          ]
+        }
+      ],
+      "new_path": "src/new_name.py",
+      "old_path": null
+    },
+    "src/sp ace.py": {
+      "binary": false,
+      "deleted": false,
+      "hunks": [
+        {
+          "header": "@@ -1 +1 @@",
+          "lines": [
+            {
+              "content": "x = 1",
+              "new_line": null,
+              "old_line": 1,
+              "type": "remove"
+            },
+            {
+              "content": "x = 2",
+              "new_line": 1,
+              "old_line": null,
+              "type": "add"
+            }
+          ]
+        }
+      ],
+      "new_path": "src/sp ace.py\t",
+      "old_path": "src/sp ace.py\t"
+    },
+    "tests/fixtures/data/a.json": {
+      "binary": false,
+      "deleted": false,
+      "hunks": [
+        {
+          "header": "@@ -1 +1 @@",
+          "lines": [
+            {
+              "content": "{\"a\": 1}",
+              "new_line": null,
+              "old_line": 1,
+              "type": "remove"
+            },
+            {
+              "content": "{\"a\": 2}",
+              "new_line": 1,
+              "old_line": null,
+              "type": "add"
+            }
+          ]
+        }
+      ],
+      "new_path": "tests/fixtures/data/a.json",
+      "old_path": "tests/fixtures/data/a.json"
+    },
+    "tests/test_app.py": {
+      "binary": false,
+      "deleted": false,
+      "hunks": [
+        {
+          "header": "@@ -1,2 +1,2 @@",
+          "lines": [
+            {
+              "content": "def test_app():",
+              "new_line": 1,
+              "old_line": 1,
+              "type": "context"
+            },
+            {
+              "content": "    assert True",
+              "new_line": null,
+              "old_line": 2,
+              "type": "remove"
+            },
+            {
+              "content": "    assert app() == 2",
+              "new_line": 2,
+              "old_line": null,
+              "type": "add"
+            }
+          ]
+        }
+      ],
+      "new_path": "tests/test_app.py",
+      "old_path": "tests/test_app.py"
+    }
+  },
+  "no_base": {
+    "diffs": {
+      ".gitignore": "*\n"
+    },
+    "manifest": "# Review scope\n\n- Scope id: `094feba8e79a`\n- Base ref: (none: neither the requested ref nor HEAD~1 resolves)\n- Scope source: not recorded\n- Written: <WRITTEN>\n- Written by: fan-out\n\nDiff failed: git diff: no base ref (neither the requested ref nor HEAD~1 resolves: an initial commit, or a shallow clone), so there is nothing to diff against\nDiff coverage: partial — 9 of 9 source and test files omitted\n- `blob.dat`: git diff failed\n- `docs/readme.md`: git diff failed\n- `src/app.py`: git diff failed\n- `src/gone.py`: git diff failed\n- `src/new.py`: git diff failed\n- `src/new_name.py`: git diff failed\n- `src/same.py`: git diff failed\n- `src/sp ace.py`: git diff failed\n- `tests/test_app.py`: git diff failed\n\nEvery path under review is listed below, grouped as source, tests, fixtures and generated. Each source and test entry names its diff file (relative to this file) with its size, or says on its own line why it has none. The diff files are the authoritative record of the change: each is one file's whole unified diff against the base ref, with both sides of every hunk, removed lines and deleted files included. A file's current contents show only the new side, so never review them in place of its diff. Fixture and generated paths are collapsed to one line per directory and get no diff file.\n\n## Source (8 files)\n\n1. `blob.dat` — omitted: git diff failed\n2. `docs/readme.md` — omitted: git diff failed\n3. `src/app.py` — omitted: git diff failed\n4. `src/gone.py` — omitted: git diff failed\n5. `src/new.py` — omitted: git diff failed\n6. `src/new_name.py` — omitted: git diff failed\n7. `src/same.py` — omitted: git diff failed\n8. `src/sp ace.py` — omitted: git diff failed\n\n## Tests (1 file)\n\n9. `tests/test_app.py` — omitted: git diff failed\n\n## Fixtures (1 file, collapsed)\n\n- `tests/fixtures/data/` — 1 file — no diff: collapsed (fixtures)\n\n## Generated (1 file, collapsed)\n\n- `gen/` — 1 file — no diff: collapsed (generated)\n",
+    "result": {
+      "base_commit": null,
+      "base_ref": "",
+      "coverage": "partial",
+      "diff_dir": "<ROOT>/plans/no_base/code-review/diff",
+      "failure": "git diff: no base ref (neither the requested ref nor HEAD~1 resolves: an initial commit, or a shallow clone), so there is nothing to diff against",
+      "omitted": [
+        [
+          "blob.dat",
+          "git diff failed"
+        ],
+        [
+          "docs/readme.md",
+          "git diff failed"
+        ],
+        [
+          "src/app.py",
+          "git diff failed"
+        ],
+        [
+          "src/gone.py",
+          "git diff failed"
+        ],
+        [
+          "src/new.py",
+          "git diff failed"
+        ],
+        [
+          "src/new_name.py",
+          "git diff failed"
+        ],
+        [
+          "src/same.py",
+          "git diff failed"
+        ],
+        [
+          "src/sp ace.py",
+          "git diff failed"
+        ],
+        [
+          "tests/test_app.py",
+          "git diff failed"
+        ]
+      ],
+      "scope_file": "<ROOT>/plans/no_base/code-review/review-scope.md",
+      "scope_id": "094feba8e79a",
+      "written": true,
+      "written_by": "fan-out"
+    },
+    "stdout": "[DIFF_FAILED] git diff: no base ref (neither the requested ref nor HEAD~1 resolves: an initial commit, or a shallow clone), so there is nothing to diff against\n[DIFF_PARTIAL] 9 of 9 source and test files have no diff file (git diff failed): blob.dat, docs/readme.md, src/app.py, src/gone.py, src/new.py … and 4 more; a reviewer that cannot run git diff cannot review them\nReview scope written (scope 094feba8e79a, coverage partial, 0 diff file(s) for 9 source and test file(s)): <ROOT>/plans/no_base/code-review/review-scope.md\n"
+  },
+  "one_failed": {
+    "diffs": {
+      ".gitignore": "*\n",
+      "1-blob.dat.diff": "diff --git a/blob.dat b/blob.dat\nindex 742c16a..3fa1528 100644\nBinary files a/blob.dat and b/blob.dat differ\n",
+      "2-docs-readme.md.diff": "diff --git a/docs/readme.md b/docs/readme.md\nindex f395431..51024d8 100644\n--- a/docs/readme.md\n+++ b/docs/readme.md\n@@ -1 +1,3 @@\n # Readme\n+\n+Staged.\n",
+      "3-src-app.py.diff": "diff --git a/src/app.py b/src/app.py\nindex 93a8ca0..5b09dd1 100644\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1,2 +1,6 @@\n def app():\n-    return 1\n+    return 2\n+\n+\n+def more():\n+    return 4\n",
+      "4-src-gone.py.diff": "diff --git a/src/gone.py b/src/gone.py\ndeleted file mode 100644\nindex d898de9..0000000\n--- a/src/gone.py\n+++ /dev/null\n@@ -1,3 +0,0 @@\n-import os\n-\n-GONE = os.sep\n",
+      "6-src-new_name.py.diff": "diff --git a/src/new_name.py b/src/new_name.py\nnew file mode 100644\nindex 0000000..c4352f8\n--- /dev/null\n+++ b/src/new_name.py\n@@ -0,0 +1,20 @@\n+line 1\n+line 2\n+line 3\n+line 4\n+line 5\n+line 6\n+line 7\n+line 8\n+line 9\n+line 10\n+line 11\n+line 12\n+line 13\n+line 14\n+line 15\n+line 16\n+line 17\n+line 18\n+line 19\n+line 20\n",
+      "8-src-sp-ace.py.diff": "diff --git a/src/sp ace.py b/src/sp ace.py\nindex 7d4290a..407de30 100644\n--- a/src/sp ace.py\t\n+++ b/src/sp ace.py\t\n@@ -1 +1 @@\n-x = 1\n+x = 2\n",
+      "9-tests-test_app.py.diff": "diff --git a/tests/test_app.py b/tests/test_app.py\nindex 450f87c..fdc3aa8 100644\n--- a/tests/test_app.py\n+++ b/tests/test_app.py\n@@ -1,2 +1,2 @@\n def test_app():\n-    assert True\n+    assert app() == 2\n"
+    },
+    "manifest": "# Review scope\n\n- Scope id: `8e49c73aba9b`\n- Base ref: `HEAD~1` (commit `8e7ad35a2a04638d3eed54bd1e98b679b027b261`)\n- Scope source: not recorded\n- Written: <WRITTEN>\n- Written by: fan-out\n\nDiff coverage: partial — 1 of 9 source and test files omitted\n- `src/new.py`: git diff failed\n\nEvery path under review is listed below, grouped as source, tests, fixtures and generated. Each source and test entry names its diff file (relative to this file) with its size, or says on its own line why it has none. The diff files are the authoritative record of the change: each is one file's whole unified diff against the base ref, with both sides of every hunk, removed lines and deleted files included. A file's current contents show only the new side, so never review them in place of its diff. Fixture and generated paths are collapsed to one line per directory and get no diff file.\n\n## Source (8 files)\n\n1. `blob.dat` (binary) — full: `diff/1-blob.dat.diff`, 109 bytes\n2. `docs/readme.md` (+2 -0) — full: `diff/2-docs-readme.md.diff`, 152 bytes\n3. `src/app.py` (+5 -1) — full: `diff/3-src-app.py.diff`, 188 bytes\n4. `src/gone.py` (+0 -3) — full: `diff/4-src-gone.py.diff`, 163 bytes\n5. `src/new.py` (+1 -0) — omitted: git diff failed. With a shell, `git diff HEAD~1 -- src/new.py` shows it\n6. `src/new_name.py` (+20 -0) — full: `diff/6-src-new_name.py.diff`, 315 bytes\n7. `src/same.py` (+0 -0) — no diff: no net change since HEAD~1\n8. `src/sp ace.py` (+1 -1) — full: `diff/8-src-sp-ace.py.diff`, 141 bytes\n\n## Tests (1 file)\n\n9. `tests/test_app.py` (+1 -1) — full: `diff/9-tests-test_app.py.diff`, 202 bytes\n\n## Fixtures (1 file, collapsed)\n\n- `tests/fixtures/data/` — 1 file (+1 -1) — no diff: collapsed (fixtures)\n\n## Generated (1 file, collapsed)\n\n- `gen/` — 1 file (+1 -1) — no diff: collapsed (generated)\n",
+    "result": {
+      "base_commit": "8e7ad35a2a04638d3eed54bd1e98b679b027b261",
+      "base_ref": "HEAD~1",
+      "coverage": "partial",
+      "diff_dir": "<ROOT>/plans/one_failed/code-review/diff",
+      "failure": null,
+      "omitted": [
+        [
+          "src/new.py",
+          "git diff failed"
+        ]
+      ],
+      "scope_file": "<ROOT>/plans/one_failed/code-review/review-scope.md",
+      "scope_id": "8e49c73aba9b",
+      "written": true,
+      "written_by": "fan-out"
+    },
+    "stdout": "[DIFF_FAILED] git diff HEAD~1 -- src/new.py: fatal: simulated\n[DIFF_PARTIAL] 1 of 9 source and test files have no diff file (git diff failed): src/new.py; a reviewer that cannot run git diff cannot review them\nReview scope written (scope 8e49c73aba9b, coverage partial, 7 diff file(s) for 9 source and test file(s)): <ROOT>/plans/one_failed/code-review/review-scope.md\n"
+  },
+  "read_back": {
+    "base_commit": "8e7ad35a2a04638d3eed54bd1e98b679b027b261",
+    "base_ref": "HEAD~1",
+    "coverage": "complete",
+    "diff_files": [
+      "diff/1-blob.dat.diff",
+      "diff/2-docs-readme.md.diff",
+      "diff/3-src-app.py.diff",
+      "diff/4-src-gone.py.diff",
+      "diff/5-src-new.py.diff",
+      "diff/6-src-new_name.py.diff",
+      "diff/8-src-sp-ace.py.diff",
+      "diff/9-tests-test_app.py.diff"
+    ],
+    "diff_sizes": {
+      "diff/1-blob.dat.diff": 109,
+      "diff/2-docs-readme.md.diff": 152,
+      "diff/3-src-app.py.diff": 188,
+      "diff/4-src-gone.py.diff": 163,
+      "diff/5-src-new.py.diff": 152,
+      "diff/6-src-new_name.py.diff": 315,
+      "diff/8-src-sp-ace.py.diff": 141,
+      "diff/9-tests-test_app.py.diff": 202
+    },
+    "omitted": [],
+    "scope_id": "e3a5f2c4a2bd",
+    "written_by": "fan-out"
+  },
+  "shas": {
+    "c0": "8e7ad35a2a04638d3eed54bd1e98b679b027b261",
+    "c1": "dcc973fd9e70c1c0051b9e91791ecaf15785a99b"
+  },
+  "write": {
+    "diffs": {
+      ".gitignore": "*\n",
+      "1-blob.dat.diff": "diff --git a/blob.dat b/blob.dat\nindex 742c16a..3fa1528 100644\nBinary files a/blob.dat and b/blob.dat differ\n",
+      "2-docs-readme.md.diff": "diff --git a/docs/readme.md b/docs/readme.md\nindex f395431..51024d8 100644\n--- a/docs/readme.md\n+++ b/docs/readme.md\n@@ -1 +1,3 @@\n # Readme\n+\n+Staged.\n",
+      "3-src-app.py.diff": "diff --git a/src/app.py b/src/app.py\nindex 93a8ca0..5b09dd1 100644\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1,2 +1,6 @@\n def app():\n-    return 1\n+    return 2\n+\n+\n+def more():\n+    return 4\n",
+      "4-src-gone.py.diff": "diff --git a/src/gone.py b/src/gone.py\ndeleted file mode 100644\nindex d898de9..0000000\n--- a/src/gone.py\n+++ /dev/null\n@@ -1,3 +0,0 @@\n-import os\n-\n-GONE = os.sep\n",
+      "5-src-new.py.diff": "diff --git a/src/new.py b/src/new.py\nnew file mode 100644\nindex 0000000..88b3f0d\n--- /dev/null\n+++ b/src/new.py\n@@ -0,0 +1 @@\n+NEW = 'brand new module'\n",
+      "6-src-new_name.py.diff": "diff --git a/src/new_name.py b/src/new_name.py\nnew file mode 100644\nindex 0000000..c4352f8\n--- /dev/null\n+++ b/src/new_name.py\n@@ -0,0 +1,20 @@\n+line 1\n+line 2\n+line 3\n+line 4\n+line 5\n+line 6\n+line 7\n+line 8\n+line 9\n+line 10\n+line 11\n+line 12\n+line 13\n+line 14\n+line 15\n+line 16\n+line 17\n+line 18\n+line 19\n+line 20\n",
+      "8-src-sp-ace.py.diff": "diff --git a/src/sp ace.py b/src/sp ace.py\nindex 7d4290a..407de30 100644\n--- a/src/sp ace.py\t\n+++ b/src/sp ace.py\t\n@@ -1 +1 @@\n-x = 1\n+x = 2\n",
+      "9-tests-test_app.py.diff": "diff --git a/tests/test_app.py b/tests/test_app.py\nindex 450f87c..fdc3aa8 100644\n--- a/tests/test_app.py\n+++ b/tests/test_app.py\n@@ -1,2 +1,2 @@\n def test_app():\n-    assert True\n+    assert app() == 2\n"
+    },
+    "manifest": "# Review scope\n\n- Scope id: `e3a5f2c4a2bd`\n- Base ref: `HEAD~1` (commit `8e7ad35a2a04638d3eed54bd1e98b679b027b261`)\n- Scope source: tracked files\n- Written: <WRITTEN>\n- Written by: fan-out\n\nDiff coverage: complete\n\nEvery path under review is listed below, grouped as source, tests, fixtures and generated. Each source and test entry names its diff file (relative to this file) with its size, or says on its own line why it has none. The diff files are the authoritative record of the change: each is one file's whole unified diff against the base ref, with both sides of every hunk, removed lines and deleted files included. A file's current contents show only the new side, so never review them in place of its diff. Fixture and generated paths are collapsed to one line per directory and get no diff file.\n\n## Source (8 files)\n\n1. `blob.dat` (binary) — full: `diff/1-blob.dat.diff`, 109 bytes\n2. `docs/readme.md` (+2 -0) — full: `diff/2-docs-readme.md.diff`, 152 bytes\n3. `src/app.py` (+5 -1) — full: `diff/3-src-app.py.diff`, 188 bytes\n4. `src/gone.py` (+0 -3) — full: `diff/4-src-gone.py.diff`, 163 bytes\n5. `src/new.py` (+1 -0) — full: `diff/5-src-new.py.diff`, 152 bytes\n6. `src/new_name.py` (+20 -0) — full: `diff/6-src-new_name.py.diff`, 315 bytes\n7. `src/same.py` (+0 -0) — no diff: no net change since HEAD~1\n8. `src/sp ace.py` (+1 -1) — full: `diff/8-src-sp-ace.py.diff`, 141 bytes\n\n## Tests (1 file)\n\n9. `tests/test_app.py` (+1 -1) — full: `diff/9-tests-test_app.py.diff`, 202 bytes\n\n## Fixtures (1 file, collapsed)\n\n- `tests/fixtures/data/` — 1 file (+1 -1) — no diff: collapsed (fixtures)\n\n## Generated (1 file, collapsed)\n\n- `gen/` — 1 file (+1 -1) — no diff: collapsed (generated)\n",
+    "result": {
+      "base_commit": "8e7ad35a2a04638d3eed54bd1e98b679b027b261",
+      "base_ref": "HEAD~1",
+      "coverage": "complete",
+      "diff_dir": "<ROOT>/plans/feature/code-review/diff",
+      "failure": null,
+      "omitted": [],
+      "scope_file": "<ROOT>/plans/feature/code-review/review-scope.md",
+      "scope_id": "e3a5f2c4a2bd",
+      "written": true,
+      "written_by": "fan-out"
+    },
+    "stdout": "Review scope written (scope e3a5f2c4a2bd, coverage complete, 8 diff file(s) for 9 source and test file(s)): <ROOT>/plans/feature/code-review/review-scope.md\n"
+  },
+  "write_again": {
+    "result": {
+      "base_commit": "8e7ad35a2a04638d3eed54bd1e98b679b027b261",
+      "base_ref": "HEAD~1",
+      "coverage": "complete",
+      "diff_dir": "<ROOT>/plans/feature/code-review/diff",
+      "failure": null,
+      "omitted": [],
+      "scope_file": "<ROOT>/plans/feature/code-review/review-scope.md",
+      "scope_id": "e3a5f2c4a2bd",
+      "written": false,
+      "written_by": "fan-out"
+    },
+    "stdout": "Review scope unchanged (scope e3a5f2c4a2bd): <ROOT>/plans/feature/code-review/review-scope.md\n"
+  }
+}

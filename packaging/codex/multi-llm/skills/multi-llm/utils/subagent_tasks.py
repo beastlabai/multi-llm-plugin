@@ -159,7 +159,8 @@ def is_write_kind(kind: Optional[str]) -> bool:
 #: immediately before dispatch (D3n). Defined here, next to the refusals, because
 #: "this token must never reach a runner" is a dispatch contract rather than a
 #: string one producer happens to use.
-PRIOR_CHANGES_TOKEN = "{prior_changes_context}"
+#: A prompt-template placeholder, not an authentication credential.
+PRIOR_CHANGES_TOKEN: str = "{prior_changes_context}"
 
 #: Providers that carry a real non-argv prompt transport (D2d). Kept here rather
 #: than imported so this module stays usable without instantiating adapters.
@@ -226,6 +227,7 @@ def build_inputs(
     reviewed_code: Optional[str] = None,
     salvage_request_file: Optional[str] = None,
     items: Optional[Any] = None,
+    context_plan_sha256: Optional[str] = None,
 ) -> Dict[str, str]:
     """Build the ``inputs`` hash block for a task file.
 
@@ -246,7 +248,15 @@ def build_inputs(
     the thing hashed is exactly the thing a validator reads. ``diff_base``
     alone pins the ref the diff was taken *against* and moves for neither an
     edit nor a commit on the other side of it, which is how a file edited
-    between fan-out and validation used to invalidate nothing.
+    between fan-out and validation used to invalidate nothing. On a review
+    pinned to a commit (``--head-ref``) it reads ``<base>..<head>``, and the
+    excerpt is read at ``head``, so neither moves with the working tree.
+
+    ``context_plan_sha256`` is a commit review's frozen context plan
+    (``commit_range.plan_sha256``, the SHA-256 of its snapshot's bytes,
+    plans/review-commits.md §2.4): passed as recorded rather than re-read, so
+    a resume or a reaggregate whose snapshot no longer hashes to it is refused
+    like a changed plan. Absent everywhere else, so no other block moves.
     """
     inputs: Dict[str, str] = {"plan_sha256": file_content_hash(plan_file)}
     if grouped_file is not None:
@@ -265,6 +275,8 @@ def build_inputs(
         inputs["items_sha256"] = content_hash(
             json.dumps(items, sort_keys=True, ensure_ascii=False)
         )
+    if context_plan_sha256 is not None:
+        inputs["context_plan_sha256"] = context_plan_sha256
     return inputs
 
 
@@ -823,6 +835,10 @@ _INPUT_CHANGE_REASONS = {
     "diff_sha256": "the diff under review changed",
     "diff_base": "the diff was taken against a different base ref",
     "reviewed_code_sha256": "a reviewed file changed at the lines these issues cite",
+    "context_plan_sha256": (
+        "the context plan's frozen snapshot no longer hashes to the "
+        "plan_sha256 the commit review recorded"
+    ),
     "salvage_request_sha256": "the salvage request was rewritten",
     "items_sha256": "the item list changed",
 }

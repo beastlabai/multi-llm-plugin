@@ -193,7 +193,7 @@ rules. Each has a contents list; load the sections relevant to the change.
   [Unattended decisions](../../docs/development/unattended.md).
 - **Shims, capabilities, installation, packaging, version updates:**
   [Host integration](../../docs/development/hosts.md).
-- **Task generation, full/composite workflows, ask, implementation state:**
+- **Task generation, full/composite workflows, commit reviews, ask, implementation state:**
   [Workflow orchestration](../../docs/development/workflows.md).
 - **Task schemas, validation context, executor dispatch, runner pinning:**
   [Delegation and validation](../../docs/development/delegation.md).

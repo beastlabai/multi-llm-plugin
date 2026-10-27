@@ -258,12 +258,15 @@ _GREP = _FlagSpec(
     hyphen_values=("-e", "--regexp"),
 )
 
-#: ``git log|show|diff|status|grep`` flags that only select or format output.
-#: ``--output*``, ``--ext-diff``, ``--textconv``, ``-O``/``--open-files-in-pager``
-#: and ``--no-index`` are absent on purpose (the grammar rejects any unlisted flag).
+#: ``git log|show|diff|status`` flags that only select or format output; ``git
+#: grep`` shares the long ones. ``--output*``, ``--ext-diff``, ``--textconv``,
+#: ``-O``/``--open-files-in-pager`` and ``--no-index`` are absent on purpose
+#: (the grammar rejects any unlisted flag). ``-L`` takes a value (``git log -L
+#: 1,5:f``): read as a bare flag it let ``git log -L -- --output=x`` through,
+#: and git takes that ``--`` as the line range, then writes ``x``.
 _GIT = _FlagSpec(
-    short_noarg="psbzwMlLicvEFPhqu",
-    short_arg="nSGUe",
+    short_noarg="psbzwMlicvEFPhqu",
+    short_arg="nSGUL",
     long_noarg=(
         "--oneline", "--stat", "--name-only", "--name-status", "--patch",
         "--no-patch", "--graph", "--decorate", "--no-decorate", "--all",
@@ -290,7 +293,40 @@ _GIT = _FlagSpec(
     numeric_short=True,
 )
 
-GIT_SUBCOMMANDS = frozenset({"log", "show", "diff", "status", "grep"})
+#: ``git grep``. Here ``-n`` (line numbers), ``-G`` (basic regexp) and ``-L``
+#: (files without a match) are booleans, not ``git log``'s value flags. Read
+#: as value-taking, ``-n`` swallowed the rest of a cluster, and git runs
+#: ``git grep -nO<cmd> x`` as ``-n -O<cmd>``: ``<cmd>`` on every matching
+#: file. ``-O``/``--open-files-in-pager`` stays absent, so a cluster holding
+#: it fails at the ``O``.
+_GIT_GREP = _FlagSpec(
+    short_noarg="nGLpzwlicvEFPhq",
+    short_arg="e",
+    long_noarg=_GIT.long_noarg,
+    long_arg=_GIT.long_arg,
+    numeric_short=True,
+)
+
+#: ``git ls-tree`` lists tree objects: no flag of it (git 2.43 ``ls-tree -h``)
+#: writes, runs a command or reads the working tree, and ``--format`` only
+#: picks entry fields.
+_GIT_LS_TREE = _FlagSpec(
+    short_noarg="drtzl",
+    long_noarg=("--long", "--name-only", "--name-status", "--object-only",
+                "--full-name", "--full-tree", "--abbrev"),
+    long_arg=("--format", "--abbrev"),
+)
+
+#: The read-only git subcommands and their grammars. ``ls-tree`` joined on
+#: 2026-10-27: the commit modes' pinned-head read rule
+#: (``commit_range.pinned_head_read_rule``) prescribes ``git ls-tree -r
+#: --name-only <head> -- <dir>``, and a codex reviewer that obeyed it was
+#: marked not clean, which on the plugin-landlock rung discards its result
+#: whenever the user's tree changes during the slot.
+GIT_SUBCOMMANDS: Dict[str, _FlagSpec] = {
+    "log": _GIT, "show": _GIT, "diff": _GIT, "status": _GIT,
+    "grep": _GIT_GREP, "ls-tree": _GIT_LS_TREE,
+}
 
 #: Verbs whose flags cannot write, whatever they are (step 4, first bullet).
 #: ``pwd`` joined on 2026-09-28: its only flags (``-L``/``-P``) choose how the
@@ -380,9 +416,10 @@ def _git(args: Sequence[str]) -> None:
     sub = args[0]
     if sub.startswith("-"):
         raise _Reject(f"git: global option {sub[:40]} is not allowed")
-    if sub not in GIT_SUBCOMMANDS:
+    spec = GIT_SUBCOMMANDS.get(sub)
+    if spec is None:
         raise _Reject(f"git: subcommand {sub[:40]!r} is not read-only")
-    _GIT.positionals(f"git {sub}", args[1:])
+    spec.positionals(f"git {sub}", args[1:])
 
 
 def _classify_segment(argv: Sequence[str]) -> None:

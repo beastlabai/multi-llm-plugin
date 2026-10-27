@@ -37,7 +37,13 @@ go to stdout — ``[WRITE_PROMPT] <path>``, ``[WRITE_PROMPT_LINES] <n>`` and
 ``[WRITE_PROMPT_CONTEXT] <entries> prior-batch entries bound`` — so the host
 can hand the subagent "read this file in full and follow it", the contract
 the review phases' ``prompt_path`` already uses. ``--stdout`` prints the
-prompt text itself instead, and nothing else. Exit 3 names the problem: no
+prompt text itself instead, and nothing else. After a commit review
+(plans/review-commits.md §2.7) an apply-code-fixes batch whose fix files
+changed since the apply guard decided gets no prompt at all: one
+``[COMMIT_FIXES_STALE]`` line replaces the markers (in both modes), the batch
+is already recorded, and the exit is 0 (:func:`commit_stale_check`); a batch
+that passes has the watched set's disk ids recorded as its prompt is bound,
+which its ``util batch-done`` compares with (:func:`commit_bind`). Exit 3 names the problem: no
 ``write_tasks.json`` (run the phase's orchestrator first), an unknown task id
 (the known ids are listed), a human task (it never dispatches) or a prompt
 without the token (a producer bug, the scheduler's own refusal).
@@ -56,6 +62,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -66,12 +73,30 @@ try:
     from .git_utils import (
         find_git_entry_root, pin_repo_root, worktree_file_stats, worktree_fingerprint,
     )
+    from .metrics import (
+        _read_state, _write_state, mark_failed_in_progress, state_file_lock,
+        withdraw_from_progress_in_state,
+    )
+    from .state_manager import (
+        PROCESSED_LEG_NATIVE, record_batch_items_in_state, update_task_status_in_state,
+    )
     from .stream_bootstrap import bootstrap_streams
     from .subagent_executor import ExecutorError, ResultRejected
     from .subagent_tasks import (
         PHASE_BY_WRITE_KIND, TASKS_SCHEMA_VERSION, declared_file_set,
     )
     from .write_batch_scheduler import (
+        COMMIT_GUARD_KIND,
+        batch_fixes_for,
+        commit_group_files,
+        commit_guard_of,
+        commit_head7,
+        commit_recheck_failing,
+        commit_stale_line,
+        commit_stale_reason,
+        commit_stale_split,
+        load_commit_apply,
+        load_orchestrator_batches,
         DISPATCHED_PROMPTS_SUBDIR,
         OWN_RUN_CONTEXT_PHASES,
         SWEEP_MAX_FILES,
@@ -97,12 +122,30 @@ except ImportError:  # pragma: no cover - direct script invocation
     from utils.git_utils import (  # type: ignore
         find_git_entry_root, pin_repo_root, worktree_file_stats, worktree_fingerprint,
     )
+    from utils.metrics import (  # type: ignore
+        _read_state, _write_state, mark_failed_in_progress, state_file_lock,
+        withdraw_from_progress_in_state,
+    )
+    from utils.state_manager import (  # type: ignore
+        PROCESSED_LEG_NATIVE, record_batch_items_in_state, update_task_status_in_state,
+    )
     from utils.stream_bootstrap import bootstrap_streams  # type: ignore
     from utils.subagent_executor import ExecutorError, ResultRejected  # type: ignore
     from utils.subagent_tasks import (  # type: ignore
         PHASE_BY_WRITE_KIND, TASKS_SCHEMA_VERSION, declared_file_set,
     )
     from utils.write_batch_scheduler import (  # type: ignore
+        COMMIT_GUARD_KIND,
+        batch_fixes_for,
+        commit_group_files,
+        commit_guard_of,
+        commit_head7,
+        commit_recheck_failing,
+        commit_stale_line,
+        commit_stale_reason,
+        commit_stale_split,
+        load_commit_apply,
+        load_orchestrator_batches,
         DISPATCHED_PROMPTS_SUBDIR,
         OWN_RUN_CONTEXT_PHASES,
         SWEEP_MAX_FILES,
@@ -127,6 +170,8 @@ __all__ = [
     "MARKER_REFUSED",
     "PROMPTS_SUBDIR",
     "check_tree_fingerprint",
+    "commit_bind",
+    "commit_stale_check",
     "policy_refusal",
     "policy_refusal_for",
     "policy_refused_hits",
@@ -419,6 +464,161 @@ def policy_refusal_for(
 
 #: The pre-rename spelling.
 _policy_violation_for = policy_violation_for
+
+
+# ---------------------------------------------------------------------------
+# The commit re-check (plans/review-commits.md §2.7)
+# ---------------------------------------------------------------------------
+#
+# "Every batch is re-checked immediately before it is dispatched": a batch
+# can start long after the apply guard decided (after judging, the batches
+# ahead of it, a stop, a `--resume`), so before this command binds the prompt
+# the host is about to hand a subagent, every fix file the batch declares is
+# held to the content the guard saved for it — the executor's
+# `WriteBatchScheduler._commit_recheck`, through the same shared helpers. A
+# batch that fails gets no prompt: `[COMMIT_FIXES_STALE]` is printed in place
+# of `[WRITE_PROMPT]`, its outcome is recorded in `state.json` with the keys
+# `util batch-done` writes, and the host goes on to the next batch. No-op
+# without a guard (the state's pinned record carries none).
+
+
+def commit_stale_check(phase_dir: Path, task_id: str) -> Optional[List[str]]:
+    """The lines to print in place of the prompt markers when *task_id*
+    fails the commit re-check, after recording it; ``None`` when it passes,
+    when there is no guard, or when the task file, the state or the
+    repository cannot be read (the render then reports those as before).
+
+    The batch's fix files are every file its groups' fixes name in the
+    phase's ``orchestrator_output.json`` (their ``files``), beside its
+    primary file. On a failure the groups that name a failing file are
+    skipped (``commit_apply.mark_stale``, saved back with
+    ``commit_apply.save_guard`` under ``state_file_lock``), the batch is
+    recorded ``failed`` with ``held back: batched with <file>`` when other
+    groups remain (else with the skip itself) and its items ``failed`` in
+    ``processed_<phase>``, as the executor records them, and it leaves the
+    run's ``[ETA]`` total as a task refused before dispatch does.
+    """
+    phase_dir = Path(os.path.abspath(str(phase_dir)))
+    try:
+        document, task = load_write_task(phase_dir, task_id)
+    except Exception:  # noqa: BLE001 - the render names the problem
+        return None
+    kind = str(document.get("kind") or "")
+    if kind != COMMIT_GUARD_KIND:
+        return None
+    if task.get("is_human") or str(task.get("executor_role") or "") == "human":
+        return None
+    target = phase_dir.parent / "state.json"
+    try:
+        state = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    guard = commit_guard_of(state, kind)
+    if guard is None:
+        return None
+    try:
+        root, problem = pin_repo_root(str(phase_dir))
+    except Exception:  # noqa: BLE001 - never refuse on a guess
+        return None
+    if root is None or problem:
+        return None
+    commit_apply = load_commit_apply()
+    groups = commit_group_files(
+        task, repo_root=root,
+        fixes=batch_fixes_for(task, load_orchestrator_batches(phase_dir)),
+    )
+    failing = commit_recheck_failing(guard, groups, repo_root=root, commit_apply=commit_apply)
+    if not failing:
+        return None
+    skipped, held = commit_stale_split(groups, failing)
+    reason = commit_stale_reason(failing, guard, held=bool(held))
+    phase = PHASE_BY_WRITE_KIND.get(kind, kind)
+    with state_file_lock(target):
+        state = _read_state(target)
+        guard = commit_guard_of(state, kind) if isinstance(state, dict) else None
+        if guard is None:
+            return None
+        commit_apply.mark_stale(guard, groups, failing, cwd=root)
+        commit_apply.save_guard(target, guard)
+        # What save_guard wrote, then this batch's record over it.
+        state = _read_state(target)
+        update_task_status_in_state(state, task_id, "failed", reason)
+        # Every item `failed`, as `util batch-done --status failed` records
+        # them: a native `--resume` hands them out again, and the guard's
+        # saved skips take the skipped ones out (and count them) there.
+        record_batch_items_in_state(
+            state, phase_dir.name, task, completed=False, leg=PROCESSED_LEG_NATIVE,
+        )
+        # No subagent ran: out of the `[ETA]` total, never "run stopped".
+        mark_failed_in_progress(state, phase, task_id, failed=False)
+        withdraw_from_progress_in_state(state, phase, [task_id], task_id)
+        # Any earlier record of this batch's own check no longer stands.
+        _known_checks.set_batch_check_report_in_state(
+            state, task_id,
+            prior_changes_id=str(task.get("prior_changes_id") or ""),
+            grouped_sha256=_known_checks.review_stamp(task),
+            findings=None, listed=None, note=None,
+        )
+        state["updated_at"] = datetime.now().isoformat()
+        _write_state(target, state)
+    line = commit_stale_line(
+        task_id, failing, guard,
+        marker=getattr(commit_apply, "STALE_MARKER", "[COMMIT_FIXES_STALE]"),
+    )
+    what = [f"{len(skipped)} fix(es) skipped"] if skipped else []
+    if held:
+        what.append(
+            f"{len(held)} held back for a --resume, which applies "
+            f"{'it' if len(held) == 1 else 'them'} in a new batch"
+        )
+    return [
+        f"{line} — not dispatched, and already recorded ({', '.join(what)}): "
+        f"write no prompt, hand {task_id} to no subagent, record nothing for "
+        f"it, and go on to the next batch. List the skipped fixes in the "
+        f"phase's summary.md as skipped, file changed since reviewed commit "
+        f"{commit_head7(guard)}."
+    ]
+
+
+def commit_bind(phase_dir: Path, task_id: str) -> bool:
+    """Record the watched set's disk ids as *task_id*'s prompt is bound
+    (plans/review-commits.md §2.7, "Every observed write, after each batch"),
+    so its ``util batch-done`` counts only a change made while the batch ran:
+    ``commit_apply.bind_watched``, saved in the guard under
+    ``state_file_lock``. The executor reads the same ids just before it
+    dispatches a batch (``WriteBatchScheduler._commit_watch_begin``); here
+    the bind is the last moment before the host hands the prompt over.
+
+    True when recorded. Without a guard, for another kind, a human task, or
+    a state or repository that cannot be read, nothing is written and
+    ``util batch-done`` compares with the ids the guard saved, as before.
+    Never raises."""
+    phase_dir = Path(os.path.abspath(str(phase_dir)))
+    try:
+        document, task = load_write_task(phase_dir, task_id)
+        kind = str(document.get("kind") or "")
+        if kind != COMMIT_GUARD_KIND:
+            return False
+        if task.get("is_human") or str(task.get("executor_role") or "") == "human":
+            return False
+        target = phase_dir.parent / "state.json"
+        if commit_guard_of(json.loads(target.read_text(encoding="utf-8")), kind) is None:
+            return False
+        root, problem = pin_repo_root(str(phase_dir))
+        if root is None or problem:
+            return False
+        commit_apply = load_commit_apply()
+        with state_file_lock(target):
+            state = _read_state(target)
+            guard = commit_guard_of(state, kind) if isinstance(state, dict) else None
+            # Nothing watched: the saved ids (none) are the same comparison.
+            if guard is None or not commit_apply.watched_ids(guard):
+                return False
+            commit_apply.bind_watched(guard, task_id, cwd=root)
+            _write_state(target, state)
+        return True
+    except Exception:  # noqa: BLE001 - batch-done then compares with the saved ids
+        return False
 
 
 def held_by_check(phase_dir: Path, task_id: str) -> Optional[Tuple[str, List[str]]]:
@@ -786,6 +986,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         pin_problem: Optional[OSError] = None
     except OSError as exc:
         pin, pin_problem = None, exc
+    # plans/review-commits.md §2.7: re-checked before the prompt is bound; a
+    # batch whose fix files changed since the apply guard decided gets none.
+    stale = commit_stale_check(Path(args.phase_dir), args.task_id)
+    if stale is not None:
+        for line in stale:
+            print(line)
+        return 0
     try:
         text, _task, info = render_write_prompt(Path(args.phase_dir), args.task_id)
     except (WritePromptError, ExecutorError) as exc:
@@ -866,6 +1073,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             record_check_tree(Path(args.phase_dir), args.task_id, pin)
         else:
             discard_check_tree(Path(args.phase_dir), args.task_id)
+
+    # plans/review-commits.md §2.7: the watched set as this batch is handed
+    # out, what its `util batch-done` compares with. No-op without a guard.
+    commit_bind(Path(args.phase_dir), args.task_id)
 
     if args.stdout:
         sys.stdout.write(text)

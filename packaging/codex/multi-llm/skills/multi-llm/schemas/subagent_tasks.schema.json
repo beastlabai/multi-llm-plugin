@@ -27,6 +27,10 @@
       "$ref": "#/$defs/inputs",
       "description": "File-level copy of the inputs block; identical to every task's own inputs."
     },
+    "context_plan_file": {
+      "type": "string",
+      "description": "Frozen context-plan snapshot, relative to the phase directory (absolute across drives). Its raw bytes must match inputs.context_plan_sha256 before dispatch."
+    },
     "tasks": {
       "type": "array",
       "items": {"$ref": "#/$defs/task"},
@@ -81,6 +85,10 @@
         "reviewed_code_sha256": {
           "type": "string",
           "description": "Content hash of the code excerpt the prompts embed — code-review only. Moves when a reviewed file is edited between fan-out and validation, which diff_base alone cannot see."
+        },
+        "context_plan_sha256": {
+          "type": "string",
+          "description": "SHA-256 of a commit review's frozen context-plan snapshot, as commit_range.plan_sha256 recorded it — code-review on a commit brief with --context-plan only. A resume or reaggregate whose snapshot no longer hashes to it is refused."
         },
         "salvage_request_sha256": {
           "type": "string",

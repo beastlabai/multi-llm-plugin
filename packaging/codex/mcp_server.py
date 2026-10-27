@@ -19,7 +19,7 @@ RULES EVERY LINE HERE KEEPS (plan D3):
      ``uv`` is absent so it can *report* that absence (rule 7); a dependency, or a
      second module, is one more thing whose absence empties the tool list.
   2. **No word of its own.** Every mode word, alias, flag, exit code, state word
-     and message template is read from ``dist/cli-surface.json`` (schema v5). The
+     and message template is read from ``dist/cli-surface.json`` (schema v6). The
      only words held here are the JSON-RPC/MCP vocabulary, the envelope's key
      names, the anchor_source spellings (``roots``, ``turn-metadata``,
      ``env:<NAME>``), codex's turn-metadata keys and posture words, the
@@ -68,8 +68,8 @@ PLUGIN_MANIFEST_PATH = PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
 
 #: Bumped in lockstep with ``packaging/common/surface.py``'s
 #: ``SURFACE_SCHEMA_VERSION``; ``test_surface_schema_version_matches`` compares
-#: the two constants, never a literal.
-SUPPORTED_SURFACE_VERSION = 5
+#: the two constants, never a literal. 6: the commit modes' optional ``revs``.
+SUPPORTED_SURFACE_VERSION = 6
 
 #: The longest a cancellation may sit unobserved (D3c). It is met by the
 #: worker's cancel-event watch in ``run_child`` (a 20 ms wait on the event, then
@@ -181,6 +181,20 @@ HOST_SANDBOX_POSTURE_ENV = "MULTI_LLM_HOST_SANDBOX_POSTURE"
 
 #: The four argument properties: the shared contract's field names (rule 1).
 PROPERTIES = ("mode", "plan", "question", "extra_flags")
+
+#: Schema v6's optional fifth property: the commit modes' range
+#: (plans/review-commits.md §2.9). Listed in the schema, never required, and
+#: written into a handed-back call only for a mode that takes a range, so every
+#: other call keeps its four keys. A left-out one is ``""``, as a left-out
+#: ``question`` is.
+REVS = "revs"
+OPTIONAL_PROPERTIES = (REVS,)
+
+#: The result key the commit run's blocks are relayed in, placed right after
+#: ``message`` (plans/review-commits.md §2.3, "Relay"): the commit block and any
+#: ``[COMMIT_FIXES]`` block, as the run printed them, moved out of ``output``
+#: and out of the parsed result so the model reads each line once.
+COMMIT_BLOCKS_KEY = "commit_blocks"
 
 #: The degraded definition (rule 7) — the only words this server authors for a
 #: model, used only when there is no surface to read words from. The literal
@@ -305,6 +319,12 @@ _REQUIRED_SURFACE_PATHS = (
     ("dispatcher", "run_id_option"), ("dispatcher", "banner"),
     ("dispatcher", "session_model_env"), ("dispatcher", "route_env"),
     ("dispatcher", "route_env", "name"), ("dispatcher", "route_env", "value"),
+    # Schema v6: the commit modes' range.
+    ("positional_kinds", "plan"), ("positional_kinds", "question"),
+    ("positional_kinds", "revs"), ("revs", "count_word"), ("revs", "brief_suffix"),
+    ("revs", "plan_refusal"), ("revs", "pinned", "sha_chars"),
+    ("revs", "pinned", "separator"), ("revs", "pinned", "pattern"),
+    ("revs", "range_key"), ("revs", "fixes_key"), ("revs", "lines_key"),
     ("needs_human_message",),
     ("needs_human_option",), ("write_posture_refusal",),
     ("anchor_unresolved",), ("shell_missing",), ("runbook",), ("host",),
@@ -341,7 +361,8 @@ def load_surface():
         return None, "{}: tool_name is not a non-empty string".format(SURFACE_PATH)
     if not isinstance(data["tool_description"], str) or not isinstance(
         described, dict
-    ) or not all(isinstance(described.get(name), str) for name in PROPERTIES):
+    ) or not all(isinstance(described.get(name), str)
+                 for name in PROPERTIES + OPTIONAL_PROPERTIES):
         return None, "{}: the tool definition's text is malformed".format(
             SURFACE_PATH)
     # Schema v5's route signal, set on every child. A surface without a usable
@@ -509,6 +530,66 @@ def with_absent_question(args):
     return args
 
 
+def takes_revs(row, surface) -> bool:
+    """Whether *row* declares the commit modes' range (schema v6)."""
+    return surface["positional_kinds"]["revs"] in row["positionals"]
+
+
+def revs_words(revs, surface) -> list:
+    """The argv words a ``revs`` value travels as, right after the mode word.
+
+    The dispatcher joins every leading bare word of a range mode into its one
+    range, a ``-N`` count word included (``multi_llm._split_positionals``), so
+    ``last 2 commits`` goes as three words and arrives as the range the user
+    typed, and ``-2 main..HEAD`` as two, which the grammar refuses whole rather
+    than reading the second as a flag. One exception keeps a value whole: a
+    commit brief's path (it ends in the surface's ``brief_suffix``), which the
+    dispatcher turns into ``--plan-file`` only as one word, so a path holding a
+    space reaches it unsplit. Nothing here is resolved as a file: ``A..B`` is
+    not a path.
+    """
+    text = (revs or "").strip()
+    if not text:
+        return []
+    if text.endswith(surface["revs"]["brief_suffix"]) and not text.startswith("-"):
+        return [text]
+    return text.split()
+
+
+def is_pinned_range(plan, surface) -> bool:
+    """Whether *plan* is a pinned range (``<base12>..<head12>``, the surface's
+    ``revs.pinned.pattern``), which ``status`` maps to its brief by name: a
+    re-attach or abort call names a commit run that way, and it is never a
+    path to resolve against the workspace."""
+    pattern = ((surface or {}).get("revs") or {}).get("pinned", {}).get("pattern")
+    return bool(isinstance(plan, str) and pattern and re.fullmatch(pattern, plan))
+
+
+def flag_like_revs_word(revs, surface):
+    """The first ``revs`` word the dispatcher would read as a flag, or None.
+
+    Only a word starting with ``-`` that is not the surface's ``count_word``
+    (``-2``): any other one ends the leading bare-word run, so it would arrive
+    as a flag the call never put in ``extra_flags``, a reserved one included.
+
+    A value kept whole as a brief path (:func:`revs_words`) is one argv word
+    and carries no flag, but a ``--`` word spelled inside it is refused too:
+    ``HEAD~3..HEAD --context-plan docs/x.md``, the shape the plan refusal
+    invites, would otherwise reach the range grammar as one bare
+    ``[RANGE_UNRECOGNIZED]`` and never hear "send it in extra_flags". Only
+    the long-option spelling counts there, as a brief path may hold a word
+    that starts with one ``-`` (``reviews -old/x.md``).
+    """
+    count = re.compile(surface["revs"]["count_word"])
+    for token in revs_words(revs, surface):
+        if token.startswith("-") and not count.fullmatch(token):
+            return token
+    for token in (revs or "").split():
+        if token.startswith("--"):
+            return token
+    return None
+
+
 def validate_args(args, surface):
     """``(mode_row, None)`` or ``(None, message)``. Every rule, before any spawn."""
     if not isinstance(args, dict):
@@ -516,6 +597,7 @@ def validate_args(args, surface):
     mode = args.get("mode")
     plan, question, extra = args.get("plan"), args.get("question"), args.get(
         "extra_flags")
+    revs = args.get(REVS, "")
     if not isinstance(mode, str) or not mode:
         return None, '"mode" must be a non-empty string, got {}. Legal words: {}'.format(
             _type_name(mode), _legal_words(surface))
@@ -537,9 +619,37 @@ def validate_args(args, surface):
         return None, (
             '"extra_flags" must be an array of strings (use [] for none), got '
             "{}.".format(_type_name(extra)))
+    if not isinstance(revs, str):
+        return None, (
+            '"revs" must be a string: the commit range for a mode that takes one, '
+            '"" (or the key left out) otherwise. Got {}.'.format(_type_name(revs)))
     kinds = surface["positional_kinds"]
+    unknown = [kind for kind in row["positionals"] if kind not in kinds.values()]
+    if unknown:
+        # Never dropped: a positional this server cannot compose would reach
+        # the dispatcher missing, or as the wrong kind.
+        return None, (
+            'mode "{}" declares a positional this server cannot compose ({}); the '
+            "plugin is inconsistent and must be reinstalled.".format(
+                row["name"], ", ".join(unknown)))
     takes_plan = kinds["plan"] in row["positionals"]
     takes_question = kinds["question"] in row["positionals"]
+    ranging = takes_revs(row, surface)
+    if ranging and plan != "":
+        # `plan` keeps one meaning: a range mode declares no plan positional,
+        # and its message names the range's argument and the context flag.
+        return None, fill(surface["revs"]["plan_refusal"], {"mode": row["name"]})
+    if not ranging and revs != "":
+        return None, (
+            'mode "{}" declares no range positional, so "revs" must be "" (or the '
+            "key left out).".format(row["name"]))
+    if ranging:
+        flag = flag_like_revs_word(revs, surface)
+        if flag is not None:
+            return None, (
+                '"revs" holds "{}", which the dispatcher would read as a flag and '
+                "not as part of the range. Send flags in extra_flags; the only "
+                'range word that may begin with "-" is a commit count.'.format(flag))
     if takes_plan and not plan.strip():
         return None, 'mode "{}" takes a plan path and "plan" was empty.'.format(
             row["name"])
@@ -866,7 +976,14 @@ def split_posix(text: str):
 
 
 def parse_dispatcher_command(command, surface):
-    """``uv run … <script> <mode> <positionals> <flags>`` back into tool args."""
+    """``uv run … <script> <mode> <positionals> <flags>`` back into tool args.
+
+    On a mode that takes a range, the leading bare words (a ``-N`` count word
+    included, as the dispatcher splits them) are the range: they are joined
+    into ``revs``, ``plan`` stays empty, and every flag from the first one on
+    (``--focus``, ``--context-plan`` and their values among them) stays in
+    ``extra_flags`` as printed.
+    """
     tokens = split_posix(command)
     if not tokens:
         return None
@@ -878,9 +995,12 @@ def parse_dispatcher_command(command, surface):
     row = resolve_mode(rest[0], surface)
     if row is None:
         return None
+    ranging = takes_revs(row, surface)
+    count = re.compile(surface["revs"]["count_word"]) if ranging else None
     positionals, flags, seen_flag = [], [], False
     for token in rest[1:]:
-        if token.startswith("-"):
+        if token.startswith("-") and not (
+                not seen_flag and count is not None and count.fullmatch(token)):
             seen_flag = True
         (flags if seen_flag else positionals).append(token)
     kinds = surface["positional_kinds"]
@@ -896,6 +1016,9 @@ def parse_dispatcher_command(command, surface):
                 index + 1].startswith("-"):
             index += 1
         index += 1
+    if ranging:
+        return {"mode": row["name"], REVS: " ".join(positionals), "plan": "",
+                "question": "", "extra_flags": kept}
     args = {
         "mode": row["name"],
         "plan": (positionals[0] if positionals else "") if takes_plan else "",
@@ -996,7 +1119,8 @@ def plan_from_root(result, values, anchor, key) -> None:
     root = result.get(key) if key and isinstance(result, dict) else None
     typed = values.get("plan_arg")
     if (not isinstance(root, str) or not os.path.isabs(root)
-            or not isinstance(typed, str) or not typed or os.path.isabs(typed)):
+            or not isinstance(typed, str) or not typed or os.path.isabs(typed)
+            or values.get("pinned_plan")):
         return
     try:
         here = os.path.realpath(anchor)
@@ -1006,6 +1130,33 @@ def plan_from_root(result, values, anchor, key) -> None:
     if here != root and not here.startswith(root.rstrip(os.sep) + os.sep):
         return
     values["plan"] = os.path.normpath(os.path.join(root, typed))
+
+
+def dispatcher_cwd(result, anchor, key):
+    """The directory the dispatcher ran from: the repository root its result
+    line names (*key*, the surface's ``dispatcher.ran_from_root_key``) when it
+    is absolute and holds the anchor, as :func:`plan_from_root` accepts it,
+    else the anchor. A relative path the dispatcher printed is relative to it.
+    """
+    root = result.get(key) if key and isinstance(result, dict) else None
+    if not isinstance(root, str) or not os.path.isabs(root):
+        return anchor
+    try:
+        here = os.path.realpath(anchor)
+    except (OSError, ValueError, TypeError):
+        return anchor
+    root = os.path.normpath(root)
+    if here == root or here.startswith(root.rstrip(os.sep) + os.sep):
+        return root
+    return anchor
+
+
+def watched_plan(watched) -> str:
+    """What a re-attach or abort call names the watched run by: a range
+    mode's pinned range when its launch pinned one (``Server.pin_commit_range``),
+    else the plan."""
+    watched = watched or {}
+    return watched.get("pinned") or watched.get("plan", "")
 
 
 def same_plan_file(left, right) -> bool:
@@ -1039,6 +1190,7 @@ def user_spelling(args, surface):
             or not row or not row.get("user_flag"):
         return None
     words = [row["user_flag"]]
+    words.extend(quote_for_reader(word) for word in revs_words(args.get(REVS), surface))
     for key in ("plan", "question"):
         if args.get(key):
             words.append(quote_for_reader(args[key]))
@@ -1637,14 +1789,15 @@ class Server:
 
     def tool_definition(self) -> dict:
         if self.surface is None:
-            properties = {name: {"type": "string"} for name in PROPERTIES}
+            properties = {name: {"type": "string"}
+                          for name in PROPERTIES + OPTIONAL_PROPERTIES}
             properties["extra_flags"] = {"type": "array", "items": {"type": "string"}}
             return {"name": DEGRADED_TOOL_NAME, "description": DEGRADED_DESCRIPTION,
                     "inputSchema": {"type": "object", "properties": properties,
                                     "required": list(PROPERTIES)}}
         described = self.surface["argument_descriptions"]
         properties = {name: {"type": "string", "description": described[name]}
-                      for name in PROPERTIES}
+                      for name in PROPERTIES + OPTIONAL_PROPERTIES}
         properties["extra_flags"] = {"type": "array", "items": {"type": "string"},
                                      "description": described["extra_flags"]}
         return {
@@ -1761,7 +1914,11 @@ class Server:
         for key in WAY_FORWARD_KEYS:
             if key in fields and kept(key, fields[key]):
                 out[key] = fields[key]
-        out.update({"message": fields.get("message"), "exit": fields.get("exit"),
+        out["message"] = fields.get("message")
+        if fields.get(COMMIT_BLOCKS_KEY) is not None:
+            # A commit run's blocks, right under the message they belong to.
+            out[COMMIT_BLOCKS_KEY] = fields[COMMIT_BLOCKS_KEY]
+        out.update({"exit": fields.get("exit"),
                     "anchor": call.anchor, "anchor_source": call.anchor_source,
                     "environment": self.environment(call),
                     "relays": dict(call.relays), "progress_lines": call.progress_lines})
@@ -2009,11 +2166,16 @@ class Server:
         self.export_host_posture(call)
         values = {"word": args["mode"], "plan": self.normalize_plan(args["plan"], call),
                   "plan_arg": self.plan_spelling(args["plan"]),
+                  "pinned_plan": is_pinned_range(args["plan"], surface),
+                  # The range as typed, never resolved here: the dispatcher
+                  # resolves it, and the launch's result line pins it.
+                  REVS: args.get(REVS) or "",
                   # What validation forwards: a restated composed flag is
                   # dropped quietly (`split_extra_flags`).
                   "question": args["question"], "extra": list(kept_flags)}
         outcome = self.run_workflow(call, row, values)
         hand_back_typed(outcome, values)
+        self.attach_commit_blocks(call, values, outcome)
         if not call.cancel.is_set():
             self.attach_resume(call, values, outcome)
         if not call.cancel.is_set() and self.unfinished(row, outcome):
@@ -2096,9 +2258,13 @@ class Server:
     def normalize_plan(self, plan: str, call: Call) -> str:
         """A relative plan resolved against the anchor, ``~`` expanded. One the
         dispatcher runs from the repository root is renamed by the root's file
-        once its result line says so (:func:`plan_from_root`)."""
+        once its result line says so (:func:`plan_from_root`). A pinned range
+        (a commit run's re-attach or abort) is passed on as it is: it names a
+        brief by name, and joined to the anchor it would name nothing."""
         if not plan:
             return ""
+        if is_pinned_range(plan, self.surface):
+            return plan
         expanded = self.plan_spelling(plan)
         if os.path.isabs(expanded):
             return expanded
@@ -2111,12 +2277,23 @@ class Server:
         kinds = surface["positional_kinds"]
         argv = [values.get("word") or row["name"]]  # aliases travel unexpanded
         for kind in row["positionals"]:
-            if kind == kinds["plan"] and values.get("plan"):
-                # The user's own spelling when the caller kept one, else the
-                # resolved path (see `plan_spelling`).
-                argv.append(values.get("plan_arg") or values["plan"])
-            elif kind == kinds["question"] and values.get("question"):
-                argv.append(values["question"])
+            if kind == kinds["plan"]:
+                if values.get("plan"):
+                    # The user's own spelling when the caller kept one, else the
+                    # resolved path (see `plan_spelling`).
+                    argv.append(values.get("plan_arg") or values["plan"])
+            elif kind == kinds["question"]:
+                if values.get("question"):
+                    argv.append(values["question"])
+            elif kind == kinds["revs"]:
+                # The range as typed, its words right after the mode and never
+                # resolved as a file; none means HEAD (`revs_words`).
+                argv.extend(revs_words(values.get(REVS), surface))
+            else:
+                # `validate_args` refuses such a row first; a kind this server
+                # cannot compose is never dropped from the argv in silence.
+                raise ValueError("mode {!r} declares a positional this server cannot "
+                                 "compose: {!r}".format(row["name"], kind))
         argv.extend(surface["baked_flags"])
         if row.get("supports_detach"):
             argv.append(surface["detach_flag"])
@@ -2293,6 +2470,10 @@ class Server:
             # abort or option names it.
             plan_from_root(launch.result, cycle_values, call.anchor,
                            dispatcher.get("ran_from_root_key"))
+            if takes_revs(cycle_row, surface):
+                # A range mode's run is named by the range the launch pinned,
+                # never by the phrase the call typed.
+                self.pin_commit_range(launch.result, cycle_values, call.anchor)
             if cycle_row.get("supports_detach"):
                 # S2 — the run id, off the banner and nothing else (rule f).
                 launched = launch.banner.get(banner["run_id_field"])
@@ -2396,6 +2577,7 @@ class Server:
                 # user's spelling so its own next-phase command does too.
                 "plan_arg": (values.get("plan_arg")
                              if same_plan_file(planned, values.get("plan")) else ""),
+                REVS: args.get(REVS) or "",
                 "question": args["question"], "extra": list(args["extra_flags"])})
             if kind == "spawn-error":
                 break
@@ -2443,18 +2625,104 @@ class Server:
         return pinned_run_id(parsed["extra_flags"], surface)
 
     def abort_args(self, call: Call) -> dict:
-        """The explicit abort spelling, as tool-call args (never the alias)."""
+        """The explicit abort spelling, as tool-call args (never the alias).
+
+        A range mode's run is named by its pinned range (`pin_commit_range`),
+        which ``status`` maps to the brief by name: never the phrase typed.
+        """
         dispatcher = self.surface["dispatcher"]
         word, flags = dispatcher["abort"][0], list(dispatcher["abort"][1:])
-        return {"mode": word, "plan": (call.watched or {}).get("plan", ""),
+        return {"mode": word, "plan": watched_plan(call.watched),
                 "question": "", "extra_flags": flags + [dispatcher["run_id_option"],
                                                         call.run_id]}
 
     def reattach_args(self, call: Call) -> dict:
         dispatcher = self.surface["dispatcher"]
-        return {"mode": dispatcher["poll"][0], "plan": (call.watched or {}).get("plan", ""),
+        return {"mode": dispatcher["poll"][0], "plan": watched_plan(call.watched),
                 "question": "", "extra_flags": list(dispatcher["poll"][1:]) + [
                     dispatcher["run_id_option"], call.run_id]}
+
+    def pin_commit_range(self, result, values, anchor) -> None:
+        """Name a range mode's run by the range its launch resolved.
+
+        The launch's result line carries ``commit_range`` (the surface's
+        ``revs.range_key``): the full ``base`` and ``head``, and the ``brief``
+        path as the dispatcher printed it, relative to the directory it ran
+        from. From it, *values* gains ``pinned``, the spelling every tool call
+        handed back names the run by (``<base12>..<head12>``, shaped by the
+        surface's ``revs.pinned``; the brief path for a root range, which has no
+        base), and the brief as the plan the polls and the abort dispatch name
+        absolutely (``plan``) and as printed (``plan_arg``, which the
+        ``--blocked`` lookup takes: ``util next-command`` reads a file). The
+        typed phrase names none of them, so a re-attach never resolves
+        ``last 2 commits`` again against a moved ``HEAD``
+        (plans/review-commits.md §2.8, §2.9). The record itself is kept for the
+        block (:meth:`attach_commit_blocks`). A launch without the key pins
+        nothing.
+        """
+        shape = self.surface["revs"]
+        record = result.get(shape["range_key"]) if isinstance(result, dict) else None
+        if not isinstance(record, dict):
+            return
+        values["commit_range"] = record
+        brief = record.get("brief")
+        brief = brief if isinstance(brief, str) and brief else None
+        base, head = record.get("base"), record.get("head")
+        chars, separator = shape["pinned"]["sha_chars"], shape["pinned"]["separator"]
+        if isinstance(base, str) and base and isinstance(head, str) and head:
+            values["pinned"] = base[:chars] + separator + head[:chars]
+        elif brief:
+            values["pinned"] = brief
+        if brief:
+            ran_from = dispatcher_cwd(result, anchor,
+                                      self.surface["dispatcher"].get("ran_from_root_key"))
+            values["plan"] = (brief if os.path.isabs(brief)
+                              else os.path.normpath(os.path.join(ran_from, brief)))
+            values["plan_arg"] = brief
+
+    def attach_commit_blocks(self, call: Call, values, outcome) -> None:
+        """The commit run's blocks, relayed once in ``commit_blocks``.
+
+        A tool route renders the commit block and the ``[COMMIT_FIXES]`` block
+        from the result line (plans/review-commits.md §2.3, "Relay"): the
+        launch printed the first before it detached and the terminal poll
+        answers for the run, so the block is in no ``output`` this call keeps.
+        Each record (the surface's ``revs.range_key`` and ``revs.fixes_key``)
+        carries its block as the run printed it (``revs.lines_key``), which is
+        what is relayed: this file composes none of it. The commit block comes
+        from the terminal payload when it has one (a launch that stopped after
+        printing it), else from the launch this call watched; ``[COMMIT_FIXES]``
+        from the terminal payload (``status`` reads it off the saved guard).
+        Moved, not copied: the lines leave the parsed result, and a block the
+        terminal child also printed leaves ``output``.
+        """
+        shape = self.surface["revs"]
+        lines_key = shape["lines_key"]
+        payload = outcome.get("result") if isinstance(outcome.get("result"), dict) else {}
+        launched = (call.watched or values or {}).get("commit_range")
+        blocks = []
+        for key, fallback in ((shape["range_key"], launched), (shape["fixes_key"], None)):
+            record = payload.get(key)
+            lines = record.get(lines_key) if isinstance(record, dict) else None
+            if isinstance(record, dict):
+                record.pop(lines_key, None)
+            if not isinstance(lines, list) and isinstance(fallback, dict):
+                lines = fallback.get(lines_key)
+            if (isinstance(lines, list) and lines
+                    and all(isinstance(line, str) for line in lines)):
+                blocks.append(redact(list(lines), None, self.surface))
+        if not blocks:
+            return
+        output = outcome.get("output")
+        if isinstance(output, str):
+            kept = output.split("\n")
+            for block in blocks:
+                for index in range(len(kept) - len(block) + 1):
+                    if kept[index:index + len(block)] == block:
+                        del kept[index:index + len(block)]
+                        break
+            outcome["output"] = "\n".join(kept).strip("\n")
+        outcome[COMMIT_BLOCKS_KEY] = "\n".join(line for block in blocks for line in block)
 
     def handoff(self, call: Call) -> dict:
         """The budget expired: the run is left ALIVE and named (D3c's re-decided edge).
@@ -2736,7 +3004,9 @@ class Server:
         spawn failure, a non-zero exit or an empty answer all leave the result
         as it was: an advisory lookup never changes what it decorates. The mode
         asked about is :func:`blocked_word`'s: a ``status``/``abort`` call
-        reports on a run and is no phase.
+        reports on a run and is no phase. A range mode's run is asked about by
+        the brief its launch pinned (:meth:`pin_commit_range`), never by the
+        phrase the call typed; one that pinned nothing is asked nothing.
         """
         dispatcher = self.surface["dispatcher"]
         resume = dispatcher.get("resume")
@@ -2774,7 +3044,8 @@ class Server:
                 clause = text["resume_markdown"]
                 self.relay_stop_beside_section(values, outcome, step)
             outcome["message"] = "{} {}".format(outcome.get("message") or "", clause)
-            self.attach_answers(step, word, plan, outcome)
+            self.attach_answers(step, word, plan, outcome,
+                                revs=values.get("pinned") or plan)
 
     def relay_stop_beside_section(self, values, outcome: dict, step: dict) -> None:
         """The stop's line without the ways forward its section carries, in
@@ -2804,7 +3075,8 @@ class Server:
         outcome["message"] = self.needs_human_message(
             payload, outcome.get("output"), outcome.get("stderr"), values)
 
-    def attach_answers(self, step: dict, word: str, plan: str, outcome: dict) -> None:
+    def attach_answers(self, step: dict, word: str, plan: str, outcome: dict,
+                       revs: str = "") -> None:
         """Lead ``options`` with the resume and every answer the stop offers.
 
         Fix round 14 (live run 5): ``resume_command`` was a plain ``--resume``
@@ -2825,7 +3097,8 @@ class Server:
         asked about answers with an inner phase's resume and answers
         (plans/improve-plan-and-improve-code.md §2.6), and a call built from
         the composite's word would carry ``--human-task`` to a parser that
-        rejects it.
+        rejects it. A call on a range mode names the run by *revs*, its pinned
+        range, with ``plan`` empty.
         """
         named = step.get("mode")
         row = resolve_mode(named if isinstance(named, str) and named else word,
@@ -2837,11 +3110,17 @@ class Server:
             return (list(value) if isinstance(value, list)
                     and all(isinstance(flag, str) and flag for flag in value) else None)
 
+        def call_for(flags):
+            if takes_revs(row, self.surface):
+                return {"mode": row["name"], REVS: revs, "plan": "", "question": "",
+                        "extra_flags": flags}
+            return {"mode": row["name"], "plan": plan, "question": "",
+                    "extra_flags": flags}
+
         lead = []
         flags = flags_of(step.get("flags"))
         if flags is not None:
-            lead.append({"mode": row["name"], "plan": plan, "question": "",
-                         "extra_flags": flags})
+            lead.append(call_for(flags))
         answers = []
         for entry in step.get("answers") if isinstance(step.get("answers"), list) else []:
             entry_flags = flags_of((entry or {}).get("flags")) if isinstance(entry, dict) else None
@@ -2851,8 +3130,7 @@ class Server:
                     or not isinstance(why, str)):
                 continue
             answers.append({"command": spelled, "why": why})
-            lead.append({"mode": row["name"], "plan": plan, "question": "",
-                         "extra_flags": entry_flags})
+            lead.append(call_for(entry_flags))
         if answers:
             outcome["resume_answers"] = answers
             clause = (self.surface.get("needs_human_message") or {}).get("answers")

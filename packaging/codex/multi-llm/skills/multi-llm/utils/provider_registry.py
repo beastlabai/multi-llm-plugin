@@ -1671,8 +1671,18 @@ def validate_progress_block(progress: object) -> None:
 
 #: The closed key set under `code_review:`. CLOSED, like `progress:`: a typo
 #: (`collapse:`) would otherwise be a silent no-op that keeps the shipped rule
-#: while the config reads as if it had been changed.
-CODE_REVIEW_KEYS = ("collapse_paths",)
+#: while the config reads as if it had been changed. ``commit_reviews_dir``
+#: is the folder the commit-review modes keep their briefs and report folders
+#: in (plans/review-commits.md §2.4); it is registered here and not only
+#: shipped in the base, because the block is validated MERGED, so a key the
+#: base carries but this set lacks would make every project override of
+#: ``collapse_paths`` fail at load.
+CODE_REVIEW_KEYS = ("collapse_paths", "commit_reviews_dir")
+
+#: Where commit briefs live when no layer sets ``code_review.commit_reviews_dir``
+#: (a fixture base): relative to the repository root, beside the plans
+#: (decision 8). The shipped ``providers.yaml`` carries the same value.
+DEFAULT_COMMIT_REVIEWS_DIR = "plans/commit-reviews"
 
 
 def _code_review_error(where: str, value: object, reason: str) -> str:
@@ -1697,6 +1707,10 @@ def validate_code_review_block(code_review: object) -> None:
     * every entry compiles, so a malformed character class is reported now
       rather than in the middle of a review.
 
+    ``commit_reviews_dir`` is checked by :func:`_commit_reviews_dir_problem`:
+    a non-empty string naming a folder inside the repository by text alone
+    (``null`` keeps the default).
+
     Called from :func:`load_config` whenever an **override** layer carried a
     ``code_review:`` key; the base is ours, and permissive mode does not relax
     it (a dropped list degrades to the default, which is the failure this
@@ -1716,6 +1730,13 @@ def validate_code_review_block(code_review: object) -> None:
             f"multi-llm config error: unknown key(s) under `code_review:`: "
             f"{', '.join(unknown)}. Known keys: {', '.join(CODE_REVIEW_KEYS)}."
         )
+    commit_reviews_dir = code_review.get("commit_reviews_dir")
+    if commit_reviews_dir is not None:
+        problem = _commit_reviews_dir_problem(commit_reviews_dir)
+        if problem is not None:
+            raise ConfigError(_code_review_error(
+                "commit_reviews_dir", commit_reviews_dir, problem,
+            ))
     collapse = code_review.get("collapse_paths")
     if collapse is None:
         return
@@ -1795,6 +1816,136 @@ def get_collapse_paths(
         else:
             resolved[name] = list(DEFAULT_COLLAPSE_PATHS[name])
     return resolved
+
+
+_COMMIT_REVIEWS_DIR_HINT = f'e.g. "{DEFAULT_COMMIT_REVIEWS_DIR}"'
+
+
+def _commit_reviews_dir_segments(value: str) -> List[str]:
+    """The folder's path segments, read with ``\\`` as ``/``.
+
+    Empty and ``.`` segments are dropped, so ``./plans/x/`` and ``plans\\x``
+    name the same folder as ``plans/x`` on every OS.
+    """
+    normalized = value.strip().replace("\\", "/")
+    return [segment for segment in normalized.split("/") if segment not in ("", ".")]
+
+
+def _commit_reviews_dir_problem(value: object) -> Optional[str]:
+    """Why *value* cannot be ``code_review.commit_reviews_dir``, or ``None``.
+
+    The text alone must keep the folder inside the repository: everything that
+    consumes it (the scope drop, the protected set, the porcelain checks)
+    works on repo-relative paths. Read with ``\\`` as ``/`` so a value written
+    on Windows is judged the same everywhere. What a symlinked component
+    resolves to is :func:`get_commit_reviews_dir`'s check, since it needs the
+    disk.
+    """
+    if not isinstance(value, str):
+        return (
+            f"expected a string naming one folder relative to the repository "
+            f"root ({_COMMIT_REVIEWS_DIR_HINT}), or null for the default"
+        )
+    normalized = value.strip().replace("\\", "/")
+    if not normalized:
+        return (
+            f"an empty string; leave it unset or null for the default "
+            f"{DEFAULT_COMMIT_REVIEWS_DIR}"
+        )
+    drive_prefixed = (
+        len(normalized) >= 2 and normalized[1] == ":" and normalized[0].isalpha()
+    )
+    if normalized.startswith("/") or drive_prefixed:
+        return (
+            f"an absolute path; the folder is relative to the repository root "
+            f"({_COMMIT_REVIEWS_DIR_HINT})"
+        )
+    if ".." in normalized.split("/"):
+        return (
+            f"a parent-traversal ('..') path; the folder must lie inside the "
+            f"repository ({_COMMIT_REVIEWS_DIR_HINT})"
+        )
+    if not _commit_reviews_dir_segments(normalized):
+        return (
+            f"the repository root itself ('.'); name a folder inside the "
+            f"repository ({_COMMIT_REVIEWS_DIR_HINT})"
+        )
+    return None
+
+
+def _nearest_existing_dir(directory: str) -> str:
+    """*directory*, absolute, or its nearest ancestor that exists.
+
+    A brief's folder may not exist yet when the brief path is the anchor, and
+    git cannot run in a directory that does not exist.
+    """
+    current = os.path.abspath(directory)
+    while not os.path.isdir(current):
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return current
+
+
+def get_commit_reviews_dir(anchor: Optional[Union[str, Path]] = None) -> Path:
+    """``code_review.commit_reviews_dir`` as an absolute folder in the anchor's repository.
+
+    The one reader of the key (plans/review-commits.md §2.4): the commit-review
+    path layer (``utils/commit_review.py``), the front doors and the
+    no-argument apply lookup all call it and none reads the YAML. The merged
+    value, or :data:`DEFAULT_COMMIT_REVIEWS_DIR` when no layer has one, is
+    joined to the git root of *anchor* (a brief path, or a directory such as
+    the cwd's repository root): the root ``_find_project_config`` reads the
+    project layer from. Never relative to the cwd or to the config file, so a
+    ``MULTI_LLM_PROVIDERS_CONFIG`` file kept anywhere still names one folder,
+    and a launch from a subdirectory finds the same briefs.
+
+    Returns the joined path, not its ``realpath``. Raises :class:`ConfigError`
+    naming the key, the value and the resolved path when
+    ``realpath(<root>/<value>)`` is not under ``realpath(<root>)`` (a
+    symlinked component pointing out, or back at the root itself), when the
+    value fails the load-time text check (a base layer is not validated at
+    load), and when *anchor* is not in a git repository at all.
+    """
+    start = _nearest_existing_dir(_anchor_start_dir(anchor))
+    config = load_config(anchor=start)
+    block = config.get("code_review")
+    value = block.get("commit_reviews_dir") if isinstance(block, dict) else None
+    if value is None:
+        value = DEFAULT_COMMIT_REVIEWS_DIR
+    problem = _commit_reviews_dir_problem(value)
+    if problem is not None:
+        raise ConfigError(_code_review_error("commit_reviews_dir", value, problem))
+    root = get_project_root_from_dir(start)
+    if not root:
+        raise ConfigError(_code_review_error(
+            "commit_reviews_dir", value,
+            f"it is relative to the repository root, and {start} is not in a "
+            f"git repository",
+        ))
+    folder = Path(root).joinpath(*_commit_reviews_dir_segments(value))
+    real_root = os.path.realpath(root)
+    resolved = os.path.realpath(str(folder))
+    try:
+        relative = os.path.relpath(resolved, real_root)
+    except ValueError:  # another drive on Windows
+        relative = None
+    if relative == os.curdir:
+        raise ConfigError(_code_review_error(
+            "commit_reviews_dir", value,
+            f"it resolves to {resolved}, the repository root itself (a "
+            f"symlinked component points there); name a folder inside the "
+            f"repository",
+        ))
+    if relative is None or relative == os.pardir or relative.startswith(os.pardir + os.sep):
+        raise ConfigError(_code_review_error(
+            "commit_reviews_dir", value,
+            f"it resolves to {resolved}, outside the repository {real_root} (a "
+            f"symlinked component points out of it); commit reviews must live "
+            f"inside the repository",
+        ))
+    return folder
 
 
 # ---------------------------------------------------------------------------

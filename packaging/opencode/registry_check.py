@@ -222,10 +222,10 @@ _VERSION_TEXT = re.compile(r"([0-9]+\.[0-9]+\.[0-9]+)")
 INSTALLER_METADATA = ("package.json", "package-lock.json", "node_modules/.package-lock.json")
 #: The build's own digest file: shipped, but outside the digest it records.
 DIGEST_FILE = "dist/tree.sha256"
-#: The placeholder the plugin resolves at startup (``SKILL_DIR_TOKEN`` in
+#: The placeholder the plugin resolves at startup (``SKILL_DIR_PLACEHOLDER`` in
 #: ``src/index.mjs`` and ``common/surface.py``; the suite pins the two equal).
 #: Spelled here because the container kit carries no skill tree to import it from.
-SKILL_DIR_TOKEN = "{SKILL_DIR}"
+SKILL_DIR_PLACEHOLDER = "{SKILL_DIR}"
 
 #: Bounded npm reads, as row 9 and the laptop path's post-publish read bound theirs.
 NPM_FETCH_FLAGS = (
@@ -1351,7 +1351,7 @@ def read_command(config: Optional[Mapping[str, Any]], location: Path) -> Dict[st
     """``probe.check_command`` against the installed payload, minus its
     directory-route verdict (``plugin_is_payload``), which an npm pin can never
     satisfy and :func:`_command_problems` replaces with the exact-spec check."""
-    command = _probe().check_command(config, location, token=SKILL_DIR_TOKEN)
+    command = _probe().check_command(config, location, token=SKILL_DIR_PLACEHOLDER)
     command.pop("plugin_is_payload", None)
     return command
 

@@ -634,6 +634,29 @@ class TestTheApplyReport:
         assert "- Verification: not configured (`driver.verify_command` is " \
                "unset). Nothing ran this repository's tests" in text
 
+    def test_a_commit_reviews_advice_names_the_commit_modes(self, tmp_path):
+        """Live run 2026-10-26 (codex, phases 05 and 06): an apply on a commit
+        brief told the user to run review-code and then apply-code-fixes, the
+        phases the commit modes front (plans/review-commits.md §2.8)."""
+        def check_findings(orch):
+            text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+            return text.split("## Check Findings", 1)[1].split("\n## ", 1)[0]
+
+        orch = self._orchestrator(tmp_path, self.ROWS)
+        assert ("fix it by hand, or run review-code and then apply-code-fixes."
+                in check_findings(orch))
+        # The same run on a commit brief: its state records a commit_range.
+        state_file = Path(orch.out_dir) / "state.json"
+        state = (json.loads(state_file.read_text(encoding="utf-8"))
+                 if state_file.is_file() else {})
+        state["commit_range"] = {"base": "a" * 40, "head": "b" * 40}
+        state_file.write_text(json.dumps(state), encoding="utf-8")
+        section = check_findings(orch)
+        assert ("fix it by hand, or commit the edits and run --review-commits and "
+                "then --apply-commit-fixes, which with no range take that commit."
+                in section)
+        assert "review-code" not in section and "apply-code-fixes" not in section
+
     def test_the_result_block_says_it_too(self, tmp_path, capsys):
         orch = self._orchestrator(tmp_path, self.ROWS, unverified=unverified_line(None))
         orch.print_write_outcome_summary()

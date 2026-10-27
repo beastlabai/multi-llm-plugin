@@ -64,6 +64,9 @@ class TestAFinishedRunsNoticeIsRelayed:
         assert "`result` can carry a `notice`" in modes.TOOL_NOTICE_LINE
         assert "nothing ran this repository's tests" in modes.TOOL_NOTICE_LINE
         assert "every part of it" in modes.TOOL_NOTICE_LINE
+        assert modes.TOOL_COMMIT_BLOCKS_LINE in description
+        assert "`commit_blocks`" in modes.TOOL_COMMIT_BLOCKS_LINE
+        assert "verbatim and once" in modes.TOOL_COMMIT_BLOCKS_LINE
 
     @pytest.mark.parametrize("path", [
         "hosts/codex/plugin-skill.md.tmpl", "hosts/opencode/plugin-command.md.tmpl",

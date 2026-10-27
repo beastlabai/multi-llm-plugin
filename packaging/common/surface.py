@@ -23,8 +23,10 @@ the server, at invocation, from its own environment.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, FrozenSet, List, Optional, Sequence
@@ -41,14 +43,14 @@ if str(SKILL_DIR) not in sys.path:
 import modes as mode_table  # noqa: E402
 import multi_llm  # noqa: E402  (side-effect free at import: main() does the work)
 from utils import (  # noqa: E402
-    cli_common, detach, host_capabilities, next_phase, provider_registry,
-    subagent_executor, subagent_tasks, unattended,
+    cli_common, commit_range, commit_review, detach, host_capabilities,
+    next_phase, provider_registry, subagent_executor, subagent_tasks, unattended,
 )
 
 #: The token a generated artifact carries in place of an absolute skill dir.
 #: The host resolves it at startup from wherever the package landed, which is
 #: the whole point of a package route: no baked path to go stale.
-SKILL_DIR_TOKEN = "{SKILL_DIR}"
+SKILL_DIR_PLACEHOLDER = "{SKILL_DIR}"
 
 #: The option a poll and a re-attach name one run by. One spelling here, read
 #: by the ``dispatcher.run_id_option`` key.
@@ -91,7 +93,21 @@ RUN_ID_OPTION = "--run-id"
 #: mode row gained ``optional_why`` beside ``summary``: ``Mode.optional_why``,
 #: the generic reason an optional phase is offered before the next required
 #: one (``None`` on every row whose phase is not optional).
-SURFACE_SCHEMA_VERSION = 5
+#:
+#: 6: the commit modes' range (plans/review-commits.md §2.9, "Tool routes").
+#: ``positional_kinds`` gained ``revs`` (``modes.POS_REVS``), and
+#: ``argument_descriptions`` the optional fifth property ``revs`` beside the
+#: four required ones. ``plan`` keeps one meaning, the plan positional, which a
+#: commit mode does not declare, so its description now says where the range
+#: and a context plan go instead. The new top-level ``revs`` block carries
+#: what a server needs to compose and read a range without spelling a word of
+#: its own: the ``-N`` count word that may start with ``-``, the brief-path
+#: suffix that keeps a value one argv element, the refusal of a non-empty
+#: ``plan`` on a range mode, the pinned spelling's shape, and the result-line
+#: keys its blocks and its pinned range are read from. The worked examples
+#: gained a range-shaped one. A server built for v5 has none of this and would
+#: drop the range (it skipped a kind it did not know), hence the bump.
+SURFACE_SCHEMA_VERSION = 6
 
 
 def _aliases_for(name: str) -> List[str]:
@@ -191,6 +207,120 @@ def _writes_worktree(mode: "mode_table.Mode") -> bool:
 _EXAMPLE_FLAG = "--quick"
 _EXAMPLE_FLAG_SITE = "model-selection"
 
+#: The commit modes' context-plan flag (plans/review-commits.md decision 9):
+#: it travels in ``extra_flags`` like ``--focus``, never as a tool argument
+#: and never as ``plan``. Written here because the front door's parser is its
+#: only owner and holds no constant; :func:`_context_plan_flag` checks that
+#: parser defines it, so a rename fails the build instead of teaching a flag
+#: the front door refuses.
+_CONTEXT_PLAN_FLAG = "--context-plan"
+
+#: The range-shaped worked example's two values. ``_EXAMPLE_REVS`` is checked
+#: against the grammar's pure phrase matcher (:func:`_checked_ranges`).
+_EXAMPLE_REVS = "last 2 commits"
+_EXAMPLE_CONTEXT_PLAN = "docs/x.md"
+
+#: The range forms the ``revs`` description names, each checked against the
+#: grammar (a phrase ``commit_range.match_phrase`` recognizes, or revision
+#: syntax ``commit_range.looks_like_range_word`` accepts) so the description
+#: never teaches a range the front door refuses.
+_DESCRIBED_RANGES = (_EXAMPLE_REVS, "-2", "HEAD~3..HEAD", "this branch")
+
+#: The result-line keys a server reads the commit run's data from
+#: (``cli_common.ResultContext``: ``commit_range`` and ``commit_fixes``), and
+#: the key inside each that holds the block exactly as the run printed it.
+_RESULT_RANGE_KEY = "commit_range"
+_RESULT_FIXES_KEY = "commit_fixes"
+_RESULT_LINES_KEY = "lines"
+
+
+def _context_plan_flag() -> str:
+    """:data:`_CONTEXT_PLAN_FLAG`, once the front door's parser defines it."""
+    parser = argparse.ArgumentParser(add_help=False)
+    commit_review.add_commit_options(parser)
+    if _CONTEXT_PLAN_FLAG not in parser._option_string_actions:
+        raise RuntimeError(
+            f"the commit front door no longer defines {_CONTEXT_PLAN_FLAG}; the "
+            "tool's plan rule and its worked example name it"
+        )
+    return _CONTEXT_PLAN_FLAG
+
+
+def _checked_ranges() -> Sequence[str]:
+    """:data:`_DESCRIBED_RANGES`, once the grammar accepts each one."""
+    for form in _DESCRIBED_RANGES:
+        if commit_range.match_phrase(form) is None and not (
+            commit_range.looks_like_range_word(form)
+        ):
+            raise RuntimeError(
+                f"the range grammar no longer accepts {form!r}; the tool's revs "
+                "description and worked example name it"
+            )
+    return _DESCRIBED_RANGES
+
+
+def _pinned_shape() -> Dict[str, Any]:
+    """How ``commit_range.pinned_spelling`` spells a pinned range, derived from
+    the owner's own output: ``{"sha_chars", "separator", "pattern"}``, so a
+    server builds ``<base>..<head>`` from a result line's full SHAs, and knows
+    one when a call names it (``commit_range.PINNED_PATTERN``: never a path to
+    resolve against the workspace), without holding the length, the operator
+    or the pattern itself."""
+    base, head = "0" * 40, "f" * 40
+    sample = commit_range.pinned_spelling(base, head) or ""
+    chars = len(sample) - len(sample.lstrip("0"))
+    separator = sample[chars:len(sample) - chars]
+    if not chars or sample != base[:chars] + separator + head[:chars]:
+        raise RuntimeError(f"unexpected pinned spelling shape: {sample!r}")
+    if not re.fullmatch(commit_range.PINNED_PATTERN, sample):
+        raise RuntimeError(f"PINNED_PATTERN does not match {sample!r}")
+    return {"sha_chars": chars, "separator": separator,
+            "pattern": commit_range.PINNED_PATTERN}
+
+
+def _revs_modes(rows: Sequence[Dict[str, Any]]) -> List[str]:
+    """The exposed modes that take a commit range, in table order."""
+    return [row["name"] for row in rows if mode_table.POS_REVS in row["positionals"]]
+
+
+def _revs_plan_refusal() -> str:
+    """The refusal of a non-empty ``plan`` on a range mode: ``{mode}``.
+
+    ``plan`` keeps one meaning, the plan positional, and a commit mode declares
+    none, so the server refuses it before any spawn; the message names both
+    ways forward (plans/review-commits.md §2.9).
+    """
+    flag = _context_plan_flag()
+    return (
+        'mode "{mode}" takes a commit range, not a plan, so "plan" must be "". '
+        'Send the range, or a commit brief\'s path, as "revs" ("" for HEAD, the '
+        "last commit). To read a plan as context, add "
+        f'["{flag}", "<path>"] to extra_flags.'
+    )
+
+
+def _revs_block() -> Dict[str, Any]:
+    """The surface's ``revs`` block (schema v6): everything a server needs to
+    compose and read the commit modes' range, so it spells none of it."""
+    return {
+        # `multi_llm._RANGE_COUNT_WORD`: on a range mode a word that fully
+        # matches this continues the leading bare-word run instead of ending
+        # it, so it is the one range word a server lets start with "-".
+        "count_word": multi_llm._RANGE_COUNT_WORD.pattern,
+        # `multi_llm._COMMIT_BRIEF_SUFFIX`: a commit brief's path ends in it
+        # (`_names_a_commit_brief` asks no other word), so a `revs` value that
+        # ends in it travels as one argv element and a brief path holding a
+        # space still reaches the dispatcher as the one word it turns into
+        # `--plan-file`.
+        "brief_suffix": multi_llm._COMMIT_BRIEF_SUFFIX,
+        "plan_refusal": _revs_plan_refusal(),
+        "pinned": _pinned_shape(),
+        "range_key": _RESULT_RANGE_KEY,
+        "fixes_key": _RESULT_FIXES_KEY,
+        "lines_key": _RESULT_LINES_KEY,
+    }
+
+
 #: Host-keyed clause of the ``plan`` description: the file-attachment sigil a
 #: host prepends to a path the user names, which the plugin strips. OpenCode's
 #: is ``@`` (measured 2026-09-16); a host absent here has none recorded, and
@@ -254,28 +384,34 @@ def _resolve_row(word: str, rows: Sequence[Dict[str, Any]]) -> Optional[Dict[str
     return None
 
 
-def _example(mode: str, plan: str, question: str, extra_flags: List[str]) -> str:
-    """One worked example, spelled exactly as the tool receives it."""
-    return json.dumps(
-        {"mode": mode, "plan": plan, "question": question,
-         "extra_flags": extra_flags},
-        separators=(",", ":"), ensure_ascii=False,
-    )
+def _example(mode: str, plan: str, question: str, extra_flags: List[str],
+             revs: Optional[str] = None) -> str:
+    """One worked example, spelled exactly as the tool receives it. ``revs``
+    is written only for a range mode's example: the property is optional and
+    every other mode leaves it out."""
+    call: Dict[str, Any] = {"mode": mode}
+    if revs is not None:
+        call["revs"] = revs
+    call.update({"plan": plan, "question": question, "extra_flags": extra_flags})
+    return json.dumps(call, separators=(",", ":"), ensure_ascii=False)
 
 
 def _worked_examples(rows: Sequence[Dict[str, Any]]) -> List[str]:
-    """The four worked spellings, **selected by shape rather than by name** (rule f).
+    """The five worked spellings, **selected by shape rather than by name** (rule f).
 
     Between them they cover every arity rule: the default mode with one plan, a
     mode declaring no positional (the three-empties spelling a flat "an empty
     plan is invalid" rule would forbid), a mode declaring a question as well as
-    a plan, and an alias travelling unexpanded beside extra flags. Each is found
-    by what the table says the mode *declares*, so a renamed mode changes the
-    examples without an edit here. The only written words are
-    ``modes.EXAMPLE_PLAN_PATH``, ``modes.EXAMPLE_QUESTION`` and
-    ``_EXAMPLE_FLAG`` — and the aliased row is chosen among the modes the
-    ``unattended`` table says accept that flag, so the example never teaches
-    a call the mode's parser refuses.
+    a plan, an alias travelling unexpanded beside extra flags, and (schema v6)
+    a mode declaring a commit range: the range in ``revs``, ``plan`` empty, and
+    a context plan in ``extra_flags``. Each is found by what the table says the
+    mode *declares*, so a renamed mode changes the examples without an edit
+    here. The only written words are ``modes.EXAMPLE_PLAN_PATH``,
+    ``modes.EXAMPLE_QUESTION``, ``_EXAMPLE_FLAG``, ``_EXAMPLE_REVS`` and
+    ``_EXAMPLE_CONTEXT_PLAN`` — the aliased row is chosen among the modes the
+    ``unattended`` table says accept that flag, and the range and the context
+    flag are checked against the grammar and the front door's parser, so no
+    example teaches a call the mode refuses.
     """
     plan_kind, question_kind = mode_table.POS_PLAN, mode_table.POS_QUESTION
     plan = mode_table.EXAMPLE_PLAN_PATH
@@ -316,6 +452,16 @@ def _worked_examples(rows: Sequence[Dict[str, Any]]) -> List[str]:
         examples.append(_example(
             aliased["aliases"][0], plan, "", [_EXAMPLE_FLAG],
         ))
+
+    ranging = next(
+        (row for row in rows if mode_table.POS_REVS in row["positionals"]), None,
+    )
+    if ranging:
+        _checked_ranges()
+        examples.append(_example(
+            ranging["name"], "", "", [_context_plan_flag(), _EXAMPLE_CONTEXT_PLAN],
+            revs=_EXAMPLE_REVS,
+        ))
     return examples
 
 
@@ -330,7 +476,9 @@ def _tool_description(host_id: str, rows: Sequence[Dict[str, Any]]) -> str:
     user's to type, never a call; plans/next-phase-command.md §2.4) and its
     sibling ``modes.TOOL_NO_COMPOSED_COMMAND_LINE`` (those keys and
     ``resume_command`` are the only commands, never one the model composes)
-    and ``modes.TOOL_NOTICE_LINE`` (a finished run's ``notice`` is relayed),
+    and ``modes.TOOL_NOTICE_LINE`` (a finished run's ``notice`` is relayed)
+    and ``modes.TOOL_COMMIT_BLOCKS_LINE`` (a commit mode's ``commit_blocks``
+    is relayed verbatim and once),
     then any host-keyed note, then the worked examples. Examples travel inside the
     description because a JSON-Schema fallback has nowhere to put an
     ``examples`` key a host would render.
@@ -346,6 +494,7 @@ def _tool_description(host_id: str, rows: Sequence[Dict[str, Any]]) -> str:
     lines.append(mode_table.TOOL_USER_NEXT_STEP_LINE)
     lines.append(mode_table.TOOL_NO_COMPOSED_COMMAND_LINE)
     lines.append(mode_table.TOOL_NOTICE_LINE)
+    lines.append(mode_table.TOOL_COMMIT_BLOCKS_LINE)
     note = _DESCRIPTION_NOTE.get(host_id)
     if note:
         writers = ", ".join(row["name"] for row in rows if row["writes_worktree"])
@@ -365,17 +514,32 @@ def _tool_description(host_id: str, rows: Sequence[Dict[str, Any]]) -> str:
 def _argument_descriptions(
     host_id: str, rows: Sequence[Dict[str, Any]], reserved: Dict[str, Any],
 ) -> Dict[str, str]:
-    """One rendered description per tool property — exactly the four of rule 1.
+    """One rendered description per tool property: the four of rule 1, and
+    (schema v6) the optional ``revs``.
 
     ``mode`` is described rather than enumerated: a fallback schema of
     ``{type, properties, required}`` has no ``enum`` to carry the vocabulary, so
     legality is the pre-spawn check against the table and the description is
     what conveys it.
+
+    ``revs`` says only ``""`` for "no range": a host whose fallback schema
+    marks every property required still accepts the call, and the servers read
+    a left-out ``revs`` as ``""`` as they read a left-out ``question``.
     """
     words = [word for row in rows for word in (row["name"], *row["aliases"])]
     plan_modes = [
         row["name"] for row in rows if mode_table.POS_PLAN in row["positionals"]
     ]
+    revs_modes = _revs_modes(rows)
+    context_flag = _context_plan_flag()
+    ranges = _checked_ranges()
+    shown_ranges = ", ".join(f'"{form}"' for form in ranges[:-1]) + (
+        f' or "{ranges[-1]}"')
+    no_plan_here = (
+        f" The commit modes ({', '.join(revs_modes)}) take none: their range "
+        f'goes in "revs", and a plan read as context goes in extra_flags as '
+        f'["{context_flag}", "<path>"].'
+    ) if revs_modes else ""
     question_modes = [
         row["name"] for row in rows
         if mode_table.POS_QUESTION in row["positionals"]
@@ -404,8 +568,19 @@ def _argument_descriptions(
             f"quotes{sigil} from what the user typed and send the value. A path "
             "containing spaces needs no escaping. Empty (\"\") when and only "
             "when the mode declares no plan positional. Modes taking a plan: "
-            f"{', '.join(plan_modes)}. Relative paths resolve against the "
-            "workspace."
+            f"{', '.join(plan_modes)}.{no_plan_here} Relative paths resolve "
+            "against the workspace."
+        ),
+        "revs": (
+            f"The commit range, for {', '.join(revs_modes) or '(none)'} only: "
+            "the words the user typed right after the mode word, as one string "
+            f"({shown_ranges}), or a commit brief's path. Several words need no "
+            "quoting; one range per call. Empty (\"\") means HEAD, the last "
+            "commit, and it is \"\" for every other mode. A word beginning with "
+            "\"-\" is refused unless it is a count such as -2: flags go in "
+            "extra_flags, never here. A plan is never the range: on these modes "
+            "\"plan\" stays empty, and a plan read as context goes in "
+            f'extra_flags as ["{context_flag}", "<path>"].'
         ),
         "question": (
             "The free-text question, as exactly one argv element — newlines "
@@ -521,7 +696,7 @@ def _reserved_flags(host_id: str) -> Dict[str, Any]:
 
 
 def _uninstall_command(host_id: str) -> str:
-    """``host_install.uninstall_line(host_id, SKILL_DIR_TOKEN)``, environment-free.
+    """``host_install.uninstall_line(host_id, SKILL_DIR_PLACEHOLDER)``, environment-free.
 
     Calling ``uninstall_line`` here leaked the builder's environment into the
     shipped file: it composes through ``cli_common.dispatcher_prefix``, which
@@ -534,7 +709,7 @@ def _uninstall_command(host_id: str) -> str:
     A ``PurePosixPath``: a ``Path`` joined ``{SKILL_DIR}\\multi_llm.py`` on a
     Windows builder, so the shipped surface depended on the build's OS.
     """
-    base = PurePosixPath(SKILL_DIR_TOKEN)
+    base = PurePosixPath(SKILL_DIR_PLACEHOLDER)
     flags = "".join(f" {flag}" for flag in unattended.DEFAULT_UV_RUN_ARGS)
     return (
         f"uv run{flags} --project {cli_common._quote(base)} -- "
@@ -584,7 +759,8 @@ def cli_surface(host_id: str) -> Dict[str, Any]:
     text and no flag name of its own — the same rule that makes the preflight
     message ``hosts/uv-missing.txt`` rather than a JS string literal. Since
     schema v4 that includes the model-facing definition itself: the tool's
-    name, its whole joined description and its four argument descriptions are
+    name, its whole joined description and its argument descriptions (the
+    four required properties and, since schema v6, the optional ``revs``) are
     rendered here, from the table and the authored ``modes.py`` constants
     beside it, and a host passes them through unchanged.
 
@@ -651,7 +827,11 @@ def cli_surface(host_id: str) -> Dict[str, Any]:
         "positional_kinds": {
             "plan": mode_table.POS_PLAN,
             "question": mode_table.POS_QUESTION,
+            # Schema v6: the commit modes' optional range, the `revs` argument.
+            "revs": mode_table.POS_REVS,
         },
+        # Schema v6: how a server composes and reads that range (`_revs_block`).
+        "revs": _revs_block(),
         "reserved_flags": reserved,
         # The flags ``execute`` appends to every dispatch, in composition order.
         # ``--yes`` is unconditional: the ``--interactive`` substitution is

@@ -651,15 +651,15 @@ def run_orchestrator(script_name, plan_file, *extra_args, timeout=30):
 #: the comparison one ``cli_common.render_instruction_text(golden, skill_dir())``
 #: round-trip: the renderer the skill already uses in the other direction, rather
 #: than a second normalization rule that could drift from it.
-SKILL_DIR_TOKEN = "{SKILL_DIR}"
+SKILL_DIR_PLACEHOLDER = "{SKILL_DIR}"
 
 
 def normalize_skill_dir(text):
     """Rewrite every resolved skill-dir path in *text* to ``{SKILL_DIR}``."""
     resolved = str(SKILL_DIR)
-    out = text.replace(resolved, SKILL_DIR_TOKEN)
+    out = text.replace(resolved, SKILL_DIR_PLACEHOLDER)
     # The same path as a Windows capture would spell it.
-    return out.replace(resolved.replace("/", "\\"), SKILL_DIR_TOKEN)
+    return out.replace(resolved.replace("/", "\\"), SKILL_DIR_PLACEHOLDER)
 
 
 def capture_help(script_name, golden_name, timeout=30):

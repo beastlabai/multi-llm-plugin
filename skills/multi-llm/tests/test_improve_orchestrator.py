@@ -1072,6 +1072,75 @@ class TestLeftoverValidation:
 
 
 # ---------------------------------------------------------------------------
+# 6b. Per-model results a fan-out stopped before grouping left behind
+# ---------------------------------------------------------------------------
+
+class TestLeftoverResults:
+    """Fable review, finding 1 (2026-10-27): `--resume` after a fan-out stopped
+    before grouping (on Claude Code, at the background launch's time limit)
+    handed the code review `--yes` alone. review-code's partial-completion
+    guard refused that (exit 3, "Run: --reaggregate"), the core's stop named
+    `[IMPROVE_RERUN]` again, and the run looped. `--force` resumes it, each
+    kept result a `[SKIP]` (`tests/test_e2e_failures.py`
+    `TestAFanOutCutOffMidRun`); review-plan resumes a plain re-run itself."""
+
+    @staticmethod
+    def _one_result(plan: Path, phase: str) -> Path:
+        review_dir = _out(plan) / phase
+        review_dir.mkdir(parents=True, exist_ok=True)
+        (review_dir / "gemini_x.json").write_text("[]", encoding="utf-8")
+        return review_dir
+
+    def test_the_code_review_resumes_with_force(self, repo, stub):
+        calls = stub()
+        plan = _plan(repo)
+        self._one_result(plan, "code-review")
+        records = _records(CODE, plan, "--resume")
+        assert records.leftover_results
+        step = iw.plan_steps(CODE, _args(CODE, plan, "--resume"), records)[0]
+        # A resume, not a new round: Resume Detection still runs.
+        assert (step.decision, step.reason, step.fresh) == ("run", "review unfinished", False)
+        assert "--force" in step.flags and "--rerun-all" not in step.flags
+        assert _main(CODE, plan, "--resume") == 0
+        assert _argv_of(calls, "review-code") == ["--yes", "--force"]
+
+    def test_the_resumed_flags_pass_review_codes_own_guard(self, repo):
+        """The loop's other half: the guard that refused `--yes` alone reads
+        the same files as `Records.leftover_results` and lets `--force` by."""
+        import code_review_orchestrator as cro
+
+        plan = _plan(repo)
+        review_dir = self._one_result(plan, "code-review")
+        flags = iw.step_flags(CODE, "review-code", _args(CODE, plan, "--resume"),
+                              _records(CODE, plan, "--resume"))
+        assert cro.leftover_model_results(review_dir) == [str(review_dir / "gemini_x.json")]
+        assert cro.parse_args(["--plan-file", str(plan), *flags]).force is True
+
+    def test_improve_commits_review_step_resumes_with_force_too(self):
+        """The same rule on the composite whose review runs on a commit brief
+        at the pinned pair: `--force` beside the pair, never `--rerun-all`."""
+        pair = ["--base-ref", "a" * 40, "--head-ref", "c" * 40]
+        args = iw.parse_args("improve-commits", ["--plan-file", "b.md", *pair, "--resume"])
+        flags = iw.step_flags("improve-commits", "review-code", args,
+                              iw.Records(mode="improve-commits", leftover_results=True))
+        assert flags == ["--yes", "--force", *pair]
+
+    def test_grouped_results_are_not_leftovers(self, repo):
+        plan = _plan(repo)
+        review_dir = self._one_result(plan, "code-review")
+        (review_dir / "grouped.json").write_text("[]", encoding="utf-8")
+        assert not _records(CODE, plan).leftover_results
+
+    def test_the_plan_review_resumes_without_force(self, repo):
+        plan = _plan(repo)
+        self._one_result(plan, "review-plan")
+        records = _records(PLAN, plan, "--resume")
+        assert not records.leftover_results
+        assert iw.step_flags(PLAN, "review-plan", _args(PLAN, plan, "--resume"),
+                             records) == ["--yes"]
+
+
+# ---------------------------------------------------------------------------
 # 7. A live run is refused, never joined
 # ---------------------------------------------------------------------------
 

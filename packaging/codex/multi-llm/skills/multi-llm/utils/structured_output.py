@@ -161,6 +161,10 @@ PHASE_SCHEMA_FILE: Dict[str, Optional[str]] = {
     "full": None,
     "improve-plan": None,
     "improve-code": None,
+    # The commit composite's run dir (plans/review-commits.md §2.8). The two
+    # commit front doors own no phase of their own: they run `code-review`
+    # and `apply-code-fixes`, which have their rows above.
+    "improve-commits": None,
 }
 
 
