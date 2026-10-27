@@ -39,6 +39,7 @@ from utils import (
     list_untracked_files,
     subtract_baseline,
 )
+from utils.commit_review import commit_review_artifact, commit_reviews_folder_rel
 from utils.git_utils import get_project_root_from_dir, ignored_paths, paths_in_commit
 from utils.metrics import StateLockTimeout, state_file_lock
 from utils.output_handler import workflow_file_entries
@@ -401,8 +402,9 @@ def _record_tracked_files(args, state_path: Path, explicit_scope: List[str]):
         if not explicit_scope:
             print(
                 "ERROR: --only-touched was given only the workflow's own files "
-                "(the plan, its task list or its output folder), so there is "
-                "nothing to track: they are never code under review.",
+                "(the plan, its task list, its output folder or commit "
+                "reviews), so there is nothing to track: they are never code "
+                "under review.",
                 file=sys.stderr,
             )
             return 1
@@ -589,16 +591,26 @@ def _drop_workflow_files(paths, workflow: List[str], say=print) -> List[str]:
 
     The plan, its task list and the output folder are what the planning
     phases edit; a census that kept them handed review-code the plan and
-    ``tasks.md`` as code (2026-10-05, Codex racing run 3).
+    ``tasks.md`` as code (2026-10-05, Codex racing run 3). Every commit
+    review's brief and report folder goes too, as a class
+    (``commit_review.commit_review_artifact``, plans/review-commits.md §2.4),
+    whatever plan this state has and whether or not a committed review sits
+    in an un-ignored folder; the folder is read for the repository the census
+    runs in, and when the accessor refuses it nothing extra is dropped.
     """
     kept = subtract_baseline(paths, workflow) if workflow else list(paths)
+    root = get_project_root_from_dir() if kept else None
+    folder = commit_reviews_folder_rel(root) if root else None
+    if folder:
+        kept = [p for p in kept if not commit_review_artifact(p.strip(), folder)]
     kept_set = set(kept)
     dropped = sorted({p for p in paths if p not in kept_set})
     if dropped:
         say(
             f"Left out {len(dropped)} of the workflow's own file(s) (the plan, "
-            f"its task list and its output folder are never code under "
-            f"review): {', '.join(dropped[:5])}{', …' if len(dropped) > 5 else ''}"
+            f"its task list, its output folder and commit reviews are never "
+            f"code under review): "
+            f"{', '.join(dropped[:5])}{', …' if len(dropped) > 5 else ''}"
         )
     return kept
 

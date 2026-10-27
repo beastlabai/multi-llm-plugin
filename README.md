@@ -127,7 +127,7 @@ The plugin ships its own `pyproject.toml`/`uv.lock`, so no manual Python setup i
 
 ## 2. Plans and outputs
 
-A **plan** is just a markdown file describing the change you want to make - a feature spec, refactor outline, or design doc. You write it (or have Claude draft it), then point multi-llm at it. There's no required template; the more concrete the plan, the more useful the reviews. Most workflows start from a plan, with one exception: `--ask` only needs a plan to give the models context for your question.
+A **plan** is just a markdown file describing the change you want to make - a feature spec, refactor outline, or design doc. You write it (or have Claude draft it), then point multi-llm at it. There's no required template; the more concrete the plan, the more useful the reviews. Most workflows start from a plan, with two exceptions: `--ask` only needs a plan to give the models context for your question, and the commit modes (`--review-commits`, `--apply-commit-fixes`, `--improve-commits`) need none - they take a plan only as optional read-only context (`--context-plan <path>`, the **context plan**), and in place of a plan they write a generated **commit brief**: the range's commits, their messages and its diff stat, which the review reads as the statement of intent ([Review commits](#review-commits)).
 
 The path you pass (e.g. `plans/my-feature.md`) is always a **file**. From it, multi-llm derives a sibling **output directory** in the same folder, named after the plan file without its extension - so `plans/my-feature.md` produces `plans/my-feature/`. All workflow state and generated artifacts live there:
 
@@ -140,6 +140,11 @@ The path you pass (e.g. `plans/my-feature.md`) is always a **file**. From it, mu
 | `plans/my-feature/code-review/report.md` | `--review-code`, `--apply-code-fixes` |
 | `plans/my-feature/ask/<question-slug>/answers.md` | `--ask` |
 | `plans/my-feature/improve-plan/`, `plans/my-feature/improve-code/` | `--improve-plan`, `--improve-code`: the run's own folder (`.status.json`, log and lock); the two phases it runs write their usual folders |
+| `plans/commit-reviews/<base>-<head>.md` | `--review-commits`, `--apply-commit-fixes`, `--improve-commits`: the commit brief, one per range |
+| `plans/commit-reviews/<base>-<head>/code-review/report.md` (and `report.html`) | `--review-commits`, `--apply-commit-fixes` |
+| `plans/commit-reviews/<base>-<head>/improve-commits/` | `--improve-commits`: the run's own folder, as for `--improve-code` |
+
+The commit rows are the one exception to the sibling rule: a commit brief is named after its range (`<base>` and `<head>` are 12-character commit ids; a range that starts at the repository's first commit is `root-<head>`), and its folder beside it holds the `state.json` and phase folders a plan's would. The folder is `code_review.commit_reviews_dir`, `plans/commit-reviews` by default, relative to the repository root ([docs/configuration.md](docs/configuration.md#good-to-know)). When multi-llm creates it, it writes a `.gitignore` holding `*` inside it, so briefs and reports never show in `git status`; delete that file to commit them.
 
 Throughout this README and the linked docs, `{plan}/...` refers to that derived directory. Because everything is stored next to the plan, a workflow is fully portable - move or commit the plan folder and its state travels with it.
 
@@ -147,7 +152,7 @@ Throughout this README and the linked docs, `{plan}/...` refers to that derived 
 
 ## 3. Modes
 
-Invoke with `/multi-llm:multi-llm [mode-flag] <plan_path> [options]` - on OpenCode the same command is `/multi-llm`, without the plugin namespace; on Codex it is a skill (model-invoked, not a slash command), so you ask for `multi-llm:multi-llm` by name instead (see [docs/hosts.md](docs/hosts.md)). With no mode flag, `--review-plan` is the default.
+Invoke with `/multi-llm:multi-llm [mode-flag] <plan_path> [options]` - on OpenCode the same command is `/multi-llm`, without the plugin namespace; on Codex it is a skill (model-invoked, not a slash command), so you ask for `multi-llm:multi-llm` by name instead (see [docs/hosts.md](docs/hosts.md)). With no mode flag, `--review-plan` is the default. The three commit modes take an optional `[<range>]` in place of `<plan_path>` ([below](#review-commits)), and `--init` takes neither.
 
 | Flag | What it does |
 | --- | --- |
@@ -161,9 +166,13 @@ Invoke with `/multi-llm:multi-llm [mode-flag] <plan_path> [options]` - on OpenCo
 | `--review-code` | Review code changes against the plan |
 | `--apply-code-fixes` | Apply validated fixes from a code review |
 | `--improve-code` | `--review-code`, then `--apply-code-fixes`, in one unattended command that edits source files ([below](#review-and-apply-in-one-command)) |
+| `--review-commits` | Review a commit or a range of commits (default: the last commit) ([below](#review-commits)) |
+| `--apply-commit-fixes` | Apply validated fixes from a commit review ([below](#review-commits)) |
+| `--improve-commits` | `--review-commits`, then `--apply-commit-fixes`, in one unattended command that edits source files ([below](#review-commits)) |
 | `--full` | Run the whole pipeline in sequence |
 | `--status` | Show workflow state and the suggested next action |
 | `--ask` | Ask each model a free-text question about a plan; aggregate the answers |
+| `--init` | Write a per-project `.multi-llm/providers.yaml` ([Configuration](#4-configuration)) |
 
 Two notes on the table above:
 
@@ -214,7 +223,7 @@ flowchart TD
 
 `--improve-plan` runs the *Implementation Plan* pair and `--improve-code` the *Code Review* pair, each as one unattended command ([below](#review-and-apply-in-one-command)).
 
-You don't have to run the whole chain: **every step is also a standalone entry point** that reads/writes the shared `{plan}/state.json`, so you can start, stop, and resume at any phase. A few modes sit outside the pipeline - **`--ask`** (read-only Q&A about a plan), **`--status`** (show progress and the suggested next step), and **`--init`** (write a per-project config) - while **`--full`** simply runs the entire flow above end to end.
+You don't have to run the whole chain: **every step is also a standalone entry point** that reads/writes the shared `{plan}/state.json`, so you can start, stop, and resume at any phase. A few modes sit outside the pipeline - **`--ask`** (read-only Q&A about a plan), **`--status`** (show progress and the suggested next step), **`--init`** (write a per-project config), and the commit modes **`--review-commits`**, **`--apply-commit-fixes`** and **`--improve-commits`**, which work on commits rather than a plan ([below](#review-commits)) - while **`--full`** simply runs the entire flow above end to end, and never runs the commit modes.
 
 #### Review and apply in one command
 
@@ -239,6 +248,69 @@ You don't have to run the whole chain: **every step is also a standalone entry p
 - *What your tree should be.* Commit or stash first, so `git diff` shows exactly what the run changed and `git restore` undoes it. Nothing refuses a dirty tree. When the apply runs with `--exec-subagents` (the Codex and OpenCode default), it records your uncommitted paths in `{plan}/state.json` (`pre_existing_changes`) as its baseline and names them at its start (`dirty tree at start: N uncommitted path(s) recorded as the baseline …`, the first ten listed), unless the plan already holds a baseline, which it keeps and only counts (an earlier `--implement` records one, before it changed anything). Without `--exec-subagents` (the Claude Code default, where the host runs the batches), the apply records nothing about your tree and says nothing about it.
 - *What it costs.* One review call per model in the review's list (`defaults.models`, or the `--quick` or `--models` list), then validation, judging, and one write dispatch per batch. `--quick` is the cheap way to run it; `--force` pays for a whole new review round. `--improve-plan` adds one consolidation pass (one subagent call per consolidation batch) when the review recommends it - 15 or more actionable groups - and that pass changes nothing that gets applied.
 
+#### Review commits
+
+`--review-commits`, `--apply-commit-fixes` and `--improve-commits` are the commit counterparts of the three code modes. They review what was committed, not what is on disk, and need no plan: the commit messages, taken together, are the stated intent, and the range's net change (`git diff <base> <head>`) is what every model reviews.
+
+| Command | Does | Counterpart |
+| --- | --- | --- |
+| `--review-commits [<range>]` | every model reviews the range; the findings are grouped, validated and reported, each naming the commit that introduced it | `--review-code` |
+| `--apply-commit-fixes [<range>]` | applies that review's validated fixes as uncommitted edits | `--apply-code-fixes` |
+| `--improve-commits [<range>]` | the two above in one unattended command | `--improve-code` |
+
+Nothing commits, amends or rebases: the fixes are uncommitted edits on top of `HEAD`, for you to read and commit.
+
+**The range.** Python resolves it, the same way on every host. Leave it out to review the last commit:
+
+| You type | Reviews |
+| --- | --- |
+| nothing | the last commit, against its first parent |
+| `<rev>`: `abc1234`, `HEAD~2`, a tag, a branch | that one commit |
+| `A..B`, `A..`, `..B` | the commits after `A` up to `B`; an omitted side is `HEAD`, and `A` must be an ancestor of `B` |
+| `A...B` | the commits on `B` since it forked from `A` |
+| `last commit`, `last N`, `last N commits`, `N commits`, `-N` | the `N` newest commits, ending at `HEAD` |
+| `today`, `yesterday`, `this week`, `last N days` (or `hours`, `weeks`; `past` works as `last`), `since YYYY-MM-DD` (optionally with `HH:MM`) | the commits in that window, by committer date in your local time zone |
+| `since <rev>` | the commits after `<rev>` up to `HEAD` |
+| `this branch`, `branch` | the commits since `HEAD` forked from the default branch (`origin/HEAD`, else `main`, else `master`) |
+
+- **`N`** is a positive whole number, or `one` to `twelve`, so `last two days` works. Commits a merge brought in are reviewed as part of that merge commit (first parent only).
+- **Anything else is refused** at exit 3 with `[RANGE_UNRECOGNIZED]` and this list of forms; nothing is guessed. A range with no commits in it (an empty window, `A..A`) exits 2 with `[NOTHING_TO_REVIEW]`. A markdown path is never taken as a plan here: to review commits against one, pass it with `--context-plan`.
+- **The range goes right after the mode word, before any flag**, and needs no quotes: `--review-commits last 2 commits --quick`. A word after a flag may be that flag's value (`--models` takes several), so range words typed after one are refused with `[RANGE_AFTER_FLAGS]`, naming the command with the range moved, never reviewed as `HEAD`.
+- **One range per run.** To cover two, type one `A..B` that spans them, or run once per range. `--files` narrows a review to some of the range's files and never widens it.
+
+**What it prints first.** Before any model runs, every commit mode prints the commits it acts on, one line each, with the range's size:
+
+```text
+[COMMIT_RANGE] a1b2c3d..e4f5a6b (3 commits, 14 files, +412 −88)
+  e4f5a6b  2026-10-24  Wait for the clock to tick in the shared-ps-table row
+  c3d4e5f  2026-10-24  Windows: kill process trees through Job Objects, not…
+  b2c3d4e  2026-10-23  docs: slim skill development guide and extract reference…
+[COMMIT_RANGE_END]
+```
+
+The block shows the 20 newest commits, then where the full list is. A date phrase adds its window, and a range over 50 commits, 200 files or 20000 changed lines adds a `[RANGE_LARGE]` line naming ways to narrow it; the run continues. `[COMMIT_BRIEF] <path>` follows, naming the commit brief. Every follow-up command a run prints names the range pinned as `<base12>..<head12>` (the commit brief's path for a range that starts at the first commit), never the phrase you typed, so following it tomorrow reaches the same review; `--status` takes that pinned range too.
+
+**Reviewing before applying.** `--review-commits` writes the same two reports as `--review-code`, in `plans/commit-reviews/<base>-<head>/code-review/`. Both open with the commit block, and each finding names the commit that introduced it ("Introduced by `e4f5a6b`" and its subject, marked "(model)" when `git blame` could not decide and the model's claim was taken); `report.html` also filters and groups the findings by commit. Tick `Skip` or a `Mark valid` / `Mark invalid` override in `report.md`, or make the same choices in `report.html` and export `user_selections.json` next to it, exactly as after `--review-code`, then run `--apply-commit-fixes`:
+
+- **With no range,** it applies the newest completed commit review when that review ends at `HEAD` or behind it in `HEAD`'s history, else the newest one ending at `HEAD`, and names its pick on a `[COMMIT_REVIEW_SELECTED]` line before any fix is applied. An unfinished review is never picked. With no match, it exits 3 listing up to five completed reviews, each with its relation to `HEAD` and its command.
+- **With a range,** it applies that range's review, which must have completed. A phrase is resolved again when the apply runs, so a day later `last 2 days` names other commits; the pinned range the review printed always names the reviewed one.
+
+`--improve-commits` skips this step: it is unattended, and a judge agent decides every `needs-human-decision` item. For commits you do not fully trust, such as a fetched pull request, `--review-commits`, then the report, then `--apply-commit-fixes` is the safer path.
+
+**`--focus` and `--context-plan`.** `--focus "<text>"` steers the review toward a priority; it is not a filter. `--context-plan <path>` hands the review a plan as read-only context, and the commits are checked against it too.
+
+- **Recorded with the commit brief.** A later run of the same range that leaves them out keeps them, so the printed follow-ups, `--resume` and a no-argument `--apply-commit-fixes` all continue the same review. Typing a different value, or `""` to clear one, restarts the review round (`[COMMIT_REVIEW_RESTARTED]`): every model reviews again, and the replaced round, its reports and your marks in them move to `code-review/restarted-<stamp>/`, with a `[COMMIT_DECISIONS_DROPPED]` line counting the decisions not carried over.
+- **The context plan is copied when the review starts.** Every reviewer and validator reads that copy, so editing the file later changes nothing in that review: the next `--review-commits` or `--improve-commits` of the range warns with `[CONTEXT_PLAN_CHANGED]` and carries on with the copy. To review against the edited text, type `--context-plan <path>` again.
+- **`--apply-commit-fixes` keeps what the review used.** It never restarts a review: a different value typed there prints `[COMMIT_REVIEW_KEPT]`, with the commands that would review with it, and applies the review on record. A fix aimed at the context plan itself is skipped and named, never applied.
+
+**When files changed since the reviewed commit.** The review reads every file at the range's last commit, never from your working tree, so what is on disk does not change what is reviewed. When reviewed files differ on disk from that commit (later commits, uncommitted edits), the commit block adds a line naming them, `[SCOPE_DRIFT] 2 of 14 reviewed files differ on disk from e4f5a6b: utils/process_control.py, tests/test_detach.py`, and the run continues. The apply compares each fix's files with the reviewed commit before anything is written, and again just before each batch: a finding with a file changed since is skipped whole and named in the `[COMMIT_FIXES]` block the apply prints before its first batch, and no batch may write a file that differed from the reviewed commit when the apply started. So after a further commit, `--apply-commit-fixes` still applies every fix to the files that commit left alone.
+
+**Before you run it.** `--review-commits` writes only the commit brief and its folder. The other two edit source files, as `--improve-code` does:
+
+- *What gets written, and how to undo it.* `--apply-commit-fixes` and `--improve-commits` edit source files anywhere in the repository as uncommitted edits, `--improve-commits` unattended. When the run uses `--exec-subagents` (the Codex and OpenCode default), each batch keeps a pre-batch snapshot that `multi_llm.py util restore-batch` restores; nothing backs up the repository as a whole, so git is the way back. Commit or stash first, so `git diff` shows exactly what the run changed and `git restore` undoes it.
+- *Re-runs and `--resume`.* `--improve-commits` follows `--improve-code`'s rules ([above](#review-and-apply-in-one-command)), and its apply always gets the reviewed range's base. A stopped run names `--improve-commits <base12>..<head12> --resume`, which never re-runs a completed review and keeps every batch already applied; once both steps are done it prints `[ALREADY_COMPLETE]` and exits 2. `--interactive` is refused: run `--review-commits --interactive`, then `--apply-commit-fixes`.
+- *What it costs.* As for the code modes: one review call per model in the review's list, then validation, judging and one write dispatch per batch. A broad phrase such as `this branch` adds no calls, but each reviewer has more to read and covers it more thinly, which `[RANGE_LARGE]` warns about.
+
 ### 3.2 Examples
 
 ```text
@@ -260,6 +332,21 @@ You don't have to run the whole chain: **every step is also a standalone entry p
 # Review the code changes, then apply the validated fixes to the source files, unattended
 /multi-llm:multi-llm --improve-code plans/my-feature.md
 
+# Review your last commit (no plan needed)
+/multi-llm:multi-llm --review-commits
+
+# Review the last two commits (no quotes; the range goes before any flag)
+/multi-llm:multi-llm --review-commits last 2 commits
+
+# Review the commits after main, with error handling as the priority
+/multi-llm:multi-llm --review-commits main..HEAD --focus "error handling"
+
+# Apply the validated fixes of the commit review you just ran
+/multi-llm:multi-llm --apply-commit-fixes
+
+# Review this branch's commits, then apply the validated fixes, unattended
+/multi-llm:multi-llm --improve-commits this branch
+
 # Review/implement/code-review a plan using the configured default LLMs completely hands-off
 /multi-llm:multi-llm --full plans/my-feature.md --agent-decide --non-interactive
 
@@ -269,26 +356,28 @@ You don't have to run the whole chain: **every step is also a standalone entry p
 
 ### 3.3 Options
 
-These flags combine with any mode and are **position-independent** - they may appear before or after the plan path (and, for `--ask`, around the question). Not every flag applies to every mode.
+These flags combine with any mode and are **position-independent** - they may appear before or after the plan path (and, for `--ask`, around the question). The one exception is a commit mode's range, which goes right after the mode word, before any flag ([above](#review-commits)). Not every flag applies to every mode.
 
 | Flag | Effect |
 | --- | --- |
 | `--models <provider:model> ...` | Use exactly these models (variadic), overriding YAML defaults. Each must exist in `providers.yaml`. |
-| `--quick` | Use the smaller `quick_models` subset for a faster  run. In `--improve-plan` / `--improve-code` it goes to the review step. |
+| `--quick` | Use the smaller `quick_models` subset for a faster  run. In `--improve-plan` / `--improve-code` / `--improve-commits` it goes to the review step. |
 | `--interactive` | Force two-step model selection (provider, then models), ignoring YAML defaults. |
 | `--no-confirm` | Skip confirmation prompts - for unattended/silent runs. |
-| `--dry-run` | Show what would happen (tasks/batches) without making changes. Applies to `--implement` and the apply modes. |
+| `--dry-run` | Show what would happen (tasks/batches) without making changes. Applies to `--implement` and the apply modes, `--apply-commit-fixes` included. |
 | `--agent-decide` | In the apply modes, let a judge agent decide every `needs-human-decision` finding instead of prompting you (see [below](#34-letting-the-agent-decide-ambiguous-findings)). Implied by `--yes`, which the Codex and OpenCode shims bake in. `--claude-decide` / `--let-claude-decide` are accepted legacy spellings. |
-| `--force` | **Meaning depends on mode.** In the fan-out review/ask modes (`--review-plan`, `--review-tasks`, `--review-code`, `--ask`), resume an interrupted run: keep already-completed per-model results, run only the missing models, and bypass the completed-phase / partial-completion guards. In the apply modes, it's an alias for `--yes` (confirm bulk approval). In `--improve-plan` / `--improve-code`, it starts a new review round, then applies that round's findings ([above](#review-and-apply-in-one-command)). |
+| `--force` | **Meaning depends on mode.** In the fan-out review/ask modes (`--review-plan`, `--review-tasks`, `--review-code`, `--review-commits`, `--ask`), resume an interrupted run: keep already-completed per-model results, run only the missing models, and bypass the completed-phase / partial-completion guards. In the apply modes, it's an alias for `--yes` (confirm bulk approval). In `--improve-plan` / `--improve-code` / `--improve-commits`, it starts a new review round, then applies that round's findings ([above](#review-and-apply-in-one-command)). |
 | `--rerun-all` | In the fan-out review/ask modes, re-run every model from scratch, discarding any existing per-model results. Combine with `--force` (`--force --rerun-all`) for a fresh full re-run of an already-completed phase. |
+| `--focus "<text>"` | Steer a commit review toward a priority (not a filter). Taken by the three commit modes only. Recorded with the commit brief: a later run of the same range keeps it when you leave it out, and a different value (or `--focus ""`, which clears it) restarts the review round. `--apply-commit-fixes` keeps the value the review on record used ([above](#review-commits)). |
+| `--context-plan <path>` | Give a commit review a plan as read-only context, and check the commits against it too. Taken by the three commit modes only. Copied into the review's folder when the review starts and recorded like `--focus`; type it again to review against an edited file. `--apply-commit-fixes` keeps the context plan the review on record used, and never edits it. |
 
 The apply and implement modes accept additional approval flags (`--yes`, `--approve-all`, `--resume`, `--task`, and more); run `multi_llm.py <mode> --help` for the authoritative list, or read the per-mode files in `skills/multi-llm/instructions/`.
 
 ### 3.4 Letting the agent decide ambiguous findings
 
-When the models disagree or a suggestion is borderline, validation marks it `needs-human-decision`. In the apply modes (`--apply-suggestions`, `--apply-code-fixes`, `--apply-task-suggestions`) Claude Code prompts you to approve or skip each one through its structured `AskUserQuestion` tool - it is the only host that has one, so on Codex and OpenCode the baked-in `--yes` resolves these without asking ([docs/hosts.md](docs/hosts.md)). Every such prompt also offers a **Let the agent decide** option, per item or for a whole batch, that hands just that judgment to a judge agent instead of you.
+When the models disagree or a suggestion is borderline, validation marks it `needs-human-decision`. In the apply modes (`--apply-suggestions`, `--apply-code-fixes`, `--apply-commit-fixes`, `--apply-task-suggestions`) Claude Code prompts you to approve or skip each one through its structured `AskUserQuestion` tool - it is the only host that has one, so on Codex and OpenCode the baked-in `--yes` resolves these without asking ([docs/hosts.md](docs/hosts.md)). Every such prompt also offers a **Let the agent decide** option, per item or for a whole batch, that hands just that judgment to a judge agent instead of you.
 
-To skip the prompts entirely and have a judge agent decide **every** `needs-human-decision` finding up front, pass `--agent-decide` - which is what the baked-in `--yes` already does on Codex and OpenCode. The judge is not necessarily Claude: on a host with native subagents (Claude Code) it is the host's own agent, and under `--exec-subagents` (the Codex and OpenCode default) it is the model your session is running on, e.g. `codex:<chat model>` on Codex. A `driver.subagent_runner` you set explicitly (in `<git-root>/.multi-llm/providers.yaml` or the file `MULTI_LLM_PROVIDERS_CONFIG` names) overrides that, and the host's floor runner (`codex:gpt-6-astra` on Codex) is used only when neither is available. The summary names it on a `judge:` line. `--improve-plan` and `--improve-code` imply `--agent-decide` (with `--yes` and `--no-confirm`) for their apply step on every host.
+To skip the prompts entirely and have a judge agent decide **every** `needs-human-decision` finding up front, pass `--agent-decide` - which is what the baked-in `--yes` already does on Codex and OpenCode. The judge is not necessarily Claude: on a host with native subagents (Claude Code) it is the host's own agent, and under `--exec-subagents` (the Codex and OpenCode default) it is the model your session is running on, e.g. `codex:<chat model>` on Codex. A `driver.subagent_runner` you set explicitly (in `<git-root>/.multi-llm/providers.yaml` or the file `MULTI_LLM_PROVIDERS_CONFIG` names) overrides that, and the host's floor runner (`codex:gpt-6-astra` on Codex) is used only when neither is available. The summary names it on a `judge:` line. `--improve-plan`, `--improve-code` and `--improve-commits` imply `--agent-decide` (with `--yes` and `--no-confirm`) for their apply step on every host.
 
 ```text
 /multi-llm:multi-llm --apply-code-fixes plans/my-feature.md --agent-decide --no-confirm

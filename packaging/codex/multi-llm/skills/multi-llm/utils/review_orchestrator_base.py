@@ -7344,7 +7344,9 @@ def _ensure_state_file(state) -> None:
         state.save()
 
 
-def already_completed_lines(mode_word: str, phase_dir: Union[str, Path]) -> List[str]:
+def already_completed_lines(
+    mode_word: str, phase_dir: Union[str, Path], *, document: str = "plan",
+) -> List[str]:
     """What a re-run of a review phase the plan already completed says: that
     it is done and nothing ran, where its results are, and the two ways to
     run it again (fix round 28, live run 12 #11: OpenCode 01f retried a
@@ -7352,7 +7354,12 @@ def already_completed_lines(mode_word: str, phase_dir: Union[str, Path]) -> List
     'review-plan' has already been completed … Use --force", which the host
     relayed as an error block). Nothing failed: the exit is 2, "nothing to
     do / phase already complete", which every route reads as a success, and
-    the next phase is the result's ``user_next_step`` as on any exit 2."""
+    the next phase is the result's ``user_next_step`` as on any exit 2.
+
+    *document* is what the user calls the input: ``plan``, or ``commit brief``
+    for a commit review (``commit_review.document_label``; plans/review-
+    commits.md §2.8 "'Commit brief', never 'plan'"), whose caller also passes
+    the commit mode the user typed as *mode_word*."""
     try:
         shown = os.path.relpath(str(phase_dir)).replace(os.sep, "/")
     except ValueError:  # Windows: another drive than the cwd's
@@ -7360,18 +7367,20 @@ def already_completed_lines(mode_word: str, phase_dir: Union[str, Path]) -> List
     if shown == os.pardir or shown.startswith(os.pardir + "/"):
         shown = str(phase_dir)
     return [
-        f"{mode_word} has already been completed for this plan, so nothing "
+        f"{mode_word} has already been completed for this {document}, so nothing "
         f"ran this time; its results are in {shown}.",
         "To run it again from the start, add --force to the command; to "
         "rebuild its report from the results already there, add --reaggregate.",
     ]
 
 
-def report_already_completed(mode_word: str, phase_dir: Union[str, Path]) -> int:
+def report_already_completed(
+    mode_word: str, phase_dir: Union[str, Path], *, document: str = "plan",
+) -> int:
     """Print :func:`already_completed_lines`, carry them as the result's
     ``notice`` (the line every route relays as plain text above the next
     step) and return exit 2."""
-    lines = already_completed_lines(mode_word, phase_dir)
+    lines = already_completed_lines(mode_word, phase_dir, document=document)
     for line in lines:
         print(line)
     cli_common.add_notice(" ".join(lines))

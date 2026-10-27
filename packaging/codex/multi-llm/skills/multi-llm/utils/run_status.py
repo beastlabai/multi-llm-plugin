@@ -73,6 +73,7 @@ from .cli_common import (
     dispatcher_command,
     record_answer_origins,
     record_artifact,
+    record_commit_fixes_result,
     record_consolidation_recommended,
     record_mode_phase,
     record_validation_context,
@@ -110,7 +111,7 @@ from .output_handler import (
     slugify_question,
 )
 from .stream_bootstrap import bootstrap_streams
-from .text_clip import clip, join_clauses, plain_line, without_closing_mark
+from .text_clip import clip, drop_said_clauses, join_clauses, plain_line, without_closing_mark
 from .validation_context import (
     pick_worst,
     validation_context_notice,
@@ -530,6 +531,26 @@ def _plan_spelling(
     return str(args.plan_file)
 
 
+def _document_word(plan_path: Path) -> str:
+    """``commit brief`` when *plan_path*'s ``state.json`` records a
+    ``commit_range``, else ``plan``: what a line ``status`` prints calls the
+    document it reads (plans/review-commits.md §2.8, "'Commit brief', never
+    'plan'"), through the one owner of the word, ``commit_review.document_label``.
+    Read-only; an unreadable state is a plan."""
+    try:
+        from .commit_review import document_label, read_commit_range
+
+        return document_label({"commit_range": read_commit_range(plan_path)})
+    except Exception:  # noqa: BLE001 - advisory: the plan's word stands
+        return "plan"
+
+
+def _document_file_label(plan_path: Path) -> str:
+    """``Plan file`` as today, or ``Commit brief`` (:func:`_document_word`)."""
+    word = _document_word(plan_path)
+    return "Plan file" if word == "plan" else word.capitalize()
+
+
 def _recorded_route(
     args: argparse.Namespace, views: Sequence[Dict[str, Any]], plan_path: Path,
 ) -> Optional[str]:
@@ -797,7 +818,8 @@ def render_run_text(
         if not state_block:
             # A native implement read back from state.json follows instead
             # (`render_state_implement_lines`, fix round 16).
-            lines.append(f"  no run recorded for {scope or 'this plan'}")
+            lines.append(
+                f"  no run recorded for {scope or 'this ' + _document_word(plan_path)}")
         return lines
     outer_spell = spell
     for view in views:
@@ -2519,13 +2541,18 @@ def native_resume_command(
     """``--<mode> <plan> --resume`` in the host's spelling (:func:`user_speller`),
     else the dispatcher's: the way on for a native phase whose loop ended
     without its finish, or that stopped. *flags* replace the bare verb with a
-    whole answer (``--resume --human-task T005=skip``, fix round 20)."""
+    whole answer (``--resume --human-task T005=skip``, fix round 20).
+
+    On a commit review (a brief whose ``state.json`` holds ``commit_range``)
+    the command reads as the commit mode with the pinned range, in either
+    spelling (plans/review-commits.md §2.8): ``status``'s ``resume with:``
+    line for a native apply that stopped."""
     tokens = [str(flag) for flag in flags] or [_RESUME_VERB_BY_MODE.get(mode, "--resume")]
     if spell is not None:
         spelled = spell(mode, [], tokens)
         if spelled:
             return spelled
-    return cli_common.retry_command(mode, str(plan_path), *tokens)
+    return _retry_command(mode, plan_path, *tokens)
 
 
 def native_stop_answer_commands(
@@ -3752,8 +3779,11 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
 #: re-reads the rest. Every mode in neither table keeps ``--force``, the only
 #: resume verb it accepts. ``status`` cannot afford to import each
 #: orchestrator's parser to derive this, so these are the two tables in this
-#: module that are typed rather than read.
-_REAGGREGATE_MODES = ("review-plan", "review-tasks", "review-code")
+#: module that are typed rather than read. ``review-commits`` forwards every
+#: flag it does not own to review-code (plans/review-commits.md §2.1), so its
+#: retry verb is review-code's.
+_REAGGREGATE_MODES = ("review-plan", "review-tasks", "review-code",
+                      "review-commits")
 
 #: Modes whose retry verb is neither. ``generate-tasks`` has a ``--reaggregate``
 #: too, but there it is the native host's second half — it only ever *consumes*
@@ -3784,6 +3814,10 @@ _REAGGREGATE_MODES = ("review-plan", "review-tasks", "review-code")
 #: ``--force`` would start a new review round. Their line is not built from
 #: this verb and the recorded flags but from the composite's own continuation
 #: (:func:`_composite_resume_tokens`); the entries say what that ends with.
+#:
+#: The commit modes (plans/review-commits.md §2.8) take their fronted
+#: phase's verb: ``apply-commit-fixes`` is apply-code-fixes' ``--resume``,
+#: and ``improve-commits`` resumes like the other composites.
 _RESUME_VERB_BY_MODE = {
     "generate-tasks": "--yes",
     "apply-suggestions": "--resume",
@@ -3793,6 +3827,8 @@ _RESUME_VERB_BY_MODE = {
     "full": "--resume",
     "improve-plan": "--resume",
     "improve-code": "--resume",
+    "apply-commit-fixes": "--resume",
+    "improve-commits": "--resume",
 }
 
 #: The modes whose progress mirror is ``write_subagents``
@@ -3809,6 +3845,7 @@ Speller = Any
 
 def user_speller(
     host_id: Optional[str], plan_arg: str,
+    *, plan_path: Optional[Path] = None,
 ) -> Optional[Speller]:
     """The run view's commands in *host_id*'s spelling, or ``None``.
 
@@ -3833,6 +3870,12 @@ def user_speller(
     :func:`_view_speller`): that route's template and the flags it composes
     (the tool routes' reserved set). A shell's ``status --host codex`` used
     to print the file shim's sentence for a run the plugin's tool started.
+
+    On a commit review (plans/review-commits.md §2.8: the ``state.json`` at
+    *plan_path*, else at *plan_arg*, holds ``commit_range``) a command naming
+    review-code, apply-code-fixes or improve-commits reads as the commit mode
+    with the pinned range, and leaves out every flag a front door synthesises
+    or consumes (``next_phase.commit_view_for``).
     """
     import io
 
@@ -3845,6 +3888,7 @@ def user_speller(
             return None
     except Exception:  # noqa: BLE001 - advisory: the dispatcher command stands
         return None
+    brief = next_phase.brief_view(plan_arg, plan_path)
 
     def spell(
         mode: str, extra: Sequence[str], tokens: Sequence[str],
@@ -3853,6 +3897,11 @@ def user_speller(
         resolved = modes.resolve(mode)
         if resolved is None:
             return None
+        view = next_phase.spelled_view(resolved.name, brief)
+        if view is not None:
+            from .commit_spelling import strip_fronted_flags
+
+            tokens = strip_fronted_flags(tokens)
         try:
             chosen = next_phase.resolve_route(
                 host, stderr=io.StringIO(), recorded=route)
@@ -3884,12 +3933,40 @@ def user_speller(
         # line and the command printed did not parse.
         if any(not token or not token.isprintable() for token in kept):
             return None
+        if view is not None:
+            return template.replace(
+                next_phase.ARGS_SLOT,
+                next_phase.commit_spelled_args(resolved.name, view, kept))
         words = [f"--{resolved.name}", next_phase.quote_plan_arg(plan_arg)]
         words += [next_phase.quote_plan_arg(token) for token in kept]
         return template.replace(next_phase.ARGS_SLOT, " ".join(words))
 
     spell.host = host  # type: ignore[attr-defined]
     return spell
+
+
+def _retry_command(
+    mode: str, plan_path: Path, *args: str, flags: Optional[Sequence[str]] = None,
+) -> str:
+    """``cli_common.retry_command(mode, plan_path, *args, flags=flags)``, the
+    dispatcher spelling of a retry this view prints, in the commit spelling
+    on a commit review (plans/review-commits.md §2.8, "Spelling of
+    commands"): the commit mode, the pinned range (the brief path on a root
+    range) and none of the flags a front door synthesises or consumes, in
+    *args* or in the replayed *flags*. A plan's run, and a direct
+    ``--head-ref`` run, keep the command byte for byte."""
+    from . import next_phase
+
+    view = next_phase.commit_view_for(mode, str(plan_path))
+    if view is None:
+        return cli_common.retry_command(mode, str(plan_path), *args, flags=flags)
+    from .commit_spelling import strip_fronted_flags
+
+    return cli_common.retry_command(
+        next_phase.commit_mode_word(mode, view), view.pinned,
+        *strip_fronted_flags(args),
+        flags=strip_fronted_flags(flags) if flags is not None else None,
+    )
 
 
 def _run_route(view: Mapping[str, Any], host: Optional[str]) -> Optional[str]:
@@ -3958,7 +4035,8 @@ def _resume_command(
         spelled = spell(mode, positionals[1:], tokens)
         if spelled:
             return spelled
-    return cli_common.retry_command(mode, *positionals, *verbs, flags=flags)
+    # On a commit review the commit spelling (plans/review-commits.md §2.8).
+    return _retry_command(mode, plan_path, *positionals[1:], *verbs, flags=flags)
 
 
 def _composite_resume_tokens(mode: str, replay_flags: Any) -> List[str]:
@@ -3973,12 +4051,24 @@ def _composite_resume_tokens(mode: str, replay_flags: Any) -> List[str]:
     either, and their ``--force`` would start another round. ``--blocked``
     refuses the same record (exit 3), since it hands its command back as a
     tool call.
+
+    On a composite whose positional is a range (``improve-commits``) the
+    tokens never carry a flag its front door synthesises or consumes
+    (``--plan-file``, ``--base-ref``, ``--head-ref``, ``--focus``,
+    ``--context-plan``; plans/review-commits.md §2.8): the front door refuses
+    the first three, and the brief inherits the rest.
     """
     from . import improve_workflow
 
     recorded = replay_flags if isinstance(replay_flags, list) else None
     try:
-        return improve_workflow.recorded_continuation(mode, recorded)
+        tokens = improve_workflow.recorded_continuation(mode, recorded)
+        row = cli_common._modes().resolve(mode)
+        if row is not None and cli_common._modes().POS_REVS in tuple(row.positionals):
+            from .commit_spelling import strip_fronted_flags
+
+            tokens = strip_fronted_flags(tokens)
+        return tokens
     except improve_workflow.ContinuationError as exc:
         detail = " ".join(str(exc).split())
         print(
@@ -4048,7 +4138,7 @@ def _rerun_command(
         spelled = spell(word, [], cli_common.retry_tokens(str(plan_path), flags=flags)[1])
         if spelled:
             return spelled
-    return cli_common.retry_command(word, str(plan_path), flags=flags)
+    return _retry_command(word, plan_path, flags=flags)
 
 
 def _resume_shape(view: Dict[str, Any]) -> "tuple":
@@ -4651,13 +4741,141 @@ def _collect(plan_path: Path, args: argparse.Namespace) -> List[Dict[str, Any]]:
     )
 
 
+#: What ``status`` takes for a commit review, said in its refusal of any other
+#: range text (plans/review-commits.md §2.2, "``status`` takes the pinned
+#: spelling").
+_STATUS_TAKES_PINNED = (
+    "status takes a commit review only by its pinned range <base12>..<head12> "
+    "or by its commit brief's path, as the commit block, [COMMIT_BRIEF] and "
+    "the result line print them. It never resolves a range: a phrase or a "
+    "revision would name today's range, not the one the run reviewed."
+)
+
+
+class StatusSpellingRefused(Exception):
+    """A ``status`` plan value that names a commit range ``status`` will not
+    resolve; ``message`` is printed whole, its first line starting with the
+    marker."""
+
+    def __init__(self, message: str, exit_code: int = EXIT_NEEDS_HUMAN):
+        super().__init__(message)
+        self.message = message
+        self.exit_code = exit_code
+
+
+def _holds_range_dots(text: str) -> bool:
+    """Whether *text* holds ``..`` as range syntax rather than as a path
+    segment: ``HEAD~2..HEAD``, ``A..``, ``..B`` and the displayed
+    ``root..<head7>`` do, ``../plans/x.md`` does not (that is a plan path that
+    is missing, and keeps ``Plan file not found``)."""
+    return any(
+        ".." in segment and segment != ".."
+        for segment in text.replace("\\", "/").split("/")
+    )
+
+
+def status_plan_value(value: str) -> str:
+    """The plan path ``status`` reads for *value*, its one positional as typed.
+
+    ``status`` keeps its ``POS_PLAN`` row, so none of the commit modes'
+    range rules run for it; it maps the value here, before the existence
+    check, and resolves nothing (plans/review-commits.md §2.2):
+
+    * an existing path is taken as it is, as before: a plan, or a commit
+      brief, which is also a root range's pinned spelling;
+    * the pinned ``<base12>..<head12>`` names its brief by name
+      (``commit_review.brief_for_pinned``, no git call), so every view,
+      ``--abort`` and ``--sweep`` see the brief; with no brief there it is
+      exit 3 ``[COMMIT_REVIEW_NOT_FOUND]``, naming the review that makes one;
+    * other range text, ``..`` syntax or a phrase the pure phrase matcher
+      recognizes (``commit_range.match_phrase``), is exit 3
+      ``[RANGE_UNRECOGNIZED]``;
+    * anything else comes back unchanged, for ``Plan file not found``.
+
+    Raises :class:`StatusSpellingRefused` for the two refusals.
+    """
+    if os.path.exists(value):
+        return value
+    from . import commit_range, commit_review
+
+    try:
+        brief = commit_review.brief_for_pinned(value)
+    except Exception as exc:  # noqa: BLE001 - no folder to find it in
+        raise StatusSpellingRefused(
+            f"[COMMIT_REVIEW_NOT_FOUND] {value}: {' '.join(str(exc).split())}"
+        ) from exc
+    if brief is not None:
+        if Path(brief).exists():
+            return str(brief)
+        raise StatusSpellingRefused(
+            f"[COMMIT_REVIEW_NOT_FOUND] {value}: no commit brief at {brief}\n"
+            f"No review of that range is on record here; review it with: "
+            f"--review-commits {value}"
+        )
+    if _holds_range_dots(value) or commit_range.match_phrase(value) is not None:
+        raise StatusSpellingRefused(
+            f"[RANGE_UNRECOGNIZED] {value}\n{_STATUS_TAKES_PINNED}"
+        )
+    return value
+
+
+def _refuse_status_spelling(exc: StatusSpellingRefused, *, as_json: bool) -> int:
+    """Print a :class:`StatusSpellingRefused` and return its exit code: the
+    marker lines on stdout (one JSON object under ``--json``, so the stream
+    stays parseable), and the line the result carries as ``error``."""
+    if as_json:
+        print(json.dumps({"error": exc.message}, indent=2))
+    else:
+        print(exc.message)
+    record_error(" ".join(exc.message.split("\n")))
+    return exc.exit_code
+
+
+#: The ``--phase`` selectors under which ``status`` shows a commit review's
+#: ``[COMMIT_FIXES]`` block: none, or the apply phase's own words.
+_COMMIT_FIXES_PHASES = (None, "apply-fixes", "apply-code-fixes")
+
+
+def _commit_fixes_view(
+    plan_path: Path, args: argparse.Namespace, views: Sequence[Dict[str, Any]],
+    terminal: bool,
+) -> Optional[Tuple[List[str], Dict[str, Any]]]:
+    """``([COMMIT_FIXES] lines, commit_fixes)`` from the apply guard saved in
+    the plan's ``state.json`` (``commit_apply.fixes_from_state``), or None.
+
+    Only for a settled poll (every listed run done, failed, aborted or
+    finished in the foreground with no run record; or no run record at all, a
+    native apply's case), and not when ``--question`` or
+    a ``--phase`` other than the apply phase narrows the poll. Read-only and
+    advisory: an unreadable state file costs the block, never the poll.
+    """
+    if getattr(args, "question", None) or not (terminal or not views):
+        return None
+    try:
+        if _resolve_phase(args.phase) not in _COMMIT_FIXES_PHASES:
+            return None
+        from .commit_apply import fixes_from_state
+
+        state_file = output_dir_path(plan_path) / "state.json"
+        if not state_file.is_file():
+            return None
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        return fixes_from_state(state) if isinstance(state, dict) else None
+    except Exception:  # noqa: BLE001 - advisory: the run view is not
+        return None
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     bootstrap_streams()
     args = parse_args(argv)
-    plan_path = Path(os.path.abspath(args.plan_file))
+    try:
+        plan_value = status_plan_value(args.plan_file)
+    except StatusSpellingRefused as exc:
+        return _refuse_status_spelling(exc, as_json=args.json)
+    plan_path = Path(os.path.abspath(plan_value))
 
     if not plan_path.exists():
-        payload = {"error": f"Plan file not found: {plan_path}"}
+        payload = {"error": f"{_document_file_label(plan_path)} not found: {plan_path}"}
         print(json.dumps(payload, indent=2))
         return EXIT_ERROR
 
@@ -4753,7 +4971,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         watched_mode = str(
             watched_run.get("mode") or watched.get("phase") or ""
         ) or None
-        watched_phase = str(watched.get("phase") or "") or None
+        # A composite's run dir holds no phase of its own; its report
+        # records the one its worker's line says (D2).
+        watched_phase = str(
+            watched.get("phase")
+            or detach.recorded_step_results(watched).get("phase") or ""
+        ) or None
         record_mode_phase(watched_mode, watched_phase)
         # Same selector, same reason one step further: a supervised poll that
         # pins one run reads its own `MULTI_LLM_RESULT` verbatim and never opens
@@ -4823,6 +5046,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     terminal_run = bool(views) and not any(
         v["verdict"] not in detach.TERMINAL_VERDICTS for v in views
     )
+    # plans/review-commits.md §2.3/§2.8: a detached apply prints its
+    # `[COMMIT_FIXES]` block into the worker's log, which no host reads, so a
+    # terminal poll whose state holds the apply guard renders the block from
+    # that saved decision and carries `commit_fixes` on its result line.
+    # A phase that ran in the foreground has no run record (`no_run`): on
+    # Claude Code the review core runs detached and the apply core in the
+    # foreground, so the hand-typed `status <pinned>` is always that mixed
+    # shape. Nothing is still writing either way, so the block is rendered
+    # when every listed run is settled, not only when every one is terminal.
+    commit_fixes_settled = bool(views) and not any(
+        v["verdict"] not in detach.TERMINAL_VERDICTS
+        and v["verdict"] != detach.VERDICT_NO_RUN
+        for v in views
+    )
+    commit_fixes = _commit_fixes_view(plan_path, args, views, commit_fixes_settled)
+    if commit_fixes is not None:
+        record_commit_fixes_result(commit_fixes[1])
     workflow_trailer: List[str] = []
     terminal_notice: Optional[str] = None
     terminal_workflow: Optional[Dict[str, Any]] = None
@@ -4947,6 +5187,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             payload["ignored_dirs"] = list(discovery["ignored_dirs"])
         if discovery.get("copies"):
             payload["copied_runs"] = list(discovery["copies"])
+        if commit_fixes is not None:
+            payload["commit_fixes"] = commit_fixes[1]
         print(json.dumps(payload, indent=2, default=str))
     else:
         lines: List[str] = []
@@ -4960,7 +5202,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
             lines.append("")
         spell = user_speller(
-            _reader_host(args), _plan_spelling(args, views, plan_path))
+            _reader_host(args), _plan_spelling(args, views, plan_path),
+            plan_path=plan_path)
         lines += render_run_text(
             views, plan_path=plan_path, workflow=workflow,
             scope=_scope_label(args), resume_workflow=terminal_workflow,
@@ -4994,6 +5237,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if runner:
             lines.append("")
             lines += runner
+        if commit_fixes is not None:
+            lines.append("")
+            lines += commit_fixes[0]
         if workflow_trailer:
             lines.append("")
             lines += workflow_trailer
@@ -5020,6 +5266,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             terminal_workflow, prefix="", suggested=False,
             carried=step)) or None
 
+    # D2 (live test 2026-10-26): a composite's steps ran in its process, so
+    # what each recorded on the result line (its notice, counts, validation
+    # context) and the line's artifacts reach its run dir only as its report
+    # recorded them, under this run's id (`detach.recorded_step_results`). A
+    # run that never got that far is read as before, from its own dir alone.
+    carried = (
+        detach.recorded_step_results(views[0])
+        if terminal_run and len(views) == 1
+        and (args.phase or args.question or args.run_id)
+        else {}
+    )
+    steps = [step for step in carried.get("steps") or [] if isinstance(step, dict)]
     # Plan §2.4: a `mode: truncated` validation source sets the notice on any
     # terminal poll (every view, not only `--view run`); it qualifies the
     # verdicts the workflow step acts on, so it comes first and joins the
@@ -5036,6 +5294,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     note_parts = [
         note for view in views for note in _run_notes(view)
     ] if terminal_run else []
+    # Then a composite's steps' own notices, in step order, each as its phase
+    # recorded and bounded it: one clip over the lot would cut the last
+    # step's (a `full` run's implement and apply-code-fixes each carry up to
+    # the 1200 characters one phase's notice is sized to). A review's
+    # truncation sentence is in its own.
+    step_parts = [str(step["notice"]) for step in steps if step.get("notice")]
     if stop_error:
         # Fix round 26 (live run 11, Codex stop 01b): a stop's own line, the
         # result's `error` the hosts relay whole, already ends with what ran
@@ -5049,11 +5313,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # it where it ends the notice.
     write_notice = clip(join_clauses(write_parts), 1200) or None
     notes_notice = join_clauses(note_parts)
-    combined_notice = join_clauses(
-        (truncation_notice, write_notice, notes_notice, terminal_notice))
+    # The steps' clause by clause, each said once (Fable review of D2): a
+    # `full` run's implement and apply-code-fixes word "Nothing ran this
+    # repository's tests: …" alike, and a stop's error may end with it.
+    steps_notice = ""
+    for part in step_parts:
+        earlier = join_clauses((
+            clip(stop_error, ERROR_MAX_CHARS) if stop_error else None,
+            write_notice, notes_notice, steps_notice))
+        steps_notice = join_clauses((steps_notice, drop_said_clauses(part, earlier)))
+    combined_notice = join_clauses((
+        truncation_notice, write_notice, notes_notice, steps_notice,
+        terminal_notice))
     if combined_notice:
         record_notice(combined_notice)
 
+    for path in carried.get("artifacts") or []:
+        if isinstance(path, str):
+            record_artifact(path)
     for view in views:
         for path in view["output_files"].values():
             if isinstance(path, str):
@@ -5075,7 +5352,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # top-level `mode` wins, first in discovery order on a tie (its `phase`
     # says which); the text above rendered every phase's line.
     validation_context = pick_worst(
-        [v.get("validation_context") for v in views]
+        [v.get("validation_context") for v in [*views, *steps]]
     )
     if validation_context:
         record_validation_context(validation_context)
@@ -5085,9 +5362,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # one run — the condition `record_mode_phase` uses above: an unselected
     # `--view run` lists every phase alphabetically while `mode`/`phase` stay
     # `status`/null, so the first view's counts would read as whichever run the
-    # host was watching.
+    # host was watching. A composite's are its last review's, the counts its
+    # worker's line kept (D2).
     counts = (
-        views[0].get("validation_counts")
+        next((v["validation_counts"] for v in reversed([*views, *steps])
+              if v.get("validation_counts")), None)
         if len(views) == 1 and (args.phase or args.question or args.run_id)
         else None
     )
@@ -5530,12 +5809,13 @@ def _run_abort(plan_path: Path, args: argparse.Namespace) -> int:
     """
     views = _collect(plan_path, args)
     if not views:
-        print("Nothing to abort: no run recorded for this plan.")
+        print(f"Nothing to abort: no run recorded for this {_document_word(plan_path)}.")
         return EXIT_NOTHING_TO_DO
     live = [v for v in views if v["verdict"] not in detach.TERMINAL_VERDICTS]
     if len(live) > 1 and not _abort_selector_given(args):
         print(
-            f"{len(live)} live runs under this plan and no selector: naming which "
+            f"{len(live)} live runs under this {_document_word(plan_path)} and no "
+            "selector: naming which "
             "one to abort is the caller's job. Candidates:"
         )
         for view in live:

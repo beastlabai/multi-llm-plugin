@@ -273,6 +273,7 @@ def build_judge_tasks(
     grouped_file: Optional[str] = None,
     tasks_file: Optional[str] = None,
     prompt_budget: Optional[PromptBudget] = None,
+    trust_note: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Materialize one judging task per in-scope item.
 
@@ -292,6 +293,11 @@ def build_judge_tasks(
             way an edited plan already does.
         prompt_budget: Optional D2d budget. A single item's prompt cannot be
             split, so an over-budget prompt fails loudly rather than truncating.
+        trust_note: Optional sentence appended to every prompt: on a commit
+            review's apply, ``commit_range.DATA_UNDER_REVIEW`` (the findings
+            are built from commits and files read at ``head``, all data under
+            review; plans/review-commits.md §2.6). ``None`` keeps every
+            prompt byte for byte what it was.
 
     Returns:
         The task-file document (not yet written).
@@ -308,6 +314,8 @@ def build_judge_tasks(
     for index, item in enumerate(items):
         group_id = item.get("group_id", "")
         prompt = build_human_decision_judge_prompt([item])
+        if trust_note:
+            prompt = f"{prompt.rstrip()}\n\n{trust_note}\n"
         if not budget.fits(prompt):
             budget.resolution(prompt, splittable=False)
         # Both identities key off the item, never off its position: this function

@@ -1067,6 +1067,94 @@ class TestVerbResolution:
         for value in ("python", "required"):
             assert f"plus {caps.WAIT_CAP_MARGIN_S:.0f} s" not in caps._DETACH[value]
             assert "--timeout" not in caps._DETACH[value]
+            assert str(caps.NATIVE_LAUNCH_TIMEOUT_MS) not in caps._DETACH[value]
+
+    def test_the_native_launch_names_its_own_timeout(self):
+        """PD-1 (2026-10-27): the sentence sized every poll and never the launch.
+
+        Claude Code stops a `run_in_background` command that names no `timeout`
+        at the tool's default deadline, ten minutes in a headless session: a
+        timeout-less `sleep 700` was stopped at 600.9 s, and a live
+        `--review-commits` fan-out at 599.7 s (`"exit":143,"next":null`), after
+        which the host improvised a `--force` re-run. The launch now names the
+        parameter's documented maximum in its unit, derived from one constant,
+        and the loop's stop condition covers a stop at that limit too.
+        """
+        sentence = caps.verb_sentence("claude-code", "detach")
+        ms = caps.NATIVE_LAUNCH_TIMEOUT_MS
+        # The tool's documented background maximum (2.1.311), whole hours so
+        # the derived "N hours" reads true.
+        assert ms == 7_200_000 and ms % 3_600_000 == 0
+        for fragment in (
+            "give that launch call a timeout of its own",
+            f"the longest the parameter takes: {ms} here, in milliseconds",
+            f"({ms // 3_600_000} hours;",
+            "clamps it rather than refusing it",
+            "exit `143`, `next` `null`",
+        ):
+            assert fragment in sentence, (
+                f"the native *run detached* sentence lost {fragment!r}; SKILL.md "
+                f"is a byte-identical copy of it.\n  sentence: {sentence}"
+            )
+        # The launch clause comes before the first status call it hands over to.
+        assert sentence.index(str(ms)) < sentence.index("one **non-waiting**")
+        # Derived, never typed into the sentence's source.
+        source = Path(caps.__file__).read_text(encoding="utf-8")
+        assert f"takes: {ms} here" not in source
+        # Milliseconds and Claude Code's number: only claude-code may read it.
+        assert [h for h in HOST_IDS if HOSTS[h]["detach"] == "native"] == ["claude-code"]
+
+    def test_a_stop_at_the_time_limit_is_offered_its_real_ways_forward(self):
+        """Fable review, finding 3 (2026-10-27): the maximum is still a ceiling.
+
+        A run past it was left with "report … rather than retrying" and nothing
+        to offer, which is the run-1 incident minus the improvisation. Probed
+        on a copy of the phase dir that kill left, with no model call: `status`
+        names no command, a plain relaunch over a dir holding a result is exit
+        3, `--force` resumes with `[SKIP]`, and `--reaggregate` reports with what
+        is there. The sentence offers those, and says which models have a file,
+        because a `done` row can have none (`tests/test_e2e_failures.py`
+        `TestAFanOutCutOffMidRun` pins all three on the real `main()`).
+        """
+        sentence = caps.verb_sentence("claude-code", "detach")
+        for fragment in (
+            "report a non-zero exit status with that path rather than retrying.",
+            "`status` still reading `running in foreground`",
+            "offer the user each of these and run none yourself",
+            "made again the same way with `--force` added, which resumes",
+            "(`[SKIP]`)",
+            # Fable's second pass, finding 2: review-code's guard alone; the
+            # other review modes and ask re-run plainly and `[SKIP]`.
+            "without it, review-code and the commit modes refuse a dir holding "
+            "results, exit `3`",
+            "never `--rerun-all`",
+            "on a review mode with at least one such file, its `--reaggregate`",
+            "a `done` row can have none",
+            "a composite's `[IMPROVE_RERUN]`), offer that instead",
+        ):
+            assert fragment in sentence, (
+                f"the native *run detached* sentence lost {fragment!r}.\n"
+                f"  sentence: {sentence}"
+            )
+        # The words the run prints, pinned against the code that prints them.
+        import code_review_orchestrator as cro_mod
+        from utils import run_status
+
+        body = Path(cro_mod.__file__).read_text(encoding="utf-8")
+        assert "- already has results" in body and "Partial completion detected" in body
+        assert "a dir holding results is refused" not in sentence
+        # The §6 rule "offer only the ways forward the stop itself names" would
+        # leave this stop with none: SKILL.md carves it out (finding 4).
+        skill = (Path(caps.__file__).parent.parent / "SKILL.md").read_text(encoding="utf-8")
+        assert ("A stop at the background mechanism's time limit is the one stop whose "
+                "ways forward are not its own to name: it names none, so offer the ones "
+                "*Run detached* (section 5) lists for it") in skill
+        assert skill.index("offer only the ways forward the stop itself names") < skill.index(
+            "is the one stop whose ways forward are not its own to name")
+        assert run_status._verdict_text({
+            "verdict": "no_run", "run": {}, "state": "models_running",
+            "progress": {"step": "fanout", "models_total": 2, "models_done": 2},
+        }).startswith("running in foreground")
 
     def test_the_margin_is_one_constant_two_registers_and_no_typed_copy(self):
         """F6, 2026-09-20: the margin was a literal in six places.

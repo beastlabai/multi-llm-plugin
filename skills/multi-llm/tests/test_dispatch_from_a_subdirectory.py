@@ -155,6 +155,100 @@ class TestEveryModeRunsFromTheRoot:
         assert seen[0]["cwd"] == str(root)
 
 
+#: The commit modes take a range, not a plan (plans/review-commits.md §2.2):
+#: what they read from the repository is a commit brief named as the range (a
+#: root range's pinned spelling) and a ``--context-plan``.
+REVS_MODES = [
+    mode.name for mode in modes.MODES
+    if modes.POS_REVS in mode.positionals and not mode.unavailable
+]
+BRIEF = "plans/commit-reviews/root-e4f5a6b7c8d9.md"
+
+
+@pytest.fixture
+def brief_rule(repo, monkeypatch):
+    """The repo's commit brief, and ``utils.commit_review.is_commit_brief``
+    (another task's module, the brief rule's one owner) as a stand-in that
+    accepts exactly that file; records each question it was asked."""
+    import types
+
+    import utils
+
+    root, _here = repo
+    path = root / BRIEF
+    path.parent.mkdir(parents=True)
+    path.write_text("<!-- multi-llm:commit-brief v1 -->\n# Commit review\n",
+                    encoding="utf-8")
+    asked = []
+
+    def is_commit_brief(candidate, *, cwd=None):
+        asked.append((str(candidate), cwd))
+        return os.path.realpath(str(candidate)) == str(path)
+
+    stand_in = types.ModuleType("utils.commit_review")
+    stand_in.is_commit_brief = is_commit_brief
+    monkeypatch.setitem(sys.modules, "utils.commit_review", stand_in)
+    monkeypatch.setattr(utils, "commit_review", stand_in, raising=False)
+    return asked
+
+
+class TestTheCommitModesRunFromTheRootToo:
+    @pytest.mark.parametrize("mode", REVS_MODES)
+    def test_a_root_relative_context_plan_typed_in_the_phase_folder(
+        self, repo, mode, monkeypatch, capsys,
+    ):
+        root, here = repo
+        seen = _stub_targets(monkeypatch)
+        argv = [mode, "HEAD", "--context-plan", PLAN, "--host", "claude-code"]
+        code, _out, err = _run(argv, capsys)
+        assert code == 0, err
+        [call] = seen
+        assert call["cwd"] == str(root)
+        assert call["argv"] == ["--revs", "HEAD", *argv[2:]]
+        assert f"{NOTICE} {root}, where {PLAN} is" in err
+        assert os.getcwd() == str(here)
+
+    @pytest.mark.parametrize("mode", REVS_MODES)
+    def test_a_root_relative_brief_typed_in_the_phase_folder(
+        self, repo, brief_rule, mode, monkeypatch, capsys,
+    ):
+        """The brief is found at the root and asked about there, so it becomes
+        the front door's `--plan-file` and the command runs from the root."""
+        root, here = repo
+        seen = _stub_targets(monkeypatch)
+        code, _out, err = _run([mode, BRIEF, "--host", "claude-code"], capsys)
+        assert code == 0, err
+        [call] = seen
+        assert call["cwd"] == str(root)
+        assert call["argv"] == ["--plan-file", BRIEF, "--host", "claude-code"]
+        assert brief_rule == [(str(root / BRIEF), str(root))]
+        assert f"{NOTICE} {root}, where {BRIEF} is" in err
+        assert os.getcwd() == str(here)
+
+    def test_a_brief_named_from_the_cwd_is_asked_about_as_typed(
+        self, repo, brief_rule, monkeypatch, capsys,
+    ):
+        root, here = repo
+        monkeypatch.chdir(root)
+        seen = _stub_targets(monkeypatch)
+        code, _out, err = _run(["review-commits", BRIEF], capsys)
+        assert code == 0, err
+        assert seen[0]["argv"] == ["--plan-file", BRIEF]
+        assert brief_rule == [(BRIEF, None)]
+        assert NOTICE not in err
+
+    @pytest.mark.parametrize("words", [["HEAD~2..HEAD"], ["last", "2", "commits"],
+                                       ["plans/nope.md"]])
+    def test_range_text_moves_nothing(self, repo, brief_rule, words, monkeypatch, capsys):
+        _root, here = repo
+        seen = _stub_targets(monkeypatch)
+        code, _out, err = _run(["review-commits", *words, "--host", "claude-code"], capsys)
+        assert code == 0, err
+        assert [call["cwd"] for call in seen] == [str(here)]
+        assert seen[0]["argv"][:2] == ["--revs", " ".join(words)]
+        assert NOTICE not in err
+
+
 UTIL_CALLS = {
     "metrics": ["record", "--state-file", "plans/x/state.json", "--phase", "implement",
                 "--label", "T001"],
@@ -176,6 +270,7 @@ UTIL_CALLS = {
     "write-prompt": ["--phase-dir", "plans/x/implement", "--task-id", "T001"],
     "batch-done": ["--phase-dir", "plans/x/implement", "--task-id", "T001",
                    "--status", "completed"],
+    "commit-brief": ["last", "2", "commits", "--context-plan", PLAN],
 }
 
 

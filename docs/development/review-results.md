@@ -87,7 +87,9 @@ measured sources only, pinned by `TestShellDeclarationMatchesTheEvidence`) and `
 (`none`/`cwd`/`any`).
 
 A lane that cannot open the phase dir gets plan, manifest and diffs inline under a 96 KB cap (argv
-`MAX_ARG_STRLEN`), or is recorded failed with `[REVIEW_UNSUPPORTED]` without being dispatched.
+`MAX_ARG_STRLEN`), or is recorded failed with `[REVIEW_UNSUPPORTED]` without being dispatched. On a
+commit review with `--context-plan`, the frozen snapshot is one more inline block (`context-plan.md`)
+under the same cap, and an unreadable snapshot is unsupported too: no lane judges the range without it.
 Every Lane A review template also carries `{working_limits}` (`render_working_limits`: the
 attempt's real minutes, no suites/builds, no unobserved test claims), which names no shell command
 because `{diff_access}` alone decides that.

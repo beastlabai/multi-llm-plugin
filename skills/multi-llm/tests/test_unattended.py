@@ -151,6 +151,25 @@ class TestTheTable:
             unknown = set(r.modes) - known
             assert not unknown, f"row {r.number} names unknown modes: {unknown}"
 
+    def test_a_commit_mode_stands_wherever_the_mode_it_fronts_does(self):
+        """plans/review-commits.md §2.8: the gates run inside the fronted
+        phase, which the rows already list; the commit words are what the
+        inventory carries when the spelled command is the commit mode. So
+        review-commits beside every review-code, apply-commit-fixes beside
+        every apply-code-fixes, and improve-commits beside every
+        improve-code (rows 2, 3, 10 and 11)."""
+        fronts = {m.name: m.commit_view_of for m in mode_table.MODES
+                  if m.commit_view_of}
+        fronts["improve-commits"] = "improve-code"
+        for r in un.ROWS:
+            if "*" in r.modes:
+                continue
+            for word, fronted in fronts.items():
+                assert (word in r.modes) == (fronted in r.modes), (
+                    f"row {r.number}: {word} must stand beside {fronted}")
+        assert {r.number for r in un.ROWS if "improve-commits" in r.modes} == {
+            2, 3, 10, 11}
+
 
 # ---------------------------------------------------------------------------
 # 2. D5a: every row has a flag, and every flag is really accepted
@@ -1126,22 +1145,32 @@ class TestExitThreeConvention:
 #: The mode file(s) that must state each row's `--yes` resolution, on top of
 #: `full-workflow.md` (which must mention all fifteen).
 #:
-#: The two composite cores (plans/improve-plan-and-improve-code.md §2.6) state
-#: every row they reach: row 1, because their step 1 (`util improve-steps`) is
-#: the run's first `uv run`, ahead of any phase core's own prerequisite; rows 2
-#: and 3, the review half under `--yes`; row 4 for `improve-plan.md` only (code
-#: review has no consolidation pass); rows 10 and 11, the apply half under `--yes
-#: --agent-decide --no-confirm`; row 14, step 3's stop with `[IMPROVE_RERUN]`;
-#: and row 15, `util improve-steps`' exit 3 before any step. Rows 5-9, 12 and 13
-#: are reached by neither composite, and unlike `full-workflow.md` the cores are
-#: not required to mention all fifteen.
-_IMPROVE_CORES = ("improve-plan.md", "improve-code.md")
+#: The three composite cores (plans/improve-plan-and-improve-code.md §2.6, and
+#: plans/review-commits.md §2.8 for `improve-commits.md`) state every row they
+#: reach: row 1, because their first step (`util improve-steps`, or
+#: improve-commits' `util commit-brief`) is the run's first `uv run`, ahead of
+#: any phase core's own prerequisite; rows 2 and 3, the review half under
+#: `--yes`; row 4 for `improve-plan.md` only (code review has no consolidation
+#: pass); rows 10 and 11, the apply half under `--yes --agent-decide
+#: --no-confirm`; row 14, step 3's stop with `[IMPROVE_RERUN]`; and row 15, the
+#: util's exit 3 before any step. Rows 5-9, 12 and 13 are reached by no
+#: composite, and unlike `full-workflow.md` the cores are not required to
+#: mention all fifteen.
+_IMPROVE_CORES = ("improve-plan.md", "improve-code.md", "improve-commits.md")
+
+#: The two commit phase cores (plans/review-commits.md §2.9) launch their front
+#: door before they load the code phase core that states the rows, so each
+#: states the rows it reaches on its own: row 1 (its launch is the run's first
+#: `uv run`), and rows 2 and 3 for the review, 10 and 11 for the apply.
+_COMMIT_PHASE_CORES = ("review-commits.md", "apply-commit-fixes.md")
 
 ROW_DOCS = {
-    1: ("review-plan.md", "review-code.md", "init-config.md", *_IMPROVE_CORES),
-    2: ("review-plan.md", "review-tasks.md", "review-code.md", *_IMPROVE_CORES),
+    1: ("review-plan.md", "review-code.md", "init-config.md", *_IMPROVE_CORES,
+        *_COMMIT_PHASE_CORES),
+    2: ("review-plan.md", "review-tasks.md", "review-code.md", *_IMPROVE_CORES,
+        "review-commits.md"),
     3: ("review-plan.md", "review-tasks.md", "review-code.md", "ask.md",
-        *_IMPROVE_CORES),
+        *_IMPROVE_CORES, "review-commits.md"),
     4: ("review-plan.md", "improve-plan.md"),
     5: ("generate-tasks.md",),
     6: ("implement.md",),
@@ -1149,9 +1178,10 @@ ROW_DOCS = {
     8: ("implement.md",),
     9: ("implement.md",),
     10: ("apply-suggestions.md", "apply-task-suggestions.md",
-         "apply-code-fixes.md", "review-tasks.md", *_IMPROVE_CORES),
+         "apply-code-fixes.md", "review-tasks.md", *_IMPROVE_CORES,
+         "apply-commit-fixes.md"),
     11: ("apply-suggestions.md", "apply-task-suggestions.md",
-         "apply-code-fixes.md", *_IMPROVE_CORES),
+         "apply-code-fixes.md", *_IMPROVE_CORES, "apply-commit-fixes.md"),
     12: ("full-workflow.md",),
     13: ("review-tasks.md",),
     14: ("full-workflow.md", *_IMPROVE_CORES),
@@ -1189,11 +1219,12 @@ class TestDocumentedResolutions:
                 f"{name} does not state row {number}'s --yes resolution"
             )
 
-    @pytest.mark.parametrize("name", _IMPROVE_CORES)
+    @pytest.mark.parametrize("name", _IMPROVE_CORES + _COMMIT_PHASE_CORES)
     def test_the_composite_cores_name_every_row_they_reach(self, name):
         """The check above also passes on a bare `--yes`, which every flags line
         of a composite core carries, so it would pass a core that states no row
-        at all. These two state each of their rows by number."""
+        at all. These state each of their rows by number, and so do the two
+        commit phase cores, which launch before any core that states them."""
         text = (SKILL_ROOT / "instructions" / name).read_text(encoding="utf-8")
         missing = [
             number for number, names in sorted(ROW_DOCS.items())
