@@ -23,8 +23,9 @@ state records as ``head_at_start`` and ``head_before_implement``;
 ``validate_git_ref`` falls back to it rather than to ``HEAD~1`` and then nothing;
 ``paths_in_commit`` reads a tree, so the empty one holds no path and an
 implement-created file is ``created`` rather than unknown; the review-scope
-manifest names the base as the empty tree. No mode needs history it cannot
-have, so none ends at exit 3 for the lack of a commit.
+manifest names the base as the empty tree. Commit-range modes have nothing to
+review and return exit 2 before launching a run; plan/code modes still work.
+No mode ends at exit 3 merely for the lack of a commit.
 
 **How the modes are driven.** Exactly as the OpenCode plugin's ``execute``
 composes them (``packaging/opencode/src/index.mjs``, ``composeDispatcherArgv``):
@@ -109,6 +110,9 @@ TOOL_HOST = "opencode"
 SURFACE = cli_surface.cli_surface(TOOL_HOST)
 TOOL_ROWS: Dict[str, dict] = {row["name"]: row for row in SURFACE["modes"]}
 TOOL_MODES: Tuple[str, ...] = tuple(TOOL_ROWS)
+COMMIT_MODES: Tuple[str, ...] = tuple(
+    name for name in TOOL_MODES if modes.POS_REVS in modes.resolve(name).positionals
+)
 
 OUT_REL = PLAN_REL[: -len(".md")]
 QUESTION = "Is the plan complete?"
@@ -618,6 +622,7 @@ CHAIN = ("init", "status", "ask", *WORKFLOW, "status")
 #: a fresh repository, as a user would start it.
 WORLDS: Dict[str, Tuple[Tuple[str, ...], bool]] = {
     "chain": (CHAIN, False),
+    "commit-modes": (COMMIT_MODES, False),
     "improve-plan": (("improve-plan",), False),
     "improve-code": (("improve-code",), True),
     "full": (("full",), False),
@@ -657,7 +662,10 @@ def _check_writes(world: NoCommitWorld, phase: str) -> None:
 def _check(mode: str, world: NoCommitWorld, calls: List[ToolCall]) -> None:
     """Each mode's own artifacts, beyond the exit and the result line."""
     state = world.state() if (world.out / "state.json").exists() else {}
-    if mode == "init":
+    if mode in COMMIT_MODES:
+        assert "[NOTHING_TO_REVIEW] no commits yet on main" in calls[0].launch.stdout
+        assert not list(world.repo.rglob("state.json"))
+    elif mode == "init":
         assert (world.repo / ".multi-llm" / "providers.yaml").is_file()
     elif mode == "ask":
         answers = list((world.out / "ask").glob("*/answers.md"))
@@ -715,6 +723,7 @@ class Recipe:
 DONE = (EXIT_OK, STATE_DONE)
 
 RECIPES: Dict[str, Recipe] = {
+    **{mode: Recipe("commit-modes", ((EXIT_NOTHING, STATE_NOTHING),)) for mode in COMMIT_MODES},
     "init": Recipe("chain", (DONE,)),
     # Before any run: "no run recorded" is exit 2 by contract (`exit_code_for`).
     # After the chain: every detached run it polled is done.
@@ -779,15 +788,19 @@ def test_the_mode_works_in_a_repository_with_no_commit(worlds, mode):
             assert "GitError" not in one.stdout + one.stderr, one.explain()
             assert "Traceback" not in one.stdout + one.stderr, one.explain()
         if TOOL_ROWS[mode]["supports_detach"]:
-            assert call.launch.exit_code == EXIT_OK and call.launch.run_id, call.explain()
-            assert call.polls, call.explain()
+            if exit_code == EXIT_NOTHING:
+                assert call.launch.run_id is None and not call.polls, call.explain()
+            else:
+                assert call.launch.exit_code == EXIT_OK and call.launch.run_id, call.explain()
+                assert call.polls, call.explain()
         final = call.final
         assert final.exit_code == exit_code, call.explain()
         assert final.result["state"] == state and final.result["exit"] == exit_code, call.explain()
         assert final.result["mode"] == mode, call.explain()
 
-    for phase in _phases_of(mode):
-        assert phase in world.completed(), (phase, world.state())
+    if all(exit_code == EXIT_OK for exit_code, _state in recipe.expect):
+        for phase in _phases_of(mode):
+            assert phase in world.completed(), (phase, world.state())
     recipe.check(mode, world, mine)
     # The plugin never commits for the user, and no fixture did either.
     assert not _has_commit(world.repo)

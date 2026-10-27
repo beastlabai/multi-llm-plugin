@@ -167,6 +167,66 @@
           }
         }
       }
+    },
+    "commit_range": {
+      "type": "object",
+      "description": "The commit range a commit front door (--review-commits, --apply-commit-fixes, --improve-commits, util commit-brief) recorded for this commit brief (plans/review-commits.md §2.1, §2.4). Written through StateManager.record_commit_range before the fronted phase loads state, or by a detached worker applying its launch's stage; the phases carry it unchanged. base and head are full SHAs (base null on a root range, diffed against the empty tree); phrase and window are the first resolution's; header_sha256 is the review's identity hash and reviewed_header_sha256 the one the review on record answered (written when a round starts); guard is the apply's decision (the apply phase's)",
+      "properties": {
+        "base": { "type": ["string", "null"] },
+        "head": { "type": "string" },
+        "commits": {
+          "type": "array",
+          "description": "Every first-parent commit of the range, newest first",
+          "items": {
+            "type": "object",
+            "properties": {
+              "sha": { "type": "string" },
+              "date": { "type": "string" },
+              "subject": { "type": "string" },
+              "merge": { "type": "boolean" },
+              "outside_window": { "type": "boolean" }
+            },
+            "required": ["sha"]
+          }
+        },
+        "phrase": { "type": ["string", "null"] },
+        "window": { "type": ["object", "null"], "description": "A window phrase's cutoff and end (epoch seconds, local texts), the SHAs tagged outside the window and the count of newer commits left off" },
+        "notes": { "type": "array", "items": { "type": "string" } },
+        "size": {
+          "type": "object",
+          "properties": {
+            "commits": { "type": "integer" },
+            "files": { "type": "integer" },
+            "added": { "type": "integer" },
+            "deleted": { "type": "integer" },
+            "lines": { "type": "integer" },
+            "large": { "type": "boolean" }
+          }
+        },
+        "brief": { "type": "string", "description": "The brief's path, repository-relative" },
+        "plan": { "type": ["string", "null"], "description": "The context plan, repository-relative in git's form" },
+        "plan_snapshot": { "type": ["string", "null"], "description": "The context plan's frozen copy, <slug>/context-plan.md, repository-relative" },
+        "plan_sha256": { "type": ["string", "null"] },
+        "focus": { "type": ["string", "null"] },
+        "header_sha256": { "type": "string" },
+        "reviewed_header_sha256": { "type": ["string", "null"] },
+        "drifted": { "type": "array", "items": { "type": "string" }, "description": "Scope files that differed on disk from head when the front door last checked" },
+        "resolved_at": { "type": "string", "description": "When a front door last resolved this range (ISO-8601 UTC); every entry, a reuse included, refreshes it" },
+        "guard": { "type": "object", "description": "The apply guard's decision about the review on record (the apply phase's)" }
+      },
+      "required": ["head"]
+    },
+    "head_ref": {
+      "type": "object",
+      "description": "A direct review-code --base-ref A --head-ref B round's two commits (plans/review-commits.md §2.5): written when the round starts and removed by a round without --head-ref; a fronted run writes commit_range instead. A direct run's apply guard lives under head_ref.guard",
+      "properties": {
+        "base": { "type": ["string", "null"] },
+        "head": { "type": "string" },
+        "drifted": { "type": "array", "items": { "type": "string" } },
+        "resolved_at": { "type": "string" },
+        "guard": { "type": "object" }
+      },
+      "required": ["head"]
     }
   },
   "patternProperties": {

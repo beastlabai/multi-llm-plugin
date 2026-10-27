@@ -128,7 +128,10 @@ with the offending token named.
 
    A detached run is not subject to your host's shell-command cap, so each
    model's own per-provider `default_timeout` (in `providers.yaml`) governs — no
-   cap-vs-provider timeout reconciliation is needed. `PYTHONUNBUFFERED=1` matters
+   cap-vs-provider timeout reconciliation is needed. A host's own background
+   mechanism has a time limit of its own, though: give that launch call the
+   longest timeout the mechanism takes, as your host's *run detached* answer
+   states, or the run is stopped mid-flight. `PYTHONUNBUFFERED=1` matters
    only on the host-background path: Python block-buffers a non-TTY pipe, which
    leaves the log empty for minutes. A host-background launch **without**
    redirection loses stdout (including the `answers.md` path), which is why the

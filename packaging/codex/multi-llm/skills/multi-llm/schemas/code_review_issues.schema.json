@@ -21,6 +21,10 @@
         "enum": ["bug", "missing", "improvement", "style", "scope"]
       },
       "anchor_text": { "type": "string" },
+      "introduced_by": {
+        "type": ["string", "null"],
+        "description": "Commit reviews only: the short SHA of the commit that introduced the issue, as the prompt's commit list shows it (the merge for code a merge brought in), or null. A claim the plugin checks against the range and git blame (plans/review-commits.md §2.6)."
+      },
       "suggested_fix": {
         "type": "object",
         "properties": {

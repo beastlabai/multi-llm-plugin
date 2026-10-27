@@ -214,6 +214,10 @@ ROWS = [
      None, A(f"--generate-tasks {P}")),
     ("improve-code->complete",
      S(ALL_REQUIRED, files=CR_FINDING), "improve-code", None, "complete"),
+    # plans/review-commits.md §2.8: improve-commits ends on apply-code-fixes
+    # too, so a finished one completes the workflow as improve-code does.
+    ("improve-commits->complete",
+     S(ALL_REQUIRED, files=CR_FINDING), "improve-commits", None, "complete"),
 
     # -- --resume, built from state ----------------------------------------
     ("after-implement-in-progress->implement-resume",

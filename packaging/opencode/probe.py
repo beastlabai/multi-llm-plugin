@@ -155,8 +155,8 @@ PROVIDERS_FILE = ".multi-llm/providers.yaml"
 #: four properties, ``plan`` empty for a mode without a plan positional,
 #: ``question`` empty for every mode but ``ask``, ``extra_flags`` ``[]``. The
 #: plugin's ``validateArgs`` refuses a missing one before anything runs.
-INIT_ARGS = {"mode": "init", "plan": "", "question": "", "extra_flags": []}
-STATUS_ARGS = {"mode": "status", "plan": PLAN, "question": "", "extra_flags": []}
+INIT_ARGS = {"mode": "init", "plan": "", "question": "", "revs": "", "extra_flags": []}
+STATUS_ARGS = {"mode": "status", "plan": PLAN, "question": "", "revs": "", "extra_flags": []}
 #: The run view's line for a plan with no run, which is what ``status``'s exit 2
 #: means on a fresh plan ("2 = non-terminal (still running, or no run
 #: recorded)", ``utils/run_status.py``'s exit-code epilog).

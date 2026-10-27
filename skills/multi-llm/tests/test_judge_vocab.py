@@ -259,8 +259,16 @@ class TestWritersUseOnlyTheNewNames:
         no write-back reached the file (review 2026-10-02). Nothing tells a
         host to write an old name.
         """
-        apply_files = [*sorted((SKILL_ROOT / "instructions").glob("apply-*.md")),
-                       *sorted((SKILL_ROOT / "legacy" / "instructions").glob("apply-*.md"))]
+        # `apply-commit-fixes.md` (plans/review-commits.md §2.9) reads no
+        # state.json key itself: it loads `apply-code-fixes.md`, whose read
+        # below it shares, so it is held only to naming no old key.
+        delegating = SKILL_ROOT / "instructions" / "apply-commit-fixes.md"
+        assert not LEGACY_TOKEN.search(delegating.read_text(encoding="utf-8"))
+        apply_files = [
+            *sorted(path for path in (SKILL_ROOT / "instructions").glob("apply-*.md")
+                    if path != delegating),
+            *sorted((SKILL_ROOT / "legacy" / "instructions").glob("apply-*.md")),
+        ]
         references = [SKILL_ROOT / "references" / "human-decision-batch.md",
                       SKILL_ROOT / "legacy" / "references" / "human-decision-batch.md"]
         assert len(apply_files) == 6

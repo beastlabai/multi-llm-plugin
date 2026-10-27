@@ -1457,7 +1457,15 @@ class TestRoutingAndDocs:
         to exceed the slowest provider budget (>=1.2M ms). That was the bug: the
         cap made it unachievable, so a foreground run was SIGTERM'd mid-run and
         lost the answers.md path printed on stdout. The fix is to run the fan-out
-        modes detached (not subject to the cap) with output captured to a log."""
+        modes detached (not subject to the cap) with output captured to a log.
+
+        PD-1 (2026-10-27): detached through the background mechanism is not
+        uncapped, though. That launch has a deadline of its own, the tool's
+        default when it names none (ten minutes in a headless session), so the
+        one timeout above the foreground cap an instruction may state is the
+        background launch's, `host_capabilities.NATIVE_LAUNCH_TIMEOUT_MS`."""
+        from utils import host_capabilities as caps
+
         BASH_TIMEOUT_CAP_MS = 600_000
 
         def documented_timeouts_ms(text):
@@ -1475,7 +1483,7 @@ class TestRoutingAndDocs:
         for doc in docs:
             over_cap = [
                 t for t in documented_timeouts_ms(doc.read_text(encoding="utf-8"))
-                if t > BASH_TIMEOUT_CAP_MS
+                if t > BASH_TIMEOUT_CAP_MS and t != caps.NATIVE_LAUNCH_TIMEOUT_MS
             ]
             assert not over_cap, (
                 f"{doc.name} documents Bash timeout(s) above the "
@@ -1489,6 +1497,7 @@ class TestRoutingAndDocs:
         assert "run_in_background" in skill
         assert "PYTHONUNBUFFERED" in skill
         assert "orchestrator-run.log" in skill
+        assert f"{caps.NATIVE_LAUNCH_TIMEOUT_MS} here, in milliseconds" in skill
 
         # The shared core states the same requirement in the host-neutral
         # vocabulary: it names the *run detached* capability verb, never a host's
