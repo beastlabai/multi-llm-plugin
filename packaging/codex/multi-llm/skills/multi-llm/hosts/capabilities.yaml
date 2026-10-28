@@ -504,7 +504,7 @@ hosts:
     package:
       registry: npm
       name: opencode-multi-llm
-      version: "0.1.1"
+      version: "0.1.2"
       public_version: "0.1.1"
       config_key: plugin
       provides: [command, tool]
