@@ -9,7 +9,7 @@ Add the plugin to your OpenCode config (`~/.config/opencode/opencode.json`) and
 restart:
 
 ```json
-{ "plugin": ["opencode-multi-llm@0.1.1"] }
+{ "plugin": ["opencode-multi-llm@0.1.2"] }
 ```
 
 Then `/multi-llm plans/my-feature.md` in a session.
@@ -114,7 +114,7 @@ There is no `opencode plugin update` and no cache-clear command. The only suppor
 hatch is deleting the package's cache directory and restarting:
 
 ```bash
-rm -rf ~/.cache/opencode/packages/opencode-multi-llm@0.1.1
+rm -rf ~/.cache/opencode/packages/opencode-multi-llm@0.1.2
 ```
 
 Spell the path from the **normalized** spec, which is not always the string in
