@@ -10,7 +10,7 @@ tracked tree) and ``make codex-package`` (clean inputs only, and the rebuilt tre
 must equal the committed one).
 
 **What it writes** (plans/codex-native-plugin.md, D1's mapping table). The
-destination is always the source re-rooted under ``skills/multi-llm/``, with six
+destination is always the source re-rooted under ``skills/multi-llm/``, with seven
 exceptions:
 
 ====================================  =========================================
@@ -20,6 +20,7 @@ staged                                from
                                       ``skills/multi-llm/pyproject.toml`` (D6)
 ``.mcp.json``                         ``mcp.json``, verbatim (A2b)
 ``mcp/server.py``                     ``mcp_server.py``, verbatim (D3)
+``assets/icon.svg``                   ``assets/icon.svg``, verbatim
 ``dist/cli-surface.json``             ``packaging/common/surface.py`` for ``codex``
 ``LICENSE``                           the repo root's, verbatim
 ``skills/multi-llm/SKILL.md``         **overwritten** with ``host_install.render``
@@ -38,7 +39,7 @@ says so.
 **Staging is** :func:`payload.stage` **and nothing else** — the allowlist, the
 required inventory (plus every ``modes.py`` target module), the symlink and
 dirty-input refusals and the secret sweep all come from there. This driver adds
-the six files above, re-runs the sweep and the ingestion rules over the whole
+the files above, re-runs the sweep and the ingestion rules over the whole
 tree, and only then swaps it into place, so a failed build never leaves a
 half-written plugin where a good one was.
 """
@@ -90,10 +91,11 @@ SKILL_TEMPLATE = "hosts/codex/plugin-skill.md.tmpl"
 #: for it, so this is belt-and-braces: nothing absolute can be baked (D2).
 SKILL_DIR_PLACEHOLDER = surface.SKILL_DIR_PLACEHOLDER
 
-#: The hand-written sources of the six non-payload files.
+#: The hand-written sources of the non-payload files.
 MANIFEST_TEMPLATE = PACKAGE_DIR / "plugin.json.tmpl"
 MCP_SOURCE = PACKAGE_DIR / "mcp.json"
 SERVER_SOURCE = PACKAGE_DIR / "mcp_server.py"
+ICON_SOURCE = PACKAGE_DIR / "assets" / "icon.svg"
 VERSION_SLOT = "{VERSION}"
 
 DIGEST_NAME = "tree.sha256"
@@ -107,6 +109,7 @@ PLUGIN_FILES: Tuple[str, ...] = (
     ".mcp.json",
     "LICENSE",
     "mcp/server.py",
+    "assets/icon.svg",
     "dist/cli-surface.json",
     DIGEST_RELATIVE,
 )
@@ -128,6 +131,7 @@ PACKAGING_INPUTS: Tuple[str, ...] = (
     "packaging/codex/mcp_server.py",
     "packaging/codex/mcp.json",
     "packaging/codex/plugin.json.tmpl",
+    "packaging/codex/assets/icon.svg",
     "packaging/common/payload.py",
     "packaging/common/surface.py",
     "LICENSE",
@@ -352,7 +356,7 @@ def build(
             cli_surface_json(), encoding="utf-8", newline="\n"
         )
 
-        # 4. The server, the server declaration, the manifest, the licence.
+        # 4. The server, the server declaration, the manifest, the icon, the licence.
         (scratch / "mcp").mkdir(parents=True, exist_ok=True)
         shutil.copyfile(server_source, scratch / "mcp" / "server.py")
         shutil.copyfile(MCP_SOURCE, scratch / ".mcp.json")
@@ -361,6 +365,8 @@ def build(
         (scratch / ".codex-plugin" / "plugin.json").write_text(
             manifest_text(version), encoding="utf-8", newline="\n"
         )
+        (scratch / "assets").mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ICON_SOURCE, scratch / "assets" / "icon.svg")
         shutil.copyfile(checkout / "LICENSE", scratch / "LICENSE")
 
         # 5. The restated ingestion rules over what will install.
@@ -374,7 +380,7 @@ def build(
                 + "\n".join(f"    {line}" for line in errors)
             )
 
-        # 6. The sweep again, over the whole tree this time (the six files
+        # 6. The sweep again, over the whole tree this time (the files
         #    above are not the payload stage() swept), then the digest, then
         #    the exact inventory — the digest cannot stand in for it, because a
         #    stale file is *inside* a digest.
