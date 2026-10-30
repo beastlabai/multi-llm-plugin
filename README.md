@@ -8,7 +8,7 @@ The diversity works on two axes: not only do you get different **LLM models** (O
 
 📺 **[Short video intro](https://www.youtube.com/watch?v=91lpnxAsyqs)** or **[Full video walkthrough](https://www.youtube.com/watch?v=_ySRt7rr0r8)** of the plugin in action.
 
-`multi-llm` fans **plan reviews, task generation, implementation, code reviews and commit reviews** out to several CLI-based LLMs in parallel - or asks every model the same free-text question about a plan - then validates and consolidates their suggestions and hands the host structured instructions to apply the results. The orchestrators never modify your code directly - they produce JSON that the host executes through its own tools, so every change stays reviewable.
+`multi-llm` fans **plan reviews, task generation, implementation, code reviews and commit reviews** out to several CLI-based LLMs in parallel - or asks every model the same free-text question about a plan - then validates and consolidates their suggestions and hands the host structured instructions to apply the results. The orchestrators never modify your code directly - they produce JSON that the host executes through its own tools, so every change stays reviewable. Your host session's model does the validating, so adding cheap reviewers is close to risk-free: it keeps their good catches and drops the rest ([cost, speed and choosing models](#4-cost-speed-and-choosing-models)).
 
 It installs as a **Claude Code plugin**, and the same workflow runs inside **Codex** and **OpenCode** too: on Codex as a Codex plugin, on OpenCode as the [`opencode-multi-llm`](https://www.npmjs.com/package/opencode-multi-llm) npm package. For either host, `install-host` is an alternative that writes a native entry point (a small command file) instead. See [Installation](#1-installation) and [docs/hosts.md](docs/hosts.md).
 
@@ -248,7 +248,16 @@ Every flag, including `--force`, `--rerun-all`, `--focus` and `--context-plan`, 
 
 ---
 
-## 4. How it works
+## 4. Cost, speed and choosing models
+
+- **Your host model does the judging, so make it your strongest.** The reviewers only make suggestions. The model your host session runs on (or `driver.subagent_runner`, if you set one) decides which suggestions are real, judges the borderline ones and applies what survives. That makes adding cheap reviewers close to risk-free: their bad suggestions get filtered out, and their good ones are kept. Stronger reviewers still find the harder bugs, but cheap models suggest a surprising amount of real value, and keeping it is much of the point of the crowd.
+- **The fan-out is not the only token cost.** Each reviewer costs one call, but the host model then reads, validates and applies everything they found, and that is your most capable and usually most expensive model. Expect it to account for a large share of a run's tokens. `--quick` reduces both costs: fewer reviewers means fewer suggestions to validate.
+- **The apply steps are slow on purpose.** Validation runs in parallel, but `--apply-suggestions` and `--apply-code-fixes` apply one batch at a time. Writers working on the same plan or source file in parallel could overwrite each other. Each batch also needs to see the plan and the code as the previous batch left them, not a stale copy that misses what another suggestion just changed. `--improve-plan` and `--improve-code` run unattended, so you can start them and come back later.
+- **What we use day to day.** We mostly run `--improve-plan` and `--improve-code`, and rarely `--full`, because its `--generate-tasks`, `--review-tasks` and `--implement` phases take the most time and tokens. Instead, we let the host agent implement the plan directly and ask it to **write any deviations back into the plan, with the reason for each**. `--improve-code` reviews the code against the plan, so without that note the reviewers and validator may treat a deliberate change as a bug and revert it. If you have the time and the budget, `--full` is the most rigorous route and should give the best implementation.
+
+---
+
+## 5. How it works
 
 - **Orchestrators emit instructions, not edits.** Each mode runs a Python orchestrator that queries the selected models in parallel, validates and consolidates their output, and prints structured instructions (and JSON) for the host to act on.
 - **State is plan-local.** Workflow state lives in `{plan}/state.json` and all outputs are written next to the plan, so everything is portable and scoped to the plan it belongs to.
@@ -257,7 +266,7 @@ Where the instruction core, the host shims and the architecture notes live: [doc
 
 ---
 
-## 5. Your project repository
+## 6. Your project repository
 
 The repo where you run multi-llm workflows should include one or more `AGENTS.md` files - at the repo root and/or in subdirectories - with project-specific guidance for AI agents (conventions, architecture, pitfalls, etc.). `AGENTS.md` is supported by most code harnesses (Cursor, Codex, OpenCode, Gemini CLI, and others), so the external models multi-llm invokes pick up the same context.
 
@@ -265,7 +274,7 @@ To keep a single source of truth while still working with Claude Code, add a sib
 
 ---
 
-## 6. Documentation
+## 7. Documentation
 
 | Document | What's in it |
 | --- | --- |
@@ -281,7 +290,7 @@ To keep a single source of truth while still working with Claude Code, add a sib
 
 ---
 
-## 7. Roadmap and contributing
+## 8. Roadmap and contributing
 
 Planned improvements and open ideas are tracked in [`TODO.md`](TODO.md).
 
@@ -289,7 +298,7 @@ Contributions are welcome - pull requests, bug reports, feature suggestions, and
 
 ---
 
-## 8. About BeastLab.ai
+## 9. About BeastLab.ai
 
 This plugin is maintained by [BeastLab.ai](https://beastlab.ai) - a frontier lab building multi-agent reasoning models.
 
@@ -297,6 +306,6 @@ This plugin is maintained by [BeastLab.ai](https://beastlab.ai) - a frontier lab
 
 ---
 
-## 9. License
+## 10. License
 
 [MIT](LICENSE) © beastlabai
