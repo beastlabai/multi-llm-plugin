@@ -1237,6 +1237,33 @@ class TestTheReaders:
 # The container: the kit stands alone, and the driver's docker calls
 # --------------------------------------------------------------------------- #
 
+class TestTheContainerSetup:
+    @pytest.mark.skipif(os.name == "nt" or not shutil.which("bash") or not shutil.which("node"),
+                        reason="the Linux container setup needs bash and Node")
+    def test_verified_https_is_ready_before_apt_fetches_packages(self, tmp_path):
+        import ssl
+
+        apt = tmp_path / "etc" / "apt"
+        sources = apt / "sources.list.d" / "debian.sources"
+        sources.parent.mkdir(parents=True)
+        sources.write_text("URIs: http://deb.debian.org/debian\n")
+        legacy = apt / "sources.list"
+        legacy.write_text("deb http://deb.debian.org/debian-security bookworm-security main\n")
+        script = rc.setup_script({"uv_url": "https://example.invalid/uv", "uv_sha256": "a" * 64})
+        # Run only the real setup's pre-fetch section, redirected into this
+        # temporary filesystem; no apt, network, or host-system write occurs.
+        prelude = script.split("apt-get update -qq", 1)[0]
+        prelude = prelude.replace("/etc/", str(tmp_path / "etc") + "/")
+        done = subprocess.run(["bash", "-c", prelude], cwd=tmp_path,
+                              capture_output=True, text=True, timeout=30)
+        assert done.returncode == 0, done.stderr
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.load_verify_locations(cafile=str(tmp_path / "etc/ssl/certs/ca-certificates.crt"))
+        assert context.cert_store_stats()["x509_ca"] > 0
+        assert "https://deb.debian.org/debian" in sources.read_text()
+        assert "https://deb.debian.org/debian-security" in legacy.read_text()
+
+
 class TestTheKit:
     def test_the_kit_runs_without_the_repository(self, tmp_path):
         kit = tmp_path / "kit"
