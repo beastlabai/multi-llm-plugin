@@ -722,7 +722,9 @@ jobs:
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ needs.verify.outputs.sha }}
+          # Provenance must match the dispatch source certified by GitHub.
+          # The rebuild below must still equal the verified tag's digest.
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -744,11 +746,15 @@ jobs:
             echo "REFUSING: ${TAG} now names ${now}; verify gated ${SHA}." >&2
             exit 1
           fi
-          if [ "$(git rev-parse HEAD)" != "${SHA}" ]; then
-            echo "REFUSING: the checkout is not ${SHA}." >&2
+          if [ "$(git rev-parse HEAD)" != "${GITHUB_SHA}" ]; then
+            echo "REFUSING: the checkout is not the dispatched commit ${GITHUB_SHA}." >&2
             exit 1
           fi
-          echo "${TAG} still names ${SHA}"
+          if ! git merge-base --is-ancestor "${SHA}" "${GITHUB_SHA}"; then
+            echo "REFUSING: the verified tag is not on the publish source ${GITHUB_SHA}." >&2
+            exit 1
+          fi
+          echo "${TAG} still names ${SHA}; publisher source ${GITHUB_SHA}"
 
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
@@ -881,15 +887,9 @@ jobs:
           NAME: ${{ steps.facts.outputs.name }}
           VERSION: ${{ steps.facts.outputs.version }}
           REGISTRY: ${{ steps.facts.outputs.registry }}
-          SOURCE_TAG: ${{ inputs.tag }}
-          SOURCE_SHA: ${{ needs.verify.outputs.sha }}
         run: |
           set -euo pipefail
           cd "${UPLOAD}"
-          # npm 11.5.1 takes its source dependency from GITHUB_REF/GITHUB_SHA,
-          # which otherwise name this dispatch's master commit. Earlier steps
-          # checked out SOURCE_SHA and proved SOURCE_TAG still names it. Bind
-          # only this process's source metadata to those verified bytes;
-          # GITHUB_WORKFLOW_REF and the OIDC workflow identity stay on master.
-          export GITHUB_REF="refs/tags/${SOURCE_TAG}" GITHUB_SHA="${SOURCE_SHA}"
+          # Preserve GitHub's certified source metadata. This job builds from
+          # that dispatch commit and refuses any digest differing from the tag.
           npm publish "./${NAME}-${VERSION}.tgz" --provenance --ignore-scripts --access public --registry "${REGISTRY}" --prefix "${UPLOAD}"
