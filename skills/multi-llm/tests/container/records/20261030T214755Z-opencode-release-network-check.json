@@ -1,0 +1,1126 @@
+{
+  "schema_version": 1,
+  "kind": "opencode-registry-install-check",
+  "recorded_at": "2026-10-30T21:53:49Z",
+  "environment": "container",
+  "workflow_run_id": null,
+  "rehearsal": false,
+  "install_source": "npm",
+  "spec": "opencode-multi-llm@0.1.3",
+  "name": "opencode-multi-llm",
+  "version": "0.1.3",
+  "registry": "https://registry.npmjs.org",
+  "installed_registry": "https://registry.npmjs.org",
+  "integrity": "sha512-b4rfpMp/eLCeYMx506jEyRbCIXzgfg9DKChejXIyxHAFMDUZH/01Jw4wWkHiOLdqNDojfV08K16/gaybJQxpYg==",
+  "tag": "opencode-v0.1.3",
+  "sha": "c9ae61b027a9e7bac4db216353495077f9c1d6f2",
+  "candidate_digest": "bf0a65a3b41130e6b2cf5f5613923b9d2eafdfd225f1f5ebf05fca0c71eedb1d",
+  "release_kind": "later",
+  "previous_pin": "opencode-multi-llm@0.1.1",
+  "measured": {
+    "opencode": "1.19.5",
+    "node": "22.23.4",
+    "npm": "10.9.9",
+    "uv": "0.13.5",
+    "python": "3.11.2"
+  },
+  "variables_set": {
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "HOME": "/work/probe-root/env/home",
+    "OPENCODE_DISABLE_AUTOUPDATE": "1",
+    "OPENCODE_DISABLE_MODELS_FETCH": "1",
+    "PATH": "/opt/opencode-pin/node_modules/opencode-linux-x64/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "TMPDIR": "/work/probe-root/env/tmp",
+    "UV_CACHE_DIR": "/work/probe-root/env/uv-cache",
+    "XDG_CACHE_HOME": "/work/probe-root/env/cache",
+    "XDG_CONFIG_HOME": "/work/probe-root/env/config",
+    "XDG_DATA_HOME": "/work/probe-root/env/data",
+    "XDG_RUNTIME_DIR": "/work/probe-root/env/runtime",
+    "XDG_STATE_HOME": "/work/probe-root/env/state",
+    "npm_config_cache": "/work/probe-root/env/npm-cache",
+    "npm_config_globalconfig": "/work/probe-root/env/npmrc-global",
+    "npm_config_registry": "https://registry.npmjs.org/",
+    "npm_config_update_notifier": "false",
+    "npm_config_userconfig": "/work/probe-root/env/npmrc-user"
+  },
+  "environment_details": {
+    "single_registry": "https://registry.npmjs.org",
+    "support": "20261030T214755Z-opencode-release-network-check.support",
+    "candidate": {
+      "sha": "c9ae61b027a9e7bac4db216353495077f9c1d6f2",
+      "digest": "bf0a65a3b41130e6b2cf5f5613923b9d2eafdfd225f1f5ebf05fca0c71eedb1d",
+      "files": 213,
+      "built_in": "a temporary git worktree of the tag's commit",
+      "build": {
+        "argv": [
+          "uv",
+          "run",
+          "--frozen",
+          "--no-dev",
+          "--project",
+          "<worktree>/skills/multi-llm",
+          "--",
+          "python",
+          "<worktree>/packaging/opencode/build.py",
+          "--destination",
+          "<destination>"
+        ],
+        "exit": 0,
+        "worktree_status_after": ""
+      }
+    },
+    "container": {
+      "base_image": "docker.io/library/node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d",
+      "platform": "linux/amd64",
+      "uv_artifact": {
+        "version": "0.13.5",
+        "url": "https://github.com/astral-sh/uv/releases/download/0.13.5/uv-x86_64-unknown-linux-gnu.tar.gz",
+        "sha256": "f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f"
+      },
+      "run_id": "eb66a7bddad8",
+      "source_tree_mounted": false,
+      "docker": {
+        "server": "29.9.2",
+        "operating_system": "Docker Desktop",
+        "kernel": "7.0.14-linuxkit"
+      },
+      "networked_phase": {
+        "transport": "default-bridge",
+        "why": "the networked phase needs only the internet, which the default bridge has",
+        "network_mode": "bridge"
+      },
+      "base_image_id": "sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d",
+      "container_tools": [
+        "uv 0.13.5 (x86_64-unknown-linux-gnu)",
+        "Python 3.11.2",
+        "git version 2.39.5",
+        "v22.23.4",
+        "10.9.9"
+      ],
+      "kit": {
+        "root": "/opt/mllm-registry-check",
+        "sha256": {
+          "packaging/opencode/registry_check.py": "0550d5bf87720e293f4c615097378fdd17fc26825852c96c3d342d20ddbc3494",
+          "packaging/opencode/probe.py": "3800e6dfd57deed2b3db0a57ee9333938abc31d499d6378d439ed5cdf46dd51f",
+          "packaging/opencode/bump.py": "ebdda4eb9d3846acaf66fcdad4487d662fac279156ade30c4f3dd4fe2223be5d",
+          "packaging/opencode/registry.py": "8e6fd01f23e6151485af0e4248a8b649d802daec89e6f8f01666a730158b174c",
+          "packaging/opencode/registry_record.py": "1e4085f5761140ed09b84ee590cddff6dcda69a006d021120c86366bb0682b3c",
+          "packaging/opencode/registry-record.schema.json": "acdf1aad2eb0562c14077054f4afa03bb1d404b23f5812b7729b966f6c0ee437",
+          "packaging/opencode/registry_stub.py": "a4b3d812ece9ffd258037e40b6da5c7994c061be396962ec57a145395c6e7e52",
+          "packaging/common/payload.py": "cba5e4caefa67ffb00c5e0d81d9587bb0a0d5c4f2901103496185a5355c4a94e",
+          "skills/multi-llm/tests/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "skills/multi-llm/tests/scenario_matcher.py": "a1111a8003bd9efcd82665fdb9d815421043942d451d023b68b55b257b392b67",
+          "skills/multi-llm/tests/container/stub_server.py": "f2667b49cc1c2fa26287c7bd4f3a806185ec665986a5fa67440b26094d4729eb"
+        }
+      },
+      "offline_phase": {
+        "image": "mllm-registry-check-offline:eb66a7bddad8",
+        "image_id": "sha256:8789dd8ed3b6f101de2e05468a9d1e52d4d747567c0ea4639183e080866fdfff"
+      },
+      "image_deleted": true,
+      "docker_calls": 24
+    },
+    "probe_root": "/work/probe-root",
+    "diagnostics": "/work/probe-root/diagnostics",
+    "empty_at_start": {
+      "home": 0,
+      "config": 0,
+      "data": 0,
+      "cache": 0,
+      "state": 0,
+      "npm_cache": 0,
+      "uv_cache": 0
+    },
+    "env_cleared": [
+      "HOME",
+      "NODE_VERSION"
+    ],
+    "opencode_paths": {
+      "home": "/work/probe-root/env/home",
+      "data": "/work/probe-root/env/data/opencode",
+      "bin": "/work/probe-root/env/cache/opencode/bin",
+      "log": "/work/probe-root/env/data/opencode/log",
+      "repos": "/work/probe-root/env/data/opencode/repos",
+      "cache": "/work/probe-root/env/cache/opencode",
+      "config": "/work/probe-root/env/config/opencode",
+      "state": "/work/probe-root/env/state/opencode",
+      "tmp": "/work/probe-root/env/tmp/opencode"
+    },
+    "installed_before_first_start": [],
+    "payload_location": "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm",
+    "installed_from": {
+      "lockfiles": [
+        "/work/probe-root/env/config/opencode/package-lock.json",
+        "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/package-lock.json"
+      ],
+      "packages": 33,
+      "origins": [
+        "https://registry.npmjs.org"
+      ],
+      "foreign": []
+    },
+    "pinned_install": {
+      "binary": "/opt/opencode-pin/node_modules/opencode-linux-x64/bin/opencode",
+      "platform_package": "node_modules/opencode-linux-x64",
+      "chosen_from": [
+        "opencode-linux-x64",
+        "opencode-linux-x64-baseline",
+        "opencode-linux-x64-musl",
+        "opencode-linux-x64-baseline-musl"
+      ],
+      "sha256": "7df4e4136301f16589b0f30bf91a61380fca5f8ef22dd36570f5ebe1d4ec802c"
+    },
+    "phase_failures": []
+  },
+  "criteria": [
+    {
+      "name": "npm_spec_resolves",
+      "pass": true,
+      "evidence": {
+        "registry": "https://registry.npmjs.org",
+        "argv": [
+          "npm",
+          "view",
+          "opencode-multi-llm@0.1.3",
+          "version",
+          "dist",
+          "--json",
+          "--prefer-online",
+          "--registry=https://registry.npmjs.org",
+          "--cache=<fresh per attempt>",
+          "--userconfig=/work/probe-root/probe-npm/npmrc-empty",
+          "--prefix=/work/probe-root/probe-npm",
+          "--no-update-notifier",
+          "--fetch-retries=2",
+          "--fetch-retry-mintimeout=2000",
+          "--fetch-retry-maxtimeout=10000",
+          "--fetch-timeout=30000"
+        ],
+        "attempts": [
+          {
+            "at": "2026-10-30T21:48:41Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:48:52Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:49:02Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:49:12Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:49:23Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:49:33Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:49:44Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:49:54Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:50:04Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:50:15Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:50:25Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:50:36Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:50:46Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:50:56Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:51:07Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:51:17Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:51:28Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:51:38Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:51:48Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:51:59Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:52:09Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:52:20Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:52:30Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:52:40Z",
+            "exit": 1,
+            "killed": false,
+            "code": "E404"
+          },
+          {
+            "at": "2026-10-30T21:52:51Z",
+            "exit": 0,
+            "killed": false,
+            "code": null
+          }
+        ],
+        "poll_s": 300.0,
+        "served": {
+          "version": "0.1.3",
+          "dist": {
+            "shasum": "9210f6b2eafe430cde205a7c2de8923a78ce9382",
+            "tarball": "https://registry.npmjs.org/opencode-multi-llm/-/opencode-multi-llm-0.1.3.tgz",
+            "fileCount": 213,
+            "integrity": "sha512-b4rfpMp/eLCeYMx506jEyRbCIXzgfg9DKChejXIyxHAFMDUZH/01Jw4wWkHiOLdqNDojfV08K16/gaybJQxpYg==",
+            "signatures": [
+              {
+                "sig": "MEYCIQCG0V9v57yH1uEt3l1u1+zrY9XvD6a/FqhkNCtvgpA0nQIhAI9hK5giUZfvNjBG96IYFHGePDCyGaXKSmn3ytAY5Pvu",
+                "keyid": "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U"
+              },
+              {
+                "keyid": "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U",
+                "sig": "MEYCIQDMzFLYqS6ry9TAqXVLpHIRLdepXZZlyfFB8TuxluVcVQIhANcl9az93vO9LsBWpjSGSR7ZSVFO8+Ptt6SDSPxVlMrO"
+              }
+            ],
+            "attestations": {
+              "url": "https://registry.npmjs.org/-/npm/v1/attestations/opencode-multi-llm@0.1.3",
+              "provenance": {
+                "predicateType": "https://slsa.dev/provenance/v1"
+              }
+            },
+            "unpackedSize": 9910842
+          }
+        },
+        "tarball_url": "https://registry.npmjs.org/opencode-multi-llm/-/opencode-multi-llm-0.1.3.tgz",
+        "integrity_served": "sha512-b4rfpMp/eLCeYMx506jEyRbCIXzgfg9DKChejXIyxHAFMDUZH/01Jw4wWkHiOLdqNDojfV08K16/gaybJQxpYg==",
+        "download": {
+          "argv": [
+            "npm",
+            "pack",
+            "opencode-multi-llm@0.1.3",
+            "--json",
+            "--pack-destination=/work/probe-root/registry-artifact",
+            "--registry=https://registry.npmjs.org",
+            "--cache=<fresh>",
+            "--userconfig=/work/probe-root/probe-npm/npmrc-empty",
+            "--prefix=/work/probe-root/probe-npm",
+            "--no-update-notifier",
+            "--fetch-retries=2",
+            "--fetch-retry-mintimeout=2000",
+            "--fetch-retry-maxtimeout=10000",
+            "--fetch-timeout=30000"
+          ],
+          "exit": 0,
+          "code": null,
+          "files": [
+            "opencode-multi-llm-0.1.3.tgz"
+          ],
+          "bytes": 2874346,
+          "integrity": "sha512-b4rfpMp/eLCeYMx506jEyRbCIXzgfg9DKChejXIyxHAFMDUZH/01Jw4wWkHiOLdqNDojfV08K16/gaybJQxpYg=="
+        }
+      }
+    },
+    {
+      "name": "manifest_version_matches",
+      "pass": true,
+      "evidence": {
+        "manifest": {
+          "name": "opencode-multi-llm",
+          "version": "0.1.3"
+        },
+        "lockfile_version": "0.1.3",
+        "location": "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm"
+      }
+    },
+    {
+      "name": "installed_tree_matches_candidate",
+      "pass": true,
+      "evidence": {
+        "candidate": {
+          "sha": "c9ae61b027a9e7bac4db216353495077f9c1d6f2",
+          "digest": "bf0a65a3b41130e6b2cf5f5613923b9d2eafdfd225f1f5ebf05fca0c71eedb1d",
+          "files": 213
+        },
+        "registry_files": {
+          "location": "/work/probe-root/registry-files/package",
+          "files": 213,
+          "missing": [],
+          "missing_count": 0,
+          "unexpected": [],
+          "unexpected_count": 0,
+          "digest": "bf0a65a3b41130e6b2cf5f5613923b9d2eafdfd225f1f5ebf05fca0c71eedb1d",
+          "recorded_digest": "bf0a65a3b41130e6b2cf5f5613923b9d2eafdfd225f1f5ebf05fca0c71eedb1d",
+          "matches": true
+        },
+        "located": {
+          "debug_paths": {
+            "home": "/work/probe-root/env/home",
+            "data": "/work/probe-root/env/data/opencode",
+            "bin": "/work/probe-root/env/cache/opencode/bin",
+            "log": "/work/probe-root/env/data/opencode/log",
+            "repos": "/work/probe-root/env/data/opencode/repos",
+            "cache": "/work/probe-root/env/cache/opencode",
+            "config": "/work/probe-root/env/config/opencode",
+            "state": "/work/probe-root/env/state/opencode",
+            "tmp": "/work/probe-root/env/tmp/opencode"
+          },
+          "searched": [
+            "/work/probe-root/env/cache/opencode",
+            "/work/probe-root/env/config/opencode",
+            "/work/probe-root/env/data/opencode",
+            "/work/probe-root/env/state/opencode"
+          ],
+          "found": [
+            "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm"
+          ]
+        },
+        "compared": "before the first tool call",
+        "installed": {
+          "location": "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm",
+          "files": 213,
+          "missing": [],
+          "missing_count": 0,
+          "unexpected": [],
+          "unexpected_count": 0,
+          "digest": "bf0a65a3b41130e6b2cf5f5613923b9d2eafdfd225f1f5ebf05fca0c71eedb1d",
+          "recorded_digest": "bf0a65a3b41130e6b2cf5f5613923b9d2eafdfd225f1f5ebf05fca0c71eedb1d",
+          "matches": true
+        },
+        "installer_metadata": {
+          "install_root": "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3",
+          "identified": [
+            "node_modules/.package-lock.json",
+            "package-lock.json",
+            "package.json"
+          ],
+          "unexpected": [],
+          "unexpected_count": 0
+        },
+        "origin": {
+          "lockfile": "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/package-lock.json",
+          "version": "0.1.3",
+          "resolved": "https://registry.npmjs.org/opencode-multi-llm/-/opencode-multi-llm-0.1.3.tgz",
+          "integrity": "sha512-b4rfpMp/eLCeYMx506jEyRbCIXzgfg9DKChejXIyxHAFMDUZH/01Jw4wWkHiOLdqNDojfV08K16/gaybJQxpYg==",
+          "origin": "https://registry.npmjs.org"
+        },
+        "installed_from": {
+          "lockfiles": [
+            "/work/probe-root/env/config/opencode/package-lock.json",
+            "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/package-lock.json"
+          ],
+          "packages": 33,
+          "origins": [
+            "https://registry.npmjs.org"
+          ],
+          "foreign": []
+        }
+      }
+    },
+    {
+      "name": "command_resolves_installed_skill",
+      "pass": true,
+      "evidence": {
+        "command": {
+          "registered": true,
+          "matches_payload": true,
+          "token_left": false,
+          "skill_paths": [],
+          "skill_paths_inside": true,
+          "plugin_specs": [
+            "opencode-multi-llm@0.1.3"
+          ],
+          "plugin_origins": [
+            "opencode-multi-llm@0.1.3"
+          ]
+        },
+        "location": "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm",
+        "skill_dir": "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm/skills/multi-llm",
+        "debug_config": {
+          "argv": [
+            "/opt/opencode-pin/node_modules/opencode-linux-x64/bin/opencode",
+            "debug",
+            "config"
+          ],
+          "exit": 0,
+          "killed": false,
+          "reason": null,
+          "elapsed_s": 8.81,
+          "stdout": "debug-config-first.json",
+          "stderr": "debug-config-first.stderr.txt"
+        }
+      }
+    },
+    {
+      "name": "tool_init_runs_installed_payload",
+      "pass": true,
+      "evidence": {
+        "init": {
+          "ok": true,
+          "exit": 0,
+          "state": "done",
+          "result": {
+            "mode": "init",
+            "phase": null,
+            "state": "done",
+            "exit": 0,
+            "artifacts": [],
+            "next": null
+          },
+          "opencode_exit": 0,
+          "tool_advertised": true,
+          "returned_to_model": true,
+          "returned_identical": true,
+          "skill_dir": "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm/skills/multi-llm",
+          "script": "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm/skills/multi-llm/multi_llm.py",
+          "uv": "/usr/local/bin/uv",
+          "run": {
+            "argv": [
+              "/opt/opencode-pin/node_modules/opencode-linux-x64/bin/opencode",
+              "run",
+              "--format",
+              "json",
+              "--print-logs",
+              "--log-level",
+              "INFO",
+              "--model",
+              "stub/m",
+              "Run the multi_llm tool with mode init."
+            ],
+            "exit": 0,
+            "killed": false,
+            "reason": null,
+            "elapsed_s": 2.4,
+            "stdout": "init.stdout.jsonl",
+            "stderr": "init.stderr.txt"
+          },
+          "network_attempts": [],
+          "files_created": [
+            ".multi-llm/providers.yaml"
+          ]
+        },
+        "installed_skill_dir": "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm/skills/multi-llm"
+      }
+    },
+    {
+      "name": "cold_dependencies_install",
+      "pass": true,
+      "evidence": {
+        "before_first_call": {
+          "uv_cache_entries": 0,
+          "venv_present": false
+        },
+        "after_first_call": {
+          "uv_cache_entries": 45,
+          "venv_present": true,
+          "python": "3.11.2",
+          "dists": [
+            "pyyaml"
+          ]
+        },
+        "runtime_requirements": [
+          "pyyaml"
+        ],
+        "uv_cache": "/work/probe-root/env/uv-cache"
+      }
+    },
+    {
+      "name": "warm_offline_operation",
+      "pass": true,
+      "evidence": {
+        "how": "docker commit of the warmed stock container, run with --network none (mllm-registry-check-offline:eb66a7bddad8)",
+        "status": {
+          "ok": true,
+          "exit": 2,
+          "state": "nothing-to-do",
+          "result": {
+            "mode": "status",
+            "phase": null,
+            "state": "nothing-to-do",
+            "exit": 2,
+            "artifacts": [],
+            "next": null
+          },
+          "opencode_exit": 0,
+          "tool_advertised": true,
+          "returned_to_model": true,
+          "returned_identical": true,
+          "skill_dir": "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm/skills/multi-llm",
+          "script": "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm/skills/multi-llm/multi_llm.py",
+          "uv": "/usr/local/bin/uv",
+          "run": {
+            "argv": [
+              "/opt/opencode-pin/node_modules/opencode-linux-x64/bin/opencode",
+              "run",
+              "--format",
+              "json",
+              "--print-logs",
+              "--log-level",
+              "INFO",
+              "--model",
+              "stub/m",
+              "Run the multi_llm tool with mode status."
+            ],
+            "exit": 0,
+            "killed": false,
+            "reason": null,
+            "elapsed_s": 2.6,
+            "stdout": "status-offline.stdout.jsonl",
+            "stderr": "status-offline.stderr.txt"
+          },
+          "network_attempts": []
+        },
+        "variables_set": {
+          "GIT_CONFIG_NOSYSTEM": "1",
+          "HOME": "/work/probe-root/env/home",
+          "OPENCODE_DISABLE_MODELS_FETCH": "1",
+          "PATH": "/opt/opencode-pin/node_modules/opencode-linux-x64/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+          "TMPDIR": "/work/probe-root/env/tmp",
+          "UV_CACHE_DIR": "/work/probe-root/env/uv-cache",
+          "XDG_CACHE_HOME": "/work/probe-root/env/cache",
+          "XDG_CONFIG_HOME": "/work/probe-root/env/config",
+          "XDG_DATA_HOME": "/work/probe-root/env/data",
+          "XDG_RUNTIME_DIR": "/work/probe-root/env/runtime",
+          "XDG_STATE_HOME": "/work/probe-root/env/state",
+          "npm_config_cache": "/work/probe-root/env/npm-cache",
+          "npm_config_globalconfig": "/work/probe-root/env/npmrc-global",
+          "npm_config_registry": "https://registry.npmjs.org/",
+          "npm_config_update_notifier": "false",
+          "npm_config_userconfig": "/work/probe-root/env/npmrc-user"
+        },
+        "left_unset": [
+          "OPENCODE_DISABLE_AUTOUPDATE",
+          "UV_OFFLINE"
+        ],
+        "interfaces": {
+          "before": [
+            {
+              "name": "erspan0",
+              "flags": "0x1002",
+              "up": false,
+              "operstate": "down"
+            },
+            {
+              "name": "gre0",
+              "flags": "0x80",
+              "up": false,
+              "operstate": "down"
+            },
+            {
+              "name": "gretap0",
+              "flags": "0x1002",
+              "up": false,
+              "operstate": "down"
+            },
+            {
+              "name": "ip6_vti0",
+              "flags": "0x80",
+              "up": false,
+              "operstate": "down"
+            },
+            {
+              "name": "ip6gre0",
+              "flags": "0x80",
+              "up": false,
+              "operstate": "down"
+            },
+            {
+              "name": "ip6tnl0",
+              "flags": "0x80",
+              "up": false,
+              "operstate": "down"
+            },
+            {
+              "name": "ip_vti0",
+              "flags": "0x80",
+              "up": false,
+              "operstate": "down"
+            },
+            {
+              "name": "lo",
+              "flags": "0x9",
+              "up": true,
+              "operstate": "unknown"
+            },
+            {
+              "name": "sit0",
+              "flags": "0x80",
+              "up": false,
+              "operstate": "down"
+            },
+            {
+              "name": "tunl0",
+              "flags": "0x80",
+              "up": false,
+              "operstate": "down"
+            }
+          ],
+          "after": [
+            {
+              "name": "erspan0",
+              "flags": "0x1002",
+              "up": false,
+              "operstate": "down"
+            },
+            {
+              "name": "gre0",
+              "flags": "0x80",
+              "up": false,
+              "operstate": "down"
+            },
+            {
+              "name": "gretap0",
+              "flags": "0x1002",
+              "up": false,
+              "operstate": "down"
+            },
+            {
+              "name": "ip6_vti0",
+              "flags": "0x80",
+              "up": false,
+              "operstate": "down"
+            },
+            {
+              "name": "ip6gre0",
+              "flags": "0x80",
+              "up": false,
+              "operstate": "down"
+            },
+            {
+              "name": "ip6tnl0",
+              "flags": "0x80",
+              "up": false,
+              "operstate": "down"
+            },
+            {
+              "name": "ip_vti0",
+              "flags": "0x80",
+              "up": false,
+              "operstate": "down"
+            },
+            {
+              "name": "lo",
+              "flags": "0x9",
+              "up": true,
+              "operstate": "unknown"
+            },
+            {
+              "name": "sit0",
+              "flags": "0x80",
+              "up": false,
+              "operstate": "down"
+            },
+            {
+              "name": "tunl0",
+              "flags": "0x80",
+              "up": false,
+              "operstate": "down"
+            }
+          ]
+        },
+        "addresses": {
+          "before": [
+            "0000:0000:0000:0000:0000:0000:0000:0001",
+            "127.0.0.0",
+            "127.0.0.1"
+          ],
+          "after": [
+            "0000:0000:0000:0000:0000:0000:0000:0001",
+            "127.0.0.0",
+            "127.0.0.1"
+          ]
+        },
+        "npm_view_output": {
+          "before": "{\n  \"error\": {\n    \"code\": \"EAI_AGAIN\",\n    \"summary\": \"request to https://registry.npmjs.org/opencode-multi-llm failed, reason: getaddrinfo EAI_AGAIN registry.npmjs.org\",\n    \"detail\": \"\"\n  }\n}\n",
+          "after": "{\n  \"error\": {\n    \"code\": \"EAI_AGAIN\",\n    \"summary\": \"request to https://registry.npmjs.org/opencode-multi-llm failed, reason: getaddrinfo EAI_AGAIN registry.npmjs.org\",\n    \"detail\": \"\"\n  }\n}\n"
+        },
+        "network_attempts_without_effect": []
+      },
+      "network_proof": {
+        "network_mode": "none",
+        "before": {
+          "taken_at": "2026-10-30T21:53:44Z",
+          "interfaces": [
+            "lo"
+          ],
+          "npm_view": {
+            "registry": "https://registry.npmjs.org",
+            "exit": 1,
+            "code": "EAI_AGAIN",
+            "argv": [
+              "npm",
+              "view",
+              "opencode-multi-llm@0.1.3",
+              "version",
+              "--json",
+              "--registry=https://registry.npmjs.org",
+              "--cache=<fresh>",
+              "--userconfig=/work/probe-root/probe-npm/offline/npmrc-empty",
+              "--prefix=/work/probe-root/probe-npm/offline",
+              "--no-update-notifier",
+              "--fetch-retries=0",
+              "--fetch-timeout=10000"
+            ]
+          }
+        },
+        "after": {
+          "taken_at": "2026-10-30T21:53:47Z",
+          "interfaces": [
+            "lo"
+          ],
+          "npm_view": {
+            "registry": "https://registry.npmjs.org",
+            "exit": 1,
+            "code": "EAI_AGAIN",
+            "argv": [
+              "npm",
+              "view",
+              "opencode-multi-llm@0.1.3",
+              "version",
+              "--json",
+              "--registry=https://registry.npmjs.org",
+              "--cache=<fresh>",
+              "--userconfig=/work/probe-root/probe-npm/offline/npmrc-empty",
+              "--prefix=/work/probe-root/probe-npm/offline",
+              "--no-update-notifier",
+              "--fetch-retries=0",
+              "--fetch-timeout=10000"
+            ]
+          }
+        },
+        "payload": {
+          "before": {
+            "location": "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm",
+            "digest": "bf0a65a3b41130e6b2cf5f5613923b9d2eafdfd225f1f5ebf05fca0c71eedb1d"
+          },
+          "after": {
+            "location": "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm",
+            "digest": "bf0a65a3b41130e6b2cf5f5613923b9d2eafdfd225f1f5ebf05fca0c71eedb1d"
+          }
+        }
+      }
+    },
+    {
+      "name": "same_pin_restart_matches",
+      "pass": true,
+      "evidence": {
+        "before": {
+          "payload": {
+            "location": "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm",
+            "digest": "bf0a65a3b41130e6b2cf5f5613923b9d2eafdfd225f1f5ebf05fca0c71eedb1d",
+            "missing": []
+          },
+          "status": {
+            "ok": true,
+            "exit": 2,
+            "state": "nothing-to-do",
+            "result": {
+              "mode": "status",
+              "phase": null,
+              "state": "nothing-to-do",
+              "exit": 2,
+              "artifacts": [],
+              "next": null
+            },
+            "opencode_exit": 0,
+            "tool_advertised": true,
+            "returned_to_model": true,
+            "returned_identical": true,
+            "skill_dir": "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm/skills/multi-llm",
+            "script": "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm/skills/multi-llm/multi_llm.py",
+            "uv": "/usr/local/bin/uv",
+            "run": {
+              "argv": [
+                "/opt/opencode-pin/node_modules/opencode-linux-x64/bin/opencode",
+                "run",
+                "--format",
+                "json",
+                "--print-logs",
+                "--log-level",
+                "INFO",
+                "--model",
+                "stub/m",
+                "Run the multi_llm tool with mode status."
+              ],
+              "exit": 0,
+              "killed": false,
+              "reason": null,
+              "elapsed_s": 1.6,
+              "stdout": "status-before-restart.stdout.jsonl",
+              "stderr": "status-before-restart.stderr.txt"
+            },
+            "network_attempts": []
+          }
+        },
+        "after": {
+          "payload": {
+            "location": "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm",
+            "digest": "bf0a65a3b41130e6b2cf5f5613923b9d2eafdfd225f1f5ebf05fca0c71eedb1d",
+            "missing": []
+          },
+          "version": "0.1.3",
+          "command": {
+            "registered": true,
+            "matches_payload": true,
+            "token_left": false,
+            "skill_paths": [],
+            "skill_paths_inside": true,
+            "plugin_specs": [
+              "opencode-multi-llm@0.1.3"
+            ],
+            "plugin_origins": [
+              "opencode-multi-llm@0.1.3"
+            ]
+          },
+          "status": {
+            "ok": true,
+            "exit": 2,
+            "state": "nothing-to-do",
+            "result": {
+              "mode": "status",
+              "phase": null,
+              "state": "nothing-to-do",
+              "exit": 2,
+              "artifacts": [],
+              "next": null
+            },
+            "opencode_exit": 0,
+            "tool_advertised": true,
+            "returned_to_model": true,
+            "returned_identical": true,
+            "skill_dir": "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm/skills/multi-llm",
+            "script": "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm/skills/multi-llm/multi_llm.py",
+            "uv": "/usr/local/bin/uv",
+            "run": {
+              "argv": [
+                "/opt/opencode-pin/node_modules/opencode-linux-x64/bin/opencode",
+                "run",
+                "--format",
+                "json",
+                "--print-logs",
+                "--log-level",
+                "INFO",
+                "--model",
+                "stub/m",
+                "Run the multi_llm tool with mode status."
+              ],
+              "exit": 0,
+              "killed": false,
+              "reason": null,
+              "elapsed_s": 1.6,
+              "stdout": "status-after-restart.stdout.jsonl",
+              "stderr": "status-after-restart.stderr.txt"
+            },
+            "network_attempts": []
+          }
+        },
+        "installed_from_at_end": {
+          "lockfiles": [
+            "/work/probe-root/env/config/opencode/package-lock.json",
+            "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/package-lock.json"
+          ],
+          "packages": 33,
+          "origins": [
+            "https://registry.npmjs.org"
+          ],
+          "foreign": []
+        }
+      }
+    },
+    {
+      "name": "upgrade_runs_new_payload",
+      "pass": true,
+      "evidence": {
+        "previous_pin": "opencode-multi-llm@0.1.1",
+        "new_pin": "opencode-multi-llm@0.1.3",
+        "before": {
+          "version": "0.1.1",
+          "location": "/work/probe-root/upgrade/env/cache/opencode/packages/opencode-multi-llm@0.1.1/node_modules/opencode-multi-llm",
+          "status": {
+            "ok": true,
+            "exit": 2,
+            "state": "nothing-to-do",
+            "result": {
+              "mode": "status",
+              "phase": null,
+              "state": "nothing-to-do",
+              "exit": 2,
+              "artifacts": [],
+              "next": null
+            },
+            "opencode_exit": 0,
+            "tool_advertised": true,
+            "returned_to_model": true,
+            "returned_identical": true,
+            "skill_dir": "/work/probe-root/upgrade/env/cache/opencode/packages/opencode-multi-llm@0.1.1/node_modules/opencode-multi-llm/skills/multi-llm",
+            "script": "/work/probe-root/upgrade/env/cache/opencode/packages/opencode-multi-llm@0.1.1/node_modules/opencode-multi-llm/skills/multi-llm/multi_llm.py",
+            "uv": "/usr/local/bin/uv",
+            "run": {
+              "argv": [
+                "/opt/opencode-pin/node_modules/opencode-linux-x64/bin/opencode",
+                "run",
+                "--format",
+                "json",
+                "--print-logs",
+                "--log-level",
+                "INFO",
+                "--model",
+                "stub/m",
+                "Run the multi_llm tool with mode status."
+              ],
+              "exit": 0,
+              "killed": false,
+              "reason": null,
+              "elapsed_s": 2.2,
+              "stdout": "status-previous.stdout.jsonl",
+              "stderr": "status-previous.stderr.txt"
+            },
+            "network_attempts": []
+          }
+        },
+        "after": {
+          "version": "0.1.3",
+          "location": "/work/probe-root/upgrade/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm",
+          "digest": "bf0a65a3b41130e6b2cf5f5613923b9d2eafdfd225f1f5ebf05fca0c71eedb1d",
+          "tree": {
+            "location": "/work/probe-root/upgrade/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm",
+            "files": 213,
+            "missing": [],
+            "missing_count": 0,
+            "unexpected": [],
+            "unexpected_count": 0,
+            "digest": "bf0a65a3b41130e6b2cf5f5613923b9d2eafdfd225f1f5ebf05fca0c71eedb1d",
+            "recorded_digest": "bf0a65a3b41130e6b2cf5f5613923b9d2eafdfd225f1f5ebf05fca0c71eedb1d",
+            "matches": true
+          },
+          "status": {
+            "ok": true,
+            "exit": 2,
+            "state": "nothing-to-do",
+            "result": {
+              "mode": "status",
+              "phase": null,
+              "state": "nothing-to-do",
+              "exit": 2,
+              "artifacts": [],
+              "next": null
+            },
+            "opencode_exit": 0,
+            "tool_advertised": true,
+            "returned_to_model": true,
+            "returned_identical": true,
+            "skill_dir": "/work/probe-root/upgrade/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm/skills/multi-llm",
+            "script": "/work/probe-root/upgrade/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm/skills/multi-llm/multi_llm.py",
+            "uv": "/usr/local/bin/uv",
+            "run": {
+              "argv": [
+                "/opt/opencode-pin/node_modules/opencode-linux-x64/bin/opencode",
+                "run",
+                "--format",
+                "json",
+                "--print-logs",
+                "--log-level",
+                "INFO",
+                "--model",
+                "stub/m",
+                "Run the multi_llm tool with mode status."
+              ],
+              "exit": 0,
+              "killed": false,
+              "reason": null,
+              "elapsed_s": 1.8,
+              "stdout": "status-upgraded.stdout.jsonl",
+              "stderr": "status-upgraded.stderr.txt"
+            },
+            "network_attempts": []
+          }
+        },
+        "ran_from": "/work/probe-root/upgrade/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm/skills/multi-llm"
+      }
+    }
+  ],
+  "payload_location": "/work/probe-root/env/cache/opencode/packages/opencode-multi-llm@0.1.3/node_modules/opencode-multi-llm"
+}
