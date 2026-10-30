@@ -881,7 +881,15 @@ jobs:
           NAME: ${{ steps.facts.outputs.name }}
           VERSION: ${{ steps.facts.outputs.version }}
           REGISTRY: ${{ steps.facts.outputs.registry }}
+          SOURCE_TAG: ${{ inputs.tag }}
+          SOURCE_SHA: ${{ needs.verify.outputs.sha }}
         run: |
           set -euo pipefail
           cd "${UPLOAD}"
+          # npm 11.5.1 takes its source dependency from GITHUB_REF/GITHUB_SHA,
+          # which otherwise name this dispatch's master commit. Earlier steps
+          # checked out SOURCE_SHA and proved SOURCE_TAG still names it. Bind
+          # only this process's source metadata to those verified bytes;
+          # GITHUB_WORKFLOW_REF and the OIDC workflow identity stay on master.
+          export GITHUB_REF="refs/tags/${SOURCE_TAG}" GITHUB_SHA="${SOURCE_SHA}"
           npm publish "./${NAME}-${VERSION}.tgz" --provenance --ignore-scripts --access public --registry "${REGISTRY}" --prefix "${UPLOAD}"
