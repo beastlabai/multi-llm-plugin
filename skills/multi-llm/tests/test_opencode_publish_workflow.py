@@ -897,7 +897,7 @@ class TestHygiene:
             assert s["with"]["fetch-depth"] == 0, job_id
             assert s["with"]["persist-credentials"] is False, job_id
         assert step_ref("verify") == "refs/tags/${{ inputs.tag }}"
-        assert step_ref("publish") == "${{ needs.verify.outputs.sha }}"
+        assert step_ref("publish") == "${{ github.sha }}"
 
     def test_actions_are_pinned_by_sha_like_the_tests_workflow(self):
         pinned = {}
@@ -1022,7 +1022,7 @@ class TestTagResolution:
     def test_publish_refuses_a_tag_that_moved_after_verify(self, shell, history):
         repo, tagged, record, _ = history
         moved = step("publish", "The tag still names verify's commit")
-        env = {"TAG": "opencode-v0.1.2", "SHA": tagged}
+        env = {"TAG": "opencode-v0.1.2", "SHA": tagged, "GITHUB_SHA": tagged}
         done, _ = shell.run(moved, cwd=repo, env=env)
         assert done.returncode == 0, done.stderr
         _git(repo, "tag", "-f", "-a", "opencode-v0.1.2", "-m", "moved", record)
@@ -1030,6 +1030,26 @@ class TestTagResolution:
         assert done.returncode != 0 and f"now names {record}" in done.stderr
         done, _ = shell.run(moved, cwd=repo, env={**env, "SHA": ""})
         assert done.returncode != 0 and "not a commit" in done.stderr
+
+    def test_publish_accepts_a_descendant_as_its_certified_source(self, shell, history):
+        repo, tagged, record, _ = history
+        _git(repo, "checkout", "-q", "--detach", record)
+        done, _ = shell.run(step("publish", "The tag still names verify's commit"), cwd=repo,
+                            env={"TAG": "opencode-v0.1.2", "SHA": tagged, "GITHUB_SHA": record})
+        assert done.returncode == 0, done.stderr
+
+    def test_publish_refuses_a_checkout_other_than_its_certified_source(self, shell, history):
+        repo, tagged, record, _ = history
+        done, _ = shell.run(step("publish", "The tag still names verify's commit"), cwd=repo,
+                            env={"TAG": "opencode-v0.1.2", "SHA": tagged, "GITHUB_SHA": record})
+        assert done.returncode != 0 and "not the dispatched commit" in done.stderr
+
+    def test_publish_refuses_a_source_unrelated_to_the_verified_tag(self, shell, history):
+        repo, tagged, _, unrelated = history
+        _git(repo, "checkout", "-q", "--detach", unrelated)
+        done, _ = shell.run(step("publish", "The tag still names verify's commit"), cwd=repo,
+                            env={"TAG": "opencode-v0.1.2", "SHA": tagged, "GITHUB_SHA": unrelated})
+        assert done.returncode != 0 and "tag is not on the publish source" in done.stderr
 
 
 @pytest.fixture(scope="module")
@@ -1164,11 +1184,12 @@ class TestPublishDigest:
 
 @needs_shell
 class TestPublishProvenance:
-    def test_npm_names_the_verified_source_and_preserves_the_workflow_identity(self, shell, tmp_path):
+    def test_npm_preserves_the_certified_source_and_workflow_identity(self, shell, tmp_path):
         repo = _repo(tmp_path / "source")
         source_sha = _commit(repo, {"payload.txt": "released bytes"}, "release")
         tag = "opencode-v0.1.3"
         _git(repo, "tag", tag)
+        dispatch_sha = _commit(repo, {"release-record.txt": "verification"}, "dispatch")
         upload = tmp_path / "upload"
         upload.mkdir()
         (upload / "opencode-multi-llm-0.1.3.tgz").write_bytes(b"gated tarball")
@@ -1192,12 +1213,12 @@ class TestPublishProvenance:
         }
         done, _ = shell.run(step("publish", "Publish the packed tarball, with provenance"),
                             cwd=repo, context=context,
-                            env={"GITHUB_SHA": "f" * 40, "GITHUB_REF": "refs/heads/master",
+                            env={"GITHUB_SHA": dispatch_sha, "GITHUB_REF": "refs/heads/master",
                                  "GITHUB_WORKFLOW_REF": workflow, "NPM_CAPTURE": str(capture)})
         assert done.returncode == 0, done.stderr
         published = json.loads(capture.read_text())
-        assert published["sha"] == source_sha
-        assert published["ref"] == f"refs/tags/{tag}"
+        assert published["sha"] == dispatch_sha
+        assert published["ref"] == "refs/heads/master"
         assert published["workflow"] == workflow
         assert published["argv"][:2] == ["publish", "./opencode-multi-llm-0.1.3.tgz"]
 
