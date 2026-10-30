@@ -1163,6 +1163,46 @@ class TestPublishDigest:
 
 
 @needs_shell
+class TestPublishProvenance:
+    def test_npm_names_the_verified_source_and_preserves_the_workflow_identity(self, shell, tmp_path):
+        repo = _repo(tmp_path / "source")
+        source_sha = _commit(repo, {"payload.txt": "released bytes"}, "release")
+        tag = "opencode-v0.1.3"
+        _git(repo, "tag", tag)
+        upload = tmp_path / "upload"
+        upload.mkdir()
+        (upload / "opencode-multi-llm-0.1.3.tgz").write_bytes(b"gated tarball")
+        capture = tmp_path / "npm.json"
+        npm = shell.bin / "npm"
+        npm.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "from pathlib import Path\n"
+            "Path(os.environ['NPM_CAPTURE']).write_text(json.dumps({\n"
+            " 'sha': os.environ['GITHUB_SHA'], 'ref': os.environ['GITHUB_REF'],\n"
+            " 'workflow': os.environ['GITHUB_WORKFLOW_REF'], 'argv': sys.argv[1:]}))\n",
+            encoding="utf-8")
+        npm.chmod(0o755)
+        workflow = "beastlabai/multi-llm-plugin/.github/workflows/publish-opencode-plugin.yml@refs/heads/master"
+        context = _dispatch(mode="publish", tag=tag)
+        context["needs"] = {"verify": {"outputs": {"sha": source_sha}}}
+        context["steps"] = {
+            "pack": {"outputs": {"dir": str(upload)}},
+            "facts": {"outputs": {"name": "opencode-multi-llm", "version": "0.1.3", "registry": SINGLE}},
+        }
+        done, _ = shell.run(step("publish", "Publish the packed tarball, with provenance"),
+                            cwd=repo, context=context,
+                            env={"GITHUB_SHA": "f" * 40, "GITHUB_REF": "refs/heads/master",
+                                 "GITHUB_WORKFLOW_REF": workflow, "NPM_CAPTURE": str(capture)})
+        assert done.returncode == 0, done.stderr
+        published = json.loads(capture.read_text())
+        assert published["sha"] == source_sha
+        assert published["ref"] == f"refs/tags/{tag}"
+        assert published["workflow"] == workflow
+        assert published["argv"][:2] == ["publish", "./opencode-multi-llm-0.1.3.tgz"]
+
+
+@needs_shell
 class TestFacts:
     def test_the_facts_step_reads_the_owners(self, shell):
         if shutil.which("make") is None:
