@@ -104,7 +104,7 @@ Updating, uninstalling, platform support and troubleshooting are in [docs/hosts.
 
 ### 1.3 OpenCode
 
-Installs from npm as [`opencode-multi-llm`](https://www.npmjs.com/package/opencode-multi-llm): a `/multi-llm` command plus a `multi_llm` tool. Needs opencode 1.19.4 or newer and `uv` on `PATH`. Linux is verified; macOS and Windows are untested on this route.
+Installs from npm as [`opencode-multi-llm`](https://www.npmjs.com/package/opencode-multi-llm): a `/multi-llm` command plus a `multi_llm` tool. Needs opencode 1.19.5 or newer and `uv` on `PATH`. Linux is verified; macOS and Windows are untested on this route.
 
 1. **Add the package** to the `plugin` list in `~/.config/opencode/opencode.json` (create the file if you have none), keeping the exact version (OpenCode never updates an unpinned entry):
 
