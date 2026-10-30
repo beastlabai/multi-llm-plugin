@@ -63,6 +63,8 @@ SINGLE = rc._registry().single_registry()
 SURFACE = build.cli_surface()
 NAME = "opencode-multi-llm"
 VERSION = "0.1.1"
+# check() reads the configured host pin, so the fake host must follow it too.
+HOST_VERSION = rc._bump().pinned_version()
 SPEC = f"{NAME}@{VERSION}"
 STUB = "http://127.0.0.1:43210"
 #: Where uv puts the venv's interpreter, the path the cold-install criterion reads.
@@ -179,7 +181,7 @@ class FakeHost:
         argv = [str(a) for a in argv]
         out, code = "", 0
         if argv[-1] == "--version":
-            out = {"opencode": "1.19.4", "node": "v22.19.0", "npm": "10.9.3"}.get(
+            out = {"opencode": HOST_VERSION, "node": "v22.19.0", "npm": "10.9.3"}.get(
                 Path(argv[0]).name, "uv 0.13.5 (x86_64-unknown-linux-gnu)")
         elif argv[:2] == ["npm", "view"]:
             out = json.dumps({"version": VERSION, "dist": {
@@ -264,7 +266,7 @@ def _context(tmp_path, candidate, environment="ci-runner", previous_pin=None, re
     return rc.Context(spec=SPEC, name=NAME, version=VERSION,
                       read_registry=STUB if rehearsal else SINGLE, single_registry=SINGLE,
                       rehearsal=rehearsal, environment=environment, candidate=candidate,
-                      binary=str(binary), opencode_pin="1.19.4", probe_root=tmp_path / "root",
+                      binary=str(binary), opencode_pin=HOST_VERSION, probe_root=tmp_path / "root",
                       previous_pin=previous_pin, poll_s=0.0, interval_s=0.0)
 
 
@@ -380,7 +382,7 @@ def _record(fixture, *, environment="ci-runner", rehearsal=True, kind="first", p
         version=VERSION, read_registry=registry_url, installed_registry=registry_url,
         integrity="sha512-" + "Q" * 86 + "==", tag=fixture["tag"], sha=fixture["sha"],
         candidate_digest="d" * 64, kind=kind, previous_pin=previous,
-        measured={"opencode": "1.19.4", "python": "3.11.2", "uv": "0.13.5"},
+        measured={"opencode": HOST_VERSION, "python": "3.11.2", "uv": "0.13.5"},
         variables_set={"OPENCODE_DISABLE_MODELS_FETCH": "1"},
         criteria=criteria if criteria is not None else _passing_criteria(rc.criteria_for(environment, kind)),
         payload_location="/work/p", environment_details={"probe_root": "/work"})
@@ -1314,7 +1316,7 @@ def _drive(tmp_path, docker, rehearsal=True):
     ctx = rc.Context(spec=SPEC, name=NAME, version=VERSION, read_registry=STUB if rehearsal else SINGLE,
                      single_registry=SINGLE, rehearsal=rehearsal, environment="container",
                      candidate=candidate, binary=f"{rc.PIN_PREFIX}/node_modules/.bin/opencode",
-                     opencode_pin="1.19.4", probe_root=Path(rc.WORK) / "probe-root")
+                     opencode_pin=HOST_VERSION, probe_root=Path(rc.WORK) / "probe-root")
     base = rc.container_base()
     return rc.drive_container(ctx=ctx, base=base, pin_files=({"name": "pin"}, {"packages": {}}),
                               support=tmp_path / "support", docker=docker), base
