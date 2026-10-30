@@ -122,7 +122,7 @@ jobs:
       # These are the same SHAs `tests.yml` pins. The trailing comment is the
       # tag each SHA was resolved from; it is a label, not a constraint, so bump
       # the SHA and the comment together and never the comment alone.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history and every tag: the shared-version check reads every
           # codex-v*/opencode-v* tag and refuses a shallow or tagless clone, and
@@ -135,7 +135,7 @@ jobs:
       # No uv cache in this workflow. The Actions cache is shared across
       # workflows and branches, so a restored cache is bytes no job of this run
       # produced. And the plan wants the `uv` installs cold.
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: false
 
@@ -153,7 +153,7 @@ jobs:
       # rehearsal runs the publish job's row 9, which is why the setup is
       # identical everywhere and the static test holds it so; this job's row-9
       # canary below then records, on every run, what row 9 hears under it.
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -404,7 +404,7 @@ jobs:
 
       - name: Keep the gate's evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: opencode-${{ github.job }}-evidence-attempt-${{ github.run_attempt }}
           path: |
@@ -442,17 +442,17 @@ jobs:
           fi
           echo "publish ${TAG}, dispatched from ${GITHUB_REF} at ${GITHUB_SHA}"
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/tags/${{ inputs.tag }}
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: false
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -679,7 +679,7 @@ jobs:
 
       - name: Keep the gate's evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: opencode-${{ github.job }}-evidence-attempt-${{ github.run_attempt }}
           path: |
@@ -720,7 +720,7 @@ jobs:
           fi
           echo "publish ${TAG}, dispatched from ${GITHUB_REF} at ${GITHUB_SHA}"
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Provenance must match the dispatch source certified by GitHub.
           # The rebuild below must still equal the verified tag's digest.
@@ -756,11 +756,11 @@ jobs:
           fi
           echo "${TAG} still names ${SHA}; publisher source ${GITHUB_SHA}"
 
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: false
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
 
