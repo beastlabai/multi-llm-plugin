@@ -1641,6 +1641,16 @@ def setup_script(base: Mapping[str, str]) -> str:
     return "\n".join([
         "set -euo pipefail",
         "export DEBIAN_FRONTEND=noninteractive",
+        # The stock Node image has no system CA bundle. Bootstrap it from
+        # that image's built-in roots so apt can use HTTPS with verification.
+        "node -e \"const fs=require('node:fs'); "
+        "fs.mkdirSync('/etc/ssl/certs',{recursive:true}); "
+        "fs.writeFileSync('/etc/ssl/certs/ca-certificates.crt',"
+        "require('node:tls').rootCertificates.join('\\n')+'\\n')\"",
+        "for source in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources; do",
+        "  if [ -f \"$source\" ]; then sed -i "
+        "'s|http://deb.debian.org|https://deb.debian.org|g' \"$source\"; fi",
+        "done",
         "apt-get update -qq",
         "apt-get install -y -qq --no-install-recommends ca-certificates curl git python3 "
         "python3-yaml >/dev/null",
