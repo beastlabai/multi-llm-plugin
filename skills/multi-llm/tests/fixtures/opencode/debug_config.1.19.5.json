@@ -1,0 +1,680 @@
+{
+  "opencode_version": "1.19.5",
+  "argv": [
+    "opencode",
+    "debug",
+    "config"
+  ],
+  "captured": "2026-10-30, debug_config_capture.py: host, scratch HOME per case under a cleared env (HOME, PATH=/usr/bin:/bin, OPENCODE_DISABLE_MODELS_FETCH=1 plus the case's own env), stdin /dev/null, egress closed by a dead HTTP(S)_PROXY, no model call; every apiKey a sk-canary-not-a-key-<n> canary; scratch paths rewritten to /rig",
+  "cases": {
+    "custom_inline_key": {
+      "setup": "global opencode.json: custom `stub` (npm + baseURL) with an inline apiKey",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1"
+      },
+      "global_files": {
+        "opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "stub": {
+              "npm": "@ai-sdk/openai-compatible",
+              "options": {
+                "baseURL": "http://127.0.0.1:9/v1",
+                "apiKey": "sk-canary-not-a-key-1"
+              },
+              "models": {
+                "stub-model": {}
+              }
+            }
+          }
+        }
+      },
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {\n    \"stub\": {\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"options\": {\n        \"baseURL\": \"http://127.0.0.1:9/v1\",\n        \"apiKey\": \"***\"\n      },\n      \"models\": {\n        \"stub-model\": {}\n      }\n    }\n  },\n  \"agent\": {},\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"username\": \"unknown\"\n}\n",
+      "stderr": ""
+    },
+    "custom_keyless": {
+      "setup": "global opencode.json: custom `keyless` with no apiKey",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1"
+      },
+      "global_files": {
+        "opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "keyless": {
+              "npm": "@ai-sdk/openai-compatible",
+              "options": {
+                "baseURL": "http://127.0.0.1:9/v1"
+              },
+              "models": {
+                "m1": {}
+              }
+            }
+          }
+        }
+      },
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {\n    \"keyless\": {\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"options\": {\n        \"baseURL\": \"http://127.0.0.1:9/v1\"\n      },\n      \"models\": {\n        \"m1\": {}\n      }\n    }\n  },\n  \"agent\": {},\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"username\": \"unknown\"\n}\n",
+      "stderr": ""
+    },
+    "custom_envkey_unset": {
+      "setup": "custom `envkey`, apiKey `{env:MY_TEST_KEY}`, variable unset",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1"
+      },
+      "global_files": {
+        "opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "envkey": {
+              "npm": "@ai-sdk/openai-compatible",
+              "options": {
+                "baseURL": "http://127.0.0.1:9/v1",
+                "apiKey": "{env:MY_TEST_KEY}"
+              },
+              "models": {
+                "m2": {}
+              }
+            }
+          }
+        }
+      },
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {\n    \"envkey\": {\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"options\": {\n        \"baseURL\": \"http://127.0.0.1:9/v1\",\n        \"apiKey\": \"***\"\n      },\n      \"models\": {\n        \"m2\": {}\n      }\n    }\n  },\n  \"agent\": {},\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"username\": \"unknown\"\n}\n",
+      "stderr": ""
+    },
+    "custom_envkey_set": {
+      "setup": "custom `envkey`, apiKey `{env:MY_TEST_KEY}`, variable set",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1",
+        "MY_TEST_KEY": "sk-canary-not-a-key-3"
+      },
+      "global_files": {
+        "opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "envkey": {
+              "npm": "@ai-sdk/openai-compatible",
+              "options": {
+                "baseURL": "http://127.0.0.1:9/v1",
+                "apiKey": "{env:MY_TEST_KEY}"
+              },
+              "models": {
+                "m2": {}
+              }
+            }
+          }
+        }
+      },
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {\n    \"envkey\": {\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"options\": {\n        \"baseURL\": \"http://127.0.0.1:9/v1\",\n        \"apiKey\": \"***\"\n      },\n      \"models\": {\n        \"m2\": {}\n      }\n    }\n  },\n  \"agent\": {},\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"username\": \"unknown\"\n}\n",
+      "stderr": ""
+    },
+    "builtin_override_keyed": {
+      "setup": "built-in `openrouter` in config with options.apiKey",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1"
+      },
+      "global_files": {
+        "opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "openrouter": {
+              "options": {
+                "apiKey": "sk-canary-not-a-key-4"
+              }
+            }
+          }
+        }
+      },
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {\n    \"openrouter\": {\n      \"options\": {\n        \"apiKey\": \"***\"\n      }\n    }\n  },\n  \"agent\": {},\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"username\": \"unknown\"\n}\n",
+      "stderr": ""
+    },
+    "builtin_override_keyless": {
+      "setup": "built-in `openrouter` in config, options without a key",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1"
+      },
+      "global_files": {
+        "opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "openrouter": {
+              "options": {
+                "timeout": 30000
+              }
+            }
+          }
+        }
+      },
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {\n    \"openrouter\": {\n      \"options\": {\n        \"timeout\": 30000\n      }\n    }\n  },\n  \"agent\": {},\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"username\": \"unknown\"\n}\n",
+      "stderr": ""
+    },
+    "builtin_override_envkey_unset": {
+      "setup": "built-in `openrouter`, apiKey `{env:MY_TEST_KEY}`, variable unset",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1"
+      },
+      "global_files": {
+        "opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "openrouter": {
+              "options": {
+                "apiKey": "{env:MY_TEST_KEY}"
+              }
+            }
+          }
+        }
+      },
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {\n    \"openrouter\": {\n      \"options\": {\n        \"apiKey\": \"***\"\n      }\n    }\n  },\n  \"agent\": {},\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"username\": \"unknown\"\n}\n",
+      "stderr": ""
+    },
+    "builtin_override_envkey_set": {
+      "setup": "built-in `openrouter`, apiKey `{env:MY_TEST_KEY}`, variable set",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1",
+        "MY_TEST_KEY": "sk-canary-not-a-key-10"
+      },
+      "global_files": {
+        "opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "openrouter": {
+              "options": {
+                "apiKey": "{env:MY_TEST_KEY}"
+              }
+            }
+          }
+        }
+      },
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {\n    \"openrouter\": {\n      \"options\": {\n        \"apiKey\": \"***\"\n      }\n    }\n  },\n  \"agent\": {},\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"username\": \"unknown\"\n}\n",
+      "stderr": ""
+    },
+    "builtin_override_empty_key": {
+      "setup": "built-in `openrouter`, apiKey an empty string",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1"
+      },
+      "global_files": {
+        "opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "openrouter": {
+              "options": {
+                "apiKey": ""
+              }
+            }
+          }
+        }
+      },
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {\n    \"openrouter\": {\n      \"options\": {\n        \"apiKey\": \"***\"\n      }\n    }\n  },\n  \"agent\": {},\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"username\": \"unknown\"\n}\n",
+      "stderr": ""
+    },
+    "builtin_override_filekey": {
+      "setup": "built-in `openrouter`, apiKey `{file:openrouter.key}`, a file beside the config",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1"
+      },
+      "global_files": {
+        "opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "openrouter": {
+              "options": {
+                "apiKey": "{file:openrouter.key}"
+              }
+            }
+          }
+        },
+        "openrouter.key": "sk-canary-not-a-key-11\n"
+      },
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {\n    \"openrouter\": {\n      \"options\": {\n        \"apiKey\": \"***\"\n      }\n    }\n  },\n  \"agent\": {},\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"username\": \"unknown\"\n}\n",
+      "stderr": ""
+    },
+    "builtin_override_filekey_missing": {
+      "setup": "built-in `openrouter`, apiKey `{file:missing.key}`, no such file",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1"
+      },
+      "global_files": {
+        "opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "openrouter": {
+              "options": {
+                "apiKey": "{file:missing.key}"
+              }
+            }
+          }
+        }
+      },
+      "project_files": {},
+      "exit": 1,
+      "stdout": "",
+      "stderr": "\u001b[91m\u001b[1mError: \u001b[0mConfiguration is invalid at /rig/home/.config/opencode/opencode.json: bad file reference: \"{file:missing.key}\" /rig/home/.config/opencode/missing.key does not exist\n"
+    },
+    "nothing_declared": {
+      "setup": "no config anywhere (built-in `openrouter` with nothing is not declared)",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1"
+      },
+      "global_files": {},
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"agent\": {},\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"username\": \"unknown\"\n}\n",
+      "stderr": ""
+    },
+    "jsonc_commented": {
+      "setup": "global opencode.jsonc with comments and trailing commas declaring `stub`",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1"
+      },
+      "global_files": {
+        "opencode.jsonc": "{\n  // a comment opencode tolerates\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {\n    /* block comment */\n    \"stub\": {\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"options\": {\"baseURL\": \"http://127.0.0.1:9/v1\", \"apiKey\": \"sk-canary-not-a-key-5\",},\n      \"models\": {\"stub-model\": {},},\n    },\n  },\n}\n"
+      },
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {\n    \"stub\": {\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"options\": {\n        \"baseURL\": \"http://127.0.0.1:9/v1\",\n        \"apiKey\": \"***\"\n      },\n      \"models\": {\n        \"stub-model\": {}\n      }\n    }\n  },\n  \"agent\": {},\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"username\": \"unknown\"\n}\n",
+      "stderr": ""
+    },
+    "project_layer": {
+      "setup": "project ./opencode.json only, declaring `stub`",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1"
+      },
+      "global_files": {},
+      "project_files": {
+        "opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "stub": {
+              "npm": "@ai-sdk/openai-compatible",
+              "options": {
+                "baseURL": "http://127.0.0.1:9/v1",
+                "apiKey": "sk-canary-not-a-key-1"
+              },
+              "models": {
+                "stub-model": {}
+              }
+            }
+          }
+        }
+      },
+      "exit": 0,
+      "stdout": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {\n    \"stub\": {\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"options\": {\n        \"baseURL\": \"http://127.0.0.1:9/v1\",\n        \"apiKey\": \"***\"\n      },\n      \"models\": {\n        \"stub-model\": {}\n      }\n    }\n  },\n  \"agent\": {},\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"username\": \"unknown\"\n}\n",
+      "stderr": ""
+    },
+    "project_layer_disabled": {
+      "setup": "project ./opencode.json with OPENCODE_DISABLE_PROJECT_CONFIG=1",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1",
+        "OPENCODE_DISABLE_PROJECT_CONFIG": "1"
+      },
+      "global_files": {},
+      "project_files": {
+        "opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "stub": {
+              "npm": "@ai-sdk/openai-compatible",
+              "options": {
+                "baseURL": "http://127.0.0.1:9/v1",
+                "apiKey": "sk-canary-not-a-key-1"
+              },
+              "models": {
+                "stub-model": {}
+              }
+            }
+          }
+        }
+      },
+      "exit": 0,
+      "stdout": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"agent\": {},\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"username\": \"unknown\"\n}\n",
+      "stderr": ""
+    },
+    "opencode_config_file": {
+      "setup": "OPENCODE_CONFIG naming a file that declares `stub`",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1",
+        "OPENCODE_CONFIG": "/rig/explicit.json"
+      },
+      "global_files": {},
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {\n    \"stub\": {\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"options\": {\n        \"baseURL\": \"http://127.0.0.1:9/v1\",\n        \"apiKey\": \"***\"\n      },\n      \"models\": {\n        \"stub-model\": {}\n      }\n    }\n  },\n  \"agent\": {},\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"username\": \"unknown\"\n}\n",
+      "stderr": ""
+    },
+    "user_external_directory_rules": {
+      "setup": "user rules for T8.2's external_directory reduction: top-level map plus agent.plan / agent.build layers, insertion order not alphabetical",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1"
+      },
+      "global_files": {
+        "opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "permission": {
+            "external_directory": {
+              "/zz/*": "allow",
+              "/shared/*": "allow",
+              "/shared/private/*": "deny",
+              "*": "ask"
+            },
+            "*": "allow"
+          },
+          "agent": {
+            "plan": {
+              "permission": {
+                "external_directory": {
+                  "/aa/*": "ask"
+                }
+              }
+            },
+            "build": {
+              "permission": {
+                "external_directory": "deny"
+              }
+            }
+          }
+        }
+      },
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"permission\": {\n    \"external_directory\": {\n      \"/zz/*\": \"allow\",\n      \"/shared/*\": \"allow\",\n      \"/shared/private/*\": \"deny\",\n      \"*\": \"ask\"\n    },\n    \"*\": \"allow\"\n  },\n  \"agent\": {\n    \"plan\": {\n      \"permission\": {\n        \"external_directory\": {\n          \"/aa/*\": \"ask\"\n        }\n      },\n      \"options\": {}\n    },\n    \"build\": {\n      \"permission\": {\n        \"external_directory\": \"deny\"\n      },\n      \"options\": {}\n    }\n  },\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"username\": \"unknown\"\n}\n",
+      "stderr": ""
+    },
+    "hermetic_config_content": {
+      "setup": "the T4.1 hermetic env: empty XDG_CONFIG_HOME, project layer disabled, OPENCODE_CONFIG_CONTENT = config_providers `stub` block (no credential) plus the §4.2 permission block under agent.plan.permission; the user's global config (declaring `userstub`) is present under HOME and must vanish",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1",
+        "XDG_CONFIG_HOME": "/rig/hermetic-config",
+        "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+        "OPENCODE_TEST_HOME": "/rig/hermetic-config",
+        "OPENCODE_CONFIG_CONTENT": "{\"$schema\": \"https://opencode.ai/config.json\", \"provider\": {\"stub\": {\"npm\": \"@ai-sdk/openai-compatible\", \"options\": {\"baseURL\": \"http://127.0.0.1:9/v1\"}, \"models\": {\"stub-model\": {}}}}, \"agent\": {\"plan\": {\"permission\": {\"external_directory\": {\"*\": \"deny\"}, \"read\": {\"*.env\": \"deny\", \"*.env.*\": \"deny\", \"*.env.example\": \"allow\"}, \"doom_loop\": \"deny\"}}}}"
+      },
+      "global_files": {
+        "opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "userstub": {
+              "npm": "@ai-sdk/openai-compatible",
+              "options": {
+                "baseURL": "http://127.0.0.1:9/v1",
+                "apiKey": "sk-canary-not-a-key-1"
+              },
+              "models": {
+                "stub-model": {}
+              }
+            }
+          }
+        }
+      },
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"agent\": {\n    \"plan\": {\n      \"permission\": {\n        \"external_directory\": {\n          \"*\": \"deny\"\n        },\n        \"read\": {\n          \"*.env\": \"deny\",\n          \"*.env.*\": \"deny\",\n          \"*.env.example\": \"allow\"\n        },\n        \"doom_loop\": \"deny\"\n      },\n      \"options\": {}\n    }\n  },\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {\n    \"stub\": {\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"options\": {\n        \"baseURL\": \"http://127.0.0.1:9/v1\"\n      },\n      \"models\": {\n        \"stub-model\": {}\n      }\n    }\n  },\n  \"username\": \"unknown\"\n}\n",
+      "stderr": ""
+    },
+    "hermetic_pure_config_content": {
+      "setup": "as hermetic_config_content, with the global --pure the hermetic argv renders",
+      "argv": [
+        "opencode",
+        "--pure",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1",
+        "XDG_CONFIG_HOME": "/rig/hermetic-config",
+        "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+        "OPENCODE_TEST_HOME": "/rig/hermetic-config",
+        "OPENCODE_CONFIG_CONTENT": "{\"$schema\": \"https://opencode.ai/config.json\", \"provider\": {\"stub\": {\"npm\": \"@ai-sdk/openai-compatible\", \"options\": {\"baseURL\": \"http://127.0.0.1:9/v1\"}, \"models\": {\"stub-model\": {}}}}, \"agent\": {\"plan\": {\"permission\": {\"external_directory\": {\"*\": \"deny\"}, \"read\": {\"*.env\": \"deny\", \"*.env.*\": \"deny\", \"*.env.example\": \"allow\"}, \"doom_loop\": \"deny\"}}}}"
+      },
+      "global_files": {
+        "opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "userstub": {
+              "npm": "@ai-sdk/openai-compatible",
+              "options": {
+                "baseURL": "http://127.0.0.1:9/v1",
+                "apiKey": "sk-canary-not-a-key-1"
+              },
+              "models": {
+                "stub-model": {}
+              }
+            }
+          }
+        }
+      },
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"agent\": {\n    \"plan\": {\n      \"permission\": {\n        \"external_directory\": {\n          \"*\": \"deny\"\n        },\n        \"read\": {\n          \"*.env\": \"deny\",\n          \"*.env.*\": \"deny\",\n          \"*.env.example\": \"allow\"\n        },\n        \"doom_loop\": \"deny\"\n      },\n      \"options\": {}\n    }\n  },\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {\n    \"stub\": {\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"options\": {\n        \"baseURL\": \"http://127.0.0.1:9/v1\"\n      },\n      \"models\": {\n        \"stub-model\": {}\n      }\n    }\n  },\n  \"username\": \"unknown\"\n}\n",
+      "stderr": ""
+    },
+    "home_opencode_layer": {
+      "setup": "~/.opencode/opencode.json declaring custom `homeleak` and a built-in `openrouter` key, no hermetic env: the layer is in force",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1"
+      },
+      "global_files": {},
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"agent\": {},\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"provider\": {\n    \"homeleak\": {\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"options\": {\n        \"baseURL\": \"http://127.0.0.1:9/v1\",\n        \"apiKey\": \"***\"\n      },\n      \"models\": {\n        \"stub-model\": {}\n      }\n    },\n    \"openrouter\": {\n      \"options\": {\n        \"apiKey\": \"***\"\n      }\n    }\n  },\n  \"username\": \"unknown\"\n}\n",
+      "stderr": "",
+      "home_files": {
+        ".opencode/opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "homeleak": {
+              "npm": "@ai-sdk/openai-compatible",
+              "options": {
+                "baseURL": "http://127.0.0.1:9/v1",
+                "apiKey": "sk-canary-not-a-key-1"
+              },
+              "models": {
+                "stub-model": {}
+              }
+            },
+            "openrouter": {
+              "options": {
+                "apiKey": "sk-canary-not-a-key-12"
+              }
+            }
+          }
+        }
+      }
+    },
+    "hermetic_home_opencode": {
+      "setup": "as home_opencode_layer, under the hermetic env (OPENCODE_TEST_HOME = the empty config home) with --pure: `homeleak` and the key must vanish",
+      "argv": [
+        "opencode",
+        "--pure",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1",
+        "XDG_CONFIG_HOME": "/rig/hermetic-config",
+        "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+        "OPENCODE_TEST_HOME": "/rig/hermetic-config",
+        "OPENCODE_CONFIG_CONTENT": "{\"$schema\": \"https://opencode.ai/config.json\", \"agent\": {\"plan\": {\"permission\": {\"external_directory\": {\"*\": \"deny\"}, \"read\": {\"*.env\": \"deny\", \"*.env.*\": \"deny\", \"*.env.example\": \"allow\"}, \"doom_loop\": \"deny\"}}}}"
+      },
+      "global_files": {},
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"agent\": {\n    \"plan\": {\n      \"permission\": {\n        \"external_directory\": {\n          \"*\": \"deny\"\n        },\n        \"read\": {\n          \"*.env\": \"deny\",\n          \"*.env.*\": \"deny\",\n          \"*.env.example\": \"allow\"\n        },\n        \"doom_loop\": \"deny\"\n      },\n      \"options\": {}\n    }\n  },\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"username\": \"unknown\"\n}\n",
+      "stderr": "",
+      "home_files": {
+        ".opencode/opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "homeleak": {
+              "npm": "@ai-sdk/openai-compatible",
+              "options": {
+                "baseURL": "http://127.0.0.1:9/v1",
+                "apiKey": "sk-canary-not-a-key-1"
+              },
+              "models": {
+                "stub-model": {}
+              }
+            },
+            "openrouter": {
+              "options": {
+                "apiKey": "sk-canary-not-a-key-12"
+              }
+            }
+          }
+        }
+      }
+    },
+    "hermetic_pure_permission_only": {
+      "setup": "hermetic --pure with a built-in prefix: OPENCODE_CONFIG_CONTENT holds only the permission block, so no provider is declared",
+      "argv": [
+        "opencode",
+        "--pure",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1",
+        "XDG_CONFIG_HOME": "/rig/hermetic-config",
+        "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+        "OPENCODE_TEST_HOME": "/rig/hermetic-config",
+        "OPENCODE_CONFIG_CONTENT": "{\"$schema\": \"https://opencode.ai/config.json\", \"agent\": {\"plan\": {\"permission\": {\"external_directory\": {\"*\": \"deny\"}, \"read\": {\"*.env\": \"deny\", \"*.env.*\": \"deny\", \"*.env.example\": \"allow\"}, \"doom_loop\": \"deny\"}}}}"
+      },
+      "global_files": {
+        "opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "userstub": {
+              "npm": "@ai-sdk/openai-compatible",
+              "options": {
+                "baseURL": "http://127.0.0.1:9/v1",
+                "apiKey": "sk-canary-not-a-key-1"
+              },
+              "models": {
+                "stub-model": {}
+              }
+            }
+          }
+        }
+      },
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"agent\": {\n    \"plan\": {\n      \"permission\": {\n        \"external_directory\": {\n          \"*\": \"deny\"\n        },\n        \"read\": {\n          \"*.env\": \"deny\",\n          \"*.env.*\": \"deny\",\n          \"*.env.example\": \"allow\"\n        },\n        \"doom_loop\": \"deny\"\n      },\n      \"options\": {}\n    }\n  },\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"username\": \"unknown\"\n}\n",
+      "stderr": ""
+    }
+  }
+}

@@ -504,11 +504,11 @@ hosts:
     package:
       registry: npm
       name: opencode-multi-llm
-      version: "0.1.2"
+      version: "0.1.3"
       public_version: "0.1.1"
       config_key: plugin
       provides: [command, tool]
-      min_host_version: "1.19.4"   # the one supported opencode release (the
+      min_host_version: "1.19.5"   # the one supported opencode release (the
                                     # newest; `make opencode-bump` moves it with
                                     # every other pin), never a lower one that
                                     # might work: `engines` is a hard gate, and
