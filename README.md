@@ -109,7 +109,7 @@ Installs from npm as [`opencode-multi-llm`](https://www.npmjs.com/package/openco
 1. **Add the package** to the `plugin` list in `~/.config/opencode/opencode.json` (create the file if you have none), keeping the exact version (OpenCode never updates an unpinned entry):
 
    ```json
-   { "plugin": ["opencode-multi-llm@0.1.1"] }
+   { "plugin": ["opencode-multi-llm@0.1.3"] }
    ```
 
 2. **Restart OpenCode** while online, then check that it loaded - on this route a failure is silent:

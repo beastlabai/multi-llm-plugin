@@ -668,6 +668,10 @@ class TestConservativeResolution:
     #: with empty caches and passed all eight first-release criteria
     #: (records/20261026T175524Z-opencode-release-network-check.json). It
     #: promotes `package` and nothing else.
+    #: opencode 1.19.5, 2026-10-30, later npm release opencode-v0.1.3:
+    #: fresh registry install, offline use, restart, and the 0.1.1 -> 0.1.3
+    #: upgrade pass all nine criteria in records/20261030T214755Z-opencode-release-network-check.json.
+    #: Reconfirms the existing package cell; no other provenance is promoted.
     RECORDED_SMOKES = {
         "claude-code": {"next_command.skill"},
         "codex": {
