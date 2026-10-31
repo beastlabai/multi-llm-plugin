@@ -1238,8 +1238,8 @@ class TestTheReaders:
 # --------------------------------------------------------------------------- #
 
 class TestTheContainerSetup:
-    @pytest.mark.skipif(os.name == "nt" or not shutil.which("bash") or not shutil.which("node"),
-                        reason="the Linux container setup needs bash and Node")
+    @pytest.mark.skipif(sys.platform != "linux" or not shutil.which("bash") or not shutil.which("node"),
+                        reason="the Linux container setup needs Linux (GNU sed), bash and Node")
     def test_verified_https_is_ready_before_apt_fetches_packages(self, tmp_path):
         import ssl
 
