@@ -302,7 +302,7 @@ _VOLATILE_KEYS = {
 
 
 def normalize(value: Any, roots: Sequence[str]) -> Any:
-    """*value* with temp roots replaced and timestamps dropped (for goldens)."""
+    """*value* with portable temp paths and timestamps dropped (for goldens)."""
     if isinstance(value, dict):
         return {k: normalize(v, roots) for k, v in value.items() if k not in _VOLATILE_KEYS}
     if isinstance(value, list):
@@ -310,6 +310,10 @@ def normalize(value: Any, roots: Sequence[str]) -> Any:
     if isinstance(value, str):
         for root in roots:
             value = value.replace(root, "<ROOT>")
+        # Windows spells these paths with backslashes. Normalize only paths
+        # beneath a fixture root so prompt escapes elsewhere stay comparable.
+        value = re.sub(r"<ROOT>[\\/][^\s`\"'<>]*",
+                       lambda match: match.group().replace("\\", "/"), value)
         value = re.sub(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?", "<TIME>", value)
         return value
     return value
