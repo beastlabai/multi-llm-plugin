@@ -128,10 +128,12 @@ def test_both_hosts_ship_one_schema_version():
     sys.path.insert(0, str(REPO_ROOT / "packaging" / "opencode"))
     import build as opencode_build  # noqa: E402
 
-    assert surface.SURFACE_SCHEMA_VERSION == 6
+    assert surface.SURFACE_SCHEMA_VERSION == 7
     assert opencode_build.SURFACE_SCHEMA_VERSION == surface.SURFACE_SCHEMA_VERSION
     for host in HOSTS:
-        assert surface.cli_surface(host)["schema_version"] == 6
+        assert surface.cli_surface(host)["schema_version"] == 7
+        assert surface.cli_surface(host)["dispatcher"]["foreground_preview_flags"] == list(
+            surface.cli_common.FOREGROUND_PREVIEW_FLAGS)
     # The plugin's lockstep constant, compared rather than trusted.
     mjs = (REPO_ROOT / "packaging" / "opencode" / "src" / "index.mjs").read_text(
         encoding="utf-8"

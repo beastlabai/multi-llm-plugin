@@ -259,6 +259,14 @@ shim; the two routes are not mutually exclusive, and when both are installed the
 `config` hook overwrites the file entry wholesale — silently, as far as OpenCode is
 concerned — which is what `install-host --check`'s route-detection note exists to say.
 
+Both package supervisors accept an explicit preview that finishes before detaching without
+requiring a run-id banner. Surface schema v7 exports `dispatcher.foreground_preview_flags`
+from `cli_common.FOREGROUND_PREVIEW_FLAGS`; the supervisors still require a valid structured
+result. Ordinary launches still require the banner, and a preview that actually detaches is
+polled by its banner's run id as usual. A running result or a launch handshake carrying a
+continuation still requires the banner even with a preview flag. A successful preview finishes the invocation without
+claiming that the workflow phase applied changes or completed.
+
 **The required inventory is the static list plus every `target_module` in
 `modes.py`**: `build.py`'s `target_module_paths` maps each dotted target to
 `x/y.py` (or `x/y/__init__.py`) and passes them as `payload.stage(required_extra=…)` and to

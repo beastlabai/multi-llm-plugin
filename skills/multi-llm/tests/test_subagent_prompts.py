@@ -24,6 +24,7 @@ SKILL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SKILL_ROOT))
 
 from utils import subagent_prompts  # noqa: E402
+from utils.scope_policy import validator_guidance  # noqa: E402
 from utils.subagent_prompts import (  # noqa: E402
     CODE_REVIEW_VALIDATION_GUIDANCE,
     HUMAN_DECISION_JUDGE_RULES,
@@ -148,6 +149,17 @@ def _prompts():
             plan_excerpt=PLAN_EXCERPT,
             suggestion_records=SUGGESTION_RECORDS,
             kind="revalidation",
+        ),
+        # The round's validator scope block, both policies (plan §3.1): the
+        # default `expand` block is informational; `preserve` adds the
+        # independent rejection of leaked extensions.
+        "validation_scope_expand": build_validation_prompt(
+            plan_excerpt=PLAN_EXCERPT, suggestion_records=SUGGESTION_RECORDS,
+            scope_guidance=validator_guidance("expand", "review-plan"),
+        ),
+        "validation_scope_preserve": build_validation_prompt(
+            plan_excerpt=PLAN_EXCERPT, suggestion_records=SUGGESTION_RECORDS,
+            scope_guidance=validator_guidance("preserve", "review-plan"),
         ),
         "validation_code_review": build_validation_prompt(
             plan_excerpt=PLAN_EXCERPT,

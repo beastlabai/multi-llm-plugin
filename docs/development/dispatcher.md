@@ -409,6 +409,16 @@ Never redefine a cross-cutting flag locally: `--host`,
 `--skip-prerequisites` come from `cli_common.build_parent_parser()`. Adding one to an orchestrator parser that
 already includes the parent raises `argparse.ArgumentError` at import of the parser, not at first use.
 
+`--scope-policy {expand,preserve}` is not a parent flag (`ask`, `status` and the utilities take
+none) but is still declared once: every applicable parser calls
+`cli_common.add_scope_policy_argument(parser, role=…)` (`SCOPE_POLICY_MODES` lists the modes; the
+commit doors forward it to the parser they front). Its default is `None`, *omitted*, never
+`expand`: resolution tells a new run from a continuation. The replay list, retry commands, a
+detached worker's argv, a composite's row-14 continuation and `[IMPROVE_RERUN]` carry a typed
+value verbatim. A next-phase command (`user_next_step`) carries none, like every other selector:
+the next phase is either a continuation that inherits its review round's or its run's recorded
+policy, or a new review round whose policy is the user's new choice (`expand` when omitted).
+
 ## Mode and help updates
 
 A new mode is a row in `modes.py`, never an edit in twelve places — but the

@@ -61,6 +61,31 @@ Look for:
 - Do NOT modify, create or delete any file except the output file named below.
 - Do NOT claim that a test passes or fails unless you ran it during this review and saw its result. Say what a test covers, not what it would report.
 
+## Scope Classification (labels only)
+Follow every instruction above exactly as written: nothing in this section
+changes which findings you report. For the report's labels, also classify each
+finding's proposed action against the scope baseline, which is the accepted plan and its requirements, limits and recorded decisions. The diff and the task list are evidence of what was built, not of what was asked for: drift in the implementation cannot authorize itself. Fixing a regression the change introduced is ordinarily within scope.
+This classification is informational: do not leave out a finding, change its
+importance, or narrow its fix because it extends the scope or because its scope
+is uncertain.
+
+- "in_scope": the action completes, corrects or clarifies what the baseline
+  already asks for. Completing an existing requirement is in scope even when it
+  is substantial work, and so is a prerequisite in another file, fixing a
+  regression the work introduced, and removing behaviour or content the
+  baseline never asked for (existing scope creep).
+- "scope_extension": the action adds a capability, outcome or unrelated cleanup
+  the baseline does not ask for, or changes an agreed outcome, even when it is
+  worthwhile or needed to make the overall goal achievable.
+- "unclear": the baseline does not settle it (missing, truncated or vague
+  intent), or materially different fixes would differ in scope and none is
+  chosen.
+
+Give each finding these three extra fields:
+- "scope_relation": "in_scope" | "scope_extension" | "unclear"
+- "scope_reason": string (one short line saying why, against the baseline)
+- "scope_reference": string (optional: the baseline section or text it rests on, or "")
+
 ## Output Format
 Return ONLY a valid JSON array with no additional text. Each issue must have this structure:
 {
@@ -70,7 +95,10 @@ Return ONLY a valid JSON array with no additional text. Each issue must have thi
   "file": "path/to/file.py",
   "line_range": [10, 15],
   "type": "bug",
-  "anchor_text": "exact code snippet identifying the location"
+  "anchor_text": "exact code snippet identifying the location",
+  "scope_relation": "in_scope",
+  "scope_reason": "One short line saying why, against the scope baseline",
+  "scope_reference": "the plan section it rests on, or empty"
 }
 
 Field requirements:
@@ -85,6 +113,9 @@ Field requirements:
 - "type": exactly "bug", "missing", "improvement", "style", or "scope" (required)
 - "anchor_text": string, 10-50 char code snippet for locating issue (required)
   - for a secret, use a snippet without the value, such as the assignment's left-hand side ("self.api_key ="). If no 10-50 char snippet leaves the value out, a shorter snippet or "" is fine; give line_range so file and line_range locate it
+- "scope_relation": exactly "in_scope", "scope_extension", or "unclear" (required): how the issue's proposed action relates to the scope baseline, as the scope section above defines them
+- "scope_reason": string, one short line saying why, against the scope baseline (required)
+- "scope_reference": string, the baseline section or text the classification rests on, or "" (optional)
 
 If a finding involves a secret (a key, token or password), say where it is and never copy its value into any field. That includes evidence: cite where the value is, and leave it out of any quote.
 

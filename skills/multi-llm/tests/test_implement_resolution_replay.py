@@ -33,5 +33,9 @@ def test_task_suggestion_auto_skip_survives_launcher_reentry(repo, monkeypatch):
     monkeypatch.setattr(implement_orchestrator, "maybe_detach_implement_phase", claim_worker)
     assert implement_orchestrator.main(argv) == 0
     resolutions = status_file.read_run(phase).get("resolutions", [])
-    assert [entry["site"] for entry in resolutions] == [unattended.row(7).site_id]
+    # Row 16 (the scope policy nobody typed: expand) is replayed the same way,
+    # after the earlier rows (plans/scope-policy-and-report-tags.md §4).
+    assert [entry["site"] for entry in resolutions] == [
+        unattended.row(7).site_id, unattended.row(16).site_id]
     assert "skipped" in resolutions[0]["decision"]
+    assert resolutions[1]["decision"].startswith("expand (no --scope-policy given")

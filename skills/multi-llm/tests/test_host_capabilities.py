@@ -1674,7 +1674,7 @@ class TestNotOnAnAgentReadPath:
 class TestInteractiveInventory:
     def test_the_inventory_covers_every_d6_row_exactly_once(self):
         covered = [number for entry in un.INVENTORY for number in entry.rows]
-        assert sorted(covered) == list(range(2, 16)), covered
+        assert sorted(covered) == list(range(2, 17)), covered
         assert len(covered) == len(set(covered))
 
     def test_row_one_is_absent_by_design(self):
@@ -1709,9 +1709,20 @@ class TestInteractiveInventory:
                 "that turns it into a question has reintroduced the hang"
             )
 
-    def test_the_fail_closed_rows_are_exactly_thirteen_to_fifteen(self):
+    def test_the_never_rendered_rows_are_thirteen_to_sixteen(self):
+        """13-15 fail closed; 16, the scope policy, is answered by its flag or
+        resolved automatically and is never a question either
+        (plans/scope-policy-and-report-tags.md §4)."""
         closed = sorted(e.rows[0] for e in un.INVENTORY if not e.renderable)
-        assert closed == [13, 14, 15]
+        assert closed == [13, 14, 15, 16]
+        fail_closed = [n for n in closed
+                       if un.FAIL_CLOSED in un.row(n).dispositions]
+        assert fail_closed == [13, 14, 15]
+        with pytest.raises(un.NeedsHuman) as excinfo:
+            un.render_option_block(
+                "scope-policy", [un.DecisionOption("preserve", "cmd")])
+        assert "never rendered as a question" in str(excinfo.value)
+        assert "fail-closed" not in str(excinfo.value)
 
     @pytest.mark.parametrize(
         "site_id", [e.site_id for e in un.INVENTORY if e.renderable]

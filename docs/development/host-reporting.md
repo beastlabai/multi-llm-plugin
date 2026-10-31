@@ -201,3 +201,8 @@ and any other emit starts a run.
 named after the count with the reason its record gave (`failed_batch_clause`:
 `1 batch failed: apply-batch-0 (<reason>)`, `--json`'s `failed_batches`), never a bare
 `0/4 items applied`.
+
+Items a `--scope-policy preserve` apply defers are never handed out, so they are in neither the
+run's `items` nor its records: the count covers the eligible items, and the deferrals are named
+apart (`orchestrator_output.json`'s `scope_policy.deferred_items`, the `[SCOPE_DEFERRED]` lines,
+the result line's `notice`, `summary.md`'s `## Deferred by scope policy` section).

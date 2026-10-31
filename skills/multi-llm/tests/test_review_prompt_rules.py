@@ -38,6 +38,7 @@ from utils.llm_client import (  # noqa: E402
 )
 from utils.providers import PROVIDER_CLASSES  # noqa: E402
 from utils.providers.base import classify_streams, match_streams  # noqa: E402
+from utils.scope_policy import POLICIES, reviewer_guidance  # noqa: E402
 
 PROMPTS_DIR = SKILL_ROOT / "prompts"
 SUGGESTIONS_SCHEMA = SKILL_ROOT / "schemas" / "review_suggestions.schema.json"
@@ -82,9 +83,14 @@ def _template(name):
     return (PROMPTS_DIR / name).read_text(encoding="utf-8")
 
 
-def _render(name, location="file"):
+#: The scope-policy prompt phase of each template.
+_SCOPE_PHASE = {PLAN_PROMPT: "review-plan", CODE_PROMPT: "code-review"}
+
+
+def _render(name, location="file", policy="expand"):
     """The prompt a reviewer receives: the three keys `invoke_with_file_output`
-    injects on top of the phase's own context."""
+    injects on top of the phase's own context, which includes the round's
+    `{scope_policy_guidance}` block (default `expand`)."""
     path = _RESULT_PATH[name]
     block = (
         FILE_OUTPUT_LOCATION.format(path=path)
@@ -93,6 +99,7 @@ def _render(name, location="file"):
     )
     return _template(name).format(
         **_CONTEXT[name],
+        scope_policy_guidance=reviewer_guidance(policy, _SCOPE_PHASE[name]),
         output_json_path=path,
         output_location=block,
         working_limits=render_working_limits(1200),
@@ -458,16 +465,17 @@ class TestRenderedPromptsTripNoFailureClassifier:
     reworded at its source, never excluded here."""
 
     @pytest.mark.parametrize("provider", sorted(PROVIDER_CLASSES))
+    @pytest.mark.parametrize("policy", POLICIES)
     @pytest.mark.parametrize("location", LOCATIONS)
     @pytest.mark.parametrize("name", REVIEW_PROMPTS)
-    def test_neither_stream_classifies(self, name, location, provider):
+    def test_neither_stream_classifies(self, name, location, provider, policy):
         cls = PROVIDER_CLASSES[provider]
         patterns = dict(
             auth_patterns=cls.auth_error_patterns,
             rate_limit_patterns=cls.rate_limit_patterns,
             exit_zero_markers=cls.exit_zero_failure_markers,
         )
-        rendered = _render(name, location)
+        rendered = _render(name, location, policy)
 
         for stdout, stderr in ((rendered, ""), ("", rendered)):
             verdict = classify_streams(stdout, stderr, **patterns)

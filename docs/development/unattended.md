@@ -13,7 +13,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 
 ## Decision sites and recorded resolutions
 
-**`utils/unattended.py` owns the unattended contract (D6): fifteen decision *sites*, three
+**`utils/unattended.py` owns the unattended contract (D6): sixteen decision *sites*, three
 dispositions, no questions.** `ROWS` is the closed table — each site keyed by a
 stable `site_id`, the modes that reach it, the disposition it lands on (**auto-select**
 / **fail closed** / **explicit flag** — "ask in free text" is not a fourth option) and where it is
@@ -47,6 +47,15 @@ confirmation, and the run it describes as "apply all valid items" applies none. 
 on a `--yes --exec-subagents` apply-suggestions run: 29 of 33 groups were applied because nobody had
 selected anything, `.status.json` said `"resolutions": []`, and the row-11 decision left
 no trace in the log, the payload or the status view.
+
+**Row 16 is `--scope-policy`** (plans/scope-policy-and-report-tags.md §4): auto-select or explicit
+flag, never a question on any host (its inventory entry is not renderable, and
+`render_option_block` says so without calling it fail-closed). Row 15's parse-time check
+validates its values (`expand`, `preserve`), so `--scope-policy ""` is exit 3, never argparse's 2. A policy
+nobody typed — the default `expand` of a new run, or one a continuation inherited — is recorded
+under `--yes` as `[AUTO_RESOLVED] scope-policy: …` through `scope_policy_runs.announce`
+(`resolution_text` words it per source); a typed value is the explicit-flag answer and records
+nothing. A composite with no choice forwards no flag and leaves the announcement to its phases.
 
 `--yes` also now *implies* `--agent-decide` in every apply phase
 (`apply_orchestrator_base.apply_unattended_defaults`) and resolves the human-task strategy to `skip-dependents`; it

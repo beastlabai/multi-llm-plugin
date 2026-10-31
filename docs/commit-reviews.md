@@ -59,6 +59,16 @@ The block shows the 20 newest commits, then where the full list is. A date phras
 - **The context plan is copied when the review starts.** Every reviewer and validator reads that copy, so editing the file later changes nothing in that review: the next `--review-commits` or `--improve-commits` of the range warns with `[CONTEXT_PLAN_CHANGED]` and carries on with the copy. To review against the edited text, type `--context-plan <path>` again.
 - **`--apply-commit-fixes` keeps what the review used.** It never restarts a review: a different value typed there prints `[COMMIT_REVIEW_KEPT]`, with the commands that would review with it, and applies the review on record. A fix aimed at the context plan itself is skipped and named, never applied.
 
+**Keeping the fixes to what the commits set out to do.** `--scope-policy expand|preserve` works here as in the code modes ([Scope policy](workflows.md#scope-policy)): `expand`, the default, only tags each finding's scope; `preserve` asks the reviewers for in-scope corrections only, and validation and the apply defer every extension. With your host's prefix in front, for example:
+
+```text
+--review-commits this branch --scope-policy preserve --context-plan plans/feature.md
+--improve-commits main..HEAD --scope-policy preserve
+```
+
+- **The scope is the commit brief, as the review pinned it:** the commit messages, the `--focus`, and the copy of the `--context-plan` taken when the review started. A focus narrows where the reviewers look; it adds no goal. Commit messages alone are often too vague to settle whether a fix extends what the commits meant to do, and then the models are told to answer `Scope unclear` rather than guess, which under `preserve` defers the fix. A context plan that states the goal and its limits gives them a firmer scope.
+- **`--apply-commit-fixes` applies under the review's policy.** Typing `--scope-policy expand` there applies what a `preserve` review deferred. To have the commits reviewed again under another policy, start a new round: `--review-commits <range> --force --rerun-all --scope-policy <policy>`, or `--improve-commits <range> --force --scope-policy <policy>`.
+
 **When files changed since the reviewed commit.** The review reads every file at the range's last commit, never from your working tree, so what is on disk does not change what is reviewed. When reviewed files differ on disk from that commit (later commits, uncommitted edits), the commit block adds a line naming them, `[SCOPE_DRIFT] 2 of 14 reviewed files differ on disk from e4f5a6b: utils/process_control.py, tests/test_detach.py`, and the run continues. The apply compares each fix's files with the reviewed commit before anything is written, and again just before each batch: a finding with a file changed since is skipped whole and named in the `[COMMIT_FIXES]` block the apply prints before its first batch, and no batch may write a file that differed from the reviewed commit when the apply started. So after a further commit, `--apply-commit-fixes` still applies every fix to the files that commit left alone.
 
 **Before you run it.** `--review-commits` writes only the commit brief and its folder. The other two edit source files, as `--improve-code` does:

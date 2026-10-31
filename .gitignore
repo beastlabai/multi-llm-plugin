@@ -18,9 +18,9 @@ htmlcov/
 # Test scratch: integration tests generate fixtures under the skill's plans/ dir
 skills/multi-llm/plans/
 
-# This repo's own working plans: local scratch, never pushed. Any comment below
-# (or in the Makefile, .dockerignore, Dockerfile, README or sources) that cites a
-# plans/*.md design doc is citing a local-only note that a fresh clone will not have.
+# Working plans remain local by default. The user-approved scope-policy plan,
+# its QA report and its evidence are explicitly tracked; the closed allowlist
+# in test_no_committed_secrets.py prevents publishing unrelated scratch notes.
 /plans/
 
 # Multi-LLM local config & workspace temp dir (this repo dogfoods its own skill;

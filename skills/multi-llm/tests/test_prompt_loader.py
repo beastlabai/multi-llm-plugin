@@ -318,11 +318,14 @@ class TestReviewTemplatesCarryWorkingLimits:
     def test_the_template_formats_without_a_key_error(self, name):
         from utils.llm_client import STDOUT_OUTPUT_LOCATION, render_working_limits
 
+        from utils.scope_policy import reviewer_guidance
+
         rendered = load_prompt(name).format(
             **_REVIEW_CONTEXT[name],
             output_json_path="",
             output_location=STDOUT_OUTPUT_LOCATION,
             working_limits=render_working_limits(1200),
+            scope_policy_guidance=reviewer_guidance("expand", "review-plan"),
         )
 
         assert render_working_limits(1200) in rendered

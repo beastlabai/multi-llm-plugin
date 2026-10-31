@@ -1,4 +1,4 @@
-"""D6 — the unattended contract: fifteen sites, three dispositions, no questions.
+"""D6 — the unattended contract: sixteen sites, three dispositions, no questions.
 
 What these tests pin, in the order the design states it:
 
@@ -86,7 +86,7 @@ def plan_without_tasks(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 1. The table: fifteen rows, one disposition each
+# 1. The table: sixteen rows, one disposition each
 # ---------------------------------------------------------------------------
 
 #: The D6 disposition table, transcribed from the design so a code change that
@@ -107,6 +107,7 @@ EXPECTED_DISPOSITIONS = {
     13: (un.FAIL_CLOSED,),
     14: (un.FAIL_CLOSED,),
     15: (un.FAIL_CLOSED,),
+    16: (un.AUTO_SELECT, un.EXPLICIT_FLAG),
 }
 
 #: The only rows whose answer is out-of-band by design (1, 13) or which *are* the
@@ -115,9 +116,9 @@ FLAGLESS_ROWS = {1, 13, 15}
 
 
 class TestTheTable:
-    def test_exactly_fifteen_rows_numbered_one_to_fifteen(self):
-        assert len(un.ROWS) == 15
-        assert [r.number for r in un.ROWS] == list(range(1, 16))
+    def test_exactly_sixteen_rows_numbered_one_to_sixteen(self):
+        assert len(un.ROWS) == 16
+        assert [r.number for r in un.ROWS] == list(range(1, 17))
 
     def test_site_ids_are_unique(self):
         ids = [r.site_id for r in un.ROWS]
@@ -168,7 +169,7 @@ class TestTheTable:
                 assert (word in r.modes) == (fronted in r.modes), (
                     f"row {r.number}: {word} must stand beside {fronted}")
         assert {r.number for r in un.ROWS if "improve-commits" in r.modes} == {
-            2, 3, 10, 11}
+            2, 3, 10, 11, 16}
 
 
 # ---------------------------------------------------------------------------
@@ -1186,6 +1187,9 @@ ROW_DOCS = {
     13: ("review-tasks.md",),
     14: ("full-workflow.md", *_IMPROVE_CORES),
     15: ("full-workflow.md", *_IMPROVE_CORES),
+    16: ("full-workflow.md", "review-plan.md", "review-tasks.md", "review-code.md",
+         "apply-suggestions.md", "apply-task-suggestions.md", "apply-code-fixes.md",
+         "generate-tasks.md", "implement.md", *_IMPROVE_CORES, *_COMMIT_PHASE_CORES),
 }
 
 
@@ -1428,8 +1432,9 @@ class TestApplyPhaseRowsAreRecorded:
         capsys.readouterr()
 
         run = status_file.read_run(str(phase_dir))
+        # Row 16 (the scope policy) is resolved at step 10b, between the two.
         assert [r["site"] for r in run["resolutions"]] == [
-            un.row(10).site_id, un.row(11).site_id
+            un.row(10).site_id, un.row(16).site_id, un.row(11).site_id
         ]
         assert all(r["decision"] and r["at"] for r in run["resolutions"])
 

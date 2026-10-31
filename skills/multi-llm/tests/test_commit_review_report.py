@@ -773,3 +773,16 @@ class TestSalvageKeepsTheClaim:
         request = self._salvage(plan, monkeypatch, self.OUTCOMES[path])
         assert request["expected_schema"]["fields"] == [
             "title", "desc", "importance", "file", "line_range", "type", "anchor_text"]
+
+    @pytest.mark.parametrize("path", sorted(OUTCOMES))
+    def test_the_request_carries_the_scope_tags_as_optional(self, commit_repo, monkeypatch,
+                                                            path):
+        """A repaired answer keeps the reviewer's provisional scope tags, and a
+        finding without them is never dropped for it."""
+        root, base, head, record, _brief = commit_repo
+        plan = root / "plans" / "feature.md"
+        plan.write_text("# Plan\n", encoding="utf-8")
+        cro.get_phase_dir(plan, "code-review").mkdir(parents=True, exist_ok=True)
+        schema = self._salvage(plan, monkeypatch, self.OUTCOMES[path])["expected_schema"]
+        assert schema["optional_fields"] == ["scope_relation", "scope_reason", "scope_reference"]
+        assert not set(schema["optional_fields"]) & set(schema["fields"])

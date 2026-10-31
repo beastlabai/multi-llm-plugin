@@ -23,6 +23,7 @@ import review_plan_orchestrator as rpo  # noqa: E402
 from utils import cli_common, review_orchestrator_base as base  # noqa: E402
 from utils import progress_tracker, run_status, status_file  # noqa: E402
 from utils.validation import prepare_batched_validation_tasks  # noqa: E402
+from utils.scope_policy import reviewer_guidance  # noqa: E402
 
 
 #: The reserved ``progress`` keys, as ``utils/status_file.py``'s module docstring
@@ -1850,7 +1851,12 @@ class TestTheRecordedPromptNamesTheAttemptsMinutes:
                 model_spec=model_spec,
                 plan_path=str(plan),
                 prompt_template=rpo.load_review_prompt_template(),
-                prompt_context={"plan_path": str(plan), "prefix": "auth-feature"},
+                prompt_context={
+                    "plan_path": str(plan), "prefix": "auth-feature",
+                    # The round's scope block, which the orchestration's
+                    # factory adds (`with_reviewer_guidance`).
+                    "scope_policy_guidance": reviewer_guidance("expand", "review-plan"),
+                },
                 phase_name="review-plan",
                 invoke_phase="plan_review",
                 timeout=timeout,

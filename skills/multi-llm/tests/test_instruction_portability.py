@@ -1905,12 +1905,13 @@ INVOCATION_LINE_ALLOWLIST = {
     "instructions/full-workflow.md": (
         AllowedInvocationLine(
             "/multi-llm:multi-llm --full <plan_path> [model1 model2 ...] "
-            "[--quick] [--yes]",
+            "[--quick] [--yes] [--scope-policy expand|preserve]",
             "usage", _USAGE),
     ),
     "instructions/generate-tasks.md": (
         AllowedInvocationLine(
-            "/multi-llm:multi-llm --generate-tasks <plan_path>",
+            "/multi-llm:multi-llm --generate-tasks <plan_path> "
+            "[--scope-policy expand|preserve]",
             "usage", _USAGE),
     ),
     "instructions/improve-code.md": (
@@ -1919,13 +1920,14 @@ INVOCATION_LINE_ALLOWLIST = {
             # `[--files <path> ...]` read as a list (Fable review 2026-10-09).
             "/multi-llm:multi-llm --improve-code <plan_path> [--quick | --models "
             "provider:model ...] [--files <path> (repeatable) | --files-from <file>] "
-            "[--base-ref REF] [--force] [--resume]",
+            "[--base-ref REF] [--scope-policy expand|preserve] [--force] [--resume]",
             "usage", _USAGE),
     ),
     "instructions/improve-plan.md": (
         AllowedInvocationLine(
             "/multi-llm:multi-llm --improve-plan <plan_path> [--quick | --models "
-            "provider:model ...] [--force] [--resume]",
+            "provider:model ...] [--scope-policy expand|preserve] [--force] "
+            "[--resume]",
             "usage", _USAGE),
     ),
     # The three commit cores (plans/review-commits.md §2.9): a range, never a
@@ -1934,7 +1936,8 @@ INVOCATION_LINE_ALLOWLIST = {
         AllowedInvocationLine(
             "/multi-llm:multi-llm --review-commits [<range>] [--quick | --models "
             'provider:model ...] [--focus "<text>"] [--context-plan <path>] '
-            "[--files <path> (repeatable) | --files-from <file>] [--force]",
+            "[--files <path> (repeatable) | --files-from <file>] "
+            "[--scope-policy expand|preserve] [--force]",
             "usage", _USAGE),
     ),
     "instructions/apply-commit-fixes.md": (
@@ -1946,7 +1949,8 @@ INVOCATION_LINE_ALLOWLIST = {
         AllowedInvocationLine(
             "/multi-llm:multi-llm --improve-commits [<range>] [--quick | --models "
             'provider:model ...] [--focus "<text>"] [--context-plan <path>] '
-            "[--files <path> (repeatable) | --files-from <file>] [--force] [--resume]",
+            "[--files <path> (repeatable) | --files-from <file>] "
+            "[--scope-policy expand|preserve] [--force] [--resume]",
             "usage", _USAGE),
     ),
     "instructions/init-config.md": (
@@ -1958,7 +1962,7 @@ INVOCATION_LINE_ALLOWLIST = {
     "instructions/review-code.md": (
         AllowedInvocationLine(
             "/multi-llm:multi-llm --review-code <plan_path> [--models model1 "
-            "model2] [--base-ref REF] [--quick]",
+            "model2] [--base-ref REF] [--quick] [--scope-policy expand|preserve]",
             "usage", _USAGE),
         AllowedInvocationLine(
             "User: /multi-llm:multi-llm --review-code plans/my-feature.md",
@@ -1971,7 +1975,8 @@ INVOCATION_LINE_ALLOWLIST = {
     "instructions/review-plan.md": (
         AllowedInvocationLine(
             "/multi-llm:multi-llm --review-plan <plan_path> [--models "
-            "provider:model ...] [--quick] [--interactive]",
+            "provider:model ...] [--quick] [--interactive] "
+            "[--scope-policy expand|preserve]",
             "usage", _USAGE),
         AllowedInvocationLine(
             "- If models provided in args (e.g., `/multi-llm:multi-llm "
@@ -1985,7 +1990,7 @@ INVOCATION_LINE_ALLOWLIST = {
     "instructions/review-tasks.md": (
         AllowedInvocationLine(
             "/multi-llm:multi-llm --review-tasks <plan_path> [model1 model2 ...] "
-            "[--quick] [--interactive]",
+            "[--quick] [--interactive] [--scope-policy expand|preserve]",
             "usage", _USAGE),
         AllowedInvocationLine(
             "- If models provided in args (e.g., `/multi-llm:multi-llm "

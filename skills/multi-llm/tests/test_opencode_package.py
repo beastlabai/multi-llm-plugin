@@ -2586,6 +2586,60 @@ class TestNeedsHumanMessage:
 
 
 class TestExecuteStateMachine:
+    @pytest.mark.parametrize("flag", ["--dry-run", "--dry-run-subagents", "--consolidate-dry-run"])
+    def test_a_foreground_preview_returns_without_polling(self, built_package, uv_stub, flag):
+        launch = {"exit": 0, "stdout": [
+            "Preview: nothing applied",
+            'MULTI_LLM_RESULT: {"mode":"apply-suggestions","state":"done","exit":0,'
+            '"artifacts":[],"next":null,"notice":"No changes applied."}',
+        ]}
+        result, calls = uv_stub.run(built_package,
+            {"mode": "apply-suggestions", "plan": "p.md", "question": "", "extra_flags": [flag]},
+            [launch])
+        assert result["ok"] is True and result["exit"] == 0
+        assert result["result"]["notice"] == "No changes applied."
+        assert "Preview: nothing applied" in result["output"]
+        assert not result.get("run_id") and not result.get("abort_command")
+        assert len(calls) == 1
+
+    @pytest.mark.parametrize("extra", [[], ["--dry-runner"], ["--focus=--dry-run"]])
+    def test_only_an_explicit_preview_can_finish_without_a_banner(self, built_package, uv_stub, extra):
+        launch = {"exit": 0, "stdout": [
+            'MULTI_LLM_RESULT: {"mode":"review-plan","state":"done","exit":0,"next":null}',
+        ]}
+        result, calls = uv_stub.run(built_package,
+            {"mode":"review-plan", "plan":"p.md", "question":"", "extra_flags":extra}, [launch])
+        assert result["ok"] is False and len(calls) == 1
+
+    def test_a_preview_still_needs_a_structured_result(self, built_package, uv_stub):
+        result, calls = uv_stub.run(built_package,
+            {"mode":"review-plan", "plan":"p.md", "question":"", "extra_flags":["--dry-run"]},
+            [{"exit":0, "stdout":["Preview"]}])
+        assert result["ok"] is False and len(calls) == 1
+        assert "MULTI_LLM_RESULT" in result["message"]
+
+    def test_a_preview_with_a_banner_is_polled(self, built_package, uv_stub):
+        launch = {"exit":0, "stdout":["run_id: RID-PREVIEW", "log: /tmp/preview.log",
+            'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}']}
+        done = {"exit":0, "stdout":['MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}']}
+        result, calls = uv_stub.run(built_package,
+            {"mode":"review-plan", "plan":"p.md", "question":"", "extra_flags":["--dry-run-subagents"]},
+            [launch, done])
+        assert result["ok"] is True and result["run_id"] == "RID-PREVIEW"
+        assert len(calls) == 2
+
+    @pytest.mark.parametrize("payload", [
+        {"next": "uv run -- python multi_llm.py status p.md --view run --wait"},
+        {"state": "running"},
+    ])
+    def test_a_preview_does_not_accept_a_bannerless_launch_handshake(self, built_package, uv_stub, payload):
+        body = {"state":"done", "exit":0, "next":None, **payload}
+        result, calls = uv_stub.run(built_package,
+            {"mode":"review-plan", "plan":"p.md", "question":"", "extra_flags":["--dry-run-subagents"]},
+            [{"exit":0, "stdout":["MULTI_LLM_RESULT: "+json.dumps(body)]}])
+        assert result["ok"] is False and len(calls) == 1
+        assert "no run_id" in result["message"]
+
     def test_run_id_comes_from_the_banner(self, built_package, uv_stub):
         """A non-``ask`` launch still yields a poll argv pinned to the banner id.
 

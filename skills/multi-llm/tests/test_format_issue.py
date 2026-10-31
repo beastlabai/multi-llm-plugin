@@ -281,18 +281,21 @@ class TestFormatIssueStructure:
         # Expected structure:
         # 0: ### 1. Test
         # 1: - [ ] Skip
-        # 2: **Validation:** ... | **File:** ... | **Type:** ... | **Model:** ...
-        # 3: (empty)
-        # 4: Description here
-        # 5: (empty)
-        # 6: ---
-        # 7: (empty)
+        # 2: **Scope:** ... (the reviewer's provisional tag, above the
+        #    metadata line the description parser starts after)
+        # 3: **Validation:** ... | **File:** ... | **Type:** ... | **Model:** ...
+        # 4: (empty)
+        # 5: Description here
+        # 6: (empty)
+        # 7: ---
+        # 8: (empty)
 
         assert lines[0].startswith("### 1.")
         assert "- [ ] Skip" in lines[1]
-        assert "**Validation:**" in lines[2]
-        assert lines[3] == ""
-        assert "Description here" in lines[4]
+        assert lines[2].startswith("**Scope:** `Scope unclear` (reviewer, provisional)")
+        assert "**Validation:**" in lines[3]
+        assert lines[4] == ""
+        assert "Description here" in lines[5]
         assert "---" in lines
 
 

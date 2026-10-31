@@ -230,6 +230,47 @@ which a planner that builds no workflow can ask too.
 The refactor guard's golden and `tests/test_full_workflow_orchestrator.py` hold `full`'s per-step argv
 byte for byte.
 
+**`--scope-policy` is resolved once per run and forwarded as one value**
+(plans/scope-policy-and-report-tags.md §4): `common_flags` ends with `--scope-policy <value>`, so
+every phase and the prerequisite gates' one auto-run apply get it, and `step_generate_tasks` sets the
+child namespace's `scope_policy` to the same value. Only a user's choice is forwarded — the typed
+flag, else the live choice an earlier run of the same mode recorded in `state.json`'s
+`scope_policy_runs[<mode>]` (`utils/scope_policy_runs.py`: written when typed, live until the
+run's last phase records a newer completion or skip or the run closes it at its end, never read
+under `--force`); with no choice no phase gets the flag and each resolves from its own review
+round's record, so omission and an explicit `expand` differ only there. A phase therefore reads a
+received `--scope-policy` as explicit: it always is the user's. generate-tasks and implement keep a
+typed choice under their own mode word the same way, for the re-run or `--resume` that never
+repeats it, and add `scope_policy_runs.generation_guidance`/`implementation_guidance` to their
+prompts under `preserve` only.
+
+Starting a new run without a choice closes the previous run's policy record
+(`scope_policy_runs.record_run_start`), so resuming an unfinished default run cannot restore
+an older `preserve` choice. This applies to `full` and the improve composites under `--force`,
+generation under `--force`, and implementation under `--fresh`. Leaf-mode dry runs leave the
+record unchanged.
+
+**Scope deferrals finish an apply; a scope blocker does not** (plans/scope-policy-and-report-tags.md
+§5). A bounded `--scope-policy preserve` apply that leaves optional extensions deferred records the
+phase completed with the round's `scope_policy.<review>.completion.outcome: "eligible work
+completed"` and its `deferrals` kept, so `check_workflow_prerequisites` reads it as met and the
+bounded one-auto-apply/recheck finds nothing missing (no loop; `status` adds `scope_deferred` and a
+notice). A `SCOPE BLOCKER:` decline records `outcome: "blocked"` and `blockers`;
+`scope_blocker_reason` (apply phases only: the record is the review round's, and the review phase
+must stay a met prerequisite of the apply that clears it) then makes the apply prerequisite checks
+unmet (`scope_blocked`; `check_apply_task_suggestions_prerequisite` too, which `collect_missing`
+and implement's own gate turn into a hard prerequisite of implement rather than the row-7
+advisory), so a dependent phase refuses with the two ways forward (amend the plan and review
+again, or the apply mode with `--scope-policy expand`). `--skip-prerequisites` cannot skip a scope
+blocker (`ensure_prerequisites` and implement's gate refuse, exit 3). An explicit `expand` over a completed apply
+with open deferrals, or one that stopped on a scope blocker, is not "already complete": the
+composites ask `improve_workflow.releases_deferrals` (through `Records.scope_deferrals` and
+`Records.scope_blockers`) and `full`'s `skip_reason` asks `scope_apply.releases_deferrals`, both
+with the run's choice — the typed flag or the run's live `scope_policy_runs` record — so the
+override survives a later run that omits it. Deferrals and blockers only come from a `preserve`
+apply, so `expand` is the one policy that releases them; the check sits where a step is chosen,
+never in `full`'s `_recorded`, which also judges whether a step that ran recorded itself.
+
 ## Improve-plan and improve-code
 
 **`--improve-plan` and `--improve-code` are composites: a `sequence` row
@@ -246,7 +287,12 @@ step runs (a review on record only as skipped runs, unlike under `full`) and
 `--models`/`--quick` (no model list of its own) and `--force --rerun-all`
 on a `--force` round; the apply `--yes --agent-decide --no-confirm`, plus `--resume`
 only when the review is passed over and `apply_phase_in_progress` holds, never
-`--force`/`--fresh` — so both legs plan one state one way.
+`--force`/`--fresh` — so both legs plan one state one way. Both steps also get the one
+`--scope-policy` `scope_policy_choice` resolves (typed, else `Records.scope_policy_run`, never on a
+new round; the consolidation pass only when this run's review writes its round), the
+continuation carries a typed one like the other selectors, and `expand` (that same choice) over a
+completed apply with open scope deferrals or a scope blocker runs it again
+(`releases_deferrals`) instead of `[ALREADY_COMPLETE]`.
 
 Executor leg: `ImproveWorkflow(FullWorkflow)` through the hooks above, each argv `step_flags` +
 `cross_cutting_flags` (never `common_flags`). Native leg:

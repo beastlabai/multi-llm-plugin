@@ -3,8 +3,9 @@ usage: apply_code_fixes_orchestrator.py [-h] [--host ID] [--yes]
                                         [--if-not-running] [--max-detached N]
                                         [--exec-subagents]
                                         [--dry-run-subagents]
-                                        [--skip-prerequisites] --plan-file
-                                        PLAN_FILE [--skip-human-review]
+                                        [--skip-prerequisites]
+                                        --plan-file PLAN_FILE
+                                        [--skip-human-review]
                                         [--min-priority {low,medium,high}]
                                         [--dry-run] [--no-batch]
                                         [--max-batch-size MAX_BATCH_SIZE]
@@ -13,16 +14,20 @@ usage: apply_code_fixes_orchestrator.py [-h] [--host ID] [--yes]
                                         [--approve-importance {LOW,MEDIUM,HIGH} [{LOW,MEDIUM,HIGH} ...]]
                                         [--agent-decide] [--force]
                                         [--include-high] [--resume] [--fresh]
+                                        [--human-task BATCH=skip]
                                         [--batch-review-mode {individual,by-importance,summary-only}]
                                         [--accept-stale-consolidation]
                                         [--no-confirm] [--include-low]
-                                        [--verbose] [--revalidate]
+                                        [--verbose]
+                                        [--scope-policy {expand,preserve}]
+                                        [--revalidate]
                                         [--revalidate-model REVALIDATE_MODEL]
                                         [--output-format {json,text}]
                                         [--base-ref BASE_REF]
                                         [--approve-validation-failed]
                                         [--revalidate-all-human]
                                         [--internal-revalidation]
+                                        [--mark-completed]
 
 Prepare validated code review fixes for application
 
@@ -77,6 +82,16 @@ options:
                         refused (exit 3), since every batch would land twice.
                         Earlier rollback points are kept aside, never
                         overwritten.
+  --human-task BATCH=skip
+                        With --resume and --exec-subagents, answer a batch
+                        that stopped as a partial application because its
+                        report left items out (the stop names it): --human-
+                        task apply-fix-batch-1=skip keeps what that batch
+                        applied as it stands, records each item it did not
+                        report applied as skipped at your request (never
+                        counted as applied), and goes on with the batches
+                        after it. Refused when the files it changed no longer
+                        hold what it left.
   --batch-review-mode {individual,by-importance,summary-only}
                         How to present items for human review (default: by-
                         importance)
@@ -88,6 +103,21 @@ options:
   --include-low         [DEPRECATED] No longer needed, low is now default. Use
                         --min-priority to filter.
   --verbose             Enable verbose/debug output
+  --scope-policy {expand,preserve}
+                        expand (the default for a new run) keeps today's
+                        behaviour: warranted scope extensions stay eligible
+                        and scope tags are informational. preserve keeps the
+                        run to the agreed scope: reviewers propose in-scope
+                        corrections only, validation rejects extensions and
+                        the apply defers them. Omitted, a continuation keeps
+                        the policy on record (a --resume or --reaggregate, the
+                        apply after its review, a re-run of a stopped
+                        composite or full workflow). Here it sets which
+                        validated findings may be applied; a value typed here
+                        overrides the review's and is kept for later runs of
+                        this apply. Taken by the review, apply and commit
+                        modes, generate-tasks, implement, the improve-*
+                        composites and full; ask and status take none.
   --revalidate          Re-run validation only on items with validation_failed
                         status
   --revalidate-model REVALIDATE_MODEL
@@ -105,6 +135,8 @@ options:
   --internal-revalidation
                         Run revalidation inside orchestrator (legacy mode)
                         instead of delegating to Claude Code subagent
+  --mark-completed      Mark the phase as completed (call after all batches
+                        are processed)
 
 cross-cutting options:
   --host ID             Host harness driving this run (e.g. claude-code,
@@ -146,18 +178,21 @@ This orchestrator outputs a JSON list of fixes to apply.
 The actual application is handled by Claude Code using Task subagents.
 
 Example:
-  uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes plans/my-plan.md
+  uv run --frozen --no-dev --project {SKILL_DIR} -- python {SKILL_DIR}/multi_llm.py apply-code-fixes plans/my-plan.md
 
 Bulk Approval Examples:
   # Auto-approve all LOW importance items
-  uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes plans/my-plan.md --approve-all-low
+  uv run --frozen --no-dev --project {SKILL_DIR} -- python {SKILL_DIR}/multi_llm.py apply-code-fixes plans/my-plan.md --approve-all-low
 
   # Auto-approve items with validation failures (parsing errors, timeouts)
-  uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes plans/my-plan.md --approve-validation-failed
+  uv run --frozen --no-dev --project {SKILL_DIR} -- python {SKILL_DIR}/multi_llm.py apply-code-fixes plans/my-plan.md --approve-validation-failed
 
   # Skip all items requiring human review
-  uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes plans/my-plan.md --skip-all-human
+  uv run --frozen --no-dev --project {SKILL_DIR} -- python {SKILL_DIR}/multi_llm.py apply-code-fixes plans/my-plan.md --skip-all-human
 
   # Re-run validation on failed items with a different model
-  uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes plans/my-plan.md --revalidate --revalidate-model cursor-agent:opus
+  uv run --frozen --no-dev --project {SKILL_DIR} -- python {SKILL_DIR}/multi_llm.py apply-code-fixes plans/my-plan.md --revalidate --revalidate-model cursor-agent:opus
+
+Finalization (run by the host AFTER every batch has been applied and verified):
+  uv run --frozen --no-dev --project {SKILL_DIR} -- python {SKILL_DIR}/multi_llm.py apply-code-fixes plans/my-plan.md --mark-completed
         

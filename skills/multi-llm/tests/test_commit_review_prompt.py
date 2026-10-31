@@ -43,11 +43,12 @@ from utils.prompt_loader import load_prompt  # noqa: E402
 from utils.providers import PROVIDER_CLASSES  # noqa: E402
 from utils.providers.base import classify_streams, match_streams  # noqa: E402
 from utils.schema_validator import validate_code_review_issues  # noqa: E402
+from utils.scope_policy import POLICIES, reviewer_guidance  # noqa: E402
 
 PLACEHOLDERS = (
     "commit_brief_path", "commit_range_line", "commit_list", "focus_block", "plan_block",
     "scope_source", "tracked_files_list", "scope_file", "diff_dir", "diff_access",
-    "drift_block", "working_limits", "output_location",
+    "drift_block", "working_limits", "scope_policy_guidance", "output_location",
 )
 
 
@@ -88,8 +89,11 @@ def shared_context() -> Dict[str, str]:
 
 
 def render(record: Dict[str, Any], *, location: str = "file", inline: bool = False,
-           scope_total: int = 2) -> str:
+           scope_total: int = 2, policy: str = "expand") -> str:
     context = shared_context()
+    # `run_single_review` renders the round's scope block per slot; a commit
+    # review judges scope against its brief (phase `commits`).
+    context["scope_policy_guidance"] = reviewer_guidance(policy, "commits")
     context.update(commit_prompt_context(
         record, brief_text=context["plan_path"],
         brief_pointer=None if inline else context["plan_path"],
@@ -268,9 +272,10 @@ class TestRenderedPromptTripsNoFailureClassifier:
     """goose, muse, pi and omp echo the prompt into their stream; the commit
     template must not read as a failure under any adapter's pattern sets."""
 
+    @pytest.mark.parametrize("policy", POLICIES)
     @pytest.mark.parametrize("provider", sorted(PROVIDER_CLASSES))
     @pytest.mark.parametrize("location", ("file", "stdout"))
-    def test_neither_stream_classifies(self, provider, location):
+    def test_neither_stream_classifies(self, provider, location, policy):
         cls = PROVIDER_CLASSES[provider]
         patterns = dict(
             auth_patterns=cls.auth_error_patterns,
@@ -280,7 +285,8 @@ class TestRenderedPromptTripsNoFailureClassifier:
         rendered = render(make_record(25, focus="retry handling",
                                       drifted=["src/app.py"],
                                       plan="docs/x.md", plan_snapshot="p/context-plan.md",
-                                      plan_sha256="0" * 64), location=location)
+                                      plan_sha256="0" * 64), location=location,
+                          policy=policy)
         for stdout, stderr in ((rendered, ""), ("", rendered)):
             assert classify_streams(stdout, stderr, **patterns) is None, \
                 match_streams(stdout, stderr, **patterns)
