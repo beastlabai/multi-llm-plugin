@@ -1,0 +1,57 @@
+{
+  "tasks_schema_version": 2,
+  "kind": "apply_suggestions",
+  "inputs": {
+    "plan_sha256": "7cc6262e7492474e",
+    "grouped_sha256": "7a9dd75d27c9d7d8"
+  },
+  "batches": [
+    {
+      "tasks_schema_version": 2,
+      "task_id": "apply-batch-0",
+      "kind": "apply_suggestions",
+      "prompt": "Apply the following suggestion to the plan file:\n\n**Plan file**: /tmp/scope-policy-live-20261031/leaked-fixture/feature.md\n**Suggestion**: CSV header row is never specified\n**Type**: clarification\n**Section**: ## Output\n**Importance**: MEDIUM\n\n**Details**:\nThe plan says CSV but never names the columns of the header row, so two implementers would write two different files. The Output section is the only place the format is named, and it lists no column, no order and no quoting rule; name them there so the export is checkable.\n\n## Changes Applied in Prior Batches\n(Review these to avoid redoing work \u2014 do NOT re-apply these changes)\n\n{prior_changes_context}\n\nInstructions:\n1. Read the current plan file\n2. Locate the section mentioned in the reference\n3. Apply the suggested change appropriately:\n   - For \"addition\": Add new content in the appropriate location\n   - For \"modification\": Update existing content as described\n   - For \"deletion\": Remove the specified content\n   - For \"clarification\": Rewrite for clarity while preserving meaning\n4. Ensure the change integrates smoothly with surrounding content\n5. Check if the plan already contains a similar change (from a previously applied suggestion). If so, skip this suggestion or merge it with the existing content rather than duplicating\n6. Do NOT make any other changes beyond this specific suggestion\n\nReturn a brief summary of what was changed.",
+      "output_name": "apply_batch_0.json",
+      "output_path": "/tmp/scope-policy-live-20261031/leaked-fixture/feature/apply-suggestions/apply_batch_0.json",
+      "result_channel": "file",
+      "context_mode": "workspace-read",
+      "capability_tier": "full",
+      "executor_role": "agent",
+      "subagent_type": "general-purpose",
+      "inputs": {
+        "plan_sha256": "7cc6262e7492474e",
+        "grouped_sha256": "7a9dd75d27c9d7d8"
+      },
+      "batch_index": 0,
+      "section_key": "section:output",
+      "task_title": "apply 1 suggestion(s) to section:output",
+      "declared_files": [
+        "/tmp/scope-policy-live-20261031/leaked-fixture/feature.md"
+      ],
+      "expected_ids": [
+        "1de5f2451724bb54"
+      ],
+      "prior_changes_id": "section:output#2013a09a",
+      "can_parallelize": false,
+      "is_human": false,
+      "scope": {
+        "policy": "preserve",
+        "policy_source": "explicit",
+        "baseline_id": "6bb22b82c1042ded",
+        "binding": "8a22fe6eeffb7ec1f4ad0e37272edc90593d989905b4d82dd67efe63435baead",
+        "items": [
+          {
+            "id": "1de5f2451724bb54",
+            "group_id": "1de5f2451724bb54",
+            "relation": "in_scope",
+            "reason": "Naming the CSV header and format completes the agreed CSV export requirement without adding new features.",
+            "proposal_digest": "d15f6aa33990f1b13117bea6d295696a3620c0948c7bb95d20aba37c7c821785"
+          }
+        ]
+      }
+    }
+  ],
+  "total_batches": 1,
+  "phase": "apply-suggestions",
+  "phase_dir": "/tmp/scope-policy-live-20261031/leaked-fixture/feature/apply-suggestions"
+}

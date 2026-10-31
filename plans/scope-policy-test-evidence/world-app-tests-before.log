@@ -1,0 +1,25 @@
+test_api_unchanged (test_expenses.ExpenseTests.test_api_unchanged) ... ok
+test_empty_header (test_expenses.ExpenseTests.test_empty_header) ... ok
+test_special_characters_round_trip (test_expenses.ExpenseTests.test_special_characters_round_trip) ... FAIL
+
+======================================================================
+FAIL: test_special_characters_round_trip (test_expenses.ExpenseTests.test_special_characters_round_trip)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/scope-policy-world-20261031/expenses/tests/test_expenses.py", line 12, in test_special_characters_round_trip
+    self.assertEqual(rows, [["date", "category", "amount"], ["2026-10-31", category, "-1.25"]])
+AssertionError: Lists differ: [['date', 'category', 'amount'], ['2026-10-31', 'Food', ' groceries', '-1.25']] != [['date', 'category', 'amount'], ['2026-10-31', 'Food, groceries', '-1.25']]
+
+First differing element 1:
+['2026-10-31', 'Food', ' groceries', '-1.25']
+['2026-10-31', 'Food, groceries', '-1.25']
+
+- [['date', 'category', 'amount'], ['2026-10-31', 'Food', ' groceries', '-1.25']]
+?                                                      - --
+
++ [['date', 'category', 'amount'], ['2026-10-31', 'Food, groceries', '-1.25']]
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.001s
+
+FAILED (failures=1)

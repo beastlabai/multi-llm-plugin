@@ -1,0 +1,145 @@
+You are validating review suggestions for accuracy.
+
+## Context (Plan content)
+
+# Local CSV export
+
+## Goal
+Implement a local command that converts a UTF-8 JSON array of expense records to CSV.
+The command takes input and output file paths. Each record has date, category and amount.
+CSV columns are date,category,amount in that order, with one header row.
+Keep the current CLI arguments. Existing callers must keep working.
+
+## Implementation
+Read the JSON, iterate records, and join each row's three fields with commas.
+Open the destination for writing and write the resulting lines.
+
+## Checks
+Use a happy-path record and confirm the file has a header and one data row.
+
+
+## Suggestion groups to validate (1)
+
+[
+  {
+    "category": "modification",
+    "group_hash": "7b8c477a0f6b43ff",
+    "group_id": "7b8c477a0f6b43ff",
+    "group_index": 5,
+    "models": [
+      "claude-code:haiku"
+    ],
+    "suggestions": [
+      {
+        "desc": "The Implementation section says to 'join each row's three fields with commas'. Nothing quotes or escapes fields, so a category containing a comma, a double quote or a newline (for example 'Food, drinks') splits into extra columns or extra rows. The output is then not valid CSV and a downstream reader gets the wrong column count. The Goal requires CSV with exactly three columns per row, so the plan needs a quoting rule, such as RFC 4180 quoting of any field containing a comma, quote or newline, with embedded quotes doubled.",
+        "importance": "HIGH",
+        "scope_reason": "Makes the required CSV output valid; the Goal already asks for CSV with three columns per row.",
+        "scope_relation": "in_scope",
+        "title": "Naive comma join produces invalid CSV for special characters",
+        "type": "modification"
+      }
+    ],
+    "theme": "Naive comma join produces invalid CSV for special characters"
+  }
+]
+
+## Task
+
+For each of the 1 suggestion groups above, decide:
+- "valid": the issue is real and should be addressed
+- "invalid": a false positive — incorrect or not applicable
+- "needs-human-decision": cannot be determined from the context above and
+  requires human judgment
+
+Compare each group against the context above to verify it. Judge only the
+groups listed above; ignore anything else.
+
+When a suggestion claims something about existing code — a function name, a
+line number, current behaviour — and you can read the repository you are
+running in, open it and check the claim before answering; do not rely on the
+context above alone when the code itself is one read away. Reserve
+"needs-human-decision" for genuine judgment calls (a product or design
+trade-off), never for a claim you could have checked but did not look at. If
+you cannot read the repository, judge from the records and the context above
+alone.
+
+Do not probe system paths, services or databases (anything outside the
+repository, a database client, a service status): the repository and the
+context above are the evidence.
+
+A claim that the plan or the tasks omit something — "the plan does not specify
+X", "the tasks never say to reset X" — is judged against the plan or tasks text
+above, not against the working tree: the plan is what an implementer follows,
+and a partially implemented tree is exactly the situation this review exists
+for. Code that already does X does not make such a claim invalid; it makes it
+valid — document or decide it — and the reason should say that the code already
+does X. Where the artifact under review is a diff or a code change rather than a
+plan, that change is the text such a claim is judged against.
+
+Scope: a plan is a design document. Breaking it into implementation tasks, with
+ids, dependencies and an order, is a later phase (task generation). A finding
+whose only complaint is that the plan has no task breakdown, task list,
+implementation order, dependency graph or milestones is "invalid": not
+applicable to a plan review. A finding that names a concrete design gap which
+would block writing those tasks is judged on that gap. A missing ordering
+constraint between parts of the design (a data migration that must precede the
+schema switch) is a design gap, judged on its merits.
+
+## Scope Classification (labels only)
+Judge "status" exactly as the task above says; this section does not change it.
+For the report's labels, also classify each group's full proposed action (every
+member's proposed change together) against the scope baseline, which is
+the reviewed plan's own goals, requirements and explicit limits or exclusions. Classify independently of the reviewers' own `scope_relation` tags.
+This classification is informational: a group whose issue is real is "valid"
+whether or not it extends the scope, and its status, confidence and reason must
+not depend on its scope.
+
+- "in_scope": the action completes, corrects or clarifies what the baseline
+  already asks for. Completing an existing requirement is in scope even when it
+  is substantial work, and so is a prerequisite in another file, fixing a
+  regression the work introduced, and removing behaviour or content the
+  baseline never asked for (existing scope creep).
+- "scope_extension": the action adds a capability, outcome or unrelated cleanup
+  the baseline does not ask for, or changes an agreed outcome, even when it is
+  worthwhile or needed to make the overall goal achievable.
+- "unclear": the baseline does not settle it (missing, truncated or vague
+  intent), or materially different fixes would differ in scope and none is
+  chosen.
+
+Add to each result: "scope_relation": "in_scope|scope_extension|unclear", "scope_reason": "<one brief sentence>", "scope_reference": "<baseline section, or empty>".
+
+## Reply
+
+Print ONE JSON object and nothing else — no prose, no markdown fences, no
+explanation. Do not write any file; whoever invoked you persists your reply.
+Your reply is parsed as-is, and a reply that does not parse is thrown away:
+the first character is `{` and the last is the `}` that closes it. Keep every
+`reason` and `scope_reason` to one short line with no raw double quotes or line
+breaks inside it.
+`metadata` comes first and `groups` last, so the reply ends with the last
+result's `}`, the `]` that closes `groups` and the `}` that closes the object:
+`}]}`. Re-read the object once for balanced brackets before you finish.
+Settle every verdict, and check each result's `group_hash` against its group
+above, before you print anything, then print the object once: a reply that
+adds a correction, a note or a second object after the first does not parse.
+
+{
+  "metadata": {"model": "<the model you are>", "timestamp": "<ISO 8601>", "schema_version": "2.1"},
+  "groups": [
+    {"group_index": <the group's group_index value>, "group_hash": "<copy the group_hash of the group verbatim>", "status": "valid|invalid|needs-human-decision", "reason": "<one brief sentence>", "confidence": 0.0, "scope_relation": "in_scope|scope_extension|unclear", "scope_reason": "<one brief sentence>", "scope_reference": "<baseline section, or empty>"}
+  ]
+}
+
+Rules:
+1. Output EXACTLY one result per requested group — no more, no fewer.
+2. Each group above carries its own `group_index` — echo that group's
+   `group_index` value back into its result, and copy its `group_hash` value
+   verbatim too. The `group_index` you echo is advisory; the hash is what the
+   results are joined on, so a wrong hash discards the result, and the hash
+   of another group in this batch puts your verdict on that group.
+3. Confidence is a number between 0.0 and 1.0.
+4. Be conservative: when you cannot decide from the context given, answer
+   "needs-human-decision" rather than guessing.
+5. `scope_relation`, `scope_reason` and `scope_reference` classify the group's
+   proposed remedy against the scope baseline. They never change `status`;
+   when the context cannot settle the scope, answer "unclear".

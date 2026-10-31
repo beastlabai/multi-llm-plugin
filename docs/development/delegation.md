@@ -24,6 +24,10 @@ emits (`validation_tasks.json`, `revalidation_tasks.json`, `consolidation_tasks.
 hash block — validated against `schemas/subagent_tasks.schema.json` **on write and on read**
 (`utils/subagent_tasks.py`). The invoker's whole job is: run `task.prompt` as a subagent,
 write the JSON it returns to `task.output_path`; the callee only prints.
+An apply write task materialized under `--scope-policy preserve` also carries a `scope` block
+(policy, baseline id, binding, per-item relation and selected remedy; absent under `expand`),
+which both dispatch paths check against the round's effective policy before binding a prompt
+([write scheduling](write-scheduler.md#scope-policy-at-the-write-seam)).
 
 Prompt bodies live in `utils/subagent_prompts.py` as five **pure** generators (no I/O, no clock, no
 config — identical inputs render byte-identical text, pinned by `tests/golden/prompts/`), never in
@@ -190,6 +194,23 @@ prompt showed the finding and the prior-*batch* log but never the prior-*phase* 
 `## Implementation record` section from that same `implement`-phase `prior_changes.jsonl`
 (entries naming the batch's own file sorted first) with an explicit "do not silently revert a
 recorded decision" instruction (F3, 2026-09-16).
+
+**The validation task file carries the round's scope block** (`scope`: policy, prompt phase, the
+baseline these validators are shown and the round's own baseline id;
+plans/scope-policy-and-report-tags.md §3.1). `prepare_batched_validation_tasks(scope=...)` renders
+`scope_policy.validator_guidance` into every batch prompt per call, as its own argument after the
+phase guidance (so `PLAN_VALIDATION_SCOPE_GUIDANCE` still fills in when `extra_instructions` is
+empty), and both invokers run those bytes. The reply contract gains the optional
+`scope_relation`/`scope_reason`/`scope_reference`, policy-independent; `util check-reply` and the
+executor's result check never ask for them, so a reply without them is still a reply and reads
+`unclear`. A revalidation resolves the policy as its apply phase does (explicit, recorded apply
+override, recorded review policy, `expand`) and, when the current document is not the round's
+baseline document, embeds the round's hash-verified `validation-snapshot.md` as a second labelled
+context so correctness is judged against the current text and scope against the original
+(`revalidation_scope_binding`). The legacy `--internal-validation` route renders the same block, its
+Output Format asks for each group's `group_id` verbatim, and it stamps only a verdict whose echoed
+`group_id` names one of its groups (that echo also sets the record's `group_index`); any other echo
+joins by the reported index, for validity only.
 
 The reply template's `group_index` example is a placeholder, never a number (models copied
 `0`: 41 of 46 and 18 of 32 verdicts echoed batch-local ordinals), and

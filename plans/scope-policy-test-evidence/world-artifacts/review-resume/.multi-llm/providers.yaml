@@ -1,0 +1,5 @@
+driver:
+  subagent_runner: claude-code:haiku
+  subagent_runner_cheap: claude-code:haiku
+  subagent_timeout_s: 1300
+  max_concurrent_subagents: 1

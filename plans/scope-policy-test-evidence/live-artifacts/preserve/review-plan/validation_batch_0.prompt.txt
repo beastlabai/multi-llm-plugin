@@ -1,0 +1,155 @@
+You are validating review suggestions for accuracy.
+
+## Context (Plan content)
+
+# Local CSV export
+
+## Goal
+Implement a local command that converts a UTF-8 JSON array of expense records to CSV.
+The command takes input and output file paths. Each record has date, category and amount.
+CSV columns are date,category,amount in that order, with one header row.
+Keep the current CLI arguments. Existing callers must keep working.
+
+## Implementation
+Read the JSON, iterate records, and join each row's three fields with commas.
+Open the destination for writing and write the resulting lines.
+
+## Checks
+Use a happy-path record and confirm the file has a header and one data row.
+
+
+## Suggestion groups to validate (1)
+
+[
+  {
+    "category": "modification",
+    "group_hash": "6e642be4da539acd",
+    "group_id": "6e642be4da539acd",
+    "group_index": 2,
+    "models": [
+      "claude-code:haiku"
+    ],
+    "suggestions": [
+      {
+        "desc": "## Implementation says 'join each row's three fields with commas'. That is not CSV: a category such as 'Food, groceries' or one containing a double quote or newline adds extra columns or splits the row, so the output file is malformed for valid input. The goal is a CSV file, so fields that contain commas, quotes or line breaks must be quoted and escaped (RFC 4180, e.g. Python's csv module). This is a correctness bug in the approach itself, not a style choice.",
+        "importance": "HIGH",
+        "scope_reason": "Makes the output a valid CSV file as the Goal requires; adds no new behaviour.",
+        "scope_relation": "in_scope",
+        "title": "Comma-joined rows break when a field holds a comma",
+        "type": "modification"
+      }
+    ],
+    "theme": "Comma-joined rows break when a field holds a comma"
+  }
+]
+
+## Task
+
+For each of the 1 suggestion groups above, decide:
+- "valid": the issue is real and should be addressed
+- "invalid": a false positive — incorrect or not applicable
+- "needs-human-decision": cannot be determined from the context above and
+  requires human judgment
+
+Compare each group against the context above to verify it. Judge only the
+groups listed above; ignore anything else.
+
+When a suggestion claims something about existing code — a function name, a
+line number, current behaviour — and you can read the repository you are
+running in, open it and check the claim before answering; do not rely on the
+context above alone when the code itself is one read away. Reserve
+"needs-human-decision" for genuine judgment calls (a product or design
+trade-off), never for a claim you could have checked but did not look at. If
+you cannot read the repository, judge from the records and the context above
+alone.
+
+Do not probe system paths, services or databases (anything outside the
+repository, a database client, a service status): the repository and the
+context above are the evidence.
+
+A claim that the plan or the tasks omit something — "the plan does not specify
+X", "the tasks never say to reset X" — is judged against the plan or tasks text
+above, not against the working tree: the plan is what an implementer follows,
+and a partially implemented tree is exactly the situation this review exists
+for. Code that already does X does not make such a claim invalid; it makes it
+valid — document or decide it — and the reason should say that the code already
+does X. Where the artifact under review is a diff or a code change rather than a
+plan, that change is the text such a claim is judged against.
+
+Scope: a plan is a design document. Breaking it into implementation tasks, with
+ids, dependencies and an order, is a later phase (task generation). A finding
+whose only complaint is that the plan has no task breakdown, task list,
+implementation order, dependency graph or milestones is "invalid": not
+applicable to a plan review. A finding that names a concrete design gap which
+would block writing those tasks is judged on that gap. A missing ordering
+constraint between parts of the design (a data migration that must precede the
+schema switch) is a design gap, judged on its merits.
+
+## Scope Policy: Preserve
+The user asked to preserve the agreed scope for this run. Verify each group's
+facts and set "status" exactly as the task above says. Then, separately and
+independently, check each group's full proposed remedy (every member's proposed
+change together) against the original requirements and limits, which are
+the reviewed plan's own goals, requirements and explicit limits or exclusions.
+
+- Classify independently of the reviewers' own `scope_relation` tags, their
+  confidence, how many models agree, and their wording. Do not assume a
+  reviewer obeyed an instruction to stay in scope, and do not accept a remedy
+  because its description calls a new feature "required".
+- "scope_extension": the remedy extends those limits. It is rejected for this
+  run, even if its facts are correct or its importance is high.
+- "unclear": you cannot establish that the remedy stays within those limits. An
+  uncertain remedy is deferred, never approved for automatic application.
+- "in_scope": the remedy completes, corrects or clarifies an agreed
+  requirement, fixes a regression the work introduced, or removes behaviour the
+  baseline never asked for.
+- Keep correctness and scope separate. A factually correct suggestion whose
+  remedy extends the scope stays "valid"; never mark it "invalid" to keep it
+  out — the scope classification is what holds it back. If the problem is real
+  but only an extension would fix it, keep its status, classify the remedy
+  "scope_extension", and name in `scope_reason` the scope decision it needs.
+- When the members propose materially different remedies and one of them stays
+  within scope, you may name that one in "selected_remedy" (one line) and
+  classify that remedy; otherwise classify the remedies together, and any
+  extension among them makes the group "scope_extension".
+- Explicit exclusions in the baseline bind under every policy.
+
+Add to each result: "scope_relation": "in_scope|scope_extension|unclear", "scope_reason": "<one brief sentence>", "scope_reference": "<baseline section, or empty>", and optionally
+"selected_remedy": "<the one in-scope remedy you classified>". Give the
+evidence for the scope decision in `scope_reason`.
+
+## Reply
+
+Print ONE JSON object and nothing else — no prose, no markdown fences, no
+explanation. Do not write any file; whoever invoked you persists your reply.
+Your reply is parsed as-is, and a reply that does not parse is thrown away:
+the first character is `{` and the last is the `}` that closes it. Keep every
+`reason` and `scope_reason` to one short line with no raw double quotes or line
+breaks inside it.
+`metadata` comes first and `groups` last, so the reply ends with the last
+result's `}`, the `]` that closes `groups` and the `}` that closes the object:
+`}]}`. Re-read the object once for balanced brackets before you finish.
+Settle every verdict, and check each result's `group_hash` against its group
+above, before you print anything, then print the object once: a reply that
+adds a correction, a note or a second object after the first does not parse.
+
+{
+  "metadata": {"model": "<the model you are>", "timestamp": "<ISO 8601>", "schema_version": "2.1"},
+  "groups": [
+    {"group_index": <the group's group_index value>, "group_hash": "<copy the group_hash of the group verbatim>", "status": "valid|invalid|needs-human-decision", "reason": "<one brief sentence>", "confidence": 0.0, "scope_relation": "in_scope|scope_extension|unclear", "scope_reason": "<one brief sentence>", "scope_reference": "<baseline section, or empty>"}
+  ]
+}
+
+Rules:
+1. Output EXACTLY one result per requested group — no more, no fewer.
+2. Each group above carries its own `group_index` — echo that group's
+   `group_index` value back into its result, and copy its `group_hash` value
+   verbatim too. The `group_index` you echo is advisory; the hash is what the
+   results are joined on, so a wrong hash discards the result, and the hash
+   of another group in this batch puts your verdict on that group.
+3. Confidence is a number between 0.0 and 1.0.
+4. Be conservative: when you cannot decide from the context given, answer
+   "needs-human-decision" rather than guessing.
+5. `scope_relation`, `scope_reason` and `scope_reference` classify the group's
+   proposed remedy against the scope baseline. They never change `status`;
+   when the context cannot settle the scope, answer "unclear".

@@ -1,0 +1,76 @@
+{
+  "report_version": 1,
+  "kind": "apply_suggestions",
+  "phase": "apply-suggestions",
+  "written_at": "2026-10-31T17:43:20.262673",
+  "exit": 0,
+  "batches_dispatched": [
+    0
+  ],
+  "stopped_at_batch": null,
+  "verification": null,
+  "finalized": true,
+  "summary_file": "/tmp/scope-policy-live-20261031/preserve/apply-suggestions/summary.md",
+  "human_task_strategy": null,
+  "skipped_tasks": {},
+  "dependency_overrides": {},
+  "pending_human_tasks": [],
+  "accepted_tasks": {},
+  "not_run_tasks": {},
+  "blocked_by_check": {},
+  "stop": null,
+  "tasks": [
+    {
+      "task_id": "apply-batch-0",
+      "kind": "apply_suggestions",
+      "runner": "claude-code:haiku",
+      "profile": "agent-write",
+      "status": "ok",
+      "attempt_count": 1,
+      "duration_seconds": 9.57,
+      "output_path": "/tmp/scope-policy-live-20261031/preserve/apply-suggestions/apply_batch_0.json",
+      "write_outcome": "applied",
+      "runner_notes": "6e642be4da539acd: applied. Implementation section now requires an RFC 4180 CSV writer (e.g. Python csv module), quoting fields with commas/quotes/line breaks and doubling embedded quotes; header and data rows are written; raw comma-joining is prohibited. Within validated scope.",
+      "files_touched": [
+        "preserve.md"
+      ],
+      "summary": "Implementation: replaced raw comma-join with RFC 4180 CSV writer quoting/escaping for fields with commas, quotes or line breaks.",
+      "snapshot_dir": "/tmp/scope-policy-live-20261031/preserve/apply-suggestions/pre_batch/apply-batch-0",
+      "expected_ids": [
+        "6e642be4da539acd"
+      ],
+      "returned_ids": [
+        "6e642be4da539acd"
+      ],
+      "sha256_before": {
+        "preserve.md": "32ad997f3ed3b05ab5a3a930c010ef44cbd158208ce19160ffa8eedc9014d460"
+      },
+      "sha256_after": {
+        "preserve.md": "19822cc06a7c7354414c0d25900dcc3b337612857c22f23606aeff98b31bceb6"
+      },
+      "usage": {
+        "input_tokens": 6,
+        "output_tokens": 983,
+        "cached_input_tokens": 70723,
+        "cost_usd": 0.0047988300000000005,
+        "total_tokens": 989
+      },
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "ok",
+          "duration_seconds": 9.562,
+          "exit_code": 0,
+          "usage": {
+            "input_tokens": 6,
+            "output_tokens": 983,
+            "cached_input_tokens": 70723,
+            "cost_usd": 0.0047988300000000005,
+            "total_tokens": 989,
+            "served_model": "claude-haiku-5-5"
+          }
+        }
+      ]
+    }
+  ]
+}

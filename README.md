@@ -179,7 +179,7 @@ Invoke with `/multi-llm:multi-llm [mode-flag] <plan_path> [options]` - on OpenCo
 
 ### 3.1 Pipeline flow
 
-The mode flags are designed to run as an ordered pipeline (exactly what `--full` chains for you). Each **review** step fans the work out to multiple LLMs in parallel; each **apply** step is where the host writes the changes back and pauses for any `needs-human-decision` findings.
+The mode flags are designed to run as an ordered pipeline (exactly what `--full` chains for you).
 
 ```mermaid
 flowchart TD
@@ -231,8 +231,6 @@ You don't have to run the whole chain: **every step is also a standalone entry p
 
 ### 3.4 Common options
 
-Options may appear before or after the plan path. Not every flag applies to every mode.
-
 | Flag | Effect |
 | --- | --- |
 | `--models <provider:model> ...` | Use exactly these models, overriding the YAML defaults. |
@@ -241,10 +239,11 @@ Options may appear before or after the plan path. Not every flag applies to ever
 | `--dry-run` | Show what `--implement` or an apply mode would do, without changing anything. |
 | `--agent-decide` | In the apply modes, let a judge agent decide every `needs-human-decision` finding instead of asking you. |
 | `--no-confirm` | Skip confirmation prompts, for unattended runs. |
+| `--scope-policy expand\|preserve` | `expand` (the default) allows warranted scope extensions; `preserve` keeps the run within the agreed scope ([details](docs/workflows.md#scope-policy)). |
 
 When the models disagree or a suggestion is borderline, validation marks it `needs-human-decision`. On Claude Code the apply modes ask you about each one, each with a **Let the agent decide** option, per item or for a whole batch; on Codex and OpenCode, and with `--agent-decide`, a judge agent decides them all. The judge salvages partially-valid findings rather than dropping them, and the HTML report badges every finding **Approved / Salvaged / Skipped**.
 
-Every flag, including `--force`, `--rerun-all`, `--focus` and `--context-plan`, and how the judge is chosen: [docs/workflows.md](docs/workflows.md#options).
+Options may appear before or after the plan path; not every flag applies to every mode. Every flag, including `--force`, `--rerun-all`, `--focus` and `--context-plan`, and how the judge is chosen: [docs/workflows.md](docs/workflows.md#options).
 
 ---
 

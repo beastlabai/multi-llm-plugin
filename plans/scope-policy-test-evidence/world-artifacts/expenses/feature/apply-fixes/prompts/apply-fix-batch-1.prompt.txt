@@ -1,0 +1,96 @@
+Fix the following code issue:
+
+**Plan file**: /tmp/scope-policy-world-20261031/expenses/feature.md
+**File**: expenses.py
+**Lines**: 5-5
+**Issue**: None values now export as the string 'None'
+**Type**: bug
+**Importance**: MEDIUM
+
+**Description**:
+str(record[key]) turns a None amount or category into the literal text "None", whereas the base csv.writer wrote an empty field. Callers with missing values now get a different output than before, which conflicts with the requirement that existing callers remain compatible and values be preserved exactly.
+
+**Anchor text** (to help locate): `str(record[key]) for key in`
+
+## Changes Applied in Prior Batches
+(Review these to avoid redoing work — do NOT re-apply these changes)
+
+- **apply-fix-batch-0** (expenses.py#0ba38170): Restored csv.writer in export_expenses so commas, quotes and newlines are quoted and escaped.
+
+## Instructions
+1. Use `git diff HEAD -- expenses.py` to see recent changes
+2. Read the file and locate the issue using line numbers or anchor text
+3. Make the necessary fix
+4. Verify your fix doesn't break anything (run typecheck if applicable)
+5. Do NOT make any other changes beyond this specific fix
+6. Do NOT edit this run's plan (`/tmp/scope-policy-world-20261031/expenses/feature.md`) or the task list generated from it (not to record an "approved deviation", not to make the plan match the code). Every other file a fix names is yours to change, markdown included: a fix on a README, a doc or another plan in the diff is applied like any code fix. If a fix can only be satisfied by changing this run's plan or task list, or that plan should be what moves, make no edit for that fix and decline it. When the plan or its task list already decides against the fix (a rule it states, such as "do not add X"), quote that decision as the reason; report it as "not applied: needs a plan decision" only when they do not decide it.
+
+Return: Brief summary of what you changed.
+
+## Scope Policy: Preserve
+This run preserves the agreed scope. Apply each item exactly as its instruction
+says, and only within the scope its validation established. If you find that an
+item cannot be completed without adding a feature, outcome or change beyond that
+scope, do not make the expansion: decline that item with the reason. If you had
+already edited files for it, say what you changed rather than reporting a clean
+decline.
+
+Scope baseline: a2b83aa2f58e9cd1. The validated scope of each item:
+- `2a0448e732607e3b`: Within scope — The remedy makes None export as an empty field, which preserves values as the plan requires and fixes a regression from the rewrite.
+
+If an item's agreed requirement itself cannot be met without such an expansion, begin its decline reason with `SCOPE BLOCKER:` and name the scope decision the user has to make.
+
+## Process safety (required)
+
+Never run `kill`, `pkill`, `killall` or any process-wide signal: the orchestrator that dispatched you is a sibling process, and a write subagent's `killall -9 python3` ended a whole phase (measured 2026-09-16). Do not start background servers, watchers, browsers or any other background process, and leave no process running when you finish.
+
+## Git (required)
+
+Do not stage, commit, stash or push anything (no `git add`, `git commit`, `git stash` or `git push`), even when your task makes a file trackable: leave the git index and history as you found them. The user reviews and stages the changes.
+
+## Scratch files (advisory)
+
+Keep scratch work (an extracted script to syntax-check, a probe) out of the repository and out of fixed, shared names such as a bare `check.mjs` in the system temp directory: create a fresh directory with `mktemp -d`, work only there and delete it before you finish. The write gate only sees the repository, so a file left elsewhere is invisible to it (measured 2026-10-01, OpenCode runner).
+
+## Result (required — this is how the batch is verified)
+
+Do the work above, then end your reply with ONE JSON object (a fenced ```json block is fine) of exactly this shape:
+
+```json
+{"status": "applied", "ids": ["<id>", "..."], "declined": [{"id": "<id>", "reason": "<why you did not apply it>"}], "files_touched": ["<repo-relative path>"], "summary": "<one line, at most 200 characters>", "notes": "<the per-item summary requested above>", "check": {"passed": true, "findings": [], "ran": {"<each check command you ran>": "passed"}}}
+```
+
+- `status`: `applied` if you edited any file; `no-op` if you edited nothing because every change was already present or you declined it; `failed` if you could not apply the batch.
+- `ids`: the ids of the fixes you applied **or found already applied by a prior batch**, from this list (numbered in the order they appear above): fix 1 = `2a0448e732607e3b`.
+- `declined`: each fix from that list you deliberately left unapplied, as `{"id": "<its id>", "reason": "<why, in one sentence>"}`; `[]` when you applied every one. The reason says what decides it: when the plan, its task list or the implementation record already decides against the fix (a rule it states, a decision it records), name which one and quote that decision; when you judge the fix wrong for this code, say why; say it needs a plan decision only when nothing there decides it. Every fix goes in exactly one of `ids` and `declined`: one left out of both reads as a fix you meant to apply and did not finish, and the run stops for a human to inspect it.
+- `files_touched`: repo-root-relative paths you edited (empty for `no-op` and `failed`).
+- `summary`: one line; it is recorded verbatim as this batch's entry in the prior-changes log the next batch reads.
+- `notes`: the per-item summary the return format above asks for.
+- `check`: required in every reply, also when you ran no check — which checks you ran on your edits and how each one ended (see below).
+
+A reply without this JSON object is recorded as a FAILED batch even when the edits landed, so send it in every case — including when nothing needed changing.
+
+## Checks you ran (required in every reply)
+
+Always send the `check` object in the JSON above, also when you ran no check: it is the only record of what was checked after your edits, and a reply without it leaves the checks you ran off the record.
+
+- `ran`: every check you ran on your edits — a test, a build, a type check, a linter, a syntax check — as its command mapped to how its last run ended, `"passed"` or `"failed"`.
+- `passed`: the JSON boolean `true` only when the last run of every check you ran passed, else `false`.
+- `findings`: one string per check whose last run failed: the command and what it reported, nothing else; `[]` when `passed` is `true`.
+- `note` (optional): anything you want to say about your checks, such as why one fails or that a failure is a known one. It is recorded and shown beside them and never read as a finding, so keep such words out of `findings`.
+
+A batch whose check failed answers:
+
+```json
+{"check": {"passed": false, "findings": ["<one failing check: the command and what it reported>"], "ran": {"<that command>": "failed", "<another command you ran>": "passed"}}}
+```
+
+If you ran no check, say so and why: `ran` empty, no `passed`, and the reason in `not_run`:
+
+```json
+{"check": {"ran": {}, "not_run": "<why no check could run on these edits>"}}
+```
+
+Report the last run of each check. A run that failed because of how you ran it (a wrong flag, mode or path) and that you then ran correctly is reported by the corrected run, and so is a check you ran again after fixing what it found: an attempt you corrected is not a finding. The corrected run is the same check over the same scope: the full command the task or the repository names, with only what you ran wrongly put right. It is never a narrower one (fewer files or tests, a filter, or a flag such as `--passWithNoTests` that lets it pass on less). If the only run that passed was narrower, the failing run is the last run of that check: report it. Never describe a passing run as a finding.
+
+Report a failing check here even when you think your change did not cause it: the batch is then recorded as applied with a failing check, and the user is told, instead of the run reporting a clean success.

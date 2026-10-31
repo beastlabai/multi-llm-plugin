@@ -1,0 +1,45 @@
+{
+  "state": "complete",
+  "phase": "apply-suggestions",
+  "progress": {
+    "step": "complete",
+    "write_subagents": {
+      "kind": "apply_suggestions",
+      "invoker": "executor",
+      "total": 1,
+      "ok": 1,
+      "completed": 1,
+      "in_flight": [],
+      "items_total": 1,
+      "items_applied": 1,
+      "applied_to": "preserve.md",
+      "runner_versions": {
+        "claude-code:haiku": "2.1.316"
+      },
+      "batches_dispatched": [
+        0
+      ],
+      "stopped_at_batch": null,
+      "finalized": true,
+      "human_task_strategy": null,
+      "skipped_task_ids": [],
+      "pending_human_task_ids": [],
+      "tasks": [
+        {
+          "task_id": "apply-batch-0",
+          "batch_index": 0,
+          "status": "ok",
+          "write_outcome": "applied",
+          "files_touched": [
+            "preserve.md"
+          ]
+        }
+      ],
+      "failed_task_ids": [],
+      "runner_failed_task_ids": [],
+      "not_run_task_ids": [],
+      "accepted_task_ids": []
+    }
+  },
+  "updated_at": "2026-10-31T17:43:20.272738"
+}

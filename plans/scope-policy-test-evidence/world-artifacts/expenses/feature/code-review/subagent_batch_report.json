@@ -1,0 +1,115 @@
+{
+  "report_version": 1,
+  "invoker": "executor",
+  "phase": "code-review",
+  "kind": "validation",
+  "task_file": "/tmp/scope-policy-world-20261031/expenses/feature/code-review/validation_tasks.json",
+  "ceilings": {
+    "effective": 1,
+    "driver_max_concurrent_subagents": 1,
+    "host_max_concurrent_subagents": 4,
+    "provider_max_concurrent": {
+      "claude-code": 2
+    }
+  },
+  "runner_versions": {
+    "claude-code:haiku": "2.1.316"
+  },
+  "batch_provenance": {
+    "validation-batch-0": {
+      "task_id": "validation-batch-0",
+      "kind": "validation",
+      "round": "912feb6d9b9dc232d9d8d5b4fc3722ed3c66194d5c24e8af4c8d270ac16f6737",
+      "runner": "claude-code:haiku",
+      "sha256": "1e00935683cd62086a83503419ac4810b34485124fd139af71cf42851e026c30"
+    },
+    "validation-batch-1": {
+      "task_id": "validation-batch-1",
+      "kind": "validation",
+      "round": "912feb6d9b9dc232d9d8d5b4fc3722ed3c66194d5c24e8af4c8d270ac16f6737",
+      "runner": "claude-code:haiku",
+      "sha256": "db58c46c2d4c61676447e460834ad044aaa7672656b2d5a0741a28213b1d8629"
+    }
+  },
+  "pin_sha256": "a2ba6400bbff34e59bd21eefbb77d4626f0935183b47797054941025528d5aac",
+  "counts": {
+    "ok": 2
+  },
+  "usage": {
+    "input_tokens": 14,
+    "output_tokens": 4802,
+    "cached_input_tokens": 169954,
+    "cost_usd": 0.013088840000000001,
+    "total_tokens": 4816,
+    "tasks_without_usage": 0,
+    "attempts": 2
+  },
+  "tasks": [
+    {
+      "task_id": "validation-batch-0",
+      "kind": "validation",
+      "runner": "claude-code:haiku",
+      "profile": "agent-readonly",
+      "status": "ok",
+      "attempt_count": 1,
+      "duration_seconds": 10.734,
+      "output_path": "/tmp/scope-policy-world-20261031/expenses/feature/code-review/validation_batch_0.json",
+      "usage": {
+        "input_tokens": 4,
+        "output_tokens": 917,
+        "cached_input_tokens": 38305,
+        "cost_usd": 0.00488155,
+        "total_tokens": 921
+      },
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "ok",
+          "duration_seconds": 10.729,
+          "exit_code": 0,
+          "usage": {
+            "input_tokens": 4,
+            "output_tokens": 917,
+            "cached_input_tokens": 38305,
+            "cost_usd": 0.00488155,
+            "total_tokens": 921,
+            "served_model": "claude-haiku-5-5"
+          }
+        }
+      ]
+    },
+    {
+      "task_id": "validation-batch-1",
+      "kind": "validation",
+      "runner": "claude-code:haiku",
+      "profile": "agent-readonly",
+      "status": "ok",
+      "attempt_count": 1,
+      "duration_seconds": 26.742,
+      "output_path": "/tmp/scope-policy-world-20261031/expenses/feature/code-review/validation_batch_1.json",
+      "usage": {
+        "input_tokens": 10,
+        "output_tokens": 3885,
+        "cached_input_tokens": 131649,
+        "cost_usd": 0.00820729,
+        "total_tokens": 3895
+      },
+      "attempts": [
+        {
+          "attempt": 1,
+          "status": "ok",
+          "duration_seconds": 26.738,
+          "exit_code": 0,
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 3885,
+            "cached_input_tokens": 131649,
+            "cost_usd": 0.00820729,
+            "total_tokens": 3895,
+            "served_model": "claude-haiku-5-5"
+          }
+        }
+      ]
+    }
+  ]
+}

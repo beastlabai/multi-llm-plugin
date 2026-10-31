@@ -1,0 +1,45 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_____________ test_fresh_default_expand_survives_implement_resume ______________
+
+repo = <tests.test_write_executor_orchestrators.repo.<locals>.Repo object at 0x728a012e63c0>
+handed_out = [{'batches': [{'batch_index': 0, 'can_parallelize': False, 'tasks': [{'complexity': 'medium', 'depends_on': [], 'descr...ng_tasks': 3, 'plan_arg': '/tmp/pytest-of-marc/pytest-2312/test_fresh_default_expand_surv0/repo/plans/sample.md', ...}]
+
+    def test_fresh_default_expand_survives_implement_resume(repo, handed_out):
+        assert _implement(repo, '--scope-policy', 'preserve') == 0
+        assert _implement(repo, '--fresh', '--yes') == 0
+        assert all(PRESERVE_HEADING not in p for p in _prompts(handed_out[-1]))
+        assert _implement(repo, '--resume', '--yes') == 0
+>       assert all(PRESERVE_HEADING not in p for p in _prompts(handed_out[-1])), (
+            'The continuation of the fresh expand run restored the older preserve policy'
+        )
+E       AssertionError: The continuation of the fresh expand run restored the older preserve policy
+E       assert False
+E        +  where False = all(<generator object test_fresh_default_expand_survives_implement_resume.<locals>.<genexpr> at 0x728a010e5970>)
+
+/home/marc/code/multi-llm-plugin/coding_planning/scope-policy-test-evidence/test_fresh_resume_regression.py:16: AssertionError
+----------------------------- Captured stdout call -----------------------------
+Loaded plan: /tmp/pytest-of-marc/pytest-2312/test_fresh_default_expand_surv0/repo/plans/sample.md
+State file: /tmp/pytest-of-marc/pytest-2312/test_fresh_default_expand_surv0/repo/plans/sample/state.json
+Recorded 1 pre-existing changed paths
+Found 3 tasks
+Loaded plan: /tmp/pytest-of-marc/pytest-2312/test_fresh_default_expand_surv0/repo/plans/sample.md
+State file: /tmp/pytest-of-marc/pytest-2312/test_fresh_default_expand_surv0/repo/plans/sample/state.json
+Pre-existing changes already recorded (1 paths)
+Found 3 tasks
+[AUTO_RESOLVED] scope-policy: expand (no --scope-policy given: the default for a new run)
+Loaded plan: /tmp/pytest-of-marc/pytest-2312/test_fresh_default_expand_surv0/repo/plans/sample.md
+State file: /tmp/pytest-of-marc/pytest-2312/test_fresh_default_expand_surv0/repo/plans/sample/state.json
+Pre-existing changes already recorded (1 paths)
+Found 3 tasks
+Restored previous session state
+[AUTO_RESOLVED] scope-policy: preserve (kept from this implement run's recorded --scope-policy)
+=============================== warnings summary ===============================
+../mllm-wt/scope-policy/skills/multi-llm/tests/test_write_executor_orchestrators.py:1038
+  /home/marc/code/mllm-wt/scope-policy/skills/multi-llm/tests/test_write_executor_orchestrators.py:1038: PytestUnknownMarkWarning: Unknown pytest.mark.timeout - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.timeout(300)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED coding_planning/scope-policy-test-evidence/test_fresh_resume_regression.py::test_fresh_default_expand_survives_implement_resume
+1 failed, 1 warning in 0.12s

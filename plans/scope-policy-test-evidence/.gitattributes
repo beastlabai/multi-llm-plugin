@@ -1,0 +1,4 @@
+# Preserve unified-diff context and captured terminal output verbatim.
+*.patch -whitespace
+*.diff -whitespace
+*.log -whitespace

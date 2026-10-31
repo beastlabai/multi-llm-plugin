@@ -1,0 +1,7 @@
+{
+  "ok": false,
+  "exit": 0,
+  "state": "error",
+  "message": "the launch reported no run id on its banner, so the run cannot be polled or aborted safely. Refusing to adopt whatever run is newest.",
+  "anchor": "/tmp/scope-policy-world-20261031/browser-roundtrip"
+}

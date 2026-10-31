@@ -1,0 +1,32 @@
+{
+  "temporary_root": "/tmp/scope-policy-world-20261031",
+  "package_entrypoint": "Copied regenerated Codex MCP package, real stdio JSON-RPC client; no actual Codex UI session",
+  "model": "claude-code:haiku (also :low for the second reviewer slot)",
+  "application_tests": {
+    "before": "1 failed, 2 passed",
+    "after": "3 passed"
+  },
+  "policy_resume_checks": "passed",
+  "browser_engine": "Chrome via agent-browser after T3 preview action timeouts",
+  "browser_scope_checks": "passed: skips, description edits, stale binding, validity override, explicit expand eligibility",
+  "browser_errors": [],
+  "additional_finding": {
+    "severity": "P2",
+    "title": "MCP package misreports successful dry runs as errors",
+    "reproduced_on_original_HEAD_package": true,
+    "message": "the launch reported no run id on its banner, so the run cannot be polled or aborted safely. Refusing to adopt whatever run is newest.",
+    "implementation_changed": false
+  },
+  "additional_reported_cost_usd": 0.05945721,
+  "cumulative_reported_cost_usd": 0.12369333,
+  "usage_sources": {
+    "expenses/feature/code-review/.status.json": 0.00787262,
+    "review-resume/feature/review-plan/.status.json": 0.015321000000000001,
+    "expenses/feature/code-review/subagent_batch_report.json": 0.013088840000000001,
+    "expenses/feature/apply-fixes/subagent_batch_report.json": 0.01167311,
+    "generation-resume/feature/generate-tasks/subagent_batch_report.json": 0.01150164
+  },
+  "completed_calls_with_usage": 8,
+  "interrupted_calls_without_final_usage": 3,
+  "cost_note": "Reported completed-call usage only; interrupted calls may incur additional unreported usage. Excludes the parent Codex conversation and is not a verified bill."
+}

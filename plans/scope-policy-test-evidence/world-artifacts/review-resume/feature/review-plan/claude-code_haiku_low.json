@@ -1,0 +1,52 @@
+[
+  {
+    "title": "Plan omits the public signature it says to preserve",
+    "desc": "The plan says 'Preserve this public signature' but never states the signature. It only says 'Implement add(a, b) returning a+b'. An implementer cannot tell whether the parameters are positional-only, keyword-capable, or carry type hints or defaults, so 'preserve' has no defined target. The plan should state the exact signature, for example 'def add(a, b):' with its parameter names and any annotations.",
+    "importance": "MEDIUM",
+    "reference": "# Arithmetic helper (single section)",
+    "type": "clarification",
+    "scope_relation": "in_scope",
+    "scope_reason": "Stating the signature the plan already asks to preserve completes its existing requirement.",
+    "scope_reference": "Implement add(a, b) ... Preserve this public signature."
+  },
+  {
+    "title": "Operand types are not specified",
+    "desc": "The plan says add(a, b) returns a+b but does not say which operand types are supported (int only, floats, Decimal, Fraction, strings, mixed types) or what should happen for unsupported types (raise TypeError, return NotImplemented behaviour, or let Python's own error propagate). The tests it asks for cover only positive, negative and zero operands, so the type contract is untested and undefined. The plan should name the supported types and the expected error for others.",
+    "importance": "MEDIUM",
+    "reference": "# Arithmetic helper (single section)",
+    "type": "addition",
+    "scope_relation": "in_scope",
+    "scope_reason": "Defining the input contract is needed to implement and verify the add function the plan already requires.",
+    "scope_reference": "Implement add(a, b) returning a+b in arithmetic.py"
+  },
+  {
+    "title": "Test file location and run method are not given",
+    "desc": "The plan asks to 'Verify positive, negative and zero operands with unittest' but names no test file, no test module path, and no command to run the tests. It also does not say whether arithmetic.py already exists. If it does, 'preserve' and 'implement' pull in different directions and the implementer must decide whether to overwrite it. The plan should name the test file path and the run command (for example python -m unittest) and state whether arithmetic.py is new or existing.",
+    "importance": "MEDIUM",
+    "reference": "# Arithmetic helper (single section)",
+    "type": "addition",
+    "scope_relation": "in_scope",
+    "scope_reason": "Where the verification lives is part of the testing requirement the plan already states.",
+    "scope_reference": "Verify positive, negative and zero operands with unittest."
+  },
+  {
+    "title": "No acceptance criteria; a test without assertions would pass",
+    "desc": "The plan has no acceptance criteria. Its only testing requirement is to 'verify' three operand classes, which does not say the tests must assert the returned value. A test that calls add(1, 2) without comparing the result would pass even if add returned None or the wrong sum. The plan should state that each case asserts the exact expected sum, for example add(2, 3) == 5, add(-2, -3) == -5, add(0, 0) == 0 and a mixed-sign case.",
+    "importance": "MEDIUM",
+    "reference": "# Arithmetic helper (single section)",
+    "type": "addition",
+    "scope_relation": "in_scope",
+    "scope_reason": "Makes the existing verification requirement checkable, with no new behaviour.",
+    "scope_reference": "Verify positive, negative and zero operands with unittest."
+  },
+  {
+    "title": "Plan has no problem statement, objective or file list",
+    "desc": "The plan is a single sentence and lacks the sections a design document needs: a problem statement or objective (why an add helper is needed in the project), the list of files changed and their purpose, and an explicit list of what is out of scope. Without the file list an implementer cannot tell whether anything besides arithmetic.py and a test module is expected, such as a package __init__ or a README entry.",
+    "importance": "LOW",
+    "reference": "# Arithmetic helper (single section)",
+    "type": "addition",
+    "scope_relation": "unclear",
+    "scope_reason": "The baseline asks for a file list and objective, but does not say how much design detail is wanted for a plan this small.",
+    "scope_reference": ""
+  }
+]

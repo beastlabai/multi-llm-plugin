@@ -1,0 +1,734 @@
+{
+  "planPath": "/tmp/scope-policy-live-20261031/leaked-fixture/feature.md",
+  "planTitle": "Plan",
+  "title": "Plan",
+  "baseRef": null,
+  "phase": "review-plan",
+  "readOnly": false,
+  "generatedAt": "2026-10-31T17:41:51.240062",
+  "models": [
+    "cursor-agent:auto"
+  ],
+  "modelMetadata": {
+    "cursor-agent:auto": {
+      "full": "cursor-agent:auto",
+      "provider": "cursor-agent",
+      "model": "auto",
+      "provider_color": "#3E6ED4",
+      "model_color": "#37A9BD",
+      "icon": "data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPHN2ZyBpZD0iRWJlbmVfMSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiB2ZXJzaW9uPSIxLjEiIHZpZXdCb3g9IjAgMCA0NjYuNzMgNTMyLjA5Ij4KICA8IS0tIEdlbmVyYXRvcjogQWRvYmUgSWxsdXN0cmF0b3IgMjkuNi4xLCBTVkcgRXhwb3J0IFBsdWctSW4gLiBTVkcgVmVyc2lvbjogMi4xLjEgQnVpbGQgOSkgIC0tPgogIDxkZWZzPgogICAgPHN0eWxlPgogICAgICAuc3QwIHsKICAgICAgICBmaWxsOiAjMjYyNTFlOwogICAgICB9CiAgICA8L3N0eWxlPgogIDwvZGVmcz4KICA8cGF0aCBjbGFzcz0ic3QwIiBkPSJNNDU3LjQzLDEyNS45NEwyNDQuNDIsMi45NmMtNi44NC0zLjk1LTE1LjI4LTMuOTUtMjIuMTIsMEw5LjMsMTI1Ljk0Yy01Ljc1LDMuMzItOS4zLDkuNDYtOS4zLDE2LjExdjI0Ny45OWMwLDYuNjUsMy41NSwxMi43OSw5LjMsMTYuMTFsMjEzLjAxLDEyMi45OGM2Ljg0LDMuOTUsMTUuMjgsMy45NSwyMi4xMiwwbDIxMy4wMS0xMjIuOThjNS43NS0zLjMyLDkuMy05LjQ2LDkuMy0xNi4xMXYtMjQ3Ljk5YzAtNi42NS0zLjU1LTEyLjc5LTkuMy0xNi4xMWgtLjAxWk00NDQuMDUsMTUxLjk5bC0yMDUuNjMsMzU2LjE2Yy0xLjM5LDIuNC01LjA2LDEuNDItNS4wNi0xLjM2di0yMzMuMjFjMC00LjY2LTIuNDktOC45Ny02LjUzLTExLjMxTDI0Ljg3LDE0NS42N2MtMi40LTEuMzktMS40Mi01LjA2LDEuMzYtNS4wNmg0MTEuMjZjNS44NCwwLDkuNDksNi4zMyw2LjU3LDExLjM5aC0uMDFaIi8+Cjwvc3ZnPg==",
+      "provider_icon": ""
+    }
+  },
+  "failedModels": {},
+  "sortConfig": {
+    "validationOrder": {
+      "needs-human-decision": 0,
+      "valid": 1,
+      "validation_failed": 2,
+      "invalid": 3,
+      "pending": 4
+    },
+    "importanceOrder": {
+      "HIGH": 0,
+      "MEDIUM": 1,
+      "LOW": 2,
+      "": 3
+    },
+    "unknownStatusRank": 5,
+    "unknownImportanceRank": 3
+  },
+  "groups": [
+    {
+      "index": 1,
+      "originalIndex": 1,
+      "theme": "Also export the report as PDF",
+      "category": "addition",
+      "models": [
+        "cursor-agent:auto"
+      ],
+      "priorityScore": 2,
+      "validationStatus": "needs-human-decision",
+      "validationReason": "Whether users want PDF is a product judgment the plan does not address; the plan only says to export as CSV.",
+      "validationConfidence": 0.8,
+      "maxImportance": "HIGH",
+      "suggestions": [
+        {
+          "id": "9ef906c4aadf903f",
+          "title": "Also export the report as PDF",
+          "description": "Users will want PDF; add a PDF exporter beside the CSV one.",
+          "importance": "HIGH",
+          "type": "addition",
+          "sectionRef": "## Output",
+          "fileRef": "",
+          "model": "cursor-agent:auto",
+          "anchorText": null,
+          "suggestedFix": null,
+          "lineRange": null,
+          "displayLabel": "G1S1",
+          "displayHash": "9ef906c4",
+          "scope": {
+            "relation": "in_scope",
+            "label": "Within scope",
+            "reason": "Required for the export goal.",
+            "reference": "",
+            "classified": true,
+            "provisional": true
+          }
+        }
+      ],
+      "groupHash": "0a7d6dd3784f86f9",
+      "displayLabel": "G1",
+      "displayHash": "0a7d6dd3",
+      "scope": {
+        "relation": "scope_extension",
+        "label": "Scope extension",
+        "reason": "The plan's only output requirement is CSV export, so adding a PDF exporter extends the agreed scope.",
+        "reference": "Output",
+        "authority": "bound",
+        "validated": true,
+        "stale": false,
+        "provisional": false,
+        "classifiedRelation": "scope_extension",
+        "classifiedLabel": "Scope extension",
+        "classifiedReason": "The plan's only output requirement is CSV export, so adding a PDF exporter extends the agreed scope.",
+        "baselineId": "6bb22b82c1042ded",
+        "proposalDigest": "28fe0d7dfa6f7c8d7a0b0f2e007339a16db7e9014518f1482eea3f2b147f5df8",
+        "decision": {
+          "policy": "preserve",
+          "eligible": false,
+          "relation": "scope_extension",
+          "label": "Scope extension",
+          "reason": "Deferred: scope preservation requested: the proposed remedy extends the agreed scope (The plan's only output requirement is CSV export, so adding a PDF exporter extends the agreed scope.)",
+          "outcome": "deferred",
+          "authority": "bound",
+          "recorded": true,
+          "detail": "the proposed remedy extends the agreed scope (The plan's only output requirement is CSV export, so adding a PDF exporter extends the agreed scope.)",
+          "outcomeText": "Deferred: scope preservation requested"
+        }
+      }
+    },
+    {
+      "index": 2,
+      "originalIndex": 2,
+      "theme": "CSV header row is never specified",
+      "category": "clarification",
+      "models": [
+        "cursor-agent:auto"
+      ],
+      "priorityScore": 2,
+      "validationStatus": "valid",
+      "validationReason": "The plan's Output section says export as CSV but names no header columns, order, or quoting, so two implementers could produce different files.",
+      "validationConfidence": 0.8,
+      "maxImportance": "MEDIUM",
+      "suggestions": [
+        {
+          "id": "c3cce6546d07474f",
+          "title": "CSV header row is never specified",
+          "description": "The plan says CSV but never names the columns of the header row, so two implementers would write two different files. The Output section is the only place the format is named, and it lists no column, no order and no quoting rule; name them there so the export is checkable.",
+          "importance": "MEDIUM",
+          "type": "clarification",
+          "sectionRef": "## Output",
+          "fileRef": "",
+          "model": "cursor-agent:auto",
+          "anchorText": null,
+          "suggestedFix": null,
+          "lineRange": null,
+          "displayLabel": "G2S1",
+          "displayHash": "c3cce654",
+          "scope": {
+            "relation": "in_scope",
+            "label": "Within scope",
+            "reason": "Completes the CSV requirement.",
+            "reference": "",
+            "classified": true,
+            "provisional": true
+          }
+        }
+      ],
+      "groupHash": "1de5f2451724bb54",
+      "displayLabel": "G2",
+      "displayHash": "1de5f245",
+      "scope": {
+        "relation": "in_scope",
+        "label": "Within scope",
+        "reason": "Naming the CSV header and format completes the agreed CSV export requirement without adding new features.",
+        "reference": "Output",
+        "authority": "bound",
+        "validated": true,
+        "stale": false,
+        "provisional": false,
+        "classifiedRelation": "in_scope",
+        "classifiedLabel": "Within scope",
+        "classifiedReason": "Naming the CSV header and format completes the agreed CSV export requirement without adding new features.",
+        "baselineId": "6bb22b82c1042ded",
+        "proposalDigest": "d15f6aa33990f1b13117bea6d295696a3620c0948c7bb95d20aba37c7c821785",
+        "decision": {
+          "policy": "preserve",
+          "eligible": true,
+          "relation": "in_scope",
+          "label": "Within scope",
+          "reason": "Naming the CSV header and format completes the agreed CSV export requirement without adding new features.",
+          "outcome": "eligible",
+          "authority": "bound",
+          "detail": "",
+          "outcomeText": "Eligible under scope preservation"
+        }
+      }
+    }
+  ],
+  "sectionContexts": {
+    "## Output": "# Plan\n\n## Output\nExport the report as CSV.\n"
+  },
+  "logSnippets": {},
+  "fileView": {
+    "_global": {
+      "suggestions": [
+        {
+          "index": 1,
+          "originalIndex": 1,
+          "theme": "Also export the report as PDF",
+          "category": "addition",
+          "models": [
+            "cursor-agent:auto"
+          ],
+          "priorityScore": 2,
+          "validationStatus": "needs-human-decision",
+          "validationReason": "Whether users want PDF is a product judgment the plan does not address; the plan only says to export as CSV.",
+          "validationConfidence": 0.8,
+          "maxImportance": "HIGH",
+          "suggestions": [
+            {
+              "id": "9ef906c4aadf903f",
+              "title": "Also export the report as PDF",
+              "description": "Users will want PDF; add a PDF exporter beside the CSV one.",
+              "importance": "HIGH",
+              "type": "addition",
+              "sectionRef": "## Output",
+              "fileRef": "",
+              "model": "cursor-agent:auto",
+              "anchorText": null,
+              "suggestedFix": null,
+              "lineRange": null,
+              "displayLabel": "G1S1",
+              "displayHash": "9ef906c4",
+              "scope": {
+                "relation": "in_scope",
+                "label": "Within scope",
+                "reason": "Required for the export goal.",
+                "reference": "",
+                "classified": true,
+                "provisional": true
+              }
+            }
+          ],
+          "groupHash": "0a7d6dd3784f86f9",
+          "displayLabel": "G1",
+          "displayHash": "0a7d6dd3",
+          "scope": {
+            "relation": "scope_extension",
+            "label": "Scope extension",
+            "reason": "The plan's only output requirement is CSV export, so adding a PDF exporter extends the agreed scope.",
+            "reference": "Output",
+            "authority": "bound",
+            "validated": true,
+            "stale": false,
+            "provisional": false,
+            "classifiedRelation": "scope_extension",
+            "classifiedLabel": "Scope extension",
+            "classifiedReason": "The plan's only output requirement is CSV export, so adding a PDF exporter extends the agreed scope.",
+            "baselineId": "6bb22b82c1042ded",
+            "proposalDigest": "28fe0d7dfa6f7c8d7a0b0f2e007339a16db7e9014518f1482eea3f2b147f5df8",
+            "decision": {
+              "policy": "preserve",
+              "eligible": false,
+              "relation": "scope_extension",
+              "label": "Scope extension",
+              "reason": "Deferred: scope preservation requested: the proposed remedy extends the agreed scope (The plan's only output requirement is CSV export, so adding a PDF exporter extends the agreed scope.)",
+              "outcome": "deferred",
+              "authority": "bound",
+              "recorded": true,
+              "detail": "the proposed remedy extends the agreed scope (The plan's only output requirement is CSV export, so adding a PDF exporter extends the agreed scope.)",
+              "outcomeText": "Deferred: scope preservation requested"
+            }
+          }
+        },
+        {
+          "index": 2,
+          "originalIndex": 2,
+          "theme": "CSV header row is never specified",
+          "category": "clarification",
+          "models": [
+            "cursor-agent:auto"
+          ],
+          "priorityScore": 2,
+          "validationStatus": "valid",
+          "validationReason": "The plan's Output section says export as CSV but names no header columns, order, or quoting, so two implementers could produce different files.",
+          "validationConfidence": 0.8,
+          "maxImportance": "MEDIUM",
+          "suggestions": [
+            {
+              "id": "c3cce6546d07474f",
+              "title": "CSV header row is never specified",
+              "description": "The plan says CSV but never names the columns of the header row, so two implementers would write two different files. The Output section is the only place the format is named, and it lists no column, no order and no quoting rule; name them there so the export is checkable.",
+              "importance": "MEDIUM",
+              "type": "clarification",
+              "sectionRef": "## Output",
+              "fileRef": "",
+              "model": "cursor-agent:auto",
+              "anchorText": null,
+              "suggestedFix": null,
+              "lineRange": null,
+              "displayLabel": "G2S1",
+              "displayHash": "c3cce654",
+              "scope": {
+                "relation": "in_scope",
+                "label": "Within scope",
+                "reason": "Completes the CSV requirement.",
+                "reference": "",
+                "classified": true,
+                "provisional": true
+              }
+            }
+          ],
+          "groupHash": "1de5f2451724bb54",
+          "displayLabel": "G2",
+          "displayHash": "1de5f245",
+          "scope": {
+            "relation": "in_scope",
+            "label": "Within scope",
+            "reason": "Naming the CSV header and format completes the agreed CSV export requirement without adding new features.",
+            "reference": "Output",
+            "authority": "bound",
+            "validated": true,
+            "stale": false,
+            "provisional": false,
+            "classifiedRelation": "in_scope",
+            "classifiedLabel": "Within scope",
+            "classifiedReason": "Naming the CSV header and format completes the agreed CSV export requirement without adding new features.",
+            "baselineId": "6bb22b82c1042ded",
+            "proposalDigest": "d15f6aa33990f1b13117bea6d295696a3620c0948c7bb95d20aba37c7c821785",
+            "decision": {
+              "policy": "preserve",
+              "eligible": true,
+              "relation": "in_scope",
+              "label": "Within scope",
+              "reason": "Naming the CSV header and format completes the agreed CSV export requirement without adding new features.",
+              "outcome": "eligible",
+              "authority": "bound",
+              "detail": "",
+              "outcomeText": "Eligible under scope preservation"
+            }
+          }
+        }
+      ],
+      "suggestionCount": 2,
+      "maxImportance": "HIGH"
+    }
+  },
+  "sectionView": {
+    "## Output": {
+      "suggestions": [
+        {
+          "index": 1,
+          "originalIndex": 1,
+          "theme": "Also export the report as PDF",
+          "category": "addition",
+          "models": [
+            "cursor-agent:auto"
+          ],
+          "priorityScore": 2,
+          "validationStatus": "needs-human-decision",
+          "validationReason": "Whether users want PDF is a product judgment the plan does not address; the plan only says to export as CSV.",
+          "validationConfidence": 0.8,
+          "maxImportance": "HIGH",
+          "suggestions": [
+            {
+              "id": "9ef906c4aadf903f",
+              "title": "Also export the report as PDF",
+              "description": "Users will want PDF; add a PDF exporter beside the CSV one.",
+              "importance": "HIGH",
+              "type": "addition",
+              "sectionRef": "## Output",
+              "fileRef": "",
+              "model": "cursor-agent:auto",
+              "anchorText": null,
+              "suggestedFix": null,
+              "lineRange": null,
+              "displayLabel": "G1S1",
+              "displayHash": "9ef906c4",
+              "scope": {
+                "relation": "in_scope",
+                "label": "Within scope",
+                "reason": "Required for the export goal.",
+                "reference": "",
+                "classified": true,
+                "provisional": true
+              }
+            }
+          ],
+          "groupHash": "0a7d6dd3784f86f9",
+          "displayLabel": "G1",
+          "displayHash": "0a7d6dd3",
+          "scope": {
+            "relation": "scope_extension",
+            "label": "Scope extension",
+            "reason": "The plan's only output requirement is CSV export, so adding a PDF exporter extends the agreed scope.",
+            "reference": "Output",
+            "authority": "bound",
+            "validated": true,
+            "stale": false,
+            "provisional": false,
+            "classifiedRelation": "scope_extension",
+            "classifiedLabel": "Scope extension",
+            "classifiedReason": "The plan's only output requirement is CSV export, so adding a PDF exporter extends the agreed scope.",
+            "baselineId": "6bb22b82c1042ded",
+            "proposalDigest": "28fe0d7dfa6f7c8d7a0b0f2e007339a16db7e9014518f1482eea3f2b147f5df8",
+            "decision": {
+              "policy": "preserve",
+              "eligible": false,
+              "relation": "scope_extension",
+              "label": "Scope extension",
+              "reason": "Deferred: scope preservation requested: the proposed remedy extends the agreed scope (The plan's only output requirement is CSV export, so adding a PDF exporter extends the agreed scope.)",
+              "outcome": "deferred",
+              "authority": "bound",
+              "recorded": true,
+              "detail": "the proposed remedy extends the agreed scope (The plan's only output requirement is CSV export, so adding a PDF exporter extends the agreed scope.)",
+              "outcomeText": "Deferred: scope preservation requested"
+            }
+          }
+        },
+        {
+          "index": 2,
+          "originalIndex": 2,
+          "theme": "CSV header row is never specified",
+          "category": "clarification",
+          "models": [
+            "cursor-agent:auto"
+          ],
+          "priorityScore": 2,
+          "validationStatus": "valid",
+          "validationReason": "The plan's Output section says export as CSV but names no header columns, order, or quoting, so two implementers could produce different files.",
+          "validationConfidence": 0.8,
+          "maxImportance": "MEDIUM",
+          "suggestions": [
+            {
+              "id": "c3cce6546d07474f",
+              "title": "CSV header row is never specified",
+              "description": "The plan says CSV but never names the columns of the header row, so two implementers would write two different files. The Output section is the only place the format is named, and it lists no column, no order and no quoting rule; name them there so the export is checkable.",
+              "importance": "MEDIUM",
+              "type": "clarification",
+              "sectionRef": "## Output",
+              "fileRef": "",
+              "model": "cursor-agent:auto",
+              "anchorText": null,
+              "suggestedFix": null,
+              "lineRange": null,
+              "displayLabel": "G2S1",
+              "displayHash": "c3cce654",
+              "scope": {
+                "relation": "in_scope",
+                "label": "Within scope",
+                "reason": "Completes the CSV requirement.",
+                "reference": "",
+                "classified": true,
+                "provisional": true
+              }
+            }
+          ],
+          "groupHash": "1de5f2451724bb54",
+          "displayLabel": "G2",
+          "displayHash": "1de5f245",
+          "scope": {
+            "relation": "in_scope",
+            "label": "Within scope",
+            "reason": "Naming the CSV header and format completes the agreed CSV export requirement without adding new features.",
+            "reference": "Output",
+            "authority": "bound",
+            "validated": true,
+            "stale": false,
+            "provisional": false,
+            "classifiedRelation": "in_scope",
+            "classifiedLabel": "Within scope",
+            "classifiedReason": "Naming the CSV header and format completes the agreed CSV export requirement without adding new features.",
+            "baselineId": "6bb22b82c1042ded",
+            "proposalDigest": "d15f6aa33990f1b13117bea6d295696a3620c0948c7bb95d20aba37c7c821785",
+            "decision": {
+              "policy": "preserve",
+              "eligible": true,
+              "relation": "in_scope",
+              "label": "Within scope",
+              "reason": "Naming the CSV header and format completes the agreed CSV export requirement without adding new features.",
+              "outcome": "eligible",
+              "authority": "bound",
+              "detail": "",
+              "outcomeText": "Eligible under scope preservation"
+            }
+          }
+        }
+      ],
+      "suggestionCount": 2,
+      "maxImportance": "HIGH",
+      "hasSuggestions": true
+    }
+  },
+  "taskView": {
+    "_coverageGaps": {
+      "suggestions": [
+        {
+          "index": 1,
+          "originalIndex": 1,
+          "theme": "Also export the report as PDF",
+          "category": "addition",
+          "models": [
+            "cursor-agent:auto"
+          ],
+          "priorityScore": 2,
+          "validationStatus": "needs-human-decision",
+          "validationReason": "Whether users want PDF is a product judgment the plan does not address; the plan only says to export as CSV.",
+          "validationConfidence": 0.8,
+          "maxImportance": "HIGH",
+          "suggestions": [
+            {
+              "id": "9ef906c4aadf903f",
+              "title": "Also export the report as PDF",
+              "description": "Users will want PDF; add a PDF exporter beside the CSV one.",
+              "importance": "HIGH",
+              "type": "addition",
+              "sectionRef": "## Output",
+              "fileRef": "",
+              "model": "cursor-agent:auto",
+              "anchorText": null,
+              "suggestedFix": null,
+              "lineRange": null,
+              "displayLabel": "G1S1",
+              "displayHash": "9ef906c4",
+              "scope": {
+                "relation": "in_scope",
+                "label": "Within scope",
+                "reason": "Required for the export goal.",
+                "reference": "",
+                "classified": true,
+                "provisional": true
+              }
+            }
+          ],
+          "groupHash": "0a7d6dd3784f86f9",
+          "displayLabel": "G1",
+          "displayHash": "0a7d6dd3",
+          "scope": {
+            "relation": "scope_extension",
+            "label": "Scope extension",
+            "reason": "The plan's only output requirement is CSV export, so adding a PDF exporter extends the agreed scope.",
+            "reference": "Output",
+            "authority": "bound",
+            "validated": true,
+            "stale": false,
+            "provisional": false,
+            "classifiedRelation": "scope_extension",
+            "classifiedLabel": "Scope extension",
+            "classifiedReason": "The plan's only output requirement is CSV export, so adding a PDF exporter extends the agreed scope.",
+            "baselineId": "6bb22b82c1042ded",
+            "proposalDigest": "28fe0d7dfa6f7c8d7a0b0f2e007339a16db7e9014518f1482eea3f2b147f5df8",
+            "decision": {
+              "policy": "preserve",
+              "eligible": false,
+              "relation": "scope_extension",
+              "label": "Scope extension",
+              "reason": "Deferred: scope preservation requested: the proposed remedy extends the agreed scope (The plan's only output requirement is CSV export, so adding a PDF exporter extends the agreed scope.)",
+              "outcome": "deferred",
+              "authority": "bound",
+              "recorded": true,
+              "detail": "the proposed remedy extends the agreed scope (The plan's only output requirement is CSV export, so adding a PDF exporter extends the agreed scope.)",
+              "outcomeText": "Deferred: scope preservation requested"
+            }
+          }
+        },
+        {
+          "index": 2,
+          "originalIndex": 2,
+          "theme": "CSV header row is never specified",
+          "category": "clarification",
+          "models": [
+            "cursor-agent:auto"
+          ],
+          "priorityScore": 2,
+          "validationStatus": "valid",
+          "validationReason": "The plan's Output section says export as CSV but names no header columns, order, or quoting, so two implementers could produce different files.",
+          "validationConfidence": 0.8,
+          "maxImportance": "MEDIUM",
+          "suggestions": [
+            {
+              "id": "c3cce6546d07474f",
+              "title": "CSV header row is never specified",
+              "description": "The plan says CSV but never names the columns of the header row, so two implementers would write two different files. The Output section is the only place the format is named, and it lists no column, no order and no quoting rule; name them there so the export is checkable.",
+              "importance": "MEDIUM",
+              "type": "clarification",
+              "sectionRef": "## Output",
+              "fileRef": "",
+              "model": "cursor-agent:auto",
+              "anchorText": null,
+              "suggestedFix": null,
+              "lineRange": null,
+              "displayLabel": "G2S1",
+              "displayHash": "c3cce654",
+              "scope": {
+                "relation": "in_scope",
+                "label": "Within scope",
+                "reason": "Completes the CSV requirement.",
+                "reference": "",
+                "classified": true,
+                "provisional": true
+              }
+            }
+          ],
+          "groupHash": "1de5f2451724bb54",
+          "displayLabel": "G2",
+          "displayHash": "1de5f245",
+          "scope": {
+            "relation": "in_scope",
+            "label": "Within scope",
+            "reason": "Naming the CSV header and format completes the agreed CSV export requirement without adding new features.",
+            "reference": "Output",
+            "authority": "bound",
+            "validated": true,
+            "stale": false,
+            "provisional": false,
+            "classifiedRelation": "in_scope",
+            "classifiedLabel": "Within scope",
+            "classifiedReason": "Naming the CSV header and format completes the agreed CSV export requirement without adding new features.",
+            "baselineId": "6bb22b82c1042ded",
+            "proposalDigest": "d15f6aa33990f1b13117bea6d295696a3620c0948c7bb95d20aba37c7c821785",
+            "decision": {
+              "policy": "preserve",
+              "eligible": true,
+              "relation": "in_scope",
+              "label": "Within scope",
+              "reason": "Naming the CSV header and format completes the agreed CSV export requirement without adding new features.",
+              "outcome": "eligible",
+              "authority": "bound",
+              "detail": "",
+              "outcomeText": "Eligible under scope preservation"
+            }
+          }
+        }
+      ],
+      "suggestionCount": 2,
+      "maxImportance": "HIGH"
+    },
+    "_unanchored": {
+      "suggestions": [],
+      "suggestionCount": 0,
+      "maxImportance": ""
+    }
+  },
+  "globalSuggestions": [
+    {
+      "id": "9ef906c4aadf903f",
+      "title": "Also export the report as PDF",
+      "description": "Users will want PDF; add a PDF exporter beside the CSV one.",
+      "importance": "HIGH",
+      "type": "addition",
+      "sectionRef": "## Output",
+      "fileRef": "",
+      "model": "cursor-agent:auto",
+      "anchorText": null,
+      "suggestedFix": null,
+      "lineRange": null,
+      "displayLabel": "G1S1",
+      "displayHash": "9ef906c4",
+      "scope": {
+        "relation": "in_scope",
+        "label": "Within scope",
+        "reason": "Required for the export goal.",
+        "reference": "",
+        "classified": true,
+        "provisional": true
+      }
+    },
+    {
+      "id": "c3cce6546d07474f",
+      "title": "CSV header row is never specified",
+      "description": "The plan says CSV but never names the columns of the header row, so two implementers would write two different files. The Output section is the only place the format is named, and it lists no column, no order and no quoting rule; name them there so the export is checkable.",
+      "importance": "MEDIUM",
+      "type": "clarification",
+      "sectionRef": "## Output",
+      "fileRef": "",
+      "model": "cursor-agent:auto",
+      "anchorText": null,
+      "suggestedFix": null,
+      "lineRange": null,
+      "displayLabel": "G2S1",
+      "displayHash": "c3cce654",
+      "scope": {
+        "relation": "in_scope",
+        "label": "Within scope",
+        "reason": "Completes the CSV requirement.",
+        "reference": "",
+        "classified": true,
+        "provisional": true
+      }
+    }
+  ],
+  "fullSectionContexts": {
+    "## Output": "## Output\nExport the report as CSV."
+  },
+  "sectionOrder": [
+    "## Output"
+  ],
+  "notices": [],
+  "summary": {
+    "totalGroups": 2,
+    "totalSuggestions": 2,
+    "validCount": 1,
+    "invalidCount": 0,
+    "needsHumanCount": 1,
+    "validationFailedCount": 0
+  },
+  "requestedModels": 1,
+  "dataSource": "grouped",
+  "templateStyle": "pr",
+  "scopePolicy": {
+    "reviewPolicy": "preserve",
+    "reviewPolicySource": "explicit",
+    "applyPolicy": "preserve",
+    "applyPolicySource": "explicit",
+    "effectivePolicy": "preserve",
+    "recorded": true,
+    "baselineId": "6bb22b82c1042ded",
+    "baseline": {
+      "version": 1,
+      "baseline_id": "6bb22b82c1042ded",
+      "sources": [
+        {
+          "role": "plan",
+          "sha256": "7cc6262e7492474ecb69fbae1cedf89fa32a8b82c741637ad08b1a13b784f674",
+          "path": "/tmp/scope-policy-live-20261031/leaked-fixture/feature.md",
+          "snapshot": "validation-snapshot.md"
+        }
+      ],
+      "phase": "review-plan"
+    },
+    "policyLine": "Scope policy: preserve. Additional scope was not solicited from reviewers; extension counts cover returned findings only.",
+    "legend": "Scope tags: `Within scope` completes or corrects the agreed outcome; `Scope extension` adds to it; `Scope unclear` could not be settled. Tags describe proposals; they are separate from validity and selection.",
+    "labels": {
+      "in_scope": "Within scope",
+      "scope_extension": "Scope extension",
+      "unclear": "Scope unclear"
+    },
+    "deferredOutcome": "Deferred: scope preservation requested",
+    "counts": {
+      "in_scope": 1,
+      "scope_extension": 1,
+      "unclear": 0,
+      "deferred": 1
+    }
+  },
+  "humanDecisionsSummary": {
+    "approved": 0,
+    "salvaged": 0,
+    "skipped": 0,
+    "judgeDecided": 0,
+    "total": 0
+  }
+}

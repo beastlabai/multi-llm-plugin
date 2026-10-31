@@ -1,0 +1,8 @@
+test_api_unchanged (test_expenses.ExpenseTests.test_api_unchanged) ... ok
+test_empty_header (test_expenses.ExpenseTests.test_empty_header) ... ok
+test_special_characters_round_trip (test_expenses.ExpenseTests.test_special_characters_round_trip) ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.000s
+
+OK

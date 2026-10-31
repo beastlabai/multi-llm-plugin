@@ -1,0 +1,36 @@
+{
+  "schema_version": "2.0",
+  "plan_path": "/tmp/scope-policy-live-20261031/expand.md",
+  "plan_hash": "32ad997f3ed3b05a",
+  "created_at": "2026-10-31T17:39:53.731841",
+  "updated_at": "2026-10-31T17:40:56.170193",
+  "head_at_start": "51f6c7f38ae1e25a64ed0f7dbabbd707cef8676a",
+  "branch_name": "master",
+  "review_phase_completed": true,
+  "tracked_files": [],
+  "task_status": {},
+  "phases_completed": {
+    "review-plan": "2026-10-31T17:40:56.170188"
+  },
+  "phases_skipped": {},
+  "scope_policy": {
+    "review-plan": {
+      "review_policy": "expand",
+      "review_policy_source": "explicit",
+      "recorded_at": "2026-10-31T17:39:53",
+      "baseline": {
+        "version": 1,
+        "baseline_id": "d1ba0d1dd8b9a88d",
+        "sources": [
+          {
+            "role": "plan",
+            "sha256": "32ad997f3ed3b05ab5a3a930c010ef44cbd158208ce19160ffa8eedc9014d460",
+            "path": "/tmp/scope-policy-live-20261031/expand.md",
+            "snapshot": "validation-snapshot.md"
+          }
+        ],
+        "phase": "review-plan"
+      }
+    }
+  }
+}

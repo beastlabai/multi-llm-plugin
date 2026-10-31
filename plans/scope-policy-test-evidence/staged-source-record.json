@@ -1,0 +1,260 @@
+{
+  "head": "c91e8d2937ecc543d7cd94fb8a3dff7c4a8df46a",
+  "index_tree": "00d2631ca24c556e937c43f4d13d17e7e5ed9400",
+  "changed_source_files": 63,
+  "codex_mirror_mismatches": [],
+  "sources": [
+    {
+      "path": "skills/multi-llm/apply_code_fixes_orchestrator.py",
+      "sha256": "f89c6b42f4c44b50794cee1fa2946691837ac39ca5393e8b490c399ebb78d826"
+    },
+    {
+      "path": "skills/multi-llm/apply_suggestions_orchestrator.py",
+      "sha256": "c7c970a9fe4e34d1b444b9eb3ed8ff35d5f67bf90c08fe96220628337d39de3b"
+    },
+    {
+      "path": "skills/multi-llm/apply_task_suggestions_orchestrator.py",
+      "sha256": "daeb81f4ca7de400a46890ee28031aa917a340b956315842177adbb3514b5a77"
+    },
+    {
+      "path": "skills/multi-llm/check_workflow_prerequisites.py",
+      "sha256": "c17ce6d916273ea9ed36aefe275963baa9bb869d7225b07db2d283a322f9d8b1"
+    },
+    {
+      "path": "skills/multi-llm/code_review_orchestrator.py",
+      "sha256": "2325873d1a7cc0cd5495a2a916e6bf444087ebcc94b997bd99d14f45510fb62d"
+    },
+    {
+      "path": "skills/multi-llm/full_workflow_orchestrator.py",
+      "sha256": "e727cfabdd67be7e162e2077711504ade0578befccb00f71c18fb0aa6115d6e0"
+    },
+    {
+      "path": "skills/multi-llm/generate_tasks_orchestrator.py",
+      "sha256": "b83edc4c11d246744a2700c9fa2a6e1e3d5cbcf02d0e17a706bccd68c78dbce0"
+    },
+    {
+      "path": "skills/multi-llm/implement_orchestrator.py",
+      "sha256": "0895e9f9d544661af01e5a676669ed04b48da5890f8ce0c5daa227e9b3174bb0"
+    },
+    {
+      "path": "skills/multi-llm/instructions/apply-code-fixes.md",
+      "sha256": "fb0564141d7bc671c34731092f0f20e9b08a8b8ad052020f024fa180e832977f"
+    },
+    {
+      "path": "skills/multi-llm/instructions/apply-commit-fixes.md",
+      "sha256": "da0ab26fd33c1e6a4e8361000c816f6414efbdf94b0336741f41f32f81c96c50"
+    },
+    {
+      "path": "skills/multi-llm/instructions/apply-suggestions.md",
+      "sha256": "78aacee65f5358c1a660e4eb68a1f1bea669db49376eed9a7c4a647024c9239f"
+    },
+    {
+      "path": "skills/multi-llm/instructions/apply-task-suggestions.md",
+      "sha256": "3615ff055d4896ebe8b3f2964a07cb0bb754cc41136117da77a8639d421c7446"
+    },
+    {
+      "path": "skills/multi-llm/instructions/full-workflow.md",
+      "sha256": "ca4fce015331e6518c5e9cf1da4b124054e6adb193043ebaa3c6ea389d0611cf"
+    },
+    {
+      "path": "skills/multi-llm/instructions/generate-tasks.md",
+      "sha256": "3052c5a674fc20b0e248a51564eb73ce13a13ba7c51e19ffa99ee13c699b210d"
+    },
+    {
+      "path": "skills/multi-llm/instructions/implement.md",
+      "sha256": "1868a3ed256d093e2978b07b7ea41d58982566f0f149c8fc7d245ec397643243"
+    },
+    {
+      "path": "skills/multi-llm/instructions/improve-code.md",
+      "sha256": "3270ca52cad7e62754e958cf8f85f609beaffa672ee682b14d19df0ee407b630"
+    },
+    {
+      "path": "skills/multi-llm/instructions/improve-commits.md",
+      "sha256": "8db952f470f09a559a1d323e4e6aff6722d145d2ea3f0362306d905d019328a8"
+    },
+    {
+      "path": "skills/multi-llm/instructions/improve-plan.md",
+      "sha256": "d87cc749e95773a8706d9d927af87b738bf7498915ebc75f64651519bb47ae66"
+    },
+    {
+      "path": "skills/multi-llm/instructions/review-code.md",
+      "sha256": "f6e6718e97802166c4f1f3d3221eef57e797fb04d04ba1d57d5dd04687911dba"
+    },
+    {
+      "path": "skills/multi-llm/instructions/review-commits.md",
+      "sha256": "7a77887b097ea9b36d2f0c2553aeb36a87c981dc38a05363259cde2626d1d673"
+    },
+    {
+      "path": "skills/multi-llm/instructions/review-plan.md",
+      "sha256": "545b3e53df259bf49791583c9878ed2798fe1f503ec45c3a56fadf3705f7c71d"
+    },
+    {
+      "path": "skills/multi-llm/instructions/review-tasks.md",
+      "sha256": "ff487c31813fd42d13b52fa04e1680f33f64fba6bb7bd83a330cd4d61fc74f38"
+    },
+    {
+      "path": "skills/multi-llm/modes.py",
+      "sha256": "079a9c720c0a3a84b585c4077145445340ff0345740a96765a8e01913c876d22"
+    },
+    {
+      "path": "skills/multi-llm/multi_llm.py",
+      "sha256": "3ec58ba2ef0ba28fded5897e9eaf434d5bb197dab72b1d83b5c81aad7d61f46c"
+    },
+    {
+      "path": "skills/multi-llm/prompts/code_review.txt",
+      "sha256": "d294a886e885f3e73777bc82ff73b079520d1b8273651a15a7db6942b603921c"
+    },
+    {
+      "path": "skills/multi-llm/prompts/commit_review.txt",
+      "sha256": "f49d39c443df232b41198c063348fce5db88da2fdb13f367f38a6133eca6a27a"
+    },
+    {
+      "path": "skills/multi-llm/prompts/plan_review.txt",
+      "sha256": "8ccb5dd91bb321f84d2f47a4409ab4fc5bfd759a21aad8f59142a2621c81d1d0"
+    },
+    {
+      "path": "skills/multi-llm/prompts/task_review.txt",
+      "sha256": "0d2db037ee4eb85b74d69b75f059fff6777d5d7956130de097440cbfbc943881"
+    },
+    {
+      "path": "skills/multi-llm/references/resume-detection.md",
+      "sha256": "2f72ddf6f2ff02a516e313d08bab839a1e9747368e7d82e8c96a4ba21c3b8420"
+    },
+    {
+      "path": "skills/multi-llm/review_plan_orchestrator.py",
+      "sha256": "a590963f44efdfbfdc7174ed0288cf6701a563487e87f1dd1f51afeacaa68709"
+    },
+    {
+      "path": "skills/multi-llm/review_tasks_orchestrator.py",
+      "sha256": "7ea3906c378f22d3b2d63004d0b4ff46b4b9d28dd4628fa4cb927b24fda6e5ce"
+    },
+    {
+      "path": "skills/multi-llm/schemas/code_review_issues.schema.json",
+      "sha256": "4f9764b988e6075ca1b46141bd2010af08261b4100ac5aec35cec580d28b956d"
+    },
+    {
+      "path": "skills/multi-llm/schemas/review_suggestions.schema.json",
+      "sha256": "723df8137f0b236fe30b6f8b6b9a9f11905b8c854f533ec4734fb790c28377a0"
+    },
+    {
+      "path": "skills/multi-llm/schemas/state_file.schema.json",
+      "sha256": "5b0e06c4e779fa1e167775f5d14681a7c9b14c1cb96f91a9366d4704ccc3934e"
+    },
+    {
+      "path": "skills/multi-llm/schemas/subagent_tasks.schema.json",
+      "sha256": "51794791e94b42ef23889ae4522862475475489e39279140e105dac813c34e0d"
+    },
+    {
+      "path": "skills/multi-llm/templates/consolidated_report_template.html",
+      "sha256": "416e8c3735a8434b0bdc9e286ece7496f0457e0edd44bbf344b357629c15e985"
+    },
+    {
+      "path": "skills/multi-llm/templates/pr_report_template.html",
+      "sha256": "37f08436103621f714d6e55b01ec6fb38abee74bf3b045cb00c14271fb553894"
+    },
+    {
+      "path": "skills/multi-llm/templates/report_template.html",
+      "sha256": "d03c4e6356ec064b8545d16b37f04844a3973bf702db9e1d1ec1cc5168ae401d"
+    },
+    {
+      "path": "skills/multi-llm/utils/apply_orchestrator_base.py",
+      "sha256": "70cf50935b1a0c749609ffea46bdebf9e6c1edbcd495b2cfbeefb665ab0dfc35"
+    },
+    {
+      "path": "skills/multi-llm/utils/apply_selection_helpers.py",
+      "sha256": "c300335e6a361b372c73efe2b69577cb8004d5366024fe950bb7bfa6837f6f74"
+    },
+    {
+      "path": "skills/multi-llm/utils/check_reply.py",
+      "sha256": "97cba9b5ac7ed3a03c7ca68d03ce0e9d9247b55adde9d632ab6022cdc7f2c88f"
+    },
+    {
+      "path": "skills/multi-llm/utils/cli_common.py",
+      "sha256": "8e18d40b8ae6bafd95ae9bb05465cb150196b6a91e672a6455033d2c2221475c"
+    },
+    {
+      "path": "skills/multi-llm/utils/commit_review.py",
+      "sha256": "8492afa9c5adb3d951d59702657b471eeaddfaae444900a6c29484879667b508"
+    },
+    {
+      "path": "skills/multi-llm/utils/consolidation.py",
+      "sha256": "303385103f70aed73b425fa274d16185f9d686a581a2b598c89e08bdac41ab93"
+    },
+    {
+      "path": "skills/multi-llm/utils/html_report_generator.py",
+      "sha256": "ca92c4918578915338bfec5bcfd19d5d5e5c5796e08c38ff38674169639ac6d0"
+    },
+    {
+      "path": "skills/multi-llm/utils/improve_steps.py",
+      "sha256": "f9a9a6e4ca3190bd21170d8b3c893527e321720a75b388a933d18553ad69966f"
+    },
+    {
+      "path": "skills/multi-llm/utils/improve_workflow.py",
+      "sha256": "17c42babf6c7dfa2ae701aba5bfc5d31e951e5190cf112623d5d33f15bb3e9f4"
+    },
+    {
+      "path": "skills/multi-llm/utils/report_parser.py",
+      "sha256": "4d293285dd46bfe71fd0e83d2e0c2ac384654c49a1346590b6e2e10181b66c1a"
+    },
+    {
+      "path": "skills/multi-llm/utils/review_orchestrator_base.py",
+      "sha256": "99a5a27ec95b46264c2e41bfab8a3a657797befe3f70a873174de83e19095976"
+    },
+    {
+      "path": "skills/multi-llm/utils/schema_validator.py",
+      "sha256": "0db1a245ba5a2c53454a7d2c2291498e4ea946c2343bc33963f11eeefacfdb33"
+    },
+    {
+      "path": "skills/multi-llm/utils/scope_apply.py",
+      "sha256": "0951139a3274ebfe7b4b0dbef07b92482fb9f249c470c5f87d7f828fffd74ce6"
+    },
+    {
+      "path": "skills/multi-llm/utils/scope_policy.py",
+      "sha256": "cd4d0749c84e2db3b3b52aaddd75d1afa3722abadd2b70a847fdcb233aa74018"
+    },
+    {
+      "path": "skills/multi-llm/utils/scope_policy_runs.py",
+      "sha256": "6c5333dc292f889aae8318b943e5acdfa086b23220e46fb5d87378164809e244"
+    },
+    {
+      "path": "skills/multi-llm/utils/scope_report.py",
+      "sha256": "997eed051f37307bfa9bb5ac9c1959d630b318369955ad3bbd4ae3c92c2b77f2"
+    },
+    {
+      "path": "skills/multi-llm/utils/scope_round.py",
+      "sha256": "f1076fd6ec380109bb121250ac029de3ed91637e84d7a29118158aa09f496577"
+    },
+    {
+      "path": "skills/multi-llm/utils/structured_output.py",
+      "sha256": "f7d30143d645895a907d7ba6438f4031eac59c31e5f48283052c33a40f584a9d"
+    },
+    {
+      "path": "skills/multi-llm/utils/subagent_prompts.py",
+      "sha256": "7d870b7a9297a9fde456759fe4665692792ac53db9066447b04b44b4d351f8e9"
+    },
+    {
+      "path": "skills/multi-llm/utils/suggestion_processor.py",
+      "sha256": "fff05d6e3205ba095e10cf27c45f87978233d5c45b73fa2a0878fc673584a2f9"
+    },
+    {
+      "path": "skills/multi-llm/utils/unattended.py",
+      "sha256": "4af899007efce25b85501a11f400ee7c9f18f245a68d8509e744b7ac0b685af2"
+    },
+    {
+      "path": "skills/multi-llm/utils/validation.py",
+      "sha256": "c63753717df362639bf2ac9098d7928c903287df0fa70f99a6a6407a136c733e"
+    },
+    {
+      "path": "skills/multi-llm/utils/write_batch_scheduler.py",
+      "sha256": "43f71a0da0a0ab4ce6781d7cfa82af734ce071b81fff5b8d77494220ffebd45a"
+    },
+    {
+      "path": "skills/multi-llm/utils/write_phase_bridge.py",
+      "sha256": "fb832d090a455c424a0b14b1aaf706885031953f5c6cbf6755c3f23cd1d5b7b1"
+    },
+    {
+      "path": "skills/multi-llm/utils/write_prompt.py",
+      "sha256": "5b43dfef3003e3e3a439c1ad48a278b6f3921845bb6dc33dad06bcbad22ba538"
+    }
+  ]
+}

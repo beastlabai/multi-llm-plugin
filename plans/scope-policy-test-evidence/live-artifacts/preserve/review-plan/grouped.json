@@ -1,0 +1,179 @@
+{
+  "format_version": 2,
+  "groups": [
+    {
+      "category": "addition",
+      "theme": "Behaviour on empty or malformed input is unspecified",
+      "suggestions": [
+        {
+          "title": "Behaviour on empty or malformed input is unspecified",
+          "desc": "The plan does not say what happens when the input is an empty array (header only, or an error?), is not valid JSON, is not a top-level array, a record lacks date, category or amount, or has extra fields. An implementer must choose between writing partial output, failing with an error, and skipping records. The plan should state the behaviour for each case, and whether a failed run leaves the output file absent or untouched.",
+          "importance": "MEDIUM",
+          "reference": "## Implementation",
+          "type": "addition",
+          "scope_relation": "in_scope",
+          "scope_reason": "Specifies error handling for the stated input (a JSON array of records with three fields).",
+          "scope_reference": "Goal: 'a UTF-8 JSON array of expense records... Each record has date, category and amount.'",
+          "source_model": "claude-code:haiku",
+          "suggestion_hash": "32d829322871563b",
+          "display_label": "G1S1",
+          "display_hash": "32d82932"
+        }
+      ],
+      "models": [
+        "claude-code:haiku"
+      ],
+      "priority_score": 2,
+      "validation_status": null,
+      "validation_reason": null,
+      "group_hash": "747cbd061cc4c7d2",
+      "display_label": "G1",
+      "display_hash": "747cbd06"
+    },
+    {
+      "category": "clarification",
+      "theme": "CLI contract is not defined and 'existing callers' has no\u2026",
+      "suggestions": [
+        {
+          "title": "CLI contract is not defined and 'existing callers' has no referent",
+          "desc": "## Goal says 'Keep the current CLI arguments. Existing callers must keep working', but the plan never lists the current arguments, names the command or entry point, or says which file it lives in. It also says the command 'takes input and output file paths' without saying whether those are new arguments or existing ones. Since this is described as a new local command, it is unclear what 'existing callers' refers to. Without the argument names and the command name, an implementer cannot know what must be preserved.",
+          "importance": "MEDIUM",
+          "reference": "## Goal",
+          "type": "clarification",
+          "scope_relation": "unclear",
+          "scope_reason": "The baseline asks to keep current CLI arguments but does not enumerate them, so the exact contract is not settled.",
+          "scope_reference": "Goal: 'Keep the current CLI arguments. Existing callers must keep working.'",
+          "source_model": "claude-code:haiku",
+          "suggestion_hash": "4b498a6cf3eab1b6",
+          "display_label": "G2S1",
+          "display_hash": "4b498a6c"
+        }
+      ],
+      "models": [
+        "claude-code:haiku"
+      ],
+      "priority_score": 2,
+      "validation_status": null,
+      "validation_reason": null,
+      "group_hash": "806a326ecc9f777a",
+      "display_label": "G2",
+      "display_hash": "806a326e"
+    },
+    {
+      "category": "modification",
+      "theme": "Comma-joined rows break when a field holds a comma",
+      "suggestions": [
+        {
+          "title": "Comma-joined rows break when a field holds a comma",
+          "desc": "## Implementation says 'join each row's three fields with commas'. That is not CSV: a category such as 'Food, groceries' or one containing a double quote or newline adds extra columns or splits the row, so the output file is malformed for valid input. The goal is a CSV file, so fields that contain commas, quotes or line breaks must be quoted and escaped (RFC 4180, e.g. Python's csv module). This is a correctness bug in the approach itself, not a style choice.",
+          "importance": "HIGH",
+          "reference": "## Implementation",
+          "type": "modification",
+          "scope_relation": "in_scope",
+          "scope_reason": "Makes the output a valid CSV file as the Goal requires; adds no new behaviour.",
+          "scope_reference": "Goal: 'converts a UTF-8 JSON array of expense records to CSV'",
+          "source_model": "claude-code:haiku",
+          "suggestion_hash": "3a591f369d8cf24e",
+          "display_label": "G3S1",
+          "display_hash": "3a591f36"
+        }
+      ],
+      "models": [
+        "claude-code:haiku"
+      ],
+      "priority_score": 2,
+      "validation_status": null,
+      "validation_reason": null,
+      "group_hash": "6e642be4da539acd",
+      "display_label": "G3",
+      "display_hash": "6e642be4"
+    },
+    {
+      "category": "clarification",
+      "theme": "Date and amount output format is not stated",
+      "suggestions": [
+        {
+          "title": "Date and amount output format is not stated",
+          "desc": "The plan does not say whether dates are written as given in the JSON or reformatted, nor how amounts are rendered (for example 12.5 versus 12.50, or floating-point artefacts such as 0.30000000000000004). Output for these fields is therefore open to interpretation and the check cannot confirm the expected value. The plan should state that values pass through as given, or name the format.",
+          "importance": "MEDIUM",
+          "reference": "## Goal",
+          "type": "clarification",
+          "scope_relation": "in_scope",
+          "scope_reason": "Clarifies how the three stated fields are written to the CSV the Goal defines.",
+          "scope_reference": "Goal: 'CSV columns are date,category,amount in that order'",
+          "source_model": "claude-code:haiku",
+          "suggestion_hash": "bec4887dbe6ac6bd",
+          "display_label": "G4S1",
+          "display_hash": "bec4887d"
+        }
+      ],
+      "models": [
+        "claude-code:haiku"
+      ],
+      "priority_score": 2,
+      "validation_status": null,
+      "validation_reason": null,
+      "group_hash": "26282e5766ac4da8",
+      "display_label": "G4",
+      "display_hash": "26282e57"
+    },
+    {
+      "category": "addition",
+      "theme": "Happy-path check cannot catch the quoting bug",
+      "suggestions": [
+        {
+          "title": "Happy-path check cannot catch the quoting bug",
+          "desc": "## Checks only asks for 'a happy-path record' with a header and one data row. A record whose fields contain no commas, quotes or newlines passes even if fields are joined naively, so the check cannot fail on the defect above. Add a check with a category containing a comma (and ideally a quote) and confirm it reads back as the same three fields.",
+          "importance": "MEDIUM",
+          "reference": "## Checks",
+          "type": "addition",
+          "scope_relation": "in_scope",
+          "scope_reason": "A check for the CSV validity the Goal already requires.",
+          "scope_reference": "Goal: 'converts a UTF-8 JSON array of expense records to CSV'",
+          "source_model": "claude-code:haiku",
+          "suggestion_hash": "706d1a00296df958",
+          "display_label": "G5S1",
+          "display_hash": "706d1a00"
+        }
+      ],
+      "models": [
+        "claude-code:haiku"
+      ],
+      "priority_score": 2,
+      "validation_status": null,
+      "validation_reason": null,
+      "group_hash": "5a3dca0e15890ed5",
+      "display_label": "G5",
+      "display_hash": "5a3dca0e"
+    },
+    {
+      "category": "clarification",
+      "theme": "Output encoding and line endings are unspecified",
+      "suggestions": [
+        {
+          "title": "Output encoding and line endings are unspecified",
+          "desc": "The input is stated to be UTF-8, but the plan does not say what encoding and line endings the CSV is written in. A category with non-ASCII characters (for example 'Caf\u00e9') could be written in the platform default encoding, which is a problem on some systems. The plan should state the output encoding, normally UTF-8.",
+          "importance": "LOW",
+          "reference": "## Implementation",
+          "type": "clarification",
+          "scope_relation": "in_scope",
+          "scope_reason": "Specifies the encoding of the output file the Goal asks for.",
+          "scope_reference": "Goal: 'converts a UTF-8 JSON array'",
+          "source_model": "claude-code:haiku",
+          "suggestion_hash": "73ba765fdf245a9e",
+          "display_label": "G6S1",
+          "display_hash": "73ba765f"
+        }
+      ],
+      "models": [
+        "claude-code:haiku"
+      ],
+      "priority_score": 2,
+      "validation_status": null,
+      "validation_reason": null,
+      "group_hash": "de876c63c3866b4b",
+      "display_label": "G6",
+      "display_hash": "de876c63"
+    }
+  ]
+}

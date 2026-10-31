@@ -849,6 +849,25 @@ changes:
       apply-code-fixes phase writes one more path. apply-suggestions writes
       it too, under the created-paths entry already declared for it.
 
+  # ---------------------------------------------------------------------------
+  # Scope policy (plans/scope-policy-and-report-tags.md §2, §4).
+  #
+  # Every review round now records its scope policy and scope baseline in
+  # `state.json` under `scope_policy.<review phase>`: the reviewer/validator
+  # policy (`expand`, source `default`, for this fixture's flag-less run) and a
+  # host-computed baseline over the inputs the round already binds (the plan's
+  # `validation-snapshot.md` bytes; review-code's plan and diff endpoints). It is
+  # an added record only: no prompt, verdict, priority, selection or write in the
+  # bundle moved, which is the default-compatibility contract.
+  - pointer: /state/scope_policy
+    rationale: >
+      New per-review-round record (`scope_policy.record_review_round`): policy,
+      its source, the recorded time and the scope baseline (roles, hashes,
+      snapshot name, endpoints, baseline id). Added keys only.
+  - pointer: /state_shape/scope_policy
+    rationale: >
+      The shape view of the same added `state.json` record.
+
 # Example of the shape an entry takes, kept as documentation only (commented, so
 # it is not an active row that would have to match something):
 #

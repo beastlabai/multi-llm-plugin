@@ -1,0 +1,165 @@
+You are validating review suggestions for accuracy.
+
+## Context (Plan content)
+
+# Local CSV export
+
+## Goal
+Implement a local command that converts a UTF-8 JSON array of expense records to CSV.
+The command takes input and output file paths. Each record has date, category and amount.
+CSV columns are date,category,amount in that order, with one header row.
+Keep the current CLI arguments. Existing callers must keep working.
+
+## Implementation
+Read the JSON, iterate records, and join each row's three fields with commas.
+Open the destination for writing and write the resulting lines.
+
+## Checks
+Use a happy-path record and confirm the file has a header and one data row.
+
+
+## Suggestion groups to validate (2)
+
+[
+  {
+    "category": "clarification",
+    "group_hash": "8c00f53cfcceecba",
+    "group_id": "8c00f53cfcceecba",
+    "group_index": 4,
+    "models": [
+      "claude-code:haiku"
+    ],
+    "suggestions": [
+      {
+        "desc": "The Goal says each record has date, category and amount, and the CSV columns are date,category,amount. The plan does not say whether date is an ISO 8601 string or another format, whether amount is a JSON number or a string, how many decimal places are written, or whether values are validated or passed through. Without this, output such as 12.5 versus 12.50 or 2026-10-31 versus 31/10/2026 is decided by the implementer, and the expected output of the check cannot be stated.",
+        "importance": "MEDIUM",
+        "scope_reason": "Specifies the value format of the columns the Goal already defines.",
+        "scope_relation": "in_scope",
+        "title": "Field formats for date and amount are not specified",
+        "type": "clarification"
+      }
+    ],
+    "theme": "Field formats for date and amount are not specified"
+  },
+  {
+    "category": "addition",
+    "group_hash": "222eb11311069350",
+    "group_id": "222eb11311069350",
+    "group_index": 6,
+    "models": [
+      "claude-code:haiku"
+    ],
+    "suggestions": [
+      {
+        "desc": "The Checks section allows one happy-path record and asserts a header plus one data row. A record with no commas, quotes or newlines passes with the naive join described in Implementation, so the check cannot detect the escaping defect. Nothing checks the 'one header row' rule across several records, or the column order date,category,amount.",
+        "importance": "MEDIUM",
+        "scope_reason": "Adds a check for behaviour the plan's own Goal and Implementation already require.",
+        "scope_relation": "in_scope",
+        "title": "Only a happy-path check, which cannot catch quoting bugs",
+        "type": "addition"
+      }
+    ],
+    "theme": "Only a happy-path check, which cannot catch quoting bugs"
+  }
+]
+
+## Task
+
+For each of the 2 suggestion groups above, decide:
+- "valid": the issue is real and should be addressed
+- "invalid": a false positive — incorrect or not applicable
+- "needs-human-decision": cannot be determined from the context above and
+  requires human judgment
+
+Compare each group against the context above to verify it. Judge only the
+groups listed above; ignore anything else.
+
+When a suggestion claims something about existing code — a function name, a
+line number, current behaviour — and you can read the repository you are
+running in, open it and check the claim before answering; do not rely on the
+context above alone when the code itself is one read away. Reserve
+"needs-human-decision" for genuine judgment calls (a product or design
+trade-off), never for a claim you could have checked but did not look at. If
+you cannot read the repository, judge from the records and the context above
+alone.
+
+Do not probe system paths, services or databases (anything outside the
+repository, a database client, a service status): the repository and the
+context above are the evidence.
+
+A claim that the plan or the tasks omit something — "the plan does not specify
+X", "the tasks never say to reset X" — is judged against the plan or tasks text
+above, not against the working tree: the plan is what an implementer follows,
+and a partially implemented tree is exactly the situation this review exists
+for. Code that already does X does not make such a claim invalid; it makes it
+valid — document or decide it — and the reason should say that the code already
+does X. Where the artifact under review is a diff or a code change rather than a
+plan, that change is the text such a claim is judged against.
+
+Scope: a plan is a design document. Breaking it into implementation tasks, with
+ids, dependencies and an order, is a later phase (task generation). A finding
+whose only complaint is that the plan has no task breakdown, task list,
+implementation order, dependency graph or milestones is "invalid": not
+applicable to a plan review. A finding that names a concrete design gap which
+would block writing those tasks is judged on that gap. A missing ordering
+constraint between parts of the design (a data migration that must precede the
+schema switch) is a design gap, judged on its merits.
+
+## Scope Classification (labels only)
+Judge "status" exactly as the task above says; this section does not change it.
+For the report's labels, also classify each group's full proposed action (every
+member's proposed change together) against the scope baseline, which is
+the reviewed plan's own goals, requirements and explicit limits or exclusions. Classify independently of the reviewers' own `scope_relation` tags.
+This classification is informational: a group whose issue is real is "valid"
+whether or not it extends the scope, and its status, confidence and reason must
+not depend on its scope.
+
+- "in_scope": the action completes, corrects or clarifies what the baseline
+  already asks for. Completing an existing requirement is in scope even when it
+  is substantial work, and so is a prerequisite in another file, fixing a
+  regression the work introduced, and removing behaviour or content the
+  baseline never asked for (existing scope creep).
+- "scope_extension": the action adds a capability, outcome or unrelated cleanup
+  the baseline does not ask for, or changes an agreed outcome, even when it is
+  worthwhile or needed to make the overall goal achievable.
+- "unclear": the baseline does not settle it (missing, truncated or vague
+  intent), or materially different fixes would differ in scope and none is
+  chosen.
+
+Add to each result: "scope_relation": "in_scope|scope_extension|unclear", "scope_reason": "<one brief sentence>", "scope_reference": "<baseline section, or empty>".
+
+## Reply
+
+Print ONE JSON object and nothing else — no prose, no markdown fences, no
+explanation. Do not write any file; whoever invoked you persists your reply.
+Your reply is parsed as-is, and a reply that does not parse is thrown away:
+the first character is `{` and the last is the `}` that closes it. Keep every
+`reason` and `scope_reason` to one short line with no raw double quotes or line
+breaks inside it.
+`metadata` comes first and `groups` last, so the reply ends with the last
+result's `}`, the `]` that closes `groups` and the `}` that closes the object:
+`}]}`. Re-read the object once for balanced brackets before you finish.
+Settle every verdict, and check each result's `group_hash` against its group
+above, before you print anything, then print the object once: a reply that
+adds a correction, a note or a second object after the first does not parse.
+
+{
+  "metadata": {"model": "<the model you are>", "timestamp": "<ISO 8601>", "schema_version": "2.1"},
+  "groups": [
+    {"group_index": <the group's group_index value>, "group_hash": "<copy the group_hash of the group verbatim>", "status": "valid|invalid|needs-human-decision", "reason": "<one brief sentence>", "confidence": 0.0, "scope_relation": "in_scope|scope_extension|unclear", "scope_reason": "<one brief sentence>", "scope_reference": "<baseline section, or empty>"}
+  ]
+}
+
+Rules:
+1. Output EXACTLY one result per requested group — no more, no fewer.
+2. Each group above carries its own `group_index` — echo that group's
+   `group_index` value back into its result, and copy its `group_hash` value
+   verbatim too. The `group_index` you echo is advisory; the hash is what the
+   results are joined on, so a wrong hash discards the result, and the hash
+   of another group in this batch puts your verdict on that group.
+3. Confidence is a number between 0.0 and 1.0.
+4. Be conservative: when you cannot decide from the context given, answer
+   "needs-human-decision" rather than guessing.
+5. `scope_relation`, `scope_reason` and `scope_reference` classify the group's
+   proposed remedy against the scope baseline. They never change `status`;
+   when the context cannot settle the scope, answer "unclear".

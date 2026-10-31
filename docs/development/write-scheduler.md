@@ -12,6 +12,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Dispatch counts](#dispatch-counts)
 - [Prior-batch context](#prior-batch-context)
 - [Write reply extraction](#write-reply-extraction)
+- [Scope policy at the write seam](#scope-policy-at-the-write-seam)
 
 ## Write scheduler contract
 
@@ -662,3 +663,43 @@ joins findings with `write_batch_scheduler.findings_clause` and ends the sentenc
 
 `util prior-changes append` refuses an empty or blank `--id` (exit 3, nothing written,
 naming the batches of the phase's `write_tasks.json`).
+
+## Scope policy at the write seam
+
+**Under `--scope-policy preserve` a write task carries its scope binding, and both legs enforce
+it before a prompt exists** (plans/scope-policy-and-report-tags.md §5). The apply phases run the
+gate (`scope_policy.scope_decision`) over the work set twice — after selection, before the
+counts, the dry-run report, the no-items exit and the judge, and again after judging, immediately
+before batching — so only a bound `in_scope` group reaches a batch; the rest are recorded as the
+round's `deferrals` (`scope_apply.persist_deferrals`), never as skipped, invalid, failed or
+processed. Under `preserve` each apply task gets a `scope` block (`scope_apply.task_block`:
+policy, `baseline_id`, `binding`, per-item relation/reason/`selected_remedy`), and
+`with_result_contract` appends `scope_apply.writer_block` (the `writer_guidance` text, each
+item's validated scope and the `SCOPE BLOCKER:` decline convention) after the batch prompt on
+both legs. A bound `selected_remedy` is the item's description (the formatters'
+`scope_annotate`; `format_fix_for_output(selected_remedy=)` concatenates nothing else), with the
+members' original text kept only as `scope.original_description` in `orchestrator_output.json`.
+Under `expand` none of this exists: no block, no added text, so the prompt, the task file and its
+`_task_fingerprint` are what they were (`tests/test_scope_policy_default_compat.py` pins them to a
+pre-feature golden).
+
+`WriteBatchScheduler._scope_refusal` (executor dispatch, after the resume skip) and
+`util write-prompt` (`render_write_prompt`) refuse a task whose materialized policy differs from the
+round's effective one (the scheduler's `scope_policy=` argument, else `state.json`), whose baseline
+or binding does not match, or that carries an item without a bound `in_scope` relation; a task
+with no block never blocks an `expand` round. The orchestrator detects a policy change at `_setup`
+step 10c (`scope_apply.detect_policy_change` over the previous `write_tasks.json` of the same
+review, after `--fresh`): a `failed` record of the review is exit 3 there, before the explicit
+policy is recorded (a refused run changes nothing in `state.json`), naming `--resume` under the old
+policy, `util restore-batch` or a fresh review; landed items (`processed_<phase>`
+applied/no-op/skipped records, written by both legs) leave the work sets before the step-25b gate,
+so they are never recorded or reported as deferrals, and the new batches start past every earlier
+batch index (`materialize_write_tasks(start_index=)`), so no pending work is renumbered onto a
+completed id; no started work retires that file to `write_tasks.retired-<policy>-<sha8>.json`
+before batching. A `preserve` decline whose reason starts with `SCOPE BLOCKER:` is the one blocker
+signal: the apply exits 3 after its batches finish (`[SCOPE_BLOCKER]`, the result line's `error`)
+and records `completion.outcome: blocked`. Every completion writer (`--mark-completed`, the
+executor's finished loop, the empty loop, the all-deferred exit and step 27 when only a blocker
+remains) derives the blockers from `processed_<phase>` through `_scope_close`, so a `--resume`
+that drops the declined item stays blocked; only a completion that finds none (an `expand` apply)
+or a fresh review round clears it, never `persist_deferrals`.

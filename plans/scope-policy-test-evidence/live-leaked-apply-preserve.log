@@ -1,0 +1,55 @@
+[AUTO_RESOLVED] needs-human-decision: --agent-decide implied by --yes: needs-human-decision items are judged, never prompted
+Plan: /tmp/scope-policy-live-20261031/leaked-fixture/feature.md
+Output directory: /tmp/scope-policy-live-20261031/leaked-fixture/feature
+Prefix: feature
+[scope-policy] apply-suggestions: preserve (source: explicit; review requested preserve, baseline 6bb22b82c1042ded)
+Loaded 2 suggestion groups
+Loaded 2 validation results
+No user preferences detected (checked user_selections.json, consolidated_user_selections.json, and report.md)
+[AUTO_RESOLVED] no-selections-confirmation: apply all valid items: 2 suggestion group(s) loaded: 1 valid (applied), 1 awaiting a decision (applied only if decided valid); bypassed by --yes
+[SCOPE_DEFERRED] 0a7d6dd3 [Scope extension] Also export the report as PDF: Deferred: scope preservation requested: the proposed remedy extends the agreed scope (The plan's only output requirement is CSV export, so adding a PDF exporter extends the agreed scope.)
+
+Filtered suggestions:
+  Valid (to apply): 1
+  Needs human review: 0
+  Skipped: 0
+  Deferred (scope policy preserve): 1
+
+Batching results:
+  Total suggestions: 1
+  Total batches: 1
+  Subagent calls saved: 0
+  Efficiency gain: 0.0%
+[OUTPUT_FILE] /tmp/scope-policy-live-20261031/leaked-fixture/feature/apply-suggestions/orchestrator_output.json
+Backup saved: /tmp/scope-policy-live-20261031/leaked-fixture/feature/apply-suggestions/backup.md
+[write-subagents] materialized 1 apply-suggestions task(s): /tmp/scope-policy-live-20261031/leaked-fixture/feature/apply-suggestions/write_tasks.json
+[write-subagents] dirty tree at start: 4 uncommitted path(s) recorded as the baseline — they are NOT part of this run's changes: .multi-llm/providers.yaml, expand/, leaked-fixture/, preserve/
+multi-llm warning: claude-code 2.1.316 is newer than the release the shipped parser fixtures were captured from (2.1.293); stream parsing is best-effort above that.
+[ETA] apply-suggestions: batch 1/1 done in 0m 16s · ALL BATCHES COMPLETE
+[write-subagents] batch 0: apply-batch-0 no-op; declined 1, not applied: suggestion 1 (`1de5f2451724bb54`) — leaked-fixture/feature.md defines no report fields, so the header columns, their order and quoting need a plan decision; the only column list in the repo (date,category,amount) belongs to the separate expense-export plans in preserve.md and expand.md and does not… in 16.6s — no files changed
+[ETA] apply-suggestions: phase complete in 0m 22s
+[write-subagents] rollback store peaked at 1.3 MB of the 64 MB budget (52 files, 49 shards; never copied, as driver.write_paths denies it (a write to it fails the batch and cannot be undone): .multi-llm/providers.yaml); discarded now — the restore points are the pre-batch snapshots in /tmp/scope-policy-live-20261031/leaked-fixture/feature/apply-suggestions/pre_batch/
+[write-subagents] report: /tmp/scope-policy-live-20261031/leaked-fixture/feature/apply-suggestions/write_batch_report.json
+[write-subagents] summary report: /tmp/scope-policy-live-20261031/leaked-fixture/feature/apply-suggestions/summary.md
+[write-subagents] decisions overlaid on /tmp/scope-policy-live-20261031/leaked-fixture/feature/review-plan/report.html (0 of 0 decision(s) matched)
+
+============================================================
+APPLY-SUGGESTIONS: RESULT
+============================================================
+File: /tmp/scope-policy-live-20261031/leaked-fixture/feature.md
+Batches: 1/1 ok
+Suggestions applied: 0
+Suggestions declined by their batch (not applied): 1
+Skipped: 0
+
+Batches:
+  apply-batch-0: ok (no-op), 1 suggestion(s), 16.6s, runner claude-code:haiku
+      reason: NO-OP: the batch declined every item it held (suggestion 1 (`1de5f2451724bb54`) — leaked-fixture/feature.md defines no report fields, so the header columns, their order and quoting need a plan decision; the only column list in the repo (date,category,amount) belongs to the separate expense-export plans in preserve.md and expand.md and does not apply to this report) and the pre-batch snapshot comparison confirms no byte changes in leaked-fixture/feature.md. Recorded; the loop continues.
+
+Suggestions not applied:
+  - CSV header row is never specified [1de5f245] (suggestion 1 of apply-batch-0) not applied: the batch declined it — leaked-fixture/feature.md defines no report fields, so the header columns, their order and quoting need a plan decision; the only column list in the repo (date,category,amount) belongs to the separate expense-export plans in preserve.md and expand.md and does not apply to this report.
+
+Deferred by --scope-policy preserve (1, not applied):
+  - [Scope extension] Also export the report as PDF [0a7d6dd3]
+      reason: Deferred: scope preservation requested: the proposed remedy extends the agreed scope (The plan's only output requirement is CSV export, so adding a PDF exporter extends the agreed scope.)
+QA_SOURCE_PHASE_EXIT: {"exit": 0}

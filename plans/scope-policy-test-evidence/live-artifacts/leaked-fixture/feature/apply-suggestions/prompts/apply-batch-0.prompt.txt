@@ -1,0 +1,71 @@
+Apply the following suggestion to the plan file:
+
+**Plan file**: /tmp/scope-policy-live-20261031/leaked-fixture/feature.md
+**Suggestion**: CSV header row is never specified
+**Type**: clarification
+**Section**: ## Output
+**Importance**: MEDIUM
+
+**Details**:
+The plan says CSV but never names the columns of the header row, so two implementers would write two different files. The Output section is the only place the format is named, and it lists no column, no order and no quoting rule; name them there so the export is checkable.
+
+## Changes Applied in Prior Batches
+(Review these to avoid redoing work — do NOT re-apply these changes)
+
+(none — this is the first batch)
+
+Instructions:
+1. Read the current plan file
+2. Locate the section mentioned in the reference
+3. Apply the suggested change appropriately:
+   - For "addition": Add new content in the appropriate location
+   - For "modification": Update existing content as described
+   - For "deletion": Remove the specified content
+   - For "clarification": Rewrite for clarity while preserving meaning
+4. Ensure the change integrates smoothly with surrounding content
+5. Check if the plan already contains a similar change (from a previously applied suggestion). If so, skip this suggestion or merge it with the existing content rather than duplicating
+6. Do NOT make any other changes beyond this specific suggestion
+
+Return a brief summary of what was changed.
+
+## Scope Policy: Preserve
+This run preserves the agreed scope. Apply each item exactly as its instruction
+says, and only within the scope its validation established. If you find that an
+item cannot be completed without adding a feature, outcome or change beyond that
+scope, do not make the expansion: decline that item with the reason. If you had
+already edited files for it, say what you changed rather than reporting a clean
+decline.
+
+Scope baseline: 6bb22b82c1042ded. The validated scope of each item:
+- `1de5f2451724bb54`: Within scope — Naming the CSV header and format completes the agreed CSV export requirement without adding new features.
+
+If an item's agreed requirement itself cannot be met without such an expansion, begin its decline reason with `SCOPE BLOCKER:` and name the scope decision the user has to make.
+
+## Process safety (required)
+
+Never run `kill`, `pkill`, `killall` or any process-wide signal: the orchestrator that dispatched you is a sibling process, and a write subagent's `killall -9 python3` ended a whole phase (measured 2026-09-16). Do not start background servers, watchers, browsers or any other background process, and leave no process running when you finish.
+
+## Git (required)
+
+Do not stage, commit, stash or push anything (no `git add`, `git commit`, `git stash` or `git push`), even when your task makes a file trackable: leave the git index and history as you found them. The user reviews and stages the changes.
+
+## Scratch files (advisory)
+
+Keep scratch work (an extracted script to syntax-check, a probe) out of the repository and out of fixed, shared names such as a bare `check.mjs` in the system temp directory: create a fresh directory with `mktemp -d`, work only there and delete it before you finish. The write gate only sees the repository, so a file left elsewhere is invisible to it (measured 2026-10-01, OpenCode runner).
+
+## Result (required — this is how the batch is verified)
+
+Do the work above, then end your reply with ONE JSON object (a fenced ```json block is fine) of exactly this shape:
+
+```json
+{"status": "applied", "ids": ["<id>", "..."], "declined": [{"id": "<id>", "reason": "<why you did not apply it>"}], "files_touched": ["<repo-relative path>"], "summary": "<one line, at most 200 characters>", "notes": "<the per-item summary requested above>"}
+```
+
+- `status`: `applied` if you edited any file; `no-op` if you edited nothing because every change was already present or you declined it; `failed` if you could not apply the batch.
+- `ids`: the ids of the suggestions you applied **or found already applied by a prior batch**, from this list (numbered in the order they appear above): suggestion 1 = `1de5f2451724bb54`.
+- `declined`: each suggestion from that list you deliberately left unapplied, as `{"id": "<its id>", "reason": "<why, in one sentence>"}`; `[]` when you applied every one. The reason says what decides it: when the plan or its task list already decides against the suggestion (a rule it states, a decision it records), name which one and quote that decision; when you judge the suggestion wrong for this code, say why; say it needs a plan decision only when nothing there decides it. Every suggestion goes in exactly one of `ids` and `declined`: one left out of both reads as a suggestion you meant to apply and did not finish, and the run stops for a human to inspect it.
+- `files_touched`: repo-root-relative paths you edited (empty for `no-op` and `failed`).
+- `summary`: one line; it is recorded verbatim as this batch's entry in the prior-changes log the next batch reads.
+- `notes`: the per-item summary the return format above asks for.
+
+A reply without this JSON object is recorded as a FAILED batch even when the edits landed, so send it in every case — including when nothing needed changing.

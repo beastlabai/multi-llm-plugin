@@ -1,0 +1,111 @@
+{
+  "format_version": 2,
+  "groups": [
+    {
+      "group_index": 0,
+      "status": "valid",
+      "reason": "expenses.py line 5 joins str() values with commas and performs no quoting or escaping, so a category containing a comma, quote or newline corrupts the row, as the plan forbids.",
+      "confidence": 0.95,
+      "error_type": "unknown",
+      "recoverable": false,
+      "revalidated": false,
+      "group_id": "aaf5288f7cb59267",
+      "scope_relation": "in_scope",
+      "scope_reason": "Restores the plan's required exact-value CSV output, which covers commas, quotes and line breaks; stdlib csv.writer stays within the limits.",
+      "scope_reference": "Plan: values preserved exactly, including categories with commas, quotes and line breaks; standard library only",
+      "scope_baseline_id": "a2b83aa2f58e9cd1",
+      "scope_proposal_digest": "b880599dd9c6870e4e50abe5a4f6596cc23c7fdf53e8a98fbc014bfdcb1434de",
+      "scope_source": "validation",
+      "scope_policy_decision": {
+        "policy": "preserve",
+        "eligible": true,
+        "relation": "in_scope",
+        "label": "Within scope",
+        "reason": "Restores the plan's required exact-value CSV output, which covers commas, quotes and line breaks; stdlib csv.writer stays within the limits.",
+        "outcome": "eligible",
+        "authority": "bound"
+      }
+    },
+    {
+      "group_index": 1,
+      "status": "valid",
+      "reason": "Line 5 uses str(record[key]), so a None category or amount is written as the text 'None' instead of a preserved value, which conflicts with the plan's exact-preservation requirement.",
+      "confidence": 0.8,
+      "error_type": "unknown",
+      "recoverable": false,
+      "revalidated": false,
+      "group_id": "2a0448e732607e3b",
+      "scope_relation": "in_scope",
+      "scope_reason": "The remedy makes None export as an empty field, which preserves values as the plan requires and fixes a regression from the rewrite.",
+      "scope_reference": "Plan: values preserved exactly; existing callers remain compatible",
+      "scope_baseline_id": "a2b83aa2f58e9cd1",
+      "scope_proposal_digest": "a2fb50ddc9979397b3dd883b1b0147fb81ace15bd4a1126420314fe4c5690b2d",
+      "scope_source": "validation",
+      "scope_policy_decision": {
+        "policy": "preserve",
+        "eligible": true,
+        "relation": "in_scope",
+        "label": "Within scope",
+        "reason": "The remedy makes None export as an empty field, which preserves values as the plan requires and fixes a regression from the rewrite.",
+        "outcome": "eligible",
+        "authority": "bound"
+      }
+    },
+    {
+      "group_index": 2,
+      "status": "needs-human-decision",
+      "reason": "Line 6 joins rows with LF, but the baseline's terminator cannot be read here because git is unavailable, and the plan is silent on line endings.",
+      "confidence": 0.4,
+      "error_type": "unknown",
+      "recoverable": false,
+      "revalidated": false,
+      "group_id": "b776c15e9ad0de50",
+      "scope_relation": "unclear",
+      "scope_reason": "Restoring CRLF is in scope only if the baseline emitted CRLF, which the baseline code could not confirm here.",
+      "scope_reference": "Plan: existing callers remain compatible",
+      "scope_baseline_id": "a2b83aa2f58e9cd1",
+      "scope_proposal_digest": "4723f92e7d752caffb846a079a2bcde2d0c782a696c0526b61a02c0b9676dc7a",
+      "scope_source": "validation",
+      "scope_policy_decision": {
+        "policy": "preserve",
+        "eligible": false,
+        "relation": "unclear",
+        "label": "Scope unclear",
+        "reason": "Deferred: scope preservation requested: scope unclear (Restoring CRLF is in scope only if the baseline emitted CRLF, which the baseline code could not confirm here.)",
+        "outcome": "deferred",
+        "authority": "bound"
+      }
+    }
+  ],
+  "metadata": {
+    "model": "claude-code:haiku",
+    "timestamp": "2026-10-31T18:07:53.825206",
+    "schema_version": "2.1",
+    "runner": "claude-code:haiku",
+    "grouped_sha256": "d63b21674b065e8a",
+    "runners": {
+      "0": "claude-code:haiku",
+      "1": "claude-code:haiku"
+    },
+    "batch_sha256": {
+      "0": "1e00935683cd62086a83503419ac4810b34485124fd139af71cf42851e026c30",
+      "1": "db58c46c2d4c61676447e460834ad044aaa7672656b2d5a0741a28213b1d8629"
+    },
+    "batch_manifest": {
+      "kind": "validation",
+      "round": "912feb6d9b9dc232d9d8d5b4fc3722ed3c66194d5c24e8af4c8d270ac16f6737"
+    },
+    "context_contract": 2,
+    "scope_policy": "preserve",
+    "scope_policy_source": "explicit",
+    "scope_baseline_id": "a2b83aa2f58e9cd1",
+    "scope_round_baseline_id": "a2b83aa2f58e9cd1",
+    "scope_policy_decisions": {
+      "eligible": 2,
+      "deferred": 1,
+      "in_scope": 2,
+      "scope_extension": 0,
+      "unclear": 1
+    }
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "status": "no-op",
+  "ids": [
+    "2a0448e732607e3b"
+  ],
+  "declined": [],
+  "files_touched": [],
+  "summary": "None values already export as empty CSV fields via csv.writer (prior batch 0); verified, no edit needed.",
+  "notes": "2a0448e732607e3b: Already applied. export_expenses writes raw values through csv.writer, so None exports as an empty field, not 'None'. Verified by running export_expenses with None category and amount: output was '2026-10-01,,' and contained no 'None' text.",
+  "check": {
+    "passed": true,
+    "findings": [],
+    "ran": {
+      "PYTHONDONTWRITEBYTECODE=1 python3 -I -c (import export_expenses; assert 'None' not in output)": "passed"
+    }
+  },
+  "verdict": {
+    "write_outcome": "no-op",
+    "status": "ok",
+    "ok": true,
+    "files_touched": [],
+    "sha256_before": {
+      "expenses.py": "bb31f08902d0da605e5e6ba8e213dd1b7cd743a0f185a7cd532db92409c94712"
+    },
+    "sha256_after": {
+      "expenses.py": "bb31f08902d0da605e5e6ba8e213dd1b7cd743a0f185a7cd532db92409c94712"
+    },
+    "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in expenses.py. Recorded; the loop continues.",
+    "batch_check": {
+      "passed": true,
+      "findings": []
+    },
+    "runner_notes": "2a0448e732607e3b: Already applied. export_expenses writes raw values through csv.writer, so None exports as an empty field, not 'None'. Verified by running export_expenses with None category and amount: output was '2026-10-01,,' and contained no 'None' text.",
+    "task_id": "apply-fix-batch-1",
+    "expected_ids": [
+      "2a0448e732607e3b"
+    ],
+    "inputs_fingerprint": "47e93d52f3e79bd8a09b67f05045fb2a6dc8fcce37afe4bde51aca2c8e64f822"
+  }
+}

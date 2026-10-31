@@ -19,7 +19,7 @@ allowed-tools:
   - AskUserQuestion
   - Glob
   - Grep
-argument-hint: [--review-plan|--apply-suggestions|--improve-plan|--generate-tasks|--review-tasks|--apply-task-suggestions|--implement|--review-code|--apply-code-fixes|--improve-code|--review-commits|--apply-commit-fixes|--improve-commits|--full|--ask|--status|--init] <plan_path>|[<range>] (<range>: --*-commits only) ["<question>" (required for --ask)] [--models provider:model ...] [--interactive] [--quick] [--yes] [--force] [--focus "<text>"|--context-plan PATH (--*-commits only)] [--dir PATH|--gitignore|--template-only (--init only)]
+argument-hint: [--review-plan|--apply-suggestions|--improve-plan|--generate-tasks|--review-tasks|--apply-task-suggestions|--implement|--review-code|--apply-code-fixes|--improve-code|--review-commits|--apply-commit-fixes|--improve-commits|--full|--ask|--status|--init] <plan_path>|[<range>] (<range>: --*-commits only) ["<question>" (required for --ask)] [--models provider:model ...] [--interactive] [--quick] [--yes] [--force] [--scope-policy expand|preserve] [--focus "<text>"|--context-plan PATH (--*-commits only)] [--dir PATH|--gitignore|--template-only (--init only)]
 ---
 
 # Multi-LLM — Claude Code entry shim

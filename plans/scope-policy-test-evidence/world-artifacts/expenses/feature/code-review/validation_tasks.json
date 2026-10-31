@@ -1,0 +1,138 @@
+{
+  "tasks_schema_version": 2,
+  "kind": "validation",
+  "inputs": {
+    "plan_sha256": "0df6d76f195ac021",
+    "grouped_sha256": "d63b21674b065e8a",
+    "diff_base": "HEAD",
+    "reviewed_code_sha256": "f91d77092479b9f9"
+  },
+  "batches": [
+    {
+      "tasks_schema_version": 2,
+      "task_id": "validation-batch-0",
+      "kind": "validation",
+      "prompt": "You are validating review suggestions for accuracy.\n\n## Context (Plan content)\n\n# Harden the existing expense CSV exporter\n\nThe existing local expense exporter must emit valid UTF-8 CSV with columns date,category,amount, one header row and one data row for each input record. Preserve values exactly, including categories with commas, quotes and line breaks. Empty input produces a header-only CSV.\n\nThe public API is export_expenses(records) -> str in expenses.py. Existing callers must remain compatible. Do not change that signature or the CLI's two positional input/output arguments. Do not introduce network access, external dependencies, or modify these restrictions.\n\nUse Python's standard library. Verify with python3 -m unittest discover -s tests -v. The current change touches expenses.py and must be reviewed against these requirements.\n\n\n## Context (The implementation under review \u2014 what it recorded about itself, and the code at the lines these issues cite)\n\n#### Implementation record\n\n(Nothing on record \u2014 this plan's implement phase left no summary, task status or change log. Judge the code against the plan alone.)\n\n#### Code at the cited lines\n\nLines are numbered as they are in the file. Only the windows these issues cite are shown; nothing between them is.\n\n### expenses.py\n\n```\n1: def export_expenses(records):\n2:     \"\"\"Return a CSV document containing the supplied expense records.\"\"\"\n3:     lines = [\"date,category,amount\"]\n4:     for record in records:\n5:         lines.append(\",\".join(str(record[key]) for key in (\"date\", \"category\", \"amount\")))\n6:     return \"\\n\".join(lines) + \"\\n\"\n```\n\n## Suggestion groups to validate (1)\n\n[\n  {\n    \"category\": \"bug\",\n    \"group_hash\": \"aaf5288f7cb59267\",\n    \"group_id\": \"aaf5288f7cb59267\",\n    \"group_index\": 0,\n    \"models\": [\n      \"claude-code:haiku\"\n    ],\n    \"suggestions\": [\n      {\n        \"desc\": \"The rewrite replaces csv.writer with a plain \\\",\\\".join of str() values, so a category containing a comma, double quote or line break is written unquoted and splits or corrupts the row. The plan requires values preserved exactly, including categories with commas, quotes and line breaks, and the base implementation handled this via csv.writer. This is a regression the change introduced.\",\n        \"file\": \"expenses.py\",\n        \"importance\": \"high\",\n        \"line_range\": [\n          5,\n          5\n        ],\n        \"scope_reason\": \"Restores the plan's required exact-value CSV output that the change broke.\",\n        \"scope_relation\": \"in_scope\",\n        \"title\": \"CSV values are no longer quoted or escaped\",\n        \"type\": \"bug\"\n      }\n    ],\n    \"theme\": \"CSV values are no longer quoted or escaped\"\n  }\n]\n\n## Task\n\nFor each of the 1 suggestion groups above, decide:\n- \"valid\": the issue is real and should be addressed\n- \"invalid\": a false positive \u2014 incorrect or not applicable\n- \"needs-human-decision\": cannot be determined from the context above and\n  requires human judgment\n\nCompare each group against the context above to verify it. Judge only the\ngroups listed above; ignore anything else.\n\nWhen a suggestion claims something about existing code \u2014 a function name, a\nline number, current behaviour \u2014 and you can read the repository you are\nrunning in, open it and check the claim before answering; do not rely on the\ncontext above alone when the code itself is one read away. Reserve\n\"needs-human-decision\" for genuine judgment calls (a product or design\ntrade-off), never for a claim you could have checked but did not look at. If\nyou cannot read the repository, judge from the records and the context above\nalone.\n\nDo not probe system paths, services or databases (anything outside the\nrepository, a database client, a service status): the repository and the\ncontext above are the evidence.\n\nA claim that the plan or the tasks omit something \u2014 \"the plan does not specify\nX\", \"the tasks never say to reset X\" \u2014 is judged against the plan or tasks text\nabove, not against the working tree: the plan is what an implementer follows,\nand a partially implemented tree is exactly the situation this review exists\nfor. Code that already does X does not make such a claim invalid; it makes it\nvalid \u2014 document or decide it \u2014 and the reason should say that the code already\ndoes X. Where the artifact under review is a diff or a code change rather than a\nplan, that change is the text such a claim is judged against.\n\nEach issue record carries `file` and `line_range` when the finding has a\nlocation.\n\n- If you can read the repository, open those locations and compare what the code\n  actually does against what the issue claims. Keep the effort bounded: at most 5\n  files per group (prefer explicitly named files, then the narrowest line ranges,\n  breaking ties by importance HIGH > MEDIUM > LOW), and at most ~200 lines around\n  each referenced range.\n- If you cannot read the repository, judge from the records and the context above\n  alone.\n- When an issue has no `file`/`line_range`, try the description plus the context\n  above; if the missing location makes the claim unverifiable, answer\n  \"needs-human-decision\" and say that the location metadata was absent.\n\n## Scope Policy: Preserve\nThe user asked to preserve the agreed scope for this run. Verify each group's\nfacts and set \"status\" exactly as the task above says. Then, separately and\nindependently, check each group's full proposed remedy (every member's proposed\nchange together) against the original requirements and limits, which are\nthe accepted plan and its requirements, limits and recorded decisions. The diff and the task list are evidence of what was built, not of what was asked for: drift in the implementation cannot authorize itself. Fixing a regression the change introduced is ordinarily within scope.\n\n- Classify independently of the reviewers' own `scope_relation` tags, their\n  confidence, how many models agree, and their wording. Do not assume a\n  reviewer obeyed an instruction to stay in scope, and do not accept a remedy\n  because its description calls a new feature \"required\".\n- \"scope_extension\": the remedy extends those limits. It is rejected for this\n  run, even if its facts are correct or its importance is high.\n- \"unclear\": you cannot establish that the remedy stays within those limits. An\n  uncertain remedy is deferred, never approved for automatic application.\n- \"in_scope\": the remedy completes, corrects or clarifies an agreed\n  requirement, fixes a regression the work introduced, or removes behaviour the\n  baseline never asked for.\n- Keep correctness and scope separate. A factually correct suggestion whose\n  remedy extends the scope stays \"valid\"; never mark it \"invalid\" to keep it\n  out \u2014 the scope classification is what holds it back. If the problem is real\n  but only an extension would fix it, keep its status, classify the remedy\n  \"scope_extension\", and name in `scope_reason` the scope decision it needs.\n- When the members propose materially different remedies and one of them stays\n  within scope, you may name that one in \"selected_remedy\" (one line) and\n  classify that remedy; otherwise classify the remedies together, and any\n  extension among them makes the group \"scope_extension\".\n- Explicit exclusions in the baseline bind under every policy.\n\nAdd to each result: \"scope_relation\": \"in_scope|scope_extension|unclear\", \"scope_reason\": \"<one brief sentence>\", \"scope_reference\": \"<baseline section, or empty>\", and optionally\n\"selected_remedy\": \"<the one in-scope remedy you classified>\". Give the\nevidence for the scope decision in `scope_reason`.\n\n## Reply\n\nPrint ONE JSON object and nothing else \u2014 no prose, no markdown fences, no\nexplanation. Do not write any file; whoever invoked you persists your reply.\nYour reply is parsed as-is, and a reply that does not parse is thrown away:\nthe first character is `{` and the last is the `}` that closes it. Keep every\n`reason` and `scope_reason` to one short line with no raw double quotes or line\nbreaks inside it.\n`metadata` comes first and `groups` last, so the reply ends with the last\nresult's `}`, the `]` that closes `groups` and the `}` that closes the object:\n`}]}`. Re-read the object once for balanced brackets before you finish.\nSettle every verdict, and check each result's `group_hash` against its group\nabove, before you print anything, then print the object once: a reply that\nadds a correction, a note or a second object after the first does not parse.\n\n{\n  \"metadata\": {\"model\": \"<the model you are>\", \"timestamp\": \"<ISO 8601>\", \"schema_version\": \"2.1\"},\n  \"groups\": [\n    {\"group_index\": <the group's group_index value>, \"group_hash\": \"<copy the group_hash of the group verbatim>\", \"status\": \"valid|invalid|needs-human-decision\", \"reason\": \"<one brief sentence>\", \"confidence\": 0.0, \"scope_relation\": \"in_scope|scope_extension|unclear\", \"scope_reason\": \"<one brief sentence>\", \"scope_reference\": \"<baseline section, or empty>\"}\n  ]\n}\n\nRules:\n1. Output EXACTLY one result per requested group \u2014 no more, no fewer.\n2. Each group above carries its own `group_index` \u2014 echo that group's\n   `group_index` value back into its result, and copy its `group_hash` value\n   verbatim too. The `group_index` you echo is advisory; the hash is what the\n   results are joined on, so a wrong hash discards the result, and the hash\n   of another group in this batch puts your verdict on that group.\n3. Confidence is a number between 0.0 and 1.0.\n4. Be conservative: when you cannot decide from the context given, answer\n   \"needs-human-decision\" rather than guessing.\n5. `scope_relation`, `scope_reason` and `scope_reference` classify the group's\n   proposed remedy against the scope baseline. They never change `status`;\n   when the context cannot settle the scope, answer \"unclear\".\n",
+      "output_name": "validation_batch_0.json",
+      "output_path": "/tmp/scope-policy-world-20261031/expenses/feature/code-review/validation_batch_0.json",
+      "prompt_path": "/tmp/scope-policy-world-20261031/expenses/feature/code-review/validation_batch_0.prompt.txt",
+      "prompt_lines": 180,
+      "result_channel": "file",
+      "context_mode": "inline",
+      "capability_tier": "full",
+      "executor_role": "agent",
+      "subagent_type": "general-purpose",
+      "model_hint": "auto",
+      "inputs": {
+        "plan_sha256": "0df6d76f195ac021",
+        "grouped_sha256": "d63b21674b065e8a",
+        "diff_base": "HEAD",
+        "reviewed_code_sha256": "f91d77092479b9f9"
+      },
+      "batch_index": 0,
+      "group_indices": [
+        0
+      ],
+      "group_ids": [
+        "aaf5288f7cb59267"
+      ],
+      "groups_count": 1,
+      "is_high_priority": true,
+      "plan_file": "/tmp/scope-policy-world-20261031/expenses/feature.md",
+      "grouped_file": "/tmp/scope-policy-world-20261031/expenses/feature/code-review/grouped.json"
+    },
+    {
+      "tasks_schema_version": 2,
+      "task_id": "validation-batch-1",
+      "kind": "validation",
+      "prompt": "You are validating review suggestions for accuracy.\n\n## Context (Plan content)\n\n# Harden the existing expense CSV exporter\n\nThe existing local expense exporter must emit valid UTF-8 CSV with columns date,category,amount, one header row and one data row for each input record. Preserve values exactly, including categories with commas, quotes and line breaks. Empty input produces a header-only CSV.\n\nThe public API is export_expenses(records) -> str in expenses.py. Existing callers must remain compatible. Do not change that signature or the CLI's two positional input/output arguments. Do not introduce network access, external dependencies, or modify these restrictions.\n\nUse Python's standard library. Verify with python3 -m unittest discover -s tests -v. The current change touches expenses.py and must be reviewed against these requirements.\n\n\n## Context (The implementation under review \u2014 what it recorded about itself, and the code at the lines these issues cite)\n\n#### Implementation record\n\n(Nothing on record \u2014 this plan's implement phase left no summary, task status or change log. Judge the code against the plan alone.)\n\n#### Code at the cited lines\n\nLines are numbered as they are in the file. Only the windows these issues cite are shown; nothing between them is.\n\n### expenses.py\n\n```\n1: def export_expenses(records):\n2:     \"\"\"Return a CSV document containing the supplied expense records.\"\"\"\n3:     lines = [\"date,category,amount\"]\n4:     for record in records:\n5:         lines.append(\",\".join(str(record[key]) for key in (\"date\", \"category\", \"amount\")))\n6:     return \"\\n\".join(lines) + \"\\n\"\n```\n\n## Suggestion groups to validate (2)\n\n[\n  {\n    \"category\": \"bug\",\n    \"group_hash\": \"2a0448e732607e3b\",\n    \"group_id\": \"2a0448e732607e3b\",\n    \"group_index\": 1,\n    \"models\": [\n      \"claude-code:haiku\"\n    ],\n    \"suggestions\": [\n      {\n        \"desc\": \"str(record[key]) turns a None amount or category into the literal text \\\"None\\\", whereas the base csv.writer wrote an empty field. Callers with missing values now get a different output than before, which conflicts with the requirement that existing callers remain compatible and values be preserved exactly.\",\n        \"file\": \"expenses.py\",\n        \"importance\": \"medium\",\n        \"line_range\": [\n          5,\n          5\n        ],\n        \"scope_reason\": \"Restores base behaviour of writing missing values as empty fields, a regression from this change.\",\n        \"scope_relation\": \"in_scope\",\n        \"title\": \"None values now export as the string 'None'\",\n        \"type\": \"bug\"\n      }\n    ],\n    \"theme\": \"None values now export as the string 'None'\"\n  },\n  {\n    \"category\": \"bug\",\n    \"group_hash\": \"b776c15e9ad0de50\",\n    \"group_id\": \"b776c15e9ad0de50\",\n    \"group_index\": 2,\n    \"models\": [\n      \"claude-code:haiku\"\n    ],\n    \"suggestions\": [\n      {\n        \"desc\": \"The base csv.writer used its default \\\\r\\\\n row terminator, while the new code joins rows with \\\\n. The output bytes differ for every row, which can break existing consumers that parse the previous format. The plan asks that existing callers remain compatible, and nothing in the plan calls for a terminator change.\",\n        \"file\": \"expenses.py\",\n        \"importance\": \"medium\",\n        \"line_range\": [\n          6,\n          6\n        ],\n        \"scope_reason\": \"Reverts an unrequested output-format change introduced by the rewrite.\",\n        \"scope_relation\": \"in_scope\",\n        \"title\": \"Line terminator changed from CRLF to LF\",\n        \"type\": \"bug\"\n      }\n    ],\n    \"theme\": \"Line terminator changed from CRLF to LF\"\n  }\n]\n\n## Task\n\nFor each of the 2 suggestion groups above, decide:\n- \"valid\": the issue is real and should be addressed\n- \"invalid\": a false positive \u2014 incorrect or not applicable\n- \"needs-human-decision\": cannot be determined from the context above and\n  requires human judgment\n\nCompare each group against the context above to verify it. Judge only the\ngroups listed above; ignore anything else.\n\nWhen a suggestion claims something about existing code \u2014 a function name, a\nline number, current behaviour \u2014 and you can read the repository you are\nrunning in, open it and check the claim before answering; do not rely on the\ncontext above alone when the code itself is one read away. Reserve\n\"needs-human-decision\" for genuine judgment calls (a product or design\ntrade-off), never for a claim you could have checked but did not look at. If\nyou cannot read the repository, judge from the records and the context above\nalone.\n\nDo not probe system paths, services or databases (anything outside the\nrepository, a database client, a service status): the repository and the\ncontext above are the evidence.\n\nA claim that the plan or the tasks omit something \u2014 \"the plan does not specify\nX\", \"the tasks never say to reset X\" \u2014 is judged against the plan or tasks text\nabove, not against the working tree: the plan is what an implementer follows,\nand a partially implemented tree is exactly the situation this review exists\nfor. Code that already does X does not make such a claim invalid; it makes it\nvalid \u2014 document or decide it \u2014 and the reason should say that the code already\ndoes X. Where the artifact under review is a diff or a code change rather than a\nplan, that change is the text such a claim is judged against.\n\nEach issue record carries `file` and `line_range` when the finding has a\nlocation.\n\n- If you can read the repository, open those locations and compare what the code\n  actually does against what the issue claims. Keep the effort bounded: at most 5\n  files per group (prefer explicitly named files, then the narrowest line ranges,\n  breaking ties by importance HIGH > MEDIUM > LOW), and at most ~200 lines around\n  each referenced range.\n- If you cannot read the repository, judge from the records and the context above\n  alone.\n- When an issue has no `file`/`line_range`, try the description plus the context\n  above; if the missing location makes the claim unverifiable, answer\n  \"needs-human-decision\" and say that the location metadata was absent.\n\n## Scope Policy: Preserve\nThe user asked to preserve the agreed scope for this run. Verify each group's\nfacts and set \"status\" exactly as the task above says. Then, separately and\nindependently, check each group's full proposed remedy (every member's proposed\nchange together) against the original requirements and limits, which are\nthe accepted plan and its requirements, limits and recorded decisions. The diff and the task list are evidence of what was built, not of what was asked for: drift in the implementation cannot authorize itself. Fixing a regression the change introduced is ordinarily within scope.\n\n- Classify independently of the reviewers' own `scope_relation` tags, their\n  confidence, how many models agree, and their wording. Do not assume a\n  reviewer obeyed an instruction to stay in scope, and do not accept a remedy\n  because its description calls a new feature \"required\".\n- \"scope_extension\": the remedy extends those limits. It is rejected for this\n  run, even if its facts are correct or its importance is high.\n- \"unclear\": you cannot establish that the remedy stays within those limits. An\n  uncertain remedy is deferred, never approved for automatic application.\n- \"in_scope\": the remedy completes, corrects or clarifies an agreed\n  requirement, fixes a regression the work introduced, or removes behaviour the\n  baseline never asked for.\n- Keep correctness and scope separate. A factually correct suggestion whose\n  remedy extends the scope stays \"valid\"; never mark it \"invalid\" to keep it\n  out \u2014 the scope classification is what holds it back. If the problem is real\n  but only an extension would fix it, keep its status, classify the remedy\n  \"scope_extension\", and name in `scope_reason` the scope decision it needs.\n- When the members propose materially different remedies and one of them stays\n  within scope, you may name that one in \"selected_remedy\" (one line) and\n  classify that remedy; otherwise classify the remedies together, and any\n  extension among them makes the group \"scope_extension\".\n- Explicit exclusions in the baseline bind under every policy.\n\nAdd to each result: \"scope_relation\": \"in_scope|scope_extension|unclear\", \"scope_reason\": \"<one brief sentence>\", \"scope_reference\": \"<baseline section, or empty>\", and optionally\n\"selected_remedy\": \"<the one in-scope remedy you classified>\". Give the\nevidence for the scope decision in `scope_reason`.\n\n## Reply\n\nPrint ONE JSON object and nothing else \u2014 no prose, no markdown fences, no\nexplanation. Do not write any file; whoever invoked you persists your reply.\nYour reply is parsed as-is, and a reply that does not parse is thrown away:\nthe first character is `{` and the last is the `}` that closes it. Keep every\n`reason` and `scope_reason` to one short line with no raw double quotes or line\nbreaks inside it.\n`metadata` comes first and `groups` last, so the reply ends with the last\nresult's `}`, the `]` that closes `groups` and the `}` that closes the object:\n`}]}`. Re-read the object once for balanced brackets before you finish.\nSettle every verdict, and check each result's `group_hash` against its group\nabove, before you print anything, then print the object once: a reply that\nadds a correction, a note or a second object after the first does not parse.\n\n{\n  \"metadata\": {\"model\": \"<the model you are>\", \"timestamp\": \"<ISO 8601>\", \"schema_version\": \"2.1\"},\n  \"groups\": [\n    {\"group_index\": <the group's group_index value>, \"group_hash\": \"<copy the group_hash of the group verbatim>\", \"status\": \"valid|invalid|needs-human-decision\", \"reason\": \"<one brief sentence>\", \"confidence\": 0.0, \"scope_relation\": \"in_scope|scope_extension|unclear\", \"scope_reason\": \"<one brief sentence>\", \"scope_reference\": \"<baseline section, or empty>\"}\n  ]\n}\n\nRules:\n1. Output EXACTLY one result per requested group \u2014 no more, no fewer.\n2. Each group above carries its own `group_index` \u2014 echo that group's\n   `group_index` value back into its result, and copy its `group_hash` value\n   verbatim too. The `group_index` you echo is advisory; the hash is what the\n   results are joined on, so a wrong hash discards the result, and the hash\n   of another group in this batch puts your verdict on that group.\n3. Confidence is a number between 0.0 and 1.0.\n4. Be conservative: when you cannot decide from the context given, answer\n   \"needs-human-decision\" rather than guessing.\n5. `scope_relation`, `scope_reason` and `scope_reference` classify the group's\n   proposed remedy against the scope baseline. They never change `status`;\n   when the context cannot settle the scope, answer \"unclear\".\n",
+      "output_name": "validation_batch_1.json",
+      "output_path": "/tmp/scope-policy-world-20261031/expenses/feature/code-review/validation_batch_1.json",
+      "prompt_path": "/tmp/scope-policy-world-20261031/expenses/feature/code-review/validation_batch_1.prompt.txt",
+      "prompt_lines": 205,
+      "result_channel": "file",
+      "context_mode": "inline",
+      "capability_tier": "full",
+      "executor_role": "agent",
+      "subagent_type": "general-purpose",
+      "model_hint": "auto",
+      "inputs": {
+        "plan_sha256": "0df6d76f195ac021",
+        "grouped_sha256": "d63b21674b065e8a",
+        "diff_base": "HEAD",
+        "reviewed_code_sha256": "f91d77092479b9f9"
+      },
+      "batch_index": 1,
+      "group_indices": [
+        1,
+        2
+      ],
+      "group_ids": [
+        "2a0448e732607e3b",
+        "b776c15e9ad0de50"
+      ],
+      "groups_count": 2,
+      "is_high_priority": false,
+      "plan_file": "/tmp/scope-policy-world-20261031/expenses/feature.md",
+      "grouped_file": "/tmp/scope-policy-world-20261031/expenses/feature/code-review/grouped.json"
+    }
+  ],
+  "context_contract": 2,
+  "total_batches": 2,
+  "batching_stats": {
+    "total_groups": 3,
+    "high_count": 1,
+    "normal_count": 2,
+    "estimated_batches": 2,
+    "subagent_calls_saved": 1,
+    "efficiency_gain_percent": 33.3
+  },
+  "grouped_file": "/tmp/scope-policy-world-20261031/expenses/feature/code-review/grouped.json",
+  "phase_dir": "/tmp/scope-policy-world-20261031/expenses/feature/code-review",
+  "reaggregate_mode": "review-code",
+  "plan_file": "/tmp/scope-policy-world-20261031/expenses/feature.md",
+  "replay_flags": [
+    "--host",
+    "codex",
+    "--models",
+    "claude-code:haiku",
+    "--scope-policy",
+    "preserve",
+    "--base-ref",
+    "HEAD",
+    "--files",
+    "expenses.py",
+    "--timeout",
+    "1300",
+    "--detach"
+  ],
+  "model_hint": "auto",
+  "base_ref": "HEAD",
+  "scope": {
+    "policy": "preserve",
+    "policy_source": "explicit",
+    "phase": "code-review",
+    "baseline_id": "a2b83aa2f58e9cd1",
+    "round_baseline_id": "a2b83aa2f58e9cd1",
+    "baseline": {
+      "version": 1,
+      "baseline_id": "a2b83aa2f58e9cd1",
+      "sources": [
+        {
+          "role": "plan",
+          "sha256": "0df6d76f195ac021b3538bd7e5e4fb60d62dfd9b57b1168b922e5d3eb7f8f1a7",
+          "path": "/tmp/scope-policy-world-20261031/expenses/feature.md",
+          "snapshot": "validation-snapshot.md"
+        },
+        {
+          "role": "diff",
+          "sha256": "c7f7d885b3331e5af65ea50c004e839d3328ecd953b3209cebe7651e572d1ee9",
+          "endpoints": {
+            "base": "HEAD"
+          }
+        }
+      ],
+      "phase": "code-review"
+    }
+  }
+}

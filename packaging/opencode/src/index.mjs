@@ -106,8 +106,10 @@ const SKILL_DIR_PLACEHOLDER = "{SKILL_DIR}"
  * 6: the commit modes' range: `positional_kinds.revs`, the optional `revs`
  * argument's description, and the `revs` block this file composes and reads
  * a range with (plans/review-commits.md §2.9).
+ * 7: dispatcher.foreground_preview_flags permits terminal previews without a
+ * detached-run banner, while retaining run-id supervision for actual launches.
  */
-const SUPPORTED_SURFACE_VERSION = 6
+const SUPPORTED_SURFACE_VERSION = 7
 
 /**
  * Schema v6's optional fifth argument: the commit modes' range. Registered
@@ -157,6 +159,12 @@ function loadSurface() {
         `cli-surface.json declares no usable dispatcher.route_env (a non-empty ` +
           `name and value). The package is inconsistent; reinstall it.`,
       )
+      return null
+    }
+    const previews = surface.dispatcher?.foreground_preview_flags
+    if (!Array.isArray(previews) || !previews.every(isNonEmptyString)) {
+      warn(`cli-surface.json declares no usable dispatcher.foreground_preview_flags. ` +
+        `The package is inconsistent; reinstall it.`)
       return null
     }
     // Schema v6's range: refused whole when it is not all there, never
@@ -1820,6 +1828,18 @@ async function runWorkflow({
         return { kind: "return", result: terminalResult(launch, foreground) }
       }
       if (!launched) {
+        // Explicit previews can finish before detaching. They still owe a
+        // structured result; a banner, when present, is always supervised.
+        const previews = surface.dispatcher.foreground_preview_flags
+        const exacts = surface.reserved_flags.exact_options || []
+        const finished = !launch.result || (
+          launch.result.next == null && launch.result.state !== surface.dispatcher.states.running
+        )
+        if (finished && (cycleValues.extraFlags || []).some(token =>
+          previews.some(flag => flagMatches(token.split("=", 1)[0], flag, exacts)),
+        )) {
+          return { kind: "return", result: terminalResult(launch, foreground) }
+        }
         return {
           kind: "return",
           result: errorResult(

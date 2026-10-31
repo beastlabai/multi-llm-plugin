@@ -1,0 +1,13 @@
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"ok\": false, \"state\": \"needs-human\", \"user_next_step\": null, \"abort_command\": {\"mode\": \"status\", \"plan\": \"feature.md\", \"question\": \"\", \"extra_flags\": [\"--abort\", \"--run-id\", \"9a57648e-23ce-4271-b0e4-249ea16cb38f\"]}, \"message\": \"the call was cancelled. The detached run 9a57648e-23ce-4271-b0e4-249ea16cb38f was confirmed aborted. Log: /tmp/scope-policy-world-20261031/generation-resume/feature/generate-tasks/orchestrator-run.log. If it is still alive, stop it with the `abort_command` tool call in this result.\", \"exit\": null, \"anchor\": \"/tmp/scope-policy-world-20261031/generation-resume\", \"anchor_source\": \"roots\", \"environment\": {\"platform\": \"linux\", \"shell\": [\"/usr/bin/bash\", \"-lc\", \"cd -- \\\"$1\\\" && shift && exec \\\"$@\\\"\", \"bash\"], \"login_shell\": true, \"profile_shell\": \"/bin/bash\", \"interpreter\": \"/home/marc/code/mllm-wt/scope-policy/skills/multi-llm/.venv/bin/python3 (3.13.14)\", \"missing\": [\"CODEX_HOME\", \"MULTI_LLM_CODEX_UNSANDBOXED_WRITES\", \"MULTI_LLM_GIT_CREDENTIAL_HELPER\", \"MULTI_LLM_HANDSHAKE_TIMEOUT_S\", \"MULTI_LLM_HEARTBEAT_INTERVAL_S\", \"MULTI_LLM_HOST\", \"MULTI_LLM_LEGACY_INSTRUCTIONS\", \"MULTI_LLM_MAX_DETACHED\", \"MULTI_LLM_PROVIDERS_CONFIG\", \"MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE\", \"MULTI_LLM_REPLAY_FLAGS\", \"MULTI_LLM_SKILL_DIR\", \"MULTI_LLM_UV\", \"MULTI_LLM_UV_RUN_ARGS\", \"UV_CACHE_DIR\", \"UV_OFFLINE\", \"UV_PROJECT_ENVIRONMENT\"]}, \"relays\": {\"attempted\": 1, \"delivered\": 1, \"rejected\": 0, \"unavailable\": 0, \"logged\": 1}, \"progress_lines\": null, \"reason\": \"the call was cancelled\", \"run_id\": \"9a57648e-23ce-4271-b0e4-249ea16cb38f\", \"log\": \"/tmp/scope-policy-world-20261031/generation-resume/feature/generate-tasks/orchestrator-run.log\", \"abort_dispatched\": true, \"session_model\": \"gpt-6-luna\"}"
+      }
+    ],
+    "isError": true
+  }
+}

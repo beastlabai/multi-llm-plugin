@@ -1,0 +1,1187 @@
+{
+  "planPath": "/tmp/scope-policy-world-20261031/expenses/feature.md",
+  "planTitle": "Harden the existing expense CSV exporter",
+  "title": "Harden the existing expense CSV exporter",
+  "baseRef": "HEAD",
+  "phase": "code-review",
+  "readOnly": false,
+  "generatedAt": "2026-10-31T18:07:53.831476",
+  "models": [
+    "claude-code:haiku"
+  ],
+  "modelMetadata": {
+    "claude-code:haiku": {
+      "full": "claude-code:haiku",
+      "provider": "claude-code",
+      "model": "haiku",
+      "provider_color": "#A3D236",
+      "model_color": "#3BD3D8",
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiBzaGFwZS1yZW5kZXJpbmc9Imdlb21ldHJpY1ByZWNpc2lvbiIgdGV4dC1yZW5kZXJpbmc9Imdlb21ldHJpY1ByZWNpc2lvbiIgaW1hZ2UtcmVuZGVyaW5nPSJvcHRpbWl6ZVF1YWxpdHkiIGZpbGwtcnVsZT0iZXZlbm9kZCIgY2xpcC1ydWxlPSJldmVub2RkIiB2aWV3Qm94PSIwIDAgNTEyIDUxMiI+PHJlY3QgZmlsbD0iI0NDOUI3QSIgd2lkdGg9IjUxMiIgaGVpZ2h0PSI1MTIiIHJ4PSIxMDQuMTg3IiByeT0iMTA1LjA0MiIvPjxwYXRoIGZpbGw9IiMxRjFGMUUiIGZpbGwtcnVsZT0ibm9uemVybyIgZD0iTTMxOC42NjMgMTQ5Ljc4N2gtNDMuMzY4bDc4Ljk1MiAyMTIuNDIzIDQzLjM2OC4wMDQtNzguOTUyLTIxMi40Mjd6bS0xMjUuMzI2IDBsLTc4Ljk1MiAyMTIuNDI3aDQ0LjI1NWwxNS45MzItNDQuNjA4IDgyLjg0Ni0uMDA0IDE2LjEwNyA0NC42MTJoNDQuMjU1bC03OS4xMjYtMjEyLjQyN2gtNDUuMzE3em0tNC4yNTEgMTI4LjM0MWwyNi45MS03NC43MDEgMjcuMDgzIDc0LjcwMWgtNTMuOTkzeiIvPjwvc3ZnPgo=",
+      "provider_icon": "",
+      "usage": {
+        "input_tokens": 8,
+        "output_tokens": 2396,
+        "cached_input_tokens": 112302,
+        "cost_usd": 0.00787262,
+        "total_tokens": 2404,
+        "served_model": "claude-haiku-5-5"
+      },
+      "usage_label": "$0.01 est., 2,396 output tokens"
+    }
+  },
+  "failedModels": {},
+  "sortConfig": {
+    "validationOrder": {
+      "needs-human-decision": 0,
+      "valid": 1,
+      "validation_failed": 2,
+      "invalid": 3,
+      "pending": 4
+    },
+    "importanceOrder": {
+      "HIGH": 0,
+      "MEDIUM": 1,
+      "LOW": 2,
+      "": 3
+    },
+    "unknownStatusRank": 5,
+    "unknownImportanceRank": 3
+  },
+  "groups": [
+    {
+      "index": 3,
+      "originalIndex": 3,
+      "theme": "Line terminator changed from CRLF to LF",
+      "category": "bug",
+      "models": [
+        "claude-code:haiku"
+      ],
+      "priorityScore": 3,
+      "validationStatus": "needs-human-decision",
+      "validationReason": "Line 6 joins rows with LF, but the baseline's terminator cannot be read here because git is unavailable, and the plan is silent on line endings.",
+      "validationConfidence": 0.4,
+      "maxImportance": "MEDIUM",
+      "suggestions": [
+        {
+          "id": "ce4e319b831f1a71",
+          "title": "Line terminator changed from CRLF to LF",
+          "description": "The base csv.writer used its default \\r\\n row terminator, while the new code joins rows with \\n. The output bytes differ for every row, which can break existing consumers that parse the previous format. The plan asks that existing callers remain compatible, and nothing in the plan calls for a terminator change.",
+          "importance": "MEDIUM",
+          "type": "bug",
+          "sectionRef": "",
+          "fileRef": "expenses.py:6-6",
+          "model": "claude-code:haiku",
+          "anchorText": "return \"\\n\".join(lines) + \"\\n\"",
+          "suggestedFix": null,
+          "lineRange": [
+            6,
+            6
+          ],
+          "displayLabel": "G3S1",
+          "displayHash": "ce4e319b",
+          "scope": {
+            "relation": "in_scope",
+            "label": "Within scope",
+            "reason": "Reverts an unrequested output-format change introduced by the rewrite.",
+            "reference": "Plan: 'Existing callers must remain compatible.'",
+            "classified": true,
+            "provisional": true
+          }
+        }
+      ],
+      "groupHash": "b776c15e9ad0de50",
+      "displayLabel": "G3",
+      "displayHash": "b776c15e",
+      "scope": {
+        "relation": "unclear",
+        "label": "Scope unclear",
+        "reason": "Restoring CRLF is in scope only if the baseline emitted CRLF, which the baseline code could not confirm here.",
+        "reference": "Plan: existing callers remain compatible",
+        "authority": "bound",
+        "validated": true,
+        "stale": false,
+        "provisional": false,
+        "classifiedRelation": "unclear",
+        "classifiedLabel": "Scope unclear",
+        "classifiedReason": "Restoring CRLF is in scope only if the baseline emitted CRLF, which the baseline code could not confirm here.",
+        "baselineId": "a2b83aa2f58e9cd1",
+        "proposalDigest": "4723f92e7d752caffb846a079a2bcde2d0c782a696c0526b61a02c0b9676dc7a",
+        "decision": {
+          "policy": "preserve",
+          "eligible": false,
+          "relation": "unclear",
+          "label": "Scope unclear",
+          "reason": "Deferred: scope preservation requested: scope unclear (Restoring CRLF is in scope only if the baseline emitted CRLF, which the baseline code could not confirm here.)",
+          "outcome": "deferred",
+          "authority": "bound",
+          "recorded": true,
+          "detail": "scope unclear (Restoring CRLF is in scope only if the baseline emitted CRLF, which the baseline code could not confirm here.)",
+          "outcomeText": "Deferred: scope preservation requested"
+        }
+      }
+    },
+    {
+      "index": 1,
+      "originalIndex": 1,
+      "theme": "CSV values are no longer quoted or escaped",
+      "category": "bug",
+      "models": [
+        "claude-code:haiku"
+      ],
+      "priorityScore": 4,
+      "validationStatus": "valid",
+      "validationReason": "expenses.py line 5 joins str() values with commas and performs no quoting or escaping, so a category containing a comma, quote or newline corrupts the row, as the plan forbids.",
+      "validationConfidence": 0.95,
+      "maxImportance": "HIGH",
+      "suggestions": [
+        {
+          "id": "d750f5ec21246585",
+          "title": "CSV values are no longer quoted or escaped",
+          "description": "The rewrite replaces csv.writer with a plain \",\".join of str() values, so a category containing a comma, double quote or line break is written unquoted and splits or corrupts the row. The plan requires values preserved exactly, including categories with commas, quotes and line breaks, and the base implementation handled this via csv.writer. This is a regression the change introduced.",
+          "importance": "HIGH",
+          "type": "bug",
+          "sectionRef": "",
+          "fileRef": "expenses.py:5-5",
+          "model": "claude-code:haiku",
+          "anchorText": "lines.append(\",\".join(str(record[key])",
+          "suggestedFix": null,
+          "lineRange": [
+            5,
+            5
+          ],
+          "displayLabel": "G1S1",
+          "displayHash": "d750f5ec",
+          "scope": {
+            "relation": "in_scope",
+            "label": "Within scope",
+            "reason": "Restores the plan's required exact-value CSV output that the change broke.",
+            "reference": "Plan: 'Preserve values exactly, including categories with commas, quotes and line breaks.'",
+            "classified": true,
+            "provisional": true
+          }
+        }
+      ],
+      "groupHash": "aaf5288f7cb59267",
+      "displayLabel": "G1",
+      "displayHash": "aaf5288f",
+      "scope": {
+        "relation": "in_scope",
+        "label": "Within scope",
+        "reason": "Restores the plan's required exact-value CSV output, which covers commas, quotes and line breaks; stdlib csv.writer stays within the limits.",
+        "reference": "Plan: values preserved exactly, including categories with commas, quotes and line breaks; standard library only",
+        "authority": "bound",
+        "validated": true,
+        "stale": false,
+        "provisional": false,
+        "classifiedRelation": "in_scope",
+        "classifiedLabel": "Within scope",
+        "classifiedReason": "Restores the plan's required exact-value CSV output, which covers commas, quotes and line breaks; stdlib csv.writer stays within the limits.",
+        "baselineId": "a2b83aa2f58e9cd1",
+        "proposalDigest": "b880599dd9c6870e4e50abe5a4f6596cc23c7fdf53e8a98fbc014bfdcb1434de",
+        "decision": {
+          "policy": "preserve",
+          "eligible": true,
+          "relation": "in_scope",
+          "label": "Within scope",
+          "reason": "Restores the plan's required exact-value CSV output, which covers commas, quotes and line breaks; stdlib csv.writer stays within the limits.",
+          "outcome": "eligible",
+          "authority": "bound",
+          "detail": "",
+          "outcomeText": "Eligible under scope preservation"
+        }
+      }
+    },
+    {
+      "index": 2,
+      "originalIndex": 2,
+      "theme": "None values now export as the string 'None'",
+      "category": "bug",
+      "models": [
+        "claude-code:haiku"
+      ],
+      "priorityScore": 3,
+      "validationStatus": "valid",
+      "validationReason": "Line 5 uses str(record[key]), so a None category or amount is written as the text 'None' instead of a preserved value, which conflicts with the plan's exact-preservation requirement.",
+      "validationConfidence": 0.8,
+      "maxImportance": "MEDIUM",
+      "suggestions": [
+        {
+          "id": "22bb796f7596cfa5",
+          "title": "None values now export as the string 'None'",
+          "description": "str(record[key]) turns a None amount or category into the literal text \"None\", whereas the base csv.writer wrote an empty field. Callers with missing values now get a different output than before, which conflicts with the requirement that existing callers remain compatible and values be preserved exactly.",
+          "importance": "MEDIUM",
+          "type": "bug",
+          "sectionRef": "",
+          "fileRef": "expenses.py:5-5",
+          "model": "claude-code:haiku",
+          "anchorText": "str(record[key]) for key in",
+          "suggestedFix": null,
+          "lineRange": [
+            5,
+            5
+          ],
+          "displayLabel": "G2S1",
+          "displayHash": "22bb796f",
+          "scope": {
+            "relation": "in_scope",
+            "label": "Within scope",
+            "reason": "Restores base behaviour of writing missing values as empty fields, a regression from this change.",
+            "reference": "Plan: 'Existing callers must remain compatible.' and 'Preserve values exactly'",
+            "classified": true,
+            "provisional": true
+          }
+        }
+      ],
+      "groupHash": "2a0448e732607e3b",
+      "displayLabel": "G2",
+      "displayHash": "2a0448e7",
+      "scope": {
+        "relation": "in_scope",
+        "label": "Within scope",
+        "reason": "The remedy makes None export as an empty field, which preserves values as the plan requires and fixes a regression from the rewrite.",
+        "reference": "Plan: values preserved exactly; existing callers remain compatible",
+        "authority": "bound",
+        "validated": true,
+        "stale": false,
+        "provisional": false,
+        "classifiedRelation": "in_scope",
+        "classifiedLabel": "Within scope",
+        "classifiedReason": "The remedy makes None export as an empty field, which preserves values as the plan requires and fixes a regression from the rewrite.",
+        "baselineId": "a2b83aa2f58e9cd1",
+        "proposalDigest": "a2fb50ddc9979397b3dd883b1b0147fb81ace15bd4a1126420314fe4c5690b2d",
+        "decision": {
+          "policy": "preserve",
+          "eligible": true,
+          "relation": "in_scope",
+          "label": "Within scope",
+          "reason": "The remedy makes None export as an empty field, which preserves values as the plan requires and fixes a regression from the rewrite.",
+          "outcome": "eligible",
+          "authority": "bound",
+          "detail": "",
+          "outcomeText": "Eligible under scope preservation"
+        }
+      }
+    }
+  ],
+  "sectionContexts": {},
+  "logSnippets": {
+    "claude-code:haiku": "   deferred or skipped is not missing functionality\n4. Identify any issues\n\nLook for:\n- **Bugs**: Logic errors, incorrect behavior, edge cases\n- **Missing functionality**: Plan requirements not implemented\n- **Tests that test nothing**: Tests in the change offered as evidence for a behaviour that would still pass with that behaviour missing or broken: they never reach the code that implements it, mock out that code, assert something that cannot fail, or are skipped unconditionally or for a reason that does not apply\n- **Security issues**: Vulnerabilities, unsafe patterns, and data exposure through logs, telemetry, caches, test output or committed files\n- **Scope creep**: Code that goes beyond what was planned\n- **Quality issues**: Performance problems, code smells\n\n## Working limits\n- This review is stopped after about 21 minutes. Anything unfinished at that point is lost, so write your answer well before then.\n- Do NOT run the project's test suite, builds, linters, installers, or any other long-running command. This is a read-only review. If a finding depends on a test's result, you may run that ONE narrowly scoped test file, and only if you can run commands at all.\n- Do NOT modify, create or delete any file except the output file named below.\n- Do NOT claim that a test passes or fails unless you ran it during this review and saw its result. Say what a test covers, not what it would report.\n\n## Scope Policy: Preserve\nThe user asked to preserve the agreed scope for this review. The scope baseline\nis the accepted plan and its requirements, limits and recorded decisions. The diff and the task list are evidence of what was built, not of what was asked for: drift in the implementation cannot authorize itself. Fixing a regression the change introduced is ordinarily within scope. This rule takes precedence over the broader checklists above.\n\n- Report only findings whose proposed correction stays within the agreed\n  outcome and its stated limits. Do not propose new features or product\n  outcomes, unrelated refactors, or optional cleanup outside that outcome, even\n  when they would be beneficial.\n- Keep reporting missing or incomplete agreed requirements, bugs and security\n  regressions the work introduces, and contradictions or gaps in it.\n- Keep reporting existing scope creep: behaviour or content the baseline never\n  asked for. A finding that removes it brings the work back within scope, so\n  report it and classify it \"in_scope\"; a finding about scope is not banned.\n- Explicit exclusions in the baseline (for example \"do not change the API\")\n  bind: never propose a remedy that crosses one.\n- If an agreed requirement cannot be met without extending the scope, or the\n  right fix is uncertain, do not hide the problem and do not prescribe the\n  expansion as the fix: report the blocker with its evidence, classify the\n  remedy honestly as \"scope_extension\" or \"unclear\", and say in the\n  description which scope de...\n\n----------------------------------------\nSTDOUT\n----------------------------------------\n{\"duration_api_ms\":15909,\"stop_reason\":\"end_turn\",\"session_id\":\"bc745152-c251-4219-b5cf-2bd65e0d0cd0\",\"total_cost_usd\":0.00787262,\"usage\":{\"input_tokens\":8,\"cache_creation_input_tokens\":25612,\"cache_read_input_tokens\":112302,\"output_tokens\":2396,\"output_tokens_details\":{\"thinking_tokens\":821},\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":25612,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"global\",\"iterations\":[{\"input_tokens\":2,\"output_tokens\":242,\"cache_read_input_tokens\":35111,\"cache_creation_input_tokens\":1883,\"cache_creation\":{\"ephemeral_5m_input_tokens\":0,\"ephemeral_1h_input_tokens\":1883},\"type\":\"message\"}],\"speed\":\"standard\",\"fallback_credit\":null},\"modelUsage\":{\"claude-haiku-5-5\":{\"inputTokens\":4207,\"outputTokens\":2413,\"cacheReadInputTokens\":112302,\"cacheCreationInputTokens\":25612,\"webSearchRequests\":0,\"costUSD\":0.00787262,\"contextWindow\":1000000,\"maxOutputTokens\":128000,\"thinkingTokens\":821,\"cacheCreationEphemeral5mInputTokens\":0,\"cacheCreationEphemeral1hInputTokens\":25612,\"canonicalModel\":\"claude-haiku-5-5\",\"provider\":\"firstParty\",\"costBasis\":\"list\"}},\"permission_denials\":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\",\"subagent_stats\":{\"spawned\":0,\"requested\":{\"background\":0,\"foreground\":0,\"unset\":0},\"started_in_background\":0,\"max_depth\":0,\"spawned_by_subagents\":0,\"completed\":0,\"failed\":0,\"killed\":{\"parent\":0,\"user\":0,\"system\":0},\"refused\":{\"depth_limit\":0,\"concurrency_limit\":0,\"budget\":0},\"by_type\":{}},\"safety_stops\":0,\"is_error\":false,\"num_turns\":6,\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"JSON written to /tmp/scope-policy-world-20261031/expenses/feature/code-review/claude-code_haiku.json\\n\\nThe review found three issues, all in `expenses.py`. I read the diff and the current file only and did not run any tests.\\n\\n1. **High:** The `csv.writer` was replaced with a plain `\\\",\\\".join`, so categories containing commas, quotes or line breaks are no longer quoted. The plan requires exact preservation of those values.\\n2. **Medium:** `str()` turns `None` values into the text `\\\"None\\\"`, where the base `csv.writer` wrote an empty field.\\n3. **Medium:** Rows are now terminated with `\\\\n` instead of the base `\\\\r\\\\n`, which changes the output bytes for existing callers.\",\"ttft_ms\":1652,\"type\":\"result\",\"duration_ms\":15985,\"uuid\":\"77226b0c-647b-41b9-be7a-8f35e78d9533\",\"ttft_stream_ms\":1452,\"time_to_request_ms\":193,\"first_content_frame_ms\":1452,\"queued_turn_count\":0,\"result_index\":0}\n\n----------------------------------------\nSTDERR\n----------------------------------------\n(empty)\n\n================================================================================\n"
+  },
+  "fileView": {
+    "expenses.py": {
+      "suggestions": [
+        {
+          "index": 3,
+          "originalIndex": 3,
+          "theme": "Line terminator changed from CRLF to LF",
+          "category": "bug",
+          "models": [
+            "claude-code:haiku"
+          ],
+          "priorityScore": 3,
+          "validationStatus": "needs-human-decision",
+          "validationReason": "Line 6 joins rows with LF, but the baseline's terminator cannot be read here because git is unavailable, and the plan is silent on line endings.",
+          "validationConfidence": 0.4,
+          "maxImportance": "MEDIUM",
+          "suggestions": [
+            {
+              "id": "ce4e319b831f1a71",
+              "title": "Line terminator changed from CRLF to LF",
+              "description": "The base csv.writer used its default \\r\\n row terminator, while the new code joins rows with \\n. The output bytes differ for every row, which can break existing consumers that parse the previous format. The plan asks that existing callers remain compatible, and nothing in the plan calls for a terminator change.",
+              "importance": "MEDIUM",
+              "type": "bug",
+              "sectionRef": "",
+              "fileRef": "expenses.py:6-6",
+              "model": "claude-code:haiku",
+              "anchorText": "return \"\\n\".join(lines) + \"\\n\"",
+              "suggestedFix": null,
+              "lineRange": [
+                6,
+                6
+              ],
+              "displayLabel": "G3S1",
+              "displayHash": "ce4e319b",
+              "scope": {
+                "relation": "in_scope",
+                "label": "Within scope",
+                "reason": "Reverts an unrequested output-format change introduced by the rewrite.",
+                "reference": "Plan: 'Existing callers must remain compatible.'",
+                "classified": true,
+                "provisional": true
+              }
+            }
+          ],
+          "groupHash": "b776c15e9ad0de50",
+          "displayLabel": "G3",
+          "displayHash": "b776c15e",
+          "scope": {
+            "relation": "unclear",
+            "label": "Scope unclear",
+            "reason": "Restoring CRLF is in scope only if the baseline emitted CRLF, which the baseline code could not confirm here.",
+            "reference": "Plan: existing callers remain compatible",
+            "authority": "bound",
+            "validated": true,
+            "stale": false,
+            "provisional": false,
+            "classifiedRelation": "unclear",
+            "classifiedLabel": "Scope unclear",
+            "classifiedReason": "Restoring CRLF is in scope only if the baseline emitted CRLF, which the baseline code could not confirm here.",
+            "baselineId": "a2b83aa2f58e9cd1",
+            "proposalDigest": "4723f92e7d752caffb846a079a2bcde2d0c782a696c0526b61a02c0b9676dc7a",
+            "decision": {
+              "policy": "preserve",
+              "eligible": false,
+              "relation": "unclear",
+              "label": "Scope unclear",
+              "reason": "Deferred: scope preservation requested: scope unclear (Restoring CRLF is in scope only if the baseline emitted CRLF, which the baseline code could not confirm here.)",
+              "outcome": "deferred",
+              "authority": "bound",
+              "recorded": true,
+              "detail": "scope unclear (Restoring CRLF is in scope only if the baseline emitted CRLF, which the baseline code could not confirm here.)",
+              "outcomeText": "Deferred: scope preservation requested"
+            }
+          }
+        },
+        {
+          "index": 1,
+          "originalIndex": 1,
+          "theme": "CSV values are no longer quoted or escaped",
+          "category": "bug",
+          "models": [
+            "claude-code:haiku"
+          ],
+          "priorityScore": 4,
+          "validationStatus": "valid",
+          "validationReason": "expenses.py line 5 joins str() values with commas and performs no quoting or escaping, so a category containing a comma, quote or newline corrupts the row, as the plan forbids.",
+          "validationConfidence": 0.95,
+          "maxImportance": "HIGH",
+          "suggestions": [
+            {
+              "id": "d750f5ec21246585",
+              "title": "CSV values are no longer quoted or escaped",
+              "description": "The rewrite replaces csv.writer with a plain \",\".join of str() values, so a category containing a comma, double quote or line break is written unquoted and splits or corrupts the row. The plan requires values preserved exactly, including categories with commas, quotes and line breaks, and the base implementation handled this via csv.writer. This is a regression the change introduced.",
+              "importance": "HIGH",
+              "type": "bug",
+              "sectionRef": "",
+              "fileRef": "expenses.py:5-5",
+              "model": "claude-code:haiku",
+              "anchorText": "lines.append(\",\".join(str(record[key])",
+              "suggestedFix": null,
+              "lineRange": [
+                5,
+                5
+              ],
+              "displayLabel": "G1S1",
+              "displayHash": "d750f5ec",
+              "scope": {
+                "relation": "in_scope",
+                "label": "Within scope",
+                "reason": "Restores the plan's required exact-value CSV output that the change broke.",
+                "reference": "Plan: 'Preserve values exactly, including categories with commas, quotes and line breaks.'",
+                "classified": true,
+                "provisional": true
+              }
+            }
+          ],
+          "groupHash": "aaf5288f7cb59267",
+          "displayLabel": "G1",
+          "displayHash": "aaf5288f",
+          "scope": {
+            "relation": "in_scope",
+            "label": "Within scope",
+            "reason": "Restores the plan's required exact-value CSV output, which covers commas, quotes and line breaks; stdlib csv.writer stays within the limits.",
+            "reference": "Plan: values preserved exactly, including categories with commas, quotes and line breaks; standard library only",
+            "authority": "bound",
+            "validated": true,
+            "stale": false,
+            "provisional": false,
+            "classifiedRelation": "in_scope",
+            "classifiedLabel": "Within scope",
+            "classifiedReason": "Restores the plan's required exact-value CSV output, which covers commas, quotes and line breaks; stdlib csv.writer stays within the limits.",
+            "baselineId": "a2b83aa2f58e9cd1",
+            "proposalDigest": "b880599dd9c6870e4e50abe5a4f6596cc23c7fdf53e8a98fbc014bfdcb1434de",
+            "decision": {
+              "policy": "preserve",
+              "eligible": true,
+              "relation": "in_scope",
+              "label": "Within scope",
+              "reason": "Restores the plan's required exact-value CSV output, which covers commas, quotes and line breaks; stdlib csv.writer stays within the limits.",
+              "outcome": "eligible",
+              "authority": "bound",
+              "detail": "",
+              "outcomeText": "Eligible under scope preservation"
+            }
+          }
+        },
+        {
+          "index": 2,
+          "originalIndex": 2,
+          "theme": "None values now export as the string 'None'",
+          "category": "bug",
+          "models": [
+            "claude-code:haiku"
+          ],
+          "priorityScore": 3,
+          "validationStatus": "valid",
+          "validationReason": "Line 5 uses str(record[key]), so a None category or amount is written as the text 'None' instead of a preserved value, which conflicts with the plan's exact-preservation requirement.",
+          "validationConfidence": 0.8,
+          "maxImportance": "MEDIUM",
+          "suggestions": [
+            {
+              "id": "22bb796f7596cfa5",
+              "title": "None values now export as the string 'None'",
+              "description": "str(record[key]) turns a None amount or category into the literal text \"None\", whereas the base csv.writer wrote an empty field. Callers with missing values now get a different output than before, which conflicts with the requirement that existing callers remain compatible and values be preserved exactly.",
+              "importance": "MEDIUM",
+              "type": "bug",
+              "sectionRef": "",
+              "fileRef": "expenses.py:5-5",
+              "model": "claude-code:haiku",
+              "anchorText": "str(record[key]) for key in",
+              "suggestedFix": null,
+              "lineRange": [
+                5,
+                5
+              ],
+              "displayLabel": "G2S1",
+              "displayHash": "22bb796f",
+              "scope": {
+                "relation": "in_scope",
+                "label": "Within scope",
+                "reason": "Restores base behaviour of writing missing values as empty fields, a regression from this change.",
+                "reference": "Plan: 'Existing callers must remain compatible.' and 'Preserve values exactly'",
+                "classified": true,
+                "provisional": true
+              }
+            }
+          ],
+          "groupHash": "2a0448e732607e3b",
+          "displayLabel": "G2",
+          "displayHash": "2a0448e7",
+          "scope": {
+            "relation": "in_scope",
+            "label": "Within scope",
+            "reason": "The remedy makes None export as an empty field, which preserves values as the plan requires and fixes a regression from the rewrite.",
+            "reference": "Plan: values preserved exactly; existing callers remain compatible",
+            "authority": "bound",
+            "validated": true,
+            "stale": false,
+            "provisional": false,
+            "classifiedRelation": "in_scope",
+            "classifiedLabel": "Within scope",
+            "classifiedReason": "The remedy makes None export as an empty field, which preserves values as the plan requires and fixes a regression from the rewrite.",
+            "baselineId": "a2b83aa2f58e9cd1",
+            "proposalDigest": "a2fb50ddc9979397b3dd883b1b0147fb81ace15bd4a1126420314fe4c5690b2d",
+            "decision": {
+              "policy": "preserve",
+              "eligible": true,
+              "relation": "in_scope",
+              "label": "Within scope",
+              "reason": "The remedy makes None export as an empty field, which preserves values as the plan requires and fixes a regression from the rewrite.",
+              "outcome": "eligible",
+              "authority": "bound",
+              "detail": "",
+              "outcomeText": "Eligible under scope preservation"
+            }
+          }
+        }
+      ],
+      "suggestionCount": 3,
+      "maxImportance": "HIGH"
+    },
+    "_global": {
+      "suggestions": [],
+      "suggestionCount": 0,
+      "maxImportance": ""
+    }
+  },
+  "sectionView": {
+    "_global": {
+      "suggestions": [
+        {
+          "index": 3,
+          "originalIndex": 3,
+          "theme": "Line terminator changed from CRLF to LF",
+          "category": "bug",
+          "models": [
+            "claude-code:haiku"
+          ],
+          "priorityScore": 3,
+          "validationStatus": "needs-human-decision",
+          "validationReason": "Line 6 joins rows with LF, but the baseline's terminator cannot be read here because git is unavailable, and the plan is silent on line endings.",
+          "validationConfidence": 0.4,
+          "maxImportance": "MEDIUM",
+          "suggestions": [
+            {
+              "id": "ce4e319b831f1a71",
+              "title": "Line terminator changed from CRLF to LF",
+              "description": "The base csv.writer used its default \\r\\n row terminator, while the new code joins rows with \\n. The output bytes differ for every row, which can break existing consumers that parse the previous format. The plan asks that existing callers remain compatible, and nothing in the plan calls for a terminator change.",
+              "importance": "MEDIUM",
+              "type": "bug",
+              "sectionRef": "",
+              "fileRef": "expenses.py:6-6",
+              "model": "claude-code:haiku",
+              "anchorText": "return \"\\n\".join(lines) + \"\\n\"",
+              "suggestedFix": null,
+              "lineRange": [
+                6,
+                6
+              ],
+              "displayLabel": "G3S1",
+              "displayHash": "ce4e319b",
+              "scope": {
+                "relation": "in_scope",
+                "label": "Within scope",
+                "reason": "Reverts an unrequested output-format change introduced by the rewrite.",
+                "reference": "Plan: 'Existing callers must remain compatible.'",
+                "classified": true,
+                "provisional": true
+              }
+            }
+          ],
+          "groupHash": "b776c15e9ad0de50",
+          "displayLabel": "G3",
+          "displayHash": "b776c15e",
+          "scope": {
+            "relation": "unclear",
+            "label": "Scope unclear",
+            "reason": "Restoring CRLF is in scope only if the baseline emitted CRLF, which the baseline code could not confirm here.",
+            "reference": "Plan: existing callers remain compatible",
+            "authority": "bound",
+            "validated": true,
+            "stale": false,
+            "provisional": false,
+            "classifiedRelation": "unclear",
+            "classifiedLabel": "Scope unclear",
+            "classifiedReason": "Restoring CRLF is in scope only if the baseline emitted CRLF, which the baseline code could not confirm here.",
+            "baselineId": "a2b83aa2f58e9cd1",
+            "proposalDigest": "4723f92e7d752caffb846a079a2bcde2d0c782a696c0526b61a02c0b9676dc7a",
+            "decision": {
+              "policy": "preserve",
+              "eligible": false,
+              "relation": "unclear",
+              "label": "Scope unclear",
+              "reason": "Deferred: scope preservation requested: scope unclear (Restoring CRLF is in scope only if the baseline emitted CRLF, which the baseline code could not confirm here.)",
+              "outcome": "deferred",
+              "authority": "bound",
+              "recorded": true,
+              "detail": "scope unclear (Restoring CRLF is in scope only if the baseline emitted CRLF, which the baseline code could not confirm here.)",
+              "outcomeText": "Deferred: scope preservation requested"
+            }
+          }
+        },
+        {
+          "index": 1,
+          "originalIndex": 1,
+          "theme": "CSV values are no longer quoted or escaped",
+          "category": "bug",
+          "models": [
+            "claude-code:haiku"
+          ],
+          "priorityScore": 4,
+          "validationStatus": "valid",
+          "validationReason": "expenses.py line 5 joins str() values with commas and performs no quoting or escaping, so a category containing a comma, quote or newline corrupts the row, as the plan forbids.",
+          "validationConfidence": 0.95,
+          "maxImportance": "HIGH",
+          "suggestions": [
+            {
+              "id": "d750f5ec21246585",
+              "title": "CSV values are no longer quoted or escaped",
+              "description": "The rewrite replaces csv.writer with a plain \",\".join of str() values, so a category containing a comma, double quote or line break is written unquoted and splits or corrupts the row. The plan requires values preserved exactly, including categories with commas, quotes and line breaks, and the base implementation handled this via csv.writer. This is a regression the change introduced.",
+              "importance": "HIGH",
+              "type": "bug",
+              "sectionRef": "",
+              "fileRef": "expenses.py:5-5",
+              "model": "claude-code:haiku",
+              "anchorText": "lines.append(\",\".join(str(record[key])",
+              "suggestedFix": null,
+              "lineRange": [
+                5,
+                5
+              ],
+              "displayLabel": "G1S1",
+              "displayHash": "d750f5ec",
+              "scope": {
+                "relation": "in_scope",
+                "label": "Within scope",
+                "reason": "Restores the plan's required exact-value CSV output that the change broke.",
+                "reference": "Plan: 'Preserve values exactly, including categories with commas, quotes and line breaks.'",
+                "classified": true,
+                "provisional": true
+              }
+            }
+          ],
+          "groupHash": "aaf5288f7cb59267",
+          "displayLabel": "G1",
+          "displayHash": "aaf5288f",
+          "scope": {
+            "relation": "in_scope",
+            "label": "Within scope",
+            "reason": "Restores the plan's required exact-value CSV output, which covers commas, quotes and line breaks; stdlib csv.writer stays within the limits.",
+            "reference": "Plan: values preserved exactly, including categories with commas, quotes and line breaks; standard library only",
+            "authority": "bound",
+            "validated": true,
+            "stale": false,
+            "provisional": false,
+            "classifiedRelation": "in_scope",
+            "classifiedLabel": "Within scope",
+            "classifiedReason": "Restores the plan's required exact-value CSV output, which covers commas, quotes and line breaks; stdlib csv.writer stays within the limits.",
+            "baselineId": "a2b83aa2f58e9cd1",
+            "proposalDigest": "b880599dd9c6870e4e50abe5a4f6596cc23c7fdf53e8a98fbc014bfdcb1434de",
+            "decision": {
+              "policy": "preserve",
+              "eligible": true,
+              "relation": "in_scope",
+              "label": "Within scope",
+              "reason": "Restores the plan's required exact-value CSV output, which covers commas, quotes and line breaks; stdlib csv.writer stays within the limits.",
+              "outcome": "eligible",
+              "authority": "bound",
+              "detail": "",
+              "outcomeText": "Eligible under scope preservation"
+            }
+          }
+        },
+        {
+          "index": 2,
+          "originalIndex": 2,
+          "theme": "None values now export as the string 'None'",
+          "category": "bug",
+          "models": [
+            "claude-code:haiku"
+          ],
+          "priorityScore": 3,
+          "validationStatus": "valid",
+          "validationReason": "Line 5 uses str(record[key]), so a None category or amount is written as the text 'None' instead of a preserved value, which conflicts with the plan's exact-preservation requirement.",
+          "validationConfidence": 0.8,
+          "maxImportance": "MEDIUM",
+          "suggestions": [
+            {
+              "id": "22bb796f7596cfa5",
+              "title": "None values now export as the string 'None'",
+              "description": "str(record[key]) turns a None amount or category into the literal text \"None\", whereas the base csv.writer wrote an empty field. Callers with missing values now get a different output than before, which conflicts with the requirement that existing callers remain compatible and values be preserved exactly.",
+              "importance": "MEDIUM",
+              "type": "bug",
+              "sectionRef": "",
+              "fileRef": "expenses.py:5-5",
+              "model": "claude-code:haiku",
+              "anchorText": "str(record[key]) for key in",
+              "suggestedFix": null,
+              "lineRange": [
+                5,
+                5
+              ],
+              "displayLabel": "G2S1",
+              "displayHash": "22bb796f",
+              "scope": {
+                "relation": "in_scope",
+                "label": "Within scope",
+                "reason": "Restores base behaviour of writing missing values as empty fields, a regression from this change.",
+                "reference": "Plan: 'Existing callers must remain compatible.' and 'Preserve values exactly'",
+                "classified": true,
+                "provisional": true
+              }
+            }
+          ],
+          "groupHash": "2a0448e732607e3b",
+          "displayLabel": "G2",
+          "displayHash": "2a0448e7",
+          "scope": {
+            "relation": "in_scope",
+            "label": "Within scope",
+            "reason": "The remedy makes None export as an empty field, which preserves values as the plan requires and fixes a regression from the rewrite.",
+            "reference": "Plan: values preserved exactly; existing callers remain compatible",
+            "authority": "bound",
+            "validated": true,
+            "stale": false,
+            "provisional": false,
+            "classifiedRelation": "in_scope",
+            "classifiedLabel": "Within scope",
+            "classifiedReason": "The remedy makes None export as an empty field, which preserves values as the plan requires and fixes a regression from the rewrite.",
+            "baselineId": "a2b83aa2f58e9cd1",
+            "proposalDigest": "a2fb50ddc9979397b3dd883b1b0147fb81ace15bd4a1126420314fe4c5690b2d",
+            "decision": {
+              "policy": "preserve",
+              "eligible": true,
+              "relation": "in_scope",
+              "label": "Within scope",
+              "reason": "The remedy makes None export as an empty field, which preserves values as the plan requires and fixes a regression from the rewrite.",
+              "outcome": "eligible",
+              "authority": "bound",
+              "detail": "",
+              "outcomeText": "Eligible under scope preservation"
+            }
+          }
+        }
+      ],
+      "suggestionCount": 3,
+      "maxImportance": "HIGH",
+      "hasSuggestions": true
+    },
+    "# Harden the existing expense CSV exporter": {
+      "suggestions": [],
+      "suggestionCount": 0,
+      "maxImportance": "",
+      "hasSuggestions": false
+    }
+  },
+  "taskView": {
+    "_coverageGaps": {
+      "suggestions": [],
+      "suggestionCount": 0,
+      "maxImportance": ""
+    },
+    "_unanchored": {
+      "suggestions": [
+        {
+          "index": 3,
+          "originalIndex": 3,
+          "theme": "Line terminator changed from CRLF to LF",
+          "category": "bug",
+          "models": [
+            "claude-code:haiku"
+          ],
+          "priorityScore": 3,
+          "validationStatus": "needs-human-decision",
+          "validationReason": "Line 6 joins rows with LF, but the baseline's terminator cannot be read here because git is unavailable, and the plan is silent on line endings.",
+          "validationConfidence": 0.4,
+          "maxImportance": "MEDIUM",
+          "suggestions": [
+            {
+              "id": "ce4e319b831f1a71",
+              "title": "Line terminator changed from CRLF to LF",
+              "description": "The base csv.writer used its default \\r\\n row terminator, while the new code joins rows with \\n. The output bytes differ for every row, which can break existing consumers that parse the previous format. The plan asks that existing callers remain compatible, and nothing in the plan calls for a terminator change.",
+              "importance": "MEDIUM",
+              "type": "bug",
+              "sectionRef": "",
+              "fileRef": "expenses.py:6-6",
+              "model": "claude-code:haiku",
+              "anchorText": "return \"\\n\".join(lines) + \"\\n\"",
+              "suggestedFix": null,
+              "lineRange": [
+                6,
+                6
+              ],
+              "displayLabel": "G3S1",
+              "displayHash": "ce4e319b",
+              "scope": {
+                "relation": "in_scope",
+                "label": "Within scope",
+                "reason": "Reverts an unrequested output-format change introduced by the rewrite.",
+                "reference": "Plan: 'Existing callers must remain compatible.'",
+                "classified": true,
+                "provisional": true
+              }
+            }
+          ],
+          "groupHash": "b776c15e9ad0de50",
+          "displayLabel": "G3",
+          "displayHash": "b776c15e",
+          "scope": {
+            "relation": "unclear",
+            "label": "Scope unclear",
+            "reason": "Restoring CRLF is in scope only if the baseline emitted CRLF, which the baseline code could not confirm here.",
+            "reference": "Plan: existing callers remain compatible",
+            "authority": "bound",
+            "validated": true,
+            "stale": false,
+            "provisional": false,
+            "classifiedRelation": "unclear",
+            "classifiedLabel": "Scope unclear",
+            "classifiedReason": "Restoring CRLF is in scope only if the baseline emitted CRLF, which the baseline code could not confirm here.",
+            "baselineId": "a2b83aa2f58e9cd1",
+            "proposalDigest": "4723f92e7d752caffb846a079a2bcde2d0c782a696c0526b61a02c0b9676dc7a",
+            "decision": {
+              "policy": "preserve",
+              "eligible": false,
+              "relation": "unclear",
+              "label": "Scope unclear",
+              "reason": "Deferred: scope preservation requested: scope unclear (Restoring CRLF is in scope only if the baseline emitted CRLF, which the baseline code could not confirm here.)",
+              "outcome": "deferred",
+              "authority": "bound",
+              "recorded": true,
+              "detail": "scope unclear (Restoring CRLF is in scope only if the baseline emitted CRLF, which the baseline code could not confirm here.)",
+              "outcomeText": "Deferred: scope preservation requested"
+            }
+          }
+        },
+        {
+          "index": 1,
+          "originalIndex": 1,
+          "theme": "CSV values are no longer quoted or escaped",
+          "category": "bug",
+          "models": [
+            "claude-code:haiku"
+          ],
+          "priorityScore": 4,
+          "validationStatus": "valid",
+          "validationReason": "expenses.py line 5 joins str() values with commas and performs no quoting or escaping, so a category containing a comma, quote or newline corrupts the row, as the plan forbids.",
+          "validationConfidence": 0.95,
+          "maxImportance": "HIGH",
+          "suggestions": [
+            {
+              "id": "d750f5ec21246585",
+              "title": "CSV values are no longer quoted or escaped",
+              "description": "The rewrite replaces csv.writer with a plain \",\".join of str() values, so a category containing a comma, double quote or line break is written unquoted and splits or corrupts the row. The plan requires values preserved exactly, including categories with commas, quotes and line breaks, and the base implementation handled this via csv.writer. This is a regression the change introduced.",
+              "importance": "HIGH",
+              "type": "bug",
+              "sectionRef": "",
+              "fileRef": "expenses.py:5-5",
+              "model": "claude-code:haiku",
+              "anchorText": "lines.append(\",\".join(str(record[key])",
+              "suggestedFix": null,
+              "lineRange": [
+                5,
+                5
+              ],
+              "displayLabel": "G1S1",
+              "displayHash": "d750f5ec",
+              "scope": {
+                "relation": "in_scope",
+                "label": "Within scope",
+                "reason": "Restores the plan's required exact-value CSV output that the change broke.",
+                "reference": "Plan: 'Preserve values exactly, including categories with commas, quotes and line breaks.'",
+                "classified": true,
+                "provisional": true
+              }
+            }
+          ],
+          "groupHash": "aaf5288f7cb59267",
+          "displayLabel": "G1",
+          "displayHash": "aaf5288f",
+          "scope": {
+            "relation": "in_scope",
+            "label": "Within scope",
+            "reason": "Restores the plan's required exact-value CSV output, which covers commas, quotes and line breaks; stdlib csv.writer stays within the limits.",
+            "reference": "Plan: values preserved exactly, including categories with commas, quotes and line breaks; standard library only",
+            "authority": "bound",
+            "validated": true,
+            "stale": false,
+            "provisional": false,
+            "classifiedRelation": "in_scope",
+            "classifiedLabel": "Within scope",
+            "classifiedReason": "Restores the plan's required exact-value CSV output, which covers commas, quotes and line breaks; stdlib csv.writer stays within the limits.",
+            "baselineId": "a2b83aa2f58e9cd1",
+            "proposalDigest": "b880599dd9c6870e4e50abe5a4f6596cc23c7fdf53e8a98fbc014bfdcb1434de",
+            "decision": {
+              "policy": "preserve",
+              "eligible": true,
+              "relation": "in_scope",
+              "label": "Within scope",
+              "reason": "Restores the plan's required exact-value CSV output, which covers commas, quotes and line breaks; stdlib csv.writer stays within the limits.",
+              "outcome": "eligible",
+              "authority": "bound",
+              "detail": "",
+              "outcomeText": "Eligible under scope preservation"
+            }
+          }
+        },
+        {
+          "index": 2,
+          "originalIndex": 2,
+          "theme": "None values now export as the string 'None'",
+          "category": "bug",
+          "models": [
+            "claude-code:haiku"
+          ],
+          "priorityScore": 3,
+          "validationStatus": "valid",
+          "validationReason": "Line 5 uses str(record[key]), so a None category or amount is written as the text 'None' instead of a preserved value, which conflicts with the plan's exact-preservation requirement.",
+          "validationConfidence": 0.8,
+          "maxImportance": "MEDIUM",
+          "suggestions": [
+            {
+              "id": "22bb796f7596cfa5",
+              "title": "None values now export as the string 'None'",
+              "description": "str(record[key]) turns a None amount or category into the literal text \"None\", whereas the base csv.writer wrote an empty field. Callers with missing values now get a different output than before, which conflicts with the requirement that existing callers remain compatible and values be preserved exactly.",
+              "importance": "MEDIUM",
+              "type": "bug",
+              "sectionRef": "",
+              "fileRef": "expenses.py:5-5",
+              "model": "claude-code:haiku",
+              "anchorText": "str(record[key]) for key in",
+              "suggestedFix": null,
+              "lineRange": [
+                5,
+                5
+              ],
+              "displayLabel": "G2S1",
+              "displayHash": "22bb796f",
+              "scope": {
+                "relation": "in_scope",
+                "label": "Within scope",
+                "reason": "Restores base behaviour of writing missing values as empty fields, a regression from this change.",
+                "reference": "Plan: 'Existing callers must remain compatible.' and 'Preserve values exactly'",
+                "classified": true,
+                "provisional": true
+              }
+            }
+          ],
+          "groupHash": "2a0448e732607e3b",
+          "displayLabel": "G2",
+          "displayHash": "2a0448e7",
+          "scope": {
+            "relation": "in_scope",
+            "label": "Within scope",
+            "reason": "The remedy makes None export as an empty field, which preserves values as the plan requires and fixes a regression from the rewrite.",
+            "reference": "Plan: values preserved exactly; existing callers remain compatible",
+            "authority": "bound",
+            "validated": true,
+            "stale": false,
+            "provisional": false,
+            "classifiedRelation": "in_scope",
+            "classifiedLabel": "Within scope",
+            "classifiedReason": "The remedy makes None export as an empty field, which preserves values as the plan requires and fixes a regression from the rewrite.",
+            "baselineId": "a2b83aa2f58e9cd1",
+            "proposalDigest": "a2fb50ddc9979397b3dd883b1b0147fb81ace15bd4a1126420314fe4c5690b2d",
+            "decision": {
+              "policy": "preserve",
+              "eligible": true,
+              "relation": "in_scope",
+              "label": "Within scope",
+              "reason": "The remedy makes None export as an empty field, which preserves values as the plan requires and fixes a regression from the rewrite.",
+              "outcome": "eligible",
+              "authority": "bound",
+              "detail": "",
+              "outcomeText": "Eligible under scope preservation"
+            }
+          }
+        }
+      ],
+      "suggestionCount": 3,
+      "maxImportance": "HIGH"
+    }
+  },
+  "globalSuggestions": [],
+  "fullSectionContexts": {
+    "# Harden the existing expense CSV exporter": "# Harden the existing expense CSV exporter\n\nThe existing local expense exporter must emit valid UTF-8 CSV with columns date,category,amount, one header row and one data row for each input record. Preserve values exactly, including categories with commas, quotes and line breaks. Empty input produces a header-only CSV.\n\nThe public API is export_expenses(records) -> str in expenses.py. Existing callers must remain compatible. Do not change that signature or the CLI's two positional input/output arguments. Do not introduce network access, external dependencies, or modify these restrictions.\n\nUse Python's standard library. Verify with python3 -m unittest discover -s tests -v. The current change touches expenses.py and must be reviewed against these requirements."
+  },
+  "sectionOrder": [
+    "# Harden the existing expense CSV exporter"
+  ],
+  "notices": [],
+  "summary": {
+    "totalGroups": 3,
+    "totalSuggestions": 3,
+    "validCount": 2,
+    "invalidCount": 0,
+    "needsHumanCount": 1,
+    "validationFailedCount": 0
+  },
+  "requestedModels": 1,
+  "usageTotal": {
+    "input_tokens": 8,
+    "output_tokens": 2396,
+    "cached_input_tokens": 112302,
+    "cost_usd": 0.007873,
+    "total_tokens": 2404
+  },
+  "usageTotalLabel": "$0.01 est., 2,396 output tokens",
+  "diffData": {
+    "expenses.py": {
+      "hunks": [
+        {
+          "header": "@@ -1,12 +1,6 @@",
+          "lines": [
+            {
+              "type": "remove",
+              "old_line": 1,
+              "new_line": null,
+              "content": "import csv"
+            },
+            {
+              "type": "remove",
+              "old_line": 2,
+              "new_line": null,
+              "content": "import io"
+            },
+            {
+              "type": "remove",
+              "old_line": 3,
+              "new_line": null,
+              "content": ""
+            },
+            {
+              "type": "remove",
+              "old_line": 4,
+              "new_line": null,
+              "content": ""
+            },
+            {
+              "type": "context",
+              "old_line": 5,
+              "new_line": 1,
+              "content": "def export_expenses(records):"
+            },
+            {
+              "type": "context",
+              "old_line": 6,
+              "new_line": 2,
+              "content": "    \"\"\"Return a CSV document containing the supplied expense records.\"\"\""
+            },
+            {
+              "type": "remove",
+              "old_line": 7,
+              "new_line": null,
+              "content": "    out = io.StringIO(newline=\"\")"
+            },
+            {
+              "type": "remove",
+              "old_line": 8,
+              "new_line": null,
+              "content": "    writer = csv.writer(out)"
+            },
+            {
+              "type": "remove",
+              "old_line": 9,
+              "new_line": null,
+              "content": "    writer.writerow([\"date\", \"category\", \"amount\"])"
+            },
+            {
+              "type": "add",
+              "old_line": null,
+              "new_line": 3,
+              "content": "    lines = [\"date,category,amount\"]"
+            },
+            {
+              "type": "context",
+              "old_line": 10,
+              "new_line": 4,
+              "content": "    for record in records:"
+            },
+            {
+              "type": "remove",
+              "old_line": 11,
+              "new_line": null,
+              "content": "        writer.writerow([record[\"date\"], record[\"category\"], record[\"amount\"]])"
+            },
+            {
+              "type": "remove",
+              "old_line": 12,
+              "new_line": null,
+              "content": "    return out.getvalue()"
+            },
+            {
+              "type": "add",
+              "old_line": null,
+              "new_line": 5,
+              "content": "        lines.append(\",\".join(str(record[key]) for key in (\"date\", \"category\", \"amount\")))"
+            },
+            {
+              "type": "add",
+              "old_line": null,
+              "new_line": 6,
+              "content": "    return \"\\n\".join(lines) + \"\\n\""
+            }
+          ]
+        }
+      ],
+      "old_path": "expenses.py",
+      "new_path": "expenses.py",
+      "binary": false,
+      "deleted": false
+    },
+    "_notices": [
+      "Diff includes uncommitted changes"
+    ]
+  },
+  "fileContexts": {
+    "expenses.py": {
+      "source": "diff",
+      "available": true,
+      "lines": [
+        {
+          "line_number": 1,
+          "content": "def export_expenses(records):"
+        },
+        {
+          "line_number": 2,
+          "content": "    \"\"\"Return a CSV document containing the supplied expense records.\"\"\""
+        },
+        {
+          "line_number": 3,
+          "content": "    lines = [\"date,category,amount\"]"
+        },
+        {
+          "line_number": 4,
+          "content": "    for record in records:"
+        },
+        {
+          "line_number": 5,
+          "content": "        lines.append(\",\".join(str(record[key]) for key in (\"date\", \"category\", \"amount\")))"
+        },
+        {
+          "line_number": 6,
+          "content": "    return \"\\n\".join(lines) + \"\\n\""
+        }
+      ]
+    }
+  },
+  "dataSource": "grouped",
+  "templateStyle": "pr",
+  "scopePolicy": {
+    "reviewPolicy": "preserve",
+    "reviewPolicySource": "explicit",
+    "applyPolicy": null,
+    "applyPolicySource": null,
+    "effectivePolicy": "preserve",
+    "recorded": true,
+    "baselineId": "a2b83aa2f58e9cd1",
+    "baseline": {
+      "version": 1,
+      "baseline_id": "a2b83aa2f58e9cd1",
+      "sources": [
+        {
+          "role": "plan",
+          "sha256": "0df6d76f195ac021b3538bd7e5e4fb60d62dfd9b57b1168b922e5d3eb7f8f1a7",
+          "path": "/tmp/scope-policy-world-20261031/expenses/feature.md",
+          "snapshot": "validation-snapshot.md"
+        },
+        {
+          "role": "diff",
+          "sha256": "c7f7d885b3331e5af65ea50c004e839d3328ecd953b3209cebe7651e572d1ee9",
+          "endpoints": {
+            "base": "HEAD"
+          }
+        }
+      ],
+      "phase": "code-review"
+    },
+    "policyLine": "Scope policy: preserve. Additional scope was not solicited from reviewers; extension counts cover returned findings only.",
+    "legend": "Scope tags: `Within scope` completes or corrects the agreed outcome; `Scope extension` adds to it; `Scope unclear` could not be settled. Tags describe proposals; they are separate from validity and selection.",
+    "labels": {
+      "in_scope": "Within scope",
+      "scope_extension": "Scope extension",
+      "unclear": "Scope unclear"
+    },
+    "deferredOutcome": "Deferred: scope preservation requested",
+    "counts": {
+      "in_scope": 2,
+      "scope_extension": 0,
+      "unclear": 1,
+      "deferred": 1
+    }
+  },
+  "diffCoverage": {
+    "coverage": "complete",
+    "omitted": [],
+    "scopeFile": "/tmp/scope-policy-world-20261031/expenses/feature/code-review/review-scope.md",
+    "diffDir": "/tmp/scope-policy-world-20261031/expenses/feature/code-review/diff"
+  },
+  "reviewScope": {
+    "scopeId": "d4579fcf7f05",
+    "baseRef": "HEAD",
+    "baseCommit": "35edcb3317af513d020167970bc4a9b3abbc9443",
+    "writtenBy": "fan-out",
+    "regenerated": false,
+    "scopeFile": "/tmp/scope-policy-world-20261031/expenses/feature/code-review/review-scope.md",
+    "diffDir": "/tmp/scope-policy-world-20261031/expenses/feature/code-review/diff",
+    "results": {},
+    "resultsMatch": true
+  },
+  "humanDecisionsSummary": {
+    "approved": 0,
+    "salvaged": 0,
+    "skipped": 0,
+    "judgeDecided": 0,
+    "total": 0
+  }
+}

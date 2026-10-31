@@ -475,8 +475,12 @@ class TestImplementOrchestratorWiring:
         # F8: the row-8 auto-resolution buffered before the detach boundary now
         # reaches `run.resolutions`.
         run = status_file.read_run(str(phase_dir))
-        assert [r["site"] for r in run["resolutions"]] == ["human-task-strategy"]
+        # Row 16 (the scope policy nobody typed) is buffered and replayed the
+        # same way, after row 8 (plans/scope-policy-and-report-tags.md §4).
+        assert [r["site"] for r in run["resolutions"]] == [
+            "human-task-strategy", "scope-policy"]
         assert "skip-dependents" in run["resolutions"][0]["decision"]
+        assert run["resolutions"][1]["decision"].startswith("expand ")
 
         # F7: the phase hands back its own artifacts.
         status = json.loads((phase_dir / ".status.json").read_text())

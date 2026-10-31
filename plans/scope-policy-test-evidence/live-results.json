@@ -1,0 +1,51 @@
+{
+  "temporary_project": "/tmp/scope-policy-live-20261031",
+  "models": [
+    "claude-code:haiku"
+  ],
+  "reviews": {
+    "preserve": {
+      "verdict_count": 6,
+      "scope_relations": {
+        "in_scope": 6
+      },
+      "validator_runners": {
+        "claude-code:haiku": "2.1.316"
+      }
+    },
+    "expand": {
+      "verdict_count": 7,
+      "scope_relations": {
+        "in_scope": 4,
+        "unclear": 3
+      },
+      "validator_runners": {
+        "claude-code:haiku": "2.1.316"
+      }
+    },
+    "leaked-fixture/feature": {
+      "verdict_count": 2,
+      "scope_relations": {
+        "scope_extension": 1,
+        "in_scope": 1
+      },
+      "validator_runners": {
+        "claude-code:haiku": "2.1.316"
+      }
+    }
+  },
+  "bounded_write": {
+    "applied": 1,
+    "inherited_policy": "preserve"
+  },
+  "leaked_candidate": {
+    "reviewer": "seeded fixture",
+    "live_validation": true,
+    "pdf_relation": "scope_extension",
+    "pdf_status": "needs-human-decision",
+    "pdf_deferred": true,
+    "eligible_header_remedy": "writer declined: missing plan decision"
+  },
+  "reported_cost_usd": 0.06423612,
+  "cost_note": "Sum of provider-reported usage, not an independently verified bill."
+}

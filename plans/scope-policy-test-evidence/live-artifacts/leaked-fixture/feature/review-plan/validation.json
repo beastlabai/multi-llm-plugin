@@ -1,0 +1,86 @@
+{
+  "format_version": 2,
+  "groups": [
+    {
+      "group_index": 0,
+      "status": "needs-human-decision",
+      "reason": "Whether users want PDF is a product judgment the plan does not address; the plan only says to export as CSV.",
+      "confidence": 0.8,
+      "error_type": "unknown",
+      "recoverable": false,
+      "revalidated": false,
+      "group_id": "0a7d6dd3784f86f9",
+      "scope_relation": "scope_extension",
+      "scope_reason": "The plan's only output requirement is CSV export, so adding a PDF exporter extends the agreed scope.",
+      "scope_reference": "Output",
+      "scope_baseline_id": "6bb22b82c1042ded",
+      "scope_proposal_digest": "28fe0d7dfa6f7c8d7a0b0f2e007339a16db7e9014518f1482eea3f2b147f5df8",
+      "scope_source": "validation",
+      "scope_policy_decision": {
+        "policy": "preserve",
+        "eligible": false,
+        "relation": "scope_extension",
+        "label": "Scope extension",
+        "reason": "Deferred: scope preservation requested: the proposed remedy extends the agreed scope (The plan's only output requirement is CSV export, so adding a PDF exporter extends the agreed scope.)",
+        "outcome": "deferred",
+        "authority": "bound"
+      }
+    },
+    {
+      "group_index": 1,
+      "status": "valid",
+      "reason": "The plan's Output section says export as CSV but names no header columns, order, or quoting, so two implementers could produce different files.",
+      "confidence": 0.8,
+      "error_type": "unknown",
+      "recoverable": false,
+      "revalidated": false,
+      "group_id": "1de5f2451724bb54",
+      "scope_relation": "in_scope",
+      "scope_reason": "Naming the CSV header and format completes the agreed CSV export requirement without adding new features.",
+      "scope_reference": "Output",
+      "scope_baseline_id": "6bb22b82c1042ded",
+      "scope_proposal_digest": "d15f6aa33990f1b13117bea6d295696a3620c0948c7bb95d20aba37c7c821785",
+      "scope_source": "validation",
+      "scope_policy_decision": {
+        "policy": "preserve",
+        "eligible": true,
+        "relation": "in_scope",
+        "label": "Within scope",
+        "reason": "Naming the CSV header and format completes the agreed CSV export requirement without adding new features.",
+        "outcome": "eligible",
+        "authority": "bound"
+      }
+    }
+  ],
+  "metadata": {
+    "model": "claude-code:haiku",
+    "timestamp": "2026-10-31T17:41:51.238888",
+    "schema_version": "2.1",
+    "runner": "claude-code:haiku",
+    "grouped_sha256": "7a9dd75d27c9d7d8",
+    "runners": {
+      "0": "claude-code:haiku",
+      "1": "claude-code:haiku"
+    },
+    "batch_sha256": {
+      "0": "9166ee079ab28a237bf5c9454d209a7f89d3c5eb54e453a58e1755bdeed02078",
+      "1": "952eb0f53ee7501295cf477d7d96986d228ad46c03713f011365e6903caea72d"
+    },
+    "batch_manifest": {
+      "kind": "validation",
+      "round": "98ac0d2e976447a9db1cf9a1f4327f4cfc398264a497f19efc3d6dc3508a8e37"
+    },
+    "context_contract": 2,
+    "scope_policy": "preserve",
+    "scope_policy_source": "explicit",
+    "scope_baseline_id": "6bb22b82c1042ded",
+    "scope_round_baseline_id": "6bb22b82c1042ded",
+    "scope_policy_decisions": {
+      "eligible": 1,
+      "deferred": 1,
+      "in_scope": 1,
+      "scope_extension": 1,
+      "unclear": 0
+    }
+  }
+}

@@ -1,0 +1,340 @@
+diff --git a/docs/development/hosts.md b/docs/development/hosts.md
+index 6575d086..21a8b5a5 100644
+--- a/docs/development/hosts.md
++++ b/docs/development/hosts.md
+@@ -259,6 +259,14 @@ shim; the two routes are not mutually exclusive, and when both are installed the
+ `config` hook overwrites the file entry wholesale — silently, as far as OpenCode is
+ concerned — which is what `install-host --check`'s route-detection note exists to say.
+ 
++Both package supervisors accept an explicit preview that finishes before detaching without
++requiring a run-id banner. Surface schema v7 exports `dispatcher.foreground_preview_flags`
++from `cli_common.FOREGROUND_PREVIEW_FLAGS`; the supervisors still require a valid structured
++result. Ordinary launches still require the banner, and a preview that actually detaches is
++polled by its banner's run id as usual. A running result or a launch handshake carrying a
++continuation still requires the banner even with a preview flag. A successful preview finishes the invocation without
++claiming that the workflow phase applied changes or completed.
++
+ **The required inventory is the static list plus every `target_module` in
+ `modes.py`**: `build.py`'s `target_module_paths` maps each dotted target to
+ `x/y.py` (or `x/y/__init__.py`) and passes them as `payload.stage(required_extra=…)` and to
+diff --git a/packaging/codex/mcp_server.py b/packaging/codex/mcp_server.py
+index 60a9e423..67922e82 100644
+--- a/packaging/codex/mcp_server.py
++++ b/packaging/codex/mcp_server.py
+@@ -19,7 +19,7 @@ RULES EVERY LINE HERE KEEPS (plan D3):
+      ``uv`` is absent so it can *report* that absence (rule 7); a dependency, or a
+      second module, is one more thing whose absence empties the tool list.
+   2. **No word of its own.** Every mode word, alias, flag, exit code, state word
+-     and message template is read from ``dist/cli-surface.json`` (schema v6). The
++     and message template is read from ``dist/cli-surface.json`` (schema v7). The
+      only words held here are the JSON-RPC/MCP vocabulary, the envelope's key
+      names, the anchor_source spellings (``roots``, ``turn-metadata``,
+      ``env:<NAME>``), codex's turn-metadata keys and posture words, the
+@@ -68,8 +68,8 @@ PLUGIN_MANIFEST_PATH = PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
+ 
+ #: Bumped in lockstep with ``packaging/common/surface.py``'s
+ #: ``SURFACE_SCHEMA_VERSION``; ``test_surface_schema_version_matches`` compares
+-#: the two constants, never a literal. 6: the commit modes' optional ``revs``.
+-SUPPORTED_SURFACE_VERSION = 6
++#: the two constants, never a literal. 7: explicit foreground-preview flags.
++SUPPORTED_SURFACE_VERSION = 7
+ 
+ #: The longest a cancellation may sit unobserved (D3c). It is met by the
+ #: worker's cancel-event watch in ``run_child`` (a 20 ms wait on the event, then
+@@ -317,6 +317,7 @@ _REQUIRED_SURFACE_PATHS = (
+     ("dispatcher", "states"), ("dispatcher", "poll"), ("dispatcher", "abort"),
+     ("dispatcher", "instructions"), ("dispatcher", "host_option"),
+     ("dispatcher", "run_id_option"), ("dispatcher", "banner"),
++    ("dispatcher", "foreground_preview_flags"),
+     ("dispatcher", "session_model_env"), ("dispatcher", "route_env"),
+     ("dispatcher", "route_env", "name"), ("dispatcher", "route_env", "value"),
+     # Schema v6: the commit modes' range.
+@@ -373,6 +374,10 @@ def load_surface():
+                for key in ("name", "value")):
+         return None, "{}: dispatcher.route_env is not a non-empty name and value".format(
+             SURFACE_PATH)
++    previews = data["dispatcher"]["foreground_preview_flags"]
++    if not isinstance(previews, list) or not all(isinstance(flag, str) and flag for flag in previews):
++        return None, "{}: dispatcher.foreground_preview_flags is not a list of flags".format(
++            SURFACE_PATH)
+     return data, None
+ 
+ 
+@@ -2496,6 +2501,18 @@ class Server:
+                                 launch.code))
+                     return "return", self.terminal_result(call, launch, cycle_values)
+                 if not launched:
++                    # Explicit previews may exit before the detach boundary.
++                    # They still owe a structured result; ordinary launches
++                    # still owe a banner, and any banner above is supervised.
++                    previews = dispatcher["foreground_preview_flags"]
++                    exacts = surface["reserved_flags"].get("exact_options", [])
++                    foreground = launch.result is None or (
++                        launch.result.get("next") is None
++                        and launch.result.get("state") != dispatcher["states"]["running"]
++                    )
++                    if foreground and any(flag_matches(token.split("=", 1)[0], flag, exacts)
++                                          for token in cycle_values.get("extra") or [] for flag in previews):
++                        return "return", self.terminal_result(call, launch, cycle_values)
+                     return "return", self.error_result(
+                         call, launch, "the launch reported no run id on its banner, "
+                         "so the run cannot be polled or aborted safely. Refusing to "
+diff --git a/packaging/common/surface.py b/packaging/common/surface.py
+index 7fc7a26d..7d1cad3b 100644
+--- a/packaging/common/surface.py
++++ b/packaging/common/surface.py
+@@ -107,7 +107,7 @@ RUN_ID_OPTION = "--run-id"
+ #: keys its blocks and its pinned range are read from. The worked examples
+ #: gained a range-shaped one. A server built for v5 has none of this and would
+ #: drop the range (it skipped a kind it did not know), hence the bump.
+-SURFACE_SCHEMA_VERSION = 6
++SURFACE_SCHEMA_VERSION = 7
+ 
+ 
+ def _aliases_for(name: str) -> List[str]:
+@@ -855,6 +855,7 @@ def cli_surface(host_id: str) -> Dict[str, Any]:
+         "dispatcher": {
+             "script": "multi_llm.py",
+             "result_marker": cli_common.RESULT_MARKER,
++            "foreground_preview_flags": list(cli_common.FOREGROUND_PREVIEW_FLAGS),
+             # Read from cli_common's constants, never as JS literals.
+             "exit_codes": {
+                 "ok": cli_common.EXIT_OK,
+diff --git a/packaging/opencode/src/index.mjs b/packaging/opencode/src/index.mjs
+index c97db370..74f5c901 100644
+--- a/packaging/opencode/src/index.mjs
++++ b/packaging/opencode/src/index.mjs
+@@ -106,8 +106,10 @@ const SKILL_DIR_PLACEHOLDER = "{SKILL_DIR}"
+  * 6: the commit modes' range: `positional_kinds.revs`, the optional `revs`
+  * argument's description, and the `revs` block this file composes and reads
+  * a range with (plans/review-commits.md §2.9).
++ * 7: dispatcher.foreground_preview_flags permits terminal previews without a
++ * detached-run banner, while retaining run-id supervision for actual launches.
+  */
+-const SUPPORTED_SURFACE_VERSION = 6
++const SUPPORTED_SURFACE_VERSION = 7
+ 
+ /**
+  * Schema v6's optional fifth argument: the commit modes' range. Registered
+@@ -159,6 +161,12 @@ function loadSurface() {
+       )
+       return null
+     }
++    const previews = surface.dispatcher?.foreground_preview_flags
++    if (!Array.isArray(previews) || !previews.every(isNonEmptyString)) {
++      warn(`cli-surface.json declares no usable dispatcher.foreground_preview_flags. ` +
++        `The package is inconsistent; reinstall it.`)
++      return null
++    }
+     // Schema v6's range: refused whole when it is not all there, never
+     // half-used, since a range mode's words would otherwise be dropped.
+     const revs = surface.revs
+@@ -1820,6 +1828,18 @@ async function runWorkflow({
+         return { kind: "return", result: terminalResult(launch, foreground) }
+       }
+       if (!launched) {
++        // Explicit previews can finish before detaching. They still owe a
++        // structured result; a banner, when present, is always supervised.
++        const previews = surface.dispatcher.foreground_preview_flags
++        const exacts = surface.reserved_flags.exact_options || []
++        const finished = !launch.result || (
++          launch.result.next == null && launch.result.state !== surface.dispatcher.states.running
++        )
++        if (finished && (cycleValues.extraFlags || []).some(token =>
++          previews.some(flag => flagMatches(token.split("=", 1)[0], flag, exacts)),
++        )) {
++          return { kind: "return", result: terminalResult(launch, foreground) }
++        }
+         return {
+           kind: "return",
+           result: errorResult(
+diff --git a/skills/multi-llm/tests/test_cli_surface_emitter.py b/skills/multi-llm/tests/test_cli_surface_emitter.py
+index c53b6801..0e0423e5 100644
+--- a/skills/multi-llm/tests/test_cli_surface_emitter.py
++++ b/skills/multi-llm/tests/test_cli_surface_emitter.py
+@@ -128,10 +128,12 @@ def test_both_hosts_ship_one_schema_version():
+     sys.path.insert(0, str(REPO_ROOT / "packaging" / "opencode"))
+     import build as opencode_build  # noqa: E402
+ 
+-    assert surface.SURFACE_SCHEMA_VERSION == 6
++    assert surface.SURFACE_SCHEMA_VERSION == 7
+     assert opencode_build.SURFACE_SCHEMA_VERSION == surface.SURFACE_SCHEMA_VERSION
+     for host in HOSTS:
+-        assert surface.cli_surface(host)["schema_version"] == 6
++        assert surface.cli_surface(host)["schema_version"] == 7
++        assert surface.cli_surface(host)["dispatcher"]["foreground_preview_flags"] == list(
++            surface.cli_common.FOREGROUND_PREVIEW_FLAGS)
+     # The plugin's lockstep constant, compared rather than trusted.
+     mjs = (REPO_ROOT / "packaging" / "opencode" / "src" / "index.mjs").read_text(
+         encoding="utf-8"
+diff --git a/skills/multi-llm/tests/test_codex_mcp_server.py b/skills/multi-llm/tests/test_codex_mcp_server.py
+index 8cdfcfde..51b39416 100644
+--- a/skills/multi-llm/tests/test_codex_mcp_server.py
++++ b/skills/multi-llm/tests/test_codex_mcp_server.py
+@@ -2167,6 +2167,51 @@ class TestExecuteStateMachine:
+         envelope, result, calls, _ = harness.run(REVIEW, [launch])
+         assert result["isError"] and len(calls) == 1
+ 
++    @pytest.mark.parametrize("mode,flag", [("apply-suggestions", "--dry-run"),
++                                          ("generate-tasks", "--dry-run-subagents"),
++                                          ("review-plan", "--consolidate-dry-run")])
++    def test_a_foreground_preview_returns_without_polling(self, harness, mode, flag):
++        args = dict(REVIEW, mode=mode, extra_flags=[flag])
++        launch = {"exit": 0, "stdout": ["Preview: nothing applied", result_line(
++            mode="apply-suggestions", notice="No changes applied.")]}
++        envelope, result, calls, _ = harness.run(
++            args, [launch], meta=turn_meta(sandbox_mode="workspace-write"))
++        assert not result["isError"] and envelope["ok"] is True
++        assert envelope["exit"] == 0 and envelope["state"] == STATES["ok"]
++        assert envelope["result"]["notice"] == "No changes applied."
++        assert "Preview: nothing applied" in envelope["output"]
++        assert not envelope.get("run_id") and not envelope.get("abort_command")
++        assert len(calls) == 1
++
++    @pytest.mark.parametrize("flag", ["--dry-runner", "--focus=--dry-run"])
++    def test_preview_like_text_does_not_bypass_the_banner_guard(self, harness, flag):
++        envelope, result, calls, _ = harness.run(dict(REVIEW, extra_flags=[flag]),
++                                                [{"exit": 0, "stdout": [result_line()]}])
++        assert result["isError"] and len(calls) == 1
++
++    def test_a_preview_still_requires_a_structured_result(self, harness):
++        envelope, result, calls, _ = harness.run(
++            dict(REVIEW, extra_flags=["--dry-run"]), [{"exit": 0, "stdout": ["Preview"]}])
++        assert result["isError"] and len(calls) == 1
++        assert MARKER in envelope["message"]
++
++    def test_a_preview_that_detaches_is_still_polled_by_its_banner(self, harness):
++        envelope, result, calls, _ = harness.run(
++            dict(REVIEW, extra_flags=["--dry-run-subagents"]), [launch_step(), poll_step(0)])
++        assert not result["isError"] and envelope["run_id"] == "RID-1"
++        assert len(calls) == 2
++
++    @pytest.mark.parametrize("payload", [
++        {"next": "uv run -- python multi_llm.py status p.md --view run --wait"},
++        {"state": STATES["running"]},
++    ])
++    def test_a_preview_does_not_accept_a_bannerless_launch_handshake(self, harness, payload):
++        envelope, result, calls, _ = harness.run(
++            dict(REVIEW, extra_flags=["--dry-run-subagents"]),
++            [{"exit":0, "stdout":[result_line(**payload)]}])
++        assert result["isError"] and len(calls) == 1
++        assert "no run id" in envelope["message"]
++
+     def test_nested_exec_reasons_are_tool_errors(self, harness):
+         code = next(iter(SURFACE["nested_exec_reasons"]))
+         refused = {"exit": 3, "stdout": ["[{}] refused".format(code)]}
+@@ -4370,6 +4415,30 @@ def _real_env(harness, uv: str) -> dict:
+ 
+ 
+ class TestRealDispatcher:
++    @pytest.mark.parametrize("policy", ["expand", "preserve"])
++    def test_apply_preview_finishes_without_detaching_or_completing_the_phase(
++        self, harness, real_root, policy
++    ):
++        from tests.scope_apply_fixtures import PLAN_CASES, write_review
++
++        subprocess.run(["git", "init", "-q", str(harness.workspace)], check=True)
++        review = write_review(harness.workspace, cases={"in_scope": PLAN_CASES["in_scope"]},
++                              review_policy=policy, selections=False, verdicts=False)
++        plan = review["plan"]
++        before = plan.read_bytes()
++        envelope, result, _, _ = harness.run(
++            {"mode": "apply-suggestions", "plan": str(plan.relative_to(harness.workspace)), "question": "",
++             "extra_flags": ["--dry-run"]},
++            root=real_root, extra_env=_real_env(harness, _real_uv()),
++            meta=turn_meta(sandbox_mode="workspace-write"))
++        assert envelope["ok"] is True and not result["isError"], envelope
++        assert envelope["exit"] == 0 and not envelope.get("run_id")
++        assert "Would apply" in envelope["stderr"]
++        assert plan.read_bytes() == before
++        state = json.loads((plan.parent / plan.stem / "state.json").read_text())
++        assert "apply-suggestions" not in state.get("phases_completed", {})
++        assert not (plan.parent / plan.stem / "apply-suggestions" / "write_tasks.json").exists()
++
+     def test_init_scaffolds_in_the_workspace_not_the_plugin(self, harness, real_root):
+         uv = _real_uv()
+         subprocess.run(["git", "init", "-q", str(harness.workspace)], check=True)
+diff --git a/skills/multi-llm/tests/test_opencode_package.py b/skills/multi-llm/tests/test_opencode_package.py
+index 01a67714..5383baed 100644
+--- a/skills/multi-llm/tests/test_opencode_package.py
++++ b/skills/multi-llm/tests/test_opencode_package.py
+@@ -2586,6 +2586,60 @@ class TestNeedsHumanMessage:
+ 
+ 
+ class TestExecuteStateMachine:
++    @pytest.mark.parametrize("flag", ["--dry-run", "--dry-run-subagents", "--consolidate-dry-run"])
++    def test_a_foreground_preview_returns_without_polling(self, built_package, uv_stub, flag):
++        launch = {"exit": 0, "stdout": [
++            "Preview: nothing applied",
++            'MULTI_LLM_RESULT: {"mode":"apply-suggestions","state":"done","exit":0,'
++            '"artifacts":[],"next":null,"notice":"No changes applied."}',
++        ]}
++        result, calls = uv_stub.run(built_package,
++            {"mode": "apply-suggestions", "plan": "p.md", "question": "", "extra_flags": [flag]},
++            [launch])
++        assert result["ok"] is True and result["exit"] == 0
++        assert result["result"]["notice"] == "No changes applied."
++        assert "Preview: nothing applied" in result["output"]
++        assert not result.get("run_id") and not result.get("abort_command")
++        assert len(calls) == 1
++
++    @pytest.mark.parametrize("extra", [[], ["--dry-runner"], ["--focus=--dry-run"]])
++    def test_only_an_explicit_preview_can_finish_without_a_banner(self, built_package, uv_stub, extra):
++        launch = {"exit": 0, "stdout": [
++            'MULTI_LLM_RESULT: {"mode":"review-plan","state":"done","exit":0,"next":null}',
++        ]}
++        result, calls = uv_stub.run(built_package,
++            {"mode":"review-plan", "plan":"p.md", "question":"", "extra_flags":extra}, [launch])
++        assert result["ok"] is False and len(calls) == 1
++
++    def test_a_preview_still_needs_a_structured_result(self, built_package, uv_stub):
++        result, calls = uv_stub.run(built_package,
++            {"mode":"review-plan", "plan":"p.md", "question":"", "extra_flags":["--dry-run"]},
++            [{"exit":0, "stdout":["Preview"]}])
++        assert result["ok"] is False and len(calls) == 1
++        assert "MULTI_LLM_RESULT" in result["message"]
++
++    def test_a_preview_with_a_banner_is_polled(self, built_package, uv_stub):
++        launch = {"exit":0, "stdout":["run_id: RID-PREVIEW", "log: /tmp/preview.log",
++            'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}']}
++        done = {"exit":0, "stdout":['MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}']}
++        result, calls = uv_stub.run(built_package,
++            {"mode":"review-plan", "plan":"p.md", "question":"", "extra_flags":["--dry-run-subagents"]},
++            [launch, done])
++        assert result["ok"] is True and result["run_id"] == "RID-PREVIEW"
++        assert len(calls) == 2
++
++    @pytest.mark.parametrize("payload", [
++        {"next": "uv run -- python multi_llm.py status p.md --view run --wait"},
++        {"state": "running"},
++    ])
++    def test_a_preview_does_not_accept_a_bannerless_launch_handshake(self, built_package, uv_stub, payload):
++        body = {"state":"done", "exit":0, "next":None, **payload}
++        result, calls = uv_stub.run(built_package,
++            {"mode":"review-plan", "plan":"p.md", "question":"", "extra_flags":["--dry-run-subagents"]},
++            [{"exit":0, "stdout":["MULTI_LLM_RESULT: "+json.dumps(body)]}])
++        assert result["ok"] is False and len(calls) == 1
++        assert "no run_id" in result["message"]
++
+     def test_run_id_comes_from_the_banner(self, built_package, uv_stub):
+         """A non-``ask`` launch still yields a poll argv pinned to the banner id.
+ 
+diff --git a/skills/multi-llm/utils/cli_common.py b/skills/multi-llm/utils/cli_common.py
+index 67159d22..51fa4b77 100644
+--- a/skills/multi-llm/utils/cli_common.py
++++ b/skills/multi-llm/utils/cli_common.py
+@@ -265,6 +265,14 @@ CONTINUATION_VERBS: FrozenSet[str] = frozenset({
+     "--reaggregate", "--reaggregate-consolidation",
+ })
+ 
++#: Explicit previews can finish before a mode's detach boundary. Package
++#: supervisors read this vocabulary from the generated CLI surface; a valid
++#: foreground result then needs no run id. A preview that does detach still
++#: follows the ordinary banner/poll contract.
++FOREGROUND_PREVIEW_FLAGS = (
++    "--dry-run", "--dry-run-subagents", "--consolidate-dry-run",
++)
++
+ 
+ def retry_command(
+     mode: str,

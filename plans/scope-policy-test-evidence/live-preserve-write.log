@@ -1,0 +1,52 @@
+[AUTO_RESOLVED] needs-human-decision: --agent-decide implied by --yes: needs-human-decision items are judged, never prompted
+Plan: /tmp/scope-policy-live-20261031/preserve.md
+Output directory: /tmp/scope-policy-live-20261031/preserve
+Prefix: preserve
+[AUTO_RESOLVED] scope-policy: preserve (the review round's recorded policy)
+[scope-policy] apply-suggestions: preserve (source: review; review requested preserve, baseline d1ba0d1dd8b9a88d)
+Loaded 6 suggestion groups
+Loaded 6 validation results
+Found HTML selections from: /tmp/scope-policy-live-20261031/preserve/review-plan/user_selections.json
+User skipped 5 groups: ['26282e5766ac4da8', '5a3dca0e15890ed5', '747cbd061cc4c7d2', '806a326ecc9f777a', 'de876c63c3866b4b']
+User preference summary: 5 items will be skipped
+  Skipping group G4: Date and amount output format is not stated
+  Skipping group G5: Happy-path check cannot catch the quoting bug
+  Skipping group G1: Behaviour on empty or malformed input is unspecified
+  Skipping group G2: CLI contract is not defined and 'existing callers' has no…
+  Skipping group G6: Output encoding and line endings are unspecified
+Filtered 5 user-skipped items
+
+Filtered suggestions:
+  Valid (to apply): 1
+  Needs human review: 0
+  Skipped: 0
+  Deferred (scope policy preserve): 0
+
+Batching results:
+  Total suggestions: 1
+  Total batches: 1
+  Subagent calls saved: 0
+  Efficiency gain: 0.0%
+[OUTPUT_FILE] /tmp/scope-policy-live-20261031/preserve/apply-suggestions/orchestrator_output.json
+Backup saved: /tmp/scope-policy-live-20261031/preserve/apply-suggestions/backup.md
+[write-subagents] materialized 1 apply-suggestions task(s): /tmp/scope-policy-live-20261031/preserve/apply-suggestions/write_tasks.json
+[write-subagents] dirty tree at start: 5 uncommitted path(s) recorded as the baseline — they are NOT part of this run's changes: .multi-llm/providers.yaml, expand/, leaked-fixture/, preserve-before-apply.md, preserve/
+multi-llm warning: claude-code 2.1.316 is newer than the release the shipped parser fixtures were captured from (2.1.293); stream parsing is best-effort above that.
+[ETA] apply-suggestions: batch 1/1 done in 0m 9s · ALL BATCHES COMPLETE
+[write-subagents] batch 0: apply-batch-0 applied in 9.6s — preserve.md
+[ETA] apply-suggestions: phase complete in 0m 12s
+[write-subagents] rollback store peaked at 1.4 MB of the 64 MB budget (65 files, 59 shards; never copied, as driver.write_paths denies it (a write to it fails the batch and cannot be undone): .multi-llm/providers.yaml); discarded now — the restore points are the pre-batch snapshots in /tmp/scope-policy-live-20261031/preserve/apply-suggestions/pre_batch/
+[write-subagents] report: /tmp/scope-policy-live-20261031/preserve/apply-suggestions/write_batch_report.json
+[write-subagents] summary report: /tmp/scope-policy-live-20261031/preserve/apply-suggestions/summary.md
+
+============================================================
+APPLY-SUGGESTIONS: RESULT
+============================================================
+File: /tmp/scope-policy-live-20261031/preserve.md
+Batches: 1/1 ok
+Suggestions applied: 1
+Skipped: 0
+
+Batches:
+  apply-batch-0: ok (applied), 1 suggestion(s), 9.6s, runner claude-code:haiku
+QA_SOURCE_PHASE_EXIT: {"exit": 0}

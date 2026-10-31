@@ -16,7 +16,9 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Reaggregation and result identity](#reaggregation-and-result-identity)
 - [Malformed result entries](#malformed-result-entries)
 - [Report regeneration](#report-regeneration)
+- [Scope tags in reports](#scope-tags-in-reports)
 - [Issue numbers and group decisions](#issue-numbers-and-group-decisions)
+- [Scope tags and the review round](#scope-tags-and-the-review-round)
 
 ## Snapshots and empty review outcomes
 
@@ -149,8 +151,8 @@ under-report.
 ## Reaggregation and result identity
 
 Reaggregation globs `{phase_dir}/*.json` and treats each file as a per-model result list.
-Non-model JSON files written into a phase dir (e.g. `report_data.json`, `subagent_batch_report.json`,
-`state`, `.status`) MUST be added to every `exclude_patterns` list
+Non-model JSON files written into a phase dir (e.g. `report_data.json`, `consolidated_report_data.json`,
+`subagent_batch_report.json`, `state`, `.status`) MUST be added to every `exclude_patterns` list
 (`review_orchestrator_base.py` — two sites — and `code_review_orchestrator.py`) or they get parsed as suggestions
 and crash reaggregate. The executor's per-attempt diagnostics escape this by living in a
 **directory** (`{phase}/failed/`), which the glob never matches.
@@ -224,11 +226,47 @@ and the merge step an un-stamped copy of `grouped` instead of the
 `stamp_stable_ids`-stamped `grouped_list`) used to overlay decisions onto nothing and
 report success anyway; both callers now print matched-vs-read and warn when they differ.
 
+The consolidated page has its own sidecar, `consolidated_report_data.json`, written by
+`consolidation.generate_consolidated_html`; the same entrypoint (and the in-process twin, through
+`regenerate_report_with_human_decisions(include_consolidated=True)`) re-embeds it with decisions
+joined to each umbrella's **underlying** groups by `groupHash`
+(`regenerate_consolidated_with_human_decisions`). A consolidated page with no sidecar (written before
+it existed) is a reported no-op, never reconstructed. Both payloads embed through
+`html_report_generator.script_json`.
+
 `output_handler.PHASE_DIRECTORIES` and `utils/prior_changes.PHASE_ALIASES` carry the same `apply-code-fixes` →
 `apply-fixes` mapping so
 `status --phase`/`--abort`/`--sweep` and `prior_changes.jsonl`'s
 `append`/`render` resolve either spelling to the one phase (F1/F6,
 2026-09-16) — `full_workflow_orchestrator.WRITE_PHASE_DIRS` was previously the only place that held it.
+
+## Scope tags in reports
+
+**Every report shows scope tags through `utils/scope_report.py`** (plan
+`scope-policy-and-report-tags` §6), over the foundation's vocabulary in `utils/scope_policy.py`:
+each finding's own tag is the reviewer's provisional classification, each group's tag is
+`scope_policy.authority` (``Scope unclear`` when missing, unbound or stale — never a confident badge
+for an edited proposal), an umbrella's is derived from its members (`combined_relation`), and under an
+effective `preserve` a group the gate would not pass shows `Deferred: scope preservation requested`
+whatever its validity. Counts are per distinct group. The round's policy comes from `state.json`'s
+`scope_policy` record beside the phase dir (or a passed `scope_state`); a legacy round reads `expand`.
+
+In `report.md` the scope lines sit between the checkboxes and the `**Validation:**`/`**Importance:**`
+line, so `report_parser`'s description boundary is unchanged and an untouched report shows no
+edit; model text goes through `scope_report.md_text` (flattened, Markdown punctuation escaped), so a
+reason cannot forge a header, a checkbox, a metadata line or the issue-digest footer.
+`find_edited_descriptions` also matches the header's display hash (it used to compare only the
+16-character `suggestion_hash`, so a v2 report's edits were dropped).
+
+The HTML payloads persist each `scope` entry (classification, authority state, baseline id, proposal
+digest, selected remedy, decision) and a `scopePolicy` block; regeneration recomputes only the
+decision for the recorded effective policy and deferrals (`scope_report.replay_decision`, the one
+gate), keeping the classification, and refreshes a report whose policy moved even with no decision
+recorded (`scope_regeneration_needed`). The three templates carry one identical JS block between
+`BEGIN SCOPE TAGS`/`END SCOPE TAGS`; an edited description in the page marks its tags stale, and
+scope- or policy-like keys in a stored or imported selection are dropped (`report_parser` drops them
+from `user_selections.json` too). Tests: `tests/test_scope_report_tags.py` (runs the templates under
+Node; skips without it).
 
 ## Issue numbers and group decisions
 
@@ -263,3 +301,50 @@ from both ends (F6, 2026-09-16): `_format_issue` flattens newlines out of the ti
 and `report_parser` accepts a header only at column 0 after a blank line or the
 `---` rule, so a rendered description containing its own `### 2.`
 plus a ticked box cannot forge a skip on an issue the user never touched.
+
+## Scope tags and the review round
+
+**One review round has one scope policy and one scope baseline, given to its reviewers and its
+validators alike** (plans/scope-policy-and-report-tags.md §2–§4; `utils/scope_policy.py` owns the
+vocabulary and prompt blocks, `utils/scope_round.py` the round). The policy is resolved before
+fan-out: the explicit `--scope-policy`, else — for a same-round resume, `--reaggregate` or
+revalidation — the round's recorded `review_policy`, else `expand`. An explicit policy that differs
+from the one an unfinished round's reviewers were asked under exits 3 with
+`[SCOPE_POLICY_CONFLICT]` (the new-round control is `--force --rerun-all`), and so does one typed
+for a `--force` round that would reuse reviewer results requested under another policy; with none
+typed, that round keeps the reused results' policy (source `review`, one `Scope policy notice:`
+line). `state.json`'s `scope_policy[<review phase>]` records the round (`record_review_round` for a
+new round only, `update_round_baseline` — first binding wins — otherwise), its baseline built by
+host hash from the inputs the round already binds: the plan's `validation-snapshot.md` bytes,
+review-tasks' `tasks-backup.md`, review-code's task list and range endpoints, a commit review's
+brief, pinned endpoints, focus and frozen context plan.
+
+The conflict check includes every cached reviewer in the round, even when the invocation
+selects only different reviewers. An authorized new round that changes policy retires all
+old-policy result files under the existing `.stale-earlier-run` convention, after the detach
+boundary and before recording the new policy or dispatching reviewers. A failed retirement
+exits 3; reselecting an earlier reviewer cannot reuse an answer from another policy.
+
+All four reviewer templates carry a `{scope_policy_guidance}` slot, rendered per invocation
+(`reviewer_guidance`) — the template cache never holds policy text — and the three output fields
+`scope_relation`/`scope_reason`/`scope_reference`. Under `expand` the slot is the informational
+annotation block alone and every existing checklist stands; only `preserve` renders the
+suppression block. Every aggregation site normalizes a member's tag through
+`schema_validator.drop_non_record_entries` (malformed reads `unclear`, never drops the finding),
+both reviewer schemas accept the fields optional and untyped, and a salvage request lists them as
+`expected_schema.optional_fields` beside the unchanged required `fields`.
+
+**Scope authority moves only by stable hash.** The validation merge stamps a verdict
+(`scope_round.stamp` → `scope_policy.stamp_validation_record`) only when it joined its group by
+hash, against the host's own copy of that group and the baseline the task file's `scope` block
+names; an index-strategy verdict, a placeholder and a hash-less legacy record keep their validity
+and lose their stamps. `apply_validation_to_groups` attaches `scope_verdict` through
+`attach_verdict(..., hash_matched=)` — never through the `group_index` fallback — and
+`save_validation_results` carries the stamped keys plus `metadata.scope_policy`,
+`scope_baseline_id` and `scope_round_baseline_id`. A validators' baseline that moved from the
+round's (`[SCOPE_BASELINE_MOVED]`) binds its verdicts to the moved text, which reads unclear for the
+round. Under an effective `preserve`, `merge_validation_batches` derives the validation-stage
+decision (`scope_policy_decision` on every group validation judged and its record — a
+`validation_failed` group gets none, an `invalid` one is shown but not counted — counts in
+`metadata.scope_policy_decisions` and `.status.json`, one `[SCOPE_POLICY]` line); validity never
+changes. Under `expand` nothing is decided.

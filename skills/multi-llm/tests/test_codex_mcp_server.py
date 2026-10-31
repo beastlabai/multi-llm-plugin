@@ -2167,6 +2167,51 @@ class TestExecuteStateMachine:
         envelope, result, calls, _ = harness.run(REVIEW, [launch])
         assert result["isError"] and len(calls) == 1
 
+    @pytest.mark.parametrize("mode,flag", [("apply-suggestions", "--dry-run"),
+                                          ("generate-tasks", "--dry-run-subagents"),
+                                          ("review-plan", "--consolidate-dry-run")])
+    def test_a_foreground_preview_returns_without_polling(self, harness, mode, flag):
+        args = dict(REVIEW, mode=mode, extra_flags=[flag])
+        launch = {"exit": 0, "stdout": ["Preview: nothing applied", result_line(
+            mode="apply-suggestions", notice="No changes applied.")]}
+        envelope, result, calls, _ = harness.run(
+            args, [launch], meta=turn_meta(sandbox_mode="workspace-write"))
+        assert not result["isError"] and envelope["ok"] is True
+        assert envelope["exit"] == 0 and envelope["state"] == STATES["ok"]
+        assert envelope["result"]["notice"] == "No changes applied."
+        assert "Preview: nothing applied" in envelope["output"]
+        assert not envelope.get("run_id") and not envelope.get("abort_command")
+        assert len(calls) == 1
+
+    @pytest.mark.parametrize("flag", ["--dry-runner", "--focus=--dry-run"])
+    def test_preview_like_text_does_not_bypass_the_banner_guard(self, harness, flag):
+        envelope, result, calls, _ = harness.run(dict(REVIEW, extra_flags=[flag]),
+                                                [{"exit": 0, "stdout": [result_line()]}])
+        assert result["isError"] and len(calls) == 1
+
+    def test_a_preview_still_requires_a_structured_result(self, harness):
+        envelope, result, calls, _ = harness.run(
+            dict(REVIEW, extra_flags=["--dry-run"]), [{"exit": 0, "stdout": ["Preview"]}])
+        assert result["isError"] and len(calls) == 1
+        assert MARKER in envelope["message"]
+
+    def test_a_preview_that_detaches_is_still_polled_by_its_banner(self, harness):
+        envelope, result, calls, _ = harness.run(
+            dict(REVIEW, extra_flags=["--dry-run-subagents"]), [launch_step(), poll_step(0)])
+        assert not result["isError"] and envelope["run_id"] == "RID-1"
+        assert len(calls) == 2
+
+    @pytest.mark.parametrize("payload", [
+        {"next": "uv run -- python multi_llm.py status p.md --view run --wait"},
+        {"state": STATES["running"]},
+    ])
+    def test_a_preview_does_not_accept_a_bannerless_launch_handshake(self, harness, payload):
+        envelope, result, calls, _ = harness.run(
+            dict(REVIEW, extra_flags=["--dry-run-subagents"]),
+            [{"exit":0, "stdout":[result_line(**payload)]}])
+        assert result["isError"] and len(calls) == 1
+        assert "no run id" in envelope["message"]
+
     def test_nested_exec_reasons_are_tool_errors(self, harness):
         code = next(iter(SURFACE["nested_exec_reasons"]))
         refused = {"exit": 3, "stdout": ["[{}] refused".format(code)]}
@@ -4370,6 +4415,30 @@ def _real_env(harness, uv: str) -> dict:
 
 
 class TestRealDispatcher:
+    @pytest.mark.parametrize("policy", ["expand", "preserve"])
+    def test_apply_preview_finishes_without_detaching_or_completing_the_phase(
+        self, harness, real_root, policy
+    ):
+        from tests.scope_apply_fixtures import PLAN_CASES, write_review
+
+        subprocess.run(["git", "init", "-q", str(harness.workspace)], check=True)
+        review = write_review(harness.workspace, cases={"in_scope": PLAN_CASES["in_scope"]},
+                              review_policy=policy, selections=False, verdicts=False)
+        plan = review["plan"]
+        before = plan.read_bytes()
+        envelope, result, _, _ = harness.run(
+            {"mode": "apply-suggestions", "plan": str(plan.relative_to(harness.workspace)), "question": "",
+             "extra_flags": ["--dry-run"]},
+            root=real_root, extra_env=_real_env(harness, _real_uv()),
+            meta=turn_meta(sandbox_mode="workspace-write"))
+        assert envelope["ok"] is True and not result["isError"], envelope
+        assert envelope["exit"] == 0 and not envelope.get("run_id")
+        assert "Would apply" in envelope["stderr"]
+        assert plan.read_bytes() == before
+        state = json.loads((plan.parent / plan.stem / "state.json").read_text())
+        assert "apply-suggestions" not in state.get("phases_completed", {})
+        assert not (plan.parent / plan.stem / "apply-suggestions" / "write_tasks.json").exists()
+
     def test_init_scaffolds_in_the_workspace_not_the_plugin(self, harness, real_root):
         uv = _real_uv()
         subprocess.run(["git", "init", "-q", str(harness.workspace)], check=True)

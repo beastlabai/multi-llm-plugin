@@ -1,0 +1,7 @@
+{
+  "ok": false,
+  "exit": null,
+  "state": "needs-human",
+  "message": "the call was cancelled. The detached run 9a57648e-23ce-4271-b0e4-249ea16cb38f was confirmed aborted. Log: /tmp/scope-policy-world-20261031/generation-resume/feature/generate-tasks/orchestrator-run.log. If it is still alive, stop it with the `abort_command` tool call in this result.",
+  "anchor": "/tmp/scope-policy-world-20261031/generation-resume"
+}

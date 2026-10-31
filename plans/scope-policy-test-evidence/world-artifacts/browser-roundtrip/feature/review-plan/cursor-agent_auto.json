@@ -1,0 +1,20 @@
+[
+  {
+    "title": "Also export the report as PDF",
+    "desc": "Users will want PDF; add a PDF exporter beside the CSV one.",
+    "importance": "HIGH",
+    "reference": "## Output",
+    "type": "addition",
+    "scope_relation": "in_scope",
+    "scope_reason": "Required for the export goal."
+  },
+  {
+    "title": "CSV header row is never specified",
+    "desc": "The plan says CSV but never names the columns of the header row, so two implementers would write two different files. The Output section is the only place the format is named, and it lists no column, no order and no quoting rule; name them there so the export is checkable.",
+    "importance": "MEDIUM",
+    "reference": "## Output",
+    "type": "clarification",
+    "scope_relation": "in_scope",
+    "scope_reason": "Completes the CSV requirement."
+  }
+]

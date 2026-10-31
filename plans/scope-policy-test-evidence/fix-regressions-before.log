@@ -1,0 +1,697 @@
+...................................................FFFFF.F.............. [ 49%]
+.......................F.........F............FF.......................F [ 99%]
+.                                                                        [100%]
+=================================== FAILURES ===================================
+_ TestTheRoundBindsBothRoles.test_a_disjoint_reviewer_selection_cannot_change_policy[preserve-expand-False] _
+
+self = <tests.test_scope_prompts_and_validation.TestTheRoundBindsBothRoles object at 0x7ba251b65130>
+tmp_path = PosixPath('/tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec0')
+capsys = <_pytest.capture.CaptureFixture object at 0x7ba252159310>
+force = False, old = 'preserve', new = 'expand'
+
+    @pytest.mark.parametrize("force", [False, True])
+    @pytest.mark.parametrize("old,new", [("preserve", "expand"), ("expand", "preserve")])
+    def test_a_disjoint_reviewer_selection_cannot_change_policy(self, tmp_path, capsys,
+                                                               force, old, new):
+        first = _review_plan_main(tmp_path, old, models=("cursor-agent:auto",))
+        before = sp.round_record(_state(first["plan"]), "review-plan")
+        capsys.readouterr()
+        second = _review_plan_main(tmp_path, new, models=("cursor-agent:gpt-5",),
+                                  extra_argv=("--force",) if force else ())
+>       assert second["code"] == 3
+E       assert 0 == 3
+
+skills/multi-llm/tests/test_scope_prompts_and_validation.py:931: AssertionError
+----------------------------- Captured stdout call -----------------------------
+Using models from --models flag: cursor-agent:gpt-5
+WARNING: Unknown models (proceeding anyway): cursor-agent:gpt-5
+Available models: claude-code:sonnet, claude-code:opus, claude-code:fable, claude-code:haiku, claude-code:claude-sonnet-5-5, claude-code:claude-opus-5-5, claude-code:claude-fable-5-1, claude-code:claude-haiku-5-5, cursor-agent:auto, cursor-agent:composer-2.5...
+Scope policy: expand (explicit; new round)
+Loaded plan: /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec0/feature.md (44 chars)
+Backup saved: /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec0/feature/review-plan/backup.md
+Output prefix: feature
+Output directory: /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec0/feature
+Models: cursor-agent:gpt-5
+Timeout override: 5s per model
+Max parallel: 5
+
+[PROGRESS] fan-out over 1 model: cursor-agent:gpt-5 (5s)
+[cursor-agent:gpt-5] Starting review with file-based output (attempt 1, timeout: 5s of a 5s slot)...
+[cursor-agent:gpt-5] Output file: unused.json (source: file)
+[cursor-agent:gpt-5] Completed successfully in 0.0s (source: file)
+[PROGRESS] 1/1 done (1 ok, 0 failed)
+[cursor-agent:gpt-5] Saved 2 suggestions to: /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec0/feature/review-plan/cursor-agent_gpt-5.json
+Grouped suggestions saved to: /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec0/feature/review-plan/grouped.json
+
+Preparing batched validation for subagent execution...
+
+[VALIDATION_BATCHES_PENDING] /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec0/feature/review-plan/validation_tasks.json
+Batches: 2
+
+Validation prepared for subagent execution.
+Groups to validate: 2
+HIGH priority groups: 1
+Normal priority groups: 1
+
+After validation completes, run:
+  uv run --frozen --no-dev --project /home/marc/code/mllm-wt/scope-policy/skills/multi-llm -- python /home/marc/code/mllm-wt/scope-policy/skills/multi-llm/multi_llm.py review-plan /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec0/feature.md --reaggregate
+[PROGRESS] step: validation_pending | 0m00s
+_ TestTheRoundBindsBothRoles.test_a_disjoint_reviewer_selection_cannot_change_policy[preserve-expand-True] _
+
+self = <tests.test_scope_prompts_and_validation.TestTheRoundBindsBothRoles object at 0x7ba25145e470>
+tmp_path = PosixPath('/tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec1')
+capsys = <_pytest.capture.CaptureFixture object at 0x7ba2510bf890>, force = True
+old = 'preserve', new = 'expand'
+
+    @pytest.mark.parametrize("force", [False, True])
+    @pytest.mark.parametrize("old,new", [("preserve", "expand"), ("expand", "preserve")])
+    def test_a_disjoint_reviewer_selection_cannot_change_policy(self, tmp_path, capsys,
+                                                               force, old, new):
+        first = _review_plan_main(tmp_path, old, models=("cursor-agent:auto",))
+        before = sp.round_record(_state(first["plan"]), "review-plan")
+        capsys.readouterr()
+        second = _review_plan_main(tmp_path, new, models=("cursor-agent:gpt-5",),
+                                  extra_argv=("--force",) if force else ())
+>       assert second["code"] == 3
+E       assert 0 == 3
+
+skills/multi-llm/tests/test_scope_prompts_and_validation.py:931: AssertionError
+----------------------------- Captured stdout call -----------------------------
+Using models from --models flag: cursor-agent:gpt-5
+WARNING: Unknown models (proceeding anyway): cursor-agent:gpt-5
+Available models: claude-code:sonnet, claude-code:opus, claude-code:fable, claude-code:haiku, claude-code:claude-sonnet-5-5, claude-code:claude-opus-5-5, claude-code:claude-fable-5-1, claude-code:claude-haiku-5-5, cursor-agent:auto, cursor-agent:composer-2.5...
+Scope policy: expand (explicit; new round)
+Loaded plan: /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec1/feature.md (44 chars)
+Backup saved: /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec1/feature/review-plan/backup.md
+Output prefix: feature
+Output directory: /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec1/feature
+Models: cursor-agent:gpt-5
+Timeout override: 5s per model
+Max parallel: 5
+
+[PROGRESS] fan-out over 1 model: cursor-agent:gpt-5 (5s)
+[cursor-agent:gpt-5] Starting review with file-based output (attempt 1, timeout: 5s of a 5s slot)...
+[cursor-agent:gpt-5] Output file: unused.json (source: file)
+[cursor-agent:gpt-5] Completed successfully in 0.0s (source: file)
+[PROGRESS] 1/1 done (1 ok, 0 failed)
+[cursor-agent:gpt-5] Saved 2 suggestions to: /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec1/feature/review-plan/cursor-agent_gpt-5.json
+Grouped suggestions saved to: /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec1/feature/review-plan/grouped.json
+
+Preparing batched validation for subagent execution...
+
+[VALIDATION_BATCHES_PENDING] /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec1/feature/review-plan/validation_tasks.json
+Batches: 2
+
+Validation prepared for subagent execution.
+Groups to validate: 2
+HIGH priority groups: 1
+Normal priority groups: 1
+
+After validation completes, run:
+  uv run --frozen --no-dev --project /home/marc/code/mllm-wt/scope-policy/skills/multi-llm -- python /home/marc/code/mllm-wt/scope-policy/skills/multi-llm/multi_llm.py review-plan /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec1/feature.md --reaggregate
+[PROGRESS] step: validation_pending | 0m00s
+_ TestTheRoundBindsBothRoles.test_a_disjoint_reviewer_selection_cannot_change_policy[expand-preserve-False] _
+
+self = <tests.test_scope_prompts_and_validation.TestTheRoundBindsBothRoles object at 0x7ba25145e360>
+tmp_path = PosixPath('/tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec2')
+capsys = <_pytest.capture.CaptureFixture object at 0x7ba251bf50f0>
+force = False, old = 'expand', new = 'preserve'
+
+    @pytest.mark.parametrize("force", [False, True])
+    @pytest.mark.parametrize("old,new", [("preserve", "expand"), ("expand", "preserve")])
+    def test_a_disjoint_reviewer_selection_cannot_change_policy(self, tmp_path, capsys,
+                                                               force, old, new):
+        first = _review_plan_main(tmp_path, old, models=("cursor-agent:auto",))
+        before = sp.round_record(_state(first["plan"]), "review-plan")
+        capsys.readouterr()
+        second = _review_plan_main(tmp_path, new, models=("cursor-agent:gpt-5",),
+                                  extra_argv=("--force",) if force else ())
+>       assert second["code"] == 3
+E       assert 0 == 3
+
+skills/multi-llm/tests/test_scope_prompts_and_validation.py:931: AssertionError
+----------------------------- Captured stdout call -----------------------------
+Using models from --models flag: cursor-agent:gpt-5
+WARNING: Unknown models (proceeding anyway): cursor-agent:gpt-5
+Available models: claude-code:sonnet, claude-code:opus, claude-code:fable, claude-code:haiku, claude-code:claude-sonnet-5-5, claude-code:claude-opus-5-5, claude-code:claude-fable-5-1, claude-code:claude-haiku-5-5, cursor-agent:auto, cursor-agent:composer-2.5...
+Scope policy: preserve (explicit; new round)
+Loaded plan: /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec2/feature.md (44 chars)
+Backup saved: /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec2/feature/review-plan/backup.md
+Output prefix: feature
+Output directory: /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec2/feature
+Models: cursor-agent:gpt-5
+Timeout override: 5s per model
+Max parallel: 5
+
+[PROGRESS] fan-out over 1 model: cursor-agent:gpt-5 (5s)
+[cursor-agent:gpt-5] Starting review with file-based output (attempt 1, timeout: 5s of a 5s slot)...
+[cursor-agent:gpt-5] Output file: unused.json (source: file)
+[cursor-agent:gpt-5] Completed successfully in 0.0s (source: file)
+[PROGRESS] 1/1 done (1 ok, 0 failed)
+[cursor-agent:gpt-5] Saved 2 suggestions to: /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec2/feature/review-plan/cursor-agent_gpt-5.json
+Grouped suggestions saved to: /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec2/feature/review-plan/grouped.json
+
+Preparing batched validation for subagent execution...
+
+[VALIDATION_BATCHES_PENDING] /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec2/feature/review-plan/validation_tasks.json
+Batches: 2
+
+Validation prepared for subagent execution.
+Groups to validate: 2
+HIGH priority groups: 1
+Normal priority groups: 1
+
+After validation completes, run:
+  uv run --frozen --no-dev --project /home/marc/code/mllm-wt/scope-policy/skills/multi-llm -- python /home/marc/code/mllm-wt/scope-policy/skills/multi-llm/multi_llm.py review-plan /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec2/feature.md --reaggregate
+[PROGRESS] step: validation_pending | 0m00s
+_ TestTheRoundBindsBothRoles.test_a_disjoint_reviewer_selection_cannot_change_policy[expand-preserve-True] _
+
+self = <tests.test_scope_prompts_and_validation.TestTheRoundBindsBothRoles object at 0x7ba251498550>
+tmp_path = PosixPath('/tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec3')
+capsys = <_pytest.capture.CaptureFixture object at 0x7ba251bf5a70>, force = True
+old = 'expand', new = 'preserve'
+
+    @pytest.mark.parametrize("force", [False, True])
+    @pytest.mark.parametrize("old,new", [("preserve", "expand"), ("expand", "preserve")])
+    def test_a_disjoint_reviewer_selection_cannot_change_policy(self, tmp_path, capsys,
+                                                               force, old, new):
+        first = _review_plan_main(tmp_path, old, models=("cursor-agent:auto",))
+        before = sp.round_record(_state(first["plan"]), "review-plan")
+        capsys.readouterr()
+        second = _review_plan_main(tmp_path, new, models=("cursor-agent:gpt-5",),
+                                  extra_argv=("--force",) if force else ())
+>       assert second["code"] == 3
+E       assert 0 == 3
+
+skills/multi-llm/tests/test_scope_prompts_and_validation.py:931: AssertionError
+----------------------------- Captured stdout call -----------------------------
+Using models from --models flag: cursor-agent:gpt-5
+WARNING: Unknown models (proceeding anyway): cursor-agent:gpt-5
+Available models: claude-code:sonnet, claude-code:opus, claude-code:fable, claude-code:haiku, claude-code:claude-sonnet-5-5, claude-code:claude-opus-5-5, claude-code:claude-fable-5-1, claude-code:claude-haiku-5-5, cursor-agent:auto, cursor-agent:composer-2.5...
+Scope policy: preserve (explicit; new round)
+Loaded plan: /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec3/feature.md (44 chars)
+Backup saved: /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec3/feature/review-plan/backup.md
+Output prefix: feature
+Output directory: /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec3/feature
+Models: cursor-agent:gpt-5
+Timeout override: 5s per model
+Max parallel: 5
+
+[PROGRESS] fan-out over 1 model: cursor-agent:gpt-5 (5s)
+[cursor-agent:gpt-5] Starting review with file-based output (attempt 1, timeout: 5s of a 5s slot)...
+[cursor-agent:gpt-5] Output file: unused.json (source: file)
+[cursor-agent:gpt-5] Completed successfully in 0.0s (source: file)
+[PROGRESS] 1/1 done (1 ok, 0 failed)
+[cursor-agent:gpt-5] Saved 2 suggestions to: /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec3/feature/review-plan/cursor-agent_gpt-5.json
+Grouped suggestions saved to: /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec3/feature/review-plan/grouped.json
+
+Preparing batched validation for subagent execution...
+
+[VALIDATION_BATCHES_PENDING] /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec3/feature/review-plan/validation_tasks.json
+Batches: 2
+
+Validation prepared for subagent execution.
+Groups to validate: 2
+HIGH priority groups: 1
+Normal priority groups: 1
+
+After validation completes, run:
+  uv run --frozen --no-dev --project /home/marc/code/mllm-wt/scope-policy/skills/multi-llm -- python /home/marc/code/mllm-wt/scope-policy/skills/multi-llm/multi_llm.py review-plan /tmp/pytest-of-marc/pytest-2314/test_a_disjoint_reviewer_selec3/feature.md --reaggregate
+[PROGRESS] step: validation_pending | 0m00s
+_ TestTheRoundBindsBothRoles.test_a_new_policy_round_retires_unselected_cached_reviewers _
+
+self = <tests.test_scope_prompts_and_validation.TestTheRoundBindsBothRoles object at 0x7ba251498750>
+tmp_path = PosixPath('/tmp/pytest-of-marc/pytest-2314/test_a_new_policy_round_retire0')
+
+    def test_a_new_policy_round_retires_unselected_cached_reviewers(self, tmp_path):
+        first = _review_plan_main(tmp_path, "preserve", models=("cursor-agent:auto",))
+        old_result = first["phase_dir"] / "cursor-agent_auto.json"
+        original = old_result.read_bytes()
+        second = _review_plan_main(tmp_path, "expand", models=("cursor-agent:gpt-5",),
+                                  extra_argv=("--force", "--rerun-all"))
+        assert second["code"] == 0
+>       assert not old_result.exists()
+E       AssertionError: assert not True
+E        +  where True = exists()
+E        +    where exists = PosixPath('/tmp/pytest-of-marc/pytest-2314/test_a_new_policy_round_retire0/feature/review-plan/cursor-agent_auto.json').exists
+
+skills/multi-llm/tests/test_scope_prompts_and_validation.py:943: AssertionError
+----------------------------- Captured stdout call -----------------------------
+Using models from --models flag: cursor-agent:auto
+Scope policy: preserve (explicit; new round)
+Loaded plan: /tmp/pytest-of-marc/pytest-2314/test_a_new_policy_round_retire0/feature.md (44 chars)
+Backup saved: /tmp/pytest-of-marc/pytest-2314/test_a_new_policy_round_retire0/feature/review-plan/backup.md
+Output prefix: feature
+Output directory: /tmp/pytest-of-marc/pytest-2314/test_a_new_policy_round_retire0/feature
+Models: cursor-agent:auto
+Timeout override: 5s per model
+Max parallel: 5
+
+[PROGRESS] fan-out over 1 model: cursor-agent:auto (5s)
+[cursor-agent:auto] Starting review with file-based output (attempt 1, timeout: 5s of a 5s slot)...
+[cursor-agent:auto] Output file: unused.json (source: file)
+[cursor-agent:auto] Completed successfully in 0.0s (source: file)
+[PROGRESS] 1/1 done (1 ok, 0 failed)
+[cursor-agent:auto] Saved 2 suggestions to: /tmp/pytest-of-marc/pytest-2314/test_a_new_policy_round_retire0/feature/review-plan/cursor-agent_auto.json
+Grouped suggestions saved to: /tmp/pytest-of-marc/pytest-2314/test_a_new_policy_round_retire0/feature/review-plan/grouped.json
+
+Preparing batched validation for subagent execution...
+
+[VALIDATION_BATCHES_PENDING] /tmp/pytest-of-marc/pytest-2314/test_a_new_policy_round_retire0/feature/review-plan/validation_tasks.json
+Batches: 2
+
+Validation prepared for subagent execution.
+Groups to validate: 2
+HIGH priority groups: 1
+Normal priority groups: 1
+
+After validation completes, run:
+  uv run --frozen --no-dev --project /home/marc/code/mllm-wt/scope-policy/skills/multi-llm -- python /home/marc/code/mllm-wt/scope-policy/skills/multi-llm/multi_llm.py review-plan /tmp/pytest-of-marc/pytest-2314/test_a_new_policy_round_retire0/feature.md --reaggregate
+[PROGRESS] step: validation_pending | 0m00s
+Using models from --models flag: cursor-agent:gpt-5
+WARNING: Unknown models (proceeding anyway): cursor-agent:gpt-5
+Available models: claude-code:sonnet, claude-code:opus, claude-code:fable, claude-code:haiku, claude-code:claude-sonnet-5-5, claude-code:claude-opus-5-5, claude-code:claude-fable-5-1, claude-code:claude-haiku-5-5, cursor-agent:auto, cursor-agent:composer-2.5...
+Scope policy: expand (explicit; new round)
+Loaded plan: /tmp/pytest-of-marc/pytest-2314/test_a_new_policy_round_retire0/feature.md (44 chars)
+Backup saved: /tmp/pytest-of-marc/pytest-2314/test_a_new_policy_round_retire0/feature/review-plan/backup.md
+Output prefix: feature
+Output directory: /tmp/pytest-of-marc/pytest-2314/test_a_new_policy_round_retire0/feature
+Models: cursor-agent:gpt-5
+Timeout override: 5s per model
+Max parallel: 5
+
+[PROGRESS] fan-out over 1 model: cursor-agent:gpt-5 (5s)
+[cursor-agent:gpt-5] Starting review with file-based output (attempt 1, timeout: 5s of a 5s slot)...
+[cursor-agent:gpt-5] Output file: unused.json (source: file)
+[cursor-agent:gpt-5] Completed successfully in 0.0s (source: file)
+[PROGRESS] 1/1 done (1 ok, 0 failed)
+[cursor-agent:gpt-5] Saved 2 suggestions to: /tmp/pytest-of-marc/pytest-2314/test_a_new_policy_round_retire0/feature/review-plan/cursor-agent_gpt-5.json
+Grouped suggestions saved to: /tmp/pytest-of-marc/pytest-2314/test_a_new_policy_round_retire0/feature/review-plan/grouped.json
+
+Preparing batched validation for subagent execution...
+
+[VALIDATION_BATCHES_PENDING] /tmp/pytest-of-marc/pytest-2314/test_a_new_policy_round_retire0/feature/review-plan/validation_tasks.json
+Batches: 2
+
+Validation prepared for subagent execution.
+Groups to validate: 2
+HIGH priority groups: 1
+Normal priority groups: 1
+
+After validation completes, run:
+  uv run --frozen --no-dev --project /home/marc/code/mllm-wt/scope-policy/skills/multi-llm -- python /home/marc/code/mllm-wt/scope-policy/skills/multi-llm/multi_llm.py review-plan /tmp/pytest-of-marc/pytest-2314/test_a_new_policy_round_retire0/feature.md --reaggregate
+[PROGRESS] step: validation_pending | 0m00s
+_ TestResolutionUnits.test_round_results_ignore_bookkeeping_and_include_empty_legacy_reviews _
+
+self = <tests.test_scope_prompts_and_validation.TestResolutionUnits object at 0x7ba251472710>
+tmp_path = PosixPath('/tmp/pytest-of-marc/pytest-2314/test_round_results_ignore_book0')
+
+    def test_round_results_ignore_bookkeeping_and_include_empty_legacy_reviews(self, tmp_path):
+>       assert not base.round_results_exist(str(tmp_path / "missing"))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'utils.review_orchestrator_base' has no attribute 'round_results_exist'. Did you mean: 'requested_results_exist'?
+
+skills/multi-llm/tests/test_scope_prompts_and_validation.py:984: AttributeError
+_______ TestGenerateTasks.test_force_is_a_new_run_without_the_old_choice _______
+
+self = <tests.test_scope_policy_leaf_modes.TestGenerateTasks object at 0x7ba251b747d0>
+repo = <tests.test_write_executor_orchestrators.repo.<locals>.Repo object at 0x7ba251beaa50>
+capsys = <_pytest.capture.CaptureFixture object at 0x7ba251c198c0>
+
+    def test_force_is_a_new_run_without_the_old_choice(self, repo, capsys):
+        phase_dir = str(output_dir_path(repo.plan) / "generate-tasks")
+        typed = gto.parse_args(["--plan-file", str(repo.plan), "--scope-policy", "preserve"])
+        assert gto._resolve_scope_policy(typed, repo.plan, phase_dir) == "preserve"
+        later = gto.parse_args(["--plan-file", str(repo.plan), "--yes"])
+        assert gto._resolve_scope_policy(later, repo.plan, phase_dir) == "preserve"
+        forced = gto.parse_args(["--plan-file", str(repo.plan), "--force", "--yes"])
+        assert gto._resolve_scope_policy(forced, repo.plan, phase_dir) == "expand"
+>       assert gto._resolve_scope_policy(later, repo.plan, phase_dir) == "expand"
+E       AssertionError: assert 'preserve' == 'expand'
+E         
+E         - expand
+E         + preserve
+
+/home/marc/code/mllm-wt/scope-policy/skills/multi-llm/tests/test_scope_policy_leaf_modes.py:63: AssertionError
+----------------------------- Captured stdout call -----------------------------
+[AUTO_RESOLVED] scope-policy: preserve (kept from this generate-tasks run's recorded --scope-policy)
+[AUTO_RESOLVED] scope-policy: expand (no --scope-policy given: the default for a new run)
+[AUTO_RESOLVED] scope-policy: preserve (kept from this generate-tasks run's recorded --scope-policy)
+_________ TestImplement.test_fresh_is_a_new_run_without_the_old_choice _________
+
+self = <tests.test_scope_policy_leaf_modes.TestImplement object at 0x7ba251a289d0>
+repo = <tests.test_write_executor_orchestrators.repo.<locals>.Repo object at 0x7ba251940980>
+handed_out = [{'batches': [{'batch_index': 0, 'can_parallelize': False, 'tasks': [{'complexity': 'medium', 'depends_on': [], 'descr...ng_tasks': 3, 'plan_arg': '/tmp/pytest-of-marc/pytest-2314/test_fresh_is_a_new_run_withou0/repo/plans/sample.md', ...}]
+capsys = <_pytest.capture.CaptureFixture object at 0x7ba251dd9c50>
+
+    def test_fresh_is_a_new_run_without_the_old_choice(self, repo, handed_out, capsys):
+        assert _implement(repo, "--scope-policy", "preserve") == 0
+        assert _implement(repo, "--fresh", "--yes") == 0
+        fresh = handed_out[-1]
+        assert all(PRESERVE_HEADING not in prompt for prompt in _prompts(fresh))
+        assert _implement(repo, "--resume", "--yes") == 0
+>       assert all(PRESERVE_HEADING not in prompt for prompt in _prompts(handed_out[-1]))
+E       assert False
+E        +  where False = all(<generator object TestImplement.test_fresh_is_a_new_run_without_the_old_choice.<locals>.<genexpr> at 0x7ba251ec9b10>)
+
+/home/marc/code/mllm-wt/scope-policy/skills/multi-llm/tests/test_scope_policy_leaf_modes.py:186: AssertionError
+----------------------------- Captured stdout call -----------------------------
+Loaded plan: /tmp/pytest-of-marc/pytest-2314/test_fresh_is_a_new_run_withou0/repo/plans/sample.md
+State file: /tmp/pytest-of-marc/pytest-2314/test_fresh_is_a_new_run_withou0/repo/plans/sample/state.json
+Recorded 1 pre-existing changed paths
+Found 3 tasks
+Loaded plan: /tmp/pytest-of-marc/pytest-2314/test_fresh_is_a_new_run_withou0/repo/plans/sample.md
+State file: /tmp/pytest-of-marc/pytest-2314/test_fresh_is_a_new_run_withou0/repo/plans/sample/state.json
+Pre-existing changes already recorded (1 paths)
+Found 3 tasks
+[AUTO_RESOLVED] scope-policy: expand (no --scope-policy given: the default for a new run)
+Loaded plan: /tmp/pytest-of-marc/pytest-2314/test_fresh_is_a_new_run_withou0/repo/plans/sample.md
+State file: /tmp/pytest-of-marc/pytest-2314/test_fresh_is_a_new_run_withou0/repo/plans/sample/state.json
+Pre-existing changes already recorded (1 paths)
+Found 3 tasks
+Restored previous session state
+[AUTO_RESOLVED] scope-policy: preserve (kept from this implement run's recorded --scope-policy)
+_ TestImproveExecutorLeg.test_a_forced_new_round_starts_without_the_old_choice[improve-plan] _
+
+self = <tests.test_scope_policy_composites.TestImproveExecutorLeg object at 0x7ba2510d8e60>
+repo = PosixPath('/tmp/pytest-of-marc/pytest-2314/test_a_forced_new_round_starts0')
+stub = <function stub.<locals>.configure at 0x7ba251dbaf20>
+capsys = <_pytest.capture.CaptureFixture object at 0x7ba251f553d0>
+mode = 'improve-plan'
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_a_forced_new_round_starts_without_the_old_choice(self, repo, stub, capsys, mode):
+        stub(fail={mode_table.resolve(mode).sequence[1]: 3})
+        plan = _plan(repo)
+        assert _main(mode, plan, *PRESERVE) == 3
+        calls = stub(fail={mode_table.resolve(mode).sequence[1]: 3})
+        calls.clear()
+        assert _main(mode, plan, "--force") == 3
+        for _word, argv, _held in calls:
+            assert "--scope-policy" not in argv, argv
+        calls = stub()
+        assert _main(mode, plan, "--resume") == 0
+        for _word, argv, _held in calls:
+>           assert "--scope-policy" not in argv, argv
+E           AssertionError: ['--yes', '--agent-decide', '--no-confirm', '--scope-policy', 'preserve', '--resume']
+E           assert '--scope-policy' not in ['--yes', '--agent-decide', '--no-confirm', '--scope-policy', 'preserve', '--resume']
+
+/home/marc/code/mllm-wt/scope-policy/skills/multi-llm/tests/test_scope_policy_composites.py:154: AssertionError
+----------------------------- Captured stdout call -----------------------------
+
+=== Step 1: review-plan ===
+
+=== Step 1b: consolidation ===
+[SKIPPED] Step 1b: consolidation: not recommended by review-plan
+
+=== Step 2: apply-suggestions ===
+
+## Improve Plan Summary
+
+**Plan**: /tmp/pytest-of-marc/pytest-2314/test_a_forced_new_round_starts0/plans/imp-plan.md
+
+- Step 1: review-plan: done — completed
+- Step 1b: consolidation: skipped — not recommended by review-plan
+- Step 2: apply-suggestions: failed — exited 3
+
+### Output files
+
+- /tmp/pytest-of-marc/pytest-2314/test_a_forced_new_round_starts0/plans/imp-plan.md
+
+
+=== Step 1: review-plan ===
+
+=== Step 1b: consolidation ===
+[SKIPPED] Step 1b: consolidation: not recommended by review-plan
+
+=== Step 2: apply-suggestions ===
+
+## Improve Plan Summary
+
+**Plan**: /tmp/pytest-of-marc/pytest-2314/test_a_forced_new_round_starts0/plans/imp-plan.md
+
+- Step 1: review-plan: done — completed
+- Step 1b: consolidation: skipped — not recommended by review-plan
+- Step 2: apply-suggestions: failed — exited 3
+
+### Output files
+
+- /tmp/pytest-of-marc/pytest-2314/test_a_forced_new_round_starts0/plans/imp-plan.md
+
+[AUTO_RESOLVED] scope-policy: preserve (kept from this improve-plan run's recorded --scope-policy)
+
+=== Step 1: review-plan: already completed, skipping ===
+
+=== Step 1b: consolidation ===
+[SKIPPED] Step 1b: consolidation: not recommended by review-plan
+
+=== Step 2: apply-suggestions ===
+
+## Improve Plan Summary
+
+**Plan**: /tmp/pytest-of-marc/pytest-2314/test_a_forced_new_round_starts0/plans/imp-plan.md
+
+- Step 1: review-plan: already-complete — completed
+- Step 1b: consolidation: skipped — not recommended by review-plan
+- Step 2: apply-suggestions: done — completed
+
+### Output files
+
+- /tmp/pytest-of-marc/pytest-2314/test_a_forced_new_round_starts0/plans/imp-plan.md
+
+----------------------------- Captured stderr call -----------------------------
+
+ERROR: Step 2: apply-suggestions did not complete (exited 3). The workflow stopped here; no later phase ran.
+       Then continue the workflow from this phase:
+         uv run --frozen --no-dev --project /home/marc/code/mllm-wt/scope-policy/skills/multi-llm -- python /home/marc/code/mllm-wt/scope-policy/skills/multi-llm/multi_llm.py improve-plan /tmp/pytest-of-marc/pytest-2314/test_a_forced_new_round_starts0/plans/imp-plan.md --scope-policy preserve --resume
+       A failed phase is never a question, even attended: nothing makes a hard failure proceed (D6 row 14).
+
+ERROR: Step 2: apply-suggestions did not complete (exited 3). The workflow stopped here; no later phase ran.
+       Then continue the workflow from this phase:
+         uv run --frozen --no-dev --project /home/marc/code/mllm-wt/scope-policy/skills/multi-llm -- python /home/marc/code/mllm-wt/scope-policy/skills/multi-llm/multi_llm.py improve-plan /tmp/pytest-of-marc/pytest-2314/test_a_forced_new_round_starts0/plans/imp-plan.md --resume
+       A failed phase is never a question, even attended: nothing makes a hard failure proceed (D6 row 14).
+_ TestImproveExecutorLeg.test_a_forced_new_round_starts_without_the_old_choice[improve-code] _
+
+self = <tests.test_scope_policy_composites.TestImproveExecutorLeg object at 0x7ba251c31710>
+repo = PosixPath('/tmp/pytest-of-marc/pytest-2314/test_a_forced_new_round_starts1')
+stub = <function stub.<locals>.configure at 0x7ba251b5aca0>
+capsys = <_pytest.capture.CaptureFixture object at 0x7ba2518c8250>
+mode = 'improve-code'
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_a_forced_new_round_starts_without_the_old_choice(self, repo, stub, capsys, mode):
+        stub(fail={mode_table.resolve(mode).sequence[1]: 3})
+        plan = _plan(repo)
+        assert _main(mode, plan, *PRESERVE) == 3
+        calls = stub(fail={mode_table.resolve(mode).sequence[1]: 3})
+        calls.clear()
+        assert _main(mode, plan, "--force") == 3
+        for _word, argv, _held in calls:
+            assert "--scope-policy" not in argv, argv
+        calls = stub()
+        assert _main(mode, plan, "--resume") == 0
+        for _word, argv, _held in calls:
+>           assert "--scope-policy" not in argv, argv
+E           AssertionError: ['--yes', '--agent-decide', '--no-confirm', '--scope-policy', 'preserve', '--resume']
+E           assert '--scope-policy' not in ['--yes', '--agent-decide', '--no-confirm', '--scope-policy', 'preserve', '--resume']
+
+/home/marc/code/mllm-wt/scope-policy/skills/multi-llm/tests/test_scope_policy_composites.py:154: AssertionError
+----------------------------- Captured stdout call -----------------------------
+
+=== Step 1: review-code ===
+
+=== Step 2: apply-code-fixes ===
+
+## Improve Code Summary
+
+**Plan**: /tmp/pytest-of-marc/pytest-2314/test_a_forced_new_round_starts1/plans/imp-plan.md
+
+- Step 1: review-code: done — completed
+- Step 2: apply-code-fixes: failed — exited 3
+
+
+=== Step 1: review-code ===
+
+=== Step 2: apply-code-fixes ===
+
+## Improve Code Summary
+
+**Plan**: /tmp/pytest-of-marc/pytest-2314/test_a_forced_new_round_starts1/plans/imp-plan.md
+
+- Step 1: review-code: done — completed
+- Step 2: apply-code-fixes: failed — exited 3
+
+[AUTO_RESOLVED] scope-policy: preserve (kept from this improve-code run's recorded --scope-policy)
+
+=== Step 1: review-code: already completed, skipping ===
+
+=== Step 2: apply-code-fixes ===
+
+## Improve Code Summary
+
+**Plan**: /tmp/pytest-of-marc/pytest-2314/test_a_forced_new_round_starts1/plans/imp-plan.md
+
+- Step 1: review-code: already-complete — completed
+- Step 2: apply-code-fixes: done — completed
+
+----------------------------- Captured stderr call -----------------------------
+
+ERROR: Step 2: apply-code-fixes did not complete (exited 3). The workflow stopped here; no later phase ran.
+       Then continue the workflow from this phase:
+         uv run --frozen --no-dev --project /home/marc/code/mllm-wt/scope-policy/skills/multi-llm -- python /home/marc/code/mllm-wt/scope-policy/skills/multi-llm/multi_llm.py improve-code /tmp/pytest-of-marc/pytest-2314/test_a_forced_new_round_starts1/plans/imp-plan.md --scope-policy preserve --resume
+       A failed phase is never a question, even attended: nothing makes a hard failure proceed (D6 row 14).
+
+ERROR: Step 2: apply-code-fixes did not complete (exited 3). The workflow stopped here; no later phase ran.
+       Then continue the workflow from this phase:
+         uv run --frozen --no-dev --project /home/marc/code/mllm-wt/scope-policy/skills/multi-llm -- python /home/marc/code/mllm-wt/scope-policy/skills/multi-llm/multi_llm.py improve-code /tmp/pytest-of-marc/pytest-2314/test_a_forced_new_round_starts1/plans/imp-plan.md --resume
+       A failed phase is never a question, even attended: nothing makes a hard failure proceed (D6 row 14).
+___________________ TestFullWorkflow.test_force_is_a_new_run ___________________
+
+self = <tests.test_scope_policy_composites.TestFullWorkflow object at 0x7ba25109a850>
+tmp_path = PosixPath('/tmp/pytest-of-marc/pytest-2314/test_force_is_a_new_run0')
+stub_phases = <function stub_phases.<locals>.configure at 0x7ba251db8400>
+generation = ['preserve', None]
+capsys = <_pytest.capture.CaptureFixture object at 0x7ba251f84ed0>
+
+    def test_force_is_a_new_run(self, tmp_path, stub_phases, generation, capsys):
+        stub_phases(fail={"implement": 3})
+        plan = _full_plan(tmp_path)
+        assert _full(plan, *PRESERVE) == 3
+        calls = stub_phases(fail={"implement": 3})
+        calls.clear()
+        assert _full(plan, "--force") == 3
+        for mode, argv in calls:
+            assert "--scope-policy" not in argv, (mode, argv)
+        calls = stub_phases()
+        assert _full(plan, "--resume") == 0
+        for mode, argv in calls:
+>           assert "--scope-policy" not in argv, (mode, argv)
+E           AssertionError: ('implement', ['--yes', '--scope-policy', 'preserve', '--resume'])
+E           assert '--scope-policy' not in ['--yes', '--scope-policy', 'preserve', '--resume']
+
+skills/multi-llm/tests/test_scope_policy_composites.py:465: AssertionError
+----------------------------- Captured stdout call -----------------------------
+
+=== Phase 1: Review Plan ===
+
+=== Phase 1b: Consolidation ===
+[SKIPPED] Phase 1b: Consolidation: not recommended by review-plan
+
+=== Phase 2: Apply Suggestions ===
+
+=== Phase 3: Generate Tasks ===
+
+$ uv run --frozen --no-dev --project /home/marc/code/mllm-wt/scope-policy/skills/multi-llm -- python /home/marc/code/mllm-wt/scope-policy/skills/multi-llm/multi_llm.py generate-tasks /tmp/pytest-of-marc/pytest-2314/test_force_is_a_new_run0/wf-plan.md --yes --scope-policy preserve
+
+=== Phase 3b: Review Tasks ===
+[AUTO_RESOLVED] review-tasks-continuation: ran review-tasks automatically
+
+=== Phase 3c: Apply Task Suggestions ===
+[SKIPPED] Phase 3c: Apply Task Suggestions: Skipped: No review-tasks results to apply
+
+=== Phase 4: Implement ===
+
+## Full Workflow Summary
+
+**Plan**: /tmp/pytest-of-marc/pytest-2314/test_force_is_a_new_run0/wf-plan.md
+
+- Phase 1: Review Plan: done — completed
+- Phase 1b: Consolidation: skipped — not recommended by review-plan
+- Phase 2: Apply Suggestions: done — completed
+- Phase 3: Generate Tasks: done — completed
+- Phase 3b: Review Tasks: done — completed
+- Phase 3c: Apply Task Suggestions: skipped — Skipped: No review-tasks results to apply
+- Phase 4: Implement: failed — exited 3
+
+
+=== Phase 1: Review Plan ===
+
+=== Phase 1b: Consolidation ===
+[SKIPPED] Phase 1b: Consolidation: not recommended by review-plan
+
+=== Phase 2: Apply Suggestions ===
+
+=== Phase 3: Generate Tasks ===
+
+$ uv run --frozen --no-dev --project /home/marc/code/mllm-wt/scope-policy/skills/multi-llm -- python /home/marc/code/mllm-wt/scope-policy/skills/multi-llm/multi_llm.py generate-tasks /tmp/pytest-of-marc/pytest-2314/test_force_is_a_new_run0/wf-plan.md --yes
+
+=== Phase 3b: Review Tasks ===
+[AUTO_RESOLVED] review-tasks-continuation: ran review-tasks automatically
+
+=== Phase 3c: Apply Task Suggestions ===
+[SKIPPED] Phase 3c: Apply Task Suggestions: Skipped: No review-tasks results to apply
+
+=== Phase 4: Implement ===
+
+## Full Workflow Summary
+
+**Plan**: /tmp/pytest-of-marc/pytest-2314/test_force_is_a_new_run0/wf-plan.md
+
+- Phase 1: Review Plan: done — completed
+- Phase 1b: Consolidation: skipped — not recommended by review-plan
+- Phase 2: Apply Suggestions: done — completed
+- Phase 3: Generate Tasks: done — completed
+- Phase 3b: Review Tasks: done — completed
+- Phase 3c: Apply Task Suggestions: skipped — Skipped: No review-tasks results to apply
+- Phase 4: Implement: failed — exited 3
+
+[AUTO_RESOLVED] scope-policy: preserve (kept from this full run's recorded --scope-policy)
+
+=== Phase 1: Review Plan: already completed, skipping ===
+
+=== Phase 1b: Consolidation ===
+[SKIPPED] Phase 1b: Consolidation: not recommended by review-plan
+
+=== Phase 2: Apply Suggestions: already completed, skipping ===
+
+=== Phase 3: Generate Tasks: already completed, skipping ===
+
+=== Phase 3b: Review Tasks: already completed, skipping ===
+
+=== Phase 3c: Apply Task Suggestions: already skipped, skipping ===
+
+=== Phase 4: Implement ===
+
+=== Phase 5: Review Code ===
+
+=== Phase 6: Apply Code Fixes ===
+[SKIPPED] Phase 6: Apply Code Fixes: Skipped: code review produced zero actionable findings
+
+## Full Workflow Summary
+
+**Plan**: /tmp/pytest-of-marc/pytest-2314/test_force_is_a_new_run0/wf-plan.md
+
+- Phase 1: Review Plan: already-complete — completed
+- Phase 1b: Consolidation: skipped — not recommended by review-plan
+- Phase 2: Apply Suggestions: already-complete — completed
+- Phase 3: Generate Tasks: already-complete — completed
+- Phase 3b: Review Tasks: already-complete — completed
+- Phase 3c: Apply Task Suggestions: already-complete — skipped
+- Phase 4: Implement: done — completed
+- Phase 5: Review Code: done — completed
+- Phase 6: Apply Code Fixes: skipped — Skipped: code review produced zero actionable findings
+
+----------------------------- Captured stderr call -----------------------------
+
+ERROR: Phase 4: Implement did not complete (exited 3). The workflow stopped here; no later phase ran.
+       Then continue the workflow from this phase:
+         uv run --frozen --no-dev --project /home/marc/code/mllm-wt/scope-policy/skills/multi-llm -- python /home/marc/code/mllm-wt/scope-policy/skills/multi-llm/multi_llm.py full /tmp/pytest-of-marc/pytest-2314/test_force_is_a_new_run0/wf-plan.md --yes --resume
+       A failed phase is never a question, even attended: nothing makes a hard failure proceed (D6 row 14).
+
+ERROR: Phase 4: Implement did not complete (exited 3). The workflow stopped here; no later phase ran.
+       Then continue the workflow from this phase:
+         uv run --frozen --no-dev --project /home/marc/code/mllm-wt/scope-policy/skills/multi-llm -- python /home/marc/code/mllm-wt/scope-policy/skills/multi-llm/multi_llm.py full /tmp/pytest-of-marc/pytest-2314/test_force_is_a_new_run0/wf-plan.md --yes --resume
+       A failed phase is never a question, even attended: nothing makes a hard failure proceed (D6 row 14).
+=========================== short test summary info ============================
+FAILED skills/multi-llm/tests/test_scope_prompts_and_validation.py::TestTheRoundBindsBothRoles::test_a_disjoint_reviewer_selection_cannot_change_policy[preserve-expand-False]
+FAILED skills/multi-llm/tests/test_scope_prompts_and_validation.py::TestTheRoundBindsBothRoles::test_a_disjoint_reviewer_selection_cannot_change_policy[preserve-expand-True]
+FAILED skills/multi-llm/tests/test_scope_prompts_and_validation.py::TestTheRoundBindsBothRoles::test_a_disjoint_reviewer_selection_cannot_change_policy[expand-preserve-False]
+FAILED skills/multi-llm/tests/test_scope_prompts_and_validation.py::TestTheRoundBindsBothRoles::test_a_disjoint_reviewer_selection_cannot_change_policy[expand-preserve-True]
+FAILED skills/multi-llm/tests/test_scope_prompts_and_validation.py::TestTheRoundBindsBothRoles::test_a_new_policy_round_retires_unselected_cached_reviewers
+FAILED skills/multi-llm/tests/test_scope_prompts_and_validation.py::TestResolutionUnits::test_round_results_ignore_bookkeeping_and_include_empty_legacy_reviews
+FAILED skills/multi-llm/tests/test_scope_policy_leaf_modes.py::TestGenerateTasks::test_force_is_a_new_run_without_the_old_choice
+FAILED skills/multi-llm/tests/test_scope_policy_leaf_modes.py::TestImplement::test_fresh_is_a_new_run_without_the_old_choice
+FAILED skills/multi-llm/tests/test_scope_policy_composites.py::TestImproveExecutorLeg::test_a_forced_new_round_starts_without_the_old_choice[improve-plan]
+FAILED skills/multi-llm/tests/test_scope_policy_composites.py::TestImproveExecutorLeg::test_a_forced_new_round_starts_without_the_old_choice[improve-code]
+FAILED skills/multi-llm/tests/test_scope_policy_composites.py::TestFullWorkflow::test_force_is_a_new_run
+11 failed, 134 passed in 2.79s

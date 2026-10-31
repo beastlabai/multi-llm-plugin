@@ -1,0 +1,110 @@
+{
+  "tasks_schema_version": 2,
+  "kind": "validation",
+  "inputs": {
+    "plan_sha256": "7cc6262e7492474e",
+    "grouped_sha256": "7a9dd75d27c9d7d8"
+  },
+  "batches": [
+    {
+      "tasks_schema_version": 2,
+      "task_id": "validation-batch-0",
+      "kind": "validation",
+      "prompt": "You are validating review suggestions for accuracy.\n\n## Context (Plan content)\n\n# Plan\n\n## Output\nExport the report as CSV.\n\n\n## Suggestion groups to validate (1)\n\n[\n  {\n    \"category\": \"addition\",\n    \"group_hash\": \"0a7d6dd3784f86f9\",\n    \"group_id\": \"0a7d6dd3784f86f9\",\n    \"group_index\": 0,\n    \"models\": [\n      \"cursor-agent:auto\"\n    ],\n    \"suggestions\": [\n      {\n        \"desc\": \"Users will want PDF; add a PDF exporter beside the CSV one.\",\n        \"importance\": \"HIGH\",\n        \"scope_reason\": \"Required for the export goal.\",\n        \"scope_relation\": \"in_scope\",\n        \"title\": \"Also export the report as PDF\",\n        \"type\": \"addition\"\n      }\n    ],\n    \"theme\": \"Also export the report as PDF\"\n  }\n]\n\n## Task\n\nFor each of the 1 suggestion groups above, decide:\n- \"valid\": the issue is real and should be addressed\n- \"invalid\": a false positive \u2014 incorrect or not applicable\n- \"needs-human-decision\": cannot be determined from the context above and\n  requires human judgment\n\nCompare each group against the context above to verify it. Judge only the\ngroups listed above; ignore anything else.\n\nWhen a suggestion claims something about existing code \u2014 a function name, a\nline number, current behaviour \u2014 and you can read the repository you are\nrunning in, open it and check the claim before answering; do not rely on the\ncontext above alone when the code itself is one read away. Reserve\n\"needs-human-decision\" for genuine judgment calls (a product or design\ntrade-off), never for a claim you could have checked but did not look at. If\nyou cannot read the repository, judge from the records and the context above\nalone.\n\nDo not probe system paths, services or databases (anything outside the\nrepository, a database client, a service status): the repository and the\ncontext above are the evidence.\n\nA claim that the plan or the tasks omit something \u2014 \"the plan does not specify\nX\", \"the tasks never say to reset X\" \u2014 is judged against the plan or tasks text\nabove, not against the working tree: the plan is what an implementer follows,\nand a partially implemented tree is exactly the situation this review exists\nfor. Code that already does X does not make such a claim invalid; it makes it\nvalid \u2014 document or decide it \u2014 and the reason should say that the code already\ndoes X. Where the artifact under review is a diff or a code change rather than a\nplan, that change is the text such a claim is judged against.\n\nScope: a plan is a design document. Breaking it into implementation tasks, with\nids, dependencies and an order, is a later phase (task generation). A finding\nwhose only complaint is that the plan has no task breakdown, task list,\nimplementation order, dependency graph or milestones is \"invalid\": not\napplicable to a plan review. A finding that names a concrete design gap which\nwould block writing those tasks is judged on that gap. A missing ordering\nconstraint between parts of the design (a data migration that must precede the\nschema switch) is a design gap, judged on its merits.\n\n## Scope Policy: Preserve\nThe user asked to preserve the agreed scope for this run. Verify each group's\nfacts and set \"status\" exactly as the task above says. Then, separately and\nindependently, check each group's full proposed remedy (every member's proposed\nchange together) against the original requirements and limits, which are\nthe reviewed plan's own goals, requirements and explicit limits or exclusions.\n\n- Classify independently of the reviewers' own `scope_relation` tags, their\n  confidence, how many models agree, and their wording. Do not assume a\n  reviewer obeyed an instruction to stay in scope, and do not accept a remedy\n  because its description calls a new feature \"required\".\n- \"scope_extension\": the remedy extends those limits. It is rejected for this\n  run, even if its facts are correct or its importance is high.\n- \"unclear\": you cannot establish that the remedy stays within those limits. An\n  uncertain remedy is deferred, never approved for automatic application.\n- \"in_scope\": the remedy completes, corrects or clarifies an agreed\n  requirement, fixes a regression the work introduced, or removes behaviour the\n  baseline never asked for.\n- Keep correctness and scope separate. A factually correct suggestion whose\n  remedy extends the scope stays \"valid\"; never mark it \"invalid\" to keep it\n  out \u2014 the scope classification is what holds it back. If the problem is real\n  but only an extension would fix it, keep its status, classify the remedy\n  \"scope_extension\", and name in `scope_reason` the scope decision it needs.\n- When the members propose materially different remedies and one of them stays\n  within scope, you may name that one in \"selected_remedy\" (one line) and\n  classify that remedy; otherwise classify the remedies together, and any\n  extension among them makes the group \"scope_extension\".\n- Explicit exclusions in the baseline bind under every policy.\n\nAdd to each result: \"scope_relation\": \"in_scope|scope_extension|unclear\", \"scope_reason\": \"<one brief sentence>\", \"scope_reference\": \"<baseline section, or empty>\", and optionally\n\"selected_remedy\": \"<the one in-scope remedy you classified>\". Give the\nevidence for the scope decision in `scope_reason`.\n\n## Reply\n\nPrint ONE JSON object and nothing else \u2014 no prose, no markdown fences, no\nexplanation. Do not write any file; whoever invoked you persists your reply.\nYour reply is parsed as-is, and a reply that does not parse is thrown away:\nthe first character is `{` and the last is the `}` that closes it. Keep every\n`reason` and `scope_reason` to one short line with no raw double quotes or line\nbreaks inside it.\n`metadata` comes first and `groups` last, so the reply ends with the last\nresult's `}`, the `]` that closes `groups` and the `}` that closes the object:\n`}]}`. Re-read the object once for balanced brackets before you finish.\nSettle every verdict, and check each result's `group_hash` against its group\nabove, before you print anything, then print the object once: a reply that\nadds a correction, a note or a second object after the first does not parse.\n\n{\n  \"metadata\": {\"model\": \"<the model you are>\", \"timestamp\": \"<ISO 8601>\", \"schema_version\": \"2.1\"},\n  \"groups\": [\n    {\"group_index\": <the group's group_index value>, \"group_hash\": \"<copy the group_hash of the group verbatim>\", \"status\": \"valid|invalid|needs-human-decision\", \"reason\": \"<one brief sentence>\", \"confidence\": 0.0, \"scope_relation\": \"in_scope|scope_extension|unclear\", \"scope_reason\": \"<one brief sentence>\", \"scope_reference\": \"<baseline section, or empty>\"}\n  ]\n}\n\nRules:\n1. Output EXACTLY one result per requested group \u2014 no more, no fewer.\n2. Each group above carries its own `group_index` \u2014 echo that group's\n   `group_index` value back into its result, and copy its `group_hash` value\n   verbatim too. The `group_index` you echo is advisory; the hash is what the\n   results are joined on, so a wrong hash discards the result, and the hash\n   of another group in this batch puts your verdict on that group.\n3. Confidence is a number between 0.0 and 1.0.\n4. Be conservative: when you cannot decide from the context given, answer\n   \"needs-human-decision\" rather than guessing.\n5. `scope_relation`, `scope_reason` and `scope_reference` classify the group's\n   proposed remedy against the scope baseline. They never change `status`;\n   when the context cannot settle the scope, answer \"unclear\".\n",
+      "output_name": "validation_batch_0.json",
+      "output_path": "/tmp/scope-policy-world-20261031/browser-roundtrip/feature/review-plan/validation_batch_0.json",
+      "prompt_path": "/tmp/scope-policy-world-20261031/browser-roundtrip/feature/review-plan/validation_batch_0.prompt.txt",
+      "prompt_lines": 146,
+      "result_channel": "file",
+      "context_mode": "inline",
+      "capability_tier": "full",
+      "executor_role": "agent",
+      "subagent_type": "general-purpose",
+      "model_hint": "auto",
+      "inputs": {
+        "plan_sha256": "7cc6262e7492474e",
+        "grouped_sha256": "7a9dd75d27c9d7d8"
+      },
+      "batch_index": 0,
+      "group_indices": [
+        0
+      ],
+      "group_ids": [
+        "0a7d6dd3784f86f9"
+      ],
+      "groups_count": 1,
+      "is_high_priority": true,
+      "plan_file": "/tmp/scope-policy-world-20261031/browser-roundtrip/feature.md",
+      "grouped_file": "/tmp/scope-policy-world-20261031/browser-roundtrip/feature/review-plan/grouped.json"
+    },
+    {
+      "tasks_schema_version": 2,
+      "task_id": "validation-batch-1",
+      "kind": "validation",
+      "prompt": "You are validating review suggestions for accuracy.\n\n## Context (Plan content)\n\n# Plan\n\n## Output\nExport the report as CSV.\n\n\n## Suggestion groups to validate (1)\n\n[\n  {\n    \"category\": \"clarification\",\n    \"group_hash\": \"1de5f2451724bb54\",\n    \"group_id\": \"1de5f2451724bb54\",\n    \"group_index\": 1,\n    \"models\": [\n      \"cursor-agent:auto\"\n    ],\n    \"suggestions\": [\n      {\n        \"desc\": \"The plan says CSV but never names the columns of the header row, so two implementers would write two different files. The Output section is the only place the format is named, and it lists no column, no order and no quoting rule; name them there so the export is checkable.\",\n        \"importance\": \"MEDIUM\",\n        \"scope_reason\": \"Completes the CSV requirement.\",\n        \"scope_relation\": \"in_scope\",\n        \"title\": \"CSV header row is never specified\",\n        \"type\": \"clarification\"\n      }\n    ],\n    \"theme\": \"CSV header row is never specified\"\n  }\n]\n\n## Task\n\nFor each of the 1 suggestion groups above, decide:\n- \"valid\": the issue is real and should be addressed\n- \"invalid\": a false positive \u2014 incorrect or not applicable\n- \"needs-human-decision\": cannot be determined from the context above and\n  requires human judgment\n\nCompare each group against the context above to verify it. Judge only the\ngroups listed above; ignore anything else.\n\nWhen a suggestion claims something about existing code \u2014 a function name, a\nline number, current behaviour \u2014 and you can read the repository you are\nrunning in, open it and check the claim before answering; do not rely on the\ncontext above alone when the code itself is one read away. Reserve\n\"needs-human-decision\" for genuine judgment calls (a product or design\ntrade-off), never for a claim you could have checked but did not look at. If\nyou cannot read the repository, judge from the records and the context above\nalone.\n\nDo not probe system paths, services or databases (anything outside the\nrepository, a database client, a service status): the repository and the\ncontext above are the evidence.\n\nA claim that the plan or the tasks omit something \u2014 \"the plan does not specify\nX\", \"the tasks never say to reset X\" \u2014 is judged against the plan or tasks text\nabove, not against the working tree: the plan is what an implementer follows,\nand a partially implemented tree is exactly the situation this review exists\nfor. Code that already does X does not make such a claim invalid; it makes it\nvalid \u2014 document or decide it \u2014 and the reason should say that the code already\ndoes X. Where the artifact under review is a diff or a code change rather than a\nplan, that change is the text such a claim is judged against.\n\nScope: a plan is a design document. Breaking it into implementation tasks, with\nids, dependencies and an order, is a later phase (task generation). A finding\nwhose only complaint is that the plan has no task breakdown, task list,\nimplementation order, dependency graph or milestones is \"invalid\": not\napplicable to a plan review. A finding that names a concrete design gap which\nwould block writing those tasks is judged on that gap. A missing ordering\nconstraint between parts of the design (a data migration that must precede the\nschema switch) is a design gap, judged on its merits.\n\n## Scope Policy: Preserve\nThe user asked to preserve the agreed scope for this run. Verify each group's\nfacts and set \"status\" exactly as the task above says. Then, separately and\nindependently, check each group's full proposed remedy (every member's proposed\nchange together) against the original requirements and limits, which are\nthe reviewed plan's own goals, requirements and explicit limits or exclusions.\n\n- Classify independently of the reviewers' own `scope_relation` tags, their\n  confidence, how many models agree, and their wording. Do not assume a\n  reviewer obeyed an instruction to stay in scope, and do not accept a remedy\n  because its description calls a new feature \"required\".\n- \"scope_extension\": the remedy extends those limits. It is rejected for this\n  run, even if its facts are correct or its importance is high.\n- \"unclear\": you cannot establish that the remedy stays within those limits. An\n  uncertain remedy is deferred, never approved for automatic application.\n- \"in_scope\": the remedy completes, corrects or clarifies an agreed\n  requirement, fixes a regression the work introduced, or removes behaviour the\n  baseline never asked for.\n- Keep correctness and scope separate. A factually correct suggestion whose\n  remedy extends the scope stays \"valid\"; never mark it \"invalid\" to keep it\n  out \u2014 the scope classification is what holds it back. If the problem is real\n  but only an extension would fix it, keep its status, classify the remedy\n  \"scope_extension\", and name in `scope_reason` the scope decision it needs.\n- When the members propose materially different remedies and one of them stays\n  within scope, you may name that one in \"selected_remedy\" (one line) and\n  classify that remedy; otherwise classify the remedies together, and any\n  extension among them makes the group \"scope_extension\".\n- Explicit exclusions in the baseline bind under every policy.\n\nAdd to each result: \"scope_relation\": \"in_scope|scope_extension|unclear\", \"scope_reason\": \"<one brief sentence>\", \"scope_reference\": \"<baseline section, or empty>\", and optionally\n\"selected_remedy\": \"<the one in-scope remedy you classified>\". Give the\nevidence for the scope decision in `scope_reason`.\n\n## Reply\n\nPrint ONE JSON object and nothing else \u2014 no prose, no markdown fences, no\nexplanation. Do not write any file; whoever invoked you persists your reply.\nYour reply is parsed as-is, and a reply that does not parse is thrown away:\nthe first character is `{` and the last is the `}` that closes it. Keep every\n`reason` and `scope_reason` to one short line with no raw double quotes or line\nbreaks inside it.\n`metadata` comes first and `groups` last, so the reply ends with the last\nresult's `}`, the `]` that closes `groups` and the `}` that closes the object:\n`}]}`. Re-read the object once for balanced brackets before you finish.\nSettle every verdict, and check each result's `group_hash` against its group\nabove, before you print anything, then print the object once: a reply that\nadds a correction, a note or a second object after the first does not parse.\n\n{\n  \"metadata\": {\"model\": \"<the model you are>\", \"timestamp\": \"<ISO 8601>\", \"schema_version\": \"2.1\"},\n  \"groups\": [\n    {\"group_index\": <the group's group_index value>, \"group_hash\": \"<copy the group_hash of the group verbatim>\", \"status\": \"valid|invalid|needs-human-decision\", \"reason\": \"<one brief sentence>\", \"confidence\": 0.0, \"scope_relation\": \"in_scope|scope_extension|unclear\", \"scope_reason\": \"<one brief sentence>\", \"scope_reference\": \"<baseline section, or empty>\"}\n  ]\n}\n\nRules:\n1. Output EXACTLY one result per requested group \u2014 no more, no fewer.\n2. Each group above carries its own `group_index` \u2014 echo that group's\n   `group_index` value back into its result, and copy its `group_hash` value\n   verbatim too. The `group_index` you echo is advisory; the hash is what the\n   results are joined on, so a wrong hash discards the result, and the hash\n   of another group in this batch puts your verdict on that group.\n3. Confidence is a number between 0.0 and 1.0.\n4. Be conservative: when you cannot decide from the context given, answer\n   \"needs-human-decision\" rather than guessing.\n5. `scope_relation`, `scope_reason` and `scope_reference` classify the group's\n   proposed remedy against the scope baseline. They never change `status`;\n   when the context cannot settle the scope, answer \"unclear\".\n",
+      "output_name": "validation_batch_1.json",
+      "output_path": "/tmp/scope-policy-world-20261031/browser-roundtrip/feature/review-plan/validation_batch_1.json",
+      "prompt_path": "/tmp/scope-policy-world-20261031/browser-roundtrip/feature/review-plan/validation_batch_1.prompt.txt",
+      "prompt_lines": 146,
+      "result_channel": "file",
+      "context_mode": "inline",
+      "capability_tier": "full",
+      "executor_role": "agent",
+      "subagent_type": "general-purpose",
+      "model_hint": "auto",
+      "inputs": {
+        "plan_sha256": "7cc6262e7492474e",
+        "grouped_sha256": "7a9dd75d27c9d7d8"
+      },
+      "batch_index": 1,
+      "group_indices": [
+        1
+      ],
+      "group_ids": [
+        "1de5f2451724bb54"
+      ],
+      "groups_count": 1,
+      "is_high_priority": false,
+      "plan_file": "/tmp/scope-policy-world-20261031/browser-roundtrip/feature.md",
+      "grouped_file": "/tmp/scope-policy-world-20261031/browser-roundtrip/feature/review-plan/grouped.json"
+    }
+  ],
+  "context_contract": 2,
+  "total_batches": 2,
+  "batching_stats": {
+    "total_groups": 2,
+    "high_count": 1,
+    "normal_count": 1,
+    "estimated_batches": 2,
+    "subagent_calls_saved": 0,
+    "efficiency_gain_percent": 0.0
+  },
+  "grouped_file": "/tmp/scope-policy-world-20261031/browser-roundtrip/feature/review-plan/grouped.json",
+  "phase_dir": "/tmp/scope-policy-world-20261031/browser-roundtrip/feature/review-plan",
+  "reaggregate_mode": "review-plan",
+  "plan_file": "/tmp/scope-policy-world-20261031/browser-roundtrip/feature.md",
+  "replay_flags": [],
+  "model_hint": "auto",
+  "base_ref": "",
+  "scope": {
+    "policy": "preserve",
+    "policy_source": "explicit",
+    "phase": "review-plan",
+    "baseline_id": "6bb22b82c1042ded",
+    "round_baseline_id": "6bb22b82c1042ded",
+    "baseline": {
+      "version": 1,
+      "baseline_id": "6bb22b82c1042ded",
+      "sources": [
+        {
+          "role": "plan",
+          "sha256": "7cc6262e7492474ecb69fbae1cedf89fa32a8b82c741637ad08b1a13b784f674",
+          "path": "/tmp/scope-policy-world-20261031/browser-roundtrip/feature.md",
+          "snapshot": "validation-snapshot.md"
+        }
+      ],
+      "phase": "review-plan"
+    }
+  },
+  "format_version": 2
+}

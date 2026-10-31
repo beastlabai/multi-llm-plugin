@@ -107,7 +107,7 @@ RUN_ID_OPTION = "--run-id"
 #: keys its blocks and its pinned range are read from. The worked examples
 #: gained a range-shaped one. A server built for v5 has none of this and would
 #: drop the range (it skipped a kind it did not know), hence the bump.
-SURFACE_SCHEMA_VERSION = 6
+SURFACE_SCHEMA_VERSION = 7
 
 
 def _aliases_for(name: str) -> List[str]:
@@ -855,6 +855,7 @@ def cli_surface(host_id: str) -> Dict[str, Any]:
         "dispatcher": {
             "script": "multi_llm.py",
             "result_marker": cli_common.RESULT_MARKER,
+            "foreground_preview_flags": list(cli_common.FOREGROUND_PREVIEW_FLAGS),
             # Read from cli_common's constants, never as JS literals.
             "exit_codes": {
                 "ok": cli_common.EXIT_OK,

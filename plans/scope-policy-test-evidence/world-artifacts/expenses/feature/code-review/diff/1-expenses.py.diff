@@ -1,0 +1,20 @@
+diff --git a/expenses.py b/expenses.py
+index 39c6a8e..23bacaf 100644
+--- a/expenses.py
++++ b/expenses.py
+@@ -1,12 +1,6 @@
+-import csv
+-import io
+-
+-
+ def export_expenses(records):
+     """Return a CSV document containing the supplied expense records."""
+-    out = io.StringIO(newline="")
+-    writer = csv.writer(out)
+-    writer.writerow(["date", "category", "amount"])
++    lines = ["date,category,amount"]
+     for record in records:
+-        writer.writerow([record["date"], record["category"], record["amount"]])
+-    return out.getvalue()
++        lines.append(",".join(str(record[key]) for key in ("date", "category", "amount")))
++    return "\n".join(lines) + "\n"

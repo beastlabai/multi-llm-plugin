@@ -1,0 +1,97 @@
+{
+  "schema_version": "2.0",
+  "plan_path": "/tmp/scope-policy-live-20261031/leaked-fixture/feature.md",
+  "plan_hash": "7cc6262e7492474e",
+  "created_at": "2026-10-31T17:41:31.810583",
+  "updated_at": "2026-10-31T17:42:27.408338",
+  "head_at_start": "c91e8d2937ecc543d7cd94fb8a3dff7c4a8df46a",
+  "branch_name": "master",
+  "review_phase_completed": true,
+  "tracked_files": [],
+  "task_status": {
+    "apply-batch-0": "completed"
+  },
+  "phases_completed": {
+    "review-plan": "2026-10-31T17:41:51.241869",
+    "apply-suggestions": "2026-10-31T17:42:27.398158"
+  },
+  "phases_skipped": {},
+  "scope_policy": {
+    "review-plan": {
+      "review_policy": "preserve",
+      "review_policy_source": "explicit",
+      "recorded_at": "2026-10-31T17:41:31",
+      "baseline": {
+        "version": 1,
+        "baseline_id": "6bb22b82c1042ded",
+        "sources": [
+          {
+            "role": "plan",
+            "sha256": "7cc6262e7492474ecb69fbae1cedf89fa32a8b82c741637ad08b1a13b784f674",
+            "path": "/tmp/scope-policy-live-20261031/leaked-fixture/feature.md",
+            "snapshot": "validation-snapshot.md"
+          }
+        ],
+        "phase": "review-plan"
+      },
+      "apply_policy": "preserve",
+      "apply_policy_source": "explicit",
+      "apply_recorded_at": "2026-10-31T17:42:04",
+      "deferrals": [
+        {
+          "group_id": "0a7d6dd3784f86f9",
+          "theme": "Also export the report as PDF",
+          "relation": "scope_extension",
+          "label": "Scope extension",
+          "reason": "Deferred: scope preservation requested: the proposed remedy extends the agreed scope (The plan's only output requirement is CSV export, so adding a PDF exporter extends the agreed scope.)",
+          "policy": "preserve",
+          "baseline_id": "6bb22b82c1042ded",
+          "authority": "bound",
+          "title": "Also export the report as PDF",
+          "importance": "HIGH",
+          "validation_status": "needs-human-decision",
+          "outcome": "Deferred: scope preservation requested"
+        }
+      ],
+      "completion": {
+        "outcome": "eligible work completed",
+        "policy": "preserve",
+        "deferred": 1,
+        "blockers": 0,
+        "at": "2026-10-31T17:42:27"
+      }
+    }
+  },
+  "pre_existing_changes": [
+    ".multi-llm/providers.yaml",
+    "expand/",
+    "leaked-fixture/",
+    "preserve/"
+  ],
+  "metrics": {
+    "apply-suggestions": [
+      {
+        "label": "apply-batch-0: apply 1 suggestion(s) to section:output [no-op]",
+        "timestamp": "2026-10-31T17:42:27.397226",
+        "subagent_type": "claude-code:haiku",
+        "token_count": 1783,
+        "duration_ms": 16617,
+        "batch_index": 1,
+        "run_id": "53b2cf0b2eb9446e93322b5bb64aa6d6"
+      }
+    ]
+  },
+  "processed_apply-suggestions": {
+    "1de5f2451724bb54": {
+      "status": "declined",
+      "details": {
+        "task_id": "apply-batch-0",
+        "prior_changes_id": "section:output#2013a09a",
+        "grouped_sha256": "7a9dd75d27c9d7d8",
+        "leg": "executor",
+        "reason": "leaked-fixture/feature.md defines no report fields, so the header columns, their order and quoting need a plan decision; the only column list in the repo (date,category,amount) belongs to the separate expense-export plans in preserve.md and expand.md and does not apply to this report."
+      },
+      "timestamp": "2026-10-31T17:42:27.397281"
+    }
+  }
+}

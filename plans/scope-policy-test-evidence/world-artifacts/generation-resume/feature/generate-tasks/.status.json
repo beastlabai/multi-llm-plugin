@@ -1,0 +1,61 @@
+{
+  "run": {
+    "run_id": "13ba9141-1df3-47b9-bc9c-d963963b7b58",
+    "pid": 1376017,
+    "process_start_time": "80351895",
+    "pgid": 1376007,
+    "detached": true,
+    "host": "codex",
+    "mode": "generate-tasks",
+    "plan_file": "/tmp/scope-policy-world-20261031/generation-resume/feature.md",
+    "plan_arg": "feature.md",
+    "cwd": "/tmp/scope-policy-world-20261031/generation-resume",
+    "log_path": "/tmp/scope-policy-world-20261031/generation-resume/feature/generate-tasks/orchestrator-run.log",
+    "started_at": "2026-10-31T18:13:17.220664",
+    "heartbeat_at": "2026-10-31T18:13:47.209190",
+    "heartbeat_interval_s": 10.0,
+    "state": "done",
+    "exit_code": 0,
+    "error": null,
+    "resolutions": [
+      {
+        "site": "scope-policy",
+        "decision": "expand (no --scope-policy given: the default for a new run)",
+        "at": "2026-10-31T18:13:17.230052"
+      }
+    ],
+    "replay_flags": [
+      "--host",
+      "codex",
+      "--detach",
+      "--skip-prerequisites"
+    ],
+    "route": "package",
+    "result_state": null,
+    "finished_at": "2026-10-31T18:13:47.209193"
+  },
+  "progress": {
+    "step": "complete",
+    "subagents": {
+      "kind": "task_generation",
+      "invoker": "executor",
+      "total": 1,
+      "ok": 1,
+      "counts": {
+        "ok": 1
+      },
+      "failed_task_ids": [],
+      "runner_versions": {
+        "claude-code:haiku": "2.1.316"
+      },
+      "effective_parallelism": 1
+    },
+    "tasks_generated": 5
+  },
+  "updated_at": "2026-10-31T18:13:47.209260",
+  "output_files": {
+    "tasks": "/tmp/scope-policy-world-20261031/generation-resume/feature/tasks/tasks.md",
+    "plan": "/tmp/scope-policy-world-20261031/generation-resume/feature.md"
+  },
+  "state": "complete"
+}

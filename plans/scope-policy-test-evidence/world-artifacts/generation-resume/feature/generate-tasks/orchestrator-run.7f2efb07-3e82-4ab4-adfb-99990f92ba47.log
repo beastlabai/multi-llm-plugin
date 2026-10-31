@@ -1,0 +1,6 @@
+[DETACHED_RUN] run_id=7f2efb07-3e82-4ab4-adfb-99990f92ba47 pid=1370950 phase_dir=/tmp/scope-policy-world-20261031/generation-resume/feature/generate-tasks
+[AUTO_RESOLVED] scope-policy: expand (no --scope-policy given: the default for a new run)
+Materialized 1 task_generation task: /tmp/scope-policy-world-20261031/generation-resume/feature/generate-tasks/task_generation_tasks.json
+multi-llm warning: claude-code 2.1.316 is newer than the release the shipped parser fixtures were captured from (2.1.293); stream parsing is best-effort above that.
+
+Received SIGTERM: aborting this detached run.

@@ -1,0 +1,63 @@
+{
+  "format_version": 2,
+  "groups": [
+    {
+      "category": "addition",
+      "theme": "Also export the report as PDF",
+      "suggestions": [
+        {
+          "title": "Also export the report as PDF",
+          "desc": "Users will want PDF; add a PDF exporter beside the CSV one.",
+          "importance": "HIGH",
+          "reference": "## Output",
+          "type": "addition",
+          "scope_relation": "in_scope",
+          "scope_reason": "Required for the export goal.",
+          "scope_reference": "",
+          "source_model": "cursor-agent:auto",
+          "suggestion_hash": "9ef906c4aadf903f",
+          "display_label": "G1S1",
+          "display_hash": "9ef906c4"
+        }
+      ],
+      "models": [
+        "cursor-agent:auto"
+      ],
+      "priority_score": 2,
+      "validation_status": null,
+      "validation_reason": null,
+      "group_hash": "0a7d6dd3784f86f9",
+      "display_label": "G1",
+      "display_hash": "0a7d6dd3"
+    },
+    {
+      "category": "clarification",
+      "theme": "CSV header row is never specified",
+      "suggestions": [
+        {
+          "title": "CSV header row is never specified",
+          "desc": "The plan says CSV but never names the columns of the header row, so two implementers would write two different files. The Output section is the only place the format is named, and it lists no column, no order and no quoting rule; name them there so the export is checkable.",
+          "importance": "MEDIUM",
+          "reference": "## Output",
+          "type": "clarification",
+          "scope_relation": "in_scope",
+          "scope_reason": "Completes the CSV requirement.",
+          "scope_reference": "",
+          "source_model": "cursor-agent:auto",
+          "suggestion_hash": "c3cce6546d07474f",
+          "display_label": "G2S1",
+          "display_hash": "c3cce654"
+        }
+      ],
+      "models": [
+        "cursor-agent:auto"
+      ],
+      "priority_score": 2,
+      "validation_status": null,
+      "validation_reason": null,
+      "group_hash": "1de5f2451724bb54",
+      "display_label": "G2",
+      "display_hash": "1de5f245"
+    }
+  ]
+}

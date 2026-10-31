@@ -1,0 +1,72 @@
+{
+  "schema_version": "2.0",
+  "plan_path": "/tmp/scope-policy-live-20261031/preserve.md",
+  "plan_hash": "19822cc06a7c7354",
+  "created_at": "2026-10-31T17:39:38.983825",
+  "updated_at": "2026-10-31T17:43:20.274398",
+  "head_at_start": "51f6c7f38ae1e25a64ed0f7dbabbd707cef8676a",
+  "branch_name": "master",
+  "review_phase_completed": true,
+  "tracked_files": [],
+  "task_status": {
+    "apply-batch-0": "completed"
+  },
+  "phases_completed": {
+    "review-plan": "2026-10-31T17:40:56.102501",
+    "apply-suggestions": "2026-10-31T17:43:20.262421"
+  },
+  "phases_skipped": {},
+  "scope_policy": {
+    "review-plan": {
+      "review_policy": "preserve",
+      "review_policy_source": "explicit",
+      "recorded_at": "2026-10-31T17:39:39",
+      "baseline": {
+        "version": 1,
+        "baseline_id": "d1ba0d1dd8b9a88d",
+        "sources": [
+          {
+            "role": "plan",
+            "sha256": "32ad997f3ed3b05ab5a3a930c010ef44cbd158208ce19160ffa8eedc9014d460",
+            "path": "/tmp/scope-policy-live-20261031/preserve.md",
+            "snapshot": "validation-snapshot.md"
+          }
+        ],
+        "phase": "review-plan"
+      },
+      "deferrals": []
+    }
+  },
+  "pre_existing_changes": [
+    ".multi-llm/providers.yaml",
+    "expand/",
+    "leaked-fixture/",
+    "preserve-before-apply.md",
+    "preserve/"
+  ],
+  "metrics": {
+    "apply-suggestions": [
+      {
+        "label": "apply-batch-0: apply 1 suggestion(s) to section:implementation [applied]",
+        "timestamp": "2026-10-31T17:43:20.261641",
+        "subagent_type": "claude-code:haiku",
+        "token_count": 989,
+        "duration_ms": 9569,
+        "batch_index": 1,
+        "run_id": "af5c315383fc4445bd1978ec3b52c377"
+      }
+    ]
+  },
+  "processed_apply-suggestions": {
+    "6e642be4da539acd": {
+      "status": "applied",
+      "details": {
+        "task_id": "apply-batch-0",
+        "prior_changes_id": "section:implementation#01e0cab2",
+        "grouped_sha256": "24daf03276ea515e",
+        "leg": "executor"
+      },
+      "timestamp": "2026-10-31T17:43:20.261690"
+    }
+  }
+}
