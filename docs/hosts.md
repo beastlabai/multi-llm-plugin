@@ -118,7 +118,7 @@ The recommended route on `opencode`: one config edit, no shell bootstrap, and no
 Add it to the host config (`~/.config/opencode/opencode.json`) and restart:
 
 ```json
-{ "plugin": ["opencode-multi-llm@0.1.3"] }
+{ "plugin": ["opencode-multi-llm@0.1.4"] }
 ```
 
 Needs opencode 1.19.5 or newer. Upgrading is bumping the pin and restarting: the cache key is the literal spec string and the installer early-returns when the package directory already exists, so an **unpinned** entry resolves once and never again. It provides a slash command and a model-callable tool, and you invoke it as `/multi-llm <the same arguments the Claude Code skill takes>`, or by calling the `multi_llm` tool directly.
@@ -208,7 +208,7 @@ The README has the install steps; this section covers what they don't. The route
 **Floors.**
 - **opencode 1.19.5 or newer, enforced.** The package's `engines` field makes an older opencode refuse it with a compatibility error. Each release supports the opencode release that was newest when it was cut; `opencode upgrade` moves an older host there.
 - **`uv` on `PATH`,** any version. It supplies Python 3.10 or newer itself.
-- **Platforms.** Linux is verified: the 0.1.3 release was installed from npm into a fresh container and checked end to end, including an upgrade from 0.1.1. macOS and Windows are untested on this route.
+- **Platforms.** Linux is verified: the 0.1.4 release was installed from npm into a fresh container and checked end to end, including an upgrade from 0.1.3. macOS and Windows are untested on this route.
 
 **Configuration.** Once per repository, run `/multi-llm --init`. It writes `<git-root>/.multi-llm/providers.yaml`, outside the package cache, where no upgrade touches it. Configure through that file, never through the copy inside the installed package.
 
