@@ -12,28 +12,102 @@ from . import harness, stub_server
 from .docker_probe import requires_docker
 
 
-def test_code_review_verdicts_cover_original_and_fx_backtick_normalization():
-    from utils.state_manager import generate_group_id
+RESPONSES = Path(__file__).parents[1] / "fixtures/e2e/responses"
 
-    responses = Path(__file__).parents[1] / "fixtures/e2e/responses"
-    issues = json.loads((responses / "code_review/container_issues.json").read_text())
-    sheet = json.loads((responses / "validation/code_review_valid.json").read_text())
-    verdicts = {row["group_hash"]: row for row in sheet["groups"]}
-    changed = 0
-    for issue in issues:
-        normalized = {**issue, "desc": issue["desc"].replace("`", "")}
-        original_hash, fx_hash = [
-            generate_group_id({"theme": issue["title"], "suggestions": [entry]})
-            for entry in (issue, normalized)
-        ]
-        for key in (original_hash, fx_hash):
-            assert verdicts[key]["_theme"] == issue["title"]
-            assert verdicts[key]["status"] == "valid"
-            assert verdicts[key]["_reviewers"] == 1
-        if original_hash != fx_hash:
-            changed += 1
-            assert verdicts[original_hash]["reason"] == verdicts[fx_hash]["reason"]
-    assert changed == 2
+
+def _fx_render(answer: str) -> str:
+    """fx's ``final_output`` for a final message with no fence and no fx
+    self-introduction line: trim, delete every ``*`` and backtick, trim the end.
+    Checked against a real capture by the test below."""
+    return "".join(c for c in answer.strip(" \t\r\n") if c not in "*`").rstrip(" \t\r\n")
+
+
+def _fx_stdout(served: str) -> str:
+    """What fx prints when the stub serves ``served`` as the one completed turn:
+    ``output`` is those bytes verbatim, ``final_output`` their rendering.
+    Measured on runs/20261106T160333Z chain-fx (fx 0.0.16), for both the
+    code-review fan-out and the ask answer."""
+    return json.dumps({
+        "output": served, "final_output": _fx_render(served), "exit_code": 0,
+        "model": "stub-model", "resolved_provider": None, "session_id": "", "steps": 0,
+        "tool_calls": [], "usage": {"input_tokens": 1, "output_tokens": 1},
+    })
+
+
+def test_the_render_model_matches_a_real_fx_capture():
+    captured = json.loads((Path(__file__).parents[1] / "fixtures/fx/markdown-markers.stdout.txt").read_text())
+    _narration, answer = captured["output"].split("\n\n", 1)
+    assert "`" in answer and "*" in answer
+    assert _fx_render(answer) == captured["final_output"]
+
+
+@pytest.mark.parametrize("fixture", ["code_review/container_issues.json", "ask/plan_question.md"])
+def test_an_fx_member_returns_the_served_answer_byte_for_byte(fixture):
+    """fx's rendering strips both fixtures' backticks (and the ask answer's
+    emphasis). The adapter must hand back what the stub served."""
+    from utils.providers.fx import FxProvider
+
+    served = (RESPONSES / fixture).read_text()
+    stdout = _fx_stdout(served)
+    assert json.loads(stdout)["final_output"] != served.strip()
+    assert FxProvider().salvage_text(stdout) == served.strip()
+    if fixture.endswith(".json"):
+        assert FxProvider().parse_output(stdout, "") == {"success": True, "data": json.loads(served)}
+
+
+def _panel_groups(members: int, with_fx: bool = False) -> list[dict]:
+    """The groups a ``members``-strong panel forms over the code-review fan-out.
+
+    Grouped through the product's own grouper. An fx member's copy goes
+    through the real adapter from the envelope fx prints for the stub's answer.
+    """
+    from utils.providers.fx import FxProvider
+    from utils.state_manager import stamp_stable_ids
+    from utils.suggestion_processor import group_similar_suggestions
+
+    served = (RESPONSES / "code_review/container_issues.json").read_text()
+    copies = [(f"plain-{n}:stub-model", json.loads(served)) for n in range(members - with_fx)]
+    if with_fx:
+        copies.append(("fx:stub-model", FxProvider().parse_output(_fx_stdout(served), "")["data"]))
+    panel = [{**issue, "source_model": model} for model, issues in copies for issue in issues]
+    groups = [group.to_dict() for group in group_similar_suggestions(panel)]
+    stamp_stable_ids(groups)
+    return groups
+
+
+def _verdicts() -> dict:
+    sheet = json.loads((RESPONSES / "validation/code_review_valid.json").read_text())
+    return {row["group_hash"]: row for row in sheet["groups"]}
+
+
+@pytest.mark.parametrize("with_fx", [False, True], ids=["plain", "one-fx"])
+@pytest.mark.parametrize("members", range(1, 7))
+def test_code_review_verdicts_join_every_panel_with_or_without_an_fx_member(members, with_fx):
+    """Every group a 1-6 member panel forms has a verdict, fx or no fx.
+
+    runs/20261106T142827Z: the opencode host's panel carries one fx member.
+    While the adapter read fx's rendered ``final_output``, groups 2 and 4 hashed
+    to ids the sheet lacked, landed ``validation_failed``, and apply-code-fixes
+    stopped on human-decision turns the scenario does not answer. An fx member
+    now groups exactly like a plain one.
+    """
+    verdicts = _verdicts()
+    groups = _panel_groups(members, with_fx)
+    assert len(groups) == len(json.loads((RESPONSES / "code_review/container_issues.json").read_text()))
+    if with_fx:
+        assert [g["group_hash"] for g in groups] == [g["group_hash"] for g in _panel_groups(members)]
+    for group in groups:
+        row = verdicts.get(group["group_hash"])
+        assert row, f"no verdict for {group['theme']!r} ({group['group_hash']})"
+        assert row["_theme"] == group["theme"]
+        assert row["status"] == "valid"
+        assert row["_reviewers"] == len(group["suggestions"]) == members
+
+
+def test_every_verdict_row_is_joined_by_some_panel():
+    """No dead rows: each row is a group some 1-6 member panel forms."""
+    formed = {g["group_hash"] for members in range(1, 7) for g in _panel_groups(members)}
+    assert set(_verdicts()) == formed
 
 
 @pytest.mark.parametrize("tool", [False, True], ids=["text", "tool"])

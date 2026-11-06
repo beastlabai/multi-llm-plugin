@@ -399,11 +399,15 @@ PINNED_SHIM_VERSION = 4
 #: step, slot or command form. Re-pinned again, unmoved, when that rule's last
 #: sentence stopped claiming every later command takes the brief: a follow-up the
 #: run prints keeps its pinned range (PD-4, 2026-10-27). One sentence of prose.
+#: Re-pinned, unmoved, when step 5's detach sentence named the apply modes and
+#: `implement` beside the fan-out modes: under the executor those run every
+#: write batch inside one command (codex-apply-executor, 2026-11-06). Prose
+#: inside an existing line; no step, slot or command form changed.
 PINNED_TEMPLATE_SHA256 = {
     "codex":
-        "ddc676b407dd92679ac231c86e4bcbdee6287ba417a7bdcd2aa53722bbb4f170",
+        "3e6cc33df9b73b0a9369d22b636b2348ef213892db3dd5e9d4d3195bfa1478e1",
     "opencode":
-        "31034c4256edf0461ada764c8f78438eaf0853810e30978a61a421543bce7327",
+        "7372b4f496eed6706f3963519c57439d9415d6362623b129330c32ff210f304e",
 }
 
 

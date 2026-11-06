@@ -33,6 +33,66 @@ def test_only_final_answer_is_parsed(provider):
     assert provider.classify_failure(raw, "fx ask: API request failed · HTTP 401") is None
 
 
+#: (output, final_output) exactly as fx 0.0.16 printed them, one completed run
+#: per row (offline loopback stub, 2026-11-06; the manifest's `markdown-markers`
+#: row is one such run in full), and the answer the adapter must return.
+#: final_output deletes every `*` and backtick unless a fence line is present.
+_CAPTURED_RENDERINGS = {
+    "split-deltas": ('[{"desc": "a `b` c **d** e*f"}]', '[{"desc": "a b c d ef"}]',
+                     '[{"desc": "a `b` c **d** e*f"}]'),
+    "narration-without-newline": ("Checking `readme`\n\n`y` is **z**", "y is z", "`y` is **z**"),
+    "two-narrations": ("Step one `a`.\n\nStep two **b**.\n\nFinal: `c` **d**", "Final: c d",
+                       "Final: `c` **d**"),
+    "fenced-verbatim": ('```json\n[{"desc": "`x` **y**"}]\n```', '```json\n[{"desc": "`x` **y**"}]\n```',
+                        '```json\n[{"desc": "`x` **y**"}]\n```'),
+    "trimmed-ends": ("\n\n  **Answer**: use `x`  \n\n", "Answer: use x", "**Answer**: use `x`"),
+    "self-introduction": ('I\'m fx, your local coding assistant.\n["`a`"]', '["a"]', '["`a`"]'),
+    "crlf-unicode": ("lét `ü` *—*\r\nline2\r\n", "lét ü —\r\nline2",
+                     "lét `ü` *—*\r\nline2"),
+}
+
+
+@pytest.mark.parametrize("output,final,answer", _CAPTURED_RENDERINGS.values(), ids=_CAPTURED_RENDERINGS)
+def test_markdown_markers_survive_fx_rendering(provider, output, final, answer):
+    from utils.providers.pi import parse_answer_text
+
+    raw = envelope(output=output, final_output=final)
+    assert provider.salvage_text(raw) == answer
+    assert provider.parse_output(raw, "") == parse_answer_text(answer)
+
+
+def test_markers_inside_json_strings_reach_the_parsed_document(provider):
+    """Shell, globs, template literals and code spans in a fix are the answer.
+
+    fx's rendering keeps the JSON valid, so the loss would be silent: a
+    different document, not a parse error.
+    """
+    answer = json.dumps([{"desc": "`a == b` leaks", "anchor_text": "`${x}`",
+                          "suggested_fix": "run `date`; rm -- *.py; f(**kw); a * b"}])
+    rendered = "".join(c for c in answer if c not in "*`")
+    raw = envelope(output="Reading **one** file.\n\n" + answer, final_output=rendered)
+    assert provider.parse_output(raw, "") == {"success": True, "data": json.loads(answer)}
+    assert json.loads(rendered) != json.loads(answer)
+
+
+@pytest.mark.parametrize("output", [
+    "",
+    "narration only",
+    '["x"]\nAPI request failed · HTTP 500 · upstream\n',
+    '["y"]',
+    '["x"] trailing words',
+])
+def test_final_output_stands_when_output_does_not_end_with_its_source(provider, output):
+    raw = envelope(output=output, final_output='["x"]')
+    assert provider.salvage_text(raw) == '["x"]'
+    assert provider.parse_output(raw, "") == {"success": True, "data": ["x"]}
+
+
+def test_a_final_output_that_kept_a_marker_is_already_the_source(provider):
+    raw = envelope(output="Draft `1`.\n\n```\n[1]\n```", final_output="```\n[2]\n```")
+    assert provider.salvage_text(raw) == "```\n[2]\n```"
+
+
 @pytest.mark.parametrize("changes", [
     {"exit_code": True}, {"exit_code": "0"}, {"exit_code": 1},
     {"output": None}, {"final_output": None}, {"final_output": ""},

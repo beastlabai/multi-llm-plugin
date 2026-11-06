@@ -1072,6 +1072,50 @@ def fan_out_correlation(fan_out: Iterable[str], *, invoked: Iterable[str],
     return missing
 
 
+#: The NAMES the host lane's live key travels under inside the container:
+#: `-e OPENROUTER_API_KEY` (creds.yaml) and the `ANTHROPIC_AUTH_TOKEN` overlay
+#: the entrypoint writes for claude-code's OpenRouter route.
+LIVE_CREDENTIAL_NAMES = ("OPENROUTER_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+
+
+def stub_credential_vars() -> dict[str, frozenset[str]]:
+    """`{cli: credential_vars}` from `redirect.yaml`."""
+    return {
+        str(row["cli"]): frozenset(row.get("credential_vars") or ())
+        for row in (load_redirect().get("clis") or [])
+        if row.get("cli")
+    }
+
+
+def live_credential_leaks(
+        call_log: Iterable[dict],
+        stub_vars: dict[str, Iterable[str]] | None = None,
+) -> list[tuple[str | None, str]]:
+    """`(cli, name)` for every provider child whose env held a live-key NAME
+    the wrapper did not fill itself.
+
+    `wrapper.build_child_env` starts the child from an EMPTY environment,
+    carries only its allowlist, then ASSIGNS every `credential_vars` name the
+    fake per-exec `mllm-stub-<exec-id>` key. A live-key name that the CLI's own
+    redirect row declares there can therefore hold only that fake key — fx is
+    that row: its settings.json authenticates with a bearer read from
+    `OPENROUTER_API_KEY`, in production and in the container alike
+    (`utils.providers.fx.render_settings`). Any other live-key name in a
+    child's receipt came from somewhere else and is a leak. The receipt is
+    names only, so this is the strongest claim it can carry; the value side
+    is pinned in `test_wrapper_env_contract` with a sentinel key.
+    """
+    declared = stub_credential_vars() if stub_vars is None else stub_vars
+    leaked: list[tuple[str | None, str]] = []
+    for record in call_log:
+        cli = record.get("cli")
+        filled = set(declared.get(cli) or ())
+        for name in record.get("child_env_names") or []:
+            if name in LIVE_CREDENTIAL_NAMES and name not in filled:
+                leaked.append((cli, name))
+    return leaked
+
+
 def row_helpers(row: Row) -> list[str]:
     """``row.helpers``, plus the host-lane runner's CLI when a row left it out.
 
@@ -3639,3 +3683,39 @@ def grade_structured_model_echo(cli: str, pinned: str, stdout: str) -> tuple[boo
         return False, (f"{cli}: served {served!r} (from {field}), "
                        f"pinned {want!r} (from {pinned!r})")
     return True, f"served {served!r} via {provider!r} (from {field})"
+
+
+# --------------------------------------------------------------------------- #
+# a2's consumed reasoning variant. providers.yaml's kilocode block: a trailing
+# `:variant` from the whitelist (none, minimal, low, medium, high, xhigh, max,
+# thinking, instant) becomes `run --variant <name>` and is NOT part of the model
+# name; anything else (`:free`) is. So `openrouter/moonshotai/kimi-k3:max` is
+# sent as `-m openrouter/moonshotai/kimi-k3 --variant max` and the banner reads
+# `> code · moonshotai/kimi-k3` (7.8.27, live row 2026-11-06). The whitelist is
+# the adapter's own REASONING_EFFORTS, so the grade strips exactly what the argv
+# drops; a CLI absent from this table keeps its pinned slug byte-for-byte.
+# --------------------------------------------------------------------------- #
+
+def _kilocode_variants() -> frozenset[str]:
+    from utils.providers.kilocode import REASONING_EFFORTS
+
+    return frozenset(REASONING_EFFORTS)
+
+
+#: CLIs whose adapter consumes a whitelisted `:variant` before the argv
+#: boundary, keyed to that whitelist. No other row's grade changes.
+MODEL_ECHO_DROPS_VARIANT = {"kilocode": _kilocode_variants}
+
+
+def model_echo_without_consumed_variant(cli: str, pinned: str) -> str:
+    """``pinned`` minus a trailing ``:variant`` that ``cli``'s adapter consumes.
+
+    Only a :data:`MODEL_ECHO_DROPS_VARIANT` CLI is touched, and only for a suffix
+    in its whitelist; every other spec comes back unchanged.
+    """
+    variants = MODEL_ECHO_DROPS_VARIANT.get(cli)
+    if variants is None:
+        return pinned
+    from utils.providers.base import split_reasoning_effort
+
+    return split_reasoning_effort(pinned, variants())[0]
