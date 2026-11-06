@@ -42,7 +42,7 @@
   "manifest": {
     "axis": "reviewer",
     "bundle_version": 1,
-    "captured_at": "2026-11-06T12:51:01Z",
+    "captured_at": "2026-11-06T16:58:38Z",
     "cli": "fx",
     "host": {
       "host_id": "sha256:e9ce53674803",
@@ -61,7 +61,7 @@
     "image": "mllm-e2e:local",
     "reviewer": "fx",
     "row_id": "chain-fx",
-    "run_bundle": "20261106T120107Z"
+    "run_bundle": "20261106T165750Z"
   },
   "markers": [
     "[AUTO_RESOLVED]",
@@ -527,11 +527,11 @@
                 {
                   "anchor_text": "return a == b",
                   "category": "bug",
-                  "desc": "compare_tokens returns a == b, which short-circuits on the first differing byte and leaks the length of the matching prefix to a caller that can time it. Use hmac.compare_digest instead.",
-                  "description": "compare_tokens returns a == b, which short-circuits on the first differing byte and leaks the length of the matching prefix to a caller that can time it. Use hmac.compare_digest instead.",
+                  "desc": "compare_tokens returns `a == b`, which short-circuits on the first differing byte and leaks the length of the matching prefix to a caller that can time it. Use hmac.compare_digest instead.",
+                  "description": "compare_tokens returns `a == b`, which short-circuits on the first differing byte and leaks the length of the matching prefix to a caller that can time it. Use hmac.compare_digest instead.",
                   "executor_role": "agent",
                   "file": "src/security.py",
-                  "group_id": "87a0ed27cf52b4a6",
+                  "group_id": "93c4a25d0e7f6cf6",
                   "importance": "MEDIUM",
                   "index": 2,
                   "line_range": [
@@ -551,11 +551,11 @@
                   "validation_status": "valid"
                 }
               ],
-              "prior_changes_id": "src/security.py#999a0c0b",
+              "prior_changes_id": "src/security.py#b17808f6",
               "priority_score": 5.0,
-              "prompt": "<text:sha256:728a248b9564:3525>",
+              "prompt": "<text:sha256:62448afacc12:3527>",
               "subagent_type": "general-purpose",
-              "total_chars": 548
+              "total_chars": 550
             },
             {
               "batch_index": 1,
@@ -607,11 +607,11 @@
                 {
                   "anchor_text": "return len(recent) > MAX_ATTEMPTS",
                   "category": "bug",
-                  "desc": "is_locked_out compares with > against MAX_ATTEMPTS, so an account is only locked after MAX_ATTEMPTS + 1 failures. Compare with >= to honour the documented limit.",
-                  "description": "is_locked_out compares with > against MAX_ATTEMPTS, so an account is only locked after MAX_ATTEMPTS + 1 failures. Compare with >= to honour the documented limit.",
+                  "desc": "is_locked_out compares with `>` against MAX_ATTEMPTS, so an account is only locked after MAX_ATTEMPTS + 1 failures. Compare with `>=` to honour the documented limit.",
+                  "description": "is_locked_out compares with `>` against MAX_ATTEMPTS, so an account is only locked after MAX_ATTEMPTS + 1 failures. Compare with `>=` to honour the documented limit.",
                   "executor_role": "agent",
                   "file": "src/security.py",
-                  "group_id": "5f2e462487597adc",
+                  "group_id": "5d4efdfb196e11f2",
                   "importance": "LOW",
                   "index": 4,
                   "line_range": [
@@ -631,11 +631,11 @@
                   "validation_status": "valid"
                 }
               ],
-              "prior_changes_id": "src/security.py#dae466c3",
+              "prior_changes_id": "src/security.py#22cf58a5",
               "priority_score": 1.0,
-              "prompt": "<text:sha256:7287d87e7a63:2485>",
+              "prompt": "<text:sha256:c038e7d71c37:2489>",
               "subagent_type": "general-purpose",
-              "total_chars": 161
+              "total_chars": 165
             }
           ],
           "batching_stats": {
@@ -756,11 +756,11 @@
             {
               "anchor_text": "return a == b",
               "category": "bug",
-              "desc": "compare_tokens returns a == b, which short-circuits on the first differing byte and leaks the length of the matching prefix to a caller that can time it. Use hmac.compare_digest instead.",
-              "description": "compare_tokens returns a == b, which short-circuits on the first differing byte and leaks the length of the matching prefix to a caller that can time it. Use hmac.compare_digest instead.",
+              "desc": "compare_tokens returns `a == b`, which short-circuits on the first differing byte and leaks the length of the matching prefix to a caller that can time it. Use hmac.compare_digest instead.",
+              "description": "compare_tokens returns `a == b`, which short-circuits on the first differing byte and leaks the length of the matching prefix to a caller that can time it. Use hmac.compare_digest instead.",
               "executor_role": "agent",
               "file": "src/security.py",
-              "group_id": "87a0ed27cf52b4a6",
+              "group_id": "93c4a25d0e7f6cf6",
               "importance": "MEDIUM",
               "index": 2,
               "line_range": [
@@ -805,11 +805,11 @@
             {
               "anchor_text": "return len(recent) > MAX_ATTEMPTS",
               "category": "bug",
-              "desc": "is_locked_out compares with > against MAX_ATTEMPTS, so an account is only locked after MAX_ATTEMPTS + 1 failures. Compare with >= to honour the documented limit.",
-              "description": "is_locked_out compares with > against MAX_ATTEMPTS, so an account is only locked after MAX_ATTEMPTS + 1 failures. Compare with >= to honour the documented limit.",
+              "desc": "is_locked_out compares with `>` against MAX_ATTEMPTS, so an account is only locked after MAX_ATTEMPTS + 1 failures. Compare with `>=` to honour the documented limit.",
+              "description": "is_locked_out compares with `>` against MAX_ATTEMPTS, so an account is only locked after MAX_ATTEMPTS + 1 failures. Compare with `>=` to honour the documented limit.",
               "executor_role": "agent",
               "file": "src/security.py",
-              "group_id": "5f2e462487597adc",
+              "group_id": "5d4efdfb196e11f2",
               "importance": "LOW",
               "index": 4,
               "line_range": [
@@ -875,7 +875,7 @@
               "expected_ids": [
                 "cf093f90d561613c",
                 "d948c7a933b2e244",
-                "87a0ed27cf52b4a6"
+                "93c4a25d0e7f6cf6"
               ],
               "files_touched": [],
               "kind": "apply_code_fixes",
@@ -969,7 +969,7 @@
               ],
               "duration_seconds": "<float>",
               "expected_ids": [
-                "5f2e462487597adc"
+                "5d4efdfb196e11f2"
               ],
               "files_touched": [],
               "kind": "apply_code_fixes",
@@ -1051,7 +1051,7 @@
               "expected_ids": [
                 "cf093f90d561613c",
                 "d948c7a933b2e244",
-                "87a0ed27cf52b4a6"
+                "93c4a25d0e7f6cf6"
               ],
               "files_touched": [],
               "kind": "apply_code_fixes",
@@ -1145,7 +1145,7 @@
               ],
               "duration_seconds": "<float>",
               "expected_ids": [
-                "5f2e462487597adc"
+                "5d4efdfb196e11f2"
               ],
               "files_touched": [],
               "kind": "apply_code_fixes",
@@ -1191,19 +1191,19 @@
               "expected_ids": [
                 "cf093f90d561613c",
                 "d948c7a933b2e244",
-                "87a0ed27cf52b4a6"
+                "93c4a25d0e7f6cf6"
               ],
               "file_key": "src/security.py",
               "inputs": {
-                "grouped_sha256": "a564f0e94a5f559a",
+                "grouped_sha256": "20f060d32f9bbd8e",
                 "plan_sha256": "74ed440ba06bd1a1"
               },
               "is_human": false,
               "kind": "apply_code_fixes",
               "output_name": "apply_fix_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/apply-fixes/apply_fix_batch_0.json",
-              "prior_changes_id": "src/security.py#999a0c0b",
-              "prompt": "<text:sha256:728a248b9564:3525>",
+              "prior_changes_id": "src/security.py#b17808f6",
+              "prompt": "<text:sha256:62448afacc12:3527>",
               "result_channel": "file",
               "subagent_type": "general-purpose",
               "task_id": "apply-fix-batch-0",
@@ -1224,7 +1224,7 @@
               ],
               "file_key": "src/auth.py",
               "inputs": {
-                "grouped_sha256": "a564f0e94a5f559a",
+                "grouped_sha256": "20f060d32f9bbd8e",
                 "plan_sha256": "74ed440ba06bd1a1"
               },
               "is_human": false,
@@ -1249,19 +1249,19 @@
               ],
               "executor_role": "agent",
               "expected_ids": [
-                "5f2e462487597adc"
+                "5d4efdfb196e11f2"
               ],
               "file_key": "src/security.py",
               "inputs": {
-                "grouped_sha256": "a564f0e94a5f559a",
+                "grouped_sha256": "20f060d32f9bbd8e",
                 "plan_sha256": "74ed440ba06bd1a1"
               },
               "is_human": false,
               "kind": "apply_code_fixes",
               "output_name": "apply_fix_batch_2.json",
               "output_path": "<run-root>/plans/auth-feature/apply-fixes/apply_fix_batch_2.json",
-              "prior_changes_id": "src/security.py#dae466c3",
-              "prompt": "<text:sha256:7287d87e7a63:2485>",
+              "prior_changes_id": "src/security.py#22cf58a5",
+              "prompt": "<text:sha256:c038e7d71c37:2489>",
               "result_channel": "file",
               "subagent_type": "general-purpose",
               "task_id": "apply-fix-batch-2",
@@ -1270,7 +1270,7 @@
             }
           ],
           "inputs": {
-            "grouped_sha256": "a564f0e94a5f559a",
+            "grouped_sha256": "20f060d32f9bbd8e",
             "plan_sha256": "74ed440ba06bd1a1"
           },
           "kind": "apply_code_fixes",
@@ -2837,9 +2837,9 @@
             },
             {
               "category": "bug",
-              "display_hash": "87a0ed27",
+              "display_hash": "93c4a25d",
               "display_label": "G3",
-              "group_hash": "87a0ed27cf52b4a6",
+              "group_hash": "93c4a25d0e7f6cf6",
               "models": [
                 "fx:stub-model"
               ],
@@ -2847,8 +2847,8 @@
               "suggestions": [
                 {
                   "anchor_text": "return a == b",
-                  "desc": "compare_tokens returns a == b, which short-circuits on the first differing byte and leaks the length of the matching prefix to a caller that can time it. Use hmac.compare_digest instead.",
-                  "display_hash": "889f2eac",
+                  "desc": "compare_tokens returns `a == b`, which short-circuits on the first differing byte and leaks the length of the matching prefix to a caller that can time it. Use hmac.compare_digest instead.",
+                  "display_hash": "c4a7bb1f",
                   "display_label": "G3S1",
                   "file": "src/security.py",
                   "importance": "medium",
@@ -2863,7 +2863,7 @@
                     "before": "    return a == b",
                     "format": "before_after"
                   },
-                  "suggestion_hash": "889f2eac8a4dac95",
+                  "suggestion_hash": "c4a7bb1f42888931",
                   "title": "Token comparison is not constant time",
                   "type": "bug"
                 }
@@ -2901,9 +2901,9 @@
             },
             {
               "category": "bug",
-              "display_hash": "5f2e4624",
+              "display_hash": "5d4efdfb",
               "display_label": "G5",
-              "group_hash": "5f2e462487597adc",
+              "group_hash": "5d4efdfb196e11f2",
               "models": [
                 "fx:stub-model"
               ],
@@ -2911,8 +2911,8 @@
               "suggestions": [
                 {
                   "anchor_text": "return len(recent) > MAX_ATTEMPTS",
-                  "desc": "is_locked_out compares with > against MAX_ATTEMPTS, so an account is only locked after MAX_ATTEMPTS + 1 failures. Compare with >= to honour the documented limit.",
-                  "display_hash": "068c4024",
+                  "desc": "is_locked_out compares with `>` against MAX_ATTEMPTS, so an account is only locked after MAX_ATTEMPTS + 1 failures. Compare with `>=` to honour the documented limit.",
+                  "display_hash": "fba66ac1",
                   "display_label": "G5S1",
                   "file": "src/security.py",
                   "importance": "low",
@@ -2922,7 +2922,7 @@
                   ],
                   "model": "fx:stub-model",
                   "source_model": "fx:stub-model",
-                  "suggestion_hash": "068c402416844ebb",
+                  "suggestion_hash": "fba66ac1aa3ba40e",
                   "title": "Lockout threshold is off by one",
                   "type": "bug"
                 }
@@ -2936,7 +2936,7 @@
         "issues.json": [
           {
             "anchor_text": "return a == b",
-            "desc": "compare_tokens returns a == b, which short-circuits on the first differing byte and leaks the length of the matching prefix to a caller that can time it. Use hmac.compare_digest instead.",
+            "desc": "compare_tokens returns `a == b`, which short-circuits on the first differing byte and leaks the length of the matching prefix to a caller that can time it. Use hmac.compare_digest instead.",
             "file": "src/security.py",
             "importance": "medium",
             "line_range": [
@@ -2967,7 +2967,7 @@
           },
           {
             "anchor_text": "return len(recent) > MAX_ATTEMPTS",
-            "desc": "is_locked_out compares with > against MAX_ATTEMPTS, so an account is only locked after MAX_ATTEMPTS + 1 failures. Compare with >= to honour the documented limit.",
+            "desc": "is_locked_out compares with `>` against MAX_ATTEMPTS, so an account is only locked after MAX_ATTEMPTS + 1 failures. Compare with `>=` to honour the documented limit.",
             "file": "src/security.py",
             "importance": "low",
             "line_range": [
@@ -3004,16 +3004,16 @@
           "batch_provenance": {
             "validation-batch-0": {
               "kind": "validation",
-              "round": "bca097c20a7da8c95a7d4975c748ef2726c50776a334da8bd81c6e5c6b10e2f8",
+              "round": "9e5ee5774538c20a4841e9ee8cea92c6e304c235eb74a59648b5305462b84d95",
               "runner": "opencode:stub/stub-model",
-              "sha256": "f9f83daa2d03519af7ee68f875dbf2a3862517f1f37813b5305d7aa46d80bd08",
+              "sha256": "208b775d7c783cba3d86efb09fb13ee37c46372b2291da91afc2821d04a8fe87",
               "task_id": "validation-batch-0"
             },
             "validation-batch-1": {
               "kind": "validation",
-              "round": "bca097c20a7da8c95a7d4975c748ef2726c50776a334da8bd81c6e5c6b10e2f8",
+              "round": "9e5ee5774538c20a4841e9ee8cea92c6e304c235eb74a59648b5305462b84d95",
               "runner": "opencode:stub/stub-model",
-              "sha256": "f9f83daa2d03519af7ee68f875dbf2a3862517f1f37813b5305d7aa46d80bd08",
+              "sha256": "208b775d7c783cba3d86efb09fb13ee37c46372b2291da91afc2821d04a8fe87",
               "task_id": "validation-batch-1"
             }
           },
@@ -3031,7 +3031,7 @@
           "invoker": "executor",
           "kind": "validation",
           "phase": "code-review",
-          "pin_sha256": "c117f1cc8fd3d98875905bb7f40a9e48be7bb513e4d18e7800cbad2dbb8e64c4",
+          "pin_sha256": "0351459c192221bca7a084c15d82be07e95cf33eed90870f5179ab34b7c3bd02",
           "report_version": 1,
           "runner_versions": {
             "opencode:stub/stub-model": "<str>"
@@ -3153,14 +3153,14 @@
             {
               "confidence": 0.9,
               "error_type": "unknown",
-              "group_id": "87a0ed27cf52b4a6",
+              "group_id": "93c4a25d0e7f6cf6",
               "group_index": 2,
               "reason": "Plain equality short-circuits, which is exactly the timing leak the finding describes.",
               "recoverable": false,
               "revalidated": false,
               "scope_baseline_id": "2a35979b501bfa9a",
               "scope_missing": true,
-              "scope_proposal_digest": "f327afd1ce988e4415f17d83493632e625cbf5044122f284bbc7d1d0b57c67fb",
+              "scope_proposal_digest": "93328d589346b40a24a746b5f9f00c0de53705a9f5c778b993da3e0149f6e266",
               "scope_reason": "",
               "scope_reference": "",
               "scope_relation": "unclear",
@@ -3187,14 +3187,14 @@
             {
               "confidence": 0.9,
               "error_type": "unknown",
-              "group_id": "5f2e462487597adc",
+              "group_id": "5d4efdfb196e11f2",
               "group_index": 4,
               "reason": "The comparison uses `>` where the documented limit calls for `>=`, so the off-by-one is real.",
               "recoverable": false,
               "revalidated": false,
               "scope_baseline_id": "2a35979b501bfa9a",
               "scope_missing": true,
-              "scope_proposal_digest": "9ec57ce35aa50bf4ced4e6187376ef94cdffc10d1b3f2b996bc24c9d8420c3a8",
+              "scope_proposal_digest": "d52318d3d1ca97d2dee9af82769b3f21b5e9235f87ddbc918cf72fe3613dd53b",
               "scope_reason": "",
               "scope_reference": "",
               "scope_relation": "unclear",
@@ -3205,14 +3205,14 @@
           "metadata": {
             "batch_manifest": {
               "kind": "validation",
-              "round": "bca097c20a7da8c95a7d4975c748ef2726c50776a334da8bd81c6e5c6b10e2f8"
+              "round": "9e5ee5774538c20a4841e9ee8cea92c6e304c235eb74a59648b5305462b84d95"
             },
             "batch_sha256": {
-              "0": "f9f83daa2d03519af7ee68f875dbf2a3862517f1f37813b5305d7aa46d80bd08",
-              "1": "f9f83daa2d03519af7ee68f875dbf2a3862517f1f37813b5305d7aa46d80bd08"
+              "0": "208b775d7c783cba3d86efb09fb13ee37c46372b2291da91afc2821d04a8fe87",
+              "1": "208b775d7c783cba3d86efb09fb13ee37c46372b2291da91afc2821d04a8fe87"
             },
             "context_contract": 2,
-            "grouped_sha256": "a564f0e94a5f559a",
+            "grouped_sha256": "20f060d32f9bbd8e",
             "model": "opencode:stub/stub-model",
             "runner": "opencode:stub/stub-model",
             "runners": {
@@ -3238,7 +3238,7 @@
               "group_ids": [
                 "ed2a0235cc4d9050",
                 "d948c7a933b2e244",
-                "87a0ed27cf52b4a6",
+                "93c4a25d0e7f6cf6",
                 "cf093f90d561613c"
               ],
               "group_indices": [
@@ -3251,7 +3251,7 @@
               "groups_count": 4,
               "inputs": {
                 "diff_base": "c42d568a4006b1c36e18bb33fa820a0aaf03a14c",
-                "grouped_sha256": "a564f0e94a5f559a",
+                "grouped_sha256": "20f060d32f9bbd8e",
                 "plan_sha256": "74ed440ba06bd1a1",
                 "reviewed_code_sha256": "c57c145cb2e57c25"
               },
@@ -3261,7 +3261,7 @@
               "output_name": "validation_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/code-review/validation_batch_0.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:07822eebede1:16399>",
+              "prompt": "<text:sha256:e2fc5d45b34d:16401>",
               "prompt_lines": 437,
               "prompt_path": "<run-root>/plans/auth-feature/code-review/validation_batch_0.prompt.txt",
               "result_channel": "file",
@@ -3275,7 +3275,7 @@
               "context_mode": "inline",
               "executor_role": "agent",
               "group_ids": [
-                "5f2e462487597adc"
+                "5d4efdfb196e11f2"
               ],
               "group_indices": [
                 4
@@ -3284,7 +3284,7 @@
               "groups_count": 1,
               "inputs": {
                 "diff_base": "c42d568a4006b1c36e18bb33fa820a0aaf03a14c",
-                "grouped_sha256": "a564f0e94a5f559a",
+                "grouped_sha256": "20f060d32f9bbd8e",
                 "plan_sha256": "74ed440ba06bd1a1",
                 "reviewed_code_sha256": "c57c145cb2e57c25"
               },
@@ -3294,7 +3294,7 @@
               "output_name": "validation_batch_1.json",
               "output_path": "<run-root>/plans/auth-feature/code-review/validation_batch_1.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:f21041b9d15b:14338>",
+              "prompt": "<text:sha256:d35622e62e25:14342>",
               "prompt_lines": 372,
               "prompt_path": "<run-root>/plans/auth-feature/code-review/validation_batch_1.prompt.txt",
               "result_channel": "file",
@@ -3315,7 +3315,7 @@
           "grouped_file": "<run-root>/plans/auth-feature/code-review/grouped.json",
           "inputs": {
             "diff_base": "c42d568a4006b1c36e18bb33fa820a0aaf03a14c",
-            "grouped_sha256": "a564f0e94a5f559a",
+            "grouped_sha256": "20f060d32f9bbd8e",
             "plan_sha256": "74ed440ba06bd1a1",
             "reviewed_code_sha256": "c57c145cb2e57c25"
           },
@@ -5156,21 +5156,21 @@
       "src/security.py"
     ],
     "processed_apply-fixes": {
-      "5f2e462487597adc": {
+      "5d4efdfb196e11f2": {
         "details": {
-          "grouped_sha256": "a564f0e94a5f559a",
+          "grouped_sha256": "20f060d32f9bbd8e",
           "leg": "executor",
-          "prior_changes_id": "src/security.py#dae466c3",
+          "prior_changes_id": "src/security.py#22cf58a5",
           "task_id": "apply-fix-batch-2"
         },
         "status": "no-op",
         "timestamp": "<str>"
       },
-      "87a0ed27cf52b4a6": {
+      "93c4a25d0e7f6cf6": {
         "details": {
-          "grouped_sha256": "a564f0e94a5f559a",
+          "grouped_sha256": "20f060d32f9bbd8e",
           "leg": "executor",
-          "prior_changes_id": "src/security.py#999a0c0b",
+          "prior_changes_id": "src/security.py#b17808f6",
           "task_id": "apply-fix-batch-0"
         },
         "status": "no-op",
@@ -5178,9 +5178,9 @@
       },
       "cf093f90d561613c": {
         "details": {
-          "grouped_sha256": "a564f0e94a5f559a",
+          "grouped_sha256": "20f060d32f9bbd8e",
           "leg": "executor",
-          "prior_changes_id": "src/security.py#999a0c0b",
+          "prior_changes_id": "src/security.py#b17808f6",
           "task_id": "apply-fix-batch-0"
         },
         "status": "no-op",
@@ -5188,9 +5188,9 @@
       },
       "d948c7a933b2e244": {
         "details": {
-          "grouped_sha256": "a564f0e94a5f559a",
+          "grouped_sha256": "20f060d32f9bbd8e",
           "leg": "executor",
-          "prior_changes_id": "src/security.py#999a0c0b",
+          "prior_changes_id": "src/security.py#b17808f6",
           "task_id": "apply-fix-batch-0"
         },
         "status": "no-op",
@@ -5198,7 +5198,7 @@
       },
       "ed2a0235cc4d9050": {
         "details": {
-          "grouped_sha256": "a564f0e94a5f559a",
+          "grouped_sha256": "20f060d32f9bbd8e",
           "leg": "executor",
           "prior_changes_id": "src/auth.py#fd43b6fc",
           "task_id": "apply-fix-batch-1"
@@ -5612,7 +5612,7 @@
       "<list>": 5
     },
     "processed_apply-fixes": {
-      "5f2e462487597adc": {
+      "5d4efdfb196e11f2": {
         "details": {
           "grouped_sha256": "<str>",
           "leg": "<str>",
@@ -5622,7 +5622,7 @@
         "status": "<str>",
         "timestamp": "<str>"
       },
-      "87a0ed27cf52b4a6": {
+      "93c4a25d0e7f6cf6": {
         "details": {
           "grouped_sha256": "<str>",
           "leg": "<str>",

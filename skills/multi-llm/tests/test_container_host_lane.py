@@ -1656,13 +1656,16 @@ class TestTheFanOutNeverWentLive:
               f"since workspace-census-host-before.json, phases {phases}")
 
     def test_no_child_carried_a_credential(self, workflow):
-        """The scrub receipt: variable NAMES only, never values."""
+        """The scrub receipt: variable NAMES only, never values.
+
+        A live-key name the CLI's own redirect row declares in
+        `credential_vars` is the wrapper's fake per-exec stub key, not an
+        inherited value (fx's `OPENROUTER_API_KEY`); the predicate is
+        `harness.live_credential_leaks`, pinned on plain CI in
+        `tests/test_stray_write_paths.py`.
+        """
         result, _row, _entry = workflow
-        leaked = []
-        for record in result.call_log:
-            for name in record.get("child_env_names") or []:
-                if name in ("OPENROUTER_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
-                    leaked.append((record.get("cli"), name))
+        leaked = harness.live_credential_leaks(result.call_log)
         assert not leaked, (
             f"{result.row.host}: a provider subprocess inherited a live "
             f"credential: {leaked}")

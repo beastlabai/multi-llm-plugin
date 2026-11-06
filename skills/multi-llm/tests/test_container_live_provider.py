@@ -68,7 +68,8 @@ RECORD = harness.HERE / "records" / "live-provider.jsonl"
 #: wire: aider, goose, pi, cline and kilocode already carry an OpenRouter spec in
 #: their own `providers.yaml` `models[0]` (`openrouter/z-ai/glm-5.2` for the
 #: first four, `openrouter/moonshotai/kimi-k2.7-code` for kilocode — all five
-#: slugs verified present in OpenRouter's 415-model catalogue on 2026-08-19), so
+#: slugs verified present in OpenRouter's 415-model catalogue on 2026-08-19;
+#: those are the wave's slugs, and the row reads today's `models[0]`), so
 #: the CLI routes ITSELF and `OPENROUTER_API_KEY` inherited from the runner's
 #: environment is the whole credential. No base-URL plumbing, no seeded
 #: endpoint, nothing for `live_base_url` to override.
@@ -782,8 +783,8 @@ STUB_ONLY_SEED: dict[str, str] = {
     "kilocode": (
         ".config/kilo/kilo.jsonc declares provider `stub` "
         "(@ai-sdk/openai-compatible at {{base_url}}, apiKey "
-        "{{stub_session_key}}). The live model is "
-        "`openrouter/moonshotai/kimi-k2.7-code`, i.e. kilocode's own built-in "
+        "{{stub_session_key}}). The live model is `models[0]` "
+        "(`openrouter/moonshotai/kimi-k3:max`), i.e. kilocode's own built-in "
         "`openrouter` provider off OPENROUTER_API_KEY (the string is in "
         "@kilocode/cli's bundle); the `stub` block names a provider the live "
         "row never selects."
@@ -925,11 +926,14 @@ MODEL_ECHO_DROPS_FIRST_SEGMENT: dict[str, str] = {
         "and not a way around one."
     ),
     "kilocode": (
-        "kilocode is handed the WHOLE spec (`-m "
-        "openrouter/moonshotai/kimi-k2.7-code`) and splits it internally: its "
-        "banner reports `> code · moonshotai/kimi-k2.7-code`, the resolved "
-        "model without the provider key. Measured 7.4.19 on the 2026-08-19 live "
-        "row. goose is NOT in this table even though it splits identically — it "
+        "kilocode is handed the whole spec minus any whitelisted `:variant` "
+        "(`-m openrouter/moonshotai/kimi-k3 --variant max` for "
+        "`openrouter/moonshotai/kimi-k3:max`, harness.MODEL_ECHO_DROPS_VARIANT) "
+        "and splits the provider key off internally: its banner reports "
+        "`> code · moonshotai/kimi-k3`, the resolved model without the provider "
+        "key. Measured 7.4.19 on the 2026-08-19 live row "
+        "(`kimi-k2.7-code`) and 7.8.27 on 2026-11-06 (`kimi-k3:max`). "
+        "goose is NOT in this table even though it splits identically — it "
         "reports no model at all, which NO_MODEL_ECHO says with the "
         "measurement, and that check runs first."
     ),
@@ -1843,7 +1847,12 @@ class TestTheSmokeReachedTheRealEndpoint:
         # assertion's clothes; the segment dropped is the ROUTE, and a1 grades
         # the route off the DNS log.
         drops_route = cli in MODEL_ECHO_DROPS_FIRST_SEGMENT
-        expected = pinned.partition("/")[2] if drops_route else pinned
+        # …and minus a whitelisted `:variant` the adapter turned into
+        # `--variant` (kilocode only; providers.yaml's kilocode block, see
+        # harness.MODEL_ECHO_DROPS_VARIANT). `:free` and every other CLI's
+        # suffix stay in the grade.
+        echoed = harness.model_echo_without_consumed_variant(cli, pinned)
+        expected = echoed.partition("/")[2] if drops_route else echoed
         assert expected and expected in blob, (
             f"{smoke['cli']}: the response does not name the pinned slug "
             f"{expected!r}"

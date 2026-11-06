@@ -180,3 +180,25 @@ rows:
     requests: 3
     notes: Production --auto policy; 2 agent requests plus 1 reviewer request. Usage
       reports only the agent requests.
+  markdown-markers:
+    stdout: markdown-markers.stdout.txt
+    stderr: markdown-markers.stderr.txt
+    exit_code: 0
+    expect:
+      success: true
+      classify_failure: null
+      salvage: answer
+      data:
+      - title: T
+        desc: uses `a == b`; pass **kwargs and a * b on *.py
+        anchor_text: return `x`
+        suggested_fix: echo `date` && ls *.txt
+    requests: 2
+    notes: 'fx 0.0.16, not 0.0.14: the checksummed archive in mllm-e2e:local (image
+      sha256:f5b48b97e88d), captured 2026-11-06 with network none, UID 10001, a dummy
+      credential and a loopback chat-completions stub. No paid call. Turn 1 streams
+      "Let me read `readme` **first**.\n" with a read_file call; turn 2 streams this
+      JSON array. final_output is fx''s terminal rendering, which deletes every * and
+      backtick: "uses a == b; pass kwargs and a  b on .py". output keeps the model''s
+      bytes after the narration. The adapter''s answer is the tail of output that renders
+      to final_output, so data keeps every marker.'

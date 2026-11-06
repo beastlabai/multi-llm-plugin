@@ -42,6 +42,9 @@ plus `error_envelope_reason` decide whether an assigned provider really ran;
 `tool_artifact_paths` is the one deliberate LOOSENING of a byte-level net, and
 its class is weighted accordingly — the case that matters most there is the
 product write the net must still catch on a row that carries the exemption.
+`live_credential_leaks` grades the wrapper's scrub receipt, and its one
+exemption (a live-key name the wrapper fills with the stub key) gets the same
+two-direction treatment.
 
 **The filename is deliberately not `test_container_*`** — the same reason
 `test_capability_promotions.py`, `test_redirect_matrix_claims.py` and
@@ -53,6 +56,8 @@ Docker runs is a guard that does not run on the PR where someone widens the glob
 """
 
 from __future__ import annotations
+
+import json
 
 import pytest
 import yaml
@@ -803,3 +808,93 @@ class TestThePredicateItself:
         """
         assert harness.stray_paths(
             STRAYS, iter(list(declared))) == sorted(STRAYS)
+
+
+#: The fx record `runs/20261106T142827Z/opencode-ask/calls.jsonl` wrote, names
+#: verbatim. Eight opencode fan-out rows failed the old name-only check on
+#: exactly this receipt, and its `OPENROUTER_API_KEY` is the wrapper's own
+#: `mllm-stub-<exec-id>` (fx's `credential_vars`), not the host's key.
+FX_MEASURED_ENV_NAMES = [
+    "FX_AUTO_UPGRADE", "FX_MAX_AGENT_STEPS", "FX_PERMISSION_MODE", "FX_PROVIDER",
+    "HOME", "MLLM_CALL_LOG", "MLLM_EXEC_ID", "MLLM_STUB_BASE_URL",
+    "MULTI_LLM_FX_PATH", "NO_COLOR", "OPENROUTER_API_KEY", "PATH", "TMPDIR",
+    "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+]
+
+
+class TestTheCredentialReceiptIsFalsifiable:
+    """`harness.live_credential_leaks`, the host lane's scrub-receipt grader.
+
+    The live caller (`test_no_child_carried_a_credential`) answers only in a
+    credentialed Docker run, so the exemption it now carries — a live-key
+    NAME the wrapper itself fills with the fake stub key — is pinned here in
+    both directions, and once through the real wrapper with a sentinel key.
+    """
+
+    def test_fxs_measured_receipt_is_not_a_leak(self):
+        record = {"cli": "fx", "child_env_names": FX_MEASURED_ENV_NAMES}
+        assert harness.live_credential_leaks([record]) == []
+
+    @pytest.mark.parametrize("name", harness.LIVE_CREDENTIAL_NAMES)
+    @pytest.mark.parametrize("cli", ["claude-code", "qwen-code", "omp", None])
+    def test_a_live_name_the_row_does_not_declare_is_a_leak(self, cli, name):
+        record = {"cli": cli, "child_env_names": ["HOME", name, "PATH"]}
+        assert harness.live_credential_leaks([record]) == [(cli, name)]
+
+    def test_the_exemption_is_per_name_not_per_cli(self):
+        record = {"cli": "fx", "child_env_names": [
+            *FX_MEASURED_ENV_NAMES, "ANTHROPIC_AUTH_TOKEN"]}
+        assert harness.live_credential_leaks([record]) == [
+            ("fx", "ANTHROPIC_AUTH_TOKEN")]
+
+    def test_only_fx_declares_a_live_name_as_its_stub_credential(self):
+        """A second row joining it widens the grader; make that a reviewed edit."""
+        declaring = {cli for cli, names in harness.stub_credential_vars().items()
+                     if names & set(harness.LIVE_CREDENTIAL_NAMES)}
+        assert declaring == {"fx"}
+        assert "OPENROUTER_API_KEY" in harness.stub_credential_vars()["fx"]
+
+    def test_the_real_wrapper_receipt_grades_clean_and_a_carried_key_is_caught(
+            self, monkeypatch, tmp_path):
+        """Sentinel live keys in the wrapper's own environment, as in the lane.
+
+        The scrubbing wrapper hands fx only its stub key and claude-code
+        neither name, so the grader is clean. A wrapper that carried the live
+        key over is caught on claude-code, while fx's slot still holds its stub
+        key because `credential_vars` is assigned after the carry.
+        """
+        from .container import wrapper
+
+        sentinel = "SENTINEL-not-a-real-key-5c1e"
+        monkeypatch.setattr(wrapper, "REDIRECT_YAML",
+                            harness.HERE / "redirect.yaml")
+        monkeypatch.setenv("OPENROUTER_API_KEY", sentinel)
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", sentinel)
+
+        def receipts(tag: str) -> tuple[list[dict], dict]:
+            log = tmp_path / f"{tag}.jsonl"
+            monkeypatch.setenv("MLLM_CALL_LOG", str(log))
+            envs = {}
+            for cli in ("fx", "claude-code"):
+                root = tmp_path / tag / cli
+                env = wrapper.build_child_env(
+                    cli, "abc123", wrapper.load_row(cli), root)
+                wrapper.write_call_record(cli, [cli], env, "abc123", root)
+                envs[cli] = env
+            return ([json.loads(line) for line in log.read_text().splitlines()],
+                    envs)
+
+        records, envs = receipts("scrubbed")
+        assert harness.live_credential_leaks(records) == []
+        assert envs["fx"]["OPENROUTER_API_KEY"] == "mllm-stub-abc123"
+        assert sentinel not in json.dumps(envs)
+
+        monkeypatch.setattr(wrapper, "ENV_CARRY_EXACT", (
+            *wrapper.ENV_CARRY_EXACT, *harness.LIVE_CREDENTIAL_NAMES))
+        records, envs = receipts("carried")
+        assert sorted(harness.live_credential_leaks(records)) == [
+            ("claude-code", "ANTHROPIC_AUTH_TOKEN"),
+            ("claude-code", "OPENROUTER_API_KEY"),
+            ("fx", "ANTHROPIC_AUTH_TOKEN"),
+        ]
+        assert envs["fx"]["OPENROUTER_API_KEY"] == "mllm-stub-abc123"

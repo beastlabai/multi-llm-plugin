@@ -33,6 +33,17 @@ pre-flight (flags, inputs, model resolution, phase-dir creation, lock pre-check)
 model or agent CLI runs, so a bad flag or an unconfigured provider fails on the caller's terminal
 with **no child and no log**.
 
+The write cores tell a host the same thing. Step 2 of `instructions/apply-suggestions.md`,
+`apply-task-suggestions.md`, `apply-code-fixes.md` and `implement.md` runs the orchestrator in the
+foreground only on the native-subagent path, where it emits batch or task JSON and applies nothing;
+under `--exec-subagents` that one command is the whole write phase, so the core says *run detached*
+(`--detach`). The `python`/`required` *run detached* sentences in `utils/host_capabilities.py` and
+both shim templates' step 5 name the apply modes and `implement` beside the fan-out modes, while a
+single-model call that applies no batch (`generate-tasks`) may stay in the foreground. An unscoped
+"run it in the foreground" sent host-lane row `codex-apply-executor` into the foreground with no
+`run` block to grade (2026-11-06); `tests/test_instruction_portability.py`
+(`TestTheWritePhasesDetachUnderTheExecutor`) guards the wording.
+
 The `--reaggregate` branch of every review orchestrator crosses the same boundary, after its
 one pre-flight (the phase dir exists): measured 2026-09-14 on review-tasks, that branch ran ahead of
 the boundary, the re-dispatch of the failed validation batches finished in the invoker's foreground

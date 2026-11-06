@@ -1,6 +1,6 @@
 {
   "name": "opencode-multi-llm",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Run multi-LLM plan reviews, task generation and code reviews from inside OpenCode",
   "type": "module",
   "main": "./dist/index.mjs",

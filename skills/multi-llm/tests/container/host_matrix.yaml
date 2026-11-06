@@ -3900,7 +3900,33 @@ hosts:
         # correction is the cell above; promoting to `verified` needs one re-grade
         # against the CORRECTED cell, which is R4's and T0's to spend, not this
         # edit's to assume.
-        provenance: measured-red   # runs/20260820T093838Z + runs/20260922T124956Z — R4 owns the detach correction; the `write_outcome` word was corrected 2026-09-22; T0 re-dates the rest
+        # PROMOTED 2026-11-06, `measured-red` → `verified`, on
+        # `runs/20261106T165921Z`: GRADED green, both verdicts — container exit
+        # 0, and the record re-emitted at session end carries the row's printed
+        # promotions, which only a grader pass writes. It answers both owners
+        # above in one run. R4, the detach assertion: the agent added
+        # `--detach` itself (receipt 003, `apply-suggestions
+        # plans/auth-feature.md --host codex --yes --exec-subagents --detach`),
+        # the worker ran (004), and the host polled `status --view run --phase
+        # apply-suggestions --wait` (005) to a `done` run block at exit 0. T0,
+        # the re-grade against the corrected `write_outcome` cell: four batches
+        # through `opencode:stub/stub-model`, all `status: ok` /
+        # `write_outcome: no-op`, zero bytes moved. codex 0.167.0, `gpt-6-luna`
+        # at `--creds fallback`, 2 turns, 22 stub requests, 91.79 s row wall.
+        # WHAT MOVED THE DETACH VERDICT is the shim, not the rig: the codex
+        # shim's run-detached sentence used to name only "a fan-out mode", so
+        # nothing told the agent to detach an APPLY mode; it now names fan-out
+        # modes, apply modes and `implement`, and that run's host transcript
+        # carries the new sentence. The row failed this same assertion
+        # (`test_the_declared_run_state_was_reached`) on
+        # `runs/20261106T142827Z` and `runs/20261106T150932Z` earlier the same
+        # day, so this is ONE green run on the corrected wording, not a
+        # recurrence count: a detach miss on a later run puts the row back to
+        # `measured-red` under R4. Earlier graded passes exist
+        # (`runs/20260821T034550Z`, `runs/20260821T145657Z`,
+        # `runs/20260922T172155Z`), and each was followed by a detach miss on
+        # the old wording (`runs/20260922T154654Z`, then the two above).
+        provenance: verified   # runs/20261106T165921Z — R4's detach assertion and T0's `write_outcome: no-op` re-grade both green; earlier reds runs/20260820T093838Z, runs/20260922T124956Z, runs/20261106T142827Z, runs/20261106T150932Z
         note: >
           C4 option (b), chosen deliberately: a real executor CLI pointed at a
           tool-call-free stub can only ever come back with nothing moved, so the
@@ -3928,6 +3954,12 @@ hosts:
           and `no-op` since `1633dd4`, which is the same measurement under two
           names — and `bytes_must_change: false`, over 6 turns and 14 stub
           requests in 373.81 s.
+          VERIFIED 2026-11-06 on `runs/20261106T165921Z`, once the shim's
+          run-detached sentence named apply modes as well as fan-out modes: the
+          agent detached, polled to `done`, and every assertion passed (the
+          provenance cell above has the receipts). So the miss was at least
+          partly an instruction gap: the old sentence never told the agent to
+          detach an apply mode, and the agent detached one only some of the time.
       - id: codex-auth-negative
         # WIRED 2026-08-20, and it is the SAME string the executor row types —
         # which is the point: the two rows differ only in `remove_seed`, so a
@@ -4918,7 +4950,22 @@ hosts:
         # since `1633dd4`. The correction is the cell above and this edit owns
         # it; `verified` is T0's to write over a re-grade against the corrected
         # cell, which is one container run this edit did not make.
-        provenance: measured-red   # runs/20260922T124956Z — the `write_outcome` word was corrected 2026-09-22 and this edit owns it; T0 owns the promotion. SUPERSEDED evidence runs/20260820T093838Z (passed, pre-D6)
+        # THIRD STEP, `measured-red` → `verified`, 2026-11-06, on
+        # `runs/20261106T165921Z`: the re-grade the second step was waiting
+        # for. The row was GRADED green against the corrected cell, on both
+        # verdicts (container exit 0; the record re-emitted at session end
+        # carries its printed promotion, which only a grader pass writes). The
+        # agent detached on its own (receipt 003 carries `--detach`) and polled
+        # `status --view run --phase apply-suggestions --wait` to a `done` run
+        # block at exit 0. Four batches went through `opencode:stub/stub-model`,
+        # all `status: ok` / `write_outcome: no-op`, with zero bytes moved.
+        # opencode 1.19.5, `deepseek/deepseek-v4.1-flash` on the OpenRouter key
+        # (key-usage delta $0.00), 2 turns, 21 stub requests, 68.19 s row wall.
+        # It is not the only graded pass on the corrected cell:
+        # `runs/20260922T154654Z` and `runs/20261106T150932Z` passed too.
+        # `runs/20261106T142827Z`, between them, failed a different assertion,
+        # `test_no_child_carried_a_credential`, which both later runs passed.
+        provenance: verified   # runs/20261106T165921Z — graded green against the corrected `write_outcome: no-op` cell (T0's re-grade); also green on runs/20260922T154654Z and runs/20261106T150932Z. Earlier red runs/20260922T124956Z (stale cell); SUPERSEDED evidence runs/20260820T093838Z (passed, pre-D6)
         note: >
           `args` WIRED 2026-08-20, exactly as codex-apply-executor is: the
           `pre_commands` leg above answers header finding (1), and
@@ -4938,7 +4985,9 @@ hosts:
           `runs/20260922T124956Z` either, which ran the same shape in 143.36 s.
           Note the contrast worth keeping: `codex-apply-executor`, the
           byte-identical row on the other host, is the one that failed the detach
-          assertion on that August run (R4) — and did NOT fail it in September.
+          assertion on that August run (R4) — and did NOT fail it on
+          `runs/20260922T124956Z` (it did again on `runs/20260922T154654Z`).
+          Both rows went `verified` on the same run, `runs/20261106T165921Z`.
       - id: opencode-auth-negative
         # WIRED 2026-08-20, the same string as the three rows above it.
         args: '--apply-suggestions "plans/auth-feature.md"'

@@ -1494,8 +1494,10 @@ clis:
     help_invocation: "fx ask --help"
     version_offline: true
     notes: >-
-      Vercel fx, not the npm JSON viewer. Prompt travels on stdin; only the
-      terminal final_output is the answer. Auto mode may make additional shell
+      Vercel fx, not the npm JSON viewer. Prompt travels on stdin; the answer
+      is the final message, which final_output selects and output's tail
+      supplies byte for byte (final_output deletes every * and backtick).
+      Auto mode may make additional shell
       reviewer requests; they are authorized and excluded from reported usage.
       This offline lane has network none; production permits web access.
       The wrapper owns HOME and tightens .fx/settings.json after substitution.

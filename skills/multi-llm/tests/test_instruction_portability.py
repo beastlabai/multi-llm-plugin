@@ -1710,12 +1710,24 @@ class TestTheCommitPhaseCores:
         assert "`[RESUME_COMMAND]` line is the command that continues the run" in step4
         assert "its own output names the way to continue" not in step4
 
-    def test_apply_commit_fixes_runs_in_the_foreground(self):
-        """It is apply-code-fixes' orchestrator call, which that core runs in
-        the foreground: no poll loop to hand over to."""
+    def test_apply_commit_fixes_runs_as_its_fronted_orchestrator_call_does(self):
+        """It is apply-code-fixes' orchestrator call, so it takes that core's
+        step-2 rule: in the foreground on the native path, where it only
+        prepares the batches, and **run detached** under `--exec-subagents`,
+        where the whole apply runs in this one call (codex-apply-executor,
+        2026-11-06: the foreground-only wording left no `.status.json` run
+        block on an executor host)."""
         flat = " ".join(self._raw("apply-commit-fixes").split())
-        assert "**in the foreground**" in flat
         assert "This call is apply-code-fixes' orchestrator call (its step 2)" in flat
+        assert ("Without `--exec-subagents` run it **in the foreground**; with it, "
+                "**run detached** (below)") in flat
+        assert "Without `--exec-subagents` it only prepares the batches" in flat
+        assert ("On a host that adds `--exec-subagents` the whole apply runs in this "
+                "one call, which is why it runs detached there: add `--detach`") in flat
+        # A detached launch hands its fixes block to the worker's log
+        # (`apply_orchestrator_base._apply_commit_guard` skips the launcher).
+        assert ("read the rest of the run's output, the `[COMMIT_FIXES]` block "
+                "included, from the log it named") in flat
 
     def test_the_host_written_summary_calls_the_brief_the_commit_brief(self):
         """Live run 2026-10-26 (Claude Code, phases 02, 05, 06): the host wrote
@@ -1731,6 +1743,150 @@ class TestTheCommitPhaseCores:
         row = next(line for line in self._raw("improve-commits").splitlines()
                    if line.startswith("| `apply-code-fixes.md` |"))
         assert "its `**Plan**:` line written `**Commit brief**:`" in row
+
+
+class TestTheWritePhasesDetachUnderTheExecutor:
+    """The write cores' foreground rule is the native path's alone.
+
+    Host-lane row `codex-apply-executor` (2026-11-06): the codex host ran
+    `apply-suggestions … --host codex --yes --exec-subagents` in the foreground,
+    as the core told it to — "Run this command in the foreground — do not run it
+    detached … it only generates batch JSON, it does not apply changes" — and no
+    detached `.status.json` run block existed to grade. That sentence is true
+    only without `--exec-subagents`. With it, the one command dispatches and
+    verifies every write batch itself (`modes.supports_detach` names these modes
+    for exactly that reason), so it must *run detached* like a fan-out.
+    """
+
+    #: The four write cores and the noun their batches are counted in.
+    WRITE_CORES = {
+        "apply-suggestions": "batches",
+        "apply-task-suggestions": "batches",
+        "apply-code-fixes": "batches",
+        "implement": "tasks",
+    }
+
+    #: The modes whose cores now tell an executor host to add `--detach`.
+    EXECUTOR_DETACH_MODES = (
+        "apply-suggestions", "apply-task-suggestions", "apply-code-fixes",
+        "apply-commit-fixes", "implement",
+    )
+
+    @staticmethod
+    def _flat(mode):
+        text = (SKILL_ROOT / "instructions" / f"{mode}.md").read_text(encoding="utf-8")
+        return " ".join(text.split())
+
+    @staticmethod
+    def _paragraphs(mode):
+        text = (SKILL_ROOT / "instructions" / f"{mode}.md").read_text(encoding="utf-8")
+        return [" ".join(block.split()) for block in re.split(r"\n\s*\n", text)]
+
+    @pytest.mark.parametrize("mode", sorted(WRITE_CORES))
+    def test_the_unscoped_foreground_rule_is_gone(self, mode):
+        flat = self._flat(mode)
+        assert ("**IMPORTANT**: Run this command in the foreground — do **not** run "
+                "it detached.") not in flat
+        assert "The orchestrator runs quickly" not in flat
+
+    @pytest.mark.parametrize("mode", sorted(WRITE_CORES) + ["apply-commit-fixes"])
+    def test_every_not_detached_rule_is_scoped_to_the_native_path(self, mode):
+        """No paragraph forbids detaching without naming the native path —
+        the shape that sent `codex-apply-executor` into the foreground."""
+        forbidding = [p for p in self._paragraphs(mode)
+                      if re.search(r"(?i)do (\*\*)?not(\*\*)? run it detached", p)]
+        for paragraph in forbidding:
+            assert "(no `--exec-subagents`)" in paragraph, paragraph[:300]
+
+    @pytest.mark.parametrize("mode", sorted(WRITE_CORES))
+    def test_the_executor_leg_runs_detached(self, mode):
+        unit = self.WRITE_CORES[mode]
+        flat = self._flat(mode)
+        native = (f"Foreground or detached depends on who runs the {unit}. On the "
+                  "native-subagent path (no `--exec-subagents`), run this command in "
+                  "the foreground — do **not** run it detached")
+        executor = ("On that path **run detached**: add `--detach` (which implies "
+                    "`--yes`;")
+        poll = ("poll the `status` command the launcher printed until the run is "
+                "finished, and read the run's markers and output paths from the log "
+                "it named")
+        assert native in flat
+        assert executor in flat
+        assert poll in flat
+        singular = {"batches": "batch", "tasks": "task"}[unit]
+        assert f"dispatches, verifies and records every {singular}" in flat
+        # One paragraph, native rule first: the executor clause qualifies it.
+        paragraph = next(p for p in self._paragraphs(mode) if native in p)
+        assert paragraph.index(native) < paragraph.index(executor)
+        assert "With `--exec-subagents`" in paragraph
+
+    @pytest.mark.parametrize("mode", sorted(WRITE_CORES))
+    def test_the_detach_flag_note_says_it_is_step_2s_launch(self, mode):
+        flat = self._flat(mode)
+        assert "it is how step 2 runs on this path" in flat
+        # The D5a rewrite left "on Claude host resolves *run detached* …" here.
+        assert "on Claude host resolves" not in flat
+
+    @pytest.mark.parametrize("mode", ["improve-plan", "improve-code", "improve-commits"])
+    def test_the_composites_end_an_executor_apply_on_its_detached_run(self, mode):
+        flat = self._flat(mode)
+        assert "its one orchestrator call, run detached as that core's step 2 says" in flat
+        assert ("(or, under `--exec-subagents`, the `status` poll that finds its "
+                "detached orchestrator call finished)") in flat
+        assert "(or its one orchestrator call under `--exec-subagents`)" not in flat
+
+    @pytest.mark.parametrize("mode", EXECUTOR_DETACH_MODES)
+    def test_each_mode_told_to_detach_accepts_the_flag(self, mode):
+        """`--detach` on a mode without `supports_detach` is a refusal (exit 3),
+        so a core may only send a host to the flag where the dispatcher takes it."""
+        assert mode in mode_table.DETACH_MODES
+
+    @pytest.mark.parametrize("host_id", ["codex", "opencode"])
+    def test_the_detach_verb_names_the_write_modes(self, host_id):
+        sentence = host_capabilities.verb_sentence(host_id, "detach")
+        assert sentence.startswith("**Run detached** — pass `--detach`")
+        assert ("on every fan-out mode, and on every apply mode and `implement`, "
+                "whose write batches the executor runs inside that one command") in sentence
+        assert "non-fan-out" not in sentence
+
+    def test_the_foreground_exception_still_covers_generate_tasks(self):
+        """`codex-next-command` grades `generate-tasks` under the executor as a
+        foreground run (`expect.run: none`): one subagent, no write batch. The
+        exception is worded so that row stays inside it."""
+        sentence = host_capabilities.verb_sentence("codex", "detach")
+        assert "Only a single-model call that applies no batch may stay in the foreground" in sentence
+
+    @pytest.mark.parametrize("host_id, opening", [
+        ("codex", "A fan-out mode, an apply mode and `implement` (whose write batches "
+                  "the executor runs inside the command) outlive one shell call, so add "
+                  "`--detach`"),
+        ("opencode", "Every fan-out mode, every apply mode and `implement` (whose write "
+                     "batches the executor runs inside the command) run with `--detach` "
+                     "here"),
+    ])
+    def test_the_shim_step_5_names_the_write_modes(self, host_id, opening):
+        text = (SKILL_ROOT / "hosts" / host_id / "shim.md.tmpl").read_text(encoding="utf-8")
+        assert opening in text
+
+    def test_the_host_matrix_rows_agree(self):
+        """The rows that grade this: each executor host's apply row expects a
+        detached worker, and each one's `generate-tasks` row a foreground run."""
+        import yaml
+
+        matrix = yaml.safe_load(
+            (SKILL_ROOT / "tests" / "container" / "host_matrix.yaml").read_text(
+                encoding="utf-8"))
+        rows = {row["id"]: row
+                for block in matrix["hosts"].values() if isinstance(block, dict)
+                for row in block.get("rows") or ()}
+        for host_id in ("codex", "opencode"):
+            apply_row = rows[f"{host_id}-apply-executor"]
+            assert "--exec-subagents --detach" in apply_row["command"]
+            assert apply_row["expect"]["run"] == "done"
+            next_row = rows[f"{host_id}-next-command"]
+            assert next_row["command"].startswith("generate-tasks ")
+            assert "--detach" not in next_row["command"]
+            assert next_row["expect"]["run"] == "none"
 
 
 # ===========================================================================
