@@ -82,23 +82,23 @@ ARG MLLM_PIN_MODE=pinned
 # tests/test_container_dockerfile_pins.py, so the two cannot drift apart.
 ARG UV_VERSION=0.13.5
 ARG UV_SHA256=f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f
-ARG GOOSE_VERSION=1.55.0
-ARG GOOSE_URL=https://github.com/aaif-goose/goose/releases/download/v1.55.0/goose-x86_64-unknown-linux-gnu.tar.bz2
-ARG GOOSE_SHA256=d9afefe7b8f4e372ebefd8b465ab6eea1f297304d058e8e9379ed627e0329708
-ARG GROK_VERSION=1.0.67
-ARG GROK_URL=https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-1.0.67-linux-x86_64
-ARG GROK_SHA256=ce33b1a29e37901f56fe59916cda7a1149e6fd377118f918e90d89f9abb52a51
-ARG MUSE_VERSION=1.4.11-R6667.1
-ARG MUSE_URL=https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.11-R6667.1&file=muse-x86-linux
-ARG MUSE_SHA256=6fda12a6a4f236528dafa707384cf6395fe859b1438ef77c7be26ed9d7976839
+ARG GOOSE_VERSION=1.57.0
+ARG GOOSE_URL=https://github.com/aaif-goose/goose/releases/download/v1.57.0/goose-x86_64-unknown-linux-gnu.tar.bz2
+ARG GOOSE_SHA256=e54036f3b7f95d3b0d7854c09465af5ef52a28c7fa03d2497d0ea68a6382282d
+ARG GROK_VERSION=1.0.77
+ARG GROK_URL=https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-1.0.77-linux-x86_64
+ARG GROK_SHA256=b702950aa5827d855e493278ab6215a4e0f5bceb5bba6c6243a9f55cdd143b0a
+ARG MUSE_VERSION=1.4.14-R7309.1
+ARG MUSE_URL=https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.14-R7309.1&file=muse-x86-linux
+ARG MUSE_SHA256=0809aac7cb58d18f5022b6d05e02aa1974683c0ec430e5f04d25b60ed17de2da
 # The documented install is `curl https://cursor.com/install | bash`, and that
 # script is SERVER-RENDERED: it bakes the current version into its body as a
 # literal DOWNLOAD_URL, so the URL is stable while what it installs is not.
 # Piping it into a shell would pin nothing, so the tarball is named by its bytes
 # here instead. The sha256 is ours -- Cursor publishes none.
-ARG CURSOR_AGENT_VERSION=2026.10.19-6bbf2c4
-ARG CURSOR_AGENT_URL=https://downloads.cursor.com/lab/2026.10.19-6bbf2c4/linux/x64/agent-cli-package.tar.gz
-ARG CURSOR_AGENT_SHA256=cf80cc18d8b33bf33e762353977ca1868cfc45290c92c0ffdcef83bb8b37b44f
+ARG CURSOR_AGENT_VERSION=2026.11.05-86047df
+ARG CURSOR_AGENT_URL=https://downloads.cursor.com/lab/2026.11.05-86047df/linux/x64/agent-cli-package.tar.gz
+ARG CURSOR_AGENT_SHA256=170b77786cbf4c93064d64fff12b71a178b968730561c64afc2e8e752535442e
 # Google's Antigravity CLI. The sha256 is UPSTREAM'S OWN -- the GitHub release
 # API publishes a `digest` per asset -- unlike cursor-agent's, which is ours
 # because Cursor publishes none. The build checks it anyway: a published digest
@@ -106,9 +106,9 @@ ARG CURSOR_AGENT_SHA256=cf80cc18d8b33bf33e762353977ca1868cfc45290c92c0ffdcef83bb
 #
 # agy RELEASES DAILY (1.1.15 on 2026-08-19, 1.2.7 on 2026-09-19), so this is a
 # pin to re-confirm whenever this file is touched.
-ARG AGY_VERSION=1.4.5
-ARG AGY_URL=https://github.com/google-antigravity/antigravity-cli/releases/download/1.4.5/agy_cli_linux_x64.tar.gz
-ARG AGY_SHA256=90cc1894b6862510869ad4cf1a6f4c043b7ae7c095bad8d5c355788a0ca935c7
+ARG AGY_VERSION=1.5.2
+ARG AGY_URL=https://github.com/google-antigravity/antigravity-cli/releases/download/1.5.2/agy_cli_linux_x64.tar.gz
+ARG AGY_SHA256=da696a8dc6122a63d5ffbdd21b02c8a62d5361fba0ed7d3bc2d2619889e62711
 # oh-my-pi. A DOWNLOAD, never the npm layer: the npm package
 # `@oh-my-pi/pi-coding-agent` needs Bun >= 1.3.14 and does not run under node at
 # all, so `npm ci` cannot install it into this image. What ships instead is the
@@ -120,13 +120,13 @@ ARG AGY_SHA256=90cc1894b6862510869ad4cf1a6f4c043b7ae7c095bad8d5c355788a0ca935c7
 # OWN: the release publishes a SHA256SUMS.txt naming it against
 # `omp-linux-x64`. Confirmed on 2026-09-17 to agree with sha256sum over the
 # fetched file -- which is the point of checking it below anyway.
-ARG OMP_VERSION=18.12.6
-ARG OMP_URL=https://github.com/can1357/oh-my-pi/releases/download/v18.12.6/omp-linux-x64
-ARG OMP_SHA256=85d9daf3a05fc76e8cd425ae1904eb576af8d21cc85fcf4690742626e07ccfa4
+ARG OMP_VERSION=18.17.0
+ARG OMP_URL=https://github.com/can1357/oh-my-pi/releases/download/v18.17.0/omp-linux-x64
+ARG OMP_SHA256=a4ce6001ab1012ca835f4184d675437531bd1ac477a7ba8424ed0b5476e9e4cb
 # Vercel's agent, not the unrelated npm JSON viewer named fx.
-ARG FX_VERSION=0.0.14
-ARG FX_URL=https://github.com/vercel-labs/fx/releases/download/v0.0.14/fx-linux-x86_64.tar.gz
-ARG FX_SHA256=731c1914fc2d497a10583f4416f8382c192e4897d6a0b4f713d6194455a8548b
+ARG FX_VERSION=0.0.16
+ARG FX_URL=https://github.com/vercel-labs/fx/releases/download/v0.0.16/fx-linux-x86_64.tar.gz
+ARG FX_SHA256=f0fb822c7be546c80bcc89d50521bc1454435e0c6f586e8420c4e2b84fa80599
 # vibe's interpreter, NOT the product's. `mistral-vibe` declares
 # `requires_python >=3.12` and bookworm-slim ships 3.11.2 -- and this file sets
 # `UV_PYTHON_DOWNLOADS=never`, so `uv venv --python 3.12` cannot fetch one
