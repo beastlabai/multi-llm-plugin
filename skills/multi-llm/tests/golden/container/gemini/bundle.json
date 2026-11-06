@@ -42,11 +42,11 @@
   "manifest": {
     "axis": "reviewer",
     "bundle_version": 1,
-    "captured_at": "2026-10-08T19:29:05Z",
+    "captured_at": "2026-11-06T12:51:01Z",
     "cli": "gemini",
     "host": {
       "host_id": "sha256:e9ce53674803",
-      "kernel_release": "6.17.0-35-generic",
+      "kernel_release": "7.0.0-38-generic",
       "machine": "x86_64",
       "system": "Linux",
       "unprivileged_userns": {
@@ -58,31 +58,39 @@
         "verdict": "permitted"
       }
     },
-    "image": "mllm-e2e:r27",
+    "image": "mllm-e2e:local",
     "reviewer": "gemini",
     "row_id": "chain-gemini",
-    "run_bundle": "20261008T190619Z"
+    "run_bundle": "20261106T120107Z"
   },
   "markers": [
+    "[AUTO_RESOLVED]",
     "[PROGRESS]",
     "[PROGRESS]",
     "[VALIDATION_BATCHES_PENDING]",
     "[PROGRESS]",
     "[SKIPPED]",
     "[AUTO_RESOLVED]",
+    "[AUTO_RESOLVED]",
+    "[AUTO_RESOLVED]",
     "[TASK_GENERATION_PENDING]",
     "[AUTO_RESOLVED]",
+    "[AUTO_RESOLVED]",
     "[PROGRESS]",
     "[PROGRESS]",
     "[VALIDATION_BATCHES_PENDING]",
     "[PROGRESS]",
     "[AUTO_RESOLVED]",
+    "[AUTO_RESOLVED]",
+    "[AUTO_RESOLVED]",
     "[SCOPE_FALLBACK]",
     "[SCOPE_FALLBACK]",
+    "[AUTO_RESOLVED]",
     "[PROGRESS]",
     "[PROGRESS]",
     "[VALIDATION_BATCHES_PENDING]",
     "[PROGRESS]",
+    "[AUTO_RESOLVED]",
     "[AUTO_RESOLVED]",
     "[WORKFLOW_COMPLETE]",
     "[PROGRESS]",
@@ -2997,14 +3005,14 @@
               "kind": "validation",
               "round": "9e5ee5774538c20a4841e9ee8cea92c6e304c235eb74a59648b5305462b84d95",
               "runner": "opencode:stub/stub-model",
-              "sha256": "751b1b620e6fbe063c60ce6b4205d0167af3e96ff46bcfd6eba8716a21fa75ce",
+              "sha256": "f9f83daa2d03519af7ee68f875dbf2a3862517f1f37813b5305d7aa46d80bd08",
               "task_id": "validation-batch-0"
             },
             "validation-batch-1": {
               "kind": "validation",
               "round": "9e5ee5774538c20a4841e9ee8cea92c6e304c235eb74a59648b5305462b84d95",
               "runner": "opencode:stub/stub-model",
-              "sha256": "751b1b620e6fbe063c60ce6b4205d0167af3e96ff46bcfd6eba8716a21fa75ce",
+              "sha256": "f9f83daa2d03519af7ee68f875dbf2a3862517f1f37813b5305d7aa46d80bd08",
               "task_id": "validation-batch-1"
             }
           },
@@ -3115,6 +3123,13 @@
               "reason": "The early return skips record_attempt, so a locked account's later attempts never extend the window.",
               "recoverable": false,
               "revalidated": false,
+              "scope_baseline_id": "2a35979b501bfa9a",
+              "scope_missing": true,
+              "scope_proposal_digest": "d087ad08dcc5e501c349f47d86c51c917b8f880d95fede0aca0305006f0eb0e7",
+              "scope_reason": "",
+              "scope_reference": "",
+              "scope_relation": "unclear",
+              "scope_source": "validation",
               "status": "valid"
             },
             {
@@ -3125,6 +3140,13 @@
               "reason": "The module level dict is only ever appended to, so the store is unbounded as the finding says.",
               "recoverable": false,
               "revalidated": false,
+              "scope_baseline_id": "2a35979b501bfa9a",
+              "scope_missing": true,
+              "scope_proposal_digest": "1aee424ca2b36432f76efddf2bf0cc052a850f6e5819cc12913cb3d42281a8e6",
+              "scope_reason": "",
+              "scope_reference": "",
+              "scope_relation": "unclear",
+              "scope_source": "validation",
               "status": "valid"
             },
             {
@@ -3135,6 +3157,13 @@
               "reason": "Plain equality short-circuits, which is exactly the timing leak the finding describes.",
               "recoverable": false,
               "revalidated": false,
+              "scope_baseline_id": "2a35979b501bfa9a",
+              "scope_missing": true,
+              "scope_proposal_digest": "93328d589346b40a24a746b5f9f00c0de53705a9f5c778b993da3e0149f6e266",
+              "scope_reason": "",
+              "scope_reference": "",
+              "scope_relation": "unclear",
+              "scope_source": "validation",
               "status": "valid"
             },
             {
@@ -3145,6 +3174,13 @@
               "reason": "The new module really does ship with no test file beside the existing tests/test_auth.py.",
               "recoverable": false,
               "revalidated": false,
+              "scope_baseline_id": "2a35979b501bfa9a",
+              "scope_missing": true,
+              "scope_proposal_digest": "dc4e3338374c058d5f50627e59b7343a465bff8cb5b4e827036ffcf617d0abd6",
+              "scope_reason": "",
+              "scope_reference": "",
+              "scope_relation": "unclear",
+              "scope_source": "validation",
               "status": "valid"
             },
             {
@@ -3155,6 +3191,13 @@
               "reason": "The comparison uses `>` where the documented limit calls for `>=`, so the off-by-one is real.",
               "recoverable": false,
               "revalidated": false,
+              "scope_baseline_id": "2a35979b501bfa9a",
+              "scope_missing": true,
+              "scope_proposal_digest": "d52318d3d1ca97d2dee9af82769b3f21b5e9235f87ddbc918cf72fe3613dd53b",
+              "scope_reason": "",
+              "scope_reference": "",
+              "scope_relation": "unclear",
+              "scope_source": "validation",
               "status": "valid"
             }
           ],
@@ -3164,8 +3207,8 @@
               "round": "9e5ee5774538c20a4841e9ee8cea92c6e304c235eb74a59648b5305462b84d95"
             },
             "batch_sha256": {
-              "0": "751b1b620e6fbe063c60ce6b4205d0167af3e96ff46bcfd6eba8716a21fa75ce",
-              "1": "751b1b620e6fbe063c60ce6b4205d0167af3e96ff46bcfd6eba8716a21fa75ce"
+              "0": "f9f83daa2d03519af7ee68f875dbf2a3862517f1f37813b5305d7aa46d80bd08",
+              "1": "f9f83daa2d03519af7ee68f875dbf2a3862517f1f37813b5305d7aa46d80bd08"
             },
             "context_contract": 2,
             "grouped_sha256": "5d1097bcbfc89fe2",
@@ -3176,6 +3219,10 @@
               "1": "opencode:stub/stub-model"
             },
             "schema_version": "2.1",
+            "scope_baseline_id": "2a35979b501bfa9a",
+            "scope_policy": "expand",
+            "scope_policy_source": "default",
+            "scope_round_baseline_id": "2a35979b501bfa9a",
             "timestamp": "<str>"
           }
         },
@@ -3213,8 +3260,8 @@
               "output_name": "validation_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/code-review/validation_batch_0.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:60a5354ddaa8:14361>",
-              "prompt_lines": 410,
+              "prompt": "<text:sha256:7dad69e73484:16441>",
+              "prompt_lines": 437,
               "prompt_path": "<run-root>/plans/auth-feature/code-review/validation_batch_0.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -3246,8 +3293,8 @@
               "output_name": "validation_batch_1.json",
               "output_path": "<run-root>/plans/auth-feature/code-review/validation_batch_1.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:6b0af39947e6:12272>",
-              "prompt_lines": 345,
+              "prompt": "<text:sha256:eb2fe978de7e:14352>",
+              "prompt_lines": 372,
               "prompt_path": "<run-root>/plans/auth-feature/code-review/validation_batch_1.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -3277,6 +3324,38 @@
           "plan_file": "<run-root>/plans/auth-feature.md",
           "reaggregate_mode": "review-code",
           "replay_flags": [],
+          "scope": {
+            "baseline": {
+              "baseline_id": "2a35979b501bfa9a",
+              "phase": "code-review",
+              "sources": [
+                {
+                  "path": "<run-root>/plans/auth-feature.md",
+                  "role": "plan",
+                  "sha256": "74ed440ba06bd1a1a3106b2f16768a05cedcca602da9a330ee83c18a555b3eda",
+                  "snapshot": "validation-snapshot.md"
+                },
+                {
+                  "path": "<run-root>/plans/auth-feature/tasks/tasks.md",
+                  "role": "tasks",
+                  "sha256": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
+                },
+                {
+                  "endpoints": {
+                    "base": "c42d568a4006b1c36e18bb33fa820a0aaf03a14c"
+                  },
+                  "role": "diff",
+                  "sha256": "69287805f64df0aae800b34578053036fad1e25118a09435241d86f5cef3d88c"
+                }
+              ],
+              "version": 1
+            },
+            "baseline_id": "2a35979b501bfa9a",
+            "phase": "code-review",
+            "policy": "expand",
+            "policy_source": "default",
+            "round_baseline_id": "2a35979b501bfa9a"
+          },
           "tasks_schema_version": 2,
           "total_batches": 2
         }
@@ -4177,6 +4256,13 @@
               "reason": "The plan names regex validation without pinning a pattern, so this is a real gap.",
               "recoverable": false,
               "revalidated": false,
+              "scope_baseline_id": "d7a68d8bb3661369",
+              "scope_missing": true,
+              "scope_proposal_digest": "2ebfca96e5a72ebd2692a5806f280b3ff4334e64cbdfc5f3235cc4ef985bdca7",
+              "scope_reason": "",
+              "scope_reference": "",
+              "scope_relation": "unclear",
+              "scope_source": "validation",
               "status": "valid"
             },
             {
@@ -4187,6 +4273,13 @@
               "reason": "Password complexity is unspecified in the plan and is a genuine security requirement.",
               "recoverable": false,
               "revalidated": false,
+              "scope_baseline_id": "d7a68d8bb3661369",
+              "scope_missing": true,
+              "scope_proposal_digest": "3cb213ccf1861ab5d6515b9dc37b2869f46aad0a4c1f00bfe80260737e3761df",
+              "scope_reason": "",
+              "scope_reference": "",
+              "scope_relation": "unclear",
+              "scope_source": "validation",
               "status": "valid"
             },
             {
@@ -4197,6 +4290,13 @@
               "reason": "The plan describes migrations without saying how they are applied without downtime.",
               "recoverable": false,
               "revalidated": false,
+              "scope_baseline_id": "d7a68d8bb3661369",
+              "scope_missing": true,
+              "scope_proposal_digest": "d53c8ad7a4c8333af11d61e8c32d0e323e36fd57ff03cfa978cde2b48dbfcd8f",
+              "scope_reason": "",
+              "scope_reference": "",
+              "scope_relation": "unclear",
+              "scope_source": "validation",
               "status": "valid"
             },
             {
@@ -4207,6 +4307,13 @@
               "reason": "Token lifetimes are absent from the plan and are needed before implementation.",
               "recoverable": false,
               "revalidated": false,
+              "scope_baseline_id": "d7a68d8bb3661369",
+              "scope_missing": true,
+              "scope_proposal_digest": "fde40db34ba275f6703deb1f2ec97684d5c752a378ce21bb5a8aaed61be53152",
+              "scope_reason": "",
+              "scope_reference": "",
+              "scope_relation": "unclear",
+              "scope_source": "validation",
               "status": "valid"
             }
           ],
@@ -4230,6 +4337,10 @@
               "2": "opencode:stub/stub-model"
             },
             "schema_version": "2.1",
+            "scope_baseline_id": "d7a68d8bb3661369",
+            "scope_policy": "expand",
+            "scope_policy_source": "default",
+            "scope_round_baseline_id": "d7a68d8bb3661369",
             "timestamp": "<str>"
           }
         },
@@ -4259,8 +4370,8 @@
               "output_name": "validation_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_0.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:770fdbf07d55:8592>",
-              "prompt_lines": 237,
+              "prompt": "<text:sha256:2a98261b65d3:10471>",
+              "prompt_lines": 264,
               "prompt_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_0.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -4290,8 +4401,8 @@
               "output_name": "validation_batch_1.json",
               "output_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_1.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:c0e74f0d16ce:8548>",
-              "prompt_lines": 237,
+              "prompt": "<text:sha256:fc6897c2957f:10427>",
+              "prompt_lines": 264,
               "prompt_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_1.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -4323,8 +4434,8 @@
               "output_name": "validation_batch_2.json",
               "output_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_2.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:358729c49d39:9192>",
-              "prompt_lines": 255,
+              "prompt": "<text:sha256:6a6aec6154bb:11071>",
+              "prompt_lines": 282,
               "prompt_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_2.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -4353,6 +4464,26 @@
           "plan_file": "<run-root>/plans/auth-feature.md",
           "reaggregate_mode": "review-plan",
           "replay_flags": [],
+          "scope": {
+            "baseline": {
+              "baseline_id": "d7a68d8bb3661369",
+              "phase": "review-plan",
+              "sources": [
+                {
+                  "path": "<run-root>/plans/auth-feature.md",
+                  "role": "plan",
+                  "sha256": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32",
+                  "snapshot": "validation-snapshot.md"
+                }
+              ],
+              "version": 1
+            },
+            "baseline_id": "d7a68d8bb3661369",
+            "phase": "review-plan",
+            "policy": "expand",
+            "policy_source": "default",
+            "round_baseline_id": "d7a68d8bb3661369"
+          },
           "tasks_schema_version": 2,
           "total_batches": 3
         }
@@ -4568,6 +4699,13 @@
               "reason": "Session revocation is in the plan and no generated task covers it, so the coverage gap is real.",
               "recoverable": false,
               "revalidated": false,
+              "scope_baseline_id": "15810c4c16d3c8d3",
+              "scope_missing": true,
+              "scope_proposal_digest": "ca73516fc96db0a8ccea69bf0394c9b2f2b21221cc4c1c2905a75d480c4141c9",
+              "scope_reason": "",
+              "scope_reference": "",
+              "scope_relation": "unclear",
+              "scope_source": "validation",
               "status": "valid"
             },
             {
@@ -4578,6 +4716,13 @@
               "reason": "The criterion as written states no post-condition, so it is not verifiable as required.",
               "recoverable": false,
               "revalidated": false,
+              "scope_baseline_id": "15810c4c16d3c8d3",
+              "scope_missing": true,
+              "scope_proposal_digest": "4de61784ab8c0ebbe46eeed107a744ac58b076533f5c93a86902fce4e75dcecf",
+              "scope_reason": "",
+              "scope_reference": "",
+              "scope_relation": "unclear",
+              "scope_source": "validation",
               "status": "valid"
             },
             {
@@ -4588,6 +4733,13 @@
               "reason": "The task names no boundary for the regression test, which leaves the acceptance criterion ambiguous.",
               "recoverable": false,
               "revalidated": false,
+              "scope_baseline_id": "15810c4c16d3c8d3",
+              "scope_missing": true,
+              "scope_proposal_digest": "792928e5508746614b52439afbcf02c28e6a8b5ce943641e98c56aefd4be1f34",
+              "scope_reason": "",
+              "scope_reference": "",
+              "scope_relation": "unclear",
+              "scope_source": "validation",
               "status": "valid"
             }
           ],
@@ -4609,6 +4761,10 @@
               "1": "opencode:stub/stub-model"
             },
             "schema_version": "2.1",
+            "scope_baseline_id": "15810c4c16d3c8d3",
+            "scope_policy": "expand",
+            "scope_policy_source": "default",
+            "scope_round_baseline_id": "15810c4c16d3c8d3",
             "timestamp": "<str>"
           }
         },
@@ -4639,8 +4795,8 @@
               "output_name": "validation_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/review-tasks/validation_batch_0.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:47fdaca4f14a:10248>",
-              "prompt_lines": 308,
+              "prompt": "<text:sha256:8e9ba9a8eaaf:12269>",
+              "prompt_lines": 335,
               "prompt_path": "<run-root>/plans/auth-feature/review-tasks/validation_batch_0.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -4673,8 +4829,8 @@
               "output_name": "validation_batch_1.json",
               "output_path": "<run-root>/plans/auth-feature/review-tasks/validation_batch_1.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:fbe5b2819fe0:10928>",
-              "prompt_lines": 326,
+              "prompt": "<text:sha256:694bb2775fd3:12949>",
+              "prompt_lines": 353,
               "prompt_path": "<run-root>/plans/auth-feature/review-tasks/validation_batch_1.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -4704,6 +4860,32 @@
           "plan_file": "<run-root>/plans/auth-feature.md",
           "reaggregate_mode": "review-tasks",
           "replay_flags": [],
+          "scope": {
+            "baseline": {
+              "baseline_id": "15810c4c16d3c8d3",
+              "phase": "review-tasks",
+              "sources": [
+                {
+                  "path": "<run-root>/plans/auth-feature.md",
+                  "role": "plan",
+                  "sha256": "f767e856b63b3cddfd6cfb9dead116ebcd81a304ffbcc52b9ed84d86678e2be9",
+                  "snapshot": "validation-snapshot.md"
+                },
+                {
+                  "path": "<run-root>/plans/auth-feature/tasks/tasks.md",
+                  "role": "tasks",
+                  "sha256": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582",
+                  "snapshot": "tasks-backup.md"
+                }
+              ],
+              "version": 1
+            },
+            "baseline_id": "15810c4c16d3c8d3",
+            "phase": "review-tasks",
+            "policy": "expand",
+            "policy_source": "default",
+            "round_baseline_id": "15810c4c16d3c8d3"
+          },
           "tasks_file": "<run-root>/plans/auth-feature/tasks/tasks.md",
           "tasks_schema_version": 2,
           "total_batches": 2
@@ -5100,6 +5282,80 @@
     },
     "review_phase_completed": true,
     "schema_version": "2.0",
+    "scope_policy": {
+      "code-review": {
+        "baseline": {
+          "baseline_id": "2a35979b501bfa9a",
+          "phase": "code-review",
+          "sources": [
+            {
+              "path": "<run-root>/plans/auth-feature.md",
+              "role": "plan",
+              "sha256": "74ed440ba06bd1a1a3106b2f16768a05cedcca602da9a330ee83c18a555b3eda",
+              "snapshot": "validation-snapshot.md"
+            },
+            {
+              "path": "<run-root>/plans/auth-feature/tasks/tasks.md",
+              "role": "tasks",
+              "sha256": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
+            },
+            {
+              "endpoints": {
+                "base": "c42d568a4006b1c36e18bb33fa820a0aaf03a14c"
+              },
+              "role": "diff",
+              "sha256": "69287805f64df0aae800b34578053036fad1e25118a09435241d86f5cef3d88c"
+            }
+          ],
+          "version": 1
+        },
+        "recorded_at": "<timestamp>",
+        "review_policy": "expand",
+        "review_policy_source": "default"
+      },
+      "review-plan": {
+        "baseline": {
+          "baseline_id": "d7a68d8bb3661369",
+          "phase": "review-plan",
+          "sources": [
+            {
+              "path": "<run-root>/plans/auth-feature.md",
+              "role": "plan",
+              "sha256": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32",
+              "snapshot": "validation-snapshot.md"
+            }
+          ],
+          "version": 1
+        },
+        "recorded_at": "<timestamp>",
+        "review_policy": "expand",
+        "review_policy_source": "default"
+      },
+      "review-tasks": {
+        "baseline": {
+          "baseline_id": "15810c4c16d3c8d3",
+          "phase": "review-tasks",
+          "sources": [
+            {
+              "path": "<run-root>/plans/auth-feature.md",
+              "role": "plan",
+              "sha256": "f767e856b63b3cddfd6cfb9dead116ebcd81a304ffbcc52b9ed84d86678e2be9",
+              "snapshot": "validation-snapshot.md"
+            },
+            {
+              "path": "<run-root>/plans/auth-feature/tasks/tasks.md",
+              "role": "tasks",
+              "sha256": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582",
+              "snapshot": "tasks-backup.md"
+            }
+          ],
+          "version": 1
+        },
+        "recorded_at": "<timestamp>",
+        "review_policy": "expand",
+        "review_policy_source": "default"
+      }
+    },
     "task_status": {
       "T001": "completed",
       "T002": "completed",
@@ -5482,6 +5738,98 @@
     },
     "review_phase_completed": "<bool>",
     "schema_version": "<str>",
+    "scope_policy": {
+      "code-review": {
+        "baseline": {
+          "baseline_id": "<str>",
+          "phase": "<str>",
+          "sources": {
+            "<item-types>": [
+              "<dict>"
+            ],
+            "<items>": [
+              {
+                "path": "<str>",
+                "role": "<str>",
+                "sha256": "<str>",
+                "snapshot": "<str>"
+              },
+              {
+                "path": "<str>",
+                "role": "<str>",
+                "sha256": "<str>"
+              },
+              {
+                "endpoints": {
+                  "base": "<str>"
+                },
+                "role": "<str>",
+                "sha256": "<str>"
+              }
+            ],
+            "<list>": 3
+          },
+          "version": "<int>"
+        },
+        "recorded_at": "<str>",
+        "review_policy": "<str>",
+        "review_policy_source": "<str>"
+      },
+      "review-plan": {
+        "baseline": {
+          "baseline_id": "<str>",
+          "phase": "<str>",
+          "sources": {
+            "<item-types>": [
+              "<dict>"
+            ],
+            "<items>": [
+              {
+                "path": "<str>",
+                "role": "<str>",
+                "sha256": "<str>",
+                "snapshot": "<str>"
+              }
+            ],
+            "<list>": 1
+          },
+          "version": "<int>"
+        },
+        "recorded_at": "<str>",
+        "review_policy": "<str>",
+        "review_policy_source": "<str>"
+      },
+      "review-tasks": {
+        "baseline": {
+          "baseline_id": "<str>",
+          "phase": "<str>",
+          "sources": {
+            "<item-types>": [
+              "<dict>"
+            ],
+            "<items>": [
+              {
+                "path": "<str>",
+                "role": "<str>",
+                "sha256": "<str>",
+                "snapshot": "<str>"
+              },
+              {
+                "path": "<str>",
+                "role": "<str>",
+                "sha256": "<str>",
+                "snapshot": "<str>"
+              }
+            ],
+            "<list>": 2
+          },
+          "version": "<int>"
+        },
+        "recorded_at": "<str>",
+        "review_policy": "<str>",
+        "review_policy_source": "<str>"
+      }
+    },
     "task_status": {
       "T001": "<str>",
       "T002": "<str>",
