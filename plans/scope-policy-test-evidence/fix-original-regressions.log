@@ -1,8 +1,0 @@
-..                                                                       [100%]
-=============================== warnings summary ===============================
-../mllm-wt/scope-policy/skills/multi-llm/tests/test_write_executor_orchestrators.py:1038
-  /home/marc/code/mllm-wt/scope-policy/skills/multi-llm/tests/test_write_executor_orchestrators.py:1038: PytestUnknownMarkWarning: Unknown pytest.mark.timeout - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
-    @pytest.mark.timeout(300)
-
--- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-2 passed, 1 warning in 0.23s

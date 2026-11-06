@@ -1,8 +1,0 @@
-{
-  "fingerprint_version": 1,
-  "kind": "apply_code_fixes",
-  "tasks": {
-    "apply-fix-batch-0": "be49d4de1b770faad7b3482f576dbdd68e0367d5a294130d4099c41e4bed7960",
-    "apply-fix-batch-1": "47e93d52f3e79bd8a09b67f05045fb2a6dc8fcce37afe4bde51aca2c8e64f822"
-  }
-}

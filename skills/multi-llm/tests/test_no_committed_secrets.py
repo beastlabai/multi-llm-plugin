@@ -1096,26 +1096,24 @@ class TestGitignoreDirections:
             f"{rel_path} is ignored by {location}:{pattern}, not by the records/ rule"
         )
 
-    def test_repo_plans_scratch_is_ignored_and_only_approved_material_is_tracked(self, ignore_repo):
-        """Unrelated working notes stay local, including after `git add -f`.
+    def test_the_repo_plans_scratch_is_ignored_and_never_tracked(self, ignore_repo):
+        """`plans/` at the root is this repo's local working notes: they name
+        local paths and in-progress decisions, and are never published.
 
-        On 2026-10-31 the user explicitly requested publishing the scope-policy
-        plan, related QA report and evidence with the feature. Permit that
-        exact set while retaining the guard against unrelated forced additions.
-        The credential/value scanner still checks the approved artifacts.
-        """
+        The ignore rule alone did not keep them out — four commits force-added
+        plan files past it (found and scrubbed from the unpushed history on
+        2026-10-23, before the first push of that history), and c5e682bf did it
+        again on 2026-10-31 with an allowlist that this test then permitted
+        (273 files, ~100 lines naming a local home directory, pushed to master).
+        The user's standing rule is that NOTHING under root `plans/` is
+        published, so there is no allowlist: the tracked set is asserted empty,
+        and `git add -f` turns this red."""
         ignored, location, pattern = _check_ignore(ignore_repo, "plans/some-note.md")
         assert ignored and pattern == "/plans/", (location, pattern)
         tracked = [path for path in _tracked_files() if path.startswith("plans/")]
-        approved = {
-            "plans/scope-policy-and-report-tags.md",
-            "plans/scope-policy-and-report-tags-test-report.md",
-        }
-        unexpected = [path for path in tracked
-                      if path not in approved and not path.startswith("plans/scope-policy-test-evidence/")]
-        assert unexpected == [], (
-            f"unapproved root plans/ files would be published: {unexpected}. They "
-            "are local notes; `git rm --cached` them.")
+        assert tracked == [], (
+            f"tracked root plans/ files would be published: {tracked}. They are "
+            "local notes; `git rm --cached` them.")
 
     def test_the_seed_templates_are_re_included_by_a_negation(self, ignore_repo):
         """The one subtle rule: credential *paths* are ignored, seed templates negated back.

@@ -1,2 +1,0 @@
-{"id": "expenses.py#0ba38170", "task_id": "apply-fix-batch-0", "phase": "apply-fixes", "summary": "Restored csv.writer in export_expenses so commas, quotes and newlines are quoted and escaped.", "timestamp": "2026-10-31T18:08:27.084449"}
-{"id": "expenses.py#032249b1", "task_id": "apply-fix-batch-1", "phase": "apply-fixes", "summary": "(no-op \u2014 None values already export as empty CSV fields via csv.writer (prior batch 0); verified, no edit needed., verified no file changes)", "timestamp": "2026-10-31T18:08:38.479709"}
