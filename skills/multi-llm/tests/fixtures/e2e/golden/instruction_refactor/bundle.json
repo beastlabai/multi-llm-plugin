@@ -31,7 +31,7 @@
   },
   "manifest": {
     "bundle_version": 1,
-    "commit": "272f9469252842e0fff0e5238203f431e8bfc016",
+    "commit": "e67d50a21914566d3e7792b035af9f69a802bcfa",
     "fixture_plan": "tests/fixtures/e2e/plans/auth-feature.md",
     "fixture_scenario": "tests/fixtures/e2e/scenarios/full_workflow.yaml",
     "label": "phase3-pre-refactor"

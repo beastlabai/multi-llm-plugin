@@ -13,7 +13,7 @@
   "installed_registry": "https://registry.npmjs.org",
   "integrity": "sha512-XjxHpcySLlsWfUQdlApgEM82ojLfJg1SD9pkAbkGPw5pv0j0+29iQJtxGb9vEQLaQNZw8VJMSs+CSpDfswCFoQ==",
   "tag": "opencode-v0.1.1",
-  "sha": "f4f024c77ae27a53d59b429e9709e57f6a3817cc",
+  "sha": "608131a31f2d2dfc5196ca8d844ff81d9c981a40",
   "candidate_digest": "dfdf456eb8c472c0f9d186e579f05ebbc1a42b7b085c7476f12bd5b521f16b35",
   "release_kind": "first",
   "previous_pin": null,
@@ -47,7 +47,7 @@
     "single_registry": "https://registry.npmjs.org",
     "support": "20261026T175524Z-opencode-release-network-check.support",
     "candidate": {
-      "sha": "f4f024c77ae27a53d59b429e9709e57f6a3817cc",
+      "sha": "608131a31f2d2dfc5196ca8d844ff81d9c981a40",
       "digest": "dfdf456eb8c472c0f9d186e579f05ebbc1a42b7b085c7476f12bd5b521f16b35",
       "files": 199,
       "built_in": "a temporary git worktree of the tag's commit",
@@ -271,7 +271,7 @@
       "pass": true,
       "evidence": {
         "candidate": {
-          "sha": "f4f024c77ae27a53d59b429e9709e57f6a3817cc",
+          "sha": "608131a31f2d2dfc5196ca8d844ff81d9c981a40",
           "digest": "dfdf456eb8c472c0f9d186e579f05ebbc1a42b7b085c7476f12bd5b521f16b35",
           "files": 199
         },

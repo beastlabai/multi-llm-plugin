@@ -76,7 +76,7 @@ ALLOWLIST = SKILL_ROOT / "tests" / "golden" / "expected_changes.yaml"
 #: The commit the baseline must have been captured on. Pinned so a re-capture
 #: taken on the wrong tree (in particular: on the very commit it is meant to
 #: police) fails loudly instead of silently proving nothing.
-BASELINE_COMMIT = "272f9469252842e0fff0e5238203f431e8bfc016"
+BASELINE_COMMIT = "e67d50a21914566d3e7792b035af9f69a802bcfa"
 
 
 def _load_allowlist():

@@ -4,7 +4,7 @@
   "plan": "plans/codex-native-plugin.md Phase 4 (the manual network check) / A6 step 6; plans/codex-plugin-publish.md step 4",
   "stamp": "20261030T181607Z",
   "tag": "codex-v0.1.3",
-  "sha": "c9ae61b027a9e7bac4db216353495077f9c1d6f2",
+  "sha": "dddde64cc8bf22ba588f9d1ef9180f6a7fd835a5",
   "source": "github.com/beastlabai/multi-llm-plugin (public), fetched by codex over HTTPS",
   "source_url": "https://github.com/beastlabai/multi-llm-plugin.git",
   "machine_kind": "fresh container from the stock image node@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436: codex installed from npm, uv from astral.sh/uv/install.sh, a new non-root user with no ~/.codex before the run; no checkout of this repository, no e2e image, no mirror",
@@ -164,7 +164,7 @@
       ],
       "exit": 0,
       "wall_clock_s": 0.0,
-      "stdout": "c9ae61b027a9e7bac4db216353495077f9c1d6f2\n",
+      "stdout": "dddde64cc8bf22ba588f9d1ef9180f6a7fd835a5\n",
       "stderr": ""
     },
     {
@@ -183,7 +183,7 @@
       "exit": 0,
       "wall_clock_s": 2.73,
       "stdout": "",
-      "stderr": "Note: switching to 'c9ae61b027a9e7bac4db216353495077f9c1d6f2'.\n\nYou are in 'detached HEAD' state. You can look around, make experimental\nchanges and commit them, and you can discard any commits you make in this\nstate without impacting any branches by switching back to a branch.\n\nIf you want to create a new branch to retain commits you create, you may\ndo so (now or later) by using -c with the switch command. Example:\n\n  git switch -c <new-branch-name>\n\nOr undo this operation with:\n\n  git switch -\n\nTurn off this advice by setting config variable advice.detachedHead to false\n\n"
+      "stderr": "Note: switching to 'dddde64cc8bf22ba588f9d1ef9180f6a7fd835a5'.\n\nYou are in 'detached HEAD' state. You can look around, make experimental\nchanges and commit them, and you can discard any commits you make in this\nstate without impacting any branches by switching back to a branch.\n\nIf you want to create a new branch to retain commits you create, you may\ndo so (now or later) by using -c with the switch command. Example:\n\n  git switch -c <new-branch-name>\n\nOr undo this operation with:\n\n  git switch -\n\nTurn off this advice by setting config variable advice.detachedHead to false\n\n"
     },
     {
       "leg": "verify",
@@ -196,7 +196,7 @@
       ],
       "exit": 0,
       "wall_clock_s": 0.0,
-      "stdout": "c9ae61b027a9e7bac4db216353495077f9c1d6f2\n",
+      "stdout": "dddde64cc8bf22ba588f9d1ef9180f6a7fd835a5\n",
       "stderr": ""
     },
     {
@@ -374,7 +374,7 @@
     {
       "name": "marketplace_resolves_beastlabai",
       "pass": true,
-      "evidence": "marketplace add exit 0: 'Added marketplace `beastlabai` from https://github.com/beastlabai/multi-llm-plugin.git#codex-v0.1.3.\\nInstalled marketplace root: /home/checker/.codex/.tmp/marketplaces/beastlabai'; root /home/checker/.codex/.tmp/marketplaces/beastlabai; snapshot HEAD c9ae61b027a9e7bac4db216353495077f9c1d6f2"
+      "evidence": "marketplace add exit 0: 'Added marketplace `beastlabai` from https://github.com/beastlabai/multi-llm-plugin.git#codex-v0.1.3.\\nInstalled marketplace root: /home/checker/.codex/.tmp/marketplaces/beastlabai'; root /home/checker/.codex/.tmp/marketplaces/beastlabai; snapshot HEAD dddde64cc8bf22ba588f9d1ef9180f6a7fd835a5"
     },
     {
       "name": "listed_with_manifest_version",
@@ -384,7 +384,7 @@
     {
       "name": "install_tree_matches_tag",
       "pass": true,
-      "evidence": "installedPath /home/checker/.codex/plugins/cache/beastlabai/multi-llm/0.1.3; 213 files blob-equal to an independent clone of codex-v0.1.3 (c9ae61b027a9e7bac4db216353495077f9c1d6f2) packaging/codex/multi-llm/ (213); missing 0, extra 0, differing 0; no .git/ or plans/ inside; marketplace snapshot at the same commit"
+      "evidence": "installedPath /home/checker/.codex/plugins/cache/beastlabai/multi-llm/0.1.3; 213 files blob-equal to an independent clone of codex-v0.1.3 (dddde64cc8bf22ba588f9d1ef9180f6a7fd835a5) packaging/codex/multi-llm/ (213); missing 0, extra 0, differing 0; no .git/ or plans/ inside; marketplace snapshot at the same commit"
     },
     {
       "name": "locator_resolves_inside_cache_dir",
@@ -406,7 +406,7 @@
     "config_toml_after_add": "[marketplaces.beastlabai]\nsource_type = \"git\"\nsource = \"https://github.com/beastlabai/multi-llm-plugin.git\"\nref = \"codex-v0.1.3\"\nsparse_paths = [\".agents\", \"packaging/codex\"]\n\n[plugins.\"multi-llm@beastlabai\"]\nenabled = true\n",
     "marketplace_snapshot": {
       "root": "/home/checker/.codex/.tmp/marketplaces/beastlabai",
-      "head": "c9ae61b027a9e7bac4db216353495077f9c1d6f2"
+      "head": "dddde64cc8bf22ba588f9d1ef9180f6a7fd835a5"
     },
     "venv_location": [
       ".codex/plugins/cache/beastlabai/multi-llm/0.1.3/skills/multi-llm/.venv/pyvenv.cfg"
