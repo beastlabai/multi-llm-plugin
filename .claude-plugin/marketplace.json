@@ -9,7 +9,10 @@
   "plugins": [
     {
       "name": "multi-llm",
-      "source": "./",
+      "source": "./packaging/claude/multi-llm",
+      "policy": {
+        "installation": "NOT_AVAILABLE"
+      },
       "description": "Multi-LLM orchestration: parallel plan review, task generation, implementation, and code review across 19 coding harnesses (Codex, Cursor, opencode, pi, omp, fx, aider, Antigravity…).",
       "category": "workflow",
       "keywords": [

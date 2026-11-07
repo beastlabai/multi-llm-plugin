@@ -3289,6 +3289,127 @@ hosts:
         scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
         provenance: verified   # runs/20261001T114907Z (openai/gpt-6-luna, OpenRouter) and runs/20261001T121548Z (sonnet, --creds fallback on the Claude subscription, $0 on the key), 2026-10-01 — every T10 check green both times; both models by MLLM_HOST_MODEL on the operator's instruction, so this row has never run on the host pin. Route observed `skill`, lookup `phase-result`, Stop hook not installed
 
+      # THE PACKAGE ROUTE: what `claude plugin install` delivers, rather than the
+      # plain-skill symlink every row above stages. Each mirrors its file-route twin
+      # argument for argument, so a difference between them is the route. The prompt
+      # names the namespaced skill, which is what a plugin advertises.
+      #
+      # Unlike the twins, these rows load the plugin's hooks: the SessionStart doctor
+      # and the Stop hooks fire on every turn. The install is the offline sparse Git
+      # marketplace (`claude_package.seed`), which is why `plugin-install.json` records
+      # `install_source: git`.
+      - id: claude-code-package-ask
+        route: package
+        args: '--ask "plans/auth-feature.md" "What does this plan change?" --quick'
+        prompt_template: |
+          Use the `multi-llm:multi-llm` skill with exactly these arguments: {args}
+          Follow the skill's own instructions step by step and run the commands it
+          gives you. Do not summarise instead of running them.
+        command: "ask plans/auth-feature.md 'What does this plan change?' --yes --quick"
+        expect: {run: none, exit: 0, phases: [ask], receipts_min: 2, artifacts_min: 0}
+        wall_clock_s: 600
+        cost_budget_usd: 0.03   # DERIVED: claude-code-ask's measured $0.0204, its mirror; ceiling floors at $0.25
+        measured:
+          on: "2026-11-07"
+          verdict: pass
+          host_wall_s: 37.68
+          host_exit: 0
+          turns: 14
+          cli_version: "2.1.318"
+          credential_mode: fallback
+          model: sonnet
+          # The host's own figure on the subscription, not a bill. The file-route twin
+          # reported $0.2254 and 15 turns in the same run, under the same model.
+          usd_reported_by_host: 0.2024
+          receipts: 7
+          note: >
+            Runs 20261107T154657Z. All seven receipts carry `--project` at the cache path.
+            The doctor hook's own `doctor` receipt is one of them, which the twin has no
+            equivalent of.
+        provenance: verified   # runs/20261107T154657Z (sonnet, --creds fallback on the Claude subscription)
+
+      - id: claude-code-package-next-command
+        route: package
+        args: '--generate-tasks "plans/next phase.md" --yes'
+        prompt_template: |
+          Use the `multi-llm:multi-llm` skill with exactly these arguments: {args}
+          Follow the skill's own instructions step by step and run the commands it
+          gives you. Do not summarise instead of running them.
+        command: "generate-tasks 'plans/next phase.md' --yes"
+        expect: {run: none, exit: 0, phases: [generate-tasks], receipts_min: 2}
+        fan_out: native
+        wall_clock_s: 900
+        cost_budget_usd: 0.15   # DERIVED: claude-code-next-command's budget, its mirror; the $0.25 floor binds
+        fixture_plan: {source: plans/auth-feature.md, path: "plans/next phase.md"}
+        next_command_check: {phase: generate-tasks, typed_followup: true, typed_wall_clock_s: 300}
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
+        measured:
+          on: "2026-11-07"
+          verdict: pass
+          host_wall_s: 81.35
+          host_exit: 0
+          turns: 11
+          cli_version: "2.1.318"
+          credential_mode: fallback
+          model: sonnet
+          usd_reported_by_host: 0.3444   # the first session alone; the typed session's figure is not recorded
+          note: >
+            Runs 20261107T154825Z, the first recorded run of `next_command.default`. The
+            dispatcher printed `/multi-llm:multi-llm --implement "plans/next phase.md"`,
+            the host copied it, and that string as the whole prompt of a fresh session
+            dispatched `implement` with the fixture unquoted. route_observed `default`,
+            lookup `util-next-command`, stop_hook `blocked`: the plugin's Stop hook fired,
+            and its `util report-check` receipt is the session's last. Criterion 5 reads
+            from receipts on this host, and holds: the first session never ran `implement`.
+            That check was replayed over the saved bundle, not re-run with a model.
+        provenance: verified   # runs/20261107T154825Z (sonnet, --creds fallback on the Claude subscription)
+
+    # -------------------------------------------------------------------------
+    # THE CLAUDE CODE PACKAGE ROUTE's ZERO-QUOTA ROWS. NOT UNDER `rows:`, for the
+    # codex list's reason: every entry there is a credentialed row. Each of these
+    # runs at `--creds none` under `--network none` with the host's model at the
+    # loopback stub, on a fresh container whose wiring step already installed the
+    # plugin (`claude_package.seed`). `tests/test_container_claude_package.py`
+    # schedules exactly this list and grades `probe-<name>.json`. `make
+    # claude-package-container` runs them.
+    # -------------------------------------------------------------------------
+    package_probes:
+      - id: claude-package-seed
+        probe: claude-seed
+        provenance: verified   # runs/20261107T154048Z: 234 files, 10350737 bytes, equal to the tree
+        records: [plugin-install.json, claude-plugin-list.json, probe-claude-seed.json]
+        note: >
+          The sparse registration and install: the plugin copied byte for byte, no test
+          file, the marketplace clone sparse and partial, no test blob fetched.
+      - id: claude-package-session
+        probe: claude-session
+        provenance: verified   # runs/20261107T154048Z
+        records: [probe-claude-session.json]
+        note: >
+          A fresh session's own `init` event names the plugin at its cache path and the
+          namespaced skill, with no plugin error, and the SessionStart doctor really ran.
+      - id: claude-package-invocation
+        probe: claude-invocation
+        provenance: verified   # runs/20261107T154048Z
+        records: [probe-claude-invocation.json, prompt-facts.json]
+        note: >
+          The published `/multi-llm:multi-llm ...` string, typed: the skill body reached
+          the model with `${CLAUDE_SKILL_DIR}` expanded to the cache path.
+      - id: claude-package-dispatch
+        probe: claude-dispatch
+        provenance: verified   # runs/20261107T154048Z
+        records: [probe-claude-dispatch.json]
+        note: >
+          The dispatcher run from the cache copy, by the command the skill prints: every
+          module and instruction file a first workflow needs came through the generator.
+      - id: claude-package-upgrade
+        probe: claude-upgrade
+        provenance: verified   # runs/20261107T154048Z: 0.1.6 to 0.1.7; the same-version byte stayed away
+        records: [probe-claude-upgrade.json]
+        note: >
+          The documented update reaches a new version, and a shipped byte moved under an
+          unmoved version reaches nobody, which is the fact the release rule stands on.
+
   # ===========================================================================
   codex:
     stage:

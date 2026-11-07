@@ -101,6 +101,8 @@ jobs:
           # the tags with it: the codex route's `test_version_bumps_with_payload`
           # reads `dist/tree.sha256` and the version at every `codex-v*` tag with
           # `git show`, so a checkout without them would grade no release at all.
+          # The Claude rule below reads the newest `claude-v*` tag and
+          # `origin/<target>`, and depth 0 is what fetches every branch too.
           fetch-depth: 0
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -118,3 +120,19 @@ jobs:
       # `package`-marked rows. No Docker, no codex binary, no stamp.
       - name: Codex plugin gate (CI tier)
         run: make codex-package-check-ci
+      # The Claude Code plugin's CI tier: the clean rebuild must equal the committed
+      # `packaging/claude/multi-llm/`, the moved-tree rule must hold, then the plain
+      # and `package`-marked rows. No Docker, no claude binary, no registry.
+      #
+      # The moved-tree rule is on a pull request where the shared-version check is
+      # not, because Claude Code installs follow `master` and cache by version: a
+      # same-version edit merged there reaches nobody who has that version. Its base
+      # is the pull request's target, or on a push the commit `master` was at before
+      # it, so a direct push is held to the rule too and an untagged bump is not a
+      # gap. After a force push that commit is not fetched, and the rule refuses by
+      # name for that one run. Through `env:`, never interpolated into the script,
+      # because a branch name is text someone else chose.
+      - name: Claude Code plugin gate (CI tier)
+        env:
+          CLAUDE_RELEASE_BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+        run: make claude-package-check-ci

@@ -212,7 +212,10 @@ _SECRET_PATTERNS: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
 )
 
 #: Text suffixes worth scanning the *contents* of. A binary sweep would be all
-#: noise, and the icons are the only sizeable binaries in the payload.
+#: noise, and the icons are the only sizeable binaries in the payload. A file with
+#: no suffix at all is scanned too (see :func:`scan_tree`): ``LICENSE`` ships in
+#: every distribution, and a sweep of the complete tree cannot skip one of its files
+#: for having no extension.
 _SCANNED_SUFFIXES: Tuple[str, ...] = (
     ".py", ".md", ".txt", ".yaml", ".yml", ".json", ".toml", ".tmpl", ".mjs",
     ".js", ".html", ".cfg", ".ini", ".lock", ".sh",
@@ -384,6 +387,24 @@ def _symlinks(root: Path, prefix: str) -> Tuple[str, ...]:
     return tuple(sorted(found))
 
 
+def symlinked_component(root: Path, relative: str) -> Optional[str]:
+    """The first component of *relative* under *root* that is a symlink, or ``None``.
+
+    ``Path.is_symlink`` looks at the last component only, and the index knows nothing
+    about the disk. So a tracked directory swapped for a link passes both while every
+    file read through it comes from wherever the link points. Components above *root*
+    are not checked: where the checkout lives is the user's business.
+    """
+    current = Path(root)
+    walked: List[str] = []
+    for part in relative.split("/"):
+        current = current / part
+        walked.append(part)
+        if current.is_symlink():
+            return "/".join(walked)
+    return None
+
+
 def assert_clean(root: Path, prefix: str) -> None:
     """Refuse to stage from a tree with uncommitted or untracked changes.
 
@@ -427,6 +448,7 @@ def expected_payload(
     prefix: str = "skills/multi-llm",
     strip: str = "skills/multi-llm",
     allowlist: Optional[Sequence[str]] = None,
+    extra_allowlist: Sequence[str] = (),
 ) -> Tuple[str, ...]:
     """The allowlist expansion, payload-relative: what a staged tree — or a
     tarball built from one — must contain **exactly**.
@@ -438,9 +460,10 @@ def expected_payload(
     """
     base = Path(root) if root else repo_root()
     strip_prefix = strip.rstrip("/") + "/"
+    patterns = tuple(allowlist) if allowlist is not None else runtime_allowlist(base)
     return tuple(sorted(
         path[len(strip_prefix):]
-        for path in selected_files(base, prefix, allowlist)
+        for path in selected_files(base, prefix, (*patterns, *extra_allowlist))
         if path.startswith(strip_prefix)
     ))
 
@@ -480,6 +503,7 @@ def stage(
     required: Sequence[str] = REQUIRED_INVENTORY,
     required_trees: Sequence[str] = REQUIRED_TREES,
     required_extra: Sequence[str] = (),
+    extra_allowlist: Sequence[str] = (),
 ) -> Tuple[str, ...]:
     """Copy the allowlisted payload into *destination*, then account for it.
 
@@ -496,6 +520,14 @@ def stage(
     ls-files`` never selected (untracked), and the static list has no way to
     know the module exists at all. The caller derives that set and passes it
     here; this function only merges and checks it.
+
+    *extra_allowlist* admits repo-root-relative globs for **this one build**, on
+    top of the manifest's list (or *allowlist*). It exists so one distribution
+    can carry a host-only file without broadening the manifest's list, which
+    every other distribution and the container image also read: Claude Code's
+    ``legacy/`` escape hatch is the case, and the Codex and OpenCode builders
+    pass nothing here. A file it admits is staged but not required: a caller
+    that needs it present names it in *required_extra* too.
 
     The write is **atomic against the destination**: staging happens in a temp
     directory on the same filesystem (see :func:`_staging_parent` for *which*
@@ -520,7 +552,8 @@ def stage(
             "0. Replace it with a real file."
         )
 
-    chosen = selected_files(root, prefix, allowlist)
+    patterns = tuple(allowlist) if allowlist is not None else runtime_allowlist(root)
+    chosen = selected_files(root, prefix, (*patterns, *extra_allowlist))
     if not chosen:
         raise PayloadError(
             f"the allowlist selected no files under {prefix}. Either the prefix "
@@ -543,7 +576,22 @@ def stage(
             relative = path[len(strip_prefix):]
             target = scratch / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(root / path, target)
+            source = root / path
+            # Both reachable only from a dirty tree: --allow-dirty reads the working
+            # copy, where the index's answer about a tracked path can be out of date.
+            link = symlinked_component(root, path)
+            if link is not None:
+                raise PayloadError(
+                    f"refusing to stage {path}: it is a regular file in the index and "
+                    f"a symlink on disk at {link}. Replace it with a real path."
+                )
+            try:
+                shutil.copy2(source, target)
+            except FileNotFoundError as exc:
+                raise PayloadError(
+                    f"{path} is tracked but missing from the working tree. Restore "
+                    "it, or `git rm` it if the deletion is intended."
+                ) from exc
             staged.append(relative)
 
         _assert_no_unexpected(scratch, staged)
@@ -560,6 +608,52 @@ def stage(
             shutil.rmtree(scratch, ignore_errors=True)
 
     return tuple(sorted(staged))
+
+
+def untracked_admitted(
+    root: Path, prefix: str, patterns: Sequence[str],
+) -> Tuple[str, ...]:
+    """Untracked, non-ignored files under *prefix* that *patterns* admit.
+
+    :func:`stage` selects from ``git ls-files``, so an untracked file is never a
+    candidate, and ``--allow-dirty`` switches off the only refusal
+    (:func:`assert_clean`) that would have named it. The result is a build that
+    silently omits an input the working tree plainly has. A checked-in tree built
+    that way attests to bytes no clean build of the commit reproduces once the
+    file is finally added, so a dirty-tolerant build must still see what it
+    cannot ship.
+    """
+    out = _git(root, "ls-files", "--others", "--exclude-standard", "-z", "--", prefix)
+    return tuple(sorted(
+        path for path in out.split("\0")
+        if path and any(_matches(path, pattern) for pattern in patterns)
+    ))
+
+
+def swap_tree(scratch: Path, destination: Path) -> None:
+    """Replace *destination* with the finished *scratch* tree, or leave it alone.
+
+    A whole-distribution swap, for a builder that assembles more than
+    :func:`stage`'s subtree. The old tree is moved aside first and moved back if
+    the rename fails, so a failure at this last step still leaves the previous
+    complete tree in place. Both directories must be on one filesystem, which
+    building into a sibling of *destination* guarantees.
+    """
+    scratch, destination = Path(scratch), Path(destination)
+    if not destination.exists():
+        scratch.replace(destination)
+        return
+    retired = Path(tempfile.mkdtemp(
+        prefix=f".{destination.name}.old.", dir=str(destination.parent)
+    ))
+    shutil.rmtree(retired)
+    destination.replace(retired)
+    try:
+        scratch.replace(destination)
+    except OSError:
+        retired.replace(destination)
+        raise
+    shutil.rmtree(retired, ignore_errors=True)
 
 
 def _assert_no_unexpected(tree: Path, staged: Sequence[str]) -> None:
@@ -660,7 +754,7 @@ def scan_tree(tree: Path) -> None:
         if located is not None:
             findings.append(f"{relative}: inside credential directory {located}")
             continue
-        if path.suffix.lower() not in _SCANNED_SUFFIXES:
+        if path.suffix and path.suffix.lower() not in _SCANNED_SUFFIXES:
             continue
         try:
             body = path.read_text(encoding="utf-8", errors="ignore")
@@ -872,6 +966,51 @@ def target_module_paths(base: Optional[Path] = None) -> Tuple[str, ...]:
                 "the dotted path in modes.py, or add the file it should name."
             )
     return tuple(sorted(found.values()))
+
+
+# ---------------------------------------------------------------------------
+# What each finished distribution may weigh
+# ---------------------------------------------------------------------------
+
+#: ``{distribution: (max files, max unpacked bytes)}`` over the finished artifact:
+#: the generated Claude and Codex trees, and the unpacked ``npm pack`` tarball.
+#: Sized from those artifacts as measured 2026-11-06, with about 10% headroom, so a
+#: real addition passes and an accidental test tree or duplicated payload does not.
+#: A deliberate growth past one of these is a reviewed edit here, not a silent side
+#: effect. Claude Code's limit also stays under its 12,000,000-byte review target.
+DISTRIBUTION_BUDGETS: Dict[str, Tuple[int, int]] = {
+    "claude-code": (260, 11_500_000),  # measured 234 files, 10,350,754 bytes
+    "codex": (240, 11_300_000),        # measured 218 files, 10,215,610 bytes
+    "opencode": (240, 11_400_000),     # measured 218 files, 10,261,602 bytes, unpacked
+}
+
+
+def budget_problem(distribution: str, files: int, size: int) -> Optional[str]:
+    """Why *distribution* is over budget, naming it and its totals, or ``None``."""
+    try:
+        max_files, max_bytes = DISTRIBUTION_BUDGETS[distribution]
+    except KeyError:
+        return f"{distribution!r} has no budget in DISTRIBUTION_BUDGETS"
+    over = []
+    if files > max_files:
+        over.append(f"{files} files (budget {max_files})")
+    if size > max_bytes:
+        over.append(f"{size} unpacked bytes (budget {max_bytes})")
+    if not over:
+        return None
+    return (
+        f"the {distribution} distribution is over budget: {' and '.join(over)}. An "
+        "over-budget payload usually means development files reached the allowlist; "
+        "find out what grew before raising DISTRIBUTION_BUDGETS in "
+        "packaging/common/payload.py."
+    )
+
+
+def check_budget(distribution: str, files: int, size: int) -> None:
+    """Raise :class:`PayloadError` when :func:`budget_problem` has an answer."""
+    problem = budget_problem(distribution, files, size)
+    if problem:
+        raise PayloadError(problem)
 
 
 # ---------------------------------------------------------------------------

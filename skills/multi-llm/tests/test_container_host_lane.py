@@ -322,6 +322,10 @@ CREDENTIALED_ROWS = [
     # `--creds none`. Last, like the rows above it: newest, and the cheapest to
     # lose if the lane budget runs out.
     ("codex", "codex-package-ask"),
+    # ...and the Claude Code package row, on the install users really get. Its route
+    # evidence is graded by `TestTheClaudePackageAskUsedThePlugin`, and its zero-quota
+    # rows by test_container_claude_package.py.
+    ("claude-code", "claude-code-package-ask"),
     # ------------------------------------------------------------------- #
     # THE claude-code PER-PHASE TIER, and it is deselected by default.
     #
@@ -375,6 +379,8 @@ CREDENTIALED_ROWS = [
     pytest.param(("opencode", "opencode-package-next-command"),
                  marks=pytest.mark.live_next_command),
     pytest.param(("claude-code", "claude-code-next-command"),
+                 marks=pytest.mark.live_next_command),
+    pytest.param(("claude-code", "claude-code-package-next-command"),
                  marks=pytest.mark.live_next_command),
 ]
 
@@ -2091,8 +2097,9 @@ class TestTheNextCommandLiveCheck:
         result, matrix_row, observed = _next_command_observed(graded)
         if result.row.route != "package":
             pytest.skip(f"{matrix_row.get('id')}: criterion 5 is asserted on the "
-                        f"two tool routes (the Codex plugin and the OpenCode "
-                        f"package); this row's observation is recorded only")
+                        f"package routes (the Codex plugin, the OpenCode package "
+                        f"and the Claude plugin); this row's observation is "
+                        f"recorded only")
         no_call = observed.get("no_call") or {}
         assert no_call.get("observable"), (
             f"{matrix_row.get('id')}: {no_call.get('reason') or no_call}. "
@@ -3342,6 +3349,43 @@ class TestTheRecordedProbes:
         for name in probe.get("records") or []:
             assert (package_probe[0].out_dir / name).is_file(), (
                 f"{probe['id']}: declared record {name} is missing")
+
+
+@pytest.fixture
+def claude_package_ask(graded):
+    result, matrix_row, entry = graded
+    if matrix_row.get("id") != "claude-code-package-ask":
+        pytest.skip(f"{matrix_row.get('id')} is not the Claude package row")
+    return result, matrix_row, entry
+
+
+class TestTheClaudePackageAskUsedThePlugin:
+    """The route-specific half. The generic classes above grade the workflow; this says
+    that workflow ran from the installed plugin rather than the image's source tree."""
+
+    pytestmark = pytest.mark.live
+
+    def test_the_plugin_was_installed_and_no_plain_skill_staged(self, claude_package_ask):
+        result, _row, _entry = claude_package_ask
+        install = _bundle_json(result, "plugin-install.json")
+        assert install and install["installed_root_exists"], install
+        assert install["file_shim_present"] is False, (
+            "a plain skill beside the plugin is two advertised copies of one skill, and "
+            "a grade that could belong to either")
+        assert install["install_source"] == "git"
+
+    def test_every_dispatch_ran_the_cache_copy(self, claude_package_ask):
+        """`--project` in each receipt, because a host that went looking for the source
+        tree in the image would still dispatch and still pass everything above."""
+        result, _row, _entry = claude_package_ask
+        install = _bundle_json(result, "plugin-install.json")
+        skill = f"{install['installed_root']}/skills/multi-llm"
+        dispatches = harness.dispatcher_receipts(result)
+        assert dispatches, "no dispatcher receipt: the host never ran the skill's commands"
+        strays = [r for r in dispatches if skill not in json.dumps(r)]
+        assert not strays, (
+            f"{len(strays)} of {len(dispatches)} dispatches did not run {skill}: "
+            f"{json.dumps(strays[0])[:600]}")
 
 
 @pytest.fixture

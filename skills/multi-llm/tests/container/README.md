@@ -97,6 +97,7 @@ make e2e-container                 pinned build; provider lane
 make e2e-container-host            pinned build; host lane (needs OPENROUTER_API_KEY)
 make e2e-container-host-discovery  host lane, --creds none tier: no key, no network
 make e2e-container-host-invocation host lane, --creds none: type the documented /multi-llm string
+make claude-package-container      the Claude plugin as installed: --creds none, no key, no network
 make e2e-container-latest          CLIs @latest; provider lane only; credential-free
 make e2e-container-latest-host     CLIs @latest; host lane; guarded, opt-in only
 make e2e-live-provider [CLI=x]     credentialed provider lane; SPENDS CREDITS on openrouter.ai
@@ -741,8 +742,9 @@ artifact, and `runs/` and `records/` are gitignored.
 
 ### Two install routes on `opencode`, and both are graded
 
-Every row above that installs anything installs it the same way (`claude-code`
-installs nothing — the plugin *is* the skill there): `install-host <host>` renders
+Every row above that installs anything installs it the same way (the file-route
+`claude-code` rows install nothing and stage the source tree as a plain skill; its
+package route has [its own section](#the-claude-code-package-route)): `install-host <host>` renders
 a **file** the host happens to scan — a `SKILL.md` on codex, a command markdown on
 opencode — and that file is the whole install. It is one of the two routes that
 ship. The other is the npm package `opencode-multi-llm`, which registers the same
@@ -909,7 +911,7 @@ image *at their own relative paths*:
 and that file names the plugin by a path relative to the marketplace root — so
 the catalog users fetch is the catalog the row installs from, byte for byte. No
 `.claude-plugin/` is copied: codex reads that catalog too, and its one entry
-points at the repository root. The layer asserts the real dispatch through the
+is the Claude Code plugin, not this route's package. The layer asserts the real dispatch through the
 payload (`uv run --frozen --no-dev --project …/skills/multi-llm -- python
 multi_llm.py --help`, the shared venv, §10b's shape) and that `python3
 mcp/server.py` answers `initialize` + `tools/list` on stdin with `multi_llm`.
@@ -983,6 +985,58 @@ row, naming the file, if either of the first two exists in the home. Without
 that, a stray `.bash_profile` makes `.profile` silently unread and every
 credentialed row fails on a missing key, indistinguishable from a real D3a
 regression.
+
+### The Claude Code package route
+
+The file-route `claude-code` rows symlink `/opt/mllm/skill` to
+`$HOME/.claude/skills/multi-llm`. That is a plain skill: no manifest, no plugin hooks,
+and a tree nobody installs. The package route is what `claude plugin install` delivers.
+
+```bash
+make claude-package-container    # five rows; Docker, no key, no network, $0
+```
+
+**The image's mirror.** Dockerfile §10d copies `.claude-plugin/marketplace.json` and
+`packaging/claude/multi-llm/` to `/opt/mllm/claude-marketplace/`, at the paths they have
+in the repository.
+
+**The install is always through Git, offline.** `claude_package.seed` commits the mirror
+and some decoys into a bare repository and runs the commands `docs/installation.md`
+prints, with the sparse paths. Three measurements (claude 2.1.318) shaped this:
+
+- `marketplace add <directory>` makes every session load the plugin from that folder and
+  never from the cache, so a directory marketplace would not grade what a user runs.
+- `file://` and `ssh://` are refused as invalid sources. `git@host:/path` is accepted and
+  goes through `GIT_SSH_COMMAND`, so a shim can run the remote command locally.
+- The CLI asks for a partial clone on that transport and not on plain `http://`, so sparse
+  behaves here as it does against GitHub. The bare repository needs
+  `uploadpack.allowFilter` and `uploadpack.allowAnySHA1InWant`, which GitHub has.
+
+**Hooks need an exec mount.** Claude Code runs hook scripts by path from the cache. Under
+the tmpfs home's `noexec` each one exits 126 while the session carries on, so
+`posture.yaml` mounts `/home/e2e/.claude` with `exec`, as it does `.codex`.
+
+| Row | What it grades |
+| --- | --- |
+| `claude-package-seed` | The install equals the generated tree byte for byte and bit for bit; no test file, no symlink, within budget; the marketplace clone is sparse and partial and no test blob arrived |
+| `claude-package-session` | A session's own `init` event names the plugin at its cache path and the namespaced skill, with no plugin error; the doctor hook's output shows it really ran; the Stop hooks fired without error |
+| `claude-package-invocation` | The published `/multi-llm:multi-llm` string, typed: the stub saw the skill's body, `${CLAUDE_SKILL_DIR}` expanded to the cache path, and the argument |
+| `claude-package-dispatch` | The dispatcher from the cache copy: `--help`, `util instructions`, the legacy switch, `doctor`, `install-host --check`, `status` |
+| `claude-package-upgrade` | A new release is invisible until `marketplace update`; the documented update reaches it and a session loads it; a byte moved under an unmoved version reaches nobody |
+
+That last reading is the fact `packaging/claude/build.py --check-release` stands on. If a
+Claude Code release starts delivering such a commit, this row fails and says so.
+
+**Do not read `plugin list` or `plugin details` as evidence of loading.** `list` reports
+a plugin enabled while a session refuses every file in it, and `details` reported 0 skills
+for directories a session loaded. The session's `init` event is what loaded.
+
+**What these rows do not answer.** The model is a stub, so they say nothing about whether
+a real model follows the skill. `claude-code-package-ask` and
+`claude-code-package-next-command` do that, on the subscription or the key, through
+`make e2e-container-host` and `make e2e-container-host-next-command`. Their dispatches are
+graded on the receipts' `--project` path, because a host that wandered into the image's
+source tree would otherwise pass everything else.
 
 ### The one measured surprise worth knowing
 

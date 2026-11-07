@@ -271,15 +271,9 @@ def untracked_admitted(root: Optional[Path] = None) -> Tuple[str, ...]:
     a dirty-tolerant mode must still see what it cannot ship.
     """
     checkout = Path(root) if root else REPO_ROOT
-    prefix = "skills/multi-llm"
-    out = payload._git(  # noqa: SLF001 — the one shared git runner
-        checkout, "ls-files", "--others", "--exclude-standard", "-z", "--", prefix,
+    return payload.untracked_admitted(
+        checkout, "skills/multi-llm", payload.runtime_allowlist(checkout),
     )
-    patterns = payload.runtime_allowlist(checkout)
-    return tuple(sorted(
-        path for path in out.split("\0")
-        if path and any(payload._matches(path, p) for p in patterns)  # noqa: SLF001
-    ))
 
 
 def build(
@@ -391,20 +385,7 @@ def build(
         _inventory(scratch)
 
         # 7. The swap.
-        if out.exists():
-            retired = Path(tempfile.mkdtemp(
-                prefix=f".{out.name}.old.", dir=str(out.parent)
-            ))
-            shutil.rmtree(retired)
-            out.replace(retired)
-            try:
-                scratch.replace(out)
-            except OSError:
-                retired.replace(out)
-                raise
-            shutil.rmtree(retired, ignore_errors=True)
-        else:
-            scratch.replace(out)
+        payload.swap_tree(scratch, out)
         scratch = None  # type: ignore[assignment]
     finally:
         if scratch is not None and scratch.exists():
@@ -715,8 +696,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help=(
             "exit non-zero if the committed digest moved since the newest "
             "codex-v* tag under an unmoved version (A4 row 10), or if the "
-            "shared-version release-history check over every codex-v*/opencode-v* "
-            "tag and npm's version list refuses HEAD. Reads the registry"
+            "shared-version release-history check over every "
+            "claude-v*/codex-v*/opencode-v* tag and npm's version list refuses HEAD. "
+            "Reads the registry"
         ),
     )
     parser.add_argument(

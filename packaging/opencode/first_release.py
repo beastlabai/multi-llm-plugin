@@ -34,7 +34,7 @@ never the same message as "the macOS leg failed":
   ``.github/workflows/test.yml`` on that SHA. Missing, pending, skipped,
   cancelled and failed all refuse, and so does any failed ``gh`` call;
 * ``bump-check`` — ``build.py --check-bump`` (the shared-version check that reads
-  both families' tags and npm's version list). A ``build.py`` without that flag
+  every family's tags and npm's version list). A ``build.py`` without that flag
   refuses: the check is a precondition, not an option;
 * ``first-release`` — this IS the first release. npm lists no version of the
   package at all (``release_history.npm_versions``: only ``E404`` on the

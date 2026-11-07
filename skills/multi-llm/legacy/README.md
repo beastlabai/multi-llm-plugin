@@ -7,7 +7,7 @@ the host-neutral rewrite**: the same 11 `instructions/*.md` and 5
 `*_orchestrator.py` directly.
 
 It exists because the rewrite touched ~5k lines of battle-tested markdown, and the
-golden regression guard (`tests/test_instruction_refactor_guard.py`) is necessary
+golden regression guard in the source repository's test suite is necessary
 but not sufficient: it proves the modes the guard fixture exercises, not the
 interactive corners a real user hits on day two. So there is **a way back that does
 not undo the Python work** — reverting the rewrite commit would also give back
@@ -49,7 +49,12 @@ notice.
   `finalize_tracking.py --state-file … --mark-completed` call. Without them this
   core could no longer complete either phase; a write-path branch on the
   environment variable would have broken the "read path only" rule above
-  instead. `tests/test_legacy_instructions.py` pins both.
+  instead. The source repository's test suite pins both.
+  A second exception, forced by packaging (2026-11-06): the Claude Code plugin no
+  longer ships `tests/`, so `instructions/implement.md`'s step 8 runs the plugin's
+  self-tests only when that directory exists, records them as unavailable in a
+  packaged installation, and reports `tests not run` when the project has no test
+  command either. The source repository's test suite pins the selection.
 - **Not linted, not counted.** The host-neutrality lint, the `${CLAUDE_SKILL_DIR}`
   manifest and the `{SKILL_DIR}` site inventory all scan `instructions/` and
   `references/` and deliberately skip this directory — a frozen copy that had to

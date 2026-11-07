@@ -67,6 +67,13 @@ import render_capabilities as renderer  # noqa: E402
 from utils import host_capabilities as caps  # noqa: E402
 from utils import host_install as hi  # noqa: E402
 
+from tests.generated_distributions import (  # noqa: E402
+    AUTHORED_MANIFEST,
+    CLAUDE,
+    CODEX,
+    DISTRIBUTIONS,
+)
+
 #: The repository (and published-plugin) root: the directory holding `README.md`
 #: and `docs/`. Anchored on the skill root, never derived from the depth of
 #: `renderer.HOST_DOC` — see :func:`readme_path`.
@@ -1527,34 +1534,48 @@ def mentions(text: str, path: str) -> bool:
     )
 
 
+def _listed_skill_manifests(root: Path) -> set:
+    """Every ``SKILL.md`` under *root* that git tracks or would pick up.
+
+    Tracked *and* untracked-but-not-ignored, so a generated tree that is about to
+    be committed is graded before the commit rather than after it. ``.claude/`` is
+    left out because a developer's own workflow skills live there and ship nowhere.
+    """
+    import subprocess
+
+    listed = subprocess.run(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard",
+         "--", ":(glob)**/SKILL.md", ":(exclude).claude/**"],
+        cwd=root, capture_output=True, text=True, check=True,
+    ).stdout
+    return {path for path in listed.split("\0") if path}
+
+
 class TestPackagingAndDocs:
-    #: Every ``SKILL.md`` the repository may carry outside ``.claude/`` (a
-    #: developer's own workflow skills live there and ship nowhere): the core
-    #: skill, and the codex plugin's generated thin skill (plans/codex-native-
-    #: plugin.md, D1/D7), which sits under ``packaging/`` precisely so the
-    #: skill tree still holds exactly one.
+    #: Every ``SKILL.md`` the repository may carry outside ``.claude/``: the core
+    #: skill, plus one per generated plugin tree. Those sit under ``packaging/``
+    #: precisely so the skill tree still holds exactly one.
     PERMITTED_SKILL_MANIFESTS = frozenset({
-        "skills/multi-llm/SKILL.md",
-        "packaging/codex/multi-llm/skills/multi-llm/SKILL.md",
+        AUTHORED_MANIFEST, *(tree.manifest for tree in DISTRIBUTIONS),
     })
+
+    def test_the_permitted_set_names_each_manifest(self):
+        """The derivation is spelled out once, so a change to the shared list that
+        drops a tree shows up here rather than as a set that quietly shrank."""
+        assert self.PERMITTED_SKILL_MANIFESTS == {
+            "skills/multi-llm/SKILL.md",
+            "packaging/codex/multi-llm/skills/multi-llm/SKILL.md",
+            "packaging/claude/multi-llm/skills/multi-llm/SKILL.md",
+        }
 
     def test_exactly_the_permitted_skill_manifests_ship(self):
         """Repo-rooted and ``git ls-files``-based, against an explicit allow-set.
 
-        Tracked *and* untracked-but-not-ignored, so a generated tree that is
-        about to be committed is graded before the commit rather than after it.
         The skill-tree half still holds on its own: a second ``SKILL.md`` under
         ``skills/multi-llm/`` is a second auto-discoverable skill to every host
         that scans that directory.
         """
-        import subprocess
-
-        listed = subprocess.run(
-            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard",
-             "--", ":(glob)**/SKILL.md", ":(exclude).claude/**"],
-            cwd=REPO_ROOT, capture_output=True, text=True, check=True,
-        ).stdout
-        manifests = {path for path in listed.split("\0") if path}
+        manifests = _listed_skill_manifests(REPO_ROOT)
         assert manifests == self.PERMITTED_SKILL_MANIFESTS, (
             f"unexpected: {sorted(manifests - self.PERMITTED_SKILL_MANIFESTS)}; "
             f"missing: {sorted(self.PERMITTED_SKILL_MANIFESTS - manifests)}"
@@ -1565,6 +1586,55 @@ class TestPackagingAndDocs:
             if ".venv" not in path.parts and "tests" not in path.parts
         ]
         assert in_skill_tree == ["SKILL.md"], in_skill_tree
+
+    @staticmethod
+    def _repo_with_manifests(tmp_path: Path, paths) -> Path:
+        import subprocess
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        for relative in paths:
+            target = tmp_path / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("---\nname: multi-llm\n---\n", encoding="utf-8")
+        return tmp_path
+
+    @pytest.mark.parametrize("stray", [
+        # A second skill beside the shipped one, in a tree the install copies whole.
+        f"{CLAUDE.root}skills/other/SKILL.md",
+        f"{CLAUDE.root}SKILL.md",
+        f"{CODEX.root}skills/other/SKILL.md",
+        # A tree the shared list does not know about is not excused by its shape.
+        "packaging/other/multi-llm/skills/multi-llm/SKILL.md",
+        "skills/multi-llm/legacy/SKILL.md",
+    ])
+    @pytest.mark.parametrize("staged", [False, True], ids=["untracked", "tracked"])
+    def test_a_manifest_outside_the_set_is_seen(self, tmp_path, stray, staged):
+        """The allow-set stays exact with both trees in it: deriving it from the
+        generated roots must not turn into permitting whatever sits under them."""
+        import subprocess
+
+        repo = self._repo_with_manifests(
+            tmp_path, [*self.PERMITTED_SKILL_MANIFESTS, stray])
+        if staged:
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        assert _listed_skill_manifests(repo) - self.PERMITTED_SKILL_MANIFESTS == {stray}
+
+    def test_a_developers_own_and_ignored_skills_stay_out(self, tmp_path):
+        """What the walk leaves out on purpose, so widening it is a visible change."""
+        repo = self._repo_with_manifests(tmp_path, [
+            *self.PERMITTED_SKILL_MANIFESTS,
+            ".claude/skills/own/SKILL.md",
+            f"{CLAUDE.root}skills/multi-llm/.venv/lib/SKILL.md",
+        ])
+        (repo / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+        assert _listed_skill_manifests(repo) == self.PERMITTED_SKILL_MANIFESTS
+
+    @pytest.mark.parametrize("gone", sorted(tree.manifest for tree in DISTRIBUTIONS))
+    def test_a_missing_generated_manifest_is_seen(self, tmp_path, gone):
+        """Equality runs both ways: a tree that lost its skill installs and does nothing."""
+        repo = self._repo_with_manifests(
+            tmp_path, self.PERMITTED_SKILL_MANIFESTS - {gone})
+        assert self.PERMITTED_SKILL_MANIFESTS - _listed_skill_manifests(repo) == {gone}
 
     def test_the_templates_are_tmpl_suffixed_and_declared(self):
         for host_id in INSTALLABLE:

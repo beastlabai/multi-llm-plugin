@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""The shared-version release-history check, run by both release families.
+"""The shared-version release-history check, run by every release family.
 
-**Why one check and not two.** The version owner is
+**Why one check and not one per family.** The version owner is
 ``skills/multi-llm/pyproject.toml``, and three distributions ship it: the Claude
-Code route, the Codex plugin and the ``opencode-multi-llm`` npm package. Codex's
+Code plugin, the Codex plugin and the ``opencode-multi-llm`` npm package. Codex's
 own ``--check-bump`` reads only ``codex-v*`` tags (``release_tags()`` in
 ``packaging/codex/build.py``), so it would pass a ``codex-v0.1.1`` cut from a
 ``master`` whose shared bytes differ from npm's 0.1.1, and an OpenCode check
@@ -11,14 +11,14 @@ reading only ``opencode-v*`` tags would pass an unbumped 0.1.0 over bytes
 ``codex-v0.1.0`` never shipped. The invariant is across families, so the
 history it reads is too (plans/opencode-plugin-publish.md, step 2):
 
-* **A shared version names one shared payload.** Every ``codex-v<V>`` tag,
-  every ``opencode-v<V>`` tag and npm's ``opencode-multi-llm@<V>`` carry one
-  shared-payload digest.
-* **Versions are shared; releases are per family.** Either family may release a
-  version the other has not, and may skip one.
+* **A shared version names one shared payload.** Every ``claude-v<V>`` tag,
+  every ``codex-v<V>`` tag, every ``opencode-v<V>`` tag and npm's
+  ``opencode-multi-llm@<V>`` carry one shared-payload digest.
+* **Versions are shared; releases are per family.** Any family may release a
+  version the others have not, and may skip one.
 * **Choosing a version.** A candidate's version either equals a released
   version, and then its shared-payload digest must equal that release's, or is
-  newer than every version either family released. An unreleased version older
+  newer than every version any family released. An unreleased version older
   than the newest release is refused.
 
 **The shared-payload digest is read from one commit alone.** It is
@@ -27,10 +27,11 @@ admits under ``skills/multi-llm/``, with the allowlist *and* the bytes taken fro
 that commit (``git show``, ``git ls-tree``, ``git cat-file``): never from the
 working tree, which is not what any tag carries, and never from a checked-in
 digest file, which is a claim about bytes rather than the bytes. Each
-distribution's own files (Codex's ``.codex-plugin/``, ``.mcp.json`` and
-``mcp/``; OpenCode's ``dist/`` and ``package.json``) are outside it: Codex's
-own-tree rule and npm's no-reuse rule already cover them. Blob bytes equal a
-fresh checkout's on every platform because ``.gitattributes`` pins ``eol=lf``.
+distribution's own files (Claude's manifest, hooks, licence and ``legacy/``;
+Codex's ``.codex-plugin/``, ``.mcp.json`` and ``mcp/``; OpenCode's ``dist/`` and
+``package.json``) are outside it: Claude's moved-tree rule, Codex's own-tree rule
+and npm's no-reuse rule already cover them. Blob bytes equal a fresh checkout's
+on every platform because ``.gitattributes`` pins ``eol=lf``.
 
 **A missing tag is never an empty history.** ``git tag --list`` answers from
 whatever this clone fetched, and a shallow CI checkout fetches no tags at all:
@@ -51,11 +52,25 @@ that exact version says so (:func:`npm_is_stub`), never the name alone
 **It is out of the ``tests`` workflow on purpose.** After V is released,
 ``master`` may change shipped bytes while still saying V (the post-release
 policy); that is unreleased development, and this check refuses a release from
-it. Run on every push it would turn ``master`` red over a legal edit, so only
-the release paths call it: ``packaging/codex/build.py --check-bump`` and
-``packaging/opencode/build.py --check-bump`` (``make opencode-check-bump``).
+it. Run on every push it would turn ``master`` red over a legal edit and tie
+every pull request to the registry, so only the release paths call it:
+``packaging/claude/build.py --check-bump`` (``make claude-check-bump``),
+``packaging/codex/build.py --check-bump`` and ``packaging/opencode/build.py
+--check-bump`` (``make opencode-check-bump``).
 
-It reads Git and the registry and writes nothing. Stdlib only, plus
+**The policy has one exception, and it is not this check.** Claude Code installs
+follow ``master`` and cache by manifest version, so for that distribution a
+same-version payload edit on ``master`` is not harmless: it is a release nobody
+holding that version ever receives. ``packaging/claude/build.py --check-release``
+(``make claude-check-release``) is the rule for that case, and it is the part
+that runs on pull requests, in the ``package`` job. It compares the whole generated
+tree, not this module's digest, with the newest ``claude-v*`` tag and the pull
+request's target, and it reads neither the registry nor another family's tags.
+That tree contains the shared payload, so the same-version edit the policy calls
+legal is refused there too; what still lands without a bump is an edit that leaves
+``packaging/claude/multi-llm/`` alone.
+
+This module reads Git and the registry and writes nothing. Stdlib only, plus
 :mod:`common.payload` and the single-registry module.
 """
 
@@ -81,11 +96,12 @@ from common.payload import PayloadError
 #: registry are read from, whatever repository the history is read out of.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-#: The two release families and their tag prefixes. A third distribution that
-#: tags releases joins here, or its versions are invisible to the invariant.
+#: The release families and their tag prefixes. A further distribution that tags
+#: releases joins here, or its versions are invisible to the invariant.
 FAMILIES: Tuple[Tuple[str, str], ...] = (
     ("codex", "codex-v"),
     ("opencode", "opencode-v"),
+    ("claude", "claude-v"),
 )
 
 #: The first release of the shared version, ever. It is in every complete
@@ -103,7 +119,7 @@ PAYLOAD_PREFIX = "skills/multi-llm"
 PACKAGE_JSON = REPO_ROOT / "packaging" / "opencode" / "package.json"
 
 #: The single-registry module (step 0). Loaded by path: it lives beside the
-#: OpenCode builder, which is not on the Codex builder's import path.
+#: OpenCode builder, which is not on the other builders' import paths.
 REGISTRY_MODULE = REPO_ROOT / "packaging" / "opencode" / "registry.py"
 
 #: ``npm view``'s bounds. npm's own retry is bounded (two retries, backoff
@@ -149,7 +165,7 @@ NpmRunner = Callable[[Sequence[str], float], "subprocess.CompletedProcess[str]"]
 class ReleaseHistoryError(PayloadError):
     """The history could not be read, so nothing about it can be concluded.
 
-    A :class:`PayloadError` so both builders' existing ``except`` clauses turn
+    A :class:`PayloadError` so the builders' existing ``except`` clauses turn
     it into a named ``REFUSING:`` line rather than a traceback.
     """
 
@@ -374,10 +390,22 @@ class Release:
 
 
 def release_tag_names(root: Path) -> Tuple[str, ...]:
-    """Every ``codex-v*`` and ``opencode-v*`` tag this clone has, sorted."""
+    """Every tag of every family in :data:`FAMILIES` this clone has, sorted."""
     patterns = [f"{prefix}*" for _, prefix in FAMILIES]
     out = _git_text(root, "tag", "--list", *patterns)
     return tuple(sorted(line.strip() for line in out.splitlines() if line.strip()))
+
+
+def shallow_gap(root: Path) -> Optional[str]:
+    """Why a shallow clone cannot answer for any release history, or ``None``."""
+    if _git_text(root, "rev-parse", "--is-shallow-repository").strip() != "true":
+        return None
+    return (
+        f"{root} is a shallow clone: its tags and their commits may be missing, "
+        "and an incomplete release history reads as one where every version is "
+        "new. Check from a full clone with every tag (`git fetch --unshallow "
+        "--tags`; actions/checkout `fetch-depth: 0`)."
+    )
 
 
 def history_gap(root: Path, tags: Sequence[str]) -> Optional[str]:
@@ -386,13 +414,9 @@ def history_gap(root: Path, tags: Sequence[str]) -> Optional[str]:
     Asked before any comparison, because every comparison would otherwise
     succeed against the empty history a tagless clone presents.
     """
-    if _git_text(root, "rev-parse", "--is-shallow-repository").strip() == "true":
-        return (
-            f"{root} is a shallow clone: its tags and their commits may be missing, "
-            "and an incomplete release history reads as one where every version is "
-            "new. Check from a full clone with every tag (`git fetch --unshallow "
-            "--tags`; actions/checkout `fetch-depth: 0`)."
-        )
+    shallow = shallow_gap(root)
+    if shallow:
+        return shallow
     if FIRST_RELEASE_TAG not in tags:
         found = ", ".join(tags) if tags else "none"
         return (
@@ -730,9 +754,9 @@ def check(
     digests: Dict[str, str] = {}
     releases, unreadable = read_releases(checkout, tags, digests)
     report.problems.extend(unreadable)
+    tag_patterns = ", ".join(f"{prefix}*" for _, prefix in FAMILIES)
     report.lines.append(
-        "release history (every codex-v* and opencode-v* tag, and npm's "
-        f"{name} versions on {url}):"
+        f"release history (every {tag_patterns} tag, and npm's {name} versions on {url}):"
     )
     for item in releases:
         report.lines.append(
@@ -756,7 +780,7 @@ def check(
             )
             report.problems.append(
                 f"version {version} names more than one shared payload: {listing}. A "
-                "shared version names one shared payload; a later release of either "
+                "shared version names one shared payload; a later release of any "
                 "family takes the next unused version instead."
             )
 
@@ -788,7 +812,7 @@ def check(
                     "release."
                 )
 
-    # 3. The candidate against everything either family has released.
+    # 3. The candidate against everything any family has released.
     try:
         commit = resolve_commit(checkout, candidate)
         version = commit_version(checkout, commit)
@@ -841,7 +865,7 @@ def check(
             report.problems.append(
                 f"the candidate's version {own} is unreleased but older than the newest "
                 f"release {newest} ({holders}). A new release takes a version newer "
-                f"than every version either family released: bump {VERSION_PATH} past "
+                f"than every version any family released: bump {VERSION_PATH} past "
                 f"{newest}."
             )
         else:
@@ -865,12 +889,13 @@ def _newest(released: Dict[str, List[Release]]) -> Optional[str]:
 def print_report(
     report: Report, *, extra: Sequence[str] = (), ok: str = "the shared-version check passes",
 ) -> int:
-    """Print *report* (and a caller's own *extra* refusals, first) the way both
-    builders' ``--check-bump`` answer: what was read on stdout, each refusal as
-    a ``REFUSING:`` line on stderr. Exit status 0 only with no refusal at all."""
+    """Print *report* (and a caller's own *extra* refusals, first) the way every
+    builder's ``--check-bump`` answers: what was read on stdout, each refusal as
+    a ``REFUSING:`` line on stderr. Exit status 0 only with no refusal at all.
+    A refusal both halves reached is printed once: a shallow clone is one fact."""
     for line in report.lines:
         print(line)
-    problems = [*extra, *report.problems]
+    problems = list(dict.fromkeys([*extra, *report.problems]))
     for line in problems:
         print(f"REFUSING: {line}", file=sys.stderr)
     if problems:

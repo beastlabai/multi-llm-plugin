@@ -689,6 +689,9 @@ COPY skills/multi-llm/tests/container/seed_cli_surface.py /opt/mllm/rig/seed_cli
 # Row 8 of plans/opencode-plugin-publish.md: the opencode package-gate scenarios,
 # imported by entrypoint.py (`--probe gate-*`), so it sits beside it.
 COPY skills/multi-llm/tests/container/opencode_package_gate.py /opt/mllm/rig/opencode_package_gate.py
+# The Claude Code package route's install, session, dispatch and upgrade legs,
+# imported by entrypoint.py for the same reason.
+COPY skills/multi-llm/tests/container/claude_package.py /opt/mllm/rig/claude_package.py
 # The credentialed provider lane (harness-expansion.md §7.4). It is NOT reached
 # through entrypoint.py: the lane bypasses the PATH wrapper on purpose -- the
 # wrapper's whole job is to scrub the vendor credential and point the CLI at the
@@ -999,10 +1002,9 @@ RUN test -f /opt/mllm/opencode-plugin/skills/multi-llm/uv.lock \
 # it writes into $CODEX_HOME, which is the row's tmpfs home and never the image.
 #
 # NO .claude-plugin/ IS COPIED, deliberately: codex also reads
-# `.claude-plugin/marketplace.json`, whose one entry's source is the repository
-# root (measured on the real checkout, see the empty-catalog note in
-# .agents/plugins/marketplace.json). The mirror carries only the codex catalog,
-# so there is no second catalog for the install to fall through to.
+# `.claude-plugin/marketplace.json`, whose one entry is the Claude Code plugin and
+# refuses codex by policy. The mirror carries only the codex catalog, so there is
+# no second catalog for the install to fall through to.
 #
 # THE PAYLOAD SHARES §10's VIRTUALENV, exactly as §10b's does and for the same
 # measured reason: `ENV UV_PROJECT_ENVIRONMENT=/opt/mllm/skill/.venv` is
@@ -1050,6 +1052,55 @@ RUN P=/opt/mllm/codex-marketplace/packaging/codex/multi-llm \
  && /usr/bin/python3 -m compileall -q "$P/skills" "$P/mcp" >/dev/null \
  && chmod -R a+rX /opt/mllm/codex-marketplace \
  && du -sh /opt/mllm/codex-marketplace \
+ && rm -rf /tmp/uv-cache
+
+# --------------------------------------------------------------------------- #
+# 10d. The Claude Code PLUGIN route -- what `claude plugin install` really delivers.
+#
+# Every other claude-code row stages the source tree as a plain skill, with no
+# manifest and no plugin hooks. This is the published artifact: the generated tree
+# at packaging/claude/multi-llm/ and the catalog that names it, at the paths they
+# have in the repository, so the catalog the row installs from is byte for byte the
+# one users fetch.
+#
+#     /opt/mllm/claude-marketplace/.claude-plugin/marketplace.json
+#     /opt/mllm/claude-marketplace/packaging/claude/multi-llm/
+#
+# THIS MIRROR IS NOT INSTALLED FROM DIRECTLY. `claude plugin marketplace add <dir>`
+# makes every session load the plugin from that folder and never from the cache, so
+# `claude_package.build_fixture` commits it into an offline Git marketplace at row
+# start and the install goes through the sparse form docs/installation.md prints.
+#
+# THE PAYLOAD SHARES §10's VIRTUALENV, as §10b's and §10c's do: UV_PROJECT_ENVIRONMENT
+# is image-wide, so `uv run --project <payload>` resolves into the skill's venv.
+#
+# Two assertions, both the payload's own and both offline: the real dispatch through
+# the payload, which proves the generated tree carries every module the dispatcher
+# imports; and that the catalog names exactly this tree and no test file came along.
+# --------------------------------------------------------------------------- #
+COPY .claude-plugin/marketplace.json /opt/mllm/claude-marketplace/.claude-plugin/marketplace.json
+COPY packaging/claude/multi-llm      /opt/mllm/claude-marketplace/packaging/claude/multi-llm
+RUN P=/opt/mllm/claude-marketplace/packaging/claude/multi-llm \
+ && for f in .claude-plugin/plugin.json hooks/hooks.json LICENSE \
+             skills/multi-llm/SKILL.md skills/multi-llm/multi_llm.py \
+             skills/multi-llm/uv.lock skills/multi-llm/pyproject.toml; do \
+        test -s "$P/$f" \
+          || { echo "the Claude plugin tree is missing $f -- packaging/claude/multi-llm/ is checked in; run make claude-regen before building this image" >&2; exit 1; }; \
+    done \
+ && for f in hooks/doctor.sh hooks/report-check.sh hooks/wakeup-check.sh; do \
+        test -x "$P/$f" \
+          || { echo "the Claude plugin hook $f is not executable, and Claude Code runs hooks by path" >&2; exit 1; }; \
+    done \
+ && ! find "$P" -type d -name tests -print -quit | grep -q . \
+ && /usr/bin/python3 -c 'import json,sys; m=json.load(open("/opt/mllm/claude-marketplace/.claude-plugin/marketplace.json")); e=[p for p in m.get("plugins") or [] if p.get("name")=="multi-llm"]; print("claude marketplace "+str(m.get("name"))+" source="+str(e[0].get("source") if e else None)); sys.exit(0 if e and e[0].get("source")=="./packaging/claude/multi-llm" else "the mirrored catalog does not name packaging/claude/multi-llm: "+repr(e))' \
+ && /opt/mllm/real/uv run --frozen --no-dev \
+      --project "$P/skills/multi-llm" \
+      -- python "$P/skills/multi-llm/multi_llm.py" --help >/dev/null \
+ && echo "claude plugin payload dispatches (uv run --frozen --no-dev, shared venv)" \
+ && /usr/bin/python3 -m compileall -q "$P/skills" >/dev/null \
+ && find "$P" -type d -name __pycache__ -prune -exec rm -rf {} + \
+ && chmod -R a+rX /opt/mllm/claude-marketplace \
+ && du -sh /opt/mllm/claude-marketplace \
  && rm -rf /tmp/uv-cache
 
 # --------------------------------------------------------------------------- #

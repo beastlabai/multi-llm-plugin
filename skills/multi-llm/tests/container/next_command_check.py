@@ -451,6 +451,42 @@ def no_call_check(calls: list[dict], step: dict | None,
     return out
 
 
+#: What the Claude plugin's own hooks run through the dispatcher. SessionStart and Stop
+#: fire around the model's turn, so they land after the terminal result without the
+#: model having run anything.
+PLUGIN_HOOK_MODES = frozenset({"doctor", "util report-check"})
+
+
+def receipts_no_call_check(step: dict | None, session_receipts: list[dict],
+                           terminal_receipt: int | None) -> dict:
+    """Criterion 5 on the one package route whose stream shows no tool calls.
+
+    claude-code's stream is a single envelope, so `no_call_check` has nothing to count.
+    The receipts do not have that gap: the `uv` wrapper writes one for every dispatcher
+    run, whoever typed it, so a model that ran the next phase cannot avoid leaving one.
+    """
+    if not isinstance(step, dict):
+        return {"observable": False, "reason": "no user_next_step was printed"}
+    if terminal_receipt is None:
+        return {"observable": False,
+                "reason": "no receipt handed the model a user_next_step"}
+    phase = step.get("phase")
+    modes = [receipt_mode(r) for r in session_receipts]
+    later = [m for m in modes[terminal_receipt + 1:] if m not in PLUGIN_HOOK_MODES]
+    named = [m for m in modes if phase and m == phase]
+    return {
+        "observable": True,
+        "phase": phase,
+        "terminal_call_index": terminal_receipt,
+        "calls": [{"index": i, "kind": "receipt", "mode": m} for i, m in enumerate(modes)],
+        "calls_after_terminal": [{"mode": m} for m in later],
+        "calls_naming_next_phase": [],
+        "receipts_after_terminal": later,
+        "receipts_naming_next_phase": named,
+        "holds": not later and not named,
+    }
+
+
 def names_fixture(plan_arg: str | None, fixture: str, workspace: str) -> bool:
     """Whether *plan_arg* is the fixture plan, relative or absolute."""
     if not plan_arg:
@@ -594,6 +630,8 @@ def observe(bundle: Path, host: str, row_id: str, matrix_row: dict,
         observed["stop_hook"] = stop_hook_state(
             _read(bundle / "host-session-digest.jsonl"),
             plugin_installed=(route == "package"))
+        if route == "package":
+            observed["no_call"] = receipts_no_call_check(step, receipts, terminal_receipt)
     else:
         observed["no_call"] = no_call_check(
             tool_calls(host, stdout), step, receipts, terminal_receipt)

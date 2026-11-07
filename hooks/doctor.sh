@@ -23,7 +23,7 @@ if [ -n "$MULTI_LLM_UV" ] && [ -f "$MULTI_LLM_UV" ]; then
 elif command -v uv >/dev/null 2>&1; then
   uv="$(command -v uv)"
 else
-  # One line, in probe order: tests/test_uv_candidates.py holds it against
+  # One line, in probe order: the source repository's test suite holds it against
   # `unattended.UV_CANDIDATES` element for element.
   for candidate in "$HOME/.local/bin/uv" "$HOME/.local/bin/uv.exe" "$HOME/.cargo/bin/uv" "$HOME/.cargo/bin/uv.exe" /opt/homebrew/bin/uv /usr/local/bin/uv /opt/local/bin/uv; do
     if [ -f "$candidate" ]; then
