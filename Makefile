@@ -142,6 +142,8 @@ CLAUDE_BUILD := uv run --project skills/multi-llm -- python $(CLAUDE_PKG)/build.
 CLAUDE_PACKAGE_PYTEST := uv run --project skills/multi-llm -- pytest \
     skills/multi-llm/tests/test_claude_package.py \
     skills/multi-llm/tests/test_claude_package_seed.py \
+    skills/multi-llm/tests/test_claude_release_helpers.py \
+    skills/multi-llm/tests/test_bump_version.py \
     skills/multi-llm/tests/test_marketplace_manifest_location.py \
     skills/multi-llm/tests/test_uv_candidates.py
 # The full gate's container half (A4 rows 1, 6b, 7, 13, 14). release_gate.py owns which
@@ -188,7 +190,8 @@ export MLLM_E2E_MATRIX_TIMEOUT_S
         codex-gate-reset codex-gate-pinned codex-gate-minimum codex-gate-ceiling \
         codex-gate-derived codex-publish \
         claude-regen claude-package claude-check-release claude-check-bump \
-        claude-package-check-ci claude-package-container
+        claude-package-check-ci claude-package-container \
+        bump-version claude-publish claude-hook-install claude-hook-uninstall
 
 help:
 	@echo "Containerized E2E harness (see $(CONTAINER_DIR)/README.md)"
@@ -243,6 +246,14 @@ help:
 	@echo "  make claude-check-release         the tree moved since the last claude-v* tag only under a newer version"
 	@echo "  make claude-check-bump            that, plus the shared-version check over every family and npm"
 	@echo "  make claude-package-container     in Docker, no key, no network: the sparse install, session, hooks, dispatch and upgrade"
+	@echo
+	@echo "Releasing it (a push to master that moves the tree IS the release; $(CLAUDE_PKG)/README.md)"
+	@echo
+	@echo "  make bump-version VERSION=x.y.z    set the shared version in its owner and every mirror, then regenerate (DRY_RUN=1: show only)"
+	@echo "  make claude-hook-install           local pre-push hook: a push of master or a claude-v* tag must pass the release checks"
+	@echo "  make claude-hook-uninstall         remove that hook (and only that hook)"
+	@echo "  make claude-publish                from master: fetch, every release check, print the push and tag it would make"
+	@echo "  make claude-publish PUSH=1         the same, then push master and the claude-v<version> tag (never forced)"
 
 # One line naming what is missing (binary absent vs daemon unreachable), rather
 # than a page of CLI errors.
@@ -1071,6 +1082,41 @@ claude-package-container: e2e-image
 	env -u OPENROUTER_API_KEY -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
 	  MLLM_E2E_IMAGE=$(IMAGE) \
 	  $(PYTEST)/test_container_claude_package.py -q -rs -m "container and not live"
+
+# THE RELEASE HELPERS (packaging/claude/README.md, "Release procedure").
+#
+# `bump-version` moves the version all three distributions share: the owner
+# (skills/multi-llm/pyproject.toml), every hand-kept mirror, then the capability
+# docs and both generated trees. It plans every edit before writing any, refuses a
+# mirror that does not already say the current version, and commits nothing. Not
+# `opencode-bump`, which moves the OpenCode CLI pins.
+#
+# `claude-hook-install` writes .git/hooks/pre-push (local, never committed). A push
+# of master then has to pass the moved-tree rule against the remote's master and a
+# clean rebuild of both generated trees from the pushed commit, and a claude-v* tag
+# has to name its commit's version on a commit the remote's master has. master has
+# no branch protection and CI reports only after a push lands, so this is the check
+# that runs before users can fetch anything.
+#
+# `claude-publish` runs those checks plus the shared-version history check (it
+# fetches, and reads the registry) on the local master and prints the push and tag
+# it would make. PUSH=1 then pushes master as a fast-forward and the
+# claude-v<version> tag. It never forces, and it does not run the Docker install
+# check: run `make claude-package-container` first.
+CLAUDE_RELEASE := uv run --quiet --project skills/multi-llm -- python $(CLAUDE_PKG)/release.py
+
+bump-version:
+	@test -n "$(VERSION)" || { echo "usage: make bump-version VERSION=<x.y.z> [DRY_RUN=1]"; exit 1; }
+	uv run --quiet --project skills/multi-llm -- python packaging/common/bump_version.py "$(VERSION)" $(if $(DRY_RUN),--dry-run)
+
+claude-hook-install:
+	$(CLAUDE_RELEASE) install-hook
+
+claude-hook-uninstall:
+	$(CLAUDE_RELEASE) uninstall-hook
+
+claude-publish:
+	$(CLAUDE_RELEASE) publish $(if $(PUSH),--push)
 
 # The full A4 gate. IT STAMPS ONLY WHAT IT RAN. The CI tier, then the container
 # rows on THREE codex builds — the container's pin, the plugin's declared
