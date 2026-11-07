@@ -113,4 +113,4 @@ with `util next-command "<plan-path>" --after <mode>` replacing `<mode> "<plan-p
 /multi-llm:multi-llm --improve-commits this branch       # review, then fix, this branch's commits
 ```
 
-Providers and models live in `${CLAUDE_SKILL_DIR}/providers.yaml` (per-repository override via `--init`); `docs/providers.md` in the repository has the rest.
+Providers and models live in `${CLAUDE_SKILL_DIR}/providers.yaml` (per-repository override via `--init`); [the provider documentation](https://github.com/beastlabai/multi-llm-plugin/blob/master/docs/providers.md) has the rest.

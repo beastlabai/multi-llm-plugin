@@ -4,3 +4,4 @@
 # the bash hook scripts.
 * text=auto eol=lf
 packaging/codex/multi-llm/** linguist-generated=true -diff
+packaging/claude/multi-llm/** linguist-generated=true -diff

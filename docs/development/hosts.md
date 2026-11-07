@@ -235,8 +235,9 @@ and the installer's cannot diverge. `init` is a thin wrapper forwarding to
 
 ## Package distribution
 
-**`packaging/opencode/` is a second distribution of the same tree, and it is not a second host.**
-It builds `opencode-multi-llm`, an npm package carrying `skills/multi-llm/` beside a v1
+**`packaging/opencode/` and `packaging/claude/` are further distributions of the same tree, and
+neither is a second host.** The Claude Code plugin closes this section.
+`packaging/opencode/` builds `opencode-multi-llm`, an npm package carrying `skills/multi-llm/` beside a v1
 OpenCode plugin: the `config` hook injects `/multi-llm` from a pack-time
 render of `hosts/opencode/plugin-command.md.tmpl`, and the `tool` hook registers a model-callable
 `multi_llm` whose `execute` composes the dispatcher argv, refuses the flags
@@ -327,6 +328,96 @@ Surface schema version 5 (`dispatcher.route_env` and the per-row `optional_why`)
 server refuses a v4 surface, or a v5 one without `route_env`, through the existing
 degraded path rather than spawning without `MULTI_LLM_ROUTE`, which would print the file-shim
 spelling on a tool route.
+
+**`packaging/claude/multi-llm/` is the Claude Code plugin: generated, checked in, and exactly what an
+install copies.** `.claude-plugin/marketplace.json` names it as the plugin's `source`, and installing
+copies that directory with no build on the user's machine, so every commit changing a shipped file owes
+a regenerated tree in the same commit. The root `.claude-plugin/plugin.json`, root `hooks/` and
+`skills/multi-llm/` stay the authored sources, and `claude --plugin-dir <checkout>` still loads the root
+during development. [`packaging/claude/README.md`](../../packaging/claude/README.md) is the maintainers'
+guide; the procedures below are the same ones.
+
+**Staging covers the whole plugin, not just the payload.** `payload.stage`'s swap and sweep reach
+`skills/multi-llm/` alone, and this plugin's manifest and hooks live outside it. So `build()` assembles the
+complete plugin in a scratch directory: the shared allowlist plus the legacy files through
+`stage(extra_allowlist=…)`, then the manifest, hooks and licence with the mode the git index records. It
+sweeps the complete root for credentials and asserts the result before anything moves: the exact file
+list both ways, the manifest's name, version and `hooks` pointer, every hook command resolving from
+`${CLAUDE_PLUGIN_ROOT}` to a file in the tree, each hook script executable, `SKILL.md`, the marketplace
+entry, and the `claude-code` entry of `DISTRIBUTION_BUDGETS` in `packaging/common/payload.py`. Only then is
+the tree swapped in, so a failure leaves the previous complete plugin in place.
+
+`make claude-regen` rewrites the tree before the commit, tolerating modified inputs and refusing
+untracked ones. `make claude-package` is the clean rebuild after it, which must equal the committed tree.
+`make claude-package-check-ci` is the CI tier, in the `package` job: no Docker, no `claude` binary, no
+registry. `make claude-package-container` installs the plugin in the test image through the published sparse
+form and grades what a session really loads: Docker, no key, no network. `make claude-check-release` is the moved-tree rule below, and `make claude-check-bump` adds the
+shared-version check and reads the registry.
+
+**The legacy files are a Claude-only inventory, named rather than globbed.**
+`MULTI_LLM_LEGACY_INSTRUCTIONS=1` serves `legacy/instructions/<mode>.md`, and a missing frozen copy silently
+falls back to the current core, so a non-empty directory proves nothing. The build requires exactly these
+17 files under `skills/multi-llm/legacy/`, both ways:
+
+```text
+README.md
+instructions/apply-code-fixes.md
+instructions/apply-suggestions.md
+instructions/apply-task-suggestions.md
+instructions/ask.md
+instructions/full-workflow.md
+instructions/generate-tasks.md
+instructions/implement.md
+instructions/init-config.md
+instructions/review-code.md
+instructions/review-plan.md
+instructions/review-tasks.md
+references/human-decision-batch.md
+references/resume-detection.md
+references/salvage-handling.md
+references/uv-check.md
+references/wave-batching.md
+```
+
+`legacy/README.md` is the one exception to the rule that development documentation stays out of a payload,
+because the runtime's stderr notice points operators at it. The shared allowlist is not widened, so the
+Codex and OpenCode builders carry none of these files.
+
+**`docs/` is in no host's payload, and two links point at it online.** `SKILL.md` and
+`instructions/init-config.md` name the user documentation by URL:
+
+- `https://github.com/beastlabai/multi-llm-plugin/blob/master/docs/providers.md`
+- `https://github.com/beastlabai/multi-llm-plugin/blob/master/docs/configuration.md`
+
+These are the explicit exception to the rule that every runtime reference resolves locally. A
+repository-relative pointer resolves neither in an installed plugin nor in a user's project. Reading them
+needs the network and running the plugin does not, and those two paths stay stable as public link targets.
+
+**Bumping the version is one commit.** `skills/multi-llm/pyproject.toml` owns it, and the new version must be
+newer than every version any family has released. Synchronize `skills/multi-llm/uv.lock` (`uv lock --project
+skills/multi-llm`), the root `.claude-plugin/plugin.json`, `skills/multi-llm/hosts/capabilities.yaml` and
+`packaging/opencode/package.json` with `packaging/opencode/README.md`, then run
+`hosts/render_capabilities.py`, `make codex-regen` and `make claude-regen`. A root manifest bump alone updates
+neither the installed manifest nor its version-keyed cache: Claude Code reads the copy inside the tree.
+
+**The Claude release is the bumped `master` commit containing the regenerated tree.** Run
+`make claude-check-bump` before publishing, from a full clone with every tag, and keep the candidate off
+`master` until it is verified as an installed plugin. Pushing it to `master` is the release. Record that exact
+commit with an immutable `claude-v<version>` tag as part of publishing it, because the moved-tree rule and the
+shared-version check both read that tag. No workflow runs on it, and the Codex and OpenCode release procedures
+are unchanged.
+
+**The post-release policy has one exception: this tree.** After a Codex or OpenCode release, `master` may
+change shipped bytes while still saying the released version, since those users install from the `release`
+ref or a pinned npm version. Claude Code installs follow `master` and cache by version, so a same-version edit
+would reach fresh installs and nobody already holding that version. After the first Claude tag, any commit
+that moves `packaging/claude/multi-llm/` under an unmoved version fails the check, so unfinished payload
+changes stay off `master` until ready to release. Every change is held to this from the moment the tree is
+on `master`, tag or no tag, because `packaging/claude/build.py --check-release` also compares with
+`CLAUDE_RELEASE_BASE`, which the `package` job sets to a pull request's target, or on a push to the commit
+`master` was at before it. It compares
+git tree ids, so hooks, legacy files and the executable bit all count, none of which the shared-payload digest
+sees. The shared-version check itself (`--check-bump`) reads the registry and stays out of the `tests` workflow.
 
 ## Detecting the active route
 

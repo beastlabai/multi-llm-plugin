@@ -52,9 +52,10 @@ from pathlib import Path
 # module, beside this one in /opt/mllm/rig, where the rig dir is `sys.path[0]`;
 # imported as a package sibling when the host-side suite imports this file.
 try:
+    import claude_package
     import opencode_package_gate
 except ImportError:  # pragma: no cover - the host-side package import
-    from . import opencode_package_gate
+    from . import claude_package, opencode_package_gate
 
 HERE = Path(__file__).resolve().parent
 SKILL_DIR = Path(os.environ.get("MLLM_SKILL_DIR", "/opt/mllm/skill"))
@@ -1276,7 +1277,20 @@ def wire_stub_host(host: str, home: Path, base_url: str,
     seed = RIG_DIR / "home_seed" / host
     overlay: dict[str, str] = {}
 
-    if host == "codex":
+    if host == "claude-code":
+        # No key to protect and no vendor to reach: the placeholder only satisfies the
+        # CLI's "is there a credential" check, and an EMPTY ANTHROPIC_API_KEY is what
+        # keeps it from reading any other. The SDK appends `/v1/messages` itself.
+        if seed.is_dir():
+            shutil.copytree(seed, home, dirs_exist_ok=True)
+        _write_claude_settings(home)
+        overlay["ANTHROPIC_BASE_URL"] = base_url.removesuffix("/v1")
+        overlay["ANTHROPIC_AUTH_TOKEN"] = STUB_PLACEHOLDER_KEY
+        overlay["ANTHROPIC_API_KEY"] = ""
+        overlay["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+        overlay.update(_seed_claude_plugin(home, route))
+
+    elif host == "codex":
         codex_home = home / ".codex"
         codex_home.mkdir(parents=True, exist_ok=True)
         (codex_home / "config.toml").write_text(
@@ -1821,6 +1835,7 @@ def wire_credentials(host: str, home: Path, key: str, slug: str,
         # wrong thing.
         overlay["ANTHROPIC_API_KEY"] = ""
         overlay["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+        overlay.update(_seed_claude_plugin(home, route))
 
     elif host == "codex":
         # COMMAND-BASED auth rather than `env_key`: a plain env_key authenticates
@@ -1913,6 +1928,23 @@ def _write_claude_settings(home: Path) -> None:
         },
         "includeCoAuthoredBy": False,
     }, indent=2), encoding="utf-8")
+
+
+def _claude_package_context(home: Path) -> "claude_package.Context":
+    return claude_package.Context(home=home, out=OUT, workspace=WORKSPACE,
+                                  real_dir=REAL_DIR, log=log)
+
+
+def _seed_claude_plugin(home: Path, route: str) -> dict:
+    """The Claude package route's install, and what later calls need to reach it.
+
+    Called after `_write_claude_settings`, whose write would otherwise replace the
+    entries the install merges into that file. A no-op on the file route, whose rows
+    stay byte-identical to every recorded run.
+    """
+    if route != "package":
+        return {}
+    return dict(claude_package.seed(_claude_package_context(home)).get("overlay") or {})
 
 
 def _codex_first_run_config() -> str:
@@ -2413,8 +2445,9 @@ GIT_NEXT_MARKER = "NEXT-RELEASE-MARKER"
 GIT_DECOYS = {
     "plans/decoy-plan.md": "# A gitignored-scratch stand-in; never installed\n",
     "README.md": "# The repository root; never installed\n",
-    # The real repository ships this file, with a root source. The `.agents`
-    # catalog shadows it; the sparse checkout must not even fetch it.
+    # The real repository ships this file. The `.agents` catalog shadows it, and
+    # the sparse checkout must not even fetch it. A root source is the worst thing
+    # this decoy could carry, so it carries one.
     ".claude-plugin/marketplace.json": json.dumps({
         "name": "beastlabai", "plugins": [{"name": "multi-llm", "source": "./"}],
     }, indent=2) + "\n",
@@ -4824,6 +4857,7 @@ def wire_fallback_credentials(host: str, home: Path, slug: str,
         # auth, and a present-and-empty ANTHROPIC_API_KEY here would be pointing
         # the host away from the very file this mode exists to use.
         overlay["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+        overlay.update(_seed_claude_plugin(home, route))
 
     elif host == "codex":
         codex_home = home / ".codex"
@@ -6262,14 +6296,17 @@ def main(argv=None) -> int:
                              "model output.")
     parser.add_argument("--probe", default=None,
                         choices=[*CODEX_PACKAGE_PROBES,
-                                 *opencode_package_gate.GATE_PROBES],
+                                 *opencode_package_gate.GATE_PROBES,
+                                 *claude_package.PROBES],
                         help="host lane, --creds none --route package: which "
                              "zero-quota package-route probe this row runs. "
                              "--host codex: plans/codex-native-plugin.md Phase "
                              "1, writing probe-<name>.json. --host opencode: "
                              "row 8's `gate-*` scenarios "
                              "(plans/opencode-plugin-publish.md), writing "
-                             "opencode-gate.json. The answer is recorded, never "
+                             "opencode-gate.json. --host claude-code: the "
+                             "`claude-*` rows (container/claude_package.py), "
+                             "writing probe-<name>.json. The answer is recorded, never "
                              "judged here.")
     parser.add_argument("--stub-port", type=int,
                         default=int(os.environ.get("MLLM_STUB_PORT", "8099")))
@@ -6303,6 +6340,7 @@ def main(argv=None) -> int:
     exit_code = 1
 
     probe_host = ("opencode" if args.probe in opencode_package_gate.GATE_PROBES
+                  else "claude-code" if args.probe in claude_package.PROBES
                   else "codex")
     if args.probe and not (args.lane == "host" and args.host == probe_host
                            and args.route == "package" and args.creds == "none"):
@@ -6352,6 +6390,21 @@ def main(argv=None) -> int:
         facts_path.write_text(json.dumps(
             invocation_facts(args.host, typed_preview,
                              f"plans/{marker}.md", marker),
+            indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    if args.probe == claude_package.PROBE_INVOCATION:
+        # Armed before the stub starts, for the reason above. The cache path is known
+        # now because Claude Code derives it from the home and the manifest version,
+        # and the mirror the install copies from is already in the image.
+        marker = f"mllm-invocation-{uuid.uuid4().hex[:8]}"
+        manifest = json.loads((claude_package.MARKETPLACE_DIR / claude_package.MANIFEST_PATH)
+                              .read_text(encoding="utf-8"))
+        cache_root = (Path.home() / ".claude" / "plugins" / "cache"
+                      / claude_package.MARKETPLACE_NAME / claude_package.PLUGIN_NAME
+                      / str(manifest.get("version")))
+        facts_path = OUT / "prompt-facts.json"
+        facts_path.write_text(json.dumps(
+            claude_package.invocation_facts(str(cache_root), marker),
             indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     with Stub(args.stub_port, OUT / "stub.jsonl",
@@ -6562,12 +6615,19 @@ def main(argv=None) -> int:
                                 route=args.route,
                                 install_source=("git" if args.probe == GIT_ROUTE_PROBE
                                                 else "local-path"))
+                        elif args.host == "claude-code":
+                            # The same shape as codex: the host's model at the
+                            # stub, then the published install into that home.
+                            probe_overlay = wire_stub_host(
+                                args.host, Path.home(),
+                                f"http://127.0.0.1:{args.stub_port}/v1",
+                                route=args.route)
                         elif args.host != "opencode":
                             raise SystemExit(
                                 f"entrypoint: --route package has no host config "
-                                f"writer for host {args.host!r}. Only opencode "
-                                f"and codex declare a package route, and a row "
-                                f"that quietly wrote nothing would stage no "
+                                f"writer for host {args.host!r}. Only opencode, "
+                                f"codex and claude-code declare a package route, and "
+                                f"a row that quietly wrote nothing would stage no "
                                 f"route and then grade one.")
                         else:
                             _write_opencode_config(
@@ -6709,6 +6769,18 @@ def main(argv=None) -> int:
                     run_codex_package_probe(
                         args.probe or "seed", Path.home(), probe_overlay,
                         OUT / "stub.jsonl", install_doc)
+                    return 0
+
+                if (args.creds == "none" and args.route == "package"
+                        and args.host == "claude-code"):
+                    # The zero-quota Claude package rows. The install ran in the
+                    # wiring step above and wrote plugin-install.json; 0 either
+                    # way, because test_container_claude_package.py gives the
+                    # verdict over what the probe recorded.
+                    claude_package.run_probe(
+                        args.probe or claude_package.PROBE_SEED,
+                        _claude_package_context(Path.home()), probe_overlay,
+                        OUT / "stub.jsonl", marker=marker)
                     return 0
 
                 if args.creds == "none" and args.documented_invocation:

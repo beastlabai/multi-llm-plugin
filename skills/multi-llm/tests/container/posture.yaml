@@ -100,13 +100,13 @@ mounts:
       the HOST process's home on a host-lane row: synthesized configs and the
       copied-in credential, all dying with the container (C6a rule 3). NOEXEC
       (docker's tmpfs default, unstated here) like every other mount, `/home/
-      e2e/.codex` below excepted.
+      e2e/.codex` and `/home/e2e/.claude` below excepted.
   - target: /home/e2e/.codex
     type: tmpfs
     mode: "rw,exec,mode=0700,uid=10001,gid=10001"
     note: >-
-      the ONE exec-enabled mount in this posture, nested inside /home/e2e
-      rather than widening it. codex >=0.157ish self-manages an
+      an exec-enabled mount nested inside /home/e2e rather than widening it
+      (`.claude` below is the only other one). codex >=0.157ish self-manages an
       app-server-daemon it stages and re-execs from
       $CODEX_HOME/packages/app-server-daemon/releases/.staging.*/bin/codex on
       first launch; under the parent's noexec that exec(2) fails EACCES
@@ -117,6 +117,18 @@ mounts:
       further was never asked for (user-approved, host-harness-portability).
       `_assert_declared_mounts` checks uid/gid/mode, not the exec bit, so this
       needs no entrypoint-side assertion beyond the existing ones.
+  - target: /home/e2e/.claude
+    type: tmpfs
+    mode: "rw,exec,mode=0700,uid=10001,gid=10001"
+    note: >-
+      exec-enabled for the same kind of reason as `.codex` above, and scoped the
+      same way. Claude Code runs a plugin's hook scripts from
+      $HOME/.claude/plugins/cache/<marketplace>/<plugin>/<version>/hooks/, by
+      path. Under the parent's noexec each one fails `Permission denied`, exit
+      126, measured on claude 2.1.318, so the SessionStart doctor and the Stop
+      hooks never ran on any package row. A real user's home is not noexec, so
+      this is the rig matching the machine it stands in for. File-route rows
+      install no plugin and execute nothing here.
   - target: /tmp
     type: tmpfs
     mode: "rw,mode=1777"

@@ -128,6 +128,22 @@ CODEX_PACKAGE_PYTEST := uv run --project skills/multi-llm -- pytest \
     skills/multi-llm/tests/test_codex_package.py \
     skills/multi-llm/tests/test_codex_mcp_server.py \
     skills/multi-llm/tests/test_uv_candidates.py
+# --- The Claude Code plugin (packaging/claude/) ------------------------------ #
+# Committed for the same reason as the codex tree, with the same two builds:
+#   claude-regen    the development regeneration. --allow-dirty, writes the tracked
+#                   tree. It runs BEFORE the commit, so the source edit and the
+#                   output it implies land in one commit.
+#   claude-package  the clean build, AFTER the commit. Refuses dirty inputs whatever
+#                   ALLOW_DIRTY says, and the rebuilt tree must equal the committed one.
+CLAUDE_PKG   := packaging/claude
+CLAUDE_BUILD := uv run --project skills/multi-llm -- python $(CLAUDE_PKG)/build.py
+# The Claude route's own rows, and the two suites that discover readers and
+# manifests across the whole tracked tree.
+CLAUDE_PACKAGE_PYTEST := uv run --project skills/multi-llm -- pytest \
+    skills/multi-llm/tests/test_claude_package.py \
+    skills/multi-llm/tests/test_claude_package_seed.py \
+    skills/multi-llm/tests/test_marketplace_manifest_location.py \
+    skills/multi-llm/tests/test_uv_candidates.py
 # The full gate's container half (A4 rows 1, 6b, 7, 13, 14). release_gate.py owns which
 # rows each tier requires (host_matrix.yaml's `gate_tiers`), the codex version
 # each tier runs, and the accounting that turns run records into the evidence
@@ -170,7 +186,9 @@ export MLLM_E2E_MATRIX_TIMEOUT_S
         opencode-registry-absent opencode-publish-first \
         codex-regen codex-package codex-package-check-ci codex-package-check \
         codex-gate-reset codex-gate-pinned codex-gate-minimum codex-gate-ceiling \
-        codex-gate-derived codex-publish
+        codex-gate-derived codex-publish \
+        claude-regen claude-package claude-check-release claude-check-bump \
+        claude-package-check-ci claude-package-container
 
 help:
 	@echo "Containerized E2E harness (see $(CONTAINER_DIR)/README.md)"
@@ -202,7 +220,7 @@ help:
 	@echo "  make opencode-bump VERSION=x.y.z  move every opencode pin to one release; re-capture its fixtures (\$$0)"
 	@echo "                                    (a release older than the pin also needs ALLOW_DOWNGRADE=1)"
 	@echo "  make opencode-latest-check        exit 1 when npm has a newer opencode than the pin"
-	@echo "  make opencode-check-bump          the shared-version check: HEAD against every codex-v*/opencode-v* tag and npm's versions"
+	@echo "  make opencode-check-bump          the shared-version check: HEAD against every claude-v*/codex-v*/opencode-v* tag and npm's versions"
 	@echo "  make opencode-registry-check SPEC=n@v TAG=t ENVIRONMENT=ci-runner|container|vm OUT=f [REHEARSAL_REGISTRY=url]"
 	@echo "                                    the registry-install probe: the bytes npm serves, installed by OpenCode"
 	@echo
@@ -216,6 +234,15 @@ help:
 	@echo "  make codex-gate-minimum           the same rows on the declared minimum codex"
 	@echo "  make codex-gate-ceiling           the same rows on npm's newest codex (row 14; fetches it)"
 	@echo "  make codex-publish                refuses unless the full gate passed on these exact bytes; tags codex-v<version>"
+	@echo
+	@echo "Claude Code plugin, checked in at $(CLAUDE_PKG)/multi-llm (see $(CLAUDE_PKG)/README.md)"
+	@echo
+	@echo "  make claude-regen                 regenerate the tracked plugin tree from dirty inputs (before the commit)"
+	@echo "  make claude-package               clean rebuild; must equal the committed tree (after the commit)"
+	@echo "  make claude-package-check-ci      the rows that need no Docker and no claude binary"
+	@echo "  make claude-check-release         the tree moved since the last claude-v* tag only under a newer version"
+	@echo "  make claude-check-bump            that, plus the shared-version check over every family and npm"
+	@echo "  make claude-package-container     in Docker, no key, no network: the sparse install, session, hooks, dispatch and upgrade"
 
 # One line naming what is missing (binary absent vs daemon unreachable), rather
 # than a page of CLI errors.
@@ -918,8 +945,8 @@ opencode-print-registry:
 # opencode-plugin-publish.md, step 2; Codex's `--check-bump` runs the same one).
 # The version is pyproject.toml's, shared by all three distributions, so HEAD's
 # version must either be released already WITH THIS SAME shared payload, or be
-# newer than every codex-v* and opencode-v* tag and every version npm lists for
-# the package (npm's own 0.0.0-stage stub, `"stub": true`, is reported and
+# newer than every claude-v*, codex-v* and opencode-v* tag and every version npm
+# lists for the package (npm's own 0.0.0-stage stub, `"stub": true`, is reported and
 # skipped). Reads git and the registry; writes nothing. A shallow or tagless
 # clone is refused, never read as "no releases" — run it from a full clone with
 # every tag.
@@ -927,7 +954,9 @@ opencode-print-registry:
 # Deliberately in NO `tests` workflow leg and not in `opencode-package-check-ci`:
 # after V is released, `master` may change shipped bytes while still saying V.
 # This check refuses a RELEASE from that state, and must not turn `master` red
-# over the legal edit. The full gate and the publish preflights call it.
+# over the legal edit. The full gate and the publish preflights call it. The one
+# exception to that policy is `claude-check-release`, a separate rule over the
+# Claude tree that does run on pull requests: see packaging/claude/README.md.
 opencode-check-bump:
 	uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/build.py --check-bump --registry $(OPENCODE_REGISTRY)
 
@@ -993,6 +1022,55 @@ codex-package-check-ci:
 	$(CODEX_PACKAGE_PYTEST) -m "not live and not container and not package" -q
 	MLLM_REQUIRE_PACKAGE_ROWS=1 $(CODEX_PACKAGE_PYTEST) -m "package and not container" -q
 	@echo "codex-package-check-ci: CI tier green (no stamp written)"
+
+# --------------------------------------------------------------------------- #
+# The Claude Code plugin. See packaging/claude/README.md for the release procedure:
+# a commit to master that moves this tree IS a release, so it carries a new version.
+# --------------------------------------------------------------------------- #
+claude-regen:
+	$(CLAUDE_BUILD) --allow-dirty
+	@echo "claude-regen: $(CLAUDE_PKG)/multi-llm rewritten; commit it WITH the source edit that implies it"
+
+# `MULTI_LLM_ALLOW_DIRTY=` on the recipe line for the reason codex-package gives.
+claude-package:
+	MULTI_LLM_ALLOW_DIRTY= $(CLAUDE_BUILD) --require-no-diff
+	@echo "claude-package: clean rebuild equals the committed tree"
+
+# The moved-tree rule, reading git only. CLAUDE_RELEASE_BASE is the ref to compare
+# with besides the newest claude-v* tag: the package job passes a pull request's
+# target, or on a push the commit master was at before it. A branch name can hold make and shell syntax, so `$(value …)` keeps
+# make from expanding it and the shell reads it from the environment: it is never
+# part of the recipe's text.
+claude-check-release:
+	$(CLAUDE_BUILD) --check-release $(if $(value CLAUDE_RELEASE_BASE),--base "$$CLAUDE_RELEASE_BASE",)
+
+# Before a release: the moved-tree rule plus the shared-version history check over
+# every family's tags and npm's list. Reads the registry.
+claude-check-bump:
+	$(CLAUDE_BUILD) --check-bump
+
+# The rows that need no Docker daemon and no claude binary. `ALLOW_DIRTY=1` swaps
+# the clean build for the regeneration, for a local run mid-edit; CI never sets it.
+claude-package-check-ci:
+	$(if $(ALLOW_DIRTY),$(MAKE) claude-regen,$(MAKE) claude-package)
+	$(MAKE) --no-print-directory claude-check-release
+	$(CLAUDE_PACKAGE_PYTEST) -m "not live and not container and not package" -q
+	MLLM_REQUIRE_PACKAGE_ROWS=1 $(CLAUDE_PACKAGE_PYTEST) -m "package and not container" -q
+	@echo "claude-package-check-ci: CI tier green"
+
+# The plugin as a user gets it, in the image: the sparse Git registration, the install,
+# a fresh session's own account of what it loaded, the hooks really running, the
+# published `/multi-llm:multi-llm` string, the dispatcher from the cache copy, and the
+# documented update. No key, no route out, $0: the host's model is the loopback stub, so
+# this answers "does it load and run" and leaves "does a model follow it" to the
+# credentialed `claude-code-package-*` rows in `make e2e-container-host`.
+#
+# Run before a release, after `make claude-package-check-ci`. It also runs under `make
+# e2e-container`, whose selection it matches, so a contributor's ordinary gate covers it.
+claude-package-container: e2e-image
+	env -u OPENROUTER_API_KEY -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
+	  MLLM_E2E_IMAGE=$(IMAGE) \
+	  $(PYTEST)/test_container_claude_package.py -q -rs -m "container and not live"
 
 # The full A4 gate. IT STAMPS ONLY WHAT IT RAN. The CI tier, then the container
 # rows on THREE codex builds — the container's pin, the plugin's declared

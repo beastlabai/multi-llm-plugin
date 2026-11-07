@@ -473,15 +473,35 @@ host's own background primitive (on Claude Code use `run_in_background`).
    only on implementation changes (ignoring unrelated uncommitted changes).
 
 8. **Run post-implementation regression tests:**
-   After all tasks complete, run the project's test suite **once** to catch any integration issues:
+   After all tasks complete, run the project's test suite **once** to catch any integration issues. From the project root, set `PLAN_MODIFIES_SKILL=1` if the plan modifies `${CLAUDE_SKILL_DIR}/` files, then run this selection:
 
-   - If plan modifies `${CLAUDE_SKILL_DIR}/` files:
-     ```bash
-     uv run --project "${CLAUDE_SKILL_DIR}" -- pytest "${CLAUDE_SKILL_DIR}/tests/" -v --tb=short 2>&1 | tail -50
-     ```
-   - Otherwise, detect common test runners:
-     - If `package.json` exists with a `test` script: `npm test 2>&1 | tail -50`
-     - If `pytest.ini`, `pyproject.toml` with `[tool.pytest]`, or `conftest.py` exists: `pytest -v --tb=short 2>&1 | tail -50`
+   ```bash
+   TEST_COMMAND=""
+   if [ "${PLAN_MODIFIES_SKILL:-0}" = 1 ] && [ -d "${CLAUDE_SKILL_DIR}/tests" ]; then
+     # A source checkout, the only place the plugin's development tests live.
+     TEST_COMMAND="uv run --project \"${CLAUDE_SKILL_DIR}\" -- pytest \"${CLAUDE_SKILL_DIR}/tests/\" -v --tb=short 2>&1 | tail -50"
+   else
+     # A packaged installation ships no development tests, so never point pytest at them.
+     if [ "${PLAN_MODIFIES_SKILL:-0}" = 1 ]; then
+       echo "plugin self-tests: unavailable (development tests are not shipped)"
+     fi
+     # The consuming project's configured command comes first.
+     TEST_COMMAND="$(uv run {UV_RUN_FLAGS} --project "${CLAUDE_SKILL_DIR}" -- python -c 'import pathlib, yaml; path = pathlib.Path(".multi-llm/providers.yaml"); data = yaml.safe_load(path.read_text(encoding="utf-8")) if path.is_file() else None; print(((data or {}).get("driver") or {}).get("verify_command") or "")')"
+     # Otherwise detect a common test runner.
+     if [ -z "$TEST_COMMAND" ] && [ -f package.json ] && grep -q '"test"[[:space:]]*:' package.json; then
+       TEST_COMMAND='npm test 2>&1 | tail -50'
+     elif [ -z "$TEST_COMMAND" ] && { [ -f pytest.ini ] || [ -f conftest.py ] || { [ -f pyproject.toml ] && grep -q '^\[tool\.pytest' pyproject.toml; }; }; then
+       TEST_COMMAND='pytest -v --tb=short 2>&1 | tail -50'
+     fi
+   fi
+   if [ -n "$TEST_COMMAND" ]; then
+     eval "$TEST_COMMAND"
+   else
+     echo "tests not run (no test command available)"
+   fi
+   ```
+
+   - A printed `tests not run` line is the result to report. Never report it as passed.
    - Record pass/fail results for inclusion in the implementation summary
    - Do NOT block on failure — record the results and continue to summary
 
@@ -520,7 +540,7 @@ host's own background primitive (on Claude Code use `run_in_background`).
 
    ## Test Results
 
-   {Pass/fail results from regression test run, or "No test runner detected"}
+   {Pass/fail results from regression test run, or "tests not run (no test command available)"}
 
    ## Deviations from Plan
 

@@ -126,7 +126,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # Full history and every tag: the shared-version check reads every
-          # codex-v*/opencode-v* tag and refuses a shallow or tagless clone, and
+          # claude-v*/codex-v*/opencode-v* tag and refuses a shallow or tagless clone, and
           # the staging step needs real history to say the tree is clean.
           fetch-depth: 0
           # Nothing in this workflow pushes. Without the persisted token no

@@ -507,6 +507,21 @@ class TestObserveOneBundle:
                                   "quote_free": None, "names_fixture": None,
                                   "passes": False, "stop_reason": "nothing to type"}
 
+    def test_a_claude_code_package_bundle_reads_criterion_5_from_receipts(self, tmp_path):
+        """The plugin route has hooks and no tool, so `no_call` has to come from receipts."""
+        step = _step("/multi-llm:multi-llm ")
+        stdout = json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                             "result": _report(step, fence_optional=False)})
+        bundle = _bundle(tmp_path, "claude-code", "x", step, stdout, [],
+                         {"exercised": False, "reason": "nothing to type"})
+        observed = ncc.observe(bundle, "claude-code", "x", MATRIX_ROW,
+                               TEMPLATES["claude-code"], route="package")
+        assert observed["route_observed"] == "default"
+        assert observed["stop_hook"] != "not-installed"
+        assert observed["no_call"]["observable"] is True, observed["no_call"]
+        assert observed["no_call"]["holds"] is True, observed["no_call"]
+        assert ncc.record_block(observed)["no_call"] is True
+
     def test_the_record_block_validates_against_the_record_schema(self, tmp_path):
         import jsonschema
 
@@ -663,8 +678,8 @@ class TestTheMatrixRows:
 
     def test_one_row_per_route_the_lane_can_run(self):
         assert sorted((host, row.get("route", "file")) for host, row in self.ROWS) == [
-            ("claude-code", "file"), ("codex", "file"), ("codex", "package"),
-            ("opencode", "file"), ("opencode", "package")]
+            ("claude-code", "file"), ("claude-code", "package"), ("codex", "file"),
+            ("codex", "package"), ("opencode", "file"), ("opencode", "package")]
 
     @pytest.mark.parametrize("host,row", ROWS, ids=[row["id"] for _h, row in ROWS])
     def test_each_row_runs_generate_tasks_on_a_spaced_fixture(self, host, row):

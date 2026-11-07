@@ -463,12 +463,12 @@ def check_bump(
     *, repo: Optional[Path] = None, candidate: str = "HEAD",
     registry: Optional[str] = None,
 ) -> "release_history.Report":
-    """OpenCode's entry point for the release-history check both families run.
+    """OpenCode's entry point for the release-history check every family runs.
 
     The version is ``pyproject.toml``'s, shared with the Claude and Codex
     distributions, so "is this version new?" has no OpenCode-only answer: the
-    check reads every ``codex-v*`` and ``opencode-v*`` tag and npm's list for
-    this package, and holds *candidate*'s shared-payload digest to theirs
+    check reads every ``claude-v*``, ``codex-v*`` and ``opencode-v*`` tag and npm's
+    list for this package, and holds *candidate*'s shared-payload digest to theirs
     (:mod:`common.release_history`). This package's own bytes outside the
     payload (``dist/``, ``package.json``) are npm's no-reuse rule's to police.
 
@@ -799,8 +799,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help=(
             "the shared-version release-history check (`make opencode-check-bump`): "
             "exit non-zero unless the candidate's version is released with this "
-            "same shared payload or newer than every codex-v*/opencode-v* tag and "
-            "npm version. Reads git and the registry; writes nothing"
+            "same shared payload or newer than every claude-v*/codex-v*/opencode-v* "
+            "tag and npm version. Reads git and the registry; writes nothing"
         ),
     )
     parser.add_argument(

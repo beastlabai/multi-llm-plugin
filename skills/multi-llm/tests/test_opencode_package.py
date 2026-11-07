@@ -72,6 +72,7 @@ from utils import (  # noqa: E402
 sys.path.insert(0, str(PACKAGE_DIR))
 import build as pkg_build  # noqa: E402
 from common import payload  # noqa: E402
+from tests.generated_distributions import DISTRIBUTIONS  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +90,27 @@ def _unavailable(reason: str) -> None:
     if os.environ.get(REQUIRE_ROWS_ENV):
         pytest.fail(f"{REQUIRE_ROWS_ENV} is set but this row cannot run: {reason}")
     pytest.skip(reason)
+
+
+def _generated_version_problem(tree, root: Path, owner: str):
+    """Why *tree*'s generated manifest under *root* is off the version chain, or ``None``.
+
+    Every failure names the command that fixes it. The file is generated, so editing
+    it by hand is the wrong fix and the next build would overwrite it anyway.
+    """
+    manifest = root / tree.root / tree.version_manifest
+    if not manifest.is_file():
+        return f"{manifest} is missing; run `{tree.regen}`."
+    try:
+        version = json.loads(manifest.read_text(encoding="utf-8")).get("version")
+    except ValueError as exc:
+        return f"{manifest} does not parse ({exc}); run `{tree.regen}`."
+    if version != owner:
+        return (
+            f"{tree.root}{tree.version_manifest} says {version}, pyproject.toml says "
+            f"{owner}. It is generated: run `{tree.regen}`."
+        )
+    return None
 
 
 def _need_node() -> str:
@@ -6982,22 +7004,50 @@ class TestStaging:
             f"plugin.json says {declared['version']}, pyproject.toml says {owner}"
         )
 
-        # The codex end of the chain is GENERATED — build.py fills it from
-        # pyproject.toml — and checked in, so a bump without `make codex-regen`
-        # leaves the committed copy behind (plans/codex-native-plugin.md, D6).
-        codex_manifest = (
-            REPO_ROOT / "packaging" / "codex" / "multi-llm" / ".codex-plugin"
-            / "plugin.json"
-        )
-        assert codex_manifest.is_file(), (
-            f"{codex_manifest} is missing; run `make codex-regen`"
-        )
-        codex_version = json.loads(
-            codex_manifest.read_text(encoding="utf-8")
-        ).get("version")
-        assert codex_version == owner, (
-            f"the codex plugin.json says {codex_version}, pyproject.toml says "
-            f"{owner}. It is generated: run `make codex-regen`."
+        # The generated ends of the chain. Each build fills them from an authored
+        # source and they are checked in, so a bump without the regeneration leaves
+        # the committed copy behind. On the Claude side that is the file an install
+        # actually reads: a root manifest bump alone reaches nobody.
+        for tree in DISTRIBUTIONS:
+            problem = _generated_version_problem(tree, REPO_ROOT, owner)
+            assert problem is None, problem
+
+    @pytest.mark.parametrize("tree", DISTRIBUTIONS, ids=lambda tree: tree.root)
+    @pytest.mark.parametrize("state, says", [
+        (None, "is missing"),
+        ('{"name": "multi-llm"}', "says None"),
+        ('{"version": "0.0.1"}', "says 0.0.1"),
+        ("{not json", "does not parse"),
+    ])
+    def test_a_generated_manifest_off_the_chain_names_its_regen(
+        self, tmp_path, tree, state, says,
+    ):
+        """Missing and stale both fail, and both say what to run."""
+        manifest = tmp_path / tree.root / tree.version_manifest
+        if state is not None:
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(state, encoding="utf-8")
+        problem = _generated_version_problem(tree, tmp_path, "1.2.3")
+        assert problem is not None
+        assert says in problem, problem
+        assert f"`{tree.regen}`" in problem, problem
+
+    @pytest.mark.parametrize("tree", DISTRIBUTIONS, ids=lambda tree: tree.root)
+    def test_a_generated_manifest_on_the_chain_has_no_problem(self, tmp_path, tree):
+        manifest = tmp_path / tree.root / tree.version_manifest
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text('{"version": "1.2.3"}', encoding="utf-8")
+        assert _generated_version_problem(tree, tmp_path, "1.2.3") is None
+
+    def test_the_chain_covers_the_claude_install_manifest(self):
+        """Named in full, since this is the one path an installed plugin reads its
+        version from. Deriving it alone would let a change to the shared list drop
+        it from the chain without anything turning red."""
+        assert any(
+            f"{tree.root}{tree.version_manifest}"
+            == "packaging/claude/multi-llm/.claude-plugin/plugin.json"
+            and tree.regen == "make claude-regen"
+            for tree in DISTRIBUTIONS
         )
 
     def test_lockfile_parity_with_image(self):

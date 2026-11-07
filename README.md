@@ -60,11 +60,17 @@ Pick your host (1.1 to 1.3), then configure providers (1.4). The prerequisites i
 
 ### 1.1 Claude Code
 
-Installs as a Claude Code plugin. In Claude Code:
+Installs as a Claude Code plugin. In a shell:
+
+```bash
+claude plugin marketplace add beastlabai/multi-llm-plugin \
+  --sparse .claude-plugin packaging/claude/multi-llm
+claude plugin install multi-llm@beastlabai
+```
+
+Then in Claude Code:
 
 ```text
-/plugin marketplace add beastlabai/multi-llm-plugin
-/plugin install multi-llm@beastlabai
 /reload-plugins
 /reload-skills
 /multi-llm:multi-llm --init
@@ -76,7 +82,14 @@ Then invoke the skill (plugin skills are namespaced `plugin:skill`), or just ask
 /multi-llm:multi-llm plans/my-feature.md
 ```
 
-> **Added the marketplace before, in another project?** `/plugin marketplace add` reuses the cached copy and installs a stale version. Run the [update steps](docs/installation.md#updating-the-claude-code-plugin) instead.
+**Shorter alternative:** run these in Claude Code in place of the shell commands. They install the same plugin, but download about three times as much and keep a 60 MB copy of the whole repository in the marketplace cache ([why](docs/installation.md#registering-the-claude-code-marketplace)).
+
+```text
+/plugin marketplace add beastlabai/multi-llm-plugin
+/plugin install multi-llm@beastlabai
+```
+
+> **Added the marketplace before, in another project?** Do not add it again: `/plugin marketplace add` reuses the cached copy and installs a stale version, and a user-level registration without sparse paths refuses the `--sparse` command above. Run the [update steps](docs/installation.md#updating-the-claude-code-plugin) instead. [Moving to sparse paths](docs/installation.md#moving-an-existing-registration-to-sparse-paths) is optional.
 
 ### 1.2 Codex
 
@@ -277,7 +290,7 @@ To keep a single source of truth while still working with Claude Code, add a sib
 
 | Document | What's in it |
 | --- | --- |
-| [docs/installation.md](docs/installation.md) | Updating the Claude Code plugin, the prerequisites in full, and the plugin's own `providers.yaml` |
+| [docs/installation.md](docs/installation.md) | Registering and updating the Claude Code plugin, moving to sparse paths, the Codex catalog boundary, the prerequisites in full, and the plugin's own `providers.yaml` |
 | [docs/hosts.md](docs/hosts.md) | Codex and OpenCode in full: both plugin routes, the `install-host` file route, capability matrix, verification, uninstall |
 | [docs/providers.md](docs/providers.md) | Every supported harness CLI, `provider:model` naming, and endpoint recipes (GLM / Z.ai) |
 | [docs/configuration.md](docs/configuration.md) | The per-project `.multi-llm/providers.yaml` override, layer precedence, and its safety model |

@@ -103,6 +103,12 @@
 !.agents/plugins/marketplace.json
 !packaging/codex/multi-llm/**
 
+# ... and the Claude Code plugin tree plus the catalog that names it (the claude-code
+# host's package route). Both TRACKED, for the codex tree's reasons. Dockerfile §10d
+# copies both into /opt/mllm/claude-marketplace/ at these same two relative paths.
+!.claude-plugin/marketplace.json
+!packaging/claude/multi-llm/**
+
 # Re-excluded from inside the allowed trees. Last match wins, so these have to
 # stay BELOW the negations above.
 **/__pycache__/**
@@ -123,6 +129,8 @@ packaging/opencode/skills/multi-llm/.venv/**
 # `uv sync` there) builds skills/multi-llm/.venv, full of host absolute paths.
 # BELOW the `!packaging/codex/multi-llm/**` negation above, since last match wins.
 packaging/codex/multi-llm/skills/multi-llm/.venv/**
+# And in the Claude plugin tree, which `make` and `link-skill.sh --root` users run in place.
+packaging/claude/multi-llm/skills/multi-llm/.venv/**
 **/creds.json
 **/creds/**
 **/*.credentials.json

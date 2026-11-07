@@ -51,6 +51,7 @@ import modes as mode_table  # noqa: E402
 from utils import cli_common, host_install, unattended  # noqa: E402
 
 from common import payload  # noqa: E402
+from tests.generated_distributions import CLAUDE, CODEX, DISTRIBUTIONS  # noqa: E402
 
 # Imported under its own name: the opencode suite imports *its* build.py as
 # ``build`` from a different directory, and one pytest session holds both.
@@ -1408,13 +1409,37 @@ class TestCompatibilityLayout:
         datetime.date.fromisoformat(ingestion_rules.LAYOUT_READ_DATE)
 
     def test_gitattributes_marks_the_tree_generated(self):
-        """D1a: one rule for the tree, and nothing else — beside the repository's
-        LF checkout, without which a Windows clone (``core.autocrlf=true``) holds
-        CRLF bytes the recorded digest does not cover."""
+        """D1a: one rule per generated tree, and nothing else — beside the
+        repository's LF checkout, without which a Windows clone
+        (``core.autocrlf=true``) holds CRLF bytes the build's byte comparison and
+        the hook scripts' shebangs cannot survive."""
         text = (REPO_ROOT / ".gitattributes").read_text(encoding="utf-8")
         rules = [line for line in text.splitlines() if line.strip() and not line.startswith("#")]
-        assert rules == ["* text=auto eol=lf",
-                         "packaging/codex/multi-llm/** linguist-generated=true -diff"]
+        assert rules == [
+            "* text=auto eol=lf",
+            *(f"{tree.root}** linguist-generated=true -diff" for tree in DISTRIBUTIONS),
+        ]
+
+    @pytest.mark.parametrize("path, generated", [
+        (f"{CODEX.root}skills/multi-llm/SKILL.md", True),
+        (f"{CLAUDE.root}skills/multi-llm/SKILL.md", True),
+        (f"{CLAUDE.root}hooks/doctor.sh", True),
+        (f"{CLAUDE.root}.claude-plugin/plugin.json", True),
+        ("skills/multi-llm/SKILL.md", False),
+        ("hooks/doctor.sh", False),
+        ("packaging/claude/build.py", False),
+    ])
+    def test_gitattributes_apply_to_the_files_they_mean_to(self, path, generated):
+        """The rules read as git reads them, so a pattern that parses but matches
+        nothing fails here. The source trees must stay reviewable, so the same
+        check runs the other way on them. LF holds for all of them."""
+        out = _git(
+            REPO_ROOT, "check-attr", "linguist-generated", "diff", "eol", "--", path,
+        ).stdout
+        attributes = dict(line.split(": ")[1:] for line in out.splitlines())
+        assert attributes["eol"] == "lf", out
+        assert attributes["linguist-generated"] == ("true" if generated else "unspecified"), out
+        assert attributes["diff"] == ("unset" if generated else "unspecified"), out
 
 
 # ===========================================================================
@@ -1707,9 +1732,10 @@ def _bump(text: str, old: str, new: str, pattern: str) -> str:
 class TestReleaseSequence:
     def test_release_sequence_runs_as_documented(self, tmp_path):
         """A6 steps 1-5 in a throwaway repository seeded from this working tree:
-        bump (with every mirror step 1 names), ``codex-regen``, commit,
-        ``codex-package``, stamp. ``make`` runs the real recipes, with
-        ``CODEX_BUILD`` pointed at this interpreter so no second venv is synced.
+        bump (with every mirror step 1 names), ``codex-regen`` and ``claude-regen``,
+        commit, ``codex-package`` and ``claude-package``, stamp. ``make`` runs the
+        real recipes, with ``CODEX_BUILD`` and ``CLAUDE_BUILD`` pointed at this
+        interpreter so no second venv is synced.
         """
         if not shutil.which("make"):
             _unavailable("make is not on PATH")
@@ -1720,13 +1746,15 @@ class TestReleaseSequence:
         _git(repo, "add", "-A")
         _git(repo, "commit", "-q", "-m", "baseline")
         build_cmd = f"{sys.executable} packaging/codex/build.py"
+        claude_build_cmd = f"{sys.executable} packaging/claude/build.py"
         env = dict(os.environ)
         for name in ("ALLOW_DIRTY", "MULTI_LLM_ALLOW_DIRTY", "MAKEFLAGS"):
             env.pop(name, None)
 
         def make(*targets: str) -> subprocess.CompletedProcess:
             return subprocess.run(
-                ["make", "--no-print-directory", *targets, f"CODEX_BUILD={build_cmd}"],
+                ["make", "--no-print-directory", *targets, f"CODEX_BUILD={build_cmd}",
+                 f"CLAUDE_BUILD={claude_build_cmd}"],
                 cwd=str(repo), capture_output=True, text=True, env=env, timeout=600,
             )
 
@@ -1781,20 +1809,50 @@ class TestReleaseSequence:
         assert manifest["version"] == new
         status = _git(repo, "status", "--porcelain", "--", "packaging/codex/multi-llm").stdout
         assert "plugin.json" in status and "tree.sha256" in status, status
+
+        # Every other mirror and Codex are now current, and Claude's generated
+        # manifest is the one thing left behind. That has to be red by name: the
+        # root manifest moved, the installed one did not, and Claude Code caches
+        # by the installed one's version.
+        claude_manifest = repo / CLAUDE.root / CLAUDE.version_manifest
+        assert json.loads(claude_manifest.read_text("utf-8"))["version"] == old
+        stale_claude = singular()
+        assert stale_claude.returncode != 0, stale_claude.stdout[-2000:]
+        assert CLAUDE.regen in stale_claude.stdout, stale_claude.stdout[-2000:]
+
+        # The regeneration fixes exactly that...
+        claude_regen = make("claude-regen")
+        assert claude_regen.returncode == 0, claude_regen.stdout + claude_regen.stderr
+        assert json.loads(claude_manifest.read_text("utf-8"))["version"] == new
+        status = _git(repo, "status", "--porcelain", "--", CLAUDE.root).stdout
+        assert CLAUDE.version_manifest in status, status
         synced = singular()
         assert synced.returncode == 0, synced.stdout[-2000:]
 
-        # ...and the clean build refuses those same inputs, naming them.
+        # ...and a tree that lost its manifest is no way out of the check.
+        claude_manifest.unlink()
+        gone_claude = singular()
+        assert gone_claude.returncode != 0, gone_claude.stdout[-2000:]
+        assert CLAUDE.regen in gone_claude.stdout, gone_claude.stdout[-2000:]
+        claude_regen = make("claude-regen")
+        assert claude_regen.returncode == 0, claude_regen.stdout + claude_regen.stderr
+
+        # ...and the clean builds refuse those same inputs, naming them.
         refused = make("codex-package")
         assert refused.returncode != 0
         assert "pyproject.toml" in refused.stdout + refused.stderr, refused.stderr
+        refused = make("claude-package")
+        assert refused.returncode != 0
+        assert "plugin.json" in refused.stdout + refused.stderr, refused.stderr
 
-        # Step 3 — one commit; step 4 — the clean re-run produces no diff.
+        # Step 3 — one commit; step 4 — the clean re-runs of both checked-in trees
+        # reproduce the bumped candidate with no diff.
         _git(repo, "add", "-A")
         _git(repo, "commit", "-q", "-m", f"release {new}")
-        clean = make("codex-package")
-        assert clean.returncode == 0, clean.stdout + clean.stderr
-        assert _git(repo, "status", "--porcelain").stdout.strip() == ""
+        for target in ("codex-package", "claude-package"):
+            clean = make(target)
+            assert clean.returncode == 0, target + clean.stdout + clean.stderr
+            assert _git(repo, "status", "--porcelain").stdout.strip() == "", target
 
         # Step 5 — codex-publish refuses until a stamp covers these bytes. No
         # remote exists, so nothing can be pushed even if a refusal regressed.

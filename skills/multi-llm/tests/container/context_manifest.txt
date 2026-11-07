@@ -93,3 +93,12 @@ packaging/opencode/skills/**  # optional
 # it earns no row here.
 .agents/plugins/marketplace.json
 packaging/codex/multi-llm/**
+
+# --- the Claude Code PLUGIN tree and its catalog ----------------------------
+
+# The claude-code host's package route: Dockerfile §10d copies both into
+# /opt/mllm/claude-marketplace/ at these same relative paths, and
+# `claude_package.seed` commits them into the offline Git marketplace it installs
+# from. ORDINARY rows, because both are tracked and a clean checkout carries them.
+.claude-plugin/marketplace.json
+packaging/claude/multi-llm/**
