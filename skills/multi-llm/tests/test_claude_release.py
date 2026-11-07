@@ -417,6 +417,16 @@ class TestCheckReleaseCli:
         assert self._run(repo, "--base", base) == 1
         assert f"moved since {base}" in capsys.readouterr().err
 
+    def test_the_candidate_flag_judges_that_commit_rather_than_head(self, repo, capsys):
+        """The pre-push hook judges the commit being pushed, which need not be HEAD."""
+        repo.commit("0.1.0", tag="claude-v0.1.0")
+        moved = repo.commit("0.1.0", "b")
+        repo.commit("0.1.1", "c")
+        assert self._run(repo) == 0
+        capsys.readouterr()
+        assert self._run(repo, "--candidate", moved) == 1
+        assert "moved since claude-v0.1.0" in capsys.readouterr().err
+
     def test_a_malformed_tag_exits_one_naming_it(self, repo, capsys):
         repo.commit("0.1.0")
         repo.tag("claude-vnext", lightweight=True)

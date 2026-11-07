@@ -673,6 +673,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="with --check-release: also compare against this ref (a PR's target)",
     )
     parser.add_argument(
+        "--candidate", default="HEAD",
+        help=(
+            "with --check-release/--check-bump: the commit to judge (default: HEAD). "
+            "The pre-push hook passes the commit being pushed, which need not be HEAD"
+        ),
+    )
+    parser.add_argument(
         "--check-bump", action="store_true",
         help=(
             "--check-release plus the shared-version release-history check over every "
@@ -698,9 +705,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(project_version())
             return 0
         if args.check_release or args.check_bump:
-            problems = list(release_problems(args.repo, base=args.base))
+            problems = list(release_problems(
+                args.repo, candidate=args.candidate, base=args.base))
             if args.check_bump:
-                shared = release_history.check(args.repo or REPO_ROOT, registry=args.registry)
+                shared = release_history.check(
+                    args.repo or REPO_ROOT, candidate=args.candidate, registry=args.registry)
                 return release_history.print_report(
                     shared, extra=problems, ok="the Claude release rules hold",
                 )

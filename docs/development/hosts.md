@@ -397,15 +397,18 @@ needs the network and running the plugin does not, and those two paths stay stab
 newer than every version any family has released. Synchronize `skills/multi-llm/uv.lock` (`uv lock --project
 skills/multi-llm`), the root `.claude-plugin/plugin.json`, `skills/multi-llm/hosts/capabilities.yaml` and
 `packaging/opencode/package.json` with `packaging/opencode/README.md`, then run
-`hosts/render_capabilities.py`, `make codex-regen` and `make claude-regen`. A root manifest bump alone updates
-neither the installed manifest nor its version-keyed cache: Claude Code reads the copy inside the tree.
+`hosts/render_capabilities.py`, `make codex-regen` and `make claude-regen`. `make bump-version VERSION=x.y.z`
+does all of that, after checking every mirror still says the current version. A root manifest bump alone
+updates neither the installed manifest nor its version-keyed cache: Claude Code reads the copy inside the tree.
 
 **The Claude release is the bumped `master` commit containing the regenerated tree.** Run
 `make claude-check-bump` before publishing, from a full clone with every tag, and keep the candidate off
 `master` until it is verified as an installed plugin. Pushing it to `master` is the release. Record that exact
 commit with an immutable `claude-v<version>` tag as part of publishing it, because the moved-tree rule and the
 shared-version check both read that tag. No workflow runs on it, and the Codex and OpenCode release procedures
-are unchanged.
+are unchanged. `make claude-publish` runs those checks on the local `master` and prints the push and tag it
+would make; `PUSH=1` makes them. `make claude-hook-install` adds a local `pre-push` hook that refuses a push
+of `master` failing the moved-tree rule or carrying a stale generated tree, before users can fetch it.
 
 **The post-release policy has one exception: this tree.** After a Codex or OpenCode release, `master` may
 change shipped bytes while still saying the released version, since those users install from the `release`
