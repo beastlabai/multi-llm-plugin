@@ -32,6 +32,7 @@ except ImportError:
 
 # Import report_parser functions for consolidated decision loading
 try:
+    from . import report_markdown as _rm
     from .report_parser import (
         parse_consolidated_skipped_groups,
         parse_consolidated_validation_overrides,
@@ -39,6 +40,7 @@ try:
         merge_consolidated_selections,
     )
 except ImportError:
+    from utils import report_markdown as _rm
     from utils.report_parser import (
         parse_consolidated_skipped_groups,
         parse_consolidated_validation_overrides,
@@ -1652,10 +1654,10 @@ def generate_consolidated_report(
             for idx in underlying_indices
         )
 
-        # Section heading
-        lines.append(
-            f"## CG{display_index} [{consolidated_id}]: {title}"
-        )
+        # Section heading. Title, metadata fields, descriptions and themes
+        # are model text: one line each, or escaped line by line
+        # (`report_markdown`), so none of it can pass for a header or a box.
+        lines.append(_rm.consolidated_header(display_index, consolidated_id, title))
 
         # Aggregate validation status across the underlying groups (used to
         # gate the needs-human-decision-only "Let the agent decide" checkbox).
@@ -1672,14 +1674,14 @@ def generate_consolidated_report(
         agg_status = derive_aggregate_validation_status(underlying_statuses)
 
         # Checkboxes
-        lines.append("- [ ] Skip this group")
-        lines.append("- [ ] Mark valid")
-        lines.append("- [ ] Mark invalid")
-        lines.append("- [ ] Needs human attention")
+        lines.append(_rm.checkbox_line(_rm.SKIP_GROUP))
+        lines.append(_rm.checkbox_line(_rm.MARK_VALID))
+        lines.append(_rm.checkbox_line(_rm.MARK_INVALID))
+        lines.append(_rm.checkbox_line(_rm.NEEDS_HUMAN))
         # "Let the agent decide" routes the consolidated group to the per-item
         # judge at apply time. Scoped to needs-human-decision only.
         if agg_status == "needs-human-decision":
-            lines.append("- [ ] Let the agent decide")
+            lines.append(_rm.checkbox_line(_rm.LET_AGENT_DECIDE))
 
         # The umbrella's derived scope tag (any extension member makes it an
         # extension, "contains extension"); no authority of its own.
@@ -1688,13 +1690,14 @@ def generate_consolidated_report(
 
         # Metadata line
         lines.append(
-            f"**Importance:** {importance} | **Section:** {reference} "
-            f"| **Models:** {model_count} | **Covers:** {covers_list}"
+            f"**Importance:** {_rm.inline_text(importance)} | "
+            f"**Section:** {_rm.inline_text(reference)} "
+            f"| **Models:** {model_count} | **Covers:** {_rm.inline_text(covers_list)}"
         )
         lines.append("")
 
         # Consolidated description
-        lines.append(description)
+        lines.append(_rm.neutralize_model_text(description))
         lines.append("")
 
         # --- Original suggestions details block ---
@@ -1716,7 +1719,9 @@ def generate_consolidated_report(
             models_str = ", ".join(models_list) if models_list else "unknown"
 
             g_label = orig_group.get("display_label", f"G{u_idx + 1}")
-            lines.append(f"**{g_label}: {theme}** ({models_str})")
+            lines.append(
+                f"**{g_label}: {_rm.inline_text(theme)}** ({_rm.inline_text(models_str)})"
+            )
             # Each member keeps its own validated tag in a mixed umbrella.
             lines.extend(_scope_report.md_group_lines(scope_entries[u_idx]))
             lines.append("")
@@ -1726,7 +1731,7 @@ def generate_consolidated_report(
                     "description", sugg.get("desc", "")
                 )
                 lines.append(_scope_report.md_member_line(sugg))
-                lines.append(f"> {sugg_desc}")
+                lines.append(f"> {_rm.neutralize_model_text(sugg_desc)}")
                 lines.append("")
 
         lines.append("</details>")

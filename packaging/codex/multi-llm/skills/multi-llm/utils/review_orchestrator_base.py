@@ -6324,7 +6324,12 @@ def aggregate_results(
     }
     phase_label = phase_labels.get(phase_name, "Plan Review")
 
+    from . import report_markdown as _rm
+
     report_lines = [
+        # Model text below is escaped; the parser un-escapes descriptions
+        # only under this first line (`report_markdown.has_escaped_text`).
+        _rm.ESCAPED_TEXT_MARKER,
         f"# {phase_label} Report: {prefix}",
         "",
         f"**Original plan:** {prefix}.md",
@@ -6414,10 +6419,14 @@ def aggregate_results(
         report_lines.append("")
 
     if failed_models:
+        # After the last group: a failure message can carry model text
+        # (`report_markdown`).
         report_lines.append("## Models Failed")
         report_lines.append("")
         for model, reason in failed_models.items():
-            report_lines.append(f"- **{model}**: {reason}")
+            report_lines.append(
+                f"- **{_rm.inline_text(model)}**: {_rm.neutralize_model_text(reason)}"
+            )
         report_lines.append("")
 
     report_path = os.path.join(phase_dir, "report.md")
@@ -6514,6 +6523,7 @@ def format_group(
             its policy outcome sit between the checkboxes and the
             ``**Validation:**`` line (plan §6).
     """
+    from . import report_markdown as _rm
     from . import scope_report as _scope_report
     theme = group.get("theme", "Untitled Group")
     category = group.get("category", "unknown")
@@ -6535,25 +6545,23 @@ def format_group(
 
     display_label = group.get("display_label", f"G{group_idx}")
     display_hash = group.get("display_hash", "")
-    if display_hash:
-        header = f"## {display_label} [{display_hash}]: {theme}"
-    else:
-        header = f"## {display_label}: {theme}"
-
+    # Theme, metadata fields and the validation reason are model text: one
+    # line each, or escaped line by line (`report_markdown`), so none of it
+    # can pass for a header or a box the apply phase would read.
     lines = [
-        header,
+        _rm.group_header(display_label, display_hash, theme),
         "",
     ]
 
-    lines.append(f"- [ ] Skip this group")
+    lines.append(_rm.checkbox_line(_rm.SKIP_GROUP))
     if validation_status in ("needs-human-decision", "validation_failed"):
-        lines.append("- [ ] Mark valid")
-        lines.append("- [ ] Mark invalid")
+        lines.append(_rm.checkbox_line(_rm.MARK_VALID))
+        lines.append(_rm.checkbox_line(_rm.MARK_INVALID))
     # "Let the agent decide" routes this item to the per-item judge at apply time.
     # Scoped to needs-human-decision only (validation_failed stays valid/invalid
     # or --revalidate).
     if validation_status == "needs-human-decision":
-        lines.append("- [ ] Let the agent decide")
+        lines.append(_rm.checkbox_line(_rm.LET_AGENT_DECIDE))
 
     lines.extend(_scope_report.md_group_lines(
         _scope_report.group_scope(group, scope_round or _scope_report.round_info({}, ""))
@@ -6561,15 +6569,17 @@ def format_group(
 
     lines.extend([
         f"**Validation:** {validation_str} | "
-        f"**Category:** {category} | "
+        f"**Category:** {_rm.inline_text(category)} | "
         f"**Priority:** {priority_score} | "
-        f"**Highest Importance:** {highest_importance} | "
-        f"**Models:** {', '.join(models)}",
+        f"**Highest Importance:** {_rm.inline_text(highest_importance)} | "
+        f"**Models:** {_rm.inline_text(', '.join(models))}",
         "",
     ])
 
     if validation_reason and validation_status in ("invalid", "needs-human-decision", "validation_failed"):
-        lines.append(f"> **Validation Reason:** {validation_reason}")
+        lines.append(
+            f"> **Validation Reason:** {_rm.neutralize_model_text(validation_reason)}"
+        )
         lines.append("")
 
     sorted_suggestions = sorted(
@@ -6616,22 +6626,22 @@ def format_suggestion_in_group(
 
     display_label = suggestion.get("display_label", suggestion_id)
     display_hash = suggestion.get("display_hash", "")
-    if display_hash:
-        header = f"### {display_label} [{display_hash}]: {title}"
-    else:
-        header = f"### {display_label}: {title}"
+    from . import report_markdown as _rm
 
+    # The title on the header line and the box right under it: the parser
+    # reads the Skip tick off that line. Title, metadata fields and the
+    # description are model text (`report_markdown`).
     lines = [
-        header,
+        _rm.suggestion_header(display_label, display_hash, title),
     ]
-    lines.append(f"- [ ] Skip")
+    lines.append(_rm.checkbox_line(_rm.SKIP))
     if group_validation_status in ("needs-human-decision", "validation_failed") and group_suggestion_count > 1:
-        lines.append("- [ ] Mark valid")
-        lines.append("- [ ] Mark invalid")
+        lines.append(_rm.checkbox_line(_rm.MARK_VALID))
+        lines.append(_rm.checkbox_line(_rm.MARK_INVALID))
         # "Let the agent decide" — needs-human-decision only. Single-suggestion
         # groups use the group-level checkbox (no per-suggestion select here).
         if group_validation_status == "needs-human-decision":
-            lines.append("- [ ] Let the agent decide")
+            lines.append(_rm.checkbox_line(_rm.LET_AGENT_DECIDE))
     # The reviewer's own (provisional) scope tag, above the `**Importance:**`
     # line: `report_parser.parse_suggestion_descriptions` reads everything
     # after that line as the editable description, so an unchanged report
@@ -6640,12 +6650,12 @@ def format_suggestion_in_group(
 
     lines.append(_scope_report.md_member_line(suggestion))
     lines.extend([
-        f"**Importance:** {importance} | "
-        f"**Type:** {stype} | "
-        f"**Section:** {reference} | "
-        f"**Model:** {model}",
+        f"**Importance:** {_rm.inline_text(importance)} | "
+        f"**Type:** {_rm.inline_text(stype)} | "
+        f"**Section:** {_rm.inline_text(reference)} | "
+        f"**Model:** {_rm.inline_text(model)}",
         "",
-        desc,
+        _rm.neutralize_model_text(desc),
         "",
     ])
 
@@ -6671,25 +6681,28 @@ def format_suggestion(
         "validation_failed": "? Validation Failed",
     }
     validation_str = validation_display.get(validation_status, "? Unknown") if validation_status else "? Unknown"
+    from . import report_markdown as _rm
 
     lines = [
-        f"### {suggestion['id']}: {suggestion['title']}",
+        _rm.flat_suggestion_header(suggestion['id'], suggestion['title']),
     ]
-    lines.append(f"- [ ] Skip")
+    lines.append(_rm.checkbox_line(_rm.SKIP))
     lines.extend([
         f"**Validation:** {validation_str} | "
-        f"**Model:** {suggestion.get('model', 'unknown')} | "
-        f"**Type:** {suggestion['type']} | "
-        f"**Section:** {suggestion['reference']}",
+        f"**Model:** {_rm.inline_text(suggestion.get('model', 'unknown'))} | "
+        f"**Type:** {_rm.inline_text(suggestion['type'])} | "
+        f"**Section:** {_rm.inline_text(suggestion['reference'])}",
         "",
     ])
 
     if validation_reason and validation_status in ("invalid", "needs-human-decision", "validation_failed"):
-        lines.append(f"> **Validation Reason:** {validation_reason}")
+        lines.append(
+            f"> **Validation Reason:** {_rm.neutralize_model_text(validation_reason)}"
+        )
         lines.append("")
 
     lines.extend([
-        suggestion['desc'],
+        _rm.neutralize_model_text(suggestion['desc']),
         "",
         "---",
         "",

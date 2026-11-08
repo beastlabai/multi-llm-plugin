@@ -18,6 +18,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Report regeneration](#report-regeneration)
 - [Scope tags in reports](#scope-tags-in-reports)
 - [Issue numbers and group decisions](#issue-numbers-and-group-decisions)
+- [Report grammar](#report-grammar)
 - [Scope tags and the review round](#scope-tags-and-the-review-round)
 
 ## Snapshots and empty review outcomes
@@ -315,6 +316,49 @@ from both ends (F6, 2026-09-16): `_format_issue` flattens newlines out of the ti
 and `report_parser` accepts a header only at column 0 after a blank line or the
 `---` rule, so a rendered description containing its own `### 2.`
 plus a ticked box cannot forge a skip on an issue the user never touched.
+
+## Report grammar
+
+**`utils/report_markdown.py` owns the structure `report.md` and `consolidated-report.md` carry, for
+the writers and for `report_parser` alike** (REVIEW-4, 2026-11-08). A ticked box is a decision the
+apply phases act on, and the same file holds model text that can quote a hostile plan or repository,
+so model text must never read as structure:
+
+- **Writers** emit headers (`group_header`, `suggestion_header`, `issue_header`,
+  `consolidated_header`) and boxes (`checkbox_line`, labels in `CHECKBOX_LABELS`) through the module.
+  A field on a header or `**Field:**` line goes through `inline_text` (line breaks become spaces), a
+  text block (description, validation reason, failure message, a "Needs Human Review" reason)
+  through `neutralize_model_text`, which puts a backslash before a line's `##` or `- [` marker. The
+  line renders as the same characters and no parser reads it. `report.md` (plan, task and code
+  review) starts with `ESCAPED_TEXT_MARKER`, an HTML comment that says so.
+- **Parsers** read a header only at column 0 and a ticked box only at a line start, one line at a
+  time (`is_checked`, `first_checked` in precedence order). The old patterns matched mid-line and
+  across line breaks (`-\s*\[`), so a one-line description could tick its own group.
+- **One structural pass for a plan or task report.** `plan_sections` finds every `## G{N}` and
+  `### G{N}S{M}` header, refused ones included, and gives each the region up to the next one (or an
+  earlier `---` or `##` line). All four decision readers (both Skip readers, both override readers)
+  take their boxes from it, so a box counts only for the header right above it: a group's own boxes
+  stop at its first suggestion (a suggestion's tick is not its group's, as `user_selections.json`
+  keeps `G1S1` keys out of the group overrides), a group's last suggestion stops at the group's
+  closing `---` (the next group's tick is not its), and a refused header keeps its box, which every
+  reader ignores. Per-reader blocks let a header one reader refused feed another (Codex review of
+  REVIEW-4: a forged `## G2:` inside a suggestion gave that suggestion a `valid`).
+- **Descriptions read back** go through `restore_model_text`, the exact inverse of the escape, so an
+  untouched report shows no edit and a user's edit reaches the apply prompt without backslashes;
+  only in a report that starts with the marker (`has_escaped_text`). In an older report a backslash
+  before `##` or `- [` is the model's own and stays. The writers before the marker put the title on
+  the first line and model text never comes first, so no report can claim it. `_is_block_cut` checks
+  both renderings, each read back as the parser reads it.
+- **Mixed headers are refused.** Every group and suggestion header carries a bracket hash or none
+  does, so an unhashed `## G{N}:` or `### G{N}S{M}:` in a report that also has hashed ones is not
+  the writer's: `hashed_headers` tells the parsers to ignore it (with a warning) instead of resolving
+  it through `grouped.json`'s index map. This also covers reports written before the escape.
+- The issue-digest footer is read from the last line that holds it (`issue_digest`).
+
+Tests: `tests/test_report_markdown.py` drives each lane's real writer with forged headers and boxes
+(after a blank line, mid-line, after a bare CR, indented, split over two lines) and the real parsers,
+puts each kind of refused header in each region of an older report, and reads older reports'
+literal backslashes back unchanged.
 
 ## Scope tags and the review round
 

@@ -64,6 +64,7 @@ from utils.cli_common import (
     record_next,
 )
 from utils.report_parser import issue_numbering_footer
+from utils import report_markdown
 # plans/review-commits.md §2.6/§2.10: a commit brief's run (its state records
 # `commit_range`) gets the commit template, attribution and report header.
 from utils import commit_report
@@ -4372,6 +4373,9 @@ def generate_review_report(
         else commit_report.label_title(None)
     )
     lines = [
+        # Model text below is escaped; the parser un-escapes descriptions
+        # only under this first line (`report_markdown.has_escaped_text`).
+        report_markdown.ESCAPED_TEXT_MARKER,
         "# Code Review Report",
         "",
         f"**{document}:** {plan_path.name}",
@@ -4667,11 +4671,14 @@ def generate_review_report(
         lines.append("_No low priority issues._")
         lines.append("")
 
+    # Everything below sits inside the last issue's block, so a path, a
+    # failure message or a validator's reason is written inert
+    # (`report_markdown`): none of it may read as a header or a ticked box.
     # Changed files list
     lines.append("## Changed Files")
     lines.append("")
     for f in changed_files:
-        lines.append(f"- `{f}`")
+        lines.append(f"- `{report_markdown.inline_text(f)}`")
     lines.append("")
 
     # Failed models
@@ -4679,7 +4686,10 @@ def generate_review_report(
         lines.append("## Failed Reviews")
         lines.append("")
         for model, error in failed_models.items():
-            lines.append(f"- **{model}**: {error}")
+            lines.append(
+                f"- **{report_markdown.inline_text(model)}**: "
+                f"{report_markdown.neutralize_model_text(error)}"
+            )
         lines.append("")
 
     # Add section for items needing human review
@@ -4693,7 +4703,10 @@ def generate_review_report(
             for g in needs_human:
                 theme = g.get("theme", "Unknown issue")
                 reason = g.get("validation_reason", "No reason provided")
-                lines.append(f"- **{theme}**: {reason}")
+                lines.append(
+                    f"- **{report_markdown.inline_text(theme)}**: "
+                    f"{report_markdown.neutralize_model_text(reason)}"
+                )
             lines.append("")
 
     # The binding between the `### N.` numbers above and the issues.json the
@@ -4830,24 +4843,24 @@ def _format_issue(
     # The header and the Skip box are one unit to `report_parser`: it reads the
     # checkbox off the line *immediately* after `### N.`. A title is model
     # output and can hold a newline, which pushes the box a line further down
-    # and loses the tick with no warning — so the title is flattened onto its
-    # own line here rather than the parser being taught to hunt for the box.
-    title = str(issue.get("title", "Untitled")).replace("\r\n", " ").replace(
-        "\n", " "
-    ).replace("\r", " ")
+    # and loses the tick with no warning — so `issue_header` flattens the title
+    # onto its own line rather than the parser being taught to hunt for the
+    # box. The other model text below is one line or escaped line by line
+    # (`report_markdown`), so it can forge neither a header nor a box.
+    rm = report_markdown
     lines = [
-        f"### {index}. {title}",
-        f"- [ ] Skip",  # Skip checkbox
+        rm.issue_header(index, issue.get("title", "Untitled")),
+        rm.checkbox_line(rm.SKIP),
     ]
 
     # Add override checkboxes for items needing human review
     if validation_status in ("needs-human-decision", "validation_failed"):
-        lines.append("- [ ] Mark valid")
-        lines.append("- [ ] Mark invalid")
+        lines.append(rm.checkbox_line(rm.MARK_VALID))
+        lines.append(rm.checkbox_line(rm.MARK_INVALID))
     # "Let the agent decide" routes this issue to the per-item judge at apply time.
     # Scoped to needs-human-decision only.
     if validation_status == "needs-human-decision":
-        lines.append("- [ ] Let the agent decide")
+        lines.append(rm.checkbox_line(rm.LET_AGENT_DECIDE))
 
     # Name the other members of this issue's group. One finding, one verdict,
     # one fix — and one checkbox between them, whichever block it is ticked on.
@@ -4870,17 +4883,17 @@ def _format_issue(
         lines.extend(_scope_report.md_group_lines(group_scope))
 
     lines.extend([
-        f"**Validation:** {validation_str} | **File:** `{file_ref}` | **Type:** {issue.get('type', 'unknown')} | **Model:** {served_model_label(issue.get('model', 'unknown'), served_models)}",
+        f"**Validation:** {validation_str} | **File:** `{rm.inline_text(file_ref)}` | **Type:** {rm.inline_text(issue.get('type', 'unknown'))} | **Model:** {rm.inline_text(served_model_label(issue.get('model', 'unknown'), served_models))}",
         "",
     ])
 
     # Include validation reason for invalid or needs-human-decision issues
     if validation_reason and validation_status in ("invalid", "needs-human-decision", "validation_failed"):
-        lines.append(f"> **Validation Reason:** {validation_reason}")
+        lines.append(f"> **Validation Reason:** {rm.neutralize_model_text(validation_reason)}")
         lines.append("")
 
     lines.extend([
-        issue.get("desc", "No description"),
+        rm.neutralize_model_text(issue.get("desc", "No description")),
         "",
         "---",
         "",

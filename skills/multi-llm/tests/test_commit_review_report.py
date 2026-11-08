@@ -35,6 +35,7 @@ import argparse  # noqa: E402
 import code_review_orchestrator as cro  # noqa: E402
 from utils import commit_report  # noqa: E402
 from utils.commit_range import resolve_range  # noqa: E402
+from utils.report_markdown import ESCAPED_TEXT_MARKER  # noqa: E402
 from utils.html_report_generator import (  # noqa: E402
     SLOT_APPLY_COMMANDS,
     SLOT_DOCUMENT_LABEL,
@@ -164,7 +165,8 @@ def blocks(report: str) -> Dict[str, str]:
 class TestReportMd:
     def test_the_header_labels_the_brief_and_carries_the_block(self, tmp_path):
         report, _html, _data, _ = report_for(tmp_path)
-        lines = report.splitlines()
+        marker, *lines = report.splitlines()
+        assert marker == ESCAPED_TEXT_MARKER
         assert lines[2] == f"**Commit brief:** {BASE[:12]}-{C3[:12]}.md"
         assert "**Plan:**" not in report
         fence = lines.index("```text")
@@ -555,7 +557,9 @@ class TestTheAbsentAtHeadLabel:
 class TestPlanReportsAreUnchanged:
     def test_report_md_has_no_commit_line(self, tmp_path):
         report, _html, _data, _ = report_for(tmp_path, commit=False)
-        lines = report.splitlines()
+        # Under the report grammar's first line (`report_markdown`).
+        marker, *lines = report.splitlines()
+        assert marker == ESCAPED_TEXT_MARKER
         assert lines[:3] == ["# Code Review Report", "", f"**Plan:** {BASE[:12]}-{C3[:12]}.md"]
         assert lines[3].startswith("**Generated:** ")
         assert lines[4:6] == ["**Files Changed:** 3", ""]

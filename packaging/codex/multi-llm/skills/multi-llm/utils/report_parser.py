@@ -10,15 +10,48 @@ from typing import Dict, List, Optional, Set, Tuple
 
 try:
     from .judge_vocab import JUDGE_DECIDE, upgrade_legacy
+    from . import report_markdown as rm
 except ImportError:  # pragma: no cover - imported with utils/ on sys.path
     from judge_vocab import JUDGE_DECIDE, upgrade_legacy
+    import report_markdown as rm
 
 # Regex for extracting display hashes from bracket notation in report headers.
 # Matches 8-16 char lowercase hex strings inside square brackets.
 _HASH_RE = re.compile(r'\[([0-9a-f]{8,16})\]')
 
 #: A code-review issue header, anchored at column 0.
-_ISSUE_HEADER_RE = re.compile(r'^###[ \t]+(\d+)\.[^\n]*$', re.MULTILINE)
+_ISSUE_HEADER_RE = rm.ISSUE_HEADER_RE
+
+#: An item's override boxes in precedence order: invalid > valid >
+#: judge_decide (an explicit valid/invalid is a firmer signal than "you
+#: decide"), so "invalid" wins when both are ticked (safety-first).
+_ITEM_OVERRIDES = (
+    (rm.MARK_INVALID, "invalid"),
+    (rm.MARK_VALID, "valid"),
+    (rm.LET_AGENT_DECIDE, JUDGE_DECIDE),
+)
+
+#: A consolidated group's: invalid > needs-human-decision > valid >
+#: judge_decide.
+_CONSOLIDATED_OVERRIDES = (
+    (rm.MARK_INVALID, "invalid"),
+    (rm.NEEDS_HUMAN, "needs-human-decision"),
+    (rm.MARK_VALID, "valid"),
+    (rm.LET_AGENT_DECIDE, JUDGE_DECIDE),
+)
+
+
+def _warn_unhashed(refused: List[str], header: str, report_path: str) -> None:
+    """Say which unhashed headers a mixed report's parse ignored
+    (``report_markdown.hashed_headers``)."""
+    if refused:
+        names = ", ".join(sorted(set(refused)))
+        print(
+            f"WARNING: {report_path} has unhashed {header} headers ({names}) "
+            f"among hashed ones; the report writer never mixes the two, so "
+            f"their checkboxes and text are ignored.",
+            file=sys.stderr,
+        )
 
 
 def _strip_scope_fields(data, source: str):
@@ -136,13 +169,12 @@ def parse_skipped_suggestions(report_path: str) -> Set[str]:
     content = Path(report_path).read_text(encoding='utf-8')
     skipped = set()
 
-    # Pattern: ### S001: ... followed by - [x/etc] Skip (case insensitive)
-    # Allow any non-blank content inside checkbox brackets
-    pattern = r'###\s+(S\d+):[^\n]*\n-\s*\[\s*[^\]\s]+\s*\]\s*skip'
-
-    for match in re.finditer(pattern, content, re.IGNORECASE):
-        suggestion_id = match.group(1)
-        skipped.add(suggestion_id)
+    # The box on the line immediately under the header; any non-blank mark
+    # inside the brackets counts as ticked (case insensitive).
+    for match in rm.FLAT_SUGGESTION_HEADER_RE.finditer(content):
+        line = rm.line_after(content, match.end())
+        if line is not None and rm.is_checked(line, rm.SKIP):
+            skipped.add(match.group(1))
 
     return skipped
 
@@ -169,13 +201,9 @@ def parse_skipped_issues(report_path: str) -> Set[int]:
 
     # The box on the line immediately under the header. Any non-blank content
     # inside the brackets counts as ticked.
-    box = re.compile(r'-\s*\[\s*[^\]\s]+\s*\]\s*skip', re.IGNORECASE)
-
     for match in _issue_headers(content):
-        # `$` stops before the header's own newline, so element 1 is the line
-        # under it — the box has to be there, exactly as it always had to be.
-        after = content[match.end():].split("\n", 2)
-        if len(after) > 1 and box.match(after[1]):
+        line = rm.line_after(content, match.end())
+        if line is not None and rm.is_checked(line, rm.SKIP):
             skipped.add(int(match.group(1)))
 
     return skipped
@@ -189,6 +217,9 @@ def parse_skipped_groups(report_path: str) -> Set[str]:
         v2: ## G1 [a1b2c3d4]: Theme  (hash extracted from brackets)
         v1: ## G1: Theme              (legacy -- mapped via grouped.json)
 
+    An unhashed header in a report that also has hashed ones is ignored
+    (``report_markdown.hashed_headers``).
+
     Returns:
         Set of group hash strings marked with [x/etc] Skip this group
     """
@@ -198,24 +229,26 @@ def parse_skipped_groups(report_path: str) -> Set[str]:
     content = Path(report_path).read_text(encoding='utf-8')
     skipped_hashes: Set[str] = set()
     skipped_indices: Set[int] = set()
+    refused: List[str] = []
     found_bracket_notation = False
 
-    # Pattern: ## G{N} [{hash}]: ... or ## G{N}: ... followed by skip checkbox
-    # The hash bracket is optional -- we detect format by checking whether any
-    # matches contain it.
-    pattern = (
-        r'##\s+G(\d+)'
-        r'(?:\s+\[([0-9a-f]{8,16})\])?'
-        r':[^\n]*\n+\s*-\s*\[\s*[^\]\s]+\s*\]\s*skip\s+this\s+group'
-    )
-
-    for match in re.finditer(pattern, content, re.IGNORECASE):
+    # The box is the first non-blank line under the header.
+    for section in rm.plan_sections(content):
+        if section.kind != rm.GROUP:
+            continue
+        line = section.first_line()
+        if line is None or not rm.is_checked(line, rm.SKIP_GROUP):
+            continue
+        match = section.match
         hash_val = match.group(2)
-        if hash_val:
+        if not section.trusted:
+            refused.append(f"G{match.group(1)}")
+        elif hash_val:
             found_bracket_notation = True
             skipped_hashes.add(hash_val)
         else:
             skipped_indices.add(int(match.group(1)))
+    _warn_unhashed(refused, "`## G{N}:`", report_path)
 
     # Map any positional indices to hashes via grouped.json
     if skipped_indices:
@@ -260,23 +293,27 @@ def parse_skipped_group_suggestions(report_path: str) -> Set[str]:
     content = Path(report_path).read_text(encoding='utf-8')
     skipped_hashes: Set[str] = set()
     skipped_positional: Set[str] = set()
+    refused: List[str] = []
     found_bracket_notation = False
 
-    # Pattern: ### G{N}S{M} [{hash}]: ... or ### G{N}S{M}: ...
-    # followed by skip checkbox (but NOT "Skip this group")
-    pattern = (
-        r'###\s+(G\d+S\d+)'
-        r'(?:\s+\[([0-9a-f]{8,16})\])?'
-        r':[^\n]*\n-\s*\[\s*[^\]\s]+\s*\]\s*skip\b(?!\s+this\s+group)'
-    )
-
-    for match in re.finditer(pattern, content, re.IGNORECASE):
+    # The Skip box (not "Skip this group") on the line immediately under the
+    # header.
+    for section in rm.plan_sections(content):
+        if section.kind != rm.SUGGESTION:
+            continue
+        line = section.line_under()
+        if line is None or not rm.is_checked(line, rm.SKIP):
+            continue
+        match = section.match
         hash_val = match.group(2)
-        if hash_val:
+        if not section.trusted:
+            refused.append(match.group(1).upper())
+        elif hash_val:
             found_bracket_notation = True
             skipped_hashes.add(hash_val)
         else:
             skipped_positional.add(match.group(1).upper())
+    _warn_unhashed(refused, "`### G{N}S{M}:`", report_path)
 
     # Map any positional IDs to hashes via grouped.json
     if skipped_positional:
@@ -378,49 +415,30 @@ def parse_suggestion_descriptions(report_path: str) -> Dict[str, str]:
     content = Path(report_path).read_text(encoding='utf-8')
     descriptions_by_hash: Dict[str, str] = {}
     descriptions_by_positional: Dict[str, str] = {}
+    refused: List[str] = []
     found_bracket_notation = False
 
-    # Pattern to find suggestion headers and capture everything until ---
-    # Header format: ### G1S1 [hash]: Title  OR  ### G1S1: Title
-    pattern = (
-        r'###\s+(G\d+S\d+)'
-        r'(?:\s+\[([0-9a-f]{8,16})\])?'
-        r':[^\n]*\n(.*?)(?=\n---|\n###|\Z)'
-    )
-
-    for match in re.finditer(pattern, content, re.DOTALL):
+    # Each suggestion header and everything under it up to the next `---` or
+    # `###` line. Header format: ### G1S1 [hash]: Title  OR  ### G1S1: Title
+    escaped = rm.has_escaped_text(content)
+    matches, trust_unhashed = rm.hashed_headers(content, rm.SUGGESTION_HEADER_RE)
+    for match in matches:
         positional_id = match.group(1)
         hash_val = match.group(2)
-        block = match.group(3)
-
-        # Find the metadata line and extract text after it
-        # Metadata starts with **Validation:** or **Importance:**
-        metadata_pattern = r'\*\*(?:Validation|Importance):\*\*[^\n]*\n'
-        metadata_match = re.search(metadata_pattern, block)
-
-        if metadata_match:
-            # Description is everything after the metadata line
-            desc_start = metadata_match.end()
-            description = block[desc_start:]
-        else:
-            # No metadata line found, use the whole block after the checkbox line
-            # Skip the checkbox line (- [ ] Skip or - [x] Skip)
-            checkbox_pattern = r'-\s*\[[^\]]*\]\s*[Ss]kip[^\n]*\n'
-            checkbox_match = re.search(checkbox_pattern, block)
-            if checkbox_match:
-                description = block[checkbox_match.end():]
-            else:
-                description = block
-
-        # Clean up the description
-        description = description.strip()
+        block = _description_block(content, match)
+        if block is None:
+            continue
+        description = _description_text(block, escaped)
 
         if description:
             if hash_val:
                 found_bracket_notation = True
                 descriptions_by_hash[hash_val] = description
-            else:
+            elif trust_unhashed:
                 descriptions_by_positional[positional_id.upper()] = description
+            else:
+                refused.append(positional_id.upper())
+    _warn_unhashed(refused, "`### G{N}S{M}:`", report_path)
 
     # Map positional IDs to hashes via grouped.json fallback
     if descriptions_by_positional:
@@ -466,40 +484,49 @@ def parse_issue_descriptions(report_path: str) -> Dict[int, str]:
     content = Path(report_path).read_text(encoding='utf-8')
     descriptions = {}
 
-    # Pattern to find issue headers and capture everything until ---
-    # Header format: ### 1. Title
-    pattern = r'###\s+(\d+)\.[^\n]*\n(.*?)(?=\n---|\n###|\Z)'
-
-    for match in re.finditer(pattern, content, re.DOTALL):
-        issue_index = int(match.group(1))
-        block = match.group(2)
-
-        # Find the metadata line and extract text after it
-        # Metadata starts with **Validation:** or **Importance:**
-        metadata_pattern = r'\*\*(?:Validation|Importance):\*\*[^\n]*\n'
-        metadata_match = re.search(metadata_pattern, block)
-
-        if metadata_match:
-            # Description is everything after the metadata line
-            desc_start = metadata_match.end()
-            description = block[desc_start:]
-        else:
-            # No metadata line found, use the whole block after the checkbox line
-            # Skip the checkbox line (- [ ] Skip or - [x] Skip)
-            checkbox_pattern = r'-\s*\[[^\]]*\]\s*[Ss]kip[^\n]*\n'
-            checkbox_match = re.search(checkbox_pattern, block)
-            if checkbox_match:
-                description = block[checkbox_match.end():]
-            else:
-                description = block
-
-        # Clean up the description
-        description = description.strip()
-
+    # Each issue header `_issue_headers` accepts and everything under it up to
+    # the next `---` or `###` line. Header format: ### 1. Title
+    escaped = rm.has_escaped_text(content)
+    for match in _issue_headers(content):
+        block = _description_block(content, match)
+        if block is None:
+            continue
+        description = _description_text(block, escaped)
         if description:
-            descriptions[issue_index] = description
+            descriptions[int(match.group(1))] = description
 
     return descriptions
+
+
+#: The metadata line a description follows: ``**Validation:**`` or
+#: ``**Importance:**``.
+_METADATA_RE = re.compile(r'\*\*(?:Validation|Importance):\*\*[^\n]*\n')
+#: The Skip box line, for a block with no metadata line.
+_SKIP_LINE_RE = re.compile(r'^[ \t]*-[ \t]*\[[^\]\n]*\][ \t]*[Ss]kip[^\n]*\n', re.MULTILINE)
+
+
+def _description_block(content: str, match: "re.Match[str]") -> Optional[str]:
+    """The text under a header up to the next ``---`` or ``###`` line, or
+    ``None`` for a header that ends the file."""
+    if not content.startswith("\n", match.end()):
+        return None
+    start = match.end() + 1
+    stop = _BLOCK_END_RE.search(content, start)
+    return content[start:stop.start() if stop else len(content)]
+
+
+def _description_text(block: str, escaped: bool) -> str:
+    """The description in a header's block: what follows the metadata line
+    (else the Skip box line), stripped, with the report's escaping undone
+    when it has any (*escaped*: ``report_markdown.has_escaped_text``)."""
+    metadata_match = _METADATA_RE.search(block)
+    if metadata_match:
+        description = block[metadata_match.end():]
+    else:
+        checkbox_match = _SKIP_LINE_RE.search(block)
+        description = block[checkbox_match.end():] if checkbox_match else block
+    description = description.strip()
+    return rm.restore_model_text(description) if escaped else description
 
 
 def find_edited_descriptions(
@@ -582,15 +609,23 @@ _BLOCK_END_RE = re.compile(r'\n---|\n###')
 def _is_block_cut(original_desc: str, report_desc: str) -> bool:
     """True when *report_desc* is *original_desc* cut where the parser stops.
 
-    A description holding its own ``---`` rule or ``###`` line is rendered
-    whole but read back only up to that line, so an untouched report would
-    otherwise read as an edit that drops the rest of the description.
+    A description holding its own ``---`` rule is rendered whole but read back
+    only up to that line, so an untouched report would otherwise read as an
+    edit that drops the rest of the description. A ``###`` line cuts it too in
+    a report written before ``report_markdown.neutralize_model_text``; a
+    current report escapes it and is read back un-escaped, so both renderings
+    are checked, each as the parser reads it.
     """
-    text = (original_desc or '').replace('\r\n', '\n')
-    match = _BLOCK_END_RE.search(text)
-    if not match:
-        return False
-    return normalize_description(text[:match.start()]) == normalize_description(report_desc)
+    raw = (original_desc or '').replace('\r\n', '\n')
+    report = normalize_description(report_desc)
+    escaped = rm.neutralize_model_text(raw)
+    for text, read_back in ((raw, str), (escaped, rm.restore_model_text)):
+        match = _BLOCK_END_RE.search(text)
+        if match and normalize_description(
+            read_back(text[:match.start()])
+        ) == report:
+            return True
+    return False
 
 
 def load_html_selections(
@@ -797,55 +832,28 @@ def parse_validation_overrides_groups(report_path: str) -> Dict[str, str]:
     content = Path(report_path).read_text(encoding='utf-8')
     overrides_by_hash: Dict[str, str] = {}
     overrides_by_index: Dict[int, str] = {}
+    refused: List[str] = []
     found_bracket_notation = False
 
-    # Split content into group sections by ## G{n} [{hash}]: or ## G{n}: headers
-    group_pattern = r'##\s+G(\d+)(?:\s+\[([0-9a-f]{8,16})\])?:[^\n]*'
-    group_matches = list(re.finditer(group_pattern, content, re.IGNORECASE))
-
-    for i, match in enumerate(group_matches):
-        group_idx = int(match.group(1))
+    # A group's own region (``report_markdown.plan_sections``): from its header
+    # to its first suggestion, so a suggestion's box is never the group's. A
+    # ticked box (any non-blank mark) on a line of its own counts.
+    for section in rm.plan_sections(content):
+        if section.kind != rm.GROUP:
+            continue
+        override_val = rm.first_checked(section.body, _ITEM_OVERRIDES)
+        if not override_val:
+            continue
+        match = section.match
         hash_val = match.group(2)
-        # Get the block between this header and the next ## or --- or end
-        start = match.end()
-        if i + 1 < len(group_matches):
-            end = group_matches[i + 1].start()
+        if not section.trusted:
+            refused.append(f"G{match.group(1)}")
+        elif hash_val:
+            found_bracket_notation = True
+            overrides_by_hash[hash_val] = override_val
         else:
-            end = len(content)
-        block = content[start:end]
-
-        # Check for "Mark valid" checkbox (checked = any non-blank content in brackets)
-        valid_checked = bool(re.search(
-            r'-\s*\[\s*[^\]\s]+\s*\]\s*mark\s+valid',
-            block, re.IGNORECASE
-        ))
-        # Check for "Mark invalid" checkbox
-        invalid_checked = bool(re.search(
-            r'-\s*\[\s*[^\]\s]+\s*\]\s*mark\s+invalid',
-            block, re.IGNORECASE
-        ))
-        # Check for "Let the agent decide" checkbox (routing marker, not a status)
-        judge_decide_checked = bool(re.search(
-            r'-\s*\[\s*[^\]\s]+\s*\]\s*let\s+(?:claude|the\s+agent)\s+decide',
-            block, re.IGNORECASE
-        ))
-
-        # Precedence: invalid > valid > judge_decide (an explicit valid/invalid
-        # is a firmer signal than "you decide").
-        override_val = None
-        if invalid_checked:
-            override_val = "invalid"  # invalid wins if both checked
-        elif valid_checked:
-            override_val = "valid"
-        elif judge_decide_checked:
-            override_val = JUDGE_DECIDE
-
-        if override_val:
-            if hash_val:
-                found_bracket_notation = True
-                overrides_by_hash[hash_val] = override_val
-            else:
-                overrides_by_index[group_idx] = override_val
+            overrides_by_index[int(match.group(1))] = override_val
+    _warn_unhashed(refused, "`## G{N}:`", report_path)
 
     # Map positional indices to hashes via grouped.json
     if overrides_by_index:
@@ -898,53 +906,30 @@ def parse_suggestion_validation_overrides(report_path: str) -> Dict[str, str]:
     content = Path(report_path).read_text(encoding='utf-8')
     overrides_by_hash: Dict[str, str] = {}
     overrides_by_positional: Dict[str, str] = {}
+    refused: List[str] = []
     found_bracket_notation = False
 
-    # Split content by suggestion headers (### G{n}S{m} [{hash}]: ...)
-    sugg_pattern = r'###\s+(G\d+S\d+)(?:\s+\[([0-9a-f]{8,16})\])?:[^\n]*'
-    sugg_matches = list(re.finditer(sugg_pattern, content, re.IGNORECASE))
-
-    for i, match in enumerate(sugg_matches):
+    # A suggestion's region (``report_markdown.plan_sections``): to the next
+    # group or suggestion header, refused ones included, or its group's
+    # closing `---`, so neither a forged header's box nor the next group's
+    # own box reads as this suggestion's.
+    for section in rm.plan_sections(content):
+        if section.kind != rm.SUGGESTION:
+            continue
+        override_val = rm.first_checked(section.body, _ITEM_OVERRIDES)
+        if not override_val:
+            continue
+        match = section.match
         positional_id = match.group(1).upper()
         hash_val = match.group(2)
-        start = match.end()
-        if i + 1 < len(sugg_matches):
-            end = sugg_matches[i + 1].start()
+        if not section.trusted:
+            refused.append(positional_id)
+        elif hash_val:
+            found_bracket_notation = True
+            overrides_by_hash[hash_val] = override_val
         else:
-            # Look for next ## or --- as section boundary
-            next_section = re.search(r'\n(?:##[^#]|---)', content[start:])
-            end = start + next_section.start() if next_section else len(content)
-        block = content[start:end]
-
-        valid_checked = bool(re.search(
-            r'-\s*\[\s*[^\]\s]+\s*\]\s*mark\s+valid',
-            block, re.IGNORECASE
-        ))
-        invalid_checked = bool(re.search(
-            r'-\s*\[\s*[^\]\s]+\s*\]\s*mark\s+invalid',
-            block, re.IGNORECASE
-        ))
-        # Check for "Let the agent decide" checkbox (routing marker, not a status)
-        judge_decide_checked = bool(re.search(
-            r'-\s*\[\s*[^\]\s]+\s*\]\s*let\s+(?:claude|the\s+agent)\s+decide',
-            block, re.IGNORECASE
-        ))
-
-        # Precedence: invalid > valid > judge_decide.
-        override_val = None
-        if invalid_checked:
-            override_val = "invalid"  # invalid wins if both checked
-        elif valid_checked:
-            override_val = "valid"
-        elif judge_decide_checked:
-            override_val = JUDGE_DECIDE
-
-        if override_val:
-            if hash_val:
-                found_bracket_notation = True
-                overrides_by_hash[hash_val] = override_val
-            else:
-                overrides_by_positional[positional_id] = override_val
+            overrides_by_positional[positional_id] = override_val
+    _warn_unhashed(refused, "`### G{N}S{M}:`", report_path)
 
     # Map positional IDs to hashes via grouped.json
     if overrides_by_positional:
@@ -1000,41 +985,10 @@ def parse_validation_overrides_issues(report_path: str) -> Dict[int, str]:
 
     # Split into issue sections by the headers `_issue_headers` accepts — a
     # `### N.` line inside a description is description text, not a new block.
-    issue_matches = _issue_headers(content)
-
-    for i, match in enumerate(issue_matches):
-        issue_idx = int(match.group(1))
-        # Get the block between this header and the next ### or ## or --- or end
-        start = match.end()
-        if i + 1 < len(issue_matches):
-            end = issue_matches[i + 1].start()
-        else:
-            end = len(content)
-        block = content[start:end]
-
-        # Check for "Mark valid" checkbox (checked = any non-blank content in brackets)
-        valid_checked = bool(re.search(
-            r'-\s*\[\s*[^\]\s]+\s*\]\s*mark\s+valid',
-            block, re.IGNORECASE
-        ))
-        # Check for "Mark invalid" checkbox
-        invalid_checked = bool(re.search(
-            r'-\s*\[\s*[^\]\s]+\s*\]\s*mark\s+invalid',
-            block, re.IGNORECASE
-        ))
-        # Check for "Let the agent decide" checkbox (routing marker, not a status)
-        judge_decide_checked = bool(re.search(
-            r'-\s*\[\s*[^\]\s]+\s*\]\s*let\s+(?:claude|the\s+agent)\s+decide',
-            block, re.IGNORECASE
-        ))
-
-        # Precedence: invalid > valid > judge_decide.
-        if invalid_checked:
-            overrides[issue_idx] = "invalid"  # invalid wins if both checked
-        elif valid_checked:
-            overrides[issue_idx] = "valid"
-        elif judge_decide_checked:
-            overrides[issue_idx] = JUDGE_DECIDE
+    for match, block in rm.sections(content, _issue_headers(content)):
+        override_val = rm.first_checked(block, _ITEM_OVERRIDES)
+        if override_val:
+            overrides[int(match.group(1))] = override_val
 
     return overrides
 
@@ -1056,16 +1010,12 @@ def parse_consolidated_skipped_groups(report_path: str) -> Set[str]:
     content = Path(report_path).read_text(encoding='utf-8')
     skipped = set()
 
-    # Pattern: ## CG{N} [{consolidated_id}]: ... followed by - [x/etc] Skip this group
-    # Allow any non-blank content inside checkbox brackets
-    pattern = (
-        r'##\s+CG\d+\s+\[([0-9a-fA-F]{12})\]:[^\n]*'
-        r'\n+\s*-\s*\[\s*[^\]\s]+\s*\]\s*skip\s+this\s+group'
-    )
-
-    for match in re.finditer(pattern, content, re.IGNORECASE):
-        consolidated_id = match.group(1)
-        skipped.add(consolidated_id)
+    # The box is the first non-blank line under the header; any non-blank
+    # mark inside the brackets counts as ticked.
+    for match in rm.CONSOLIDATED_HEADER_RE.finditer(content):
+        line = rm.first_line_after(content, match.end())
+        if line is not None and rm.is_checked(line, rm.SKIP_GROUP):
+            skipped.add(match.group(1))
 
     return skipped
 
@@ -1093,52 +1043,12 @@ def parse_consolidated_validation_overrides(report_path: str) -> Dict[str, str]:
     content = Path(report_path).read_text(encoding='utf-8')
     overrides = {}
 
-    # Split content into consolidated group sections by ## CG{N} [{id}]: headers
-    cg_pattern = r'##\s+CG\d+\s+\[([0-9a-fA-F]{12})\]:[^\n]*'
-    cg_matches = list(re.finditer(cg_pattern, content))
-
-    for i, match in enumerate(cg_matches):
-        consolidated_id = match.group(1)
-        # Get the block between this header and the next ## or end
-        start = match.end()
-        if i + 1 < len(cg_matches):
-            end = cg_matches[i + 1].start()
-        else:
-            end = len(content)
-        block = content[start:end]
-
-        # Check for "Mark valid" checkbox (checked = any non-blank content in brackets)
-        valid_checked = bool(re.search(
-            r'-\s*\[\s*[^\]\s]+\s*\]\s*mark\s+valid',
-            block, re.IGNORECASE
-        ))
-        # Check for "Mark invalid" checkbox
-        invalid_checked = bool(re.search(
-            r'-\s*\[\s*[^\]\s]+\s*\]\s*mark\s+invalid',
-            block, re.IGNORECASE
-        ))
-        # Check for "Needs human attention" checkbox
-        needs_human_checked = bool(re.search(
-            r'-\s*\[\s*[^\]\s]+\s*\]\s*needs\s+human\s+attention',
-            block, re.IGNORECASE
-        ))
-        # Check for "Let the agent decide" checkbox (routing marker, not a status)
-        judge_decide_checked = bool(re.search(
-            r'-\s*\[\s*[^\]\s]+\s*\]\s*let\s+(?:claude|the\s+agent)\s+decide',
-            block, re.IGNORECASE
-        ))
-
-        # 4-state priority: invalid > needs-human-decision > valid >
-        # judge_decide (an explicit invalid/needs-human/valid is a firmer
-        # signal than "you decide").
-        if invalid_checked:
-            overrides[consolidated_id] = "invalid"
-        elif needs_human_checked:
-            overrides[consolidated_id] = "needs-human-decision"
-        elif valid_checked:
-            overrides[consolidated_id] = "valid"
-        elif judge_decide_checked:
-            overrides[consolidated_id] = JUDGE_DECIDE
+    # Each consolidated group's block runs to the next `## CG` header.
+    matches = list(rm.CONSOLIDATED_HEADER_RE.finditer(content))
+    for match, block in rm.sections(content, matches):
+        override_val = rm.first_checked(block, _CONSOLIDATED_OVERRIDES)
+        if override_val:
+            overrides[match.group(1)] = override_val
 
     return overrides
 
@@ -1296,9 +1206,7 @@ def merge_consolidated_selections(
 #: The footer `generate_review_report` stamps and `parse_issue_numbering_digest`
 #: reads back. An HTML comment: it renders as nothing, and no parser above sees
 #: it as a block, a checkbox or a description.
-_ISSUE_DIGEST_RE = re.compile(
-    r"<!--\s*multi-llm:issues-digest\s+([0-9a-f]{8,64})\s*-->"
-)
+_ISSUE_DIGEST_RE = rm.ISSUE_DIGEST_RE
 
 
 def issue_numbering_digest(issues: List[Dict]) -> str:
@@ -1344,5 +1252,4 @@ def parse_issue_numbering_digest(report_path: str) -> Optional[str]:
             text = handle.read()
     except OSError:
         return None
-    match = _ISSUE_DIGEST_RE.search(text)
-    return match.group(1) if match else None
+    return rm.issue_digest(text)
