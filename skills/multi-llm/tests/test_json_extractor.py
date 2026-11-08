@@ -2,6 +2,7 @@
 
 import json
 import random
+import re
 import subprocess
 import sys
 import textwrap
@@ -16,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import json_extractor
 from utils.json_extractor import (
     _balanced_spans,
+    _fenced_spans,
     build_unsanitize_map,
     describe_syntax_error,
     extract_json_from_text,
@@ -1349,3 +1351,168 @@ class TestCandidateBudget:
                      json_extractor._CANDIDATE_BUDGET_PER_CHAR * 2 * 524288)
         assert result["chars"] <= budget
         assert result["elapsed"] < 30, result
+
+
+# ---------------------------------------------------------------------------
+# The fenced-block scan: one forward pass that must equal the fence pattern
+# ---------------------------------------------------------------------------
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _fenced_spans_by_pattern(text):
+    """The oracle: strategy 1's fence search as it was before it became linear,
+    returning each match's first-group span instead of its text. Quadratic on
+    fences with no closing bracket after them: keep the inputs handed to it
+    small."""
+    return [
+        match.span(1)
+        for match in re.finditer(r"```(?:json)?\s*([\[\{][\s\S]*?[\]\}])\s*```", text)
+    ]
+
+
+def _assert_fences_match_pattern(text):
+    assert _fenced_spans(text) == _fenced_spans_by_pattern(text), f"text={text!r}"
+
+
+#: Hand-written edges: language tags, unclosed fences, fences inside a block,
+#: backticks that are not three, closing brackets not followed by a fence,
+#: whitespace the pattern's ``\s`` counts (CRLF, NBSP, U+2028, U+001C).
+_FENCE_EDGE_CASES = [
+    "", "```", "``````", "```[", "```[]", "```[]```", "```{}```", "```json[1]```",
+    "```json\n[1]\n```", "```json\n{\"a\": 1}\n```", "```JSON\n[1]\n```",
+    "```jsonc\n[1]\n```", "```python\n[1]\n```", "```js\n[1]\n```", "```json json[1]```",
+    "````[1]````", "````json\n[1]\n````", "``[1]``", "~~~json\n[1]\n~~~",
+    "```[1]````", "```[1] ```x```", "```[1] x ```[2]```", "```[1]\n```\n```[2]\n```",
+    "```python\nprint(1)\n```\n```json\n[2]\n```", "```[``` ]```", "```[ ```[1]``` ]```",
+    "```[1]``````[2]```", "```[1]```[2]```", "```[1}```", "```{1]```", "```[[1],[2]]```",
+    "```[\"]```\"]```", "```json\r\n[1]\r\n```", "```json [1] ```",
+    "```json\x1c[1]\x1f```", "```\t\n [1] \t\n```", "] ``` [1] ```", "```json\n[1]\n",
+    "```json\n[1]", "prose ```json\n[{\"a\": [1, 2]}]\n``` more prose ``` tail",
+    "```json\n[1]\n``` ```json\n[\n``` ```json\n[3]\n```", "```" + "json" * 3 + "[1]```",
+    "x```[]```y```{}```z", "```json\n[1]\n```json\n[2]\n```", "```[]　```",
+]
+
+#: Token alphabets for random strings, each heavy in what the fence rule reads.
+_FENCE_ALPHABETS = (
+    ("```", "`", "json", "[", "]", "{", "}", " ", "\n", "x"),
+    ("```", "``", "````", "[", "]", " "),
+    ("```json\n", "```", "\n```", "[1]", "{}", "]", "}", "[", "{", "python\n", "\r\n"),
+    ("```", "json", "JSON", "[", "}", "\t", " ", " ", "\x1c", "\x85", "é", "a"),
+)
+
+
+def _fence_mix(rng):
+    """Prose and documents fenced every way a model fences one: tagged and not,
+    with another language, unclosed, cut short, closing on the same line."""
+    parts = []
+    for _ in range(rng.randint(1, 6)):
+        doc = json.dumps(_random_value(rng), indent=rng.choice([None, 2]))
+        opening = rng.choice(["```json\n", "```\n", "```", "```json ", "```python\n",
+                              "````json\n", "``` json\n", "```JSON\n"])
+        closing = rng.choice(["\n```", "```", "\n````", "\n", " ``` ", ""])
+        if rng.random() < 0.2:
+            doc = doc[: rng.randint(0, len(doc))]
+        parts.append(opening + doc + closing)
+        parts.append(rng.choice(_PROSE_NOISE + ("\n\n", " see ```x``` ", "`[1]`")))
+    return "".join(parts)
+
+
+def _fenced_fixture_texts():
+    """Every committed fixture holding a fence, decoded leniently: captured
+    provider output is the corpus fences come from."""
+    texts = []
+    for path in sorted(FIXTURES.rglob("*")):
+        if path.is_file():
+            text = path.read_bytes().decode("utf-8", errors="replace")
+            if "```" in text:
+                texts.append(text)
+    return texts
+
+
+class TestFencedSpansMatchThePattern:
+    """Strategy 1 finds fenced blocks in one forward pass. It must return
+    exactly the blocks the fence pattern matched — the same blocks in the same
+    order — because the last fenced block that parses is the answer
+    (clause 4)."""
+
+    @pytest.mark.parametrize("text", _FENCE_EDGE_CASES)
+    def test_hand_written_edges(self, text):
+        _assert_fences_match_pattern(text)
+        _assert_fences_match_pattern(text.strip())
+
+    @pytest.mark.parametrize("alphabet_index", range(len(_FENCE_ALPHABETS)))
+    def test_seeded_random_strings(self, alphabet_index):
+        rng = random.Random(20261109 + alphabet_index)
+        alphabet = _FENCE_ALPHABETS[alphabet_index]
+        for _ in range(5000):
+            length = rng.choice(
+                [rng.randint(0, 8), rng.randint(0, 30), rng.randint(0, 100)])
+            _assert_fences_match_pattern(
+                "".join(rng.choice(alphabet) for _ in range(length)))
+
+    def test_seeded_fence_mixes(self):
+        rng = random.Random(9090)
+        for _ in range(2000):
+            _assert_fences_match_pattern(_fence_mix(rng))
+        for _ in range(500):
+            _assert_fences_match_pattern(_document_mix(rng))
+
+    def test_every_fixture(self):
+        texts = _fenced_fixture_texts()
+        assert texts, f"no fixture under {FIXTURES} holds a fence"
+        for text in texts:
+            _assert_fences_match_pattern(text)
+            _assert_fences_match_pattern(text.strip())
+
+    def test_extraction_serves_the_same_document_either_way(self, monkeypatch):
+        """Downstream of the scan: the extractor gives the same answer on the
+        pattern's spans as on the scan's."""
+        rng = random.Random(31337)
+        texts = [_fence_mix(rng) for _ in range(300)] + _fenced_fixture_texts()
+
+        def results():
+            return [
+                (extract_json_from_text(text, prefer_arrays=True),
+                 extract_json_from_text(text, prefer_arrays=False))
+                for text in texts
+            ]
+
+        scanned = results()
+        monkeypatch.setattr(json_extractor, "_fenced_spans", _fenced_spans_by_pattern)
+        assert results() == scanned
+
+
+class TestFencedSpansAreLinear:
+    """The fence pattern was quadratic: every fence with no closing bracket
+    after it searched the rest of the reply, so 80 KB of `````[`` took about
+    4 s and 1 MiB about 12 minutes. The scan does 1 MiB in milliseconds. It
+    runs in a child process under a timeout, so a regression fails here
+    instead of hanging the suite."""
+
+    def test_a_megabyte_of_unclosed_fences_reads_in_bounded_time(self):
+        script = textwrap.dedent(f"""
+            import json, sys, time
+            sys.path.insert(0, {str(Path(__file__).parent.parent)!r})
+            from utils.json_extractor import extract_json_from_text
+            size = 1024 * 1024
+            texts = [
+                "```[" * (size // 4),
+                "```json\\n{{" * (size // 9),
+                "```[" * (size // 8) + "] x" * (size // 6),
+                "```[" + ("]" + " " * 64 + "x") * (size // 66),
+            ]
+            started = time.perf_counter()
+            for text in texts:
+                for prefer_arrays in (True, False):
+                    extract_json_from_text(text, prefer_arrays=prefer_arrays)
+            print(json.dumps({{"elapsed": time.perf_counter() - started}}))
+        """)
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-c", script], capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            pytest.fail("reading 1 MiB of unclosed fences took over 60 s: the fence "
+                        "scan has gone quadratic again (see _fenced_spans)")
+        assert completed.returncode == 0, completed.stderr[-3000:]
+        assert json.loads(completed.stdout)["elapsed"] < 20

@@ -507,6 +507,68 @@ def _loads_reply(candidate: str) -> Any:
     return json.loads(candidate, strict=False)
 
 
+#: A markdown code fence.
+_FENCE = "```"
+#: The last character of a fenced block: a closing bracket that nothing but
+#: whitespace separates from the fence after it.
+_FENCED_BLOCK_END = re.compile(r"[\]}](?=\s*```)")
+#: A run of whitespace, possibly empty, by the same ``\s`` the fence rule uses.
+_WHITESPACE = re.compile(r"\s*")
+
+
+def _fenced_spans(text: str) -> List[Tuple[int, int]]:
+    """``(start, end)`` of every fenced block :func:`extract_json_from_text`
+    tries, in order of position.
+
+    These are the spans of group 1 of ``re.finditer(pattern, text)`` for the
+    pattern below, which is the rule:
+
+        ```(?:json)?\\s*([\\[\\{][\\s\\S]*?[\\]\\}])\\s*```
+
+    * a fence is three backticks anywhere in the text. A block opens at a
+      fence followed by an optional lower-case ``json`` and then any
+      whitespace, if the next character is ``[`` or ``{``. Any other tag
+      (``python``, ``JSON``, ``jsonc``) or a fourth backtick opens nothing, and
+      the next fence is looked for one character on, so a fence that closes
+      another language's block can still open one.
+    * the block is the shortest stretch from that bracket to a ``]`` or ``}``
+      that nothing but whitespace separates from a fence. Brackets are not
+      matched, so a block may hold fences and brackets of its own.
+    * the next block is looked for after that closing fence.
+
+    Matching the pattern is quadratic: every opening without a closing bracket
+    after it searches the rest of the text, and model output is not trusted.
+    Here the openings take their closing brackets from one forward pass instead:
+    an opening's block starts after the previous one's, so a closing bracket
+    passed over is never wanted again, and an opening with no closing bracket
+    after it means none of the later ones has one either. The scan is linear in
+    *text*. ``tests/test_json_extractor.py::TestFencedSpansMatchThePattern`` pins
+    it against the pattern.
+    """
+    spans: List[Tuple[int, int]] = []
+    fence = text.find(_FENCE)
+    if fence < 0:
+        return spans
+    block_ends = _FENCED_BLOCK_END.finditer(text, fence + 4)
+    block_end = -1  # the closing bracket read last; None once there are no more
+    while fence >= 0:
+        start = fence + 3
+        if text.startswith("json", start):
+            start += 4
+        start = _WHITESPACE.match(text, start).end()
+        if text[start:start + 1] not in ("[", "{"):
+            fence = text.find(_FENCE, fence + 1)
+            continue
+        while block_end is not None and block_end <= start:
+            found = next(block_ends, None)
+            block_end = None if found is None else found.start()
+        if block_end is None:
+            break
+        spans.append((start, block_end + 1))
+        fence = text.find(_FENCE, _WHITESPACE.match(text, block_end + 1).end() + 3)
+    return spans
+
+
 def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, Any]:
     """Extract JSON with multiple fallback strategies.
 
@@ -585,13 +647,10 @@ def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, A
     # finds that same fence body among its candidates (a fence lives inside
     # `text`) and ranks it against everything outside the fences before serving
     # it as a last resort.
-    fence_matches = list(
-        re.finditer(r"```(?:json)?\s*([\[\{][\s\S]*?[\]\}])\s*```", text)
-    )
     fence_fallbacks: Dict[int, Any] = {}
-    for match in reversed(fence_matches):
+    for start, end in reversed(_fenced_spans(text)):
         try:
-            fence_data = _loads_reply(match.group(1))
+            fence_data = _loads_reply(text[start:end])
         except _UNPARSED:
             continue
         rank = _answer_rank(fence_data)
