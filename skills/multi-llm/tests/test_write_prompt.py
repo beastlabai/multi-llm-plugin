@@ -27,7 +27,7 @@ from utils import prior_changes  # noqa: E402
 from utils import write_prompt  # noqa: E402
 from utils.cli_common import parse_result_line  # noqa: E402
 from utils.subagent_tasks import PRIOR_CHANGES_TOKEN  # noqa: E402
-from utils.write_batch_scheduler import WriteBatchScheduler  # noqa: E402
+from utils.write_batch_scheduler import RESULT_IDS_HEADING, WriteBatchScheduler  # noqa: E402
 from utils.subagent_executor import CHECK_FINDING_MAX_CHARS, check_findings_from  # noqa: E402
 from utils.write_phase_bridge import (  # noqa: E402
     WRITE_TASK_FILENAME,
@@ -176,6 +176,96 @@ class TestTheTwoInvokersRenderTheSameBytes:
             write_prompt.render_write_prompt(phase_dir, "apply-batch-0")
         assert PRIOR_CHANGES_TOKEN in str(exc.value)
         assert "Nothing was dispatched" in str(exc.value)
+
+
+def _code_fix_batches():
+    return [
+        {"file_key": "src/a.py", "prompt": PROMPT,
+         "fixes": [{"group_id": "f-parse", "title": "Fix the parser"},
+                   {"group_id": "f-null", "title": "Guard the null"}]},
+        {"file_key": "src/b.py",
+         "prompt": PROMPT.replace("Add email validation", "Add rate limiting"),
+         "fixes": [{"group_id": "f-rate", "title": "Add rate limiting"}]},
+    ]
+
+
+def _implement_code_batches():
+    return [
+        {"batch_index": index, "can_parallelize": False, "tasks": [
+            {"id": task_id, "title": title, "prompt": PROMPT.replace(
+                "Add email validation", title),
+             "files_to_create": [f"src/{task_id}.py"],
+             "depends_on": [] if index == 0 else ["T001"], "executor_role": "agent"},
+        ]}
+        for index, (task_id, title) in enumerate((("T001", "Foundation"), ("T002", "Follow-up")))
+    ]
+
+
+class TestTheSharedBlocksLeadAndTheIdsClose:
+    """PERF-9 (docs/development/write-scheduler.md "Prompt order"): the text
+    every batch of a phase shares — process safety, git, scratch files, the
+    result shape and the check contracts — leads, so a provider can cache it
+    as a prefix; the batch prompt follows, and the line naming the batch's
+    expected ids closes the prompt (for the apply kinds, with the
+    `declined` line that refers to it). Both legs, every write kind."""
+
+    BATCH_START = "# Apply these suggestions"
+
+    @pytest.mark.parametrize("leg", ["native", "executor"])
+    @pytest.mark.parametrize("kind,phase,batches,task_ids", [
+        ("apply_suggestions", "apply-suggestions", _suggestion_batches(),
+         ("apply-batch-0", "apply-batch-1")),
+        ("apply_task_suggestions", "apply-task-suggestions", _suggestion_batches(),
+         ("apply-task-batch-0", "apply-task-batch-1")),
+        ("apply_code_fixes", "apply-code-fixes", _code_fix_batches(),
+         ("apply-fix-batch-0", "apply-fix-batch-1")),
+        ("implement", "implement", _implement_code_batches(), ("T001", "T002")),
+    ])
+    def test_the_contract_leads_and_the_expected_ids_close(
+        self, plan_dir, leg, kind, phase, batches, task_ids,
+    ):
+        plan, out = plan_dir
+        phase_dir, tasks = _materialize(plan, out, kind, batches, phase)
+        leads = []
+        for task_id in task_ids:
+            task = next(t for t in tasks if t["task_id"] == task_id)
+            if leg == "native":
+                text, _task, _info = write_prompt.render_write_prompt(phase_dir, task_id)
+            else:
+                text = _executor_rendering(kind, out, phase, task)
+            expected = task["expected_ids"]
+            assert expected
+
+            assert text.startswith("## Process safety (required)\n\n")
+            batch = text.index(self.BATCH_START)
+            lead = text[:batch]
+            for block in ("## Git (required)", "## Scratch files (advisory)",
+                          "## Result (required", "A reply without this JSON object"):
+                assert block in lead, block
+            if kind in ("apply_code_fixes", "implement"):
+                assert "## Checks you ran (required in every reply)" in lead
+            for member in expected:
+                assert f"`{member}`" not in lead, member
+            leads.append(lead)
+
+            # The ids close the prompt, after the batch: one `ids` line, in
+            # prompt order, and only `declined` (which refers to it) after it.
+            assert text.count(RESULT_IDS_HEADING) == 1
+            assert text.index(RESULT_IDS_HEADING) > batch
+            lines = text[text.index(RESULT_IDS_HEADING):].rstrip("\n").splitlines()
+            ids_lines = [line for line in lines if line.startswith("- `ids`:")]
+            assert len(ids_lines) == 1 and text.count("- `ids`:") == 1
+            spots = [ids_lines[0].index(f"`{member}`") for member in expected]
+            assert spots == sorted(spots)
+            if kind == "implement":
+                assert lines[-1] == ids_lines[0]
+            else:
+                assert lines[-2:] == [ids_lines[0], lines[-1]]
+                assert lines[-1].startswith("- `declined`:")
+            assert text.endswith("\n") and not text.endswith("\n\n")
+
+        # What leads is byte-identical across the run's batches: the prefix.
+        assert len(set(leads)) == 1
 
 
 class TestTheCommand:

@@ -3744,7 +3744,10 @@ class TestResultContract:
         # The contract is bound at dispatch, like the prior-changes context: the
         # hash-bound task file never learns it.
         assert "## Result" not in task["prompt"]
-        assert prompt.index("Apply batch 0") < prompt.index("## Result")
+        # The contract leads, the batch follows, the ids close the prompt
+        # (write-scheduler.md "Prompt order").
+        assert prompt.index("## Result (required") < prompt.index("Apply batch 0")
+        assert prompt.index("Apply batch 0") < prompt.index("suggestion 1 = `s0`")
 
     def test_the_implement_kind_names_its_task_id(self, env):
         log = env.enable_call_log()

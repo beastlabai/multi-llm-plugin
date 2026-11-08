@@ -4349,7 +4349,16 @@ def _scope_apply():
 def with_result_contract(
     kind: str, task: Dict[str, Any], prompt: str, *, checks_section: str = "",
 ) -> str:
-    """Append the write-batch result contract the classification reads.
+    """Wrap the batch prompt in the write-batch result contract the
+    classification reads.
+
+    Order (PERF-9, docs/development/write-scheduler.md "Prompt order"): the
+    blocks that are the same for every batch of a run's phase come first —
+    process safety, git, scratch files, the result shape and the check
+    contracts — so a provider can reuse them as a cached prefix; the batch
+    prompt and its scope block follow, and the ``ids``/``declined`` lines
+    naming this batch's ``expected_ids`` close the prompt, so it still ends
+    with what the reply must contain.
 
     The batchers' prompts end in the prose "Return Format" the native
     markdown flow compresses into a one-line summary; the scheduler — on
@@ -4369,7 +4378,7 @@ def with_result_contract(
     application and stop the loop.
 
     Module-level for the same reason as :func:`bind_prior_changes`: the
-    native leg's ``util write-prompt`` appends the same contract, so a host
+    native leg's ``util write-prompt`` binds the same contract, so a host
     subagent's closing JSON object carries the ``summary`` the prior-changes
     append wants and the ``status``/``files_touched`` the host's verification
     step reads.
@@ -4378,6 +4387,8 @@ def with_result_contract(
     an apply-code-fixes batch's list of the repository's known check
     commands, bound at dispatch on both legs, after the code batch's
     ``## Checks you ran``, whose ``check`` object it extends with ``listed``.
+    It stays in the leading blocks: its command list is the run's, and only
+    an earlier batch's failing check makes it differ between batches.
 
     A task materialized under ``--scope-policy preserve`` carries a ``scope``
     block, and its writer guidance (``scope_apply.writer_block``) follows the
@@ -4444,7 +4455,7 @@ def with_result_contract(
         )
         + '"files_touched": ["<repo-relative path>"], '
         '"summary": "<one line, at most 200 characters>", '
-        '"notes": "<the per-item summary requested above>"'
+        '"notes": "<the per-item summary requested below>"'
         + (
             ', "check": {"passed": true, "findings": [], "ran": '
             '{"<each check command you ran>": "passed"}}' if own_checks else ""
@@ -4460,8 +4471,7 @@ def with_result_contract(
         "change was already present and you edited nothing; `failed` if "
         "you could not apply the batch.\n"
     )
-    return (
-        f"{prompt.rstrip()}\n\n"
+    contract = (
         "## Process safety (required)\n\n"
         "Never run `kill`, `pkill`, `killall` or any process-wide signal: "
         "the orchestrator that dispatched you is a sibling process, and a "
@@ -4486,18 +4496,17 @@ def with_result_contract(
         "left elsewhere is invisible to it (measured 2026-10-01, OpenCode "
         "runner).\n\n"
         "## Result (required — this is how the batch is verified)\n\n"
-        "Do the work above, then end your reply with ONE JSON object (a "
+        "Do the work below, then end your reply with ONE JSON object (a "
         "fenced ```json block is fine) of exactly this shape:\n\n"
         "```json\n"
         f"{shape}"
         "```\n\n"
         f"{status_line}"
-        f"{id_lines}\n"
         "- `files_touched`: repo-root-relative paths you edited (empty for "
         "`no-op` and `failed`).\n"
         "- `summary`: one line; it is recorded verbatim as this batch's "
         "entry in the prior-changes log the next batch reads.\n"
-        "- `notes`: the per-item summary the return format above asks for.\n"
+        "- `notes`: the per-item summary the return format below asks for.\n"
         + (
             "- `check`: required in every reply, also when you ran no check — "
             "which checks you ran on your edits and how each one ended "
@@ -4512,6 +4521,21 @@ def with_result_contract(
         + (WRITE_CHECK_CONTRACT + (checks_section or "") if own_checks else "")
         + (IMPLEMENT_WHICH_CHECKS if own_checks and kind == "implement" else "")
     )
+    return (
+        f"{contract.rstrip()}\n\n{BATCH_PROMPT_RULE}\n\n{prompt.rstrip()}\n\n"
+        f"{RESULT_IDS_HEADING}\n\n{id_lines}\n"
+    )
+
+
+#: Between the leading contract blocks and the batch prompt
+#: (:func:`with_result_contract`): a thematic break, so the batch prompt's
+#: first line does not read as part of the contract's last section.
+BATCH_PROMPT_RULE = "---"
+
+#: The heading of the closing ``ids``/``declined`` lines
+#: (:func:`with_result_contract`): they name this batch's ``expected_ids``,
+#: so they follow the batch prompt rather than lead the fixed contract.
+RESULT_IDS_HEADING = "## Result ids (required in the JSON object above)"
 
 
 #: Appended to the result contract of a batch that edits code (implement's

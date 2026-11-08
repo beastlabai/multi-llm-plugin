@@ -11,6 +11,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Declined items and partial applications](#declined-items-and-partial-applications)
 - [Dispatch counts](#dispatch-counts)
 - [Prior-batch context](#prior-batch-context)
+- [Prompt order](#prompt-order)
 - [Write reply extraction](#write-reply-extraction)
 - [Scope policy at the write seam](#scope-policy-at-the-write-seam)
 
@@ -37,8 +38,8 @@ used to also embed a **frozen** `tasks_content[:3000]` excerpt of tasks.md, iden
 batches since every prompt is materialized up front — by the last few batches of an 11-batch run it
 showed a dependency-graph edge an earlier batch had already changed, so it is gone (F7, 2026-09-16):
 each prompt just tells the runner to read the live file first, which step 1 of its own instructions
-already said; the write-batch **result contract** appended at the same seam on both invokers
-(`_with_result_contract`: the `write_batch_result.schema.json` shape plus every `expected_ids` member
+already said; the write-batch **result contract** bound at the same seam on both invokers, around the batch
+prompt ([prompt order](#prompt-order); `_with_result_contract`: the `write_batch_result.schema.json` shape plus every `expected_ids` member
 spelled out in prompt order, because the prompt never names them and an omitted id reads as a
 partial application) — the batchers' prompts end in the prose "Return Format" the native markdown
 flow compresses into a summary line, and measured 2026-09-15 a real runner applied a batch, reported
@@ -726,6 +727,28 @@ an id twice (`summary_without_ids`, the record's `record_line` too, which
 Fix round 25: each is one plain line, its entry id through `prior_changes.plain_entry_id`
 (`?` when it is not a plain id) and its summary through `plain_line`,
 in the record and its left-out ids too.
+
+## Prompt order
+
+**A write batch's dispatched prompt leads with the text every batch of the phase shares and ends
+with the batch's ids** (PERF-9, code-health 2026-11-07). `with_result_contract`, the one seam both
+invokers bind through (the scheduler's dispatch and `util write-prompt`), renders, in order: the
+`## Process safety`, `## Git` and `## Scratch files` blocks, the `## Result` shape and field
+list, the check contracts (`CHECK_RESULT_CONTRACT`, `WRITE_CHECK_CONTRACT` with the known-checks
+section, `IMPLEMENT_WHICH_CHECKS`); a `---` rule; the bound batch prompt with its scope block; and
+last `## Result ids`, the `ids` line spelling out `expected_ids` in prompt order (with
+`declined` for the apply kinds). Before, the batch prompt came first, so batches of one run
+shared about 20 characters of prefix; now they share the whole contract (about 2.1K characters for
+apply-suggestions, 4.6K for apply-code-fixes, 4.9K for an implement code task), which a provider
+can serve as a cached prefix. The known-checks section stays with the contract: its command list
+is the run's, and only an earlier batch's failing check makes it differ. The prompt still ends with
+what the reply must contain, so a runner reading the batch's own prose `Return Format` last is
+still told which ids its JSON object names.
+
+Only dispatched bytes moved. The task file's `prompt` (what `_task_fingerprint` and the snapshot
+binding's run hash cover) and the prompt file names are unchanged, so a run started before the
+change resumes as before; the audit log's `prompt_sha256` and a failed attempt's capture hash the
+dispatched text, and are records, never compared on resume.
 
 ## Write reply extraction
 

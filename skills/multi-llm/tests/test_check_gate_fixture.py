@@ -349,9 +349,10 @@ class TestTheAcceptPath:
         assert "do not wait for that check to pass" in prompt
         assert "say in your `summary` what you left out and why" in prompt
         assert f'  - "{FINDINGS[0]}"' in prompt
-        # After the prior-batch context, before the task's instructions.
-        assert prompt.index("## Check findings the user accepted") < prompt.index(
-            "## Result (required")
+        # After the prior-batch context, before the task's instructions (the
+        # result contract leads the prompt: write-scheduler.md "Prompt order").
+        assert prompt.index("## Result (required") < prompt.index(
+            "## Check findings the user accepted") < prompt.index("## Instructions")
 
     def test_the_summary_says_the_findings_were_accepted_and_who_ran(
         self, repo, capsys,
