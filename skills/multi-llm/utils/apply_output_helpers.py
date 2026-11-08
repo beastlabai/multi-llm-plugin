@@ -9,7 +9,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional, TextIO
 
 
 def write_and_emit_output(
@@ -40,13 +40,18 @@ def write_and_emit_output(
     return output_file
 
 
-def emit_json_output(output: Dict[str, Any]) -> None:
-    """Print orchestrator output as formatted JSON to stdout.
+def emit_json_output(
+    output: Dict[str, Any],
+    stream: Optional[TextIO] = None,
+    indent: Optional[int] = 2,
+) -> None:
+    """Print orchestrator output as JSON to *stream* (default: stdout).
 
-    This is the standard way all three apply orchestrators emit their
-    JSON output for Claude Code to consume.
+    The apply orchestrators reach this through
+    ``ApplyOrchestratorBase.emit_payload``, which passes the stdout an
+    ``--output-format json`` run reserved for its one document.
     """
-    print(json.dumps(output, indent=2))
+    print(json.dumps(output, indent=indent), file=stream or sys.stdout)
 
 
 def build_skipped_output(

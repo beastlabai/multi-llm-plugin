@@ -10,7 +10,6 @@ Usage:
     uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-suggestions plans/my-plan.md [options]
 """
 
-import json
 import os
 import sys
 from datetime import datetime
@@ -31,7 +30,6 @@ from utils.text_clip import clip
 from utils.judge_vocab import JUDGE_AUTO_DECIDE, JUDGE_DECIDE
 from utils.apply_output_helpers import (
     build_skipped_output,
-    emit_json_output,
     write_and_emit_output,
 )
 from utils.apply_path_helpers import load_json_file
@@ -301,59 +299,51 @@ Bulk Approval Examples:
         return os.path.join(phase_dir, "orchestrator_output.json")
 
     def print_text_summary(self, batches: List[Any], output_path: str) -> None:
-        """Print human-readable summary or JSON output to stdout."""
-        output_format = getattr(self.args, "output_format", "text")
+        """Print the human-readable summary (``emit_summary`` owns JSON)."""
+        # Text format for human reading
+        print(f"\n{'=' * 60}")
+        print("SUGGESTIONS TO APPLY (BATCHED)")
+        print(f"{'=' * 60}")
+        print(f"Plan: {self.plan_path}")
+        print(f"Valid suggestions: {len(self.valid)}")
+        print(f"Batches: {len(batches)}")
+        print(f"Needs human review: {len(self.needs_human)}")
+        print(f"Skipped: {len(self.skipped)}")
 
-        if output_format == "json":
-            # Read back and emit to stdout for JSON format
-            with open(output_path, "r", encoding="utf-8") as f:
-                output = json.load(f)
-            print(json.dumps(output, indent=2))
-        else:
-            # Text format for human reading
+        if self.batching_stats.get("batching_enabled"):
+            print("\nBatching efficiency:")
+            print(f"  Subagent calls saved: {self.batching_stats.get('subagent_calls_saved', 0)}")
+            print(f"  Efficiency gain: {self.batching_stats.get('efficiency_gain_percent', 0)}%")
+
+        for i, batch in enumerate(batches):
+            batch_suggestions = batch.get("suggestions", [])
+            batch_section = batch.get("section_key", "")
+            batch_type = batch.get("batch_type", "")
+            batch_size = batch.get("suggestion_count", len(batch_suggestions))
+            batch_priority = batch.get("priority_score", 0)
+
             print(f"\n{'=' * 60}")
-            print("SUGGESTIONS TO APPLY (BATCHED)")
+            print(f"BATCH {i + 1} ({batch_size} suggestion(s))")
             print(f"{'=' * 60}")
-            print(f"Plan: {self.plan_path}")
-            print(f"Valid suggestions: {len(self.valid)}")
-            print(f"Batches: {len(batches)}")
-            print(f"Needs human review: {len(self.needs_human)}")
-            print(f"Skipped: {len(self.skipped)}")
+            print(f"Section: {batch_section}")
+            print(f"Type: {batch_type}")
+            print(f"Priority score: {batch_priority}")
 
-            if self.batching_stats.get("batching_enabled"):
-                print("\nBatching efficiency:")
-                print(f"  Subagent calls saved: {self.batching_stats.get('subagent_calls_saved', 0)}")
-                print(f"  Efficiency gain: {self.batching_stats.get('efficiency_gain_percent', 0)}%")
+            for j, s in enumerate(batch_suggestions):
+                print(f"\n  --- Suggestion {j + 1} ---")
+                print(f"  Title: {s['title']}")
+                print(f"  Type: {s['type']}")
+                print(f"  Importance: {s['importance']}")
+                print(f"  Section: {s['reference']}")
+                print(f"  Description:\n  {clip(s['description'], 200)}")
 
-            for i, batch in enumerate(batches):
-                batch_suggestions = batch.get("suggestions", [])
-                batch_section = batch.get("section_key", "")
-                batch_type = batch.get("batch_type", "")
-                batch_size = batch.get("suggestion_count", len(batch_suggestions))
-                batch_priority = batch.get("priority_score", 0)
-
-                print(f"\n{'=' * 60}")
-                print(f"BATCH {i + 1} ({batch_size} suggestion(s))")
-                print(f"{'=' * 60}")
-                print(f"Section: {batch_section}")
-                print(f"Type: {batch_type}")
-                print(f"Priority score: {batch_priority}")
-
-                for j, s in enumerate(batch_suggestions):
-                    print(f"\n  --- Suggestion {j + 1} ---")
-                    print(f"  Title: {s['title']}")
-                    print(f"  Type: {s['type']}")
-                    print(f"  Importance: {s['importance']}")
-                    print(f"  Section: {s['reference']}")
-                    print(f"  Description:\n  {clip(s['description'], 200)}")
-
-            if self.formatted_human:
-                print(f"\n{'=' * 60}")
-                print("NEEDS HUMAN REVIEW")
-                print(f"{'=' * 60}")
-                for s in self.formatted_human:
-                    print(f"\n- {s['title']}")
-                    print(f"  Reason: {s['validation_reason']}")
+        if self.formatted_human:
+            print(f"\n{'=' * 60}")
+            print("NEEDS HUMAN REVIEW")
+            print(f"{'=' * 60}")
+            for s in self.formatted_human:
+                print(f"\n- {s['title']}")
+                print(f"  Reason: {s['validation_reason']}")
 
 
 def main(argv=None) -> int:

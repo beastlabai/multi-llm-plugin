@@ -10,7 +10,6 @@ Usage:
     uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes plans/my-plan.md [options]
 """
 
-import json
 import os
 import re
 import sys
@@ -33,7 +32,6 @@ from utils.text_clip import clip
 from utils.judge_vocab import JUDGE_AUTO_DECIDE, JUDGE_DECIDE, canonical_value
 from utils.apply_output_helpers import (
     build_skipped_output,
-    emit_json_output,
     write_and_emit_output,
 )
 from utils.apply_path_helpers import load_json_file
@@ -774,7 +772,7 @@ Finalization (run by the host AFTER every batch has been applied and verified):
         }
 
         write_and_emit_output(output, phase_dir)
-        emit_json_output(output)
+        self.emit_payload(output)
         sys.exit(0)
 
     def _group_hash_for_issue(self, issue_num: int) -> Optional[str]:
@@ -1291,67 +1289,60 @@ Finalization (run by the host AFTER every batch has been applied and verified):
         return os.path.join(phase_dir, "orchestrator_output.json")
 
     def print_text_summary(self, batches: List[Any], output_path: str) -> None:
-        """Print human-readable summary or JSON output to stdout."""
-        output_format = getattr(self.args, "output_format", "text")
+        """Print the human-readable summary (``emit_summary`` owns JSON)."""
+        base_ref = getattr(self, "_base_ref", "")
 
-        if output_format == "json":
-            with open(output_path, "r", encoding="utf-8") as f:
-                output = json.load(f)
-            print(json.dumps(output, indent=2))
-        else:
-            base_ref = getattr(self, "_base_ref", "")
+        print(f"\n{'='*60}")
+        print("CODE FIXES TO APPLY (BATCHED)")
+        print(f"{'='*60}")
+        print(f"{self._document_title()}: {self.plan_path}")
+        print(f"Valid fixes: {len(self.valid)}")
+        print(f"Batches: {len(batches)}")
+        print(f"Needs human review: {len(self.needs_human)}")
+        print(f"Skipped: {len(self.skipped)}")
+        print(f"Base ref: {base_ref}")
+
+        if self.batching_stats.get("batching_enabled"):
+            print("\nBatching efficiency:")
+            print(f"  Subagent calls saved: {self.batching_stats.get('subagent_calls_saved', 0)}")
+            print(f"  Efficiency gain: {self.batching_stats.get('efficiency_gain_percent', 0)}%")
+
+        for i, batch in enumerate(batches):
+            batch_fixes = batch.get("fixes", []) if isinstance(batch, dict) else batch.fixes
+            batch_file = batch.get("file_key", "") if isinstance(batch, dict) else batch.file_key
+            batch_type = batch.get("batch_type", "") if isinstance(batch, dict) else batch.batch_type
+            batch_executor = (
+                batch.get("executor_role", "agent") if isinstance(batch, dict)
+                else batch.executor_role
+            )
+            batch_size = batch.get("fix_count", len(batch_fixes)) if isinstance(batch, dict) else batch.size
+            batch_priority = batch.get("priority_score", 0) if isinstance(batch, dict) else batch.priority_score
 
             print(f"\n{'='*60}")
-            print("CODE FIXES TO APPLY (BATCHED)")
+            print(f"BATCH {i+1} ({batch_size} fix(es))")
             print(f"{'='*60}")
-            print(f"{self._document_title()}: {self.plan_path}")
-            print(f"Valid fixes: {len(self.valid)}")
-            print(f"Batches: {len(batches)}")
-            print(f"Needs human review: {len(self.needs_human)}")
-            print(f"Skipped: {len(self.skipped)}")
-            print(f"Base ref: {base_ref}")
+            print(f"File: {batch_file}")
+            print(f"Type: {batch_type}")
+            print(f"Executor: {batch_executor}")
+            print(f"Priority score: {batch_priority}")
 
-            if self.batching_stats.get("batching_enabled"):
-                print("\nBatching efficiency:")
-                print(f"  Subagent calls saved: {self.batching_stats.get('subagent_calls_saved', 0)}")
-                print(f"  Efficiency gain: {self.batching_stats.get('efficiency_gain_percent', 0)}%")
+            for j, f in enumerate(batch_fixes):
+                print(f"\n  --- Fix {j+1} ---")
+                print(f"  Title: {f['title']}")
+                print(f"  Type: {f['type']}")
+                print(f"  Importance: {f['importance']}")
+                print(f"  File: {f.get('file', 'unknown')}")
+                desc = clip(f.get('description', f.get('desc', '')), 200)
+                print(f"  Description:\n  {desc}")
 
-            for i, batch in enumerate(batches):
-                batch_fixes = batch.get("fixes", []) if isinstance(batch, dict) else batch.fixes
-                batch_file = batch.get("file_key", "") if isinstance(batch, dict) else batch.file_key
-                batch_type = batch.get("batch_type", "") if isinstance(batch, dict) else batch.batch_type
-                batch_executor = (
-                    batch.get("executor_role", "agent") if isinstance(batch, dict)
-                    else batch.executor_role
-                )
-                batch_size = batch.get("fix_count", len(batch_fixes)) if isinstance(batch, dict) else batch.size
-                batch_priority = batch.get("priority_score", 0) if isinstance(batch, dict) else batch.priority_score
-
-                print(f"\n{'='*60}")
-                print(f"BATCH {i+1} ({batch_size} fix(es))")
-                print(f"{'='*60}")
-                print(f"File: {batch_file}")
-                print(f"Type: {batch_type}")
-                print(f"Executor: {batch_executor}")
-                print(f"Priority score: {batch_priority}")
-
-                for j, f in enumerate(batch_fixes):
-                    print(f"\n  --- Fix {j+1} ---")
-                    print(f"  Title: {f['title']}")
-                    print(f"  Type: {f['type']}")
-                    print(f"  Importance: {f['importance']}")
-                    print(f"  File: {f.get('file', 'unknown')}")
-                    desc = clip(f.get('description', f.get('desc', '')), 200)
-                    print(f"  Description:\n  {desc}")
-
-            if self.formatted_human:
-                print(f"\n{'='*60}")
-                print("NEEDS HUMAN REVIEW")
-                print(f"{'='*60}")
-                for f in self.formatted_human:
-                    print(f"\n- {f['title']}")
-                    print(f"  File: {f.get('file', 'unknown')}")
-                    print(f"  Reason: {f['validation_reason']}")
+        if self.formatted_human:
+            print(f"\n{'='*60}")
+            print("NEEDS HUMAN REVIEW")
+            print(f"{'='*60}")
+            for f in self.formatted_human:
+                print(f"\n- {f['title']}")
+                print(f"  File: {f.get('file', 'unknown')}")
+                print(f"  Reason: {f['validation_reason']}")
 
 
 def main(argv=None) -> int:

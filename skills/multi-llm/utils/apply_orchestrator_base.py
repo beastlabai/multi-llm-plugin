@@ -131,6 +131,24 @@ class OrchestratorError(Exception):
         self.exit_code = exit_code
 
 
+#: The ``status`` of an ``--output-format json`` stop object whose exit named
+#: no reason of its own (``ApplyOrchestratorBase._stop_payload``); any other
+#: code is ``error``. The words follow the exit codes in
+#: docs/development/dispatcher.md ("Entrypoint and result protocol").
+_STOP_STATUS_BY_EXIT: Dict[int, str] = {
+    0: "stopped",
+    2: "nothing_to_do",
+    3: "needs_human",
+}
+
+
+def _system_exit_code(exc: SystemExit) -> int:
+    """The process exit code a ``SystemExit`` carries (``None`` is 0)."""
+    if exc.code is None:
+        return 0
+    return exc.code if isinstance(exc.code, int) else 1
+
+
 # ---------------------------------------------------------------------------
 # Validation-override allowlist
 # ---------------------------------------------------------------------------
@@ -740,7 +758,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             return
         if self._is_detach_invoker():
             return
-        _unattended.record_resolution(None, site_id, decision)
+        # Row 10 fires in the constructor, before `run()` reserves stdout
+        # for `--output-format json`, so the marker picks its stream here.
+        with contextlib.redirect_stdout(
+            sys.stderr if self.json_output() else sys.stdout
+        ):
+            _unattended.record_resolution(None, site_id, decision)
         self._pending_resolutions.append((site_id, decision))
 
     def _loaded_groups_tally(self) -> str:
@@ -827,11 +850,94 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """Template method: orchestrate the full apply flow.
 
         Calls the five lifecycle phases in order.  Catches
-        ``OrchestratorError`` for consistent exit codes.
+        ``OrchestratorError`` for consistent exit codes. Under
+        ``--output-format json`` the run goes through :meth:`_run_json`,
+        which keeps stdout to one JSON document.
 
         Returns:
             Process exit code (0 on success).
         """
+        if self.json_output():
+            return self._run_json()
+        return self._run_lifecycle()
+
+    # ------------------------------------------------------------------
+    # `--output-format json`: one JSON document on stdout
+    # ------------------------------------------------------------------
+
+    def json_output(self) -> bool:
+        """Whether this run promised ``--output-format json``."""
+        return getattr(self.args, "output_format", "text") == "json"
+
+    def _run_json(self) -> int:
+        """Run the phase with stdout reserved for exactly one JSON document.
+
+        Everything printed for a reader (markers, ``[AUTO_RESOLVED]`` lines,
+        judging and executor progress) goes to stderr; the payload goes to the
+        stdout found here, through :meth:`emit_payload`. A run that ends
+        without one (a dry run, an error, a stop, a detach handshake) prints a
+        fresh stop object from :meth:`_stop_payload`, never an earlier run's
+        output file. The exit code is unchanged either way. Through
+        ``multi_llm.py`` the dispatcher's ``MULTI_LLM_RESULT`` line still
+        follows as the last stdout line (docs/development/dispatcher.md,
+        "Entrypoint and result protocol", **JSON output**).
+        """
+        self._payload_stream = sys.stdout
+        self._payload_emitted = False
+        self._json_stop = None
+        self._stop_error = None
+        exit_code = 1
+        try:
+            with contextlib.redirect_stdout(sys.stderr):
+                exit_code = self._run_lifecycle()
+            return exit_code
+        except SystemExit as exc:
+            exit_code = _system_exit_code(exc)
+            raise
+        finally:
+            if not self._payload_emitted:
+                self.emit_payload(self._stop_payload(exit_code))
+            self._payload_stream = None
+
+    def emit_payload(self, output: Dict[str, Any], *, indent: Optional[int] = 2) -> None:
+        """Print this run's machine payload: the one document stdout carries."""
+        emit_json_output(
+            output, stream=getattr(self, "_payload_stream", None), indent=indent
+        )
+        self._payload_emitted = True
+
+    def emit_summary(self, batches: List[Any], output_path: str) -> None:
+        """The run's closing summary: the written output file under
+        ``--output-format json``, else the phase's text summary."""
+        if self.json_output():
+            with open(output_path, "r", encoding="utf-8") as handle:
+                self.emit_payload(json.load(handle))
+            return
+        self.print_text_summary(batches, output_path)
+
+    def _note_json_stop(self, status: str, message: str, **fields: Any) -> None:
+        """Name what an exit that prints no payload stopped at, for :meth:`_stop_payload`."""
+        self._json_stop = {"status": status, "message": message, "fields": fields}
+
+    def _stop_payload(self, exit_code: int) -> Dict[str, Any]:
+        """The fresh object an ``--output-format json`` run ends with when no
+        payload was printed: what stopped, the exit code, and why."""
+        note = getattr(self, "_json_stop", None) or {}
+        status = note.get("status") or _STOP_STATUS_BY_EXIT.get(exit_code, "error")
+        payload: Dict[str, Any] = {
+            "status": status,
+            "phase": self.confirmation_phase_name or self.phase_name,
+            "exit_code": exit_code,
+            "plan_file": getattr(self, "plan_path", "") or None,
+        }
+        message = note.get("message") or getattr(self, "_stop_error", None)
+        if message:
+            payload["message"] = message
+        payload.update(note.get("fields") or {})
+        return payload
+
+    def _run_lifecycle(self) -> int:
+        """The five lifecycle phases, in order; see :meth:`run`."""
         try:
             self._setup()
             self._load_and_parse_inputs()
@@ -853,6 +959,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             # worker is the right place for them.
             detached = self.maybe_detach_write_phase()
             if detached is not None:
+                if detached == 0 and self._is_detach_invoker():
+                    self._note_json_stop(
+                        "detached",
+                        "The phase runs in a detached worker; its log and "
+                        "status commands are on stderr.",
+                    )
                 return detached
             # Past the boundary this process owns the phase dir, so the D6
             # decisions taken above can finally be written where `status` reads
@@ -874,6 +986,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             return self._write_outputs()
         except OrchestratorError as e:
             self.logger.error("Orchestrator failed: %s", e)
+            self._stop_error = e.message
             return e.exit_code
         except SystemExit as e:
             # Allow sys.exit() calls to propagate (used by early-exit paths)
@@ -885,6 +998,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 e,
                 exc_info=True,
             )
+            self._stop_error = f"Unexpected error: {type(e).__name__}: {e}"
             return 1
 
     # ==================================================================
@@ -1011,13 +1125,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             state = StateManager(Path(self.plan_path))
             state.mark_phase_skipped(self.phase_name, "User chose to skip")
             state.save()
-            print(
-                json.dumps(
-                    {
-                        "status": "skipped",
-                        "message": f"{self.phase_name.capitalize()} phase skipped by user request",
-                    }
-                )
+            self.emit_payload(
+                {
+                    "status": "skipped",
+                    "message": f"{self.phase_name.capitalize()} phase skipped by user request",
+                },
+                indent=None,
             )
             sys.exit(0)
 
@@ -1071,14 +1184,13 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             # leg's closing line names the file its batches edited, as the
             # executor's progress line does.
             target = self._completed_target_label()
-            print(
-                json.dumps(
-                    {
-                        "status": "completed",
-                        "message": f"{self.phase_name} phase marked as completed"
-                        + (f"; its batches edited {target}" if target else ""),
-                    }
-                )
+            self.emit_payload(
+                {
+                    "status": "completed",
+                    "message": f"{self.phase_name} phase marked as completed"
+                    + (f"; its batches edited {target}" if target else ""),
+                },
+                indent=None,
             )
             if scope_blockers:
                 self._scope_report_blockers(scope_blockers)
@@ -1530,7 +1642,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     ),
                     item_count=len(self.groups),
                 )
-                print(json.dumps(output, indent=2))
+                self.emit_payload(output)
                 sys.exit(0)
             # Row 11 taken, and therefore recorded. This is the decision a `--yes`
             # apply run actually makes — "nobody selected anything, apply ALL of
@@ -2594,7 +2706,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             print(line, file=sys.stderr)
         self._publish_scope_notice()
         write_and_emit_output(output, phase_dir)
-        emit_json_output(output)
+        self.emit_payload(output)
         if blockers:
             self._scope_report_blockers(blockers)
             sys.exit(3)
@@ -3013,9 +3125,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 # native path below, and `--dry-run-subagents`, which dispatches
                 # nothing. Under `--output-format json` the machine payload is
                 # emitted regardless, because that flag is a contract.
-                as_json = getattr(self.args, "output_format", "text") == "json"
+                as_json = self.json_output()
                 if not dispatched or as_json:
-                    self.print_text_summary(self.batches, output_path)
+                    self.emit_summary(self.batches, output_path)
                 if dispatched:
                     # On stderr when the payload above claimed stdout: a
                     # contract with a human-readable block printed after it is
@@ -3092,7 +3204,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
 
         # Step 34: Print summary
         try:
-            self.print_text_summary(self.batches, output_path)
+            self.emit_summary(self.batches, output_path)
         except Exception as e:
             # Non-fatal: log but don't fail
             self.logger.warning(
@@ -5455,6 +5567,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             "\nAfter revalidation completes, run this orchestrator again "
             "without --revalidate"
         )
+        self._note_json_stop(
+            "revalidation_pending",
+            "Revalidation tasks are written for the host to run; re-run this "
+            "phase without --revalidate once they complete.",
+            revalidation_tasks=revalidation_task_path,
+        )
         sys.exit(0)  # Exit — Claude Code handles revalidation
 
     def get_revalidation_instructions(self) -> Optional[str]:
@@ -5734,10 +5852,15 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     def _handle_dry_run(self) -> None:
         """Print dry-run batch summary and return.
 
-        Called from ``_prepare_batches`` when ``--dry-run`` is active.
+        Called from ``_prepare_batches`` when ``--dry-run`` is active. Under
+        ``--output-format json`` the same report is also the run's payload: a
+        fresh ``status: dry_run`` object carrying the selection under the
+        output file's own keys (``to_apply``, ``needs_human_review``,
+        ``skipped_items``, ``summary``), never the output file of a real run.
         """
         print("\n--- DRY RUN ---", file=sys.stderr)
         print("\nWould apply the following batches:", file=sys.stderr)
+        batches: List[Dict[str, Any]] = []
         for i, batch in enumerate(self.batches):
             # Try to get batch info generically
             section = getattr(batch, "section_key", None) or getattr(
@@ -5757,6 +5880,17 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     f"    - [{s.get('importance', 'MEDIUM')}] {s.get('title', 'Unknown')}",
                     file=sys.stderr,
                 )
+            batches.append({
+                "batch": i + 1,
+                "batch_type": batch_type,
+                "section": section,
+                "item_count": count,
+                "items": [
+                    {"importance": s.get("importance", "MEDIUM"),
+                     "title": s.get("title", "Unknown")}
+                    for s in items
+                ],
+            })
 
         if self.needs_human:
             print("\nWould ask for human review:", file=sys.stderr)
@@ -5767,3 +5901,24 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
 
         for line in self._scope_summary_lines(would=True):
             print(line, file=sys.stderr)
+
+        if self.json_output():
+            self.emit_payload({
+                "status": "dry_run",
+                "phase": self.confirmation_phase_name or self.phase_name,
+                "exit_code": 0,
+                "plan_file": self.plan_path,
+                # A dry run renders no prompts, so a batch is its items.
+                "batches": batches,
+                "to_apply": self.formatted_valid,
+                "needs_human_review": self.formatted_human,
+                "skipped_items": self.formatted_skipped,
+                "user_skipped_items": self.user_skipped_items,
+                "summary": {
+                    "batch_count": len(batches),
+                    "valid_count": len(self.valid),
+                    "needs_human_count": len(self.needs_human),
+                    "skipped_count": len(self.skipped),
+                    "user_skipped_count": len(self.user_skipped_items),
+                },
+            })

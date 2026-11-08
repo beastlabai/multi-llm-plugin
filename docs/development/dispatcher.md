@@ -47,6 +47,23 @@ Every invocation ends with exactly one machine-readable stdout line, `MULTI_LLM_
 even on a crash (`next` is `null` when no follow-up is owed).
 **Optional** keys join them.
 
+**JSON output** (`--output-format json` on the three apply phases, `status --json`): the mode's
+own stdout is one JSON document, and through `multi_llm.py` the result line still follows it as
+the last stdout line, so a consumer takes the text before the last `MULTI_LLM_RESULT:` marker
+(`out.rsplit(marker, 1)[0]`); run the orchestrator script directly for a stdout that is the
+document alone. The result line stays on stdout because every host reads it there and nowhere
+else (`cli_common.parse_result_line`; the opencode plugin never searches stderr for it). What
+moves is everything else: the dispatcher's `[NEXT_COMMAND]` block, and in an apply phase
+(`ApplyOrchestratorBase._run_json`) its markers, `[AUTO_RESOLVED]` lines, judging and executor
+progress, all to stderr. An apply run that ends with no payload of its own (a `--dry-run`, an
+error, a stop, a detach handshake, a host-driven revalidation) prints a fresh
+`{"status", "phase", "exit_code", "plan_file", "message"?}` object instead, never an earlier
+run's output file, and the exit code is unchanged. `status` is `error`, `needs_human`,
+`nothing_to_do`, `detached`, `revalidation_pending` or `stopped`, or `dry_run`, which also carries
+the selection under the output file's own keys (`to_apply`, `needs_human_review`,
+`skipped_items`, `summary`) and the batches without prompts; a dry run applies no bulk approval,
+so `to_apply` is what the review selected, before `--approve-*`.
+
 `consolidation_recommended` (`{valid_groups, threshold, command}`), present only on a review phase that crossed
 `CONSOLIDATION_RECOMMENDED_THRESHOLD` — written to `{phase}/.status.json` at the same site, carried through
 `detach.classify_run` and re-emitted (with one rendered line) by `status --view run`, because

@@ -32,7 +32,6 @@ from utils.text_clip import clip
 from utils.judge_vocab import JUDGE_AUTO_DECIDE, JUDGE_DECIDE
 from utils.apply_output_helpers import (
     build_skipped_output,
-    emit_json_output,
     write_and_emit_output,
 )
 from utils.apply_path_helpers import load_json_file
@@ -224,7 +223,7 @@ Bulk Approval Examples:
             },
         }
         write_and_emit_output(output, phase_dir)
-        emit_json_output(output)
+        self.emit_payload(output)
         sys.exit(0)
 
     # ----------------------------------------------------------------
@@ -262,7 +261,7 @@ Bulk Approval Examples:
                     "No actionable task suggestions found — skipping apply-task-suggestions phase.",
                 )
                 write_and_emit_output(output, phase_dir)
-                emit_json_output(output)
+                self.emit_payload(output)
                 sys.exit(0)
             else:
                 raise OrchestratorError(

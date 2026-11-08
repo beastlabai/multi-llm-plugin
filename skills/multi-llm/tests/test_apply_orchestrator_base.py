@@ -6088,19 +6088,15 @@ class TestTheExecutorLegReportsItsOutcome:
                 )
                 return 0
 
-            def print_text_summary(self, batches, output_path):
-                # What every concrete phase does under `--output-format json`.
-                with open(output_path, "r", encoding="utf-8") as handle:
-                    print(json.dumps(json.load(handle), indent=2))
-
-        assert JsonExecutorOrch(args).run() == 0
+        orch = JsonExecutorOrch(args)
+        assert orch.run() == 0
         captured = capsys.readouterr()
 
-        # From the payload to the end of stdout, nothing but the payload. (The
-        # `[AUTO_RESOLVED]` markers D6 requires precede it; they are the one
-        # thing this run prints to stdout that is not the contract.)
-        payload = captured.out[captured.out.index("{"):]
-        assert json.loads(payload)["phase"] == "apply-json-leg"
+        # The base emits the payload itself; the phase's text renderer is
+        # never asked. The `[AUTO_RESOLVED]` markers D6 requires go to stderr.
+        assert json.loads(captured.out)["phase"] == "apply-json-leg"
+        assert "print_text_summary" not in orch.call_log
+        assert "[AUTO_RESOLVED]" in captured.err
         assert "APPLY-JSON-LEG: RESULT" not in captured.out
         assert "APPLY-JSON-LEG: RESULT" in captured.err
         assert "Batches: 1/1 ok" in captured.err

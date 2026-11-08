@@ -50,7 +50,7 @@ for _path in (str(SKILL_ROOT), str(REPO_ROOT / "packaging"), str(CODEX_PKG)):
 import modes as mode_table  # noqa: E402
 from utils import cli_common, host_install, unattended  # noqa: E402
 
-from common import payload  # noqa: E402
+from common import payload, release_history  # noqa: E402
 from tests.generated_distributions import CLAUDE, CODEX, DISTRIBUTIONS  # noqa: E402
 
 # Imported under its own name: the opencode suite imports *its* build.py as
@@ -221,9 +221,9 @@ class TestManifest:
 
         pins = _load(SKILL_ROOT / "tests" / "container" / "package.json")
         pinned = pins["dependencies"]["@openai/codex"]
-        assert codex_build._version_key(  # noqa: SLF001
+        assert release_history.version_key(
             ingestion_rules.SOURCE_CODEX_VERSION
-        ) >= codex_build._version_key(pinned), (  # noqa: SLF001
+        ) >= release_history.version_key(pinned), (
             f"the ingestion rules were restated against codex "
             f"{ingestion_rules.SOURCE_CODEX_VERSION}, but the container pins "
             f"{pinned}. Re-read validate_plugin.py, fix the rules, re-stamp."
@@ -264,8 +264,8 @@ class TestManifest:
             path = SCHEMA_DIR / name
             assert path.is_file(), f"{path} is tracked by provenance.json and missing"
             assert hashlib.sha256(path.read_bytes()).hexdigest() == record["sha256"]
-            assert codex_build._version_key(record["codex_version"]) >= (  # noqa: SLF001
-                codex_build._version_key(ingestion_rules.SOURCE_CODEX_VERSION)  # noqa: SLF001
+            assert release_history.version_key(record["codex_version"]) >= (
+                release_history.version_key(ingestion_rules.SOURCE_CODEX_VERSION)
             )
             datetime.date.fromisoformat(record["fetched"])
 
@@ -1251,6 +1251,21 @@ class TestVersioning:
                 )
             return
         assert codex_build.bump_history_problems() == ()
+
+    def test_release_tags_order_pre_releases_numerically(self, tmp_path):
+        """``rc.10`` follows ``rc.2`` and a release follows its own
+        pre-releases; plain versions keep their numeric order."""
+        repo = tmp_path / "repo"
+        _git(tmp_path, "init", "-q", str(repo))
+        _git(repo, "commit", "-q", "--allow-empty", "-m", "base")
+        names = ["0.1.0", "0.1.0-rc.10", "0.1.0-rc.2", "0.0.9", "0.10.0", "0.2.0"]
+        for name in names:
+            _git(repo, "tag", f"codex-v{name}")
+        assert codex_build.release_tags(repo) == tuple(
+            f"codex-v{name}" for name in (
+                "0.0.9", "0.1.0-rc.2", "0.1.0-rc.10", "0.1.0", "0.2.0", "0.10.0",
+            )
+        )
 
     def test_the_bump_rule_reads_git_both_ways(self, tmp_path):
         """The rule itself, over a throwaway repository: digest moved under an
