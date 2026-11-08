@@ -388,6 +388,37 @@ def _files_disagree(a: str, b: str) -> bool:
     return not (a.endswith("/" + b) or b.endswith("/" + a))
 
 
+#: Where a reference separator turns: a comma, or a slash with whitespace on
+#: both sides.
+_REFERENCE_SEPARATOR_TURN = re.compile(r",|(?<=\s)/(?=\s)")
+_WHITESPACE_RUN = re.compile(r"\s*")
+
+
+def _split_reference(raw: str) -> List[str]:
+    """``re.split(r"\\s+/\\s+|\\s*,\\s*", raw)``, in linear time.
+
+    That split retries both alternatives at every character of a whitespace
+    run, each retry walking the rest of the run (1.2 s for 32 KB of spaces in
+    a reviewer's ``reference``). A match is fixed by where it turns, the first
+    character after its leading whitespace, so this walks the turns instead:
+    each separator runs from the start of the whitespace in front of its turn
+    (never before where the previous one ended) through the whitespace after
+    it. A slash needs whitespace in front that the previous separator did not
+    take, which is ``re.split``'s leftmost-match rule: in ``a / / b`` the first
+    separator takes the space before the second slash, which then stays text.
+    """
+    parts: List[str] = []
+    last = 0
+    for turn in _REFERENCE_SEPARATOR_TURN.finditer(raw):
+        at = turn.start()
+        if raw[at] == "/" and at - 1 < last:
+            continue
+        parts.append(raw[last:last + len(raw[last:at].rstrip())])
+        last = _WHITESPACE_RUN.match(raw, at + 1).end()
+    parts.append(raw[last:])
+    return parts
+
+
 def _reference_tokens(suggestion: Dict[str, Any]) -> set:
     """Each section a suggestion cites, as a normalized set.
 
@@ -400,7 +431,7 @@ def _reference_tokens(suggestion: Dict[str, Any]) -> set:
     twice.
     """
     raw = str(suggestion.get("reference", suggestion.get("section", "")) or "")
-    parts = re.split(r"\s+/\s+|\s*,\s*", raw)
+    parts = _split_reference(raw)
     return {part.strip().lstrip("#").strip().lower() for part in parts if part.strip()}
 
 

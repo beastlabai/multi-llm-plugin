@@ -2009,11 +2009,13 @@ _FINDING_QUOTES = str.maketrans({mark: " " for mark in "`'\"‘’“”"})
 #: "exited with status 2", "returned code 1"), or a bare "exited 1" /
 #: "returned 1" / "exit 1" that ends the finding or its clause (end, a
 #: punctuation mark, or "and"/"but"/"with"/"then"). A number followed by
-#: any other word is a count, and stays a word.
+#: any other word is a count, and stays a word. ``\s*(?:[:=]\s*)?`` is
+#: ``\s*[:=]?\s*`` without the quadratic ways to split one whitespace run
+#: between two ``\s*``.
 _FINDING_EXIT = re.compile(
-    r"\(\s*(?:exit(?:ed|s)?|returned)(?:\s+(?:with|code|status))*\s*[:=]?\s*-?\d+\s*\)"
-    r"|\b(?:exit(?:ed|s)?|returned)(?:\s+with)?\s+(?:code|status)\s*[:=]?\s*-?\d+\b"
-    r"|\b(?:exit(?:ed|s)?|returned)(?:\s+with)?\s*[:=]?\s*-?\d+"
+    r"\(\s*(?:exit(?:ed|s)?|returned)(?:\s+(?:with|code|status))*\s*(?:[:=]\s*)?-?\d+\s*\)"
+    r"|\b(?:exit(?:ed|s)?|returned)(?:\s+with)?\s+(?:code|status)\s*(?:[:=]\s*)?-?\d+\b"
+    r"|\b(?:exit(?:ed|s)?|returned)(?:\s+with)?\s*(?:[:=]\s*)?-?\d+"
     r"(?=\s*(?:$|[),;:!?]|\.(?!\d)|(?:and|but|with|then)\b))"
 )
 
@@ -2030,8 +2032,10 @@ _FINDING_WORD = re.compile(r"[a-z0-9]+(?:[._/\-][a-z0-9]+)*")
 #: A trailing attribution the native host appended in live run 11. Only
 #: this annotation may be set aside, and only for the accepted check it
 #: names; arbitrary parenthetical diagnostics and suffixes stay findings.
+#: Tried only where a whitespace run starts, which is where the leftmost match
+#: starts anyway: a retry at every space of a run is quadratic.
 _FINDING_ACCEPTANCE_NOTE = re.compile(
-    r"\s+\((?:the )?(?:problems?|findings?) the user accepted from "
+    r"(?<!\s)\s+\((?:the )?(?:problems?|findings?) the user accepted from "
     r"(?P<check_id>T\d+)\)\.?\s*$"
 )
 

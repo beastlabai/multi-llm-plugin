@@ -35,9 +35,120 @@ GENERATED_TASKS_END = "<!-- GENERATED_TASKS_END -->"
 TASKS_FILE_REFERENCE_PATTERN = TASKS_FILE_MARKER_PATTERN
 TASKS_FILE_REFERENCE_TEMPLATE = "<!-- TASKS_FILE: {tasks_file} -->"
 
-# Marker for implementation summary file reference
+# Marker for implementation summary file reference. The pattern is the
+# marker's grammar; the readers below match it with `_ImplSummaryMarkers`
+# rather than `re`, because the regex is cubic on whitespace.
 IMPL_SUMMARY_REFERENCE_PATTERN = r'<!-- IMPL_SUMMARY:\s*(.+?)\s*-->'
 IMPL_SUMMARY_REFERENCE_TEMPLATE = "<!-- IMPL_SUMMARY: {summary_file} -->"
+_IMPL_SUMMARY_OPEN = "<!-- IMPL_SUMMARY:"
+_IMPL_SUMMARY_HEADING = "## Implementation Summary"
+_WHITESPACE = re.compile(r"\s*")
+
+
+class _NextOccurrence:
+    """``text.find(needle, start)``, remembered: for starts that only grow,
+    each stretch of the text is searched once."""
+
+    def __init__(self, text: str, needle: str):
+        self._text, self._needle = text, needle
+        self._from, self._at = -1, -1
+
+    def __call__(self, start: int) -> int:
+        if self._from < 0 or start < self._from or 0 <= self._at < start:
+            self._from, self._at = start, self._text.find(self._needle, start)
+        return self._at
+
+
+class _ImplSummaryMarkers:
+    """Matches of :data:`IMPL_SUMMARY_REFERENCE_PATTERN` in one text, in O(n).
+
+    The regex is cubic (97 s for 8 KB of spaces after the colon): its
+    ``\\s*``, its lazy group and its closing ``\\s*`` share one whitespace run
+    every possible way before the match fails. Its result is simpler than its
+    search. After the opening ``\\s*`` takes the whole run, the group starts at
+    the first non-blank character and ends where the whitespace before the
+    first ``-->`` after that character begins, unless the group would then
+    cross a newline (``.``), in which case no match starts at this marker,
+    with one exception the backtracking finds: a marker whose run is followed
+    directly by ``-->`` still matches with the run's last non-newline
+    character as the group. Under ``re.DOTALL`` there is no newline rule.
+    Positions only grow, so each search here reads each character once.
+    """
+
+    def __init__(self, text: str):
+        self.text = text
+        self._close = _NextOccurrence(text, "-->")
+        self._newline = _NextOccurrence(text, "\n")
+        self._blank_before: Dict[int, int] = {}
+
+    def _blank_run_start(self, at: int) -> int:
+        """Where the whitespace run that ends at *at* starts."""
+        if at not in self._blank_before:
+            start = at
+            while start > 0 and self.text[start - 1].isspace():
+                start -= 1
+            self._blank_before[at] = start
+        return self._blank_before[at]
+
+    def at(self, start: int, dotall: bool = False) -> Optional[Tuple[int, int, int]]:
+        """``(end, group start, group end)`` of the match at *start*, where the
+        text has the opening marker, or None."""
+        text = self.text
+        opened = start + len(_IMPL_SUMMARY_OPEN)
+        first = _WHITESPACE.match(text, opened).end()
+        if first < len(text):
+            close = self._close(first + 1)
+            if close >= 0:
+                # `first` is not blank, so this run starts after it.
+                group_end = self._blank_run_start(close)
+                newline = self._newline(first)
+                if dotall or newline < 0 or newline >= group_end:
+                    return close + 3, first, group_end
+        if first > opened and text.startswith("-->", first):
+            last = first - 1
+            while not dotall and last >= opened and text[last] == "\n":
+                last -= 1
+            if last >= opened:
+                return first + 3, last, last + 1
+        return None
+
+    def search(self) -> Optional[Tuple[int, int, int, int]]:
+        """``(start, end, group start, group end)`` of
+        ``re.search(IMPL_SUMMARY_REFERENCE_PATTERN, text)``, or None."""
+        start = self.text.find(_IMPL_SUMMARY_OPEN)
+        while start >= 0:
+            found = self.at(start)
+            if found:
+                return (start,) + found
+            start = self.text.find(_IMPL_SUMMARY_OPEN, start + 1)
+        return None
+
+    def sections(self) -> List[Tuple[int, int]]:
+        """The spans ``re.sub`` replaces for
+        ``'## Implementation Summary\\s*\\n.*?' + IMPL_SUMMARY_REFERENCE_PATTERN``
+        under ``re.DOTALL``: a heading whose following whitespace holds a
+        newline, through the first marker after that run's last newline.
+        When that marker has no match, no later one has (nothing closes
+        after it), so the scan ends there."""
+        text = self.text
+        spans: List[Tuple[int, int]] = []
+        markers = _NextOccurrence(text, _IMPL_SUMMARY_OPEN)
+        position = 0
+        while True:
+            heading = text.find(_IMPL_SUMMARY_HEADING, position)
+            if heading < 0:
+                return spans
+            after = heading + len(_IMPL_SUMMARY_HEADING)
+            newline = text.rfind("\n", after, _WHITESPACE.match(text, after).end())
+            if newline < 0:
+                position = heading + 1
+                continue
+            marker = markers(newline + 1)
+            found = self.at(marker, dotall=True) if marker >= 0 else None
+            if found is None:
+                return spans
+            spans.append((heading, found[0]))
+            position = found[0]
 
 
 class PlanUpdater:
@@ -296,9 +407,12 @@ def extract_task_list(plan_content: str) -> List[Dict[str, str]]:
     """
     tasks = []
 
-    # Match task headers
+    # Match task headers. Every match ends before a newline, so nothing after
+    # the last one can match; cutting it off keeps a lazy title from walking
+    # an unterminated last line once per header on it (quadratic).
     task_pattern = r'(?:#{2,3})\s*(?:Task\s+)?([T]?\d+):?\s*(.+?)(?=\n)'
-    matches = re.findall(task_pattern, plan_content, re.IGNORECASE)
+    matches = re.findall(
+        task_pattern, plan_content[:plan_content.rfind("\n") + 1], re.IGNORECASE)
 
     # Also get any status markers
     status_markers = dict(re.findall(TASK_STATUS_PATTERN, plan_content))
@@ -470,9 +584,9 @@ def get_implementation_summary_path(content: str) -> Optional[str]:
     Returns:
         Path to implementation summary file, or None if not found
     """
-    match = re.search(IMPL_SUMMARY_REFERENCE_PATTERN, content)
+    match = _ImplSummaryMarkers(content).search()
     if match:
-        return match.group(1).strip()
+        return content[match[2]:match[3]].strip()
     return None
 
 
@@ -497,15 +611,20 @@ See [{summary_file}]({summary_file}) for the implementation summary including fi
 """
 
     # Check if reference already exists
-    existing_match = re.search(IMPL_SUMMARY_REFERENCE_PATTERN, content)
-    if existing_match:
-        # Replace existing reference section
-        section_pattern = r'## Implementation Summary\s*\n.*?' + IMPL_SUMMARY_REFERENCE_PATTERN
-        # Literal, as in insert_tasks_file_reference: `..\.multi-llm\p\...`
-        # was `bad escape \p` (Windows CI, 2026-10-23).
+    markers = _ImplSummaryMarkers(content)
+    if markers.search():
+        # Replace each existing reference section: the matches of
+        # `## Implementation Summary\s*\n.*?` + IMPL_SUMMARY_REFERENCE_PATTERN
+        # under re.DOTALL. Spliced literally, as in insert_tasks_file_reference:
+        # `..\.multi-llm\p\...` was `bad escape \p` (Windows CI, 2026-10-23).
         replacement = reference_section.strip()
-        content = re.sub(section_pattern, lambda _m: replacement, content, flags=re.DOTALL)
-        return content
+        pieces: List[str] = []
+        position = 0
+        for start, end in markers.sections():
+            pieces.extend((content[position:start], replacement))
+            position = end
+        pieces.append(content[position:])
+        return "".join(pieces)
 
     # Append new reference section at the end
     return content.rstrip() + "\n" + reference_section

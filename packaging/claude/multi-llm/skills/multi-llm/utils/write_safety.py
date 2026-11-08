@@ -2331,9 +2331,65 @@ def _looks_like_credential(value: str) -> bool:
     )
 
 
+#: P12's two delimiters, and the block they bound.
+_PEM_BEGIN = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+_PEM_END = re.compile(r"-----END [A-Z ]*PRIVATE KEY-----")
+#: The P12 language itself: header, the shortest body, footer.
+_PEM_BLOCK = re.compile(_PEM_BEGIN.pattern + r"[\s\S]*?" + _PEM_END.pattern)
+
+
+class _PemPrivateKeyBlocks:
+    """P12's row: exactly the matches of :data:`_PEM_BLOCK`, found in O(n).
+
+    ``_PEM_BLOCK.finditer`` itself is quadratic in the number of headers that
+    have no footer after them. CPython retries the pattern at every
+    ``-----BEGIN`` and each retry's lazy body runs to the end of the text
+    looking for a ``-----END`` that is not there: 0.1 s at 32 KB of repeated
+    headers, 6.7 s at 256 KB (about 100 s at a megabyte), and
+    :func:`redact_text` runs on the whole provider stream before any cap.
+
+    The scan here asks the same question once. A header ends at the one place
+    ``PRIVATE KEY-----`` closes its ``[A-Z ]`` run, so every later header ends
+    later; when the first header has no footer after it, none does, and the
+    scan stops. Otherwise it is the leftmost header, the first footer after its
+    end, and the scan resumes past that footer, as ``finditer`` does. Each
+    block is then matched with ``_PEM_BLOCK`` itself, bounded to that span, so
+    the rows' callers (:func:`redact_text`, the executor's offset replay) get
+    the same ``re.Match`` objects, and the redacted set is the regex's, byte for
+    byte (``tests/test_redaction_pem_scanner.py``).
+    """
+
+    pattern = _PEM_BLOCK.pattern
+
+    def finditer(self, string: str):
+        pos = 0
+        while True:
+            begin = _PEM_BEGIN.search(string, pos)
+            if begin is None:
+                return
+            end = _PEM_END.search(string, begin.end())
+            if end is None:
+                return
+            yield _PEM_BLOCK.match(string, begin.start(), end.end())
+            pos = end.end()
+
+    def sub(self, repl: Any, string: str, count: int = 0) -> str:
+        pieces: List[str] = []
+        last = 0
+        for index, match in enumerate(self.finditer(string)):
+            if count and index >= count:
+                break
+            pieces.append(string[last:match.start()])
+            pieces.append(repl(match) if callable(repl) else match.expand(repl))
+            last = match.end()
+        pieces.append(string[last:])
+        return "".join(pieces)
+
+
 #: ``(name, compiled pattern, group to replace, predicate)``. The *value* is
 #: replaced, never the whole line, so surrounding text stays diffable and a
-#: redacted log is still a usable failure artifact.
+#: redacted log is still a usable failure artifact. A row's pattern is a
+#: compiled regex, or an object with the same ``finditer``/``sub`` (P12).
 #:
 #: Order is load-bearing in one direction only: the multi-line and prefix shapes
 #: run before the generic key/value branch, so a value they already replaced
@@ -2341,14 +2397,8 @@ def _looks_like_credential(value: str) -> bool:
 #: its angle brackets. That is also what makes :func:`redact_text` idempotent.
 _REDACTIONS: List[Tuple[str, Any, int, Optional[Any]]] = [
     # P12 — multi-line, so it runs first: nothing else may chew its body.
-    (
-        "pem-private-key",
-        re.compile(
-            r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
-        ),
-        0,
-        None,
-    ),
+    # `_PEM_BLOCK`'s matches, scanned linearly (see `_PemPrivateKeyBlocks`).
+    ("pem-private-key", _PemPrivateKeyBlocks(), 0, None),
     # P13 — identity/PII (§5.2), in the **two shapes the probe boundary really
     # emits**, both of them key-named. A bare unkeyed email pattern is still
     # deliberately not shipped: it would redact commit-message prose in

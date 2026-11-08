@@ -1297,6 +1297,9 @@ LINEARITY_PAYLOADS = [
     ("dotted-identifiers", "a.b.c.d."),
     ("hyphenated-slugs", "alpha-beta-gamma-"),
     ("keyword-dense-dotted-run", "token."),
+    # PEM headers with no footer after them: each retry of P12's regex ran to
+    # the end of the stream looking for one (tests/test_redaction_pem_scanner.py).
+    ("unterminated-pem-headers", "-----BEGIN RSA PRIVATE KEY-----\n"),
 ]
 
 _PAYLOAD_CACHE: dict = {}
