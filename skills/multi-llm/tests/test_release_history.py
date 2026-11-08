@@ -1174,10 +1174,15 @@ class TestPlacement:
     @EVERY_ENTRY
     def test_every_entry_point_s_help_names_every_family(self, entry):
         """A maintainer reads this to learn what the check holds a release to. The
-        comparison drops whitespace because argparse wraps it."""
+        comparison drops whitespace because argparse wraps it.
+
+        The child is told to write UTF-8: the help text carries em dashes, and on
+        Windows a piped stdout otherwise uses the ANSI code page (cp1252 writes the
+        dash as 0x97), which the UTF-8 reader below cannot decode."""
         done = subprocess.run(
             [sys.executable, str(ENTRY_POINTS[entry]), "--help"],
             capture_output=True, text=True, encoding="utf-8", timeout=60,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
         assert done.returncode == 0, done.stderr
         assert "claude-v*/codex-v*/opencode-v*" in "".join(done.stdout.split())

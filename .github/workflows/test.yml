@@ -32,7 +32,12 @@ jobs:
     # Measured on PR #5: Ubuntu ~25 min, macOS ~60, Windows ~80 (every mock CLI
     # spawn there is a .cmd shim, node and python). A leg past its cap is hung;
     # GitHub's default would hold the run for six hours.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 180 || 120 }}
+    #
+    # The suite has grown since. On 2026-11-07 Windows took 110 min, then 164,
+    # then hit its 180-minute cap at 99% while still passing tests (Ubuntu 42,
+    # macOS 80 on the same push), and Windows runner speed varies a lot from run
+    # to run. Hence 240: still well short of six hours, with room for that spread.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 240 || 120 }}
     steps:
       # Actions are pinned by commit SHA, not by tag, for the reason the publish
       # workflow spells out: `@v4`/`@v5` are mutable refs the action owner can
