@@ -100,36 +100,20 @@ from utils.detach import (
     report_progress,
 )
 from utils.progress_tracker import FanoutProgress, PhaseProgress
-from utils.readonly_audit import combine_audits
 from utils.review_orchestrator_base import (
     backfill_deadline_losses,
-    boundaryless_sibling_count,
-    bypass_stream_audit_clears,
-    bypass_write_not_attributed,
-    bypass_write_violation,
-    fanout_ignore_prefixes,
     flip_map_entries_to_done,
     maybe_detach,
-    # Plan codex-sandbox-unavailable §6 F1 (2026-09-30): a slot on the
-    # plugin's own jail runs the mode check and the home check instead of the
-    # porcelain check.
-    mode_check_applies,
-    mode_snapshot,
-    porcelain_check_applies,
-    porcelain_snapshot,
     print_closing_summary,
     raised_attempt_home_records,
     read_plan,
-    report_jail_outcome,
-    run_incidental_checks,
     run_models_concurrent,
     sandbox_fallback_kwargs,
-    sandbox_refusal,
     slot_exception_error,
-    unexpected_writes,
     update_status,
     write_status,
 )
+from utils.slot_guard import Refused, SlotGuard
 
 # Prompt template filename
 ASK_PROMPT_FILE = "ask.txt"
@@ -2290,39 +2274,19 @@ class AskRun:
         # sandbox cannot start returns a paragraph about the file it could not
         # open — an answer file, and therefore a success. Refused here, ahead of
         # `--rerun-all`'s delete, because a slot that never runs may not destroy
-        # the previous run's answer.
-        #
-        # The third answer (D6 override, 2026-09-17): `dispatch_unsandboxed`
-        # when the probe said `unavailable` AND `providers.<name>.sandbox_fallback`
-        # is `auto` (the default; `off` refuses). One `[SANDBOX_BYPASSED]` line,
-        # the flag on the invoker, and a porcelain snapshot so a write the model
-        # makes can be named.
-        sandbox = await asyncio.to_thread(sandbox_refusal, provider_name, project_root)
-        if sandbox.refused:
-            print(f"[{model_spec}] {sandbox.reason}")
-            return {"model": model_spec, "success": False, "error": sandbox.reason,
+        # the previous run's answer. On a fallback rung the guard prints its one
+        # line and takes the before-snapshots its checks need
+        # (`utils/slot_guard.py`).
+        guard = SlotGuard(
+            provider_name=provider_name, display_name=model_spec,
+            model_spec=model_spec, project_root=project_root, plan_path=plan_path,
+            recompute_ignore_prefixes=True, tracker=tracker,
+        )
+        gate = await guard.begin()
+        if isinstance(gate, Refused):
+            return {"model": model_spec, "success": False, "error": gate.reason,
                     "source": "not-dispatched"}
-        tree_before = None
-        # Any fallback rung prints its one line: `[SANDBOX_FALLBACK]` for a
-        # contained rung, `[SANDBOX_BYPASSED]` for the uncontained one.
-        if sandbox.fallback:
-            print(f"[{model_spec}] {sandbox.reason}")
-        if porcelain_check_applies(sandbox):
-            # The roster-aware prefixes (D4.3): the plugin's own trees, plus the
-            # workspace caches an adapter in this fan-out declares — aider's
-            # `.aider.tags.cache.v4/` is a sibling's cache, never this slot's
-            # write, but only while an aider slot is in the same fan-out.
-            tree_before = await asyncio.to_thread(
-                porcelain_snapshot, project_root,
-                ignore_prefixes=fanout_ignore_prefixes(
-                    plan_path, project_root, anchor=plan_path
-                ),
-            )
-        # The plugin's own jail (F1 "What it fixes"): no porcelain check, by
-        # decision; the mode check's before-snapshot instead.
-        mode_before = None
-        if mode_check_applies(sandbox):
-            mode_before = await asyncio.to_thread(mode_snapshot, project_root)
+        sandbox = gate.sandbox
 
         sanitized = sanitize_model_name(model_spec)
         # output_md_path MUST be absolute: provider subprocesses run with
@@ -2440,74 +2404,32 @@ class AskRun:
             home_checks = await raised_attempt_home_records(armed)
         failed_source = "failed" if raised is None else "exception"
 
-        # D6 override: the detective check, ahead of the answer-file policy
-        # below — a bypassed slot that changed the working tree is failed by
-        # path even when it also left an answer file. The question dir itself
-        # is the plugin's own tree and is excluded, and so is the workspace
-        # cache of an adapter in this fan-out (`fanout_ignore_prefixes`, D4.3).
-        if porcelain_check_applies(sandbox):
-            ignore_prefixes = fanout_ignore_prefixes(
-                plan_path, project_root, anchor=plan_path
-            )
-            tracker.record_readonly_audit(
-                model_spec, combine_audits(audits).to_dict()
-            )
-            tree_after = await asyncio.to_thread(
-                porcelain_snapshot, project_root, ignore_prefixes=ignore_prefixes
-            )
-            touched = unexpected_writes(
-                tree_before, tree_after, ignore_prefixes=ignore_prefixes,
-            )
-            if touched and bypass_stream_audit_clears(audits):
-                warning = bypass_write_not_attributed(provider_name, touched)
-                print(f"[{model_spec}] {warning}")
-                tracker.warn(model_spec, warning)
-            elif touched:
-                siblings = await asyncio.to_thread(
-                    boundaryless_sibling_count, model_spec, project_root, plan_path
-                )
-                violation = bypass_write_violation(
-                    provider_name, touched, boundaryless_siblings=siblings
-                )
-                print(f"[{model_spec}] {violation}")
-                write_error_log(question_dir, model_spec, violation, result)
-                # `collect_completed` reads the answer files, not this return,
-                # so an answer this slot wrote is set aside (never deleted: it
-                # is still the operator's evidence) under a name the scan does
-                # not read, or withheld from the scan when it cannot be, or
-                # the failed slot would be counted as completed.
-                if not set_violated_answer_aside(model_spec, answer_path):
-                    answers_left_in_place.add(model_spec)
-                # The same holds for an answer this slot gave on stdout
-                # (D3.2): kept as evidence, or what survives a violation would
-                # depend on which channel the model answered on. The slot still
-                # fails with its violation; `--accept-partial` can count it.
-                if answer_text.strip():
-                    write_partial(question_dir, model_spec, answer_text)
-                return {"model": model_spec, "success": False,
-                        "error": violation, "source": failed_source}
-
-        # The plugin's own jail (F1, 2026-09-30): its `[JAIL_DENIED]` line and
-        # in-stream denial count, then the mode check and the home check's
-        # verdict — the same fail-closed treatment as the porcelain violation
-        # above: the answer is set aside as evidence and never counted.
-        report_jail_outcome(model_spec, details, question_dir)
-        incidental = await run_incidental_checks(
-            sandbox, provider_name=provider_name, display_name=model_spec,
-            model_spec=model_spec, project_root=project_root, plan_path=plan_path,
-            mode_before=mode_before,
-            home_checks=home_checks,
-            audits=audits,
-            tracker=tracker, summary_key=question_dir,
+        # The guard's checks, ahead of the answer-file policy below: on the
+        # uncontained rung the porcelain check (a slot that changed the
+        # working tree fails by path even when it also left an answer file;
+        # the question dir is the plugin's own tree and is excluded); on the
+        # plugin's jail its `[JAIL_DENIED]` line and denial count, then the
+        # mode and home checks.
+        violated = await guard.finish(
+            audits, home_checks, summary_key=question_dir, jail_details=details,
         )
-        if incidental is not None:
-            write_error_log(question_dir, model_spec, incidental, result)
+        if violated is not None:
+            write_error_log(question_dir, model_spec, violated, result)
+            # `collect_completed` reads the answer files, not this return, so
+            # an answer this slot wrote is set aside (never deleted: it is
+            # still the operator's evidence) under a name the scan does not
+            # read, or withheld from the scan when it cannot be, or the
+            # failed slot would be counted as completed.
             if not set_violated_answer_aside(model_spec, answer_path):
                 answers_left_in_place.add(model_spec)
+            # The same holds for an answer this slot gave on stdout (D3.2):
+            # kept as evidence, or what survives a violation would depend on
+            # which channel the model answered on. The slot still fails with
+            # its violation; `--accept-partial` can count it.
             if answer_text.strip():
                 write_partial(question_dir, model_spec, answer_text)
             return {"model": model_spec, "success": False,
-                    "error": incidental, "source": failed_source}
+                    "error": violated, "source": failed_source}
 
         # Steps 1 and 2 count an answer only from a run that ended by itself at
         # exit 0 with a finished answer (D3.1): success, or the PARSE_ERROR a

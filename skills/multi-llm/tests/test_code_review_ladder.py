@@ -355,7 +355,7 @@ class TestASlotExceptionIsAnError:
         """The fan-out's record of a bypassed slot whose first attempt wrote
         and whose retry raised: failed by path, with the audit verdict."""
         repo = _repo(tmp_path)
-        monkeypatch.setattr(cro, "sandbox_refusal", lambda *_a, **_k: _BYPASSED)
+        monkeypatch.setattr(rob, "sandbox_refusal", lambda *_a, **_k: _BYPASSED)
         monkeypatch.setenv("MULTI_LLM_TEST_FAST_BACKOFF", "1")
         calls = []
         invoke = _scripted([_write_then_fail(repo), ValueError("parser exploded")], calls)
@@ -443,7 +443,6 @@ def _run_lane(
     to ``verdict`` when one is given."""
     if verdict is not None:
         monkeypatch.setattr(rob, "sandbox_refusal", lambda *_a, **_k: verdict)
-        monkeypatch.setattr(cro, "sandbox_refusal", lambda *_a, **_k: verdict)
     if lane == "plan":
         outcome, calls = _run_review_plan(
             tmp_path, results=results, model_spec=model_spec, timeout=timeout,
@@ -580,7 +579,7 @@ class TestTheWriteRecordOfARaisingFirstAttemptNamesTheException:
 
     def test_review_code(self, tmp_path, monkeypatch):
         repo = _repo(tmp_path)
-        monkeypatch.setattr(cro, "sandbox_refusal", lambda *_a, **_k: _BYPASSED)
+        monkeypatch.setattr(rob, "sandbox_refusal", lambda *_a, **_k: _BYPASSED)
 
         def write_then_raise(**_kwargs):
             (repo / "src" / "app.py").write_text("x = 2\n", encoding="utf-8")

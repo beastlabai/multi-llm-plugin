@@ -82,7 +82,6 @@ from utils.output_handler import (
 )
 from utils.detach import record_output_files, report_progress
 from utils.progress_tracker import DEADLINE_ERROR, FanoutProgress, PhaseProgress
-from utils.readonly_audit import combine_audits
 from utils import importance as _importance
 from utils import scope_policy as _sp
 from utils import scope_round as _scope_round
@@ -126,20 +125,8 @@ from utils.review_orchestrator_base import (
     materialization_read_refusal,
     verify_round_context,
     announce_retired_rungs,
-    fanout_ignore_prefixes,
-    boundaryless_sibling_count,
-    bypass_stream_audit_clears,
-    bypass_write_not_attributed,
-    bypass_write_violation,
-    porcelain_check_applies,
-    porcelain_snapshot,
-    # Plan codex-sandbox-unavailable §6 F1 (2026-09-30): a slot on the
-    # plugin's own jail runs the mode check and the home check instead.
     jail_record_fields,
-    mode_check_applies,
-    mode_snapshot,
     print_closing_summary,
-    run_incidental_checks,
     record_sandbox_bypassed,
     recorded_served_models,
     recorded_usage,
@@ -149,14 +136,13 @@ from utils.review_orchestrator_base import (
     remaining_failed_models,
     salvage_requested_models,
     sandbox_fallback_kwargs,
-    sandbox_refusal,
     slot_exception_error,
     spawn_fanout_slot,
-    unexpected_writes,
     update_status,
     write_model_result,
     write_status,
 )
+from utils.slot_guard import Refused, SlotGuard
 # The read side is named from the module that owns it rather than through the
 # base's re-export. That re-export exists because every existing caller and test
 # already spelled `write_status`/`update_status` through the base
@@ -3417,14 +3403,16 @@ async def run_single_review(
     # left on disk the next `--reaggregate` would load it, move the model out
     # of `models_failed` and report another change's findings as this one's.
     #
-    # The third answer (D6 override, 2026-09-17): `dispatch_unsandboxed` when
-    # the probe said `unavailable` AND `providers.<name>.sandbox_fallback` is
-    # `auto` (the default; `off` refuses). One `[SANDBOX_BYPASSED]` line, the
-    # flag on the invoker, and a porcelain snapshot taken now so a write the
-    # model makes can be named.
-    sandbox = await asyncio.to_thread(sandbox_refusal, provider_name, project_root)
-    if sandbox.refused:
-        print(f"[{display_name}] {sandbox.reason}")
+    # On a fallback rung the guard prints its one line and takes, now, the
+    # before-snapshots its checks need, so a write the model makes can be
+    # named (`utils/slot_guard.py`).
+    guard = SlotGuard(
+        provider_name=provider_name, display_name=display_name,
+        model_spec=model_spec, project_root=project_root, plan_path=plan_path,
+        recompute_ignore_prefixes=True, tracker=tracker,
+    )
+    gate = await guard.begin()
+    if isinstance(gate, Refused):
         # Retired, never re-recorded: no attempt started, so the ledger keeps
         # the old id — the one the `.stale-<id>` name carries — and the next
         # attempt that really starts records this scope over it.
@@ -3441,28 +3429,10 @@ async def run_single_review(
         # model the report is about to list under its sandbox error.
         if tracker is not None:
             tracker.failed(
-                model_spec, error=sandbox.reason, source="not-dispatched"
+                model_spec, error=gate.reason, source="not-dispatched"
             )
-        return False, None, sandbox.reason
-    tree_before = None
-    if sandbox.fallback:
-        print(f"[{display_name}] {sandbox.reason}")
-    if porcelain_check_applies(sandbox):
-        # Roster-aware (plans/ask-answer-recovery-and-false-success.md D4.3):
-        # evaluated here in the slot's task, where the fan-out roster lives, so
-        # an aider sibling's tag cache is exempt; the after check matches it.
-        tree_before = await asyncio.to_thread(
-            porcelain_snapshot, project_root,
-            ignore_prefixes=fanout_ignore_prefixes(
-                plan_path, project_root, anchor=plan_path
-            ),
-        )
-    # The plugin's own jail (F1 "What it fixes", 2026-09-30): the porcelain
-    # check above is skipped for it by decision; the mode check's
-    # before-snapshot is taken instead, as `run_single_model` does.
-    mode_before = None
-    if mode_check_applies(sandbox):
-        mode_before = await asyncio.to_thread(mode_snapshot, project_root)
+        return False, None, gate.reason
+    sandbox = gate.sandbox
 
     # Generate log file path for debugging
     sanitized_model = sanitize_model_name(model_spec)
@@ -3791,62 +3761,19 @@ async def run_single_review(
         if isinstance(spent, dict) and spent:
             usage[model_spec] = spent
 
-    # D6 override: the detective check, ahead of every branch below. A bypassed
-    # slot that changed the working tree is failed by path whatever the
-    # invocation reported — nothing is restored, and nothing it returned is
-    # parsed as a review. Skipped entirely (no git call) for a sandboxed slot.
-    if porcelain_check_applies(sandbox):
-        ignore_prefixes = fanout_ignore_prefixes(
-            plan_path, project_root, anchor=plan_path
-        )
-        # Plan §4.3: every attempt's verdict, ANDed, so a clean retry cannot
-        # excuse an earlier attempt that wrote.
-        audits = run.audits
+    # The guard's checks over every attempt (plan §4.3: ANDed, so a clean
+    # retry cannot excuse an earlier attempt that wrote), ahead of every
+    # branch below: the porcelain check on the uncontained rung, the mode and
+    # home checks on the plugin's jail (whose `[JAIL_DENIED]` line and denial
+    # count the ladder loop printed per attempt). A slot they fail is failed
+    # whatever the invocation reported — nothing is restored, and nothing it
+    # returned is parsed as a review: `source` records which channel the
+    # rejected answer arrived on, `error` why nothing of it is parsed.
+    violated = await guard.finish(run.audits, run.home_checks, summary_key=phase_dir)
+    if violated is not None:
         if tracker is not None:
-            tracker.record_readonly_audit(
-                model_spec, combine_audits(audits).to_dict()
-            )
-        tree_after = await asyncio.to_thread(
-            porcelain_snapshot, project_root, ignore_prefixes=ignore_prefixes
-        )
-        touched = unexpected_writes(
-            tree_before, tree_after, ignore_prefixes=ignore_prefixes,
-        )
-        if touched and bypass_stream_audit_clears(audits):
-            warning = bypass_write_not_attributed(provider_name, touched)
-            print(f"[{display_name}] {warning}")
-            if tracker is not None:
-                tracker.warn(model_spec, warning)
-        elif touched:
-            siblings = await asyncio.to_thread(
-                boundaryless_sibling_count, model_spec, project_root, plan_path
-            )
-            violation = bypass_write_violation(
-                provider_name, touched, boundaryless_siblings=siblings
-            )
-            print(f"[{display_name}] {violation}")
-            # Failed by path, whatever the invocation reported: `source` records
-            # which channel the rejected answer arrived on, `error` why nothing
-            # of it is parsed.
-            if tracker is not None:
-                tracker.failed(model_spec, error=violation, source=source)
-            return False, None, violation
-
-    # The plugin's own jail (its `[JAIL_DENIED]` line and in-stream denial
-    # count were printed per attempt by the ladder loop): the mode check and
-    # the home check's verdict over every attempt — fail closed unless the
-    # slot's own audited streams clear it, exactly as above.
-    incidental = await run_incidental_checks(
-        sandbox, provider_name=provider_name, display_name=display_name,
-        model_spec=model_spec, project_root=project_root, plan_path=plan_path,
-        mode_before=mode_before, home_checks=run.home_checks,
-        audits=run.audits, tracker=tracker,
-        summary_key=phase_dir,
-    )
-    if incidental is not None:
-        if tracker is not None:
-            tracker.failed(model_spec, error=incidental, source=source)
-        return False, None, incidental
+            tracker.failed(model_spec, error=violated, source=source)
+        return False, None, violated
 
     if run.exception is not None:
         # A dispatch raised, which ended the slot; recorded as that exception

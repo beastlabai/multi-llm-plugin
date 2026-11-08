@@ -159,6 +159,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.scope_report",
         "utils.scope_round",
         "utils.selection_migration",
+        "utils.slot_guard",
         "utils.suggestion_processor",
         "utils.tasks_graph_check",
         "utils.validation",

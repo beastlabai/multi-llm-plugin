@@ -139,7 +139,7 @@ def codex_slot(tmp_path, tmp_path_factory, monkeypatch):
 def _ask(codex_slot, monkeypatch, verdict, *, extra=()):
     """``(rc, models_failed reason, progress entry)`` of one codex slot with
     the sandbox gate pinned to ``verdict``."""
-    monkeypatch.setattr(ask_orchestrator, "sandbox_refusal", lambda *_a, **_k: verdict)
+    monkeypatch.setattr(rob, "sandbox_refusal", lambda *_a, **_k: verdict)
     rc = asyncio.run(ask_orchestrator.main([
         "--plan-file", str(codex_slot["plan"]), "--question", QUESTION,
         "--models", CODEX, *extra,

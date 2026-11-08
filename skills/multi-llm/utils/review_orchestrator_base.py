@@ -3695,9 +3695,10 @@ def sandbox_refusal(provider_name: str, cwd: Optional[str]) -> SandboxVerdict:
 
     The one gate all three fan-out lanes ask — :func:`run_single_model` for
     review-plan/review-tasks, ``code_review_orchestrator.run_single_review``
-    and ``ask_orchestrator``'s ``ask_one`` — so they share one cache, one
-    probe and one wording. Blocking (it may spawn the probe), so each lane
-    hands it to ``asyncio.to_thread``. ``ok``, ``unknown`` and ``not-required``
+    and ``ask_orchestrator``'s ``ask_one``, each through
+    ``utils.slot_guard.SlotGuard.begin`` — so they share one cache, one probe
+    and one wording. Blocking (it may spawn the probe), so the guard hands it
+    to ``asyncio.to_thread``. ``ok``, ``unknown`` and ``not-required``
     all answer ``dispatch``: a probe that could not be read is a diagnostic and
     never a gate, and a sandbox that dies mid-dispatch still lands on the D3k
     ladder as rung 1.
@@ -4686,8 +4687,9 @@ async def run_incidental_checks(
 
     The shared verdict of all three fan-out lanes (``run_single_model``,
     ``code_review_orchestrator.run_single_review``, ``ask_orchestrator``'s
-    ``ask_one``), so they print one wording. ``None`` for a slot not on the
-    ``incidental`` grade — no git call at all.
+    ``ask_one``), run by ``utils.slot_guard.SlotGuard.finish``, so they print
+    one wording. ``None`` for a slot not on the ``incidental`` grade — no git
+    call at all.
     """
     if not mode_check_applies(sandbox):
         return None
@@ -4993,19 +4995,22 @@ async def run_single_model(
     # a gate, and a sandbox that then dies mid-dispatch still lands on the D3k
     # ladder as rung 1.
     #
-    # The third answer (D6 override, 2026-09-17): `dispatch_unsandboxed`, only
-    # when the probe said `unavailable` AND `providers.<name>.sandbox_fallback`
-    # resolves to `auto` (the default; `off` restores the refusal). The slot
-    # then runs with the flag, prints the one `[SANDBOX_BYPASSED]` line, and is
-    # bracketed by the porcelain detective check below — nothing else about
-    # the lane moves.
-    sandbox = await asyncio.to_thread(sandbox_refusal, provider_name, project_root)
-    if sandbox.refused:
-        reason = sandbox.reason
-        print(f"[{display_name}] {reason}")
+    # On a fallback rung the guard prints the rung's one line and takes the
+    # before-snapshots its checks need; after the last attempt, its `finish`
+    # runs those checks and the caller drops `output` on the reason it returns,
+    # so `save_model_result` never parses it (`utils/slot_guard.py`).
+    from .slot_guard import Refused, SlotGuard
+
+    guard = SlotGuard(
+        provider_name=provider_name, display_name=display_name,
+        model_spec=model_spec, project_root=project_root, plan_path=plan_path,
+        recompute_ignore_prefixes=False, tracker=tracker,
+    )
+    gate = await guard.begin()
+    if isinstance(gate, Refused):
         return {
             "success": False, "output": None,
-            "error": reason,
+            "error": gate.reason,
             # `prompt` and `stdout` stay empty for the reason rule 4's refusal
             # leaves them empty: nothing was dispatched, so there is no stream to
             # excerpt — and neither lane below has chosen an output location yet,
@@ -5015,91 +5020,9 @@ async def run_single_model(
             "model_spec": model_spec,
             "source": "not-dispatched",
         }
-    tree_before: Optional[PorcelainSnapshot] = None
-    # The roster-aware form (plans/ask-answer-recovery-and-false-success.md
-    # D4.3): an aider sibling's `.aider.tags.cache.v4/` is not this slot's
-    # write. Computed here, in the slot's task, where the fan-out roster lives;
-    # the before snapshot, `_bypass_write_check` and `unexpected_writes` all
-    # read this one list.
-    ignore_prefixes = fanout_ignore_prefixes(plan_path, project_root, anchor=plan_path)
-    if sandbox.fallback:
-        print(f"[{display_name}] {sandbox.reason}")
-    if porcelain_check_applies(sandbox):
-        tree_before = await asyncio.to_thread(
-            porcelain_snapshot, project_root, ignore_prefixes=ignore_prefixes
-        )
-    # The plugin's own jail (plan codex-sandbox-unavailable §6 F1, 2026-09-30):
-    # no porcelain check (above, unchanged by decision), the mode check's
-    # before-snapshot instead, and this run's closing-summary key for the home
-    # check's and the jail's lines.
+    sandbox = gate.sandbox
+    # This run's closing-summary key for the home check's and the jail's lines.
     summary_key = phase_summary_key(plan_path, phase_name)
-    mode_before: Optional[Dict[str, str]] = None
-    if mode_check_applies(sandbox):
-        mode_before = await asyncio.to_thread(mode_snapshot, project_root)
-
-    async def _incidental_check(
-        home_checks: Sequence[Any], audits: Sequence[Any]
-    ) -> Optional[str]:
-        """The mode check and the home check's verdict for a slot on the
-        plugin's jail, once, after the last attempt (``None`` elsewhere)."""
-        return await run_incidental_checks(
-            sandbox, provider_name=provider_name, display_name=display_name,
-            model_spec=model_spec, project_root=project_root, plan_path=plan_path,
-            mode_before=mode_before, home_checks=home_checks, audits=audits,
-            tracker=tracker, summary_key=summary_key,
-        )
-
-    async def _bypass_write_check(audits: Sequence[Any]) -> Optional[str]:
-        """The reason to fail a bypassed slot whose run changed the tree, or ``None``.
-
-        Runs once, after the last attempt. A delta fails the slot whatever the
-        attempt reported — a review that also edited the repository is not a
-        review this phase may count — and nothing is restored: no snapshot was
-        taken of the files, so the operator is told which paths and left to
-        decide. The caller drops ``output`` so ``save_model_result`` never
-        parses it — and so the slot's findings are discarded, never kept
-        beside the failure: that is the fail-closed policy, and the reason line
-        (:func:`bypass_write_violation`) reports the change without naming an
-        author. ``None`` for every slot not on the uncontained rung — gated on
-        the rung id (:func:`porcelain_check_applies`), so a contained-rung or
-        sandboxed slot makes no git call at all. The ``git status`` runs in a
-        thread like the one before the slot: on a large repository it is not
-        instant, and the sibling slots share this event loop.
-
-        ``audits`` is every attempt's ``details['readonly_audit']`` in this
-        slot's window (plan §4.3). When their AND is clean and option B is
-        switched on (:func:`bypass_stream_audit_clears`), a delta is reported
-        as a ``not attributed`` warning on ``progress.models[spec].warning``
-        and the slot keeps its output; otherwise the verdict is as before.
-        """
-        if not porcelain_check_applies(sandbox):
-            return None
-        if tracker is not None:
-            tracker.record_readonly_audit(
-                model_spec, _readonly_audit.combine_audits(audits).to_dict()
-            )
-        tree_after = await asyncio.to_thread(
-            porcelain_snapshot, project_root, ignore_prefixes=ignore_prefixes
-        )
-        touched = unexpected_writes(
-            tree_before, tree_after, ignore_prefixes=ignore_prefixes,
-        )
-        if not touched:
-            return None
-        if bypass_stream_audit_clears(audits):
-            warning = bypass_write_not_attributed(provider_name, touched)
-            print(f"[{display_name}] {warning}")
-            if tracker is not None:
-                tracker.warn(model_spec, warning)
-            return None
-        siblings = await asyncio.to_thread(
-            boundaryless_sibling_count, model_spec, project_root, plan_path
-        )
-        violation = bypass_write_violation(
-            provider_name, touched, boundaryless_siblings=siblings
-        )
-        print(f"[{display_name}] {violation}")
-        return violation
 
     # Fall back to old method if no out_dir provided
     if not out_dir:
@@ -5149,11 +5072,12 @@ async def run_single_model(
                         **sandbox_fallback_kwargs(sandbox),
                     )
             except Exception as exc:  # noqa: BLE001 - recorded as the slot's ending
-                violation = await _bypass_write_check([None])
-                if violation is None:
-                    violation = await _incidental_check(
-                        await raised_attempt_home_records(armed), [None]
-                    )
+                # The jailed homes this call armed are compared only once the
+                # write check passed.
+                violation = await guard.finish(
+                    [None], lambda: raised_attempt_home_records(armed),
+                    summary_key=summary_key,
+                )
                 return {
                     "success": False, "output": None,
                     "error": (
@@ -5169,11 +5093,10 @@ async def run_single_model(
             stderr_text = details.get("stderr", "")
             report_jail_outcome(display_name, details, summary_key)
 
-            violation = await _bypass_write_check([details.get("readonly_audit")])
-            if violation is None:
-                violation = await _incidental_check(
-                    [details.get("home_check")], [details.get("readonly_audit")]
-                )
+            violation = await guard.finish(
+                [details.get("readonly_audit")], [details.get("home_check")],
+                summary_key=summary_key,
+            )
             if violation is not None:
                 return {
                     "success": False, "output": None, "error": violation,
@@ -5388,17 +5311,13 @@ async def run_single_model(
                 "source": "not-dispatched",
             }
 
-        # D6 override: the detective check, once, after the last attempt and
-        # ahead of every branch below — a bypassed slot that changed the tree
-        # is failed with the paths whatever its last attempt reported, and the
-        # `output` is dropped so `save_model_result` never parses it. Placed
-        # after the `result is None` return because nothing ran on that path.
-        violation = await _bypass_write_check(run.audits)
-        if violation is None:
-            # The plugin's jail: the mode check and the home check, once,
-            # after the last attempt, ahead of every branch below — the same
-            # fail-closed place the porcelain check's verdict takes.
-            violation = await _incidental_check(run.home_checks, run.audits)
+        # The guard's checks, once, after the last attempt and ahead of every
+        # branch below: a slot the porcelain check (uncontained rung) or the
+        # mode and home checks (the plugin's jail) fail is failed with that
+        # reason whatever its last attempt reported, and the `output` is
+        # dropped so `save_model_result` never parses it. Placed after rule 4's
+        # refusal return because nothing ran on that path.
+        violation = await guard.finish(run.audits, run.home_checks, summary_key=summary_key)
         if violation is not None:
             return {
                 "success": False, "output": None, "error": violation,

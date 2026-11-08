@@ -4250,7 +4250,7 @@ class TestAResumeReusesOnlyResultsOfThisScope:
                 )
             return rob.SandboxVerdict(rob.SANDBOX_DISPATCH, None)
 
-        monkeypatch.setattr(cro, "sandbox_refusal", gate)
+        monkeypatch.setattr(rob, "sandbox_refusal", gate)
 
         seen, _ = _scope_fanout(scope_repo.plan, monkeypatch, self.SPECS, force=True)
 

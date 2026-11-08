@@ -285,7 +285,7 @@ class TestASelfCancelledSlotIsNamedAndItsSiblingsKept:
                 raise asyncio.CancelledError()
 
         codex_slot["child"] = child
-        monkeypatch.setattr(ask_orchestrator, "sandbox_refusal", lambda *_a, **_k: JAILED)
+        monkeypatch.setattr(rob, "sandbox_refusal", lambda *_a, **_k: JAILED)
         rc = asyncio.run(ask_orchestrator.main([
             "--plan-file", str(codex_slot["plan"]), "--question", "Q",
             "--models", CODEX, OTHER_CODEX,

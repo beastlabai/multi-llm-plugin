@@ -354,6 +354,21 @@ single-shot `ask_one`) compares the home of every jailed child the attempt armed
 before-snapshot, and a home it cannot compare is reported as not checked and fails the slot
 closed.
 
+The four fan-out lanes (ask's single-shot slot, review-code's `run_single_review`, and both lanes
+of `run_single_model`) run the gate and these checks through one object,
+`utils/slot_guard.SlotGuard`. `begin()` asks `sandbox_refusal`, prints the refusal or the rung's
+one line and takes the porcelain and mode before-snapshots, all ahead of the dispatch and each in
+a worker thread. `finish()` runs, after the last attempt, the porcelain verdict, the jail's own
+lines (for ask; the ladder loop prints them per attempt) and the mode and home checks, and returns
+the one reason the slot fails with. Each lane keeps only what it does with that reason, and
+`tests/test_slot_guard_parity.py` pins every outcome on every lane. The porcelain check's ignore
+list (`fanout_ignore_prefixes`) resolves the plan's output folder through symlinks; ask and
+review-code resolve it again for the after snapshot, the review base reuses the one `begin()`
+took (`recompute_ignore_prefixes`). With the output folder inside `.multi-llm/`, re-pointing it
+during the window is itself exempt, and each choice misses one direction: a re-resolved list
+exempts the target of a symlink planted there, a reused one the target of a symlink removed. The
+parity test pins both as strict xfails.
+
 A trust-only `[projects."…"]` table never fails it (codex adds one per session directory, and
 concurrent sessions share the home), but every one besides the run's own cwd that appeared during
 the run and is still in `config.toml` when the closing summary prints is named there, as

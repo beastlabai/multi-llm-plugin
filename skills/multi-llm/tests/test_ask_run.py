@@ -42,7 +42,7 @@ def slot(tmp_path, monkeypatch):
         state["calls"].append(kwargs)
         return state["invoke"](**kwargs)
 
-    monkeypatch.setattr(ask_orchestrator, "sandbox_refusal", lambda *_: SANDBOXED)
+    monkeypatch.setattr(rob, "sandbox_refusal", lambda *_: SANDBOXED)
     monkeypatch.setattr(ask_orchestrator, "invoke_with_provider", invoke)
 
     def make(*, rerun_all=False):
@@ -115,7 +115,7 @@ def test_a_call_that_raises_ends_the_slot_as_that_exception(slot):
 
 def test_a_refused_slot_never_dispatches_or_touches_the_last_answer(slot, monkeypatch):
     refused = rob.SandboxVerdict(rob.SANDBOX_REFUSE, "[SANDBOX_UNAVAILABLE] simulated")
-    monkeypatch.setattr(ask_orchestrator, "sandbox_refusal", lambda *_: refused)
+    monkeypatch.setattr(rob, "sandbox_refusal", lambda *_: refused)
     slot["answer"].write_text("An earlier answer.\n", encoding="utf-8")
     run = slot["make"](rerun_all=True)
     result = _ask(run)

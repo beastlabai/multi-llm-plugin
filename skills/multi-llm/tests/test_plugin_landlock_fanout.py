@@ -1224,7 +1224,7 @@ class TestTheOtherTwoLanes:
         _pin_verdict(monkeypatch, RUNG)
         monkeypatch.setattr(cro, "get_project_root", lambda _p: str(scratch["repo"]))
         porcelain = MagicMock(side_effect=AssertionError("no porcelain check on the jail"))
-        monkeypatch.setattr(cro, "porcelain_snapshot", porcelain)
+        monkeypatch.setattr(base, "porcelain_snapshot", porcelain)
         seen = []
 
         def invoke(**kwargs):
