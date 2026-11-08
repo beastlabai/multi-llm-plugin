@@ -178,13 +178,9 @@ from .provider_registry import (
     has_quick_models,
 )
 
-# providers — GENERATED from provider_registry._PROVIDERS (§9.1).
-#
-# The hand-written list this replaced omitted THREE adapters (ClaudeCode,
-# KiloCode, Muse) and nothing noticed, because deleting an export left the suite
-# green. `_PROVIDERS` is the one adapter table and it is already fully imported
-# by the block above, so the roster is read off it rather than retyped: adding
-# an adapter to the registry exports it here by construction.
+# providers — derived from provider_registry._PROVIDERS, which is discovered
+# from the modules in utils/providers/. Never retype the roster here: an adapter
+# module is exported by existing (docs/development/providers.md#adding-a-provider-adapter).
 from .providers import LLMProvider
 from .provider_registry import _PROVIDERS as _REGISTERED_PROVIDERS
 

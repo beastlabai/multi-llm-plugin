@@ -6,12 +6,71 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 
 ## Contents
 
+- [Adding a provider adapter](#adding-a-provider-adapter)
 - [Configuration and runner resolution](#configuration-and-runner-resolution)
 - [Read-only provider contracts](#read-only-provider-contracts)
 - [Provider output channels](#provider-output-channels)
 - [Usage reporting](#usage-reporting)
 - [Child Python environments](#child-python-environments)
 - [Provider outcome logs](#provider-outcome-logs)
+
+## Adding a provider adapter
+
+The roster is derived. `utils/providers/__init__.py` discovers every concrete `LLMProvider`
+subclass defined in `utils/providers/`, and `provider_registry._PROVIDERS` instantiates them,
+sorted by `name`; `utils/__init__.py` and `init_config.py` derive their lists from it. Adding
+the module registers the adapter, and no code names it anywhere else. Adapter behaviour stays
+in code, not in `providers.yaml`, because a cloned repository can layer its own config over
+that file.
+
+What cannot be derived stays hand-kept: measured config rows, pinned test tables, fixtures
+and docs. Each one has a test that compares it with the registry and fails naming the table,
+its file and the row to add or remove (`tests/roster_check.py`;
+`tests/test_provider_roster.py` holds the config, report and docs checks).
+
+**Measure first, offline.** Spend nothing: run the CLI's `--version` and `--help`, then point
+it at the localhost stubs with a fake key (`stub-key-not-a-credential`) and a throwaway
+`HOME` plus the CLI's own config directory. Use `tests/container/stub_server.py --port P
+--log L --scenario S` for answers and `tests/container/failserver.py --port P --mode M` for
+failures (`401`, `404`, `429`, `429ra`, `500`, `ctx`, `empty`, `stall` and the truncation
+modes). The reproducible place to run them is the pinned image (`tests/container/Dockerfile`
+at the `cli-versions.lock` pins, `--network none`). The `method:` paragraph of each
+`tests/fixtures/<provider>/manifest.yaml` records the exact vehicle a sibling used; copy the
+closest one.
+
+Then work through the steps in order. Each test named fails until its step is done.
+
+| Step | Where | What to add | Fails until then |
+| --- | --- | --- | --- |
+| 1 | `utils/providers/<name>.py` | One concrete `LLMProvider` subclass with the five abstract members: `name`, `default_timeout`, `is_available` (`shutil.which` of the binary), `build_command`, `parse_output`. Add `EFFORT_LADDER = ReasoningLadder(provider=..., rungs=...)` and `REASONING_EFFORTS = EFFORT_LADDER.accepted`; a CLI with no effort control declares `ReasoningLadder(provider=..., declined="<the measurement>")` and no `REASONING_EFFORTS`. Decide each declaration the argv shows: `prompt_argv_index`, `supported_prompt_transports`, `agent_profiles`, `supports_file_output`, `runs_shell_in_generate`, `internal_retries`. Copy the closest sibling: `grok.py` for a JSON envelope, `kilocode.py` for plain stdout. | `test_reasoning_effort_ladder.py`; `test_provider_housekeeping.py`: the prompt index against the argv, a `STOPS_FILE_WRITES` or `REVIEWED_STILL_WRITES` row for each restriction-shaped argv atom, a `SHELL_EVIDENCE` row for a non-`None` shell declaration |
+| 2 | `providers.yaml` | A `providers.<name>` block (`default_timeout`, `max_concurrent`, `models`, the first being the default) and a `read_only_modes.<name>` row: `mechanism: null` and `probed: null` until probed ([read-only contracts](#read-only-provider-contracts)). Insert the block where it should sit in `--init`'s order. | `test_provider_roster.py`, `test_read_only_modes.py` |
+| 3 | `templates/config/providers.override.yaml` | Regenerate it: from `skills/multi-llm/`, `uv run --project . -- python -c "import init_config as c; c.TEMPLATE_PATH.write_text(c.build_template_text())"`. | `test_provider_registry.py::TestTemplateBaseParity` |
+| 4 | `ENV_ALLOWLIST_PROFILES` in `utils/providers/base.py` | A `RunnerEnvProfile`: CA family (`node` or `native`), the env prefixes the CLI owns, its home and config variable names. | `test_env_allowlist.py` |
+| 5 | Test tables | `MODELS` in `test_provider_housekeeping.py`; `PRE_L5_ARGV` and `PRE_L5_ARGV_MODELS` in `test_provider_timeouts.py` (also read by `test_structured_output.py`); `TRANSPORT_CASES` in `test_provider_contract.py`; a `ROWS` entry in `test_answer_text.py`. Each holds a real model id from step 2, never a placeholder. The `ROWS` entry passes only when the answer is readable: a clean `{"type": "result"}` or `{"response": ...}` envelope, plain stdout (`answer_framing = "plain"`), or a `salvage_text` hook. | those files |
+| 6 | `TestDeclaredOutputChannel.CANNOT_WRITE_FILES` in `test_provider_contract.py`; `NO_WRITE_TOOL_AT_ALL` in `test_provider_housekeeping.py` | **Only for an adapter declaring `supports_file_output = False`** (it answers on stdout): its name in `CANNOT_WRITE_FILES`. **Also, only when no argv atom causes the declaration** (step 1 added no `STOPS_FILE_WRITES` row, because the CLI ships no write tool): a `NO_WRITE_TOOL_AT_ALL` row naming the probe that measured it ([output channels](#provider-output-channels)). | `test_provider_contract.py::TestDeclaredOutputChannel`; `test_provider_housekeeping.py::TestReadOnlyArgvMatchesTheDeclaration` |
+| 7 | `tests/fixtures/<name>/` | `manifest.yaml` and the captured streams, one cell per canonical row (`success`, `truncated`, ... `context-overflow`; a measured `not_applicable` counts). Until they are captured, a `FIXTURES_PENDING` row in `test_provider_fixture_rows.py` with the measured reason. | `test_provider_fixture_rows.py` |
+| 8 | `_PROVIDER_ICON_KEYS` in `utils/html_report_generator.py` | A row naming an `_ICON_DEFS` key: the CLI's own mark, or a letter icon `(None, letter, colour)`. A bundled mark also goes in `docs/attribution.md`. | `test_provider_roster.py` |
+| 9 | Docs | A row in the `docs/providers.md` table (key, binary, link). In the repository root, the harness link and count in `README.md` and the count in `.claude-plugin/plugin.json` and `marketplace.json`. The provider→`binary` list and the declaration-order list in `instructions/init-config.md`, and the base-order list in `docs/configuration.md`. The "Not affiliated" names in `docs/attribution.md` are not checked. | `test_provider_roster.py` |
+| 10 | `tests/test_provider_<name>.py` | The adapter's own cases: argv per profile, parse edge cases, failure classification over the fixtures. | (new) |
+| 11 | Packaging | `git add -N` the new files, because payload builds refuse untracked inputs. Then `make claude-regen codex-regen` and `git add -N` the copies of the new files the trees gained. A release also needs a version bump ([package distribution](hosts.md#package-distribution)). | `test_claude_package.py`, `test_codex_package.py` |
+
+The container lanes are optional and separate: a `redirect.yaml` row, a `cli-versions.lock` pin,
+`expected_argv.yaml` (`seed_expected_argv.py`), a golden bundle (`seed_container_golden.py`)
+and a host assignment in `host_matrix.yaml`, as `tests/container/README.md` describes. A CLI
+given a provider-lane row also needs its golden baseline (`test_golden_container_bundle.py`),
+and a `lane: fake` row needs its `mock_llm.py` identity (`test_fake_lane_roster.py`).
+
+Verify with the roster's own files before the broad run:
+
+```bash
+uv run --project skills/multi-llm -- pytest -q -p no:cacheprovider -n 4 --dist loadfile \
+  skills/multi-llm/tests/test_provider_roster.py skills/multi-llm/tests/test_provider_housekeeping.py \
+  skills/multi-llm/tests/test_provider_contract.py skills/multi-llm/tests/test_read_only_modes.py \
+  skills/multi-llm/tests/test_env_allowlist.py skills/multi-llm/tests/test_reasoning_effort_ladder.py \
+  skills/multi-llm/tests/test_provider_timeouts.py skills/multi-llm/tests/test_structured_output.py \
+  skills/multi-llm/tests/test_answer_text.py skills/multi-llm/tests/test_provider_fixture_rows.py \
+  skills/multi-llm/tests/test_provider_registry.py
+```
 
 ## Configuration and runner resolution
 

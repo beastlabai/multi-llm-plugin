@@ -30,6 +30,7 @@ from utils.providers.base import (
     ReasoningLadder,
     split_reasoning_effort,
 )
+from tests.roster_check import RECIPE
 from tests.source_cache import source_text, source_tree
 
 
@@ -56,9 +57,29 @@ def _adapter_module(name):
     return importlib.import_module(type(_PROVIDERS[name]).__module__)
 
 
-def _ladder(name):
-    """The ``EFFORT_LADDER`` registry id ``name`` declares."""
+def _declared_ladder(name):
+    """The module's ``EFFORT_LADDER``, or ``None`` when it declares none."""
     return getattr(_adapter_module(name), "EFFORT_LADDER", None)
+
+
+def _no_ladder_message(name):
+    return (
+        f"{name} declares no EFFORT_LADDER in {_adapter_module(name).__name__}. "
+        "Every registered adapter states its position on the canonical ladder "
+        "(M12/§6.1): `EFFORT_LADDER = ReasoningLadder(provider=<name>, "
+        "rungs=(...))` and `REASONING_EFFORTS = EFFORT_LADDER.accepted`, or, for "
+        "a CLI with no effort mechanism, `ReasoningLadder(provider=<name>, "
+        "declined='<the measurement>')` and no REASONING_EFFORTS. Recipe: " + RECIPE
+    )
+
+
+def _ladder(name):
+    """The ``EFFORT_LADDER`` registry id ``name`` declares; a missing one fails
+    every sweep with the declaration to add, not an ``AttributeError``."""
+    ladder = _declared_ladder(name)
+    if not isinstance(ladder, ReasoningLadder):
+        pytest.fail(_no_ladder_message(name))
+    return ladder
 
 
 def _declared_whitelist(name):
@@ -157,14 +178,9 @@ class TestEveryRegisteredProviderDeclaresItsPosition:
     @pytest.mark.parametrize("provider_name", _registry_provider_names())
     def test_provider_declares_an_effort_ladder(self, provider_name):
         """Every adapter states a position, including "this CLI has none"."""
-        ladder = _ladder(provider_name)
+        ladder = _declared_ladder(provider_name)
 
-        assert isinstance(ladder, ReasoningLadder), (
-            f"{provider_name} declares no EFFORT_LADDER. Every registered adapter "
-            "states its position on the canonical ladder (M12/§6.1) — an adapter "
-            "whose CLI has no effort mechanism declares "
-            "`ReasoningLadder(provider=…, declined='<the measurement>')`."
-        )
+        assert isinstance(ladder, ReasoningLadder), _no_ladder_message(provider_name)
 
     @pytest.mark.parametrize("provider_name", _registry_provider_names())
     def test_provider_field_matches_the_registry_key(self, provider_name):

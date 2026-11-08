@@ -41,8 +41,23 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.providers import base  # noqa: E402
 from utils.provider_registry import _PROVIDERS  # noqa: E402
+from tests.roster_check import assert_covers_registry, row_for  # noqa: E402
 
 SKILL_DIR = Path(__file__).parent.parent
+
+_PROFILES_WHERE = "ENV_ALLOWLIST_PROFILES in utils/providers/base.py"
+_PROFILES_HINT = (
+    "A row is a RunnerEnvProfile: the adapter's CA family (node or native), the "
+    "env prefixes its CLI owns, and its own home/config variable names."
+)
+
+
+def _profile(name):
+    """``_profile(name)``, failing with where to add the row."""
+    return row_for(
+        base.ENV_ALLOWLIST_PROFILES, name, _PROFILES_WHERE,
+        what="an env profile", hint=_PROFILES_HINT,
+    )
 
 
 def _registry_names():
@@ -207,14 +222,17 @@ class TestTheListContents:
         normal case: a newly registered adapter with no row reds here rather than
         shipping without its own home and CA variables.
         """
-        assert name in base.ENV_ALLOWLIST_PROFILES
+        _profile(name)
 
     def test_no_profile_is_declared_for_an_unregistered_adapter(self):
-        assert set(base.ENV_ALLOWLIST_PROFILES) == set(_registry_names())
+        assert_covers_registry(
+            base.ENV_ALLOWLIST_PROFILES, _PROFILES_WHERE,
+            what="an env profile", hint=_PROFILES_HINT,
+        )
 
     @pytest.mark.parametrize("name", _registry_names())
     def test_every_adapter_is_in_exactly_one_ca_family(self, name):
-        assert base.ENV_ALLOWLIST_PROFILES[name].ca_family in base.CA_BUNDLE_ENV
+        assert _profile(name).ca_family in base.CA_BUNDLE_ENV
 
     def test_the_two_ca_families_partition_the_registry(self):
         """`NODE_EXTRA_CA_CERTS` is not "all these CLIs are Node".
@@ -227,7 +245,7 @@ class TestTheListContents:
         """
         by_family = {family: set() for family in base.CA_BUNDLE_ENV}
         for name in _registry_names():
-            by_family[base.ENV_ALLOWLIST_PROFILES[name].ca_family].add(name)
+            by_family[_profile(name).ca_family].add(name)
         assert set().union(*by_family.values()) == set(_registry_names())
         assert sum(len(v) for v in by_family.values()) == len(_PROVIDERS)
         for family, members in by_family.items():
@@ -304,7 +322,7 @@ class TestTheListContents:
         gemini is how gemini authenticates, and denying it would be the mid-run
         auth failure the matrix exists to prevent.
         """
-        own = base.ENV_ALLOWLIST_PROFILES[name].prefixes
+        own = _profile(name).prefixes
         for variable in self.CREDENTIAL_PROBES:
             if any(variable.startswith(prefix) for prefix in own):
                 continue
@@ -326,7 +344,7 @@ class TestTheListContents:
     @pytest.mark.parametrize("name", _registry_names())
     def test_an_adapters_own_prefix_family_passes(self, name):
         """Each harness's own prefix family, per adapter."""
-        profile = base.ENV_ALLOWLIST_PROFILES[name]
+        profile = _profile(name)
         for prefix in profile.prefixes:
             assert base.env_allowlist_admits(name, prefix + "SOMETHING")
         for variable in profile.names:
@@ -342,7 +360,7 @@ class TestTheListContents:
         declared = {
             name: {
                 variable
-                for variable in base.ENV_ALLOWLIST_PROFILES[name].names
+                for variable in _profile(name).names
                 # A name that is also in the shared base list (aider's `COLUMNS`)
                 # is admitted everywhere by design, not by leakage.
                 if variable.upper() not in shared_base
@@ -365,7 +383,7 @@ class TestTheListContents:
                 # A sibling may still admit it through its own prefix family —
                 # that is by design and only ever widens within one vendor.
                 for other in admitting:
-                    prefixes = base.ENV_ALLOWLIST_PROFILES[other].prefixes
+                    prefixes = _profile(other).prefixes
                     assert any(variable.startswith(p) for p in prefixes), (
                         f"{variable} is declared only by {name} but {other} "
                         f"admits it through the shared base list"

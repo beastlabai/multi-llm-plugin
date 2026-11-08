@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.providers.base import LLMProvider
 from utils.providers.omp import OVERLAY_PATH as OMP_OVERLAY_PATH
-from tests.provider_test_support import _registered_provider_names
+from tests.roster_check import assert_covers_registry
 
 
 class TestInvokeWithProviderThreadsTheResolvedTimeout:
@@ -55,6 +55,15 @@ class TestInvokeWithProviderThreadsTheResolvedTimeout:
 # rollback story (§14.4): drop the one call site in `llm_client.py` and every
 # adapter is back to exactly these bytes, agy included.
 PRE_L5_ARGV_PROMPT = "Analyze this plan carefully"
+
+#: Where a new adapter adds its rows, for the coverage failures.
+PRE_L5_ARGV_WHERE = "PRE_L5_ARGV in tests/test_provider_timeouts.py"
+PRE_L5_ARGV_HINT = (
+    "A new adapter's row is the argv its build_command(PRE_L5_ARGV_PROMPT, "
+    "<model>) renders today, and its PRE_L5_ARGV_MODELS row is that model: one "
+    "real id from its providers.yaml block. Both tables are also read by "
+    "tests/test_structured_output.py."
+)
 
 
 PRE_L5_ARGV_MODELS = {
@@ -258,8 +267,14 @@ class TestTimeoutKeywordIsInertWhenUnset:
             yield
 
     def test_the_table_covers_every_registered_adapter(self):
-        assert set(PRE_L5_ARGV) == set(_registered_provider_names())
-        assert len(PRE_L5_ARGV) == 19
+        assert_covers_registry(
+            PRE_L5_ARGV, PRE_L5_ARGV_WHERE, what="a pinned argv row",
+            hint=PRE_L5_ARGV_HINT,
+        )
+        assert_covers_registry(
+            PRE_L5_ARGV_MODELS, "PRE_L5_ARGV_MODELS in tests/test_provider_timeouts.py",
+            what="a model row", hint=PRE_L5_ARGV_HINT,
+        )
 
     @pytest.mark.parametrize("name", sorted(PRE_L5_ARGV))
     def test_explicit_none_renders_the_pre_l5_argv(self, name):

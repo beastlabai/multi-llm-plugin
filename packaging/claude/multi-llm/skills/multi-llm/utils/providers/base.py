@@ -1403,10 +1403,9 @@ def env_allowlist_matrix(
 ) -> Dict[Tuple[str, str, str], str]:
     """The per-CLI × per-platform × per-capability matrix (§2.4 condition 2).
 
-    The CLI axis defaults to the **live registry**, never to a name list: the
-    specifications this came from were written against thirteen adapters and the
-    registry holds more, so a matrix derived from a literal roster silently omits
-    the newcomers' credential, keyring, proxy and CA cells. Its size is therefore
+    The CLI axis defaults to the **live registry**, never to a name list: a
+    matrix derived from a literal roster silently omits a newer adapter's
+    credential, keyring, proxy and CA cells. Its size is therefore
     ``len(registry) × len(platforms) × len(capabilities)``, computed, not typed.
     """
     if provider_names is None:
@@ -1899,7 +1898,7 @@ class SetupHints:
 # M10 (§5.1) — a typed availability status *beside* the bool
 # ---------------------------------------------------------------------------
 #
-# `is_available()` is a bare `shutil.which` in all seventeen adapters, which
+# `is_available()` is a bare `shutil.which` in every adapter, which
 # collapses "not installed" / "logged out" / "too old" into one message. The
 # fix is **additive**: a status type on a new method, with `is_available()`
 # left alone. The donor's widened-return-type proposal (a bool-or-string union
@@ -4475,7 +4474,7 @@ class LLMProvider(ABC):
                 **This composition ignores it**, exactly as
                 :meth:`resolve_env`'s does, and does *not* forward it to
                 :meth:`build_command` — so the abstract signature is unchanged
-                and seventeen adapters render argv byte-for-byte. An adapter that
+                and the adapters render argv byte-for-byte. An adapter that
                 wants it overrides this method and declares ``cwd`` on its own
                 ``build_command``.
 
@@ -4551,8 +4550,8 @@ class LLMProvider(ABC):
             model: The model identifier to use for generation.
             timeout_s: The caller's already-resolved outer timeout in whole
                 seconds, for the adapters whose CLI has an internal cutoff of
-                its own to keep *under* it (§9.6.a). Twelve of the thirteen
-                adapters have no such flag and ignore it.
+                its own to keep *under* it (§9.6.a). Most adapters have no
+                such flag and ignore it.
 
                 It is **keyword-only and optional on purpose**. Adapter
                 instances are module-level singletons shared across a concurrent
@@ -4563,9 +4562,9 @@ class LLMProvider(ABC):
                 call site in ``llm_client`` a complete rollback.
             schema: §4.2.2's optional structured-output schema, on the same terms
                 and for the same reasons as ``timeout_s``: keyword-only,
-                optional, ignored by the eleven adapters that declare no
+                optional, ignored by every adapter that declares no
                 :attr:`structured_output_support`, and ``schema=None`` — the
-                default and the only value those eleven ever see — renders argv
+                default and the only value those adapters ever see — renders argv
                 **byte-for-byte identical** to today's. That is what keeps every
                 existing ``expected_argv.yaml`` row green and what makes the
                 per-adapter flag the off switch (§14.4).

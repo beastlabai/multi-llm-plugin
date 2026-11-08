@@ -135,7 +135,9 @@ _ICON_DEFS: Dict[str, tuple] = {
 
 
 # Provider (CLI tool) → icon key. Used to render a provider icon alongside
-# the model's company icon when they differ.
+# the model's company icon when they differ. One row per registered adapter,
+# naming a key of _ICON_DEFS: tests/test_provider_roster.py compares it with the
+# registry (docs/development/providers.md#adding-a-provider-adapter).
 _PROVIDER_ICON_KEYS: Dict[str, str] = {
     "claude-code":  "anthropic",
     "gemini":       "google",
@@ -143,8 +145,6 @@ _PROVIDER_ICON_KEYS: Dict[str, str] = {
     "cursor-agent": "cursor",
     "kilocode":     "kilocode",
     "opencode":     "opencode",
-    # Backfill: these ship today and had no provider-icon row, so the provider
-    # column rendered nothing whenever the model name matched no family.
     "grok":         "xai",
     # Vercel fx is a CLI identity; model-family icons are resolved separately.
     "fx":           "vercel",
@@ -154,10 +154,6 @@ _PROVIDER_ICON_KEYS: Dict[str, str] = {
     "agy":          "antigravity",
     "muse":         "muse",
     "pi":           "pi",
-    # harness-expansion.md Wave 1/2 candidates. Keys are the frozen provider
-    # keys of §8.1. Inert until the adapter registers — this dict is only ever
-    # read through .get(), and no roster test cross-checks it against
-    # _PROVIDERS — so a §6.3 demotion is a one-line delete here, not a bug.
     "copilot":      "copilot",
     "kimi":         "moonshotai",
     "qwen-code":    "qwen",

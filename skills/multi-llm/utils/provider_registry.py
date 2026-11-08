@@ -28,7 +28,7 @@ import re
 import sys
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Mapping, Optional, Tuple, Type, Union
 
 from . import yaml_io
 from .git_utils import (
@@ -37,49 +37,39 @@ from .git_utils import (
     compile_path_glob,
     get_project_root_from_dir,
 )
-from .providers.agy import AgyProvider
-from .providers.aider import AiderProvider
-from .providers.claude_code import ClaudeCodeProvider
-from .providers.cline import ClineProvider
-from .providers.codex import CodexProvider
-from .providers.copilot import CopilotProvider
-from .providers.cursor_agent import CursorAgentProvider
-from .providers.fx import FxProvider
-from .providers.gemini import GeminiProvider
-from .providers.goose import GooseProvider
-from .providers.grok import GrokProvider
-from .providers.kilocode import KiloCodeProvider
-from .providers.kimi import KimiProvider
-from .providers.muse import MuseProvider
-from .providers.omp import OmpProvider
-from .providers.opencode import OpenCodeProvider
-from .providers.pi import PiProvider
-from .providers.qwen_code import QwenCodeProvider
-from .providers.vibe import VibeProvider
+from .providers import PROVIDER_CLASSES
 from .providers.base import GIT_HELPER_AUTO, GIT_HELPER_POLICIES, LLMProvider
 
+
+def _build_registry(
+    classes: Mapping[str, Type[LLMProvider]],
+) -> Dict[str, LLMProvider]:
+    """One instance of every adapter in ``classes``, keyed by provider name.
+
+    Derived, never typed: ``classes`` is ``PROVIDER_CLASSES``, which discovers
+    each concrete :class:`LLMProvider` subclass, so a new adapter module is
+    registered by existing. The keys are sorted so ``doctor``, help text and
+    every sweep keep one stable order, and two classes claiming one ``name``
+    refuse to load rather than letting the later one win. The instances are the
+    module-level singletons the fan-out shares. Adding an adapter:
+    docs/development/providers.md#adding-a-provider-adapter.
+    """
+    by_name: Dict[str, LLMProvider] = {}
+    for cls in classes.values():
+        adapter = cls()
+        claimed = by_name.get(adapter.name)
+        if claimed is not None:
+            raise RuntimeError(
+                f"two adapters claim the provider name {adapter.name!r}: "
+                f"{type(claimed).__qualname__} and {cls.__qualname__}"
+            )
+        by_name[adapter.name] = adapter
+    return dict(sorted(by_name.items()))
+
+
 # Built-in providers
-_PROVIDERS: Dict[str, LLMProvider] = {
-    "agy": AgyProvider(),
-    "aider": AiderProvider(),
-    "claude-code": ClaudeCodeProvider(),
-    "cline": ClineProvider(),
-    "codex": CodexProvider(),
-    "copilot": CopilotProvider(),
-    "cursor-agent": CursorAgentProvider(),
-    "fx": FxProvider(),
-    "gemini": GeminiProvider(),
-    "goose": GooseProvider(),
-    "grok": GrokProvider(),
-    "kilocode": KiloCodeProvider(),
-    "kimi": KimiProvider(),
-    "muse": MuseProvider(),
-    "omp": OmpProvider(),
-    "opencode": OpenCodeProvider(),
-    "pi": PiProvider(),
-    "qwen-code": QwenCodeProvider(),
-    "vibe": VibeProvider(),
-}
+_PROVIDERS: Dict[str, LLMProvider] = _build_registry(PROVIDER_CLASSES)
+
 
 class _ConfigSnapshot:
     """One load of the layered config: the merged dict and where each
@@ -727,6 +717,11 @@ def _merge_layers(layers: List[Tuple[str, Path]], permissive: bool) -> _ConfigSn
 def get_provider(name: str) -> Optional[LLMProvider]:
     """Get a provider by name."""
     return _PROVIDERS.get(name)
+
+
+def registered_provider_names() -> List[str]:
+    """Every built-in adapter's name, sorted: the roster any listing derives from."""
+    return list(_PROVIDERS)
 
 
 def parse_model_spec(

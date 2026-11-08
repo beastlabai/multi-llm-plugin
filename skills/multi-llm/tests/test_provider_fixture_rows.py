@@ -79,6 +79,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.provider_registry import _PROVIDERS  # noqa: E402
+from tests.roster_check import RECIPE  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures"
 MANIFEST_NAME = "manifest.yaml"
@@ -209,9 +210,10 @@ def test_every_registry_provider_is_accounted_for(provider):
     reason = MANIFEST_PENDING.get(provider) or FIXTURES_PENDING.get(provider)
     assert reason, (
         f"provider {provider!r} has neither tests/fixtures/{provider}/manifest.yaml "
-        f"nor an entry in MANIFEST_PENDING / FIXTURES_PENDING. Capture its §6.2 "
-        f"rows, or add it to one table WITH the measured reason it cannot be "
-        f"captured yet."
+        f"nor an entry in MANIFEST_PENDING / FIXTURES_PENDING in "
+        f"tests/test_provider_fixture_rows.py. Capture its §6.2 rows (offline "
+        f"capture: {RECIPE}), or add it to one table WITH the measured reason it "
+        f"cannot be captured yet."
     )
 
 

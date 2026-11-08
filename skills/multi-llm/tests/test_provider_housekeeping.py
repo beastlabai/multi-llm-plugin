@@ -37,6 +37,7 @@ import pytest
 import utils.providers.base as base_module
 import utils.providers.cursor_agent as cursor_agent_module
 from utils.provider_registry import _PROVIDERS
+from tests.roster_check import RECIPE, assert_covers_registry, assert_pinned_subset, row_for
 
 PROMPT = "Analyze this plan carefully"
 
@@ -95,6 +96,19 @@ MODELS = {
 }
 
 
+_MODELS_WHERE = "MODELS in tests/test_provider_housekeeping.py"
+_MODELS_HINT = (
+    "A row is one real model id the adapter ships in providers.yaml: several "
+    "adapters split on `/` or `:effort`, so a placeholder renders an argv shape "
+    "no real dispatch has."
+)
+
+
+def _model(name):
+    """``MODELS[name]``, failing with the table to extend for a new adapter."""
+    return row_for(MODELS, name, _MODELS_WHERE, what="a model row", hint=_MODELS_HINT)
+
+
 def _registered_class_names():
     """The adapter class names the registry really instantiates."""
     return {type(provider).__name__ for provider in _PROVIDERS.values()}
@@ -104,7 +118,9 @@ class TestGeneratedProviderExports:
     """§9.1 — the export lists are derived from the registry, not retyped."""
 
     def test_model_table_covers_every_registered_adapter(self):
-        assert set(MODELS) == set(_PROVIDERS)
+        assert_covers_registry(
+            MODELS, _MODELS_WHERE, what="a model row", hint=_MODELS_HINT
+        )
 
     def test_providers_package_all_is_exactly_the_registered_roster(self):
         import utils.providers as providers_pkg
@@ -217,7 +233,7 @@ class TestDeclaredPromptIndex:
     @pytest.mark.parametrize("name", sorted(_PROVIDERS))
     def test_declaration_matches_the_rendered_argv(self, name):
         provider = _PROVIDERS[name]
-        argv = provider.build_command(PROMPT, MODELS[name])
+        argv = provider.build_command(PROMPT, _model(name))
         index = provider.prompt_argv_index
 
         if index is None:
@@ -531,10 +547,10 @@ def _argv_for(name, *, sandbox_fallback=False):
     def render():
         if sandbox_fallback:
             argv, _ = _PROVIDERS[name].build_command_for_transport(
-                PROMPT, MODELS[name], "argv", sandbox_fallback=True
+                PROMPT, _model(name), "argv", sandbox_fallback=True
             )
             return argv
-        return _PROVIDERS[name].build_command(PROMPT, MODELS[name])
+        return _PROVIDERS[name].build_command(PROMPT, _model(name))
 
     if name == "cursor-agent":
         with mock.patch.object(
@@ -561,7 +577,7 @@ def restrictive_atoms(name, argv=None):
     """
     if argv is None:
         argv = _argv_for(name)
-    model = MODELS[name]
+    model = _model(name)
     scrubbed = [arg.replace(PROMPT, "").replace(model, "") for arg in argv]
 
     units, index = [], 0
@@ -645,11 +661,25 @@ class TestReadOnlyArgvMatchesTheDeclaration:
     def test_the_declaration_follows_the_adjudication(self, name):
         blocked = [a for a in restrictive_atoms(name) if (name, a) in STOPS_FILE_WRITES]
         no_tool = name in NO_WRITE_TOOL_AT_ALL
-        assert _PROVIDERS[name].supports_file_output == (not (blocked or no_tool)), (
-            f"{name} declares supports_file_output="
-            f"{_PROVIDERS[name].supports_file_output} but its argv carries "
+        declared = _PROVIDERS[name].supports_file_output
+        if declared:
+            fix = (
+                "Set supports_file_output = False and add the adapter to "
+                "TestDeclaredOutputChannel.CANNOT_WRITE_FILES in "
+                "tests/test_provider_contract.py."
+            )
+        else:
+            fix = (
+                "If the CLI ships no write tool under this argv, add a "
+                "NO_WRITE_TOOL_AT_ALL row in tests/test_provider_housekeeping.py "
+                "naming the probe that measured it; if an argv atom stops the "
+                "write, its STOPS_FILE_WRITES row; otherwise declare True."
+            )
+        assert declared == (not (blocked or no_tool)), (
+            f"{name} declares supports_file_output={declared} but its argv carries "
             f"{blocked or 'no write-stopping atom'}"
             + (" and it is in NO_WRITE_TOOL_AT_ALL" if no_tool else "")
+            + f". {fix}\n  recipe: {RECIPE}"
         )
 
     def test_the_roster_the_argv_produces_is_the_roster_that_is_pinned(self):
@@ -661,7 +691,15 @@ class TestReadOnlyArgvMatchesTheDeclaration:
             for name in _PROVIDERS
             if any((name, atom) in STOPS_FILE_WRITES for atom in restrictive_atoms(name))
         } | set(NO_WRITE_TOOL_AT_ALL)
-        assert derived == TestDeclaredOutputChannel.CANNOT_WRITE_FILES
+        assert_pinned_subset(
+            TestDeclaredOutputChannel.CANNOT_WRITE_FILES,
+            derived,
+            "TestDeclaredOutputChannel.CANNOT_WRITE_FILES in tests/test_provider_contract.py",
+            members="the adapters with a STOPS_FILE_WRITES atom in their argv or a "
+            "NO_WRITE_TOOL_AT_ALL row (tests/test_provider_housekeeping.py)",
+            hint="A pinned adapter with neither row needs the one that says why "
+            "it cannot write; remove it from the pin only if it now writes.",
+        )
 
     @pytest.mark.parametrize(
         "key", sorted(set(STOPS_FILE_WRITES) | set(REVIEWED_STILL_WRITES))
@@ -745,7 +783,7 @@ class TestPathOnlyAskPromptHasARoute:
         assert PLAN_BODY not in rendered
         # ... and the argv built from it attaches the plan.
         assert_path_only_plan_has_a_route(
-            name, _PROVIDERS[name], MODELS[name], plan_path
+            name, _PROVIDERS[name], _model(name), plan_path
         )
 
     def test_a_path_only_declaration_with_no_route_fails_by_name(self, tmp_path):
@@ -891,7 +929,7 @@ def _generate_argv(name):
     with mock.patch.object(
         base_module, "read_help_tokens", lambda _b, **_kw: answer
     ), mock.patch.object(base_module.shutil, "which", lambda _n: sys.executable):
-        return _PROVIDERS[name].build_command(PROMPT, MODELS[name])
+        return _PROVIDERS[name].build_command(PROMPT, _model(name))
 
 
 def _shell_grants(argv):

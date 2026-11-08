@@ -43,6 +43,7 @@ import pytest
 
 import utils.providers.base as base_module
 from utils.provider_registry import _PROVIDERS, load_base_config
+from tests.roster_check import assert_covers_registry, row_for
 from utils.providers.base import (
     PROFILE_AGENT_READONLY,
     PROFILE_AGENT_WRITE,
@@ -338,6 +339,20 @@ def read_only_modes():
     return load_base_config().get("read_only_modes") or {}
 
 
+_ROWS_WHERE = "read_only_modes: in skills/multi-llm/providers.yaml"
+_ROWS_HINT = (
+    "An unprobed adapter's row is `mechanism: null` and `probed: null`, never a "
+    "guess; a probed one names the flag and the probe."
+)
+
+
+def _row(name):
+    """``read_only_modes()[name]``, failing with where to add the row."""
+    return row_for(
+        read_only_modes(), name, _ROWS_WHERE, what="a read-only row", hint=_ROWS_HINT
+    )
+
+
 def _rows_with_exceptions():
     return {
         name: row["bypass_exception"]
@@ -369,19 +384,13 @@ class TestTheTableIsOneRowPerRegisteredAdapter:
     """The row set comes from the registry, not from a list written by hand."""
 
     def test_the_row_set_is_exactly_the_registry(self):
-        table = set(read_only_modes())
-        registry = set(_registered_provider_names())
-
-        assert table == registry, (
-            f"read_only_modes: is missing {sorted(registry - table)} and carries "
-            f"{sorted(table - registry)} for adapters the registry does not have. "
-            f"Every registered adapter needs a row on the day it is registered — "
-            f"an unprobed one is `mechanism: null`, never a guess."
+        assert_covers_registry(
+            read_only_modes(), _ROWS_WHERE, what="a read-only row", hint=_ROWS_HINT
         )
 
     @pytest.mark.parametrize("name", _registered_provider_names())
     def test_the_row_declares_only_known_keys(self, name):
-        row = read_only_modes()[name]
+        row = _row(name)
 
         assert isinstance(row, dict), f"{name}: row must be a mapping, got {row!r}"
         unknown = set(row) - ROW_KEYS
@@ -419,7 +428,7 @@ class TestAnUnprobedRowIsNull:
 
     @pytest.mark.parametrize("name", _registered_provider_names())
     def test_a_mechanism_and_its_probe_move_together(self, name):
-        row = read_only_modes()[name]
+        row = _row(name)
         mechanism, probed = row["mechanism"], row["probed"]
 
         if mechanism is None:
@@ -458,7 +467,7 @@ class TestAnUnprobedRowIsNull:
         Neither starts with ``-``, so :meth:`_borrowable` never turns one into a
         flag another row could be accused of borrowing.
         """
-        mechanism = read_only_modes()[name]["mechanism"]
+        mechanism = _row(name)["mechanism"]
         if mechanism is None:
             pytest.skip(f"{name} is a null row — the probe queue, not a claim")
 
@@ -747,7 +756,7 @@ class TestTheYoloClassNegativeSet:
         bypass beside it is a contradiction: the mechanism would be the reason
         the bypass is unnecessary.
         """
-        row = read_only_modes()[name]
+        row = _row(name)
         if row.get("bypass_exception") is None:
             pytest.skip(f"{name} declares no bypass exception")
 

@@ -49,7 +49,11 @@ from utils import yaml_io  # noqa: E402
 from utils.stream_bootstrap import bootstrap_streams  # noqa: E402
 from utils.cli_common import build_parent_parser  # noqa: E402
 from utils.git_utils import get_project_root_from_dir  # noqa: E402
-from utils.provider_registry import get_provider, load_base_config  # noqa: E402
+from utils.provider_registry import (  # noqa: E402
+    get_provider,
+    load_base_config,
+    registered_provider_names,
+)
 from utils.providers.base import Availability  # noqa: E402
 
 # Template is resolved strictly relative to THIS file, never CWD / --project dir
@@ -202,6 +206,21 @@ def _unusable_notices(detected: "list[str]") -> "list[str]":
         if report.state in (Availability.NEEDS_AUTH, Availability.VERSION_TOO_LOW):
             lines.append(f"{name}: {report.detail}")
     return lines
+
+
+def _supported_provider_names() -> "list[str]":
+    """Every registered adapter, in base-config declaration order.
+
+    Derived from the registry, so the install notice never lists a CLI the
+    plugin cannot drive nor omits one it can; an adapter the base config does
+    not declare yet goes last.
+    """
+    registered = registered_provider_names()
+    declared = [
+        name for name in (load_base_config().get("providers") or {})
+        if name in registered
+    ]
+    return declared + [name for name in registered if name not in declared]
 
 
 def _available_providers(providers_cfg: dict) -> "list[str]":
@@ -1055,10 +1074,8 @@ def _write_config(
         print(
             "No supported provider CLIs found on PATH; wrote an inert "
             ".multi-llm/providers.yaml that inherits the built-in defaults.\n"
-            "Install one of: claude, cursor-agent, gemini, grok, opencode, "
-            "codex, kilocode, kimi, qwen, copilot, cline, goose, aider, agy, pi, muse, "
-            "vibe, omp, fx and "
-            "re-run `--init`."
+            "Install the CLI of one of these providers and re-run `--init`: "
+            f"{', '.join(_supported_provider_names())}."
         )
     else:
         chosen = detected_list[0]  # validation guarantees default_provider == this

@@ -72,7 +72,9 @@ search the copies deliberately.
 - **`utils/provider_registry.py`** owns configuration layering and typed driver
   accessors. `utils/providers/` owns provider commands, profiles, output channels,
   and usage parsing. Configuration `command` values are metadata; executable
-  provider binaries come from built-in adapters.
+  provider binaries come from built-in adapters. The adapter roster is discovered
+  from `utils/providers/`, never typed; to add an adapter, follow
+  [Adding a provider adapter](../../docs/development/providers.md#adding-a-provider-adapter).
 - **`utils/subagent_executor.py`** invokes materialized tasks;
   **`utils/write_batch_scheduler.py`** owns write scheduling and continuation.
   Both host-native and executor paths must preserve the same task and result
@@ -214,7 +216,7 @@ rules. Each has a contents list; load the sections relevant to the change.
   [Write boundaries and tracking](../../docs/development/write-safety.md).
 - **Check findings, accepted checks, human-task answers and dependencies:**
   [Checks and human task gates](../../docs/development/checks.md).
-- **Adapters, configuration, permission profiles, output and environments:**
+- **Adapters (adding one included), configuration, permission profiles, output and environments:**
   [Provider contracts](../../docs/development/providers.md).
 - **Grouping, snapshots, aggregation, result recovery, report decisions:**
   [Review artifacts and reports](../../docs/development/review-results.md).

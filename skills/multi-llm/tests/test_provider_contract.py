@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.providers.agy import AgyProvider
 from utils.providers.aider import AiderProvider
 from utils.providers.base import LLMProvider, split_reasoning_effort
+from tests.roster_check import assert_covers_registry, assert_pinned_subset
 from utils.providers import base as base_module, cursor_agent as cursor_agent_module
 from utils.providers.claude_code import ClaudeCodeProvider
 from utils.providers.cline import ClineProvider
@@ -124,14 +125,13 @@ class TestInternalRetryEnvelopeDeclarations:
         return _PROVIDERS
 
     def test_the_sweep_really_covers_every_registered_adapter(self, registry):
-        """The done-when is 'all of them' — a shrinking sweep must fail, not pass.
+        """The done-when is 'all of them': the sweep is the registry itself.
 
-        The count is spelled once, here, and the name no longer carries it: the
-        literal "thirteen" went stale the moment the roster grew, and a test
-        whose name disagrees with its assertion is worse than one with no name at
-        all. Bump the number with the registry entry that moves it.
+        No count is pinned: the registry is derived from utils/providers/, and a
+        deleted or added adapter is caught by the hand-kept tables it leaves out
+        of step (tests/test_provider_roster.py names them).
         """
-        assert len(registry) == 19, sorted(registry)
+        assert _envelope_sweep_names() == sorted(registry)
 
     def test_the_base_default_is_none(self):
         """An adapter that measured nothing declares nothing, by inheriting."""
@@ -449,9 +449,14 @@ class TestPromptTransport:
         """The transport table stays in sync with the provider registry."""
         from utils.provider_registry import _PROVIDERS
 
-        registered = {type(p) for p in _PROVIDERS.values()}
-
-        assert registered == {cls for cls, _, _ in TRANSPORT_CASES}
+        assert_covers_registry(
+            {cls.__name__ for cls, _, _ in TRANSPORT_CASES},
+            "TRANSPORT_CASES in tests/test_provider_contract.py",
+            what="a transport row",
+            hint="A row is (AdapterClass, the transport its default build uses, "
+            "one real model id).",
+            registry={type(p).__name__ for p in _PROVIDERS.values()},
+        )
 
 
 class TestSubagentRunnerDeclarations:
@@ -687,7 +692,15 @@ class TestDeclaredOutputChannel:
             for name, provider in _PROVIDERS.items()
             if not provider.supports_file_output
         }
-        assert declared == self.CANNOT_WRITE_FILES
+        assert_pinned_subset(
+            self.CANNOT_WRITE_FILES,
+            declared,
+            "TestDeclaredOutputChannel.CANNOT_WRITE_FILES in tests/test_provider_contract.py",
+            members="the adapters that declare supports_file_output = False",
+            hint="A member's cause is adjudicated in tests/test_provider_housekeeping.py: "
+            "a STOPS_FILE_WRITES row for the argv atom that stops the write, or a "
+            "NO_WRITE_TOOL_AT_ALL row naming the probe when the CLI ships no write tool.",
+        )
 
     def test_cursor_declares_it_cannot_write_files(self):
         from utils.provider_registry import get_provider
