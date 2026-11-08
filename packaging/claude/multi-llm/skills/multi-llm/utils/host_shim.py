@@ -58,7 +58,9 @@ except ImportError:  # pragma: no cover - direct script runs with utils/ on path
 #: silently, and on every poll. A changed command form, which is exactly what
 #: this counter is for, and it moves for the same reason the ``--exec-subagents``
 #: case above did.
-SHIM_VERSION = 4
+#: 5: the OpenCode shim's load step gained ``--to-file`` and reads the core from
+#: the ``[CORE_FILE]`` path it prints. Another changed command form.
+SHIM_VERSION = 5
 
 #: The key that identifies a file as ours. ``uninstall-host`` removes files by
 #: this block and **never** by filename, so a user's own `multi-llm.md` is safe.

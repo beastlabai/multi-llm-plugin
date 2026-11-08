@@ -401,7 +401,7 @@ class TestInstalledShimPassesTheShippedGuard:
 #: asserts nothing. A template edit therefore lands as a failing test naming the
 #: file, which is where the author is asked whether the edit also moved the
 #: rendered *shape* and so owes ``SHIM_VERSION`` a bump.
-PINNED_SHIM_VERSION = 4
+PINNED_SHIM_VERSION = 5
 
 #: Re-pinned with SHIM_VERSION unmoved for plans/review-commits.md §2.9: step 2
 #: gained the commit modes' range rule, prose beside the plan rule, with no new
@@ -416,7 +416,7 @@ PINNED_TEMPLATE_SHA256 = {
     "codex":
         "3e6cc33df9b73b0a9369d22b636b2348ef213892db3dd5e9d4d3195bfa1478e1",
     "opencode":
-        "7372b4f496eed6706f3963519c57439d9415d6362623b129330c32ff210f304e",
+        "492a6378a4745758d01a504c974d9405f5acec7e6d2952b68bed72e89c20e7a3",
 }
 
 
