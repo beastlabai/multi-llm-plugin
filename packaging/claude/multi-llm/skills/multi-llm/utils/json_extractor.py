@@ -16,7 +16,7 @@ import sys
 from array import array
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 
 def strip_jsonc(text: str) -> str:
@@ -509,14 +509,18 @@ def _loads_reply(candidate: str) -> Any:
 
 #: A markdown code fence.
 _FENCE = "```"
-#: The last character of a fenced block: a closing bracket that nothing but
-#: whitespace separates from the fence after it.
-_FENCED_BLOCK_END = re.compile(r"[\]}](?=\s*```)")
+#: The last character of a fenced block, by the brackets a block may open with:
+#: a closing bracket that nothing but whitespace separates from the fence after
+#: it. A block that may open with either bracket closes on either one.
+_FENCED_BLOCK_ENDS = {
+    "[{": re.compile(r"[\]}](?=\s*```)"),
+    "[": re.compile(r"\](?=\s*```)"),
+}
 #: A run of whitespace, possibly empty, by the same ``\s`` the fence rule uses.
 _WHITESPACE = re.compile(r"\s*")
 
 
-def _fenced_spans(text: str) -> List[Tuple[int, int]]:
+def _fenced_spans(text: str, openers: str = "[{") -> List[Tuple[int, int]]:
     """``(start, end)`` of every fenced block :func:`extract_json_from_text`
     tries, in order of position.
 
@@ -536,6 +540,10 @@ def _fenced_spans(text: str) -> List[Tuple[int, int]]:
       matched, so a block may hold fences and brackets of its own.
     * the next block is looked for after that closing fence.
 
+    *openers* is ``"[{"``, or ``"["`` for array blocks only: the same pattern
+    with ``\\[`` and ``\\]`` in place of the two bracket classes
+    (:func:`first_fenced_block`).
+
     Matching the pattern is quadratic: every opening without a closing bracket
     after it searches the rest of the text, and model output is not trusted.
     Here the openings take their closing brackets from one forward pass instead:
@@ -545,28 +553,77 @@ def _fenced_spans(text: str) -> List[Tuple[int, int]]:
     *text*. ``tests/test_json_extractor.py::TestFencedSpansMatchThePattern`` pins
     it against the pattern.
     """
-    spans: List[Tuple[int, int]] = []
+    return list(_iter_fenced_spans(text, openers))
+
+
+def _iter_fenced_spans(text: str, openers: str) -> Iterator[Tuple[int, int]]:
+    """:func:`_fenced_spans`, one span at a time."""
     fence = text.find(_FENCE)
     if fence < 0:
-        return spans
-    block_ends = _FENCED_BLOCK_END.finditer(text, fence + 4)
+        return
+    opening = tuple(openers)
+    block_ends = _FENCED_BLOCK_ENDS[openers].finditer(text, fence + 4)
     block_end = -1  # the closing bracket read last; None once there are no more
     while fence >= 0:
         start = fence + 3
         if text.startswith("json", start):
             start += 4
         start = _WHITESPACE.match(text, start).end()
-        if text[start:start + 1] not in ("[", "{"):
+        if not text.startswith(opening, start):
             fence = text.find(_FENCE, fence + 1)
             continue
         while block_end is not None and block_end <= start:
             found = next(block_ends, None)
             block_end = None if found is None else found.start()
         if block_end is None:
-            break
-        spans.append((start, block_end + 1))
+            return
+        yield start, block_end + 1
         fence = text.find(_FENCE, _WHITESPACE.match(text, block_end + 1).end() + 3)
-    return spans
+
+
+def _require_text(text: Any) -> None:
+    """Raise ``TypeError`` for anything but a string, as the ``re.search`` the
+    two readers below replace did, so their callers' error handling holds."""
+    if not isinstance(text, str):
+        raise TypeError(f"expected a string, got {type(text).__name__}")
+
+
+def first_fenced_block(text: str, openers: str = "[{") -> Optional[str]:
+    """The first fenced block in *text*, or ``None``: what
+    ``re.search(pattern, text).group(1)`` returns for :func:`_fenced_spans`'s
+    fence pattern (with *openers* ``"["``, its array-only form).
+
+    For the readers that take the first fenced block where
+    :func:`extract_json_from_text` ranks them all. The search is quadratic on
+    fences with no closing bracket after them; this stops at the first block
+    the linear scan finds.
+    """
+    _require_text(text)
+    for start, end in _iter_fenced_spans(text, openers):
+        return text[start:end]
+    return None
+
+
+#: The closing bracket of each opening one.
+_CLOSING_BRACKET = {"[": "]", "{": "}"}
+
+
+def first_to_last_bracket(text: str, opener: str) -> Optional[str]:
+    """*text* from its first *opener* (``[`` or ``{``) to the last closing
+    bracket of that kind after it, or ``None`` when no closing one follows.
+
+    This is what the greedy ``re.search(r"\\[[\\s\\S]*\\]", text)``
+    (``\\{[\\s\\S]*\\}`` for ``{``) matched; nothing is balanced. The
+    search is quadratic on openers with no closing bracket after them: each
+    one reads to the end of the text and back. Two string scans find the same
+    span.
+    """
+    _require_text(text)
+    start = text.find(opener)
+    end = text.rfind(_CLOSING_BRACKET[opener])
+    if start < 0 or end < start:
+        return None
+    return text[start:end + 1]
 
 
 def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, Any]:

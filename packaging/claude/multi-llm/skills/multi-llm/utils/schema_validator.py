@@ -6,6 +6,13 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
+try:
+    from .json_extractor import first_fenced_block, first_to_last_bracket
+except ImportError:  # pragma: no cover - direct-script import shim
+    # `python utils/check_reply.py` imports this module as a top-level one
+    # (check_reply.py's own shim), with utils/ itself on sys.path.
+    from json_extractor import first_fenced_block, first_to_last_bracket
+
 SCHEMA_DIR = Path(__file__).parent.parent / "schemas"
 
 
@@ -402,25 +409,23 @@ def validate_json_output(
     except json.JSONDecodeError:
         pass
 
-    # Try extracting from code blocks
+    # Try extracting from the first code block. This reader and the next are
+    # linear (utils.json_extractor): the output may be a model's.
     if parsed is None:
-        code_block_match = re.search(
-            r'```(?:json)?\s*([\[\{][\s\S]*?[\]\}])\s*```',
-            output
-        )
-        if code_block_match:
+        block = first_fenced_block(output)
+        if block is not None:
             try:
-                parsed = json.loads(code_block_match.group(1))
+                parsed = json.loads(block)
             except json.JSONDecodeError:
                 pass
 
-    # Try finding JSON structure
+    # Try finding JSON structure: first opening bracket to last closing one
     if parsed is None:
-        for pattern in [r'\[[\s\S]*\]', r'\{[\s\S]*\}']:
-            match = re.search(pattern, output)
-            if match:
+        for opener in ("[", "{"):
+            candidate = first_to_last_bracket(output, opener)
+            if candidate is not None:
                 try:
-                    parsed = json.loads(match.group(0))
+                    parsed = json.loads(candidate)
                     break
                 except json.JSONDecodeError:
                     continue

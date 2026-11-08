@@ -6,6 +6,8 @@ one. The check is what lets the instructions say "re-ask once, never repair".
 """
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -186,6 +188,18 @@ class TestMain:
     def test_it_is_a_registered_util_command(self):
         from multi_llm import UTIL_COMMANDS
         assert UTIL_COMMANDS["check-reply"][0] == "utils.check_reply"
+
+    def test_it_runs_as_a_direct_script(self, tmp_path):
+        """`python utils/check_reply.py` is a supported entry point: its import
+        shim loads schema_validator as a top-level module, so every module that
+        one imports must load outside the package too."""
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+        done = subprocess.run(
+            [sys.executable, str(SKILL_ROOT / "utils" / "check_reply.py"), "--help"],
+            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert done.returncode == 0, done.stderr
+        assert "--tasks-file" in done.stdout
 
 
 class TestRevalidationRunsTheCheckToo:

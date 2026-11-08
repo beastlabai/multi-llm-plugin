@@ -22,6 +22,8 @@ from utils.json_extractor import (
     describe_syntax_error,
     extract_json_from_text,
     find_json_candidates,
+    first_fenced_block,
+    first_to_last_bracket,
     generate_output_path,
     has_salvageable_json,
     is_answer_shaped,
@@ -1516,3 +1518,97 @@ class TestFencedSpansAreLinear:
                         "scan has gone quadratic again (see _fenced_spans)")
         assert completed.returncode == 0, completed.stderr[-3000:]
         assert json.loads(completed.stdout)["elapsed"] < 20
+
+
+#: The fence searches the readers outside this module ran, by *openers*:
+#: ``review_orchestrator_base.extract_json_array`` read array blocks only,
+#: ``schema_validator`` and ``suggestion_processor`` either kind.
+_FIRST_FENCE_PATTERNS = {
+    "[{": r"```(?:json)?\s*([\[\{][\s\S]*?[\]\}])\s*```",
+    "[": r"```(?:json)?\s*(\[[\s\S]*?\])\s*```",
+}
+#: The greedy searches they fell back to, by opening bracket.
+_FIRST_TO_LAST_PATTERNS = {"[": r"\[[\s\S]*\]", "{": r"\{[\s\S]*\}"}
+
+
+def _first_block_by_pattern(text, openers):
+    """The oracle for ``first_fenced_block``: the search it replaces.
+    Quadratic: keep the inputs handed to it small."""
+    match = re.search(_FIRST_FENCE_PATTERNS[openers], text)
+    return match.group(1) if match else None
+
+
+def _first_to_last_by_pattern(text, opener):
+    """The oracle for ``first_to_last_bracket``. Quadratic too."""
+    match = re.search(_FIRST_TO_LAST_PATTERNS[opener], text)
+    return match.group(0) if match else None
+
+
+def _assert_readers_match_patterns(text):
+    for openers in _FIRST_FENCE_PATTERNS:
+        assert first_fenced_block(text, openers) == _first_block_by_pattern(
+            text, openers), f"openers={openers!r} text={text!r}"
+        assert _fenced_spans(text, openers) == [
+            match.span(1)
+            for match in re.finditer(_FIRST_FENCE_PATTERNS[openers], text)
+        ], f"openers={openers!r} text={text!r}"
+    for opener in _FIRST_TO_LAST_PATTERNS:
+        assert first_to_last_bracket(text, opener) == _first_to_last_by_pattern(
+            text, opener), f"opener={opener!r} text={text!r}"
+
+
+#: Edges where the array-only block and the greedy span differ from the
+#: either-kind block: mismatched closers, an object fenced before an array,
+#: a closer only before the first opener.
+_FIRST_READER_EDGE_CASES = [
+    "```[1}```", "```[1}``` ```[2]```", "```{\"a\": [1]}```", "```{\"a\": 1}``` ```[1]```",
+    "```[1} ] ```", "```[{]```", "``` {}```[1]```", "] [", "} {", "][", "}{", "[", "]",
+    "x [1] y [2] z", "x {1} y {2} z", "[ { ] }", "{ [ } ]", "[\n]", "{\n}",
+    "```json\n{\"k\": [1, 2]}\n```\n[3]", "[1] ```json\n[2]\n```",
+]
+
+
+class TestFirstReadersMatchTheSearches:
+    """``first_fenced_block`` and ``first_to_last_bracket`` serve the readers
+    outside this module that took the first fenced block, then everything from
+    the first opening bracket to the last closing one. They must return exactly
+    what those readers' searches returned."""
+
+    @pytest.mark.parametrize("text", _FENCE_EDGE_CASES + _FIRST_READER_EDGE_CASES)
+    def test_hand_written_edges(self, text):
+        _assert_readers_match_patterns(text)
+        _assert_readers_match_patterns(text.strip())
+
+    @pytest.mark.parametrize(
+        "alphabet", _FENCE_ALPHABETS + _WALK_ALPHABETS,
+        ids=lambda alphabet: "".join(alphabet)[:12].encode("unicode_escape").decode())
+    def test_seeded_random_strings(self, alphabet):
+        rng = random.Random(20261110 + len("".join(alphabet)))
+        for _ in range(3000):
+            length = rng.choice(
+                [rng.randint(0, 8), rng.randint(0, 30), rng.randint(0, 100)])
+            _assert_readers_match_patterns(
+                "".join(rng.choice(alphabet) for _ in range(length)))
+
+    def test_seeded_mixes(self):
+        rng = random.Random(6565)
+        for _ in range(1500):
+            _assert_readers_match_patterns(_fence_mix(rng))
+            _assert_readers_match_patterns(_document_mix(rng))
+
+    def test_every_fixture(self):
+        for text in _fenced_fixture_texts():
+            _assert_readers_match_patterns(text)
+
+    @pytest.mark.parametrize("value", [None, 5, ["```[1]```"], b"```[1]```", {"a": 1}])
+    def test_anything_but_a_string_raises_type_error_as_the_search_did(self, value):
+        for openers in _FIRST_FENCE_PATTERNS:
+            with pytest.raises(TypeError):
+                re.search(_FIRST_FENCE_PATTERNS[openers], value)
+            with pytest.raises(TypeError):
+                first_fenced_block(value, openers)
+        for opener in _FIRST_TO_LAST_PATTERNS:
+            with pytest.raises(TypeError):
+                re.search(_FIRST_TO_LAST_PATTERNS[opener], value)
+            with pytest.raises(TypeError):
+                first_to_last_bracket(value, opener)

@@ -7,6 +7,7 @@ import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from . import importance as _importance
+from .json_extractor import first_fenced_block
 from .schema_validator import drop_non_record_entries
 
 
@@ -96,11 +97,12 @@ def extract_suggestions_from_review(
     """
     suggestions = []
 
-    # Try to extract JSON if present
-    json_match = re.search(r'```(?:json)?\s*([\[\{][\s\S]*?[\]\}])\s*```', review_text)
-    if json_match:
+    # Try to extract JSON if present: the first fenced block, read in linear
+    # time (utils.json_extractor), as are the prose patterns below.
+    block = first_fenced_block(review_text)
+    if block is not None:
         try:
-            parsed = json.loads(json_match.group(1))
+            parsed = json.loads(block)
             if isinstance(parsed, list):
                 # Same guard as the aggregation sites: `item["source_model"] = …`
                 # is an item assignment, and a fenced array can carry a bare
@@ -118,7 +120,12 @@ def extract_suggestions_from_review(
     suggestion_patterns = [
         r'(?:Suggestion|Issue|Problem|Concern|Improvement)[\s:]+(.+?)(?=\n\n|\n-|\n\d+\.|\Z)',
         r'-\s+(.+?)(?=\n-|\n\n|\Z)',
-        r'\d+\.\s+(.+?)(?=\n\d+\.|\n\n|\Z)',
+        # `(?<!\d)`: a match starts where a number does. A match from inside
+        # a run of digits is also one from the run's start, which no earlier
+        # match can have taken (each ends before a newline or at the end), so
+        # findall's matches are unchanged and a run is read once, not once
+        # per digit.
+        r'(?<!\d)\d+\.\s+(.+?)(?=\n\d+\.|\n\n|\Z)',
     ]
 
     for pattern in suggestion_patterns:

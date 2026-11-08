@@ -19,7 +19,6 @@ import asyncio
 import contextvars
 import json
 import os
-import re
 import shutil
 import stat
 import subprocess
@@ -66,6 +65,8 @@ from .provider_registry import (
 )
 from .json_extractor import (
     build_unsanitize_map,
+    first_fenced_block,
+    first_to_last_bracket,
     generate_output_path,
     has_salvageable_json,
     read_json_from_file,
@@ -2245,7 +2246,13 @@ def validate_suggestion(suggestion: dict) -> Tuple[bool, Optional[str]]:
 
 
 def extract_json_array(text: str) -> Optional[str]:
-    """Extract JSON array from text that may contain extra content."""
+    """Extract JSON array from text that may contain extra content.
+
+    The first fenced array block, else everything from the first ``[`` to the
+    last ``]``. Both readers are linear (:mod:`utils.json_extractor`): this runs
+    on a model's reply while its result is saved, after the provider's
+    deadline, so a quadratic search here could stall the round.
+    """
     try:
         wrapper = json.loads(text)
         if isinstance(wrapper, dict) and 'result' in wrapper:
@@ -2253,15 +2260,10 @@ def extract_json_array(text: str) -> Optional[str]:
     except (json.JSONDecodeError, TypeError):
         pass
 
-    code_block_match = re.search(r'```(?:json)?\s*(\[[\s\S]*?\])\s*```', text)
-    if code_block_match:
-        return code_block_match.group(1)
-
-    array_match = re.search(r'\[[\s\S]*\]', text)
-    if array_match:
-        return array_match.group(0)
-
-    return None
+    block = first_fenced_block(text, "[")
+    if block is not None:
+        return block
+    return first_to_last_bracket(text, "[")
 
 
 #: The one translation from §7.2's classifier vocabulary into the D3k ladder's
@@ -6396,13 +6398,39 @@ def save_model_result(
             print(f"[{model}] Warning: All suggestions were invalid")
 
         result_path = os.path.join(phase_dir, f"{sanitized_model}.json")
+        # Encoded before the file is opened, so a reply the encoder cannot write
+        # back out leaves no partial `{model}.json`: the encoder's stack can be
+        # shallower than the decoder's (about 1,000 levels against 10,000 on
+        # Python 3.12). Such a reply did parse, so it is not one to salvage: the
+        # model fails and the log names the encoder.
+        try:
+            encoded = json.dumps(validated_suggestions, indent=2)
+        except RecursionError as e:
+            error_path = os.path.join(phase_dir, f"error_{sanitized_model}.log")
+            with open(error_path, 'w', encoding='utf-8') as f:
+                f.write(f"Model: {model}\n")
+                f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+                f.write(
+                    "Encode error: the reply parsed, but it is nested too deep "
+                    f"to write back out as {sanitized_model}.json: {e}\n"
+                )
+                f.write(f"\nRaw output:\n{output}\n")
+            print(
+                f"[{model}] Reply parsed but is nested too deep to save, "
+                f"raw output saved to: {error_path}"
+            )
+            return False
         with open(result_path, 'w', encoding='utf-8') as f:
-            json.dump(validated_suggestions, f, indent=2)
+            f.write(encoded)
 
         print(f"[{model}] Saved {len(validated_suggestions)} suggestions to: {result_path}")
         return True
 
-    except (json.JSONDecodeError, ValueError) as e:
+    # A reply nested deeper than the JSON decoder's stack (RecursionError: about
+    # 1,000 brackets on Python 3.10 and 3.11, 10,000 or more later) is a reply
+    # that does not parse, not an error that ends the round's save loop. The
+    # encoder's RecursionError never reaches here: it is caught above.
+    except (json.JSONDecodeError, ValueError, RecursionError) as e:
         # The fan-out's sibling of code_review_orchestrator's two salvage sites,
         # and it holds the same rule: salvage only when the reply still holds an
         # answer to repair. A model that answered in prose — §40's write
