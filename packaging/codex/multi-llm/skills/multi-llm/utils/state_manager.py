@@ -33,7 +33,13 @@ PHASES_STALED_BY_IMPLEMENT = ("code-review", "apply-code-fixes")
 
 
 def _parse_completion_time(value) -> Optional[datetime]:
-    """A ``phases_completed`` timestamp as a naive local datetime, or None."""
+    """An ISO timestamp as a naive local datetime, or None.
+
+    The one reading of a stamp, whatever wrote it: ``state.json``'s phase
+    and metrics stamps, a write report's ``written_at``, an audit record, a
+    snapshot manifest. A stamp with a UTC offset is converted to local time,
+    so it compares with a naive local one as the same instant.
+    """
     if not isinstance(value, str) or not value:
         return None
     try:
@@ -43,6 +49,54 @@ def _parse_completion_time(value) -> Optional[datetime]:
     if parsed.tzinfo is not None:
         parsed = parsed.astimezone().replace(tzinfo=None)
     return parsed
+
+
+def predates_review(
+    stamped: Optional[datetime], reviewed_at: Optional[datetime], *,
+    whole_seconds: bool = False, undated_predates: bool = False,
+) -> bool:
+    """Whether a record dated *stamped* belongs to an earlier review cycle.
+
+    The review-cycle rule: a record older than the review's latest
+    completion (*reviewed_at*) is an earlier cycle's. Strictly older, so a
+    record stamped at the completion's instant is this cycle's. A missing
+    date on either side keeps the record: absence of a date is not
+    staleness. Both datetimes are naive local times, as
+    :func:`_parse_completion_time` reads them.
+
+    *whole_seconds* is for records stamped to the second (the audit log, a
+    pre-batch snapshot's manifest): the completion is truncated to its
+    second first, so a record in the review's own second is this cycle's.
+
+    *undated_predates* reads a record with no date as an earlier cycle's
+    when the review has one. Only a pre-batch snapshot takes it
+    (``write_safety.TaskSnapshot.taken_before``): the manifests without a
+    date predate the field, and a rollback point of unknown age is set
+    aside rather than trusted. See docs/development/write-scheduler.md.
+    """
+    if reviewed_at is None:
+        return False
+    if stamped is None:
+        return undated_predates
+    if whole_seconds:
+        reviewed_at = reviewed_at.replace(microsecond=0)
+    return stamped < reviewed_at
+
+
+def stamp_or_mtime(value: Any, path: Any) -> Optional[datetime]:
+    """*value* read as a stamp, else *path*'s modification time, else None.
+
+    How a file that carries its own date is dated (``write_batch_report.json``
+    and its ``written_at``): the stamp when it parses, the file's mtime when
+    the stamp is missing or unreadable.
+    """
+    parsed = _parse_completion_time(value)
+    if parsed is not None:
+        return parsed
+    try:
+        return datetime.fromtimestamp(os.stat(path).st_mtime)
+    except OSError:
+        return None
 
 
 def mark_phase_started_in_state(state: Dict[str, Any], phase: str) -> None:
@@ -2769,11 +2823,9 @@ class StateManager:
         again after the apply last finished, so its findings are not applied
         yet.
 
-        Every stamp goes through :func:`_parse_completion_time`, the reading
-        ``phase_completion_is_stale`` and ``is_phase_started`` give a stamp
-        (``write_batch_scheduler._parse_local_timestamp`` and
-        ``check_workflow_prerequisites._parse_timestamp`` are its copies), so
-        a stamp with a UTC offset and a naive local one compare as instants.
+        Every stamp goes through :func:`_parse_completion_time`, the one
+        reading of a stamp, so a stamp with a UTC offset and a naive local
+        one compare as instants.
 
         False whenever a date does not parse (an unparseable review stamp, a
         completion that is not a string, a skip that is not a dict or has no
@@ -2805,7 +2857,7 @@ class StateManager:
             if stamp is None:
                 return False
             stamps.append(stamp)
-        return bool(stamps) and max(stamps) < reviewed_at
+        return bool(stamps) and predates_review(max(stamps), reviewed_at)
 
     def has_plan_changed(self) -> bool:
         """Check if plan has changed since last run."""

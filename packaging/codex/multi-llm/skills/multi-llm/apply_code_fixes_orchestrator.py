@@ -1071,7 +1071,7 @@ Finalization (run by the host AFTER every batch has been applied and verified):
         """
         from utils.scope_apply import selected_remedy
 
-        remedy = selected_remedy(group, self.scope)
+        remedy = selected_remedy(group, self.scope_gate.policy)
         formatted = format_fix_for_output(group, index, selected_remedy=remedy)
         if getattr(self, "_pinned", None) is not None:
             from utils.commit_apply import group_files

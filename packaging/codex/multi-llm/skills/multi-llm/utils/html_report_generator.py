@@ -2840,7 +2840,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             # nothing by hand or by judge re-rendered the report anyway and
             # printed "0 of 0 human decision(s) matched", which the host
             # relayed. The executor leg's twin
-            # (`ApplyOrchestratorBase.regenerate_decisions_overlay`) has
+            # (`ApplyPhaseReport.regenerate_decisions_overlay`) has
             # always left the report alone then; this leg now does too.
             print(
                 f"No human or judge decisions are recorded for "

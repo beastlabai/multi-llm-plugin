@@ -411,7 +411,7 @@ the ids before the first `(`, `—`, `;` or
 is the range, an empty label reads the id-only bullets under it, and a bare number is an id only in
 a Step-numbered document (adversarial review, 2026-10-02); the executor leg prints the same findings
 as `[CONSISTENCY_WARNING]` and in `summary.md`, and (fix round 14) hands them, with every
-item it left unapplied and why, to the result as `progress.notes` (`ApplyOrchestratorBase.run_notes`):
+item it left unapplied and why, to the result as `progress.notes` (`ApplyPhaseReport.run_notes`):
 the run's own `notice`, `status`'s `note:` lines and
 `progress_lines`, and a terminal poll's `notice`, so a host relays them beside
 the counts.

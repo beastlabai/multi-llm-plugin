@@ -69,6 +69,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from .git_utils import pin_repo_root
 from .process_control import FileMutex
 from .provider_registry import get_write_paths
+from .state_manager import _parse_completion_time, predates_review
 from .subagent_tasks import declared_file_set
 
 
@@ -1298,20 +1299,17 @@ class TaskSnapshot:
     def taken_before(self, cutoff: Optional[datetime]) -> bool:
         """Whether this snapshot predates ``cutoff`` (a review's completion).
 
-        A manifest with no parseable date cannot be placed in a cycle and is
-        read as predating any cutoff given: the only such manifests are
-        older than the field, and an unknown-age rollback point is kept
-        aside rather than trusted as this cycle's.
+        The review-cycle rule (:func:`state_manager.predates_review`) to the
+        second, as ``taken_at`` is stamped. Unlike the rule's other readers,
+        a manifest with no parseable date is read as predating any cutoff
+        given: the only such manifests are older than the field, and an
+        unknown-age rollback point is kept aside rather than trusted as this
+        cycle's.
         """
-        if cutoff is None:
-            return False
-        try:
-            taken = datetime.fromisoformat(self.taken_at or "")
-        except ValueError:
-            return True
-        if taken.tzinfo is not None:
-            taken = taken.astimezone().replace(tzinfo=None)
-        return taken < cutoff
+        return predates_review(
+            _parse_completion_time(self.taken_at), cutoff,
+            whole_seconds=True, undated_predates=True,
+        )
 
     @staticmethod
     def items_digest(expected_ids: Optional[Sequence[str]]) -> str:

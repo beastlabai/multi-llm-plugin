@@ -401,6 +401,30 @@ def group_suggestions_for_subagents(
     return batches
 
 
+#: A multi-suggestion prompt's section on the batches before it: the
+#: ``{prior_changes_context}`` token is filled at dispatch time.
+PRIOR_BATCHES_SECTION = """## Changes Applied in Prior Batches
+(Review these to avoid redoing work — do NOT re-apply these changes)
+
+{prior_changes_context}
+"""
+
+
+def format_suggestion_block(number: int, suggestion: Dict[str, Any], reference_label: str) -> str:
+    """One suggestion of a multi-suggestion prompt, its reference under
+    *reference_label* (the plan's ``Section``, the task list's ``Task reference``)."""
+    s = suggestion
+    return f"""---
+### Suggestion {number}: {s.get('title', 'Untitled')}
+- **Type**: {s.get('type', 'modification')}
+- **{reference_label}**: {s.get('reference', 'N/A')}
+- **Importance**: {s.get('importance', 'MEDIUM')}
+
+**Details**:
+{s.get('description', 'No description provided.')}
+"""
+
+
 def format_batch_for_prompt(batch: SuggestionBatch, plan_path: str) -> str:
     """
     Format a batch of suggestions into a prompt for a subagent.
@@ -460,21 +484,9 @@ Return a brief summary of what was changed."""
     ]
 
     for i, s in enumerate(suggestions, 1):
-        prompt_parts.append(f"""---
-### Suggestion {i}: {s.get('title', 'Untitled')}
-- **Type**: {s.get('type', 'modification')}
-- **Section**: {s.get('reference', 'N/A')}
-- **Importance**: {s.get('importance', 'MEDIUM')}
+        prompt_parts.append(format_suggestion_block(i, s, "Section"))
 
-**Details**:
-{s.get('description', 'No description provided.')}
-""")
-
-    prompt_parts.append("""## Changes Applied in Prior Batches
-(Review these to avoid redoing work — do NOT re-apply these changes)
-
-{prior_changes_context}
-""")
+    prompt_parts.append(PRIOR_BATCHES_SECTION)
 
     prompt_parts.append("""---
 

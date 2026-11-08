@@ -73,7 +73,9 @@ from .output_handler import (
     output_dir_path,
     phase_dir_path,
 )
-from .state_manager import StateManager, _parse_completion_time
+from .state_manager import (
+    StateManager, _parse_completion_time, predates_review, stamp_or_mtime,
+)
 
 #: The step word of review-plan's advisory consolidation pass. Not a mode and
 #: not in any ``sequence``: it is ``review-plan --consolidate``, run between the
@@ -1988,7 +1990,7 @@ class ImproveWorkflow(fwo.FullWorkflow):
 
         The ``files_touched`` of every ``ok`` or partly applied row of the
         apply's ``write_batch_report.json``: the set the apply hands back as
-        its own ``touched_file_{n}`` (``ApplyOrchestratorBase._touched_files``),
+        its own ``touched_file_{n}`` (``ApplyPhaseReport.touched_files``),
         earlier runs of this review cycle's rows included. Never
         ``tracked_files``: that list also holds implement's entries (label
         ``implementation``), so the summary, and the artifacts on the result
@@ -2022,12 +2024,7 @@ class ImproveWorkflow(fwo.FullWorkflow):
         rows = report.get("tasks") if isinstance(report, dict) else None
         if not isinstance(rows, list):
             return []
-        written_at = _parse_completion_time(report.get("written_at"))
-        if written_at is None:
-            try:
-                written_at = datetime.fromtimestamp(report_path.stat().st_mtime)
-            except OSError:
-                written_at = None
+        written_at = stamp_or_mtime(report.get("written_at"), report_path)
         try:
             completed = StateManager(self.plan_path, read_only=True).get(
                 "phases_completed")
@@ -2038,8 +2035,7 @@ class ImproveWorkflow(fwo.FullWorkflow):
                 completed.get(review_phase_for(self.row.sequence[1])))
             if isinstance(completed, dict) else None
         )
-        if written_at is not None and reviewed_at is not None \
-                and written_at < reviewed_at:
+        if predates_review(written_at, reviewed_at):
             return []
         root = Path(get_project_root(str(self.plan_path)) or os.getcwd())
         paths: List[Path] = []

@@ -91,7 +91,7 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[COMMIT_REVIEW_NOT_FOUND]` | `utils/commit_apply.py` `NOT_FOUND_MARKER`<br>`utils/commit_front_door.py` `COMMIT_REVIEW_NOT_FOUND`<br>`utils/improve_steps.py` `COMMIT_REVIEW_NOT_FOUND`<br>`utils/run_status.py` | `instructions/apply-commit-fixes.md`<br>`instructions/review-commits.md` | The exit-3 refusal when no completed review fits |
 | `[COMMIT_REVIEW_RESTARTED]` | `utils/commit_front_door.py` `COMMIT_REVIEW_RESTARTED` | `instructions/improve-commits.md`<br>`instructions/review-commits.md` | — |
 | `[COMMIT_REVIEW_SELECTED]` | `utils/commit_apply.py` `SELECTED_MARKER` | `instructions/apply-commit-fixes.md` | The commit block's line naming the review a no-argument apply picked |
-| `[CONSISTENCY_WARNING]` | `utils/apply_orchestrator_base.py` | not for the host: run-notice | — |
+| `[CONSISTENCY_WARNING]` | `utils/apply_report.py` | not for the host: run-notice | — |
 | `[CONSOLIDATION_BATCHES_PENDING]` | `review_plan_orchestrator.py` | `instructions/full-workflow.md`<br>`instructions/improve-plan.md`<br>`instructions/review-plan.md`<br>`references/consolidation.md` | — |
 | `[CONSOLIDATION_PENDING]` | `review_plan_orchestrator.py` | `instructions/full-workflow.md`<br>`instructions/improve-plan.md`<br>`instructions/review-plan.md`<br>`references/consolidation.md` | — |
 | `[CONSOLIDATION_RECOMMENDED]` | `utils/review_orchestrator_base.py` | `instructions/full-workflow.md`<br>`instructions/review-plan.md`<br>`references/consolidation.md` | — |

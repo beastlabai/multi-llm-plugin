@@ -41,7 +41,6 @@ import multi_llm  # noqa: E402
 from utils import cli_common, detach, process_control, status_file  # noqa: E402
 from utils import improve_workflow as iw  # noqa: E402
 from utils import review_orchestrator_base as rob  # noqa: E402
-from utils import state_manager as sm  # noqa: E402
 from utils import write_batch_scheduler as wbs  # noqa: E402
 from utils.output_handler import output_dir_path  # noqa: E402
 from utils.state_manager import StateManager  # noqa: E402
@@ -731,15 +730,6 @@ class TestSkipLogic:
         records = iw.read_records(PLAN, plan, args)
         assert not records.apply_predates_review, "an equal instant keeps it done"
         assert iw.skip_reason(PLAN, "apply-suggestions", args, records) == "completed"
-
-    def test_three_stamp_readers_agree(self):
-        cases = [T(0), BASE.astimezone(timezone.utc).isoformat(), "", None, 7, "nope"]
-        for value in cases:
-            assert (
-                sm._parse_completion_time(value)
-                == wbs._parse_local_timestamp(value)
-                == prereq._parse_timestamp(value)
-            ), value
 
     @pytest.mark.parametrize("started, completed_at", [(T(10), T(5)), (T(10), None)],
                              ids=["start-newer-than-completion", "start-beside-a-skip"])

@@ -391,7 +391,7 @@ class TestTheContextPlan:
         assert guard["skipped"][ids[0]] == {"reason": "context_plan", "files": ["docs/x.md"]}
         assert guard["skipped"][ids[2]]["reason"] == "context_plan"
         assert guard["context_plan"] == "docs/x.md"
-        summary = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        summary = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "context plan docs/x.md is read-only in this review" in summary
         assert "**Files**: `docs/x.md`" in summary
 
@@ -658,10 +658,10 @@ class TestGroupGranularity:
         assert rc == 0
         block = _block(out)
         assert f"  skipped  1 (file changed since {head[:7]}: b.py)" in block
-        summary = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        summary = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert summary.count(f"**Group**: `{ab}`") == 1
         assert "**Files**: `b.py`" in summary
-        assert orch.regenerate_decisions_overlay() is not None
+        assert orch.phase_report().regenerate_decisions_overlay() is not None
         data = json.loads((review / "report_data.json").read_text(encoding="utf-8"))
         stamped = [g for g in data["groups"] if g.get("guardSkip")]
         assert len(stamped) == 1

@@ -70,7 +70,7 @@ rule; adversarial review, 2026-10-02) — an earlier row is the same batch as th
 both name the same `expected_ids` (`_same_batch_row`: apply ids are positional, so a
 resume whose selection changed hands `apply-batch-1` to other items), and the apply phases'
 own `summary.md` and result block render the same `report_rows()`
-(`ApplyOrchestratorBase._phase_rows`), marking `(earlier run)` and a reused resume skip apart, with counts
+(`ApplyPhaseReport._phase_rows`), marking `(earlier run)` and a reused resume skip apart, with counts
 taken from those rows; and `{phase}/subagent_audit.jsonl`, one fsynced append-only line before dispatch and
 one after classification, carrying the rendered argv with the prompt reduced to its sha256 + byte
 length — **never** prompt bytes, the runner's environment or any auth value.
@@ -208,7 +208,7 @@ is not claimed again, any other label is replaced.
 It is recorded as each code batch finishes (`WriteBatchScheduler._record_batch_tracking`, in memory through the run's own
 `StateManager`; `util batch-done` on the native leg, census only), so a run that stops
 part-way has recorded its finished batches, and a resume's `--touched` set carries the
-earlier runs' `ok` report rows (`_touched_files`).
+earlier runs' `ok` report rows (`ApplyPhaseReport.touched_files`).
 
 The plan, the task list its `TASKS_FILE` marker names (a Markdown file only) and what of
 its output folder is the workflow's (`output_handler.workflow_file_entries`: the whole folder only when everything

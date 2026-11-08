@@ -1483,10 +1483,10 @@ def _record_implement_write_artifacts(
 
     ``implement`` never goes through ``ApplyOrchestratorBase`` — this function
     drives ``WriteBatchScheduler`` directly — so it never got that base's
-    ``_record_write_artifacts``: a fully completed detached run's result line
+    ``record_write_artifacts``: a fully completed detached run's result line
     said ``"artifacts": []`` and ``status`` had no ``output_files:`` block,
-    unlike every apply phase. This mirrors ``ApplyOrchestratorBase.
-    _record_write_artifacts``'s shape (same two channels: ``record_output_files``
+    unlike every apply phase. This mirrors ``ApplyPhaseReport.
+    record_write_artifacts``'s shape (same two channels: ``record_output_files``
     feeds ``.status.json`` for ``status``, ``record_artifacts`` feeds the
     terminal ``MULTI_LLM_RESULT`` line) for the files implement itself writes,
     plus the file(s) the write executor actually verified changed

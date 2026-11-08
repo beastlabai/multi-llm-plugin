@@ -209,7 +209,7 @@ class TestAnApplyPhasesNotesReachTheResult:
 
     def test_the_notes_name_the_warning_and_the_skipped_item(self, tmp_path):
         orch = self._orchestrator(tmp_path)
-        notes = orch.run_notes()
+        notes = orch.phase_report().run_notes()
         assert notes[0] == f"consistency warning: {WARNING}"
         # Fix round 26: the count names the file the items were applied to.
         target = orch._applied_to_label()
@@ -227,7 +227,7 @@ class TestAnApplyPhasesNotesReachTheResult:
         context = cli_common.activate_result(cli_common.ResultContext())
         try:
             cli_common.record_notice("an earlier notice")
-            orch._publish_run_notes()
+            orch.phase_report().publish_run_notes()
             notice = context.notice
         finally:
             cli_common.deactivate_result()
@@ -235,7 +235,7 @@ class TestAnApplyPhasesNotesReachTheResult:
         assert "1 " + orch.item_noun + " not applied" in notice
         status = json.loads(
             (Path(orch.out_dir) / orch.phase_name / ".status.json").read_text())
-        assert status["progress"]["notes"] == orch.run_notes()
+        assert status["progress"]["notes"] == orch.phase_report().run_notes()
 
     def test_a_terminal_poll_carries_them(self, tmp_path, capsys):
         import multi_llm

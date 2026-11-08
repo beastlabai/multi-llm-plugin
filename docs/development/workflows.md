@@ -588,7 +588,7 @@ failure line says the file was left in place.
 phases already closed for themselves.** `run_implement_write_phase` now seeds every materialized task
 `pending` in `state.json` before the scheduler loop starts, so
 `check_workflow_prerequisites`'s task count reads the plan's total rather than however many happened to
-finish or be skipped so far (F5); records its own artifacts the way `ApplyOrchestratorBase._record_write_artifacts` does,
+finish or be skipped so far (F5); records its own artifacts the way `ApplyPhaseReport.record_write_artifacts` does,
 since `implement` never goes through that base (`write_tasks.json`,
 `write_batch_report.json`, `subagent_batch_report.json`, `summary.md`, `prior_changes.jsonl`, and
 every `files_touched` path an `ok` outcome names — F7); buffers the row-8

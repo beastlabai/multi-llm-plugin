@@ -494,6 +494,18 @@ class TestInitSubclassValidation:
                 # supports_revalidation intentionally omitted
                 supports_skip_flag = False
 
+    def test_an_abstract_intermediate_is_not_validated_but_its_subclasses_are(self):
+        """`abstract=True` skips the checks for a shared class only."""
+        from utils.apply_suggestion_phase import SuggestionApplyPhase
+
+        assert SuggestionApplyPhase.phase_name == ""
+        with pytest.raises(TypeError, match="supports_skip_flag"):
+            class Bad(SuggestionApplyPhase):
+                phase_name = "apply-test"
+                review_subdir = "review-plan"
+                item_noun = "item"
+                supports_revalidation = False
+
     def test_invalid_bool_type(self):
         """TypeError raised when boolean config is not a bool."""
         with pytest.raises(TypeError, match="must be a bool"):
@@ -702,9 +714,12 @@ class TestAbstractMethodContracts:
         with pytest.raises(NotImplementedError, match="build_output_json"):
             self._call_base_method("build_output_json", [])
 
-    def test_get_output_path_raises(self):
-        with pytest.raises(NotImplementedError, match="get_output_path"):
-            self._call_base_method("get_output_path")
+    def test_get_output_path_default_is_under_the_phase_dir(self):
+        dummy_args = _make_args()
+        orch = MockApplyOrchestrator(dummy_args)
+        orch.out_dir = "/out"
+        assert ApplyOrchestratorBase.get_output_path(orch) == os.path.join(
+            "/out", orch.phase_name, "orchestrator_output.json")
 
     def test_print_text_summary_raises(self):
         with pytest.raises(NotImplementedError, match="print_text_summary"):
@@ -5592,7 +5607,7 @@ class _FakeOutcome:
         self.duration_seconds = duration_seconds
         self.runner = runner
         self.reason = reason
-        # F7/F10: only read by `_touched_files()` and the batch's own result
+        # F7/F10: only read by `touched_files()` and the batch's own result
         # file (`notes`) — optional so every existing caller is unaffected.
         self.files_touched = files_touched or []
         self.output_path = output_path
@@ -5913,7 +5928,7 @@ class TestTheExecutorLegHandsBackItsArtifacts:
         context = cli_common.ResultContext(mode="apply-mock", phase="apply-mock")
         cli_common.activate_result(context)
         try:
-            orch._record_write_artifacts(str(output_path))
+            orch.phase_report().record_write_artifacts(str(output_path))
         finally:
             cli_common.deactivate_result()
 
@@ -5937,7 +5952,7 @@ class TestTheExecutorLegHandsBackItsArtifacts:
         context = cli_common.ResultContext(mode="apply-mock", phase="apply-mock")
         cli_common.activate_result(context)
         try:
-            orch._record_write_artifacts(str(output_path))
+            orch.phase_report().record_write_artifacts(str(output_path))
         finally:
             cli_common.deactivate_result()
 
@@ -5970,7 +5985,7 @@ class TestTheExecutorLegReportsItsOutcome:
                 {"task_id": "apply-batch-1", "expected_ids": ["d"]},
             ],
         )
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         out = capsys.readouterr().out
 
         assert "Batches: 1/2 ok" in out
@@ -5997,7 +6012,7 @@ class TestTheExecutorLegReportsItsOutcome:
                 "reason": "the plan file exists and is readable",
             }
         ]
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         out = capsys.readouterr().out
 
         assert "Skipped: 1" in out
@@ -6324,11 +6339,11 @@ class TestTheExecutorLegRunsStepSeven:
             batch_context={"decision_source": "user"},
         )
         orch.state.save()
-        assert list(orch.judge_decisions()) == ["3b810046f0a56e8c"]
+        assert list(orch.phase_report().judge_decisions()) == ["3b810046f0a56e8c"]
 
     def test_the_result_block_names_what_the_judge_decided(self, tmp_path, capsys):
         orch = self._orchestrator_with_a_decision(tmp_path)
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         out = capsys.readouterr().out
         assert "Decided by the judge agent (1)" in out
         assert "  judge: codex:gpt-6-astra" in out
@@ -6344,7 +6359,7 @@ class TestTheExecutorLegRunsStepSeven:
         self, tmp_path
     ):
         orch = self._orchestrator_with_a_decision(tmp_path)
-        path = orch.write_apply_summary_report()
+        path = orch.phase_report().write_apply_summary_report()
         assert path == str(Path(orch.out_dir) / orch.phase_name / "summary.md")
         text = Path(path).read_text(encoding="utf-8")
         assert "## Summary" in text
@@ -6382,11 +6397,11 @@ class TestTheExecutorLegRunsStepSeven:
             },
         )
         orch.state.save()
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         out = capsys.readouterr().out
         assert "[salvaged] " in out
         assert "source: judge agent (salvaged)" in out
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "(MEDIUM) — Salvaged" in text
         assert "**Source**: judge agent (salvaged)" in text
         assert "(0 approved, 1 salvaged, 1 skipped)" in text
@@ -6399,11 +6414,11 @@ class TestTheExecutorLegRunsStepSeven:
             {"group_id": "3b810046f0a56e8c", "title": "Raise T001 to high",
              "status": "judge_skipped", "reason": "subjective"}
         ]
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         out = capsys.readouterr().out
         assert "[skipped by judge] Raise T001 to high" in out
         assert "judge_skipped" not in out
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "### Raise T001 to high [skipped by judge]" in text
 
     def test_the_report_names_the_verification_the_template_promised(
@@ -6421,20 +6436,20 @@ class TestTheExecutorLegRunsStepSeven:
             "command": "pnpm typecheck", "source": "project",
             "exit_code": 1, "duration_seconds": 4.2, "output_tail": "boom",
         }
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "- Verification: `pnpm typecheck` — FAIL (exit 1), 4.2s" in text
 
     def test_an_unconfigured_check_is_reported_as_unconfigured(self, tmp_path):
         orch = self._orchestrator_with_a_decision(tmp_path)
         orch.write_kind = "apply_code_fixes"
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "- Verification: not configured" in text
 
     def test_a_plan_text_phase_reports_no_verification_line_at_all(self, tmp_path):
         """`apply_suggestions` edits markdown — there is nothing to typecheck."""
         orch = self._orchestrator_with_a_decision(tmp_path)
         orch.write_kind = "apply_suggestions"
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "Verification" not in text
 
     def test_the_report_omits_the_decision_section_when_nothing_was_judged(
@@ -6443,7 +6458,7 @@ class TestTheExecutorLegRunsStepSeven:
         orch = _orchestrator_on(tmp_path, yes=True)
         orch.write_tasks = []
         orch.write_result = _FakeSchedulerResult([])
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "## Decided by the judge agent" not in text
 
     def test_the_overlay_is_regenerated_from_the_review_sidecar(self, tmp_path):
@@ -6454,7 +6469,7 @@ class TestTheExecutorLegRunsStepSeven:
             json.dumps({"templateStyle": "flat", "groups": []}),
             encoding="utf-8",
         )
-        written = orch.regenerate_decisions_overlay()
+        written = orch.phase_report().regenerate_decisions_overlay()
         assert written == str(review_dir / "report.html")
         assert (review_dir / "report.html").exists()
 
@@ -6463,7 +6478,7 @@ class TestTheExecutorLegRunsStepSeven:
         orch = self._orchestrator_with_a_decision(tmp_path)
         review_dir = Path(orch.out_dir) / orch.review_subdir
         assert not (review_dir / "report_data.json").exists()
-        assert orch.regenerate_decisions_overlay() is None
+        assert orch.phase_report().regenerate_decisions_overlay() is None
 
     def test_write_outputs_produces_both_on_the_executor_leg(
         self, tmp_path, capsys
@@ -6540,12 +6555,7 @@ class TestTheExecutorLegRunsStepSeven:
             ApplySuggestionsOrchestrator,
             ApplyTaskSuggestionsOrchestrator,
         ):
-            assert cls.write_apply_summary_report is (
-                ApplyOrchestratorBase.write_apply_summary_report
-            )
-            assert cls.regenerate_decisions_overlay is (
-                ApplyOrchestratorBase.regenerate_decisions_overlay
-            )
+            assert cls.phase_report is ApplyOrchestratorBase.phase_report
             assert cls._rebuild_formatted_skipped is (
                 ApplyOrchestratorBase._rebuild_formatted_skipped
             )
@@ -6569,7 +6579,7 @@ class TestTheFilesChangedFallback:
             [_FakeOutcome("apply-fix-batch-0", files_touched=["index.html"])],
             [{"task_id": "apply-fix-batch-0", "expected_ids": ["a"]}],
         )
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         out = capsys.readouterr().out
         assert "Files changed: index.html" in out
         assert orch.plan_path not in out
@@ -6581,7 +6591,7 @@ class TestTheFilesChangedFallback:
                           write_outcome=None)],
             [{"task_id": "apply-fix-batch-0", "expected_ids": ["a"]}],
         )
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         out = capsys.readouterr().out
         assert "Files changed: (none)" in out
 
@@ -6594,9 +6604,9 @@ class TestTheFilesChangedFallback:
             [{"task_id": "apply-fix-batch-0", "expected_ids": ["a", "b"]}],
         )
         orch.batches = [{"fixes": [{"title": "Incomplete fix"}]}]
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         stdout = capsys.readouterr().out
-        report = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        report = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "Files changed: index.html" in stdout
         assert "**Files changed**: index.html" in report
         assert "Incomplete fix** - Partial application; inspect batch" in report
@@ -6607,7 +6617,7 @@ class TestTheFilesChangedFallback:
         orch = _orchestrator_on(tmp_path, yes=True)
         orch.write_tasks = [{"task_id": "apply-batch-0", "expected_ids": ["a"]}]
         orch.write_result = _FakeSchedulerResult([_FakeOutcome("apply-batch-0")])
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         out = capsys.readouterr().out
         assert f"File: {orch.plan_path}" in out
         assert "Files changed:" not in out
@@ -6618,7 +6628,7 @@ class TestTheFilesChangedFallback:
             [_FakeOutcome("apply-fix-batch-0", files_touched=["index.html"])],
             [{"task_id": "apply-fix-batch-0", "expected_ids": ["a"]}],
         )
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "**Files changed**: index.html" in text
         assert "**Applied to**" not in text
 
@@ -6644,7 +6654,7 @@ class TestTheFilesChangedFallback:
                 {"task_id": "apply-fix-batch-2", "expected_ids": ["c"]},
             ],
         )
-        assert orch._touched_files() == ["index.html", "style.css"]
+        assert orch.phase_report().touched_files() == ["index.html", "style.css"]
 
     def test_record_write_artifacts_names_the_touched_files(self, tmp_path):
         from utils import cli_common
@@ -6654,7 +6664,7 @@ class TestTheFilesChangedFallback:
             [_FakeOutcome("apply-fix-batch-0", files_touched=["index.html"])],
             [{"task_id": "apply-fix-batch-0", "expected_ids": ["a"]}],
         )
-        # `_touched_files()` names repo-root-relative paths; the resolved file
+        # `touched_files()` names repo-root-relative paths; the resolved file
         # must actually exist for `record_output_files`/`record_artifacts` to
         # name it (same rule every other artifact path follows).
         plan_dir = Path(orch.plan_path).parent
@@ -6667,7 +6677,7 @@ class TestTheFilesChangedFallback:
         context = cli_common.ResultContext(mode="apply-mock", phase="apply-mock")
         cli_common.activate_result(context)
         try:
-            orch._record_write_artifacts(str(output_path))
+            orch.phase_report().record_write_artifacts(str(output_path))
         finally:
             cli_common.deactivate_result()
 
@@ -6701,7 +6711,7 @@ class TestTheFilesChangedFallback:
         context = cli_common.ResultContext(mode="apply-mock", phase="apply-mock")
         cli_common.activate_result(context)
         try:
-            orch._record_write_artifacts(str(output_path))
+            orch.phase_report().record_write_artifacts(str(output_path))
         finally:
             cli_common.deactivate_result()
 
@@ -6750,7 +6760,7 @@ class TestPerFixDetailInTheSummary:
 
     def test_each_fix_is_listed_with_its_title_and_status(self, tmp_path):
         orch = self._orchestrator_with_a_fix_batch(tmp_path)
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "1. **Fix the OOB teleport** - Applied" in text
         assert "2. **Drop speedForward** - Applied" in text
 
@@ -6770,9 +6780,9 @@ class TestPerFixDetailInTheSummary:
         outcome.files_touched = []
         outcome.reason = "Snapshot comparison confirms no byte changes."
 
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         stdout = capsys.readouterr().out
-        report = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        report = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         for text in (stdout, report):
             assert "Suggestions applied: 0" in text
             assert f"Suggestions {count_label}: 2" in text
@@ -6790,9 +6800,9 @@ class TestPerFixDetailInTheSummary:
             _FakeOutcome("noop", write_outcome="no-op"),
             _FakeOutcome("clean-failure", write_outcome="clean-failure"),
         ])
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         stdout = capsys.readouterr().out
-        report = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        report = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         for text in (stdout, report):
             assert "Suggestions applied: 2" in text
             assert "Suggestions needing no changes: 3" in text
@@ -6800,13 +6810,13 @@ class TestPerFixDetailInTheSummary:
 
     def test_a_two_element_line_range_renders_as_a_span(self, tmp_path):
         orch = self._orchestrator_with_a_fix_batch(tmp_path)
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         stripped = [line.strip() for line in text.splitlines()]
         assert "- File: index.html:725-727" in stripped
 
     def test_a_single_element_line_range_renders_without_a_span(self, tmp_path):
         orch = self._orchestrator_with_a_fix_batch(tmp_path)
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         stripped = [line.strip() for line in text.splitlines()]
         assert "- File: index.html" in stripped
 
@@ -6818,12 +6828,12 @@ class TestPerFixDetailInTheSummary:
                 reason="no bytes moved",
             )
         ])
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "1. **Fix the OOB teleport** - Not applied" in text
 
     def test_the_batch_result_notes_are_carried_through(self, tmp_path):
         orch = self._orchestrator_with_a_fix_batch(tmp_path)
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "**Notes**: Fix 1: OOB now resyncs lap timing." in text
 
     def test_a_missing_result_file_yields_no_notes_line(self, tmp_path):
@@ -6831,7 +6841,7 @@ class TestPerFixDetailInTheSummary:
         orch.write_result = _FakeSchedulerResult([
             _FakeOutcome("apply-fix-batch-0")  # no output_path
         ])
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "**Notes**" not in text
 
     def test_batching_efficiency_line_when_batching_ran(self, tmp_path):
@@ -6841,25 +6851,25 @@ class TestPerFixDetailInTheSummary:
             "subagent_calls_saved": 5,
             "efficiency_gain_percent": 42,
         }
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "Batching efficiency: 5 subagent call(s) saved (42%)" in text
 
     def test_no_batching_line_when_batching_was_not_enabled(self, tmp_path):
         orch = self._orchestrator_with_a_fix_batch(tmp_path)
         orch.batching_stats = {"batching_enabled": False}
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "Batching efficiency" not in text
 
     def test_base_ref_line_when_the_orchestrator_resolves_one(self, tmp_path):
         orch = self._orchestrator_with_a_fix_batch(tmp_path)
         orch.resolve_base_ref = lambda: "abc1234"
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "**Base ref**: abc1234" in text
 
     def test_no_base_ref_line_when_none_is_resolved(self, tmp_path):
         """The default hook returns "" for the sibling phases — no line."""
         orch = self._orchestrator_with_a_fix_batch(tmp_path)
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "**Base ref**" not in text
 
 
@@ -6883,8 +6893,8 @@ class TestTheSummaryFileIsPatchedIntoTheWriteBatchReport:
             [_FakeOutcome("apply-batch-0")], report_path=str(report_path)
         )
 
-        summary_path = orch.write_apply_summary_report()
-        orch._patch_write_batch_report_summary_file(summary_path)
+        summary_path = orch.phase_report().write_apply_summary_report()
+        orch.phase_report().patch_write_batch_report_summary_file(summary_path)
 
         patched = json.loads(report_path.read_text(encoding="utf-8"))
         assert patched["summary_file"] == summary_path
@@ -6903,14 +6913,14 @@ class TestTheSummaryFileIsPatchedIntoTheWriteBatchReport:
         orch.write_result = _FakeSchedulerResult([], report_path=str(report_path))
         mtime_before = report_path.stat().st_mtime_ns
 
-        orch._patch_write_batch_report_summary_file("/already/there.md")
+        orch.phase_report().patch_write_batch_report_summary_file("/already/there.md")
 
         assert report_path.stat().st_mtime_ns == mtime_before
 
     def test_a_missing_report_path_is_a_quiet_no_op(self, tmp_path):
         orch = _orchestrator_on(tmp_path, yes=True)
         orch.write_result = _FakeSchedulerResult([])  # report_path=None
-        orch._patch_write_batch_report_summary_file("/tmp/does-not-matter.md")
+        orch.phase_report().patch_write_batch_report_summary_file("/tmp/does-not-matter.md")
         assert orch.write_result.summary_file == "/tmp/does-not-matter.md"
 
     def test_the_executor_leg_wires_it_end_to_end(self, tmp_path):

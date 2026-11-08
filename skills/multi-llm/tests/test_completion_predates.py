@@ -7,10 +7,9 @@ its skip, compared strictly with the review's completion. A date that does not
 parse keeps the apply done, as in every other cycle check (absence of a date
 is not staleness).
 
-Three parsers date an apply against its review — `state_manager`'s canonical
-`_parse_completion_time` and its copies in the scheduler and the prerequisite
-script. They are not merged (the scheduler imports `state_manager`, and the
-script is a top-level module), so this file holds them to one reading.
+Every reader that dates a record against its review reads the stamp with
+`state_manager._parse_completion_time`; this file holds them to that one
+reading.
 """
 
 import os
@@ -24,7 +23,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import check_workflow_prerequisites as prereq  # noqa: E402
-from utils import write_batch_scheduler  # noqa: E402
+from utils import (  # noqa: E402
+    apply_orchestrator_base, improve_workflow, write_batch_scheduler, write_safety,
+)
 from utils.state_manager import StateManager, _parse_completion_time  # noqa: E402
 
 APPLY, REVIEW = "apply-suggestions", "review-plan"
@@ -199,11 +200,13 @@ class TestPhaseWordsOnly:
 # One reading of a stamp
 # ---------------------------------------------------------------------------
 
-PARSERS = {
-    "state_manager._parse_completion_time": _parse_completion_time,
-    "write_batch_scheduler._parse_local_timestamp":
-        write_batch_scheduler._parse_local_timestamp,
-    "check_workflow_prerequisites._parse_timestamp": prereq._parse_timestamp,
+#: The modules that date a record against its review.
+READERS = {
+    "write_batch_scheduler": write_batch_scheduler,
+    "check_workflow_prerequisites": prereq,
+    "apply_orchestrator_base": apply_orchestrator_base,
+    "improve_workflow": improve_workflow,
+    "write_safety": write_safety,
 }
 
 STAMPS = [
@@ -221,17 +224,25 @@ STAMPS = [
 
 class TestOneReadingOfAStamp:
 
+    @pytest.mark.parametrize("name", sorted(READERS))
+    def test_every_reader_parses_with_the_one_parser(self, name):
+        assert READERS[name]._parse_completion_time is _parse_completion_time
+
     @pytest.mark.parametrize("value", STAMPS, ids=repr)
-    def test_the_three_parsers_agree(self, local_zone_off_utc, value):
-        readings = {name: parse(value) for name, parse in PARSERS.items()}
-        assert len(set(readings.values())) == 1, readings
+    def test_every_stamp_reads_as_a_naive_local_time_or_none(
+        self, local_zone_off_utc, value
+    ):
+        parsed = _parse_completion_time(value)
+        assert parsed is None or parsed.tzinfo is None
 
     def test_a_stamp_with_an_offset_is_read_as_local_time(self, local_zone_off_utc):
-        for parse in PARSERS.values():
-            assert parse("2026-10-09T04:30:00+00:00") == datetime(2026, 10, 9, 10, 0)
-            assert parse("2026-10-09T10:00:00") == datetime(2026, 10, 9, 10, 0)
-            assert parse("") is None and parse(12345) is None
-            assert parse("not-a-date") is None
+        parse = _parse_completion_time
+        assert parse("2026-10-09T04:30:00+00:00") == datetime(2026, 10, 9, 10, 0)
+        assert parse("2026-10-09T04:30:00Z") == datetime(2026, 10, 9, 10, 0)
+        assert parse("2026-10-09T06:30:00+02:00") == datetime(2026, 10, 9, 10, 0)
+        assert parse("2026-10-09T10:00:00") == datetime(2026, 10, 9, 10, 0)
+        assert parse("") is None and parse(12345) is None and parse(None) is None
+        assert parse("not-a-date") is None
 
     @pytest.mark.parametrize("apply_stamp,predates", [
         ("2026-10-09T10:00:00", False),

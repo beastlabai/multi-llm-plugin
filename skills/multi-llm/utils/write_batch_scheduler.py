@@ -138,9 +138,12 @@ from .subagent_tasks import (
 from .state_manager import (
     IMPLEMENT_TASK_GRAPH_KEY,
     PROCESSED_LEG_EXECUTOR,
+    _parse_completion_time,
     manual_task_gates,
+    predates_review,
     record_batch_items_in_state,
     set_task_check_findings_in_state,
+    stamp_or_mtime,
 )
 from .subagent_prompts import build_nothing_changed_resend_prompt
 from .write_phase_bridge import WRITE_TASK_FILENAME
@@ -926,18 +929,22 @@ def _same_batch_row(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
     return str(left.get("task_id", "")) == str(right.get("task_id", ""))
 
 
-def _parse_local_timestamp(value: Any) -> Optional[datetime]:
-    """An ISO timestamp as a naive local datetime, or None — the reading
-    ``check_workflow_prerequisites._parse_timestamp`` gives ``state.json``."""
-    if not isinstance(value, str) or not value:
+def review_completed_at(recorded: Any, write_kind: Any) -> Optional[datetime]:
+    """When the review *write_kind* applies last completed, or None.
+
+    The cutoff between review cycles (:func:`state_manager.predates_review`),
+    read from a ``state.json`` dict (*recorded*): the review is
+    :data:`REVIEW_PHASE_BY_WRITE_KIND`'s entry. None for ``implement`` (its
+    ``T###`` ids are the plan's, not a cycle's), for anything that is not a
+    state dict, and for a review with no parseable completion.
+    """
+    review = REVIEW_PHASE_BY_WRITE_KIND.get(write_kind or "")
+    if review is None or not isinstance(recorded, dict):
         return None
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
+    completed = recorded.get("phases_completed")
+    if not isinstance(completed, dict):
         return None
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone().replace(tzinfo=None)
-    return parsed
+    return _parse_completion_time(completed.get(review))
 
 
 # ---------------------------------------------------------------------------
@@ -10789,15 +10796,14 @@ class WriteBatchScheduler:
         existing = TaskSnapshot.load(
             self.phase_dir, task_id, expected_root=self.repo_root,
         )
-        # The same cutoff `_earlier_rows` applies: a snapshot taken before
-        # the review this phase applies completed belongs to the previous
-        # cycle — the bytes before THAT cycle's batch, so restoring from it
-        # would roll that cycle's applied edit back too (follow-up to the
-        # 2026-10-02 adversarial review). Set aside, never deleted.
+        # The same cutoff `_earlier_report_rows` applies: a snapshot taken
+        # before the review this phase applies completed belongs to the
+        # previous cycle — the bytes before THAT cycle's batch, so restoring
+        # from it would roll that cycle's applied edit back too (follow-up to
+        # the 2026-10-02 adversarial review). Set aside, never deleted.
+        # `taken_before` applies the rule to the second, as the manifest is
+        # stamped.
         reviewed_at = self._review_completed_at()
-        if reviewed_at is not None:
-            # The manifest is stamped to the second.
-            reviewed_at = reviewed_at.replace(microsecond=0)
         if existing is not None and existing.taken_before(reviewed_at):
             moved_to = existing.set_aside()
             self.log(
@@ -13896,10 +13902,10 @@ class WriteBatchScheduler:
         review, so a ``--resume`` typed after a ``--force`` review re-run
         carried the previous review's rows as "(earlier run)" rows of a
         different review (adversarial review, 2026-10-02). The rule is
-        ``check_workflow_prerequisites._apply_batches_predate_review``'s:
-        a report written before its review's latest completion belongs to
-        the earlier cycle. A missing date on either side keeps the rows, as
-        there — absence of a date is not staleness.
+        :func:`state_manager.predates_review`: a report written (its
+        ``written_at``, else its mtime) before its review's latest
+        completion belongs to the earlier cycle, and a missing date on
+        either side keeps the rows.
         """
         path = os.path.join(self.phase_dir, WRITE_BATCH_REPORT_FILENAME)
         try:
@@ -13909,15 +13915,9 @@ class WriteBatchScheduler:
             return []
         if not isinstance(data, dict):
             return []
-        written_at = _parse_local_timestamp(data.get("written_at"))
-        if written_at is None:
-            try:
-                written_at = datetime.fromtimestamp(os.stat(path).st_mtime)
-            except OSError:
-                written_at = None
+        written_at = stamp_or_mtime(data.get("written_at"), path)
         reviewed_at = self._review_completed_at()
-        if written_at is not None and reviewed_at is not None \
-                and written_at < reviewed_at:
+        if predates_review(written_at, reviewed_at):
             self.log(
                 f"[write-subagents] the earlier {WRITE_BATCH_REPORT_FILENAME} "
                 f"(written {written_at.isoformat(timespec='seconds')}) predates "
@@ -13933,21 +13933,9 @@ class WriteBatchScheduler:
         ]
 
     def _review_completed_at(self) -> Optional[datetime]:
-        """When the review this apply phase applies last completed, or None.
-
-        ``None`` for ``implement`` (its ``T###`` ids are the plan's, not a
-        cycle's) and for a state that records no parseable completion.
-        """
-        review = REVIEW_PHASE_BY_WRITE_KIND.get(self.kind)
-        if review is None or self.state is None:
-            return None
-        recorded = getattr(self.state, "state", None)
-        if not isinstance(recorded, dict):
-            return None
-        completed = recorded.get("phases_completed")
-        if not isinstance(completed, dict):
-            return None
-        return _parse_local_timestamp(completed.get(review))
+        """When the review this apply phase applies last completed, or None
+        (:func:`review_completed_at`)."""
+        return review_completed_at(getattr(self.state, "state", None), self.kind)
 
     def _applied_to_label(self) -> Optional[str]:
         """The phase's single write target relative to the repository root

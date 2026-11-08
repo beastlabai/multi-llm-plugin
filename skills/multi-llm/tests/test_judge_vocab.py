@@ -407,10 +407,10 @@ class TestAnEarlierRunLoadsTheSame:
             orch = _resumed_orchestrator(plan_path)
             capsys.readouterr()  # the constructor's and the previous pass's lines
 
-            decided = orch.judge_decisions()
-            orch.print_write_outcome_summary()
+            decided = orch.phase_report().judge_decisions()
+            orch.phase_report().print_write_outcome_summary()
             out = capsys.readouterr().out
-            summary = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+            summary = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
             # No save() by hand: on the native leg nothing saves after the
             # load (completion is the host's --mark-completed, later), and the
             # host reads this file raw for its "Decided by the judge agent"
@@ -419,7 +419,7 @@ class TestAnEarlierRunLoadsTheSame:
 
             seen[spelling] = (
                 sorted(decided),
-                orch._judge_breakdown(decided),
+                orch.phase_report()._judge_breakdown(decided),
                 _normalized(out, root),
                 _normalized(summary, root),
             )

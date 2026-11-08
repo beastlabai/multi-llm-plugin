@@ -287,20 +287,24 @@ class TestApplyTaskSuggestionsNamesTheFileItEdited:
 
     def test_the_notice_line_of_what_was_left_out_names_it(self, tmp_path):
         from apply_task_suggestions_orchestrator import ApplyTaskSuggestionsOrchestrator
+        from utils.apply_report import ApplyPhaseReport
 
         plan = _task_plan(tmp_path)
         orch = ApplyTaskSuggestionsOrchestrator.__new__(ApplyTaskSuggestionsOrchestrator)
         orch.plan_path = str(plan)
         orch.tasks_file = str(tmp_path / TASKS_TARGET)
         assert orch._applied_to_label() == TASKS_TARGET
-        orch.consistency_warnings = lambda: []
-        orch._phase_rows = lambda: []
-        orch._not_applied_lines = lambda rows: []
-        orch._write_item_counts = lambda rows: {"applied": 7}
-        orch.formatted_skipped = [{
-            "group_id": "4051e333aaaaaaaa", "status": "judge_skipped",
-            "title": "T003 high complexity bundles several concerns"}]
-        assert orch.run_notes() == [
+        report = ApplyPhaseReport(
+            phase_name=orch.phase_name, write_kind=orch.write_kind,
+            item_noun=orch.item_noun, item_noun_plural=orch.item_noun_plural,
+            plan_path=orch.plan_path, out_dir=str(tmp_path),
+            target_file=orch.write_target_file(),
+            formatted_skipped=[{
+                "group_id": "4051e333aaaaaaaa", "status": "judge_skipped",
+                "title": "T003 high complexity bundles several concerns"}],
+        )
+        report._write_item_counts = lambda rows: {"applied": 7}
+        assert report.run_notes() == [
             f"1 {orch.item_noun} not applied, beside the 7 applied to "
             f"{TASKS_TARGET} — skipped by judge: T003 high complexity bundles "
             "several concerns [4051e333] (reasons in summary.md)"]

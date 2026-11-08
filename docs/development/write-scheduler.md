@@ -408,6 +408,14 @@ now dates each signal against the review's latest completion (`_review_completed
 earlier cycle's; a missing date on either side keeps the signal, and `--resume` still
 counts on its own (mid-cycle it is the native leg's only signal).
 
+That rule is one function, `state_manager.predates_review`, with one stamp reader
+(`_parse_completion_time`) and one cutoff (`write_batch_scheduler.review_completed_at`), and
+every cycle check calls it: `_earlier_report_rows`, `TaskSnapshot.taken_before`,
+`_phase_has_recorded_progress`, `_fresh_target_refusal`, the improve summary's applied files and
+`check_workflow_prerequisites`. Two readers pass a parameter: the audit log and snapshot manifests
+are stamped to the second (`whole_seconds`), and a manifest with no date is set aside rather than
+trusted (`undated_predates`). `tests/test_review_cycle_rule.py` holds the table.
+
 Any re-stamp over a backup whose bytes differ keeps the earlier one aside first
 (`keep_backup_aside`, `backup.<sha8>.md`), so the plan from before cycle 1 survives cycle 2
 (`tests/test_apply_backup_across_rounds.py`). `--fresh` re-stamps for the same reason, and it is the one
@@ -476,7 +484,7 @@ before `--mark-completed`; the reporting reads (`status`, `util next-command`,
 writes and makes `save()` raise.
 
 **Steps 7 and 8 of the apply instructions run on this leg too** (`write_apply_summary_report`,
-`regenerate_decisions_overlay`, plus a `Decided by the judge agent` block in the RESULT output): the
+`regenerate_decisions_overlay`, both on `utils/apply_report.py`'s `ApplyPhaseReport`, plus a `Decided by the judge agent` block in the RESULT output): the
 `{phase}/summary.md` the instructions advertise and the decision badges on the review HTML lived
 only on the native leg, which `--exec-subagents` never reaches, so the first run that judged
 anything had no durable human-readable home for the decision. The overlay is called as a function,
@@ -599,7 +607,7 @@ entry without a reason is a missing id, i.e. a partial application with the prob
 mirror's `declined_items` (`status` names them; `items_applied` excludes
 them), summary.md's own `## Declined by their batch (not applied)` / `## Skipped at your request (not applied)` sections (fix round 22:
 never under an applied heading, on both legs — the executor's summary, the runbooks' template, the
-`[BATCH_DECLINED]`/`[BATCH_SKIPPED]` lines) and counts, and `ApplyOrchestratorBase.run_notes` (the
+`[BATCH_DECLINED]`/`[BATCH_SKIPPED]` lines) and counts, and `ApplyPhaseReport.run_notes` (the
 notice).
 
 On the executor leg a readable report that, after edits that moved bytes, leaves items out of both

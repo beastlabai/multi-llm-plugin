@@ -61,7 +61,7 @@ from utils.cli_common import (
 from modes import PREREQUISITE_PHASES, phase_from_selector, resolve as resolve_mode
 from utils import importance as _importance
 from utils import unattended as unattended_mod
-from utils.state_manager import StateManager
+from utils.state_manager import StateManager, _parse_completion_time, predates_review
 from utils.output_handler import get_output_dir
 from utils import phase_walk
 from utils.phase_walk import DONE_STATUSES, OPTIONAL_PHASES  # noqa: F401 - re-exported
@@ -120,19 +120,6 @@ def _grouped_has_suggestions(path: Path) -> bool:
     )
 
 
-def _parse_timestamp(value) -> Optional[datetime]:
-    """An ISO timestamp from ``state.json`` as a naive local datetime, or None."""
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone().replace(tzinfo=None)
-    return parsed
-
-
 def _latest_phase_activity(state: StateManager, phase: str) -> Optional[datetime]:
     """The newest time ``state.json`` records for one of ``phase``'s own runs.
 
@@ -144,15 +131,15 @@ def _latest_phase_activity(state: StateManager, phase: str) -> Optional[datetime
     own record of a run handed to the host (re-stamped on every emit). None
     when none holds a readable time.
     """
-    stamps = [_parse_timestamp(state.phase_started_at(phase))]
+    stamps = [_parse_completion_time(state.phase_started_at(phase))]
     progress = state.state.get("metrics_progress")
     if isinstance(progress, dict) and isinstance(progress.get(phase), dict):
-        stamps.append(_parse_timestamp(progress[phase].get("started_at")))
+        stamps.append(_parse_completion_time(progress[phase].get("started_at")))
     metrics = state.state.get("metrics")
     entries = metrics.get(phase) if isinstance(metrics, dict) else None
     if isinstance(entries, list):
         stamps.extend(
-            _parse_timestamp(entry.get("timestamp"))
+            _parse_completion_time(entry.get("timestamp"))
             for entry in entries if isinstance(entry, dict)
         )
     stamps = [stamp for stamp in stamps if stamp is not None]
@@ -175,14 +162,11 @@ def implement_records_predate_task_list(state: StateManager) -> bool:
     applies to apply batches.
     """
     last_run = _latest_phase_activity(state, "implement")
-    if last_run is None:
-        return False
     completed = state.state.get("phases_completed") or {}
-    for phase in TASK_LIST_PHASES:
-        produced = _parse_timestamp(completed.get(phase))
-        if produced is not None and produced > last_run:
-            return True
-    return False
+    return any(
+        predates_review(last_run, _parse_completion_time(completed.get(phase)))
+        for phase in TASK_LIST_PHASES
+    )
 
 
 def _apply_batches_predate_review(state: StateManager, phase: str) -> bool:
@@ -213,11 +197,8 @@ def _apply_batches_predate_review(state: StateManager, phase: str) -> bool:
     if not state.is_phase_completed(review):
         return True
     completed = state.state.get("phases_completed") or {}
-    reviewed_at = _parse_timestamp(completed.get(review))
-    last_run = _latest_phase_activity(state, phase)
-    if reviewed_at is None or last_run is None:
-        return False
-    return last_run < reviewed_at
+    reviewed_at = _parse_completion_time(completed.get(review))
+    return predates_review(_latest_phase_activity(state, phase), reviewed_at)
 
 
 def apply_phase_in_progress(state: StateManager, phase: str) -> bool:

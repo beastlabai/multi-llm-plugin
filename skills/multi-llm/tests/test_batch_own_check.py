@@ -625,7 +625,7 @@ class TestTheApplyReport:
         self, tmp_path,
     ):
         orch = self._orchestrator(tmp_path, self.ROWS, unverified=unverified_line(None))
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "### apply-batch-0 — ok (applied, its check fails)" in text
         assert "### apply-batch-1 — ok (applied)" in text
         assert "## Check Findings" in text
@@ -639,7 +639,7 @@ class TestTheApplyReport:
         brief told the user to run review-code and then apply-code-fixes, the
         phases the commit modes front (plans/review-commits.md §2.8)."""
         def check_findings(orch):
-            text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+            text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
             return text.split("## Check Findings", 1)[1].split("\n## ", 1)[0]
 
         orch = self._orchestrator(tmp_path, self.ROWS)
@@ -659,7 +659,7 @@ class TestTheApplyReport:
 
     def test_the_result_block_says_it_too(self, tmp_path, capsys):
         orch = self._orchestrator(tmp_path, self.ROWS, unverified=unverified_line(None))
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         out = capsys.readouterr().out
         assert "Not a clean finish: 1 batch(es) applied their edits, but their own " \
                "report says a check they ran fails: apply-batch-0" in out
@@ -670,9 +670,9 @@ class TestTheApplyReport:
     def test_a_clean_run_reads_as_before(self, tmp_path, capsys):
         rows = [dict(self.ROWS[1])]
         orch = self._orchestrator(tmp_path, rows)
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "## Check Findings" not in text and "its check fails" not in text
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         assert "Not a clean finish" not in capsys.readouterr().out
 
 

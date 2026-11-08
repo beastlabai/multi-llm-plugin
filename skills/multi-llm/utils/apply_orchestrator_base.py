@@ -41,7 +41,7 @@ from .apply_output_helpers import (
     write_and_emit_output,
 )
 from .apply_path_helpers import load_json_file
-from .cli_common import add_retired_flag, build_parent_parser, record_artifacts
+from .cli_common import add_retired_flag, build_parent_parser
 from .apply_selection_helpers import (
     merge_validation_with_groups,
     resolve_priority_args,
@@ -68,10 +68,12 @@ from .report_parser import load_html_selections, merge_selections
 from .state_manager import (
     CURRENT_FORMAT_VERSION,
     StateManager,
+    _parse_completion_time,
     group_join_ids,
+    predates_review,
     processed_record_counts,
+    stamp_or_mtime,
 )
-from .text_clip import join_clauses
 from .suggestion_batcher import (
     SuggestionBatch,
     estimate_batch_processing_stats,
@@ -90,14 +92,12 @@ from .human_decisions import (
     judge_labels,
     native_judge_label,
     is_judge_source,
-    judge_outcome,
-    judge_source_label,
-    judge_status_label,
     JUDGE_SKIPPED_STATUS,
     judge_item_from_group,
     record_verdicts,
     write_judge_tasks,
 )
+from .apply_report import ApplyPhaseReport, applied_to_label
 from . import scope_apply as _scope
 from . import scope_policy as _sp
 from . import unattended as _unattended
@@ -529,7 +529,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     * ``supports_revalidation`` — ``True`` / ``False``
     * ``supports_skip_flag`` — ``True`` / ``False``
 
-    And implement all 11 abstract methods (see the *Abstract methods*
+    And implement the nine abstract methods (see the *Abstract methods*
     section below).
 
     The constructor accepts a pre-parsed ``argparse.Namespace`` — the
@@ -570,8 +570,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     # batch. apply-code-fixes partitions by ``file_key`` — its declared set is
     # per batch and it has no single target — so it sets this False and takes no
     # backup. The backup itself is announced on stderr by ``write_target_backup``
-    # and is NOT one of the paths ``_record_write_artifacts`` publishes; what it
-    # publishes for a single-target phase is ``applied_to`` (the file itself).
+    # and is NOT one of the paths ``ApplyPhaseReport.record_write_artifacts``
+    # publishes; what it publishes for a single-target phase is ``applied_to``
+    # (the file itself).
     has_single_write_target: bool = True
     # Whether this phase's batches rewrite the PLAN itself. Only
     # apply-suggestions does; apply-task-suggestions edits the tasks file and
@@ -589,22 +590,21 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     # §2.7). Only apply-code-fixes does: the other two phases edit the plan or
     # its task list, never code a commit review judged at `head`.
     guards_commit_fixes: bool = False
-    # Class-level defaults of the scope-policy state `__init__` sets, so an
-    # instance built without it (a test's `object.__new__`) reads `expand`.
-    scope: Optional["_scope.ApplyPolicy"] = None
-    scope_deferred: Sequence[Dict[str, Any]] = ()
-    _scope_released: Sequence[str] = ()
-    _scope_start_index: int = 0
-    _scope_change: Optional["_scope.PolicyChange"] = None
-    _scope_landed_reported: bool = False
 
     # ------------------------------------------------------------------
     # Subclass validation
     # ------------------------------------------------------------------
 
-    def __init_subclass__(cls, **kwargs: Any) -> None:
-        """Validate that subclasses set all required config attributes."""
+    def __init_subclass__(cls, *, abstract: bool = False, **kwargs: Any) -> None:
+        """Validate that subclasses set all required config attributes.
+
+        ``abstract=True`` in the class statement marks a shared intermediate
+        class (``apply_suggestion_phase.SuggestionApplyPhase``): it is never
+        run as a phase, so its subclasses are the ones validated.
+        """
         super().__init_subclass__(**kwargs)
+        if abstract:
+            return
 
         # Validate string config attributes are non-empty
         for attr in ("phase_name", "review_subdir", "item_noun"):
@@ -718,21 +718,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         self.write_result: Optional[Any] = None
         self.write_tasks: List[Dict[str, Any]] = []
         # The review report path `regenerate_decisions_overlay()` rewrote, if it
-        # ran and matched anything (F7) — read by `_record_write_artifacts`.
+        # ran and matched anything (F7) — read by `record_write_artifacts`.
         self._decisions_overlay_path: Optional[str] = None
 
-        # The scope policy (plans/scope-policy-and-report-tags.md §5): the
-        # effective apply policy resolved in `_setup`, this run's deferrals
-        # (their own outcome — never invalid, skipped, applied or processed),
-        # the earlier deferrals an `expand` override released, the first
-        # batch index new work takes after a policy change kept earlier
-        # batches, and that change (step 10c) with the work it keeps.
-        self.scope: Optional[_scope.ApplyPolicy] = None
-        self.scope_deferred: List[Dict[str, Any]] = []
-        self._scope_released: List[str] = []
-        self._scope_start_index: int = 0
-        self._scope_change: Optional[_scope.PolicyChange] = None
-        self._scope_landed_reported: bool = False
+        # The scope policy (plans/scope-policy-and-report-tags.md §5): its
+        # effective apply policy, deferrals and policy change (:attr:`scope_gate`).
+        self._scope_gate = _scope.ApplyScopeGate()
 
     # ------------------------------------------------------------------
     # D6 auto-resolutions (rows 10 and 11)
@@ -792,7 +783,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             self.groups, self.validation or []
         ):
             status = str(group.get("validation_status") or "needs-human-decision")
-            if status == "valid" and self._scope_counts_as_deferred(group):
+            if status == "valid" and self.scope_gate.counts_as_deferred(group):
                 # Valid, but not applied: the scope policy defers it (plan §5).
                 deferred += 1
                 continue
@@ -987,9 +978,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             # proposals (judge approval and salvage included) and immediately
             # before batching; then this review's earlier materialization
             # under another policy, if any (plan §5, "Resume").
-            self._scope_gate_work_set()
-            self._scope_policy_change()
-            self._scope_persist()
+            gate = self.scope_gate
+            gate.gate_work_set(self.valid, self.needs_human)
+            gate.apply_policy_change(self.valid, self.needs_human,
+                                     phase=self._scope_phase_word(), dry=self._scope_dry())
+            if self.state is not None and not self._scope_dry():
+                gate.persist(self.state, self._scope_phase_word())
             self._prepare_batches()
             return self._write_outputs()
         except OrchestratorError as e:
@@ -1877,16 +1871,17 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # under `expand`; re-applied in `run()` after judging. What an earlier
         # run of this review landed under another policy leaves first: it is
         # applied, never this run's deferral.
-        self._scope_exclude_landed()
-        self._scope_gate_work_set()
+        self.scope_gate.exclude_landed(self.valid, self.needs_human,
+                                       phase=self._scope_phase_word())
+        self.scope_gate.gate_work_set(self.valid, self.needs_human)
 
         print(f"\nFiltered {self.item_noun_plural}:", file=sys.stderr)
         print(f"  Valid (to apply): {len(self.valid)}", file=sys.stderr)
         print(f"  Needs human review: {len(self.needs_human)}", file=sys.stderr)
         print(f"  Skipped: {len(self.skipped)}", file=sys.stderr)
-        if self.scope is not None and self.scope.preserve:
+        if self.scope_gate.preserve:
             print(
-                f"  Deferred (scope policy preserve): {len(self.scope_deferred)}",
+                f"  Deferred (scope policy preserve): {len(self.scope_gate.deferred)}",
                 file=sys.stderr,
             )
 
@@ -1913,7 +1908,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
 
         # Step 27: handle_no_items_early_exit
         if not self.valid and not self.needs_human:
-            if self.scope_deferred or self._scope_open_blockers():
+            if self.scope_gate.deferred or self._scope_open_blockers():
                 # Everything eligible is done and the rest is deferred by
                 # scope: the phase's eligible work is complete (plan §5) —
                 # or, when a batch of this review declined a blocker, the
@@ -2259,6 +2254,19 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     # The scope policy (plans/scope-policy-and-report-tags.md §4, §5)
     # ==================================================================
 
+    @property
+    def scope_gate(self) -> "_scope.ApplyScopeGate":
+        """This run's scope-policy state (``scope_apply.ApplyScopeGate``).
+
+        ``__init__`` makes it; an instance built without ``__init__`` (a
+        test's ``object.__new__``) gets its own on first use, which reads
+        ``expand``.
+        """
+        gate = self.__dict__.get("_scope_gate")
+        if gate is None:
+            gate = self.__dict__["_scope_gate"] = _scope.ApplyScopeGate()
+        return gate
+
     def _scope_phase_word(self) -> str:
         """The phase word the round record and completion are keyed by."""
         return self.confirmation_phase_name or self.phase_name
@@ -2287,23 +2295,23 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             raise OrchestratorError(f"Phase _setup, step 10b: {problem}", exit_code=3)
         word = self._scope_phase_word()
         state = self.state.state if self.state is not None else {}
-        self.scope = _scope.resolve_apply_policy(explicit, state, word)
-        if self.scope.source != _sp.SOURCE_EXPLICIT:
+        scope = self.scope_gate.policy = _scope.resolve_apply_policy(explicit, state, word)
+        if scope.source != _sp.SOURCE_EXPLICIT:
             # D6 row 16: a policy nobody typed is recorded under `--yes` only
             # (`_record_resolution` returns early otherwise).
             from . import scope_policy_runs as _scope_policy_runs
 
             self._record_resolution(
                 _scope_policy_runs.SITE_ID,
-                _scope_policy_runs.resolution_text(self.scope.policy, self.scope.source),
+                _scope_policy_runs.resolution_text(scope.policy, scope.source),
             )
-        if self.scope.preserve or self.scope.source in (
+        if scope.preserve or scope.source in (
                 _sp.SOURCE_EXPLICIT, _sp.SOURCE_CONTINUATION):
-            baseline = f", baseline {self.scope.baseline_id}" if self.scope.baseline_id else ""
+            baseline = f", baseline {scope.baseline_id}" if scope.baseline_id else ""
             print(
-                f"[scope-policy] {word}: {self.scope.policy} "
-                f"(source: {self.scope.source}; review requested "
-                f"{self.scope.review_policy}{baseline})",
+                f"[scope-policy] {word}: {scope.policy} "
+                f"(source: {scope.source}; review requested "
+                f"{scope.review_policy}{baseline})",
                 file=sys.stderr,
             )
 
@@ -2314,11 +2322,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         run that omits it. Dry runs record nothing, and neither does a run
         :meth:`_scope_detect_change` refused (it raised before this).
         """
-        if (self.scope is None or self.scope.source != _sp.SOURCE_EXPLICIT
+        scope = self.scope_gate.policy
+        if (scope is None or scope.source != _sp.SOURCE_EXPLICIT
                 or self.state is None or self._scope_dry()):
             return
         _sp.record_scope_apply_policy(self.state, self._scope_phase_word(),
-                                      self.scope.policy, _sp.SOURCE_EXPLICIT)
+                                      scope.policy, _sp.SOURCE_EXPLICIT)
         self.state.save()
 
     def _scope_detect_change(self) -> None:
@@ -2326,18 +2335,19 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
 
         Read-only. A batch of that run that did not finish is exit 3 here,
         before anything is recorded or built (rebuilding the batches could
-        apply its half-applied items again). Otherwise the change is kept
-        for :meth:`_scope_exclude_landed` (before the gate) and
-        :meth:`_scope_policy_change` (before batching).
+        apply its half-applied items again). Otherwise the change is kept on
+        the gate for ``exclude_landed`` (before the gate) and
+        ``apply_policy_change`` (before batching).
         """
-        self._scope_change = None
-        if self.scope is None or not self.write_kind or self.state is None:
+        gate = self.scope_gate
+        gate.change = None
+        if gate.policy is None or not self.write_kind or self.state is None:
             return
         from .subagent_tasks import file_content_hash
 
         phase_dir = os.path.join(self.out_dir, self.phase_name)
         change = _scope.detect_policy_change(
-            phase_dir, current_policy=self.scope.policy,
+            phase_dir, current_policy=gate.policy.policy,
             review_stamp=file_content_hash(
                 os.path.join(self.out_dir, self.review_subdir, "grouped.json")),
             processed=self.state.get_processed_items(self.phase_name),
@@ -2355,155 +2365,14 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 "Phase _setup, step 10c: a scope-policy change over an unfinished batch",
                 exit_code=3,
             )
-        self._scope_change = change
-
-    def _scope_landed_ids(self) -> Set[str]:
-        """Member ids an earlier run of this review landed under another policy."""
-        change = self._scope_change
-        return set(change.landed) if change is not None else set()
-
-    def _scope_exclude_landed(self) -> None:
-        """Keep what an earlier run of this review landed out of this run.
-
-        After a policy change those items stay applied (or no-op, or skipped
-        at the user's request) and are never dispatched again. They leave
-        the work sets *before* the gate, so a ``preserve`` run never records
-        or reports an applied item as deferred, and this run's batches start
-        past every earlier batch index. Idempotent; reported once.
-        """
-        landed = self._scope_landed_ids()
-        if not landed:
-            return
-        before = len(self.valid) + len(self.needs_human)
-        self.valid[:] = [g for g in self.valid if group_id_of(g) not in landed]
-        self.needs_human[:] = [g for g in self.needs_human if group_id_of(g) not in landed]
-        self._scope_start_index = self._scope_change.next_index
-        if self._scope_landed_reported:
-            return
-        self._scope_landed_reported = True
-        print(
-            f"{_scope.RETIRED_MARKER} {self._scope_phase_word()}: this review's tasks "
-            f"were materialized under {_sp.FLAG} {self._scope_change.previous}; the "
-            f"{len(landed)} item(s) an earlier run landed stay applied and are "
-            f"not dispatched again ({before - len(self.valid) - len(self.needs_human)} "
-            f"left out of this run), and this run's batches start at index "
-            f"{self._scope_change.next_index}.",
-            file=sys.stderr,
-        )
-
-    def _scope_counts_as_deferred(self, group: Dict[str, Any]) -> bool:
-        """Whether a loaded ``valid`` group is one this ``preserve`` run defers.
-
-        For the counts printed before the gate runs (the confirmation, row
-        11's tally); an item an earlier run landed is not deferred.
-        """
-        if self.scope is None or not self.scope.preserve:
-            return False
-        if group_id_of(group) in self._scope_landed_ids():
-            return False
-        return not _sp.scope_decision(
-            group, self.scope.policy, self.scope.baseline_id).eligible
+        gate.change = change
 
     def _scope_confirmation_message(self, message: str) -> str:
         """Step 19's text, naming the deferred set under ``preserve`` only."""
-        if self.scope is None or not self.scope.preserve:
+        if not self.scope_gate.preserve:
             return message
-        deferred = sum(
-            1 for group in merge_validation_with_groups(self.groups, self.validation or [])
-            if group.get("validation_status") == "valid"
-            and self._scope_counts_as_deferred(group)
-        )
-        return message.replace(
-            "ALL valid items will be applied if you proceed.",
-            "ALL valid items validated as within scope will be applied if you "
-            f"proceed; {deferred} valid item(s) are deferred by {_sp.FLAG} preserve.",
-        )
-
-    def _scope_gate_work_set(self) -> None:
-        """The pre-write gate over ``valid`` and ``needs_human`` (plan §5).
-
-        A pass-through under ``expand``. Under ``preserve`` a group without a
-        bound ``in_scope`` verdict leaves both sets for :attr:`scope_deferred`
-        — its own outcome, never ``skipped`` — and never reaches the judge,
-        whose approval cannot make it eligible (approval keeps the relation;
-        salvage makes the binding stale). No flag bypasses it.
-        """
-        if self.scope is None or not self.scope.preserve:
-            return
-        if not isinstance(self.scope_deferred, list):
-            self.scope_deferred = list(self.scope_deferred)
-        known = {str(entry.get("group_id")) for entry in self.scope_deferred}
-        for work in (self.valid, self.needs_human):
-            eligible, deferred = _scope.gate(work, self.scope)
-            work[:] = eligible
-            for group in deferred:
-                entry = _scope.deferral_entry(
-                    group, self.scope, importance=get_highest_importance(group))
-                if entry["group_id"] in known:
-                    continue
-                known.add(entry["group_id"])
-                self.scope_deferred.append(entry)
-                print(
-                    f"{_scope.DEFERRED_MARKER} {entry['group_id'][:8]} "
-                    f"[{entry['label']}] {entry['title']}: {entry['reason']}",
-                    file=sys.stderr,
-                )
-
-    def _scope_policy_change(self) -> None:
-        """This review's earlier materialization under another policy (plan §5).
-
-        Detected at step 10c (:meth:`_scope_detect_change`, which also
-        refuses a change over a batch that did not finish). With no started
-        work the obsolete task file is kept aside and the batches are
-        rematerialized. With landed work its items stay done (never
-        dispatched again; :meth:`_scope_exclude_landed` already took them out
-        before the gate) and new batches take ids past every earlier one, so
-        pending work is never renumbered onto a completed batch id.
-        """
-        change = self._scope_change
-        if change is None:
-            return
-        if change.landed:
-            self._scope_exclude_landed()
-            return
-        if self._scope_dry():
-            return
-        retired = _scope.retire_task_file(change)
-        if retired:
-            print(
-                f"{_scope.RETIRED_MARKER} {self._scope_phase_word()}: no batch of the "
-                f"tasks materialized under {_sp.FLAG} {change.previous} had started; "
-                f"kept them at {retired} and rematerializing under {change.current}.",
-                file=sys.stderr,
-            )
-
-    def _scope_persist(self) -> None:
-        """Record this run's deferrals on the round (never under a dry run).
-
-        Under ``expand`` the round's earlier deferrals are released: they are
-        in this run's work set again under the ordinary rules, and the record
-        no longer holds them.
-        """
-        if self.scope is None or self.state is None or self._scope_dry():
-            return
-        word = self._scope_phase_word()
-        if self.scope.preserve:
-            _scope.record_scope_deferrals(self.state, word, self.scope_deferred)
-            self.state.save()
-            return
-        if self.scope.recorded_deferrals:
-            self._scope_released = [
-                str(entry.get("group_id")) for entry in self.scope.recorded_deferrals
-                if entry.get("group_id")
-            ]
-            _scope.record_scope_deferrals(self.state, word, [])
-            self.state.save()
-            print(
-                f"[scope-policy] {word}: {len(self._scope_released)} item(s) an "
-                f"earlier {_sp.FLAG} preserve run deferred are offered again "
-                f"under expand",
-                file=sys.stderr,
-            )
+        return self.scope_gate.confirmation_message(
+            message, merge_validation_with_groups(self.groups, self.validation or []))
 
     def scope_annotate(self, formatted: Dict[str, Any], group: Dict[str, Any], *,
                        original_description: Optional[str] = None) -> Dict[str, Any]:
@@ -2513,38 +2382,14 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         instruction (``scope_apply.annotate_item``); under ``expand`` the
         formatted item is returned untouched.
         """
-        return _scope.annotate_item(formatted, group, self.scope,
-                                    original_description=original_description)
-
-    def scope_output_fields(self) -> Dict[str, Any]:
-        """``orchestrator_output.json``'s scope block, or ``{}`` (expand, nothing released)."""
-        return _scope.output_block(self.scope, self.scope_deferred, self._scope_released)
-
-    def _scope_materialize_kwargs(self) -> Dict[str, Any]:
-        """``materialize_write_tasks``' scope arguments; ``{}`` under ``expand``."""
-        kwargs: Dict[str, Any] = {}
-        if self.scope is not None and self.scope.preserve:
-            kwargs["scope"] = self.scope
-        if self._scope_start_index:
-            kwargs["start_index"] = self._scope_start_index
-        return kwargs
-
-    def _scope_scheduler_kwargs(self) -> Dict[str, Any]:
-        """The scheduler's scope arguments: the policy its dispatch check enforces."""
-        if self.scope is None:
-            return {}
-        return {"scope_policy": self.scope.policy,
-                "scope_baseline_id": self.scope.baseline_id}
+        return self.scope_gate.annotate(formatted, group,
+                                        original_description=original_description)
 
     def _scope_effective(self, state: StateManager) -> "_scope.ApplyPolicy":
         """This run's policy, or (``--mark-completed``, which resolves none)
         the one the round's record gives."""
-        if self.scope is not None:
-            return self.scope
-        explicit = getattr(self.args, _sp.DEST, None)
-        return _scope.resolve_apply_policy(
-            explicit if _sp.is_valid_policy(explicit) else None, state.state,
-            self._scope_phase_word())
+        return self.scope_gate.effective(
+            state.state, getattr(self.args, _sp.DEST, None), self._scope_phase_word())
 
     def _scope_blockers(self, state: Optional[StateManager]) -> List[Dict[str, Any]]:
         """The blockers this review's batches declined, from the phase's records.
@@ -2603,36 +2448,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             print(line, file=sys.stderr)
         record_error(_scope.blocker_error(blockers, mode_word=word))
 
-    def _scope_summary_lines(self, *, markdown: bool = False, would: bool = False) -> List[str]:
-        """The deferral (and release) lines a summary prints; ``[]`` under a default run."""
-        lines: List[str] = []
-        entries = list(self.scope_deferred)
-        if entries:
-            verb = "Would defer" if would else "Deferred"
-            if markdown:
-                lines += [f"## Deferred by scope policy ({len(entries)}, not applied)", ""]
-            else:
-                lines += ["", f"{verb} by {_sp.FLAG} preserve ({len(entries)}, not applied):"]
-            for entry in entries:
-                gid = str(entry.get("group_id") or "")
-                if markdown:
-                    lines.append(
-                        f"- **{entry.get('title')}** (`{gid}`) `{entry.get('label')}` — "
-                        f"{entry.get('reason')}"
-                    )
-                else:
-                    lines.append(f"  - [{entry.get('label')}] {entry.get('title')} [{gid[:8]}]")
-                    lines.append(f"      reason: {entry.get('reason')}")
-            if markdown:
-                lines.append("")
-        if self._scope_released and not markdown:
-            lines += ["", f"Offered again under {_sp.FLAG} expand: "
-                          f"{len(self._scope_released)} earlier scope deferral(s)"]
-        return lines
-
     def _print_scope_summary(self) -> None:
         """The native leg's deferral lines, beside its plan of work."""
-        lines = self._scope_summary_lines()
+        lines = self.scope_gate.summary_lines()
         if not lines:
             return
         stream = sys.stderr if getattr(self.args, "output_format", "text") == "json" else sys.stdout
@@ -2640,7 +2458,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             print(line, file=stream)
 
     def _publish_scope_notice(self) -> None:
-        note = _scope.deferral_note(self.scope_deferred, self.item_noun_plural)
+        note = self.scope_gate.notice(self.item_noun_plural)
         if note:
             from .cli_common import add_notice
 
@@ -2660,7 +2478,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         word = self._scope_phase_word()
         blockers: List[Dict[str, Any]] = []
         if not self._scope_dry() and self.state is not None:
-            _scope.record_scope_deferrals(self.state, word, self.scope_deferred)
+            _scope.record_scope_deferrals(self.state, word, self.scope_gate.deferred)
             self.state.mark_phase_completed(word)
             blockers = self._scope_close(self.state)
             if self.edits_the_plan and getattr(self.args, "resume", False):
@@ -2670,7 +2488,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 self.print_native_tests_not_run()
         phase_dir = os.path.join(self.out_dir, self.phase_name)
         os.makedirs(phase_dir, exist_ok=True)
-        count = len(self.scope_deferred)
+        count = len(self.scope_gate.deferred)
         output: Dict[str, Any] = {
             "format_version": CURRENT_FORMAT_VERSION,
             "status": "completed",
@@ -2702,11 +2520,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 "scope_deferred_count": count,
             },
         }
-        output.update(self.scope_output_fields())
+        output.update(self.scope_gate.output_fields())
         if not blockers:
             print(f"\nNo {self.item_noun_plural} eligible under {_sp.FLAG} preserve.",
                   file=sys.stderr)
-        for line in self._scope_summary_lines():
+        for line in self.scope_gate.summary_lines():
             print(line, file=sys.stderr)
         self._publish_scope_notice()
         write_and_emit_output(output, phase_dir)
@@ -3065,7 +2883,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # The scope policy's block (plan §5): present only under `preserve`
         # or when an `expand` override released earlier deferrals, so a
         # default run's payload keeps exactly its keys.
-        output.update(self.scope_output_fields())
+        output.update(self.scope_gate.output_fields())
 
         # Step 33: Write output + mark phase completed
         try:
@@ -3109,16 +2927,17 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 # *before* the artifact record, so the report is one of the
                 # files handed back.
                 try:
-                    summary_path = self.write_apply_summary_report()
-                    self._decisions_overlay_path = self.regenerate_decisions_overlay()
+                    report = self.phase_report()
+                    summary_path = report.write_apply_summary_report()
+                    self._decisions_overlay_path = report.regenerate_decisions_overlay()
                     if summary_path:
                         # F11: the scheduler already serialized
                         # write_batch_report.json with summary_file: null by
                         # this point — patch it now that the path is known.
-                        self._patch_write_batch_report_summary_file(summary_path)
+                        report.patch_write_batch_report_summary_file(summary_path)
                 except Exception as e:  # noqa: BLE001 - reporting is non-fatal
                     self.logger.warning("summary report failed: %s", e)
-            self._record_write_artifacts(output_path)
+            self.phase_report().record_write_artifacts(output_path)
             try:
                 # `print_text_summary` is a *plan of work* — "SUGGESTIONS TO
                 # APPLY", every batch, every description — and on this leg it ran
@@ -3139,11 +2958,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     # gets the outcome block in its teeth. It is still printed —
                     # to the stream the scheduler's own progress lines already
                     # use, which is the same log either way under `--detach`.
+                    report = self.phase_report()
                     with contextlib.redirect_stdout(
                         sys.stderr if as_json else sys.stdout
                     ):
-                        self.print_write_outcome_summary()
-                    self._publish_run_notes()
+                        report.print_write_outcome_summary()
+                    report.publish_run_notes()
             except Exception as e:  # noqa: BLE001 - summary is non-fatal
                 self.logger.warning("write outcome summary failed: %s", e)
             return scheduled
@@ -3308,26 +3128,17 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """When the review this phase applies last completed, or ``None``.
 
         The cutoff between review cycles that every check over this phase's
-        own records dates against: the review is
-        ``REVIEW_PHASE_BY_WRITE_KIND``'s entry for this write kind (the
-        scheduler's ``_review_completed_at`` reads the same one), and its
-        stamp is read with the scheduler's ``_parse_local_timestamp``.
-        ``None`` for a phase with no write kind, before ``_setup`` built the
-        state, or when the review has no parseable completion — and every
-        caller then keeps what it was dating (absence of a date is not
-        staleness).
+        own records dates against, read as the scheduler reads it
+        (``write_batch_scheduler.review_completed_at``). ``None`` for a phase
+        with no write kind, before ``_setup`` built the state, or when the
+        review has no parseable completion — and every caller then keeps
+        what it was dating (absence of a date is not staleness).
         """
-        from .write_batch_scheduler import (
-            REVIEW_PHASE_BY_WRITE_KIND, _parse_local_timestamp,
+        from .write_batch_scheduler import review_completed_at
+        return review_completed_at(
+            getattr(getattr(self, "state", None), "state", None),
+            getattr(self, "write_kind", ""),
         )
-        recorded_state = getattr(getattr(self, "state", None), "state", None)
-        if not isinstance(recorded_state, dict):
-            return None
-        completed = recorded_state.get("phases_completed")
-        review = REVIEW_PHASE_BY_WRITE_KIND.get(getattr(self, "write_kind", "") or "")
-        if not isinstance(completed, dict) or not review:
-            return None
-        return _parse_local_timestamp(completed.get(review))
 
     def _fresh_target_refusal(self) -> Optional[str]:
         """Why ``--fresh`` must not run against the target as it is, or ``None``.
@@ -3353,7 +3164,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         from .write_safety import (
             AuditLog, file_sha256, relative_to_root, resolve_repo_root,
         )
-        from .write_batch_scheduler import _parse_local_timestamp
         records = AuditLog(phase_dir).records()
         if not records:
             return None
@@ -3366,18 +3176,17 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         except Exception:  # noqa: BLE001 - fall back to matching by hash alone
             target_key = None
         reviewed_at = self._review_completed_at()
-        if reviewed_at is not None:
-            # The audit stamps whole seconds; a completion in the review's
-            # own second is this cycle's.
-            reviewed_at = reviewed_at.replace(microsecond=0)
         hits: List[Tuple[str, str]] = []
         for record in records:
             if record.get("event") != "completed":
                 continue
-            if reviewed_at is not None:
-                stamped = _parse_local_timestamp(record.get("timestamp"))
-                if stamped is not None and stamped < reviewed_at:
-                    continue
+            # The audit stamps whole seconds; a completion in the review's
+            # own second is this cycle's.
+            if predates_review(
+                _parse_completion_time(record.get("timestamp")), reviewed_at,
+                whole_seconds=True,
+            ):
+                continue
             for path, info in (record.get("observed") or {}).items():
                 if target_key is not None and str(path) != target_key:
                     continue
@@ -3537,25 +3346,17 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if getattr(self.args, "resume", False):
             return True
         from .subagent_executor import OUTPUT_NAME_PATTERN_BY_KIND
-        from .write_batch_scheduler import (
-            WRITE_BATCH_REPORT_FILENAME, _parse_local_timestamp,
-        )
+        from .write_batch_scheduler import WRITE_BATCH_REPORT_FILENAME
 
         reviewed_at = self._review_completed_at()
 
         def this_cycle(stamped: Optional[datetime]) -> bool:
-            return stamped is None or reviewed_at is None or not stamped < reviewed_at
-
-        def modified_at(path: str) -> Optional[datetime]:
-            try:
-                return datetime.fromtimestamp(os.stat(path).st_mtime)
-            except OSError:
-                return None
+            return not predates_review(stamped, reviewed_at)
 
         if self.state is not None:
             for record in self.state.get_processed_items(self.phase_name).values():
                 stamped = (
-                    _parse_local_timestamp(record.get("timestamp"))
+                    _parse_completion_time(record.get("timestamp"))
                     if isinstance(record, dict) else None
                 )
                 if this_cycle(stamped):
@@ -3571,482 +3372,58 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     report = json.load(handle)
             except (OSError, ValueError):
                 report = None
-            written_at = (
-                _parse_local_timestamp(report.get("written_at"))
-                if isinstance(report, dict) else None
-            )
-            if this_cycle(written_at or modified_at(report_path)):
+            written = report.get("written_at") if isinstance(report, dict) else None
+            if this_cycle(stamp_or_mtime(written, report_path)):
                 return True
         # The kind's own result pattern, never a glob typed here: it is the same
         # table the executor admits a result filename against, so a new write
         # kind cannot leave this check silently blind.
         pattern = OUTPUT_NAME_PATTERN_BY_KIND.get(self.write_kind)
         return pattern is not None and any(
-            pattern.match(name) and this_cycle(modified_at(os.path.join(phase_dir, name)))
+            # A batch result carries no stamp of its own: its mtime dates it.
+            pattern.match(name)
+            and this_cycle(stamp_or_mtime(None, os.path.join(phase_dir, name)))
             for name in names
         )
 
-    def _touched_files(self) -> List[str]:
-        """The files the write batches actually verified changed (F7).
-
-        The observed post-run byte comparison, not the runner's own claim — the
-        same set each applied or partially applied outcome's ``files_touched``
-        carries. Partial application stops the run but preserves its edits,
-        so those files must remain visible for inspection. Repo-root-
-        relative, order-preserving, de-duplicated across every outcome; empty
-        before the write executor has run, or when every batch was a no-op /
-        clean failure. This is the only "what did this phase change" answer for
-        a phase with no single write target (``has_single_write_target`` False —
-        apply-code-fixes partitions by ``file_key``), and it is honest for the
-        single-target phases too since it reflects what actually moved rather
-        than the phase's own convention.
-
-        Read from :meth:`_phase_rows`, so a ``--resume`` still names the files
-        an earlier run of this phase changed.
-        """
-        touched: List[str] = []
-        seen: Set[str] = set()
-        for row in self._phase_rows():
-            if not self._row_ok(row) and (
-                row.get("write_outcome") != "partial-application"
-            ):
-                continue
-            for touched_path in row.get("files_touched") or []:
-                if touched_path and touched_path not in seen:
-                    seen.add(touched_path)
-                    touched.append(touched_path)
-        return touched
-
-    def _phase_rows(self) -> List[Dict[str, Any]]:
-        """Every batch row of this phase, earlier runs' first (#28).
-
-        The scheduler's own ``report_rows()``, the rows
-        ``write_batch_report.json`` carries, so ``summary.md``, the result
-        block and the report cannot disagree. On a ``--resume`` they include
-        the rows an interrupted run of this review cycle recorded, flagged
-        ``from_earlier_run``, and never rows of an earlier cycle (the
-        scheduler drops a report that predates the review). Built from this
-        run's outcomes when the result has no rows of its own.
-        """
-        result = self.write_result
-        report_rows = getattr(result, "report_rows", None)
-        if callable(report_rows):
-            return [dict(row) for row in report_rows()]
-        rows: List[Dict[str, Any]] = []
-        for outcome in getattr(result, "outcomes", None) or []:
-            rows.append({
-                "task_id": str(getattr(outcome, "task_id", "")),
-                "status": getattr(outcome, "status", None),
-                "write_outcome": getattr(outcome, "write_outcome", None),
-                "runner": getattr(outcome, "runner", None),
-                "duration_seconds": getattr(outcome, "duration_seconds", 0.0),
-                "reason": getattr(outcome, "reason", None),
-                "files_touched": list(getattr(outcome, "files_touched", None) or []),
-                "output_path": getattr(outcome, "output_path", None),
-                "expected_ids": list(getattr(outcome, "expected_ids", None) or []),
-                "skipped": bool(getattr(outcome, "skipped", False)),
-                **(
-                    {"batch_check": {
-                        "passed": not outcome.batch_check,
-                        "findings": list(outcome.batch_check),
-                    }}
-                    if getattr(outcome, "batch_check", None) is not None else {}
-                ),
-            })
-        return rows
-
-    @staticmethod
-    def _row_ok(row: Dict[str, Any]) -> bool:
-        return row.get("status") == "ok"
-
-    def _row_item_ids(self, row: Dict[str, Any]) -> List[str]:
-        """The items a row's batch carried: the row's own ``expected_ids``,
-        else this run's materialized task of the same id."""
-        own = row.get("expected_ids")
-        if own:
-            return [str(item) for item in own]
-        for task in self.write_tasks:
-            if str(task.get("task_id", "")) == str(row.get("task_id", "")):
-                return [str(item) for item in task.get("expected_ids") or []]
-        return []
-
-    @staticmethod
-    def _row_provenance(row: Dict[str, Any]) -> str:
-        """The marker a row from before this run carries, else ``""``."""
-        if row.get("from_earlier_run"):
-            return " (earlier run)"
-        if row.get("skipped"):
-            # A resume skip whose earlier row the scheduler could not supply
-            # (that run left no report, or its report belonged to an earlier
-            # review): this run reused the result file and dispatched nothing.
-            return " (earlier result, not dispatched again)"
-        return ""
-
-    def _rows_provenance_note(self, rows: List[Dict[str, Any]]) -> str:
-        """`` (N from an earlier run of this phase, …)`` for a count line."""
-        earlier = sum(1 for row in rows if row.get("from_earlier_run"))
-        reused = sum(
-            1 for row in rows
-            if row.get("skipped") and not row.get("from_earlier_run")
-        )
-        parts = []
-        if earlier:
-            parts.append(f"{earlier} from an earlier run of this phase")
-        if reused:
-            parts.append(f"{reused} earlier result(s) reused")
-        if not parts:
-            return ""
-        return f" ({', '.join(parts)}, not dispatched again)"
-
-    def _items_by_member_id(self) -> Dict[str, Dict[str, Any]]:
-        """``member id -> formatted item`` over this run's batches.
-
-        Each materialized task's ``expected_ids`` are its batch's items in
-        order (``write_phase_bridge``), so an earlier run's row, whose
-        positional id may now name another batch, still finds its own items.
-        """
-        items: Dict[str, Dict[str, Any]] = {}
-        for task, batch in zip(self.write_tasks, self.batches):
-            if not isinstance(batch, dict):
-                continue
-            members = self._batch_member_items(batch)
-            for member_id, item in zip(task.get("expected_ids") or [], members):
-                items.setdefault(str(member_id), item)
-        return items
-
-    def _record_write_artifacts(self, output_path: str) -> None:
-        """Hand back the files this phase produced, on the executor leg.
-
-        A fully successful detached run reported ``artifacts: []`` and no
-        ``output_files``: the phase that rewrote the plan never named the plan,
-        its own output JSON, its batch report or the prior-changes log, so the
-        host was left to glob a phase dir or mine a log it cannot see. Same two
-        channels the review base writes — ``record_output_files`` feeds
-        ``.status.json`` for ``status``, ``record_artifacts`` feeds the terminal
-        ``MULTI_LLM_RESULT`` line every host is told to trust — and both drop
-        paths that do not exist, so a stopped run names only what it produced.
-
-        F7: also names every file the batches verified changed
-        (``touched_file_{n}``, resolved against the same
-        ``write_safety.resolve_repo_root`` anchor the scheduler pins the write
-        path to — mirrors ``implement_orchestrator._record_implement_write_
-        artifacts``), plus the judge's own dispatch report and the review report
-        this run's decisions overlay rewrote, when either exists.
-        """
-        phase_dir = os.path.join(self.out_dir, self.phase_name)
-        paths: Dict[str, str] = {}
-        target = self.write_target_file()
-        if target:
-            paths["applied_to"] = target
-        paths["orchestrator_output"] = output_path
-        report_path = getattr(self.write_result, "report_path", None)
-        paths["write_batch_report"] = report_path or os.path.join(
-            phase_dir, "write_batch_report.json"
-        )
-        paths["prior_changes"] = os.path.join(self.out_dir, "prior_changes.jsonl")
-        # The summary report this leg writes itself (F3). Dropped like every
-        # other path when absent, so `--dry-run-subagents` names no report.
-        paths["summary"] = os.path.join(phase_dir, "summary.md")
-
-        try:
-            from .write_safety import repo_root_for_report
-        except ImportError:  # pragma: no cover - direct script runs
-            from write_safety import repo_root_for_report  # type: ignore
-
-        repo_root = repo_root_for_report(self.plan_path)
-        for index, touched_path in enumerate(self._touched_files(), start=1):
-            resolved = (
-                touched_path if os.path.isabs(touched_path)
-                else os.path.join(repo_root, touched_path)
-            )
-            paths[f"touched_file_{index}"] = resolved
-
-        # The judge's own dispatch report, kind-qualified because a judge
-        # dispatch can share this phase dir with the later write dispatch
-        # (KINDS_SHARING_A_WRITE_PHASE_DIR) — otherwise invisible to a host
-        # that only reads this run's `output_files`. Asked of the executor
-        # rather than spelled out here (F6, 2026-09-17): it owns the naming
-        # rule, and a hand-typed copy would drop this key on the day it moves.
-        try:
-            from .subagent_executor import batch_report_path
-        except ImportError:  # pragma: no cover - direct script runs
-            from subagent_executor import batch_report_path  # type: ignore
-
-        judge_report = batch_report_path(phase_dir, "human_decision_judge")
-        if os.path.exists(judge_report):
-            paths["human_decision_judge_report"] = judge_report
-
-        # The review report this phase's own decisions overlay just rewrote,
-        # if any (`regenerate_decisions_overlay`, called just before this).
-        overlay_path = getattr(self, "_decisions_overlay_path", None)
-        if overlay_path:
-            paths["decisions_overlay"] = overlay_path
-
-        try:
-            from . import detach as _detach
-        except ImportError:  # pragma: no cover - direct script runs
-            import detach as _detach  # type: ignore
-        _detach.record_output_files(phase_dir, **paths)
-        record_artifacts(
-            path for path in paths.values() if path and os.path.exists(path)
-        )
-
-    def _write_item_counts(self, rows: List[Dict[str, Any]]) -> Dict[str, int]:
-        """Count items by the scheduler's verdict, rather than dispatch success.
-
-        An ``ok`` dispatch may be a no-op or a clean failure. Neither is
-        evidence that its requested changes were applied. Counted over
-        :meth:`_phase_rows`, the rows the report lists, so the count lines
-        agree with the table under them.
-        """
-        counts = {
-            "applied": 0, "no-op": 0, "clean-failure": 0,
-            "declined": 0, "skipped": 0,
-        }
-        for row in rows:
-            verdict = row.get("write_outcome")
-            if self._row_ok(row) and verdict in counts:
-                # Fix round 18: an item its batch declined, or one skipped at
-                # the user's request, is never counted under the batch's
-                # verdict (an `applied` batch did not apply it).
-                declined, skipped = self._row_not_applied(row)
-                counts[verdict] += len([
-                    item for item in self._row_item_ids(row)
-                    if item not in declined and item not in skipped
-                ])
-                counts["declined"] += len(declined)
-                counts["skipped"] += len(skipped)
-        return counts
-
-    def _not_applied_lines(self, rows: List[Dict[str, Any]]) -> List[str]:
-        """One plain line per item a finished batch did not apply on purpose
-        (fix round 18): ``<title> [<id8>] (fix 2 of apply-fix-batch-1) not
-        applied: the batch declined it — <reason>``, and the same for an item
-        skipped at the user's request. Over the finished (``ok``) rows only:
-        a stopped batch is dispatched again."""
-        word = "fix" if self.write_kind == "apply_code_fixes" else "suggestion"
-        lines: List[str] = []
-        for row in rows:
-            if not self._row_ok(row):
-                continue
-            declined, skipped = self._row_not_applied(row)
-            if not declined and not skipped:
-                continue
-            item_ids = self._row_item_ids(row)
-            titles = {
-                member: str(item.get("title") or item.get("theme") or "").strip()
-                for member, item in self._row_items_with_ids(row, item_ids)
-                if member
-            }
-            for member in item_ids:
-                # Fix round 26: the record keeps the reason's closing stop.
-                # Fix round 28 (live run 12 #7): so does this line, which
-                # ends with it; the notice's join (`join_clauses`) drops it
-                # only where another clause follows (OpenCode decline's
-                # notice lost it as its last clause).
-                if member in declined:
-                    why = f"the batch declined it — {str(declined[member] or '').strip()}"
-                elif member in skipped:
-                    why = f"skipped at your request — {str(skipped[member] or '').strip()}"
-                else:
-                    continue
-                title = titles.get(member) or "Untitled"
-                lines.append(
-                    f"{title} [{member[:8]}] ({word} {item_ids.index(member) + 1} "
-                    f"of {row.get('task_id')}) not applied: {why}"
-                )
-        return lines
-
-    def print_write_outcome_summary(self) -> None:
-        """Report what the batch loop DID, plus the decision summary.
-
-        Two gaps close here. The first is tense: the log's 12 KB tail described
-        batches that had already run, and carried no outcome, duration or runner
-        anywhere in it. The second is reach: ``util decisions`` (step 3 of the
-        apply instructions) is the only surface for the applied/skipped
-        breakdown, and on the ``--exec-subagents`` leg the phase finishes in one
-        invocation, so that step never runs — the per-item reasons, which are the
-        good part, existed only inside ``orchestrator_output.json``.
-        """
-        from .subagent_executor import batch_check_could_not_run, row_batch_check_findings
-
-        result = self.write_result
-        rows = self._phase_rows()
-        ok = [row for row in rows if self._row_ok(row)]
-        item_counts = self._write_item_counts(rows)
-        target = self.write_target_file()
-        touched = self._touched_files()
-
-        print(f"\n{'=' * 60}")
-        print(f"{self.phase_name.upper()}: RESULT")
-        print(f"{'=' * 60}")
-        # F7: a phase with no single write target (has_single_write_target False —
-        # apply-code-fixes partitions by file_key) used to fall back to
-        # `self.plan_path` here, which the phase never opens, so every run named
-        # the plan as what it changed. The files the batches actually verified
-        # changed are the honest answer, and they exist for every phase.
-        if target:
-            print(f"File: {target}")
-        else:
-            print(f"Files changed: {', '.join(touched) if touched else '(none)'}")
-        print(
-            f"Batches: {len(ok)}/{len(rows)} ok"
-            + self._rows_provenance_note(rows)
-        )
-        print(f"{self.item_noun_plural.capitalize()} applied: {item_counts['applied']}")
-        if item_counts["declined"]:
-            print(
-                f"{self.item_noun_plural.capitalize()} declined by their batch "
-                f"(not applied): {item_counts['declined']}"
-            )
-        if item_counts["skipped"]:
-            print(
-                f"{self.item_noun_plural.capitalize()} skipped at your request "
-                f"(not applied): {item_counts['skipped']}"
-            )
-        if item_counts["no-op"]:
-            print(f"{self.item_noun_plural.capitalize()} needing no changes: {item_counts['no-op']}")
-        if item_counts["clean-failure"]:
-            print(f"{self.item_noun_plural.capitalize()} without verified changes: {item_counts['clean-failure']}")
-        print(f"Skipped: {len(self.formatted_skipped)}")
-        if getattr(result, "stopped_at_batch", None) is not None:
-            print(f"Stopped at batch: {result.stopped_at_batch}")
-        failing = {
-            str(row.get("task_id")): row_batch_check_findings(row)
-            for row in rows
-            if self._row_ok(row) and row_batch_check_findings(row)
-        }
-        if failing:
-            # Fix round 14: applied, but not a clean finish.
-            from .write_batch_scheduler import batch_check_summary
-
-            print(f"Not a clean finish: {batch_check_summary(failing)}")
-        if getattr(result, "unverified", None):
-            print(result.unverified)
-
-        if rows:
-            print("\nBatches:")
-            for row in rows:
-                count = len(self._row_item_ids(row))
-                # `subagent_executor.row_outcome_label`'s reading order.
-                verdict = row.get("outcome_label") or row.get("write_outcome") or "-"
-                if self._row_ok(row) and row_batch_check_findings(row):
-                    verdict += (
-                        ", its check could not run"
-                        if batch_check_could_not_run(row_batch_check_findings(row))
-                        else ", its check fails"
-                    )
-                print(
-                    f"  {row.get('task_id')}{self._row_provenance(row)}: "
-                    f"{row.get('status')} ({verdict}), "
-                    f"{count} {self.item_noun}(s), "
-                    f"{float(row.get('duration_seconds') or 0.0):.1f}s, "
-                    f"runner {row.get('runner') or '(none)'}"
-                )
-                reason = row.get("reason")
-                if reason:
-                    print(f"      reason: {reason}")
-            not_applied = self._not_applied_lines(rows)
-            if not_applied:
-                print(f"\n{self.item_noun_plural.capitalize()} not applied:")
-                for line in not_applied:
-                    print(f"  - {line}")
-
-        for warning in self.consistency_warnings():
-            print(f"\n[CONSISTENCY_WARNING] {warning}")
-
-        # The decision summary, folded in: every skip with the status and the
-        # specific reason validation gave it, plus its group id so the skip can
-        # be looked up in the review report.
-        if self.formatted_skipped:
-            print(f"\nSkipped {self.item_noun_plural} (not applied):")
-            for item in self.formatted_skipped:
-                gid = str(item.get("group_id") or "")
-                label = f" [{gid[:8]}]" if gid else ""
-                print(
-                    f"  - [{judge_status_label(item.get('status'))}] "
-                    f"{item.get('title', 'Unknown')}{label}"
-                )
-                if item.get("reason"):
-                    print(f"      reason: {item['reason']}")
-        # What the judge decided, on the leg where nothing else reports it. The
-        # instructions put a `## Decided by the judge agent` section in the summary
-        # report, but that step lives on the native leg only, so before
-        # this the one decision a `--yes --exec-subagents` run actually *made*
-        # reached no output the phase wrote (measured 2026-09-16).
-        decided = self.judge_decisions()
-        if decided:
-            print(f"\nDecided by the judge agent ({len(decided)}):")
-            print(f"  judge: {', '.join(self._judges_of(decided))}")
-            titles = self._titles_by_group_id()
-            for group_id, record in decided.items():
-                title = titles.get(group_id, group_id)
-                context = record.get("batch_context") or {}
-                print(
-                    f"  - [{judge_outcome(record)}] {title} "
-                    f"[{group_id[:8]}]"
-                )
-                print(f"      source: {judge_source_label(context.get('decision_source'))}")
-                if record.get("reason"):
-                    print(f"      reason: {record['reason']}")
-
-        if self.formatted_human:
-            print(f"\nStill needing a human ({len(self.formatted_human)}):")
-            for item in self.formatted_human:
-                print(f"  - {item.get('title', 'Unknown')}")
-
-        for line in self._scope_summary_lines():
-            print(line)
-
     # ------------------------------------------------------------------
-    # The executor leg's own summary report and decisions overlay (F3)
+    # The executor leg's closing report (F3): utils/apply_report.py
     # ------------------------------------------------------------------
 
-    def run_notes(self) -> List[str]:
-        """The lines a host must relay beside this run's counts (fix round 14).
+    def phase_report(self) -> ApplyPhaseReport:
+        """The closing report over what this phase holds now.
 
-        Codex racing re-run 5, apply-task-suggestions: the log carried
-        ``[CONSISTENCY_WARNING] T003 depends on T004, listed after it`` and
-        "Skipped: 1" (a suggestion the judge skipped), while the result the
-        host read said "10/10 items applied" and nothing else, so the host
-        reported "Applied 10 of 10". One line per consistency warning, and one
-        naming every item left unapplied with why, its title and group id —
-        the RESULT block's own facts, in plain words.
+        Built from the phase's own data each time it is asked for, so a
+        report step reads the state the steps before it left. The phase's
+        hooks (:meth:`consistency_warnings`, :meth:`resolve_base_ref`,
+        :meth:`_document_title`) are read when the report needs them.
         """
-        notes = [
-            f"consistency warning: {warning}" for warning in self.consistency_warnings()
-        ]
-        # Fix round 18: an item a batch declined (or one skipped at the
-        # user's request) is named with its reason, never only counted.
-        notes.extend(self._not_applied_lines(self._phase_rows()))
-        skipped = list(self.formatted_skipped or [])
-        if skipped:
-            applied = self._write_item_counts(self._phase_rows())["applied"]
-            noun = self.item_noun if len(skipped) == 1 else self.item_noun_plural
-            by_label: Dict[str, List[str]] = {}
-            for item in skipped:
-                gid = str(item.get("group_id") or "")
-                title = str(item.get("title") or "Unknown").strip()
-                by_label.setdefault(judge_status_label(item.get("status")), []).append(
-                    f"{title}{f' [{gid[:8]}]' if gid else ''}"
-                )
-            shown = "; ".join(
-                f"{label}: {', '.join(titles[:5])}"
-                + (f" (+{len(titles) - 5} more)" if len(titles) > 5 else "")
-                for label, titles in by_label.items()
-            )
-            # Fix round 26 (live run 11, OpenCode 05: the host said the task
-            # suggestions went "to plans/racing-game.md"): the file they went to.
-            target = self._applied_to_label()
-            notes.append(
-                f"{len(skipped)} {noun} not applied, beside the {applied} "
-                f"applied{f' to {target}' if target else ''} — {shown} "
-                "(reasons in summary.md)"
-            )
-        scope_note = _scope.deferral_note(self.scope_deferred, self.item_noun_plural)
-        if scope_note:
-            notes.append(scope_note)
-        return notes
+        return ApplyPhaseReport(
+            phase_name=self.phase_name,
+            write_kind=self.write_kind,
+            item_noun=self.item_noun,
+            item_noun_plural=self.item_noun_plural,
+            plan_path=self.plan_path,
+            out_dir=self.out_dir,
+            review_subdir=self.review_subdir,
+            write_result=self.write_result,
+            write_tasks=self.write_tasks,
+            batches=self.batches,
+            batching_stats=self.batching_stats,
+            formatted_valid=self.formatted_valid,
+            formatted_human=self.formatted_human,
+            formatted_skipped=self.formatted_skipped,
+            scope_deferred=self.scope_gate.deferred,
+            scope_released=self.scope_gate.released,
+            state=self.state,
+            pinned=self._pinned,
+            decisions_overlay_path=self._decisions_overlay_path,
+            target_file=self.write_target_file(),
+            consistency_warnings=self.consistency_warnings,
+            resolve_base_ref=self.resolve_base_ref,
+            document_title=self._document_title,
+            logger=self.logger,
+        )
 
     def _completed_target_label(self) -> Optional[str]:
         """:meth:`_applied_to_label` for the native ``--mark-completed``
@@ -4056,44 +3433,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     def _applied_to_label(self) -> Optional[str]:
         """The single file this phase edits, relative to the repository
         root (``write_target_file``), or ``None`` without one."""
-        target = self.write_target_file()
-        if not target:
-            return None
-        try:
-            from .git_utils import find_git_entry_root
-        except ImportError:  # pragma: no cover - direct script runs
-            from git_utils import find_git_entry_root  # type: ignore
-        try:
-            # The `.git` holder above the plan, walked (no git runs here).
-            start = os.path.dirname(os.path.realpath(self.plan_path))
-            root = os.path.realpath(find_git_entry_root(start) or start)
-            relative = os.path.relpath(os.path.realpath(target), root)
-        except (OSError, ValueError):
-            return target
-        # A label in prose and in the result line: `/` on every platform.
-        return target if relative.startswith(os.pardir) else relative.replace(os.sep, "/")
-
-    def _publish_run_notes(self) -> None:
-        """Hand :meth:`run_notes` to the result line and to ``status``.
-
-        The run's own ``notice`` (appended, never replacing one) for a
-        foreground caller, and ``progress.notes`` in the phase's
-        ``.status.json``, which a detached run's terminal poll carries into
-        its ``notice`` — the poll is the only result line a tool route reads.
-        """
-        notes = self.run_notes()
-        if not notes:
-            return
-        from . import cli_common as _cli
-
-        try:
-            from . import detach as _detach
-        except ImportError:  # pragma: no cover - direct script runs
-            import detach as _detach  # type: ignore
-        _detach.report_progress(
-            os.path.join(self.out_dir, self.phase_name), notes=notes,
-        )
-        _cli.add_notice(join_clauses(notes))
+        return applied_to_label(self.write_target_file(), self.plan_path)
 
     def consistency_warnings(self) -> List[str]:
         """Problems the finished edits left in the file they edited (advisory).
@@ -4103,554 +3443,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         each edit one corner of that graph and none of them sees the whole.
         """
         return []
-
-    def judge_decisions(self) -> Dict[str, Dict[str, Any]]:
-        """This phase's recorded decisions that a judge subagent made.
-
-        The same filter the instructions' ``## Decided by the judge agent`` section
-        specifies: ``human_decisions_{phase}`` entries whose
-        ``batch_context.decision_source`` is ``judge_auto_decide`` or
-        ``judge_auto_decide_salvage`` (or the ``claude_*`` spelling of either
-        that a run started before the rename recorded).
-        """
-        if self.state is None:
-            return {}
-        try:
-            recorded = self.state.get_all_human_decisions(self.phase_name)
-        except Exception:  # noqa: BLE001 - reporting must not fail a run
-            return {}
-        return {
-            group_id: record
-            for group_id, record in (recorded or {}).items()
-            if is_judge_source(
-                ((record or {}).get("batch_context") or {}).get("decision_source")
-            )
-        }
-
-    @staticmethod
-    def _judge_breakdown(decided: Dict[str, Dict[str, Any]]) -> str:
-        """`` (N approved, N salvaged, N skipped)`` for the summary's count line.
-
-        The same three counts the ingest line prints, so one run never reports
-        a salvage as "salvaged" in one place and "approved" in another.
-        """
-        if not decided:
-            return ""
-        outcomes = [judge_outcome(record) for record in decided.values()]
-        return (
-            f" ({outcomes.count('approved')} approved, "
-            f"{outcomes.count('salvaged')} salvaged, "
-            f"{outcomes.count('skipped')} skipped)"
-        )
-
-    @staticmethod
-    def _judges_of(decided: Dict[str, Dict[str, Any]]) -> List[str]:
-        """The distinct judges named by *decided*'s records, in first-seen order."""
-        judges: List[str] = []
-        for record in decided.values():
-            judge = str(((record or {}).get("batch_context") or {}).get("judge")
-                        or "unrecorded")
-            if judge not in judges:
-                judges.append(judge)
-        return judges
-
-    def _titles_by_group_id(self) -> Dict[str, str]:
-        """``group_id -> title`` over every work set, for decision reporting."""
-        titles: Dict[str, str] = {}
-        for formatted in (
-            self.formatted_valid,
-            self.formatted_human,
-            self.formatted_skipped,
-        ):
-            for item in formatted or []:
-                gid = str(item.get("group_id") or "")
-                if gid:
-                    titles[gid] = str(item.get("title") or gid)
-        return titles
-
-    @staticmethod
-    def _batch_member_items(batch: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """The formatted items a batch dict carries (F10).
-
-        ``fixes`` for a ``CodeFixBatch``, ``suggestions`` for the two sibling
-        phases' ``SuggestionBatch`` — whichever key the batch's own
-        ``to_dict()`` used, so this reads all three phases' batches without a
-        subclass override.
-        """
-        if not batch:
-            return []
-        return list(batch.get("fixes") or batch.get("suggestions") or [])
-
-    @staticmethod
-    def _read_batch_result_notes(
-        output_path: Optional[str], item_ids: Optional[List[str]] = None
-    ) -> Optional[str]:
-        """Best-effort read of a write batch's own ``notes`` field (F10).
-
-        ``notes`` (``schemas/write_batch_result.schema.json``) is the runner's
-        free-text detail beyond the structured ``status``/``ids``/``summary``
-        fields ``TaskOutcome`` already carries — on a real run, the only place a
-        batch's own account of *why* (e.g. "Fix 1: car.accel 32->28 per plan
-        §8.") survives past verification. Silent on any read/parse failure —
-        the field is optional and this is reporting, never gating.
-
-        With ``item_ids``, a file whose own ``ids`` name none of them is
-        another batch's: an apply result file is named by position, and a
-        resumed run may have rewritten it for the batch that now holds it.
-        """
-        if not output_path or not os.path.isfile(output_path):
-            return None
-        try:
-            with open(output_path, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
-        except (OSError, json.JSONDecodeError):
-            return None
-        if not isinstance(data, dict):
-            return None
-        returned = [str(i) for i in data.get("ids") or []]
-        if item_ids and returned and not set(returned) & set(item_ids):
-            return None
-        notes = data.get("notes")
-        return notes if isinstance(notes, str) and notes.strip() else None
-
-    def _row_items(
-        self, row: Dict[str, Any], item_ids: List[str]
-    ) -> List[Dict[str, Any]]:
-        """The formatted items (titles, files) a report row's batch carried.
-
-        This run's batch of the same id when it holds the same items — task
-        and batch are materialized from the same ``self.batches`` list, in the
-        same order (``run_write_executor``), so a positional zip joins them —
-        else the items found by member id: an earlier run's row whose
-        positional id now names another batch.
-        """
-        return [item for _member, item in self._row_items_with_ids(row, item_ids)]
-
-    def _row_items_with_ids(
-        self, row: Dict[str, Any], item_ids: List[str]
-    ) -> List[Tuple[Optional[str], Dict[str, Any]]]:
-        """:meth:`_row_items` with each item's own id beside it (fix round 18:
-        a declined item is named by its id on the row). ``None`` for an item
-        whose id cannot be told."""
-        task_id = str(row.get("task_id", ""))
-        for task, batch in zip(self.write_tasks, self.batches):
-            if str(task.get("task_id", "")) != task_id or not isinstance(batch, dict):
-                continue
-            task_ids = [str(i) for i in task.get("expected_ids") or []]
-            if not row.get("expected_ids") or sorted(task_ids) == sorted(item_ids):
-                members = self._batch_member_items(batch)
-                return [
-                    (task_ids[index] if index < len(task_ids) else None, item)
-                    for index, item in enumerate(members)
-                ]
-            break
-        by_id = self._items_by_member_id()
-        return [(i, by_id[i]) for i in item_ids if i in by_id]
-
-    @staticmethod
-    def _row_not_applied(row: Dict[str, Any]) -> Tuple[Dict[str, str], Dict[str, str]]:
-        """``(declined, skipped)``: a row's items its batch declined and the
-        items a ``--human-task <id>=skip`` answer recorded as skipped at the
-        user's request, each ``{id: reason}`` (fix round 18). Never applied."""
-        from .subagent_executor import row_declined
-
-        return (
-            row_declined(row),
-            row_declined({"declined": row.get("skipped_items")}),
-        )
-
-    @staticmethod
-    def _item_file_lines(item: Dict[str, Any]) -> List[str]:
-        """An item's ``   - File: <path>[:<a>-<b>]`` line, when it names one."""
-        file_path = item.get("file")
-        if not file_path:
-            return []
-        line_range = item.get("line_range") or []
-        if len(line_range) >= 2:
-            return [f"   - File: {file_path}:{line_range[0]}-{line_range[1]}"]
-        return [f"   - File: {file_path}"]
-
-    def _not_applied_item_lines(
-        self, member: str, item: Optional[Dict[str, Any]], task_id: str, why: str,
-    ) -> List[str]:
-        """One item of a not-applied section (fix round 22): ``- **<title>**
-        (`<id>`, <batch>) — <reason>``, then its file; the id alone when this
-        run's batches no longer hold the item."""
-        if item is None:
-            return [f"- `{member}` ({task_id}) — {why}"]
-        title = item.get("title") or item.get("theme") or "Untitled"
-        return [f"- **{title}** (`{member}`, {task_id}) — {why}"] + self._item_file_lines(item)
-
-    def write_apply_summary_report(self) -> Optional[str]:
-        """Write ``{phase}/summary.md`` — the report the instructions promise (F3).
-
-        Their *Output Files* block lists this file for all three apply phases,
-        and their *Generate Summary Report* step describes its sections; both
-        live on the native leg, which ``--exec-subagents`` never reaches ("the phase
-        finishes in that one invocation"). So the executor leg writes the same
-        document itself, from the data it already has: the batch outcomes, the
-        skip list rebuilt after judging, and the judge's own decisions.
-
-        F10 extends it with the per-fix detail the instructions' own template
-        promises and that was sitting unread on disk: each batch's own items
-        (title, file:lines when the item has them, applied/not-applied) from
-        ``self.batches``, the runner's free-text ``notes`` from its result file,
-        plus ``Base ref`` / batching-efficiency lines when the orchestrator
-        computed them (empty for the two sibling phases, which is why both are
-        conditional rather than assumed present).
-
-        Best-effort and never fatal — a report is not worth failing an applied
-        run over. Returns the path written, or ``None``.
-        """
-        try:
-            from .write_batch_scheduler import (
-                CODE_WRITE_KINDS, batch_check_section, verification_line,
-            )
-        except ImportError:  # pragma: no cover - direct script runs
-            from utils.write_batch_scheduler import (  # type: ignore
-                CODE_WRITE_KINDS,
-                batch_check_section,
-                verification_line,
-            )
-        from .commit_spelling import commit_view
-        from .subagent_executor import (
-            DECLINED_SECTION_HEADING,
-            SKIPPED_SECTION_HEADING,
-            batch_check_could_not_run,
-            row_batch_check_findings,
-        )
-        phase_dir = os.path.join(self.out_dir, self.phase_name)
-        result = self.write_result
-        # #28: the phase's rows, not this run's outcomes — a `--resume` keeps
-        # the batches an interrupted run of this review cycle finished, marked
-        # "(earlier run)" with that run's runner, duration and verdict. The
-        # count lines below are computed from the same rows as the table.
-        rows = self._phase_rows()
-        ok = [row for row in rows if self._row_ok(row)]
-        item_counts = self._write_item_counts(rows)
-        decided = self.judge_decisions()
-        titles = self._titles_by_group_id()
-        nouns = self.item_noun_plural
-
-        lines = [
-            f"# Applied {nouns.title()} Report",
-            "",
-            # `**Commit brief**:` on a commit review (plans/review-commits.md §2.8).
-            f"**{self._document_title()}**: {self.plan_path}",
-        ]
-        target = self.write_target_file()
-        touched = self._touched_files()
-        if target:
-            lines.append(f"**Applied to**: {target}")
-        elif touched:
-            # F7: apply-code-fixes has no single write target — the files the
-            # batches verified changed is the honest "what did this phase
-            # change" answer, where before nothing named it at all.
-            lines.append(f"**Files changed**: {', '.join(touched)}")
-        base_ref = self.resolve_base_ref()
-        if base_ref:
-            lines.append(f"**Base ref**: {base_ref}")
-        lines += [
-            f"**Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            "",
-            "## Summary",
-            f"- Batches processed: {len(ok)}/{len(rows)}"
-            + self._rows_provenance_note(rows),
-            f"- {nouns.capitalize()} applied: {item_counts['applied']}",
-            *(
-                [f"- {nouns.capitalize()} declined by their batch (not "
-                 f"applied): {item_counts['declined']}"]
-                if item_counts["declined"] else []
-            ),
-            *(
-                [f"- {nouns.capitalize()} skipped at your request (not "
-                 f"applied): {item_counts['skipped']}"]
-                if item_counts["skipped"] else []
-            ),
-            f"- {nouns.capitalize()} skipped: {len(self.formatted_skipped)}",
-            f"- Decided by the judge agent: {len(decided)}"
-            + self._judge_breakdown(decided),
-        ]
-        if item_counts["no-op"]:
-            lines.append(f"- {nouns.capitalize()} needing no changes: {item_counts['no-op']}")
-        if item_counts["clean-failure"]:
-            lines.append(f"- {nouns.capitalize()} without verified changes: {item_counts['clean-failure']}")
-        # F4: the instructions' own report template requires a verification line
-        # and this leg had none, so a phase that applied seven code fixes without
-        # running any check read exactly like one that had. Only for the
-        # code-editing phase — a typecheck has nothing to say about a plan file.
-        if self.write_kind in CODE_WRITE_KINDS:
-            lines.append(f"- Verification: {verification_line(result)}")
-        if self.batching_stats.get("batching_enabled"):
-            lines.append(
-                f"- Batching efficiency: "
-                f"{self.batching_stats.get('subagent_calls_saved', 0)} "
-                f"subagent call(s) saved "
-                f"({self.batching_stats.get('efficiency_gain_percent', 0)}%)"
-            )
-        lines += [
-            "",
-            "## Applied Changes",
-            "",
-        ]
-        # Fix round 22 (live run 9): an item its batch declined, or that a
-        # `=skip` answer recorded as skipped at your request, is listed in a
-        # section of its own below, never under this applied heading.
-        not_applied_sections: Dict[str, List[str]] = {
-            DECLINED_SECTION_HEADING: [], SKIPPED_SECTION_HEADING: [],
-        }
-        if rows:
-            for row in rows:
-                item_ids = self._row_item_ids(row)
-                # `subagent_executor.row_outcome_label`'s reading order.
-                verdict = row.get("outcome_label") or row.get("write_outcome") or "-"
-                failing = (
-                    (", its check could not run"
-                     if batch_check_could_not_run(row_batch_check_findings(row))
-                     else ", its check fails")
-                    if self._row_ok(row) and row_batch_check_findings(row) else ""
-                )
-                lines.append(
-                    f"### {row.get('task_id')}{self._row_provenance(row)} — "
-                    f"{row.get('status')} ({verdict}{failing})"
-                )
-                lines.append(
-                    f"**{nouns.capitalize()}**: {len(item_ids)}  "
-                    f"**Duration**: {float(row.get('duration_seconds') or 0.0):.1f}s  "
-                    f"**Runner**: {row.get('runner') or '(none)'}"
-                )
-                members = self._row_items_with_ids(row, item_ids)
-                items = [item for _member, item in members]
-                declined, skipped = self._row_not_applied(row)
-                if not items and item_ids and row.get("from_earlier_run"):
-                    # An earlier batch whose items this run no longer selects:
-                    # its ids are all that is left to name them by.
-                    lines.append(
-                        "**Items**: " + ", ".join(f"`{i}`" for i in item_ids)
-                    )
-                titles_by_member = {member: item for member, item in members}
-                for kept, heading in (
-                    (declined, DECLINED_SECTION_HEADING),
-                    (skipped, SKIPPED_SECTION_HEADING),
-                ):
-                    for member, why in kept.items():
-                        not_applied_sections[heading] += self._not_applied_item_lines(
-                            member, titles_by_member.get(member),
-                            str(row.get("task_id")), why,
-                        )
-                if declined or skipped:
-                    told = [
-                        f'{len(kept)} {words} (listed under "{heading}" below)'
-                        for kept, words, heading in (
-                            (declined, "declined by the batch", DECLINED_SECTION_HEADING),
-                            (skipped, "skipped at your request", SKIPPED_SECTION_HEADING),
-                        ) if kept
-                    ]
-                    lines.append(f"**Not applied**: {'; '.join(told)}")
-                listed = [
-                    (member, item) for member, item in members
-                    if member not in declined and member not in skipped
-                ]
-                if listed:
-                    item_status = {
-                        "applied": "Applied",
-                        "no-op": "No changes needed",
-                        "clean-failure": "No verified changes",
-                        "partial-application": "Partial application; inspect batch",
-                    }.get(verdict, "Not applied")
-                    for item_index, (member, item) in enumerate(listed, 1):
-                        item_title = item.get("title") or item.get("theme") or "Untitled"
-                        lines.append(f"{item_index}. **{item_title}** - {item_status}")
-                        lines += self._item_file_lines(item)
-                notes = self._read_batch_result_notes(
-                    row.get("output_path"), item_ids
-                )
-                if notes:
-                    lines.append(f"**Notes**: {notes}")
-                reason = row.get("reason")
-                if reason:
-                    lines.append(f"**Reason**: {reason}")
-                lines.append("")
-            # Fix round 14: the batches whose own check failed, whole, in the
-            # commit modes' words on a commit review (§2.8).
-            section = batch_check_section(
-                rows, commit_review=commit_view(self.plan_path) is not None)
-            if section:
-                lines += section[1:] + [""]
-            for heading, entries in not_applied_sections.items():
-                if entries:
-                    lines += [f"## {heading}", ""] + entries + [""]
-        else:
-            lines += ["(no batches were dispatched)", ""]
-
-        if decided:
-            lines += [
-                f"## Decided by the judge agent ({len(decided)})",
-                "",
-                f"judge: {', '.join(self._judges_of(decided))}",
-                "",
-                f"{nouns.capitalize()} whose decision was offloaded to a judge "
-                f"subagent (`{AGENT_DECIDE_FLAG}`, or a per-item \"Let the agent "
-                "decide\" selection).",
-                "",
-            ]
-            for group_id, record in decided.items():
-                context = record.get("batch_context") or {}
-                lines.append(
-                    f"### {titles.get(group_id, group_id)} "
-                    f"({context.get('importance_at_decision', 'MEDIUM')}) — "
-                    f"{judge_outcome(record).capitalize()}"
-                )
-                lines.append(f"**Group**: `{group_id}`")
-                lines.append(f"**Source**: {judge_source_label(context.get('decision_source'))}")
-                if context.get("salvaged_description"):
-                    lines.append(f"**Kept**: {context['salvaged_description']}")
-                if context.get("dropped"):
-                    lines.append(f"**Dropped**: {context['dropped']}")
-                if record.get("reason"):
-                    lines.append(f"**Reason**: {record['reason']}")
-                lines.append("")
-
-        warnings = self.consistency_warnings()
-        if warnings:
-            lines += ["## Consistency warnings", ""]
-            lines += [f"- {warning}" for warning in warnings]
-            lines.append("")
-
-        if self.formatted_skipped:
-            lines += [f"## Skipped {nouns.title()}", ""]
-            for item in self.formatted_skipped:
-                lines.append(
-                    f"### {item.get('title', 'Unknown')} "
-                    f"[{judge_status_label(item.get('status'))}]"
-                )
-                gid = str(item.get("group_id") or "")
-                if gid:
-                    lines.append(f"**Group**: `{gid}`")
-                if item.get("reason"):
-                    lines.append(f"**Reason**: {item['reason']}")
-                if item.get("files"):
-                    # A commit guard skip (§2.7): the files that caused it.
-                    lines.append(
-                        "**Files**: " + ", ".join(f"`{f}`" for f in item["files"])
-                    )
-                lines.append("")
-
-        # The scope policy's deferrals (plan §5): their own section, never
-        # under a skipped or applied heading.
-        lines += self._scope_summary_lines(markdown=True)
-
-        path = os.path.join(phase_dir, "summary.md")
-        try:
-            os.makedirs(phase_dir, exist_ok=True)
-            with open(path, "w", encoding="utf-8") as handle:
-                handle.write("\n".join(lines).rstrip() + "\n")
-        except OSError as exc:  # noqa: BLE001 - a report must not fail a run
-            self.logger.warning("summary report not written: %s", exc)
-            return None
-        print(f"[write-subagents] summary report: {path}")
-        return path
-
-    def _patch_write_batch_report_summary_file(self, summary_path: str) -> None:
-        """Fill in ``write_batch_report.json``'s ``summary_file`` after the fact (F11).
-
-        ``WriteBatchScheduler`` serializes that report inside
-        ``run_write_executor()``, before this base ever calls
-        ``write_apply_summary_report()`` — the scheduler only fills
-        ``summary_file`` itself when constructed with its own ``summary_file``
-        argument, which the apply phases never pass (they write their own
-        summary here, on this leg). So the report on disk said
-        ``summary_file: null`` for a run that went on to write one a few lines
-        later. Patched here, once the apply phase's own path is known, rather
-        than by changing the scheduler (owned elsewhere — see AGENTS.md).
-
-        Best-effort: a read/parse/write failure is logged and never raised, the
-        same posture as the report it patches.
-        """
-        if self.write_result is not None:
-            self.write_result.summary_file = summary_path
-        report_path = getattr(self.write_result, "report_path", None)
-        if not report_path or not os.path.isfile(report_path):
-            return
-        try:
-            with open(report_path, "r", encoding="utf-8") as handle:
-                report = json.load(handle)
-        except (OSError, json.JSONDecodeError) as exc:  # noqa: BLE001 - best-effort
-            self.logger.warning("write_batch_report.json not patched: %s", exc)
-            return
-        if not isinstance(report, dict) or report.get("summary_file") == summary_path:
-            return
-        report["summary_file"] = summary_path
-        try:
-            from .subagent_executor import _atomic_write_json
-        except ImportError:  # pragma: no cover - direct script runs
-            from subagent_executor import _atomic_write_json  # type: ignore
-        try:
-            _atomic_write_json(report_path, report)
-        except OSError as exc:  # noqa: BLE001 - best-effort
-            self.logger.warning("write_batch_report.json not patched: %s", exc)
-
-    def regenerate_decisions_overlay(self) -> Optional[str]:
-        """Badge the review report's findings with this phase's decisions (F3).
-
-        The in-process twin of ``util report regenerate-decisions --apply-phase
-        {phase}``, which the instructions run on the native leg only.
-        Called as a function rather than shelled out: the executor leg is
-        already inside the process that holds the decisions, and a subprocess
-        would re-resolve the skill dir it is running from.
-
-        Best-effort by design — the command it mirrors exits 0 with a notice
-        when the review predates the ``report_data.json`` sidecar.
-        """
-        if self.state is None:
-            return None
-        review_dir = Path(self.out_dir) / self.review_subdir
-        if not (review_dir / "report_data.json").exists():
-            return None
-        decisions = self.state.get_all_human_decisions(self.phase_name)
-        # The commit guard's skips badge their groups beside the decisions
-        # (plans/review-commits.md §2.10): read from the saved guard.
-        guard = None
-        if self._pinned is not None:
-            from .commit_apply import guard_record
-
-            guard = guard_record(self.state.state)
-        try:
-            from .html_report_generator import (
-                regenerate_report_with_human_decisions,
-                scope_regeneration_needed,
-            )
-        except ImportError:  # pragma: no cover - direct script runs
-            from utils.html_report_generator import (  # type: ignore
-                regenerate_report_with_human_decisions,
-                scope_regeneration_needed,
-            )
-        # A recorded scope-policy change (an apply override, its deferrals)
-        # refreshes the report's eligibility even with no decision to badge.
-        if (not decisions and not (guard and guard.get("skipped"))
-                and not scope_regeneration_needed(review_dir, self.state.state)):
-            return None
-        try:
-            report_path, matched = regenerate_report_with_human_decisions(
-                review_dir, decisions, **({"guard": guard} if guard else {}),
-                scope_state=self.state.state,
-            )
-        except Exception as exc:  # noqa: BLE001 - an overlay must not fail a run
-            self.logger.warning("decision overlay not regenerated: %s", exc)
-            return None
-        if report_path is None:
-            return None
-        print(
-            f"[write-subagents] decisions overlaid on {report_path} "
-            f"({matched} of {len(decisions)} decision(s) matched)"
-        )
-        if matched < len(decisions):
-            self.logger.warning(
-                "decision overlay matched %d of %d decision(s) on %s — the "
-                "rest joined no group (no groupHash, or a stale group id)",
-                matched, len(decisions), report_path,
-            )
-        return str(report_path)
 
     def run_write_executor(self) -> Optional[int]:
         """Drive this phase's batches through the write scheduler, or decline.
@@ -4692,7 +3484,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             plan_file=self.plan_path,
             tasks_file=tasks_file,
             grouped_file=grouped_file if os.path.exists(grouped_file) else None,
-            **self._scope_materialize_kwargs(),
+            **self.scope_gate.materialize_kwargs(),
         )
         task_file = write_task_file_for_phase(
             kind=self.write_kind, tasks=tasks, phase_dir=phase_dir,
@@ -4746,7 +3538,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 # answer the stop offers, in this host's spelling.
                 partial_skips=getattr(self, "partial_skips", None) or None,
                 user_commands=self._stop_user_commands(),
-                **self._scope_scheduler_kwargs(),
+                **self.scope_gate.scheduler_kwargs(),
             )
         except (ExecutorError, WriteSafetyError) as exc:
             # A target that cannot be granted (gone, a symlink, not a regular
@@ -4826,7 +3618,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             plan_file=self.plan_path,
             tasks_file=tasks_file,
             grouped_file=grouped,
-            **self._scope_materialize_kwargs(),
+            **self.scope_gate.materialize_kwargs(),
         )
         self._native_write_tasks = list(tasks)
         # Fix round 26: stamped native, so `status` shows this run rather
@@ -5107,12 +3899,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     def get_output_path(self) -> str:
         """Return the filesystem path for orchestrator_output.json.
 
-        Returns:
-            Absolute path where the output JSON should be written.
+        Under ``self.out_dir``, which carries ``find_output_dir``'s
+        double-nesting guard.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement get_output_path()"
-        )
+        return os.path.join(self.out_dir, self.phase_name, "orchestrator_output.json")
 
     def print_text_summary(
         self,
@@ -5507,7 +4297,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             # round's recorded apply override, its review policy, expand);
             # the raw flag only when step 10b never ran.
             scope_policy=(
-                self.scope.policy if getattr(self, "scope", None) is not None
+                self.scope_gate.policy.policy if self.scope_gate.policy is not None
                 else getattr(self.args, "scope_policy", None)
             ),
         )
@@ -5901,7 +4691,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 reason = group.get("validation_reason", "No reason")
                 print(f"  - {theme}: {reason}", file=sys.stderr)
 
-        for line in self._scope_summary_lines(would=True):
+        for line in self.scope_gate.summary_lines(would=True):
             print(line, file=sys.stderr)
 
         if self.json_output():
