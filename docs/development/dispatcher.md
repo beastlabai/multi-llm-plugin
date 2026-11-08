@@ -162,8 +162,8 @@ exactly as its source supplied it and, only when that phase is recorded `in_prog
 (completed, skipped, or `in_progress`: exit 0 at a `[…_PENDING]` marker or the
 native first call of an apply phase is not a finished phase), never beside a non-null
 `next` (which is what excludes a real `--detach` launch or
-`--if-not-running` re-attach: `detach.launch` records the run's poll command as
-`next`), never on `1`/`3`, never for a
+`--if-not-running` re-attach: `detach.launch`, or a review launcher's entry gate
+(`detach.take_for_launch`), records the run's poll command as `next`), never on `1`/`3`, never for a
 write-phase invocation without `--exec-subagents` (it hands its batch loop to the invoker and
 records the phase `in_progress` at emit time — `StateManager.mark_phase_started`, since 2026-10-05;
 the builder would answer `--resume` for the phase being run), except the apply phases'
@@ -318,11 +318,12 @@ which shim uses which form, and the paged completeness rule). `util resume-state
 it prints one `[RESUME_STATE]` line (case, action, models, batches, flags, ownership) from the files
 the orchestrators' own guards read, and `references/resume-detection.md`'s case list is rendered from
 its table (`tests/tools/render_resume_cases.py`). Only `state.json`'s completion (the primary guard)
-answers `report`, and only a `.status.json` reading `validation_pending` ties a task file to the run
-it records; no file date is read. Validation files nothing ties to that run answer a `--force`
-re-run marked `ownership=uncertain`, which may re-run work but never reports an earlier round's
-verdicts as this one's. No writer stamps a round identity into those files yet, so the
-checkpoint word is the only proof there is.
+answers `report`; no file date is read. A task file is this round's when it records the `round_id`
+`.status.json` records ([round identity](review-results.md#round-identity)), or, for a file from
+before round ids, when `.status.json` reads `validation_pending`. Validation files of another round
+answer a `--force` re-run marked `ownership=stale`, and files nothing ties to that run the same
+re-run marked `ownership=uncertain`: it may re-run work but never reports an earlier round's
+verdicts as this one's.
 
 `util finalize-tracking` also inserts the implementation summary's back-reference into the plan when
 `--plan-file`/`--summary-file-relative` are passed (it replaced an inline

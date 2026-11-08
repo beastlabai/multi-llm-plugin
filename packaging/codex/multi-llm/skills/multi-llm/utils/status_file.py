@@ -238,8 +238,12 @@ def now_iso() -> str:
     return datetime.now().isoformat()
 
 
+class CheckpointLockUnavailable(Exception):
+    """:func:`checkpoint_lock` with ``required=True`` could not take the mutex."""
+
+
 @contextlib.contextmanager
-def checkpoint_lock(phase_dir: str) -> Iterator[None]:
+def checkpoint_lock(phase_dir: str, *, required: bool = False) -> Iterator[None]:
     """Hold *phase_dir*'s checkpoint mutex — across threads and processes.
 
     Every read-modify-write in this module runs inside one of these, and so must
@@ -257,6 +261,11 @@ def checkpoint_lock(phase_dir: str) -> Iterator[None]:
     wait; the body then runs unserialized, which is what it did before this lock
     existed. It is never an exception, because a heartbeat that raises out of a
     checkpoint write kills a run over a lock file.
+
+    ``required=True`` is the one exception, for a decision that is only sound
+    serialized (a review round's ownership check, ``utils/review_round.py``):
+    a mutex it cannot take raises :class:`CheckpointLockUnavailable` before
+    the body runs, and so does a nested frame whose outer frame ran untaken.
     """
     with _WRITE_LOCK:
         # `realpath`, so one phase dir is one lock domain however a caller spells
@@ -264,10 +273,13 @@ def checkpoint_lock(phase_dir: str) -> Iterator[None]:
         # --abort` started through the real one must contend for the same file.
         key = os.path.realpath(status_lock_path(phase_dir))
         if key in _HELD_MUTEXES:  # a nested write; the outer frame owns it
+            if required and not _HELD_MUTEXES[key].held:
+                raise CheckpointLockUnavailable(key)
             yield
             return
         mutex = process_control.FileMutex(key)
-        mutex.acquire()
+        if not mutex.acquire() and required:
+            raise CheckpointLockUnavailable(key)
         _HELD_MUTEXES[key] = mutex
         try:
             yield

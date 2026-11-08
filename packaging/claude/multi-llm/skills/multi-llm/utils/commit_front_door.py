@@ -1070,9 +1070,17 @@ def _take_lock(mode: str, door: str, brief: Path) -> Any:
             time.sleep(improve_workflow.STEP_LOCK_RETRY_S)
         try:
             lock.acquire(payload)
-            return lock
         except process_control.LockUnavailable as exc:
             refused = exc
+            continue
+        # Before the door's first write: an earlier run's teardown not
+        # confirmed refuses as a live run does (docs/development/runtime.md).
+        try:
+            detach.refuse_unconfirmed_cleanup(str(directory), plan_file=str(brief),
+                                              phase=phase, lock=lock)
+        except detach.DetachError as exc:
+            raise _stop(str(exc), _EXIT_NEEDS_HUMAN)
+        return lock
     owner = improve_workflow._inspect(str(brief), phase, directory) or improve_workflow.LiveOwner(  # noqa: SLF001
         directory=str(directory),
         holder=str((refused.holder or {}).get("holder") or "an unrecorded holder"),

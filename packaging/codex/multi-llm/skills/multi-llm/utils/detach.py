@@ -50,7 +50,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from . import (
     output_handler,
@@ -141,6 +141,14 @@ REPLAY_FLAGS_ENV = "MULTI_LLM_REPLAY_FLAGS"
 #: by hand — records no ``plan_arg``, and readers fall back to ``plan_file``.
 PLAN_ARG_ENV = "MULTI_LLM_PLAN_ARG"
 
+#: The number of the descriptor on which a ``--detach`` launcher hands its
+#: worker the phase lock (POSIX). The worker inherits the launcher's open file
+#: description, and a ``flock`` belongs to that, so the lock is held across the
+#: boundary with no unlocked interval (docs/development/runtime.md, "One writer
+#: per phase dir"). Popped by the worker on its first line
+#: (:func:`prepare_worker_output`), so no provider child sees it.
+LOCK_FD_ENV = "MULTI_LLM_PHASE_LOCK_FD"
+
 #: Env overrides, all read at call time so a test can set them per-case.
 HEARTBEAT_INTERVAL_ENV = "MULTI_LLM_HEARTBEAT_INTERVAL_S"
 HANDSHAKE_TIMEOUT_ENV = "MULTI_LLM_HANDSHAKE_TIMEOUT_S"
@@ -228,6 +236,36 @@ def prepare_worker_output() -> None:
     log = os.environ.pop(WORKER_LOG_ENV, None)
     if log and os.environ.get(WORKER_ENV) == "1":
         process_control.redirect_output_to_log(log)
+    _receive_handed_lock()
+
+
+#: The descriptor a launcher handed this worker (:data:`LOCK_FD_ENV`), from the
+#: worker's first line until its entry adopts it (:func:`_adopt_handed_lock`).
+_HANDED_LOCK_FD: Optional[int] = None
+
+
+def _receive_handed_lock() -> None:
+    """Take :data:`LOCK_FD_ENV` out of the environment and make the descriptor
+    it names close-on-exec at once, before anything this worker starts could
+    inherit it."""
+    global _HANDED_LOCK_FD
+    raw = os.environ.pop(LOCK_FD_ENV, None)
+    if raw is None:
+        return
+    try:
+        fd = int(raw)
+        os.set_inheritable(fd, False)
+    except (ValueError, OSError):
+        return
+    _HANDED_LOCK_FD = fd
+
+
+def _take_handed_lock_fd() -> Optional[int]:
+    global _HANDED_LOCK_FD
+    if _HANDED_LOCK_FD is None:
+        _receive_handed_lock()
+    fd, _HANDED_LOCK_FD = _HANDED_LOCK_FD, None
+    return fd
 
 
 def lock_path(phase_dir: str) -> str:
@@ -425,6 +463,8 @@ def child_env(
         env.pop(name, None)
     env["MULTI_LLM_SKILL_DIR"] = str(base)
     env[WORKER_ENV] = "1"
+    # Only `launch` names a handed lock, for the one worker it hands it to.
+    env.pop(LOCK_FD_ENV, None)
     env[REPLAY_FLAGS_ENV] = json.dumps([str(t) for t in (replay_flags or [])])
     # This launch's own value or none: never one inherited from whatever
     # environment the invoker itself was started in.
@@ -1178,6 +1218,899 @@ def active_run() -> Optional["RunHandle"]:
     return _ACTIVE
 
 
+# ---------------------------------------------------------------------------
+# One writer per review phase dir, for the whole run (PhaseRun)
+# ---------------------------------------------------------------------------
+
+#: How often, and how far apart, a run's entry tries the phase dir's lock:
+#: every ``status`` poll probes it by taking and dropping it
+#: (``process_control.lock_is_free``), so one refusal may be a poll. The same
+#: numbers as a composite's step lock (``improve_workflow.STEP_LOCK_*``).
+ENTRY_LOCK_ATTEMPTS = 5
+ENTRY_LOCK_RETRY_S = 0.025
+
+#: How long a ``--detach --force`` launch waits, after asking the run that
+#: holds the dir to stop, to take the same lock: twice the abort's own
+#: escalation (SIGTERM, then SIGKILL after
+#: ``process_control.DEFAULT_ESCALATE_AFTER_S``). Taking the lock is the proof
+#: the old writer is gone; not taking it in time refuses the launch.
+FORCE_STOP_WAIT_S = 2 * process_control.DEFAULT_ESCALATE_AFTER_S
+
+#: How long a run's exit waits for the phase work still running on its
+#: threads (:func:`run_phase_work`) before it releases the lock. Past it the
+#: lock is held until the process exits, never released early.
+PHASE_WORK_JOIN_S = 30.0
+
+#: While an interrupted run waits for its phase work, how often it stops the
+#: provider CLIs again: a thread that started its CLI after the first sweep
+#: is stopped too, so the wait ends with the work rather than at its bound.
+PHASE_WORK_RESWEEP_S = 1.0
+
+#: The phase locks a run took at its entry (:meth:`PhaseRun.take`), by lock
+#: key, until it releases them, a ``--detach`` launch hands one to its worker
+#: (:func:`launch`), or the detached worker's :class:`RunHandle` takes one over.
+_ENTRY_HOLDS: Dict[str, process_control.PhaseLock] = {}
+
+#: The phase work handed to a thread and not ended yet (:func:`run_phase_work`):
+#: a run's phase lock outlives every item (:meth:`PhaseRun.__exit__`).
+_PHASE_WORK: set = set()
+_PHASE_WORK_LOCK = threading.Lock()
+
+#: The record a detached worker refused at the lock leaves for its launcher,
+#: ``{phase}/.worker-refused-<run_id>``: the launch reports the refusal rather
+#: than a run (:func:`_await_handshake`). Named for the worker's own run id
+#: and read only by its launch, which removes it; nothing else reads it.
+WORKER_REFUSAL_PREFIX = ".worker-refused-"
+
+
+def _entry_key(phase_dir: str) -> str:
+    return os.path.normcase(os.path.realpath(lock_path(str(phase_dir))))
+
+
+class PhaseDirBusy(Exception):
+    """Another live process holds the phase dir's lock."""
+
+    def __init__(self, holder: Dict[str, Any]):
+        super().__init__("phase dir busy")
+        self.holder = holder
+
+
+def _take_entry_lock(
+    path: str, payload: Dict[str, Any], *, attempts: int = ENTRY_LOCK_ATTEMPTS,
+) -> process_control.PhaseLock:
+    """Take *path* for a run: retried past a ``status`` probe, and through a
+    holder that is gone by the rule :meth:`RunHandle._acquire_lock` uses (a
+    payload naming a dead process breaks only when the lock proves free).
+    Raises :class:`PhaseDirBusy` while a live holder keeps it, and the
+    ``OSError`` of a file that cannot be opened or locked at all."""
+    holder: Dict[str, Any] = {}
+    for attempt in range(attempts):
+        if attempt:
+            time.sleep(ENTRY_LOCK_RETRY_S)
+        lock = process_control.PhaseLock(path)
+        try:
+            lock.acquire(payload)
+            return lock
+        except process_control.LockUnavailable as exc:
+            holder = dict(exc.holder or {})
+            if (process_control.holder_verdict(exc.holder) == process_control.DEAD
+                    and process_control.break_lock(path)):
+                continue
+    raise PhaseDirBusy(holder)
+
+
+def _take_within(
+    path: str, payload: Dict[str, Any], timeout: float,
+) -> Optional[process_control.PhaseLock]:
+    """A blocking take of *path*, bounded by *timeout*: ``None`` when a live
+    holder still has it then."""
+    deadline = time.monotonic() + max(timeout, 0.0)
+    while True:
+        try:
+            return _take_entry_lock(path, payload, attempts=1)
+        except PhaseDirBusy:
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.05)
+
+
+def phase_dir_busy_message(
+    phase_dir: str, holder: Dict[str, Any], *, plan_file: str, phase: Optional[str],
+) -> str:
+    """The refusal a run prints when another run holds its phase dir."""
+    pid = holder.get("pid") or "unrecorded"
+    verdict = process_control.holder_verdict(holder or None)
+    run_id = holder.get("run_id")
+    lines = [
+        f"ERROR: another run of this phase is in progress (pid {pid}, {verdict}): "
+        f"{_holder_words(holder)} owns this phase dir ({phase_dir}).",
+        "       Two runs must not write one phase dir, so this run stopped before "
+        "it read or changed anything there.",
+        "       Watch it: " + status_command_for(plan_file, phase=phase, run_id=run_id),
+    ]
+    if run_id:
+        lines.append("       Abort it: " + abort_command_for(plan_file, run_id=run_id))
+    lines.append("       Then run this command again; it continues from what that "
+                 "run leaves.")
+    return "\n".join(lines)
+
+
+def _holder_words(holder: Dict[str, Any]) -> str:
+    run_id = holder.get("run_id")
+    if run_id:
+        return f"detached run {run_id}"
+    return str(holder.get("holder") or "an unrecorded holder")
+
+
+# -- the detached worker's side of the hand-off --------------------------
+
+def worker_refusal_path(phase_dir: str, run_id: str) -> str:
+    return os.path.join(str(phase_dir), f"{WORKER_REFUSAL_PREFIX}{run_id}")
+
+
+def _record_worker_refusal(phase_dir: str, run_id: Optional[str], message: str) -> None:
+    """A detached worker refused at its lock tells its launch why, so the
+    launch reports the refusal instead of a run (Windows, where the lock is
+    retaken across the boundary and another run can take it in between; and
+    on POSIX a hand-off the worker could not adopt). Only a real detached
+    worker writes it, and only under its own run id."""
+    if not run_id or os.environ.get(WORKER_ENV) != "1":
+        return
+    path = worker_refusal_path(phase_dir, str(run_id))
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump({"run_id": str(run_id), "pid": os.getpid(), "message": message},
+                      handle)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _read_worker_refusal(phase_dir: str, run_id: str) -> Optional[Dict[str, Any]]:
+    """The refusal record run *run_id*'s worker left, removed once read."""
+    path = worker_refusal_path(phase_dir, run_id)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+    return data if isinstance(data, dict) else {}
+
+
+def _adopt_handed_lock(
+    path: str, payload: Dict[str, Any],
+) -> Optional[process_control.PhaseLock]:
+    """The lock this worker's launch handed it (:data:`LOCK_FD_ENV`), held
+    from here and relabelled with *payload*; ``None`` when none was handed
+    over (Windows, a worker started by hand). Raises
+    ``process_control.LockHandoffFailed`` when the descriptor is not *path*,
+    and ``LockUnavailable`` when it does not hold the lock."""
+    fd = _take_handed_lock_fd()
+    if fd is None:
+        return None
+    return process_control.PhaseLock.adopt(path, fd, payload)
+
+
+# -- a --detach launch's gate ---------------------------------------------
+
+def _takes_over(args: Any) -> bool:
+    """Whether this launch's ``--force`` takes a live run over. A commit front
+    door's restart adds ``--force --rerun-all`` to restart the round; only a
+    ``--force`` the user typed takes a live run over (plans/review-commits.md
+    §2.1), and the stage records which it was."""
+    force = bool(getattr(args, "force", False))
+    if force and getattr(args, "commit_stage", None):
+        from .commit_front_door import stage_takes_over
+
+        force = stage_takes_over(getattr(args, "commit_stage", None))
+    return force
+
+
+def _launcher_payload(mode: str) -> Dict[str, Any]:
+    return {
+        "holder": f"{mode} (--detach launcher)", "mode": mode,
+        "pid": os.getpid(),
+        "process_start_time": process_control.process_start_time(os.getpid()),
+        "acquired_at": status_file.now_iso(),
+    }
+
+
+def _live_holder_run(phase_dir: str, holder: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The detached run the lock's label names, while the checkpoint records it
+    unfinished: the run a re-attach follows and a ``--force`` stops. ``None``
+    for any other holder (a foreground run, a launcher, a composite's step)."""
+    run = status_file.read_run(phase_dir)
+    run_id = run.get("run_id")
+    if not run_id or holder.get("run_id") != run_id:
+        return None
+    if run.get("state") in TERMINAL_RUN_STATES:
+        return None
+    return run
+
+
+def _print_reattach(
+    phase_dir: str, run: Dict[str, Any], *, plan_file: str, phase: Optional[str],
+    host: Optional[str],
+) -> int:
+    """``--if-not-running`` onto run *run*: its log and poll command."""
+    existing_id = str(run.get("run_id"))
+    print(f"A detached run is already in flight for {phase_dir}.")
+    print(f"  run_id:  {existing_id}")
+    print(f"  log:     {run.get('log_path')}")
+    reattach_cmd = status_command_for(
+        plan_file, phase=phase, run_id=existing_id, host=run.get("host") or host,
+    )
+    print(f"  status:  {reattach_cmd}")
+    record_artifact(run.get("log_path") or log_path(phase_dir))
+    record_next(reattach_cmd)
+    return EXIT_OK
+
+
+def _busy_launch_message(
+    phase_dir: str, holder: Dict[str, Any], run: Optional[Dict[str, Any]], *,
+    plan_file: str, force: bool = False,
+) -> str:
+    if run is not None:
+        run_id = str(run.get("run_id"))
+        age = heartbeat_age(run)
+        return (
+            f"ERROR: a detached run already owns {phase_dir}.\n"
+            f"       run_id:        {run_id}\n"
+            f"       pid:           {run.get('pid')} "
+            f"({process_control.holder_verdict(holder or None)})\n"
+            f"       last heartbeat: {'never' if age is None else f'{age:.0f}s ago'}\n"
+            "       Pass --if-not-running to re-attach to it, abort it "
+            f"({abort_command_for(plan_file, run_id=run_id)}), or pass "
+            "--force to stop it and take the dir over."
+        )
+    lines = [
+        f"ERROR: {lock_path(phase_dir)} is held by {_holder_words(holder)} "
+        f"(pid {holder.get('pid') or 'unrecorded'}, "
+        f"{process_control.holder_verdict(holder or None)}).",
+        "       Two orchestrators must not interleave .status.json merges and "
+        "result files in one phase dir, so nothing was launched.",
+    ]
+    if force:
+        lines.append("       --force stops only a detached run of this phase, and "
+                     "this holder is not one; a live writer's lock is never broken.")
+    lines.append("       Let it finish (or stop it where it runs), then run this "
+                 "command again.")
+    return "\n".join(lines)
+
+
+#: The :func:`abort_run` outcomes that mean every process of the stopped run
+#: is gone: the only ones after which ``--detach --force`` takes the dir over.
+#: An allowlist, so any other outcome (``needs_force``, ``survived``, a
+#: teardown that could not confirm every process stopped, a value added
+#: later) refuses: the old run's provider CLIs or their children may still
+#: write in the dir, and the lock no longer says so once its worker is dead.
+CONFIRMED_STOPS = frozenset({"aborted", "not_running"})
+
+
+def _unconfirmed_stop_message(
+    phase_dir: str, run: Dict[str, Any], stopped: Dict[str, Any], *,
+    plan_file: str, phase: Optional[str],
+) -> str:
+    run_id = str(run.get("run_id"))
+    outcome = stopped.get("result")
+    verdict = stopped.get("verdict")
+    return "\n".join([
+        f"ERROR: --force asked run {run_id} (pid {run.get('pid')}) to stop, and its "
+        f"teardown ended `{outcome}`"
+        + (f" (verdict `{verdict}`)" if verdict else "")
+        + ": not every process of that run is confirmed stopped, so its provider "
+        f"CLIs or their children may still write in {phase_dir}.",
+        "       Nothing was launched, and the run's records are kept for the cleanup.",
+        f"       Finish the cleanup: {abort_command_for(plan_file, run_id=run_id)}",
+        f"       or sweep this project's runs: {dispatcher_command('util', 'runs', '--sweep')}",
+        f"       Check it: {status_command_for(plan_file, phase=phase, run_id=run_id)}",
+        "       Then run this command again.",
+    ])
+
+
+#: The ``cleanup.state`` of a stopped run whose processes are all confirmed
+#: stopped: with no ``cleanup`` at all, the only record a run's entry goes
+#: past (:func:`unconfirmed_cleanup`). An allowlist, like
+#: :data:`CONFIRMED_STOPS`.
+CONFIRMED_CLEANUP_STATES = frozenset({"complete"})
+
+
+#: :func:`unconfirmed_cleanup`'s verdicts on one ``cleanup`` value.
+CLEANUP_UNCONFIRMED = "unconfirmed"
+CLEANUP_MALFORMED = "malformed"
+
+
+def _cleanup_problem(cleanup: Any) -> Optional[str]:
+    """``None`` when *cleanup* is confirmed: absent, or a ``state`` in
+    :data:`CONFIRMED_CLEANUP_STATES`. :data:`CLEANUP_UNCONFIRMED` for any other
+    string ``state``; :data:`CLEANUP_MALFORMED` for any other shape (not an
+    object, or a ``state`` that is missing or not a string)."""
+    if cleanup is None:
+        return None
+    if not isinstance(cleanup, dict) or not isinstance(cleanup.get("state"), str):
+        return CLEANUP_MALFORMED
+    return None if cleanup["state"] in CONFIRMED_CLEANUP_STATES else CLEANUP_UNCONFIRMED
+
+
+def _matches_entry(entry: Dict[str, Any], here: str, run_id: Any) -> Tuple[bool, bool]:
+    """Is registry *entry* that of run *run_id*, and of the phase dir keyed
+    *here*? Read from the entry's ``run_id`` and ``phase_dir`` alone, before
+    anything else in it: an entry of another dir and run, malformed or not,
+    is not this entry's to read."""
+    same_run = bool(run_id) and str(entry.get("run_id")) == str(run_id)
+    where = entry.get("phase_dir")
+    same_dir = False
+    if isinstance(where, str) and where:
+        try:
+            same_dir = _entry_key(where) == here
+        except (OSError, ValueError):
+            same_dir = False
+    return same_run, same_dir
+
+
+def _cleanup_records(
+    phase_dir: str, *, plan_file: Optional[str],
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """``(blocking, stale)`` for :func:`unconfirmed_cleanup` and its caller:
+    the cleanup record that refuses this entry, and a checkpoint cleanup not
+    confirmed that no registry entry backs any more. Each is
+    ``{"run_id", "cleanup", "record", "problem"}`` or ``None``."""
+    status = status_file.status_path(phase_dir)
+    run = status_file.read_run(phase_dir)
+    run_id = run.get("run_id")
+    try:
+        root = run_registry.resolve_project_root(plan_file or str(phase_dir))
+        entries: Optional[List[Dict[str, Any]]] = run_registry.list_entries(root)
+    except Exception:  # noqa: BLE001 - unread, the checkpoint's record stands alone
+        entries = None
+    here = _entry_key(phase_dir)
+    kept_for_run = False
+    for entry in entries or ():
+        same_run, same_dir = _matches_entry(entry, here, run_id)
+        if not (same_run or same_dir):
+            continue
+        kept_for_run = kept_for_run or same_run
+        problem = _cleanup_problem(entry.get("cleanup"))
+        if problem is not None:
+            return {"run_id": entry.get("run_id"), "cleanup": entry.get("cleanup"),
+                    "record": entry.get("_path"), "problem": problem}, None
+    problem = _cleanup_problem(run.get("cleanup"))
+    if problem is None:
+        return None, None
+    found = {"run_id": run_id, "cleanup": run.get("cleanup"), "record": status,
+             "problem": problem}
+    # The registry decides: the kill paths keep a run's entry until its
+    # teardown is confirmed and drop it then, but may leave the checkpoint's
+    # value behind (docs/development/runtime.md).
+    if entries is not None and not kept_for_run:
+        return None, found
+    return found, None
+
+
+def unconfirmed_cleanup(
+    phase_dir: str, *, plan_file: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """The teardown an earlier run of *phase_dir* left unconfirmed, or ``None``.
+
+    Read against the schema code health U77 writes (its ``abort_run``,
+    close-out and ``run_registry.mark_cleanup``):
+
+    * ``.status.json`` ``run.cleanup``: ``{"state", "verdict", "pid", "pgid",
+      "checked_at"}``. ``state`` is ``pending`` while an abort's kill is under
+      way (and after an aborter that died in it), ``incomplete`` when a kill
+      ``survived``, was ``unresolved`` or ``skipped``, and ``complete`` once
+      every process of the run is confirmed stopped;
+    * the run's registry entry, ``{project_root}/.multi-llm/runs/<run_id>.json``.
+      The kill paths keep it, carrying the same ``cleanup`` beside its
+      ``phase_dir`` when the kill could not confirm every process stopped,
+      until a sweep or an abort confirms them stopped, and remove it then.
+
+    The registry decides. Only entries of this dir or of the checkpoint's
+    run are read. Such an entry's own ``cleanup``, then the checkpoint's
+    while that run's entry is still kept, refuse unless absent or
+    ``complete`` (:data:`CONFIRMED_CLEANUP_STATES`): any other string
+    ``state`` is :data:`CLEANUP_UNCONFIRMED`, and any other shape
+    :data:`CLEANUP_MALFORMED`. A checkpoint value no entry backs is stale and
+    goes on. Returns ``{"run_id", "cleanup", "record", "problem"}`` for the
+    record that refuses. Reads only."""
+    return _cleanup_records(str(phase_dir), plan_file=plan_file)[0]
+
+
+def _unconfirmed_cleanup_message(
+    phase_dir: str, found: Dict[str, Any], *, plan_file: str, phase: Optional[str],
+) -> str:
+    run_id = found.get("run_id")
+    cleanup = found.get("cleanup")
+    details = cleanup if isinstance(cleanup, dict) else {"state": cleanup}
+    facts = [f"cleanup `{details.get('state')}`"] + [
+        f"{key} {details[key]}" for key in ("verdict", "pid", "pgid", "checked_at")
+        if details.get(key) is not None
+    ]
+    who = f"run {run_id}" if run_id else "an earlier run"
+    lines = [
+        f"ERROR: the teardown of {who} in {phase_dir} is not confirmed "
+        f"({', '.join(facts)}; recorded in {found.get('record')}): its provider CLIs "
+        "or their children may still write in that dir.",
+        "       This run stopped before it changed anything there, and that run's "
+        "records are kept for the cleanup.",
+    ]
+    sweep = dispatcher_command("util", "runs", "--sweep")
+    if run_id:
+        lines += [
+            f"       Finish the cleanup: {abort_command_for(plan_file, run_id=str(run_id))}",
+            f"       or sweep this project's runs: {sweep}",
+            f"       Check it: {status_command_for(plan_file, phase=phase, run_id=str(run_id))}",
+        ]
+    else:
+        lines.append(f"       Finish the cleanup: {sweep}")
+    lines.append("       Then run this command again.")
+    return "\n".join(lines)
+
+
+def _shown(value: Any, limit: int = 80) -> str:
+    text = repr(value)
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def _malformed_cleanup_message(
+    phase_dir: str, *, record: str, problem: str, plan_file: str, phase: Optional[str],
+    run_id: Any = None,
+) -> str:
+    """The refusal for a cleanup record this entry cannot read: what is in it
+    or why the read failed (*problem*), and the file(s) it read (*record*)."""
+    who = f"run {run_id}" if run_id else "an earlier run"
+    lines = [
+        f"ERROR: malformed cleanup record of {who} in {phase_dir} ({problem}; in "
+        f"{record}): whether that run's provider CLIs or their children still write "
+        "in that dir is unknown.",
+        "       This run stopped before it changed anything there, and the record is "
+        "kept.",
+        f"       Close that run out: {dispatcher_command('util', 'runs', '--sweep')}",
+    ]
+    if run_id:
+        lines.append(
+            f"       Check it: {status_command_for(plan_file, phase=phase, run_id=str(run_id))}")
+    lines.append("       Then run this command again.")
+    return "\n".join(lines)
+
+
+def _records_read(phase_dir: str, plan_file: Optional[str]) -> str:
+    """The checkpoint and the run registry the cleanup read looks in, named
+    for a refusal; the registry left out when even its path is unknown."""
+    names = [status_file.status_path(phase_dir)]
+    try:
+        names.append(run_registry.registry_dir(
+            run_registry.resolve_project_root(plan_file or str(phase_dir))))
+    except Exception:  # noqa: BLE001 - only the refusal's wording
+        pass
+    return " and ".join(str(name) for name in names)
+
+
+def refuse_unconfirmed_cleanup(
+    phase_dir: str, *, plan_file: str, phase: Optional[str],
+    lock: Optional[process_control.PhaseLock] = None,
+) -> None:
+    """A run's entry, under its phase lock and before its first write: raise
+    :class:`DetachError` (exit 3) while an earlier run's teardown is not
+    confirmed or its record is malformed (:func:`unconfirmed_cleanup`), and
+    when that read fails at all, releasing *lock* first when given. The lock
+    frees once the stopped run's worker is gone, but what outlived it may
+    still write in the dir. A stale checkpoint value warns and goes on.
+    Writes nothing."""
+    phase_dir = str(phase_dir)
+    stale: Optional[Dict[str, Any]] = None
+    try:
+        found, stale = _cleanup_records(phase_dir, plan_file=plan_file)
+        if found is None:
+            message = None
+        elif found["problem"] == CLEANUP_MALFORMED:
+            message = _malformed_cleanup_message(
+                phase_dir, record=str(found.get("record")),
+                problem=f"cleanup {_shown(found.get('cleanup'))}, not an object with a "
+                        "string `state`",
+                plan_file=plan_file, phase=phase, run_id=found.get("run_id"))
+        else:
+            message = _unconfirmed_cleanup_message(phase_dir, found, plan_file=plan_file,
+                                                   phase=phase)
+    except Exception as exc:  # noqa: BLE001 - a record that breaks the read refuses
+        message = _malformed_cleanup_message(
+            phase_dir, record=_records_read(phase_dir, plan_file),
+            problem=f"reading it failed: {type(exc).__name__}: {exc}",
+            plan_file=plan_file, phase=phase)
+    if message is None:
+        if stale is not None:
+            who = f"run {stale['run_id']}" if stale.get("run_id") else "an earlier run"
+            print(
+                f"WARNING: the cleanup state {_shown(stale.get('cleanup'))} of {who} "
+                f"recorded in {stale.get('record')} is stale: the run registry no "
+                "longer keeps that run, so its teardown was confirmed since; going on.",
+                file=sys.stderr,
+            )
+        return
+    if lock is not None:
+        lock.release()
+    raise DetachError(message)
+
+
+def _stop_holder_and_take(
+    phase_dir: str, holder: Dict[str, Any], run: Optional[Dict[str, Any]],
+    payload: Dict[str, Any], *, plan_file: str, phase: Optional[str],
+) -> process_control.PhaseLock:
+    """``--detach --force`` against a live holder: ask it to stop through the
+    abort path (:func:`abort_run`, what ``status --abort`` runs), then wait on
+    the same lock, at most :data:`FORCE_STOP_WAIT_S`. Getting it is the proof
+    the old worker is gone; a live holder's lock is never broken. Only a
+    detached run of this dir can be stopped, never this process; anything
+    else, an abort that does not confirm every process of the run stopped
+    (:data:`CONFIRMED_STOPS`), and a holder that outlives the wait, refuse
+    (exit 3)."""
+    path = lock_path(phase_dir)
+    own = os.getpid()
+    if run is None or own in (holder.get("pid"), run.get("pid")):
+        raise DetachError(_busy_launch_message(
+            phase_dir, holder, None, plan_file=plan_file, force=True))
+    run_id = str(run.get("run_id"))
+    print(
+        f"WARNING: --force: stopping run {run_id} (pid {run.get('pid')}), which owns "
+        f"{phase_dir}; this launch takes the dir over once that run has let go "
+        "of its lock.",
+        file=sys.stderr,
+    )
+    stopped = abort_run(phase_dir)
+    outcome = stopped.get("result")
+    if outcome == "needs_force":
+        raise DetachError(
+            f"ERROR: --force could not stop run {run_id}: its identity probe is "
+            f"inconclusive (pid {run.get('pid')}), so nothing was signalled and "
+            "nothing was launched.\n"
+            f"       Stop it yourself: {abort_command_for(plan_file, run_id=run_id)} "
+            "--force\n"
+            "       Then run this command again."
+        )
+    if outcome not in CONFIRMED_STOPS:
+        raise DetachError(_unconfirmed_stop_message(
+            phase_dir, run, stopped, plan_file=plan_file, phase=phase))
+    lock = _take_within(path, payload, FORCE_STOP_WAIT_S)
+    if lock is None:
+        now = process_control.read_lock_holder(path) or holder
+        raise DetachError(
+            f"ERROR: --force asked run {run_id} to stop ({stopped.get('result')}), and "
+            f"{path} is still held after {FORCE_STOP_WAIT_S:.0f}s by "
+            f"{_holder_words(now)} (pid {now.get('pid') or 'unrecorded'}, "
+            f"{process_control.holder_verdict(now or None)}).\n"
+            "       A live writer's lock is never broken, so nothing was launched.\n"
+            f"       Watch it: {status_command_for(plan_file, phase=phase, run_id=run_id)}\n"
+            "       Then run this command again."
+        )
+    print(f"WARNING: --force: run {run_id} has stopped; this launch now holds {path}.",
+          file=sys.stderr)
+    return lock
+
+
+def take_for_launch(
+    phase_dir: str, *, mode: str, plan_file: str, phase: Optional[str], args: Any,
+) -> Union[process_control.PhaseLock, int]:
+    """A ``--detach`` launch's hold on its phase dir, taken before it writes
+    anything there, and kept until its worker has it (:func:`launch`).
+
+    Free: taken. Held by a live run: ``--if-not-running`` re-attaches to the
+    detached run that holds it, deciding from the checkpoint alone (returns
+    ``EXIT_OK``); ``--force`` stops that run and takes the lock once it is
+    free (:func:`_stop_holder_and_take`); anything else refuses. Either way
+    a lock taken is given up again while an earlier run's teardown is not
+    confirmed (:func:`refuse_unconfirmed_cleanup`). Raises
+    :class:`DetachError` on a refusal and ``OSError`` when the lock file
+    cannot be opened or locked at all.
+    """
+    path = lock_path(phase_dir)
+    payload = _launcher_payload(mode)
+    try:
+        lock = _take_entry_lock(path, payload)
+    except PhaseDirBusy as busy:
+        holder = busy.holder
+    else:
+        refuse_unconfirmed_cleanup(phase_dir, plan_file=plan_file, phase=phase, lock=lock)
+        return lock
+    run = _live_holder_run(phase_dir, holder)
+    if getattr(args, "if_not_running", False):
+        if run is not None:
+            return _print_reattach(phase_dir, run, plan_file=plan_file, phase=phase,
+                                   host=getattr(args, "host", None))
+        raise DetachError(_busy_launch_message(phase_dir, holder, None,
+                                               plan_file=plan_file))
+    if _takes_over(args):
+        lock = _stop_holder_and_take(phase_dir, holder, run, payload,
+                                     plan_file=plan_file, phase=phase)
+        refuse_unconfirmed_cleanup(phase_dir, plan_file=plan_file, phase=phase, lock=lock)
+        return lock
+    raise DetachError(_busy_launch_message(phase_dir, holder, run, plan_file=plan_file))
+
+
+def _hand_off(hold: process_control.PhaseLock, env: Dict[str, str]) -> Optional[int]:
+    """Ready *hold* for the worker about to be spawned: on POSIX the descriptor
+    it inherits, named in *env*; on Windows, where a lock does not cross a
+    spawn, the hold is released here and the worker takes it again (a run
+    that takes it in between is reported by the worker's refusal record)."""
+    if process_control.IS_WINDOWS:  # pragma: no cover - Windows
+        _handed_over(hold, release=True)
+        return None
+    fd = hold.handoff_fd()
+    env[LOCK_FD_ENV] = str(fd)
+    return fd
+
+
+def _handed_over(hold: process_control.PhaseLock, *, release: bool = False) -> None:
+    """This launch's part in the lock ends: on POSIX its descriptor is closed
+    without unlocking (:meth:`~process_control.PhaseLock.disown`), whatever
+    the spawn and handshake said, so a worker that adopted the lock keeps it
+    and the kernel drops it with the last copy otherwise."""
+    for key, lock in list(_ENTRY_HOLDS.items()):
+        if lock is hold:
+            del _ENTRY_HOLDS[key]
+    if release:
+        hold.release()
+    else:
+        hold.disown()
+
+
+# -- the phase work a run's lock outlives ----------------------------------
+
+class _PhaseWork:
+    """One call :func:`run_phase_work` handed to a thread: listed in
+    :data:`_PHASE_WORK` from its hand-off until it has ended, or until its
+    awaiter gave it up before any thread started it."""
+
+    __slots__ = ("done", "started")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.started = False
+
+
+def _end_phase_work(item: _PhaseWork) -> None:
+    with _PHASE_WORK_LOCK:
+        _PHASE_WORK.discard(item)
+    item.done.set()
+
+
+async def run_phase_work(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+    """``asyncio.to_thread(func, ...)`` for anything a review phase runs on a
+    thread: the fan-out's provider calls, with the result files and logs
+    they write, rename and adopt, its probes, and a batch dispatch
+    (``review_orchestrator_base.phase_thread``). A cancelled awaiter (a
+    Ctrl-C) ends the coroutine, never the thread, so the run's exit waits for
+    every listed call before it releases its phase lock
+    (:meth:`PhaseRun.__exit__`). A call the awaiter gave up before a thread
+    started it is never run. Listed until it ends, off the list before its
+    awaiter wakes.
+
+    Starting and giving up are one decision each, made under
+    :data:`_PHASE_WORK_LOCK`: the thread marks the call started only while it
+    is still listed, and the awaiter unlists it only while it is not started,
+    each check and its change in one critical section. So either the thread
+    finds the call given up and never runs it, or the awaiter finds it started
+    and leaves it listed for the exit to wait on."""
+    import asyncio
+    import functools
+
+    item = _PhaseWork()
+    with _PHASE_WORK_LOCK:
+        _PHASE_WORK.add(item)
+
+    @functools.wraps(func)
+    def work(*call_args: Any, **call_kwargs: Any) -> Any:
+        with _PHASE_WORK_LOCK:
+            if item not in _PHASE_WORK:
+                return None
+            item.started = True
+        try:
+            return func(*call_args, **call_kwargs)
+        finally:
+            _end_phase_work(item)
+
+    try:
+        return await asyncio.to_thread(work, *args, **kwargs)
+    finally:
+        with _PHASE_WORK_LOCK:
+            given_up = not item.started
+            if given_up:
+                _PHASE_WORK.discard(item)
+        if given_up:
+            item.done.set()
+
+
+def _pending_phase_work() -> List[_PhaseWork]:
+    with _PHASE_WORK_LOCK:
+        return list(_PHASE_WORK)
+
+
+def _is_interrupt(exc_type: Any) -> bool:
+    if exc_type is None:
+        return False
+    if issubclass(exc_type, KeyboardInterrupt):
+        return True
+    import asyncio
+
+    return issubclass(exc_type, asyncio.CancelledError)
+
+
+def _await_phase_work(locks: Sequence[process_control.PhaseLock], *,
+                      interrupted: bool) -> None:
+    """Before a run releases *locks*: wait for the phase work still listed
+    (:func:`run_phase_work`), at most :data:`PHASE_WORK_JOIN_S`; past it, or
+    when the wait itself is interrupted, the locks are held until this process
+    exits. On an interrupt the live provider CLIs are stopped first, as the
+    dispatcher's own sweep would a moment later, and again every
+    :data:`PHASE_WORK_RESWEEP_S` while it waits, so the work can return."""
+    pending = _pending_phase_work()
+    if not pending or not locks:
+        return
+    try:
+        if interrupted:
+            process_control.sweep_live_clis("INTERRUPT_SWEEP")
+        print("Waiting for this phase's provider calls and dispatch to stop before "
+              "releasing its lock...", file=sys.stderr)
+        deadline = time.monotonic() + PHASE_WORK_JOIN_S
+        while pending:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            pending[0].done.wait(min(left, PHASE_WORK_RESWEEP_S) if interrupted else left)
+            pending = _pending_phase_work()
+            if pending and interrupted:
+                process_control.sweep_live_clis("INTERRUPT_SWEEP")
+        pending = _pending_phase_work()
+    except BaseException:
+        for lock in locks:
+            lock.hold_until_exit()
+        raise
+    if pending:
+        for lock in locks:
+            lock.hold_until_exit()
+        print(f"WARNING: this phase's provider calls or dispatch are still running "
+              f"after {PHASE_WORK_JOIN_S:.0f}s, so its lock is held until this process "
+              "exits.", file=sys.stderr)
+
+
+class PhaseRun:
+    """A review run's hold on its phase dir's ``.lock``, from its entry to its exit.
+
+    One writer per phase dir for the whole run: every invocation that can stamp
+    a round, regroup, validate, reaggregate, auto-heal or complete a review
+    phase takes it before it reads anything (:meth:`take`), and the context
+    manager releases it when the orchestrator returns or exits, as its very
+    last step. A second run is refused at its entry, before it writes anything
+    (docs/development/runtime.md, "One writer per phase dir").
+
+    * **Re-entrant within a process.** A lock this process already holds
+      (a composite's step lock, a commit front door's, the worker's) is used
+      as it is, and its taker releases it.
+    * **A ``--detach`` launcher** decides at its entry, before any pre-flight
+      write (:func:`take_for_launch`): it takes a free lock, re-attaches
+      (``--if-not-running``), stops the detached run that holds it and waits
+      for its lock (``--force``), or refuses. It keeps the lock to the
+      boundary and hands it to its worker (:func:`launch`).
+    * **The detached worker** adopts the lock its launcher handed it (POSIX)
+      or takes it, so its pre-flight and guard run under it; its
+      :class:`RunHandle` then takes the hold over and releases it after the
+      terminal ``run`` record.
+    * **Its exit waits for its phase work.** The fan-out's provider calls
+      (with the result files and logs they write) and a batch dispatch run on
+      threads (:func:`run_phase_work`) that a Ctrl-C does not stop; the lock
+      is released only once every one has ended, or held until the process
+      exits.
+    * **Fail closed.** A live holder refuses a foreground run or a worker at
+      exit 3; a lock file that cannot be opened or locked refuses every lane.
+      A holder that is gone never blocks: the OS dropped its lock.
+    """
+
+    def __init__(self) -> None:
+        import contextlib
+
+        self._stack = contextlib.ExitStack()
+        #: Every lock this run writes under: its own, or one it found held.
+        self._locks: List[process_control.PhaseLock] = []
+
+    def __enter__(self) -> "PhaseRun":
+        return self
+
+    def __exit__(self, exc_type: Any, *exc_info: Any) -> None:
+        try:
+            _await_phase_work(self._locks, interrupted=_is_interrupt(exc_type))
+        finally:
+            self._stack.close()
+
+    def take(
+        self, phase_dir: str, *, mode: str, plan_file: str, args: Any,
+        phase: Optional[str] = None,
+    ) -> None:
+        """Hold *phase_dir*'s lock for this run, or stop the run here: a
+        refusal prints why and raises ``SystemExit(3)``, a launcher's
+        re-attach ``SystemExit(0)``. Every lane, a lock already held
+        included, then refuses while an earlier run's teardown is not
+        confirmed (:func:`refuse_unconfirmed_cleanup`)."""
+        phase_dir = str(phase_dir)
+        path = lock_path(phase_dir)
+        worker = bool(getattr(args, "internal_worker", False))
+        run_id = getattr(args, "internal_run_id", None) if worker else None
+        held = process_control.held_phase_lock(path)
+        if held is not None:
+            self._locks.append(held)
+            try:
+                # Its taker releases it.
+                refuse_unconfirmed_cleanup(phase_dir, plan_file=plan_file, phase=phase)
+            except DetachError as exc:
+                print(str(exc), file=sys.stderr)
+                raise SystemExit(exc.exit_code)
+            return
+        launcher = bool(getattr(args, "detach", False)) and not worker
+        identity = {
+            "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "acquired_at": status_file.now_iso(),
+        }
+        if worker:
+            payload = {"run_id": run_id, "host": getattr(args, "host", None), **identity}
+        else:
+            payload = {"holder": f"{mode} (foreground)", "mode": mode, **identity}
+        try:
+            os.makedirs(phase_dir, exist_ok=True)
+            if launcher:
+                taken = take_for_launch(phase_dir, mode=mode, plan_file=plan_file,
+                                        phase=phase, args=args)
+                if isinstance(taken, int):
+                    raise SystemExit(taken)
+                lock = taken
+            else:
+                lock = ((_adopt_handed_lock(path, payload) if worker else None)
+                        or _take_entry_lock(path, payload))
+                refuse_unconfirmed_cleanup(phase_dir, plan_file=plan_file, phase=phase,
+                                           lock=lock)
+        except DetachError as exc:
+            print(str(exc), file=sys.stderr)
+            if worker:
+                _record_worker_refusal(phase_dir, run_id, str(exc))
+            raise SystemExit(exc.exit_code)
+        except (PhaseDirBusy, process_control.LockUnavailable) as busy:
+            message = phase_dir_busy_message(
+                phase_dir, dict(busy.holder or {}), plan_file=plan_file, phase=phase)
+            print(message)
+            if worker:
+                _record_worker_refusal(phase_dir, run_id, message)
+            raise SystemExit(EXIT_NEEDS_HUMAN)
+        except OSError as exc:
+            message = (
+                f"ERROR: could not lock {path} ({exc}).\n"
+                "       A review run writes its phase dir only while it holds this "
+                "lock, so it stopped before it read or changed anything there."
+            )
+            print(message)
+            if worker:
+                _record_worker_refusal(phase_dir, run_id, message)
+            raise SystemExit(EXIT_NEEDS_HUMAN)
+        key = _entry_key(phase_dir)
+        _ENTRY_HOLDS[key] = lock
+        self._locks.append(lock)
+        self._stack.callback(_drop_entry_hold, key, lock)
+
+
+def _drop_entry_hold(key: str, lock: process_control.PhaseLock) -> None:
+    """Release an entry hold, unless it went to the worker's :class:`RunHandle`
+    (which releases it after the terminal record) or to a detached worker
+    (:func:`_handed_over`)."""
+    if _ENTRY_HOLDS.get(key) is lock:
+        del _ENTRY_HOLDS[key]
+        lock.release()
+
+
 def _tool_route(host: Optional[str]) -> Optional[str]:
     """The tool route (``modes.TOOL_ROUTES``) this process runs on for *host*,
     or ``None``: ``next_phase.resolve_route`` over this process's
@@ -1247,6 +2180,14 @@ class RunHandle:
         """Take the dir, publish identity, start beating. Raises on conflict."""
         global _ACTIVE
         self._acquire_lock()
+        # Under the lock, before this run's first write: a mode with no
+        # `PhaseRun` entry stops here too.
+        try:
+            refuse_unconfirmed_cleanup(self.phase_dir, plan_file=self.plan_file,
+                                       phase=None, lock=self._lock)
+        except DetachError as exc:
+            _record_worker_refusal(self.phase_dir, self.run_id, str(exc))
+            raise
         self._apply_commit_stage()
         identity = process_control.identity()
         # Recorded, never re-derived: after the double spawn the group leader is
@@ -1367,6 +2308,27 @@ class RunHandle:
             "host": self.host,
             "acquired_at": status_file.now_iso(),
         }
+        # The hold this worker took at its entry (`PhaseRun`), so its
+        # pre-flight ran under the lock: taken over, never taken twice (the OS
+        # refuses a second descriptor), and released in `finish`.
+        entry = _ENTRY_HOLDS.pop(_entry_key(self.phase_dir), None)
+        if entry is not None and entry.held:
+            entry.relabel(payload)
+            self._lock = entry
+            return
+        # The lock this worker's launch handed it (POSIX; `launch`), adopted
+        # rather than taken: it was held across the boundary.
+        try:
+            handed = _adopt_handed_lock(lock_path(self.phase_dir), payload)
+        except (process_control.LockUnavailable, OSError) as exc:
+            message = (f"ERROR: the phase lock handed to this worker could not be "
+                       f"adopted ({exc}), so it stopped before it changed anything "
+                       f"in {self.phase_dir}.")
+            _record_worker_refusal(self.phase_dir, self.run_id, message)
+            raise DetachError(message)
+        if handed is not None:
+            self._lock = handed
+            return
         try:
             self._lock.acquire(payload)
             return
@@ -1395,7 +2357,7 @@ class RunHandle:
                         pass
             run = status_file.read_run(self.phase_dir)
             age = heartbeat_age(run)
-            raise DetachError(
+            message = (
                 "ERROR: another run owns this phase dir "
                 f"({self.phase_dir}).\n"
                 f"       holder run_id: {holder.get('run_id') or 'unrecorded'}\n"
@@ -1405,8 +2367,11 @@ class RunHandle:
                 f"{'never' if age is None else f'{age:.0f}s ago'}\n"
                 "       Wait for it, abort it (status <plan> --abort"
                 + (f" --run-id {holder.get('run_id')}" if holder.get("run_id") else "")
-                + "), or pass --force to break the lock."
+                + "), or launch with --detach --force to stop it and take the "
+                "dir over."
             )
+            _record_worker_refusal(self.phase_dir, self.run_id, message)
+            raise DetachError(message)
 
     # -- heartbeat ------------------------------------------------------
     def _beat_loop(self) -> None:
@@ -1604,6 +2569,10 @@ class RunHandle:
         # skips it. Before `finish()`, so the phase lock is still held and no
         # successor run can arm the same config first.
         _restore_codex_trust()
+        # The lock goes last, with the process: `os._exit` ends every thread
+        # that could still write the phase dir, and only then does the kernel
+        # drop the lock (docs/development/runtime.md, "One writer per phase dir").
+        self._lock.hold_until_exit()
         self.finish(
             EXIT_NEEDS_HUMAN,
             state=RUN_STATE_ABORTED,
@@ -1968,17 +2937,54 @@ def launch(
     Everything knowable before the fork is reported before it: an unresolvable
     ``uv``, an unwritable phase dir, the concurrency ceiling and a live lock holder
     all exit non-zero here, with no child spawned and no log file created.
+
+    The launch holds the phase dir's lock from its gate to its worker: the
+    entry hold a review launcher took (:class:`PhaseRun`), or the one taken
+    here (:func:`take_for_launch`, which also re-attaches or takes a live run
+    over), handed to the worker at the spawn (docs/development/runtime.md,
+    "One writer per phase dir").
     """
     plan_file = os.path.abspath(str(plan_file))
     phase_dir = os.path.abspath(str(phase_dir))
-    force = bool(getattr(args, "force", False))
-    if force and getattr(args, "commit_stage", None):
-        # A commit front door's restart adds `--force --rerun-all` to restart
-        # the round; only a `--force` the user typed takes a live run over
-        # (plans/review-commits.md §2.1), and the stage records which it was.
-        from .commit_front_door import stage_takes_over
+    hold = _ENTRY_HOLDS.get(_entry_key(phase_dir))
+    taken: Optional[process_control.PhaseLock] = None
+    if (hold is None or not hold.held) and os.path.isdir(phase_dir) and os.access(
+            phase_dir, os.W_OK):
+        try:
+            gate = take_for_launch(phase_dir, mode=mode, plan_file=plan_file,
+                                   phase=phase, args=args)
+        except OSError as exc:
+            raise DetachError(
+                f"ERROR: could not lock {lock_path(phase_dir)} ({exc}), so nothing "
+                "was launched: a run writes its phase dir only while it holds it."
+            )
+        if isinstance(gate, int):
+            return gate
+        hold = taken = gate
+    try:
+        return _launch(mode=mode, argv=argv, phase_dir=phase_dir, plan_file=plan_file,
+                       phase=phase, args=args, ask_slug=ask_slug,
+                       model_specs=model_specs, hold=hold)
+    finally:
+        # A no-op once the worker has it (`_handed_over`).
+        if taken is not None:
+            taken.release()
 
-        force = stage_takes_over(getattr(args, "commit_stage", None))
+
+def _launch(
+    *,
+    mode: str,
+    argv: Sequence[str],
+    phase_dir: str,
+    plan_file: str,
+    phase: Optional[str],
+    args: Any,
+    ask_slug: Optional[str],
+    model_specs: Optional[Sequence[str]],
+    hold: Optional[process_control.PhaseLock],
+) -> int:
+    """:func:`launch`, under *hold*."""
+    force = _takes_over(args)
     if_not_running = bool(getattr(args, "if_not_running", False))
     # The launcher's `--host`, carried into every poll command printed below —
     # it is the host the worker records, so the poll must select it too.
@@ -2041,28 +3047,20 @@ def launch(
             )
 
     # -- re-attach beats relaunch --------------------------------------
+    # Read under the lock this launch holds: a run recorded as live here is
+    # not holding it, so it is not writing this phase dir.
     existing = classify_run(phase_dir, close_out=True)
     if existing["verdict"] in (VERDICT_RUNNING, VERDICT_STARTING, VERDICT_STALE):
         existing_id = str(existing["run"].get("run_id"))
         if if_not_running:
-            print(f"A detached run is already in flight for {phase_dir}.")
-            print(f"  run_id:  {existing_id}")
-            print(f"  log:     {existing['run'].get('log_path')}")
-            reattach_cmd = status_command_for(
-                plan_file, phase=phase, run_id=existing_id,
-                host=existing["run"].get("host") or host,
-            )
-            print(f"  status:  {reattach_cmd}")
-            record_artifact(existing["run"].get("log_path") or log_path(phase_dir))
-            record_next(reattach_cmd)
-            return EXIT_OK
+            return _print_reattach(phase_dir, existing["run"], plan_file=plan_file,
+                                   phase=phase, host=host)
         if force:
             print(
-                f"WARNING: --force is taking {phase_dir} over from live run "
-                f"{existing_id}. Its next heartbeat fails the run_id "
-                "compare-and-set and it exits rather than writing over the new "
-                "record — but it may still be mid-write for up to one heartbeat "
-                f"interval ({heartbeat_interval():.0f}s).",
+                f"WARNING: --force replaces the record of run {existing_id}: it "
+                f"does not hold {lock_path(phase_dir)}, which this launch holds, so "
+                "it is not writing this phase dir, and its next heartbeat fails the "
+                "run_id compare-and-set.",
                 file=sys.stderr,
             )
         else:
@@ -2078,42 +3076,9 @@ def launch(
                 f"({abort_command_for(plan_file, run_id=existing_id)}), or pass "
                 "--force to take the dir over."
             )
-
-    # -- lock pre-check (authoritative acquisition happens in the worker) --
-    lock = lock_path(phase_dir)
-    if not process_control.lock_is_free(lock):
-        recorded = process_control.read_lock_holder(lock)
-        holder = recorded or {}
-        # `unknown`, not `dead`, when the payload could not be read: the lock is
-        # held and its label is written after the lock is taken, so an empty or
-        # half-written file names a live holder we cannot identify.
-        verdict = process_control.holder_verdict(recorded)
-        broke = False
-        if verdict == process_control.DEAD or force:
-            # break_lock proves the holder is gone by taking the lock (and only
-            # `--force` skips that proof), so a stale payload in front of a live
-            # holder leaves us here with `broke` False and fails in the
-            # foreground rather than forking a second writer for this dir.
-            broke = process_control.break_lock(lock, force=force)
-            if broke:
-                print(
-                    f"WARNING: breaking a stale {LOCK_NAME} left by run "
-                    f"{holder.get('run_id') or 'unrecorded'} "
-                    f"(pid {holder.get('pid') or 'unrecorded'}: {verdict}).",
-                    file=sys.stderr,
-                )
-        if not broke:
-            run = status_file.read_run(phase_dir)
-            age = heartbeat_age(run)
-            raise DetachError(
-                f"ERROR: {lock} is held by run "
-                f"{holder.get('run_id') or 'an unrecorded holder'} "
-                f"(pid {holder.get('pid') or 'unrecorded'}, {verdict}, last "
-                f"heartbeat {'never' if age is None else f'{age:.0f}s ago'}).\n"
-                "       Two orchestrators must not interleave .status.json "
-                "merges and result files in one phase dir.\n"
-                "       Abort the holder or pass --force to break the lock."
-            )
+    if hold is None or not hold.held:  # pragma: no cover - the gate above
+        raise DetachError(f"ERROR: this launch does not hold {lock_path(phase_dir)}, "
+                          "so nothing was launched.")
 
     # -- the ceiling ---------------------------------------------------
     project_root = run_registry.resolve_project_root(plan_file)
@@ -2154,6 +3119,11 @@ def launch(
     )
     log = log_path(phase_dir)
     env[WORKER_LOG_ENV] = log
+    # The lock crosses the boundary held: the worker inherits this launch's
+    # open file description and adopts it, and from the spawn on this process
+    # only closes its own copy (`_handed_over`). Windows: released here, taken
+    # again by the worker (`_hand_off`).
+    handoff = _hand_off(hold, env)
     try:
         # On Windows the worker starts inside the run's named Job Object, and
         # `run_job` is this launcher's handle on it (`None` elsewhere, and
@@ -2161,12 +3131,17 @@ def launch(
         # resolves, so a failed one ends exactly the tree it started, then
         # closed. By then the worker holds the job itself (2026-10-25).
         worker_pid, run_job = process_control.spawn_detached_run(
-            command, cwd=os.getcwd(), env=env, log_path=log, run_id=run_id
+            command, cwd=os.getcwd(), env=env, log_path=log, run_id=run_id,
+            **({"keep_fds": (handoff,)} if handoff is not None else {}),
         )
     except (OSError, process_control.SpawnFailed) as exc:
+        _handed_over(hold)
         raise DetachError(
             f"ERROR: could not start the detached worker: {exc}", exit_code=EXIT_ERROR
         )
+    finally:
+        if handoff is not None:
+            os.close(handoff)
 
     try:
         observed = _await_handshake(phase_dir, run_id)
@@ -2183,6 +3158,7 @@ def launch(
     finally:
         if run_job is not None:
             run_job.close()
+        _handed_over(hold)
     if observed is None:
         tail = _log_tail(log, 20)
         raise DetachError(
@@ -2350,6 +3326,15 @@ def _await_handshake(phase_dir: str, run_id: str) -> Optional[Dict[str, Any]]:
             RUN_STATE_RUNNING, *TERMINAL_RUN_STATES
         ):
             return run
+        refusal = _read_worker_refusal(phase_dir, run_id)
+        if refusal is not None:
+            # The worker stopped at the lock and published nothing: this launch
+            # reports that, never a run (`_record_worker_refusal`).
+            raise DetachError(
+                f"ERROR: the detached worker for run {run_id} stopped before it took "
+                f"{phase_dir}, so no run was launched.\n"
+                + str(refusal.get("message") or "(no reason recorded)")
+            )
         if time.time() >= deadline:
             return None
         time.sleep(0.05)

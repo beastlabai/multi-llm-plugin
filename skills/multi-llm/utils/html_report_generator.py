@@ -48,6 +48,28 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _write_atomic(path: Path, text: str) -> None:
+    """Write *text* beside *path* and rename it into place, so a reader (the
+    apply step, a decision overlay, a browser) sees the old file or the new
+    one, never part of one. UTF-8, the platform's newlines, as ``write_text``."""
+    import os
+
+    path = Path(path)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 # ---------------------------------------------------------------------------
 # Model icon mapping — maps model families to OpenRouter icon data URIs
 # ---------------------------------------------------------------------------
@@ -1804,7 +1826,7 @@ def generate_html_report(
     # (diff_data, base_ref, models, ...). Best-effort: never fail report
     # generation if the sidecar cannot be written.
     try:
-        (Path(phase_dir) / "report_data.json").write_text(sidecar_json(payload), encoding="utf-8")
+        _write_atomic(Path(phase_dir) / "report_data.json", sidecar_json(payload))
     except OSError:
         pass
 
@@ -2078,7 +2100,7 @@ def write_html_report(html: str, phase_dir: Path) -> Path:
     """
     phase_dir.mkdir(parents=True, exist_ok=True)
     report_path = phase_dir / "report.html"
-    report_path.write_text(html, encoding='utf-8')
+    _write_atomic(report_path, html)
     return report_path
 
 
@@ -2597,10 +2619,10 @@ def regenerate_report_with_human_decisions(
     style = template_style or report_data.get("templateStyle", "pr")
     html = embed_report_data(report_data, load_report_template(style))
     report_path = phase_dir / "report.html"
-    report_path.write_text(html, encoding="utf-8")
+    _write_atomic(report_path, html)
     # Keep the sidecar in sync so a subsequent re-run overlays cleanly.
     try:
-        sidecar.write_text(sidecar_json(report_data), encoding="utf-8")
+        _write_atomic(sidecar, sidecar_json(report_data))
     except OSError:
         pass
     if include_consolidated:
@@ -2687,10 +2709,9 @@ def regenerate_consolidated_with_human_decisions(
         scope_state = _scope_report.read_state(phase_dir)
     report_data = upgrade_legacy(json.loads(sidecar.read_text(encoding="utf-8")))
     matched = _overlay_consolidated(report_data, human_decisions or {}, scope_state)
-    page.write_text(embed_report_data(report_data, load_report_template("consolidated")),
-                    encoding="utf-8")
+    _write_atomic(page, embed_report_data(report_data, load_report_template("consolidated")))
     try:
-        sidecar.write_text(sidecar_json(report_data), encoding="utf-8")
+        _write_atomic(sidecar, sidecar_json(report_data))
     except OSError:
         pass
     return page, matched, "regenerated"

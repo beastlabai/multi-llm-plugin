@@ -1184,9 +1184,10 @@ class TestReaggregateAttributesTheExecutorsOwnRunner:
         calls = []
         real_merge = cro.merge_validation_batches
 
-        def spy(phase_dir_arg, batch_metadata, grouped, validation_path):
+        def spy(phase_dir_arg, batch_metadata, grouped, validation_path, claim=None):
             calls.append((phase_dir_arg, validation_path, len(grouped)))
-            return real_merge(phase_dir_arg, batch_metadata, grouped, validation_path)
+            return real_merge(phase_dir_arg, batch_metadata, grouped, validation_path,
+                              claim=claim)
 
         _run_cro_reaggregate(
             plan, phase_dir, skip_validation=False,

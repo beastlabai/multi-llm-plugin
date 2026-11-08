@@ -5732,7 +5732,13 @@ def persist_result(task: Dict[str, Any], phase_dir: str, data: Any) -> str:
             f"still parse and would reaggregate as a real one.",
             STATUS_SCHEMA_INVALID,
         )
-    _atomic_write_json(str(target), data)
+    # Written only while the round that dispatched it is still the round on
+    # record; a late result of a replaced round is dropped (utils/review_round.py).
+    from .review_round import persisting_result
+
+    with persisting_result(phase_dir, target.name) as current:
+        if current:
+            _atomic_write_json(str(target), data)
     return str(target)
 
 

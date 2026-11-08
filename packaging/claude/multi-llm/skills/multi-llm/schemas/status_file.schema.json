@@ -26,6 +26,11 @@
       "type": ["string", "null"],
       "description": "The phase's own stop reason, cleared (`null`) when a new fan-out starts."
     },
+    "round_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16,64}$",
+      "description": "Review phases only: the review round, a random token a fan-out stamps right past its detach boundary, before it replaces any file of the previous round (utils/review_round.py). validation_tasks.json, validation.json (`metadata.round_id`) and report.md (its second line) record the round that wrote them; a file whose id differs is another round's, and the partial-completion guard and `util resume-state` never complete or resume the phase on it. A `--reaggregate` keeps it. Absent on a checkpoint written before round ids."
+    },
     "question": {
       "type": "string",
       "description": "ask only: the question text, read byte-for-byte as the slug-collision guard."

@@ -9,15 +9,19 @@ the orchestrators' own guards use, and prints the answer as one line:
 ``case`` is a letter of :data:`CASES`, ``action`` a word of :data:`ACTIONS`;
 ``models`` is the full ``--models`` set a ``rerun`` launches, ``batches`` the
 validation batch numbers a ``validate`` still owes, ``flags`` what a ``rerun``
-adds, and ``ownership`` reads ``uncertain`` when validation files are on disk
-that the checkpoint cannot tie to the run it records (case c). ``-`` means
-none. It never answers ``--rerun-all``.
+adds, and ``ownership`` says why case c chose a re-run over the validation
+files on disk: ``stale`` when one records another review round, ``uncertain``
+when nothing ties them to the run the checkpoint records. ``-`` means none.
+It never answers ``--rerun-all``.
 
 Only the orchestrator's primary guard (``state.json``) completes a phase: no
-file on disk does, and no file date decides which round wrote a file (a clock
-set back, a copy that kept its dates or a coarse file system all defeat one).
-When the round of the validation files is unknown, the answer is the one that
-can cost a re-run but never a wrong result.
+file on disk does. Which round wrote a validation file is read from the round
+id the fan-out stamps into ``.status.json`` and every file of its round
+records (``utils/review_round.py``), never from a file date (a clock set back,
+a copy that kept its dates or a coarse file system all defeat one). A file
+written before round ids keeps the older proof, the checkpoint word; when
+neither settles it, the answer is the one that can cost a re-run but never a
+wrong result.
 
 Read-only: it creates nothing, the plan's output folder included. The case
 list in ``references/resume-detection.md`` is rendered from :data:`CASES` and
@@ -38,7 +42,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import modes as mode_table
 
-from . import result_files, status_file
+from . import result_files, review_round, status_file
 from .cli_common import EXIT_NEEDS_HUMAN, EXIT_OK
 from .json_extractor import sanitize_model_name
 from .output_handler import output_dir_path, phase_dir_path
@@ -74,12 +78,15 @@ CASES: Tuple[Case, ...] = (
     ),
     Case(
         "b",
-        "`{plan}/{phase}/.status.json` reads `state: \"validation_pending\"`, "
-        "`validation_tasks.json` beside it lists its batches, and "
+        "`{plan}/{phase}/validation_tasks.json` is this round's and lists its "
+        "batches, no validation file is another round's (c), and "
         "`validation_batch_*.json` files exist (a retired round's `*.stale.json` "
-        "does not count). That checkpoint word is what proves the task file is "
-        "this round's: a run writes it right after the task file, and the next "
-        "fan-out's first write replaces it",
+        "does not count). This round's: the task file records the `round_id` "
+        "`.status.json` beside it records (a fan-out stamps a fresh one there "
+        "before it replaces any file); where either records none (written "
+        "before round ids), when `.status.json` reads `state: "
+        "\"validation_pending\"` (a run writes that word right after the task "
+        "file, and the next fan-out's first write replaces it)",
         "Validation ran partially or fully. If every batch the task file lists has its "
         "`validation_batch_<N>.json`: run `--reaggregate` to finalize (`reaggregate`). "
         "If some are missing: run only the validation tasks of the missing batches "
@@ -88,19 +95,22 @@ CASES: Tuple[Case, ...] = (
     Case(
         "c",
         "`validation.json`, `validation_tasks.json` or a `validation_batch_*.json` "
-        "exists in `{plan}/{phase}/`, but the checkpoint does not prove them this "
-        "round's as in b and f: `.status.json` reads another state (a re-run's "
+        "exists in `{plan}/{phase}/`, but nothing proves them this round's as in "
+        "b and f: the task file or `validation.json` records a `round_id` other "
+        "than the one `.status.json` records (`ownership=stale`: an earlier "
+        "round's file a re-run stopped before replacing), or, where either "
+        "records no round id, the checkpoint reads another state (a re-run's "
         "`models_running`, `models_complete` or `grouping_complete`, or a "
-        "`complete` that `state.json` no longer records) or is missing, or the "
-        "task file cannot be read. No file date settles it",
-        "Their round is uncertain: reporting, reaggregating or validating them "
-        "could finish the phase on an earlier round's verdicts. Run the "
-        "orchestrator again with `--force` (every phase) and the models "
-        "`models_requested` records (`rerun`, `ownership=uncertain`; `models=-` "
-        "when none is recorded: launch with the selection the core would make). "
-        "It keeps each reusable model result (`[SKIP]`), regroups, retires the "
-        "verdicts its grouping does not bind and validates again. Never "
-        "`--rerun-all`.",
+        "`complete` that `state.json` no longer records), or there is no "
+        "checkpoint, no readable task file, or validation files without a task "
+        "file (`ownership=uncertain`). No file date settles it",
+        "Reporting, reaggregating or validating them could finish the phase on "
+        "an earlier round's verdicts. Run the orchestrator again with `--force` "
+        "(every phase) and the models `models_requested` records (`rerun`, "
+        "`ownership=stale` or `ownership=uncertain`; `models=-` when none is "
+        "recorded: launch with the selection the core would make). It keeps "
+        "each reusable model result (`[SKIP]`), regroups, retires the verdicts "
+        "its grouping does not bind and validates again. Never `--rerun-all`.",
     ),
     Case(
         "d",
@@ -135,8 +145,8 @@ CASES: Tuple[Case, ...] = (
     ),
     Case(
         "f",
-        "`.status.json` reads `state: \"validation_pending\"`, "
-        "`validation_tasks.json` lists its batches (as in b), and NO "
+        "`validation_tasks.json` is this round's and lists its batches, no "
+        "validation file is another round's (both as in b), and NO "
         "`validation_batch_*.json` exists",
         "The orchestrator handed validation over and none has run. Skip to "
         "Validation Handling: run every validation task, then reaggregate "
@@ -156,12 +166,14 @@ ACTIONS: Dict[str, str] = {
     "run": "nothing to resume: launch the orchestrator as planned.",
 }
 
-#: The ``ownership=`` value of case c, and what it tells a reader.
+#: The ``ownership=`` values of case c, and what they tell a reader.
 OWNERSHIP_UNCERTAIN = "uncertain"
+OWNERSHIP_STALE = "stale"
 OWNERSHIP_NOTE = (
-    "`ownership=uncertain` (case c) says why a `rerun` was chosen over the files "
-    "on disk: nothing recorded ties them to the run `.status.json` describes. "
-    "Every other answer prints `ownership=-`."
+    "`ownership=` says why case c chose a `rerun` over the validation files on "
+    "disk: `stale` when one records a review round other than the one "
+    "`.status.json` records, `uncertain` when nothing recorded ties them to "
+    "that run. Every other answer prints `ownership=-`."
 )
 
 #: Where the rendered case list sits in references/resume-detection.md.
@@ -270,13 +282,15 @@ def _requested_models(status: Dict[str, Any]) -> List[str]:
 FANOUT_STATES = frozenset({"models_running", "models_complete", "grouping_complete"})
 
 
-#: The ``.status.json`` state that proves ``validation_tasks.json`` is the
-#: round's own. Every writer of the task file writes it next (the fan-out's
-#: hand-off, a ``--reaggregate`` that materializes or reopens a round:
-#: ``reopen_phase_for_validation``), and every fan-out's opening write replaces
-#: it with ``models_running``. Nothing else does: a file date cannot (see the
-#: module docstring), and ``progress`` is display only (``utils/status_file``).
-VALIDATION_STATE = "validation_pending"
+#: The ``.status.json`` state that proves a ``validation_tasks.json`` *with no
+#: round id* (written before round ids) is the round's own. Every writer of the
+#: task file writes it next (the fan-out's hand-off, a ``--reaggregate`` that
+#: materializes or reopens a round: ``reopen_phase_for_validation``), and every
+#: fan-out's opening write replaces it with ``models_running``. A task file with
+#: a round id is judged by that id instead (``utils/review_round.py``). Nothing
+#: else proves either: a file date cannot (see the module docstring), and
+#: ``progress`` is display only (``utils/status_file``).
+VALIDATION_STATE = review_round.VALIDATION_PENDING
 
 
 def _validation_files(phase_dir: Path) -> List[str]:
@@ -287,22 +301,34 @@ def _validation_files(phase_dir: Path) -> List[str]:
     return names + sorted(Path(path).name for path in _batch_files(phase_dir))
 
 
-def _this_round_s_batches(phase_dir: Path, status: Dict[str, Any]) -> Optional[List[int]]:
-    """The batches of ``validation_tasks.json`` when the checkpoint proves it
-    this round's (:data:`VALIDATION_STATE`); ``None`` when it does not."""
-    if status.get("state") != VALIDATION_STATE:
+def _this_round_s_batches(phase_dir: Path, status: Dict[str, Any],
+                          rounds: "review_round.RoundFiles") -> Optional[List[int]]:
+    """The batches of ``validation_tasks.json`` when it is this round's (its
+    round id, or for a file without one :data:`VALIDATION_STATE`:
+    ``review_round.tasks_file_is_this_rounds``); ``None`` when it is not."""
+    if not review_round.tasks_file_is_this_rounds(rounds, status):
         return None
-    return _listed_batches(phase_dir / "validation_tasks.json")
+    return _listed_batches(phase_dir / review_round.TASKS_NAME)
+
+
+_RERUN_SENTENCE = ("Re-running with --force keeps every reusable model result, "
+                   "regroups and retires the verdicts its grouping does not bind.")
 
 
 def _uncertain_note(phase_dir: Path, status: Dict[str, Any], files: Sequence[str]) -> str:
     recorded = status.get("state")
     reads = f"reads `{recorded}`" if isinstance(recorded, str) and recorded else "records no state"
     return (f"multi-llm: {', '.join(files)} in {phase_dir} may be an earlier round's: "
-            f".status.json {reads}, and only `{VALIDATION_STATE}` beside a readable "
-            "task file ties them to this run. Re-running with --force keeps every "
-            "reusable model result, regroups and retires the verdicts its grouping "
-            "does not bind.")
+            f".status.json {reads}, and only a matching round id, or for a task file "
+            f"without one `{VALIDATION_STATE}` beside it, ties them to this run. "
+            + _RERUN_SENTENCE)
+
+
+def _stale_note(phase_dir: Path, rounds: "review_round.RoundFiles",
+                stale: Sequence[str], status: Dict[str, Any]) -> str:
+    return (f"multi-llm: {', '.join(stale)} in {phase_dir} belong to an earlier "
+            f"review round ({review_round.evidence(rounds, tuple(stale), status)}): "
+            "a re-run stopped before replacing them. " + _RERUN_SENTENCE)
 
 
 def _recorded_scope(phase_dir: Path) -> Optional[str]:
@@ -359,7 +385,15 @@ def classify(plan: Path, phase: str) -> ResumeState:
     if completed:
         return ResumeState("a", "report")
     status = status_file.read_status(str(phase_dir))
-    listed = _this_round_s_batches(phase_dir, status)
+    rounds = review_round.round_files(phase_dir, status)
+    requested = _requested_models(status)
+    earlier = rounds.stale()
+    if earlier:
+        # Proven another round's by the ids, so neither b nor f may read them.
+        return ResumeState("c", "rerun", models=tuple(requested), flags=("--force",),
+                           ownership=OWNERSHIP_STALE,
+                           note=_stale_note(phase_dir, rounds, earlier, status))
+    listed = _this_round_s_batches(phase_dir, status, rounds)
     if listed is not None:
         if _batch_files(phase_dir):
             missing = _missing_batches(phase_dir, listed)
@@ -367,7 +401,6 @@ def classify(plan: Path, phase: str) -> ResumeState:
                 return ResumeState("b", "validate", batches=tuple(missing))
             return ResumeState("b", "reaggregate")
         return ResumeState("f", "validate", batches=tuple(listed))
-    requested = _requested_models(status)
     files = _validation_files(phase_dir)
     if files:
         # Every phase takes --force here: it is the command that started the

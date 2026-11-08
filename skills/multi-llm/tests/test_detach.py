@@ -901,7 +901,9 @@ class TestDetachGates:
         assert "ceiling 2" in str(exc.value)
         capsys.readouterr()
         assert not Path(detach.log_path(str(phase))).exists()
-        assert not Path(detach.lock_path(str(phase))).exists()
+        # The launch held the dir's lock from its gate and let it go: the file
+        # is durable and inert (process_control.PhaseLock.release), the lock free.
+        assert process_control.lock_is_free(detach.lock_path(str(phase)))
         assert len(run_registry.list_entries(root)) == 2, "no new registry entry"
 
     def test_all_provider_binaries_missing_is_a_foreground_failure(

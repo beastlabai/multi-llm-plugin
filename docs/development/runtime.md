@@ -139,7 +139,10 @@ run-scoped results (`status_file.RUN_SCOPED_KEYS`: `high_priority_groups`, `vali
 top-level `state`, except a refusal close-out's: a `runner_rejected` or `executor_refused`
 `state` goes, with the `reason_code`, `runner`, `runner_key` and `refused_batch` written beside
 it (`status_file.REFUSAL_STATES`, `REFUSAL_KEYS`), since `status` reads them as the refusal
-of the run it is polling.
+of the run it is polling. A review phase's checkpoint also records the review round,
+`round_id`, which its fan-out stamps and every file of the round records; `claim_run` keeps it, so a
+detached `--reaggregate` continues the round on record
+([round identity](review-results.md#round-identity)).
 
 Its reserved keys are `{step, models, models_done, models_succeeded, models_total, interval_s, tasks_generated, notes, subagents, write_subagents, sandbox_bypassed, sandbox_fallback}` (`status_file.py`'s module docstring is the
 prose contract, `schemas/status_file.schema.json` the declared one, held to every writer by
@@ -183,6 +186,108 @@ in exactly one terminal state with `run.exit_code` recorded — the worker recor
 (nothing is its parent after the double spawn), and `status` closes out
 `failed(heartbeat_timeout)` with `exit_code: null` when the heartbeat expires and the identity probe
 says the process is gone.
+
+### One writer per phase dir
+
+**A review run (review-plan, review-tasks, review-code) holds `{phase}/.lock` from its entry to
+its exit, foreground or detached** (`detach.PhaseRun`, code health U81 round 3). The phase mains
+take it before they read `state.json` or any file of the phase (review-code's reaggregate after
+its output-dir check), so every step that can stamp a round, regroup, validate, reaggregate,
+auto-heal or complete the phase runs under it, and a context manager at each entry
+(`run_review_orchestration`, review-code's `main`) releases it when the run returns or exits. A
+second run is refused at its entry, before it reads or writes anything: exit 3, `another run of
+this phase is in progress (pid …, alive): … owns this phase dir`, with the holder's status and
+abort commands. Before it, a foreground run took no lock and only the round claims
+(review-results.md, "Round identity") stood between two runs: Codex found five interleavings in
+which the second run restored a superseded round, completed the other's phase, retired its
+verdicts or sealed a report to them.
+
+- **Re-entrant within one process.** The OS refuses a second descriptor even to the holder's own
+  process, so `PhaseLock` lists every lock this process holds (`process_control.held_phase_lock`)
+  and a take of one already held uses it as it is; its taker releases it. That is the case under
+  a composite's step lock (`improve_workflow.ImproveWorkflow.run_mode`) and a commit front door's
+  lock (`commit_front_door._take_lock`).
+- **A `--detach` launcher decides at its entry**, before any pre-flight write (`backup.md`,
+  `state.json`, a task file, the checkpoint; `detach.take_for_launch`). A free lock is taken and held
+  to the boundary. Against a live holder: `--if-not-running` re-attaches to the detached run whose
+  label and checkpoint name it, deciding from those alone (it writes nothing); `--force` stops that
+  run (below); anything else refuses at exit 3. `detach.launch` runs the same gate for a mode that
+  takes no entry hold, so the lock is held from its first check to its worker.
+- **A live holder's lock is never broken.** `--detach --force` asks the detached run that holds the
+  dir to stop through the abort path (`detach.abort_run`, what `status --abort` runs), then waits on
+  a take of the same lock, at most `FORCE_STOP_WAIT_S` (twice the abort's SIGTERM-to-SIGKILL
+  window): getting the lock is the proof that the old worker is gone. It waits only after an abort
+  that confirms every process of the run stopped (`detach.CONFIRMED_STOPS`: `aborted`,
+  `not_running`). The lock dies with the worker, but a provider CLI or its child that outlived it
+  can still write in the dir, so every other outcome (`needs_force`, `survived`, a teardown that
+  could not confirm every process stopped, any value added later) refuses at exit 3, launches
+  nothing, keeps the run's records, and names the cleanup (`status --abort`, `util runs --sweep`).
+  A holder that outlives the wait, or one `--force` cannot stop (a foreground run, a composite's
+  step, another launcher, this process), refuses at exit 3 naming it. `process_control.break_lock` frees only a lock it can take,
+  so a dead holder's lock is taken over as before and a live one never is; the lock file is never
+  unlinked.
+- **A teardown not confirmed refuses every entry, the lock free or not.** A stopped run's lock
+  frees with its worker, so a later invocation would take it at once while what outlived the
+  worker still writes. Each entry therefore reads the earlier run's cleanup record once it holds
+  the lock and before its first write (`detach.refuse_unconfirmed_cleanup`): a foreground run, a
+  launcher (the free lock and `--force`'s alike), a detached worker, a re-entrant take of a held
+  lock, a commit front door's lock and `RunHandle.start`. The record is `.status.json`
+  `run.cleanup` and the run's registry entry (`.multi-llm/runs/<run_id>.json`), in the shape the
+  kill paths write (code health U77; `detach.unconfirmed_cleanup`). **The registry decides**: the
+  kill paths keep a run's entry until its teardown is confirmed (with the same `cleanup` when a
+  kill could not confirm every process stopped) and remove it once a sweep or an abort confirms
+  them stopped, but may leave the checkpoint's value behind. So only entries of this dir or of the
+  checkpoint's run are read (another dir's entry, malformed or not, never is), and the
+  checkpoint's value counts only while that run's entry is kept; with no entry it is stale, warns
+  in one line and goes on. No record, or `state: complete`, goes on; any other string `state`
+  (`pending`, `incomplete`, one added later) refuses at exit 3, names the cleanup
+  (`status --abort --run-id`, `util runs --sweep`) and keeps the records. Any other shape (not an
+  object, a `state` missing or not a string), and a read that raises at all, refuses at exit 3
+  as a malformed cleanup record naming the file, after releasing a lock the entry took.
+- **The lock crosses the detach boundary held (POSIX).** `flock` belongs to the open file
+  description, so `detach.launch` passes a duplicate of its descriptor to the worker
+  (`process_control.spawn_detached_run(keep_fds=…)`, numbered in `MULTI_LLM_PHASE_LOCK_FD`) and the
+  worker adopts it on its first line (`detach.prepare_worker_output`, then
+  `process_control.PhaseLock.adopt` at its entry, which checks the descriptor is `{phase}/.lock` by
+  `fstat` against `stat` and makes it close-on-exec). The launcher only ever closes its own copy,
+  never unlocks it (`PhaseLock.disown`), once the handshake resolves or the spawn fails: a worker that
+  adopted the lock keeps it, and one that died took its copy with it. No other process can take the
+  lock between the launcher's pre-flight and the worker's (`tests/test_review_round.py`,
+  `TestTheLockCrossesTheDetachBoundaryHeld`). The lock's descriptor is otherwise never inherited: a
+  provider CLI must not keep a phase locked.
+- **Windows keeps the old hand-off**: an `msvcrt` lock belongs to the process that took it, so the
+  launcher releases its hold right before the spawn and the worker takes it again. Another run can
+  take it in between; the worker then refuses at exit 3 and leaves `{phase}/.worker-refused-<run_id>`
+  (written only by a detached worker, under its own run id), and the launch reports that refusal at
+  exit 3 instead of a run (`detach._await_handshake`).
+- **The detached worker** adopts that lock (or takes it) at its entry, so its pre-flight and the
+  secondary guard run under it; `RunHandle._acquire_lock` takes that hold over instead of taking the
+  lock again, and releases it in `finish`, after the terminal `run` record. An aborted worker holds
+  it until `os._exit` (`RunHandle._on_signal`), so the kernel drops it after every thread has ended.
+- **Lock release is a run's last step.** Every thread a review phase starts goes through one helper,
+  `review_orchestrator_base.phase_thread` (`detach.run_phase_work`): the fan-out's provider calls,
+  with the logs they write and the earlier round's result they set aside or adopt, the slot guard's
+  probes and snapshots, and the validation and salvage dispatches (`dispatch_in_round`). None of
+  those modules calls `asyncio.to_thread` itself (`tests/test_review_round.py`,
+  `TestACtrlCHoldsTheLockUntilTheFanOutEnds`). A Ctrl-C does not stop such a thread: the
+  cancellation ends the coroutine, not the thread. `PhaseRun`'s exit therefore stops the live
+  provider CLIs (on an interrupt, and again every `PHASE_WORK_RESWEEP_S` while it waits, for a CLI
+  started after the first sweep) and waits for every listed call before it releases the lock; a
+  call given up before any thread started it is never run and not waited for. Past
+  `PHASE_WORK_JOIN_S`, or when the wait itself is interrupted, the lock is held until the process
+  exits (`PhaseLock.hold_until_exit`), never released early.
+- **Late results are bound to their round.** The dispatch runs under `review_round.results_bound_to`
+  its claim, and `subagent_executor.persist_result` writes a result file only while the checkpoint
+  still records that round, deciding under the `.status.lock` mutex held across the write; a result
+  of a replaced round (or one whose round cannot be checked) is logged (`… dropped, not written`)
+  and dropped. Defence in depth behind the lock; batch files a host's own subagents write arrive from
+  outside the run and are judged by content (review-results.md, "Round identity").
+- **Fail closed, never stuck.** A refusal is retried `ENTRY_LOCK_ATTEMPTS` times
+  `ENTRY_LOCK_RETRY_S` apart (a `status` poll probes the lock by taking it), then refuses. A lock
+  file that cannot be opened or locked refuses every lane; nothing proceeds unlocked. A holder that
+  died released its lock with its descriptor, and the label it left is overwritten; a payload
+  naming a dead process in front of a live holder breaks only when `break_lock` proves the lock
+  free, as for the worker.
 
 A composite whose run ends other than `done` (aborted, closed out dead, failed —
 `full` included) also retires the live model maps in the phase dirs it drove, which

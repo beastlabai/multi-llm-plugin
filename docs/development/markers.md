@@ -123,7 +123,7 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[IMPROVE_STEP_FRESH]` | `utils/improve_steps.py` `FRESH_MARKER` | `instructions/improve-code.md`<br>`instructions/improve-commits.md`<br>`instructions/improve-plan.md` | — |
 | `[INSTALL_CHECK]` | `utils/host_install.py` | not for the host: operator-cli | — |
 | `[INSTALL_CHECK_FAILED]` | `utils/host_install.py` | not for the host: operator-cli | — |
-| `[INTERRUPT_SWEEP]` | `multi_llm.py` `sweep_live_clis()`<br>`utils/process_control.py` `sweep_live_clis()` | not for the host: runner-diagnostic | — |
+| `[INTERRUPT_SWEEP]` | `multi_llm.py` `sweep_live_clis()`<br>`utils/detach.py` `sweep_live_clis()`<br>`utils/process_control.py` `sweep_live_clis()` | not for the host: runner-diagnostic | — |
 | `[JAIL_DENIED]` | `utils/providers/base.py` `JAIL_DENIED_MARKER` | not for the host: runner-diagnostic | — |
 | `[LEGACY_INSTRUCTIONS]` | `multi_llm.py` | not for the host: operator-cli | — |
 | `[MANUAL_GATE]` | `implement_orchestrator.py` | `instructions/implement.md` | — |

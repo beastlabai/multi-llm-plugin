@@ -77,9 +77,10 @@ from utils.state_manager import (
 from utils.output_handler import (
     get_phase_dir, output_dir_path, phase_dir_path, workflow_file_entries,
 )
-from utils.detach import record_output_files, report_progress
+from utils.detach import PhaseRun, record_output_files, report_progress
 from utils.progress_tracker import DEADLINE_ERROR, FanoutProgress, PhaseProgress
 from utils import importance as _importance
+from utils import review_round as _review_round
 from utils import scope_policy as _sp
 from utils import scope_round as _scope_round
 from utils.review_orchestrator_base import (
@@ -95,6 +96,8 @@ from utils.review_orchestrator_base import (
     dispatch_with_ladder,
     slot_ladder,
     dispatch_subagent_tasks,
+    dispatch_in_round,
+    phase_thread,
     exec_subagents_requested,
     grouped_coverage_gap,
     maybe_detach,
@@ -3134,7 +3137,8 @@ def record_review_scope_in_report_data(
     if "resultsMatch" in record:
         data["reviewScope"]["resultsMatch"] = record["resultsMatch"]
     try:
-        sidecar.write_text(sidecar_json(data), encoding="utf-8")
+        # Replaced whole, as the generator writes it: apply reads it back.
+        _review_round.replace_file(sidecar, sidecar_json(data))
     except OSError:
         pass
 
@@ -3595,17 +3599,17 @@ async def run_single_review(
     # slot's answer when a retry writes nothing, and one already there when the
     # slot started is never read as this slot's.
     misnamed_baseline = (
-        await asyncio.to_thread(
+        await phase_thread(
             misnamed_result_baseline, out_dir, "code_review", model_spec
         )
         if run_model_specs is not None else None
     )
-    requested_baseline = await asyncio.to_thread(
+    requested_baseline = await phase_thread(
         requested_result_baseline, out_dir, "code_review", model_spec
     )
 
     async def _dispatch(attempt_timeout: int) -> Dict[str, Any]:
-        return await asyncio.to_thread(
+        return await phase_thread(
             invoke_with_file_output,
             prompt_template=prompt_template,
             model_spec=model_spec,
@@ -4396,6 +4400,8 @@ def generate_review_report(
     lines = [
         # Model text below is escaped; the parser un-escapes descriptions
         # only under this first line (`report_markdown.has_escaped_text`).
+        # The round line goes under it at publication
+        # (`review_round.publish_report`).
         report_markdown.ESCAPED_TEXT_MARKER,
         "# Code Review Report",
         "",
@@ -4955,6 +4961,7 @@ def code_review_validation_round(
     plan_sha256: Optional[str],
     scope_round_policy: Any,
     state: Any,
+    round_id: Optional[str] = None,
 ) -> ValidationRound:
     """The validation round review-code materializes, after its fan-out and on
     ``--reaggregate``: one builder, so a reaggregate re-validates against the
@@ -4964,6 +4971,7 @@ def code_review_validation_round(
     line: a second path, the live plan, would point a validator at bytes the
     snapshot hash does not cover. The second block is the reviewed code, each
     batch embedding the windows its own issues cite, from one read.
+    *round_id* is the materializing invocation's claim (utils/review_round.py).
     """
     guidance = pinned_guidance_kwargs(pinned, plan_snapshot, plan_sha256)
     cut_report: Dict[str, Any] = {}
@@ -4979,6 +4987,10 @@ def code_review_validation_round(
         phase="code-review",
         base_ref=base_ref,
         **pinned_provenance(pinned, plan_snapshot, plan_sha256, git_root),
+        # The materializing invocation's own round, captured once: the
+        # fan-out's, or on a `--reaggregate` the round it continues
+        # (utils/review_round.py), never a re-read of the checkpoint.
+        round_id=round_id,
     )
     # The guidance, plus the dropped files to open when the reviewed-code
     # block lost any (T7.4), outside every block a context budget can cut.
@@ -5068,6 +5080,15 @@ async def reaggregate_from_existing_files(
     """
     # Find all model result files in the code-review phase directory
     phase_dir = get_phase_dir(plan_path, 'code-review')
+    # The round on record, captured once: everything this reaggregate writes
+    # records it and is published only while the checkpoint still does. A task
+    # file or validation.json of another round is refused before anything is
+    # touched (utils/review_round.py, the check every orchestrator shares).
+    claim = _review_round.continue_round(phase_dir)
+    _review_round.refuse_foreign_round(claim, commit_spelling.spell_retry_command(
+        "review-code", plan_path, "--force",
+        flags=cli_common.current_replay_flags(mode="review-code"),
+    ))
     pattern = str(phase_dir / "*.json")
     # Sorted, so issues.json is reproducible across machines; every phase-dir
     # artifact (grouped, validation, the executor's and write scheduler's
@@ -5402,13 +5423,17 @@ async def reaggregate_from_existing_files(
             commit_attribution_pass = attribute_review_groups(
                 grouped, state, repo_root=git_root or project_root
             )
-            # D7: a re-group orphans any verdicts on disk, so they leave with it.
-            retire_stale_validation(str(phase_dir), reason="grouped.json rewritten by reaggregate")
-            with open(grouped_path, 'w', encoding='utf-8') as f:
-                json.dump(save_groups_payload(grouped), f, indent=2)
+            # D7: a re-group orphans any verdicts on disk, so they leave with it,
+            # in the same step as the new grouped.json (replaced whole).
+            with claim.held("retire the previous validation and regroup"):
+                retire_stale_validation(str(phase_dir), reason="grouped.json rewritten by reaggregate")
+                _review_round.replace_file(
+                    grouped_path, json.dumps(save_groups_payload(grouped), indent=2))
             print(f"Grouped issues saved to: {grouped_path}")
 
         validated_groups_for_report = None
+        # The validation.json bytes the report's verdicts come from, when they do.
+        verdicts: Optional[_review_round.Verdicts] = None
 
         # Task 2.10: a contract-1 round built from an over-limit plan is never
         # reused — retired whole (renamed, kept) and rematerialized below.
@@ -5426,7 +5451,7 @@ async def reaggregate_from_existing_files(
         # Check if we're merging validation batch results
         if not grouped:
             validated_groups_for_report = []
-            validation_path.write_text("[]\n", encoding="utf-8")
+            claim.publish(validation_path, "[]\n", "write validation.json")
         elif not args.skip_validation and validation_tasks_path.exists():
             print("\nMerging validation batch results...")
             # Same resume guard as the plan-review path: a v1 file (no prompts to
@@ -5481,7 +5506,8 @@ async def reaggregate_from_existing_files(
                     from utils.subagent_executor import _atomic_write_json
 
                     try:
-                        _atomic_write_json(str(validation_tasks_path), batch_metadata)
+                        with claim.held("rewrite validation_tasks.json"):
+                            _atomic_write_json(str(validation_tasks_path), batch_metadata)
                     except OSError as exc:
                         print(
                             f"ERROR: Could not persist repaired prompt metadata to "
@@ -5503,16 +5529,19 @@ async def reaggregate_from_existing_files(
             if batches_found == total_batches and total_batches > 0:
                 print(f"All {total_batches} batch files found, merging...")
                 validated_groups_for_report = merge_validation_batches(
-                    str(phase_dir), batch_metadata, grouped, str(validation_path)
+                    str(phase_dir), batch_metadata, grouped, str(validation_path),
+                    claim=claim,
                 )
+                verdicts = claim.verdicts
             else:
                 # An unfinished round reopens the phase before any batch is
                 # handed out, the state a fresh hand-off leaves: an earlier
                 # `--reaggregate --skip-validation` may have recorded it
                 # complete.
+                claim.check("reopen the phase for validation")
                 reopen_phase_for_validation(plan_path, "code-review", phase_dir)
-                if await asyncio.to_thread(
-                    dispatch_subagent_tasks,
+                if await dispatch_in_round(
+                    claim, dispatch_subagent_tasks,
                     args,
                     task_file=str(validation_tasks_path),
                     phase_dir=str(phase_dir),
@@ -5525,8 +5554,10 @@ async def reaggregate_from_existing_files(
                     # D3b: the still-incomplete batches ran in this process (the
                     # completed ones are skipped by their result files, D3i).
                     validated_groups_for_report = merge_validation_batches(
-                        str(phase_dir), batch_metadata, grouped, str(validation_path)
+                        str(phase_dir), batch_metadata, grouped, str(validation_path),
+                        claim=claim,
                     )
+                    verdicts = claim.verdicts
                 else:
                     # The host hand-off's pair, as at the materialization site.
                     report_progress(str(phase_dir), step="validation_pending")
@@ -5547,11 +5578,12 @@ async def reaggregate_from_existing_files(
                     project_root=project_root, git_root=git_root, pinned=pinned,
                     plan_snapshot=plan_snapshot, plan_sha256=plan_sha256,
                     scope_round_policy=scope_round_policy, state=state,
+                    round_id=claim.round_id,
                 ))
 
                 # Save validation task instructions
-                with open(validation_tasks_path, 'w', encoding='utf-8') as f:
-                    json.dump(batched_tasks, f, indent=2)
+                claim.publish(validation_tasks_path, json.dumps(batched_tasks, indent=2),
+                              "write validation_tasks.json")
 
             # 2026-09-21, the remaining lane-parity gap: the phase machine's own
             # word for the stretch that starts here, written UNCONDITIONALLY the
@@ -5568,6 +5600,7 @@ async def reaggregate_from_existing_files(
             # instant-return test tells a polling agent to read. A new round
             # also reopens a phase an earlier `--skip-validation` run recorded
             # complete.
+            claim.check("reopen the phase for validation")
             reopen_phase_for_validation(plan_path, "code-review", phase_dir)
 
             total_batches = batched_tasks["total_batches"]
@@ -5588,8 +5621,8 @@ async def reaggregate_from_existing_files(
 
             # D3b: with --exec-subagents this process dispatches the batch itself
             # and continues to the merge below instead of exiting at the marker.
-            if await asyncio.to_thread(
-                dispatch_subagent_tasks,
+            if await dispatch_in_round(
+                claim, dispatch_subagent_tasks,
                 args,
                 task_file=str(validation_tasks_path),
                 phase_dir=str(phase_dir),
@@ -5600,8 +5633,10 @@ async def reaggregate_from_existing_files(
                 retry_command=reaggregate_cmd,
             ):
                 validated_groups_for_report = merge_validation_batches(
-                    str(phase_dir), batched_tasks, grouped, str(validation_path)
+                    str(phase_dir), batched_tasks, grouped, str(validation_path),
+                    claim=claim,
                 )
+                verdicts = claim.verdicts
             else:
                 # The plan as the user typed it (fix round 14).
                 reaggregate_cmd = resolved_reaggregate_command(
@@ -5657,10 +5692,12 @@ async def reaggregate_from_existing_files(
             **({"pinned": pinned, "repo_root": git_root} if pinned is not None else {}),
         )
 
-        # Save report
+        # Save report: published whole and sealed with this round's line
+        # (utils/review_round.py, "the report's seal").
         report_path = get_output_paths(plan_path, "code_review", phase='code-review')
         report_path = report_path.with_suffix(".md")
-        report_path.write_text(report, encoding="utf-8")
+        _review_round.publish_report(report_path, report, claim=claim,
+                                     verdicts=verdicts)
 
         print("\nReaggregation complete!")
         print(f"Report: {report_path}")
@@ -5696,7 +5733,9 @@ async def reaggregate_from_existing_files(
             unattended=False,
         )
 
-        # Mark phase complete after successful reaggregation
+        # Mark phase complete after successful reaggregation, while the round
+        # on record is still this one's.
+        claim.check("record the phase complete")
         state = get_or_create_state(plan_path)
         state.mark_phase_completed("code-review")
         state.save()
@@ -5768,7 +5807,16 @@ def _plan_file_label(plan_path: Path, args: Any = None) -> str:
 
 
 async def main(argv: Optional[List[str]] = None) -> int:
-    """Main entry point."""
+    """Main entry point: :func:`_main` under this run's hold on the code-review
+    phase dir, taken at its entry and released when it returns or exits
+    (``detach.PhaseRun``; docs/development/runtime.md, "One writer per phase
+    dir")."""
+    with PhaseRun() as run:
+        return await _main(argv, run)
+
+
+async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
+    """The review: a fan-out, or a ``--reaggregate`` of the round on record."""
     # Line buffering + UTF-8/replace stream encoding (Windows-safe output);
     # see utils/stream_bootstrap.py for the full rationale.
     bootstrap_streams()
@@ -5832,6 +5880,12 @@ async def main(argv: Optional[List[str]] = None) -> int:
             print(f"ERROR: Output directory does not exist: {out_dir}")
             sys.exit(1)
 
+        # One writer per phase dir: held from here until this run exits, so a
+        # second run is refused before it reads or changes anything (a
+        # launcher hands it to its worker at the boundary).
+        run.take(get_phase_dir(plan_path, 'code-review'), mode="review-code",
+                 plan_file=str(plan_path), args=args, phase="code-review")
+
         # The review on record's two commits, when state pins them (a commit
         # brief's `commit_range`, a direct round's `head_ref`): resolved
         # strictly here, before the detach boundary and before anything is
@@ -5876,6 +5930,16 @@ async def main(argv: Optional[List[str]] = None) -> int:
         resolve_scope_round(
             get_or_create_state(plan_path), "code-review", args, same_round=True,
             phase_dir=str(get_phase_dir(plan_path, 'code-review')),
+        )
+        # Another round's validation files are refused here too, before the
+        # boundary, so a `--reaggregate --detach` refusal reaches the caller
+        # (the worker checks again against the round it captures).
+        _review_round.refuse_foreign_round(
+            _review_round.continue_round(get_phase_dir(plan_path, 'code-review')),
+            commit_spelling.spell_retry_command(
+                "review-code", plan_path, "--force",
+                flags=cli_common.current_replay_flags(mode="review-code"),
+            ),
         )
 
         # The detach boundary, crossed here as well as on the fan-out path
@@ -5942,6 +6006,13 @@ async def main(argv: Optional[List[str]] = None) -> int:
             await phase_ticker.stop_ticker(final_line=not refused)
         return reaggregate_exit
 
+    # One writer per phase dir, as on the reaggregate path: taken before this
+    # run reads state.json or the phase's files. A `--detach` launcher whose
+    # dir a live run holds re-attaches, takes it over or refuses right here,
+    # before any of its pre-flight (`detach.take_for_launch`).
+    run.take(get_phase_dir(plan_path, 'code-review'), mode="review-code",
+             plan_file=str(plan_path), args=args, phase="code-review")
+
     # Guard against re-running already-completed phase (expensive LLM calls)
     state_guard = get_or_create_state(plan_path)
     # A review pinned to two commits (`--head-ref`, or a commit brief's
@@ -6002,6 +6073,8 @@ async def main(argv: Optional[List[str]] = None) -> int:
         print("NOTE: Cleared previous phase completion (--force mode)")
 
     # Secondary guard: detect partial completion (validation_tasks.json, grouped.json, etc.)
+    # Under the phase lock, so no other run can be writing the files it judges
+    # or completes the phase on.
     if not args.force:
         phase_dir_check = get_phase_dir(plan_path, 'code-review')
         validation_tasks_path = phase_dir_check / "validation_tasks.json"
@@ -6010,8 +6083,41 @@ async def main(argv: Optional[List[str]] = None) -> int:
         report_path_check = phase_dir_check / "report.md"
 
         if validation_tasks_path.exists():
-            if validation_path.exists() and report_path_check.exists():
-                # Auto-heal: all artifacts present, just mark complete
+            # Only the round on record's own files may complete the phase or
+            # be resumed (utils/review_round.py). A `--force` re-run stamps a
+            # new round before it replaces anything, so one stopped early
+            # leaves the previous round's task file, validation.json and
+            # report.md beside a checkpoint that names another round.
+            status_check = read_status(str(phase_dir_check))
+            rounds = _review_round.round_files(phase_dir_check, status_check)
+            unproven = rounds.stale()
+            if not _review_round.tasks_file_is_this_rounds(rounds, status_check):
+                unproven = (_review_round.TASKS_NAME,) + tuple(
+                    name for name in unproven if name != _review_round.TASKS_NAME
+                )
+            if unproven:
+                print("ERROR: Partial completion detected for 'code-review'.")
+                print(f"  {', '.join(unproven)} may not be this round's: "
+                      f"{_review_round.evidence(rounds, unproven, status_check)}.")
+                print("  Files a re-run stopped before replacing look exactly like "
+                      "this, so they neither complete this phase nor resume it.")
+                print("  Re-run with --force: it keeps each reusable model result "
+                      "([SKIP]), regroups and validates again:")
+                print("  " + commit_spelling.spell_retry_command(
+                    "review-code", plan_path, "--force",
+                    flags=cli_common.current_replay_flags(mode="review-code"),
+                ))
+                sys.exit(EXIT_NEEDS_HUMAN)
+            seal = _review_round.report_seal(phase_dir_check)
+            if validation_path.exists() and report_path_check.exists() and (
+                rounds.owner(_review_round.VALIDATION_NAME) == _review_round.OWNED
+                and rounds.owner(_review_round.REPORT_NAME) == _review_round.OWNED
+                and seal.whole and seal.binds_validation
+            ):
+                # Auto-heal: this round's verdicts and report are both on disk
+                # (both record the round on record, and the report is whole and
+                # was built from this very validation.json: its seal), so only
+                # the mark is missing.
                 state_guard.mark_phase_completed("code-review")
                 state_guard.save()
                 update_status(str(phase_dir_check), {"state": "complete"})
@@ -6019,6 +6125,26 @@ async def main(argv: Optional[List[str]] = None) -> int:
                 print("Phase 'code-review' was complete but not marked. Auto-healed state.")
                 print(f"Report: {report_path_check}")
                 sys.exit(0)
+            elif validation_path.exists() and report_path_check.exists():
+                # This round's task file, but a validation.json or report.md
+                # that does not record this round, or a report cut short or
+                # built from another validation.json (its seal): a report
+                # rebuilt from the verdicts the reaggregate checks against this
+                # task file, never a completion taken from the files as they are.
+                unrecorded = (_review_round.VALIDATION_NAME, _review_round.REPORT_NAME)
+                print("ERROR: Partial completion detected for 'code-review'.")
+                if (rounds.owner(_review_round.VALIDATION_NAME) == _review_round.OWNED
+                        and rounds.owner(_review_round.REPORT_NAME) == _review_round.OWNED):
+                    print("  validation.json and report.md record this round, but "
+                          "report.md is not the whole report built from this "
+                          "validation.json (it was cut short, edited, or written "
+                          "before the verdicts were merged again).")
+                else:
+                    print("  validation.json and report.md are on disk, but "
+                          f"{_review_round.evidence(rounds, unrecorded, status_check)}.")
+                print("  Run: --reaggregate, which checks validation.json against this "
+                      "round's task file and rebuilds the report.")
+                sys.exit(3)
             elif validation_path.exists():
                 print("ERROR: Partial completion detected for 'code-review'.")
                 print(f"  validation.json exists but report is missing.")
@@ -6248,6 +6374,15 @@ async def main(argv: Optional[List[str]] = None) -> int:
     if detach_outcome is not None:
         sys.exit(detach_outcome)
 
+    # A new review round, recorded before this process replaces or retires
+    # anything: from here on the previous round's validation files and report
+    # read as another round's, so neither the partial-completion guard nor a
+    # resume answer completes this phase on them (utils/review_round.py). The
+    # opening checkpoint write below carries it, every file this run writes
+    # records it, and each publication checks that the checkpoint still does
+    # (`claim.held`).
+    claim = _review_round.start_round(detach_phase_dir)
+
     # A detached worker takes its lock inside `maybe_detach`, and a commit
     # front door's stage (the new header, `commit_range`, a context-plan
     # snapshot; plans/review-commits.md §2.1) is applied there — after the
@@ -6357,27 +6492,31 @@ async def main(argv: Optional[List[str]] = None) -> int:
     # (`utils/subagent_tasks.py`) checks `validation_tasks.json` against moments
     # later in the same command. review-code's documented validate-then-
     # reaggregate path refused its own task file until this line existed.
-    write_status(str(detach_phase_dir), {
-        "phase": "code-review",
-        "state": "models_running",
-        "started_at": datetime.now().isoformat(),
-        "models_requested": list(model_specs),
-        "error": None,
-        # A re-used phase dir keeps its predecessor's `progress` unless someone
-        # drops it, and on the FOREGROUND lane nobody did: `claim_run` is the
-        # only writer of `progress: None` and only the detached worker calls it,
-        # while `write_status` carries the reserved objects over from disk by
-        # design. So a re-review of the same plan opened with the last run's
-        # per-model map on screen — every slot `done`, `2 ok` — and the
-        # `just finished:` line, whose baseline is "what this map already calls
-        # terminal", could never announce a model whose predecessor row was
-        # already terminal: it was in the baseline before this run seeded it
-        # queued, and in every later poll's baseline after it really finished
-        # (F1, 2026-09-20). Dropping it here is the same move `claim_run` makes,
-        # at the same moment — the write that claims the dir for this fan-out.
-        # `report_progress` below rebuilds it two statements later.
-        "progress": None,
-    })
+    # The opening checkpoint, written while the round is this run's
+    # (`claim.opening`), which puts the id back if the write lost it.
+    with claim.opening():
+        write_status(str(detach_phase_dir), {
+            "phase": "code-review",
+            "state": "models_running",
+            "started_at": datetime.now().isoformat(),
+            "models_requested": list(model_specs),
+            "error": None,
+            _review_round.ROUND_KEY: claim.round_id,
+            # A re-used phase dir keeps its predecessor's `progress` unless someone
+            # drops it, and on the FOREGROUND lane nobody did: `claim_run` is the
+            # only writer of `progress: None` and only the detached worker calls it,
+            # while `write_status` carries the reserved objects over from disk by
+            # design. So a re-review of the same plan opened with the last run's
+            # per-model map on screen — every slot `done`, `2 ok` — and the
+            # `just finished:` line, whose baseline is "what this map already calls
+            # terminal", could never announce a model whose predecessor row was
+            # already terminal: it was in the baseline before this run seeded it
+            # queued, and in every later poll's baseline after it really finished
+            # (F1, 2026-09-20). Dropping it here is the same move `claim_run` makes,
+            # at the same moment — the write that claims the dir for this fan-out.
+            # `report_progress` below rebuilds it two statements later.
+            "progress": None,
+        })
     # ...and read it straight back, because the write above cannot tell us it
     # failed. `write_status` is best-effort by contract (see the module note
     # beside `warn_stem_attribution`): no return value to check and no exception
@@ -6545,6 +6684,12 @@ async def main(argv: Optional[List[str]] = None) -> int:
             tracker=fanout_trackers[0] if fanout_trackers else None,
         )
 
+        # The model results are saved (a later `--force` reuses them);
+        # everything after this belongs to the round, so a run whose round
+        # another run replaced while its models ran stops here
+        # (utils/review_round.py).
+        claim.check("record its models and group their results")
+
         # D3b: a salvage task exists for every model whose output would not parse
         # (emit_salvage_task materialized it above). With --exec-subagents this
         # run repairs them itself, exactly as the fan-out path in
@@ -6568,7 +6713,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
             # while `progress.step` still read `fanout`. Both halves of the cure
             # are the ones the validation window already uses: publish the step
             # *before* the dispatch (so the ticker's lines and a `--poll` both
-            # name the work), and reach the dispatch through `asyncio.to_thread`
+            # name the work), and reach the dispatch off the loop (`phase_thread`)
             # — it ends in `subagent_executor._run_sync`'s
             # `pool.submit(asyncio.run, …).result()` and would otherwise pin
             # this loop and starve the ticker for the whole window, which is
@@ -6577,8 +6722,8 @@ async def main(argv: Optional[List[str]] = None) -> int:
             salvage_ticker = PhaseProgress(str(phase_dir), anchor=str(plan_path))
             salvage_ticker.start_ticker()
             try:
-                repaired = await asyncio.to_thread(
-                    dispatch_salvage_tasks,
+                repaired = await dispatch_in_round(
+                    claim, dispatch_salvage_tasks,
                     args,
                     phase_dir=str(phase_dir),
                     phase='code-review',
@@ -6760,7 +6905,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
         # `pool.submit(asyncio.run, …).result()` for the whole validation
         # window, which used to pin this loop and leave the executor lane with
         # exactly one `[PROGRESS]` line, the teardown one — and it is awaited
-        # through `asyncio.to_thread` below, so the ticker gets its interval
+        # off the loop (`phase_thread`) below, so the ticker gets its interval
         # for those minutes. Everything around it — grouping, the excerpts,
         # `materialize_validation_round`, the merge — is still synchronous,
         # so an interval expiring inside them is serviced only once they
@@ -6792,6 +6937,8 @@ async def main(argv: Optional[List[str]] = None) -> int:
 
             # Group similar issues and validate
             validated_groups_for_report = None
+            # The validation.json bytes the report's verdicts come from, when they do.
+            verdicts: Optional[_review_round.Verdicts] = None
             commit_attribution_pass = None
             if all_issues:
                 # The slot that returned an issue is its reviewer, whatever
@@ -6818,9 +6965,12 @@ async def main(argv: Optional[List[str]] = None) -> int:
                 # alone when the hashes are the same grouping (a resume that
                 # skipped every model), so completed batches are not re-run
                 # (adversarial review, 2026-10-02).
-                retire_validation_for_regroup(str(grouped_path.parent), grouped_list, reason="grouped.json rewritten by a re-run")
-                with open(grouped_path, 'w', encoding='utf-8') as f:
-                    json.dump(save_groups_payload(grouped_list), f, indent=2)
+                # The retirement and the new grouped.json (replaced whole: a
+                # reaggregate reads it back) are one step of this run's round.
+                with claim.held("retire the previous validation and regroup"):
+                    retire_validation_for_regroup(str(grouped_path.parent), grouped_list, reason="grouped.json rewritten by a re-run")
+                    _review_round.replace_file(
+                        grouped_path, json.dumps(save_groups_payload(grouped_list), indent=2))
                 print(f"Grouped issues saved to: {grouped_path}")
 
                 # Validate grouped issues (unless skipped)
@@ -6848,18 +6998,21 @@ async def main(argv: Optional[List[str]] = None) -> int:
                             project_root=project_root, git_root=git_root, pinned=pinned,
                             plan_snapshot=plan_snapshot, plan_sha256=plan_sha256,
                             scope_round_policy=scope_round_policy, state=state,
+                            round_id=claim.round_id,
                         ))
 
-                        # Save validation task instructions
+                        # Save validation task instructions, and the same
+                        # unconditional checkpoint word as the `--reaggregate` site
+                        # above, for the same reason: the stretch starts here, not
+                        # at the host-driven return further down, so the word is
+                        # written before the dispatch that may never come back to
+                        # write it. Both while the round is this run's.
                         validation_tasks_path = phase_dir / "validation_tasks.json"
-                        with open(validation_tasks_path, 'w', encoding='utf-8') as f:
-                            json.dump(batched_tasks, f, indent=2)
-
-                    # The same unconditional write as the `--reaggregate` site
-                    # above, and the same reason: the stretch starts here, not at
-                    # the host-driven return further down, so the word is written
-                    # before the dispatch that may never come back to write it.
-                    update_status(str(phase_dir), {"state": "validation_pending"})
+                        with claim.held("write validation_tasks.json"):
+                            _review_round.replace_file(
+                                validation_tasks_path, json.dumps(batched_tasks, indent=2)
+                            )
+                            update_status(str(phase_dir), {"state": "validation_pending"})
 
                     total_batches = batched_tasks["total_batches"]
                     stats = batched_tasks.get("batching_stats", {})
@@ -6884,8 +7037,8 @@ async def main(argv: Optional[List[str]] = None) -> int:
 
                     # D3b: self-contained mode dispatches and merges here rather than
                     # exiting for a host to drive a second turn.
-                    if await asyncio.to_thread(
-                        dispatch_subagent_tasks,
+                    if await dispatch_in_round(
+                        claim, dispatch_subagent_tasks,
                         args,
                         task_file=str(validation_tasks_path),
                         phase_dir=str(phase_dir),
@@ -6899,8 +7052,10 @@ async def main(argv: Optional[List[str]] = None) -> int:
                             plan_path, "code_review_validation", phase='code-review'
                         )
                         validated_groups_for_report = merge_validation_batches(
-                            str(phase_dir), batched_tasks, grouped_list, str(validation_path)
+                            str(phase_dir), batched_tasks, grouped_list, str(validation_path),
+                            claim=claim,
                         )
+                        verdicts = claim.verdicts
                         validated_groups = validated_groups_for_report
                     else:
                         # The plan as the user typed it (fix round 14).
@@ -6945,10 +7100,12 @@ async def main(argv: Optional[List[str]] = None) -> int:
             else:
                 validated_groups_for_report = []
                 grouped_path = get_output_paths(plan_path, "code_review_grouped", phase='code-review')
-                retire_stale_validation_round(str(grouped_path.parent), reason="review returned no issues")
-                grouped_path.write_text(json.dumps(save_groups_payload([]), indent=2), encoding="utf-8")
+                with claim.held("retire the previous validation and regroup"):
+                    retire_stale_validation_round(str(grouped_path.parent), reason="review returned no issues")
+                    _review_round.replace_file(
+                        grouped_path, json.dumps(save_groups_payload([]), indent=2))
                 validation_path = get_output_paths(plan_path, "code_review_validation", phase='code-review')
-                validation_path.write_text("[]\n", encoding="utf-8")
+                claim.publish(validation_path, "[]\n", "write validation.json")
 
             # Generate report (after validation so we can include validation status)
             # F10: `failed_models` is this run's own authoritative post-salvage map
@@ -6985,10 +7142,12 @@ async def main(argv: Optional[List[str]] = None) -> int:
                 **({"pinned": pinned, "repo_root": git_root} if pinned is not None else {}),
             )
 
-            # Save report
+            # Save report: published whole and sealed with this round's line
+            # (utils/review_round.py, "the report's seal").
             report_path = get_output_paths(plan_path, "code_review", phase='code-review')
             report_path = report_path.with_suffix(".md")
-            report_path.write_text(report, encoding="utf-8")
+            _review_round.publish_report(report_path, report, claim=claim,
+                                         verdicts=verdicts)
             print(f"\nReport saved to: {report_path}")
 
             # A detached run's caller never saw this stdout, so `status` hands the
@@ -7017,7 +7176,9 @@ async def main(argv: Optional[List[str]] = None) -> int:
                 validation_path_out, issues_path_out,
             )
 
-            # Mark phase as completed in state
+            # Mark phase as completed in state, while the round on record is
+            # still this run's.
+            claim.check("record the phase complete")
             state.mark_phase_completed("code-review")
             state.save()
             # And the in-phase machine's terminal word, which `status` renders.

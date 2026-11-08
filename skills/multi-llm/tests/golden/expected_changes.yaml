@@ -598,6 +598,16 @@ changes:
       `usage_support: "partial"` adapter, hence these four token leaves and no
       `cost_usd`. Nothing else in the checkpoint moved, and an adapter that
       reports nothing still writes no key at all.
+  - pointer: /phases/review-plan/status_shape/round_id
+    rationale: >
+      U81, 2026-11-08 — every review fan-out stamps a random `round_id` into
+      `.status.json` before it replaces any file of the previous round, and the
+      round's task file, `validation.json` and `report.md` record it
+      (utils/review_round.py), so review-code's partial-completion guard and
+      `util resume-state` can tell this round's files from an earlier round's
+      without a file date. An added key; every other key, every artifact and
+      every instruction is untouched (review-code's checkpoint is already
+      declared as a subtree under `/phases/code-review/status_shape`).
 
   # ---------------------------------------------------------------------------
   # T2 — `progress` is the one reserved object a FOREGROUND run writes.

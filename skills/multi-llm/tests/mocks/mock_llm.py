@@ -77,6 +77,9 @@ Environment Variables (New - for scenario-based testing):
     MOCK_LLM_TOUCH: Path the mock writes to before answering, so the D3e
         read-only sentinel test can prove a runner that ignores its profile is
         detectable (a genuinely read-only runner never sets this).
+    MOCK_LLM_HOLD: A path. A dispatch writes ``<path>.waiting`` (its pid) and
+        answers only once ``<path>`` exists, or after 60 s. A test overlaps two
+        runs with it: the first run's model call waits while the second runs.
     MOCK_LLM_PRINT_TIMEOUT_BEHAVIOUR: "honour" or "ignore" — agy only. Selects
         one of the two §9.6.e stubs behind `--print-timeout`: the child that
         reaches its own derived cutoff and shuts down cleanly before the outer
@@ -2012,6 +2015,17 @@ def run_print_timeout_stub(provider: str, args: Any) -> Optional[int]:
     return 0
 
 
+def hold_until(path: Optional[str], timeout_s: float = 60.0) -> None:
+    """``MOCK_LLM_HOLD``: announce the held dispatch, then wait for the release
+    file (bounded, so a broken test never hangs the suite)."""
+    if not path:
+        return
+    Path(path + ".waiting").write_text(str(os.getpid()), encoding="utf-8")
+    deadline = time.monotonic() + timeout_s
+    while not os.path.exists(path) and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
 def main() -> int:
     """Main entry point for the unified mock LLM binary.
 
@@ -2066,6 +2080,9 @@ def main() -> int:
     args, prompt = parse_provider_args(provider)
     if not prompt:
         prompt = read_stdin_prompt()
+
+    # A dispatch held at a known point, so a test can overlap two runs.
+    hold_until(os.environ.get("MOCK_LLM_HOLD"))
 
     # A genuinely read-only runner can never do this; the D3e sentinel test uses
     # it to prove the check has teeth rather than passing vacuously.

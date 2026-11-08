@@ -95,6 +95,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.metrics",
         "utils.output_handler",
         "utils.review_diff",
+        "utils.review_round",
         "utils.run_registry",
         "utils.state_manager",
         "utils.status_file",

@@ -690,17 +690,34 @@ class TestPartialCompletionGuard:
         assert "Running code review" in result.stdout
         assert "ERROR: All models failed" in result.stdout
 
-    def test_auto_heals_when_report_and_validation_exist(self, temp_plan):
-        """Auto-heals legacy state when report + validation exist but phase not marked."""
-        phase_dir = get_phase_dir(temp_plan, 'code-review')
-        phase_dir.mkdir(parents=True, exist_ok=True)
-        (phase_dir / "validation_tasks.json").write_text(json.dumps({"tasks_schema_version": 2, "kind": "validation",
-                         "inputs": {"plan_sha256": "", "grouped_sha256": ""},
-                         "batches": []}), encoding="utf-8")
-        (phase_dir / "validation.json").write_text(json.dumps({"groups": []}), encoding="utf-8")
-        (phase_dir / "report.md").write_text("# Report\n\nNo issues found.", encoding="utf-8")
+    @staticmethod
+    def _round_files(phase_dir, round_id=None):
+        """A task file, validation.json and report.md, each recording
+        *round_id* when one is given (none: files from before round ids), the
+        report sealed to that validation.json as its writer seals it."""
+        from utils import review_round
+        from utils.report_markdown import ESCAPED_TEXT_MARKER
 
-        result = subprocess.run(
+        tasks = {"tasks_schema_version": 2, "kind": "validation",
+                 "inputs": {"plan_sha256": "", "grouped_sha256": ""},
+                 "batches": []}
+        validation = {"groups": [], "metadata": {}}
+        report = "# Report\n\nNo issues found."
+        if round_id:
+            tasks["round_id"] = round_id
+            validation["metadata"]["round_id"] = round_id
+        (phase_dir / "validation_tasks.json").write_text(json.dumps(tasks), encoding="utf-8")
+        (phase_dir / "validation.json").write_text(json.dumps(validation), encoding="utf-8")
+        if round_id:
+            report = review_round.report_text(
+                review_round.Claim(str(phase_dir), round_id),
+                f"{ESCAPED_TEXT_MARKER}\n{report}",
+                review_round.verdicts_of((phase_dir / "validation.json").read_bytes()),
+            )
+        (phase_dir / "report.md").write_text(report, encoding="utf-8")
+
+    def _run_plain(self, temp_plan):
+        return subprocess.run(
             [
                 sys.executable, str(SKILL_DIR / "code_review_orchestrator.py"),
                 "--plan-file", str(temp_plan),
@@ -710,12 +727,40 @@ class TestPartialCompletionGuard:
             timeout=15,
             encoding="utf-8",
         )
+
+    def test_auto_heals_when_report_and_validation_exist(self, temp_plan):
+        """Auto-heals when this round's report + validation exist but the phase
+        is not marked: both record the round `.status.json` records."""
+        phase_dir = get_phase_dir(temp_plan, 'code-review')
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        round_id = "0123456789abcdef"
+        self._round_files(phase_dir, round_id)
+        (phase_dir / ".status.json").write_text(json.dumps(
+            {"phase": "code-review", "state": "validation_pending", "round_id": round_id}
+        ), encoding="utf-8")
+
+        result = self._run_plain(temp_plan)
         assert result.returncode == 0
         assert "Auto-healed" in result.stdout
 
         # Verify state was actually marked complete
         state = StateManager(temp_plan)
         assert state.is_phase_completed("code-review")
+
+    def test_files_from_before_round_ids_never_auto_heal(self, temp_plan):
+        """Nothing ties a report and validation without a round id to the run
+        on record, so the guard sends the run to --force instead of recording
+        the phase complete on them (utils/review_round.py)."""
+        phase_dir = get_phase_dir(temp_plan, 'code-review')
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        self._round_files(phase_dir)
+
+        result = self._run_plain(temp_plan)
+        assert result.returncode == 3
+        assert "Partial completion detected" in result.stdout
+        assert "Auto-healed" not in result.stdout
+        assert "--force" in result.stdout
+        assert not StateManager(temp_plan).is_phase_completed("code-review")
 
 
 # ============================================================================

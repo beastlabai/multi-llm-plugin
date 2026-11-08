@@ -230,7 +230,7 @@ def _run_with_validation(tmp_path: Path, threshold: int):
     def _dispatch(_args, **kwargs):
         return True
 
-    def _merged(_phase_dir, _metadata, grouped, _validation_path):
+    def _merged(_phase_dir, _metadata, grouped, _validation_path, claim=None):
         return [
             dict(g.to_dict() if hasattr(g, "to_dict") else g,
                  validation_status="valid")
@@ -1640,7 +1640,7 @@ class TestThePhaseTickerOutlivesTheFanOut:
             window["after"] = len(phase_lines())
             return True
 
-        def merged(_phase_dir, _metadata, grouped, _validation_path):
+        def merged(_phase_dir, _metadata, grouped, _validation_path, claim=None):
             return [
                 (g.to_dict() if hasattr(g, "to_dict") else dict(g))
                 for g in grouped

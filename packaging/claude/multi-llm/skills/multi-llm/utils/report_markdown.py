@@ -330,6 +330,58 @@ def has_escaped_text(content: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Round line
+# ---------------------------------------------------------------------------
+
+#: The second line of a ``report.md`` a review round wrote: the round's id,
+#: then the digest of the ``validation.json`` its verdicts came from (absent
+#: for a report built without one) and of the report's text below the line
+#: (``utils/review_round.py``, "the report's seal"). It sits right under
+#: :data:`ESCAPED_TEXT_MARKER`, a place no model text reaches, and is absent
+#: from a report written before round ids or with no round on record.
+ROUND_LINE_RE = re.compile(
+    r"<!-- multi-llm:round ([0-9a-f]{16,64})"
+    r"(?: validation ([0-9a-f]{16,64}))?"
+    r"(?: report ([0-9a-f]{16,64}))? -->"
+)
+
+
+class RoundMark(NamedTuple):
+    """What a report's round line records (:data:`ROUND_LINE_RE`)."""
+
+    round_id: str
+    validation: Optional[str]
+    body: Optional[str]
+
+
+def round_line(round_id: str, *, validation: Optional[str] = None,
+               body: Optional[str] = None) -> str:
+    """The line that records *round_id* (and the digests) in a report."""
+    parts = [f"<!-- multi-llm:round {round_id}"]
+    if validation:
+        parts.append(f"validation {validation}")
+    if body:
+        parts.append(f"report {body}")
+    return " ".join(parts) + " -->"
+
+
+def report_round_mark(content: str) -> Optional[RoundMark]:
+    """The round line a report records, or ``None``: read only from the line
+    right after :data:`ESCAPED_TEXT_MARKER`, never from anywhere model text is."""
+    lines = (content or "").lstrip("\ufeff").split("\n", 2)
+    if len(lines) < 2 or lines[0].rstrip() != ESCAPED_TEXT_MARKER:
+        return None
+    match = ROUND_LINE_RE.fullmatch(lines[1].rstrip())
+    return RoundMark(*match.groups()) if match else None
+
+
+def report_round(content: str) -> Optional[str]:
+    """The round id a report records, or ``None`` (:func:`report_round_mark`)."""
+    mark = report_round_mark(content)
+    return mark.round_id if mark else None
+
+
+# ---------------------------------------------------------------------------
 # Footer
 # ---------------------------------------------------------------------------
 

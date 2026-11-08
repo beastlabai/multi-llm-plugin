@@ -324,17 +324,47 @@ class LockUnavailable(Exception):
         self.holder = holder or {}
 
 
+#: The phase locks this process holds, by :func:`_phase_lock_key`. The OS
+#: refuses a second take of a held lock on another descriptor even to the
+#: process that holds it (``flock`` is per open file description), so code
+#: that may run inside a holder (a phase main under a composite step's lock,
+#: or under the detached worker's) asks :func:`held_phase_lock` first and
+#: leaves the release to whoever took it.
+_HELD_PHASE_LOCKS: Dict[str, "PhaseLock"] = {}
+
+
+def _phase_lock_key(path: str) -> str:
+    return os.path.normcase(os.path.realpath(str(path)))
+
+
+def held_phase_lock(path: str) -> Optional["PhaseLock"]:
+    """The :class:`PhaseLock` this process holds on *path*, or ``None``."""
+    lock = _HELD_PHASE_LOCKS.get(_phase_lock_key(path))
+    return lock if lock is not None and lock.held else None
+
+
+class LockHandoffFailed(OSError):
+    """A descriptor handed to this process is not the lock it was meant to be."""
+
+
 class PhaseLock:
     """A non-blocking, advisory-on-POSIX / mandatory-on-Windows file lock.
 
     Held on an open fd for the whole run, so a crash releases it even though the
     file remains on disk — which is why "the file exists" is never treated as
-    "someone holds it".
+    "someone holds it". While held it is listed for :func:`held_phase_lock`.
+
+    The descriptor is never inherited by a child (close-on-exec): a provider
+    CLI must not keep a phase locked after its run ends. The one deliberate
+    crossing is a ``--detach`` launch handing the lock to its worker
+    (:meth:`handoff_fd`, :meth:`adopt`, :meth:`disown`; POSIX only, where the
+    ``flock`` belongs to the open file description both processes share).
     """
 
     def __init__(self, path: str):
         self.path = str(path)
         self._fd: Optional[int] = None
+        self._until_exit = False
 
     # -- acquisition ----------------------------------------------------
     def acquire(self, payload: Optional[Dict[str, Any]] = None) -> None:
@@ -344,12 +374,98 @@ class PhaseLock:
             flags |= os.O_BINARY
         fd = os.open(self.path, flags, 0o644)
         try:
+            # PEP 446 already opens it non-inheritable; said here because the
+            # rule is load-bearing (see the class docstring).
+            os.set_inheritable(fd, False)
             self._lock_fd(fd)
         except (OSError, IOError):
             os.close(fd)
             raise LockUnavailable(self.path, read_lock_holder(self.path))
         self._fd = fd
+        _HELD_PHASE_LOCKS[_phase_lock_key(self.path)] = self
         if payload is not None:
+            self._write_payload(payload)
+
+    @classmethod
+    def adopt(cls, path: str, fd: int,
+              payload: Optional[Dict[str, Any]] = None) -> "PhaseLock":
+        """The lock a ``--detach`` launcher handed this process on the
+        inherited descriptor *fd* (POSIX), held from here.
+
+        *fd* must be *path* itself, the same file (``fstat`` against ``stat``),
+        or nothing is adopted: :class:`LockHandoffFailed`, and *fd* is left
+        alone (a number that names some other file here is not ours to
+        close). The ``flock`` is then taken on *fd* again, which succeeds
+        only because the open file description shared with the launcher
+        already holds it, so a lock that was not handed over held is
+        :class:`LockUnavailable` rather than adopted. The descriptor is made
+        close-on-exec at once.
+        """
+        try:
+            on_fd = os.fstat(fd)
+            on_path = os.stat(path)
+        except OSError as exc:
+            raise LockHandoffFailed(
+                exc.errno or errno.EBADF,
+                f"the descriptor handed over ({fd}) is not {path}: {exc.strerror}",
+            ) from None
+        if (on_fd.st_dev, on_fd.st_ino) != (on_path.st_dev, on_path.st_ino):
+            raise LockHandoffFailed(
+                errno.ESTALE, f"the descriptor handed over ({fd}) is not {path}")
+        os.set_inheritable(fd, False)
+        lock = cls(path)
+        try:
+            lock._lock_fd(fd)
+        except (OSError, IOError):
+            raise LockUnavailable(path, read_lock_holder(path))
+        lock._fd = fd
+        _HELD_PHASE_LOCKS[_phase_lock_key(path)] = lock
+        if payload is not None:
+            lock._write_payload(payload)
+        return lock
+
+    def handoff_fd(self) -> int:
+        """A duplicate of the held descriptor for a child to inherit (POSIX):
+        numbered 3 or above, so a child's stdio set-up cannot clobber it, and
+        close-on-exec until the spawn clears that for the one child it hands
+        it to. The caller closes it once the spawn is done."""
+        import fcntl
+
+        assert self._fd is not None
+        return fcntl.fcntl(self._fd, fcntl.F_DUPFD_CLOEXEC, 3)
+
+    def disown(self) -> None:
+        """Close this process's descriptor **without** unlocking. Idempotent.
+
+        After a hand-off the lock lives in the open file description the
+        worker shares: an unlock here would drop it for the worker too, while
+        a close only drops this process's reference, and the kernel releases
+        the lock with the last one. So a worker that adopted it keeps it, and
+        one that died took its copy with it.
+        """
+        fd, self._fd = self._fd, None
+        if fd is None:
+            return
+        key = _phase_lock_key(self.path)
+        if _HELD_PHASE_LOCKS.get(key) is self:
+            del _HELD_PHASE_LOCKS[key]
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    def hold_until_exit(self) -> None:
+        """Keep the lock until this process exits: :meth:`release` does
+        nothing from here on, and the kernel releases the lock when the
+        process's last descriptor closes, after every thread has ended. For a
+        run whose writers may outlive its main code path (a Ctrl-C, an abort);
+        docs/development/runtime.md, "One writer per phase dir"."""
+        self._until_exit = True
+
+    def relabel(self, payload: Dict[str, Any]) -> None:
+        """Rewrite the holder's label in a lock this object holds (a holder
+        that takes a lock over from an earlier holder in its own process)."""
+        if self._fd is not None:
             self._write_payload(payload)
 
     def _lock_fd(self, fd: int) -> None:
@@ -381,15 +497,20 @@ class PhaseLock:
         and a third process ``O_CREAT``s a fresh file at the same path and locks
         that — two workers, two inodes, both believing they own the phase dir,
         interleaving ``.status.json`` merges. (The mirror image is just as bad:
-        a holder displaced by ``break_lock(force=True)`` would, on release,
-        unlink the path its *successor* now owns.) So the file is durable and the
-        lock is what is held: an empty ``{phase}/.lock`` left behind means
-        nothing, exactly as it already does after a crash — see
-        :func:`lock_is_free`, which probes rather than stats.
+        a holder displaced by an unlink would, on release, unlink the path its
+        *successor* now owns.) So the file is durable and the lock is what is
+        held: an empty ``{phase}/.lock`` left behind means nothing, exactly as
+        it already does after a crash — see :func:`lock_is_free`, which probes
+        rather than stats. Nothing at all after :meth:`hold_until_exit`.
         """
+        if self._until_exit:
+            return
         fd, self._fd = self._fd, None
         if fd is None:
             return
+        key = _phase_lock_key(self.path)
+        if _HELD_PHASE_LOCKS.get(key) is self:
+            del _HELD_PHASE_LOCKS[key]
         try:
             _drop_fd_lock(fd)
         finally:
@@ -460,7 +581,7 @@ def lock_is_free(path: str) -> bool:
     return True
 
 
-def break_lock(path: str, *, force: bool = False) -> bool:
+def break_lock(path: str) -> bool:
     """Free a lock whose holder is gone. ``True`` when nobody holds it now.
 
     The proof that the holder is gone is *the lock itself*: this takes it, so a
@@ -474,11 +595,10 @@ def break_lock(path: str, *, force: bool = False) -> bool:
     unlinking: a crashed holder's lock is already free (the OS dropped it), and
     the leftover file is inert — the next acquirer overwrites its payload.
 
-    ``force=True`` is the deliberate ``--force`` path, which the plan defines as
-    taking the dir over from a **live** holder — the one case an unlink is the
-    only available mechanism, since no process can drop another's lock. It still
-    tries the non-destructive path first, so forcing a lock nobody holds does
-    not needlessly unlink an inode a concurrent launcher may be acquiring.
+    **A live holder's lock is never broken**, ``--force`` included: a
+    ``--detach --force`` launch asks the holder to stop through the abort path
+    and then waits to take this same lock, so getting it is the proof the old
+    writer is gone (``detach._stop_holder_and_take``).
     """
     if not os.path.exists(path):
         return True
@@ -486,27 +606,13 @@ def break_lock(path: str, *, force: bool = False) -> bool:
     try:
         probe_lock.acquire()
     except LockUnavailable:
-        pass
+        return False
     except OSError:
         # The file could not even be opened: inconclusive, unless it has since
         # vanished — in which case there is nothing left to hold.
-        if not os.path.exists(path):
-            return True
-    else:
-        probe_lock.release()
-        return True
-    if not force:
-        return False
-    # `--force` against a genuinely held lock. The displaced holder keeps its
-    # (now unnamed) inode and cannot unlink the successor's file, because
-    # `release` no longer unlinks anything.
-    try:
-        os.unlink(path)
-        return True
-    except FileNotFoundError:
-        return True
-    except OSError:
-        return False
+        return not os.path.exists(path)
+    probe_lock.release()
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -2916,6 +3022,7 @@ def spawn_detached_run(
     env: Dict[str, str],
     log_path: Optional[str] = None,
     run_id: str,
+    keep_fds: Sequence[int] = (),
 ) -> Tuple[int, Optional[TreeJob]]:
     """:func:`spawn_detached` for run *run_id*: its pid, and on Windows the
     launcher's handle on the run's named Job Object (2026-10-25).
@@ -2933,8 +3040,18 @@ def spawn_detached_run(
     unchanged), for a run id that names no job, when the name already exists
     (never used: see :func:`_create_run_job`), and whenever the job route
     fails: the spawn is then the one it always was.
+
+    *keep_fds* (POSIX): descriptors the worker inherits at the same numbers,
+    past the sweep that closes everything else (the phase lock a launcher
+    hands its worker, ``detach.launch``). A replaced ``spawn_detached`` starts
+    no process and is handed none.
     """
     spawn = spawn_detached
+    if keep_fds and not IS_WINDOWS and spawn is _REAL_SPAWN_DETACHED:
+        return _spawn_detached_posix(
+            [str(a) for a in argv], cwd=cwd, env=env, log_path=log_path,
+            keep_fds=keep_fds,
+        ), None
     if not IS_WINDOWS or spawn is not _REAL_SPAWN_DETACHED:
         return spawn(argv, cwd=cwd, env=env, log_path=log_path), None
     return _spawn_detached_windows(
@@ -2980,8 +3097,9 @@ def _fd_sweep_limit() -> int:
     return min(max(limit, 3), _FD_SWEEP_CEILING)
 
 
-def _close_inherited_fds() -> None:
-    """Close every descriptor above stdio. Call in a forked child, pre-``exec``.
+def _close_inherited_fds(keep: Sequence[int] = ()) -> None:
+    """Close every descriptor above stdio but *keep*. Call in a forked child,
+    pre-``exec``.
 
     D4's spawn recipe requires the worker to hold *nothing* belonging to the
     host: fds 0/1/2 are replaced, and everything above them has to go, or the
@@ -3012,14 +3130,18 @@ def _close_inherited_fds() -> None:
                 fd = int(name)
             except ValueError:  # pragma: no cover - non-numeric entry
                 continue
-            if fd < 3:
+            if fd < 3 or fd in keep:
                 continue
             try:
                 os.close(fd)
             except OSError:
                 pass
         return
-    os.closerange(3, _fd_sweep_limit())  # pragma: no cover - no fd directory
+    low = 3  # pragma: no cover - no fd directory
+    for fd in sorted(f for f in keep if f >= 3):  # pragma: no cover
+        os.closerange(low, fd)
+        low = fd + 1
+    os.closerange(low, _fd_sweep_limit())  # pragma: no cover
 
 
 def _open_worker_log(log_path: Optional[str]) -> Optional[int]:
@@ -3040,7 +3162,8 @@ def _open_worker_log(log_path: Optional[str]) -> Optional[int]:
 
 
 def _spawn_detached_posix(
-    argv: List[str], *, cwd: str, env: Dict[str, str], log_path: Optional[str]
+    argv: List[str], *, cwd: str, env: Dict[str, str], log_path: Optional[str],
+    keep_fds: Sequence[int] = (),
 ) -> int:
     # Opened here, in the invoker, so the descriptor exists before the fork and
     # the child has nothing to fail at: it only dup2s what it was handed.
@@ -3088,8 +3211,11 @@ def _spawn_detached_posix(
                 # Everything above the three fds replaced above goes with it —
                 # including whatever the *invoker* inherited from the host, which
                 # `execve` alone would carry into the worker and leave the host's
-                # pipe waiting on an EOF that never comes.
-                _close_inherited_fds()
+                # pipe waiting on an EOF that never comes. *keep_fds* stay,
+                # inheritable across the exec for this one child only.
+                _close_inherited_fds(keep_fds)
+                for kept in keep_fds:
+                    os.set_inheritable(kept, True)
                 try:
                     os.chdir(cwd)
                 except OSError:

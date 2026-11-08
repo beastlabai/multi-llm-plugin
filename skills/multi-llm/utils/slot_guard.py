@@ -36,7 +36,6 @@ and home checks) and docs/development/write-safety.md.
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional, Sequence, Union
@@ -124,7 +123,7 @@ class SlotGuard:
         are never compared. The mode baseline is taken for the plugin's own
         jail alone (``mode_check_applies``).
         """
-        sandbox = await asyncio.to_thread(
+        sandbox = await _base.phase_thread(
             _base.sandbox_refusal, self.provider_name, self.project_root
         )
         self.sandbox = sandbox
@@ -138,13 +137,13 @@ class SlotGuard:
             print(f"[{self.display_name}] {sandbox.reason}")
         if _base.porcelain_check_applies(sandbox):
             self._ignore_before = self._resolve_ignore_prefixes()
-            self._tree_before = await asyncio.to_thread(
+            self._tree_before = await _base.phase_thread(
                 _base.porcelain_snapshot, self.project_root,
                 ignore_prefixes=self._resolve_ignore_prefixes(output_folder=False),
                 zones=(self._ignore_before,),
             )
         if _base.mode_check_applies(sandbox):
-            self._mode_before = await asyncio.to_thread(
+            self._mode_before = await _base.phase_thread(
                 _base.mode_snapshot, self.project_root
             )
         return Ready(sandbox)
@@ -232,7 +231,7 @@ class SlotGuard:
                 self.model_spec, _readonly_audit.combine_audits(audits).to_dict()
             )
         if drift is None:
-            tree_after = await asyncio.to_thread(
+            tree_after = await _base.phase_thread(
                 _base.porcelain_snapshot, self.project_root,
                 ignore_prefixes=ignore_after,
             )
@@ -240,7 +239,7 @@ class SlotGuard:
                 self._tree_before, tree_after, ignore_prefixes=ignore_after,
             )
         else:
-            tree_after = await asyncio.to_thread(
+            tree_after = await _base.phase_thread(
                 _base.porcelain_snapshot, self.project_root,
                 ignore_prefixes=_base.common_ignore_prefixes(
                     self._ignore_before, ignore_after
@@ -259,7 +258,7 @@ class SlotGuard:
             if self.tracker is not None:
                 self.tracker.warn(self.model_spec, warning)
             return None
-        siblings = await asyncio.to_thread(
+        siblings = await _base.phase_thread(
             _base.boundaryless_sibling_count,
             self.model_spec, self.project_root, self.plan_path,
         )

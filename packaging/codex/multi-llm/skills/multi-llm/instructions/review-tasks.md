@@ -119,7 +119,7 @@ uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.p
 ```
 
 - `action=run`: nothing to resume; go on to step 3.
-- `action=rerun`: step 3's launch with `--models` set to the `models=` list (comma-separated there) and the `flags=` added (`-` is none): each model with a result keeps it (`[SKIP]`) and only the rest run. Never `--rerun-all`. `models=-` means none was recorded: select the models as for a fresh run. `ownership=uncertain` means validation files on disk may be an earlier round's: the `--force` in `flags=` re-runs the phase over them rather than reporting them.
+- `action=rerun`: step 3's launch with `--models` set to the `models=` list (comma-separated there) and the `flags=` added (`-` is none): each model with a result keeps it (`[SKIP]`) and only the rest run. Never `--rerun-all`. `models=-` means none was recorded: select the models as for a fresh run. `ownership=stale` means validation files on disk are an earlier round's, and `ownership=uncertain` that they may be: the `--force` in `flags=` re-runs the phase over them rather than reporting them.
 - `action=validate`: skip the launch and go to step 6 with `{plan}/review-tasks/validation_tasks.json`; when `batches=` lists numbers, run only those batches (the ones with no `validation_batch_<N>.json` yet), then `--reaggregate` as step 6 says.
 - `action=reaggregate`: skip the launch and run step 6's `--reaggregate`.
 - `action=report`: the phase is complete: report results from `{plan}/review-tasks/report.md` (or `report.html`) and run no orchestrator.

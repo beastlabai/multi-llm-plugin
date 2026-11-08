@@ -27,6 +27,7 @@ try:
     )
     from .subagent_prompts import build_validation_prompt, code_review_validation_guidance
     from . import scope_policy as _sp
+    from . import review_round as _review_round
     from . import scope_round as _scope_round
     from . import validation_sections as _sections
     from .schema_validator import VALIDATION_VERDICTS
@@ -51,6 +52,7 @@ except ImportError:
     )
     from utils.subagent_prompts import build_validation_prompt, code_review_validation_guidance
     from utils import scope_policy as _sp
+    from utils import review_round as _review_round
     from utils import scope_round as _scope_round
     from utils import validation_sections as _sections
     from utils.schema_validator import VALIDATION_VERDICTS
@@ -1777,6 +1779,8 @@ def save_validation_results(
     batch_manifest: Optional[Dict[str, Any]] = None,
     scope: Optional[Dict[str, Any]] = None,
     scope_decisions: Optional[Dict[str, Any]] = None,
+    round_id: Optional[str] = None,
+    claim: Optional["_review_round.Claim"] = None,
 ) -> None:
     """
     Save validation results to a JSON file with metadata.
@@ -1830,6 +1834,15 @@ def save_validation_results(
         scope_decisions: A ``preserve`` round's validation-stage decision
             counts (``scope_round.annotate_decisions``), recorded as
             ``metadata.scope_policy_decisions``.
+        round_id: The review round the merged task file records
+            (``utils/review_round.py``), as ``metadata.round_id``. ``None``
+            adds no key.
+        claim: The writing invocation's round claim: the file is published
+            only while the phase's checkpoint still records that round, and
+            the bytes written become the claim's verdicts, which the report's
+            seal binds (``review_round.Claim.publish_verdicts``). Either way it
+            is written to a temp file and renamed into place, so no reader sees
+            part of it.
 
     Each record keeps the scope keys it carries — the normalized
     ``scope_relation``/``scope_reason``/``scope_reference``, a ``preserve``
@@ -1903,11 +1916,17 @@ def save_validation_results(
             "context_contract": CONTEXT_CONTRACT,
             **(_scope_round.validation_metadata(scope, scope_decisions)
                if scope is not None else {}),
+            **({_review_round.ROUND_KEY: round_id}
+               if _review_round.valid_round(round_id) else {}),
         }
     }
 
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(validation_data, f, indent=2)
+    payload = json.dumps(validation_data, indent=2)
+    if claim is not None:
+        # The bytes written are the report's verdicts (`claim.verdicts`).
+        claim.publish_verdicts(output_path, payload)
+    else:
+        _review_round.replace_file(output_path, payload)
     print(f"[validation] Saved validation results to: {output_path}")
 
 
@@ -2038,7 +2057,9 @@ def prepare_validation_task(
     }
 
 
-def load_validation_results(validation_path: Path) -> List[Dict[str, Any]]:
+def load_validation_results(
+    validation_path: Path, *, raw: Optional[bytes] = None
+) -> List[Dict[str, Any]]:
     """
     Load validation results with migration for older format files.
 
@@ -2048,12 +2069,18 @@ def load_validation_results(validation_path: Path) -> List[Dict[str, Any]]:
 
     Args:
         validation_path: Path to the validation.json file
+        raw: The file's bytes, when the caller read them already (a report
+            built from them binds those exact bytes, ``review_round.Verdicts``);
+            the path is not read again.
 
     Returns:
         List of validation results with all fields populated
     """
-    with open(validation_path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
+    if raw is not None:
+        data = json.loads(raw)
+    else:
+        with open(validation_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
 
     # Handle both old format (list) and new format (dict with groups/metadata)
     if isinstance(data, list):
@@ -2293,6 +2320,10 @@ class RoundProvenance:
       frozen context plan (§2.4), recorded as ``inputs.context_plan_sha256``
       and, relative to the phase dir, ``context_plan_file``, so a resume
       whose snapshot no longer hashes to it is refused.
+    * ``round_id``: the review round the phase's ``.status.json`` records
+      (``utils/review_round.py``), written as the task file's last top-level
+      key; ``None`` writes no key, so the file is byte-identical to one from
+      before round ids.
     """
 
     model: str = "auto"
@@ -2303,6 +2334,7 @@ class RoundProvenance:
     tasks_file: Optional[str] = ""
     context_plan_sha256: Optional[str] = None
     context_plan_file: Optional[str] = None
+    round_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -2391,6 +2423,7 @@ def prepare_batched_validation_tasks(
     secondary_for_batch: Optional[
         Callable[[List[int]], Tuple[str, Optional[BoundDocument], str]]
     ] = None,
+    round_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """The keyword form of :func:`materialize_validation_round`.
 
@@ -2419,12 +2452,19 @@ def prepare_batched_validation_tasks(
             base_ref=base_ref, head_ref=head_ref, tasks_file=tasks_file,
             context_plan_sha256=context_plan_sha256,
             context_plan_file=context_plan_file,
+            round_id=round_id,
         ),
         kind=kind,
         max_per_batch=max_per_batch,
         prompt_budget=prompt_budget,
         publish=publish,
     ))
+
+
+def _round_key(provenance: RoundProvenance) -> Dict[str, str]:
+    """The task file's round key (``utils/review_round.py``), or ``{}``."""
+    round_id = _review_round.valid_round(provenance.round_id)
+    return {_review_round.ROUND_KEY: round_id} if round_id else {}
 
 
 def materialize_validation_round(round_: ValidationRound) -> Dict[str, Any]:
@@ -2559,6 +2599,7 @@ def materialize_validation_round(round_: ValidationRound) -> Dict[str, Any]:
             "model_hint": model,
             "base_ref": base_ref,
             _scope_round.TASK_SCOPE_KEY: scope_meta,
+            **_round_key(provenance),
         })
         return empty
 
@@ -2815,6 +2856,7 @@ def materialize_validation_round(round_: ValidationRound) -> Dict[str, Any]:
     }
     if tasks_file:
         extra["tasks_file"] = tasks_file
+    extra.update(_round_key(provenance))
     document = make_task_file(
         kind=kind,
         tasks=batch_tasks,

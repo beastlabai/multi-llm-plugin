@@ -15,6 +15,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Grouping and section references](#grouping-and-section-references)
 - [Consolidation batches](#consolidation-batches)
 - [Reaggregation and result identity](#reaggregation-and-result-identity)
+- [Round identity](#round-identity)
 - [Malformed result entries](#malformed-result-entries)
 - [Report payload](#report-payload)
 - [Report regeneration](#report-regeneration)
@@ -295,6 +296,88 @@ The moment the slot finds it so, the file is renamed `<stem>.json.stale-earlier-
 `exists()`, and the review base's salvage recovery adopts only a file this attempt's
 `dispatch_salvage_tasks` repaired (Fable review 2026-10-09: left in place, `--exec-subagents`'
 salvage loop and `--reaggregate` both read it back as this round's).
+
+## Round identity
+
+**A review round's files say which round wrote them** (`utils/review_round.py`, code health U81).
+A fan-out of review-plan, review-tasks or review-code stamps a random `round_id` into
+`.status.json` (`review_round.start_round`) right past its detach boundary, before it replaces or
+retires any file of the previous round, and its opening `write_status` carries the same id. The
+round's `validation_tasks.json` records it as a top-level key (`RoundProvenance.round_id`, written
+last, so the file is the one from before round ids plus that key), `validation.json` as
+`metadata.round_id`, copied from the task file the merge read (`merge_validation_batches`), and
+`report.md` on the line right after `ESCAPED_TEXT_MARKER` (`report_markdown.round_line`, read only
+there by `report_markdown.report_round`, never from model text). A `--reaggregate` continues the
+round on record and draws no new id. `report_data.json` gets no key, and a zero-group round's
+`validation.json` stays the bare `[]` its readers expect, so it records none.
+
+Against the checkpoint a file is the round's own (same id), another round's (`stale`, a different
+id) or `legacy` (no id on either side: written before round ids, or by a writer that records none).
+The id is a random token, never a time: a clock set back, a copy that kept its dates or a coarse
+file system cannot make an earlier round's file pass for this one's. Batch files carry none; a
+host's subagents write them as the validator replied, and they follow the task file beside them
+(a regroup that changes the grouping retires them, and the merge joins verdicts by group hash).
+
+The stamp writes `state: models_running` in the same update, so an earlier `validation_pending`
+never stands beside the new id: an interruption between the stamp and the opening write would
+otherwise leave an id-less task file passing the legacy proof below as the new round's.
+
+**Two runs never write one phase dir at once**: every review run holds `{phase}/.lock` from its
+entry to its exit, a second is refused there, and a live holder's lock is never broken (runtime.md,
+"One writer per phase dir"). The claims below are defence in depth behind that lock, should another
+round be stamped regardless (a lock file removed by hand): nothing a run publishes passes for it, and
+a result its batch dispatch persists late is dropped (`review_round.results_bound_to`).
+
+**Each invocation writes for its own round, captured once** (`review_round.Claim`):
+`start_round` returns the fan-out's, `continue_round` a `--reaggregate`'s (the round on record when
+it starts, `None` on a checkpoint without one). Writers take the id from the claim, never from
+`.status.json` again, and every publication (the task file, `validation.json`, `grouped.json` with
+the retirement it replaces, `report.md`) and completion decision runs under `Claim.held`, which
+re-reads the checkpoint under its `.status.lock` mutex and stops the run at exit 3
+(`RoundTakenOver`, a `SystemExit`) unless the checkpoint still records the claim's round. It fails
+closed: a mutex it cannot take (`checkpoint_lock(required=True)`), or a checkpoint that lost an id
+the claim established, stops the run as surely as another round's id. `start_round` establishes a
+round only when it reads its stamp back under the mutex, and the fan-out's opening write runs under
+`Claim.opening`, which puts the id back if that best-effort write landed without it (the run then
+carries on, as on every lost checkpoint write) and never restores a superseded one. A fan-out also
+checks once its model results are saved, before it records, groups or retires anything, so its
+spend stays on disk for the `--force` the message names. Before this, two runs in one phase dir
+each read the other's id off the checkpoint, and a run whose round another run had replaced wrote
+that run's id into its own task file. The files recovery reads (the task file, `validation.json`,
+`grouped.json`, `report.md`, `report.html`, `report_data.json`) are written to a temp file and
+renamed into place (`review_round.replace_file`, `html_report_generator._write_atomic`), so no
+reader sees part of one.
+
+**`report.md`'s round line seals it**: `<!-- multi-llm:round <id> validation <digest> report
+<digest> -->`, inserted at publication (`review_round.publish_report`). `validation` is the digest
+of the exact `validation.json` bytes the report's verdicts came from (`review_round.Verdicts`,
+`Claim.verdicts`): the bytes the merge wrote (`Claim.publish_verdicts`) or the reuse branch read
+and parsed (`Claim.read_verdicts`), carried to the report and never computed by reading the path
+again, which let a report built from one revision certify another of the same round. It is recorded
+only when those bytes record the claim's round (a report never claims a round its verdicts did not
+come from: with id-less verdicts it gets no line), and absent for a report built without them
+(`--skip-validation`, zero groups). `report` is the digest of the text below the line, newlines
+read as `\n`. `review_round.report_seal` checks both against the disk.
+
+Two readers decide on it. review-code's partial-completion guard records the phase complete from
+the files only when `validation.json` and `report.md` both record the round on record and the
+report's seal holds (the whole report, built from this very `validation.json`); a stale task
+file or `validation.json`, or a task file with no id that no `validation_pending` checkpoint ties
+to the run (`review_round.tasks_file_is_this_rounds`), sends the run to `--force`, which keeps
+every reusable result and validates again, and this round's verdicts beside another round's
+report, a report cut short, or one built before the verdicts were merged again send it to
+`--reaggregate`. Before round ids a forced review stopped after its fan-out started left the
+previous round's three files beside a cleared completion, and the next plain review recorded the
+phase complete on them. `util resume-state` answers from the same decision (case c with
+`ownership=stale`, or `uncertain` for a legacy file; references/resume-detection.md). review-plan
+and review-tasks have no such guard: a plain run of either starts a new round.
+
+**A `--reaggregate` reuses or merges only its round's files** (`review_round.refuse_foreign_round`,
+one check for all three orchestrators, before the detach boundary and again on the claim it
+captures): a task file or `validation.json` recording another round is refused at exit 3 naming the
+`--force` re-run, and nothing is changed. Before it, a reaggregate after a `--force` stopped right
+past its stamp merged the previous round's files and wrote a report claiming the new round.
+Files with no id on either side keep the reaggregate's content checks, as before round ids.
 
 ## Malformed result entries
 

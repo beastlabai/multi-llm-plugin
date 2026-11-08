@@ -371,7 +371,7 @@ class TestValidationInputsCarryTheStampedGroupHash:
             captured["prepare_groups"] = round_.groups
             return {"total_batches": 1, "batching_stats": {}}
 
-        def fake_merge(phase_dir, batch_metadata, grouped, validation_path):
+        def fake_merge(phase_dir, batch_metadata, grouped, validation_path, claim=None):
             captured["merge_grouped"] = grouped
             return grouped
 
@@ -2260,7 +2260,7 @@ class TestTheValidationStretchIsNamedBeforeItIsDispatched:
             body = (SKILL_ROOT / rel).read_text(encoding="utf-8")
             sites = [
                 i for i in range(len(body))
-                if body.startswith("json.dump(batched_tasks", i)
+                if body.startswith(("json.dump(batched_tasks", "json.dumps(batched_tasks"), i)
             ]
             assert len(sites) == 2, (
                 f"{rel} materializes a validation document at {len(sites)} "
