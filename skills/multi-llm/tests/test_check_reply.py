@@ -214,19 +214,33 @@ class TestRevalidationRunsTheCheckToo:
         end = text.index("leave its file as it is and say so.", start)
         return " ".join(text[start:end].split())
 
-    def test_each_revalidating_core_carries_the_review_paragraph(self):
+    def test_the_revalidation_runbook_carries_the_review_paragraph(self):
+        """Both apply cores send revalidation to one runbook,
+        ``references/revalidation.md``, which a host reads as it is: the same
+        paragraph, its command behind the ``<prefix>`` that file defines and its
+        path under the ``{review}`` dir the core names."""
         instructions = SKILL_ROOT / "instructions"
         review = self._paragraph(
             (instructions / "review-plan.md").read_text(encoding="utf-8"))
+        text = (SKILL_ROOT / "references" / "revalidation.md").read_text(
+            encoding="utf-8")
+        assert self._paragraph(text) == review.replace(
+            'uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python '
+            '"{SKILL_DIR}/multi_llm.py" util check-reply',
+            "<prefix> util check-reply",
+        ).replace(
+            '"{plan}/review-plan/validation_tasks.json"',
+            '"{plan}/{review}/revalidation_tasks.json"')
+        # Above both the single- and the multi-batch path.
+        assert text.index("util check-reply") < text.index(
+            "### Single batch: `[REVALIDATION_PENDING]`")
         for name, phase in (("apply-suggestions.md", "review-plan"),
                             ("apply-code-fixes.md", "code-review")):
-            text = (instructions / name).read_text(encoding="utf-8")
-            assert self._paragraph(text) == review.replace(
-                '"{plan}/review-plan/validation_tasks.json"',
-                f'"{{plan}}/{phase}/revalidation_tasks.json"'), name
-            # Above both the single- and the multi-batch path.
-            assert text.index("util check-reply") < text.index(
-                "#### Single Batch: `[REVALIDATION_PENDING]`"), name
+            core = (instructions / name).read_text(encoding="utf-8")
+            trigger = next(line for line in core.splitlines()
+                           if "references/revalidation.md" in line)
+            assert "[REVALIDATION_PENDING]" in trigger, name
+            assert f"`{phase}` as its `{{review}}`" in trigger, name
 
     def test_a_revalidation_task_is_checked_like_a_validation_one(self, tmp_path):
         _write(tmp_path, _reply(HASH_A))
@@ -290,12 +304,13 @@ class TestARepliesNotWrittenYet:
         assert "[REPLY_INVALID] validation-batch-0: no reply file" in capsys.readouterr().out
 
     @pytest.mark.parametrize("name", [
-        "review-plan", "review-code", "review-tasks", "apply-suggestions",
-        "apply-code-fixes",
+        "instructions/review-plan.md", "instructions/review-code.md",
+        "instructions/review-tasks.md",
+        # The apply cores' revalidation runbook, which both name by a trigger.
+        "references/revalidation.md",
     ])
     def test_every_runbook_checks_the_whole_file_after_the_subagents_return(self, name):
-        text = " ".join((SKILL_ROOT / "instructions" / f"{name}.md").read_text(
-            encoding="utf-8").split())
+        text = " ".join((SKILL_ROOT / name).read_text(encoding="utf-8").split())
         assert ("(omit `--task-id` to check every batch, and only once every "
                 "batch's subagent has returned: a reply not written yet prints "
                 "`[REPLY_MISSING]`, which is no bad reply and no re-ask)") in text

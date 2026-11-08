@@ -189,7 +189,7 @@ Run it as the full workflow does:
 
 2. When it prints `[CONSOLIDATION_PENDING]` or `[CONSOLIDATION_BATCHES_PENDING]`, load
    `consolidation_tasks.json` from `{plan}/review-plan/` and spawn subagents for its
-   batches as `review-plan.md` step 9 b) does: when a task carries `prompt_path`, the
+   batches as section b) of `references/consolidation.md` (review-plan's step 9) does: when a task carries `prompt_path`, the
    subagent reads that file in full (through line `prompt_lines`) and follows it;
    otherwise pass `task.prompt`, with that step's Strategy A or B for several batches.
    Write each reply to its task's `output_path`, and confirm every `output_path`

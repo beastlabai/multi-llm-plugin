@@ -228,7 +228,10 @@ class TestTaskGenerationCarriesItsPromptFile:
 class TestTheHostIsToldToUseThem:
 
     def test_review_plan_hands_consolidation_subagents_the_file(self):
-        text = _flat("instructions/review-plan.md")
+        # The optional pass is a runbook review-plan's step 9 names by a trigger.
+        assert "read `references/consolidation.md` in full" in _flat(
+            "instructions/review-plan.md")
+        text = _flat("references/consolidation.md")
         assert ("carries a complete `prompt`, and `prompt_path` "
                 "(`consolidation_batch_N.prompt.txt` in the same directory") in text
         assert ("when the task carries `prompt_path`, the subagent reads that file "

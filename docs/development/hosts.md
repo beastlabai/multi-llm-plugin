@@ -143,6 +143,28 @@ manifest, whose one non-zero `${CLAUDE_SKILL_DIR}` row is `SKILL.md` — the Cla
 shim, where the host expands the variable at load time. Each verb is resolved to exactly one
 concrete mechanism *in the shim*; the matrix is never on an agent read path.
 
+**Steps a clean run never takes live in `references/`, behind a trigger sentence.** A served core
+stays in the host's context for the whole phase, so a conditional branch (interrupted-run recovery,
+review-plan's optional consolidation, apply revalidation, review-code's `--apply-fixes`, implement's
+prerequisite markers) is a runbook in `references/`, and the core keeps a trigger that names the
+file, says to read it in full, and carries every condition that can send a host there: each marker,
+flag or state the moved block handled, work already pending included (a `[CONSOLIDATION_PENDING]`
+from an explicit `--consolidate` as well as the recommendation), so searching the core for a printed
+marker finds it. A branch with several ways in names each case and where in the runbook it starts,
+and a sentence saying when to skip the branch spells out every one of those conditions itself, so
+it cannot quietly drop a case (apply revalidation's failed items print no marker until a retry is
+requested, so a skip clause about the markers alone would exclude them). Keep inline anything a
+host must act on without
+that read: the `--yes` resolution of the branch's gate (its D6 row), and any rule that also applies
+outside the branch (the `[SKIP]` retry line, for one, belongs to every `--force` retry). A reference
+is read as it is, never through `render_instruction_text`, so it carries no template token; its
+commands are spelled from the mode word on behind a `<prefix>` the file defines as the core's own
+dispatcher prefix. `tests/test_instruction_references.py` holds all of it: every named reference
+exists; every moved block lives only in its reference, and its trigger and the reference's opening
+name every entry condition in the test's inventory; every marker a reference handles is in that
+inventory, as a way in, a line the trigger itself resolves, or a line met only inside the runbook;
+every skip sentence names all the ways in; and no reference carries a token.
+
 **The frozen pre-refactor core (`legacy/`) was removed on 2026-11-08**; it lives at tag `phase3-pre-refactor`,
 and `MULTI_LLM_LEGACY_INSTRUCTIONS=1` now only earns a stderr line saying so. The regression guard is
 `tests/test_instruction_refactor_guard.py`: a normalized golden bundle of one fully mocked workflow run over

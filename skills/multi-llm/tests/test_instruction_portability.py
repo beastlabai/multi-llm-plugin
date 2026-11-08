@@ -192,8 +192,11 @@ PLACEHOLDER_MANIFEST = {
     # +2 on all three (32 -> 34, 32 -> 34, 28 -> 30): the per-batch `util
     # batch-done` record, the native leg's progress record that a `--resume`
     # skips and `status` counts (reviewer finding 1, fix round 6, 2026-10-05).
-    "instructions/apply-code-fixes.md": (0, 34),
-    "instructions/apply-suggestions.md": (0, 34),
+    # 34 -> 28 on both: the revalidation runbook (its two recovery commands and
+    # its `util check-reply`) moved to `references/revalidation.md`, which a
+    # host reads only when a revalidation marker prints.
+    "instructions/apply-code-fixes.md": (0, 28),
+    "instructions/apply-suggestions.md": (0, 28),
     # 26 -> 28: the post-loop `util check-tasks` graph check (issue 10).
     "instructions/apply-task-suggestions.md": (0, 30),
     # 4 -> 6: the hand-rolled question-file dance (write the file, re-resolve the
@@ -245,7 +248,9 @@ PLACEHOLDER_MANIFEST = {
     # 24 -> 26: the per-task `util batch-done` record replaced the inline
     # `state["task_status"][task_id] = …` Python block the host used to retype
     # (reviewer finding 1, fix round 6, 2026-10-05).
-    "instructions/implement.md": (0, 26),
+    # 26 -> 22: step 0's prerequisite-marker handling, with its two `--skip`
+    # commands, moved to `references/implement-prerequisites.md`.
+    "instructions/implement.md": (0, 22),
     # 3 -> 2: the "substitute {SKILL_DIR} yourself" preamble is obsolete; the core
     # is served pre-substituted.
     "instructions/init-config.md": (0, 2),
@@ -268,8 +273,13 @@ PLACEHOLDER_MANIFEST = {
     # plan D2.6).
     # +2 each on review-code/-plan/-tasks: the `util check-reply` command run after
     # each validation batch is written (issue 11).
-    "instructions/review-code.md": (0, 32),
-    "instructions/review-plan.md": (0, 32),
+    # review-code 32 -> 26: the `--apply-fixes` branch (three `util metrics`
+    # commands) moved to `references/review-code-apply-fixes.md`. review-plan
+    # 32 -> 22: the optional consolidation pass (five commands) moved to
+    # `references/consolidation.md`. Conditional steps a clean run never takes
+    # live in `references/`, behind a trigger sentence the core keeps.
+    "instructions/review-code.md": (0, 26),
+    "instructions/review-plan.md": (0, 22),
     "instructions/review-tasks.md": (0, 22),
     # The shared shim partials (D5). Authored once, interpolated into a rendered
     # shim by `install-host`, and still counted against that shim's rendered line
@@ -309,6 +319,15 @@ PLACEHOLDER_MANIFEST = {
     # skill-dir placeholder of either spelling.
     "references/host-capabilities.md": (0, 0),
     "references/human-decision-batch.md": (0, 0),
+    # The conditional runbooks the cores name with a trigger sentence. A
+    # reference is read as it is, never through `render_instruction_text`, so
+    # it can carry no template token: its commands are spelled from the mode
+    # word on, behind a `<prefix>` the file defines as the core's own.
+    "references/consolidation.md": (0, 0),
+    "references/implement-prerequisites.md": (0, 0),
+    "references/interrupted-run-recovery.md": (0, 0),
+    "references/revalidation.md": (0, 0),
+    "references/review-code-apply-fixes.md": (0, 0),
     # Fix round 27: the one rule both write runbooks point to for a code
     # batch's own check; it names flags, never a command, so no token.
     "references/own-check.md": (0, 0),

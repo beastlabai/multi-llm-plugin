@@ -131,6 +131,8 @@ When validation failed due to parsing errors or timeouts, you can retry:
 - `--revalidate-model MODEL`: Use a different model for retry (e.g., `cursor-agent:opus`)
 - `--revalidate-all-human`: Also re-validate all `needs-human-decision` items
 
+A run with `--revalidate` or `--revalidate-model` stops at a revalidation marker: see *When Validation Fails, and `--revalidate`* under Recovery Workflows.
+
 ### Resume/State Options
 
 - `--resume`: Resume from last checkpoint, skip already-processed items
@@ -828,96 +830,11 @@ The separate mode gives users time to:
 
 ## Recovery Workflows
 
-### When Validation Fails
+### When Validation Fails, and `--revalidate`
 
-If validation produces many `validation_failed` items due to parsing errors or timeouts:
-
-```bash
-# Option 1: Re-run validation with a different model
-uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes \
-  --plan-file "$PLAN_PATH" \
-  --revalidate \
-  --revalidate-model cursor-agent:opus
-
-# Option 2: Bulk approve validation failures (if you trust the fixes)
-uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes \
-  --plan-file "$PLAN_PATH" \
-  --approve-validation-failed
-```
-
-### Handling Revalidation Subagent
-
-When running with `--revalidate`, the orchestrator outputs a revalidation marker.
-
-#### The task file
-
-`revalidation_tasks.json` carries `tasks_schema_version: 2` and one complete task
-per batch under `batches` — each with `prompt`, `output_name`, the derived
-`output_path`, `prompt_path` and `prompt_lines`, `result_channel: file`,
-`context_mode`, `capability_tier`, `executor_role` and `task_id`. The
-sidecar at `prompt_path` holds exactly the bytes of `prompt` (`prompt_lines` is
-its line count), so the two are interchangeable and a host that would otherwise
-re-emit the whole prompt can point the subagent at the file instead. The
-context excerpt and this batch's issue records travel **inside** `prompt`;
-`item_indices` and `original_validation` stay on the file for the merge step.
-The context is the fix diff, which is never named by path. Only when the diff
-is missing and the plan stands in can a plan over the inline limit be named
-once under `## Plan file` (a hash-bound snapshot in the phase dir), making the
-task `context_mode: workspace-read`. The subagent must then be able to read
-that path, so do not run it where it cannot. Never treat such a batch as
-having the full plan inline.
-
-**For each task in the file: when the task carries `prompt_path`, run a subagent
-that reads that file in full — through line `prompt_lines`, paging if a single
-read stops short — and follows it verbatim; otherwise, or if the file is absent,
-run `task.prompt` as a subagent. Either way, write the JSON it returns to
-`task.output_path`.** That is the whole contract — do not assemble a prompt
-beyond that one read instruction, and do not tell the subagent to write the file
-itself. The file's bytes are exactly `task.prompt`; the two are interchangeable.
-
-A file whose `tasks_schema_version` is missing or not `2`, or whose recorded
-`inputs` hashes no longer match their sources, is refused with exit 3: re-run the
-phase with `--force` to re-materialize it.
-
-**Check each reply right after you write it.** Run
-`uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util check-reply --tasks-file "{plan}/code-review/revalidation_tasks.json" --task-id <task_id>`
-(omit `--task-id` to check every batch, and only once every batch's subagent has
-returned: a reply not written yet prints `[REPLY_MISSING]`, which is no bad reply and
-no re-ask). `[REPLY_INVALID]` means the subagent's reply
-did not parse or did not cover its groups — Sonnet subagents lost a closing `]` on 3 of
-14 batches in the 2026-10-01 Claude Code run. Re-ask the same subagent once for the
-whole reply and write the new reply over the file. Never edit, trim or complete a reply
-yourself, and never assemble one from the parts of two replies. A batch still
-`[REPLY_INVALID]` after that one re-ask is a failed batch: leave its file as it is and say so.
-
-#### Single Batch: `[REVALIDATION_PENDING]`
-
-If `[REVALIDATION_PENDING]` marker is present:
-1. Read `revalidation_tasks.json` from `{plan}/code-review/`
-2. Run the single task as the contract above says — the sidecar at `prompt_path`
-   when it has one, `task.prompt` otherwise — and write its JSON reply to that
-   task's `output_path`
-3. After the result file is written, run the orchestrator again (without `--revalidate`)
-
-#### Multiple Batches: `[REVALIDATION_BATCHES_PENDING]`
-
-If `[REVALIDATION_BATCHES_PENDING]` marker is present:
-1. Read `revalidation_tasks.json` from `{plan}/code-review/`
-2. Count the number of batches and choose a strategy:
-
-**Strategy A: Direct parallel spawning (≤ 4 batches)**
-
-For each task in the `batches` array, run the task exactly as the contract above says — the sidecar at `prompt_path` when it has one, `task.prompt` otherwise — and write the JSON it returns to that task's `output_path`.
-
-**Run all batches in parallel** (single message with multiple subagent calls).
-
-**Strategy B: Wave-based parallel spawning (> 4 batches)**
-
-Follow the wave-based spawning strategy in `references/wave-batching.md`.
-
-**Before you continue: verify every batch wrote its file, and do not end your turn before it has.** Confirm that each task's `output_path` exists and is not empty. Re-dispatch any task whose file is missing — exactly as the contract above says — and write its reply yourself; only a batch that comes back empty-handed a second time is a failed batch, and a batch nobody re-dispatched is not one. Spawn batches so their replies return inside this turn, and stay in the turn until the last file is on disk: **you** write these files, not the subagents, and a host that runs one headless turn has no second turn in which to write them — a reply that lands after the turn ends is a batch lost with nothing on disk to say so. Naming the batch you are waiting on is not waiting for it.
-
-3. After ALL batches complete, run the orchestrator again (without `--revalidate`) to merge and continue
+Two cases lead here, and in either you read `references/revalidation.md` in full, with `apply-code-fixes` as its `{mode}` and `code-review` as its `{review}`, and follow it before your next command. Skip this only when no item is `validation_failed` and no run printed `[REVALIDATION_PENDING]` or `[REVALIDATION_BATCHES_PENDING]`.
+- **Failed items to recover:** validation left items `validation_failed` (`summary.validation_failed_count` above 0: a parse error, a timeout or a rate limit, unlike `needs-human-decision`; see Error Types below). No marker prints for these until a retry is requested. Start at the reference's *When validation fails*, which offers the two ways forward: `--revalidate` (optionally with `--revalidate-model`) and `--approve-validation-failed`.
+- **Revalidation pending:** a run with `--revalidate` or `--revalidate-model` printed `[REVALIDATION_PENDING]` (one batch) or `[REVALIDATION_BATCHES_PENDING]` (several) and exited 0 having applied nothing. Start at the reference's *Running the revalidation subagents*.
 
 ### Resuming Interrupted Sessions
 

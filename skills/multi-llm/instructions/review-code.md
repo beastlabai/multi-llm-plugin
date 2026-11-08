@@ -544,109 +544,11 @@ to bare `python`.
 
    **CRITICAL**: Do NOT report results to the user until reaggregation is complete.
 
-8. **If `--apply-fixes` was used, apply fixes by spawning subagents:**
-
-   After the orchestrator outputs `{prefix}_fix_tasks.json`, **spawn one subagent per issue**.
-
-   Before the fix loop, mark the phase start where `{total_fixes}` is the number of fix tasks:
-   ```bash
-   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
-     --state-file "$STATE_FILE" --phase "review-code-fixes" --total-batches {total_fixes}
-   ```
-
-   For each fix task in the JSON file:
-
-   a. Read the fix tasks JSON file to get the list of issues to fix
-   b. For each task, spawn a subagent:
-      ```
-      Spawn one subagent with:
-      - executor_role: "agent"
-      - description: "Fix: {task.title}"
-      - prompt: |
-          Fix the following code issue:
-
-          **Issue**: {task.title}
-          **Type**: {task.type}
-          **Importance**: {task.importance}
-          **Description**: {task.description}
-          **Location hints**: {task.location_hints}
-
-          Plan file for context: {task.plan_path}
-
-          1. Read the relevant files and understand the issue
-          2. Make the necessary code changes to fix it
-          3. Verify your changes don't break anything
-
-          After fixing, report what you changed.
-      ```
-   c. Track fix results (success/failure) for each task
-
-   **Record metrics** for each fix subagent:
-   ```bash
-   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
-     --state-file "$STATE_FILE" --phase "code-review" \
-     --label "Fix: {task_title}" --subagent-type "{executor_role}" \
-     --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
-     --total-batches {total_fixes} --batch-index {N}
-   ```
-   Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports, and `{N}` is the 1-based fix index. Omit any flag it does not report. Never pass `0` for an unknown value; omit the flag — a made-up zero is averaged into the phase totals as a real measurement. The script prints an `[ETA]` line to stderr after each call.
-
-   d. After all fixes are attempted, mark the phase finish:
-   ```bash
-   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
-     --state-file "$STATE_FILE" --phase "review-code-fixes"
-   ```
-
-   e. Update the plan file with a "Review Fixes Applied" section documenting what was fixed
+8. **If `--apply-fixes` was used, apply fixes by spawning subagents:** only then (the orchestrator wrote `{prefix}_fix_tasks.json`), read `references/review-code-apply-fixes.md` in full and follow it: one subagent per issue, then the *Post-Fix Workflow*'s steps 1 to 4. A review without `--apply-fixes` skips this step.
 
 ## Post-Fix Workflow
 
-After spawning subagents to apply fixes:
-
-1. **Wait for all subagents to complete**
-   - Track success/failure of each fix
-
-2. **Run verification**
-   Run the repository's own typecheck/lint commands, if any (for example
-   `pnpm typecheck` and `pnpm lint:fix` in a pnpm project) — this plan may
-   have neither.
-
-3. **Update `{plan}_code_review.md`** with implementation status for each issue:
-
-   For each issue in the code review file, add an "Implementation" subsection:
-
-   ```markdown
-   ### Issue N: [Original Title]
-   **Type**: security | **Importance**: HIGH
-   **Description**: [original description]
-   **Location Hints**: [original hints]
-
-   #### Implementation Status: FIXED
-   **Files Modified**:
-   - `path/to/file1.ts` - Added input validation
-   - `path/to/file2.ts` - Updated error handling
-
-   **Summary**: Added proper input sanitization to prevent SQL injection...
-   ```
-
-   Or if not fixed:
-   ```markdown
-   #### Implementation Status: NOT FIXED
-   **Reason**: Requires architectural changes beyond scope of this review
-   ```
-
-4. **Update the original plan file** by appending a reference section:
-
-   ```markdown
-   ---
-   ## Code Review Applied
-
-   A code review was performed on this implementation. See the full review and implementation details at:
-   **[{plan}_code_review.md](./{plan}/{plan}_code_review.md)**
-
-   **Summary**: X of Y issues were fixed.
-   **Date**: [timestamp]
-   ```
+Steps 1 to 4 of this workflow run only under `--apply-fixes`, and they are in `references/review-code-apply-fixes.md` with step 8. Step 6, the report, runs on every review:
 
 6. **Report results** following `references/summary-format.md`, including files in `{plan}/code-review/`:
 
