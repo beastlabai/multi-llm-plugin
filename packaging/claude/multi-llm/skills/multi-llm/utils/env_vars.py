@@ -113,6 +113,7 @@ HOST_SESSION_MODEL = "MULTI_LLM_HOST_SESSION_MODEL"
 HOST_SANDBOX_POSTURE = "MULTI_LLM_HOST_SANDBOX_POSTURE"
 DETACHED_WORKER = "MULTI_LLM_DETACHED_WORKER"
 WORKER_LOG = "MULTI_LLM_WORKER_LOG"
+PHASE_LOCK_FD = "MULTI_LLM_PHASE_LOCK_FD"
 REPLAY_FLAGS = "MULTI_LLM_REPLAY_FLAGS"
 PLAN_ARG = "MULTI_LLM_PLAN_ARG"
 FX_PATH = "MULTI_LLM_FX_PATH"
@@ -218,6 +219,11 @@ ENV_VARS: Tuple[EnvVar, ...] = (
     _v(WORKER_LOG, HANDSHAKE, "utils/detach.py", False,
        "The launcher's own log path for one worker, consumed by the dispatcher "
        "before pre-flight."),
+    _v(PHASE_LOCK_FD, HANDSHAKE, "utils/detach.py", False,
+       "The inherited descriptor of the phase lock the launcher hands its "
+       "worker (POSIX); the worker checks it names the phase's lock file "
+       "before adopting it. A descriptor number means nothing elsewhere, so "
+       "it is never forwarded."),
     _v(REPLAY_FLAGS, HANDSHAKE, "utils/detach.py", True,
        "The launcher's replayable flags (JSON) for one detached run, written to "
        "the run record once; absent or malformed reads as none."),

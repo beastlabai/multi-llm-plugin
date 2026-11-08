@@ -101,6 +101,10 @@ NOT_REGISTERED: Dict[str, str] = {
     "utils.review_orchestrator_base._CLOSING_LINES":
         "a running phase's closing lines, keyed by its directory and popped "
         "at its close",
+    "utils.detach._ENTRY_HOLDS": "phase locks a review entry holds until its run ends",
+    "utils.detach._PHASE_WORK": "phase-mutating calls still running, joined before the lock is released",
+    "utils.process_control._HELD_PHASE_LOCKS": "phase locks this process holds (re-entrancy)",
+    "utils.review_round._BOUND": "the round each running dispatch thread is bound to",
     "utils.status_file._HELD_MUTEXES": "interprocess mutexes this process holds",
     "utils.validation._VIEWS_LOCKS":
         "the per-phase host-views mutexes this process holds (re-entrant per thread)",
