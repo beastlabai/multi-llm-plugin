@@ -198,26 +198,63 @@ def _kill(pid):
         pass
 
 
-#: A CLI that starts a background writer on its own stdout and stderr and exits
-#: 0 at once. The writer waits past the capture's grace, writes more than a
-#: pipe buffer holds, and records whether the write went through.
-_DELAYED_WRITER = textwrap.dedent("""\
-    import subprocess, sys
-    writer = (
-        "import os, sys, time\\n"
-        "time.sleep(1.0)\\n"
-        "try:\\n"
-        "    os.write(1, b'late\\\\n' * 50000)\\n"
-        "    os.write(2, b'late\\\\n' * 50000)\\n"
-        "    result = 'ok'\\n"
-        "except BrokenPipeError:\\n"
-        "    result = 'epipe'\\n"
-        "open(sys.argv[1], 'w').write(result)\\n"
-    )
-    child = subprocess.Popen([sys.executable, "-c", writer, sys.argv[1]])
-    open(sys.argv[2], "w").write(str(child.pid))
-    print("answer", flush=True)
+#: The background writer: waits for a go file the test creates only after the
+#: capture has returned and closed (an event, not a sleep, so machine load
+#: cannot move the write before the grace), then writes more than a pipe buffer
+#: holds to each stream, looping until every byte is in (one ``os.write`` may
+#: take only part of it, so a single call proves nothing about the whole
+#: payload), and records whether that went through (published whole by a
+#: rename, so the flag never exists empty).
+_LATE_WRITER = textwrap.dedent("""\
+    import os, sys, time
+
+    def put(fd, data):
+        view = memoryview(data)
+        while view:
+            try:
+                view = view[os.write(fd, view):]
+            except BlockingIOError:
+                time.sleep(0.01)
+
+    deadline = time.monotonic() + 60
+    while not os.path.exists(sys.argv[2]) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    try:
+        put(1, b"late\\n" * 50000)
+        put(2, b"late\\n" * 50000)
+        result = "ok"
+    except BrokenPipeError:
+        result = "epipe"
+    open(sys.argv[1] + ".tmp", "w").write(result)
+    os.replace(sys.argv[1] + ".tmp", sys.argv[1])
     """)
+
+#: A CLI that starts that writer on its own stdout and stderr and exits 0 at
+#: once.
+_DELAYED_WRITER = (
+    "import subprocess, sys\n"
+    f"writer = {_LATE_WRITER!r}\n"
+    + textwrap.dedent("""\
+        child = subprocess.Popen([sys.executable, "-c", writer, sys.argv[1], sys.argv[3]])
+        open(sys.argv[2], "w").write(str(child.pid))
+        print("answer", flush=True)
+        """)
+)
+
+
+def _stop_group(proc, *, timeout=15.0):
+    """End a test subprocess and everything it started: it is its own process
+    group leader (``start_new_session``), so the group takes the background
+    writer with it even when the writer's pid was never read."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=timeout)
 
 
 @POSIX_ONLY
@@ -227,27 +264,30 @@ def test_a_survivor_that_writes_after_the_grace_is_not_cut_off(selectable, tmp_p
     running that writes after the capture returned (more than a pipe buffer)
     neither blocks nor dies of SIGPIPE/EPIPE. The drain reads and drops it."""
     flag, marker = tmp_path / "write.result", tmp_path / "writer.pid"
+    go = tmp_path / "go"
+    threads_before = set(_capture_threads())
     proc = subprocess.Popen(
-        [sys.executable, "-c", _DELAYED_WRITER, str(flag), str(marker)],
+        [sys.executable, "-c", _DELAYED_WRITER, str(flag), str(marker), str(go)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
-        text=True, encoding="utf-8", errors="replace",
+        text=True, encoding="utf-8", errors="replace", start_new_session=True,
     )
     capture = _capture(proc, selectable, grace_s=0.3)
-    writer = None
     try:
         out, _err = capture.communicate(timeout=30)
-        writer = int(marker.read_text(encoding="utf-8"))
         assert out == "answer\n" and proc.returncode == 0
         assert capture.pipe_held
         capture.close()
+        go.write_text("go", encoding="utf-8")
         assert _wait_for(flag.exists), "the survivor's write never finished"
         assert flag.read_text(encoding="utf-8") == "ok"
         # What it wrote after the capture let go was dropped, not kept.
         assert capture._sinks["stdout"].snapshot() == b"answer\n"
     finally:
         capture.close()
-        if writer is not None:
-            _kill(writer)
+        _stop_group(proc)
+        # With the writer gone the drains reach end of file and end.
+        assert _wait_for(lambda: not (set(_capture_threads()) - threads_before)), (
+            f"drain threads outlived the test: {_capture_threads()}")
 
 
 #: A CLI that starts a background child on its own stdin (which never reads

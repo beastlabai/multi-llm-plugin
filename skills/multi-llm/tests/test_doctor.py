@@ -667,6 +667,21 @@ class TestDoctorReportsTheLadder:
 
         from utils.provider_registry import get_provider
 
+        class Clock:
+            """The report's clock, moved only by the probes below: the budget
+            is a number of seconds a probe "takes", not a race with the
+            machine. Everything but ``monotonic`` is the real ``time``."""
+
+            now = 1000.0
+
+            def monotonic(self):
+                return self.now
+
+            def __getattr__(self, name):
+                return getattr(time, name)
+
+        clock = Clock()
+        monkeypatch.setattr(doctor, "time", clock)
         provider = get_provider("codex")
         monkeypatch.setattr(
             codex_module, "sandbox_fallback_policy", lambda anchor=None: "auto"
@@ -677,13 +692,13 @@ class TestDoctorReportsTheLadder:
             calls.append((profile, kwargs.get("timeout")))
             if profile == PROFILE_GENERATE:
                 pytest.fail("the read-only probe started on an exhausted budget")
-            time.sleep(0.25)
+            clock.now += 0.25
             return executor.SandboxProbeResult("unavailable", BWRAP_BROKEN_LINE)
 
         monkeypatch.setattr(executor, "sandbox_verdict", slow)
-        started = time.monotonic()
+        started = clock.monotonic()
         row = doctor._probe_sandbox(provider, 0.2, None)
-        assert time.monotonic() - started < 1.0
+        assert clock.monotonic() - started == pytest.approx(0.25)
         assert row["state"] == "unavailable" and row["ok"] is False
         assert row["fallback_probe"] == "unprobed"
         assert doctor._fallback_note("codex", row) == (
@@ -692,12 +707,21 @@ class TestDoctorReportsTheLadder:
 
         # With budget left, the second probe is handed the remainder, not the whole.
         calls.clear()
-        _fake_verdicts(monkeypatch, executor.SandboxProbeResult(
+        walk_verdict = executor.SandboxProbeResult(
             "unavailable", BWRAP_BROKEN_LINE, "landlock", (("landlock", "taken"),),
-        ), calls=calls)
+        )
+
+        def fake(provider, profile, **kwargs):
+            calls.append((profile, kwargs.get("timeout")))
+            if profile == PROFILE_GENERATE:
+                return walk_verdict
+            clock.now += 0.25
+            return executor.SandboxProbeResult("unavailable", BWRAP_BROKEN_LINE)
+
+        monkeypatch.setattr(executor, "sandbox_verdict", fake)
         doctor._probe_sandbox(provider, 5.0, None)
         assert [profile for profile, _ in calls][-1] == PROFILE_GENERATE
-        assert calls[-1][1] <= calls[0][1]
+        assert calls[-1][1] == pytest.approx(calls[0][1] - 0.25)
 
 
 class TestDoctorNamesTheRetiredRung:

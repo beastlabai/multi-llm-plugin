@@ -33,6 +33,7 @@ import sys
 import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -410,20 +411,45 @@ def _parallel_tasks(env, batches=2):
 class _Bodies:
     """``dispatch_task`` with stand-in task bodies, behind the real admission.
 
-    Each body waits until its batch's four tasks have all started or
-    ``HOLD`` seconds pass, so ``peak[batch]`` is exactly the size of the
-    largest group the scheduler admitted together. ``runners`` is the spec
-    each task was dispatched on.
+    Each body waits until ``group[batch]`` tasks are in flight together (an
+    event, so a loaded machine only makes it slower, never different), then
+    ``SETTLE`` seconds more for a task the scheduler should not have admitted
+    to join them. ``peak[batch]`` is the largest number of bodies in flight
+    together; ``admitted(batch)`` is the size of every group the scheduler
+    admitted for it, read from the executor pool it started per group, so a
+    worker that arrives after a settled pair is still counted in the group it
+    was admitted with. ``runners`` is the spec each task was dispatched on.
     """
 
-    HOLD = 0.5
+    #: Only a bound for a group that never forms (a broken scheduler); the
+    #: normal release is the group forming.
+    SAFETY = 30.0
+    #: The window for a wrongly admitted extra task: it can only make a broken
+    #: ceiling pass on a slow machine, never a correct one fail.
+    SETTLE = 0.3
 
-    def __init__(self, monkeypatch) -> None:
+    def __init__(self, monkeypatch, group: Dict[int, int]) -> None:
+        self.group = group
         self.cond = threading.Condition()
         self.in_flight = 0
         self.started: Dict[int, int] = {}
         self.peak: Dict[int, int] = {}
         self.runners: Dict[str, str] = {}
+        #: The task ids submitted to each pool the scheduler opened, in order.
+        self.pools: List[List[str]] = []
+        bodies = self
+
+        class RecordingPool(ThreadPoolExecutor):
+            def __init__(self, *args, **kwargs) -> None:
+                super().__init__(*args, **kwargs)
+                self.members: List[str] = []
+                bodies.pools.append(self.members)
+
+            def submit(self, fn, /, *args, **kwargs):
+                self.members.append(str(args[0]["task_id"]))
+                return super().submit(fn, *args, **kwargs)
+
+        monkeypatch.setattr(scheduler_mod, "ThreadPoolExecutor", RecordingPool)
         monkeypatch.setattr(scheduler_mod, "dispatch_task", self.dispatch)
         monkeypatch.setattr(scheduler_mod, "preflight_runner",
                             lambda spec, **kwargs: {"version": "test"})
@@ -431,21 +457,30 @@ class _Bodies:
         monkeypatch.setattr(WriteBatchScheduler, "_render_argv",
                             lambda *a, **kw: ["stand-in"])
 
+    def admitted(self, batch: int) -> List[int]:
+        """Sizes of the groups admitted for ``batch``: one per pool, and one
+        for each task that ran alone (no pool)."""
+        pooled = [members for members in self.pools
+                  if members and members[0].startswith(f"apply-fix-{batch}-")]
+        alone = self.started.get(batch, 0) - sum(len(m) for m in pooled)
+        return sorted([len(m) for m in pooled] + [1] * alone, reverse=True)
+
     def dispatch(self, task, *, phase_dir, runner, cwd, before_attempt,
                  after_result, **kwargs):
         task_id = task["task_id"]
         batch = int(task["batch_index"])
         before_attempt({"task_id": task_id, "attempt": 1, "cwd": cwd})
-        deadline = time.monotonic() + self.HOLD
+        deadline = time.monotonic() + self.SAFETY
         with self.cond:
             self.in_flight += 1
             self.runners[task_id] = runner
             self.started[batch] = self.started.get(batch, 0) + 1
             self.peak[batch] = max(self.peak.get(batch, 0), self.in_flight)
             self.cond.notify_all()
-            while (self.started[batch] < _PER_BATCH
+            while (self.in_flight < self.group[batch]
                    and time.monotonic() < deadline):
                 self.cond.wait(timeout=0.05)
+        time.sleep(self.SETTLE)
         target = Path(task["declared_files"][0])
         target.write_text(target.read_text() + "applied\n", encoding="utf-8")
         with self.cond:
@@ -485,9 +520,9 @@ class TestAChangeBetweenBatches:
     every batch's upper bound; the second batch binds to any lower value and
     to the runners it really dispatches on."""
 
-    def _run(self, env, monkeypatch, change, *, first_peak=4):
+    def _run(self, env, monkeypatch, change, *, first_peak=4, second_peak):
         tasks = _parallel_tasks(env)
-        bodies = _Bodies(monkeypatch)
+        bodies = _Bodies(monkeypatch, {0: first_peak, 1: second_peak})
         seen = _ceilings_seen(monkeypatch)
         _between_batches(monkeypatch, change)
         result = env.scheduler(
@@ -497,6 +532,12 @@ class TestAChangeBetweenBatches:
         assert len(result.outcomes) == 2 * _PER_BATCH, result.outcomes
         # The control: the first batch's bodies did run together.
         assert bodies.peak[0] == first_peak, bodies.peak
+        # What the scheduler admitted, not only what happened to overlap: a
+        # worker admitted beyond the ceiling can arrive after the others have
+        # finished and leave the peak right.
+        for batch, size in ((0, first_peak), (1, second_peak)):
+            assert bodies.admitted(batch) == [size] * (_PER_BATCH // size), (
+                batch, bodies.pools)
         report = json.loads(Path(executor.batch_report_path(
             str(env.phase_dir), "apply_code_fixes")).read_text())
         return bodies, seen, report["ceilings"]
@@ -504,7 +545,8 @@ class TestAChangeBetweenBatches:
     def test_a_lowered_driver_cap_binds_the_next_batch(self, env, monkeypatch):
         _configure(env, driver_max=4)
         bodies, seen, ceilings = self._run(
-            env, monkeypatch, lambda: _configure(env, driver_max=1))
+            env, monkeypatch, lambda: _configure(env, driver_max=1),
+            second_peak=1)
         assert bodies.peak[1] == 1, bodies.peak
         assert seen == [4, 1], seen
         assert ceilings["effective"] == 4
@@ -513,7 +555,8 @@ class TestAChangeBetweenBatches:
     def test_a_lowered_provider_cap_binds_the_next_batch(self, env, monkeypatch):
         _configure(env, driver_max=4)
         bodies, seen, ceilings = self._run(
-            env, monkeypatch, lambda: _configure(env, driver_max=4, codex_max=1))
+            env, monkeypatch, lambda: _configure(env, driver_max=4, codex_max=1),
+            second_peak=1)
         assert bodies.peak[1] == 1, bodies.peak
         assert seen == [4, 1], seen
         assert ceilings["provider_max_concurrent"] == {"codex": 1}
@@ -524,7 +567,8 @@ class TestAChangeBetweenBatches:
         _configure(env, driver_max=4)
         bodies, seen, ceilings = self._run(
             env, monkeypatch,
-            lambda: _configure(env, "claude-code:sonnet", driver_max=4))
+            lambda: _configure(env, "claude-code:sonnet", driver_max=4),
+            second_peak=2)
         # claude-code ships `max_concurrent: 2`.
         assert bodies.peak[1] == 2, bodies.peak
         assert seen == [4, 2], seen
@@ -553,7 +597,8 @@ class TestAChangeBetweenBatches:
             return "claude-code:sonnet" if codex_gone.is_set() else "codex:gpt-5.5"
 
         monkeypatch.setattr(scheduler_mod, "resolve_task_runner", resolve)
-        bodies, seen, ceilings = self._run(env, monkeypatch, codex_gone.set)
+        bodies, seen, ceilings = self._run(
+            env, monkeypatch, codex_gone.set, second_peak=2)
         assert bodies.peak[1] == 2, bodies.peak
         assert seen == [4, 2], seen
         assert {spec for task_id, spec in bodies.runners.items()
@@ -567,7 +612,7 @@ class TestAChangeBetweenBatches:
         _configure(env, driver_max=2)
         bodies, seen, ceilings = self._run(
             env, monkeypatch, lambda: _configure(env, driver_max=4),
-            first_peak=2)
+            first_peak=2, second_peak=2)
         assert bodies.peak[1] == 2, bodies.peak
         assert seen == [2, 2], seen
         assert ceilings["effective"] == 2
