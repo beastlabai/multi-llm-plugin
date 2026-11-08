@@ -1056,14 +1056,17 @@ class TestASlotWaitingOnTheSemaphoreReadsQueued:
 class TestTheStaggeringRowCarriesItsCountdown:
     """2026-09-21: the fan-out names the sleep it takes, so the row can.
 
-    `run_models_concurrent` is the one caller that knows the stagger delay —
-    `index * PROVIDER_STAGGER_DELAY`, through `get_backoff_delay` — and the
-    tracker cannot infer it. The slot's `staggering` transition is therefore
-    made with that delay, and the map, read at that instant, carries the
-    `stagger_until` the `status` table renders as `starts in Ns`.
+    `run_models_concurrent` is the one caller that knows how long a slot waits
+    for its provider's launch turn — its place in the line times the
+    provider's interval, through `get_backoff_delay` — and the tracker cannot
+    infer it. The slot's `staggering` transition is therefore made with that
+    delay, and the map, read at that instant, carries the `stagger_until` the
+    `status` table renders as `starts in Ns`. On a virtual clock, so each slot
+    waits exactly once.
     """
 
-    MODELS = ["cursor-agent:auto", "codex:gpt-5.5", "pi:auto"]
+    # One provider: the stagger is bucketed by provider.
+    MODELS = ["cursor-agent:auto", "cursor-agent:sonnet", "cursor-agent:gpt-5"]
 
     def test_every_staggered_slot_is_stamped_with_its_own_delay(self, tmp_path):
         phase_dir = tmp_path / "review-plan"
@@ -1077,25 +1080,26 @@ class TestTheStaggeringRowCarriesItsCountdown:
         def spy(spec, **kwargs):
             real(spec, **kwargs)
             # The row as a poll landing on this write would read it.
-            seen[spec] = (kwargs, dict(tracker.snapshot()[spec]))
+            seen.setdefault(spec, (kwargs, dict(tracker.snapshot()[spec])))
 
         async def factory(model_spec, index):
             tracker.running(model_spec, attempt=1)
             return {"success": True, "source": "file"}
 
+        from tests.launch_timeline import run_on_virtual_clock
         with patch.object(base, "PROVIDER_STAGGER_DELAY", 0.02), \
                 patch.object(tracker, "staggering", spy):
-            asyncio.run(base.run_models_concurrent(
+            run_on_virtual_clock(base.run_models_concurrent(
                 list(self.MODELS), factory, 30, 3, tracker=tracker
             ))
 
         head, *tail = self.MODELS
-        assert head not in seen, "index 0 never staggers"
+        assert head not in seen, "a provider's first slot never staggers"
         assert list(seen) == tail
+        step = base.get_backoff_delay(0.02)
         for index, spec in enumerate(tail, start=1):
             kwargs, row = seen[spec]
-            expected = base.get_backoff_delay(index * 0.02)
-            assert kwargs == {"delay_s": expected}, (spec, kwargs)
+            assert kwargs == {"delay_s": index * step}, (spec, kwargs)
             assert row["state"] == "staggering"
             assert "stagger_until" in row, (spec, row)
         # And once dispatched, no row still carries a countdown.

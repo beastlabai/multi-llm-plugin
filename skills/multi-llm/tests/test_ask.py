@@ -1369,23 +1369,60 @@ class TestRunModelsConcurrent:
         asyncio.run(run_models_concurrent(specs, cb, None, 10))
         assert state["max"] <= 2
 
-    def test_applies_staggered_starts(self, monkeypatch):
+    # The launch spacing, asserted on the dispatch timeline the fan-out really
+    # produces (a virtual clock), not on the sleeps it asks for; the
+    # contention and retry schedules are in tests/test_launch_limiter.py.
+
+    @staticmethod
+    def _dispatch_times(monkeypatch, specs, max_parallel=5):
         import utils.review_orchestrator_base as base
-        recorded = []
+        from tests.launch_timeline import now, run_on_virtual_clock
 
-        async def fake_sleep(delay):
-            recorded.append(delay)
-
-        monkeypatch.setattr(base.asyncio, "sleep", fake_sleep)
-        monkeypatch.setattr(base, "get_backoff_delay", lambda x: x)
+        monkeypatch.delenv("MULTI_LLM_TEST_FAST_BACKOFF", raising=False)
+        dispatched = []
 
         async def cb(spec, idx):
+            dispatched.append((spec, now()))
             return spec
 
-        specs = ["gemini:gemini-3-flash", "gemini:gemini-3-pro", "gemini:gemini-2.5-flash"]
-        asyncio.run(run_models_concurrent(specs, cb, None, 5))
-        # index 0 has no stagger; indices 1,2 -> index * PROVIDER_STAGGER_DELAY (2.0).
-        assert recorded == [base.PROVIDER_STAGGER_DELAY, 2 * base.PROVIDER_STAGGER_DELAY]
+        run_on_virtual_clock(base.run_models_concurrent(specs, cb, None, max_parallel))
+        return dict(dispatched)
+
+    def test_applies_staggered_starts(self, monkeypatch):
+        # cursor-agent declares a launch stagger; its first slot starts at once.
+        from utils.providers.cursor_agent import CursorAgentProvider
+        step = CursorAgentProvider.LAUNCH_STAGGER_S
+        assert step > 0
+        specs = ["cursor-agent:auto", "cursor-agent:gpt-5", "cursor-agent:sonnet"]
+        times = self._dispatch_times(monkeypatch, specs)
+        assert [times[s] for s in specs] == [0.0, step, 2 * step]
+
+    def test_slots_of_different_providers_start_together(self, monkeypatch):
+        specs = ["gemini:gemini-3-flash", "claude-code:sonnet", "codex:gpt-5.5",
+                 "cursor-agent:auto"]
+        # Only a repeated provider can wait, and only if its adapter declares one.
+        assert set(self._dispatch_times(monkeypatch, specs).values()) == {0.0}
+
+    def test_a_provider_is_staggered_among_its_own_slots_only(self, monkeypatch):
+        # cursor-agent's second slot sits at global index 3, behind two other
+        # providers: it waits one stagger step, not three.
+        from utils.providers.cursor_agent import CursorAgentProvider
+        step = CursorAgentProvider.LAUNCH_STAGGER_S
+        specs = ["cursor-agent:auto", "gemini:gemini-3-flash", "codex:gpt-5.5",
+                 "cursor-agent:sonnet"]
+        times = self._dispatch_times(monkeypatch, specs)
+        assert [times[s] for s in specs] == [0.0, 0.0, 0.0, step]
+
+    def test_total_timeout_accounts_for_the_largest_stagger(self):
+        import utils.review_orchestrator_base as base
+        from utils.providers.cursor_agent import CursorAgentProvider
+        step = CursorAgentProvider.LAUNCH_STAGGER_S
+        limiter, overhead = base.plan_launch_limiter(["gemini", "codex", "gemini"])
+        assert overhead == 0.0 and not limiter.spaces("gemini")
+        # Three cursor-agent slots, one other: the cursor bucket sets the margin.
+        _, overhead = base.plan_launch_limiter(
+            ["cursor-agent", "gemini", "cursor-agent", "cursor-agent"])
+        assert overhead == 3 * step
 
 
 # ---------------------------------------------------------------------------

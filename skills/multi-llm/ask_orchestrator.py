@@ -89,6 +89,7 @@ from utils.provider_registry import (
 from utils.json_extractor import looks_like_ndjson, sanitize_model_name  # noqa: F401
 from utils.llm_client import ERROR_PARSE_ERROR, armed_homes_window, invoke_with_provider
 from utils.git_utils import get_project_root
+from utils.launch_limiter import attempt_turn
 from utils import process_control
 from utils.detach import (
     VERDICT_RUNNING,
@@ -2232,6 +2233,11 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
         # lane makes exactly one dispatch and has no ladder to count; `timeout_s`
         # is the slot's whole budget, which is the seed's value unless a
         # per-slot override moved it — the one thing the seed could not know.
+        #
+        # The provider's launch turn first, here at the dispatch rather than
+        # where the slot claimed it, so the preparation above (the probe, the
+        # snapshots) cannot eat the spacing (`utils/launch_limiter.py`).
+        await attempt_turn()
         tracker.running(model_spec, attempt=1, timeout_s=per_model_timeout)
 
         call = provider_calls[model_spec] = ProviderCall()

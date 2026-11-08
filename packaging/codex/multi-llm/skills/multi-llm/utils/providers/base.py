@@ -3368,6 +3368,14 @@ class LLMProvider(ABC):
     # ("file") mode should override this to opt out of that check.
     prompt_transport: str = "argv"
 
+    # Minimum seconds between two dispatches of this provider in one fan-out
+    # (0 = never throttled), retries included (``utils/launch_limiter.py``);
+    # dispatches of different providers never wait on each other. Declare a
+    # value only for a CLI with a *measured* concurrent-start fault, and keep it
+    # here rather than in ``providers.yaml``, which a cloned repository can
+    # layer over.
+    LAUNCH_STAGGER_S: float = 0.0
+
     # Which transports this adapter can actually deliver a prompt over (D2d).
     # ``prompt_transport`` above is the one the fan-out path uses by default;
     # this tuple is what a *caller* may ask for, and it is what the materialized

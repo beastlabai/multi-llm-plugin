@@ -129,6 +129,7 @@ from .retry_ladder import (
     STATUS_SALVAGE_UNRECOVERABLE,
     budget_exhausted_reason,
 )
+from .launch_limiter import LaunchLimiter, attempt_turn
 from .git_utils import get_project_root, git_argv
 from .html_report_generator import (
     failed_models_line,
@@ -187,8 +188,13 @@ REQUIRED_FIELDS = ["title", "desc", "importance", "reference", "type"]
 VALID_IMPORTANCE = set(_importance.MODEL_VALUES)
 VALID_TYPES = {"addition", "modification", "deletion", "clarification"}
 
-# Delay between launching provider processes to avoid concurrent launch bugs
-PROVIDER_STAGGER_DELAY = 2.0  # seconds
+# Launch spacing. The minimum interval between two dispatches of the *same*
+# provider is the adapter's own ``LAUNCH_STAGGER_S`` (``utils/providers/base.py``,
+# enforced by ``utils/launch_limiter.py``); this module attribute is only a
+# uniform override of every adapter's value, ``None`` in production. Tests set
+# it (``0.0`` to switch the spacing off, a positive number to force it on
+# providers that declare none).
+PROVIDER_STAGGER_DELAY: Optional[float] = None
 
 # Maximum prompt length to log
 MAX_LOGGED_PROMPT_LENGTH = 5000
@@ -2228,6 +2234,68 @@ def get_backoff_delay(base_delay: float) -> float:
     return base_delay
 
 
+def get_provider_launch_stagger(provider_name: str) -> float:
+    """Seconds between two launches of one provider (0 means none).
+
+    Declared by the adapter (``LLMProvider.LAUNCH_STAGGER_S``), not by
+    ``providers.yaml``; :data:`PROVIDER_STAGGER_DELAY` overrides every adapter
+    when set. A name with no adapter staggers nothing.
+    """
+    if PROVIDER_STAGGER_DELAY is not None:
+        return float(PROVIDER_STAGGER_DELAY)
+    provider = get_provider(provider_name)
+    if provider is None:
+        return 0.0
+    return float(getattr(provider, "LAUNCH_STAGGER_S", 0.0) or 0.0)
+
+
+def plan_launch_limiter(
+    provider_names: Sequence[str],
+) -> Tuple[LaunchLimiter, float]:
+    """One fan-out's launch limiter, and the margin its overall deadline adds.
+
+    The limiter spaces two dispatches of one provider by that provider's
+    stagger (:func:`get_provider_launch_stagger`, through
+    :func:`get_backoff_delay`); a provider with none is never throttled. Every
+    slot of the fan-out shares it, retries included. The margin is the largest
+    provider's slot count times its stagger. See
+    docs/development/delegation.md#read-and-analyze-executor.
+    """
+    counts: Dict[str, int] = {}
+    for name in provider_names:
+        counts[name] = counts.get(name, 0) + 1
+    staggers = {name: get_provider_launch_stagger(name) for name in counts}
+    limiter = LaunchLimiter({
+        name: get_backoff_delay(stagger)
+        for name, stagger in staggers.items() if stagger > 0
+    })
+    overhead = max(
+        (counts[name] * stagger for name, stagger in staggers.items()), default=0.0
+    )
+    return limiter, overhead
+
+
+def slot_launch(
+    limiter: LaunchLimiter,
+    provider_name: str,
+    model_spec: str,
+    display_name: str,
+    tracker: Optional[FanoutProgress] = None,
+) -> Any:
+    """A fan-out slot's launch turn (:meth:`LaunchLimiter.slot`), entered once
+    the slot holds its semaphores: the row reads ``staggering`` while it
+    waits, and ``queued`` again until its dispatch."""
+    return limiter.slot(
+        provider_name,
+        label=display_name,
+        on_wait=(
+            None if tracker is None
+            else lambda seconds: tracker.staggering(model_spec, delay_s=seconds)
+        ),
+        after_wait=None if tracker is None else lambda: tracker.queued(model_spec),
+    )
+
+
 def validate_suggestion(suggestion: dict) -> Tuple[bool, Optional[str]]:
     """Validate that a suggestion has all required fields with valid values."""
     for field in REQUIRED_FIELDS:
@@ -2455,6 +2523,18 @@ class LadderRun:
         return f"{error}{note}"
 
 
+async def _next_attempt_on_turn(ladder: RetryLadder) -> Optional[float]:
+    """``ladder.next_attempt()``, once the slot has its provider's launch turn.
+
+    Taken before the slice is computed, so the wait is charged to the slot's
+    one deadline (§7.5 rule 1) and a turn that came too late is refused like
+    any other attempt the deadline cannot hold. A no-op outside a fan-out slot
+    and for a provider without a launch interval (`utils/launch_limiter.py`).
+    """
+    await attempt_turn(budget=max(0.0, ladder.remaining()))
+    return ladder.next_attempt()
+
+
 async def dispatch_with_ladder(
     dispatch: Callable[[int], Any],
     *,
@@ -2491,12 +2571,14 @@ async def dispatch_with_ladder(
 
     Awaited, not Lane B's blocking loop: the slot runs inside
     ``asyncio.gather`` under two semaphores, where a blocking retry loop would
-    serialize the fan-out. The tracker gets ``running`` at every attempt and
-    ``retrying`` at every backoff; terminal transitions stay the lane's.
+    serialize the fan-out. Every attempt first takes the slot's launch turn
+    (:func:`_next_attempt_on_turn`). The tracker gets ``running`` at every
+    attempt, ``retrying`` at every backoff and ``staggering`` while an attempt
+    waits for its turn; terminal transitions stay the lane's.
     See docs/development/delegation.md#read-and-analyze-executor.
     """
     run = LadderRun(ladder=ladder, timeout=timeout)
-    while (slice_s := ladder.next_attempt()) is not None:
+    while (slice_s := await _next_attempt_on_turn(ladder)) is not None:
         # `round`, not `int`: the invokers take whole seconds, and truncating
         # would spend up to a second of the slot's budget on every attempt.
         # Rule 3 keeps the slice at least MIN_ATTEMPT_BUDGET_S, so the floor
@@ -5020,6 +5102,9 @@ async def run_single_model(
             working_limits=render_working_limits(int(effective_timeout)),
         )
         try:
+            # The provider's launch turn, at the dispatch, after the
+            # preparation above, as a ladder's first attempt takes it.
+            await attempt_turn()
             print(f"[{display_name}] Starting review (timeout: {effective_timeout}s)...")
             if tracker is not None:
                 # This lane makes exactly one dispatch and has no ladder, so the
@@ -5479,8 +5564,10 @@ async def run_models_concurrent(
     - per-provider semaphores derived from ``get_provider_max_concurrent`` (a
       provider's semaphore is acquired *before* the global one so capped
       providers do not hog global slots while waiting for their turn)
-    - staggered launches (``index * PROVIDER_STAGGER_DELAY``, honoring
-      ``MULTI_LLM_TEST_FAST_BACKOFF``)
+    - launch spacing: two dispatches of one provider at least that adapter's
+      ``LAUNCH_STAGGER_S`` apart, a turn taken once the slot holds both
+      semaphores and renewed by every ladder retry (:func:`plan_launch_limiter`,
+      honoring ``MULTI_LLM_TEST_FAST_BACKOFF``); other providers never wait
     - an overall timeout wrapping ``asyncio.gather`` that harvests whatever
       finished before it fired and cancels the stragglers (F2, 2026-09-20: it
       used to harvest nothing, so a deadline threw away the results of the
@@ -5499,10 +5586,10 @@ async def run_models_concurrent(
             overall-timeout calculation.
         max_parallel: Maximum concurrent model invocations.
         skip_predicate: Optional cheap, synchronous ``(model_spec, index) ->
-            Optional[result]`` checked *before* the stagger sleep and any
-            semaphore acquisition. If it returns a non-``None`` value, that
+            Optional[result]`` checked *before* any semaphore acquisition and
+            launch turn. If it returns a non-``None`` value, that
             value is stored as the model's result and the model short-circuits
-            immediately (no stagger delay, no semaphore serialization). This
+            immediately (no launch wait, no semaphore serialization). This
             keeps resume of already-completed models fast. Returning ``None``
             means "not skipped" and the model proceeds normally.
         anchor: Optional discovery anchor (the run's plan-file path). This
@@ -5515,9 +5602,9 @@ async def run_models_concurrent(
             because they are the mechanics it already owns: it seeds every
             requested spec **before** the tasks are created (so a poller sees a
             complete map from the first read instead of one that fills in as
-            models start), transitions a slot to ``staggering`` at the stagger
-            sleep and back to ``queued`` the moment that sleep ends and the
-            semaphore wait begins, records the **terminal** transition for every
+            models start), transitions a slot to ``staggering`` while it waits
+            for its launch turn and back to ``queued`` the moment that wait
+            ends, until its dispatch, records the **terminal** transition for every
             slot from the result dict — the skip predicate's return and the
             factory's alike, since both are result dicts carrying
             ``success``/``source``/``error`` — retires a slot that raised, names
@@ -5545,6 +5632,11 @@ async def run_models_concurrent(
             if limit is not None:
                 provider_semaphores[prov] = asyncio.Semaphore(limit)
 
+    # Launch spacing, shared by every slot and retry (see `plan_launch_limiter`).
+    launcher, stagger_overhead = plan_launch_limiter(
+        [parse_model_spec(spec, anchor=anchor)[0] for spec in model_specs]
+    )
+
     async def run_with_semaphore(model_spec: str, index: int) -> Tuple[str, Any]:
         # Display-only, but still anchored: a bare spec must render the same
         # provider the router chose, not a second, different guess (§9.3.c).
@@ -5571,33 +5663,19 @@ async def run_models_concurrent(
                     tracker.record_result(model_spec, skipped)
                 return (model_spec, skipped)
 
-        # Stagger launches
-        if index > 0:
-            base_stagger = index * PROVIDER_STAGGER_DELAY
-            stagger_delay = get_backoff_delay(base_stagger)
-            print(f"[{display_name}] Waiting {stagger_delay:.1f}s before starting (staggered launch)...")
-            if tracker is not None:
-                tracker.staggering(model_spec, delay_s=stagger_delay)
-            await asyncio.sleep(stagger_delay)
-            # The stagger is spent, but this slot is not dispatched: the two
-            # semaphores below can park it for minutes (five models at
-            # `max_parallel: 2` park three of them), and `running` is only
-            # reached inside the factory's coroutine. Without this the whole
-            # wait rendered `staggering` — a state the slot left at the line
-            # above — while index 0, which never staggers, rendered the same
-            # wait as `queued`. One word for one wait.
-            if tracker is not None:
-                tracker.queued(model_spec)
-
-        # Acquire provider semaphore first (if any), then global semaphore.
+        # Acquire provider semaphore first (if any), then global semaphore,
+        # then the provider's launch turn: spacing is between dispatches, so a
+        # slot parked on a semaphore (`queued`) has not taken a turn yet, and
+        # it reads `staggering` only while it waits for one.
         prov_sem = provider_semaphores.get(provider_name)
+        turn = slot_launch(launcher, provider_name, model_spec, display_name, tracker)
         try:
             if prov_sem:
                 async with prov_sem:
-                    async with semaphore:
+                    async with semaphore, turn:
                         result = await per_model_coro_factory(model_spec, index)
             else:
-                async with semaphore:
+                async with semaphore, turn:
                     result = await per_model_coro_factory(model_spec, index)
         except Exception as exc:
             # A task that raised is printed as `Task exception:` and dropped from
@@ -5650,7 +5728,6 @@ async def run_models_concurrent(
             for spec in model_specs
         )
 
-    stagger_overhead = len(model_specs) * PROVIDER_STAGGER_DELAY
     total_timeout = base_timeout * 2 + stagger_overhead
 
     # Created alongside the `gather`, cancelled-and-awaited in the `finally`.
@@ -5773,11 +5850,11 @@ async def run_tasks_concurrent(
       acquired *before* the global one, and **shared in shape** with the fan-out
       path so a mixed-tier batch on one provider contends on ONE semaphore
       (the rate limit belongs to the provider, not the model)
-    - the same stagger, bucketed by resolved provider
+    - the same launch spacing, per resolved provider
     - the same overall timeout wrapping ``asyncio.gather``
 
-    ``model_spec`` is used *only* to pick the provider semaphore and stagger
-    bucket; it is a column on each row, never the key. ``run_models_concurrent``
+    ``model_spec`` is used *only* to pick the provider semaphore and launch
+    spacing; it is a column on each row, never the key. ``run_models_concurrent``
     keeps its current signature and callers.
 
     Args:
@@ -5789,7 +5866,7 @@ async def run_tasks_concurrent(
         max_parallel: The global gate (``driver.max_concurrent_subagents``,
             already reduced to D3i's three-way minimum by the caller).
         skip_predicate: Cheap synchronous ``(task, runner, index) -> result|None``
-            checked *before* the stagger sleep and any semaphore acquisition, so a
+            checked *before* any semaphore acquisition and launch turn, so a
             resume of already-complete tasks stays fast.
         provider_limits: Optional per-provider in-flight overrides (D3i
             backpressure narrows a throttled provider's slots for the rest of the
@@ -5823,6 +5900,13 @@ async def run_tasks_concurrent(
         if limit is not None:
             provider_semaphores[prov] = asyncio.Semaphore(limit)
 
+    launcher, stagger_overhead = plan_launch_limiter(
+        [
+            parse_model_spec(runners[str(task.get("task_id", index))], anchor=anchor)[0]
+            for index, task in enumerate(tasks)
+        ]
+    )
+
     async def run_with_semaphore(task: Dict[str, Any], index: int) -> Tuple[str, Any]:
         task_id = str(task.get("task_id", index))
         runner = runners[task_id]
@@ -5835,17 +5919,16 @@ async def run_tasks_concurrent(
             if skipped is not None:
                 return (task_id, skipped)
 
-        if index > 0:
-            stagger_delay = get_backoff_delay(index * PROVIDER_STAGGER_DELAY)
-            await asyncio.sleep(stagger_delay)
-
+        # The launch turn is taken inside both semaphores, as on the fan-out;
+        # `dispatch_task` confirms or renews it before every attempt.
         prov_sem = provider_semaphores.get(provider_name)
+        turn = launcher.slot(provider_name, label=f"{task_id} {runner}")
         if prov_sem:
             async with prov_sem:
-                async with semaphore:
+                async with semaphore, turn:
                     return (task_id, await per_task_coro_factory(task, runner, index))
         else:
-            async with semaphore:
+            async with semaphore, turn:
                 return (task_id, await per_task_coro_factory(task, runner, index))
 
     coros = [
@@ -5860,7 +5943,7 @@ async def run_tasks_concurrent(
             get_provider_timeout(parse_model_spec(spec, anchor=anchor)[0], anchor=anchor)
             for spec in runners.values()
         )
-    total_timeout = base_timeout * 2 + len(tasks) * PROVIDER_STAGGER_DELAY
+    total_timeout = base_timeout * 2 + stagger_overhead
 
     try:
         completed = await asyncio.wait_for(

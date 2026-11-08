@@ -1567,7 +1567,7 @@ def _run_cro_review(tmp_path: Path, replies: Dict[str, Dict[str, Any]], **arg_ov
          patch.object(cro, "validate_git_ref", side_effect=lambda ref: ref or "HEAD~1"), \
          patch.object(cro, "intent_to_add_untracked",
                       side_effect=lambda files, **_: contextlib.nullcontext()), \
-         patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
+         patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), \
          patch.object(cro, "invoke_with_file_output",
                       side_effect=lambda **kwargs: replies[kwargs["model_spec"]]):
         exit_code = asyncio.run(cro.main())
@@ -3486,7 +3486,7 @@ class TestAFanOutCutOffMidRun:
              patch.object(cro, "validate_git_ref", side_effect=lambda ref: ref or "HEAD~1"), \
              patch.object(cro, "intent_to_add_untracked",
                           side_effect=lambda files, **_: contextlib.nullcontext()), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
+             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), \
              patch.object(cro, "invoke_with_file_output", side_effect=reply):
             with pytest.raises(SystemExit):
                 asyncio.run(cro.main())

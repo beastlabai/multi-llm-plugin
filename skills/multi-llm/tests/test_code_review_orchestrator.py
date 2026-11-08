@@ -1209,7 +1209,7 @@ class TestTheFanoutReportsProgressWhileItRuns:
             calls.append(dict(updates))
 
         with patch.object(cro, "run_single_review", new=_answering_review()), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
+             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), \
              patch.object(base._detach, "report_progress", record):
             results = asyncio.run(cro.run_all_reviews(
                 ["cursor-agent:auto", "claude-code:sonnet", "codex:gpt-5.5"],
@@ -1244,7 +1244,7 @@ class TestTheFanoutReportsProgressWhileItRuns:
             calls.append(dict(updates))
 
         with patch.object(cro, "run_single_review", new=_answering_review()), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
+             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), \
              patch.object(base._detach, "report_progress", record):
             results = asyncio.run(cro.run_all_reviews(
                 ["cursor-agent:auto", "claude-code:sonnet"],
@@ -1295,7 +1295,7 @@ class TestThisLanesOwnFanoutCarriesTheMapAndTheTicker:
             real_report_progress(phase_dir, **updates)
 
         with patch.object(cro, "run_single_review", new=_answering_review()), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
+             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), \
              patch.object(base._detach, "report_progress", record):
             asyncio.run(cro.run_all_reviews(specs, plan_path, tmp_path, 30, 3))
 
@@ -1332,7 +1332,7 @@ class TestThisLanesOwnFanoutCarriesTheMapAndTheTicker:
             return True, [], None
 
         with patch.object(cro, "run_single_review", new=fake_review), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
+             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), \
              patch.object(progress_tracker, "_monotonic", clock.monotonic), \
              patch.object(progress_tracker, "_tick_sleep", clock.sleep), \
              patch.object(progress_tracker, "_emit", emitted.append):
@@ -1363,7 +1363,7 @@ class TestThisLanesOwnFanoutCarriesTheMapAndTheTicker:
             return True, [], None
 
         with patch.object(cro, "run_single_review", new=fake_review), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
             asyncio.run(cro.run_all_reviews(
                 ["cursor-agent:auto", "claude-code:sonnet"],
                 plan_path, tmp_path, 30, 2,
@@ -1435,7 +1435,7 @@ class TestASlotWaitingOnTheSemaphoreReadsQueuedOnThisFanout:
             await task
 
         with patch.object(cro, "run_single_review", new=fake_review), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
             asyncio.run(drive())
 
         assert seen["head"] == "running", seen
@@ -1455,13 +1455,15 @@ class TestASlotWaitingOnTheSemaphoreReadsQueuedOnThisFanout:
 class TestTheStaggeringRowCarriesItsCountdownOnThisFanout:
     """2026-09-21, this lane's copy: `run_all_reviews` names the sleep it takes.
 
-    The base's `run_models_concurrent` reaches nothing here, so the one
-    `tracker.staggering` call this fan-out makes has to pass `delay_s` itself
-    — without it the row reads `staggering` with no `starts in Ns`, on the
+    The base's `run_models_concurrent` reaches nothing here, so this fan-out
+    has to hand its own tracker to its slots' launch turns (`slot_launch`) —
+    without it the row reads `staggering` with no `starts in Ns`, on the
     one lane a user watching a `--review-code` launch would see.
     """
 
-    MODELS = ["cursor-agent:auto", "claude-code:sonnet", "codex:gpt-5.5"]
+    # One provider: launch spacing is per provider, so only repeated slots of
+    # one provider wait.
+    MODELS = ["cursor-agent:auto", "cursor-agent:sonnet", "cursor-agent:gpt-5"]
 
     def test_every_staggered_slot_is_stamped_with_its_own_delay(self, tmp_path):
         plan_path = tmp_path / "plan.md"
@@ -1472,7 +1474,7 @@ class TestTheStaggeringRowCarriesItsCountdownOnThisFanout:
         def spy(self, spec, **kwargs):
             real(self, spec, **kwargs)
             # The row as a poll landing on this write would read it.
-            seen[spec] = (kwargs, dict(self.snapshot()[spec]))
+            seen.setdefault(spec, (kwargs, dict(self.snapshot()[spec])))
 
         async def fake_review(model_spec, *args, **kwargs):
             tracker = kwargs["tracker"]
@@ -1480,21 +1482,23 @@ class TestTheStaggeringRowCarriesItsCountdownOnThisFanout:
             tracker.done(model_spec, source="file")
             return True, [], None
 
+        # On a virtual clock, so each slot waits for its launch turn exactly once.
+        from tests.launch_timeline import run_on_virtual_clock
         with patch.object(cro, "run_single_review", new=fake_review), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.02), \
+             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.02), \
              patch.object(progress_tracker.FanoutProgress, "staggering", spy):
-            asyncio.run(cro.run_all_reviews(
+            run_on_virtual_clock(cro.run_all_reviews(
                 list(self.MODELS), plan_path, tmp_path, 30, 3,
             ))
 
         head, *tail = self.MODELS
-        assert head not in seen, "index 0 never staggers"
+        assert head not in seen, "a provider's first slot never staggers"
         assert list(seen) == tail
+        step = base.get_backoff_delay(0.02)
         for index, spec in enumerate(tail, start=1):
             kwargs, row = seen[spec]
-            # This lane sleeps the bare product; it does not route the delay
-            # through `get_backoff_delay`, and the row must say what it slept.
-            assert kwargs == {"delay_s": pytest.approx(index * 0.02)}, (spec, kwargs)
+            # The row must say how long the slot waits for its turn.
+            assert kwargs == {"delay_s": pytest.approx(index * step)}, (spec, kwargs)
             assert row["state"] == "staggering"
             assert "stagger_until" in row, (spec, row)
         # And once dispatched, no row still carries a countdown.
@@ -1531,7 +1535,7 @@ class TestEveryEndingRetiresEverySlotOnThisFanout:
         # `timeout=0` makes `total_timeout` 0 with the stagger patched out, so
         # `asyncio.wait_for` fires its deadline on the first suspension.
         with patch.object(cro, "run_single_review", new=never_returns), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
             results = asyncio.run(
                 cro.run_all_reviews(specs, plan_path, tmp_path, 0, 2)
             )
@@ -1592,7 +1596,7 @@ class TestEveryEndingRetiresEverySlotOnThisFanout:
             return True, issues, None
 
         with patch.object(cro, "run_single_review", new=one_answers_one_straggles), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
             results = asyncio.run(
                 cro.run_all_reviews(specs, plan_path, tmp_path, 0.05, 2)
             )
@@ -1644,7 +1648,7 @@ class TestEveryEndingRetiresEverySlotOnThisFanout:
             return True, [], None
 
         with patch.object(cro, "run_single_review", new=one_explodes), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
             results = asyncio.run(
                 cro.run_all_reviews(specs, plan_path, tmp_path, 30, 2)
             )
@@ -1694,7 +1698,7 @@ class TestEveryEndingRetiresEverySlotOnThisFanout:
                 await task
 
         with patch.object(cro, "run_single_review", new=hang), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
             asyncio.run(scenario())
 
         phase_dir = cro.get_phase_dir(plan_path, "code-review")
@@ -1730,7 +1734,7 @@ class TestAResumedRunDoesNotReportSkippedModelsAsPending:
             raise AssertionError("a resumed slot must not dispatch")
 
         with patch.object(cro, "run_single_review", new=never_dispatched), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
             results = asyncio.run(
                 cro.run_all_reviews(specs, plan_path, tmp_path, 30, 2)
             )
@@ -1814,7 +1818,7 @@ class TestThePhaseTickerCoversTheRestOfThePhase:
              patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "run_single_review", new=fake_review), \
              patch.object(cro, "run_all_reviews", new=watched_fanout), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
+             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), \
              patch.object(progress_tracker, "_monotonic", clock.monotonic), \
              patch.object(progress_tracker, "_tick_sleep", clock.sleep), \
              patch.object(progress_tracker, "_emit", emitted.append):
@@ -3642,7 +3646,7 @@ def _run_fanout_capturing_prompts(tmp_path, monkeypatch, args_overrides, *, diff
     monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
     monkeypatch.setattr(cro, "get_project_root", lambda _p: str(tmp_path))
     monkeypatch.setattr(cro, "invoke_with_file_output", dispatch)
-    monkeypatch.setattr(cro, "PROVIDER_STAGGER_DELAY", 0.0)
+    monkeypatch.setattr(base, "PROVIDER_STAGGER_DELAY", 0.0)
     if stdin is not None:
         import io
 
@@ -3996,7 +4000,7 @@ def _scope_fanout(plan, monkeypatch, models, *, respond=None, capabilities=None,
     monkeypatch.setattr(rob, "get_provider", lambda _name: _NoProbeAdapter())
     monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
     monkeypatch.setattr(cro, "invoke_with_file_output", dispatch)
-    monkeypatch.setattr(cro, "PROVIDER_STAGGER_DELAY", 0.0)
+    monkeypatch.setattr(base, "PROVIDER_STAGGER_DELAY", 0.0)
     if capabilities is not None:
         real = _llm_client.get_provider
         monkeypatch.setattr(

@@ -68,7 +68,8 @@ from utils.review_orchestrator_base import (
     REQUIRED_FIELDS,
     VALID_IMPORTANCE,
     VALID_TYPES,
-    PROVIDER_STAGGER_DELAY,
+    plan_launch_limiter,
+    slot_launch,
     derive_prefix,
     read_plan,
     get_backoff_delay,
@@ -189,6 +190,9 @@ async def run_all_models(
             limit = get_provider_max_concurrent(prov, anchor=plan_path)
             if limit is not None:
                 provider_semaphores[prov] = asyncio.Semaphore(limit)
+    launcher, stagger_overhead = plan_launch_limiter(
+        [parse_model_spec(spec, anchor=plan_path)[0] for spec in model_specs]
+    )
     results = {}
 
     async def _run_with_semaphore(model_spec, index):
@@ -222,22 +226,19 @@ async def run_all_models(
                 except Exception:
                     print(f"[{display_name}] Existing result file corrupt, re-running...")
 
-        if index > 0:
-            stagger_delay = get_backoff_delay(index * PROVIDER_STAGGER_DELAY)
-            print(f"[{display_name}] Waiting {stagger_delay:.1f}s before starting (staggered launch)...")
-            await asyncio.sleep(stagger_delay)
-
         # Acquire provider semaphore first (if any), then global semaphore.
         # This order prevents capped providers from hogging global slots while
-        # waiting for their provider-specific turn.
+        # waiting for their provider-specific turn. The provider's launch turn
+        # comes last, as on the base's fan-out.
         prov_sem = provider_semaphores.get(provider_name)
+        turn = slot_launch(launcher, provider_name, model_spec, display_name)
         if prov_sem:
             async with prov_sem:
-                async with semaphore:
+                async with semaphore, turn:
                     result = await run_single_model(model_spec, plan_path, timeout, out_dir=out_dir, prefix=prefix)
                     return (model_spec, result)
         else:
-            async with semaphore:
+            async with semaphore, turn:
                 result = await run_single_model(model_spec, plan_path, timeout, out_dir=out_dir, prefix=prefix)
                 return (model_spec, result)
 
@@ -256,7 +257,6 @@ async def run_all_models(
             for spec in model_specs
         )
 
-    stagger_overhead = len(model_specs) * PROVIDER_STAGGER_DELAY
     total_timeout = base_timeout * 2 + stagger_overhead
 
     try:

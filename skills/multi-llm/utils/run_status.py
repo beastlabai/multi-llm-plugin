@@ -93,7 +93,7 @@ from .progress_tracker import (
     STATE_QUEUED,
     STATE_RETRYING,
     TERMINAL_STATES,
-    WAITING_STATES,
+    awaits_first_dispatch,
     entry_budget,
     entry_elapsed_s,
     entry_queued_s,
@@ -1476,7 +1476,9 @@ def _model_timing_text(entry: Dict[str, Any]) -> str:
       started_at`` for a map written before ``dispatched_at`` existed);
     * the wait before dispatch, :func:`progress_tracker.entry_queued_s`.
 
-    A row still waiting for its dispatch (``queued``/``staggering``) renders
+    A row still waiting for its first dispatch (``queued``/``staggering``,
+    :func:`progress_tracker.awaits_first_dispatch`; a retry waiting for its
+    launch turn renders its run time) renders
     ``waiting 7m45s`` and no budget: it has spent none, and ``7m30s/20m`` —
     what it rendered until the wait and the run were separated — read as budget
     spent (plan: review-run-scope-salvage-and-failure-visibility §6). A
@@ -1517,7 +1519,7 @@ def _model_timing_text(entry: Dict[str, Any]) -> str:
     cannot be read costs the ``, queued`` clause, never the run time beside it.
     """
     terminal = bool(entry.get("ended_at"))
-    if not terminal and str(entry.get("state") or "") in WAITING_STATES:
+    if not terminal and awaits_first_dispatch(entry):
         try:
             wait = entry_queued_s(entry)
         except Exception:
@@ -1561,8 +1563,8 @@ def _model_detail_text(entry: Dict[str, Any]) -> str:
         retry_after = entry.get("retry_after_s")
         if isinstance(retry_after, (int, float)) and not isinstance(retry_after, bool):
             details.append(f"retry in {retry_after:.0f}s")
-    # `starts in 4s`: the launch ramp, named. Slots dispatch
-    # `index * PROVIDER_STAGGER_DELAY` apart, and the launch-time poll — taken at
+    # `starts in 4s`: the launch ramp, named. Slots of a provider
+    # dispatch its `LAUNCH_STAGGER_S` apart, and the launch-time poll — taken at
     # second zero on purpose, for the roster — met every row but the first
     # reading `staggering`, which a reader took for the fan-out running its
     # models one at a time (2026-09-21). The state word is the lifecycle's and

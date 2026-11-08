@@ -107,13 +107,15 @@ LIVE_STATES: Tuple[str, ...] = (
     STATE_RUNNING, STATE_RETRYING, STATE_STAGGERING, STATE_QUEUED,
 )
 
-#: The live states that mean *admitted, not yet dispatched*: the slot is
-#: sleeping out its stagger or parked on a concurrency semaphore. A row in one
-#: of them has no run time yet — :func:`entry_elapsed_s` is ``None`` for it —
-#: only a wait (:func:`entry_queued_s`). Read from ``state`` and never from the
-#: absence of ``dispatched_at``, so a map written before that key existed reads
-#: its queued rows the same way (plan: review-run-scope-salvage-and-failure-
-#: visibility §6.2).
+#: The live states that mean *waiting for a dispatch*: the slot is waiting for
+#: its provider's launch turn or parked on a concurrency semaphore. A row in one
+#: of them that has not dispatched yet has no run time — :func:`entry_elapsed_s`
+#: is ``None`` for it — only a wait (:func:`entry_queued_s`); read through
+#: :func:`awaits_first_dispatch`, from ``state`` and not from the absence of
+#: ``dispatched_at`` alone, so a map written before that key existed reads its
+#: queued rows the same way (plan: review-run-scope-salvage-and-failure-
+#: visibility §6.2). A retry waiting for its launch turn is ``staggering`` too,
+#: and it has dispatched.
 WAITING_STATES = frozenset({STATE_QUEUED, STATE_STAGGERING})
 
 #: How many queued slots the ``[PROGRESS]`` line names, longest wait first,
@@ -331,6 +333,21 @@ def format_budget(seconds: Optional[float]) -> str:
     return f"{minutes}m"
 
 
+def awaits_first_dispatch(entry: Any) -> bool:
+    """Whether this live row is waiting and has never dispatched.
+
+    A :data:`WAITING_STATES` row with no ``dispatched_at``: admitted, not yet
+    run, so it has a wait and no run time. A ``staggering`` row that carries
+    ``dispatched_at`` is a retry waiting for its provider's launch turn: its run
+    time keeps counting from the first dispatch, against the same deadline.
+    """
+    return (
+        isinstance(entry, Mapping)
+        and _entry_state(entry) in WAITING_STATES
+        and not entry.get("dispatched_at")
+    )
+
+
 def entry_elapsed_s(
     entry: Mapping[str, Any], now: Optional[float] = None
 ) -> Optional[float]:
@@ -341,11 +358,12 @@ def entry_elapsed_s(
     1. ``ended_at`` present -> the stored ``elapsed_s``, frozen at the terminal
        transition and never touched again, so a table rendered an hour later
        shows the slot's real duration rather than a clock that kept running.
-    2. A row still waiting for its dispatch (``state`` in
-       :data:`WAITING_STATES`) -> ``None``. It has no run time yet; what it
-       has is a wait, and :func:`entry_queued_s` is the rule for that. Keyed on
-       ``state`` rather than on a missing ``dispatched_at``, so a map written
-       before that key existed reads its queued rows the same way.
+    2. A row still waiting for its first dispatch
+       (:func:`awaits_first_dispatch`) -> ``None``. It has no run time yet;
+       what it has is a wait, and :func:`entry_queued_s` is the rule for that.
+       Keyed on ``state`` rather than on a missing ``dispatched_at`` alone, so
+       a map written before that key existed reads its queued rows the same
+       way. A retry waiting for its launch turn has dispatched: rule 3.
     3. A live row carrying ``dispatched_at`` -> ``now - dispatched_at``,
        clamped at ``timeout_s``. Always fresh, which is why no writer has to
        tick.
@@ -375,7 +393,7 @@ def entry_elapsed_s(
         if isinstance(stored, bool) or not isinstance(stored, (int, float)):
             return None
         return float(stored)
-    if _entry_state(entry) in WAITING_STATES:
+    if awaits_first_dispatch(entry):
         return None
 
     # One ISO parser for the whole checkpoint (`heartbeat_at`, `dispatched_at`,
@@ -427,12 +445,13 @@ def entry_queued_s(
       beside ``elapsed_s``, or ``None`` when none was stored (a map written
       before the key existed, or a slot a ``--reaggregate`` closed out without
       knowing when its wait would have ended).
-    * A row still waiting (:data:`WAITING_STATES`) -> ``now - started_at``: the
-      wait so far, **unclamped**, because a wait is not charged to the slot's
-      budget.
-    * A live dispatched row -> the stored ``queued_s`` the first dispatch
-      wrote, measured on the monotonic clock; failing that, ``dispatched_at -
-      started_at``, since both stamps are exact.
+    * A row still waiting for its first dispatch
+      (:func:`awaits_first_dispatch`) -> ``now - started_at``: the wait so far,
+      **unclamped**, because a wait is not charged to the slot's budget.
+    * A live dispatched row, a retry waiting for its launch turn included ->
+      the stored ``queued_s`` the first dispatch wrote, measured on the
+      monotonic clock; failing that, ``dispatched_at - started_at``, since
+      both stamps are exact.
     * A live row with no ``dispatched_at`` in any other state (a map written
       before the key existed) -> ``None``: its wait was never recorded.
 
@@ -447,7 +466,7 @@ def entry_queued_s(
 
     from . import detach
 
-    if _entry_state(entry) in WAITING_STATES:
+    if awaits_first_dispatch(entry):
         return detach._elapsed_since(entry.get("started_at"), now)
     dispatched = entry.get("dispatched_at")
     if not dispatched:
@@ -1049,17 +1068,20 @@ class FanoutProgress:
         return None if entry["state"] in TERMINAL_STATES else entry
 
     def staggering(self, spec: str, *, delay_s: Optional[float] = None) -> None:
-        """The slot is waiting out its stagger delay before dispatch.
+        """The slot is waiting for its provider's launch turn before dispatch.
 
-        **Only the stagger sleep**, not the semaphore wait that follows it —
-        see :meth:`queued`, which is where the slot goes next.
+        **Only that wait**, not the semaphore wait before it — see
+        :meth:`queued`, which is where the slot waits for a semaphore and where
+        it goes back to until its dispatch. A retry's wait for a launch turn is
+        this state too, between ``retrying`` and ``running``.
 
         *delay_s* is the sleep the caller is about to take, and it is what the
-        row renders (2026-09-21): a fan-out launches its slots
-        ``index * PROVIDER_STAGGER_DELAY`` apart, so the launch-time ``status``
-        call — made on purpose at second zero, because the roster is the one
-        thing worth relaying before the loop — finds every row but the first
-        reading ``staggering``, which a reader took for the models being run one
+        row renders (2026-09-21): a fan-out dispatches a provider at most once
+        per ``LAUNCH_STAGGER_S`` (an adapter that declares none never
+        staggers), so the launch-time ``status`` call — made on purpose at
+        second zero, because the roster is the one thing worth relaying before
+        the loop — finds every later slot of a staggering provider reading
+        ``staggering``, which a reader took for the models being run one
         at a time. The word was true and said nothing about *how long*. The
         entry therefore carries ``stagger_until``, the wall-clock stamp the sleep
         ends at, and the table's detail column reads it back as ``starts in
@@ -1080,18 +1102,15 @@ class FanoutProgress:
         self._write()
 
     def queued(self, spec: str) -> None:
-        """The stagger is over; the slot is waiting for a concurrency slot.
+        """The launch wait is over; the slot is admitted, not yet dispatched.
 
         The other half of :meth:`staggering`, and the seeded state read back
         (2026-09-21). ``max_parallel`` — and a provider's own
-        ``max_concurrent`` — park a slot *after* its stagger sleep has elapsed
-        and *before* the per-model coroutine that calls :meth:`running` is
-        entered, and nothing marked that boundary: five models at
-        ``max_parallel: 2`` rendered three rows as ``staggering`` for as long
-        as they waited, minutes after every stagger delay had run out, which
-        the lifecycle does not describe. Index 0 never staggers and never calls
-        this — it reads ``queued`` from the seed until it runs — so the two
-        waits are one state either way.
+        ``max_concurrent`` — park a slot in this state from the seed; a slot
+        that then waited for its launch turn comes back here until the
+        per-model coroutine calls :meth:`running`, as a slot that never waited
+        reads it from the seed until it runs, so the waits that are not the
+        launch spacing are one state either way.
 
         Not a step backwards: ``queued`` is *admitted, not yet dispatched*, and
         that is exactly what a slot parked on a semaphore is. :meth:`_live_entry`
@@ -1805,8 +1824,10 @@ def retire_live_entries(
     the rule all three close-out writers share (the third is
     ``review_orchestrator_base.flip_map_entries_to_done``): a row that
     dispatched freezes ``elapsed_s`` as ``now - dispatched_at`` and keeps its
-    ``queued_s``; a row still waiting (``queued``/``staggering``) freezes
-    ``elapsed_s: 0`` and ``queued_s`` as ``now - started_at``, because this
+    ``queued_s`` (a retry waiting for its launch turn is one); a row still
+    waiting for its first dispatch (``queued``/``staggering``, no
+    ``dispatched_at``) freezes ``elapsed_s: 0`` and ``queued_s`` as
+    ``now - started_at``, because this
     runs at the real end of the run, so *now* is when that wait ended. Without
     the ``queued_s`` half, every row an abort retired would lose the wait the
     table exists to show. The figures come from the persisted wall stamps

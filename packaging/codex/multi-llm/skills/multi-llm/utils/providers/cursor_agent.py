@@ -1132,6 +1132,10 @@ class CursorAgentProvider(LLMProvider):
     strategies for code blocks and raw JSON.
     """
 
+    #: cursor-agent has known faults when several copies start at once, so
+    #: two of its dispatches in one fan-out start at least 2 s apart.
+    LAUNCH_STAGGER_S = 2.0
+
     # D3j: the `--output-format json` envelope really does carry a `usage`
     # block, so this adapter is not duration-only. `partial` rather than `full`
     # because the envelope has **no cost field at all** — the nine keys are

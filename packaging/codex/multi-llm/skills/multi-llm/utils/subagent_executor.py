@@ -59,6 +59,7 @@ from typing import (
 try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import process_control
     from . import structured_output
+    from .launch_limiter import attempt_turn_blocking
     from .text_clip import clip
     from .json_extractor import (
         describe_syntax_error,
@@ -195,6 +196,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
 except ImportError:  # pragma: no cover - direct-script import shim
     from utils import process_control
     from utils import structured_output
+    from utils.launch_limiter import attempt_turn_blocking  # type: ignore
     from utils.text_clip import clip  # type: ignore
     from utils.json_extractor import (
         describe_syntax_error,
@@ -7747,6 +7749,10 @@ def dispatch_task(
         )
 
     while True:
+        # Launch spacing: inside `run_tasks_concurrent` every attempt takes its
+        # provider's launch turn first, charged to this deadline
+        # (`utils/launch_limiter.py`); a no-op anywhere else.
+        attempt_turn_blocking(budget=max(0.0, ladder.remaining()))
         if ladder.next_attempt() is None:
             # §7.5 rules 3 and 4: no attempt starts with less than
             # MIN_ATTEMPT_BUDGET_S of the deadline left, and none starts at all

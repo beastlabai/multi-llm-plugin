@@ -2536,17 +2536,9 @@ class TestLongestFirstDispatch:
         same reason. Preflight still runs against the real mock CLI, so the
         batch reaches the gate exactly as a real one does.
         """
-        from utils import review_orchestrator_base as rob
-
         runner_env.use("codex:gpt-5.5", max_concurrent_subagents=1)
-        # Tasks reach the one lane in the order their stagger sleeps end, and
-        # the stagger is ``index * PROVIDER_STAGGER_DELAY``. FAST_BACKOFF
-        # flattens it to 10 ms for every index, which only orders the tasks
-        # while the loop clock can tell two timers apart: Windows' ticks every
-        # 15.6 ms, so those timers tie and wake in heap order, not file order
-        # (Windows CI: tasks 3 and 4 swapped). Keep the index-proportional
-        # shape at a tenth of a second per index instead.
-        monkeypatch.setattr(rob, "get_backoff_delay", lambda delay: delay / 20)
+        # codex declares no launch stagger, so no timer orders the tasks: they
+        # reach the one lane in file order.
         tasks = self._sized_batches(tmp_path)
         dispatched = []
 
@@ -6836,3 +6828,57 @@ class TestOpenCodeDeniedTurnIsRecorded:
             capture = json.loads(Path(attempt.capture_path).read_text(encoding="utf-8"))
             assert capture["status"] == executor.STATUS_RUNNER_ERROR
             assert capture["error"] == _DENIED_SENTENCE
+
+
+class TestEveryAttemptTakesALaunchTurn:
+    """PERF-6: inside a task fan-out slot, every attempt is spaced, retries too.
+
+    The retry loop runs on a worker thread, so it takes the turn through the
+    slot that `asyncio.to_thread` copied into it; the spawn is instant here, so
+    any gap between the two spawns is the launch spacing alone.
+    """
+
+    INTERVAL = 0.3
+
+    class _Capture:
+        stdout = ""
+        stderr = "boom"
+        exit_code = 1
+        duration = 0.0
+        timed_out = False
+        launch_error = None
+        argv: list = []
+
+    def _dispatch(self, tmp_path):
+        return executor.dispatch_task(
+            _validation_batch(tmp_path), phase_dir=str(tmp_path),
+            runner="codex:gpt-5.5", sleep=lambda _s: None, retries=1,
+        )
+
+    def test_a_retry_waits_for_its_providers_turn(self, tmp_path, runner_env, monkeypatch):
+        import asyncio
+        from utils.launch_limiter import LaunchLimiter
+
+        runner_env.use("codex:gpt-5.5")
+        spawned = []
+
+        def fake_spawn(**_kwargs):
+            spawned.append(time.monotonic())
+            return self._Capture()
+
+        monkeypatch.setattr(executor, "_spawn", fake_spawn)
+        limiter = LaunchLimiter({"codex": self.INTERVAL})
+
+        async def in_a_slot():
+            async with limiter.slot("codex", label="t0 codex:gpt-5.5"):
+                return await asyncio.to_thread(self._dispatch, tmp_path)
+
+        outcome = asyncio.run(in_a_slot())
+        assert len(spawned) == 2, outcome
+        assert spawned[1] - spawned[0] >= self.INTERVAL - 0.01, spawned
+
+        # Outside a fan-out slot nothing is spaced: the retry spawns at once.
+        spawned.clear()
+        self._dispatch(tmp_path)
+        assert len(spawned) == 2
+        assert spawned[1] - spawned[0] < self.INTERVAL, spawned

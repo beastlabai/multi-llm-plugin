@@ -370,12 +370,32 @@ check is the ladder loop's own read-back of the jailed children it armed (see
 [providers](providers.md)), and a write it fails is recorded with `source: exception`. Cancellation
 (`CancelledError`, `KeyboardInterrupt`) is not caught there: the fan-out's teardown retires the slot.
 
+**Launch spacing is between dispatches, per provider.** An adapter with a measured concurrent-start
+fault declares `LAUNCH_STAGGER_S` (cursor-agent: 2 s); every other adapter declares 0 and is never
+throttled. Each fan-out (`run_models_concurrent`, used by review-plan, review-tasks and ask;
+`run_tasks_concurrent`; review-code's and review-plan's own loops) shares one
+`utils/launch_limiter.py` limiter across its slots and their retries. A slot takes its provider's
+turn only once it holds both semaphores (it reads `queued` while parked, `staggering` while it waits
+for the turn), so slots queued behind other providers cannot dispatch together. Every ladder attempt
+then takes a turn right before it dispatches (`dispatch_with_ladder`, and `dispatch_task` on its
+worker thread): the first attempt confirms the slot's turn or waits again if another slot of the
+provider took one meanwhile, a retry always takes a fresh one, and the wait is charged to the slot's
+deadline. A lane with no ladder (ask, review-plan without an output dir) takes the turn the same
+way at its one dispatch, after its pre-dispatch probe and snapshots, so slow preparation cannot eat
+the spacing. Turns are served in arrival order and taken when claimed, never reserved: a waiter that
+leaves (cancelled, or its deadline passed) takes no turn and wakes the waiters behind it to work
+their turns out again, and no turn is granted once the waiter's deadline has passed. A retry waiting
+for its turn reads `staggering` but has dispatched, so its row keeps counting run time. Lane B's
+blocking waiter is not stopped when its asyncio slot is cancelled, like the dispatch it precedes; no
+adapter with a launch interval serves the executor's profiles today. The overall deadline adds the
+largest provider's slot count times its stagger.
+
 A batch with any failed or incomplete task writes `{phase}/subagent_batch_report.json`, refuses to reaggregate and
 exits **3 even under `--yes`** — and **never** falls back to salvage. Resume is
 defined by artifacts: a task is done iff its `output_name` exists, parses and validates, so
 re-invoking a phase re-dispatches exactly the failed set. `run_tasks_concurrent`
 (`utils/review_orchestrator_base.py`) is `run_models_concurrent`'s mechanics keyed by `task_id`
-instead of `model_spec` — same global gate, same per-provider semaphores, same stagger —
+instead of `model_spec` — same global gate, same per-provider semaphores, same launch spacing —
 because a subagent batch normally shares one runner and a model-keyed map would overwrite completed
 tasks.
 

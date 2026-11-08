@@ -88,6 +88,8 @@ from utils import scope_policy as _sp
 from utils import scope_round as _scope_round
 from utils.review_orchestrator_base import (
     RETIRE_SUPERSEDED,
+    plan_launch_limiter,
+    slot_launch,
     round_results_exist,
     retire_scope_round_results,
     resolve_scope_round,
@@ -3945,11 +3947,6 @@ async def run_single_review(
         return False, None, wrong_type
 
 
-# Delay between launching provider processes to avoid concurrent launch bugs
-# Especially important for cursor-agent which has known issues with concurrent starts
-PROVIDER_STAGGER_DELAY = 2.0  # seconds
-
-
 async def run_all_reviews(
     model_specs: List[str],
     plan_path: Path,
@@ -4036,6 +4033,10 @@ async def run_all_reviews(
             limit = get_provider_max_concurrent(prov, anchor=str(plan_path))
             if limit is not None:
                 provider_semaphores[prov] = asyncio.Semaphore(limit)
+    # Launch spacing, shared by every slot and retry (see `plan_launch_limiter`).
+    launcher, stagger_overhead = plan_launch_limiter(
+        [parse_model_spec(spec, anchor=str(plan_path))[0] for spec in model_specs]
+    )
     results: Dict[str, Tuple[bool, Optional[List[Dict]], Optional[str]]] = {}
     # F6, and the counter this replaces. `progress.models_done` was written `0`
     # before dispatch and recomputed only after the last model returned, so a
@@ -4129,32 +4130,12 @@ async def run_all_reviews(
                 except (json.JSONDecodeError, IOError):
                     print(f"[{display_name}] Existing result file corrupt, re-running...")
 
-        # Stagger launches to avoid concurrent start bugs (especially with cursor-agent)
-        # First model starts immediately, subsequent models wait
-        if index > 0:
-            stagger_delay = index * PROVIDER_STAGGER_DELAY
-            print(f"[{display_name}] Waiting {stagger_delay:.1f}s before starting (staggered launch)...")
-            # The row is not idle and it is not running: it was admitted at
-            # `started_at` and has not dispatched, so the table renders this
-            # sleep as a wait (`waiting …`), never as budget spent. Its run
-            # time starts at `running()` — `dispatched_at`, the same point this
-            # slot's own timeout clock starts — and the wait lands in
-            # `queued_s` (plan: review-run-scope-salvage-and-failure-visibility
-            # §6).
-            tracker.staggering(model_spec, delay_s=stagger_delay)
-            await asyncio.sleep(stagger_delay)
-            # The stagger is spent, but this slot is not dispatched: the two
-            # semaphores below can park it for minutes (five models at
-            # `max_parallel: 2` park three of them), and `running` is only
-            # reached inside `run_single_review`. Without this the whole wait
-            # rendered `staggering` — a state the slot left at the line above —
-            # while index 0, which never staggers, rendered the same wait as
-            # `queued`. One word for one wait, on this lane as on the base's.
-            tracker.queued(model_spec)
-
         # Acquire provider semaphore first (if any), then global semaphore.
         # This order prevents capped providers from hogging global slots while
-        # waiting for their provider-specific turn.
+        # waiting for their provider-specific turn. The provider's launch turn
+        # comes last, as on the base's fan-out: a slot parked on a semaphore
+        # reads `queued`, one waiting for its turn `staggering`, and the wait
+        # lands in `queued_s`, never in the slot's run time.
         #
         # No `finally` here any more. `slot_finished()` used to tick from one,
         # because a slot that raised — or was cancelled by the overall
@@ -4170,10 +4151,11 @@ async def run_all_reviews(
         # in this function's own `finally`, which runs whichever way the fan-out
         # ends. A transition here as well would be the second writer.
         prov_sem = provider_semaphores.get(provider_name)
+        turn = slot_launch(launcher, provider_name, model_spec, display_name, tracker)
         try:
             if prov_sem:
                 async with prov_sem:
-                    async with semaphore:
+                    async with semaphore, turn:
                         result = await run_single_review(
                             model_spec, plan_path, out_dir, timeout, changed_files,
                             base_ref, served_models=served_models, usage=usage,
@@ -4186,7 +4168,7 @@ async def run_all_reviews(
                             **scope_kwargs,
                         )
             else:
-                async with semaphore:
+                async with semaphore, turn:
                     result = await run_single_review(
                         model_spec, plan_path, out_dir, timeout, changed_files,
                         base_ref, served_models=served_models, usage=usage,
@@ -4250,7 +4232,6 @@ async def run_all_reviews(
             for spec in model_specs
         )
 
-    stagger_overhead = len(model_specs) * PROVIDER_STAGGER_DELAY
     total_timeout = base_timeout * 2 + stagger_overhead
 
     # One `[PROGRESS]` line per `progress.interval_s`, computed from the map this
