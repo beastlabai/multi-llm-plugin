@@ -19,7 +19,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, NoReturn, Optional, Sequence, Tuple
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -30,7 +30,6 @@ from utils import (
     Task,
     StateManager,
     get_or_create_state,
-    get_tasks_file_path,
     load_prompt,
     get_output_paths,
     get_relative_output_path,
@@ -52,6 +51,12 @@ from utils.cli_common import (
     typed_plan_for,
 )
 from utils.output_handler import get_phase_dir, get_output_dir
+from utils.tasks_file import (
+    TasksFileAmbiguous,
+    TasksFileMissing,
+    TasksFileRefused,
+    read_task_list,
+)
 from utils.state_manager import mark_tasks_reset_in_state
 from utils.git_utils import get_project_root
 from utils.provider_registry import set_run_anchor
@@ -2306,6 +2311,69 @@ def _refuse_unrecorded_native_resume(
     return True
 
 
+def _stop_on_unreadable_task_list(
+    plan_path: Path, unreadable: Exception
+) -> NoReturn:
+    """Exit 3 for a ``TASKS_FILE`` marker implement cannot follow.
+
+    *unreadable* is the :class:`TasksFileMissing` (no such file),
+    :class:`TasksFileAmbiguous` (markers naming different files) or
+    :class:`TasksFileRefused` (outside the plan's directory) that
+    ``read_task_list`` raised. Each prints the ``TASKS_FILE_MISSING`` block.
+    """
+    raw = getattr(unreadable, "raw_path", "")
+    regenerate = dispatcher_command("generate-tasks", plan_path.absolute(), "--yes")
+    if isinstance(unreadable, TasksFileAmbiguous):
+        named = plan_path.parent / raw
+        listed = "\n".join(
+            f"         <!-- TASKS_FILE: {path} -->" for path in unreadable.raw_paths
+        )
+        print(
+            "ERROR: the plan carries TASKS_FILE markers naming different task "
+            f"lists:\n{listed}\n"
+            "       Nothing was implemented. Keep the one that names this plan's "
+            "task list (a marker quoted as code does not count), or regenerate "
+            "it — " + regenerate
+            + "\n       then re-run this command. (Following either one would "
+            "risk implementing a stale or pasted task list.)"
+        )
+        reason = "Plan carries TASKS_FILE markers naming different task lists"
+    elif isinstance(unreadable, TasksFileRefused):
+        named = plan_path.parent / raw
+        print(
+            f"ERROR: the plan's <!-- TASKS_FILE: {raw} --> marker names a task "
+            f"list outside the plan's directory ({unreadable.reason}).\n"
+            f"       Nothing was implemented. Point the marker at the task list "
+            f"in {plan_path.parent}, or regenerate it — " + regenerate
+            + "\n       then re-run this command. (Parsing the plan itself "
+            "instead would invent a task list from its prose.)"
+        )
+        reason = "Plan names a TASKS_FILE outside the plan's directory"
+    else:
+        named = unreadable.path
+        print(
+            f"ERROR: the plan's <!-- TASKS_FILE: {raw} --> marker "
+            f"names a task list that does not exist:\n"
+            f"       {named}\n"
+            f"       Nothing was implemented. Regenerate the task list — "
+            + regenerate
+            + "\n       then re-run this command. (Parsing the plan itself "
+            "instead would invent a task list from its prose, which every "
+            "later phase would treat as ground truth.)"
+        )
+        reason = "Plan names a TASKS_FILE that does not exist"
+    unattended_mod.mark_needs_human("implement")
+    print(json.dumps({
+        "marker": "TASKS_FILE_MISSING",
+        "mode": "implement",
+        "state": "needs-human",
+        "exit": EXIT_NEEDS_HUMAN,
+        "tasks_file": str(named),
+        "reason": reason,
+    }, indent=2))
+    sys.exit(EXIT_NEEDS_HUMAN)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """Main entry point."""
     bootstrap_streams()
@@ -2512,55 +2580,24 @@ def main(argv: Optional[List[str]] = None) -> int:
             sys.exit(EXIT_NEEDS_HUMAN)
         sys.exit(0)
 
-    # Check for external tasks file reference
-    tasks_file_ref = get_tasks_file_path(plan_content)
-    tasks_content = plan_content  # Default: parse from plan itself
+    # The task list: the file the plan's TASKS_FILE marker names, or the plan
+    # itself only when it carries no marker (the legacy embedded-task format).
+    # A marker naming no file, or a path outside the plan's directory, stops
+    # here: parsing the plan instead would invent tasks from its prose
+    # (docs/development/workflows.md, "Task generation").
+    try:
+        task_list = read_task_list(plan_path, plan_content)
+    except (TasksFileMissing, TasksFileRefused) as unreadable:
+        _stop_on_unreadable_task_list(plan_path, unreadable)
+    tasks_content = task_list.text
+    if task_list.path is not None:
+        print(f"Loading tasks from: {task_list.path}")
 
-    if tasks_file_ref:
-        # Load tasks from external file
-        tasks_file_path = plan_path.parent / tasks_file_ref
-        if tasks_file_path.exists():
-            tasks_content = tasks_file_path.read_text(encoding="utf-8")
-            print(f"Loading tasks from: {tasks_file_path}")
-        else:
-            # The plan names a task list that is not on disk (a moved or cleaned
-            # `plans/<plan>/tasks/`, a plan copied without its sibling dir).
-            # Parsing the plan instead does not fail — it *fabricates*: measured
-            # 2026-09-16 against a real plan, the fallback returned 18 confident
-            # tasks titled ". Overview" and ".1 Rendering", with zero acceptance
-            # criteria and `camera.update` declared as a file to create. A
-            # WARNING into a detached log is not a gate, and this is the same
-            # rule `generate_tasks_orchestrator.verify_outcome` applies at the
-            # other end: a task list nobody generated is worse than none. Only a
-            # plan with NO marker at all (the legacy embedded-task format) still
-            # parses its own content.
-            print(
-                f"ERROR: the plan's <!-- TASKS_FILE: {tasks_file_ref} --> marker "
-                f"names a task list that does not exist:\n"
-                f"       {tasks_file_path}\n"
-                f"       Nothing was implemented. Regenerate the task list — "
-                + dispatcher_command("generate-tasks", plan_path.absolute(), "--yes")
-                + "\n       then re-run this command. (Parsing the plan itself "
-                "instead would invent a task list from its prose, which every "
-                "later phase would treat as ground truth.)"
-            )
-            unattended_mod.mark_needs_human("implement")
-            print(json.dumps({
-                "marker": "TASKS_FILE_MISSING",
-                "mode": "implement",
-                "state": "needs-human",
-                "exit": EXIT_NEEDS_HUMAN,
-                "tasks_file": str(tasks_file_path),
-                "reason": "Plan names a TASKS_FILE that does not exist",
-            }, indent=2))
-            sys.exit(EXIT_NEEDS_HUMAN)
-
-    # F15: the external tasks file this run's prompts are actually built from,
-    # captured here (before `tasks_file_path` is reassigned below to the
-    # phase-based `tasks_file` output path) so `run_implement_write_phase` can
-    # stamp `write_tasks.json` with `inputs.tasks_sha256` — `None` for the
-    # legacy embedded-task format, where there is no such file.
-    implement_tasks_file: Optional[Path] = tasks_file_path if tasks_file_ref else None
+    # F15: the external tasks file this run's prompts are built from, so
+    # `run_implement_write_phase` can stamp `write_tasks.json` with
+    # `inputs.tasks_sha256` — `None` for the legacy embedded-task format,
+    # where there is no such file.
+    implement_tasks_file: Optional[Path] = task_list.path
 
     # Record pre-existing changes (before implementation modifies anything)
     record_pre_existing_changes(state)

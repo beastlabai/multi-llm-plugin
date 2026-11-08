@@ -1854,6 +1854,194 @@ class TestMissingExternalTasksFile:
         assert json.loads(output_path.read_text(encoding="utf-8"))["total_tasks"] >= 1
 
 
+class TestTaskListMarkerIsReadOneWay:
+    """Implement reads the plan's `TASKS_FILE` marker through
+    `tasks_file.read_task_list`, the resolver every phase uses: any spelling
+    review-tasks follows, inside the plan's directory only, and never the
+    plan's prose in place of a task list it names."""
+
+    PROSE = (
+        "# Rendering plan\n\n"
+        "## 1. Overview\nWhat the renderer does.\n\n"
+        "### 2.1 Rendering\nCall camera.update once per frame.\n\n"
+        "## Implementation Tasks\n\n{marker}\n"
+    )
+
+    def _plan(self, temp_dir, marker):
+        """`plans/render.md` with *marker*, a task list beside it in
+        `plans/tasks/` and another outside the plan's directory in `tasks/`."""
+        for tasks in (temp_dir / "plans" / "tasks" / "tasks.md",
+                      temp_dir / "tasks" / "tasks.md"):
+            tasks.parent.mkdir(parents=True, exist_ok=True)
+            tasks.write_text(
+                "# Tasks\n\n### T001: The real task\nDo the real thing.\n"
+                "- Depends on: none\n",
+                encoding="utf-8",
+            )
+        plan = temp_dir / "plans" / "render.md"
+        plan.write_text(self.PROSE.format(marker=marker), encoding="utf-8")
+        return plan
+
+    def _main(self, plan, mock_state_manager, output_path, *, exits=True):
+        from implement_orchestrator import main
+
+        with patch('implement_orchestrator.parse_args') as mock_args, \
+             patch('implement_orchestrator.get_or_create_state', return_value=mock_state_manager), \
+             patch('implement_orchestrator.record_pre_existing_changes'):
+            mock_args.return_value = MagicMock(
+                plan_file=str(plan),
+                output=str(output_path),
+                resume=False,
+                task=None,
+                dry_run=False,
+                exec_subagents=False,
+                dry_run_subagents=False,
+                detach=False,
+                internal_worker=False,
+                yes=False,
+            )
+            if not exits:
+                with patch('sys.exit'):
+                    main()
+                return None
+            with pytest.raises(SystemExit) as excinfo:
+                main()
+            return excinfo.value
+
+    @pytest.mark.parametrize("marker", [
+        "<!--TASKS_FILE: tasks/tasks.md-->",
+        "<!--   TASKS_FILE: tasks/tasks.md   -->",
+        "<!--\nTASKS_FILE: tasks/tasks.md\n-->",
+    ])
+    def test_a_reformatted_marker_is_followed_not_parsed_as_plan_prose(
+        self, temp_dir, mock_state_manager, capsys, marker
+    ):
+        """Before the shared resolver, implement's own regex wanted exactly
+        `<!-- TASKS_FILE:`, missed these, and decomposed the plan instead:
+        tasks T1 ". Overview" and T2 ".1 Rendering"."""
+        plan = self._plan(temp_dir, marker)
+        output_path = temp_dir / "out.json"
+
+        self._main(plan, mock_state_manager, output_path, exits=False)
+
+        data = json.loads(output_path.read_text(encoding="utf-8"))
+        ids = [t["id"] for batch in data["batches"] for t in batch["tasks"]]
+        assert ids == ["T001"], "the task list the marker names, not the plan's headings"
+        assert "Loading tasks from:" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("marker, reason", [
+        ("<!-- TASKS_FILE: ../tasks/tasks.md -->", "climbs out with .."),
+        ("<!-- TASKS_FILE: {abs} -->", "absolute path"),
+    ])
+    def test_a_marker_outside_the_plan_directory_is_exit_three(
+        self, temp_dir, mock_state_manager, capsys, marker, reason
+    ):
+        """review-tasks refuses these (`find_tasks_file`); implement used to
+        open them. Same rule now, with implement's exit-3 block."""
+        outside = (temp_dir / "tasks" / "tasks.md").resolve()
+        plan = self._plan(temp_dir, marker.format(abs=outside))
+        output_path = temp_dir / "out.json"
+
+        exit_info = self._main(plan, mock_state_manager, output_path)
+
+        assert exit_info.code == 3
+        out = capsys.readouterr().out
+        assert "TASKS_FILE_MISSING" in out
+        assert "outside the plan's directory" in out
+        assert reason in out
+        assert "generate-tasks" in out
+        assert "Found " not in out, "nothing was decomposed"
+        assert not output_path.exists()
+
+    @pytest.mark.parametrize("marker", [
+        "<!-- TASKS_FILE:  -->",
+        "<!--TASKS_FILE:-->",
+        "<!-- TASKS_FILE:-->",
+        "<!--TASKS_FILE:\n-->",
+    ])
+    def test_a_marker_naming_nothing_is_exit_three_not_a_parse_of_the_plan(
+        self, temp_dir, mock_state_manager, capsys, marker
+    ):
+        """An empty marker is a marker however it is spaced: the plan is not
+        the legacy embedded-task format, so its prose is not decomposed. The
+        compact spellings used to read as no marker, and gave T1 ". Overview"."""
+        plan = self._plan(temp_dir, marker)
+        output_path = temp_dir / "out.json"
+
+        exit_info = self._main(plan, mock_state_manager, output_path)
+
+        assert exit_info.code == 3
+        out = capsys.readouterr().out
+        assert "TASKS_FILE_MISSING" in out
+        assert "Found " not in out
+        assert not output_path.exists()
+
+
+class TestAMarkerQuotedAsCodeIsNotTheTaskList:
+    """A plan that quotes the marker syntax (a fenced block, inline code)
+    carries examples, not its marker. The first match used to win, so an
+    example above the real marker made implement run the example's tasks."""
+
+    PROSE = TestTaskListMarkerIsReadOneWay.PROSE
+    _main = TestTaskListMarkerIsReadOneWay._main
+
+    def _plan(self, temp_dir, marker):
+        plan = TestTaskListMarkerIsReadOneWay._plan(self, temp_dir, marker)
+        (plan.parent / "example.md").write_text(
+            "# Example\n\n### T999: Not this plan's task\nDo nothing.\n"
+            "- Depends on: none\n",
+            encoding="utf-8",
+        )
+        return plan
+
+    @pytest.mark.parametrize("quoted", [
+        "```\n<!-- TASKS_FILE: example.md -->\n```",
+        "```markdown\n<!--TASKS_FILE: ../tasks/tasks.md-->\n```",
+        "Implement reads `<!-- TASKS_FILE: example.md -->` first.",
+    ])
+    @pytest.mark.parametrize("where", ["before", "after"])
+    def test_the_real_marker_is_followed_not_the_example(
+        self, temp_dir, mock_state_manager, capsys, quoted, where
+    ):
+        real = "<!-- TASKS_FILE: tasks/tasks.md -->"
+        marker = (
+            f"{quoted}\n\n{real}" if where == "before" else f"{real}\n\n{quoted}"
+        )
+        plan = self._plan(temp_dir, marker)
+        output_path = temp_dir / "out.json"
+
+        self._main(plan, mock_state_manager, output_path, exits=False)
+
+        data = json.loads(output_path.read_text(encoding="utf-8"))
+        ids = [t["id"] for batch in data["batches"] for t in batch["tasks"]]
+        assert ids == ["T001"], "the plan's own task list, not the quoted example's"
+        out = capsys.readouterr().out
+        assert f"Loading tasks from: {(plan.parent / 'tasks' / 'tasks.md').resolve()}" in out
+
+    def test_two_markers_naming_different_lists_are_exit_three(
+        self, temp_dir, mock_state_manager, capsys
+    ):
+        """Which list is current is the author's call: implement follows
+        neither, and says how to settle it."""
+        plan = self._plan(
+            temp_dir,
+            "<!-- TASKS_FILE: tasks/tasks.md -->\n\n<!--TASKS_FILE: example.md-->",
+        )
+        output_path = temp_dir / "out.json"
+
+        exit_info = self._main(plan, mock_state_manager, output_path)
+
+        assert exit_info.code == 3
+        out = capsys.readouterr().out
+        assert "TASKS_FILE_MISSING" in out
+        assert "naming different task lists" in out
+        assert "<!-- TASKS_FILE: tasks/tasks.md -->" in out
+        assert "<!-- TASKS_FILE: example.md -->" in out
+        assert "generate-tasks" in out
+        assert "Found " not in out, "nothing was decomposed"
+        assert not output_path.exists()
+
+
 class TestOutputFormat:
     """Tests for output JSON format."""
 

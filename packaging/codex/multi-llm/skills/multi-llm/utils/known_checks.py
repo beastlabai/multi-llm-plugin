@@ -400,12 +400,12 @@ def implement_task_list_text(output_dir: Any, plan: Optional[Path]) -> Optional[
         return None
     try:
         try:
-            from .plan_updater import get_tasks_file_path
             from .subagent_tasks import content_hash
+            from .tasks_file import read_task_list
             from .write_phase_bridge import WRITE_TASK_FILENAME
         except ImportError:  # pragma: no cover - direct script invocation
-            from utils.plan_updater import get_tasks_file_path  # type: ignore
             from utils.subagent_tasks import content_hash  # type: ignore
+            from utils.tasks_file import read_task_list  # type: ignore
             from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
         document = json.loads(
             (Path(str(output_dir)) / "implement" / WRITE_TASK_FILENAME).read_text(encoding="utf-8")
@@ -413,13 +413,11 @@ def implement_task_list_text(output_dir: Any, plan: Optional[Path]) -> Optional[
         inputs = document.get("inputs") if isinstance(document, dict) else None
         if not isinstance(inputs, dict):
             return None
-        content = Path(plan).read_text(encoding="utf-8")
-        reference = get_tasks_file_path(content)
-        if reference:
-            expected = inputs.get("tasks_sha256")
-            content = (Path(plan).parent / reference).read_text(encoding="utf-8")
-        else:
-            expected = inputs.get("plan_sha256")
+        task_list = read_task_list(plan)
+        content = task_list.text
+        expected = inputs.get(
+            "tasks_sha256" if task_list.path is not None else "plan_sha256"
+        )
         if not expected or content_hash(content) != str(expected):
             return None
         return content

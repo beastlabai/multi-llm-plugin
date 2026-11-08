@@ -439,6 +439,99 @@ class TestDocumentValidation:
         assert "could not be read as JSON" in capsys.readouterr().err
 
 
+class TestTheMarkerIsCheckedTheWayImplementFollowsIt:
+    """Generation succeeds only on a plan implement can read its task list
+    from: the writer rewrites every marker that counts (not one quoted as
+    code), and `verify_outcome` resolves the marker with implement's own
+    resolver (`tasks_file.resolve_tasks_marker`)."""
+
+    def _generate(self, plan: Path) -> int:
+        _materialize(plan)
+        _persist(plan, _valid_document())
+        return multi_llm.main(["generate-tasks", str(plan), "--yes", "--reaggregate"])
+
+    @pytest.mark.parametrize("stray", [
+        "<!-- TASKS_FILE: tg-plan/../tg-plan/tasks/tasks.md -->",
+        "<!--TASKS_FILE: stale/tasks.md-->",
+        "<!--TASKS_FILE:-->",
+        "<!-- TASKS_FILE:-->",
+        "<!--TASKS_FILE:\n-->",
+    ])
+    def test_a_marker_under_the_title_is_rewritten_for_implement(
+        self, tmp_path, capsys, stray
+    ):
+        """The `..` marker used to be left in place: generation reported
+        success, and implement then refused the plan."""
+        from utils.tasks_file import read_task_list, tasks_marker_spans
+
+        plan = tmp_path / "tg-plan.md"
+        plan.write_text(PLAN_BODY.replace("\n", f"\n{stray}\n", 1), encoding="utf-8")
+
+        assert self._generate(plan) == 0, capsys.readouterr().err
+
+        text = plan.read_text(encoding="utf-8")
+        assert text.startswith(
+            "# Task Generation Plan\n<!-- TASKS_FILE: tg-plan/tasks/tasks.md -->\n"
+        )
+        assert {raw for _, _, raw in tasks_marker_spans(text)} == {"tg-plan/tasks/tasks.md"}
+        assert read_task_list(plan).path == _tasks_md(plan).resolve()
+
+    def test_a_quoted_example_marker_is_left_alone(self, tmp_path, capsys):
+        from utils.tasks_file import read_task_list
+
+        example = "```\n<!-- TASKS_FILE: example.md -->\n```\n"
+        plan = tmp_path / "tg-plan.md"
+        plan.write_text(PLAN_BODY + "\n" + example, encoding="utf-8")
+
+        assert self._generate(plan) == 0, capsys.readouterr().err
+
+        assert example in plan.read_text(encoding="utf-8")
+        assert read_task_list(plan).path == _tasks_md(plan).resolve()
+
+    def test_a_marker_implement_refuses_fails_generation(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Even one that leads to the rendered file: `(plan.parent /
+        marker).resolve()` accepted `tg-plan/../tg-plan/tasks/tasks.md`."""
+        import update_plan_tasks
+
+        plan = tmp_path / "tg-plan.md"
+        plan.write_text(
+            PLAN_BODY + "\n<!-- TASKS_FILE: tg-plan/../tg-plan/tasks/tasks.md -->\n",
+            encoding="utf-8",
+        )
+        _materialize(plan)
+        _persist(plan, _valid_document())
+        before = plan.read_bytes()
+        monkeypatch.setattr(
+            update_plan_tasks, "insert_tasks_file_reference",
+            lambda content, tasks_file: content,
+        )
+
+        code = multi_llm.main(["generate-tasks", str(plan), "--yes", "--reaggregate"])
+
+        err = capsys.readouterr().err
+        assert code == 3
+        assert "implement would refuse the plan's TASKS_FILE marker" in err
+        assert "climbs out with .." in err
+        assert plan.read_bytes() == before
+
+    def test_verify_outcome_refuses_disagreeing_markers(self, tmp_path):
+        plan = tmp_path / "tg-plan.md"
+        _tasks_md(plan).parent.mkdir(parents=True)
+        _tasks_md(plan).write_text("### T001: One\nBody.\n", encoding="utf-8")
+        plan.write_text(
+            PLAN_BODY + "\n<!-- TASKS_FILE: tg-plan/tasks/tasks.md -->\n"
+            "<!-- TASKS_FILE: other.md -->\n",
+            encoding="utf-8",
+        )
+
+        problems = gto.verify_outcome(plan, 1)
+
+        assert len(problems) == 1
+        assert "different task lists" in problems[0]
+
+
 class TestSemanticRules:
     """The four rules, as a unit — they live with the task graph, not the schema."""
 

@@ -5,6 +5,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+try:
+    from .tasks_file import (
+        TASKS_FILE_MARKER_PATTERN,
+        markdown_code_ranges,
+        tasks_marker,
+        tasks_marker_spans,
+    )
+except ImportError:  # pragma: no cover - direct script invocation
+    from utils.tasks_file import (  # type: ignore
+        TASKS_FILE_MARKER_PATTERN,
+        markdown_code_ranges,
+        tasks_marker,
+        tasks_marker_spans,
+    )
+
 
 # HTML comment markers for idempotent updates
 IMPL_START_MARKER = "<!-- IMPLEMENTATION_STATUS_START -->"
@@ -15,8 +30,9 @@ TASK_STATUS_PATTERN = r'<!-- TASK_STATUS:(\w+):(\w+) -->'
 GENERATED_TASKS_START = "<!-- GENERATED_TASKS_START -->"
 GENERATED_TASKS_END = "<!-- GENERATED_TASKS_END -->"
 
-# Marker for external tasks file reference (new - tasks in separate file)
-TASKS_FILE_REFERENCE_PATTERN = r'<!-- TASKS_FILE:\s*(.+?)\s*-->'
+# Marker for external tasks file reference (new - tasks in separate file).
+# The pattern is `tasks_file`'s, the one every phase reads the marker with.
+TASKS_FILE_REFERENCE_PATTERN = TASKS_FILE_MARKER_PATTERN
 TASKS_FILE_REFERENCE_TEMPLATE = "<!-- TASKS_FILE: {tasks_file} -->"
 
 # Marker for implementation summary file reference
@@ -314,16 +330,19 @@ def has_implementation_tasks(content: str) -> bool:
         True if tasks exist, False otherwise
     """
     # Check for external tasks file reference
-    if re.search(TASKS_FILE_REFERENCE_PATTERN, content):
+    if tasks_marker(content) is not None:
         return True
 
     # Check for generated tasks section (legacy embedded tasks)
     if GENERATED_TASKS_START in content:
         return True
 
-    # Check for existing task patterns using same regex as TaskDecomposer
-    task_pattern = r'(?:#{2,3})\s*(?:Step|Task)?\s*([T]?\d+):?\s*(.+?)(?=\n#{2,3}\s*(?:Step|Task)?\s*[T]?\d|\n## |\Z)'
-    matches = re.findall(task_pattern, content, re.DOTALL | re.IGNORECASE)
+    # Check for existing task patterns: the grammar TaskDecomposer parses.
+    try:
+        from .task_decomposer import TASK_SECTION_PATTERN
+    except ImportError:  # pragma: no cover - direct script invocation
+        from utils.task_decomposer import TASK_SECTION_PATTERN  # type: ignore
+    matches = re.findall(TASK_SECTION_PATTERN, content, re.DOTALL | re.IGNORECASE)
 
     return len(matches) > 0
 
@@ -336,11 +355,29 @@ def get_tasks_file_path(content: str) -> Optional[str]:
         content: Plan markdown content
 
     Returns:
-        Path to tasks file, or None if not found
+        Path to tasks file as written, or None if not found. A caller that
+        reads the task list uses ``tasks_file.read_task_list``, which also
+        keeps the path inside the plan's directory.
     """
-    match = re.search(TASKS_FILE_REFERENCE_PATTERN, content)
-    if match:
-        return match.group(1).strip()
+    return tasks_marker(content)
+
+
+_REFERENCE_SECTION_HEADING = "## Implementation Tasks"
+_HEADING_LINE_RE = re.compile(r"^#{1,6}[ \t].*$", re.MULTILINE)
+
+
+def _reference_section_start(content: str, marker_start: int, code) -> Optional[int]:
+    """Where the ``## Implementation Tasks`` section holding a marker starts.
+
+    ``None`` unless the nearest heading before *marker_start* that is not
+    inside code (*code*, ``tasks_file.markdown_code_ranges``) is that heading.
+    """
+    nearest = None
+    for heading in _HEADING_LINE_RE.finditer(content, 0, marker_start):
+        if not any(start <= heading.start() < end for start, end in code):
+            nearest = heading
+    if nearest is not None and nearest.group(0).rstrip() == _REFERENCE_SECTION_HEADING:
+        return nearest.start()
     return None
 
 
@@ -364,16 +401,20 @@ See [{tasks_file}]({tasks_file}) for the detailed task breakdown.
 {reference}
 """
 
-    # Check if reference already exists
-    existing_match = re.search(TASKS_FILE_REFERENCE_PATTERN, content)
-    if existing_match:
-        # Replace existing reference section
-        # Find the section boundaries (## Implementation Tasks ... <!-- TASKS_FILE -->)
-        section_pattern = r'## Implementation Tasks\s*\n.*?' + TASKS_FILE_REFERENCE_PATTERN
-        # A function replacement: a template string would read the path's
-        # backslashes (a Windows spelling) as escapes and raise `bad escape`.
-        replacement = reference_section.strip()
-        content = re.sub(section_pattern, lambda _m: replacement, content, flags=re.DOTALL)
+    # Every marker that counts (`tasks_file.tasks_marker_spans`: not one quoted
+    # as code) now names the new list, so none is left for implement to refuse
+    # or follow: the marker of this function's own section is rewritten with
+    # its heading and link, any other in place. Spliced, not `re.sub`: a
+    # template would read a Windows path's backslashes as escapes.
+    spans = tasks_marker_spans(content)
+    if spans:
+        code = markdown_code_ranges(content)
+        for start, end, _raw in reversed(spans):
+            heading = _reference_section_start(content, start, code)
+            if heading is None:
+                content = content[:start] + reference + content[end:]
+            else:
+                content = content[:heading] + reference_section.strip() + content[end:]
         return content
 
     # Check for legacy embedded tasks and remove them

@@ -56,7 +56,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -77,7 +76,7 @@ from utils.cli_common import (
 )
 from utils.git_utils import get_project_root
 from utils.output_handler import archive_file, get_output_paths, get_phase_dir
-from utils.plan_updater import TASKS_FILE_REFERENCE_PATTERN
+from utils.tasks_file import TasksFileRefused, resolve_tasks_marker
 from utils.provider_registry import set_run_anchor
 from utils.stream_bootstrap import bootstrap_streams
 from utils.subagent_prompts import build_task_generation_prompt
@@ -425,12 +424,6 @@ class _Snapshot:
                 )
 
 
-def _tasks_marker(plan_text: str) -> Optional[str]:
-    """The path a plan's ``<!-- TASKS_FILE: … -->`` marker names, if it has one."""
-    match = re.search(TASKS_FILE_REFERENCE_PATTERN, plan_text)
-    return match.group(1).strip() if match else None
-
-
 def verify_outcome(plan_path: Path, expected_count: int) -> List[str]:
     """What the plan and the rendered tasks file must show, or the reasons why not.
 
@@ -440,12 +433,23 @@ def verify_outcome(plan_path: Path, expected_count: int) -> List[str]:
     """
     problems: List[str] = []
     plan_text = plan_path.read_text(encoding="utf-8")
-    marker = _tasks_marker(plan_text)
-    if not marker:
+    # The marker is checked the way implement follows it (`read_task_list`):
+    # a path implement refuses is a failed generation, even one that leads
+    # to the rendered file.
+    resolved: Optional[Path] = None
+    try:
+        resolved = resolve_tasks_marker(plan_path, plan_text)
+    except TasksFileRefused as refused:
         problems.append(
-            "the plan carries no <!-- TASKS_FILE: … --> marker, so no later phase "
-            "can find a task list"
+            f"implement would refuse the plan's TASKS_FILE marker "
+            f"({refused.raw_path}): {refused.reason}"
         )
+    else:
+        if resolved is None:
+            problems.append(
+                "the plan carries no <!-- TASKS_FILE: … --> marker, so no later "
+                "phase can find a task list"
+            )
     tasks_path = get_output_paths(plan_path, "tasks", phase="tasks")
     if not tasks_path.exists():
         problems.append(f"the rendered tasks file {tasks_path} does not exist")
@@ -462,13 +466,11 @@ def verify_outcome(plan_path: Path, expected_count: int) -> List[str]:
             f"{tasks_path} parses to {len(parsed)} task(s) but the validated "
             f"document declared {expected_count}"
         )
-    if marker:
-        resolved = (plan_path.parent / marker).resolve()
-        if resolved != tasks_path.resolve():
-            problems.append(
-                f"the TASKS_FILE marker points at {resolved}, not at the rendered "
-                f"{tasks_path}"
-            )
+    if resolved is not None and resolved != tasks_path.resolve():
+        problems.append(
+            f"the TASKS_FILE marker points at {resolved}, not at the rendered "
+            f"{tasks_path}"
+        )
     return problems
 
 

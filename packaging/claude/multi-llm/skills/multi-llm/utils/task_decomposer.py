@@ -261,6 +261,16 @@ def declared_dependencies(text: str, *, bare_numbers: bool = False) -> List[str]
     return deps
 
 
+#: One task section of a task list, matched with ``re.DOTALL | re.IGNORECASE``:
+#: ``### T001: Title``, ``## Task 1: Title``, ``### Step 1: Title`` or
+#: ``## 1: Title``, then its body up to the next task heading or ``## `` heading.
+#: Group 1 is the id, group 2 the title line and body.
+TASK_SECTION_PATTERN = (
+    r'(?:#{2,3})\s*(?:Step|Task)?\s*([T]?\d+):?\s*(.+?)'
+    r'(?=\n#{2,3}\s*(?:Step|Task)?\s*[T]?\d|\n## |\Z)'
+)
+
+
 class TaskDecomposer:
     """Decomposes plans into executable tasks with dependency management."""
 
@@ -280,12 +290,9 @@ class TaskDecomposer:
         """
         tasks = []
 
-        # Look for task sections with various formats:
-        # - "### Step 1: Title" or "## Step 1: Title"
-        # - "### Task 1: Title" or "## Task 1: Title"
-        # - "### T1: Title" or "## 1: Title"
-        task_pattern = r'(?:#{2,3})\s*(?:Step|Task)?\s*([T]?\d+):?\s*(.+?)(?=\n#{2,3}\s*(?:Step|Task)?\s*[T]?\d|\n## |\Z)'
-        matches = re.findall(task_pattern, plan_content, re.DOTALL | re.IGNORECASE)
+        matches = re.findall(
+            TASK_SECTION_PATTERN, plan_content, re.DOTALL | re.IGNORECASE
+        )
         # A bare number names a task only in a document whose own ids are
         # bare (`### Step 1`); in a `T001`-numbered one it is prose.
         bare_numbers = any(
@@ -892,13 +899,20 @@ def decompose_plan_file(plan_path: Path) -> TaskDecomposer:
     """
     Convenience function to decompose a plan file.
 
+    Parses the task list the plan's ``TASKS_FILE`` marker names, or the plan
+    itself when it carries no marker (``tasks_file.read_task_list``, which
+    raises rather than parse the prose of a plan whose marker it cannot follow).
+
     Args:
         plan_path: Path to the plan markdown file
 
     Returns:
         TaskDecomposer instance with parsed tasks
     """
+    try:
+        from .tasks_file import read_task_list
+    except ImportError:  # pragma: no cover - direct script invocation
+        from utils.tasks_file import read_task_list  # type: ignore
     decomposer = TaskDecomposer()
-    plan_content = plan_path.read_text(encoding="utf-8")
-    decomposer.parse_plan(plan_content)
+    decomposer.parse_plan(read_task_list(plan_path).text)
     return decomposer

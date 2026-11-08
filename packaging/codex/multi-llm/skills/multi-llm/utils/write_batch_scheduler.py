@@ -3559,19 +3559,12 @@ def _check_task_ids_of_plan(plan: Path) -> set:
     which counts every completed task as code — the conservative reading."""
     try:
         try:
-            from .plan_updater import get_tasks_file_path
             from .task_decomposer import TaskDecomposer
+            from .tasks_file import read_task_list
         except ImportError:  # pragma: no cover - direct script invocation
-            from utils.plan_updater import get_tasks_file_path  # type: ignore
             from utils.task_decomposer import TaskDecomposer  # type: ignore
-        content = plan.read_text(encoding="utf-8")
-        reference = get_tasks_file_path(content)
-        if reference:
-            tasks_file = plan.parent / reference
-            if not tasks_file.is_file():
-                return set()
-            content = tasks_file.read_text(encoding="utf-8")
-        tasks = TaskDecomposer().parse_plan(content)
+            from utils.tasks_file import read_task_list  # type: ignore
+        tasks = TaskDecomposer().parse_plan(read_task_list(plan).text)
     except Exception:  # noqa: BLE001 - conservative: no check known
         return set()
     return {
