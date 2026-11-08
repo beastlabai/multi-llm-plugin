@@ -59,6 +59,7 @@ from utils.cli_common import (
 # `--phase` word against the same rows (`modes.py`), so `review-code` (the mode
 # word) and `code-review` (the phase name) can never drift apart per host.
 from modes import PREREQUISITE_PHASES, phase_from_selector, resolve as resolve_mode
+from utils import importance as _importance
 from utils import unattended as unattended_mod
 from utils.state_manager import StateManager
 from utils.output_handler import get_output_dir
@@ -344,9 +345,7 @@ def check_apply_suggestions_prerequisite(state: StateManager, plan_dir: Path) ->
             continue
         if entry.get("status") == "valid":
             valid_count += 1
-            importance = entry.get("importance", "MEDIUM")
-            if importance in importance_breakdown:
-                importance_breakdown[importance] += 1
+            importance_breakdown[_importance.normalize(entry.get("importance"))] += 1
 
     if valid_count == 0:
         # `open_count` is what `get_workflow_status` keys the
@@ -469,9 +468,7 @@ def check_apply_task_suggestions_prerequisite(state: StateManager, plan_dir: Pat
                     continue
                 if entry.get("status") == "valid":
                     valid_count += 1
-                    importance = entry.get("importance", "MEDIUM")
-                    if importance in importance_breakdown:
-                        importance_breakdown[importance] += 1
+                    importance_breakdown[_importance.normalize(entry.get("importance"))] += 1
 
             if valid_count > 0:
                 actionable_count = valid_count

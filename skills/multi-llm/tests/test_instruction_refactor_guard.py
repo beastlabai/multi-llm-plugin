@@ -334,3 +334,99 @@ class TestBatchListsCompareAsMultisets:
         import container_bundle
 
         assert container_bundle.diff_bundles is bundle_compare.diff_bundles
+
+
+class TestRecordListsCompareByIdentity:
+    """grouped.json's `groups` (by `group_hash`) and their member
+    `suggestions` (by `suggestion_hash`), and the apply phases' `to_apply`
+    (by `group_id`), align the way `batches` do: a reorder is one diff at
+    `<list>/@order`, and every other change inside a moved record is still
+    reported, at the baseline's index. Read by position, a reorder was every
+    leaf of every moved record, and the entries that absorbed it (a pointer on
+    `groups/0`) excused anything else at that position too."""
+
+    GROUPS = "/phases/review-plan/artifacts/grouped.json/groups"
+    TO_APPLY = "/phases/apply-suggestions/artifacts/orchestrator_output.json/to_apply"
+
+    @staticmethod
+    def _baseline():
+        bundle = json.loads(BASELINE.read_text(encoding="utf-8"))
+        bundle.pop("manifest", None)
+        return bundle
+
+    @staticmethod
+    def _reorder_high_first(bundle):
+        """The REVIEW-5 movement on the baseline: slots 0,1,2,3 -> 1,2,0,3."""
+        import copy
+
+        fresh = copy.deepcopy(bundle)
+        groups = fresh["phases"]["review-plan"]["artifacts"]["grouped.json"]["groups"]
+        groups[:] = [groups[1], groups[2], groups[0], groups[3]]
+        return fresh
+
+    def test_a_pure_reorder_of_groups_is_one_diff_at_the_order_leaf(self):
+        baseline = self._baseline()
+        diffs = diff_bundles(baseline, self._reorder_high_first(baseline))
+        assert [pointer for pointer, _b, _a in diffs] == [f"{self.GROUPS}/@order"]
+        _pointer, before, after = diffs[0]
+        assert sorted(before) == sorted(after) and before != after
+
+    def test_an_unrelated_change_inside_a_moved_group_is_reported_and_not_allowed(self):
+        """The review's repro: a changed description inside a reordered group
+        passed under the `groups/0` entry. It is reported at the group's
+        baseline slot, and no allowlist entry excuses it."""
+        baseline = self._baseline()
+        fresh = self._reorder_high_first(baseline)
+        moved = fresh["phases"]["review-plan"]["artifacts"]["grouped.json"]["groups"][2]
+        moved["suggestions"][0]["desc"] = "an unrelated rewrite"
+
+        diffs = diff_bundles(baseline, fresh)
+        desc = f"{self.GROUPS}/0/suggestions/0/desc"
+        assert [pointer for pointer, _b, _a in diffs] == [
+            f"{self.GROUPS}/0/suggestions/0/desc", f"{self.GROUPS}/@order",
+        ]
+        allowed, unexplained, _matched = _partition(diffs, _load_allowlist())
+        assert [pointer for pointer, _b, _a in unexplained] == [desc]
+        assert [pointer for pointer, _b, _a in allowed] == [f"{self.GROUPS}/@order"]
+
+    def test_to_apply_records_align_by_group_id(self):
+        import copy
+
+        baseline = self._baseline()
+        fresh = copy.deepcopy(baseline)
+        records = fresh["phases"]["apply-suggestions"]["artifacts"][
+            "orchestrator_output.json"]["to_apply"]
+        records[:] = [records[1], records[0]] + records[2:]
+        records[1]["description"] = "changed"  # baseline slot 0's record
+        pointers = [pointer for pointer, _b, _a in diff_bundles(baseline, fresh)]
+        assert pointers == [f"{self.TO_APPLY}/0/description", f"{self.TO_APPLY}/@order"]
+
+    def test_group_members_align_by_suggestion_hash(self):
+        left = {"groups": [{"group_hash": "g", "suggestions": [
+            {"suggestion_hash": "a", "desc": "x"}, {"suggestion_hash": "b", "desc": "y"},
+        ]}]}
+        right = {"groups": [{"group_hash": "g", "suggestions": [
+            {"suggestion_hash": "b", "desc": "y"}, {"suggestion_hash": "a", "desc": "z"},
+        ]}]}
+        assert [p for p, _b, _a in diff_bundles(left, right)] == [
+            "/groups/0/suggestions/0/desc", "/groups/0/suggestions/@order",
+        ]
+
+    def test_records_without_an_id_stay_positional(self):
+        """A batch's `suggestions` carry no `suggestion_hash`: they keep their
+        place, and a list where nothing has an id reports no order leaf."""
+        left = {"suggestions": [{"title": "a"}]}
+        right = {"suggestions": [{"title": "b"}, {"title": "a"}]}
+        assert [p for p, _b, _a in diff_bundles(left, right)] == [
+            "/suggestions/0/title", "/suggestions/1/title",
+        ]
+
+    def test_no_entry_excuses_a_whole_record(self):
+        """An entry on a whole group, `to_apply` record or batch excuses every
+        change inside it; with records aligned by identity, an entry names a
+        leaf or the order."""
+        import re
+
+        whole = re.compile(r"/(groups|to_apply|batches)(/\d+)?$")
+        wide = [e["pointer"] for e in _load_allowlist() if whole.search(e["pointer"])]
+        assert not wide, wide

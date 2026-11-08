@@ -27,6 +27,7 @@ try:
         upgrade_legacy,
     )
     from . import scope_report as _scope_report
+    from . import importance as _importance
 except ImportError:
     # Direct script invocation (`python utils/html_report_generator.py`):
     # sys.path[0] is the utils/ directory, so import the sibling module directly.
@@ -41,6 +42,7 @@ except ImportError:
         upgrade_legacy,
     )
     import scope_report as _scope_report
+    import importance as _importance
 
 logger = logging.getLogger(__name__)
 
@@ -238,8 +240,10 @@ VALIDATION_ORDER = {
 }
 UNKNOWN_STATUS_RANK = 5
 
-IMPORTANCE_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2, "": 3}
-UNKNOWN_IMPORTANCE_RANK = 3
+# The rank table is `utils/importance.py`'s; "" is a group with no members,
+# which sorts after LOW. The templates sort by this table (`sortConfig`).
+IMPORTANCE_ORDER = {**_importance.RANK, "": _importance.UNKNOWN_RANK}
+UNKNOWN_IMPORTANCE_RANK = _importance.UNKNOWN_RANK
 
 
 # ---------------------------------------------------------------------------
@@ -247,24 +251,15 @@ UNKNOWN_IMPORTANCE_RANK = 3
 # ---------------------------------------------------------------------------
 
 def compute_max_importance(suggestions: Optional[List[Dict[str, Any]]]) -> str:
-    """Return the highest importance level among *suggestions*.
+    """Return the importance of a group or bucket holding *suggestions*.
 
-    Returns ``""`` when *suggestions* is ``None``, empty, or contains no
-    recognised importance values — this maps to ``IMPORTANCE_ORDER[""]``
-    (rank 3, after LOW) so that empty groups sort last within their
-    validation-status tier.
+    The rule apply filters by (``importance.members_importance``): the
+    highest level, in either case, a suggestion naming none counting as
+    MEDIUM as its own badge does. Returns ``""`` only when *suggestions* is
+    ``None`` or empty — this maps to ``IMPORTANCE_ORDER[""]`` (after LOW) so
+    that empty groups sort last within their validation-status tier.
     """
-    if not suggestions:
-        return ""
-    best_rank = UNKNOWN_IMPORTANCE_RANK
-    best_label = ""
-    for s in suggestions:
-        imp = (s.get("importance") or "").upper()
-        rank = IMPORTANCE_ORDER.get(imp, UNKNOWN_IMPORTANCE_RANK)
-        if rank < best_rank:
-            best_rank = rank
-            best_label = imp
-    return best_label
+    return _importance.members_importance(suggestions, empty="")
 
 
 def _sort_by_priority(
@@ -309,7 +304,7 @@ def sort_raw_groups_by_priority(
     return _sort_by_priority(
         groups,
         status_fn=lambda g: g.get("validation_status") or "",
-        importance_fn=lambda g: compute_max_importance(g.get("suggestions", [])),
+        importance_fn=lambda g: _importance.group_importance(g, empty=""),
     )
 
 
@@ -320,7 +315,7 @@ def sort_consolidated_groups_by_priority(
     return _sort_by_priority(
         groups,
         status_fn=lambda g: g.get("validation_status") or "",
-        importance_fn=lambda g: g.get("importance") or "",
+        importance_fn=lambda g: _importance.normalize(g.get("importance"), ""),
     )
 
 
@@ -1063,7 +1058,7 @@ def _build_suggestion_data(
         "id": suggestion_id,
         "title": suggestion.get("title", "Untitled"),
         "description": suggestion.get("desc", suggestion.get("description", "")),
-        "importance": suggestion.get("importance", "MEDIUM").upper(),
+        "importance": _importance.normalize(suggestion.get("importance")),
         "type": suggestion.get("type", "unknown"),
         "sectionRef": suggestion.get("reference", suggestion.get("section", "")),
         "fileRef": file_ref,  # For code-review: file path with line range

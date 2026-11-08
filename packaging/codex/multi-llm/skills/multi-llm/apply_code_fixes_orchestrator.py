@@ -45,6 +45,7 @@ from utils.code_fix_batcher import (
     format_fix_batch_prompt,
 )
 from utils.git_utils import validate_git_ref
+from utils import importance as _importance
 from utils.importance import get_highest_importance
 from utils.output_handler import derive_prefix, find_output_dir
 from utils.report_parser import (
@@ -322,8 +323,7 @@ def format_fix_for_output(
         anchor_text = group.get("anchor_text", "")
         importance = group.get("importance", "MEDIUM")
 
-    if isinstance(importance, str):
-        importance = importance.upper()
+    importance = _importance.normalize(importance)
 
     if len(suggestions) > 1:
         all_descs = [s.get("desc", s.get("description", "")) for s in suggestions if s.get("desc") or s.get("description")]

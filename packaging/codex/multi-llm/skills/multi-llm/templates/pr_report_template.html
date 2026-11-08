@@ -2904,16 +2904,9 @@
         var entry = taskView[taskId];
         var hasSuggestions = entry.hasSuggestions !== false && (entry.suggestions || []).length > 0;
         var count = 0;
-        var maxImp = 'low';
+        var maxImp = (entry.maxImportance || 'low').toLowerCase();
         if (hasSuggestions) {
           (entry.suggestions || []).forEach(function(g) { count += (g.suggestions || []).length; });
-          (entry.suggestions || []).forEach(function(g) {
-            (g.suggestions || []).forEach(function(s) {
-              var imp = (s.importance || 'low').toLowerCase();
-              if (imp === 'high') maxImp = 'high';
-              else if (imp === 'medium' && maxImp !== 'high') maxImp = 'medium';
-            });
-          });
         }
         var dotClass = hasSuggestions
           ? (maxImp === 'high' ? 'dot-high' : maxImp === 'medium' ? 'dot-medium' : 'dot-low')
@@ -3711,26 +3704,18 @@
         var aModels = (a.group.models || []).length;
         var bModels = (b.group.models || []).length;
         if (aModels !== bModels) return bModels - aModels;
-        var impOrder = { high: 0, medium: 1, low: 2 };
-        var aImp = getGroupMaxImportance(a.group);
-        var bImp = getGroupMaxImportance(b.group);
-        return (impOrder[aImp] || 2) - (impOrder[bImp] || 2);
+        // The generator's group importance and rank table (`sortConfig`).
+        var sortConfig = reportData.sortConfig || {};
+        var impOrder = sortConfig.importanceOrder || {};
+        var unknownImp = sortConfig.unknownImportanceRank || 3;
+        var aImp = a.group.maxImportance || '';
+        var bImp = b.group.maxImportance || '';
+        var aRank = impOrder[aImp] !== undefined ? impOrder[aImp] : unknownImp;
+        var bRank = impOrder[bImp] !== undefined ? impOrder[bImp] : unknownImp;
+        return aRank - bRank;
       });
 
       return result;
-    }
-
-    /**
-     * Get the maximum importance level from a group's suggestions.
-     */
-    function getGroupMaxImportance(group) {
-      var maxImp = 'low';
-      (group.suggestions || []).forEach(function(s) {
-        var imp = (s.importance || 'low').toLowerCase();
-        if (imp === 'high') maxImp = 'high';
-        else if (imp === 'medium' && maxImp !== 'high') maxImp = 'medium';
-      });
-      return maxImp;
     }
 
     /**
@@ -4632,16 +4617,7 @@
         var hasSuggestions = entry.hasSuggestions !== false && groups.length > 0;
         var meta = entry.taskMetadata;
         var title = taskId + (meta && meta.title ? ': ' + meta.title : '');
-        var maxImp = 'low';
-        if (hasSuggestions) {
-          groups.forEach(function(g) {
-            (g.suggestions || []).forEach(function(s) {
-              var imp = (s.importance || 'low').toLowerCase();
-              if (imp === 'high') maxImp = 'high';
-              else if (imp === 'medium' && maxImp !== 'high') maxImp = 'medium';
-            });
-          });
-        }
+        var maxImp = (entry.maxImportance || 'low').toLowerCase();
 
         // Task block
         html += '<div class="block' + (hasSuggestions ? '' : ' no-suggestions') + '" id="task-' + escapeAttr(taskId) + '">';
@@ -4869,12 +4845,7 @@
       var validationConfidence = group.validationConfidence || group.validation_confidence || 0;
       var isConsensus = models.length >= 3;
       var isGroupSkipped = !!selections.skipped_groups[groupHashKey];
-      var maxImp = 'low';
-      suggestions.forEach(function(s) {
-        var imp = (s.importance || 'low').toLowerCase();
-        if (imp === 'high') maxImp = 'high';
-        else if (imp === 'medium' && maxImp !== 'high') maxImp = 'medium';
-      });
+      var maxImp = (group.maxImportance || 'low').toLowerCase();
 
       // Build labels map
       if (group.groupHash && group.displayLabel) {
@@ -5168,15 +5139,12 @@
         var theme = group.theme || (suggestions.length > 0 ? suggestions[0].title : 'Untitled Group');
         var isConsensus = models.length >= 3;
 
-        // Compute max importance
-        var maxImportance = '';
+        // The group's importance is the one the generator computed
+        // (`utils/importance.py`), which apply filters by.
+        var maxImportance = group.maxImportance || '';
         var groupModels = [];
         suggestions.forEach(function(s) {
           if (s.model && groupModels.indexOf(s.model) === -1) groupModels.push(s.model);
-          var imp = (s.importance || '').toUpperCase();
-          if (imp === 'HIGH') maxImportance = 'HIGH';
-          else if (imp === 'MEDIUM' && maxImportance !== 'HIGH') maxImportance = 'MEDIUM';
-          else if (imp === 'LOW' && !maxImportance) maxImportance = 'LOW';
         });
 
         var modelBadgesHtml = groupModels.map(function(model) {

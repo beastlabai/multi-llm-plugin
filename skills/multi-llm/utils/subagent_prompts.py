@@ -43,6 +43,11 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional, Sequence
 
+try:
+    from . import importance as _importance
+except ImportError:  # pragma: no cover - direct-script import shim
+    from utils import importance as _importance
+
 try:  # Python 3.8+: TypedDict lives in typing
     from typing import TypedDict
 except ImportError:  # pragma: no cover
@@ -792,7 +797,7 @@ def build_human_decision_judge_prompt(items: Sequence[Dict[str, Any]]) -> str:
             "group_id": item.get("group_id", ""),
             "title": item.get("title", ""),
             "description": item.get("description", item.get("desc", "")),
-            "importance": (item.get("importance") or "MEDIUM").upper(),
+            "importance": _importance.normalize(item.get("importance")),
             "validation_reason": item.get("validation_reason", ""),
             "confidence": item.get("validation_confidence", item.get("confidence", 0.0)),
             "models": list(item.get("models", [])),

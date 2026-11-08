@@ -778,13 +778,18 @@ changes:
       plans/next-phase-command.md T5: the `[NEXT_COMMAND]` line of the same
       answer, printed on stdout after the phase's last marker.
 
-  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches
-    rationale: >
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches/0/prompt
+    rationale: &code_only_rule >
       Issue 31 of the 2026-10-01 three-host run: every fix-batch prompt now ends
       its instructions with the "change code only" rule
       (`code_fix_batcher.CODE_ONLY_RULE`), because a code-fix phase edited the
       plan and tasks.md to record an "approved deviation" where the reviewers
-      had asked for a code fix.
+      had asked for a code fix. One entry per batch prompt, so nothing else
+      under `batches` is excused.
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches/1/prompt
+    rationale: *code_only_rule
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches/2/prompt
+    rationale: *code_only_rule
 
   # ---------------------------------------------------------------------------
   # Issue 18 of the 2026-10-01 three-host run: the judge's persisted names are
@@ -867,6 +872,109 @@ changes:
   - pointer: /state_shape/scope_policy
     rationale: >
       The shape view of the same added `state.json` record.
+
+  # ---------------------------------------------------------------------------
+  # REVIEW-5 (code health 2026-11-07): importance is read in either case.
+  #
+  # The fixture's reviewers answer `HIGH`/`MEDIUM`, and the grouper looked those
+  # up in lower-case tables, so every suggestion weighed as LOW in
+  # `priority_score` and ranked as MEDIUM when ordering groups. Through
+  # `utils/importance.py` a HIGH member now weighs 3 and a MEDIUM one 2, and the
+  # two HIGH groups sort ahead of the MEDIUM ones. Every group here is a
+  # singleton, so the set of `group_hash` values is unchanged: groups and
+  # `to_apply` records are compared by their hash (`bundle_compare`), so what
+  # moves is each list's order, every group's score, and the fields that name a
+  # position (`display_label`, a record's `index`, a batch member's `index`).
+  # Old index -> new index: c948ad24 0 -> 2, 1558bbe6 1 -> 0, a4ba6812 2 -> 1;
+  # 64ba7f16 stays 3.
+  # ---------------------------------------------------------------------------
+  - pointer: /phases/review-plan/artifacts/grouped.json/groups/@order
+    rationale: &review5_order >
+      The two HIGH singletons now sort ahead of the MEDIUM one
+      (c948ad24 1558bbe6 a4ba6812 64ba7f16 -> 1558bbe6 a4ba6812 c948ad24
+      64ba7f16); the group hashes are the same set.
+  - pointer: /phases/code-review/artifacts/grouped.json/groups/@order
+    rationale: *review5_order
+  - pointer: /phases/apply-suggestions/artifacts/orchestrator_output.json/to_apply/@order
+    rationale: &review5_selected >
+      The selected groups follow the reordered groups (HIGH first); the same
+      group ids are selected.
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/to_apply/@order
+    rationale: *review5_selected
+  - pointer: /phases/review-plan/artifacts/grouped.json/groups/0/priority_score
+    rationale: &review5_medium >
+      A MEDIUM member now weighs 2 rather than the LOW 1 the upper-case value
+      fell back to: one model plus 2 (2 -> 3).
+  - pointer: /phases/review-plan/artifacts/grouped.json/groups/1/priority_score
+    rationale: &review5_high >
+      A HIGH member now weighs 3 rather than the LOW 1 the upper-case value
+      fell back to: one model plus 3 (2 -> 4).
+  - pointer: /phases/review-plan/artifacts/grouped.json/groups/2/priority_score
+    rationale: *review5_high
+  - pointer: /phases/review-plan/artifacts/grouped.json/groups/3/priority_score
+    rationale: *review5_medium
+  - pointer: /phases/code-review/artifacts/grouped.json/groups/0/priority_score
+    rationale: *review5_medium
+  - pointer: /phases/code-review/artifacts/grouped.json/groups/1/priority_score
+    rationale: *review5_high
+  - pointer: /phases/code-review/artifacts/grouped.json/groups/2/priority_score
+    rationale: *review5_high
+  - pointer: /phases/code-review/artifacts/grouped.json/groups/3/priority_score
+    rationale: *review5_medium
+  - pointer: /phases/review-plan/artifacts/grouped.json/groups/0/display_label
+    rationale: &review5_label >
+      A group's display label names its position (`G<n>`, members `G<n>S<m>`),
+      so it follows the group to its new place.
+  - pointer: /phases/review-plan/artifacts/grouped.json/groups/0/suggestions/0/display_label
+    rationale: *review5_label
+  - pointer: /phases/review-plan/artifacts/grouped.json/groups/1/display_label
+    rationale: *review5_label
+  - pointer: /phases/review-plan/artifacts/grouped.json/groups/1/suggestions/0/display_label
+    rationale: *review5_label
+  - pointer: /phases/review-plan/artifacts/grouped.json/groups/2/display_label
+    rationale: *review5_label
+  - pointer: /phases/review-plan/artifacts/grouped.json/groups/2/suggestions/0/display_label
+    rationale: *review5_label
+  - pointer: /phases/code-review/artifacts/grouped.json/groups/0/display_label
+    rationale: *review5_label
+  - pointer: /phases/code-review/artifacts/grouped.json/groups/0/suggestions/0/display_label
+    rationale: *review5_label
+  - pointer: /phases/code-review/artifacts/grouped.json/groups/1/display_label
+    rationale: *review5_label
+  - pointer: /phases/code-review/artifacts/grouped.json/groups/1/suggestions/0/display_label
+    rationale: *review5_label
+  - pointer: /phases/code-review/artifacts/grouped.json/groups/2/display_label
+    rationale: *review5_label
+  - pointer: /phases/code-review/artifacts/grouped.json/groups/2/suggestions/0/display_label
+    rationale: *review5_label
+  - pointer: /phases/apply-suggestions/artifacts/orchestrator_output.json/to_apply/0/index
+    rationale: &review5_index >
+      A selected group's `index` is its position in grouped.json, so it follows
+      the group to its new place.
+  - pointer: /phases/apply-suggestions/artifacts/orchestrator_output.json/to_apply/1/index
+    rationale: *review5_index
+  - pointer: /phases/apply-suggestions/artifacts/orchestrator_output.json/to_apply/2/index
+    rationale: *review5_index
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/to_apply/0/index
+    rationale: *review5_index
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/to_apply/1/index
+    rationale: *review5_index
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/to_apply/2/index
+    rationale: *review5_index
+  - pointer: /phases/apply-suggestions/artifacts/orchestrator_output.json/batches/0/suggestions/0/index
+    rationale: &review5_batch_index >
+      Each batch member's group index follows the reordered groups; the batches
+      keep their members and order.
+  - pointer: /phases/apply-suggestions/artifacts/orchestrator_output.json/batches/1/suggestions/0/index
+    rationale: *review5_batch_index
+  - pointer: /phases/apply-suggestions/artifacts/orchestrator_output.json/batches/2/suggestions/0/index
+    rationale: *review5_batch_index
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches/0/fixes/0/index
+    rationale: *review5_batch_index
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches/1/fixes/0/index
+    rationale: *review5_batch_index
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches/2/fixes/0/index
+    rationale: *review5_batch_index
 
 # Example of the shape an entry takes, kept as documentation only (commented, so
 # it is not an active row that would have to match something):

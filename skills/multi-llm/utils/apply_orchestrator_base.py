@@ -54,6 +54,7 @@ from .filtering import (
     should_bypass_no_selection_confirmation,
     validate_judge_decide_items_honored,
 )
+from . import importance as _importance
 from .importance import get_highest_importance
 from .judge_vocab import (
     JUDGE_AUTO_DECIDE,
@@ -5133,9 +5134,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """
         by_importance: Dict[str, List[Dict[str, Any]]] = {"HIGH": [], "MEDIUM": [], "LOW": []}
         for item in self.formatted_human:
-            imp = item.get("importance", "MEDIUM").upper()
-            if imp in by_importance:
-                by_importance[imp].append(item)
+            by_importance[_importance.normalize(item.get("importance"))].append(item)
 
         mode = getattr(self.args, "batch_review_mode", "by-importance")
         agent_decide = bool(getattr(self.args, "agent_decide", False))

@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .human_decisions import is_judge_source
 from .judge_vocab import JUDGE_DECIDE, JUDGE_DECIDE_ITEM_IDS, upgrade_legacy
+from . import importance as _importance
 from .importance import get_highest_importance
 
 # Import error type constants (will be added to validation.py)
@@ -150,9 +151,9 @@ def filter_items(
     for warning in warnings:
         print(warning, file=sys.stderr)
 
-    # Priority levels for filtering
-    priority_levels = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
-    min_level = priority_levels.get(min_priority.upper(), 0)
+    # The floor for valid items, in either case; one naming no level is LOW
+    # (keep everything).
+    min_importance = _importance.normalize(min_priority, "LOW")
 
     valid = []
     needs_human = []
@@ -235,8 +236,7 @@ def filter_items(
                 approval_reason = f"--approve-importance {importance}"
 
         elif status == "valid":
-            importance_level = priority_levels.get(importance, 0)
-            if importance_level < min_level:
+            if not _importance.at_least(importance, min_importance):
                 skipped.append(group)
                 continue
             else:

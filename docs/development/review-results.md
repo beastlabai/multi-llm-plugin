@@ -152,7 +152,31 @@ Validation statuses: `valid`, `invalid`, `needs-human-decision`,
 
 ## Importance levels
 
-Importance levels: HIGH > MEDIUM > LOW
+Importance levels: HIGH > MEDIUM > LOW. `utils/importance.py` owns the spelling (`LEVELS`), the
+order (`RANK`) and the score table (`WEIGHT`). Every reader goes through it (`normalize`, `rank`,
+`weight`, `is_high`, `highest`, `group_importance`) and never compares the string itself.
+
+- **Read either case, write upper case.** Reviewers answer in the schemas' lower-case enum
+  (`MODEL_VALUES`), and artifacts from before 2026-11-08 carry either case: the plan lane wrote
+  upper case and the code lane lower case. Reads accept both. The plugin stores upper case: the
+  base lane's `save_model_result`, and on the code lane `run_single_review`, the fan-out's
+  flattening and the reaggregate loader (`canonicalize`).
+- **A value that names no level reads as MEDIUM** unless the caller passes another default. The
+  plan lane drops such a suggestion; the code lane only warns and keeps it as written, so the
+  report lists it under MEDIUM instead of in no section.
+- **A group has no importance field.** `SuggestionGroup.to_dict` writes none; derive it from the
+  members with `group_importance` (`members_importance` for a bare member list): the highest
+  member, a member naming no level counting as MEDIUM, as its own badge does. Only a group with no
+  members has no level; the HTML report shows that as `""` (no badge, sorted after LOW). The HTML
+  report's `maxImportance`, its priority sorts and apply filtering share this one rule, and the
+  report templates take a group's level and the rank table from the generator's data
+  (`maxImportance`, `sortConfig`) rather than deriving their own.
+- **Ids.** Importance enters neither `generate_group_id` nor `generate_suggestion_id`, so a
+  spelling change moves no id. The rank does order a group's members and the groups themselves,
+  so a regrouping can give a mixed-importance group a different theme (and so a different
+  `group_hash`) than a grouping made before the case fix. An in-flight round still reuses its
+  bound `grouped.json`, and a regroup retires the verdicts it orphans
+  (`retire_validation_for_regroup`).
 
 ## Grouping and section references
 

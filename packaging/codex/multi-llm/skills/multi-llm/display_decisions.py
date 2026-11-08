@@ -22,6 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.stream_bootstrap import bootstrap_streams
+from utils import importance as _importance
 from utils.human_decisions import judge_source_label
 from utils.judge_vocab import JUDGE_SKIPPED, upgrade_legacy
 from utils.output_handler import sanitize_prefix, get_phase_dir
@@ -38,7 +39,7 @@ def get_title(item: dict) -> str:
 
 
 def get_importance(item: dict) -> str:
-    return (item.get("importance") or "MEDIUM").upper()
+    return _importance.normalize(item.get("importance"))
 
 
 def importance_badge(imp: str) -> str:

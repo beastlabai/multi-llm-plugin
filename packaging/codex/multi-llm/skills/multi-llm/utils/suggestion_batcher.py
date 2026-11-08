@@ -17,8 +17,10 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
 try:
+    from . import importance as _importance
     from .prior_changes import entry_id, stable_key
 except ImportError:
+    from utils import importance as _importance
     from utils.prior_changes import entry_id, stable_key
 
 
@@ -75,11 +77,7 @@ class SuggestionBatch:
     @property
     def priority_score(self) -> float:
         """Calculate batch priority based on contained suggestions."""
-        score = 0.0
-        importance_weights = {"HIGH": 3.0, "MEDIUM": 2.0, "LOW": 1.0}
-        for s in self.suggestions:
-            score += importance_weights.get(s.get("importance", "MEDIUM").upper(), 2.0)
-        return score
+        return float(sum(_importance.weight(s.get("importance")) for s in self.suggestions))
 
     def can_add(self, suggestion: Dict[str, Any]) -> bool:
         """Check if a suggestion can be added to this batch."""
@@ -287,8 +285,7 @@ def group_suggestions_for_subagents(
     # Step 3: Within each section, create batches respecting limits
     for section_key, cluster in sorted_sections:
         # Sort by importance within cluster (HIGH first)
-        importance_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
-        cluster.sort(key=lambda s: importance_order.get(s.get("importance", "MEDIUM").upper(), 1))
+        cluster.sort(key=lambda s: _importance.rank(s.get("importance")))
 
         current_batch = SuggestionBatch(section_key=section_key)
 

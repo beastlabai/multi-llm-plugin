@@ -47,6 +47,7 @@ try:
         JUDGE_SKIPPED,
         canonical_value,
     )
+    from . import importance as _importance
     from .schema_validator import validate_human_decision_verdicts
     from .subagent_prompts import build_human_decision_judge_prompt
     from .subagent_tasks import (
@@ -66,6 +67,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         JUDGE_SKIPPED,
         canonical_value,
     )
+    from utils import importance as _importance
     from utils.schema_validator import validate_human_decision_verdicts
     from utils.subagent_prompts import build_human_decision_judge_prompt
     from utils.subagent_tasks import (
@@ -223,9 +225,9 @@ def judge_item_from_group(group: Dict[str, Any]) -> Dict[str, Any]:
         "group_id": group_id_of(group),
         "title": primary.get("title") or group.get("theme") or "Untitled",
         "description": description or group.get("desc") or group.get("description") or "",
-        "importance": (
-            primary.get("importance") or group.get("importance") or "MEDIUM"
-        ).upper(),
+        "importance": _importance.normalize(
+            primary.get("importance") or group.get("importance")
+        ),
         "validation_reason": group.get("validation_reason", ""),
         "validation_confidence": group.get("validation_confidence", 0.0),
         "models": list(group.get("models", [])),
@@ -609,7 +611,7 @@ def record_verdicts(
     for group_id, verdict in ingest.verdicts.items():
         decision = verdict["decision"]
         item = items_by_group.get(group_id, {})
-        importance = (item.get("importance") or "MEDIUM").upper()
+        importance = _importance.normalize(item.get("importance"))
         salvaged = verdict.get("salvaged_description")
         dropped = verdict.get("dropped")
         model_reason = verdict.get("reason", "")

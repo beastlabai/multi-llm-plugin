@@ -147,7 +147,10 @@ concrete mechanism *in the shim*; the matrix is never on an agent read path.
 and `MULTI_LLM_LEGACY_INSTRUCTIONS=1` now only earns a stderr line saying so. The regression guard is
 `tests/test_instruction_refactor_guard.py`: a normalized golden bundle of one fully mocked workflow run over
 `tests/fixtures/e2e/plans/auth-feature.md` × `full_workflow.yaml`, captured on the `phase3-pre-refactor` tag and reproduced with a **zero**
-diff outside `tests/golden/expected_changes.yaml`.
+diff outside `tests/golden/expected_changes.yaml`. Record lists (`batches`, grouped.json's `groups` and
+their `suggestions`, `to_apply`) are compared by each record's stable identity, with the order as one
+`@dispatch_order` or `@order` leaf (`tests/golden/bundle_compare.py`), so an entry names a leaf or an
+order, never a whole record.
 
 **No spelled invocation in the corpus** (plans/next-phase-command.md T6): the lint also forbids, as
 a plain substring on every line of `instructions/*.md` and `references/*.md`

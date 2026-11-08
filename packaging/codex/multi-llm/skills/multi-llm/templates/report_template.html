@@ -1954,22 +1954,14 @@
         var validationConfidence = group.validationConfidence || 0;
         var confidencePercent = Math.round(validationConfidence * 100);
 
-        // Get unique models and max importance for this group
+        // Unique models for this group. Its importance is the one the
+        // generator computed (`utils/importance.py`), which apply filters by.
         var groupModels = [];
-        var maxImportance = '';
+        var maxImportance = group.maxImportance || '';
         if (group.suggestions) {
           group.suggestions.forEach(function(s) {
             if (s.model && groupModels.indexOf(s.model) === -1) {
               groupModels.push(s.model);
-            }
-            // Track max importance (HIGH > MEDIUM > LOW)
-            var imp = (s.importance || '').toUpperCase();
-            if (imp === 'HIGH') {
-              maxImportance = 'HIGH';
-            } else if (imp === 'MEDIUM' && maxImportance !== 'HIGH') {
-              maxImportance = 'MEDIUM';
-            } else if (imp === 'LOW' && !maxImportance) {
-              maxImportance = 'LOW';
             }
           });
         }

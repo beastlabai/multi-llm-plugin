@@ -28,6 +28,7 @@ from utils.apply_orchestrator_base import (
     build_common_arg_parser,
 )
 from utils.cli_common import dispatcher_prefix
+from utils import importance as _importance
 from utils.text_clip import clip
 from utils.judge_vocab import JUDGE_AUTO_DECIDE, JUDGE_DECIDE
 from utils.apply_output_helpers import (
@@ -323,7 +324,7 @@ Bulk Approval Examples:
             desc = primary.get("desc", "")
             suggestion_type = primary.get("type", "modification")
             reference = primary.get("reference", "")
-            importance = primary.get("importance", "MEDIUM")
+            importance = _importance.normalize(primary.get("importance"))
         else:
             title = group.get("theme", "Unknown")
             desc = ""

@@ -17,11 +17,13 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
 try:
+    from . import importance as _importance
     from .plan_updater import get_tasks_file_path
     from .prior_changes import entries as prior_changes_entries
     from .prior_changes import entry_id, plain_entry_id, record_line, stable_key
     from .subagent_tasks import subagent_type_for_role
 except ImportError:
+    from utils import importance as _importance
     from utils.plan_updater import get_tasks_file_path
     from utils.prior_changes import entries as prior_changes_entries
     from utils.prior_changes import entry_id, plain_entry_id, record_line, stable_key
@@ -104,14 +106,7 @@ class CodeFixBatch:
         safety (F5, 2026-09-16) — kept as-is here for JSON-output
         compatibility (``to_dict()``'s ``priority_score`` field).
         """
-        score = 0.0
-        importance_weights = {"HIGH": 3.0, "MEDIUM": 2.0, "LOW": 1.0}
-        for fix in self.fixes:
-            importance = fix.get("importance", "MEDIUM")
-            if isinstance(importance, str):
-                importance = importance.upper()
-            score += importance_weights.get(importance, 2.0)
-        return score
+        return float(sum(_importance.weight(fix.get("importance")) for fix in self.fixes))
 
     def can_add(self, fix: Dict[str, Any]) -> bool:
         """Check if a fix can be added to this batch."""
@@ -220,20 +215,13 @@ def is_high_risk_fix(fix: Dict[str, Any]) -> bool:
     Security fixes and HIGH importance fixes should always be isolated.
     """
     fix_type = (fix.get("type") or "").lower()
-    importance = (fix.get("importance") or "").upper()
 
     # Security fixes are always isolated
     if fix_type == "security":
         return True
 
     # HIGH importance fixes are isolated
-    if importance == "HIGH":
-        return True
-
-    return False
-
-
-_IMPORTANCE_RANK = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
+    return _importance.is_high(fix.get("importance"))
 
 
 def batch_sort_key(batch: "CodeFixBatch"):
@@ -255,7 +243,7 @@ def batch_sort_key(batch: "CodeFixBatch"):
     is_isolated_high_risk = any(is_high_risk_fix(f) for f in batch.fixes)
     max_importance = max(
         (
-            _IMPORTANCE_RANK.get(str(f.get("importance", "MEDIUM")).upper(), 2)
+            _importance.weight(f.get("importance"))
             for f in batch.fixes
         ),
         default=0,

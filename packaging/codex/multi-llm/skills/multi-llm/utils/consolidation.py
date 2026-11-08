@@ -68,8 +68,10 @@ logger = logging.getLogger(__name__)
 
 try:
     from . import scope_report as _scope_report
+    from . import importance as _importance
 except ImportError:  # pragma: no cover - direct script import
     from utils import scope_report as _scope_report
+    from utils import importance as _importance
 
 
 # ---------------------------------------------------------------------------
@@ -653,14 +655,6 @@ def prepare_consolidation_tasks(
 # Merge helpers
 # ---------------------------------------------------------------------------
 
-# Importance priority for choosing the higher importance level.
-_IMPORTANCE_PRIORITY: Dict[str, int] = {
-    "HIGH": 3,
-    "MEDIUM": 2,
-    "LOW": 1,
-}
-
-
 def _word_overlap_ratio(title_a: str, title_b: str) -> float:
     """
     Compute word-overlap ratio between two titles.
@@ -691,7 +685,7 @@ def _highest_importance(*importance_values: str) -> str:
     """
     Return the highest importance level among the given values.
 
-    Uses ``_IMPORTANCE_PRIORITY`` ordering: HIGH > MEDIUM > LOW.
+    HIGH > MEDIUM > LOW, in either case (``utils/importance.py``).
     Unrecognized values are treated as lowest priority.
 
     Args:
@@ -700,15 +694,7 @@ def _highest_importance(*importance_values: str) -> str:
     Returns:
         The highest importance level string.
     """
-    best = "LOW"
-    best_rank = _IMPORTANCE_PRIORITY.get(best, 0)
-    for val in importance_values:
-        normalized = val.upper() if isinstance(val, str) else ""
-        rank = _IMPORTANCE_PRIORITY.get(normalized, 0)
-        if rank > best_rank:
-            best = normalized
-            best_rank = rank
-    return best
+    return _importance.highest(importance_values, default="LOW")
 
 
 def _resolve_type_for_group_ids(
@@ -822,11 +808,7 @@ def _make_singleton_consolidated(
         group_type = "clarification"
 
     # Determine importance
-    importance = group.get("importance", "LOW")
-    if isinstance(importance, str):
-        importance = importance.upper()
-    if importance not in _IMPORTANCE_PRIORITY:
-        importance = "LOW"
+    importance = _importance.normalize(group.get("importance"), "LOW")
 
     return {
         "title": group.get("theme", "Untitled"),
@@ -1062,8 +1044,7 @@ def merge_consolidation_results(
                 cluster["reasoning"] = ""
             if "description" not in cluster:
                 cluster["description"] = cluster.get("title", "")
-            if "importance" not in cluster:
-                cluster["importance"] = "MEDIUM"
+            cluster["importance"] = _importance.normalize(cluster.get("importance"))
             if "type" not in cluster:
                 cluster["type"] = "clarification"
             if "title" not in cluster:

@@ -34,6 +34,7 @@ from utils.apply_output_helpers import (
 )
 from utils.apply_path_helpers import load_json_file
 from utils.apply_selection_helpers import merge_edited_descriptions
+from utils import importance as _importance
 from utils.importance import get_highest_importance
 from utils.report_parser import (
     find_edited_descriptions,
@@ -199,7 +200,7 @@ Bulk Approval Examples:
             desc = primary.get("desc", "")
             suggestion_type = primary.get("type", "modification")
             reference = primary.get("reference", "")
-            importance = primary.get("importance", "MEDIUM")
+            importance = _importance.normalize(primary.get("importance"))
         else:
             title = group.get("theme", "Unknown")
             desc = ""

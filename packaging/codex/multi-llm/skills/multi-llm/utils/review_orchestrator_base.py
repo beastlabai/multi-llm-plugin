@@ -137,8 +137,8 @@ from .html_report_generator import (
     served_model_label,
     sort_raw_groups_by_priority,
     compute_max_importance,
-    IMPORTANCE_ORDER,
 )
+from . import importance as _importance
 from .state_manager import (
     get_or_create_state,
     stamp_stable_ids,
@@ -180,8 +180,10 @@ from . import (
 # Required fields for each suggestion (shared across review phases)
 REQUIRED_FIELDS = ["title", "desc", "importance", "reference", "type"]
 
-# Valid values for certain fields
-VALID_IMPORTANCE = {"high", "medium", "low"}
+# Valid values for certain fields. Importance is read in any case and stored
+# in canonical spelling (`utils/importance.py`); this set is the spelling the
+# schema asks reviewers for.
+VALID_IMPORTANCE = set(_importance.MODEL_VALUES)
 VALID_TYPES = {"addition", "modification", "deletion", "clarification"}
 
 # Delay between launching provider processes to avoid concurrent launch bugs
@@ -2231,8 +2233,8 @@ def validate_suggestion(suggestion: dict) -> Tuple[bool, Optional[str]]:
         if field not in suggestion:
             return (False, f"Missing required field: {field}")
 
-    importance = suggestion.get("importance", "").lower()
-    if importance not in VALID_IMPORTANCE:
+    importance = suggestion.get("importance", "")
+    if _importance.canonical(importance) is None:
         return (False, f"Invalid importance: {importance}")
 
     stype = suggestion.get("type", "").lower()
@@ -6169,7 +6171,7 @@ def _write_salvage_request(
             # The reviewer's provisional scope tags: kept when present, never
             # a reason to drop an entry.
             "optional_fields": list(_sp.SCOPE_FIELDS),
-            "importance_values": list(VALID_IMPORTANCE),
+            "importance_values": list(_importance.MODEL_VALUES),
             "type_values": list(VALID_TYPES),
         },
         "output_path": os.path.join(phase_dir, f"{sanitized_model}.json"),
@@ -6335,7 +6337,7 @@ def save_model_result(
             if not is_valid:
                 print(f"[{model}] Warning: Suggestion {i} invalid - {validation_error}")
                 continue
-            suggestion["importance"] = suggestion["importance"].upper()
+            suggestion["importance"] = _importance.normalize(suggestion["importance"])
             suggestion["type"] = suggestion["type"].lower()
             validated_suggestions.append(suggestion)
 
@@ -6482,7 +6484,7 @@ def aggregate_results(
         for group in groups_to_display:
             for s in group.get("suggestions", []):
                 total_suggestions += 1
-                importance = s.get("importance", "LOW").upper()
+                importance = _importance.normalize(s.get("importance"), "LOW")
                 if importance == "HIGH":
                     high_count += 1
                 elif importance == "MEDIUM":
@@ -6760,7 +6762,7 @@ def format_group(
 
     sorted_suggestions = sorted(
         suggestions,
-        key=lambda s: IMPORTANCE_ORDER.get(s.get("importance", "LOW").upper(), 3)
+        key=lambda s: _importance.rank(s.get("importance"), "LOW")
     )
 
     for suggestion_idx, suggestion in enumerate(sorted_suggestions, 1):
@@ -6797,7 +6799,7 @@ def format_suggestion_in_group(
     desc = suggestion.get("desc", "")
     stype = suggestion.get("type", "unknown")
     reference = suggestion.get("reference", "")
-    importance = suggestion.get("importance", "LOW").upper()
+    importance = _importance.normalize(suggestion.get("importance"), "LOW")
     model = suggestion.get("model", suggestion.get("source_model", "unknown"))
 
     display_label = suggestion.get("display_label", suggestion_id)

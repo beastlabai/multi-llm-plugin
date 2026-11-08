@@ -83,6 +83,7 @@ from utils.output_handler import (
 from utils.detach import record_output_files, report_progress
 from utils.progress_tracker import DEADLINE_ERROR, FanoutProgress, PhaseProgress
 from utils.readonly_audit import combine_audits
+from utils import importance as _importance
 from utils import scope_policy as _sp
 from utils import scope_round as _scope_round
 from utils.review_orchestrator_base import (
@@ -2575,7 +2576,7 @@ def prepare_fixes_for_subagents(
             "id": f"FIX-{i:03d}",
             "title": issue.get("title") or issue.get("theme", "Unknown issue"),
             "type": issue_type,
-            "importance": issue.get("importance", "medium"),
+            "importance": _importance.normalize(issue.get("importance")),
             "description": issue.get("desc") or issue.get("description", "No description provided"),
             "location_hints": location_hints,
             "plan_path": str(plan_path.absolute()),
@@ -3817,7 +3818,7 @@ async def run_single_review(
                 "expected_schema": {
                     "fields": salvage_issue_fields(commit_record),
                     "optional_fields": list(_sp.SCOPE_FIELDS),
-                    "importance_values": ["high", "medium", "low"],
+                    "importance_values": list(_importance.MODEL_VALUES),
                     "type_values": ["bug", "missing", "improvement", "style", "scope"]
                 },
                 "output_path": str(phase_dir / f"{sanitized_model}.json"),
@@ -3875,6 +3876,8 @@ async def run_single_review(
         is_valid, errors = validate_code_review_issues(output_data)
         if not is_valid:
             print(f"[{display_name}] Warning: Validation errors: {errors}")
+        # Stored in canonical spelling, as the base lane stores it.
+        _importance.canonicalize(output_data)
         print(f"[{display_name}] Found {len(output_data)} issues")
         # `done` at the *return*, not at the completion print two branches up,
         # even though the print is where `source` is named. The print only says
@@ -3913,7 +3916,7 @@ async def run_single_review(
             "expected_schema": {
                 "fields": salvage_issue_fields(commit_record),
                 "optional_fields": list(_sp.SCOPE_FIELDS),
-                "importance_values": ["high", "medium", "low"],
+                "importance_values": list(_importance.MODEL_VALUES),
                 "type_values": ["bug", "missing", "improvement", "style", "scope"]
             },
             "output_path": str(phase_dir / f"{sanitized_model}.json"),
@@ -4637,10 +4640,11 @@ def generate_review_report(
             if location and 0 < location[0] <= len(group_scopes):
                 issue_scope[id(issue)] = group_scopes[location[0] - 1][1]
 
-    # Group by importance
-    high = [i for i in all_issues if i.get("importance") == "high"]
-    medium = [i for i in all_issues if i.get("importance") == "medium"]
-    low = [i for i in all_issues if i.get("importance") == "low"]
+    # Group by importance, read in either case; a value naming no level is
+    # MEDIUM (`utils/importance.py`), so every counted issue lands in a section.
+    high = [i for i in all_issues if _importance.normalize(i.get("importance")) == "HIGH"]
+    medium = [i for i in all_issues if _importance.normalize(i.get("importance")) == "MEDIUM"]
+    low = [i for i in all_issues if _importance.normalize(i.get("importance")) == "LOW"]
 
     def _issue_sort_key(issue):
         status, _ = get_validation_info(issue)
@@ -5113,6 +5117,8 @@ async def reaggregate_from_existing_files(
             # failure the missing checkpoint caused, from the other direction.
             issue["model"] = model            # report generation reads this one
             issue["source_model"] = model     # grouping attributes by this one
+        # A salvage or an older run wrote whichever case it was given.
+        _importance.canonicalize(issues)
         all_issues.extend(issues)
 
         # Add to results dict for report generation
@@ -6793,6 +6799,9 @@ async def main(argv: Optional[List[str]] = None) -> int:
                     ):
                         issue["model"] = model_spec
                         all_issues.append(issue)
+            # An in-process salvage's file reaches `results` in the case it
+            # was written in.
+            _importance.canonicalize(all_issues)
 
             # An empty successful review replaces the previous findings too.
             # Otherwise --force can report zero issues while apply-code-fixes

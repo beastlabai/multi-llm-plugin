@@ -90,10 +90,14 @@ except ImportError:  # flat import, `tests/golden` on sys.path
 
 __all__ = [
     "diff_bundles",
+    "align_record_lists",
     "align_batch_lists",
     "batch_identity",
+    "record_identity",
     "ALIGNED_LIST_KEY",
+    "RECORD_ID_FIELDS",
     "DISPATCH_ORDER_LEAF",
+    "ORDER_LEAF",
     "normalize_run",
     "COMPARED_JSON",
     "derived_scalars",
@@ -111,7 +115,7 @@ __all__ = [
 
 
 # ---------------------------------------------------------------------------
-# Batch lists compare as multisets
+# Record lists compare as multisets
 #
 # `_flatten` addresses a list by position, so a permuted `batches` list — the
 # apply phases' dispatch order is sorted, and the sort key is code — reads as
@@ -120,20 +124,35 @@ __all__ = [
 # could absorb that was a pointer on the whole list, and a prefix entry that
 # wide excuses any future drift underneath it: a changed prompt template, a fix
 # that moved batch, a `priority_score` that no longer sums. So the comparison,
-# not the allowlist, understands what a batch list is: the fresh list is
-# aligned onto the baseline's slots by the titles of each batch's members, the
-# leaves are then diffed in place (a changed leaf inside a moved batch is still
-# reported, at the baseline's index, where the leaf-exact entries already
+# not the allowlist, understands what a record list is: the fresh list is
+# aligned onto the baseline's slots by each record's stable identity, the
+# leaves are then diffed in place (a changed leaf inside a moved record is
+# still reported, at the baseline's index, where the leaf-exact entries already
 # point), and the order itself is reported once, as its own leaf, so a reorder
 # still needs one entry with a rationale — a narrow one.
+#
+# The same holds for every list whose records carry a stable id: grouped.json's
+# `groups` (by `group_hash`) and their member `suggestions` (by
+# `suggestion_hash`), and the apply phases' `to_apply` (by `group_id`). Group
+# order is a sort whose key is code too (importance, then score), and a pointer
+# on `groups/0` would excuse a changed description, membership or hash at that
+# position along with the reorder.
 # ---------------------------------------------------------------------------
 
-#: The key whose list value is aligned by content. Only the apply phases'
-#: `orchestrator_output.json` carries one, but the rule is by key, not path,
-#: so the container lane's bundles get the same reading.
+#: The key whose list value is aligned by its members' titles. Only the apply
+#: phases' `orchestrator_output.json` carries one, but the rule is by key, not
+#: path, so the container lane's bundles get the same reading.
 ALIGNED_LIST_KEY = "batches"
-#: The synthetic leaf a reorder is reported at, under the list's own pointer.
+#: Keys whose list records are aligned by one id field, the same way.
+RECORD_ID_FIELDS = {
+    "groups": "group_hash",
+    "to_apply": "group_id",
+    "suggestions": "suggestion_hash",
+}
+#: The synthetic leaf a batch reorder is reported at, under the list's pointer.
 DISPATCH_ORDER_LEAF = "@dispatch_order"
+#: The synthetic leaf any other record list's reorder is reported at.
+ORDER_LEAF = "@order"
 #: Member lists a batch may carry, in the order they are looked for.
 _BATCH_MEMBER_KEYS = ("fixes", "suggestions", "tasks")
 
@@ -156,18 +175,32 @@ def batch_identity(batch: Any) -> Optional[Tuple[str, ...]]:
     return None
 
 
-def _align_batch_list(baseline: list, fresh: list) -> Tuple[list, bool]:
-    """Reorder *fresh* onto *baseline*'s slots by batch identity.
+def record_identity(key: str, record: Any) -> Any:
+    """What names *record* in a list under *key*, or ``None`` (it keeps its
+    position): a batch's member titles, or the record's id field
+    (:data:`RECORD_ID_FIELDS`)."""
+    if key == ALIGNED_LIST_KEY:
+        return batch_identity(record)
+    field = RECORD_ID_FIELDS.get(key)
+    if field is None or not isinstance(record, dict):
+        return None
+    value = record.get(field)
+    return value if isinstance(value, str) and value else None
 
-    Each baseline slot takes the first unclaimed fresh batch with the same
-    identity; a slot nothing matches takes the next unclaimed fresh batch in
-    dispatch order (so a batch whose *content* changed still diffs leaf by
-    leaf, in place, rather than as one absence plus one addition); anything
-    still unclaimed is appended, where it reads as added. The second value
-    says whether the dispatch order differed at all.
+
+def _align_list(baseline: list, fresh: list, key: str) -> Tuple[list, bool]:
+    """Reorder *fresh* onto *baseline*'s slots by record identity.
+
+    Each baseline slot takes the first unclaimed fresh record with the same
+    identity; a slot nothing matches takes the next unclaimed fresh record in
+    order (so a record whose *identity* changed still diffs leaf by leaf, in
+    place, rather than as one absence plus one addition); anything still
+    unclaimed is appended, where it reads as added. The second value says
+    whether the sequence of identities differed at all (never for a list
+    where nothing has one).
     """
-    fresh_ids = [batch_identity(b) for b in fresh]
-    base_ids = [batch_identity(b) for b in baseline]
+    fresh_ids = [record_identity(key, r) for r in fresh]
+    base_ids = [record_identity(key, r) for r in baseline]
     claimed = [False] * len(fresh)
     aligned: List[Any] = [None] * len(baseline)
     for slot, identity in enumerate(base_ids):
@@ -182,21 +215,28 @@ def _align_batch_list(baseline: list, fresh: list) -> Tuple[list, bool]:
     for slot in range(len(baseline)):
         if aligned[slot] is None and leftovers:
             aligned[slot] = fresh[leftovers.pop(0)]
-    result = [b for b in aligned if b is not None]
+    result = [r for r in aligned if r is not None]
     result.extend(fresh[j] for j in leftovers)
-    return result, fresh_ids != base_ids
+    named = any(i is not None for i in base_ids + fresh_ids)
+    return result, named and fresh_ids != base_ids
 
 
 def _pointer_token(key: Any) -> str:
     return str(key).replace("~", "~0").replace("/", "~1")
 
 
-def align_batch_lists(
+def _identity_value(identity: Any) -> Any:
+    return list(identity) if isinstance(identity, tuple) else identity
+
+
+def align_record_lists(
     baseline: Any, fresh: Any, prefix: str = ""
 ) -> Tuple[Any, List[Tuple[str, Any, Any]]]:
-    """Walk both bundles together; return *fresh* with every ``batches`` list
-    aligned onto the baseline's, plus one ``@dispatch_order`` diff per list
-    whose order differed (``(pointer, baseline_identities, fresh_identities)``).
+    """Walk both bundles together; return *fresh* with every record list
+    (``batches`` and the :data:`RECORD_ID_FIELDS` keys) aligned onto the
+    baseline's, plus one order diff per list whose order differed
+    (``(pointer, baseline_identities, fresh_identities)``, at
+    ``<list>/@dispatch_order`` for batches, ``<list>/@order`` otherwise).
     """
     order_diffs: List[Tuple[str, Any, Any]] = []
     if isinstance(baseline, dict) and isinstance(fresh, dict):
@@ -207,27 +247,25 @@ def align_batch_lists(
                 out[key] = value
                 continue
             left = baseline[key]
-            if (key == ALIGNED_LIST_KEY and isinstance(left, list)
-                    and isinstance(value, list)):
-                aligned, reordered = _align_batch_list(left, value)
+            if ((key == ALIGNED_LIST_KEY or key in RECORD_ID_FIELDS)
+                    and isinstance(left, list) and isinstance(value, list)):
+                aligned, reordered = _align_list(left, value, key)
                 if reordered:
+                    leaf = DISPATCH_ORDER_LEAF if key == ALIGNED_LIST_KEY else ORDER_LEAF
                     order_diffs.append((
-                        f"{pointer}/{DISPATCH_ORDER_LEAF}",
-                        [list(i) if i is not None else None for i in map(batch_identity, left)],
-                        [list(i) if i is not None else None for i in map(batch_identity, value)],
+                        f"{pointer}/{leaf}",
+                        [_identity_value(record_identity(key, r)) for r in left],
+                        [_identity_value(record_identity(key, r)) for r in value],
                     ))
                 value = aligned
-                left_items = left
-            else:
-                left_items = left
-            out[key], nested = align_batch_lists(left_items, value, pointer)
+            out[key], nested = align_record_lists(left, value, pointer)
             order_diffs.extend(nested)
         return out, order_diffs
     if isinstance(baseline, list) and isinstance(fresh, list):
         out_list = []
         for index, item in enumerate(fresh):
             if index < len(baseline):
-                aligned_item, nested = align_batch_lists(
+                aligned_item, nested = align_record_lists(
                     baseline[index], item, f"{prefix}/{index}"
                 )
                 out_list.append(aligned_item)
@@ -238,15 +276,21 @@ def align_batch_lists(
     return fresh, order_diffs
 
 
+#: The older name, from when only ``batches`` lists were aligned.
+align_batch_lists = align_record_lists
+
+
 def diff_bundles(baseline: Any, fresh: Any) -> List[Tuple[str, Any, Any]]:
     """Every difference as ``(json-pointer, baseline, fresh)``, pointer-sorted.
 
-    Positional everywhere except a ``batches`` list, which is compared as a
-    multiset keyed by its members' titles (see the block comment above): its
-    leaves are reported at the baseline's indices and its order once, at
-    ``<list>/@dispatch_order``.
+    Positional everywhere except a record list, which is compared as a
+    multiset keyed by each record's identity (see the block comment above): a
+    ``batches`` list by its members' titles, ``groups``, ``to_apply`` and
+    ``suggestions`` by their id field. Its leaves are reported at the
+    baseline's indices and its order once, at ``<list>/@dispatch_order``
+    (batches) or ``<list>/@order``.
     """
-    aligned, order_diffs = align_batch_lists(baseline, fresh)
+    aligned, order_diffs = align_record_lists(baseline, fresh)
     return sorted(_diff_positional(baseline, aligned) + order_diffs)
 
 

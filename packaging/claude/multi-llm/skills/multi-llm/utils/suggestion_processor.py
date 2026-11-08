@@ -6,6 +6,7 @@ import math
 import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
+from . import importance as _importance
 from .schema_validator import drop_non_record_entries
 
 
@@ -35,13 +36,14 @@ class SuggestionGroup:
         self._recalculate_priority()
 
     def _recalculate_priority(self) -> None:
-        """Recalculate priority based on model consensus and importance."""
-        base_score = len(self.models)
+        """Recalculate priority based on model consensus and importance.
 
-        importance_weights = {"high": 3, "medium": 2, "low": 1}
+        Each member adds its importance's weight, read in either case
+        (``utils/importance.py``).
+        """
+        base_score = len(self.models)
         for suggestion in self.suggestions:
-            importance = suggestion.get("importance", "medium")
-            base_score += importance_weights.get(importance, 1)
+            base_score += _importance.weight(suggestion.get("importance"))
 
         self.priority_score = base_score
 
@@ -651,12 +653,10 @@ def group_similar_suggestions(
     # review vs. ``glob`` order during ``--reaggregate``) must produce
     # byte-identical groups, or validation — tasked against the original
     # grouping — mis-joins the re-grouped output by stale index.
-    importance_order = {"high": 0, "medium": 1, "low": 2}
-
     def _stable_sort_key(item: Tuple[int, Dict[str, Any]]):
         _, s = item
         return (
-            importance_order.get(s.get("importance", "medium"), 1),
+            _importance.rank(s.get("importance")),
             str(s.get("file", "")),
             str(s.get("line_range", s.get("line", ""))),
             str(s.get("title", "")),
@@ -799,20 +799,18 @@ def filter_by_importance(
 
     Args:
         groups: List of suggestion groups
-        min_importance: Minimum importance level ("low", "medium", "high")
+        min_importance: Minimum importance level, in either case
 
     Returns:
         Filtered list of groups
     """
-    importance_levels = {"low": 0, "medium": 1, "high": 2}
-    min_level = importance_levels.get(min_importance, 0)
-
     def group_meets_threshold(group: SuggestionGroup) -> bool:
-        for suggestion in group.suggestions:
-            importance = suggestion.get("importance", "medium")
-            if importance_levels.get(importance, 1) >= min_level:
-                return True
-        return False
+        return any(
+            _importance.at_least(
+                suggestion.get("importance"), _importance.normalize(min_importance, "LOW")
+            )
+            for suggestion in group.suggestions
+        )
 
     return [g for g in groups if group_meets_threshold(g)]
 
