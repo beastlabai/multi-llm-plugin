@@ -117,6 +117,51 @@ class TestCheckTaskReply:
         assert check_task_reply(_task(tmp_path, kind="consolidation"), str(tmp_path))
 
 
+
+class TestOneCheckForBothLanes:
+    """The native lane's check and the executor lane's are one function
+    (`schema_validator.validation_reply_problems`). They differ only in what
+    the merge recovers from by leaving a group `validation_failed`: the native
+    lane re-asks over it, the executor lane leaves it to the merge, since a
+    schema failure is terminal for a validation batch."""
+
+    @staticmethod
+    def _executor(document):
+        from utils import subagent_executor
+        return subagent_executor.validate_result("validation", document)
+
+    def test_an_unknown_status_is_re_asked_natively_and_left_to_the_merge(self, tmp_path):
+        from utils.schema_validator import VALIDATION_VERDICTS
+
+        reply = _reply(HASH_A, HASH_B)
+        reply["groups"][0]["status"] = "approved"
+        _write(tmp_path, reply)
+        assert check_task_reply(_task(tmp_path), str(tmp_path)) == [
+            "groups[0] status 'approved' is not one of " + ", ".join(VALIDATION_VERDICTS)]
+        assert self._executor(reply) == []
+
+    @pytest.mark.parametrize("document, problem", [
+        ({"groups": None}, 'reply has no "groups" list'),
+        (42, 'reply has no "groups" list'),
+        ({"groups": ["x"]}, "groups[0] is not an object"),
+        ({"groups": [{"group_hash": HASH_A, "status": ""}]}, "groups[0] has no status"),
+        ({"groups": [{"status": "valid"}]}, "groups[0] has no group_hash (or group_id)"),
+    ])
+    def test_what_the_merge_cannot_use_fails_on_both(self, tmp_path, document, problem):
+        _write(tmp_path, document)
+        assert problem in check_task_reply(_task(tmp_path), str(tmp_path))
+        assert problem in self._executor(document)
+
+    def test_coverage_is_checked_natively_only(self):
+        from utils.schema_validator import validation_reply_problems
+
+        reply = _reply(HASH_A)
+        assert validation_reply_problems(reply, group_ids=[HASH_A, HASH_B]) == [
+            f"missing group_hash: {HASH_B}"]
+        assert validation_reply_problems(
+            reply, group_ids=[HASH_A, HASH_B], recoverable=False) == []
+
+
 class TestMain:
     def _tasks_file(self, tmp_path):
         document = {"batches": [_task(tmp_path)]}

@@ -1065,6 +1065,32 @@ class TestCarryingTheGrant:
         assert details["jail_failure"]["path"] == str(gone)
         assert details["sandbox"] == RUNG
 
+    @pytest.mark.parametrize("straddle", [False, True])
+    def test_a_credential_in_the_denied_path_is_redacted(self, scratch, straddle):
+        """The error and the notice name the denied path on their own, beside
+        the excerpt: a key in it is redacted whole, even where the excerpt's
+        300-character cut falls inside it."""
+        secret = "sk-proj-" + "A1b2C3d4" * 6
+        head = "Error: Permission denied (os error 13) at "
+        parent = scratch["tmp"] / "cache"
+        if straddle:
+            pad = 294 - len(head) - len(str(parent)) - 2
+            assert 0 < pad < 250, "the tmp path is too long for this layout"
+            parent = parent / ("p" * pad)
+        line = f"{head}{parent / secret / 'state'}"
+        assert (line.index(secret) == 294) is straddle
+
+        with _patch_spawn(side_effect=lambda cmd, **kw: _completed("", 1, line + "\n")):
+            result = _invoke(scratch)
+        details = result["details"]
+        assert details["failure_reason"] == "jail-denied" and details["retryable"] is False
+        failure = details["jail_failure"]
+        assert failure["path"] == str(parent / "<redacted:sk-family>" / "state")
+        assert JAIL_DENIED_MARKER in failure["notice"]
+        assert "<redacted:sk-family>/state" in result["error"]
+        for text in (result["error"], json.dumps(failure)):
+            assert "A1b2C3d4" not in text and "sk-pro" not in text
+
     def test_an_ordinary_permission_error_says_it_is_not_a_jail_denial(self, scratch):
         def fake_run(cmd, **kwargs):
             inside_tmp = os.path.join(_tmpdir_of(cmd), "x")
@@ -1293,6 +1319,20 @@ class TestTheJailDeniedLine:
             "", "",
         )
         assert key not in notice and "<redacted:" in notice
+
+    def test_the_whole_notice_is_redacted_whatever_the_evidence_held(self):
+        """The evidence comes redacted, but the notice reaches stdout, the run
+        log and the closing summary, so it goes through the boundary itself."""
+        key = "sk-proj-" + "A1b2C3d4" * 6
+        notice = llm_client.jail_denied_notice(
+            "codex", SPEC, PLUGIN_LANDLOCK_RUNG,
+            {"where": "stderr", "path": f"/srv/{key}/x", "class": "jail",
+             "line": "Permission denied (os error 13)"},
+            f"dir:/srv/{key}", "",
+        )
+        assert notice.startswith(JAIL_DENIED_MARKER)
+        assert "/srv/<redacted:sk-family>/x;" in notice
+        assert "A1b2C3d4" not in notice
 
 
 class TestAJailDeniedSlotInAPartialRun:

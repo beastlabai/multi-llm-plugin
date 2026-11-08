@@ -181,6 +181,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from .schema_validator import (
         validate_human_decision_verdicts,
         validate_with_schema_file,
+        validation_reply_problems,
     )
     from .subagent_tasks import (
         KINDS,  # noqa: F401 - re-exported for callers that read it off this module
@@ -316,6 +317,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
     from utils.schema_validator import (
         validate_human_decision_verdicts,
         validate_with_schema_file,
+        validation_reply_problems,
     )
     from utils.subagent_tasks import (
         KINDS,  # noqa: F401 - re-exported for callers that read it off this module
@@ -5843,34 +5845,13 @@ def _validation_result_errors(data: Any) -> List[str]:
     """Structural check for a ``validation_batch_N.json`` / revalidation result.
 
     There is no shipped JSON Schema for these (the merge deliberately tolerates
-    several index shapes and joins by ``group_hash``), so this pins the two things
-    the merge cannot recover from: it must be a wrapper object with a ``groups``
-    array (or a bare array), and every entry must carry a ``status`` plus the
-    ``group_hash``/``group_id`` the merge joins on.
+    several index shapes and joins by ``group_hash``), so this pins only what
+    the merge cannot recover from, through the check ``util check-reply``
+    shares (``schema_validator.validation_reply_problems``). A status outside
+    the verdicts is left to the merge, which reads it as ``validation_failed``:
+    rung 6 is terminal for this kind.
     """
-    if isinstance(data, dict):
-        groups = data.get("groups")
-        if groups is None:
-            return ["expected a `groups` array (or a bare array of group results)"]
-    elif isinstance(data, list):
-        groups = data
-    else:
-        return [f"expected an object or array, got {type(data).__name__}"]
-    if not isinstance(groups, list):
-        return [f"`groups` must be an array, got {type(groups).__name__}"]
-    errors: List[str] = []
-    for index, entry in enumerate(groups):
-        if not isinstance(entry, dict):
-            errors.append(f"groups[{index}]: expected an object")
-            continue
-        if not entry.get("status"):
-            errors.append(f"groups[{index}]: missing `status`")
-        if not (entry.get("group_hash") or entry.get("group_id")):
-            errors.append(
-                f"groups[{index}]: missing `group_hash`/`group_id` — the merge "
-                f"joins by hash, never by position"
-            )
-    return errors
+    return validation_reply_problems(data, recoverable=False)
 
 
 def _salvage_result_errors(data: Any) -> List[str]:
@@ -6774,10 +6755,12 @@ def jail_denied_line(
     (plan codex-sandbox-unavailable §6 F1 item 6, 2026-09-30).
 
     It names the runner and spec, the rung, the denied path (or "path not
-    named"), the ≤300-char excerpt, the allow-list, the installed and
+    named"), the redacted ≤300-char excerpt, the allow-list, the installed and
     measured-through Codex versions — adding "Codex is newer than the jail was
     measured with, the likely cause" when it is — and the next steps. ``$HOME``
-    renders as ``~``, so the line can be pasted into an issue as it is.
+    renders as ``~``, so the line can be pasted into an issue as it is. The
+    whole line goes through the redaction boundary too, whatever its caller
+    already redacted: it reaches stdout, the run log and the closing summary.
 
     The skip step is worded per lane (``profile``/``write_scope``): for a read
     dispatch, skipping the rung runs the job on the next rung for one run; for
@@ -6792,7 +6775,11 @@ def jail_denied_line(
         landlock_dispatch.render_home(path) if path
         else "path not named (Codex did not name the path; a probable jail denial)"
     )
-    shown = _render_home_text(" ".join((excerpt or "").split())[:300])
+    # The excerpt quotes codex's raw stderr or error event, and this line
+    # reaches stdout, the detached run log and the closing summary: redacted
+    # before the cut (`_redact`), as the fan-out lane's notice is, then `$HOME`
+    # rendered as `~`.
+    shown = _render_home_text(" ".join(_redact(excerpt or "").split())[:300])
     if profile in SANDBOX_WRITE_FALLBACK_PROFILES:
         skip = (
             f"to run the job anyway, set `driver.subagent_runner` to a runner "
@@ -6811,7 +6798,7 @@ def jail_denied_line(
             f"that is not Codex (F6), or else set {SKIP_RUNG_ENV}={rung.name} "
             f"for one run."
         )
-    return (
+    return _redact(
         f"{JAIL_DENIED_MARKER} {spec} on rung {rung.name!r}: denied {where}; "
         f"excerpt: {shown!r}; allow-list: {allow_list or '(not computed)'}; "
         f"{versions}. This is a jail failure, not a model error, and is not "
@@ -6941,7 +6928,9 @@ def _spawn_in_context(
             # model error, never retried on another rung, nothing spawned.
             capture.launch_error = exc.message
             capture.jail_evidence = {
-                "where": "setup", "line": exc.message[:300], "path": exc.path,
+                "where": "setup",
+                "line": landlock_dispatch.redacted_excerpt(exc.message),
+                "path": landlock_dispatch.redacted_excerpt(exc.path) or None,
                 "class": landlock_dispatch.JAIL_CLASS_JAIL, "reason": exc.reason,
             }
             capture.jail_denied_line = jail_denied_line(
@@ -9715,27 +9704,21 @@ def run_tasks(
         resume=resume,
         on_task_finished=task_finished,
     ))
-    report.outcomes = [outcomes[str(t.get("task_id", i))]
-                       for i, t in enumerate(selected)
-                       if str(t.get("task_id", i)) in outcomes]
-
-    # A task whose coroutine never returned (cancelled by the overall timeout) is
-    # *incomplete*, not silently absent: it has no result file, so the batch must
-    # not reaggregate.
+    # The batch deadline cancels the gather, and its result map comes back
+    # empty: a task that settled before it is still in `finished`, with its
+    # runner, attempts and usage, and `.status.json` already counted it.
+    settled_by_id = {outcome.task_id: outcome for outcome in finished}
+    report.outcomes = []
     for index, task in enumerate(selected):
         task_id = str(task.get("task_id", index))
-        if task_id in outcomes:
-            continue
-        report.outcomes.append(TaskOutcome(
-            task_id=task_id,
-            kind=str(task.get("kind", "")),
-            runner=runners[task_id],
-            status=STATUS_INCOMPLETE,
-            reason=(
-                "the dispatch did not complete (cancelled by the batch timeout or "
-                "the run was killed); no result file exists"
-            ),
-        ))
+        outcome = outcomes.get(task_id)
+        if outcome is None:
+            outcome = settled_by_id.get(task_id)
+        if outcome is None:
+            outcome = _unsettled_outcome(
+                task, task_id, runners[task_id], phase_dir, resume=resume,
+            )
+        report.outcomes.append(outcome)
 
     report.batch_provenance = _batch_provenance(
         report.outcomes, tasks, kind=kind, previous=previous_provenance,
@@ -9747,6 +9730,62 @@ def run_tasks(
     for line in jail_summary_lines(jail_lines_before):
         print(f"[exec-subagents] closing summary: {line}")
     return report
+
+
+def _unsettled_outcome(
+    task: Dict[str, Any], task_id: str, runner: str, phase_dir: str, *, resume: bool,
+) -> TaskOutcome:
+    """The outcome of a task that never reached its verdict in this batch
+    (cancelled by the batch deadline, or its dispatch raised).
+
+    Cancelling the wait does not stop a dispatch already in its thread, so its
+    result file can land after the deadline. Under ``resume`` a file that passes
+    :func:`task_is_complete` counts, as it would on the next ``--resume``: it
+    was not there at batch start, or the task would have been skipped. It is
+    ``ok`` and ``skipped``, so :func:`_batch_provenance` credits no runner with
+    bytes this batch never recorded it writing. Without ``resume`` such a file
+    may be an earlier run's. Anything else is ``incomplete`` and the batch must
+    not reaggregate.
+    """
+    kind = str(task.get("kind", ""))
+    incomplete = (
+        "the dispatch did not complete (cancelled by the batch timeout or "
+        "the run was killed); "
+    )
+    if task_is_complete(task, phase_dir):
+        if resume:
+            return TaskOutcome(
+                task_id=task_id,
+                kind=kind,
+                runner=runner,
+                status=STATUS_OK,
+                output_path=str(resolve_output_target(task, phase_dir)),
+                reason=(
+                    "its result file exists and validates; the batch ended "
+                    "before its dispatch reported an outcome"
+                ),
+                skipped=True,
+            )
+        found = (
+            "a valid result file is on disk, but this batch ran without resume, "
+            "so it is not taken as this dispatch's"
+        )
+    else:
+        try:
+            present = resolve_output_target(task, phase_dir).exists()
+        except ResultRejected:
+            present = False
+        found = (
+            "its result file does not validate" if present
+            else "no result file exists"
+        )
+    return TaskOutcome(
+        task_id=task_id,
+        kind=kind,
+        runner=runner,
+        status=STATUS_INCOMPLETE,
+        reason=incomplete + found,
+    )
 
 
 def _batch_provenance(
@@ -10129,13 +10168,15 @@ async def _gather(
     # runner was behaving. `dispatch_task` bounds one task by
     # `get_subagent_timeout(provider)` **in total** — retries and rate-limit
     # backoff are spent inside that same deadline, so the retry budget no longer
-    # multiplies it — and the gate serializes the batch into
-    # ceil(tasks / effective parallelism) waves, so that product is the batch's
-    # own ceiling. `run_tasks_concurrent` still doubles it and adds the stagger,
+    # multiplies it. The gate can run a provider's tasks one at a time: its
+    # slots start at its own `max_concurrent` (below the batch's parallelism
+    # when another runner's is higher) and `_ProviderBackpressure` narrows them
+    # to one on a rate limit, mid-batch. So one budget per task is the only
+    # ceiling that holds whatever the slots do; sized by the starting
+    # parallelism's waves, it cancelled healthy tasks queued behind a narrowed
+    # provider. `run_tasks_concurrent` still doubles it and adds the stagger,
     # which is the headroom for queueing, kill grace and drain.
-    lanes = max(1, max_parallel)
-    waves = (len(tasks) + lanes - 1) // lanes
-    batch_timeout = per_task_budget * waves if per_task_budget > 0 else None
+    batch_timeout = per_task_budget * len(tasks) if per_task_budget > 0 else None
 
     def settled(outcome: TaskOutcome) -> TaskOutcome:
         """One task has reached its verdict — tell the caller, then hand it back."""

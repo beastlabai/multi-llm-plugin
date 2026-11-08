@@ -4,7 +4,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 SCHEMA_DIR = Path(__file__).parent.parent / "schemas"
 
@@ -306,6 +306,76 @@ def validate_document(
 def validate_with_schema_file(data: Any, schema_name: str) -> List[str]:
     """Validate already-parsed ``data`` against a schema file by name."""
     return validate_document(data, load_schema(schema_name))
+
+
+#: The verdicts a validation or revalidation reply may give a group: the one
+#: vocabulary every reader of a reply checks against.
+VALIDATION_VERDICTS = ("valid", "invalid", "needs-human-decision")
+
+
+def validation_reply_problems(
+    document: Any,
+    *,
+    group_ids: Optional[Sequence[str]] = None,
+    recoverable: bool = True,
+) -> List[str]:
+    """The problems with a parsed validation or revalidation reply; empty
+    means fine. Both lanes check a reply here.
+
+    Always checked, because the batched merge
+    (``validation.merge_batched_validation_results``) cannot use a reply
+    without them: an object with a ``groups`` array, or a bare array; every
+    entry an object with a non-empty ``status`` and an id to join on, its
+    ``group_hash`` else its ``group_id``.
+
+    ``recoverable`` also checks what the merge recovers from by leaving the
+    group ``validation_failed``: a status outside :data:`VALIDATION_VERDICTS`,
+    an id that is not a string, and, given ``group_ids``, entries that miss,
+    repeat or add to them. The native lane's ``util check-reply`` checks these,
+    since a bad reply costs it one re-ask. The executor lane does not: a schema
+    failure is terminal for a validation batch (``SCHEMA_REPAIRS_BY_KIND``), so
+    one odd word would fail the phase.
+    """
+    if isinstance(document, dict):
+        entries = document.get("groups")
+    else:
+        entries = document
+    if not isinstance(entries, list):
+        return ['reply has no "groups" list']
+    problems: List[str] = []
+    seen: List[str] = []
+    for position, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            problems.append(f"groups[{position}] is not an object")
+            continue
+        status = entry.get("status")
+        if not status:
+            problems.append(f"groups[{position}] has no status")
+        elif recoverable and status not in VALIDATION_VERDICTS:
+            problems.append(
+                f"groups[{position}] status {status!r} is not one of "
+                + ", ".join(VALIDATION_VERDICTS)
+            )
+        group_hash = entry.get("group_hash") or entry.get("group_id")
+        if not group_hash:
+            problems.append(f"groups[{position}] has no group_hash (or group_id)")
+        elif isinstance(group_hash, str):
+            seen.append(group_hash)
+        elif recoverable:
+            problems.append(
+                f"groups[{position}] group_hash {group_hash!r} is not a string"
+            )
+    expected = [str(item) for item in group_ids or []] if recoverable else []
+    if expected:
+        missing = [item for item in expected if item not in seen]
+        foreign = sorted({item for item in seen if item not in expected})
+        if missing:
+            problems.append("missing group_hash: " + ", ".join(missing))
+        if foreign:
+            problems.append("foreign group_hash: " + ", ".join(foreign))
+        if len(seen) != len(set(seen)):
+            problems.append("a group_hash appears more than once")
+    return problems
 
 
 def validate_json_output(

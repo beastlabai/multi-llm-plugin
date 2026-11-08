@@ -848,7 +848,8 @@ class JailEvidence:
     """What :func:`is_jail_failure` found: where the EACCES was (``stderr`` or
     ``event``), the one line carrying it (≤300 chars), the absolute path when
     the line names one, the class (``jail`` / ``ordinary`` / ``probable``) and,
-    for ``ordinary``, why it is not a jail denial."""
+    for ``ordinary``, why it is not a jail denial. ``line``, ``path`` and
+    ``reason`` are redacted (:func:`redacted_excerpt`): both lanes print them."""
 
     where: str
     line: str
@@ -861,6 +862,31 @@ class JailEvidence:
             "where": self.where, "line": self.line, "path": self.path,
             "class": self.klass, "reason": self.reason,
         }
+
+
+#: How much of the line carrying an EACCES the evidence keeps, and of the
+#: denied path.
+EXCERPT_CHARS = 300
+
+#: A ``reason`` quotes a path and an allow entry, so it gets room for both.
+REASON_CHARS = 2 * EXCERPT_CHARS
+
+
+def redacted_excerpt(text: Optional[str], limit: Optional[int] = EXCERPT_CHARS) -> str:
+    """``text`` redacted, then cut to ``limit`` characters (``None``: uncut).
+
+    Jail evidence quotes codex's own stderr or ``error`` event, or a path
+    taken from one, and both lanes print it to stdout, the detached run log
+    and the closing summary, so it is redacted where it is taken. Redaction
+    runs before the cut: a cut inside a token leaves a fragment no pattern
+    matches (``write_safety.redact_text``).
+    """
+    try:  # pragma: no cover - import shim mirrors the rest of utils/
+        from .write_safety import redact_text
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.write_safety import redact_text
+    redacted = redact_text(text or "")
+    return redacted if limit is None else redacted[:limit]
 
 
 def _events(stdout: str) -> Iterator[Dict[str, Any]]:
@@ -946,8 +972,11 @@ def wrapper_evidence(returncode: Optional[int], stderr: str) -> Optional[JailEvi
         spec = body[len("required-entry: "):]
         spec = spec.rsplit(": ", 1)[0] if ": " in spec else spec
         path = spec.split(":", 1)[1] if ":" in spec else spec
+    # The note is read off the child's stderr, where any line can start with
+    # the prefix: redacted like codex's own text.
     return JailEvidence(
-        where="wrapper", line=note[:300], path=path or None, klass=JAIL_CLASS_JAIL,
+        where="wrapper", line=redacted_excerpt(note),
+        path=redacted_excerpt(path) or None, klass=JAIL_CLASS_JAIL,
     )
 
 
@@ -975,6 +1004,12 @@ def is_jail_failure(
     cannot hide a jail denial after it, nor the reverse. What a lane makes of
     the evidence is its own rule, and it is the same on both: a child killed
     at its deadline is a timeout, never a jail failure.
+
+    The path and the class are read from the raw line, since a redaction can
+    rewrite the denied path: a path that starts in the first
+    :data:`EXCERPT_CHARS` characters is read whole, past the cut. The
+    evidence's ``line``, ``path`` and ``reason`` are then redacted before they
+    are cut (:func:`redacted_excerpt`).
     """
     if returncode is not None:
         refused = wrapper_evidence(returncode, stderr)
@@ -991,8 +1026,9 @@ def is_jail_failure(
     best: Optional[JailEvidence] = None
     for where, raw in candidates:
         full = raw.strip()
-        line = full[:300]
-        match = _ABS_PATH.search(line)
+        match = _ABS_PATH.search(full[:EXCERPT_CHARS])
+        if match:
+            match = _ABS_PATH.match(full, match.start())
         path = match.group(1).rstrip(".") if match else None
         if not _EACCES.search(full) and not (path and _PERMISSION_DENIED.search(full)):
             continue
@@ -1005,7 +1041,11 @@ def is_jail_failure(
                     entries = []
         klass, reason = classify_denied_path(path, entries)
         if best is None or _CLASS_RANK[klass] > _CLASS_RANK[best.klass]:
-            best = JailEvidence(where=where, line=line, path=path, klass=klass, reason=reason)
+            best = JailEvidence(
+                where=where, line=redacted_excerpt(full),
+                path=redacted_excerpt(path) if path else None,
+                klass=klass, reason=redacted_excerpt(reason, REASON_CHARS),
+            )
             if klass == JAIL_CLASS_JAIL:
                 break
     return best
@@ -2095,6 +2135,7 @@ __all__ = [
     "jail_denied_edits",
     "preview_context",
     "preview_wrap_argv",
+    "redacted_excerpt",
     "render_allow_list",
     "render_home",
     "rung_probe",

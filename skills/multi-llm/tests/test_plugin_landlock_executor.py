@@ -176,6 +176,9 @@ if kind == "eacces":
         ": Permission denied (os error 13)", 1)
 if kind == "eacces_nopath":
     say("Error: Permission denied (os error 13)", 1)
+if kind == "eacces_secret":
+    say("Error: failed to write " + arg + ": Permission denied (os error 13) "
+        "(auth: Authorization: Bearer " + "sk-proj-" + "A1b2C3d4" * 6 + ")", 1)
 if kind == "tree":
     os.execvp("sh", ["sh", "-c", "sleep 300 & echo $! > " + arg + "; wait"])
 if kind == "home":
@@ -1149,6 +1152,78 @@ class TestTheDispatchOnTheRung:
         assert out.count("[JAIL_DENIED]") == 1
         assert any("[JAIL_DENIED]" in line for line in executor.jail_summary_lines())
 
+    @posix_paths
+    def test_the_quoted_line_is_redacted_on_every_sink(
+        self, repo, wrapper, runner_env, jail_home, capsys
+    ):
+        """Codex's quoted line can carry a credential, and the `[JAIL_DENIED]`
+        line reaches stdout, the closing summary and the outcome: redacted on
+        each, as the fan-out lane's notice is."""
+        secret = "sk-proj-" + "A1b2C3d4" * 6
+        runner_env.use("codex:gpt-5.5")
+        denied = Path(os.environ["HOME"]) / "elsewhere" / "state.db"
+        denied.parent.mkdir(parents=True)
+        wrapper.set(dispatch=f"eacces_secret:{denied}")
+        _decide("codex:gpt-5.5", PROFILE_AGENT_READONLY, "plugin-landlock")
+        phase = repo / "phase"
+        phase.mkdir()
+        before = executor.jail_summary_count()
+        report = executor.run_tasks(
+            [_validation_batch(phase)], phase_dir=str(phase), kind="validation", cwd=str(repo),
+        )
+        [outcome] = report.outcomes
+        assert outcome.status == executor.STATUS_REJECTED
+        assert outcome.reason.startswith("[JAIL_DENIED] codex:gpt-5.5 on rung 'plugin-landlock'")
+        assert "denied ~/elsewhere/state.db" in outcome.reason
+        assert "<redacted:" in outcome.reason
+        out = capsys.readouterr().out
+        assert "[exec-subagents] closing summary: [JAIL_DENIED]" in out
+        summary = executor.jail_summary_lines(before)
+        assert any("[JAIL_DENIED]" in line for line in summary)
+        for sink in (outcome.reason, out, *summary):
+            assert secret not in sink and "A1b2C3d4" not in sink
+
+    @posix_paths
+    @pytest.mark.parametrize("straddle", [False, True])
+    def test_a_credential_in_the_denied_path_is_redacted_on_every_sink(
+        self, repo, wrapper, runner_env, jail_home, capsys, straddle
+    ):
+        """The line names the denied path on its own, beside the excerpt, so a
+        key in the path is redacted on stdout, the closing summary, the
+        outcome and the written batch report: whole, even where the excerpt's
+        300-character cut falls inside it."""
+        secret = "sk-proj-" + "A1b2C3d4" * 6
+        runner_env.use("codex:gpt-5.5")
+        head = "Error: failed to write "
+        parent = Path(os.environ["HOME"]) / "elsewhere"
+        if straddle:
+            pad = 294 - len(head) - len(str(parent)) - 2
+            assert 0 < pad < 250, "the tmp HOME is too long for this layout"
+            parent = parent / ("p" * pad)
+        parent.mkdir(parents=True)
+        denied = parent / secret / "state.db"
+        assert (f"{head}{denied}".index(secret) == 294) is straddle
+        wrapper.set(dispatch=f"eacces:{denied}")
+        _decide("codex:gpt-5.5", PROFILE_AGENT_READONLY, "plugin-landlock")
+        phase = repo / "phase"
+        phase.mkdir()
+        before = executor.jail_summary_count()
+        report = executor.run_tasks(
+            [_validation_batch(phase)], phase_dir=str(phase), kind="validation", cwd=str(repo),
+        )
+        [outcome] = report.outcomes
+        assert outcome.status == executor.STATUS_REJECTED
+        assert outcome.reason.startswith("[JAIL_DENIED] codex:gpt-5.5 on rung 'plugin-landlock'")
+        assert "/<redacted:sk-family>/state.db" in outcome.reason
+        out = capsys.readouterr().out
+        assert "[exec-subagents] closing summary: [JAIL_DENIED]" in out
+        summary = executor.jail_summary_lines(before)
+        written = (phase / executor._batch_report_filename("validation")).read_text(
+            encoding="utf-8")
+        assert "<redacted:sk-family>" in written
+        for sink in (outcome.reason, out, *summary, written):
+            assert "A1b2C3d4" not in sink and "sk-pro" not in sink
+
     def test_a_denial_that_names_no_path_is_a_probable_jail_denial(self, repo, wrapper, runner_env):
         runner_env.use("codex:gpt-5.5")
         wrapper.set(dispatch="eacces_nopath")
@@ -1441,6 +1516,18 @@ class TestTheJailDeniedNextStep:
         assert "refused unless the chat itself runs in danger-full-access" in line
         assert HOST_SANDBOX_POSTURE_ENV in line and "F5" in line
         assert "not Codex (F6)" in line
+
+    def test_the_whole_line_is_redacted_whatever_the_caller_passed(self):
+        """The evidence comes redacted, but the line reaches stdout, the run
+        log and the closing summary, so it goes through the boundary itself."""
+        key = "sk-proj-" + "A1b2C3d4" * 6
+        line = executor.jail_denied_line(
+            spec="codex:gpt-5.5", rung=PLUGIN_LANDLOCK_RUNG, path=f"/srv/{key}/x",
+            excerpt="Permission denied", allow_list=f"dir:/srv/{key}",
+        )
+        assert line.startswith("[JAIL_DENIED] codex:gpt-5.5 on rung 'plugin-landlock'")
+        assert "denied /srv/<redacted:sk-family>/x;" in line
+        assert "A1b2C3d4" not in line
 
 
 class TestNoSpawnRejectionsCloseTheAudit:

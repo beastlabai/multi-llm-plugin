@@ -2597,6 +2597,124 @@ class TestLongestFirstDispatch:
             assert task["output_path"].endswith(f"validation_batch_{index}.json")
 
 
+class TestTheBatchDeadline:
+    """The batch deadline cancels the gather, whose result map then comes back
+    empty. A task that settled before it keeps its outcome; one whose file
+    landed after it is not reported as having none."""
+
+    HASHES = ("aaaa000000000000", "bbbb000000000000", "cccc000000000000")
+
+    def _run(self, tmp_path, runner_env, monkeypatch, *, resume=True):
+        from utils import review_orchestrator_base as rob
+
+        runner_env.use("codex:gpt-5.5", max_concurrent_subagents=3)
+        # Three tasks at a 0.1 s budget: the batch cap is 2 x 3 x 0.1 s, no stagger.
+        monkeypatch.setattr(executor, "get_subagent_timeout", lambda *_a, **_k: 0.1)
+        monkeypatch.setattr(rob, "PROVIDER_STAGGER_DELAY", 0.0)
+        tasks = [_validation_batch(tmp_path, i, hashes=(h,)) for i, h in enumerate(self.HASHES)]
+
+        def write_reply(task, phase_dir):
+            reply = {"groups": [{"group_index": 0, "group_hash": task["group_ids"][0],
+                                 "status": "valid", "reason": "r", "confidence": 0.9}]}
+            path = Path(phase_dir) / task["output_name"]
+            path.write_text(json.dumps(reply), encoding="utf-8")
+            return str(path)
+
+        def dispatch(task, *, phase_dir, runner, anchor=None, cwd=None):
+            index = task["batch_index"]
+            if index:
+                time.sleep(1.5)  # still running when the deadline fires
+            if index == 2:
+                return executor.TaskOutcome(
+                    task_id=task["task_id"], kind=task["kind"], runner=runner,
+                    status=executor.STATUS_TIMEOUT, reason="its own deadline",
+                )
+            return executor.TaskOutcome(
+                task_id=task["task_id"], kind=task["kind"], runner=runner,
+                status=executor.STATUS_OK, output_path=write_reply(task, phase_dir),
+            )
+
+        monkeypatch.setattr(executor, "dispatch_task", dispatch)
+        return executor.run_tasks(
+            tasks, phase_dir=str(tmp_path), kind="validation", resume=resume,
+        )
+
+    def test_a_task_settled_before_the_deadline_keeps_its_outcome(
+        self, tmp_path, runner_env, monkeypatch, capsys
+    ):
+        report = self._run(tmp_path, runner_env, monkeypatch)
+        assert "Total subagent batch timeout" in capsys.readouterr().out
+        ids = [f"validation-batch-{i}" for i in range(3)]
+        assert [o.task_id for o in report.outcomes] == ids
+        first, late, absent = report.outcomes
+        assert first.status == executor.STATUS_OK and not first.skipped
+        assert first.runner == "codex:gpt-5.5" and first.reason is None
+        # Credited: its own dispatch recorded writing those bytes.
+        assert report.batch_provenance[ids[0]]["runner"] == "codex:gpt-5.5"
+        # Landed after the deadline: it counts, but no runner is credited.
+        assert late.status == executor.STATUS_OK and late.skipped
+        assert late.reason.startswith("its result file exists and validates")
+        assert ids[1] not in report.batch_provenance
+        assert absent.status == executor.STATUS_INCOMPLETE
+        assert absent.reason.endswith("; no result file exists")
+        assert not report.ok
+        document = json.loads(
+            (tmp_path / "subagent_batch_report.json").read_text(encoding="utf-8")
+        )
+        assert [row["status"] for row in document["tasks"]] == [
+            executor.STATUS_OK, executor.STATUS_OK, executor.STATUS_INCOMPLETE,
+        ]
+
+    def test_the_cap_holds_when_backpressure_narrows_the_provider_to_one_slot(
+        self, tmp_path, runner_env, monkeypatch, capsys
+    ):
+        """Two rate limits narrow the provider from four slots to one, so the
+        rest of the batch runs one task at a time, each inside its own budget.
+        The cap allows one budget per task; sized by the starting four lanes'
+        waves (2 x 4 x 0.15 s), it cancelled the tail."""
+        from utils import review_orchestrator_base as rob
+
+        runner_env.use("codex:gpt-5.5", max_concurrent_subagents=4)
+        budget = 0.15
+        monkeypatch.setattr(executor, "get_subagent_timeout", lambda *_a, **_k: budget)
+        monkeypatch.setattr(rob, "PROVIDER_STAGGER_DELAY", 0.0)
+        tasks = [_validation_batch(tmp_path, i, hashes=(f"{i:04d}" + "0" * 12,))
+                 for i in range(16)]
+
+        def dispatch(task, *, phase_dir, runner, anchor=None, cwd=None):
+            if task["batch_index"] < 2:
+                return executor.TaskOutcome(
+                    task_id=task["task_id"], kind=task["kind"], runner=runner,
+                    status=executor.STATUS_RATE_LIMITED, reason="429",
+                )
+            time.sleep(budget - 0.01)
+            reply = {"groups": [{"group_index": 0, "group_hash": task["group_ids"][0],
+                                 "status": "valid", "reason": "r", "confidence": 0.9}]}
+            path = Path(phase_dir) / task["output_name"]
+            path.write_text(json.dumps(reply), encoding="utf-8")
+            return executor.TaskOutcome(
+                task_id=task["task_id"], kind=task["kind"], runner=runner,
+                status=executor.STATUS_OK, output_path=str(path),
+            )
+
+        monkeypatch.setattr(executor, "dispatch_task", dispatch)
+        report = executor.run_tasks(tasks, phase_dir=str(tmp_path), kind="validation")
+        out = capsys.readouterr().out
+        assert "narrowing it to 1 in-flight slot(s)" in out
+        assert "Total subagent batch timeout" not in out
+        statuses = [o.status for o in report.outcomes]
+        assert statuses == [executor.STATUS_RATE_LIMITED] * 2 + [executor.STATUS_OK] * 14
+        assert not any(o.skipped for o in report.outcomes)
+
+    def test_without_resume_a_late_file_is_not_taken(self, tmp_path, runner_env, monkeypatch):
+        report = self._run(tmp_path, runner_env, monkeypatch, resume=False)
+        first, late, absent = report.outcomes
+        assert first.status == executor.STATUS_OK
+        assert late.status == executor.STATUS_INCOMPLETE
+        assert "a valid result file is on disk, but this batch ran without resume" in late.reason
+        assert absent.reason.endswith("; no result file exists")
+
+
 class TestUsageMetrics:
     """D3j: a normalized shape where the provider reports it, absent otherwise."""
 

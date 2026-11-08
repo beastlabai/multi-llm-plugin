@@ -23,6 +23,7 @@ try:
     from .subagent_prompts import build_validation_prompt, code_review_validation_guidance
     from . import scope_policy as _sp
     from . import scope_round as _scope_round
+    from .schema_validator import VALIDATION_VERDICTS
     from .subagent_tasks import (
         PromptBudget,
         TaskFileError,
@@ -44,6 +45,7 @@ except ImportError:
     from utils.subagent_prompts import build_validation_prompt, code_review_validation_guidance
     from utils import scope_policy as _sp
     from utils import scope_round as _scope_round
+    from utils.schema_validator import VALIDATION_VERDICTS
     from utils.subagent_tasks import (
         PromptBudget,
         TaskFileError,
@@ -2387,6 +2389,36 @@ def prepare_batched_validation_tasks(
     return document
 
 
+def _verdict_or_failure(result: Dict[str, Any]) -> Dict[str, Any]:
+    """``result`` as placed, or a ``validation_failed`` record in its stead
+    when its status is not one of :data:`VALIDATION_VERDICTS`.
+
+    An out-of-vocabulary status is no verdict, so the group stays
+    ``validation_failed`` as a discarded foreign hash leaves it, keeping the
+    ``group_id`` it was placed under. The executor lane persists such a reply
+    (``schema_validator.validation_reply_problems``), so this is where the word
+    stops before it reaches ``validation.json``. The record carries no scope
+    authority: it is never stamped.
+    """
+    status = result.get("status")
+    if status in VALIDATION_VERDICTS:
+        return result
+    failed: Dict[str, Any] = {"group_index": result.get("group_index")}
+    if result.get("group_id"):
+        failed["group_id"] = result["group_id"]
+    failed.update({
+        "status": "validation_failed",
+        "reason": (
+            f"the reply's status {status!r} is not one of "
+            + ", ".join(VALIDATION_VERDICTS)
+        ),
+        "confidence": 0.0,
+        "error_type": ERROR_TYPE_PARSING,
+        "recoverable": True,
+    })
+    return failed
+
+
 def merge_batched_validation_results(
     output_dir: str,
     batch_metadata: Dict[str, Any],
@@ -2521,9 +2553,16 @@ def merge_batched_validation_results(
                         hash_join_mismatched += 1
                     result["group_index"] = original_index
                     result["group_id"] = result_hash
-                    merged_results[original_index] = result
+                    placed = _verdict_or_failure(result)
+                    merged_results[original_index] = placed
                     filled_indices.add(original_index)
-                    hash_joined[original_index] = result_hash
+                    # A later row for the same hash replaces the slot, so it
+                    # also decides the slot's scope authority: a failure in
+                    # place of a verdict is never stamped.
+                    if placed is result:
+                        hash_joined[original_index] = result_hash
+                    else:
+                        hash_joined.pop(original_index, None)
                 else:
                     print(f"[merge] Warning: Batch {batch_index}: discarding result with "
                           f"foreign group_hash {result_hash} (not assigned to this batch — "
@@ -2562,7 +2601,7 @@ def merge_batched_validation_results(
                     local_idx = group_indices.index(original_index)
                     if local_idx < len(batch_group_ids):
                         result["group_id"] = batch_group_ids[local_idx]
-                    merged_results[original_index] = result
+                    merged_results[original_index] = _verdict_or_failure(result)
                 continue
 
             # Strategy 2: Positional match — correct count, wrong indices
@@ -2572,7 +2611,7 @@ def merge_batched_validation_results(
                     result["group_index"] = original_index
                     if i < len(batch_group_ids):
                         result["group_id"] = batch_group_ids[i]
-                    merged_results[original_index] = result
+                    merged_results[original_index] = _verdict_or_failure(result)
                 continue
 
             # Strategy 3: Salvage partial global matches
@@ -2582,7 +2621,7 @@ def merge_batched_validation_results(
                     local_idx = group_indices.index(original_index)
                     if local_idx < len(batch_group_ids):
                         result["group_id"] = batch_group_ids[local_idx]
-                    merged_results[original_index] = result
+                    merged_results[original_index] = _verdict_or_failure(result)
                 unmatched = global_indices_set - set(matched_globals.keys())
                 if unmatched:
                     print(f"[merge] Warning: Batch {batch_index}: matched {len(matched_globals)}/{len(group_indices)}, missing {unmatched}")
@@ -2596,7 +2635,7 @@ def merge_batched_validation_results(
                     result["group_index"] = original_index
                     if result_index < len(batch_group_ids):
                         result["group_id"] = batch_group_ids[result_index]
-                    merged_results[original_index] = result
+                    merged_results[original_index] = _verdict_or_failure(result)
                 else:
                     print(f"[merge] Warning: Index {result_index} out of range for batch {batch_index} (expected 0-{len(group_indices)-1})")
 

@@ -2044,6 +2044,75 @@ class TestMergeBatchedValidationResults:
             assert merged[8]["status"] == "validation_failed"
             assert merged[8].get("reason") != "Wrong group reasoning"
 
+    @pytest.mark.parametrize("hashed", [True, False])
+    def test_a_status_outside_the_verdicts_never_reaches_the_merge_output(self, tmp_path, hashed):
+        """The executor lane persists a reply whose status is not one of the
+        three verdicts (a schema failure is terminal for this kind), so the
+        merge reads that word as no verdict: the group stays
+        ``validation_failed`` under its own id, joined by hash or placed by
+        index alike, and its sibling's verdict is kept."""
+        batch_metadata = {"total_batches": 1, "batches": [{
+            "batch_index": 0, "group_indices": [0, 1], "group_ids": ["hash_0", "hash_1"],
+            "groups_count": 2,
+        }]}
+        entries = [
+            {"group_index": 0, "group_hash": "hash_0", "status": "approved",
+             "reason": "Looks fine", "confidence": 0.9},
+            {"group_index": 1, "group_hash": "hash_1", "status": "valid",
+             "reason": "Real issue", "confidence": 0.8},
+        ]
+        if not hashed:
+            for entry in entries:
+                del entry["group_hash"]
+        (tmp_path / "validation_batch_0.json").write_text(
+            json.dumps({"groups": entries, "metadata": {"model": "m"}}), encoding="utf-8")
+
+        merged = merge_batched_validation_results(str(tmp_path), batch_metadata, 2)
+
+        assert [r["status"] for r in merged] == ["validation_failed", "valid"]
+        failed = merged[0]
+        assert failed["group_id"] == "hash_0" and failed["group_index"] == 0
+        assert failed["reason"] == (
+            "the reply's status 'approved' is not one of valid, invalid, needs-human-decision")
+        assert (failed["error_type"], failed["recoverable"]) == (
+            validation_module.ERROR_TYPE_PARSING, True)
+        assert merged[1]["reason"] == "Real issue"
+
+    def test_a_later_row_outside_the_verdicts_for_the_same_hash_is_never_stamped(
+        self, tmp_path
+    ):
+        """A later row for a hash replaces the slot's verdict, and so its scope
+        authority too: a ``validation_failed`` in place of a joined verdict
+        carries no scope stamps, while the sibling's joined verdict keeps
+        them."""
+        from utils.scope_round import STAMP_KEYS
+        from utils.state_manager import generate_group_id
+
+        groups = [
+            {"theme": theme, "category": "completeness",
+             "suggestions": [{"title": theme, "desc": "d", "source_model": "m"}]}
+            for theme in ("First finding", "Second finding")
+        ]
+        hashes = [generate_group_id(group) for group in groups]
+        batch_metadata = {"total_batches": 1, "batches": [{
+            "batch_index": 0, "group_indices": [0, 1], "group_ids": hashes,
+            "groups_count": 2,
+        }]}
+        entries = [
+            {"group_hash": hashes[0], "status": "valid", "reason": "Real", "confidence": 0.9},
+            {"group_hash": hashes[0], "status": "approved", "reason": "Fine", "confidence": 0.9},
+            {"group_hash": hashes[1], "status": "valid", "reason": "Real", "confidence": 0.8},
+        ]
+        (tmp_path / "validation_batch_0.json").write_text(
+            json.dumps({"groups": entries, "metadata": {"model": "m"}}), encoding="utf-8")
+
+        merged = merge_batched_validation_results(str(tmp_path), batch_metadata, 2, groups)
+
+        assert [r["status"] for r in merged] == ["validation_failed", "valid"]
+        assert merged[0]["group_id"] == hashes[0]
+        assert not [key for key in STAMP_KEYS if key in merged[0]]
+        assert "scope_proposal_digest" in merged[1]
+
     def test_merge_partial_salvage(self):
         """Batch [2, 5, 9] where LLM returns [2, 3] — Strategy 3 saves group 2.
 

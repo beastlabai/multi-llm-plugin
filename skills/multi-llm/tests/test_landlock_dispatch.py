@@ -853,6 +853,82 @@ class TestIsJailFailure:
         assert len(evidence.line) <= 300
         assert evidence.path == str(target)
 
+    _KEY = "sk-proj-" + "A1b2C3d4" * 6
+
+    @pytest.mark.parametrize("where", ["stderr", "event"])
+    def test_the_line_is_redacted_and_the_path_read_raw(self, lay, where):
+        """Both lanes print the line to stdout, the run log and the closing
+        summary, so it is redacted where it is taken; the path and the class
+        are read from the raw text."""
+        target = lay.root / "outside.txt"
+        text = (f"Error: Permission denied (os error 13) at {target} "
+                f"(env: OPENAI_API_KEY={self._KEY})")
+        if where == "stderr":
+            stderr, stdout = text + "\n", ""
+        else:
+            stderr, stdout = "", _event({"type": "error", "message": text}) + "\n"
+        evidence = ld.is_jail_failure(stderr, stdout, _ctx(lay))
+        assert (evidence.where, evidence.klass, evidence.path) == (where, "jail", str(target))
+        assert self._KEY not in evidence.line and "<redacted:" in evidence.line
+        assert str(target) in evidence.line
+
+    def test_the_line_is_redacted_before_the_cut(self, lay):
+        """A cut inside the token would leave six characters of it, which no
+        pattern matches."""
+        target = lay.root / "outside.txt"
+        head = f"Error: Permission denied (os error 13) at {target} "
+        assert len(head) < 250, "the tmp path is too long for this layout"
+        prefix = head + "y" * (294 - len(head) - len("Bearer ")) + "Bearer "
+        evidence = ld.is_jail_failure(prefix + self._KEY + "\n", "", _ctx(lay))
+        assert evidence.path == str(target) and len(evidence.line) <= 300
+        assert "sk-pro" not in evidence.line
+
+    @pytest.mark.parametrize("straddle", [False, True])
+    def test_a_credential_in_the_denied_path_is_redacted(self, lay, straddle):
+        """Both lanes print the path on its own, beside the excerpt. The class
+        is read from the raw path; the path kept is redacted whole, even where
+        the excerpt's cut falls inside the key."""
+        head = "Error: Permission denied (os error 13) at "
+        parent = lay.root / "cache"
+        if straddle:
+            pad = 294 - len(head) - len(str(parent)) - 2
+            assert 0 < pad < 250, "the tmp path is too long for this layout"
+            parent = parent / ("p" * pad)
+        line = f"{head}{parent / self._KEY / 'state'}"
+        assert (line.index(self._KEY) == 294) is straddle
+        evidence = ld.is_jail_failure(line + "\n", "", _ctx(lay))
+        assert (evidence.where, evidence.klass) == ("stderr", "jail")
+        assert evidence.path == str(parent / "<redacted:sk-family>" / "state")
+        assert len(evidence.line) <= 300
+        dumped = json.dumps(evidence.to_dict())
+        assert "A1b2C3d4" not in dumped and "sk-pro" not in dumped
+
+    def test_a_credential_in_an_ordinary_reason_is_redacted(self, lay):
+        """The reason quotes the path, and both lanes print it after "not a
+        jail denial"."""
+        target = lay.slot / self._KEY / "x.txt"
+        stderr = f"Error: Permission denied (os error 13) at {target}"
+        evidence = ld.is_jail_failure(stderr, "", _ctx(lay))
+        assert evidence.klass == "ordinary"
+        assert evidence.reason.startswith(
+            f"{lay.slot / '<redacted:sk-family>' / 'x.txt'} is inside the allow entry")
+        assert "A1b2C3d4" not in evidence.reason
+
+    @pytest.mark.parametrize("straddle", [False, True])
+    def test_the_wrappers_refusal_is_redacted(self, straddle):
+        """The note is read off the child's stderr, so it is redacted like
+        codex's own text, before its cut."""
+        head = "landlock_exec: required-entry: dir:/srv/"
+        pad = "p" * (294 - len(head) - 1) + "/" if straddle else ""
+        note = f"{head}{pad}{self._KEY}/x: missing"
+        assert (note.index(self._KEY) == 294) is straddle
+        evidence = ld.wrapper_evidence(ld.EXIT_REQUIRED_ENTRY, note + "\n")
+        assert (evidence.where, evidence.klass) == ("wrapper", "jail")
+        assert evidence.path == f"/srv/{pad}<redacted:sk-family>/x"
+        assert len(evidence.line) <= 300
+        dumped = json.dumps(evidence.to_dict())
+        assert "A1b2C3d4" not in dumped and "sk-pro" not in dumped
+
     def test_a_path_inside_the_slot_tmpdir_is_ordinary(self, lay):
         target = lay.slot / "sub" / "x.txt"
         stderr = f"Error: Permission denied (os error 13) at {target}"

@@ -1572,7 +1572,9 @@ def jail_denied_notice(
     The runner and spec, the rung, the denied path or "path not named", the
     excerpt, the allow-list, the installed and measured-through versions —
     with "the likely cause" when codex is newer — and the next steps. ``$HOME``
-    renders as ``~`` throughout.
+    renders as ``~`` throughout. The whole notice goes through the redaction
+    boundary too, whatever the evidence already had: it reaches stdout, the
+    run log and the closing summary.
     """
     rung_name = getattr(rung, "name", SANDBOX_RUNG_PLUGIN_LANDLOCK)
     measured = (getattr(rung, "measured_through", None) or ("",))[0] or "unknown"
@@ -1594,7 +1596,7 @@ def jail_denied_notice(
             f"; {provider_name.capitalize()} is newer than the jail was measured "
             f"with, the likely cause"
         )
-    return (
+    return _redact(
         f"{JAIL_DENIED_MARKER} {provider_name} ({model_spec}): the plugin's "
         f"Landlock jail (fallback rung {rung_name!r}) denied a write "
         f"{provider_name} itself needed, so the turn failed: {denied}; "
@@ -1692,7 +1694,8 @@ def _jail_refused_result(
 ) -> Dict[str, Any]:
     """A slot the jail could not be granted for: nothing was spawned."""
     evidence = {
-        "where": "spawn", "line": message[:300], "path": path,
+        "where": "spawn", "line": _landlock.redacted_excerpt(message),
+        "path": _landlock.redacted_excerpt(path) or None,
         "class": _landlock.JAIL_CLASS_JAIL, "reason": reason,
     }
     details: Dict[str, Any] = {
