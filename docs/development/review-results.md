@@ -16,6 +16,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Consolidation batches](#consolidation-batches)
 - [Reaggregation and result identity](#reaggregation-and-result-identity)
 - [Malformed result entries](#malformed-result-entries)
+- [Report payload](#report-payload)
 - [Report regeneration](#report-regeneration)
 - [Scope tags in reports](#scope-tags-in-reports)
 - [Issue numbers and group decisions](#issue-numbers-and-group-decisions)
@@ -332,6 +333,39 @@ reaggregates refuse such a file too (`resolve_result_files_by_model`: deeper tha
 review-code aggregates from memory, so its loop also marks such a model failed in `results`. A
 result file nested deeper than the decoder's stack is read as one that does not parse
 (`json_extractor.parse_file_content`).
+
+## Report payload
+
+`html_report_generator.generate_html_report` is the view, its embedding and its sidecar. The view is
+`report_view.build_report_view(ReportInputs)`: `ReportInputs` holds the function's parameters one
+field each, and `ReportView` (a `TypedDict`) lists the payload keys the templates read, marking the
+conditional ones. A conditional key is absent, never empty, when it does not apply (`servedModels`,
+`usageTotal`, `requestedModels`, `commitRange`, ...), so a default run's `report_data.json` gains no
+key. The builders take their inputs as arguments: `build_file_contexts` reads code only through the
+reader it is handed, and `pinned_file_reader` never falls back to the disk on a pinned review (a path
+missing from the `head` snapshots has no file context). The consolidated page builds its badges with
+the same `build_model_metadata` (fallback, sandbox rung and usage labels; `reaggregate_consolidation_mode`
+passes `recorded_served_models`) and its title with the same `plan_title`. Every page loads its
+template through `load_report_template` and embeds through `embed_report_data`.
+
+**Each group is stored once.** The `fileView`, `sectionView` and `taskView` buckets hold
+`groupIndexes` (positions in `groups`), and `globalSuggestions` is `{"groupIndexes": [...]}`
+(`report_view.compact_views`); the PR template's `hydrateViews` rebuilds `suggestions` from them
+before anything renders, and `report_view.hydrate_views` is its Python twin, used by readers and
+tests. The views then share the group objects, so a decision or guard stamp the overlay puts on
+`groups` shows in every PR-view block (the per-view copies never carried it). A bucket that still
+holds `suggestions` (a sidecar written before 2026-11-08) is left as it is by both, and a
+regeneration rewrites it as it found it. Sidecars are compact JSON (`html_report_generator.sidecar_json`).
+On a real 262 KB plan's review the page went from 6.5 MB to 1.7 MB and the sidecar from 6.2 MB to
+1.3 MB. Tests: `tests/test_html_report_view.py` (runs `hydrateViews` under Node and the PR page in
+headless Chrome; each skips without its tool).
+
+**A full section is a heading's section.** `extract_section_contexts(..., full_section=True)` matches
+only headings (`_heading_levels`: one to six `#` and a space, outside fenced code, the same rule as
+`extract_plan_section_order`) and ends at the next heading of the same or a higher level. A reference
+that matches only body text (`status`, `next step`) gets no `fullSectionContexts` entry: its block
+still renders its suggestions, with the hover context around the words. Matching body text there gave
+the section no level, so it ran to the end of the plan.
 
 ## Report regeneration
 

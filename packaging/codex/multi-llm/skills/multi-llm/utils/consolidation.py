@@ -1911,7 +1911,8 @@ def generate_consolidated_report(
     return str(output_path)
 
 
-def _failure_report_fields(phase_dir: str) -> Dict[str, Any]:
+def _failure_report_fields(phase_dir: str,
+                           served_models: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """``failedModels``, ``requestedModels`` and ``notices`` for the consolidated page.
 
     The phase report's failure fields, read the same way a reaggregate reads
@@ -1922,7 +1923,8 @@ def _failure_report_fields(phase_dir: str) -> Dict[str, Any]:
     ``message`` is ``report.md``'s ``**Models failed:**`` line without its bold
     markers. ``failedModels`` is always a dict (the template iterates it with
     ``Object.keys``); ``requestedModels`` is left out when the checkpoint
-    records no requested set.
+    records no requested set. *served_models* gives a jail-denied slot its
+    label in the notice, as on the phase report.
 
     Imported here rather than at module level: ``review_orchestrator_base``
     imports this package, and the consolidated page is generated long after
@@ -1948,6 +1950,7 @@ def _failure_report_fields(phase_dir: str) -> Dict[str, Any]:
         "notices": build_report_notices(
             [], failures, requested_count,
             salvage_requested_models(str(phase_dir), list(failures)),
+            served_models=served_models,
         ),
     }
     if requested_count is not None:
@@ -1965,6 +1968,7 @@ def generate_consolidated_html(
     phase_name: str = "review-plan",
     usage: Optional[Dict[str, Dict[str, Any]]] = None,
     scope_state: Optional[Dict[str, Any]] = None,
+    served_models: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> str:
     """
     Write ``consolidated-report.html`` to *phase_dir*, and its payload to
@@ -2001,6 +2005,12 @@ def generate_consolidated_html(
             gains ``scopePolicy`` and a ``scope`` entry per umbrella,
             underlying group and suggestion, and is persisted as
             ``consolidated_report_data.json`` for decision regeneration.
+        served_models: ``models_served`` as the fan-out recorded it
+            (``recorded_served_models``). The badges then name a fallback
+            that served a slot and a slot's sandbox rung exactly as
+            ``report.html``'s do (``report_view.build_model_metadata``), and
+            the failure notice leads a jail-denied slot's entry with its
+            label. ``None`` (a default run) leaves the payload as it was.
 
     Returns:
         The path (as a string) of the written ``consolidated-report.html``.
@@ -2011,74 +2021,43 @@ def generate_consolidated_html(
     """
     from datetime import datetime
 
-    # Reuse helpers from html_report_generator
+    # The report page's own helpers: one template loader, one embedder, one
+    # badge builder and one title rule for every page.
     try:
         from .html_report_generator import (
             CONSOLIDATED_REPORT_DATA,
-            get_model_metadata,
             derive_aggregate_validation_status,
             build_sort_config,
-            embed_consolidated_report_data,
+            embed_report_data,
+            load_report_template,
+            sidecar_json,
             sum_usage,
         )
         from .metrics import describe_usage
+        from .report_view import build_model_metadata, plan_title, read_plan
     except ImportError:
         from utils.html_report_generator import (
             CONSOLIDATED_REPORT_DATA,
-            get_model_metadata,
             derive_aggregate_validation_status,
             build_sort_config,
-            embed_consolidated_report_data,
+            embed_report_data,
+            load_report_template,
+            sidecar_json,
             sum_usage,
         )
         from utils.metrics import describe_usage
+        from utils.report_view import build_model_metadata, plan_title, read_plan
 
     phase_path = Path(phase_dir)
     plan_file = Path(plan_path)
 
-    # --- Load template ---
-    template_path = (
-        Path(__file__).parent.parent
-        / "templates"
-        / "consolidated_report_template.html"
-    )
-    if not template_path.exists():
-        raise FileNotFoundError(
-            f"Consolidated report template not found at: {template_path}"
-        )
-    template = template_path.read_text(encoding="utf-8")
+    # --- Load template (FileNotFoundError when it is missing) ---
+    template = load_report_template("consolidated")
 
-    # --- Extract plan title ---
-    plan_title = ""
-    if plan_file.exists():
-        try:
-            plan_content = plan_file.read_text(encoding="utf-8")
-            for line in plan_content.splitlines():
-                stripped = line.strip()
-                if stripped.startswith("# "):
-                    plan_title = stripped[2:].strip()
-                    break
-        except OSError:
-            pass
-    if not plan_title:
-        plan_title = plan_file.stem
+    title = plan_title(read_plan(plan_file), plan_file.stem)
 
-    # --- Build model metadata ---
-    model_metadata: Dict[str, Any] = {}
-    for model in models:
-        model_metadata[model] = get_model_metadata(model)
-        # Stage U, the shape `generate_html_report` builds: the numbers for
-        # anything that wants to compute, and beside them the one clause
-        # `describe_usage` renders, because the *text* is settled server-side
-        # rather than separately in each template. A model the fan-out recorded
-        # nothing for gets no key and no badge — never `$0.00`, which would
-        # claim a free run.
-        model_usage = (usage or {}).get(model)
-        if isinstance(model_usage, dict) and model_usage:
-            model_metadata[model]["usage"] = model_usage
-            label = describe_usage(model_usage)
-            if label:
-                model_metadata[model]["usage_label"] = label
+    # --- Badges: served model, sandbox rung and usage, as report.html says them ---
+    model_metadata = build_model_metadata(models, served_models, usage)
 
     # --- Build validation lookups ---
     # Primary: hash-based lookup (group_id/group_hash -> status info)
@@ -2204,7 +2183,7 @@ def generate_consolidated_html(
     # --- Assemble full report data ---
     report_data: Dict[str, Any] = {
         "planPath": str(plan_path),
-        "planTitle": plan_title,
+        "planTitle": title,
         "phase": phase_name,
         "generatedAt": datetime.now().isoformat(),
         "models": models,
@@ -2234,7 +2213,7 @@ def generate_consolidated_html(
     # Decision 11.12: the consolidated page is a second front page for the
     # same run, so a reviewer that produced nothing is named here as it is on
     # report.html — the same failure map, denominator and warning notice.
-    report_data.update(_failure_report_fields(phase_dir))
+    report_data.update(_failure_report_fields(phase_dir, served_models))
 
     # The round's policy line, legend and tag counts over distinct groups.
     report_data[_scope_report.REPORT_KEY] = _scope_report.report_block(
@@ -2244,7 +2223,7 @@ def generate_consolidated_html(
     )
 
     # --- Inject data into template (the flat/PR report's escaping) ---
-    html = embed_consolidated_report_data(report_data, template)
+    html = embed_report_data(report_data, template)
 
     # --- Write ---
     phase_path.mkdir(parents=True, exist_ok=True)
@@ -2256,7 +2235,7 @@ def generate_consolidated_html(
     # and `report_data`, which every reaggregation scan excludes.
     try:
         (phase_path / CONSOLIDATED_REPORT_DATA).write_text(
-            json.dumps(report_data, indent=2), encoding="utf-8")
+            sidecar_json(report_data), encoding="utf-8")
     except OSError:
         pass
 

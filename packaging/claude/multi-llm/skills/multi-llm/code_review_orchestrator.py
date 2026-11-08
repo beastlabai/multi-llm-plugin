@@ -251,7 +251,7 @@ from utils.git_utils import (
     run_git,
 )
 from utils.html_report_generator import generate_html_report, write_html_report, model_label, served_model_label, VALIDATION_ORDER, UNKNOWN_STATUS_RANK
-from utils.html_report_generator import failed_models_line
+from utils.html_report_generator import failed_models_line, sidecar_json
 from utils.commit_paths import commit_review_artifact, commit_reviews_folder_rel
 from utils.commit_range import (
     RangeError,
@@ -3218,7 +3218,7 @@ def record_review_scope_in_report_data(
     if "resultsMatch" in record:
         data["reviewScope"]["resultsMatch"] = record["resultsMatch"]
     try:
-        sidecar.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        sidecar.write_text(sidecar_json(data), encoding="utf-8")
     except OSError:
         pass
 

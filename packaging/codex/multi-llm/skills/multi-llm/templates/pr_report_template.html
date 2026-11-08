@@ -2195,10 +2195,47 @@
       }
     })();
 
+    /**
+     * Rebuild the views from `groups`, in place. The generator stores every
+     * group once: each fileView/sectionView/taskView bucket names its groups
+     * by position in `groups` (`groupIndexes`), and `globalSuggestions` names
+     * the groups whose suggestions it lists. Each bucket gets `suggestions`
+     * back as those very group objects, so every view shows what the page and
+     * the decision overlay put on a group. A bucket that already holds
+     * `suggestions` (a report written before) is left as it is. The Python
+     * twin is utils/report_view.py hydrate_views.
+     */
+    function hydrateViews(data) {
+      if (!data) return data;
+      var groups = data.groups || [];
+      function picked(indexes) {
+        return indexes.map(function(i) { return groups[i]; }).filter(Boolean);
+      }
+      ['fileView', 'sectionView', 'taskView'].forEach(function(name) {
+        var view = data[name];
+        if (!view || typeof view !== 'object') return;
+        Object.keys(view).forEach(function(key) {
+          var bucket = view[key];
+          if (bucket && Array.isArray(bucket.groupIndexes) && !Array.isArray(bucket.suggestions)) {
+            bucket.suggestions = picked(bucket.groupIndexes);
+          }
+        });
+      });
+      var flat = data.globalSuggestions;
+      if (flat && !Array.isArray(flat) && Array.isArray(flat.groupIndexes)) {
+        data.globalSuggestions = [];
+        picked(flat.groupIndexes).forEach(function(group) {
+          (group.suggestions || []).forEach(function(s) { data.globalSuggestions.push(s); });
+        });
+      }
+      return data;
+    }
+
     // ================================================================
     // Data injection placeholder — replaced by generator
     // ================================================================
     const reportData = /* REPORT_DATA_PLACEHOLDER */null;
+    hydrateViews(reportData);
 
     // ================================================================
     // State

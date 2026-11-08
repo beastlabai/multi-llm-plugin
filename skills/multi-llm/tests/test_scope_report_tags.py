@@ -41,6 +41,7 @@ import code_review_orchestrator as cro  # noqa: E402
 from apply_code_fixes_orchestrator import find_edited_issue_descriptions  # noqa: E402
 from utils import commit_report  # noqa: E402
 from utils import html_report_generator as hrg  # noqa: E402
+from utils.report_view import hydrate_views  # noqa: E402
 from utils import result_files  # noqa: E402
 from utils import scope_policy as sp  # noqa: E402
 from utils import scope_report  # noqa: E402
@@ -565,8 +566,8 @@ class TestHtmlPayload:
             "relation": "in_scope", "label": "Within scope",
             "reason": "the reviewer calls it required", "reference": "", "classified": True,
             "provisional": True}
-        # Every view's copy of a group carries the same entry.
-        for bucket in data["sectionView"].values():
+        # Every view's group, rebuilt from the sidecar, carries the same entry.
+        for bucket in hydrate_views(data)["sectionView"].values():
             for copy_ in bucket["suggestions"]:
                 assert copy_["scope"] == by_hash[copy_["groupHash"]]["scope"]
 
@@ -959,7 +960,7 @@ class TestTemplateBadges:
             g.pop("scope", None)
             for s in g.get("suggestions") or []:
                 s.pop("scope", None)
-        legacy = hrg._embed_report_data(data, hrg._load_report_template(style))
+        legacy = hrg.embed_report_data(data, hrg.load_report_template(style))
         out = run_page(legacy, render)
         texts = {b["text"] for b in badges_in(out[key]).badges}
         assert texts == {"Scope unclear (not classified)", "Scope unclear (provisional)"}

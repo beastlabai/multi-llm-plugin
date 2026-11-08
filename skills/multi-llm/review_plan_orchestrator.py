@@ -63,6 +63,7 @@ from utils.html_report_generator import (
 from utils.review_orchestrator_base import (
     run_review_orchestration,
     dispatch_subagent_tasks,
+    recorded_served_models,
     recorded_usage,
     # Re-export for backward compatibility (tests or other modules may import these)
     REQUIRED_FIELDS,
@@ -767,16 +768,17 @@ def reaggregate_consolidation_mode(
     )
     print(f"Consolidated report: {report_path}")
 
-    # Stage U: what the fan-out spent, read back off the checkpoint the same
-    # way the full report reads it. Consolidation runs in its own invocation,
-    # long after the slots exited, so `.status.json` is the only place those
-    # numbers still exist — the per-model `{model}.json` files this mode
-    # re-reads are bare suggestion lists. `None` for a run of duration-only
-    # adapters, which leaves the report exactly as it was.
+    # What the fan-out spent and which model and sandbox served each slot,
+    # read back off the checkpoint the way the full report reads them:
+    # consolidation runs in its own invocation, long after the slots exited,
+    # and the per-model `{model}.json` files this mode re-reads are bare
+    # suggestion lists. `None` for a default run, which leaves the report
+    # exactly as it was.
     html_path = generate_consolidated_html(
         consolidated_groups, groups, phase_dir, plan_path, list(all_models),
         validation=validation_for_html,
         usage=recorded_usage(phase_dir),
+        served_models=recorded_served_models(phase_dir),
     )
     print(f"Consolidated HTML: {html_path}")
 

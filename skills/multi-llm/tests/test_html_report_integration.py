@@ -26,6 +26,7 @@ from review_plan_orchestrator import aggregate_results
 from code_review_orchestrator import generate_review_report
 from utils.report_parser import load_html_selections, merge_selections
 from utils.html_report_generator import generate_html_report, write_html_report
+from utils.report_view import hydrate_views
 
 
 class TestFixtures:
@@ -785,7 +786,8 @@ class TestReportParserIntegration:
 
 
 def _extract_report_data(html_content: str) -> dict:
-    """Extract the embedded reportData JSON from HTML content."""
+    """Extract the embedded reportData JSON from HTML content, with its views
+    rebuilt from ``groups`` as the page's ``hydrateViews`` does."""
     start_marker = 'const reportData = '
     start_idx = html_content.find(start_marker)
     if start_idx == -1:
@@ -819,7 +821,7 @@ def _extract_report_data(html_content: str) -> dict:
                 break
 
     json_str = html_content[json_start:end_idx]
-    return json.loads(json_str)
+    return hydrate_views(json.loads(json_str))
 
 
 class TestStableIDCompatibility:

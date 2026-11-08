@@ -26,6 +26,7 @@ from utils.html_report_generator import (
     _resolve_provider_icon_key,
 )
 from utils.report_parser import load_html_selections, merge_selections
+from utils.report_view import hydrate_views
 
 
 def test_fx_provider_icon_is_available():
@@ -483,6 +484,75 @@ More content.
             plan_content, {"### Nonexistent"}, full_section=True
         )
         assert "### Nonexistent" not in result
+
+    #: A plan whose body mentions words reviewers cite as references.
+    BODY_MENTIONS = """# Plan
+
+Status: draft. The next step is the rollout.
+
+## Overview
+Overview body.
+
+## Rollout
+Rollout body, on Windows too.
+
+```bash
+# install the tools
+make install
+```
+
+After the code block.
+
+## Testing
+Testing body.
+"""
+
+    @pytest.mark.parametrize("ref", ["status", "next step", "Windows", "install the tools"])
+    def test_full_section_match_that_is_not_a_heading_has_no_entry(self, ref):
+        """A reference that matches body text (or a shell comment in a fence)
+        names no section, so it gets no full-section text — on the base the
+        span had no level and ran to the end of the plan."""
+        result = extract_section_contexts(self.BODY_MENTIONS, {ref}, full_section=True)
+        assert ref not in result
+        # The hover context still shows where the words appear.
+        assert ref in extract_section_contexts(self.BODY_MENTIONS, {ref})
+
+    def test_full_section_partial_match_prefers_the_heading(self):
+        """``Rollout`` is in the body before it is a heading; the full section
+        is the heading's, ending at the next ``##``."""
+        plan = "# Plan\n\nWe plan the rollout last.\n\n## Rollout\nRollout body.\n\n## Testing\nT.\n"
+        result = extract_section_contexts(plan, {"Rollout"}, full_section=True)
+        assert result["Rollout"] == "## Rollout\nRollout body."
+
+    def test_full_section_fenced_comment_does_not_end_the_section(self):
+        """A ``#`` line inside fenced code is not a heading."""
+        result = extract_section_contexts(self.BODY_MENTIONS, {"## Rollout"}, full_section=True)
+        section = result["## Rollout"]
+        assert "make install" in section and "After the code block." in section
+        assert "## Testing" not in section
+
+
+    def test_a_longer_fence_can_quote_a_shorter_one(self):
+        """A three-backtick line inside a four-backtick block neither closes it
+        nor, once the real fence closes, hides the headings after it."""
+        plan = ("# Plan\n\n````md\n```\n# not a heading\n```\n````\n\n"
+                "## Real\nReal body.\n\n## Next\nN.\n")
+        result = extract_section_contexts(plan, {"Real"}, full_section=True)
+        assert result["Real"] == "## Real\nReal body."
+
+    def test_a_tab_after_the_hashes_is_a_heading(self):
+        plan = "# Plan\n\n##\tReal\nReal body.\n\n## Next\nN.\n"
+        result = extract_section_contexts(plan, {"Real"}, full_section=True)
+        assert result["Real"] == "##\tReal\nReal body."
+
+    def test_a_fence_closes_only_on_its_own_character(self):
+        """``~~~`` does not close a backtick fence, so the ``#`` line after it
+        is still code."""
+        plan = ("# Plan\n\n## Real\nBody.\n```\n~~~\n# comment\n```\nAfter.\n\n"
+                "## Next\nN.\n")
+        result = extract_section_contexts(plan, {"Real"}, full_section=True)
+        assert "# comment" in result["Real"] and "After." in result["Real"]
+        assert "## Next" not in result["Real"]
 
 
 class TestEmbedLogSnippets:
@@ -987,7 +1057,7 @@ Second step details.
             tasks_path=tasks_path,
         )
 
-        report_data = json.loads((phase_dir / "report_data.json").read_text())
+        report_data = hydrate_views(json.loads((phase_dir / "report_data.json").read_text()))
         task_view = report_data["taskView"]
         real_task_keys = [k for k in task_view if not k.startswith("_")]
 

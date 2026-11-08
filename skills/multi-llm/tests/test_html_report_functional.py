@@ -26,10 +26,12 @@ from utils.html_report_generator import (
     string_to_color,
 )
 from utils.report_parser import load_html_selections, merge_selections
+from utils.report_view import hydrate_views
 
 
 def extract_report_data(html_content: str) -> dict:
-    """Extract the embedded reportData JSON from HTML content.
+    """Extract the embedded reportData JSON from HTML content, with its views
+    rebuilt from ``groups`` as the page's ``hydrateViews`` does.
 
     Uses brace counting to properly extract the complete JSON object,
     handling nested structures and strings with special characters.
@@ -77,7 +79,7 @@ def extract_report_data(html_content: str) -> dict:
                 break
 
     json_str = html_content[json_start:end_idx]
-    return json.loads(json_str)
+    return hydrate_views(json.loads(json_str))
 
 
 # ============================================================================

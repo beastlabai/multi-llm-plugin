@@ -11,7 +11,6 @@ import json
 import logging
 import re
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
@@ -829,6 +828,64 @@ def failure_reason_text(reason: Any) -> str:
     return str(reason)
 
 
+_FENCE_RUN = re.compile(r"(`{3,}|~{3,})")
+
+
+def _heading_levels(lines: Sequence[str]) -> Dict[int, int]:
+    """``{line index: level}`` for every markdown heading among *lines*.
+
+    The one definition of a heading the report uses: one to six ``#`` then a
+    space or tab, outside fenced code (a shell comment is not a heading, and
+    neither is ``#hashtag``). Fences follow CommonMark, as the page's ``marked``
+    does: a fence closes only on a run of its own character at least as long as
+    the one that opened it, with nothing after it, so a four-backtick block can
+    quote a three-backtick line.
+    """
+    levels: Dict[int, int] = {}
+    fence_char, fence_len = "", 0
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        run = _FENCE_RUN.match(stripped)
+        if run:
+            marker = run.group(1)
+            rest = stripped[run.end():]
+            if not fence_char:
+                # A backtick fence's info string cannot hold a backtick.
+                if not (marker[0] == "`" and "`" in rest):
+                    fence_char, fence_len = marker[0], len(marker)
+                    continue
+            elif marker[0] == fence_char and len(marker) >= fence_len and not rest:
+                fence_char, fence_len = "", 0
+                continue
+        if fence_char or not stripped.startswith("#"):
+            continue
+        level = len(stripped) - len(stripped.lstrip("#"))
+        if level > 6 or stripped[level:level + 1] not in (" ", "\t"):
+            continue
+        levels[index] = level
+    return levels
+
+
+def _find_reference_line(lines: Sequence[str], ref: str,
+                         candidates: Optional[Sequence[int]] = None) -> int:
+    """The first line *ref* names, or -1: an exact or prefix match on the
+    stripped line, else the reference's text inside the line's text after its
+    ``#`` markers. *candidates* restricts the search to those line indexes."""
+    indexes = range(len(lines)) if candidates is None else candidates
+    ref_lower = ref.lower().strip()
+    for i in indexes:
+        line_stripped = lines[i].strip().lower()
+        if line_stripped == ref_lower or line_stripped.startswith(ref_lower):
+            return i
+    ref_text = ref.lstrip('#').strip().lower()
+    if candidates is not None and not ref_text:
+        return -1
+    for i in indexes:
+        if ref_text in lines[i].lstrip('#').strip().lower():
+            return i
+    return -1
+
+
 def extract_section_contexts(
     plan_content: str,
     section_refs: Set[str],
@@ -839,16 +896,24 @@ def extract_section_contexts(
     Takes the plan markdown content and a set of section references
     (like "### Step 2") and returns surrounding context text for each.
 
-    By default, extracts ~15 lines around each header (for tooltip/hover use).
-    When full_section=True, extracts the full text from the matched ### header
-    to the next ### header (or end of content), including any nested headers
-    (e.g., #### within a ### section).
+    By default, extracts ~15 lines around the first line the reference names,
+    heading or not (for tooltip/hover use).
+
+    When full_section=True, the reference must name a heading
+    (:func:`_heading_levels`), and the entry is that heading's section: from
+    it to the next heading of the same or a higher level, nested headings
+    included. A reference that matches only body text names no section and
+    gets no entry; its block in the report still renders its suggestions,
+    under the hover context above. (Taking the enclosing heading's span
+    instead would repeat a section the report already shows under its own
+    heading, and for a match above the first ``##`` it is the title's span:
+    the whole plan.)
 
     Args:
         plan_content: The full markdown content of the plan
         section_refs: Set of section references to find (e.g., {"### Step 2"})
-        full_section: If True, capture full section text between ### headers
-            instead of ~15 lines around each header. Default False.
+        full_section: If True, capture the full section text of the heading
+            the reference names instead of ~15 lines around it. Default False.
 
     Returns:
         Dict mapping section reference to surrounding context text
@@ -858,71 +923,37 @@ def extract_section_contexts(
 
     lines = plan_content.split('\n')
     contexts = {}
+    headings = _heading_levels(lines) if full_section else {}
+    heading_indexes = sorted(headings)
 
     for ref in section_refs:
         if not ref:
             continue
 
-        # Find line index where this section header appears
-        ref_lower = ref.lower().strip()
-        found_idx = -1
-
-        for i, line in enumerate(lines):
-            line_stripped = line.strip().lower()
-            # Match exact header or header that starts with ref
-            if line_stripped == ref_lower or line_stripped.startswith(ref_lower):
-                found_idx = i
-                break
-
-        if found_idx == -1:
-            # Try partial match on the text after ### markers
-            ref_text = ref.lstrip('#').strip().lower()
-            for i, line in enumerate(lines):
-                line_text = line.lstrip('#').strip().lower()
-                if ref_text in line_text:
-                    found_idx = i
-                    break
-
-        if found_idx >= 0:
-            if full_section:
-                # Determine the header level of the matched line
-                matched_line = lines[found_idx].lstrip()
-                header_level = 0
-                for ch in matched_line:
-                    if ch == '#':
-                        header_level += 1
-                    else:
-                        break
-
-                # Find the next header at the same or higher level (fewer or equal #'s)
-                # Headers with more #'s (e.g., #### inside ###) are nested and included
-                end_idx = len(lines)
-                for j in range(found_idx + 1, len(lines)):
-                    line_stripped = lines[j].lstrip()
-                    if line_stripped.startswith('#'):
-                        # Count the header level of this line
-                        level = 0
-                        for ch in line_stripped:
-                            if ch == '#':
-                                level += 1
-                            else:
-                                break
-                        # A header at same or higher level ends the section
-                        if 0 < level <= header_level:
-                            end_idx = j
-                            break
-
-                context_lines = lines[found_idx:end_idx]
-                # Strip trailing blank lines for cleaner output
-                while context_lines and context_lines[-1].strip() == '':
-                    context_lines.pop()
-                contexts[ref] = '\n'.join(context_lines)
-            else:
+        if not full_section:
+            found_idx = _find_reference_line(lines, ref)
+            if found_idx >= 0:
                 # Extract ~15 lines of context (7 before, the line, 7 after)
                 start = max(0, found_idx - 7)
                 end = min(len(lines), found_idx + 8)
-                context_lines = lines[start:end]
-                contexts[ref] = '\n'.join(context_lines)
+                contexts[ref] = '\n'.join(lines[start:end])
+            continue
+
+        found_idx = _find_reference_line(lines, ref, heading_indexes)
+        if found_idx < 0:
+            continue
+        # The next heading at the same or a higher level (fewer or equal #'s)
+        # ends the section; deeper ones (#### inside ###) are nested in it.
+        header_level = headings[found_idx]
+        end_idx = next(
+            (j for j in heading_indexes if j > found_idx and headings[j] <= header_level),
+            len(lines),
+        )
+        context_lines = lines[found_idx:end_idx]
+        # Strip trailing blank lines for cleaner output
+        while context_lines and context_lines[-1].strip() == '':
+            context_lines.pop()
+        contexts[ref] = '\n'.join(context_lines)
 
     return contexts
 
@@ -951,22 +982,9 @@ def extract_plan_section_order(plan_content: str) -> List[str]:
         return []
     deep: List[str] = []
     top: List[str] = []
-    fence = ""
-    for line in plan_content.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("```") or stripped.startswith("~~~"):
-            marker = stripped[:3]
-            if not fence:
-                fence = marker
-            elif fence == marker:
-                fence = ""
-            continue
-        if fence or not stripped.startswith("#"):
-            continue
-        level = len(stripped) - len(stripped.lstrip("#"))
-        if level > 6 or not stripped[level:].startswith(" "):
-            continue  # "#hashtag" and "####### deeper than markdown goes"
-        (top if level == 1 else deep).append(stripped)
+    lines = plan_content.splitlines()
+    for index, level in _heading_levels(lines).items():
+        (top if level == 1 else deep).append(lines[index].strip())
     order = deep or top
     seen: Set[str] = set()
     return [ref for ref in order if not (ref in seen or seen.add(ref))]
@@ -1491,13 +1509,15 @@ CONSOLIDATED_REPORT_DATA = "consolidated_report_data.json"
 #: The consolidated page itself.
 CONSOLIDATED_REPORT_HTML = "consolidated-report.html"
 
-#: The flat/PR payload's group views; each bucket's ``suggestions`` is a list
-#: of group copies, so an overlay must reach them as well as ``groups``.
+#: The flat/PR payload's group views. A current payload's buckets name their
+#: groups by index into ``groups`` (utils/report_view.py); a sidecar written
+#: before that holds group copies in each bucket's ``suggestions``, so an
+#: overlay must reach them as well as ``groups``.
 _GROUP_VIEWS = ("fileView", "sectionView", "taskView")
 
 
 def _payload_groups(report_data: Mapping[str, Any]) -> List[Dict[str, Any]]:
-    """Every group dict of a flat/PR payload: ``groups`` and each view's copies."""
+    """Every group dict of a flat/PR payload: ``groups`` and any view copies."""
     found: List[Dict[str, Any]] = [g for g in report_data.get("groups") or [] if isinstance(g, dict)]
     for view in _GROUP_VIEWS:
         for bucket in (report_data.get(view) or {}).values():
@@ -1623,25 +1643,6 @@ def _scope_view(group: Any) -> Any:
     return (group or {}).get(_scope_report.ENTRY_KEY) if isinstance(group, Mapping) else None
 
 
-def embed_consolidated_report_data(report_data: Mapping[str, Any], template: str) -> str:
-    """The consolidated page: *report_data* embedded at its placeholder.
-
-    The same script-safe JSON as the flat/PR pages (:func:`script_json`); a
-    template without the placeholder is an error rather than a page with no
-    data. The vendored scripts go in first, as on the other two pages.
-    """
-    template = template.replace(SLOT_VENDOR_SCRIPTS, vendor_scripts_html())
-    payload = script_json(report_data)
-    for placeholder in ("/* REPORT_DATA_PLACEHOLDER */null", "/* REPORT_DATA_PLACEHOLDER */",
-                        "REPORT_DATA_PLACEHOLDER"):
-        if placeholder in template:
-            return template.replace(placeholder, payload)
-    raise ValueError(
-        "Template does not contain REPORT_DATA_PLACEHOLDER \u2014 "
-        "cannot inject report data."
-    )
-
-
 def generate_html_report(
     groups: List[Dict[str, Any]],
     plan_path: Path,
@@ -1667,6 +1668,12 @@ def generate_html_report(
     scope_state: Optional[Mapping[str, Any]] = None,
 ) -> str:
     """Generate complete HTML report and return the HTML string.
+
+    The page is the view (``report_view.build_report_view``, these
+    parameters as ``ReportInputs``) with its views indexed
+    (``report_view.compact_views``), embedded in the style's template; the
+    same payload is persisted as ``report_data.json``. A missing template
+    returns an error page and writes no sidecar.
 
     Args:
         groups: Validated groups from grouped.json
@@ -1764,568 +1771,39 @@ def generate_html_report(
         FileNotFoundError: When ``data_source="consolidated"`` and the file
             does not exist.
         ValueError: When ``data_source`` is not one of the allowed values,
-            or when ``data_source="consolidated"`` and the file is malformed.
+            or when ``data_source="consolidated"`` and the file is malformed,
+            or when the template has no data placeholder.
     """
-    if data_source not in ("auto", "consolidated", "grouped"):
-        raise ValueError(
-            f"data_source must be 'auto', 'consolidated', or 'grouped', "
-            f"got {data_source!r}"
-        )
+    try:
+        from .report_view import ReportInputs, build_report_view, compact_views
+    except ImportError:
+        from report_view import ReportInputs, build_report_view, compact_views
 
-    # --- Resolve data source (consolidated vs grouped) ---
-    effective_groups, umbrella_map, source_notices = _load_data_source(
-        phase_dir, data_source, groups
-    )
+    view = build_report_view(ReportInputs(
+        groups=groups, plan_path=plan_path, phase_dir=phase_dir, phase_type=phase_type,
+        models=models, failed_models=failed_models, validation_results=validation_results,
+        base_ref=base_ref, tasks_path=tasks_path, template_style=template_style,
+        diff_data=diff_data, data_source=data_source, file_snapshots=file_snapshots,
+        served_models=served_models, usage=usage, commit_review=commit_review,
+        requested_models=requested_models, salvage_requested=salvage_requested,
+        head_ref=head_ref, repo_root=repo_root, file_labels=file_labels,
+        scope_state=scope_state,
+    ))
+    try:
+        template = load_report_template(template_style)
+    except FileNotFoundError as exc:
+        return _missing_template_page(exc.filename)
 
-    # Select template based on template_style
-    templates_dir = Path(__file__).parent.parent / 'templates'
-    if template_style == 'pr':
-        template_path = templates_dir / 'pr_report_template.html'
-        if not template_path.exists():
-            import warnings
-            warnings.warn(
-                f"PR template not found at {template_path}, falling back to flat template"
-            )
-            template_path = templates_dir / 'report_template.html'
-    else:
-        template_path = templates_dir / 'report_template.html'
-
-    if not template_path.exists():
-        # Return a basic error HTML if template is missing
-        return f"""<!DOCTYPE html>
-<html>
-<head><title>Report Error</title></head>
-<body>
-<h1>Error: Template Not Found</h1>
-<p>Could not find template at: {template_path}</p>
-<p>Please ensure the template file exists.</p>
-</body>
-</html>"""
-
-    template = template_path.read_text(encoding='utf-8')
-
-    # Gather all section references from suggestions. A composite reference
-    # is split into the sections it names: those are the sectionView's bucket
-    # keys, and the whole composite string matches no header in the plan, so
-    # collecting it unsplit left every one of them without context.
-    section_refs: Set[str] = set()
-    for group in effective_groups:
-        for sugg in group.get("suggestions", group.get("issues", [])):
-            ref = sugg.get("reference", sugg.get("section", ""))
-            section_refs.update(split_section_refs(ref))
-
-    # Read plan content for section contexts
-    plan_content = ""
-    if plan_path.exists():
-        try:
-            plan_content = plan_path.read_text(encoding='utf-8')
-        except OSError:
-            pass
-
-    # Extract section contexts for hover previews
-    section_contexts = extract_section_contexts(plan_content, section_refs)
-
-    # Get log snippets
-    log_snippets = embed_log_snippets(phase_dir, models)
-
-    # The review round's scope record (policy, baseline, deferrals).
-    scope_round = _scope_report.round_info(
-        scope_state if scope_state is not None else _scope_report.read_state(phase_dir),
-        phase_type, effective_groups)
-
-    # Build groups data
-    groups_data = []
-    for i, group in enumerate(effective_groups):
-        built = _build_group_data(group, i, validation_results)
-        built[_scope_report.ENTRY_KEY] = _scope_report.group_scope(group, scope_round)
-        # Carry through consolidated metadata if present
-        cons_meta = group.get("_consolidated_meta")
-        if cons_meta is not None:
-            built["_consolidatedMeta"] = cons_meta
-        if group.get("_umbrella_first"):
-            built["_umbrellaFirst"] = True
-        if group.get("_is_consolidated_flat"):
-            built["_isConsolidatedFlat"] = True
-        groups_data.append(built)
-
-    # An umbrella's derived scope tag, on the metadata dict its groups share.
-    _scope_umbrellas(groups_data)
-
-    # Sort groups by priority (validation status, then importance, then original index)
-    groups_data = sort_groups_by_priority(groups_data)
-
-    # Build model metadata for badges
-    model_metadata = {}
-    for model in models:
-        model_metadata[model] = get_model_metadata(model)
-        # §3.6: a report must never attribute a fallback model's output to the
-        # primary. The badge text is `metadata.model` in every template, so the
-        # served model is folded into it there rather than in three templates —
-        # and only when a fallback really fired, so an unconfigured run's badge
-        # (and its persisted report_data.json) is unchanged.
-        served_entry = (served_models or {}).get(model)
-        if isinstance(served_entry, dict) and served_entry.get("served_model"):
-            served = served_entry["served_model"]
-            model_metadata[model]["served_model"] = served
-            model_metadata[model]["fallback"] = bool(served_entry.get("fallback"))
-            if served_entry.get("fallback"):
-                model_metadata[model]["model"] = (
-                    f"{model_metadata[model]['model']} (fallback: {served})"
-                )
-        # D6 override (2026-09-17): the same badge names a slot that ran with
-        # no sandbox, so the HTML report says it wherever the markdown does.
-        if isinstance(served_entry, dict) and served_entry.get("sandbox") == "bypassed":
-            model_metadata[model]["sandbox"] = "bypassed"
-            model_metadata[model]["model"] = (
-                f"{model_metadata[model]['model']} (unsandboxed)"
-            )
-        # Landlock rung (2026-09-22): a contained fallback rung is a sandbox,
-        # so the badge names the rung and never says "unsandboxed".
-        elif isinstance(served_entry, dict) and str(
-            served_entry.get("sandbox") or ""
-        ).startswith(SANDBOX_FALLBACK_WORD_PREFIX):
-            word = served_entry["sandbox"]
-            model_metadata[model]["sandbox"] = word
-            model_metadata[model]["model"] = (
-                f"{model_metadata[model]['model']} ({sandbox_fallback_label(word)})"
-            )
-        # Stage U: what this slot spent, on the same metadata dict the badge is
-        # rendered from — the numbers for anything that wants to compute, and
-        # the rendered clause beside them because the *text* is settled here
-        # rather than in three templates. The templates then print a string
-        # instead of each carrying its own copy of "cost to the cent, drop it
-        # under half a cent, say est., thousands separators on the token count"
-        # — the rule that would drift three ways the first time it changed.
-        # `describe_usage` is the same function the failed-slot error line and
-        # the markdown `**Models:**` line call, so the three say the same words.
-        # Absent when the adapter reported nothing, never `{}` or `$0.00`.
-        model_usage = (usage or {}).get(model)
-        if isinstance(model_usage, dict) and model_usage:
-            model_metadata[model]["usage"] = model_usage
-            label = describe_usage(model_usage)
-            if label:
-                model_metadata[model]["usage_label"] = label
-
-    # Extract plan title from markdown (first # heading), fallback to filename
-    plan_title = ""
-    for line in plan_content.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("# "):
-            plan_title = stripped[2:].strip()
-            break
-    if not plan_title:
-        plan_title = plan_path.stem
-
-    # --- PR-style view indexes ---
-    file_view = build_file_view(groups_data)
-    section_view = build_section_view(groups_data)
-
-    # Load task metadata if tasks_path provided.
-    # Supports both JSON (tasks.json) and markdown (tasks.md) formats.
-    tasks_metadata: Optional[Dict[str, Any]] = None
-    if tasks_path is not None:
-        try:
-            raw_text = tasks_path.read_text(encoding='utf-8')
-            if tasks_path.suffix == '.json':
-                tasks_metadata = json.loads(raw_text)
-            elif tasks_path.suffix == '.md':
-                tasks_metadata = _parse_tasks_markdown(raw_text)
-            else:
-                # Try JSON first, fall back to markdown parsing
-                try:
-                    tasks_metadata = json.loads(raw_text)
-                except json.JSONDecodeError:
-                    tasks_metadata = _parse_tasks_markdown(raw_text)
-        except OSError as exc:
-            logger.warning("Could not load tasks metadata from %s: %s", tasks_path, exc)
-            tasks_metadata = None
-
-    task_view = build_task_view(groups_data, tasks_metadata)
-
-    # --- Diff data: pre-computed takes precedence over base_ref capture ---
-    # Normalize empty string base_ref to None so we don't attempt a
-    # diff capture with an invalid (empty) ref.
-    if not base_ref:
-        base_ref = None
-    # Collect file paths referenced by suggestions
-    referenced_files: List[str] = []
-    seen_files: Set[str] = set()
-    for group in groups_data:
-        for sugg in group.get("suggestions", []):
-            file_ref = sugg.get("fileRef", "")
-            fpath = _extract_file_path(file_ref)
-            if fpath and fpath not in seen_files:
-                seen_files.add(fpath)
-                referenced_files.append(fpath)
-    resolved_diff_data: Optional[Dict[str, Any]] = None
-    if diff_data is not None:
-        # Use pre-computed diff data directly
-        resolved_diff_data = diff_data
-    elif base_ref is not None:
-        if referenced_files:
-            try:
-                from .git_utils import capture_diff_hunks
-                if head_ref is None:
-                    resolved_diff_data = capture_diff_hunks(base_ref, referenced_files)
-                else:
-                    resolved_diff_data = capture_diff_hunks(
-                        base_ref, referenced_files, head_ref=head_ref, cwd=repo_root,
-                    )
-            except Exception as exc:
-                import warnings
-                warnings.warn(f"Failed to capture diff hunks: {exc}")
-                resolved_diff_data = None
-
-    # A pinned review's context is the reviewed code: the files as `head`
-    # holds them, read once here unless the caller handed snapshots in.
-    if head_ref is not None and file_snapshots is None and referenced_files:
-        try:
-            from .git_utils import capture_file_snapshots_at
-            file_snapshots = capture_file_snapshots_at(
-                head_ref, referenced_files, cwd=repo_root,
-            )
-        except Exception as exc:
-            import warnings
-            warnings.warn(f"Failed to read files at {head_ref[:12]}: {exc}")
-            file_snapshots = {}
-
-    def _file_context(
-        fpath: str, line_range: List[int], context_lines: int = 5,
-    ) -> Optional[List[Dict[str, Any]]]:
-        """``capture_file_context``, which never falls back to the disk on a
-        pinned review: a path missing from the head snapshots has no file
-        context there (it is absent at `head`), whatever the disk holds."""
-        if head_ref is not None and (not file_snapshots or fpath not in file_snapshots):
-            return None
-        from .git_utils import capture_file_context
-        return capture_file_context(
-            fpath, line_range, context_lines=context_lines,
-            file_snapshots=file_snapshots,
-        )
-
-    # --- File contexts fallback chain ---
-    # For each file referenced by suggestions, try:
-    # 1. diff hunks (already in resolved_diff_data)
-    # 2. file content via capture_file_context()
-    # 3. anchor_text from the suggestion itself
-    file_contexts: Dict[str, Any] = {}
-    for group in groups_data:
-        for sugg in group.get("suggestions", []):
-            file_ref = sugg.get("fileRef", "")
-            fpath = _extract_file_path(file_ref)
-            if not fpath or fpath in file_contexts:
-                continue
-
-            # Check if diff data already covers this file
-            if resolved_diff_data and fpath in resolved_diff_data:
-                file_contexts[fpath] = {"source": "diff", "available": True}
-                continue
-
-            # Try file content fallback
-            line_range = sugg.get("lineRange")
-            if line_range and isinstance(line_range, (list, tuple)) and len(line_range) >= 1:
-                try:
-                    ctx = _file_context(fpath, list(line_range))
-                    if ctx is not None:
-                        file_contexts[fpath] = {
-                            "source": "file",
-                            "lines": ctx,
-                            "available": True,
-                        }
-                        continue
-                except Exception:
-                    pass
-
-            # Final fallback: anchor_text
-            anchor = sugg.get("anchorText")
-            if anchor:
-                file_contexts[fpath] = {
-                    "source": "anchor",
-                    "anchorText": anchor,
-                    "available": True,
-                }
-            else:
-                file_contexts[fpath] = {
-                    "source": "none",
-                    "available": False,
-                }
-
-    # --- Augment file contexts with lines for ALL suggestion lineRanges ---
-    # The loop above only captures context for the first suggestion per file.
-    # For files with diff data, outside-diff suggestions have no context lines.
-    # This second pass captures file content covering all suggestion lineRanges
-    # so the template can render context around outside-diff suggestions.
-    file_line_ranges: Dict[str, List[List[int]]] = {}
-    for group in groups_data:
-        for sugg in group.get("suggestions", []):
-            file_ref = sugg.get("fileRef", "")
-            fpath = _extract_file_path(file_ref)
-            line_range = sugg.get("lineRange")
-            if (
-                fpath
-                and line_range
-                and isinstance(line_range, (list, tuple))
-                and len(line_range) >= 1
-            ):
-                file_line_ranges.setdefault(fpath, []).append(list(line_range))
-
-    for fpath, ranges in file_line_ranges.items():
-        entry = file_contexts.get(fpath, {})
-        # Skip if we already have context lines
-        if entry.get("lines"):
-            continue
-        # Merge all ranges into one broad range — the template filters
-        # to ±5 lines around each specific suggestion's lineRange.
-        all_starts = [r[0] for r in ranges]
-        all_ends = [r[1] if len(r) > 1 else r[0] for r in ranges]
-        merged_range = [min(all_starts), max(all_ends)]
-        try:
-            ctx = _file_context(fpath, merged_range, context_lines=5)
-            if ctx is not None:
-                if fpath in file_contexts:
-                    file_contexts[fpath]["lines"] = ctx
-                else:
-                    file_contexts[fpath] = {
-                        "source": "file",
-                        "lines": ctx,
-                        "available": True,
-                    }
-        except Exception:
-            pass
-
-    # A path absent at `head` says why in its context's header: the same words
-    # as its validation excerpt (plans/review-commits.md §2.5).
-    for fpath, label in (file_labels or {}).items():
-        if fpath in file_contexts and label:
-            file_contexts[fpath]["label"] = label
-
-    # --- Plan section ordering (narrative order from markdown) ---
-    section_order = extract_plan_section_order(plan_content)
-
-    # --- Full section contexts for sectionView ---
-    # Extract for ALL section_order headers + suggestion refs so every
-    # plan section has rendered content in the PR view.
-    all_section_refs: Set[str] = set(section_order)
-    all_section_refs.update(section_refs)
-    full_section_contexts: Dict[str, str] = {}
-    if all_section_refs:
-        full_section_contexts = extract_section_contexts(
-            plan_content, all_section_refs, full_section=True
-        )
-
-    # --- Merge all plan sections into sectionView ---
-    # Ensure every section from section_order appears in section_view,
-    # even if it has no suggestions. This enables the "full document" PR view.
-    def _normalize_section_ref(ref: str) -> str:
-        """Strip leading # and lowercase for fuzzy matching."""
-        return ref.lstrip('#').strip().lower()
-
-    def _find_canonical_match(
-        ref: str, canonical_map: Dict[str, str]
-    ) -> Optional[str]:
-        """Find a canonical sectionView key matching a section_order ref."""
-        norm = _normalize_section_ref(ref)
-        # Exact match
-        if norm in canonical_map:
-            return canonical_map[norm]
-        # Starts-with fallback (handles truncated refs)
-        for canon_norm, canon_key in canonical_map.items():
-            if canon_norm.startswith(norm) or norm.startswith(canon_norm):
-                return canon_key
-        return None
-
-    # Build normalized map of existing sectionView keys
-    sv_canonical: Dict[str, str] = {}  # normalized -> original key
-    for sv_key in section_view:
-        sv_canonical[_normalize_section_ref(sv_key)] = sv_key
-
-    # Merge sectionView keys that match section_order entries,
-    # and inject empty entries for sections not already in sectionView.
-    for so_ref in section_order:
-        match = _find_canonical_match(so_ref, sv_canonical)
-        if match is None:
-            # Section has no suggestions - inject empty entry
-            section_view[so_ref] = {
-                "suggestions": [],
-                "suggestionCount": 0,
-                "maxImportance": "",
-                "hasSuggestions": False,
-            }
-        else:
-            # Mark existing entry as having suggestions
-            section_view[match]["hasSuggestions"] = True
-
-    # Ensure hasSuggestions is set on ALL entries
-    for key in section_view:
-        if "hasSuggestions" not in section_view[key]:
-            has = len(section_view[key].get("suggestions", [])) > 0
-            section_view[key]["hasSuggestions"] = has
-
-    # --- Merge all tasks into taskView ---
-    # If tasks_metadata is available, ensure every task appears in task_view.
-    if tasks_metadata:
-        # Extract bare task IDs (T001, T002, etc.) to avoid duplicates
-        existing_task_ids: Set[str] = set()
-        for tk in task_view:
-            if tk.startswith('_'):
-                continue
-            # Normalize: extract T\d+ pattern
-            m = re.match(r'(T\d+)', tk)
-            if m:
-                existing_task_ids.add(m.group(1))
-            else:
-                existing_task_ids.add(tk)
-
-        for task_id, meta in tasks_metadata.items():
-            # _parse_tasks_markdown keys every task under BOTH the bare ID
-            # and the full header text ("### Task T001: ...") pointing at
-            # the identical meta dict, so the bare-ID key alone already
-            # covers every task. Skip the header-text key here: a bare
-            # `re.match(r'(T\d+)', task_id)` never matches it (the string
-            # doesn't start with "T"), which used to fall through to the
-            # `else` branch and back-fill a second, empty entry keyed by
-            # the whole header.
-            if not re.fullmatch(r'T\d+', task_id):
-                continue
-            if task_id not in existing_task_ids:
-                task_view[task_id] = {
-                    "taskMetadata": meta,
-                    "suggestions": [],
-                    "suggestionCount": 0,
-                    "maxImportance": "",
-                    "hasSuggestions": False,
-                }
-                existing_task_ids.add(task_id)
-
-    # Ensure hasSuggestions is set on ALL task entries
-    for key in task_view:
-        if key.startswith('_'):
-            continue
-        if "hasSuggestions" not in task_view[key]:
-            has = len(task_view[key].get("suggestions", [])) > 0
-            task_view[key]["hasSuggestions"] = has
-
-    # --- Global suggestions: those without file or section anchors ---
-    global_suggestions_list: List[Dict[str, Any]] = []
-    global_entry = file_view.get("_global", {})
-    for grp in global_entry.get("suggestions", []):
-        global_suggestions_list.extend(grp.get("suggestions", []))
-
-    # Build the complete report data
-    report_data = {
-        "planPath": str(plan_path),
-        "planTitle": plan_title,
-        "title": plan_title,
-        "baseRef": base_ref,
-        "phase": phase_type,
-        # Intentionally False for all phases — the review-tasks phase now
-        # supports skip/override actions, so interactive controls are enabled
-        # everywhere.  See review_orchestrator_base.py aggregate_results().
-        "readOnly": False,
-        "generatedAt": datetime.now().isoformat(),
-        "models": models,
-        "modelMetadata": model_metadata,
-        "failedModels": failed_models or {},
-        "sortConfig": build_sort_config(),
-        "groups": groups_data,
-        "sectionContexts": section_contexts,
-        "logSnippets": log_snippets,
-        # PR-style view indexes
-        "fileView": file_view,
-        "sectionView": section_view,
-        "taskView": task_view,
-        "globalSuggestions": global_suggestions_list,
-        "fullSectionContexts": full_section_contexts,
-        "sectionOrder": section_order,
-        "notices": build_report_notices(
-            source_notices, failed_models, requested_models, salvage_requested,
-            served_models=served_models,
-        ),
-        "summary": {
-            "totalGroups": len(effective_groups),
-            "totalSuggestions": sum(
-                len(g.get("suggestions", g.get("issues", [])))
-                for g in effective_groups
-            ),
-            "validCount": sum(
-                1 for g in groups_data
-                if g["validationStatus"] == "valid"
-            ),
-            "invalidCount": sum(
-                1 for g in groups_data
-                if g["validationStatus"] == "invalid"
-            ),
-            "needsHumanCount": sum(
-                1 for g in groups_data
-                if g["validationStatus"] == "needs-human-decision"
-            ),
-            "validationFailedCount": sum(
-                1 for g in groups_data
-                if g["validationStatus"] == "validation_failed"
-            ),
-        }
-    }
-
-    # The denominator of "N of M requested", as the caller counted it. Absent
-    # rather than guessed when the caller holds no requested set: succeeded
-    # plus failed would silently drop a requested model that has neither a
-    # result nor a recorded failure.
-    if requested_models is not None:
-        report_data["requestedModels"] = int(requested_models)
-
-    # §3.6: the structured half of the attribution, added only when a fallback
-    # list was configured AND something came back — so a default run's
-    # report_data.json gains no key at all.
-    if served_models:
-        report_data["servedModels"] = served_models
-
-    # Stage U, the same rule: the run total is added only when some adapter
-    # reported something, so a fan-out of duration-only adapters leaves
-    # `report_data.json` exactly as it was — no `usageTotal`, no `$0.00` in the
-    # header. The label travels beside the numbers for the same reason the
-    # per-model one does: the templates render text, not a formatting rule.
-    usage_total = sum_usage(usage)
-    if usage_total:
-        report_data["usageTotal"] = usage_total
-        total_label = describe_usage(usage_total)
-        if total_label:
-            report_data["usageTotalLabel"] = total_label
-
-    # A commit review's header, filter, badges and export help (§2.10).
-    if commit_review:
-        report_data[COMMIT_RANGE_KEY] = commit_range_report_data(commit_review, groups_data)
-
-    # Conditionally add diff data and file contexts
-    if resolved_diff_data is not None:
-        report_data["diffData"] = resolved_diff_data
-    if file_contexts:
-        report_data["fileContexts"] = file_contexts
-
-    # Add consolidated metadata when using consolidated data source
-    if umbrella_map is not None:
-        report_data["umbrellaMap"] = umbrella_map
-        report_data["dataSource"] = "consolidated"
-    else:
-        report_data["dataSource"] = "grouped"
-
-    # Record the template style so a later post-apply regeneration
-    # (regenerate_report_with_human_decisions) re-renders with the same template.
-    report_data["templateStyle"] = template_style
-
-    # The round's policy line, legend and tag counts (distinct groups).
-    report_data[_scope_report.REPORT_KEY] = _scope_report.report_block(
-        scope_round, _scope_counts(groups_data))
-
-    html = _embed_report_data(report_data, template)
+    # Each group once: the views name theirs by index (utils/report_view.py).
+    payload = compact_views(view)
+    html = embed_report_data(payload, template)
 
     # Persist the assembled report_data so the apply phase can overlay human
     # decisions onto it and re-embed without reconstructing runtime inputs
     # (diff_data, base_ref, models, ...). Best-effort: never fail report
     # generation if the sidecar cannot be written.
     try:
-        (phase_dir / "report_data.json").write_text(
-            json.dumps(report_data, indent=2), encoding="utf-8"
-        )
+        (Path(phase_dir) / "report_data.json").write_text(sidecar_json(payload), encoding="utf-8")
     except OSError:
         pass
 
@@ -2497,38 +1975,38 @@ def script_json(report_data: Any) -> str:
     )
 
 
-def _embed_report_data(report_data: Dict[str, Any], template: str) -> str:
-    """Embed ``report_data`` as JSON into ``template`` at the data placeholder.
+def sidecar_json(report_data: Any) -> str:
+    """A report sidecar's text (``report_data.json``,
+    ``consolidated_report_data.json``): compact JSON. Machines read it; the
+    page is where a person reads the data."""
+    return json.dumps(report_data, separators=(",", ":"))
 
-    Shared by initial generation and post-apply regeneration so both paths
-    escape and inject the data identically. The template's slots
-    (:func:`_fill_template_slots`) are filled first, before any data is in
-    it, so text inside the data can never be taken for a slot.
+
+#: Where a template takes its data, longest spelling first: the shipped
+#: templates write ``const reportData = /* REPORT_DATA_PLACEHOLDER */null;``.
+_DATA_PLACEHOLDERS = ("/* REPORT_DATA_PLACEHOLDER */null", "/* REPORT_DATA_PLACEHOLDER */",
+                      "REPORT_DATA_PLACEHOLDER")
+
+
+def embed_report_data(report_data: Mapping[str, Any], template: str) -> str:
+    """Every report page (flat, PR, consolidated): *report_data* embedded in
+    *template* at its data placeholder.
+
+    Shared by initial generation and post-apply regeneration so every path
+    escapes (:func:`script_json`) and injects the data identically. The
+    template's slots (:func:`_fill_template_slots`, the vendored scripts
+    included) are filled first, before any data is in it, so text inside the
+    data can never be taken for a slot. A template without the placeholder is
+    an error (``ValueError``) rather than a page with no data.
     """
     template = _fill_template_slots(template, report_data)
-    json_data = script_json(report_data)
-
-    # Replace the placeholder in the template
-    # The template has: const reportData = /* REPORT_DATA_PLACEHOLDER */null;
-    # We replace the entire "/* ... */null" pattern with the actual JSON data
-    if "/* REPORT_DATA_PLACEHOLDER */null" in template:
-        return template.replace("/* REPORT_DATA_PLACEHOLDER */null", json_data)
-    elif "/* REPORT_DATA_PLACEHOLDER */" in template:
-        return template.replace("/* REPORT_DATA_PLACEHOLDER */", json_data)
-    elif "REPORT_DATA_PLACEHOLDER" in template:
-        return template.replace("REPORT_DATA_PLACEHOLDER", json_data)
-    else:
-        # Fallback: inject before </body>
-        inject_script = f"""
-<script>
-const reportData = {json_data};
-// Initialize report if renderReport function exists
-if (typeof renderReport === 'function') {{
-    renderReport(reportData);
-}}
-</script>
-"""
-        return template.replace("</body>", f"{inject_script}</body>")
+    for placeholder in _DATA_PLACEHOLDERS:
+        if placeholder in template:
+            return template.replace(placeholder, script_json(report_data))
+    raise ValueError(
+        "Template does not contain REPORT_DATA_PLACEHOLDER \u2014 "
+        "cannot inject report data."
+    )
 
 
 def write_html_report(html: str, phase_dir: Path) -> Path:
@@ -2947,18 +2425,44 @@ def _overlay_human_decisions(
     return matched
 
 
-def _load_report_template(template_style: str) -> str:
-    """Load the report template text for the given style ('pr' or 'flat')."""
+#: Each report page's template under ``templates/``, by style.
+REPORT_TEMPLATES = {
+    "pr": "pr_report_template.html",
+    "flat": "report_template.html",
+    "consolidated": "consolidated_report_template.html",
+}
+
+
+def load_report_template(style: str) -> str:
+    """The template text of a report page: ``pr``, ``consolidated``, or the
+    flat one for any other style. A missing PR template falls back to the
+    flat one with a warning. Raises ``FileNotFoundError`` (``filename`` set
+    to the path looked for) when the file is missing."""
+    import warnings
+
     templates_dir = Path(__file__).parent.parent / "templates"
-    if template_style == "pr":
-        template_path = templates_dir / "pr_report_template.html"
-        if not template_path.exists():
-            template_path = templates_dir / "report_template.html"
-    else:
-        template_path = templates_dir / "report_template.html"
-    if not template_path.exists():
-        raise FileNotFoundError(f"Report template not found: {template_path}")
-    return template_path.read_text(encoding="utf-8")
+    path = templates_dir / REPORT_TEMPLATES.get(style, REPORT_TEMPLATES["flat"])
+    if style == "pr" and not path.exists():
+        warnings.warn(f"PR template not found at {path}, falling back to flat template")
+        path = templates_dir / REPORT_TEMPLATES["flat"]
+    if not path.exists():
+        missing = FileNotFoundError(f"Report template not found: {path}")
+        missing.filename = str(path)
+        raise missing
+    return path.read_text(encoding="utf-8")
+
+
+def _missing_template_page(path: Any) -> str:
+    """The page :func:`generate_html_report` returns when its template is missing."""
+    return f"""<!DOCTYPE html>
+<html>
+<head><title>Report Error</title></head>
+<body>
+<h1>Error: Template Not Found</h1>
+<p>Could not find template at: {path}</p>
+<p>Please ensure the template file exists.</p>
+</body>
+</html>"""
 
 
 def _overlay_guard_skips(report_data: Dict[str, Any], guard: Optional[Dict[str, Any]]) -> int:
@@ -3034,13 +2538,12 @@ def regenerate_report_with_human_decisions(
     _overlay_guard_skips(report_data, guard)
     _overlay_scope(report_data, scope_state)
     style = template_style or report_data.get("templateStyle", "pr")
-    template = _load_report_template(style)
-    html = _embed_report_data(report_data, template)
+    html = embed_report_data(report_data, load_report_template(style))
     report_path = phase_dir / "report.html"
     report_path.write_text(html, encoding="utf-8")
     # Keep the sidecar in sync so a subsequent re-run overlays cleanly.
     try:
-        sidecar.write_text(json.dumps(report_data, indent=2), encoding="utf-8")
+        sidecar.write_text(sidecar_json(report_data), encoding="utf-8")
     except OSError:
         pass
     if include_consolidated:
@@ -3101,13 +2604,6 @@ def _overlay_consolidated(report_data: Dict[str, Any],
     return matched
 
 
-def _load_consolidated_template() -> str:
-    path = Path(__file__).parent.parent / "templates" / "consolidated_report_template.html"
-    if not path.exists():
-        raise FileNotFoundError(f"Consolidated report template not found at: {path}")
-    return path.read_text(encoding="utf-8")
-
-
 def regenerate_consolidated_with_human_decisions(
     phase_dir: Path,
     human_decisions: Mapping[str, Mapping[str, Any]],
@@ -3134,10 +2630,10 @@ def regenerate_consolidated_with_human_decisions(
         scope_state = _scope_report.read_state(phase_dir)
     report_data = upgrade_legacy(json.loads(sidecar.read_text(encoding="utf-8")))
     matched = _overlay_consolidated(report_data, human_decisions or {}, scope_state)
-    page.write_text(embed_consolidated_report_data(report_data, _load_consolidated_template()),
+    page.write_text(embed_report_data(report_data, load_report_template("consolidated")),
                     encoding="utf-8")
     try:
-        sidecar.write_text(json.dumps(report_data, indent=2), encoding="utf-8")
+        sidecar.write_text(sidecar_json(report_data), encoding="utf-8")
     except OSError:
         pass
     return page, matched, "regenerated"
