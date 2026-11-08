@@ -1479,19 +1479,29 @@ class TestStep:
 
     @pytest.mark.skipif(os.name != "posix", reason="the release gate uses POSIX process groups")
     @pytest.mark.parametrize("cooperative", [False, True])
-    def test_a_parent_exiting_on_term_does_not_end_the_group_sweep(self, tmp_path, cooperative):
+    def test_a_parent_exiting_on_term_does_not_end_the_group_sweep(self, tmp_path, monkeypatch,
+                                                                    cooperative):
         """The launcher exits first; its child still needs either grace or KILL."""
+        import types
+
         marker = tmp_path / "descendant.pid"
         swept = tmp_path / "swept"
-        descendant = textwrap.dedent(f"""
-            import os, signal, sys, time
-            from pathlib import Path
+        # Files are published by rename, so a reader never sees a half-written one.
+        publish = textwrap.dedent("""
+            import os
+            def publish(path, text):
+                with open(path + ".tmp", "w") as out:
+                    out.write(text)
+                os.replace(path + ".tmp", path)
+        """)
+        descendant = publish + textwrap.dedent(f"""
+            import signal, sys, time
             def finish(*_args):
                 time.sleep(0.3)
-                Path({str(swept)!r}).write_text("done")
+                publish({str(swept)!r}, "done")
                 sys.exit(0)
             signal.signal(signal.SIGTERM, finish if {cooperative!r} else signal.SIG_IGN)
-            Path({str(marker)!r}).write_text(str(os.getpid()))
+            publish({str(marker)!r}, str(os.getpid()))
             time.sleep(60)
         """)
         parent = textwrap.dedent(f"""
@@ -1500,26 +1510,74 @@ class TestStep:
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             time.sleep(60)
         """)
-        try:
-            assert gate.run_step("descendant", [sys.executable, "-c", parent], timeout=2,
-                                 grace=0.8, directory=tmp_path) == 124
-            pid = int(marker.read_text())
-            for _ in range(50):
-                status = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
-                                        capture_output=True, text=True, timeout=5).stdout.strip()
+        launched, fired = [], []
+
+        class Launcher(subprocess.Popen):
+            """The step's launcher, kept for cleanup. Its first wait is the readiness
+            fixture: it returns once the descendant has published its marker (the
+            handler is installed by then) by raising the step's bound itself, so the
+            production termination path runs without any fixed wall-clock bound."""
+
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                launched.append(self)
+
+            def wait(self, timeout=None):
+                if fired:
+                    return super().wait(timeout)
+                fired.append(True)
+                limit = time.monotonic() + 60
+                while not marker.exists() and self.poll() is None and time.monotonic() < limit:
+                    time.sleep(0.02)
+                raise subprocess.TimeoutExpired(self.args, timeout)
+
+        monkeypatch.setattr(gate.common_gate, "subprocess", types.SimpleNamespace(
+            Popen=Launcher, PIPE=subprocess.PIPE, DEVNULL=subprocess.DEVNULL,
+            TimeoutExpired=subprocess.TimeoutExpired))
+        budget = 15.0  # one bound for the whole check, `ps` runs included
+
+        def wait_gone(pid):
+            """True once ``pid`` is gone, False when ``budget`` runs out. ``Z`` counts:
+            a zombie has terminated, which is what the sweep owes; reaping is its
+            parent's business."""
+            deadline = time.monotonic() + budget
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                try:
+                    status = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
+                                            capture_output=True, text=True,
+                                            timeout=remaining).stdout.strip()
+                except subprocess.TimeoutExpired:
+                    return False
                 if not status or status.startswith("Z"):
-                    break
-                time.sleep(0.02)
-            else:
-                pytest.fail("the TERM-ignoring descendant outlived the step's group sweep")
+                    return True
+                time.sleep(min(0.05, remaining))
+
+        try:
+            # The grace is wide because the cooperative descendant must finish inside it
+            # on a loaded machine; the wide grace still ends the step by SIGKILL when
+            # the descendant ignores TERM.
+            assert gate.run_step("descendant", [sys.executable, "-c", parent], timeout=60,
+                                 grace=3.0, directory=tmp_path) == 124
+            assert marker.exists(), "the descendant had not started when the bound fired"
+            pid = int(marker.read_text())
+            assert wait_gone(pid), "the TERM-ignoring descendant outlived the step's group sweep"
             if cooperative:
                 assert swept.read_text() == "done", "the descendant lost its shutdown grace"
         finally:
-            if marker.exists():
+            # The step leads its own group, whose id is the launcher's pid, so the group
+            # is signalled directly: it outlives a reaped leader, and the launcher handle
+            # exists even when the marker never appeared.
+            for child in launched:
                 try:
-                    os.kill(int(marker.read_text()), 9)
-                except ProcessLookupError:
-                    pass
+                    os.killpg(child.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass  # no member left (macOS answers EPERM for an all-zombie group)
+                child.poll()
+            if marker.exists():
+                wait_gone(int(marker.read_text()))
 
     @pytest.mark.skipif(os.name != "posix", reason="sessions and SIGTERM dispositions are "
                         "POSIX; the gate runs on Linux")
