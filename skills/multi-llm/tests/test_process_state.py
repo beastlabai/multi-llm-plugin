@@ -103,7 +103,17 @@ NOT_REGISTERED: Dict[str, str] = {
         "at its close",
     "utils.detach._ENTRY_HOLDS": "phase locks a review entry holds until its run ends",
     "utils.detach._PHASE_WORK": "phase-mutating calls still running, joined before the lock is released",
+    "utils.process_control._CLI_RECORD":
+        "the run whose launch record popen_tree writes in this process (live, "
+        "named once by record_cli_identities)",
+    "utils.process_control._DETACHED_START":
+        "the detached worker's start time, read the moment its pid was known, "
+        "for the launcher's failed-handshake teardown",
     "utils.process_control._HELD_PHASE_LOCKS": "phase locks this process holds (re-entrancy)",
+    "utils.process_control._LAUNCHES_REFUSED":
+        "the run whose worker teardown began: launches stay refused until exit",
+    "utils.process_control._PIDFDS":
+        "the lazily bound pidfd API, fixed for the process",
     "utils.review_round._BOUND": "the round each running dispatch thread is bound to",
     "utils.status_file._HELD_MUTEXES": "interprocess mutexes this process holds",
     "utils.validation._VIEWS_LOCKS":
