@@ -14,10 +14,11 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Collection, Dict, Iterator, List, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import Any, Collection, Dict, FrozenSet, Iterator, List, NamedTuple, Optional, Sequence, Tuple, Union
 
 from . import structured_output
 from . import process_control
+from . import process_capture
 from . import landlock_dispatch as _landlock
 from . import readonly_audit as _readonly_audit_mod
 from . import result_files as _result_files
@@ -42,7 +43,7 @@ from .providers.base import (
     version_tuple,
 )
 from .providers.result_envelope import is_clean_envelope
-from .retry_ladder import STATUS_TIMEOUT
+from .retry_ladder import STATUS_TIMEOUT, STATUS_UNPARSEABLE
 
 
 # Error codes for consistent error reporting
@@ -935,7 +936,8 @@ _READONLY_AUDIT_KEY = _readonly_audit_mod.DETAILS_KEY
 
 
 def _readonly_audit(
-    provider: Any, stdout: Optional[str], sandbox_fallback: Any = None
+    provider: Any, stdout: Optional[str], sandbox_fallback: Any = None,
+    *, complete: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """The adapter's read-only verdict on this attempt's **full** stdout, compact.
 
@@ -956,6 +958,10 @@ def _readonly_audit(
     verdict dict leaves (never the stream). ``None`` when the adapter has no
     opinion or the hook raised — a missing verdict, which
     ``readonly_audit.combine_audits`` treats as not clean.
+
+    ``complete=False`` says the capture cut stdout at its bound
+    (``process_capture``): the audit cannot see the whole stream, so the
+    verdict is not clean whatever the kept head shows.
     """
     if sandbox_rung_id(sandbox_fallback) not in (
         SANDBOX_RUNG_UNSANDBOXED, *_INCIDENTAL_RUNG_IDS,
@@ -964,6 +970,10 @@ def _readonly_audit(
     hook = getattr(provider, "audit_readonly_stream", None)
     if hook is None:
         return None
+    if not complete:
+        return _readonly_audit_mod.AuditVerdict(
+            False, "stdout passed the capture bound; the audit saw only its head",
+        ).to_dict()
     try:
         verdict = hook(stdout or "")
     except Exception:  # noqa: BLE001 - an audit may never break a run
@@ -978,10 +988,10 @@ def _readonly_audit(
 
 def _attach_readonly_audit(
     details: Dict[str, Any], provider: Any, stdout: Optional[str],
-    sandbox_fallback: Any = None,
+    sandbox_fallback: Any = None, *, complete: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """Put :func:`_readonly_audit`'s verdict on ``details['readonly_audit']``."""
-    verdict = _readonly_audit(provider, stdout, sandbox_fallback)
+    verdict = _readonly_audit(provider, stdout, sandbox_fallback, complete=complete)
     if verdict is not None:
         details[_READONLY_AUDIT_KEY] = verdict
     return verdict
@@ -1255,12 +1265,16 @@ def _served_model_attribution(
 #: it.
 LANE_A_TERMINATE_GRACE_S = process_control.DEFAULT_TERMINATE_GRACE_S
 
-#: Ceiling on the post-sweep drain. A second ``communicate()`` collects whatever
-#: the CLI wrote before it died, but a grandchild the sweep did not reach would
-#: keep the inherited pipe open for ever — the reason
-#: ``write_batch_scheduler._run_verify_command`` captures to a file — so a
-#: drain that outlives this falls back to the output already read.
-LANE_A_DRAIN_S = 5.0
+#: Ceiling on the post-sweep drain, and the grace a CLI's pipes get to reach end
+#: of file once it has exited: the shared ``process_capture.DRAIN_S``. A
+#: grandchild the sweep did not reach can keep an inherited pipe open for ever,
+#: so a drain that outlives this returns the output already read.
+LANE_A_DRAIN_S = process_capture.DRAIN_S
+
+#: Per-stream capture bound, the executor's figure. A stdout past it is never
+#: parsed (``process_capture.oversized_stream_message``); a stderr past it is
+#: kept truncated.
+LANE_A_MAX_STREAM_BYTES = process_capture.MAX_STREAM_BYTES
 
 #: A CLI that died of one of these was stopped from outside the slot — a
 #: terminal Ctrl-C reaches the whole foreground group, an abort SIGTERMs the
@@ -1341,13 +1355,14 @@ def _stop_cli_tree(
 
 
 def _drain_after_stop(
-    proc: "subprocess.Popen[Any]", expired: subprocess.TimeoutExpired
+    proc: Any, expired: subprocess.TimeoutExpired
 ) -> Tuple[Any, Any]:
     """Everything the stopped CLI wrote, without ever hanging on a survivor.
 
-    The second ``communicate()`` returns the whole capture (what the first call
-    had read before the deadline included). If even that blocks, the newest
-    partial capture is used and the pipes are let go.
+    *proc* is the CLI's :class:`process_capture.PipeCapture`. The second
+    ``communicate()`` returns the whole capture (what the first call had read
+    before the deadline included). If even that blocks, the newest partial
+    capture is used and the pipes are let go.
     """
     try:
         return proc.communicate(timeout=LANE_A_DRAIN_S)
@@ -1392,6 +1407,13 @@ def _run_provider_cli(
     4. a ``TimeoutExpired`` is re-raised with it and with the per-group verdicts
        as ``tree_sweep``, which the handler writes into the provider log.
 
+    The pipes are read by ``process_capture.PipeCapture``: at most
+    :data:`LANE_A_MAX_STREAM_BYTES` per stream, and the wait ends when the CLI
+    exits (plus a drain of :data:`LANE_A_DRAIN_S` at most), not when the last
+    process holding an inherited pipe closes it. The streams that passed the
+    bound ride out as ``capped_streams`` on the ``CompletedProcess`` and on the
+    ``TimeoutExpired``.
+
     A ``KeyboardInterrupt`` (or anything else) raised while waiting does the same
     sweep and is re-raised, so the interrupt still ends the run (decision 11.9).
     The CLI is registered in ``process_control.live_cli_registry`` for exactly as
@@ -1415,17 +1437,22 @@ def _run_provider_cli(
     if input is not None:
         popen_kwargs["stdin"] = subprocess.PIPE
     proc, job = process_control.popen_tree(cmd, **popen_kwargs)
+    streams: Optional[process_capture.PipeCapture] = None
     try:
         with process_control.live_cli_registry.tracking(proc, job):
             try:
-                stdout, stderr = proc.communicate(input=input, timeout=timeout)
+                streams = process_capture.PipeCapture(
+                    proc, max_bytes=LANE_A_MAX_STREAM_BYTES, grace_s=LANE_A_DRAIN_S,
+                )
+                stdout, stderr = streams.communicate(input=input, timeout=timeout)
             except subprocess.TimeoutExpired as exc:
                 sweep = _stop_cli_tree(proc, job)
-                out, err = _drain_after_stop(proc, exc)
+                out, err = _drain_after_stop(streams, exc)
                 expired = subprocess.TimeoutExpired(
                     proc.args, exc.timeout, output=out, stderr=err
                 )
                 expired.tree_sweep = sweep
+                expired.capped_streams = streams.capped
                 raise expired from None
             except BaseException:
                 _stop_cli_tree(proc, job)
@@ -1439,11 +1466,28 @@ def _run_provider_cli(
         # After `tracking` has unregistered the CLI, so a sweep can no longer
         # be terminating the job through the handle closed here.
         try:
+            if streams is not None:
+                streams.close()
             _release_pipes(proc)
         finally:
             if job is not None:
                 job.close()
-    return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+    completed = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+    completed.capped_streams = streams.capped
+    return completed
+
+
+def _capped_streams(outcome: Any) -> FrozenSet[str]:
+    """The streams :func:`_run_provider_cli` cut at its bound; none for a
+    stand-in that returns a plain ``CompletedProcess``."""
+    capped = getattr(outcome, "capped_streams", None)
+    return frozenset(capped) if capped else frozenset()
+
+
+def _note_stream_cap(details: Dict[str, Any], capped: FrozenSet[str]) -> None:
+    """Name the capped streams on ``details`` (absent when none was)."""
+    if capped:
+        details["stream_capped"] = sorted(capped)
 
 
 def _describe_tree_sweep(expired: BaseException) -> str:
@@ -2424,6 +2468,9 @@ def invoke_with_provider(
                 ),
             )
         duration = time.time() - start_time
+        # A stdout cut at the capture bound is never parsed, and its read-only
+        # audit is never clean (`process_capture`).
+        capped = _capped_streams(result)
 
         if result.returncode != 0:
             error_message = f"{provider_name} exited with code {result.returncode}"
@@ -2483,7 +2530,10 @@ def invoke_with_provider(
             # Plan §4.2: the read-only audit sees the FULL stream, here, before
             # the excerpt below bounds it — a failed attempt of a bypassed slot
             # could still have written, and 4.3 ANDs every attempt's verdict.
-            audit = _readonly_audit(provider, result.stdout, sandbox_fallback)
+            audit = _readonly_audit(
+                provider, result.stdout, sandbox_fallback,
+                complete="stdout" not in capped,
+            )
 
             # Save log on failure if requested
             if log_file:
@@ -2531,6 +2581,7 @@ def invoke_with_provider(
             # different judgement from the same evidence.
             if audit is not None:
                 details[_READONLY_AUDIT_KEY] = audit
+            _note_stream_cap(details, capped)
             if classified:
                 details[FAILURE_CATEGORY_KEY] = failure_category
             # The child ran, so the D6 provenance rides a failure too.
@@ -2583,8 +2634,19 @@ def invoke_with_provider(
                 "details": details,
             }
 
-        # Parse output using provider
-        parsed = provider.parse_output(result.stdout, result.stderr)
+        # Parse output using provider. A stdout cut at the capture bound is
+        # refused unparsed, and its head is never a finished answer: it is
+        # `incomplete` (below), so ask keeps it as partial evidence only.
+        if "stdout" in capped:
+            parsed = {
+                "success": False,
+                "error": f"{provider_name}: " + process_capture.oversized_stream_message(
+                    "stdout", LANE_A_MAX_STREAM_BYTES),
+                "data": None,
+                "incomplete": True,
+            }
+        else:
+            parsed = provider.parse_output(result.stdout, result.stderr)
 
         # Add details to successful results
         parsed["details"] = {
@@ -2595,9 +2657,10 @@ def invoke_with_provider(
         # The adapter's completion verdict moves onto `details` straight after
         # the parse (plans/ask-answer-recovery-and-false-success.md D3.1):
         # `incomplete` says the stream's own terminal state shows the answer did
-        # not finish (pi's `stopReason: "length"`), whether or not the text
-        # parsed. On `details` it survives the schema-verdict rebuild below,
-        # which keeps only `details`, and the `PARSE_ERROR` stamp. It is not an
+        # not finish (pi's `stopReason: "length"`), or that the capture cut
+        # stdout at its bound, whether or not the text parsed. On `details` it
+        # survives the schema-verdict rebuild below, which keeps only `details`,
+        # and the `PARSE_ERROR` stamp. It is not an
         # `error_code`, so `invoke_with_file_output`'s hard-failure gate — and
         # with it the findings-file channel — is unchanged.
         if parsed.pop("incomplete", False):
@@ -2619,8 +2682,14 @@ def invoke_with_provider(
         # (the schema branch below spreads `details`, so it rides across), and
         # always before `_attach_stdout_excerpt` bounds anything.
         audit = _attach_readonly_audit(
-            parsed["details"], provider, result.stdout, sandbox_fallback
+            parsed["details"], provider, result.stdout, sandbox_fallback,
+            complete="stdout" not in capped,
         )
+        _note_stream_cap(parsed["details"], capped)
+        if "stdout" in capped:
+            # The executor's rung for the same refusal, so the fan-out's ladder
+            # retries it as the executor does (`process_capture`).
+            parsed["details"][FAILURE_CATEGORY_KEY] = STATUS_UNPARSEABLE
         # D6 override (2026-09-17): a slot that ran without the runner's own
         # sandbox says so on the same dict, so `served_model_fields` carries it
         # to the result record, `.status.json`'s `models_served` and the report
@@ -2648,8 +2717,9 @@ def invoke_with_provider(
         # validates against the SAME schema file (→ `recovered`, one WARN).
         # Anything else is `schema_violation`, handed to the retry ladder like
         # any other parse failure. Applied here, on the parsed envelope, so no
-        # adapter can silently upgrade prose to validated output.
-        if schema_phase:
+        # adapter can silently upgrade prose to validated output. A capped
+        # stdout is refused above and never recovered here.
+        if schema_phase and "stdout" not in capped:
             verdict = structured_output.classify_attempt(
                 schema,
                 stdout=result.stdout,
@@ -2808,7 +2878,10 @@ def invoke_with_provider(
         # Plan §4.2: a killed attempt is audited too — on whatever it streamed
         # before the kill, which has no `turn.completed`, so it can only come
         # out not clean (an incomplete stream is "could have written").
-        audit = _readonly_audit(provider, stdout, sandbox_fallback)
+        capped = _capped_streams(e)
+        audit = _readonly_audit(
+            provider, stdout, sandbox_fallback, complete="stdout" not in capped,
+        )
 
         # F1 (2026-09-30): a jailed child killed at the deadline is read back
         # like any other — the home check and the in-stream denials — but it
@@ -2876,6 +2949,7 @@ def invoke_with_provider(
         # `details.get("stdout_excerpt")` the same way.
         if audit is not None:
             details[_READONLY_AUDIT_KEY] = audit
+        _note_stream_cap(details, capped)
         # A deadline kill is a timeout whatever the partial streams say, as on
         # the executor lane (`_classify_pre_parse`), so the adapter is not asked.
         details[FAILURE_CATEGORY_KEY] = STATUS_TIMEOUT

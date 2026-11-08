@@ -5004,9 +5004,9 @@ class TestAStoppedLaneACliTakesItsTreeWithIt:
         the call simply returns. Its detached tree is swept from the registry's
         last snapshot, the only thing that still links it to the slot.
 
-        pi's shape (the shell read through pi's own pipe), because a child that
-        holds the CALLER's pipe keeps ``communicate()`` waiting until the
-        slot's deadline, where the timeout path sweeps it instead.
+        pi's shape (the shell read through pi's own pipe). A child that holds
+        the CALLER's pipe is the held-pipe case, which
+        ``TestLaneACaptureEndsWithTheCliAndIsBounded`` covers.
         """
         from tests.harness import cli_tree
 
@@ -5078,6 +5078,177 @@ class TestAStoppedLaneACliTakesItsTreeWithIt:
             capture_output=True, text=True, timeout=30, input=text,
         )
         assert completed.stdout.split() == [str(len(text)), "END"]
+
+
+# =========================================================================== #
+# PROV-4 / PROV-11: Lane A reads its CLI through `process_capture.PipeCapture`.
+# The wait ends with the CLI, not with the last process holding an inherited
+# pipe, and each stream is kept to a bound. Real processes throughout.
+# =========================================================================== #
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell scripts")
+class TestLaneACaptureEndsWithTheCliAndIsBounded:
+    MODEL_SPEC = "pi:stub/stub-model"
+
+    def test_a_cli_that_exits_with_a_held_pipe_returns_its_answer_promptly(
+        self, tmp_path, monkeypatch
+    ):
+        """The CLI prints its answer and exits 0 while a process it started
+        keeps stdout open: the call returns once the CLI is gone (plus the
+        drain), with the answer and the real exit code, not at the deadline,
+        and stops nothing — a CLI that exits on its own leaves what it started
+        running."""
+        import signal as _signal
+
+        from utils import process_control
+
+        monkeypatch.setattr(llm_client, "LANE_A_DRAIN_S", 1.0)
+        marker = tmp_path / "holder.pid"
+        script = (
+            'echo "[{\\"answer\\":1}]"; '
+            f'sleep 30 & echo $! > "{marker}"; exit 0'
+        )
+        holder = None
+        try:
+            started = time.monotonic()
+            completed = llm_client._run_provider_cli(
+                ["sh", "-c", script], capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=60,
+                stdin=subprocess.DEVNULL,
+            )
+            elapsed = time.monotonic() - started
+            holder = int(marker.read_text(encoding="utf-8").strip())
+            assert elapsed < 6, f"{elapsed:.1f}s: the call waited on the held pipe"
+            assert completed.returncode == 0
+            assert completed.stdout == '[{"answer":1}]\n'
+            assert completed.capped_streams == frozenset()
+            assert len(process_control.live_cli_registry) == 0
+            os.kill(holder, 0)  # still running: nothing was stopped for it
+        finally:
+            if holder is not None:
+                try:
+                    os.kill(holder, _signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    @staticmethod
+    def _stub_pi(tmp_path, monkeypatch, stdout_expr):
+        """A ``pi`` on PATH that answers the flag probes and writes
+        *stdout_expr* (a Python expression) on stdout, with the Lane A capture
+        bound lowered to 4096 bytes."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        fake = bin_dir / "pi"
+        fake.write_text(
+            f"#!{sys.executable}\n"
+            "import sys\n"
+            "args = sys.argv[1:]\n"
+            "if '--help' in args:\n"
+            "    print('  --tools, -t <tools>            Comma-separated allowlist "
+            "of tool names to enable')\n"
+            "    sys.exit(0)\n"
+            "if '--version' in args:\n"
+            "    print('0.87.1'); sys.exit(0)\n"
+            "sys.stdin.read()\n"
+            f"sys.stdout.write({stdout_expr})\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+        monkeypatch.setattr(llm_client, "LANE_A_MAX_STREAM_BYTES", 4096)
+
+    @pytest.fixture(autouse=True)
+    def _fresh_flag_gate(self):
+        from utils.providers import base as providers_base
+
+        providers_base.reset_flag_gate_cache()
+        yield
+        providers_base.reset_flag_gate_cache()
+
+    def test_a_stdout_past_the_bound_is_refused_not_parsed(self, tmp_path, monkeypatch):
+        """A stdout cut at the capture bound is never parsed from its head: the
+        slot fails with the executor's wording and names the capped stream."""
+        self._stub_pi(tmp_path, monkeypatch, "'[]' + ' ' * 20000")
+        result = invoke_with_provider("Review this", self.MODEL_SPEC, timeout=60)
+
+        assert result["success"] is False
+        assert result["error_code"] == ERROR_PARSE_ERROR
+        assert (
+            "the runner produced more than 4096 bytes on stdout; refusing to parse it"
+            in result["error"]
+        )
+        assert result["details"]["stream_capped"] == ["stdout"]
+
+    def test_a_capped_stdout_is_partial_evidence_never_a_finished_answer(
+        self, tmp_path, monkeypatch
+    ):
+        """Ask counts an exit-0 ``PARSE_ERROR`` as a finished prose answer, so
+        a capped stdout must say it is not one: ``incomplete``, which
+        ``answer_finished`` honours, and the head stays partial evidence."""
+        import ask_orchestrator
+
+        self._stub_pi(tmp_path, monkeypatch, "'An answer that goes on. ' * 1100")
+        result = invoke_with_provider(
+            "Question", self.MODEL_SPEC, timeout=60, want_answer_text=True,
+        )
+
+        assert result["error_code"] == ERROR_PARSE_ERROR
+        assert result["details"]["incomplete"] is True
+        assert result["details"]["stream_capped"] == ["stdout"]
+        assert ask_orchestrator.answer_finished(result) is False
+        # The head is still there, for step 3 to keep as the partial.
+        assert result["details"]["answer_text"].startswith("An answer that goes on.")
+        # The ask gate reads the cap itself too, not only `incomplete`.
+        bare = {"success": False, "error_code": ERROR_PARSE_ERROR,
+                "details": {"stream_capped": ["stdout"]}}
+        assert ask_orchestrator.answer_finished(bare) is False
+        bare["details"]["stream_capped"] = ["stderr"]
+        assert ask_orchestrator.answer_finished(bare) is True
+
+    def test_a_capped_stdout_is_retried_by_the_review_ladder_as_on_the_executor(
+        self, tmp_path, monkeypatch
+    ):
+        """The executor refuses a capped stdout at rung 5 (``unparseable_result``,
+        retried); the fan-out's refusal carries the same category, so the review
+        caller's ladder retries it too instead of stopping on an unrecognised
+        error line."""
+        import asyncio
+
+        from utils import review_orchestrator_base as rob
+        from utils.retry_ladder import STATUS_UNPARSEABLE
+
+        self._stub_pi(tmp_path, monkeypatch, "'[]' + ' ' * 20000")
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        results = []
+
+        async def dispatch(attempt_timeout):
+            result = invoke_with_file_output(
+                prompt_template="WRITE-TO {output_json_path}",
+                model_spec=self.MODEL_SPEC,
+                prompt_context={},
+                output_dir=out_dir,
+                phase="review-plan",
+                timeout=attempt_timeout,
+            )
+            results.append(result)
+            return result
+
+        run = asyncio.run(rob.dispatch_with_ladder(
+            dispatch,
+            ladder=rob.slot_ladder("pi", 120, anchor=None),
+            model_spec=self.MODEL_SPEC,
+            display_name=self.MODEL_SPEC,
+            timeout=120,
+            start_line=lambda attempt, slice_s: f"attempt {attempt}",
+            jail_summary_key=None,
+        ))
+
+        assert results[0]["details"]["failure_category"] == STATUS_UNPARSEABLE
+        assert rob.attempt_ladder_status(results[0], results[0]["details"]) == (
+            STATUS_UNPARSEABLE)
+        assert run.status == STATUS_UNPARSEABLE
+        assert len(results) == 2, "rung 5: driver.subagent_retries=1"
 
 
 def process_control_interval() -> float:

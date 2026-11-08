@@ -52,11 +52,12 @@ import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import (
-    Any, Callable, Dict, Iterable, Iterator, List, Mapping, NamedTuple, Optional, Sequence,
-    Set, Tuple,
+    Any, Callable, Dict, FrozenSet, Iterable, Iterator, List, Mapping, NamedTuple, Optional,
+    Sequence, Set, Tuple,
 )
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
+    from . import process_capture
     from . import process_control
     from . import structured_output
     from .launch_limiter import attempt_turn_blocking
@@ -195,6 +196,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         tasks_of,
     )
 except ImportError:  # pragma: no cover - direct-script import shim
+    from utils import process_capture
     from utils import process_control
     from utils import structured_output
     from utils.launch_limiter import attempt_turn_blocking  # type: ignore
@@ -468,19 +470,22 @@ MAX_RESULT_BYTES = 8 * 1024 * 1024
 #: Per-stream diagnostic capture cap (D3k): last 64 KiB each of stdout/stderr.
 MAX_CAPTURE_BYTES = 64 * 1024
 
-#: Captured-stream cap. Beyond this the capture is refused (rung 5) rather than
-#: half-parsed into a plausible-looking result.
-MAX_STREAM_BYTES = 32 * 1024 * 1024
+#: Captured-stream cap, per stream (``process_capture`` holds no more than this
+#: in memory). A stdout beyond it is refused (rung 5) rather than half-parsed
+#: into a plausible-looking result; a stderr beyond it is kept truncated.
+MAX_STREAM_BYTES = process_capture.MAX_STREAM_BYTES
 
 #: Grace between the SIGTERM and the SIGKILL of a timed-out dispatch's process
 #: group (D3k rung 2). Short on purpose: the child has already spent its entire
 #: ``subagent_timeout_s``, so this is teardown, not one more chance to finish.
 TIMEOUT_KILL_GRACE_S = 0.5
 
-#: Ceiling on the post-kill drain. A grandchild the kill did not reach still
-#: holds the inherited stdout pipe, so the drain must be bounded — an unbounded
-#: one is the hang that turns a timed-out task into a wedged batch.
-TIMEOUT_DRAIN_S = 5.0
+#: Ceiling on the post-kill drain, and the grace a runner's pipes get to reach
+#: end of file once it has exited: the shared ``process_capture.DRAIN_S``. A
+#: grandchild the kill did not reach still holds the inherited stdout pipe, so
+#: the drain must be bounded — an unbounded one is the hang that turns a
+#: timed-out task into a wedged batch.
+TIMEOUT_DRAIN_S = process_capture.DRAIN_S
 
 #: The status vocabulary, the D3k rung table, ``MIN_ATTEMPT_BUDGET_S`` and the
 #: two policy frozensets (``RETRYABLE_STATUSES``, ``BACKOFF_STATUSES``,
@@ -5764,7 +5769,7 @@ def extract_result(provider: Any, stdout: str, stderr: str, *, prefer_arrays: bo
 
 def _extract_result_and_syntax(
     provider: Any, stdout: str, stderr: str, *, prefer_arrays: bool,
-    kind: str = "",
+    kind: str = "", capped: bool = False,
 ) -> Tuple[Any, Optional[Dict[str, Any]]]:
     """Recover the subagent's answer: ``parse_output`` first, then extraction.
 
@@ -5784,15 +5789,17 @@ def _extract_result_and_syntax(
     a dict/list ``data`` is the extracted result; a *string* ``data`` (adapters
     that return raw text) goes through ``utils/json_extractor`` here.
 
+    ``capped`` says the capture already cut stdout at its bound; it is
+    refused like any stream over :data:`MAX_STREAM_BYTES`.
+
     Raises:
         ResultRejected: rung 4 (``runner_error``) when the adapter recovered no
             response text at all, rung 5 (``unparseable_result``) when it recovered
-            text but no result object.
+            text but no result object, or the stream is over the bound.
     """
-    if len(stdout.encode("utf-8", errors="replace")) > MAX_STREAM_BYTES:
+    if capped or len(stdout.encode("utf-8", errors="replace")) > MAX_STREAM_BYTES:
         raise ResultRejected(
-            f"the runner produced more than {MAX_STREAM_BYTES} bytes on stdout; "
-            f"refusing to parse it rather than truncating a stream into a result",
+            process_capture.oversized_stream_message("stdout", MAX_STREAM_BYTES),
             STATUS_UNPARSEABLE,
         )
 
@@ -6498,6 +6505,9 @@ class _Capture:
     #: extractor served only a piece of a broken document and that piece failed
     #: validation; set by :func:`_parse_and_validate`, read by the re-ask.
     reply_syntax_error: Optional[str] = None
+    #: The streams the capture cut at :data:`MAX_STREAM_BYTES`
+    #: (``process_capture``). A capped stdout is refused at rung 5, unparsed.
+    capped_streams: FrozenSet[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -7027,6 +7037,7 @@ def _spawn_in_context(
             started_before = _JAILED_CHILDREN["started"]
             _JAILED_CHILDREN["live"] += 1
             _JAILED_CHILDREN["started"] += 1
+    streams: Optional[process_capture.PipeCapture] = None
     try:
         # Read the group now, while the child is alive: `os.getpgid` stops
         # answering the moment the leader is reaped, and the group — the thing
@@ -7034,21 +7045,28 @@ def _spawn_in_context(
         # where the job stands in for it.
         pgid = process_control.process_group_id(proc.pid)
         try:
-            stdout, stderr = proc.communicate(input=stdin_text, timeout=timeout)
+            # Bounded, and the wait ends with the runner, not with the last
+            # process holding its pipes (`process_capture`).
+            streams = process_capture.PipeCapture(
+                proc, max_bytes=MAX_STREAM_BYTES, grace_s=TIMEOUT_DRAIN_S,
+            )
+            stdout, stderr = streams.communicate(input=stdin_text, timeout=timeout)
             capture.duration = time.time() - start
             capture.stdout = _decode(stdout)
             capture.stderr = _decode(stderr)
             capture.exit_code = proc.returncode
+            capture.capped_streams = streams.capped
         except subprocess.TimeoutExpired as exc:
             _kill_timed_out(proc, pgid, job)
-            stdout, stderr = _drain_after_kill(proc, exc)
+            stdout, stderr = _drain_after_kill(streams, exc)
             capture.duration = time.time() - start
             capture.timed_out = True
             capture.stdout = stdout
             capture.stderr = stderr
+            capture.capped_streams = streams.capped
         except OSError as exc:
             _kill_timed_out(proc, pgid, job)
-            _drain_after_kill(proc, None)
+            _drain_after_kill(streams or proc, None)
             capture.duration = time.time() - start
             capture.launch_error = str(exc)
             return capture
@@ -7062,11 +7080,13 @@ def _spawn_in_context(
             # the run; a teardown failure never masks it.
             _kill_timed_out(proc, pgid, job)
             try:
-                _drain_after_kill(proc, None)
+                _drain_after_kill(streams or proc, None)
             except Exception:  # noqa: BLE001 - the interrupt is what propagates
                 pass
             raise
     finally:
+        if streams is not None:
+            streams.close()
         if job is not None:
             job.close()
         if context is not None:
@@ -7190,11 +7210,13 @@ def _drain_after_kill(
 ) -> Tuple[str, str]:
     """Collect the killed child's output and reap it, without ever hanging.
 
-    A second ``communicate()`` returns everything buffered, including what the
-    first one had already read before it timed out. If even *that* blocks, a
-    grandchild the kill did not reach is still holding the pipe: fall back to the
-    partial capture the ``TimeoutExpired`` carries and let the descriptors go,
-    because a diagnostic tail is never worth wedging the batch for.
+    *proc* is the child's :class:`process_capture.PipeCapture` (or the child
+    itself when the capture never started). A second ``communicate()`` returns
+    everything captured, including what was read before the first one timed
+    out. If even *that* blocks, the child itself outlived the kill: fall back
+    to the partial capture the ``TimeoutExpired`` carries and let the
+    descriptors go, because a diagnostic tail is never worth wedging the batch
+    for.
     """
     try:
         stdout, stderr = proc.communicate(timeout=TIMEOUT_DRAIN_S)
@@ -8958,7 +8980,7 @@ def _parse_and_validate(
     try:
         data, fragment = _extract_result_and_syntax(
             provider, capture.stdout, capture.stderr, prefer_arrays=prefer_arrays,
-            kind=kind,
+            kind=kind, capped="stdout" in getattr(capture, "capped_streams", ()),
         )
     except ResultRejected as exc:
         return exc.status, exc.message, None
@@ -9049,7 +9071,9 @@ def _parse_with_schema_policy(
       before, so exit 0 is never on its own a success for a schema-carrying
       dispatch.
     """
-    if schema is None:
+    # A stdout the capture cut at its bound is refused at rung 5 unread: its
+    # head is never a native document either (`process_capture`).
+    if schema is None or "stdout" in getattr(capture, "capped_streams", ()):
         status, error, data = _parse_and_validate(
             provider, capture, kind=kind, prefer_arrays=prefer_arrays,
             failure=failure,

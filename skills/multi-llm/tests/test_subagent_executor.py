@@ -23,6 +23,7 @@ import copy
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -782,6 +783,84 @@ class TestFailureLadder:
         while time.time() < deadline and _pid_alive(pid):
             time.sleep(0.1)
         assert not _pid_alive(pid), "the runner's tool child survived the kill"
+
+    def _wrap_codex(self, runner_env, body):
+        """Put a shell wrapper in front of the mock codex; *body* runs around
+        ``"$real" "$@"`` and must end with its exit status."""
+        real_dir = runner_env.bin_dir / "real"
+        real_dir.mkdir(exist_ok=True)
+        real = real_dir / "codex"
+        (runner_env.bin_dir / "codex").rename(real)
+        wrapper = runner_env.bin_dir / "codex"
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            f'case "$1" in --version|-V) exec "{real}" "$@";; esac\n'
+            + textwrap.dedent(body).replace("$real", str(real)),
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+
+    def test_a_runner_that_exits_while_a_grandchild_holds_its_pipe_returns_its_result(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """PROV-4: the runner prints its result and exits 0, and a process it
+        started keeps the inherited stdout open. The dispatch returns with the
+        result once the runner is gone (plus the drain), never at the deadline,
+        and stops nothing: a runner that exits on its own leaves what it
+        started running."""
+        if os.name == "nt":  # pragma: no cover - a POSIX shell wrapper
+            pytest.skip("the wrapper is a POSIX shell script")
+        runner_env.use("codex:gpt-5.5")
+        runner_env.echo("validation")
+        marker = tmp_path / "holder.pid"
+        self._wrap_codex(runner_env, f"""\
+            sleep 30 &
+            echo $! > "{marker}"
+            "$real" "$@"
+            exit $?
+            """)
+        monkeypatch.setattr(executor, "TIMEOUT_DRAIN_S", 1.0)
+        holder = None
+        try:
+            started = time.monotonic()
+            outcome = self._dispatch(tmp_path, runner_env, timeout=60, retries=0)
+            elapsed = time.monotonic() - started
+            holder = int(marker.read_text(encoding="utf-8").strip())
+            assert outcome.status == executor.STATUS_OK, outcome.reason
+            assert (tmp_path / "validation_batch_0.json").exists()
+            assert elapsed < 15, f"{elapsed:.1f}s: the dispatch waited on the held pipe"
+            assert _pid_alive(holder), "a normal exit must not stop what the runner started"
+        finally:
+            if holder is not None and _pid_alive(holder):
+                os.kill(holder, signal.SIGKILL)
+
+    def test_a_stdout_past_the_capture_bound_is_refused_at_rung_5(
+        self, tmp_path, runner_env, monkeypatch, capsys
+    ):
+        """PROV-11: the capture keeps at most ``MAX_STREAM_BYTES`` of a stream,
+        and a stdout that passed it is refused with the executor's wording,
+        never parsed from its head."""
+        if os.name == "nt":  # pragma: no cover - a POSIX shell wrapper
+            pytest.skip("the wrapper is a POSIX shell script")
+        runner_env.use("codex:gpt-5.5")
+        runner_env.echo("validation")
+        self._wrap_codex(runner_env, """\
+            "$real" "$@"
+            status=$?
+            head -c 20000 /dev/zero | tr '\\0' 'x'
+            exit $status
+            """)
+        monkeypatch.setattr(executor, "MAX_STREAM_BYTES", 4096)
+        outcome = self._dispatch(tmp_path, runner_env, timeout=60, retries=0)
+        assert outcome.status == executor.STATUS_UNPARSEABLE
+        assert outcome.rung == 5
+        assert (
+            "the runner produced more than 4096 bytes on stdout; refusing to parse it"
+            in (outcome.reason or "")
+        )
+        assert not (tmp_path / "validation_batch_0.json").exists()
+        # The capture itself stopped keeping bytes at the bound.
+        assert "[STREAM_CAP]" in capsys.readouterr().err
 
     def test_windows_drain_does_not_close_a_pipe_held_by_a_reader(self, monkeypatch):
         """Closing a Windows communicate reader's pipe can wait forever."""

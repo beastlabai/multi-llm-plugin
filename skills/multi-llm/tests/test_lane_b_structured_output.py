@@ -435,6 +435,25 @@ class TestSchemaReachesTheRunner:
             Path(outcome.output_path).read_text(encoding="utf-8")
         ) == GENERATED_TASKS_DOC
 
+    def test_a_capped_stdout_is_refused_at_rung_5_even_with_a_native_head(
+        self, lane, monkeypatch
+    ):
+        """A stdout the capture cut at its bound is partial evidence only, on
+        this lane too: refused at rung 5 before the schema verdict reads it, so
+        a native document in its head is never the answer."""
+        lane.respond(_envelope("ignored prose", structured=GENERATED_TASKS_DOC))
+        monkeypatch.setattr(
+            executor.process_capture.PipeCapture, "capped",
+            property(lambda _self: frozenset({"stdout"})),
+        )
+
+        outcome = lane.dispatch("task_generation")
+
+        assert outcome.status == executor.STATUS_UNPARSEABLE
+        assert "refusing to parse it" in (outcome.reason or "")
+        assert outcome.structured_output is None
+        assert not Path(lane.phase_dir / "task_generation_result.json").exists()
+
     def test_a_prose_answer_that_validates_is_marked_recovered(self, lane):
         lane.respond(_envelope(json.dumps(GENERATED_TASKS_DOC)))
 

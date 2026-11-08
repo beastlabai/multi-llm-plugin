@@ -10,6 +10,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Configuration and runner resolution](#configuration-and-runner-resolution)
 - [Read-only provider contracts](#read-only-provider-contracts)
 - [Provider output channels](#provider-output-channels)
+- [Capturing a CLI's streams](#capturing-a-clis-streams)
 - [Usage reporting](#usage-reporting)
 - [Child Python environments](#child-python-environments)
 - [Provider outcome logs](#provider-outcome-logs)
@@ -573,6 +574,69 @@ answered when the flag is introduced rather than when a user's fan-out dies on i
 those two: `NO_WRITE_TOOL_AT_ALL`, keyed by provider rather than by atom, whose rows are
 measurements naming their probe rather than opinions, and which feeds the same derived-roster
 assertion.
+
+## Capturing a CLI's streams
+
+Both spawn lanes read a provider CLI's stdout and stderr through one helper,
+`utils/process_capture.py` (`PipeCapture`): the review fan-out in `llm_client._run_provider_cli`
+and the executor in `subagent_executor._spawn_in_context`. Each lane still owns its spawn
+(`process_control.popen_tree`), its process group (Lane A shares the terminal's so a Ctrl-C reaches
+the CLI; the executor gives each runner its own), its Windows Job Object, its timeout and its
+teardown. The capture only replaces what `Popen.communicate` did with the CLI's pipes:
+
+- **Bounded per stream** at `process_capture.MAX_STREAM_BYTES` (32 MiB, the executor's
+  `MAX_STREAM_BYTES`). Bytes past the bound are still read, so the CLI never blocks on a full
+  pipe, then dropped and counted; one `[STREAM_CAP]` line names the stream. A capped stdout is
+  never parsed and its head is never an answer: both lanes refuse it with the same sentence
+  (`process_capture.oversized_stream_message`) at the same rung, `unparseable_result` (rung 5,
+  retried). The executor refuses it before the schema verdict reads it; the fan-out's exit-0
+  refusal is a parse failure carrying `details.stream_capped`, `failure_category:
+  unparseable_result` (so the review ladder retries it as the executor does) and `incomplete`, so
+  ask's `answer_finished` keeps the head as partial evidence and counts no answer from that run.
+  A capped stderr is kept truncated. The fan-out's read-only audit is never clean for a capped
+  stdout, since it saw only the head.
+- **The same text below the bound.** The kept bytes are decoded once with the stream's encoding
+  and error handler, with `communicate`'s text-mode newline translation, so parsers see the same
+  string. Stdin is encoded as `communicate` encodes it (on Windows, as the text stdin's
+  `TextIOWrapper` writes it: `\n` becomes `\r\n`).
+- **Stdin fails as `communicate` fails.** The input is checked and encoded in the caller's thread
+  before any feed starts, so a type or encoding error raises there instead of the child reading an
+  empty prompt. A feed ignores only what `communicate` ignores, `BrokenPipeError` and, on the
+  blocking (Windows) path, the `EINVAL` of `Popen._stdin_write`; any other write error is raised
+  once by the capture's `communicate` after the CLI exits, unless that call had already timed out.
+- **The wait ends with the CLI.** The capture takes all three pipes off the `Popen`, so
+  `Popen.communicate` serves only as the wait, under the caller's timeout, and returns when the
+  process exits. Stdin is fed from a thread of the capture's own and is not part of the wait: once
+  the CLI has exited, what it left unread is not sent (a background child holding stdin unread
+  cannot keep a finished CLI waiting to the deadline). The output pipes then get at most
+  `process_capture.DRAIN_S` (5 s; `LANE_A_DRAIN_S` and the executor's `TIMEOUT_DRAIN_S` are this
+  value) to reach end of file. Past that the capture prints `[PIPE_HELD]` and returns what the CLI
+  wrote with its real exit code. A timeout still raises `TimeoutExpired` with the output so far,
+  and the lane's post-stop drain collects the rest.
+- **Nothing is stopped or cut off for a survivor.** A held pipe is never closed under its writer,
+  which would end it with `SIGPIPE`/`EPIPE`: its drain keeps reading and drops what it reads until
+  the last writer closes it. A CLI that exits on its own leaves what it started running.
+- **A closed capture is let go.** The drain and feed threads hold only their pipe, an end-of-file
+  flag and, until `close()`, the buffer they fill; never the capture or the `Popen`. A survivor
+  that holds a pipe for hours keeps a drain thread and its descriptors, not the call's buffers.
+- **The prompt goes with the CLI.** The encoded input belongs to the capture, and a feed takes it
+  one chunk at a time. When the CLI exits the capture drops what is left, so a feed stuck writing
+  to a stdin a survivor never reads holds one chunk (64 KiB at most) and its raw descriptor, never
+  the prompt or a write buffer.
+
+POSIX drains both output pipes on one thread with a poll selector, and feeds stdin in pieces the
+pipe has room for, so the feed stops as soon as the CLI is gone. Windows cannot select on pipes,
+so each pipe gets a blocking thread, stdin's writing 64 KiB chunks with a stop check between them.
+None is closed from another thread: Windows' anonymous pipes are synchronous and the C runtime
+locks a descriptor for the whole of a pending read or write, so a close from elsewhere waits for
+the write instead of ending it (`Popen.communicate` on Windows likewise leaves such a writer
+running). A blocking thread whose pipe is still held finishes when the last process on the other
+end closes it. A `Popen` stand-in without
+real pipes, as the tests use, has nothing to take, and its own `communicate` answers. Tests:
+`tests/test_process_capture.py` (both drain shapes on POSIX, the Windows one included),
+`TestLaneACaptureEndsWithTheCliAndIsBounded` in `tests/test_llm_client.py`, the capped-stdout row
+in `tests/test_lane_b_structured_output.py`, and the held-pipe and capture-bound rows beside the
+surviving-grandchild test in `tests/test_subagent_executor.py`.
 
 ## Usage reporting
 

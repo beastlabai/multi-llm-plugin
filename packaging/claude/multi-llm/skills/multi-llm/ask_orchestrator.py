@@ -663,7 +663,11 @@ def answer_finished(result: Any) -> bool:
     so a gate on ``success`` alone would fail every such answer. In both cases the
     adapter must not have reported ``details["incomplete"]``: pi's ``stopReason:
     "length"`` exits 0 with no code on purpose (so the review lanes' file channel
-    still looks for a findings file) and its text is a cut answer.
+    still looks for a findings file) and its text is a cut answer. Nor may the
+    capture have cut stdout at its bound (``details["stream_capped"]``, which
+    ``invoke_with_provider`` also marks ``incomplete``): the head of a stream is
+    partial evidence, never a finished answer, and the run's answer file is
+    judged with it.
 
     Everything else — ``TIMEOUT``, ``SUBPROCESS_FAILED`` (a non-zero exit, or an
     adapter-declared hard failure at exit 0), a pre-spawn refusal — goes to step
@@ -673,6 +677,8 @@ def answer_finished(result: Any) -> bool:
         return False
     details = result.get("details")
     if (isinstance(details, dict) and details.get("incomplete")) or result.get("incomplete"):
+        return False
+    if isinstance(details, dict) and "stdout" in (details.get("stream_capped") or ()):
         return False
     return bool(result.get("success")) or result.get("error_code") == ERROR_PARSE_ERROR
 
