@@ -252,11 +252,44 @@ When the jail probes ok under `auto`, the AppArmor/sysctl block is still printed
 full but headed `System-level alternative (needs /etc and sudo; …)` instead of `Repair (…)` (`REPAIR_HEADING_SYSTEM_ALTERNATIVE`);
 the verdict and the exit code do not move. It also WARNs when codex's own config has
 `[features] use_legacy_landlock` enabled globally, which makes every `workspace-write` dispatch panic. It
-takes no lock and writes nothing.
+takes no lock and writes nothing but its version cache.
+
+**doctor's version cache** (`utils/cli_version_cache.py`, PERF-5/PROV-12, 2026-11-08): the parsed
+`--version` string per provider, in `$XDG_CACHE_HOME/multi-llm/cli-versions.json` (default
+`~/.cache/multi-llm/`), so a second doctor skips those spawns (most of its CPU). The key is the
+probe's argv plus the resolved launcher's real path, `st_size`, `st_mtime_ns`, `st_ctime_ns` and
+`st_ino`, and the same identity of the file that defines the adapter's `parse_version`. Resolved
+executables are often launchers (a uv shim, `codex.js`) whose bytes can be identical across
+versions, so the times carry the key; installers rewrite the launcher. A hand-made wrapper whose
+target changes beneath it is what the key cannot see, so an entry also expires after 7 days and
+`doctor --fresh` re-probes every CLI (and still writes the cache). The floor verdict is taken live
+from the cached string. Only parsed strings are stored, never a probe's output, and never a failed
+or timed-out read; auth and sandbox probes always run. The file is written once per run to a temp
+file in the same directory, merged over what is on disk and moved into place with `os.replace`, so
+concurrent sessions never see a torn file (a race costs one more probe); a missing, unreadable or
+corrupt file is an empty cache. Only what doctor could have written is read: the file and the
+`multi-llm` directory must be this user's, not symlinks and not group- or world-writable (the file
+is opened without following a link or blocking on a FIFO), else the cache is empty and a refused
+directory is never written to; `--json`'s `version_cache.refused` says why, and the text views say
+nothing. An entry needs a finite `probed_at` inside the 7-day window and a version the adapter's own
+`parse_version` reads back unchanged, so a planted `unknown` (which skips the floor) is a miss. A
+same-user forgery stays possible: that user can edit the CLI itself. **Doctor only:** the executor's `min_version` refusal
+(`subagent_executor._detect_version`) and every other runner check read the CLI live, and
+`tests/test_cli_version_cache.py` holds that no other module imports the cache. `--json` rows say
+`version.source` (`probe` or `cache`) and the report carries `version_cache` (path, hits, written).
 
 The Claude Code plugin's `hooks/hooks.json` runs it `--warn-only` from a
 `SessionStart` hook through `hooks/doctor.sh` (silent exit 0 when uv is missing) —
-advisory, never blocking; beside it, a `Stop` hook runs `hooks/report-check.sh`
+advisory, never blocking. Its stdout reaches the model every session, so `--warn-only` prints a
+one-line summary and then one line per problem (`doctor.problem_lines`: a configured name with no
+adapter, each failure with a `[sandbox_fallback: …]` clause on a BROKEN runner sandbox saying what
+the next run does — and, wherever plugin-landlock serves a phase, that it stops stray writes, not
+the model, and leaves the network unconfined — each warning, a bad `MULTI_LLM_CODEX_SKIP_RUNG`, one
+`NOTE` per check that ran but settled nothing (an unread version, an auth answer no verdict matched,
+a sandbox probe with no result; an undeclared probe is not one), and one `NOTE` naming every probe
+that ran out of budget). Any `NOTE` makes the summary say checking was incomplete instead of "no
+problems"; the full table and the repair text are a plain `doctor`'s, and
+`--json` is complete either way (about 450 characters here against 4,350 before, 2026-11-08); beside it, a `Stop` hook runs `hooks/report-check.sh`
 (plans/next-phase-command.md T11), which exits 0 at once when `stop_hook_active` is set or when
 the transcript holds no `[NEXT_COMMAND`/`[WORKFLOW_COMPLETE]` text and no Bash call that ran
 `multi_llm.py` (a `grep` before uv is even looked up; the call is enough

@@ -77,6 +77,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
     )),
     1: ("state", (
         "utils.cli_common",
+        "utils.cli_version_cache",
         "utils.git_utils",
         "utils.host_capabilities",
         "utils.metrics",

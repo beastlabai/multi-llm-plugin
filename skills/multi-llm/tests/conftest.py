@@ -340,6 +340,31 @@ def _isolate_state_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_cli_version_cache(tmp_path, monkeypatch):
+    """Keep doctor's version cache (``utils/cli_version_cache.py``) under each
+    test's tmp dir, never the developer's ``~/.cache/multi-llm``.
+
+    ``XDG_CACHE_HOME`` carries the redirect into child interpreters (a
+    subprocess doctor run); the module patch holds it in-process even for a
+    test that resets that variable. The variable also moves uv's cache, so on
+    POSIX ``UV_CACHE_DIR`` is pinned to the one uv would have used (uv's
+    Windows cache ignores ``XDG_CACHE_HOME``). It sits beside ``tmp_path``,
+    not in it, because tests that ``chdir`` there assert that doctor leaves
+    the working directory alone; nothing is created until a doctor run writes.
+    """
+    from utils import cli_version_cache
+
+    if os.name != "nt" and not os.environ.get("UV_CACHE_DIR"):
+        base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+        monkeypatch.setenv("UV_CACHE_DIR", os.path.join(base, "uv"))
+    home = tmp_path.parent / f"{tmp_path.name}.xdg-cache"
+    monkeypatch.setenv("XDG_CACHE_HOME", str(home))
+    target = str(home / "multi-llm")
+    monkeypatch.setattr(cli_version_cache, "cache_dir", lambda: target)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _pin_opencode_debug_config(request, monkeypatch):
     """Keep the default suite from spawning `opencode debug config` (plan §8).
 

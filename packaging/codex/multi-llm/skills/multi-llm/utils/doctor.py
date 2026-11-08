@@ -57,8 +57,15 @@ today's. Under ``off`` no rung is probed, the rung gets no row, and the
 ``agent-write`` row says refused by config.
 
 This is the one mode allowed to spawn provider CLIs outside a phase, and only
-their model-free probes. It takes no lock, writes nothing, and does not read
-or touch any phase directory.
+their model-free probes. It takes no lock and does not read or touch any phase
+directory. The one thing it writes is its own cache of parsed ``--version``
+strings (``utils/cli_version_cache.py``, under the user cache directory), keyed
+on each executable's file identity; auth and sandbox probes always run live,
+and ``--fresh`` skips the cache's reads. The executor never reads that cache.
+
+``--warn-only`` (the SessionStart hook) prints a one-line summary and then one
+line per problem; the full table and the repair text are a plain ``doctor``'s,
+and ``--json`` is the same complete object either way.
 """
 
 from __future__ import annotations
@@ -74,6 +81,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from . import cli_version_cache
 from .cli_common import EXIT_NEEDS_HUMAN, EXIT_OK, build_parent_parser, dispatcher_prefix
 from .stream_bootstrap import bootstrap_streams
 
@@ -210,30 +218,75 @@ def _bwrap_self_test(timeout: float) -> Tuple[str, str]:
     return ("ok" if code == 0 else "unavailable"), detail
 
 
-def _probe_version(provider: Any, name: str, timeout: float) -> Dict[str, Any]:
+def _version_cache_key(provider: Any, argv: Sequence[str]) -> Optional[Dict[str, Any]]:
+    """The cache key for one ``version_cmd``: the resolved launcher's file
+    identity (``utils/cli_version_cache.fingerprint``), or ``None``."""
+    from .llm_client import _resolve_executable
+
+    try:
+        launcher, _ = _resolve_executable(argv[0])
+        return cli_version_cache.fingerprint(provider, argv, launcher)
+    except Exception:  # noqa: BLE001 - the cache is optional; probe instead
+        return None
+
+
+def _cached_version(
+    cache: Optional[cli_version_cache.VersionCache], provider: Any, name: str,
+    key: Optional[Dict[str, Any]],
+) -> Optional[str]:
+    """``cache``'s answer for ``name``, or ``None`` (probe it)."""
+    if cache is None:
+        return None
+    try:
+        return cache.lookup(name, key, provider)
+    except Exception:  # noqa: BLE001 - the cache is optional; probe instead
+        return None
+
+
+def _probe_version(
+    provider: Any, name: str, timeout: float,
+    cache: Optional[cli_version_cache.VersionCache] = None,
+) -> Dict[str, Any]:
+    """The version row. With a ``cache``, a hit skips the spawn; the floor
+    verdict is always taken live from the (cached or read) string."""
     from .providers.base import version_verdict
 
     argv = list(getattr(provider, "version_cmd", ()) or ())
     row: Dict[str, Any] = {
         "version": "unknown", "state": "unprobed", "detail": "", "ok": True,
         "min_version": (getattr(provider, "min_version", "") or "").strip(),
+        "source": "",
     }
     if not argv:
         row["detail"] = "no version_cmd declared"
         return row
-    result = _run(argv, timeout=timeout)
-    if result is None:
-        row["detail"] = "slow: the probe did not answer within the budget"
-        return row
-    _, out, err = result
-    try:
-        parsed = provider.parse_version(out, err)
-    except Exception:  # noqa: BLE001 - a diagnostic must not crash the report
-        parsed = None
-    if not parsed:
-        row["state"] = "unread"
-        row["detail"] = f"`{' '.join(argv)}` printed nothing this adapter reads as a version"
-        return row
+    key = _version_cache_key(provider, argv) if cache is not None else None
+    parsed = _cached_version(cache, provider, name, key)
+    if parsed:
+        row["source"] = "cache"
+    else:
+        row["source"] = "probe"
+        result = _run(argv, timeout=timeout)
+        if result is None:
+            row["detail"] = "slow: the probe did not answer within the budget"
+            return row
+        _, out, err = result
+        try:
+            parsed = provider.parse_version(out, err)
+        except Exception:  # noqa: BLE001 - a diagnostic must not crash the report
+            parsed = None
+        if not parsed:
+            row["state"] = "unread"
+            row["detail"] = f"`{' '.join(argv)}` printed nothing this adapter reads as a version"
+            return row
+        # Recorded only when the launcher did not change under the probe, and
+        # only a string a later lookup would accept as this parser's output.
+        if (
+            cache is not None and key is not None
+            and cli_version_cache.parser_output(provider, parsed)
+            and _version_cache_key(provider, argv) == key
+        ):
+            cache.record(name, key, parsed)
     row["version"] = parsed
     verdict = version_verdict(provider, parsed, name=name)
     row["state"] = verdict.state
@@ -1277,13 +1330,17 @@ def _landlock_config_warning(path: str) -> str:
 
 def collect(
     *, budget_s: float = DEFAULT_BUDGET_S, host_id: Optional[str] = None,
-    anchor: Optional[str] = None,
+    anchor: Optional[str] = None, fresh: bool = False,
 ) -> Dict[str, Any]:
-    """Every configured provider, probed concurrently inside one budget."""
+    """Every configured provider, probed concurrently inside one budget.
+
+    Version reads go through doctor's own cache (``utils/cli_version_cache``)
+    unless ``fresh``; a fresh run still writes what it read back to it."""
     from . import host_capabilities as caps
     from .provider_registry import get_provider, load_config
 
     started = time.monotonic()
+    version_cache = cli_version_cache.VersionCache(read=not fresh)
     try:
         host = caps.resolve_host_id(explicit=host_id)
     except Exception:  # noqa: BLE001 - an unknown host id does not stop a report
@@ -1321,7 +1378,7 @@ def collect(
         name, provider, kind = item
         remaining = max(deadline - time.monotonic(), 0.0)
         if kind == "version":
-            result = _probe_version(provider, name, remaining)
+            result = _probe_version(provider, name, remaining, version_cache)
         elif kind == "auth":
             result = _probe_auth(provider, remaining, cwd, anchor)
         else:
@@ -1336,6 +1393,11 @@ def collect(
         with ThreadPoolExecutor(max_workers=min(3 * len(present), 24)) as pool:
             for name, kind, result in pool.map(probe, jobs):
                 by_name[name][kind] = result
+    cache_written = version_cache.save()
+    cache_hits = sum(
+        1 for row in rows
+        if row["present"] and (row.get("version") or {}).get("source") == "cache"
+    )
 
     warnings: List[str] = []
     if "codex" in names:
@@ -1384,6 +1446,15 @@ def collect(
             if sandbox_broken else None
         ),
         "repair_is_system_alternative": bool(sandbox_broken and repair_alternative),
+        "version_cache": {
+            "path": version_cache.path,
+            "read": not fresh,
+            "hits": cache_hits,
+            "written": cache_written,
+            # Why the file or its directory was refused, "" when it was not:
+            # reported here only, the text views stay silent about it.
+            "refused": version_cache.refused,
+        },
     }
 
 
@@ -1407,12 +1478,143 @@ def _probe_cwd(anchor: Optional[str]) -> Optional[str]:
     return executor_probe_cwd(anchor)
 
 
+def _sandbox_fallback_brief(sandbox: Dict[str, Any]) -> str:
+    """What the next run does with a BROKEN runner sandbox, in one clause for
+    the compact report: the key in force, the rung the read-only walk took and
+    the ``agent-write`` row's status. ``""`` when no fallback rides the row."""
+    from .providers.base import SANDBOX_FALLBACK_OFF
+
+    policy = sandbox.get("fallback") or ""
+    if not policy or sandbox.get("bypassed_by"):
+        return ""
+    if policy == SANDBOX_FALLBACK_OFF:
+        return " [sandbox_fallback: off, so read-only phases are refused too]"
+    rung = sandbox.get("fallback_rung")
+    if rung == "unsandboxed":
+        reads = "read-only phases run unsandboxed"
+    elif rung:
+        reads = f"read-only phases run on {rung}"
+    elif sandbox.get("fallback_probe") in ("", "unprobed"):
+        reads = "rung unprobed"
+    else:
+        reads = "no rung usable, read-only phases are refused"
+    write = sandbox.get("agent_write")
+    writes = ""
+    jail = (sandbox.get("plugin_landlock") or {}).get("rung") or ""
+    on_jail = bool(jail and rung == jail)
+    if isinstance(write, dict):
+        status = write.get("status") or ""
+        writes = (
+            f", writes run on {write.get('rung')}" if status == WRITE_RUNS_ON_RUNG
+            else f", writes {status}" if status and status != WRITE_NO_RUNG else ""
+        )
+        if status == WRITE_RUNS_ON_RUNG:
+            jail = jail or write.get("rung") or ""
+            on_jail = True
+    # The jail's grade and its open network ride the line wherever it serves a
+    # phase (INCIDENTAL_GRADE_WORDING, WRITE_RUNG_NETWORK_WORDING).
+    limits = f"; {jail} {INCIDENTAL_GRADE_WORDING}, and the network is not confined" if on_jail else ""
+    return f" [sandbox_fallback: {policy}, {reads}{writes}{limits}]"
+
+
+def _inconclusive_detail(kind: str, probe: Dict[str, Any]) -> str:
+    """What a check that ran but settled nothing said: an unread version, an
+    auth answer no verdict matched, a sandbox probe with no result. ``""``
+    for every other state, including probes the adapter never declared and
+    probes that ran out of budget (those share their own ``NOTE``)."""
+    state = probe.get("state")
+    if kind == "version" and state == "unread":
+        return str(probe.get("detail") or "") or "no version was read"
+    if kind in ("auth", "sandbox") and state == "unknown":
+        return str(probe.get("detail") or "") or "its probe gave no verdict"
+    return ""
+
+
+def problem_lines(report: Dict[str, Any]) -> List[str]:
+    """One line per problem, in the report's own order: a configured name with
+    no adapter, each failure (``WARN``: this is ``--warn-only``'s view), each
+    warning, a bad ``MULTI_LLM_CODEX_SKIP_RUNG`` value, one ``NOTE`` per check
+    that ran but settled nothing (:func:`_inconclusive_detail`), and one
+    ``NOTE`` naming every probe that ran out of budget. The full table and the
+    repair text are an explicit ``doctor``'s."""
+    lines: List[str] = []
+    inconclusive: List[str] = []
+    by_name = {row["provider"]: row for row in report["providers"]}
+    for row in report["providers"]:
+        if not row.get("adapter", True):
+            lines.append(f"WARN: {row['provider']}: {row.get('detail') or 'no built-in adapter'}")
+    for failure in report["failures"]:
+        name, _, rest = failure.partition(":")
+        suffix = ""
+        if rest.startswith(" sandbox"):
+            suffix = _sandbox_fallback_brief((by_name.get(name) or {}).get("sandbox") or {})
+        lines.append(f"WARN: {failure}{suffix}")
+    for warning in report.get("warnings") or ():
+        lines.append(f"WARN: {warning}")
+    slow: List[str] = []
+    for row in report["providers"]:
+        if not row["present"]:
+            continue
+        rung = (row.get("sandbox") or {}).get("plugin_landlock")
+        if isinstance(rung, dict) and rung.get("switch_error"):
+            switch = str(rung.get("switch") or "")
+            lines.append(
+                f"WARN: {row['provider']}: {rung['switch_error']} — every other mode "
+                f"refuses to start until it is unset or set to {switch.split('=', 1)[-1]}"
+            )
+        for kind in ("version", "auth", "sandbox"):
+            probe = row.get(kind) or {}
+            if probe.get("state") == "unprobed" and str(probe.get("detail") or "").startswith("slow"):
+                slow.append(f"{row['provider']} {kind}")
+            detail = _inconclusive_detail(kind, probe)
+            if detail:
+                inconclusive.append(f"NOTE: {row['provider']} {kind} inconclusive: {detail}")
+    lines.extend(inconclusive)
+    if slow:
+        lines.append(
+            f"NOTE: no answer within the {report['budget_s']:.1f} s budget, so not "
+            f"checked: {', '.join(slow)} (`multi_llm.py doctor --budget 10` waits longer)"
+        )
+    return lines
+
+
+def render_problems(report: Dict[str, Any]) -> List[str]:
+    """``--warn-only``'s text (the SessionStart hook's): a one-line summary,
+    then :func:`problem_lines`. Nothing else, so a healthy machine costs a
+    session one line."""
+    problems = problem_lines(report)
+    count = sum(1 for line in problems if line.startswith("WARN:"))
+    # Every NOTE is a check that settled nothing, so the summary never claims
+    # a clean machine over one.
+    incomplete = any(line.startswith("NOTE:") for line in problems)
+    summary = (
+        f"multi-llm doctor: {report['present']} of {report['configured']} configured "
+        f"provider(s) present, host {report['host']}, {report['elapsed_s']:.2f} s; "
+    )
+    if count:
+        summary += f"{count} problem(s), one per line below"
+        if incomplete:
+            summary += ", and checking was incomplete (NOTE lines)"
+        summary += "; `multi_llm.py doctor` prints the full table and any repair"
+    elif incomplete:
+        summary += "no problems found, but checking was incomplete (NOTE lines below)"
+    else:
+        summary += "no problems"
+    return [summary, *problems]
+
+
 def render_text(report: Dict[str, Any], *, warn_only: bool) -> List[str]:
     lines = [
         f"multi-llm doctor — host {report['host']}, {report['configured']} provider(s) "
         f"configured, {report['present']} present, {report['elapsed_s']:.2f} s "
         f"(budget {report['budget_s']:.1f} s)"
     ]
+    cache = report.get("version_cache") or {}
+    if cache.get("hits"):
+        lines.append(
+            f"  versions: {cache['hits']} read from doctor's cache, keyed on each "
+            f"executable's path, size and times (`--fresh` re-probes them)"
+        )
     width = max((len(r["provider"]) for r in report["providers"]), default=8)
     for row in report["providers"]:
         name = row["provider"].ljust(width)
@@ -1508,6 +1710,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help=f"Wall-clock budget for the whole report (default {DEFAULT_BUDGET_S:.1f}).",
     )
     parser.add_argument(
+        "--fresh", action="store_true",
+        help="Ignore doctor's version cache and run every --version probe.",
+    )
+    parser.add_argument(
         "--plan-file", default=None, metavar="PATH",
         help="Optional discovery anchor for the project-local config layer.",
     )
@@ -1522,14 +1728,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         budget_s=max(float(args.budget), 0.05),
         host_id=getattr(args, "host", None),
         anchor=anchor,
+        fresh=bool(args.fresh),
     )
     exit_code = EXIT_NEEDS_HUMAN if report["failures"] else EXIT_OK
     report["exit"] = EXIT_OK if args.warn_only else exit_code
     report["warn_only"] = bool(args.warn_only)
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
+    elif args.warn_only:
+        # The SessionStart hook's view reaches the model every session: one
+        # line per problem (docs/development/status.md, "doctor").
+        print("\n".join(render_problems(report)))
     else:
-        print("\n".join(render_text(report, warn_only=bool(args.warn_only))))
+        print("\n".join(render_text(report, warn_only=False)))
     return report["exit"]
 
 

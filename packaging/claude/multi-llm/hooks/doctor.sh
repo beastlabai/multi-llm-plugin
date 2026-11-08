@@ -6,7 +6,9 @@
 # would block the session, and a missing uv is exactly the machine where the
 # doctor's own message would be the least useful thing to block on. The check
 # is re-run per session rather than stored per repo because a verdict taken at
-# install time goes stale with the next CLI or kernel update.
+# install time goes stale with the next CLI or kernel update. Only the parsed
+# `--version` strings are reused, keyed on each executable's file identity
+# (utils/cli_version_cache.py); auth and sandbox probes run every time.
 #
 # uv is looked for the way `utils/unattended.find_uv()` and every rendered shim
 # look for it: $MULTI_LLM_UV, then PATH, then the documented install locations

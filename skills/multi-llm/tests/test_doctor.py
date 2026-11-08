@@ -159,14 +159,32 @@ class TestDoctorOnABrokenSandbox:
         assert "not recommended" in out
         assert "kernel.apparmor_restrict_unprivileged_userns=0" in out
 
-    def test_warn_only_reports_the_same_and_exits_0(self, clinic, monkeypatch, capsys):
+    def test_warn_only_prints_one_line_per_problem_and_exits_0(
+        self, clinic, monkeypatch, capsys
+    ):
+        """PERF-5: the SessionStart hook's view is a summary line plus one
+        line per problem. The table and the repair text stay on a plain
+        `doctor`, which the problem line names; `--json` stays complete."""
         monkeypatch.setenv("MOCK_LLM_SANDBOX_BROKEN", "1")
         _broken_bwrap(monkeypatch)
         assert doctor.main(["--warn-only", "--budget", "10"]) == 0
-        out = capsys.readouterr().out
-        assert "WARN: codex: sandbox" in out
+        lines = capsys.readouterr().out.splitlines()
+        assert lines[0].startswith("multi-llm doctor: 3 of ")
+        assert "1 problem(s)" in lines[0] and "`multi_llm.py doctor`" in lines[0]
+        assert lines[1:] == [
+            "WARN: codex: sandbox — " + doctor.SANDBOX_FIX_SENTENCE
+            + " [sandbox_fallback: auto, read-only phases run unsandboxed, writes refused]"
+        ]
+        out = "\n".join(lines)
         assert "FAIL:" not in out
-        assert "profile bwrap /usr/bin/bwrap flags=(unconfined)" in out
+        assert "profile bwrap" not in out and "grok" not in out
+
+        assert doctor.main(["--warn-only", "--json", "--budget", "10"]) == 0
+        report = json.loads(capsys.readouterr().out)
+        assert report["repair"] == doctor._repair_block()
+        assert {r["provider"] for r in report["providers"] if r["present"]} == {
+            "codex", "grok", "muse",
+        }
 
     def test_the_default_fallback_is_named_beside_broken_and_changes_nothing_else(
         self, clinic, monkeypatch, capsys
@@ -428,12 +446,17 @@ class TestDoctorIsAMode:
         assert "multi-llm doctor" in out
         assert '"mode": "doctor"' in out and '"phase": null' in out
 
-    def test_doctor_takes_no_lock_and_writes_nothing(self, clinic, monkeypatch, capsys):
+    def test_doctor_takes_no_lock_and_writes_nothing_but_its_version_cache(
+        self, clinic, monkeypatch, capsys
+    ):
+        from utils import cli_version_cache
+
         monkeypatch.setattr(doctor, "_bwrap_self_test", lambda timeout: ("ok", ""))
         before = sorted(p.name for p in Path.cwd().iterdir())
         assert doctor.main(["--budget", "10"]) == 0
         capsys.readouterr()
         assert sorted(p.name for p in Path.cwd().iterdir()) == before
+        assert os.listdir(cli_version_cache.cache_dir()) == [cli_version_cache.FILE_NAME]
 
 
 # ---------------------------------------------------------------------------
