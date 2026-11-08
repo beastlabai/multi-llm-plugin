@@ -29,6 +29,10 @@ See the "Host-neutral instruction core" section of ``docs/development/hosts.md``
 
 from __future__ import annotations
 
+import argparse
+import contextlib
+import importlib
+import io
 import re
 import sys
 from pathlib import Path
@@ -39,7 +43,11 @@ import pytest
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SKILL_ROOT))
 
-from utils import cli_common  # noqa: E402
+import apply_code_fixes_orchestrator  # noqa: E402
+import apply_commit_fixes_orchestrator  # noqa: E402
+import modes as mode_table  # noqa: E402
+import multi_llm  # noqa: E402
+from utils import cli_common, host_capabilities  # noqa: E402
 
 INSTRUCTIONS = SKILL_ROOT / "instructions"
 REFERENCES = SKILL_ROOT / "references"
@@ -119,7 +127,52 @@ def _revalidation(core: str) -> Moved:
     )
 
 
+#: The Python write executor's ways in: a flag on the command that runs the
+#: phase, never a marker. `--detach` counts because the dispatcher writes the
+#: `--exec-subagents` it implies out, and `--dry-run-subagents` because it is a
+#: preflight through the same scheduler. `TestTheWriteExecutorIsReachable`
+#: holds this list to the real dispatcher on every shipped host: a host's
+#: capability decides none of it (docs/development/hosts.md, "Host-neutral
+#: instruction core").
+WRITE_EXECUTOR_WAYS_IN = ("--exec-subagents", "--detach", "--dry-run-subagents")
+
+
+def _write_executor(core: str, reference: str, inline: Tuple[str, ...], anchor: str) -> Moved:
+    """The trigger also carries what a host must not miss even on the default
+    route: an abbreviation of a flag counts, and a run on this route (a dry run
+    included, which dispatched nothing) leaves no work for the core's own
+    steps, each named in *inline*. Those rules live in the trigger alone; the
+    reference holds the rest (`KEPT_RULES`), so the route carries each once."""
+    return Moved(
+        core, reference,
+        enters=WRITE_EXECUTOR_WAYS_IN,
+        inline=("which implies it", "abbreviation", "dispatched nothing and leaves no work")
+        + inline,
+        inside=(),
+        anchor=anchor,
+    )
+
+
+_APPLY_EXECUTOR_ANCHOR = "the prior-batch context bound late per dispatch"
+#: The native steps an executor run already did, which the host must not run again.
+_APPLY_NOT_TWICE = ("do not run the loop below", "step 3's `util decisions`",
+                    "summary report", "`--mark-completed`")
+
+#: The references the executor sections moved to.
+EXECUTOR_REFERENCES = ("apply-write-executor.md", "implement-write-executor.md")
+
 MOVED = (
+    _write_executor("apply-suggestions.md", "apply-write-executor.md",
+                    _APPLY_NOT_TWICE, _APPLY_EXECUTOR_ANCHOR),
+    _write_executor("apply-task-suggestions.md", "apply-write-executor.md",
+                    _APPLY_NOT_TWICE, _APPLY_EXECUTOR_ANCHOR),
+    _write_executor("apply-code-fixes.md", "apply-write-executor.md",
+                    _APPLY_NOT_TWICE + ("step 7's verification",), _APPLY_EXECUTOR_ANCHOR),
+    _write_executor("implement.md", "implement-write-executor.md",
+                    ("run none of steps 5 to 10",
+                     "no subagent, metrics, summary, tracking or `--mark-completed`",
+                     "step 11"),
+                    "re-dispatches only the unfinished batches"),
     _CONSOLIDATION,
     _interrupted("review-plan.md"),
     _interrupted("review-tasks.md"),
@@ -138,6 +191,53 @@ MOVED = (
           inside=(),
           anchor="consent to run unattended is not consent to stale input"),
 )
+
+#: Every rule the executor sections held that their trigger does not carry, as
+#: a phrase the reference must still hold: each flag they named, then the words
+#: of each rule, so a later edit cannot drop one without this list saying
+#: which. What a host must not run again on this route is the trigger's
+#: (`_write_executor`'s *inline*), never repeated here.
+KEPT_RULES = {
+    "apply-write-executor.md": (
+        "--exec-subagents", "--dry-run-subagents", "--detach", "--phase-dir",
+        "--task-id", "--all-failed", "--force",
+        # one batch at a time, each verified and recorded before the next
+        "ascending `batch_index`", "recorded **before** the next is dispatched",
+        "bound late per dispatch",
+        # concurrency limits, per mode
+        "pinned to 1", "provably disjoint",
+        "marked completed only after every batch verified",
+        # the closing steps the run does itself, apply-code-fixes' verification included
+        "prints step 3's breakdown itself", "the review report",
+        "runs `driver.verify_command` once after the last batch",
+        "ends the phase at exit 3 when it fails",
+        # a dry run dispatches nothing, and its file is what is reported
+        "**zero dispatch**", "report what that file holds",
+        # detach is never wrapped in a host's own background mechanism
+        "never passes `--detach`",
+        # rollback is a human's call, and a changed file is refused
+        "A partial application never reverts itself", "unless `--force` is passed",
+    ),
+    "implement-write-executor.md": (
+        "--force-strategy", "--yes", "--human-task", "--resume", "--force",
+        "--phase-dir", "--task-id", "--dry-run-subagents", "--detach",
+        # scheduling
+        "ascending `batch_index`", "pairwise disjoint", "a task declaring no file set runs alone",
+        # the human-task strategy, resolved once and persisted
+        "resolved **once**", "persisted in `state.json`", "rather than blocking on a stdin",
+        # finalization is part of the contract
+        "**failed** run, not a partial one",
+        # a stop keeps what a human needs and resumes only what is unfinished
+        "keeps every pre-batch snapshot", "re-dispatches only the unfinished batches",
+        "account for every task of the decomposition",
+        # a failed check: retry, accept or skip, and no dispatch on an unchanged tree
+        "`--human-task <id>=done`", "`--human-task <id>=retry`", "`--human-task <id>=skip`",
+        "no dispatch is spent", "is not a stop",
+        # a dry run dispatches nothing, and its file is what is reported
+        "starts no child", "report what that file holds",
+        "Never combine it with a host's own background mechanism",
+    ),
+}
 
 #: A printed marker, up to its first non-name character: `[PARTIAL_RESULTS: m]`
 #: and `[PREREQUISITE_SKIPPED_UPSTREAM apply-suggestions: …]` are their stems.
@@ -337,3 +437,164 @@ class TestReferencesAreReadAsTheyAre:
             f"references/{path.name} runs `<prefix>` commands without saying what "
             "`<prefix>` is"
         )
+
+
+class TestTheExecutorRulesStayReachable:
+    @pytest.mark.parametrize("name", sorted(KEPT_RULES))
+    def test_each_rule_is_in_its_reference(self, name):
+        text = _flat(_read(REFERENCES / name))
+        lost = [phrase for phrase in KEPT_RULES[name] if phrase not in text]
+        assert not lost, f"references/{name} no longer carries {lost}"
+
+    def test_every_executor_reference_has_its_rules(self):
+        assert set(KEPT_RULES) == set(EXECUTOR_REFERENCES)
+        assert {m.reference for m in MOVED if m.enters == WRITE_EXECUTOR_WAYS_IN} == set(
+            EXECUTOR_REFERENCES)
+
+
+# ---------------------------------------------------------------------------
+# The executor's ways in, held to the real dispatcher
+# ---------------------------------------------------------------------------
+
+#: An argparse abbreviation of each way in: the dispatcher reads flags the way
+#: argparse does (`cli_common.flag_present`), so each is a way in too.
+ABBREVIATIONS = {"--exec-subagents": "--exec", "--detach": "--det",
+                 "--dry-run-subagents": "--dry-run-sub"}
+
+#: The modes whose cores carry an executor trigger, each with that core.
+EXECUTOR_CORES = {
+    Path(moved.core).stem: moved.core
+    for moved in MOVED if moved.reference in EXECUTOR_REFERENCES
+}
+
+
+def _parse(mode: str, argv) -> argparse.Namespace:
+    """*argv* parsed by *mode*'s own orchestrator, as its ``main`` parses it."""
+    if mode == "apply-commit-fixes":
+        # The commit front door forwards what it does not own to
+        # apply-code-fixes' parser, the core it loads.
+        forwarded = apply_commit_fixes_orchestrator.parse_args(list(argv)).remaining
+        return apply_code_fixes_orchestrator.ApplyCodeFixesOrchestrator.parse_args(
+            list(forwarded) + ["--plan-file", "brief.md"])
+    module = importlib.import_module(mode_table.resolve(mode).target_module)
+    owners = [value for value in vars(module).values()
+              if isinstance(value, type) and value.__module__ == module.__name__
+              and "parse_args" in vars(value)]
+    assert len(owners) <= 1, owners
+    return (owners[0] if owners else module).parse_args(list(argv))
+
+
+def _takes_the_executor(args: argparse.Namespace) -> bool:
+    """The two flags every write orchestrator's executor leg reads
+    (``run_write_executor`` in the apply base, ``build_handoff`` in implement)."""
+    return bool(getattr(args, "exec_subagents", False)
+                or getattr(args, "dry_run_subagents", False))
+
+
+@pytest.fixture
+def dispatch(monkeypatch, tmp_path):
+    """Run the real dispatcher with a recording target in place of the mode's
+    orchestrator, and return the argv that target would have parsed (``None``
+    when the dispatcher refused the command before reaching it)."""
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Plan\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    seen = {}
+
+    def loader(module_path, attr):
+        def target(argv):
+            seen["argv"] = list(argv)
+            return 0
+
+        return target
+
+    monkeypatch.setattr(multi_llm, "_load_target", loader)
+
+    def run(mode, host, flags):
+        seen.clear()
+        head = [mode] if mode == "apply-commit-fixes" else [mode, str(plan)]
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            try:
+                multi_llm.main(head + ["--host", host] + list(flags))
+            except SystemExit:
+                pass
+        return seen.get("argv")
+
+    yield run
+    cli_common.clear_invocation()
+
+
+def _routes(mode, argv) -> bool:
+    if argv is None:
+        return False
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            return _takes_the_executor(_parse(mode, argv))
+    except SystemExit:  # the mode's own parser refuses it: no route at all
+        return False
+
+
+def _mode_parser(mode: str, monkeypatch) -> argparse.ArgumentParser:
+    """The parser *mode*'s orchestrator builds, caught as it starts parsing."""
+    caught = {}
+
+    class Caught(Exception):
+        pass
+
+    def grab(self, *args, **kwargs):
+        caught["parser"] = self
+        raise Caught()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(argparse.ArgumentParser, "parse_args", grab)
+        with pytest.raises(Caught):
+            _parse(mode, ["--plan-file", "plan.md"])
+    return caught["parser"]
+
+
+class TestTheWriteExecutorIsReachable:
+    """Each way in a trigger names really takes the executor, through the real
+    dispatcher, on every shipped host — Claude Code's ``subagents: native`` is
+    its default, not a prohibition — and no other option does. A way in this
+    misses is one the trigger would let a host skip."""
+
+    @pytest.mark.parametrize("host", host_capabilities.host_ids())
+    @pytest.mark.parametrize("mode", sorted(EXECUTOR_CORES))
+    @pytest.mark.parametrize("flag", WRITE_EXECUTOR_WAYS_IN)
+    def test_each_way_in_takes_the_executor(self, dispatch, mode, host, flag):
+        assert _routes(mode, dispatch(mode, host, [flag])), (
+            f"{mode} {flag} on {host} no longer reaches the executor; drop it "
+            "from WRITE_EXECUTOR_WAYS_IN and from the trigger")
+        assert _routes(mode, dispatch(mode, host, [ABBREVIATIONS[flag]]))
+
+    @pytest.mark.parametrize("host", host_capabilities.host_ids())
+    @pytest.mark.parametrize("mode", sorted(EXECUTOR_CORES))
+    def test_the_default_route_does_not(self, dispatch, mode, host):
+        argv = dispatch(mode, host, [])
+        assert argv is not None and not _routes(mode, argv)
+
+    @pytest.mark.parametrize("flag", WRITE_EXECUTOR_WAYS_IN)
+    def test_the_commit_front_door_forwards_each_way_in(self, dispatch, flag):
+        """apply-commit-fixes runs apply-code-fixes' phase and loads its core."""
+        assert _routes("apply-commit-fixes", dispatch("apply-commit-fixes", "claude-code", [flag]))
+        assert not _routes("apply-commit-fixes", dispatch("apply-commit-fixes", "claude-code", []))
+
+    @pytest.mark.parametrize("mode", sorted(EXECUTOR_CORES))
+    def test_no_other_option_takes_it(self, dispatch, mode, monkeypatch):
+        parser = _mode_parser(mode, monkeypatch)
+        routed, tried = set(), 0
+        for action in parser._actions:
+            longs = [o for o in action.option_strings if o.startswith("--")]
+            if not longs or isinstance(action, argparse._HelpAction):
+                continue
+            option = longs[0]
+            flags = [option] if action.nargs == 0 else [option, "1"]
+            tried += 1
+            if _routes(mode, dispatch(mode, "claude-code", flags)):
+                routed.add(option)
+        assert tried > 15, f"{mode}: the option sweep found only {tried} options"
+        assert routed == set(WRITE_EXECUTOR_WAYS_IN), (
+            f"{mode}: the options that reach the executor are {sorted(routed)}; "
+            "every one is a way in the trigger and the reference must name")

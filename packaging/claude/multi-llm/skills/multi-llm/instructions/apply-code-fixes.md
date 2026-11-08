@@ -237,52 +237,7 @@ Where `{total_batches}` is the length of the `batches` array.
 
 ### The Python write executor: `--exec-subagents` (an alternative to this loop)
 
-Everything from here to the end of the batch loop is the **native-subagent** path:
-this agent binds each batch's prompt with `util write-prompt`, spawns a subagent
-on the bound prompt file, checks the target files against their pre-batch state
-and appends to the prior-changes log.
-
-A host with no native subagent tool runs the *same* loop in Python instead. Add
-`--exec-subagents` to the orchestrator invocation above and the phase schedules
-itself in one process: batches in ascending `batch_index`, each one's snapshot/diff
-classification completed and recorded **before** the next is dispatched, the
-prior-batch context bound late per dispatch (the literal `{prior_changes_context}`
-token never reaches a runner), `prior_changes.py append` and `metrics.py record`
-called per batch, and the phase marked completed only after every batch verified.
-The runner comes from `driver.subagent_runner` in `providers.yaml`; write
-concurrency comes from `driver.max_concurrent_write_subagents` (default **1**, and
-raise it above 1 only for this phase, whose batches are partitioned by file — and even then two batches co-schedule only when their declared file sets are provably disjoint).
-
-Do **not** combine the two: with `--exec-subagents` the phase finishes in that one
-invocation and there is no batch left for this agent to run. It also writes this
-phase's own summary report itself: the batch loop's outcome block names every item
-the judge decided, `{phase}/summary.md` is written with the same sections the
-*Generate Summary Report* step below describes, the recorded decisions are overlaid
-onto the review report, and the phase is marked completed only once every batch
-verified. Those steps below belong to the native path; do not run them a second time.
-
-Three flags belong to that path and are worth knowing even on this one:
-
-- `--dry-run-subagents` — full preflight, **zero dispatch**. Renders the exact
-  command per batch, applies the invocation profile, the co-scheduling admission
-  check and the `driver.write_paths` policy, writes
-  `{phase}/subagent_dry_run.json` and exits 0 having started no child and changed
-  nothing else. The recommended first unattended run on a new host.
-- `--detach` — the phase self-daemonizes and returns a log path plus a `status`
-  command to poll; it is how step 2 runs on this path. Per-batch progress lands in
-  `{phase}/.status.json` under `progress.write_subagents`, so an unattended write
-  run is observable with no chat context at all. Never combine it with a host's own
-  background primitive: a host that resolves *run detached* to its own background
-  mechanism uses that mechanism and never passes `--detach`.
-- Rollback, when a batch half-applies —
-  `multi_llm.py util restore-batch --phase-dir <dir> --task-id <id>` (also
-  `--all-failed`), invoked through the dispatcher the same way every other mode is.
-  It restores exactly the files `{phase}/subagent_audit.jsonl` recorded as touched,
-  from the pre-batch snapshot under `{phase}/pre_batch/{task_id}/`, and **refuses**
-  a file whose current hash no longer matches what the audit recorded at completion
-  (someone edited it since) unless `--force` is passed. A partial application never
-  reverts itself: the run exits 3 naming this command, because an automatic revert
-  would destroy the half-applied state a human needs to inspect.
+When the command that runs this phase carries `--exec-subagents`, `--detach` (which implies it) or `--dry-run-subagents`, however it got there (typed, printed by a resume or `util next-command`, forwarded by a workflow step, or as an abbreviation such as `--exec` or `--det`), the Python write executor runs the phase: read `references/apply-write-executor.md` in full before that command runs, or before your next command if it already ran. That one invocation is the whole phase; a dry run dispatched nothing and leaves no work either: do not run the loop below, step 3's `util decisions`, step 7's verification, step 8's summary report or step 10's `--mark-completed`. A command with none of `--exec-subagents`, `--detach` and `--dry-run-subagents`, in any spelling, skips the reference and runs the loop below.
 
 For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
@@ -415,10 +370,6 @@ If the command fails:
 - Do **not** revert anything — each batch was verified when it finished (step 4),
   and the failing state is what a human needs to read
 - The phase is **not** complete: stop and hand the failure to a human
-
-On the `--exec-subagents` leg the executor does all of this itself, from the same
-`driver.verify_command` — it runs the command once after the last batch, records the
-result in `summary.md` and `.status.json`, and ends the phase at exit 3 when it fails.
 
 ### 8. Generate Summary Report
 

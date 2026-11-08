@@ -325,8 +325,10 @@ PLACEHOLDER_MANIFEST = {
     # reference is read as it is, never through `render_instruction_text`, so
     # it can carry no template token: its commands are spelled from the mode
     # word on, behind a `<prefix>` the file defines as the core's own.
+    "references/apply-write-executor.md": (0, 0),
     "references/consolidation.md": (0, 0),
     "references/implement-prerequisites.md": (0, 0),
+    "references/implement-write-executor.md": (0, 0),
     "references/interrupted-run-recovery.md": (0, 0),
     "references/revalidation.md": (0, 0),
     "references/review-code-apply-fixes.md": (0, 0),
@@ -1805,12 +1807,26 @@ class TestTheWritePhasesDetachUnderTheExecutor:
         assert paragraph.index(native) < paragraph.index(executor)
         assert "With `--exec-subagents`" in paragraph
 
+    #: The reference each write core's executor trigger names, where the
+    #: executor's own flags are described.
+    EXECUTOR_REFERENCE = {
+        "apply-suggestions": "apply-write-executor.md",
+        "apply-task-suggestions": "apply-write-executor.md",
+        "apply-code-fixes": "apply-write-executor.md",
+        "implement": "implement-write-executor.md",
+    }
+
     @pytest.mark.parametrize("mode", sorted(WRITE_CORES))
     def test_the_detach_flag_note_says_it_is_step_2s_launch(self, mode):
         flat = self._flat(mode)
-        assert "it is how step 2 runs on this path" in flat
+        name = self.EXECUTOR_REFERENCE[mode]
+        assert f"references/{name}" in flat
+        reference = " ".join(
+            (SKILL_ROOT / "references" / name).read_text(encoding="utf-8").split())
+        assert "it is how step 2 runs on this path" in reference
         # The D5a rewrite left "on Claude host resolves *run detached* …" here.
         assert "on Claude host resolves" not in flat
+        assert "on Claude host resolves" not in reference
 
     @pytest.mark.parametrize("mode", ["improve-plan", "improve-code", "improve-commits"])
     def test_the_composites_end_an_executor_apply_on_its_detached_run(self, mode):
