@@ -72,6 +72,7 @@ from .json_extractor import (
 from .schema_validator import drop_non_record_entries
 from .llm_client import (
     ERROR_TIMEOUT,
+    FAILURE_CATEGORY_KEY,
     FAILURE_JAIL_DENIED,
     SALVAGE_FAILURE_KEY,
     SALVAGE_FAILURE_TIMEOUT,
@@ -92,9 +93,6 @@ from .llm_client import (
 )
 from .providers.base import (
     CATEGORY_CONNECTION_ERROR,
-    CATEGORY_INVALID_MODEL,
-    CATEGORY_PERMISSION_DENIED,
-    CATEGORY_SANDBOX_UNAVAILABLE,
     CATEGORY_SERVER_ERROR,
     CODEX_HOME_CHECK_MARKER,
     INCIDENTAL_LANE_FANOUT,
@@ -104,7 +102,6 @@ from .providers.base import (
     SANDBOX_BYPASSED_MARKER,
     SANDBOX_FALLBACK_AUTO,
     SANDBOX_RUNG_UNSANDBOXED,
-    LLMProvider,
     SandboxRung,
     classify_streams,
     rung_is_incidental,
@@ -118,14 +115,11 @@ from .providers.base import (
 )
 from .retry_ladder import (
     RetryLadder,
-    STATUS_AUTH_FAILED,
     STATUS_CONTEXT_LENGTH_EXCEEDED,
     STATUS_OK,
     STATUS_RATE_LIMITED,
     STATUS_RUNNER_ERROR,
     STATUS_SALVAGE_UNRECOVERABLE,
-    STATUS_SPAWN_FAILED,
-    STATUS_TIMEOUT,
     budget_exhausted_reason,
 )
 from .git_utils import get_project_root, git_argv
@@ -2224,48 +2218,13 @@ def extract_json_array(text: str) -> Optional[str]:
     return None
 
 
-#: The ``Reason:`` line, keyed by the shared classifier's category (§7.1.a).
-#:
-#: This replaces a seven-branch ``elif`` chain of raw substring tests that had
-#: drifted from every other classifier in the tree: its first branch called
-#: **every** provider's failure "cursor-agent command not found" (and swallowed
-#: "model not found" with a bare ``'not found' in stderr``), its rate-limit
-#: branch disagreed with the retry decision three hundred lines below it, and
-#: ``'insufficient'`` matched any prose containing the word.
-#:
-#: A lookup rather than a chain is the point: the sentence a user acts on and
-#: the retry decision now read the *same* verdict off the *same* streams, so
-#: they can no longer contradict each other.
-#:
-#: The old "Quota exceeded or insufficient credits" branch is deliberately gone.
-#: A quota notice is what the shared classifier calls ``rate_limited`` — that is
-#: the rung it is retried on — and a second name for it here is exactly the
-#: disagreement this table removes.
-_REASON_BY_CATEGORY = {
-    STATUS_SPAWN_FAILED:
-        "Reason: the runner CLI could not be started (is it installed and in PATH?)",
-    CATEGORY_PERMISSION_DENIED: "Reason: Permission denied",
-    CATEGORY_SANDBOX_UNAVAILABLE: (
-        "Reason: the runner's own sandbox (bubblewrap) could not start — "
-        "see `multi_llm.py doctor`"
-    ),
-    STATUS_AUTH_FAILED: "Reason: Authentication error (check API key)",
-    CATEGORY_INVALID_MODEL: "Reason: Model not found or invalid",
-    STATUS_RATE_LIMITED: "Reason: Rate limited",
-    STATUS_TIMEOUT: "Reason: Timed out",
-    CATEGORY_CONNECTION_ERROR: "Reason: Connection/network error",
-    CATEGORY_SERVER_ERROR: "Reason: API/Server error",
-    STATUS_RUNNER_ERROR: "Reason: the runner reported a failure",
-}
-
-_REASON_UNKNOWN = "Reason: Unknown (see tail output below)"
-
-
 #: The one translation from §7.2's classifier vocabulary into the D3k ladder's
-#: (§7.1.b). ``classify_streams`` returns four ``CATEGORY_*`` names the ladder has
-#: no rung for; two of them are transport-shaped and therefore rung 4, which is
-#: what makes a connection error or a 5xx spend ``driver.subagent_retries``
-#: exactly once — the behaviour the deleted ``retry_count < 1`` recursion had.
+#: (§7.1.b). That vocabulary (an adapter's ``classify_failure``, or
+#: ``classify_streams`` over the error line) has four ``CATEGORY_*`` names the
+#: ladder has no rung for; two of them are transport-shaped and therefore rung
+#: 4, which is what makes a connection error or a 5xx spend
+#: ``driver.subagent_retries`` exactly once — the behaviour the deleted
+#: ``retry_count < 1`` recursion had.
 #:
 #: Everything **absent** from this table reaches :meth:`RetryLadder.record` under
 #: its own name, and that is deliberate rather than an oversight:
@@ -2275,11 +2234,19 @@ _REASON_UNKNOWN = "Reason: Unknown (see tail output below)"
 #: ``FATAL_STATUSES`` branch — ``STOP_FATAL``, "invalid_model is fatal to the
 #: batch", zero retries either way, D4; ``sandbox_unavailable`` is the same
 #: arrangement, D6); and ``permission_denied``,
-#: ``context_length_exceeded`` and the unrecognized ``None`` all fall through
-#: ``record``'s last branch to "never retried", which is exactly what the
+#: ``context_length_exceeded`` and an unrecognized error line's ``None`` all
+#: fall through ``record``'s last branch to "never retried", which is what the
 #: deleted ``failure_category in RETRYABLE_FAILURE_CATEGORIES`` guard decided.
-#: One table, not two. ``tests/test_lane_a_ladder.py`` pins the two
-#: vocabularies in agreement.
+#: An adapter's ``None`` on a non-zero exit never reaches this table:
+#: ``run_single_model`` makes it ``runner_error`` first, as the executor does.
+#: One table, not two.
+#: ``tests/test_lane_a_ladder.py`` pins the two vocabularies in agreement.
+#:
+#: Two verdicts stop here and are retried once by the executor, whose
+#: ``_classify_failed_run`` forwards neither: ``spawn_failed`` (an install or
+#: argv refusal, identical on every attempt) and ``permission_denied`` (a 403
+#: or a denied tool). That difference is deliberate; see
+#: docs/development/delegation.md#read-and-analyze-executor.
 _LADDER_STATUS_BY_CATEGORY = {
     CATEGORY_CONNECTION_ERROR: STATUS_RUNNER_ERROR,
     CATEGORY_SERVER_ERROR: STATUS_RUNNER_ERROR,
@@ -2291,73 +2258,6 @@ _LADDER_STATUS_BY_CATEGORY = {
 #: not know as "never retried", and a jail denial must never be re-dispatched —
 #: nor moved to another rung.
 STATUS_JAIL_DENIED = "jail_denied"
-
-
-def _get_tail_output(text: str, max_lines: int = 20) -> str:
-    """Get the last N lines of text for error context."""
-    if not text:
-        return ""
-    lines = text.strip().split('\n')
-    if len(lines) <= max_lines:
-        return text.strip()
-    return '\n'.join(lines[-max_lines:])
-
-
-def _format_failure_details(
-    returncode: int,
-    stdout_text: str,
-    stderr_text: str,
-    max_tail_lines: int = 20,
-    *,
-    provider: Optional[LLMProvider] = None,
-) -> str:
-    """Format failure details with clear reason and tail output.
-
-    The reason is the shared classifier's verdict looked up in
-    :data:`_REASON_BY_CATEGORY` (§7.1.a) — there is no second rule here.
-
-    **``provider`` is how this helper stops being the one classifier that reads
-    raw stdout.** It is handed a whole ``stdout_text``, and four shipped
-    adapters echo our prompt into that stream, so on the committed goose
-    ``prompt-echo`` bytes this function answered ``Reason: Timed out`` about a
-    run that had *succeeded*. Passing the adapter routes the verdict through
-    :meth:`~utils.providers.base.LLMProvider.classify_failure`, which applies
-    that adapter's :meth:`~utils.providers.base.LLMProvider.vendor_text`
-    reduction first — and any caller that has an adapter in hand must pass it.
-
-    With no adapter the behaviour is exactly what it was: the module-level
-    :func:`classify_streams` against :class:`~utils.providers.base.LLMProvider`'s
-    own declared pattern sets. That path is deliberately kept rather than made
-    an error, because §7.2 depends on ``classify_streams`` staying callable with
-    no adapter (``validation.py`` is the other such caller) — but it can only
-    under-reduce, never mis-reduce, and it is not a path a production caller
-    should be on.
-    """
-    error_parts = [f"Exit code {returncode}"]
-
-    category = (
-        provider.classify_failure(stdout_text, stderr_text, returncode)
-        if provider is not None
-        else classify_streams(stdout_text, stderr_text, returncode)
-    )
-    if category == STATUS_CONTEXT_LENGTH_EXCEEDED:
-        error_parts.append(f"Reason: {context_length_message('')}")
-    else:
-        error_parts.append(_REASON_BY_CATEGORY.get(category, _REASON_UNKNOWN))
-
-    tail_parts = []
-    if stderr_text.strip():
-        stderr_tail = _get_tail_output(stderr_text, max_tail_lines)
-        tail_parts.append(f"--- stderr (last {max_tail_lines} lines) ---\n{stderr_tail}")
-    if stdout_text.strip():
-        stdout_tail = _get_tail_output(stdout_text, max_tail_lines)
-        tail_parts.append(f"--- stdout (last {max_tail_lines} lines) ---\n{stdout_tail}")
-    if tail_parts:
-        error_parts.append("\n" + "\n".join(tail_parts))
-    elif not stderr_text.strip() and not stdout_text.strip():
-        error_parts.append("(no output captured)")
-
-    return "\n".join(error_parts)
 
 
 def _try_pretty_print_json(text: str) -> str:
@@ -5076,25 +4976,27 @@ async def run_single_model(
             if output_file and result.get("success"):
                 print(f"[{display_name}] {describe_output_file(output_file, source)}")
 
-            # §7.1.a/§7.2: ONE classification per failed slot, read off the
-            # shared classifier, replacing the three raw-substring tests that
-            # used to live in this function and disagree with each other. The
-            # boundary- and context-awareness L2 introduced is preserved because
-            # it is the *same* implementation — a model that wrote "reviewed 429
-            # files" still costs one dispatch, not four full-timeout ones plus
-            # 35s of backoff.
-            # The haystack is the invocation's own ``error`` string and nothing
-            # else, exactly as L2 left it. That string is already what
-            # ``_format_failure_details`` built from *both* streams, so adding
-            # ``stderr_text`` beside it would not add information — it would
-            # duplicate the same prose and let the tail of one copy supply the
-            # error-context word for a bare token in the other, which is
-            # precisely the false positive ``matches_any``'s 48-character window
-            # exists to prevent.
-            failure_category = (
-                None if result.get("success")
-                else classify_streams(str(result.get("error", "")), "")
-            )
+            # ONE classification per failed slot. A non-zero exit or a deadline
+            # kill carries the adapter's own verdict on `details` (read by
+            # `invoke_with_provider` while it held the streams), and that is
+            # what the ladder obeys, as on the executor lane. A verdict of
+            # `None` (nothing recognised) is `runner_error`, one transport
+            # retry: the executor keeps its own rung-4/5 parse failure when the
+            # adapter names nothing. Any other failure (an exit-0 run whose
+            # answer did not parse, a launch failure) has no such key and falls
+            # back to the shared classifier over the error line alone, where an
+            # unrecognised line is never retried; adding `stderr_text` would
+            # duplicate the same prose and let one copy supply the error-context
+            # word for a bare token in the other. Both paths use the
+            # boundary-aware matcher, so a model that wrote "reviewed 429 files"
+            # is not a rate limit. See
+            # docs/development/delegation.md#read-and-analyze-executor.
+            if result.get("success"):
+                failure_category = None
+            elif FAILURE_CATEGORY_KEY in details:
+                failure_category = details[FAILURE_CATEGORY_KEY] or STATUS_RUNNER_ERROR
+            else:
+                failure_category = classify_streams(str(result.get("error", "")), "")
             status = (
                 STATUS_OK if result.get("success")
                 else _LADDER_STATUS_BY_CATEGORY.get(failure_category, failure_category)

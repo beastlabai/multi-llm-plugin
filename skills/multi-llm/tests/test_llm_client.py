@@ -627,6 +627,69 @@ class TestInvokeWithProvider:
         assert result["details"]["duration_seconds"] >= 0
 
 
+class TestTheAdapterVerdictRidesAFailedChild:
+    """``details["failure_category"]``: what the fan-out's ladder obeys.
+
+    Set on a non-zero exit from the adapter's ``classify_failure`` and on a
+    deadline kill as ``timeout``; absent on every other failure, which is how
+    ``run_single_model`` knows to fall back to the error line.
+    """
+
+    @pytest.fixture
+    def run(self):
+        def _run(stdout="", stderr="", returncode=1, side_effect=None):
+            completed = subprocess.CompletedProcess(
+                ["cursor-agent"], returncode, stdout=stdout, stderr=stderr
+            )
+            with patch("shutil.which", return_value="/usr/bin/cursor-agent"), \
+                    patch("utils.llm_client.subprocess.run",
+                          return_value=completed, side_effect=side_effect):
+                return invoke_with_provider(prompt="Test", model_spec="cursor-agent:auto")
+        return _run
+
+    def test_a_non_zero_exit_carries_the_category_and_names_it(self, run):
+        result = run(stderr="HTTP 429 Too Many Requests")
+        assert result["details"]["failure_category"] == "rate_limited"
+        assert result["error"].endswith(" [rate_limited]")
+
+    def test_an_unrecognised_failure_is_a_none_verdict_with_no_tag(self, run):
+        result = run(stderr="something went sideways")
+        assert "failure_category" in result["details"]
+        assert result["details"]["failure_category"] is None
+        assert not result["error"].endswith("]")
+
+    def test_an_adapter_that_raises_leaves_the_key_absent(self, run):
+        def boom(self, *args, **kwargs):
+            raise RuntimeError("adapter bug")
+
+        with patch.object(CursorAgentProvider, "classify_failure", boom):
+            result = run(stderr="HTTP 429 Too Many Requests")
+        assert result["success"] is False
+        assert "failure_category" not in result["details"]
+        assert "[rate_limited]" not in result["error"]
+
+    def test_only_the_category_leaves_never_the_stream(self, run):
+        secret = _synthesize("anthropic-api-key", "failure-category")
+        result = run(stderr=f"HTTP 401 Unauthorized: invalid api key {secret}")
+        assert result["details"]["failure_category"] == "auth_failed"
+        assert secret not in result["error"]
+
+    def test_a_deadline_kill_is_a_timeout_whatever_it_streamed(self, run):
+        exc = subprocess.TimeoutExpired(
+            cmd=["cursor-agent"], timeout=5,
+            output="HTTP 401 Unauthorized: not logged in", stderr="",
+        )
+        result = run(side_effect=exc)
+        assert result["error_code"] == ERROR_TIMEOUT
+        assert result["details"]["failure_category"] == "timeout"
+        assert not result["error"].endswith("]"), "the line already says timed out"
+
+    def test_an_exit_zero_failure_carries_no_category(self, run):
+        result = run(stdout="This is plain text without any JSON", returncode=0)
+        assert result["success"] is False
+        assert "failure_category" not in result["details"]
+
+
 class TestHardFailureStdoutExcerpt:
     """``details["stdout_excerpt"]`` on the two paths that used to drop stdout.
 

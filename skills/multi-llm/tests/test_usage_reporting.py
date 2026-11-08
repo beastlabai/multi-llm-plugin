@@ -415,7 +415,14 @@ class TestFanOutResultRecords:
         assert results[FULL_SPEC]["success"] is True
         assert results[FULL_SPEC]["usage"] == EXPECTED_USAGE
 
-    def test_the_record_of_a_slot_that_failed_carries_it_as_well(self, tmp_path):
+    def test_the_record_of_a_slot_that_failed_carries_it_as_well(
+        self, tmp_path, monkeypatch
+    ):
+        # One attempt: an unrecognised non-zero exit is otherwise retried once,
+        # and a retried slot's sum is section 2b's.
+        monkeypatch.setattr(
+            "utils.review_orchestrator_base.get_subagent_retries", lambda **_kw: 0
+        )
         results = _fan_out(
             tmp_path, [FULL_SPEC],
             streams={"usagefull-cli": (MULTI_TURN_STREAM, 3)},

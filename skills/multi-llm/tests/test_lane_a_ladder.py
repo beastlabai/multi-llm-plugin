@@ -20,6 +20,15 @@ lanes** — the four §14.2 M9 acceptance checks, each red before the change:
   — the constraint of §7.1.b: that ``wait_for`` is a backstop, and when it fires
   it cancels the task without killing the child (§8), so it may never be M9's
   enforcement point.
+
+It also pins what Lane A hands the ladder: on a non-zero exit or a deadline
+kill, the adapter's own verdict (``details["failure_category"]``, set by
+``invoke_with_provider``), with ``None`` taking one transport retry as on
+Lane B; every other failure falls back to classifying the error line. Every
+committed fixture row with a non-zero exit, and every row as a deadline kill,
+goes through both lanes' real dispatch loops and must be dispatched the same
+number of times, apart from the two verdicts the fan-out deliberately stops on
+(``_LANE_A_STOPS_LANE_B_RETRIES``).
 """
 
 from __future__ import annotations
@@ -32,12 +41,27 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import subagent_executor as executor  # noqa: E402
 from utils.retry_ladder import MIN_ATTEMPT_BUDGET_S  # noqa: E402
 from utils.subagent_tasks import build_inputs, make_task  # noqa: E402
+
+#: ``_run_lane_a``'s "no ``failure_category`` key at all": the error-line
+#: fallback an exit-0 failure takes. ``None`` is a verdict, so it cannot mark
+#: absence.
+_ABSENT = object()
+
+#: Error lines as ``invoke_with_provider`` composes them for a non-zero exit,
+#: category tag included.
+RATE_LIMIT_LINE = "cli exited with code 1: HTTP 429 Too Many Requests [rate_limited]"
+CONNECTION_REFUSED_LINE = (
+    "cli exited with code 1: Error: connection refused by api.openai.com "
+    "[connection_error]"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +76,10 @@ def _no_sleep(_delay):
 
 def _run_lane_a(
     *,
-    error: str,
+    error: str = "",
+    category=_ABSENT,
+    details=None,
+    result=None,
     model_spec: str = "cursor-agent:auto",
     timeout: float = 30,
     burn: float = 0.0,
@@ -60,6 +87,9 @@ def _run_lane_a(
 ):
     """Drive ``run_single_model`` against a provider that always fails.
 
+    ``category`` is the adapter verdict ``invoke_with_provider`` puts on
+    ``details["failure_category"]`` for a non-zero exit or a timeout; leaving it
+    out is the error-line fallback. ``result`` replaces the whole fake return.
     ``burn`` makes each fake dispatch spend real wall clock, which is the only
     way to observe the monotonic budget: an instantaneous fake leaves
     ``remaining()`` indistinguishable from a fresh ``timeout``.
@@ -67,16 +97,18 @@ def _run_lane_a(
     from utils import review_orchestrator_base as rob
 
     calls = []
+    fake_result = result
+    if fake_result is None:
+        fake_details = {"stderr": error, **(details or {})}
+        if category is not _ABSENT:
+            fake_details["failure_category"] = category
+        fake_result = {"success": False, "error": error, "details": fake_details}
 
     def _fake_invoke(**kwargs):
         calls.append(kwargs)
         if burn:
             time.sleep(burn)
-        return {
-            "success": False,
-            "error": error,
-            "details": {"stderr": error},
-        }
+        return fake_result
 
     with tempfile.TemporaryDirectory() as tmp:
         plan_path = str(Path(tmp) / "plan.md")
@@ -208,7 +240,8 @@ class TestLaneABudgetIsMonotonic:
 
     def test_the_second_attempt_is_spawned_with_what_is_left(self):
         result, calls = _run_lane_a(
-            error="Error: connection refused by api.openai.com",
+            error=CONNECTION_REFUSED_LINE,
+            category="connection_error",
             timeout=3,
             burn=0.55,
         )
@@ -356,7 +389,7 @@ class TestBudgetExhaustedRefusesTheSpawn:
 
         monkeypatch.setattr(rob, "RetryLadder", Ladder)
         result, calls = _run_lane_a(
-            error="Error: connection refused by api.openai.com", timeout=300,
+            error=CONNECTION_REFUSED_LINE, category="connection_error", timeout=300,
         )
         assert len(calls) == 1
         assert result["success"] is False
@@ -422,7 +455,8 @@ class TestRule6bNoIdenticalRateLimitRedispatch:
         the same verdict — ≤ 3 harness backoffs would turn 4 requests into 20.
         """
         result, calls = _run_lane_a(
-            error="HTTP 429 Too Many Requests",
+            error=RATE_LIMIT_LINE,
+            category="rate_limited",
             model_spec="claude-code:sonnet",
             timeout=1800,  # comfortably above the declared 1200 s wall
         )
@@ -442,7 +476,8 @@ class TestRule6bNoIdenticalRateLimitRedispatch:
         had already run for four minutes.
         """
         result, calls = _run_lane_a(
-            error="HTTP 429 Too Many Requests",
+            error=RATE_LIMIT_LINE,
+            category="rate_limited",
             model_spec="muse:muse-spark-1.2",
             timeout=1800,  # above the declared 985 s wall
         )
@@ -463,7 +498,8 @@ class TestRule6bNoIdenticalRateLimitRedispatch:
         turning 10 requests into 40.
         """
         result, calls = _run_lane_a(
-            error="HTTP 429 Too Many Requests",
+            error=RATE_LIMIT_LINE,
+            category="rate_limited",
             model_spec="gemini:gemini-2.5-flash",
             timeout=1800,  # comfortably above the declared 243 s wall
         )
@@ -481,7 +517,8 @@ class TestRule6bNoIdenticalRateLimitRedispatch:
         requests into 32.
         """
         result, calls = _run_lane_a(
-            error="HTTP 429 Too Many Requests",
+            error=RATE_LIMIT_LINE,
+            category="rate_limited",
             model_spec="goose:openrouter/z-ai/glm-5.2",
             timeout=30,  # no declared wall, so a short slot is still admitted
         )
@@ -497,7 +534,8 @@ class TestRule6bNoIdenticalRateLimitRedispatch:
         backoffs would have turned 4 requests into 16.
         """
         result, calls = _run_lane_a(
-            error="HTTP 429 Too Many Requests",
+            error=RATE_LIMIT_LINE,
+            category="rate_limited",
             model_spec="pi:openrouter/deepseek/deepseek-v4.1-flash",
             timeout=30,  # no declared wall, so a short slot is still admitted
         )
@@ -512,7 +550,8 @@ class TestRule6bNoIdenticalRateLimitRedispatch:
         This is the control that keeps rule 6(b) from disabling the real path.
         """
         _, calls = _run_lane_a(
-            error="HTTP 429 Too Many Requests",
+            error=RATE_LIMIT_LINE,
+            category="rate_limited",
             model_spec="cursor-agent:auto",
             timeout=30,
         )
@@ -548,8 +587,8 @@ class TestForever429EndsInsideResolvedTimeout:
             time.sleep(kwargs["timeout"] * 0.4)
             return {
                 "success": False,
-                "error": "HTTP 429 Too Many Requests",
-                "details": {"stderr": "HTTP 429 Too Many Requests"},
+                "error": RATE_LIMIT_LINE,
+                "details": {"stderr": "", "failure_category": "rate_limited"},
             }
 
         fired = {"outer": False}
@@ -606,3 +645,388 @@ class TestForever429EndsInsideResolvedTimeout:
         assert len(calls) <= 5, "§7.5 rule 2's ceiling across the two counters"
         # …and the fan-out as a whole stayed inside base_timeout × 2 + stagger.
         assert elapsed <= resolved_timeout * 2 + 2.0
+
+
+# ---------------------------------------------------------------------------
+# 5 — what the ladder is handed: the adapter's verdict, else the error line
+# ---------------------------------------------------------------------------
+
+class TestTheAdapterVerdictDecides:
+    """A non-zero exit or a timeout carries ``details["failure_category"]``.
+
+    ``run_single_model`` obeys it and does not re-read the error line, which
+    is composed for a human and can say less (a bare ``exited with code 1``)
+    or something else (``API Error`` on an auth failure) than the streams did.
+    """
+
+    def test_the_category_wins_over_a_rate_limit_shaped_line(self):
+        _, calls = _run_lane_a(
+            error="cli exited with code 1: HTTP 429 Too Many Requests [auth_failed]",
+            category="auth_failed",
+        )
+        assert len(calls) == 1, "auth_failed is rung 1: never retried"
+
+    def test_a_bare_exit_line_still_gets_the_transport_retry_it_was_owed(self):
+        _, calls = _run_lane_a(
+            error="cline exited with code 1 [runner_error]", category="runner_error",
+        )
+        assert len(calls) == 2, "one transport retry (driver.subagent_retries=1)"
+
+    def test_none_is_a_verdict_not_a_missing_key(self):
+        """The adapter recognised nothing: one transport retry, as the executor
+        gives a run with no usable result, and the rate-limit-shaped line is
+        not read (that would be four dispatches)."""
+        _, calls = _run_lane_a(error="HTTP 429 Too Many Requests", category=None)
+        assert len(calls) == 2, "rung 4: one transport retry (driver.subagent_retries=1)"
+
+    def test_spawn_failed_and_permission_denied_are_never_retried(self):
+        """The two verdicts the executor retries and the fan-out does not: an
+        install or argv refusal, and a 403 or a denied tool, fail the same way
+        on every attempt."""
+        for category in ("spawn_failed", "permission_denied"):
+            _, calls = _run_lane_a(
+                error=f"cli exited with code 1 [{category}]", category=category,
+            )
+            assert len(calls) == 1, category
+
+    def test_a_timeout_category_is_rung_2(self):
+        _, calls = _run_lane_a(
+            error="cli timed out after 30s", category="timeout",
+        )
+        assert len(calls) == 2
+
+    def test_a_jail_denial_still_wins(self):
+        """F1 item 6: non-retryable and never moved to another rung, whether
+        the adapter named a retryable category or recognised nothing."""
+        for category in ("rate_limited", None):
+            _, calls = _run_lane_a(
+                error="codex exited with code 1: [JAIL_DENIED] write outside the jail",
+                category=category,
+                details={"failure_reason": "jail-denied"},
+            )
+            assert len(calls) == 1, category
+
+    def test_a_context_overflow_category_names_the_remedy(self):
+        result, calls = _run_lane_a(
+            error="cli exited with code 1 [context_length_exceeded]",
+            category="context_length_exceeded",
+        )
+        assert len(calls) == 1
+        assert "context" in str(result["error"]).lower()
+        assert "[context_length_exceeded]" not in str(result["error"])
+
+    def test_a_claude_code_rate_limit_category_is_not_re_dispatched(self):
+        """Rule 6(b) holds on the category path too (``retries_rate_limit``)."""
+        _, calls = _run_lane_a(
+            error="claude-code exited with code 1 [rate_limited]",
+            category="rate_limited",
+            model_spec="claude-code:sonnet",
+            timeout=1800,
+        )
+        assert len(calls) == 1
+
+
+class TestTheErrorLineFallback:
+    """No ``failure_category`` key (an exit-0 failure, a launch failure): the
+    shared classifier reads the error line alone, as before."""
+
+    def test_a_rate_limit_line_backs_off(self):
+        _, calls = _run_lane_a(error="HTTP 429 Too Many Requests")
+        assert len(calls) == 4, "one initial dispatch plus MAX_RATE_LIMIT_BACKOFFS"
+
+    def test_rule_6b_holds_on_the_fallback_too(self):
+        _, calls = _run_lane_a(
+            error="HTTP 429 Too Many Requests",
+            model_spec="claude-code:sonnet",
+            timeout=1800,
+        )
+        assert len(calls) == 1
+
+    def test_a_connection_line_gets_one_transport_retry(self):
+        _, calls = _run_lane_a(error="Error: connection refused by api.openai.com")
+        assert len(calls) == 2
+
+    def test_an_unrecognised_line_is_never_retried(self):
+        _, calls = _run_lane_a(error="JSON parsing failed from both file and stdout")
+        assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# 6 — both lanes' real dispatch loops make the same call on every failing child
+# ---------------------------------------------------------------------------
+
+_FIXTURES = Path(__file__).parent / "fixtures"
+#: Far above every adapter's declared ``max_wall_s``, so rule 4 admits every
+#: slot and the ladder decides on the status alone.
+_ROW_SLOT_S = 100000
+_ROW_RETRIES = 1
+
+
+def _manifest_rows():
+    import yaml
+
+    rows = []
+    for manifest_path in sorted(_FIXTURES.glob("*/manifest.yaml")):
+        manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        for name, row in (manifest.get("rows") or {}).items():
+            if "not_applicable" in row:
+                continue
+            rows.append((manifest["provider"], name, row))
+    return rows
+
+
+_ROWS = _manifest_rows()
+
+
+def _assert_the_tag_only_names_itself(untagged, category):
+    """A string reader of the tagged line (``classify_streams`` over the error
+    line, the fallback's rule) reaches the untagged line's verdict or the
+    adapter's own category, never a third one."""
+    from utils.providers.base import classify_streams
+
+    tagged = classify_streams(f"{untagged} [{category}]", "")
+    assert tagged in (classify_streams(untagged, ""), category), (
+        f"the [{category}] tag moved {untagged!r} to {tagged!r}"
+    )
+
+
+def _category_vocabulary():
+    from utils import retry_ladder
+    from utils.providers import base
+
+    names = {
+        value for name, value in vars(base).items()
+        if name.startswith("CATEGORY_") and isinstance(value, str)
+    }
+    names |= {
+        retry_ladder.STATUS_AUTH_FAILED, retry_ladder.STATUS_BUDGET_EXHAUSTED,
+        retry_ladder.STATUS_CONTEXT_LENGTH_EXCEEDED, retry_ladder.STATUS_RATE_LIMITED,
+        retry_ladder.STATUS_RUNNER_ERROR, retry_ladder.STATUS_SPAWN_FAILED,
+        retry_ladder.STATUS_TIMEOUT,
+    }
+    return sorted(names)
+
+
+@pytest.mark.parametrize("category", _category_vocabulary())
+@pytest.mark.parametrize("untagged", [
+    "cli exited with code 1",
+    "cli exited with code 1: Error: connection refused by the API host",
+    "cli exited with code 1: HTTP 401 Unauthorized: invalid api key",
+    "cli exited with code 2: the run took too long and timed out",
+    "cli exited with code 1: the module under review spans 429 lines",
+])
+def test_the_category_tag_only_ever_names_itself(untagged, category):
+    _assert_the_tag_only_names_itself(untagged, category)
+
+
+_NONZERO_ROWS = [r for r in _ROWS if r[2].get("exit_code", 0) != 0]
+
+#: The two adapter verdicts the lanes answer differently on purpose. The
+#: executor's ``_classify_failed_run`` forwards neither, so it keeps its parse
+#: failure's rung-4/5 status and retries once; the fan-out stops, because an
+#: install or argv refusal, and a 403 or a denied tool, fail the same way on
+#: every attempt. Pinned both ways, so a change on either lane shows up here.
+_LANE_A_STOPS_LANE_B_RETRIES = frozenset({"spawn_failed", "permission_denied"})
+
+
+def _row_streams(provider, row):
+    def read(key):
+        name = row.get(key)
+        if not name:
+            return ""
+        return (_FIXTURES / provider / name).read_bytes().decode("utf-8", errors="replace")
+
+    return read("stdout"), read("stderr")
+
+
+def _replay(monkeypatch, tmp_path, provider_name, stdout, stderr, exit_code, *, kill=False):
+    """The real ``invoke_with_file_output`` over a captured row, spawn stubbed."""
+    import contextlib
+    import subprocess
+
+    from utils import llm_client
+    from utils.provider_registry import get_provider
+
+    adapter = get_provider(provider_name)
+
+    def fake_run(cmd, **kwargs):
+        if kill:
+            raise subprocess.TimeoutExpired(cmd, 30, output=stdout, stderr=stderr)
+        return subprocess.CompletedProcess(cmd, exit_code, stdout, stderr)
+
+    @contextlib.contextmanager
+    def no_dispatch_context(*args, **kwargs):
+        class _Dispatch:
+            refusal = None
+        yield _Dispatch()
+
+    monkeypatch.setattr(llm_client, "_run_provider_cli", fake_run)
+    monkeypatch.setattr(llm_client, "_resolve_executable", lambda name: ([name], False))
+    monkeypatch.setattr(llm_client, "provider_dispatch_context", no_dispatch_context)
+    monkeypatch.setattr(adapter, "is_available", lambda: True)
+    monkeypatch.setattr(
+        adapter, "build_command_for_transport", lambda *a, **k: (["/bin/true"], None)
+    )
+    monkeypatch.setattr(adapter, "resolve_env", lambda *a, **k: {})
+    return adapter, llm_client.invoke_with_file_output(
+        prompt_template="hi {output_json_path}",
+        model_spec=f"{provider_name}:m",
+        prompt_context={},
+        output_dir=tmp_path,
+        phase="review-plan",
+        timeout=30,
+        prefer_arrays=True,
+        cwd=str(tmp_path),
+    )
+
+
+def _lane_b_dispatches(monkeypatch, phase_dir, provider_name, **capture):
+    """The executor's real call: ``dispatch_task`` on a read task, every attempt
+    answered by one ``_Capture`` built from ``capture`` (spawn stubbed). Returns
+    how many attempts it spawned.
+
+    Most adapters declare no ``agent-readonly`` profile and the executor refuses
+    them before any spawn, so the profile gate is lifted here: what is compared
+    is how the executor classifies and retries a capture once it has one, and
+    that path reads the profile only for a write task.
+    """
+    from utils.provider_registry import get_provider
+
+    spawned = []
+
+    def fake_spawn(**kwargs):
+        spawned.append(kwargs)
+        return executor._Capture(argv=["/bin/true"], **capture)
+
+    monkeypatch.setattr(executor, "_spawn", fake_spawn)
+    monkeypatch.setattr(get_provider(provider_name), "supports_profile", lambda _p: True)
+    phase_dir = Path(phase_dir)
+    phase_dir.mkdir(parents=True, exist_ok=True)
+    executor.dispatch_task(
+        _validation_batch(phase_dir),
+        phase_dir=str(phase_dir),
+        runner=f"{provider_name}:m",
+        timeout=_ROW_SLOT_S,
+        retries=_ROW_RETRIES,
+        sleep=lambda _s: None,
+    )
+    return len(spawned)
+
+
+def _lane_a_dispatches(monkeypatch, result, provider_name):
+    """``run_single_model`` handed this result on every dispatch: how many?"""
+    from utils import review_orchestrator_base as rob
+
+    monkeypatch.setattr(rob, "get_subagent_retries", lambda *a, **k: _ROW_RETRIES)
+    monkeypatch.setattr(
+        rob, "sandbox_refusal",
+        lambda *a, **k: rob.SandboxVerdict(rob.SANDBOX_DISPATCH, None),
+    )
+    _, calls = _run_lane_a(
+        result=result, model_spec=f"{provider_name}:m", timeout=_ROW_SLOT_S,
+    )
+    return len(calls)
+
+
+def _assert_lanes_agree(verdict, lane_a, lane_b):
+    if verdict in _LANE_A_STOPS_LANE_B_RETRIES:
+        assert (lane_a, lane_b) == (1, 1 + _ROW_RETRIES), (
+            f"{verdict}: the fan-out stops, the executor retries once"
+        )
+    else:
+        assert lane_a == lane_b, (
+            f"verdict {verdict!r}: the fan-out dispatched {lane_a} times, "
+            f"the executor {lane_b}"
+        )
+
+
+@pytest.mark.parametrize("verdict", [None, *_category_vocabulary()])
+def test_every_verdict_gets_the_executors_call(monkeypatch, tmp_path, verdict):
+    """Every verdict an adapter can give a non-zero exit, through both lanes'
+    dispatch loops. opencode declares the read profile and no
+    ``internal_retries`` envelope, so a rate limit takes the full backoff on
+    both lanes."""
+    from utils.provider_registry import get_provider
+
+    monkeypatch.setattr(
+        get_provider("opencode"), "classify_failure", lambda *a, **k: verdict
+    )
+    lane_b = _lane_b_dispatches(
+        monkeypatch, tmp_path, "opencode", stdout="", stderr="boom", exit_code=1,
+    )
+    tag = f" [{verdict}]" if verdict else ""
+    lane_a = _lane_a_dispatches(monkeypatch, {
+        "success": False,
+        "error": f"opencode exited with code 1: boom{tag}",
+        "details": {"stderr": "boom", "failure_category": verdict},
+    }, "opencode")
+    _assert_lanes_agree(verdict, lane_a, lane_b)
+
+
+def test_an_empty_codex_exit_1_is_retried_on_both_lanes(monkeypatch, tmp_path):
+    """codex recognises nothing in an exit-1 run with empty streams; both lanes
+    send the slot once more."""
+    _, result = _replay(monkeypatch, tmp_path, "codex", "", "", 1)
+    assert result["details"]["failure_category"] is None
+    lane_a = _lane_a_dispatches(monkeypatch, result, "codex")
+    lane_b = _lane_b_dispatches(
+        monkeypatch, tmp_path / "lane-b", "codex", stdout="", stderr="", exit_code=1,
+    )
+    assert lane_a == lane_b == 1 + _ROW_RETRIES
+
+
+@pytest.mark.parametrize(
+    "provider_name,row_name,row",
+    _NONZERO_ROWS,
+    ids=[f"{p}/{n}" for p, n, _ in _NONZERO_ROWS],
+)
+def test_a_non_zero_exit_row_gets_the_executors_call(
+    monkeypatch, tmp_path, provider_name, row_name, row
+):
+    """The same captured child through both lanes' real paths: Lane A is
+    ``invoke_with_file_output``'s real result handed to ``run_single_model``,
+    Lane B is ``dispatch_task`` over the capture."""
+    stdout, stderr = _row_streams(provider_name, row)
+    exit_code = row["exit_code"]
+    adapter, result = _replay(
+        monkeypatch, tmp_path, provider_name, stdout, stderr, exit_code
+    )
+    assert result["success"] is False
+    verdict = adapter.classify_failure(stdout, stderr, exit_code)
+    assert result["details"]["failure_category"] == verdict
+    if verdict:
+        line = str(result["error"])
+        assert line.endswith(f" [{verdict}]"), "the error line names the category"
+        _assert_the_tag_only_names_itself(line[: -len(f" [{verdict}]")], verdict)
+
+    lane_a = _lane_a_dispatches(monkeypatch, result, provider_name)
+    lane_b = _lane_b_dispatches(
+        monkeypatch, tmp_path / "lane-b", provider_name,
+        stdout=stdout, stderr=stderr, exit_code=exit_code,
+    )
+    _assert_lanes_agree(verdict, lane_a, lane_b)
+
+
+@pytest.mark.parametrize(
+    "provider_name,row_name,row",
+    _ROWS,
+    ids=[f"{p}/{n}" for p, n, _ in _ROWS],
+)
+def test_a_deadline_kill_is_a_timeout_whatever_the_row_streamed(
+    monkeypatch, tmp_path, provider_name, row_name, row
+):
+    """Lane B decides a killed run before it reads a byte (``_classify_pre_parse``),
+    so a login notice or a 429 in the partial streams never moves it off rung 2.
+    Lane A mirrors that."""
+    from utils.retry_ladder import STATUS_TIMEOUT
+
+    stdout, stderr = _row_streams(provider_name, row)
+    _, result = _replay(
+        monkeypatch, tmp_path, provider_name, stdout, stderr, None, kill=True
+    )
+    assert result["details"]["failure_category"] == STATUS_TIMEOUT
+    lane_b = _lane_b_dispatches(
+        monkeypatch, tmp_path / "lane-b", provider_name,
+        stdout=stdout, stderr=stderr, timed_out=True,
+    )
+    assert _lane_a_dispatches(monkeypatch, result, provider_name) == lane_b

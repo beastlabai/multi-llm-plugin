@@ -541,14 +541,16 @@ def stderr_diagnosis(stderr: str) -> str:
 def _named_for_the_ladder(token: str, sentence: str) -> str:
     """``sentence`` with ``token`` in front of it, unless it already says it.
 
-    **Lane A classifies the error string, not the streams.** Its file-output
-    lane reaches for ``classify_streams(str(result.get("error", "")), "")``
+    **On an exit-0 failure Lane A classifies the error string, not the
+    streams.** A non-zero exit or a timeout carries
+    :meth:`OmpProvider.classify_failure`'s own verdict to its ladder
+    (``details["failure_category"]``); an exit-0 failure does not, and there
+    the file-output lane reaches for
+    ``classify_streams(str(result.get("error", "")), "")``
     (``utils/review_orchestrator_base.py``) — that composed sentence is the only
-    thing it is handed — and never :meth:`OmpProvider.classify_failure`, whose
-    callers are ``_format_failure_details`` and the Lane B executor. So a
-    structural verdict reaches Lane A's ladder only insofar as this sentence
-    carries a word the shared marker tables recognise, and three of the four
-    structural shapes carried none:
+    thing it is handed. So on that path a structural verdict reaches Lane A's
+    ladder only insofar as this sentence carries a word the shared marker
+    tables recognise, and three of the four structural shapes carried none:
 
     * the ``toolUse``-final deadline. ``Command aborted`` is deliberately not a
       marker — a tool error the model *recovered* from contains it — so "run
@@ -615,10 +617,10 @@ def terminal_verdict(stdout: str, stderr: str) -> Optional[str]:
     what ``_DESCRIBE_FAILURE_CHANNELS``' ``STDOUT_ELSE_STDERR`` contract forbids.
 
     Three of these sentences go out with the shared tables' own word for their
-    shape in front of them (:func:`_named_for_the_ladder`), because Lane A
-    classifies this *string* and not the streams: an unnamed verdict reaches its
-    ladder as ``None`` — "never retried" — however confidently
-    :meth:`OmpProvider.classify_failure` read the same bytes.
+    shape in front of them (:func:`_named_for_the_ladder`), because on an exit-0
+    failure Lane A classifies this *string* and not the streams: an unnamed
+    verdict reaches its ladder as ``None`` — "never retried" — however
+    confidently :meth:`OmpProvider.classify_failure` read the same bytes.
     """
     events, _junk = _events(stdout)
     if not events:
@@ -1350,13 +1352,13 @@ class OmpProvider(LLMProvider):
         ``; stderr: …`` to it, where both halves are wanted and where
         ``error_contains`` grades them.
 
-        **Diagnostics first — but the words are load-bearing.** Nothing here
-        chooses a category; Lane A, however, classifies the string this sentence
-        is composed into (``omp exited with code 1: <this>``) rather than the
-        streams, so :func:`_named_for_the_ladder` puts the shared tables' own
-        word in front of the denial, the deadline and the 5xx ``error``. The
-        verdict is still :meth:`classify_failure`'s; this only keeps it from
-        being lost in transit.
+        **Diagnostics, never classification.** Nothing here chooses a category:
+        on this exit-1 path Lane A's ladder takes :meth:`classify_failure`'s
+        verdict from ``details["failure_category"]``, and the error line
+        (``omp exited with code 1: <this> [<category>]``) is for the reader.
+        :func:`_named_for_the_ladder` still puts the shared tables' own word in
+        front of the denial, the deadline and the 5xx ``error``, which the
+        exit-0 path, classified off its error string, depends on.
         """
         if _never_started(stdout):
             return stderr_diagnosis(stderr) or None
@@ -1396,8 +1398,7 @@ class OmpProvider(LLMProvider):
 
         Tool results and earlier assistant turns are **retained for diagnostics,
         not classification**: ``_attach_stdout_excerpt`` puts the raw stdout on
-        ``details.stdout_excerpt``, ``_save_log`` writes it in full, and
-        ``_format_failure_details``' stdout tail is cut from the raw stream. This
+        ``details.stdout_excerpt`` and ``_save_log`` writes it in full. This
         hook is applied inside :meth:`classify_failure` (to classify) and, for
         the failure reason's quote only, by the executor's
         ``_classify_failed_run`` (see the base docstring); neither writes the
@@ -1463,7 +1464,8 @@ class OmpProvider(LLMProvider):
         nothing.
 
         **Which ladder reads this method, and which reads the sentence.** The
-        Lane B executor and ``_format_failure_details`` call it. Lane A's
+        Lane B executor calls it, and so does ``invoke_with_provider`` on a
+        non-zero exit, for Lane A's ladder. On an exit-0 failure Lane A's
         file-output lane does not: it classifies ``str(result["error"])``
         through ``classify_streams``, so what reaches that ladder is whatever
         :func:`terminal_verdict` wrote. :func:`_named_for_the_ladder` is what

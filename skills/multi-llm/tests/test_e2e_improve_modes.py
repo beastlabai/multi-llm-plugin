@@ -1006,7 +1006,9 @@ class TestAReviewThatFails:
         assert world.state()["improve_plan"]["failed_phase"] == "review-plan"
         assert not (world.out / "apply-suggestions").exists()
         assert world.plan_bytes == world.original_plan
-        assert [classify(call) for call in world.calls()] == ["review"]
+        # The mock's bare `ERROR: Simulated failure`, exit 1, is a failure no
+        # adapter recognises: one transport retry of the review, nothing else.
+        assert [classify(call) for call in world.calls()] == ["review", "review"]
 
         again = world.composite("improve-plan")
 

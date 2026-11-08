@@ -322,12 +322,14 @@ class TestOmpStreamReading:
     def test_the_structural_verdict_survives_lane_as_string_classification(
         self, provider, row, exit_code
     ):
-        r"""Lane A classifies the error STRING and never calls `classify_failure`.
+        r"""On an exit-0 failure Lane A classifies the error STRING.
 
-        `run_single_model`'s file-output lane reaches for
-        `classify_streams(str(result["error"]), "")`; `_format_failure_details`
-        and the Lane B executor are the only callers of the structural read. So
-        a verdict the sentence does not name arrives at that ladder as `None`,
+        There `run_single_model`'s file-output lane reaches for
+        `classify_streams(str(result["error"]), "")`; a non-zero exit carries
+        the structural read itself (`details["failure_category"]`), and the
+        exit-1 sentence is held to the same words regardless, as the reader's
+        account of the verdict. So a verdict the sentence does not name arrives
+        at the exit-0 ladder as `None`,
         and `RetryLadder.record`'s last branch never retries it. `Command
         aborted` is deliberately not a marker, the denial's own text is not one,
         and the 500 body's `(type=server_error)` matches no

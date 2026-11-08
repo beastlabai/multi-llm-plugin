@@ -2676,12 +2676,13 @@ CONNECTION_ERROR_MARKERS = _markers(
     # Measured on those same bytes, what moves downstream is the `Reason:` line
     # — "the runner reported a failure" and "Unknown (see tail output below)"
     # both become "Connection/network error" — and, for omp alone, Lane A's
-    # retry decision. Lane A classifies its own `"<cli> exited with code N:
-    # <describe_failure>"` string rather than the streams: omp's
-    # `describe_failure` quotes the sentence into it, so that slot goes from
+    # retry decision. Lane A then classified its own `"<cli> exited with code
+    # N: <describe_failure>"` string rather than the streams: omp's
+    # `describe_failure` quotes the sentence into it, so that slot went from
     # `None` ("never retried") to one transport retry, while cline declares no
-    # `describe_failure` at all, so its Lane A string stays the bare exit line
-    # and its retry behaviour is byte-for-byte what it was. Lane B is unmoved
+    # `describe_failure` at all, so its Lane A string stayed the bare exit line.
+    # A non-zero exit now carries the adapter's own verdict to Lane A's ladder
+    # (docs/development/delegation.md#read-and-analyze-executor). Lane B is unmoved
     # for both: its re-classification hook only upgrades a slot to auth, rate
     # limit, invalid model or sandbox, and `connection_error` is none of those.
     r"connection (?:was )?(?:refused|reset|closed|aborted|error|failed)",
@@ -2769,7 +2770,7 @@ def classify_streams(
 
     ``auth_patterns``/``rate_limit_patterns`` default to :class:`LLMProvider`'s
     declared sets, which is what lets a caller with no adapter in hand — Lane A's
-    ``_format_failure_details``, ``validation.py`` — get the same verdict as one
+    error-line fallback, ``validation.py`` — get the same verdict as one
     with an adapter. Both are matched through :func:`matches_any`, never as raw
     substrings.
     """
@@ -2900,8 +2901,8 @@ def match_streams(
     that may not contain it (the b38de8bb run quoted a stderr line with no
     rate limit in it).
 
-    **Nothing classifies through this.** Not ``validation.py``, not
-    ``_format_failure_details``, not any adapter's ``classify_failure`` — the
+    **Nothing classifies through this.** Not ``validation.py``, not Lane A's
+    error-line fallback, not any adapter's ``classify_failure`` — the
     verdict is always :func:`classify_streams`' (through
     :meth:`LLMProvider.classify_failure`), and this is re-run afterwards for
     the quote alone. Like :func:`classify_streams` it is adapter-free: it never
@@ -3934,8 +3935,8 @@ class LLMProvider(ABC):
         the verdict. Nothing else applies it. The module-level
         :func:`classify_streams` (and its quote-only twin
         :func:`match_streams`) deliberately does **not** grow it:
-        ``validation.py`` and ``_format_failure_details`` call that function with
-        no adapter in hand, and §7.2 depends on it staying the one rule both
+        ``validation.py`` and Lane A's error-line fallback call that function
+        with no adapter in hand, and §7.2 depends on it staying the one rule both
         lanes share. :meth:`classify_auth_probe`'s haystack — the second place
         this module builds ``f"{stdout}\\n{stderr}".lower()``, over an
         ``auth_check`` run — is out of scope too: an auth probe never carries

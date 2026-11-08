@@ -442,7 +442,34 @@ class TestLaneARateLimitIsBoundaryAware:
         Returns the number of times the invocation leg was entered — 1 means
         the slot was dispatched once and the error was *not* read as a rate
         limit; 4 is the defect (one initial dispatch plus ``retry_count < 3``).
+        The failure carries no ``failure_category``, so this is the error-line
+        fallback an exit-0 failure takes.
         """
+        return self._dispatches_result({
+            "success": False,
+            "error": error_text,
+            "details": {"stderr": error_text},
+        })
+
+    def _dispatches_from_streams(self, stdout, stderr="", exit_code=1):
+        """``_dispatches`` for a non-zero exit, through the real invocation.
+
+        ``invoke_with_provider`` runs against a stubbed cursor-agent child that
+        wrote these streams, so the ladder sees the adapter's own
+        ``failure_category`` rather than a hand-written error line.
+        """
+        completed = subprocess.CompletedProcess(
+            ["cursor-agent"], exit_code, stdout=stdout, stderr=stderr
+        )
+        with patch("shutil.which", return_value="/usr/bin/cursor-agent"), \
+                patch("utils.llm_client.subprocess.run", return_value=completed):
+            result = invoke_with_provider(
+                prompt="Test", model_spec="cursor-agent:auto", timeout=30
+            )
+        assert "failure_category" in result["details"]
+        return self._dispatches_result(result)
+
+    def _dispatches_result(self, fake_result):
         import asyncio
 
         from utils import review_orchestrator_base as rob
@@ -451,11 +478,7 @@ class TestLaneARateLimitIsBoundaryAware:
 
         def _fake_invoke(**kwargs):
             calls.append(kwargs)
-            return {
-                "success": False,
-                "error": error_text,
-                "details": {"stderr": error_text},
-            }
+            return fake_result
 
         with tempfile.TemporaryDirectory() as tmp:
             plan_path = str(Path(tmp) / "plan.md")
@@ -511,15 +534,20 @@ class TestLaneARateLimitIsBoundaryAware:
         """
         assert self._dispatches("HTTP 429 Too Many Requests") == 4
 
-    def test_reason_line_is_boundary_aware_too(self):
-        """``format_failure_details`` at :442 — the sentence a user acts on."""
-        from utils.review_orchestrator_base import _format_failure_details
+    def test_prose_on_a_failed_childs_stdout_is_not_a_rate_limit(self):
+        """The adapter's verdict reads the whole stdout of a non-zero exit, so
+        the same boundary rule has to hold there. It recognises nothing, and an
+        unrecognised non-zero exit takes rung 4's one transport retry, as on
+        the executor: two dispatches, never the backoff's four."""
+        assert self._dispatches_from_streams(self.PROSE_WITH_DIGITS) == 2
+        assert self._dispatches_from_streams(
+            "completed after 14290 output tokens", exit_code=2
+        ) == 2
 
-        prose = _format_failure_details(1, self.PROSE_WITH_DIGITS, "")
-        assert "Rate limited" not in prose
-
-        real = _format_failure_details(1, "", "HTTP status 429 returned")
-        assert "Reason: Rate limited" in real
+    def test_a_real_429_on_a_failed_childs_stream_still_backs_off(self):
+        assert self._dispatches_from_streams(
+            "", stderr="HTTP 429 Too Many Requests"
+        ) == 4
 
 
 def _no_sleep(_delay):

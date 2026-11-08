@@ -41,6 +41,7 @@ from .providers.base import (
     version_tuple,
 )
 from .providers.result_envelope import is_clean_envelope
+from .retry_ladder import STATUS_TIMEOUT
 
 
 # Error codes for consistent error reporting
@@ -1013,6 +1014,34 @@ def _attach_usage(
         return
     if isinstance(usage, dict) and usage:
         details["usage"] = usage
+
+
+#: ``details`` key for the adapter's own verdict on a failed child: the
+#: ``classify_failure`` category of a non-zero exit, or ``timeout`` for a
+#: deadline kill. ``review_orchestrator_base.run_single_model`` hands it to the
+#: retry ladder instead of re-classifying the error line; see
+#: docs/development/delegation.md#read-and-analyze-executor.
+FAILURE_CATEGORY_KEY = "failure_category"
+
+
+def _adapter_failure_category(
+    provider: Any, stdout: Optional[str], stderr: Optional[str], returncode: int
+) -> Tuple[bool, Optional[str]]:
+    """``provider.classify_failure`` on a non-zero exit, as ``(classified, category)``.
+
+    ``None`` from a working adapter is a verdict ("nothing recognized"), so it
+    comes back as ``(True, None)``. Best-effort like ``describe_failure``: an
+    adapter that raises, or answers anything but a category name or ``None``,
+    gives ``(False, None)`` and the caller leaves :data:`FAILURE_CATEGORY_KEY`
+    absent. Only the category leaves; the streams it was read from do not.
+    """
+    try:
+        category = provider.classify_failure(stdout or "", stderr or "", returncode)
+    except Exception:  # noqa: BLE001 - classification must not break a failure path
+        return False, None
+    if category is not None and not isinstance(category, str):
+        return False, None
+    return True, category
 
 
 #: What a run cost, as one clause (``$25.05 est., 137,348 output tokens``).
@@ -2315,6 +2344,12 @@ def invoke_with_provider(
             )
             if unavailable is not None:
                 error_message = f"{error_message} [{unavailable.value}]"
+            # The adapter's own verdict, read while the streams are held. The
+            # fan-out's retry ladder takes it from `details`, and the error line
+            # names it so `.status.json` says why the slot stopped or retried.
+            classified, failure_category = _adapter_failure_category(
+                provider, result.stdout, result.stderr, result.returncode
+            )
 
             # F1 item 6 (2026-09-30): a jailed child that died on a
             # codex-internal EACCES the jail caused is a jail failure, never a
@@ -2333,6 +2368,10 @@ def invoke_with_provider(
                 )
             elif jail_note:
                 error_message = f"{error_message}{jail_note}"
+            # A jail denial replaces the line and decides the slot on its own,
+            # so it carries no category tag.
+            if failure_category and not jail_error:
+                error_message = f"{error_message} [{failure_category}]"
 
             # Plan §4.2: the read-only audit sees the FULL stream, here, before
             # the excerpt below bounds it — a failed attempt of a bypassed slot
@@ -2385,6 +2424,8 @@ def invoke_with_provider(
             # different judgement from the same evidence.
             if audit is not None:
                 details[_READONLY_AUDIT_KEY] = audit
+            if classified:
+                details[FAILURE_CATEGORY_KEY] = failure_category
             # The child ran, so the D6 provenance rides a failure too.
             _attach_sandbox_word(details, sandbox_fallback)
             details.update(jail_details)
@@ -2728,6 +2769,9 @@ def invoke_with_provider(
         # `details.get("stdout_excerpt")` the same way.
         if audit is not None:
             details[_READONLY_AUDIT_KEY] = audit
+        # A deadline kill is a timeout whatever the partial streams say, as on
+        # the executor lane (`_classify_pre_parse`), so the adapter is not asked.
+        details[FAILURE_CATEGORY_KEY] = STATUS_TIMEOUT
         # A killed child ran too, and ran under whatever rung it was given.
         _attach_sandbox_word(details, sandbox_fallback)
         details.update(jail_details)

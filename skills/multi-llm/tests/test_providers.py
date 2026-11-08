@@ -11657,31 +11657,6 @@ class TestTheAuthProbeHaystackIsUntouched:
         assert adapter.classify_auth_probe(stdout, "", 0) is False
 
 
-class TestFormatFailureDetailsIsNoLongerTheOneRawStdoutClassifier:
-    """Lane A's cosmetic `Reason:` line, routed through the hook (`:523`)."""
-
-    def _reason(self, **kwargs):
-        from utils.review_orchestrator_base import _format_failure_details
-
-        return _format_failure_details(
-            0, _c1_capture("goose", "prompt-echo.stdout.txt"), "", **kwargs
-        )
-
-    def test_with_the_adapter_it_no_longer_calls_a_green_run_timed_out(self):
-        assert "Reason: Timed out" not in self._reason(provider=GooseProvider())
-
-    def test_without_one_it_is_byte_for_byte_what_it_was(self):
-        """Kept, not made an error: §7.2 needs the adapter-free rule callable."""
-        assert "Reason: Timed out" in self._reason()
-
-    def test_the_existing_three_positional_callers_still_work(self):
-        from utils.review_orchestrator_base import _format_failure_details
-
-        assert "Reason: Rate limited" in _format_failure_details(
-            1, "", "HTTP status 429 returned"
-        )
-
-
 # =========================================================================== #
 # T3.1 / T3.2 — the other subagent runners read what the VENDOR wrote
 #

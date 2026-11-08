@@ -85,8 +85,6 @@ from utils.review_orchestrator_base import (
     format_suggestion,
     write_status as _write_status,
     update_status as _update_status,
-    _get_tail_output,
-    _format_failure_details,
     _try_pretty_print_json,
 )
 

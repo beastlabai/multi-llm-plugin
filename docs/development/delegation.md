@@ -322,6 +322,44 @@ prompt elided to its sha256; attempt numbering restarts per invocation, so an ex
 name is first retired to `{task_id}.attemptN.<its own mtime, UTC>.json` (`_retire_capture`) rather than overwritten — a
 retry never destroys the evidence of the attempt it retries.
 
+**What each lane hands the ladder: the adapter's verdict.** The adapter's `classify_failure` is the
+one classifier that knows its CLI's error shapes, so both lanes ask it rather than re-reading
+a sentence composed for a human. The executor asks it for a run with no usable result
+(`_classify_failed_run`) and lets the verdict replace the parse failure's status when it is one
+that changes the slot's fate (auth, invalid model, sandbox, rate limit, context length, budget, or
+a structural `runner_error`). Any other verdict, `None` included, leaves the parse failure's own
+status, rung 4 or 5: one transport retry. The review fan-out (`run_single_model`, review-plan and
+review-tasks) takes it from `details["failure_category"]`, which `llm_client.invoke_with_provider`
+sets on a **non-zero exit** while it still holds the streams; only the category leaves that
+function, never the streams. The fan-out applies it the same way: `None` (the adapter recognised
+nothing) is `runner_error`, connection and server errors are rung 4 through
+`review_orchestrator_base._LADDER_STATUS_BY_CATEGORY`, and every other category reaches the ladder
+under its own name. Two verdicts stop on the fan-out and are retried once by the executor, which
+forwards neither: `spawn_failed` (an install or argv refusal, such as omp's unknown `--tools`
+name) and `permission_denied` (a 403 or a denied tool). Both fail the same way on every attempt,
+so the difference is deliberate. On both lanes a run killed at its deadline is `timeout` whatever
+its partial streams say (the executor's `_classify_pre_parse`), and a jail denial is never retried
+whatever the category. The fan-out's error line ends with the category
+(`<cli> exited with code 1: <reason> [rate_limited]`), so `.status.json` names why a slot stopped
+or retried. Read by `classify_streams`, that tag can only ever name its own category. An adapter
+whose `classify_failure` raises, or answers something other than a category name or `None`,
+sets no key, and that slot takes the exit-0 rule below.
+
+An **exit-0 failure** (an answer that did not parse) carries no category, and the fan-out still
+classifies its error line alone with `classify_streams`, retrying only what that line names (a rate
+limit, a connection or server error); an unrecognised line is never retried. `classify_failure`
+over the stdout of a run that looked successful can match the model's own prose ("reviewed 429
+files"), and the adapters that do not override `vendor_text` have nothing to stop it. Moving those
+rows to the adapter's verdict is deferred, and until then the lanes differ there: the executor
+retries any run with no usable result once, so replayed through both real dispatch loops
+(2026-11-08), 35 of the 51 failing exit-0 fixture rows are retried by the executor and stopped by
+the fan-out.
+`tests/test_lane_a_ladder.py` replays every committed fixture row with a non-zero exit, and every
+row as a deadline kill, through both lanes' real paths (`invoke_with_file_output` into
+`run_single_model`, and `dispatch_task` with the spawn stubbed and the profile gate lifted) and
+asserts the same number of dispatches, apart from the two deliberate verdicts above.
+`code_review_orchestrator` has no ladder.
+
 A batch with any failed or incomplete task writes `{phase}/subagent_batch_report.json`, refuses to reaggregate and
 exits **3 even under `--yes`** — and **never** falls back to salvage. Resume is
 defined by artifacts: a task is done iff its `output_name` exists, parses and validates, so

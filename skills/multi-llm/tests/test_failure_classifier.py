@@ -899,51 +899,6 @@ class TestPerAdapterPatternOverrides:
 
 
 # ---------------------------------------------------------------------------
-# §7.1.a — `_format_failure_details`' elif chain becomes a category lookup
-# ---------------------------------------------------------------------------
-
-class TestReasonLineIsACategoryLookup:
-    """The `Reason:` line and the retry decision read the same classifier."""
-
-    def _reason(self, returncode, stdout="", stderr=""):
-        from utils.review_orchestrator_base import _format_failure_details
-
-        return _format_failure_details(returncode, stdout, stderr)
-
-    def test_a_missing_binary_no_longer_hard_codes_cursor_agent(self):
-        """`:434` named "cursor-agent" as the missing CLI for every provider."""
-        reason = self._reason(127, stderr="sh: 1: goose: not found")
-        assert "cursor-agent" not in reason
-
-    @pytest.mark.parametrize("stderr,expected", [
-        ("bash: codex: command not found", "could not be started"),
-        ("Error: permission denied", "Permission denied"),
-        ("HTTP status 429 returned", "Rate limited"),
-        ("Error: model not found: gpt-5.5", "Model not found or invalid"),
-        ("HTTP status 503 service unavailable", "API/Server error"),
-        ("the request timed out after 600s", "Timed out"),
-        ("Error: connection refused by the API host", "Connection"),
-    ])
-    def test_each_category_renders_its_own_reason(self, stderr, expected):
-        assert expected in self._reason(1, stderr=stderr)
-
-    def test_a_context_overflow_gets_the_actionable_reason(self):
-        reason = self._reason(1, stderr=CONTEXT_OVERFLOW_STREAMS["openai"])
-        assert "context window" in reason
-
-    def test_an_unrecognized_failure_is_still_unknown(self):
-        assert "Unknown" in self._reason(1, stderr="something went sideways")
-
-    def test_the_reason_line_is_still_boundary_aware(self):
-        """L2's guarantee, re-asserted through the shared classifier."""
-        prose = (
-            "Failed to parse JSON output from cursor-agent. The module under "
-            "review spans 429 lines and imports nothing unusual.\n"
-        )
-        assert "Rate limited" not in self._reason(1, stdout=prose)
-
-
-# ---------------------------------------------------------------------------
 # §14.2 — the grep-style guard. Red today at six sites.
 # ---------------------------------------------------------------------------
 
@@ -1192,14 +1147,6 @@ class TestSandboxMarkers:
         assert rob._LADDER_STATUS_BY_CATEGORY.get(category, category) in FATAL_STATUSES
         assert RUNG_BY_STATUS[STATUS_SANDBOX_UNAVAILABLE] == 1
         assert category not in pbase.RETRYABLE_FAILURE_CATEGORIES
-
-    def test_the_reason_line_names_doctor(self):
-        from utils.review_orchestrator_base import _format_failure_details
-
-        reason = _format_failure_details(1, "", self.BWRAP_LINES[0])
-        assert "sandbox" in reason
-        assert "multi_llm.py doctor" in reason
-        assert "Permission denied" not in reason.split("\n")[0]
 
     def test_a_bwrap_word_inside_prose_is_not_a_sandbox_failure(self):
         """`^bwrap: ` is anchored to a line start; a review quoting the word
