@@ -151,6 +151,40 @@ prints the path), so you can port any custom settings into the regenerated file.
     workflow's own file(s)` line names them. Anything else you keep in the
     folder (a README, notes, a script) is reviewed like any other file.
 
+## Environment variables
+
+These are the `MULTI_LLM_*` variables a person may set. Codex starts the
+plugin's tool server with a stripped environment: of these variables, only the
+ones the plugin's `.mcp.json` lists in `env_vars` arrive from the environment
+Codex itself was started in. The "Codex manifest" column says which. The server
+then starts every run through a `bash -lc` login shell, which reads
+`~/.bash_profile` or `~/.profile`, so a variable exported there reaches the run
+whether the manifest lists it or not, and overrides a forwarded value (see
+[hosts](hosts.md)). `MULTI_LLM_CODEX_UNSANDBOXED_WRITES` is the exception: the
+server reads it itself before any shell starts, so only a value in Codex's own
+environment counts. The variables the plugin sets for itself (handshakes,
+probes, host inputs) and the build and test switches are listed, with their
+owners, in `skills/multi-llm/utils/env_vars.py`.
+
+<!-- BEGIN GENERATED: environment-variables (utils/env_vars.py) -->
+<!-- Generated from the `setting` rows of utils/env_vars.py. Edit the row, then run `python utils/env_vars.py`. -->
+
+| Variable | What it does | Codex manifest |
+|---|---|---|
+| `MULTI_LLM_PROVIDERS_CONFIG` | Path to a `providers.yaml` deep-merged over the project and user config, above both. A malformed file fails fast (see the next row). | forwarded |
+| `MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE` | `1` (also `true`, `yes`, `on`) turns a malformed explicit override file into a warning and skips it instead of failing fast. | forwarded |
+| `MULTI_LLM_GIT_CREDENTIAL_HELPER` | One-run override of the git credential-helper policy for runner children: `auto` (default), `wipe` or `keep`. Wins over both config layers; anything else warns and uses `auto`. | forwarded |
+| `MULTI_LLM_HOST` | Host id used when `--host` is not passed (for a host that calls `multi_llm.py` without a rendered shim). Default `claude-code`; an unknown id exits 3. | forwarded |
+| `MULTI_LLM_UV` | Explicit path to `uv`, tried before `PATH` and the documented probe chain. Also used to re-run a detached worker. | forwarded |
+| `MULTI_LLM_UV_RUN_ARGS` | Replaces the flags passed to `uv run` (split on whitespace, no shell). Unset or empty keeps the default; `--no-sync` is correct only against an already-built `.venv`. | forwarded |
+| `MULTI_LLM_MAX_DETACHED` | Ceiling on concurrent detached runs per project (default 4, minimum 1). The `--max-detached` flag beats it. | forwarded |
+| `MULTI_LLM_HEARTBEAT_INTERVAL_S` | Seconds between a detached worker's heartbeats (default 10, minimum 0.05). Mostly for tests and slow disks. | forwarded |
+| `MULTI_LLM_HANDSHAKE_TIMEOUT_S` | Seconds `--detach` waits for the worker to confirm it started (default 10, minimum 0.1) before reporting the launch as failed. | forwarded |
+| `MULTI_LLM_VALIDATION_CONTEXT` | How much plan and code each validation batch embeds: unset (whole plan plus the code its issues cite), `cited` (plan scoped per batch) or `full` (round-wide blocks in every batch). Anything else reads as `full`. | forwarded |
+| `MULTI_LLM_CODEX_UNSANDBOXED_WRITES` | Codex plugin only: `1` lifts the tool's own refusal of write-capable modes under a read-only or unreadable session posture. It never changes which sandbox the runners use. Set it in the environment that starts Codex. | forwarded |
+| `MULTI_LLM_CODEX_SKIP_RUNG` | `plugin-landlock` skips that sandbox rung alone for the process; any other value is rejected at start-up. Use it to tell a jail denial from a codex fault. | not forwarded |
+<!-- END GENERATED: environment-variables -->
+
 ## Safety
 
 A repo's override is auto-loaded, so a cloned repo can change which models a run
