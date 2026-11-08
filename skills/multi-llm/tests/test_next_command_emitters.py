@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import check_workflow_prerequisites as prereq  # noqa: E402
 import multi_llm  # noqa: E402
 from utils import cli_common, detach, next_phase, process_control  # noqa: E402
-from utils import run_status, status_file  # noqa: E402
+from utils import run_status, status_file, status_views  # noqa: E402
 from utils.next_phase import (  # noqa: E402
     LOOKUP_FAILED_PREFIX,
     NEXT_COMMAND_MARKER,
@@ -881,14 +881,14 @@ class TestTheTerminalPoll:
                          plan_file=str(plan), plan_arg=P)
         _terminal_record(plan, f"ask/{slugify_question('why?')}", mode="ask",
                          plan_file=str(plan), plan_arg=P, run_id="run-ask-0001")
-        real = run_status._workflow_payload
+        real = status_views._workflow_payload
         calls = []
 
         def counted(plan_path, **kw):
             calls.append(plan_path)
             return real(plan_path, **kw)
 
-        monkeypatch.setattr(run_status, "_workflow_payload", counted)
+        monkeypatch.setattr(status_views, "_workflow_payload", counted)
         # The control: the same state, polled as the review-plan run, names it.
         _code, _out, _err, control = _run(_poll(P, "--view", "run"), capsys)
         assert control["user_next_step"]["command"] == EXPECTED_POLL, control
@@ -916,7 +916,7 @@ class TestTheTerminalPoll:
         def unreadable(plan_path, **_kw):
             raise OSError("state.json unreadable")
 
-        monkeypatch.setattr(run_status, "_workflow_payload", unreadable)
+        monkeypatch.setattr(status_views, "_workflow_payload", unreadable)
         code, out, err, result = _run(_poll(P, "--view", "run"), capsys)
         assert code == 0
         _assert_neither(out, err, result)

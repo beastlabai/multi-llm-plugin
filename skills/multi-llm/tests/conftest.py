@@ -382,8 +382,9 @@ def _isolate_cli_version_cache(tmp_path, monkeypatch):
 
 
 #: The test files that run with ``MULTI_LLM_STRICT_ADVISORY=1``: an exception an
-#: advisory read of ``run_status``, ``detach`` or ``next_phase`` swallows
-#: (``utils/advisory.py``) fails the test instead of vanishing. A test in them
+#: advisory read of ``run_status`` (or a ``status_*`` module beside it),
+#: ``detach`` or ``next_phase`` swallows (``utils/advisory.py``) fails the
+#: test instead of vanishing. A test in them
 #: that feeds a malformed input on purpose asserts the swallow with
 #: :func:`lenient_advisory` (docs/development/runtime.md#advisory-guards).
 STRICT_ADVISORY_FILES = frozenset({
@@ -467,7 +468,8 @@ def lenient_advisory(monkeypatch):
         labels.append(label)
         real(label, exc)
 
-    for name in ("advisory", "run_status", "detach", "next_phase"):
+    for name in ("advisory", "run_status", "status_views", "status_commands",
+                 "status_native", "status_text", "detach", "next_phase"):
         monkeypatch.setattr(importlib.import_module(f"utils.{name}"), "note_swallowed", record)
     yield labels
 

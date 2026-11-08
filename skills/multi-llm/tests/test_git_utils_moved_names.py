@@ -32,7 +32,6 @@ eager imports are not theirs to change.
 import ast
 import inspect
 import itertools
-import re
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -44,6 +43,7 @@ import pytest
 SKILL_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(SKILL_ROOT))
 
+from tests.moved_name_writes import MovedNameWriteScanner  # noqa: E402
 from utils import git_diff, git_utils, review_diff  # noqa: E402
 
 OWNERS = {"git_diff": git_diff, "review_diff": review_diff}
@@ -729,119 +729,6 @@ def test_reloads_in_a_fresh_process():
 # The guard: no test writes a moved name on git_utils
 # ---------------------------------------------------------------------------
 
-#: A patch target string naming a moved name on git_utils: ``utils.git_utils.X``.
-_DOTTED_TARGET = re.compile(r"(?:^|\.)git_utils\.([A-Za-z_]\w*)$")
-
-
-def _dotted(node):
-    parts = []
-    while isinstance(node, ast.Attribute):
-        parts.append(node.attr)
-        node = node.value
-    if not isinstance(node, ast.Name):
-        return None
-    parts.append(node.id)
-    return ".".join(reversed(parts))
-
-
-def _string(node):
-    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
-
-
-class MovedNameWriteScanner:
-    """The places a test source writes a moved name on ``git_utils``: ``patch``
-    and ``patch.object`` / ``patch.multiple`` / ``patch.dict(vars(...))``,
-    ``monkeypatch.setattr`` / ``delattr`` (object and dotted-string forms),
-    builtin ``setattr`` / ``delattr``, and assignment or ``del`` of the
-    attribute. Names reached only through a variable are not seen."""
-
-    def __init__(self, moved):
-        self.moved = moved
-
-    def scan(self, source, filename="<test>"):
-        tree = ast.parse(source, filename)
-        aliases = {"git_utils"}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                aliases.update(a.asname or a.name for a in node.names if a.name == "git_utils")
-            elif isinstance(node, ast.Import):
-                aliases.update(a.asname for a in node.names if a.asname and a.name.endswith("git_utils"))
-            elif isinstance(node, ast.Assign) and self._is_git_utils(node.value, aliases):
-                aliases.update(t.id for t in node.targets if isinstance(t, ast.Name))
-        hits = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                hits.extend(self._call(node, aliases))
-            elif isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Delete)):
-                targets = node.targets if isinstance(node, (ast.Assign, ast.Delete)) else [node.target]
-                form = "del" if isinstance(node, ast.Delete) else "assignment"
-                for target in self._leaves(targets):
-                    if isinstance(target, ast.Attribute) and self._is_git_utils(target.value, aliases):
-                        hits.append((target.lineno, form, target.attr))
-                    elif isinstance(target, ast.Subscript) and self._is_namespace(target.value, aliases):
-                        hits.append((target.lineno, form, _string(target.slice)))
-        return [
-            (lineno, form, name, self.moved[name])
-            for lineno, form, name in hits if name in self.moved
-        ]
-
-    def _leaves(self, targets):
-        for target in targets:
-            if isinstance(target, (ast.Tuple, ast.List)):
-                yield from self._leaves(target.elts)
-            elif isinstance(target, ast.Starred):
-                yield from self._leaves([target.value])
-            else:
-                yield target
-
-    @staticmethod
-    def _is_git_utils(node, aliases):
-        if isinstance(node, ast.Name):
-            return node.id in aliases
-        if isinstance(node, ast.Attribute):
-            return node.attr == "git_utils" and _dotted(node) is not None
-        if isinstance(node, ast.Call) and (_dotted(node.func) or "").endswith("import_module") and node.args:
-            return (_string(node.args[0]) or "").split(".")[-1] == "git_utils"
-        if isinstance(node, ast.Subscript) and _dotted(node.value) == "sys.modules":
-            return (_string(node.slice) or "").split(".")[-1] == "git_utils"
-        return False
-
-    def _is_namespace(self, node, aliases):
-        """``vars(git_utils)`` or ``git_utils.__dict__``."""
-        if isinstance(node, ast.Call) and _dotted(node.func) == "vars" and node.args:
-            return self._is_git_utils(node.args[0], aliases)
-        return (isinstance(node, ast.Attribute) and node.attr == "__dict__"
-                and self._is_git_utils(node.value, aliases))
-
-    def _call(self, node, aliases):
-        func = _dotted(node.func) or ""
-        last = func.rpartition(".")[2]
-        args = node.args
-        if last == "patch" and args and _string(args[0]):
-            match = _DOTTED_TARGET.search(_string(args[0]))
-            if match:
-                yield node.lineno, f"{func}(...)", match.group(1)
-        elif func.endswith("patch.object") and len(args) >= 2 and self._is_git_utils(args[0], aliases):
-            yield node.lineno, f"{func}(...)", _string(args[1])
-        elif func.endswith("patch.multiple") and args and (
-            self._is_git_utils(args[0], aliases)
-            or (_string(args[0]) or "").split(".")[-1] == "git_utils"
-        ):
-            for keyword in node.keywords:
-                yield node.lineno, f"{func}(...)", keyword.arg
-        elif func.endswith("patch.dict") and args and self._is_namespace(args[0], aliases):
-            if len(args) > 1 and isinstance(args[1], ast.Dict):
-                for key in args[1].keys:
-                    yield node.lineno, f"{func}(...)", _string(key) if key else None
-        elif last in ("setattr", "delattr") and args:
-            if len(args) >= 2 and self._is_git_utils(args[0], aliases):
-                yield node.lineno, f"{func}(...)", _string(args[1])
-            elif func != last and _string(args[0]):
-                match = _DOTTED_TARGET.search(_string(args[0]))
-                if match:
-                    yield node.lineno, f"{func}(...)", match.group(1)
-
-
 def _guard_message(path, lineno, form, name, owner):
     return (
         f"{path}:{lineno}: {form} writes `{name}` on utils.git_utils, but {name} lives in "
@@ -852,7 +739,7 @@ def _guard_message(path, lineno, form, name, owner):
 
 def test_no_test_writes_a_moved_name_on_git_utils():
     """This file is the one exception: it exercises those writes on purpose."""
-    scanner = MovedNameWriteScanner(git_utils._MOVED_TO)
+    scanner = MovedNameWriteScanner(git_utils._MOVED_TO, "git_utils")
     tests_dir = Path(__file__).parent
     problems = [
         _guard_message(path.relative_to(SKILL_ROOT), *hit)
@@ -891,7 +778,7 @@ class TestTheGuardSeesEveryForm:
         ('import sys\nsys.modules["utils.git_utils"]._is_binary_file = None', "_is_binary_file"),
     ])
     def test_a_write(self, snippet, name):
-        hits = MovedNameWriteScanner(git_utils._MOVED_TO).scan(_IMPORTS + snippet)
+        hits = MovedNameWriteScanner(git_utils._MOVED_TO, "git_utils").scan(_IMPORTS + snippet)
         assert [hit[2] for hit in hits] == [name]
         owner = git_utils._MOVED_TO[name]
         assert hits[0][3] == owner
@@ -910,4 +797,4 @@ class TestTheGuardSeesEveryForm:
         'other.setattr(thing, "capture_diff_hunks", 1)',
     ])
     def test_not_a_write(self, snippet):
-        assert MovedNameWriteScanner(git_utils._MOVED_TO).scan(_IMPORTS + snippet) == []
+        assert MovedNameWriteScanner(git_utils._MOVED_TO, "git_utils").scan(_IMPORTS + snippet) == []

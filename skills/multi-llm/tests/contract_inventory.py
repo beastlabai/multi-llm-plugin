@@ -987,23 +987,33 @@ def result_line_keys(corpus_: Optional[_Corpus] = None) -> Inventory:
 # status --json
 # ---------------------------------------------------------------------------
 
+#: ``status`` itself and the modules split out of it (``run_status._MOVED``).
+STATUS_MODULES = (
+    "utils/run_status.py", "utils/status_commands.py", "utils/status_native.py",
+    "utils/status_text.py", "utils/status_views.py",
+)
+
+
 def status_json_top_level(corpus_: Optional[_Corpus] = None) -> Inventory:
-    """Keys of ``status --json``'s run/all document (``run_status.main``)."""
+    """Keys of ``status --json``'s document: ``run_status.main``'s error
+    object and the run/all document ``run_status._render_json`` builds."""
     c = corpus_ or corpus()
     module = c.by_rel["utils/run_status.py"]
-    return variable_keys(c, module, module.functions["main"][0], "payload")
+    inventory = variable_keys(c, module, module.functions["main"][0], "payload")
+    return variable_keys(c, module, module.functions["_render_json"][0], "payload", inventory)
 
 
 def run_view_keys(corpus_: Optional[_Corpus] = None) -> Inventory:
     """Keys of one ``runs[]`` entry: ``detach.classify_run``'s view and every
-    in-place write to a ``view`` dict in ``detach`` and ``run_status``."""
+    in-place write to a ``view`` dict in ``detach`` and the status modules."""
     c = corpus_ or corpus()
     detach = c.by_rel["utils/detach.py"]
     inventory = variable_keys(c, detach, detach.functions["classify_run"][0], "view")
-    status = c.by_rel["utils/run_status.py"]
-    for functions in status.functions.values():
-        for function in functions:
-            mutation_keys(c, status, function, "view", inventory)
+    for rel in STATUS_MODULES:
+        status = c.by_rel[rel]
+        for functions in status.functions.values():
+            for function in functions:
+                mutation_keys(c, status, function, "view", inventory)
     return inventory
 
 

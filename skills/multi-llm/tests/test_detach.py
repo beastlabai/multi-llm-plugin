@@ -44,7 +44,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import multi_llm  # noqa: E402
 import modes as mode_table  # noqa: E402
 from utils import cli_common, detach, process_control, run_registry, run_status, unattended  # noqa: E402
-from utils import progress_tracker, status_file  # noqa: E402
+from utils import progress_tracker, status_file, status_text  # noqa: E402
 from tests.source_cache import python_files, source_text, source_tree
 
 SKILL_ROOT = Path(__file__).parent.parent
@@ -5874,7 +5874,7 @@ class TestOneBadModelRowCostsItsOwnColumn:
                 )
             return None
 
-        monkeypatch.setattr(run_status, "entry_elapsed_s", _explode)
+        monkeypatch.setattr(status_text, "entry_elapsed_s", _explode)
 
         assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
         out = capsys.readouterr().out
@@ -5926,7 +5926,7 @@ class TestOneBadModelRowCostsItsOwnColumn:
         def _explode(entry, now=None):
             raise TypeError("can't subtract offset-naive and offset-aware datetimes")
 
-        monkeypatch.setattr(run_status, "entry_queued_s", _explode)
+        monkeypatch.setattr(status_text, "entry_queued_s", _explode)
 
         assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
         out = capsys.readouterr().out
@@ -6688,7 +6688,7 @@ class TestJustFinishedNamesWhatCrossedTheLineDuringTheWait:
                 "gemini:gemini-3.5-pro": self._entry("done", "soon"),
                 "pi:auto": "truncated mid-write",
             })
-            real = run_status.entry_elapsed_s
+            real = status_text.entry_elapsed_s
 
             def _explode(entry, now=None):
                 if entry.get("elapsed_s") == 252:
@@ -6697,7 +6697,7 @@ class TestJustFinishedNamesWhatCrossedTheLineDuringTheWait:
                     )
                 return real(entry, now)
 
-            monkeypatch.setattr(run_status, "entry_elapsed_s", _explode)
+            monkeypatch.setattr(status_text, "entry_elapsed_s", _explode)
 
         assert self._wait_once(plan, monkeypatch, _finish) == 2
         out = capsys.readouterr().out

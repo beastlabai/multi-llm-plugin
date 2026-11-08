@@ -199,6 +199,10 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.next_phase",
         "utils.resume_state",
         "utils.run_status",
+        "utils.status_commands",
+        "utils.status_native",
+        "utils.status_text",
+        "utils.status_views",
     )),
 }
 

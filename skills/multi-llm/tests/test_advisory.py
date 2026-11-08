@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from utils import advisory, run_status, status_file  # noqa: E402
+from utils import advisory, run_status, status_file, status_text  # noqa: E402
 
 
 @pytest.fixture
@@ -209,7 +209,7 @@ class TestAStatusCallUnderDebug:
         def explode(entry, now=None):
             raise TypeError("can't subtract offset-naive and offset-aware datetimes")
 
-        switches.setattr(run_status, "entry_elapsed_s", explode)
+        switches.setattr(status_text, "entry_elapsed_s", explode)
         argv = ["--plan-file", str(plan), "--view", "run"]
 
         quiet_code = run_status.main(argv)

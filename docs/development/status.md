@@ -11,6 +11,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [ETA outcomes and denominators](#eta-outcomes-and-denominators)
 - [Status parity across execution paths](#status-parity-across-execution-paths)
 - [Clipping model text](#clipping-model-text)
+- [How `status` is built](#how-status-is-built)
 
 ## Status views and run selection
 
@@ -537,3 +538,134 @@ boundary, ends in "…", drops a dangling separator and closes any bracket or qu
 opened; the budgets stay each surface's own, the OpenCode stop title mirrors it in
 `capTitleLine` (a parity test holds them together), and `plain_line` lives beside
 it.
+
+## How `status` is built
+
+**Five modules, one job each, importing down only.** `utils/run_status.py` is the command: its
+parser, the plan value, `main` and its stages, `--wait`, `--abort` and `--sweep`. Below it,
+lowest first:
+
+- `utils/status_views.py`: what a run view is. Discovery and selection of the phase dirs, the
+  predicates over one `detach.classify_run` view (terminal, stopped for the user, died, live),
+  `exit_code_for`, and the workflow read `_workflow_payload`.
+- `utils/status_commands.py`: the commands `status` prints, in the reader's spelling
+  (`user_speller`), the `resume with:` block (`_resume_lines`) and the runner section
+  (`render_runner_text`).
+- `utils/status_native.py`: the phases a native host ran, read back from `state.json`, the
+  executor runs a native leg superseded, and implement's task tally.
+- `utils/status_text.py`: the run view and the workflow section as text, the per-model table, the
+  progress lines a pinned poll's result carries, the executor mirrors, the notices, and the
+  `just finished:` difference a `--wait` takes.
+
+`tests/test_run_status_moved_names.py` holds the layering, and `tests/test_import_layers.py` puts
+all five at L6.
+
+**`run_status` re-exports every moved name for reading only** (`run_status._MOVED`, the same
+contract as `git_utils`'): `run_status.X` returns the owner's current object, and a patch of
+`run_status.X` reaches no code. Patch the owner; the moved-names test fails a test that patches a
+moved name on `run_status`. The names tests patch to reach `main` stay defined in `run_status`:
+`_collect` (which the wait loop re-reads), `_wait_for_terminal`, `_resolve_wait_timeout`, the wait's
+`time`, `_emit_user_next_step`, `_run_abort` and `note_swallowed`. **The workflow read is one seam**:
+every reader in the five modules calls `status_views._workflow_payload` on its owner at each call,
+never a copy, so one patch there reaches them all (an ask poll reads no workflow, and a test counts
+those reads). The advisory guards of all five modules are recorded by `lenient_advisory`.
+
+**`main` runs in stages, and their order is the contract.** Before the stages: a refused commit
+spelling (exit 3), a plan that is not there (exit 1, one JSON error object), `--abort`, `--sweep`,
+and `--view workflow`, which is the workflow read printed as is (byte-identical to
+`check_workflow_prerequisites.py --status`, exit 0 included). Then:
+
+1. `_gather` reads the views, then what discovery skipped (before any wait, so it describes the
+   views the poll started from), then waits (`--wait`), then sets aside the executor runs a
+   native leg went on from (fix round 26, the commit review of 2026-10-08: such a run is not
+   this phase's run any more) and tallies implement's tasks beside an executor implement run
+   (fix round 16, run 6: the run's own counts are that run's; the phase's are `state.json`'s).
+   `--timeout` is a sentinel until here and is resolved only under `--wait`, where it can see both
+   the flag and the config, so a plain poll pays no config read. A `--wait` with no honest
+   deadline is exit 3 with the fix on stderr and nothing on stdout (F4/F7, 2026-09-20): rule 2
+   stops on 3 and relays the message, while exit 1 would read as "the run is unreadable".
+2. `_decide` builds the answer from those facts, in this order: the pinned run's own fields
+   (below), the exit code, a pinned exit-0 run's result word, the `[COMMIT_FIXES]` block, a
+   terminal `--view run` poll's workflow trailer, the native phases' blocks, and the next step. It
+   reads `state.json` again for the last four and prints nothing but a failed next-step lookup's
+   one stderr line.
+3. `_render` prints the `--json` document (`_render_json`) or the text (`_render_text`), then
+   the next step's block.
+4. `_record_result` records the rest of the result line: the notice; the artifacts;
+   `consolidation_recommended`, `validation_context`, then the pinned run's `validation_counts`,
+   `high_priority_groups` and `answer_origins`; and on exit 2, `next` and `state`.
+
+**Each result field is recorded as soon as the poll knows it, never saved up for the end.** The
+dispatcher prints the result line on a crash or an interrupt too (exit 1), holding what was
+recorded before it, and a host that reads only that line keeps what the poll had learned. So
+`_decide` records the pinned run's `mode` and `phase`, then its `progress`, then its
+`progress_lines`, then its stop line as `error`, each before the next read; its result word
+before the `[COMMIT_FIXES]` read; `commit_fixes` before the trailer's workflow read; and
+`user_next_step` as the next step is built. Everything else waits for its value, after the
+render. A later record of the same key wins, so this order is fixed too.
+`tests/test_status_result_line_on_a_fault.py` raises an `OSError` and a `KeyboardInterrupt` at
+each boundary and pins which fields the line keeps.
+
+`--exit-zero` then moves the code alone (fix round 7): the word stays on the result line, and
+everything above was decided on the real verdict.
+
+**A pinned poll answers for one run** (`run_status._pinned_view`): one listed view under
+`--phase`, `--question` or `--run-id`. A listing (no selector, or several views) has no single
+run to answer for. Beyond N5's `mode`/`phase` (above), a pinned poll carries:
+
+- the run's progress map whole, and beside it the same run rendered (`progress_lines`), because
+  the supervised poll reads only its own `MULTI_LLM_RESULT` and the OpenCode plugin may not
+  compose a sentence about the run. An executor implement's lines end with the whole phase's
+  tally (fix round 16). `--question` counts as a selector (F8a, 2026-09-20): the ask core forbids
+  `--phase` (`--phase ask` selects every question ever asked), so an ask always polls by
+  `--question`.
+- a failed run's own stop line as `error` (`run.error`, which the worker writes from its result
+  context; racing re-run 3, 2026-10-05). The hosts read a terminal poll's `error` as "the last
+  line it left". The close-out's generic `needs_human (exit 3)` is not a reason and is left off.
+- on exit 0, the run's own result word (`run.result_state`, plan §5). A `partial` run exits 0,
+  and `cli_common.emit` would turn exit 0 into `done`. `--json`'s `runs[].run.state` stays the
+  process word `done`.
+- `user_next_step` (above). It is built before the text and printed after it (fix round 26), so
+  a tool route's trailer can leave out what the step's markdown says (fix round 26, live run 11,
+  Codex 08).
+- the verdict counts (§6 T6.1; a composite's last review's, D2), the distinct-HIGH-group count of
+  a finished run whose phase is `complete` (F4: a detached `--fail-on-high` review the gate held
+  at exit 3 is "completed" to a host only with a positive count, `modes.REVIEW_GATE`), and an
+  ask's answer origins (plans/ask-answer-recovery-and-false-success.md D7.2). An unselected
+  `--view run` lists every phase alphabetically while `mode`/`phase` stay `status`/null, so the
+  first view's counts would read as whichever run the host was watching. Freshness is
+  `claim_run`'s: it drops a predecessor's (`status_file.RUN_SCOPED_KEYS`), so a run that stopped
+  short of its own report relays none.
+
+**A terminal `--view run` poll of a workflow step's run carries the workflow trailer** (F7,
+above). `suggested next:` is left out of a non-zero poll's text and notice (fix round 26, live
+run 11, Codex stop 01b): a stopped or failed run has no next phase, and the hosts relayed the
+line beside the stop's own ways forward. When the stop's section leads with the resume that
+records implement's manual tasks done, that command is given once, there (fix round 28): the
+notice, and the text a tool route reads, name the tasks and leave it out. A shell's text keeps
+every line.
+
+**The `[COMMIT_FIXES]` block** (plans/review-commits.md §2.3/§2.8): a detached apply prints it
+into the worker's log, which no host reads, so a poll renders it from the apply guard saved in
+`state.json` and carries `commit_fixes` on its result line. It is shown once every listed run is
+settled: terminal, or with no run record. On Claude Code the review core runs detached and the
+apply core in the foreground, so a hand-typed `status <pinned>` always sees that mixed shape.
+
+**The notice is one join, in this order** (fix round 28, live run 12 #7: one join, so a part gives
+up its closing stop to the separator): a `mode: truncated` validation source on any terminal poll
+(plan §2.4: it qualifies the verdicts the next step acts on); a terminal write run's own
+not-clean parts, then each finished run's notes, a consistency warning or the items left
+unapplied (fix round 14: the log was the only place that carried them); a composite's steps'
+notices in step order, each as its phase recorded and bounded it (D2, live test 2026-10-26: one
+clip over the lot would cut the last step's), each clause said once (Fable review of D2); and the
+workflow trailer. A part the run's stop line carries word for word is left out (fix round 26,
+live run 11, Codex stop 01b). With a next step, the trailer part leaves out what the step's
+markdown says: the manual tasks' command (fix round 22, live run 9), the `suggested next` line
+(fix round 24, live run 10) and the optional entry's why (fix round 26, live run 11). The hosts
+relayed each beside the step. The text a person reads keeps them.
+
+**Exit 2's `next` polls a run that can change its answer.** It names the first live view
+(non-terminal and holding a run record, F1/F3 above), else the first view with a run record (F2,
+2026-09-21: the old bare `views[0]` fallback handed back a poll of a `no_run` view, which now
+carries `--wait` and loops forever), else nothing: a plan with no run recorded has nothing to
+poll. It carries the run's own host (F6, 2026-09-16).

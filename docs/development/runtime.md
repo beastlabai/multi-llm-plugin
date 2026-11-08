@@ -401,8 +401,8 @@ Rules for a site:
 - The debug report goes through `sys.stderr` and falls back to fd 2 through `_FdWriter`; it never
   raises.
 
-`utils/run_status.py`, `utils/detach.py` and `utils/next_phase.py` use the guard; the broad
-excepts elsewhere in the tree are still silent.
+`utils/run_status.py` and the `utils/status_*.py` modules split out of it, `utils/detach.py` and
+`utils/next_phase.py` use the guard; the broad excepts elsewhere in the tree are still silent.
 
 ## Durable retry commands
 

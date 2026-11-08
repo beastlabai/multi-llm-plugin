@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import modes as mode_table  # noqa: E402
 import multi_llm  # noqa: E402
-from utils import cli_common, run_status  # noqa: E402
+from utils import cli_common, run_status, status_views  # noqa: E402
 from utils.cli_common import parse_result_line  # noqa: E402
 
 COMMIT_MODES = ("review-commits", "apply-commit-fixes", "improve-commits")
@@ -464,7 +464,7 @@ def status_reads(monkeypatch):
         return {}
 
     monkeypatch.setattr(run_status, "_run_abort", abort)
-    monkeypatch.setattr(run_status, "_workflow_payload", workflow)
+    monkeypatch.setattr(status_views, "_workflow_payload", workflow)
     return reads
 
 
