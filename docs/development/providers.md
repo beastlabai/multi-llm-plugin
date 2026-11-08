@@ -364,12 +364,27 @@ a worker thread. `finish()` runs, after the last attempt, the porcelain verdict,
 lines (for ask; the ladder loop prints them per attempt) and the mode and home checks, and returns
 the one reason the slot fails with. Each lane keeps only what it does with that reason, and
 `tests/test_slot_guard_parity.py` pins every outcome on every lane. The porcelain check's ignore
-list (`fanout_ignore_prefixes`) resolves the plan's output folder through symlinks; ask and
-review-code resolve it again for the after snapshot, the review base reuses the one `begin()`
-took (`recompute_ignore_prefixes`). With the output folder inside `.multi-llm/`, re-pointing it
-during the window is itself exempt, and each choice misses one direction: a re-resolved list
-exempts the target of a symlink planted there, a reused one the target of a symlink removed. The
-parity test pins both as strict xfails.
+list (`fanout_ignore_prefixes`) follows the plan's output folder through symlinks, and an
+unsandboxed slot can re-point that folder during its window. With the folder inside
+`.multi-llm/`, the re-pointing is itself exempt, and either list alone would exempt a tracked
+tree: one taken before the window exempts the target of a symlink removed in it, one taken after
+exempts the target of a symlink planted in it. So every lane resolves the list in `begin()` and
+again in `finish()`, before the after snapshot, and a path is left out only where both lists
+leave it out (`common_ignore_prefixes`). When they differ, one `[SANDBOX_BYPASSED]` line names
+the folders only one of them covers (`bypass_ignore_drift`), printed under the slot's name and
+noted for the closing summary; it fails nothing by itself. A folder that appears during the run
+resolves to the path it had before, so a normal run sees no difference, and its after snapshot and
+comparison are the plain ones. The before snapshot keeps the output folder's entries apart (a
+`porcelain_snapshot` zone, hashed under a cap of its own, never printed), compared only when the
+lists differ. Then the after snapshot hashes the paths outside both lists and the folders under
+each list alone under caps of their own, so a large file in a folder that one list leaves out
+cannot switch off the content comparison of the paths both lists audit, and
+`unexpected_writes_across_drift` compares them: a path that appears or disappears counts; outside
+both lists, a status change counts, and so does a content change where both sides were hashed
+(a lane's own list could have hashed them or not, so both comparisons run); under one list alone,
+the same where both sides were hashed, and the path itself otherwise. So the verdict names every
+change either list alone would have seen, a dirty file put back to clean under the before list is
+named, and one left alone there is not.
 
 A trust-only `[projects."…"]` table never fails it (codex adds one per session directory, and
 concurrent sessions share the home), but every one besides the run's own cwd that appeared during

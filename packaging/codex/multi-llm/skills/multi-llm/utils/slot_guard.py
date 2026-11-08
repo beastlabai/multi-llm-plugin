@@ -75,12 +75,15 @@ class SlotGuard:
     records the audit verdicts and the not-attributed warnings on it and
     leaves every slot transition to the lane.
 
-    ``recompute_ignore_prefixes`` is the lane's own rule for the porcelain
-    check's ignore list after the dispatch: ``True`` resolves it again for the
-    after snapshot (ask and review-code), ``False`` reuses the one ``begin()``
-    took (the review base's two lanes). The list resolves the output folder
-    through symlinks, so the two can differ when the window re-points it
-    (docs/development/providers.md, the porcelain check).
+    The porcelain check's ignore list is resolved in ``begin()`` and again in
+    ``finish()``, before the after snapshot, and a path is left out only where
+    both lists leave it out (``common_ignore_prefixes``). The list follows the
+    plan's output folder through symlinks, and an unsandboxed slot can
+    re-point that folder during its window; either list alone would then
+    leave out a tracked tree. The folders only one list covers are hashed
+    apart from the rest, so they can never switch off the content comparison
+    of the paths both lists audit (docs/development/providers.md, the
+    porcelain check).
     """
 
     def __init__(
@@ -91,7 +94,6 @@ class SlotGuard:
         model_spec: str,
         project_root: Optional[str],
         plan_path: Union[str, Path],
-        recompute_ignore_prefixes: bool,
         tracker: Optional[Any] = None,
     ) -> None:
         self.provider_name = provider_name
@@ -99,10 +101,9 @@ class SlotGuard:
         self.model_spec = model_spec
         self.project_root = project_root
         self.plan_path = plan_path
-        self.recompute_ignore_prefixes = recompute_ignore_prefixes
         self.tracker = tracker
         self.sandbox: Optional[_base.SandboxVerdict] = None
-        self._ignore_prefixes: Sequence[str] = ()
+        self._ignore_before: Sequence[str] = ()
         self._tree_before: Optional[_base.PorcelainSnapshot] = None
         self._mode_before: Optional[Dict[str, str]] = None
 
@@ -115,10 +116,13 @@ class SlotGuard:
         baseline is taken for the uncontained rung alone (the rung id decides,
         ``porcelain_check_applies``), so a sandboxed or contained-rung slot
         makes no git call. Its ignore list is the roster-aware one, computed
-        here in the slot's task where the fan-out roster lives; the after
-        snapshot reuses it or resolves it again, as the lane chose
-        (``recompute_ignore_prefixes``). The mode baseline is taken for the
-        plugin's own jail alone (``mode_check_applies``).
+        here in the slot's task where the fan-out roster lives; ``finish()``
+        resolves it again and keeps only what both cover. The entries under
+        the plan's output folder, the one entry that follows symlinks, are
+        kept in the baseline as a zone of their own, hashed under their own
+        cap, for ``finish()`` to compare should the list move; otherwise they
+        are never compared. The mode baseline is taken for the plugin's own
+        jail alone (``mode_check_applies``).
         """
         sandbox = await asyncio.to_thread(
             _base.sandbox_refusal, self.provider_name, self.project_root
@@ -133,12 +137,11 @@ class SlotGuard:
         if sandbox.fallback:
             print(f"[{self.display_name}] {sandbox.reason}")
         if _base.porcelain_check_applies(sandbox):
-            self._ignore_prefixes = _base.fanout_ignore_prefixes(
-                self.plan_path, self.project_root, anchor=self.plan_path
-            )
+            self._ignore_before = self._resolve_ignore_prefixes()
             self._tree_before = await asyncio.to_thread(
                 _base.porcelain_snapshot, self.project_root,
-                ignore_prefixes=self._ignore_prefixes,
+                ignore_prefixes=self._resolve_ignore_prefixes(output_folder=False),
+                zones=(self._ignore_before,),
             )
         if _base.mode_check_applies(sandbox):
             self._mode_before = await asyncio.to_thread(
@@ -169,7 +172,7 @@ class SlotGuard:
         because the ladder loop reports the jail per attempt. Then the mode
         and home checks for a slot on the plugin's jail.
         """
-        violation = await self._write_check(audits)
+        violation = await self._write_check(audits, summary_key)
         if violation is not None:
             return violation
         if jail_details is not None:
@@ -184,7 +187,9 @@ class SlotGuard:
             tracker=self.tracker, summary_key=summary_key,
         )
 
-    async def _write_check(self, audits: Sequence[Any]) -> Optional[str]:
+    async def _write_check(
+        self, audits: Sequence[Any], summary_key: Any
+    ) -> Optional[str]:
         """The reason to fail an uncontained slot whose window changed the tree, or ``None``.
 
         A delta fails the slot whatever the attempt reported. A review that
@@ -201,29 +206,51 @@ class SlotGuard:
         (``bypass_stream_audit_clears``), the delta is reported as a
         ``not attributed`` warning on ``progress.models[spec].warning`` and
         the slot keeps its output.
+
+        The ignore list is resolved again here, in the slot's task like
+        ``begin()``'s and before the after snapshot. When both lists cover the
+        same paths, the after snapshot and the comparison are the plain ones.
+        When they differ, one ``[SANDBOX_BYPASSED]`` line names the folders
+        only one of them covers (``bypass_ignore_drift``), printed and noted
+        for the closing summary, and only what both cover is left out
+        (``common_ignore_prefixes``). The after snapshot then hashes the paths
+        outside both lists and the folders under each list alone under caps
+        of their own, and ``unexpected_writes_across_drift`` compares them, so
+        the verdict names every change either list alone would have seen.
         """
         if not _base.porcelain_check_applies(self._verdict()):
             return None
-        # Resolved again here, in the slot's task like begin()'s, when the
-        # lane asks for it (``recompute_ignore_prefixes``).
-        ignore_prefixes = (
-            _base.fanout_ignore_prefixes(
-                self.plan_path, self.project_root, anchor=self.plan_path
-            )
-            if self.recompute_ignore_prefixes
-            else self._ignore_prefixes
+        ignore_after = self._resolve_ignore_prefixes()
+        drift = _base.bypass_ignore_drift(
+            self.provider_name, self._ignore_before, ignore_after
         )
+        if drift is not None:
+            print(f"[{self.display_name}] {drift}")
+            _base.note_for_closing_summary(summary_key, drift)
         if self.tracker is not None:
             self.tracker.record_readonly_audit(
                 self.model_spec, _readonly_audit.combine_audits(audits).to_dict()
             )
-        tree_after = await asyncio.to_thread(
-            _base.porcelain_snapshot, self.project_root,
-            ignore_prefixes=ignore_prefixes,
-        )
-        touched = _base.unexpected_writes(
-            self._tree_before, tree_after, ignore_prefixes=ignore_prefixes,
-        )
+        if drift is None:
+            tree_after = await asyncio.to_thread(
+                _base.porcelain_snapshot, self.project_root,
+                ignore_prefixes=ignore_after,
+            )
+            touched = _base.unexpected_writes(
+                self._tree_before, tree_after, ignore_prefixes=ignore_after,
+            )
+        else:
+            tree_after = await asyncio.to_thread(
+                _base.porcelain_snapshot, self.project_root,
+                ignore_prefixes=_base.common_ignore_prefixes(
+                    self._ignore_before, ignore_after
+                ),
+                zones=(ignore_after, self._ignore_before),
+            )
+            touched = _base.unexpected_writes_across_drift(
+                self._tree_before, tree_after,
+                before_prefixes=self._ignore_before, after_prefixes=ignore_after,
+            )
         if not touched:
             return None
         if _base.bypass_stream_audit_clears(audits):
@@ -241,6 +268,15 @@ class SlotGuard:
         )
         print(f"[{self.display_name}] {violation}")
         return violation
+
+    def _resolve_ignore_prefixes(self, *, output_folder: bool = True) -> Sequence[str]:
+        """The roster-aware ignore list, resolved now; called in the slot's
+        task, where the fan-out roster lives (``fanout_ignore_prefixes``).
+        ``output_folder=False`` leaves out the plan's output folder."""
+        return _base.fanout_ignore_prefixes(
+            self.plan_path, self.project_root, anchor=self.plan_path,
+            output_folder=output_folder,
+        )
 
     def _verdict(self) -> _base.SandboxVerdict:
         if self.sandbox is None:

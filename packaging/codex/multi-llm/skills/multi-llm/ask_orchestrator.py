@@ -2280,7 +2280,7 @@ class AskRun:
         guard = SlotGuard(
             provider_name=provider_name, display_name=model_spec,
             model_spec=model_spec, project_root=project_root, plan_path=plan_path,
-            recompute_ignore_prefixes=True, tracker=tracker,
+            tracker=tracker,
         )
         gate = await guard.begin()
         if isinstance(gate, Refused):

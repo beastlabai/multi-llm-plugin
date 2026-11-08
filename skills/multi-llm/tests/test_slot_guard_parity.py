@@ -29,6 +29,7 @@ import argparse
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -45,6 +46,7 @@ import ask_orchestrator  # noqa: E402
 import code_review_orchestrator as cro  # noqa: E402
 from ask_orchestrator import ASK_PROMPT_FILE, AskRun  # noqa: E402
 from utils import review_orchestrator_base as base  # noqa: E402
+from utils import slot_guard  # noqa: E402
 from utils.json_extractor import sanitize_model_name  # noqa: E402
 from utils.prompt_loader import load_prompt  # noqa: E402
 from utils.providers.base import (  # noqa: E402
@@ -678,39 +680,67 @@ _INVOKERS = {
 _PHASE_DIRS = ("ask/q-12345678", "code-review", "review-plan")
 
 
-def _repointed_row(lane, direction):
-    """One row; a strict xfail where ``lane`` does not name the edit.
+#: The folders only one ignore list covers, per direction. The output folder
+#: is followed through symlinks (``bypass_ignore_prefixes``); its own entry
+#: under ``.multi-llm/`` is covered by ``.multi-llm`` on both sides anyway.
+_DRIFT = {
+    "symlink-replaced": ("src", "none"),
+    "symlink-planted": ("none", "src"),
+}
 
-    Ask and review-code resolve the ignore list again after the window, the
-    review base reuses the one it took before (``SlotGuard``'s
-    ``recompute_ignore_prefixes``). Each choice misses one direction, and the
-    rows it misses are strict xfails: pinned as each lane's own, not as a rule.
-    """
-    recomputes = lane in ("ask", "review-code")
-    caught = recomputes if direction == "symlink-replaced" else not recomputes
-    marks = () if caught else pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "the ignore list resolves the output folder through symlinks, and "
-            "this lane's after snapshot exempts the target of the symlink "
-            + ("planted in the window" if recomputes else "removed in the window")
-        ),
+
+def _drift_line(before_only: str, after_only: str) -> str:
+    return (
+        f"{SANDBOX_BYPASSED_MARKER} codex: the plugin's own folders, which the "
+        f"write check leaves out, resolved differently before and after this "
+        f"unsandboxed slot's window (the plan's output folder is followed "
+        f"through symlinks; before only: {before_only}; after only: "
+        f"{after_only}); the check leaves out only what both cover, so a change "
+        f"under the others is reported"
     )
-    return pytest.param(lane, direction, marks=marks, id=f"{lane}-{direction}")
 
 
-@pytest.mark.parametrize("lane, direction", [
-    _repointed_row(lane, direction)
-    for lane in LANES
-    for direction in ("symlink-replaced", "symlink-planted")
+@pytest.mark.parametrize("before, after, common, before_only, after_only", [
+    # Nobody re-pointed anything: the list comes back as is, and no line.
+    ([".multi-llm", "plans/feature"], [".multi-llm", "plans/feature/"],
+     [".multi-llm", "plans/feature/"], "", ""),
+    # Symlink replaced by a directory: `src` was only ever the symlink's target.
+    ([".multi-llm", "src"], [".multi-llm", ".multi-llm/feature"],
+     [".multi-llm", ".multi-llm/feature"], "src", ""),
+    # Symlink planted: the reverse.
+    ([".multi-llm", ".multi-llm/feature"], [".multi-llm", "src"],
+     [".multi-llm", ".multi-llm/feature"], "", "src"),
+    # Both sides own a folder the other lacks: only the shared tree is left.
+    ([".multi-llm", "src", ".aider.tags.cache.v4"],
+     [".multi-llm", "plans/feature", ".aider.tags.cache.v4"],
+     [".multi-llm", ".aider.tags.cache.v4"], "src", "plans/feature"),
+    # Nested on one side only: the deeper prefix is what both cover.
+    (["plans"], ["plans/feature"], ["plans/feature"], "plans", ""),
 ])
-def test_a_reported_edit_survives_a_repointed_output_folder(lane, direction, rig, monkeypatch):
+def test_the_exemption_is_what_both_ignore_lists_cover(
+    before, after, common, before_only, after_only
+):
+    assert base.common_ignore_prefixes(before, after) == common
+    line = base.bypass_ignore_drift("codex", before, after)
+    if not before_only and not after_only:
+        assert line is None
+    else:
+        assert line == _drift_line(before_only or "none", after_only or "none")
+
+
+@pytest.mark.parametrize("direction", ["symlink-replaced", "symlink-planted"])
+@pytest.mark.parametrize("lane", LANES)
+def test_a_reported_edit_survives_a_repointed_output_folder(
+    lane, direction, rig, monkeypatch, capsys
+):
     """The plan in ``.multi-llm/``, so re-pointing its output folder is a change
     inside the plugin's own, always-exempt tree, and an uncontained slot whose
     stream audit did not clear it edits tracked ``src/app.py`` in the window.
 
     ``symlink-replaced``: the output folder is a symlink to ``src/`` before the
-    window and a directory after it. ``symlink-planted``: the reverse.
+    window and a directory after it. ``symlink-planted``: the reverse. Either
+    ignore list alone covers ``src/``; every lane leaves out only what both
+    cover (``SlotGuard``), so the edit is named, and one line names the drift.
     """
     root = rig["repo"]
     (root / "plans").rename(root / ".multi-llm")
@@ -743,3 +773,346 @@ def test_a_reported_edit_survives_a_repointed_output_folder(lane, direction, rig
         f"unsandboxed slot's window ("
     ), outcome.reason
     assert "src/app.py" in outcome.reason.split("(", 1)[1].split(")", 1)[0]
+    drift = _drift_line(*_DRIFT[direction])
+    lines = _marker_lines(capsys.readouterr().out)
+    assert drift in lines, lines
+    assert lines.index(drift) < lines.index(outcome.reason), lines
+    assert drift in base.print_closing_summary(outcome.summary_key)
+
+
+# ---------------------------------------------------------------------------
+# A normal run keeps its answer: both ignore lists cover the output folder
+# ---------------------------------------------------------------------------
+
+
+def _write_plugin_files(output: Path) -> None:
+    """What the plugin writes into the output folder during a slot: the lanes'
+    folders and a log in each (the ask lane's answer comes on top)."""
+    for sub in _PHASE_DIRS:
+        folder = output / sub
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "slot.log").write_text("log\n", encoding="utf-8")
+
+
+def _grow_past_the_cap(path: Path) -> None:
+    """A sparse file one byte over the hashing cap: its size counts, and a
+    snapshot over the cap never reads it."""
+    with path.open("wb") as handle:
+        handle.truncate(base.PORCELAIN_HASH_CAP_BYTES + 1)
+
+
+@pytest.mark.parametrize("write", [False, True], ids=["no-edit", "edit"])
+@pytest.mark.parametrize(
+    "case", ["created-in-window", "unchanged", "stable-symlink", "dirty-rerun"]
+)
+@pytest.mark.parametrize("lane", LANES)
+def test_an_output_folder_nobody_re_points_stays_exempt(
+    lane, case, write, rig, monkeypatch, capsys
+):
+    """No drift line and no false positive on a normal run, on every lane.
+
+    ``created-in-window``: the output folder does not exist when the gate runs
+    (removed there, ahead of ``begin()``'s ignore list) and the plugin creates
+    it during the run (review-code's phase folder after the gate, the logs in
+    the window); the list resolved before already names the path it gets.
+    ``unchanged``: an existing folder nobody touches. ``stable-symlink``:
+    the output folder is a symlink to an untracked ``out/`` that stays put
+    through the window. ``dirty-rerun``: the folder holds an earlier run's
+    files, one of them past the hashing cap, and ``src/app.py`` is already
+    dirty; the output folder's entries are kept in the baseline apart from the
+    rest, so they never switch off the content comparison (no
+    ``[PORCELAIN_CHECK]`` note) and the edit below, which keeps the file's
+    `` M`` status, is still seen. With ``edit`` the slot also changes tracked
+    ``src/app.py``, which must then be the one path named: the plugin's own
+    files stay left out.
+    """
+    root = rig["repo"]
+    output = root / "plans" / "feature"
+    if case == "stable-symlink":
+        (root / "out").mkdir()
+        output.symlink_to("../out", target_is_directory=True)
+    elif case == "unchanged":
+        output.mkdir(exist_ok=True)
+    elif case == "dirty-rerun":
+        (output / "review-plan").mkdir(parents=True, exist_ok=True)
+        (output / "review-plan" / "earlier.json").write_text("[]\n", encoding="utf-8")
+        _grow_past_the_cap(output / "review-plan" / "earlier.log")
+        (root / "src" / "app.py").write_text("print('dirty before')\n", encoding="utf-8")
+    scenario = SCENARIOS["bypass-write-violation" if write else "bypass-no-write"]
+    rig["scenario"] = scenario
+    gate = base.sandbox_refusal("codex", str(root))
+
+    removed: List[bool] = []
+    if case == "created-in-window":
+        probe = base._fanout_sandbox_verdict
+
+        def remove_then_probe(provider_name, cwd):
+            if provider_name == "codex" and not removed:
+                subprocess.run(["rm", "-rf", str(output)], check=True)
+                removed.append(True)
+            return probe(provider_name, cwd)
+
+        monkeypatch.setattr(base, "_fanout_sandbox_verdict", remove_then_probe)
+
+    module, name = _INVOKERS[lane]
+    invoke = getattr(module, name)
+
+    def plugin_writes_then_answer(**kwargs):
+        _write_plugin_files(output)
+        return invoke(**kwargs)
+
+    monkeypatch.setattr(module, name, plugin_writes_then_answer)
+    capsys.readouterr()
+
+    outcome = _drive(lane, rig)
+    out = capsys.readouterr().out
+
+    if case == "created-in-window":
+        assert removed == [True]
+    assert (output / "review-plan" / "slot.log").is_file()
+    assert outcome.reason == scenario.reason, out
+    assert outcome.success is (scenario.reason is None)
+    assert _marker_lines(out) == [gate.reason, *scenario.lines[1:]], out
+    assert base.print_closing_summary(outcome.summary_key) == []
+    assert "[PORCELAIN_CHECK]" not in out, out
+    if case == "stable-symlink":
+        assert output.is_symlink()
+        assert (root / "out" / "review-plan" / "slot.log").is_file()
+
+
+def test_two_plans_sharing_an_output_folder_stay_exempt(rig):
+    """Two plans whose output folders are symlinks to one ``out/``: each
+    slot's lists cover it before and after, so the plugin's write there is
+    left out on both, with no drift line."""
+    root = rig["repo"]
+    (root / "out").mkdir()
+    plans = []
+    for name in ("one", "two"):
+        plan = root / "plans" / f"{name}.md"
+        plan.write_text("# Plan\n", encoding="utf-8")
+        (root / "plans" / name).symlink_to("../out", target_is_directory=True)
+        plans.append(plan)
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "two plans")
+    rig["scenario"] = SCENARIOS["bypass-no-write"]
+
+    async def both():
+        guards = [_guard(root, plan) for plan in plans]
+        for guard in guards:
+            assert isinstance(await guard.begin(), slot_guard.Ready)
+        (root / "out" / "slot.log").write_text("log\n", encoding="utf-8")
+        return [
+            await guard.finish([NOT_CLEAN], [], summary_key=str(root)) for guard in guards
+        ]
+
+    assert _in_fanout(both) == [None, None]
+    assert base.print_closing_summary(str(root)) == []
+
+
+# ---------------------------------------------------------------------------
+# The folders only one ignore list covers are hashed apart from the rest
+# ---------------------------------------------------------------------------
+
+
+def _guard(root: Path, plan: Path) -> "slot_guard.SlotGuard":
+    return slot_guard.SlotGuard(
+        provider_name="codex", display_name=SPEC, model_spec=SPEC,
+        project_root=str(root), plan_path=plan,
+    )
+
+
+def _plan_in_the_plugin_folder(rig) -> Path:
+    """Move the plan into ``.multi-llm/`` (so re-pointing its output folder is
+    a change inside the always-exempt tree) and return the output folder."""
+    root = rig["repo"]
+    (root / "plans").rename(root / ".multi-llm")
+    rig["plan"] = root / ".multi-llm" / "feature.md"
+    return root / ".multi-llm" / "feature"
+
+
+def _repoint(output: Path, target: Optional[str]) -> None:
+    """Make the output folder a symlink to ``target``, or a directory when
+    ``None``, with the lanes' phase folders in it."""
+    if output.is_symlink():
+        output.unlink()
+    elif output.exists():
+        shutil.rmtree(output)
+    if target is None:
+        output.mkdir()
+    else:
+        output.symlink_to(target, target_is_directory=True)
+    for sub in _PHASE_DIRS:
+        (output / sub).mkdir(parents=True, exist_ok=True)
+
+
+def _named(reason: str) -> List[str]:
+    return reason.split("(", 1)[1].split(")", 1)[0].split(", ")
+
+
+def test_a_zone_is_hashed_under_its_own_cap(repo, capsys):
+    """``porcelain_snapshot``'s zones: their entries are kept apart and
+    hashed under a cap of their own, so a zone past it leaves the rest
+    hashed, and its note is kept, not printed. Without the zone, the same
+    tree is one snapshot past the cap."""
+    (repo / "src" / "app.py").write_text("print('dirty')\n", encoding="utf-8")
+    (repo / "out").mkdir()
+    _grow_past_the_cap(repo / "out" / "big.log")
+    snapshot = base.porcelain_snapshot(
+        str(repo), ignore_prefixes=[".multi-llm"], zones=(["out"],)
+    )
+    assert capsys.readouterr().out == ""
+    assert snapshot.hashed and set(snapshot.entries) == {"src/app.py"}
+    assert snapshot.entries["src/app.py"].blob
+    (zone,) = snapshot.zones
+    assert set(zone.entries) == {"out/big.log"}
+    assert not zone.hashed and "hashing cap" in zone.note
+    whole = base.porcelain_snapshot(str(repo), ignore_prefixes=[".multi-llm"])
+    assert not whole.hashed and whole.zones == ()
+    assert "hashing cap" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("direction", ["reverse", "forward"])
+@pytest.mark.parametrize("lane", LANES)
+def test_a_folder_past_the_cap_under_one_list_keeps_the_content_check(
+    lane, direction, rig, monkeypatch, capsys
+):
+    """Tracked ``src/app.py`` is already dirty, so the slot's edit keeps its
+    `` M`` status and only its content tells. The output folder is a directory
+    before the window and a symlink to untracked ``payload/`` after it
+    (``reverse``), or the other way round (``forward``), and ``payload/blob``
+    grows past the hashing cap in the window.
+
+    ``payload/`` is under one list only. Hashed with the rest, it would switch
+    off the content comparison for every path and the edit would go unseen;
+    the list that leaves ``payload/`` out (the after list for ``reverse``, the
+    before list for ``forward``) sees it alone. Hashed apart, every lane names
+    it, with no ``[PORCELAIN_CHECK]`` note. (The drift line is pinned above.)
+    """
+    root = rig["repo"]
+    output = _plan_in_the_plugin_folder(rig)
+    (root / "payload").mkdir()
+    (root / "payload" / "blob").write_text("small\n", encoding="utf-8")
+    (root / "src" / "app.py").write_text("print('dirty before')\n", encoding="utf-8")
+    _repoint(output, "../payload" if direction == "forward" else None)
+    rig["scenario"] = SCENARIOS["bypass-write-violation"]
+    module, name = _INVOKERS[lane]
+    invoke = getattr(module, name)
+
+    def repoint_grow_then_answer(**kwargs):
+        _repoint(output, None if direction == "forward" else "../payload")
+        _grow_past_the_cap(root / "payload" / "blob")
+        return invoke(**kwargs)  # the stub's write edits src/app.py
+
+    monkeypatch.setattr(module, name, repoint_grow_then_answer)
+    outcome = _drive(lane, rig)
+    out = capsys.readouterr().out
+
+    assert not outcome.success, out
+    assert "src/app.py" in _named(outcome.reason), outcome.reason
+    assert "[PORCELAIN_CHECK]" not in out, out
+
+
+@pytest.mark.parametrize("lane", LANES)
+def test_under_drift_what_the_after_list_saw_change_is_still_named(
+    lane, rig, monkeypatch
+):
+    """The output folder is a symlink to untracked ``payload/`` before the
+    window and a directory after it; in the window ``payload/blob`` grows past
+    the hashing cap, its status unchanged, and untracked ``src/new.py`` is
+    staged, its bytes unchanged.
+
+    The list taken after the window, alone, hashes ``payload/`` with the rest,
+    goes past the cap and compares by status, so it names the staged file; it
+    has no baseline under ``payload/``, so it names the blob. Outside both
+    lists a status change always counts, and under one list alone a path whose
+    content cannot be compared counts, so both stay named.
+    """
+    root = rig["repo"]
+    output = _plan_in_the_plugin_folder(rig)
+    (root / "payload").mkdir()
+    (root / "payload" / "blob").write_text("small\n", encoding="utf-8")
+    (root / "src" / "new.py").write_text("print('new')\n", encoding="utf-8")
+    _repoint(output, "../payload")
+    rig["scenario"] = SCENARIOS["bypass-no-write"]
+    module, name = _INVOKERS[lane]
+    invoke = getattr(module, name)
+
+    def repoint_grow_stage_then_answer(**kwargs):
+        _repoint(output, None)
+        _grow_past_the_cap(root / "payload" / "blob")
+        _git(root, "add", "src/new.py")
+        return invoke(**kwargs)
+
+    monkeypatch.setattr(module, name, repoint_grow_stage_then_answer)
+    outcome = _drive(lane, rig)
+
+    assert not outcome.success, outcome.result
+    assert {"payload/blob", "src/new.py"} <= set(_named(outcome.reason)), outcome.reason
+
+
+def test_the_guard_keeps_the_content_check_when_one_list_tips_the_cap(rig):
+    """The reverse case above, at the guard itself: the output folder becomes
+    a symlink to ``payload/`` in the window and ``payload/blob`` grows past the
+    cap; the edit to already-dirty ``src/app.py`` is named."""
+    root = rig["repo"]
+    output = _plan_in_the_plugin_folder(rig)
+    output.mkdir()
+    (root / "payload").mkdir()
+    (root / "payload" / "blob").write_text("small\n", encoding="utf-8")
+    app = root / "src" / "app.py"
+    app.write_text("print('dirty before')\n", encoding="utf-8")
+    rig["scenario"] = SCENARIOS["bypass-write-violation"]
+
+    async def slot():
+        guard = _guard(root, rig["plan"])
+        assert isinstance(await guard.begin(), slot_guard.Ready)
+        shutil.rmtree(output)
+        output.symlink_to("../payload", target_is_directory=True)
+        _grow_past_the_cap(root / "payload" / "blob")
+        app.write_text("print('edited in the window')\n", encoding="utf-8")
+        return await guard.finish([NOT_CLEAN], [], summary_key=str(root))
+
+    reason = _in_fanout(slot)
+    assert reason is not None and "src/app.py" in _named(reason), reason
+
+
+@pytest.mark.parametrize("change", ["restored", "edited", "unchanged"])
+@pytest.mark.parametrize("lane", LANES)
+def test_a_folder_only_the_before_list_covers_keeps_its_baseline(
+    lane, change, rig, monkeypatch, capsys
+):
+    """The output folder is a symlink to ``src/`` before the window and a
+    directory after it, so ``src/`` is under the before list only, and
+    ``src/app.py`` is already dirty. The baseline kept the output folder's
+    entries apart, so they are compared like any other path:
+
+    ``restored``: put back to clean in the window, named. ``edited``: edited
+    again, same `` M`` status, named. ``unchanged``: left alone, not named,
+    and the slot keeps its answer. (The drift line is pinned above.)
+    """
+    root = rig["repo"]
+    output = _plan_in_the_plugin_folder(rig)
+    app = root / "src" / "app.py"
+    app.write_text("print('dirty before')\n", encoding="utf-8")
+    _repoint(output, "../src")
+    rig["scenario"] = SCENARIOS["bypass-no-write"]
+    module, name = _INVOKERS[lane]
+    invoke = getattr(module, name)
+
+    def repoint_change_then_answer(**kwargs):
+        _repoint(output, None)
+        if change == "restored":
+            app.write_text("print('app')\n", encoding="utf-8")
+        elif change == "edited":
+            app.write_text("print('edited in the window')\n", encoding="utf-8")
+        return invoke(**kwargs)
+
+    monkeypatch.setattr(module, name, repoint_change_then_answer)
+    outcome = _drive(lane, rig)
+    out = capsys.readouterr().out
+
+    if change == "unchanged":
+        assert outcome.success and outcome.reason is None, out
+    else:
+        assert not outcome.success, out
+        assert _named(outcome.reason) == ["src/app.py"], outcome.reason

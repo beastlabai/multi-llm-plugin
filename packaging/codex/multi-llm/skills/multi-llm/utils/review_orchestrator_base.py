@@ -3820,11 +3820,17 @@ class PorcelainSnapshot(NamedTuple):
     :data:`PORCELAIN_HASH_CAP_BYTES`, or ``git hash-object`` failed as a whole):
     its entries then carry no blob ids, and a comparison involving it is by path
     and status only. ``note`` is the one line that was printed about it.
+
+    ``zones`` holds one snapshot per ``zones`` prefix list the call was given:
+    the entries under it, kept out of ``entries`` and hashed under a cap of
+    their own, so neither side can degrade the other. A zone's ``note`` is
+    kept, never printed.
     """
 
     entries: Dict[str, PorcelainEntry]
     hashed: bool = True
     note: Optional[str] = None
+    zones: Tuple[Any, ...] = ()
 
 
 def _under_prefixes(path: str, prefixes: Sequence[str]) -> bool:
@@ -3868,7 +3874,10 @@ def _porcelain_records(stdout: str) -> Optional[List[Tuple[str, str]]]:
 
 
 def porcelain_snapshot(
-    cwd: Optional[str], *, ignore_prefixes: Sequence[str] = ()
+    cwd: Optional[str],
+    *,
+    ignore_prefixes: Sequence[str] = (),
+    zones: Sequence[Sequence[str]] = (),
 ) -> Optional[PorcelainSnapshot]:
     """A per-path baseline of the working tree's dirty set, or ``None``.
 
@@ -3894,7 +3903,14 @@ def porcelain_snapshot(
     - above :data:`PORCELAIN_HASH_CAP_BYTES` of regular files (summed ``lstat``
       sizes), or when ``hash-object`` fails as a whole, the snapshot records no
       hashes (``hashed=False``) and prints one note, and the comparison falls
-      back to path + status for this slot.
+      back to path + status for this slot;
+    - an entry under one of ``zones`` (each a prefix list; the first that
+      covers it wins) goes to that zone's own snapshot
+      (``PorcelainSnapshot.zones``) instead, hashed under its own cap and
+      with its note kept, not printed. The write check uses them when its
+      ignore list moved during the window (:func:`unexpected_writes_across_drift`),
+      so the folders only one list covers never degrade the comparison of the
+      rest.
 
     Cost, stated because it runs twice per bracketed slot: two ``lstat`` passes
     and two ``hash-object`` runs over the dirty set, inside the ``to_thread``
@@ -3955,12 +3971,32 @@ def porcelain_snapshot(
         return None
 
     prefixes = _normalized_prefixes(ignore_prefixes)
+    zone_prefixes = [_normalized_prefixes(zone) for zone in zones]
+    groups: List[List[Tuple[str, str]]] = [[] for _ in range(len(zone_prefixes) + 1)]
+    for status, path in records:
+        if _under_prefixes(path, prefixes):
+            continue
+        index = next(
+            (i for i, zone in enumerate(zone_prefixes, 1) if _under_prefixes(path, zone)),
+            0,
+        )
+        groups[index].append((status, path))
+    main, *kept_apart = [_porcelain_group_snapshot(root, group) for group in groups]
+    if main.note is not None:
+        print(main.note)
+    return main._replace(zones=tuple(kept_apart))
+
+
+def _porcelain_group_snapshot(
+    root: str, records: Sequence[Tuple[str, str]]
+) -> PorcelainSnapshot:
+    """One :class:`PorcelainSnapshot` of ``records``, hashed under one
+    :data:`PORCELAIN_HASH_CAP_BYTES`; its note is returned, not printed
+    (:func:`porcelain_snapshot`)."""
     kinds: Dict[str, Tuple[str, str, str, bool]] = {}
     to_hash: List[str] = []
     total = 0
     for status, path in records:
-        if _under_prefixes(path, prefixes):
-            continue
         if "D" in status and status != PORCELAIN_RENAME_SOURCE:
             kinds[path] = (status, PORCELAIN_ABSENT, PORCELAIN_ABSENT, False)
             continue
@@ -4057,8 +4093,6 @@ def porcelain_snapshot(
                 "writes to files that were already modified or untracked are not "
                 "seen for this slot (path + status comparison only)"
             )
-    if note is not None:
-        print(note)
 
     entries: Dict[str, PorcelainEntry] = {}
     for path, (status, kind, blob, exec_bit) in kinds.items():
@@ -4127,6 +4161,68 @@ def unexpected_writes(
         b = before.entries.get(path)
         a = after.entries.get(path)
         if b is None or a is None or _entry_changed(b, a, by_content=by_content):
+            changed.append(path)
+    return sorted(changed)
+
+
+def unexpected_writes_across_drift(
+    before: Optional[PorcelainSnapshot],
+    after: Optional[PorcelainSnapshot],
+    *,
+    before_prefixes: Sequence[str],
+    after_prefixes: Sequence[str],
+) -> List[str]:
+    """:func:`unexpected_writes` for a slot whose ignore list moved in its window.
+
+    ``before_prefixes`` and ``after_prefixes`` are the lists resolved ahead of
+    the dispatch and after it (``utils/slot_guard.SlotGuard``); a path both
+    cover is left out. ``before`` was taken with the before list as its one
+    zone, ``after`` with the list both cover ignored and the after and before
+    lists as its zones (:func:`porcelain_snapshot`), so the paths outside both
+    lists, the ones under the after list only and the ones under the before
+    list only are each hashed under a cap of their own: the folders a lane's
+    own list would have left out can never degrade the comparison of the
+    paths it audited (docs/development/providers.md, the porcelain check).
+
+    A path that appears or disappears counts. Outside both lists, a status
+    change counts, and so does a content change where both sides were
+    hashed: a lane's own list could have hashed these paths or not, and this
+    runs both comparisons. Under one list only, a path is compared the same
+    way where both sides were hashed, and counts otherwise, since nothing
+    tells its content apart. ``None`` on either side is "nothing to report".
+    Sorted by path.
+    """
+    if before is None or after is None:
+        return []
+    covered_before = _normalized_prefixes(before_prefixes)
+    covered_after = _normalized_prefixes(after_prefixes)
+
+    def with_hashed(snapshot: PorcelainSnapshot) -> Dict[str, Tuple[PorcelainEntry, bool]]:
+        flat: Dict[str, Tuple[PorcelainEntry, bool]] = {}
+        for part in (snapshot, *snapshot.zones):
+            for path, entry in part.entries.items():
+                flat.setdefault(path, (entry, part.hashed))
+        return flat
+
+    before_entries, after_entries = with_hashed(before), with_hashed(after)
+    changed: List[str] = []
+    for path in set(before_entries) | set(after_entries):
+        in_before = _under_prefixes(path, covered_before)
+        in_after = _under_prefixes(path, covered_after)
+        if in_before and in_after:
+            continue
+        b = before_entries.get(path)
+        a = after_entries.get(path)
+        if b is None or a is None:
+            changed.append(path)
+            continue
+        (b_entry, b_hashed), (a_entry, a_hashed) = b, a
+        by_content = b_hashed and a_hashed
+        if (in_before or in_after) and not by_content:
+            changed.append(path)
+        elif _entry_changed(b_entry, a_entry, by_content=False) or (
+            by_content and _entry_changed(b_entry, a_entry, by_content=True)
+        ):
             changed.append(path)
     return sorted(changed)
 
@@ -4737,7 +4833,10 @@ async def run_incidental_checks(
 
 
 def bypass_ignore_prefixes(
-    plan_path: Union[str, Path], project_root: Optional[str]
+    plan_path: Union[str, Path],
+    project_root: Optional[str],
+    *,
+    output_folder: bool = True,
 ) -> List[str]:
     """The repo-relative trees the plugin itself writes during a slot.
 
@@ -4746,9 +4845,11 @@ def bypass_ignore_prefixes(
     ``.multi-llm/`` (batch snapshot tmp files, the write-safety snapshots). A
     plan outside the repository, or no repository, contributes nothing —
     the check then reports every delta, which is the conservative reading.
+    ``output_folder=False`` leaves the output directory out: the part that
+    does not follow symlinks, so a slot cannot move it (``SlotGuard.begin``).
     """
     prefixes = [".multi-llm"]
-    if not project_root:
+    if not project_root or not output_folder:
         return prefixes
     # `output_dir_path`, not `get_output_dir`: the latter `mkdir`s, and a
     # detective check must not create the directory it is about to exclude.
@@ -4795,6 +4896,8 @@ def fanout_ignore_prefixes(
     plan_path: Union[str, Path],
     project_root: Optional[str],
     anchor: Optional[Union[str, Path]] = None,
+    *,
+    output_folder: bool = True,
 ) -> List[str]:
     """:func:`bypass_ignore_prefixes`, plus the fan-out's declared workspace caches.
 
@@ -4804,13 +4907,89 @@ def fanout_ignore_prefixes(
     the slot's task — where the roster context lives — not in a worker thread
     started without it (``asyncio.to_thread`` copies the context, so either is
     fine there). ``anchor`` resolves bare model specs; it defaults to
-    ``plan_path``.
+    ``plan_path``. ``output_folder`` is :func:`bypass_ignore_prefixes`'.
     """
-    prefixes = bypass_ignore_prefixes(plan_path, project_root)
+    prefixes = bypass_ignore_prefixes(plan_path, project_root, output_folder=output_folder)
     for cache in fanout_workspace_caches(anchor if anchor is not None else plan_path):
         if cache not in prefixes:
             prefixes.append(cache)
     return prefixes
+
+
+def common_ignore_prefixes(
+    before: Sequence[str], after: Sequence[str]
+) -> List[str]:
+    """The prefixes covering exactly the paths that both lists cover.
+
+    The porcelain check resolves its ignore list twice per slot, before the
+    dispatch and after it (``utils/slot_guard.SlotGuard``), and leaves a path
+    out only where both lists leave it out. The plan's output folder is
+    resolved through symlinks (:func:`bypass_ignore_prefixes`), and an
+    unsandboxed slot can re-point it during its window, so either list alone
+    can cover a tracked tree (docs/development/providers.md, the porcelain
+    check). For every pair of prefixes where one contains the other, the
+    deeper one is kept. Lists that cover the same paths come back as
+    ``after``, unchanged.
+    """
+    if set(_normalized_prefixes(before)) == set(_normalized_prefixes(after)):
+        return list(after)
+    common: List[str] = []
+    seen: set = set()
+    for b in before:
+        nb = _normalized_prefixes((b,))
+        for a in after:
+            na = _normalized_prefixes((a,))
+            if not nb or not na:
+                continue
+            if na[0].startswith(nb[0]):
+                deeper, key = a, na[0]
+            elif nb[0].startswith(na[0]):
+                deeper, key = b, nb[0]
+            else:
+                continue
+            if key not in seen:
+                seen.add(key)
+                common.append(deeper)
+    return common
+
+
+def _uncovered_prefixes(prefixes: Sequence[str], other: Sequence[str]) -> List[str]:
+    """The entries of ``prefixes`` that ``other`` does not cover, as written
+    (no trailing ``/``)."""
+    covering = _normalized_prefixes(other)
+    return [
+        p.rstrip("/") for p in prefixes
+        if p and p.rstrip("/") and not _under_prefixes(p.rstrip("/"), covering)
+    ]
+
+
+def bypass_ignore_drift(
+    provider_name: str, before: Sequence[str], after: Sequence[str]
+) -> Optional[str]:
+    """The line naming how the porcelain check's ignore list moved, or ``None``.
+
+    ``before`` and ``after`` are the lists resolved ahead of the dispatch and
+    after it (:func:`common_ignore_prefixes`). ``None`` when they cover the
+    same paths, which is every run whose output folder nobody re-pointed: the
+    folder appearing during the run resolves to the path it had before. A
+    list entry the other list covers is not named, since it stays left out.
+    Printed under the slot's name and noted for the closing summary; it fails
+    nothing by itself. The narrower exemption is what makes a change under
+    either side's own folder count.
+    """
+    before_only = _uncovered_prefixes(before, after)
+    after_only = _uncovered_prefixes(after, before)
+    if not before_only and not after_only:
+        return None
+    return (
+        f"{SANDBOX_BYPASSED_MARKER} {provider_name}: the plugin's own folders, "
+        f"which the write check leaves out, resolved differently before and "
+        f"after this unsandboxed slot's window (the plan's output folder is "
+        f"followed through symlinks; before only: "
+        f"{', '.join(before_only) or 'none'}; after only: "
+        f"{', '.join(after_only) or 'none'}); the check leaves out only what "
+        f"both cover, so a change under the others is reported"
+    )
 
 
 def report_misnamed_result(
@@ -5004,7 +5183,7 @@ async def run_single_model(
     guard = SlotGuard(
         provider_name=provider_name, display_name=display_name,
         model_spec=model_spec, project_root=project_root, plan_path=plan_path,
-        recompute_ignore_prefixes=False, tracker=tracker,
+        tracker=tracker,
     )
     gate = await guard.begin()
     if isinstance(gate, Refused):
