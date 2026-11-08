@@ -74,6 +74,7 @@ __all__ = [
     "make_write_task",
     "write_output_name",
     "implement_output_name",
+    "safe_output_token",
     "WRITE_OUTPUT_NAME_TEMPLATE",
     "declared_file_set",
     "snapshot_file_set",
@@ -482,8 +483,16 @@ WRITE_OUTPUT_NAME_TEMPLATE = {
 }
 
 #: The basename charset ``schemas/subagent_tasks.schema.json`` admits for an
-#: ``output_name`` token. Mirrors ``human_decisions._SAFE_VERDICT_TOKEN``.
+#: ``output_name`` token.
 _SAFE_OUTPUT_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def safe_output_token(token: Any) -> str:
+    """*token* as an ``output_name`` token: itself when the task schema's
+    basename charset admits it, else its :func:`content_hash`, so an exotic id
+    still names exactly one stable file rather than being rejected."""
+    token = str(token or "")
+    return token if _SAFE_OUTPUT_TOKEN.match(token) else content_hash(token)
 
 
 def write_output_name(kind: str, batch_index: int) -> str:
@@ -499,27 +508,14 @@ def write_output_name(kind: str, batch_index: int) -> str:
 
 
 def implement_output_name(task_id: str) -> str:
-    """The result basename for one implement task, keyed by the *task id*.
+    """The result basename for one implement task, keyed by the *task id*
+    (:func:`safe_output_token`).
 
-    **Never its position** in the materialized list.
-    ``implement_orchestrator`` re-materializes from
-    ``format_batches_for_output(skip_completed=--resume)``, so the list a counter
-    would run over *shrinks* on a resume and every survivor is renamed: measured
-    2026-09-16, a resumed run re-pointed T006 at T001's ``implement_batch_0.json``,
-    ``_already_done`` found an ``applied`` file with no fingerprint under T006 and
-    declared five never-dispatched tasks complete — the phase exited 0 having
-    implemented four of the fourteen tasks it reported. The judging phase hit the
-    identical defect and fixed it the identical way
-    (``human_decisions.verdict_output_name``); keying by the task id is what makes
-    "resume by id" true of the filenames too.
-
-    A token outside the task schema's basename charset is hashed rather than
-    rejected, so an exotic id still names exactly one stable file.
+    **Never its position** in the materialized list: a resume re-materializes a
+    shorter list, so a position renames every survivor onto another task's
+    result file (2026-09-16: five never-dispatched tasks read as complete).
     """
-    token = str(task_id or "")
-    if not _SAFE_OUTPUT_TOKEN.match(token):
-        token = content_hash(token)
-    return f"implement_batch_{token}.json"
+    return f"implement_batch_{safe_output_token(task_id)}.json"
 
 
 def _default_write_output_name(kind: str, task_id: str, batch_index: int) -> str:

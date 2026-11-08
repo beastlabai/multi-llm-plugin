@@ -67,6 +67,7 @@ from utils.write_batch_scheduler import (  # noqa: E402
     WriteBatchScheduler,
     resolve_human_task_plan,
 )
+from tests.harness.native_invoker import native_dispatcher  # noqa: E402
 from tests.mock_launchers import (  # noqa: E402
     MOCK_LLM,
     install_mock_llm,
@@ -300,6 +301,10 @@ class WriteEnv:
             repo_root=str(self.root),
             log=lambda line: None,
         )
+        respond = over.pop("respond", None)
+        if respond is not None:
+            # The simulated native invoker, through the dispatch seam.
+            over["dispatcher"] = native_dispatcher(respond)
         kwargs.update(over)
         return WriteBatchScheduler(**kwargs)
 

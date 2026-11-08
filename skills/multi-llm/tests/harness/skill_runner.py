@@ -518,7 +518,7 @@ class SkillRunner:
         whole point of materializing them.
 
         The write itself is delegated to
-        ``utils.subagent_executor.simulate_native_invoker``, so the harness and
+        ``tests.harness.native_invoker.simulate_native_invoker``, so the harness and
         the executor share **one** persist leg: same containment checks, same
         per-kind result validation, same serialization. That is what makes "the
         same task JSON through either invoker produces byte-identical files" a
@@ -533,10 +533,7 @@ class SkillRunner:
         Returns:
             The list of files written, in task order.
         """
-        import sys as _sys
-
-        _sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-        from utils.subagent_executor import simulate_native_invoker
+        from tests.harness.native_invoker import simulate_native_invoker
 
         document = json.loads(task_file.read_text(encoding="utf-8"))
         if document.get("tasks_schema_version") != 2:

@@ -609,7 +609,7 @@ def _build_dependency_section(
     return "\n".join(lines) + "\n"
 
 
-def _enforce_token_budget(
+def _enforce_char_budget(
     acceptance_section: str,
     dependency_section: str,
     budget: int = 2000,
@@ -682,7 +682,7 @@ def build_task_prompt(
     dependency_section = _build_dependency_section(task, all_tasks)
 
     # Enforce combined budget
-    acceptance_criteria_section, dependency_section = _enforce_token_budget(
+    acceptance_criteria_section, dependency_section = _enforce_char_budget(
         acceptance_criteria_section, dependency_section
     )
 
@@ -3101,16 +3101,13 @@ def resolve_scope(run: ImplementRun) -> Optional[int]:
     scope_choice = scope_policy_runs.resolve_run_choice(
         getattr(args, "scope_policy", None), state.state, "implement",
         new_run=bool(getattr(args, "fresh", False)))
-    run.scope_policy, scope_source = scope_policy_runs.effective_choice(scope_choice)
-    if not (args.dry_run or getattr(args, "dry_run_subagents", False)):
-        if scope_policy_runs.record_scope_run_start(state, "implement", scope_choice):
-            state.save()
-    if scope_source != scope_policy_runs.sp.SOURCE_EXPLICIT:
-        scope_decision = scope_policy_runs.announce(
-            None, run.scope_policy, scope_source, unattended=run.unattended,
-            mode="implement")
-        if scope_decision:
-            run.pending_resolutions.append((scope_policy_runs.SITE_ID, scope_decision))
+    dry_run = args.dry_run or getattr(args, "dry_run_subagents", False)
+    run.scope_policy, _source, scope_decision = scope_policy_runs.open_run(
+        None if dry_run else state, "implement", scope_choice,
+        phase_dir=None, unattended=run.unattended,
+    )
+    if scope_decision:
+        run.pending_resolutions.append((scope_policy_runs.SITE_ID, scope_decision))
     return None
 
 

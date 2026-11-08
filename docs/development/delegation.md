@@ -375,7 +375,8 @@ read/analyze kind, `cwd` pinned to the repo) → capture stdout → the adapter'
 extraction would match an envelope or a reasoning item and write a garbage result reaggregation
 would accept) → validate against the kind's result shape → atomic 0600 write under the phase dir.
 
-`persist_result` is the **shared** invoker-persists leg: `simulate_native_invoker` (which
+`persist_result` is the **shared** invoker-persists leg: the test harness's
+`simulate_native_invoker` (`tests/harness/native_invoker.py`, which
 `SkillRunner.simulate_subagents` delegates to) calls the same function, which is what makes "either invoker,
 byte-identical `output_path`" a property of the code.
 

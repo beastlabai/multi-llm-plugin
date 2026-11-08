@@ -410,13 +410,15 @@ class _Snapshot:
         }
 
     def restore(self) -> None:
+        from update_plan_tasks import replace_file
+
         for path, before in self._before.items():
             try:
                 if before is None:
                     if path.exists():
                         path.unlink()
                 else:
-                    path.write_bytes(before)
+                    replace_file(path, before)
             except OSError as exc:  # pragma: no cover - best effort
                 print(
                     f"multi-llm warning: could not restore {path}: {exc}",
@@ -488,8 +490,8 @@ def consume_document(plan_path: Path, result_path: str) -> int:
     # The native host writes the reply itself, so the executor's completion of
     # an omitted-but-empty list key has not happened yet on this path. It runs
     # here, and the completed document goes back to disk before validation:
-    # `update_plan_tasks` reads the *file*, and a later `task_is_complete`
-    # re-validates the file, so what was validated is what is on disk.
+    # a later `task_is_complete` re-validates the file, so what was validated
+    # and applied is what is on disk.
     from utils.schema_validator import schema_version_supplied
     from utils.subagent_executor import normalize_result, supply_result_version
 
@@ -549,22 +551,19 @@ def consume_document(plan_path: Path, result_path: str) -> int:
     import update_plan_tasks
 
     try:
-        code = update_plan_tasks.main(
-            ["--plan-file", str(plan_path), "--tasks-file", str(result_path)]
+        update_plan_tasks.apply_tasks_document(plan_path, data)
+    except update_plan_tasks.TasksDocumentError as exc:
+        snapshot.restore()
+        return _fail(
+            f"ERROR: update_plan_tasks refused the document ({exc}), so the plan "
+            f"was not updated. The plan and state.json are back to their "
+            f"pre-run bytes."
         )
-    except SystemExit as exc:  # argparse or an explicit sys.exit inside the script
-        code = EXIT_OK if exc.code is None else exc.code
     except Exception as exc:  # noqa: BLE001 - a crashed consumer must not leave
         snapshot.restore()     # the plan half-written; the bytes go back first
         return _fail(
             f"ERROR: update_plan_tasks raised {type(exc).__name__}: {exc}. The "
             f"plan and state.json are back to their pre-run bytes."
-        )
-    if code not in (EXIT_OK, None):
-        snapshot.restore()
-        return _fail(
-            f"ERROR: update_plan_tasks exited {code}, so the plan was not "
-            f"updated. The plan and state.json are back to their pre-run bytes."
         )
 
     problems = verify_outcome(plan_path, len(tasks))
@@ -631,6 +630,33 @@ def _state_file_for(plan_path: Path) -> Path:
     return get_output_dir(Path(plan_path)) / "state.json"
 
 
+def _move_result_aside(
+    result_path: str,
+    dry_run: bool,
+    *,
+    kept: str,
+    failed: Callable[[OSError], str],
+    done: Callable[[Path], str],
+) -> Optional[int]:
+    """Archive the result file before a re-dispatch; ``None`` to go on, else the exit.
+
+    Archived, never deleted: a result that cost a dispatch is never thrown away
+    silently. Under ``--dry-run-subagents`` (D3l) it stays put — the run starts
+    no child, so nothing would replace it, and the flag promises nothing else
+    changes. A move that fails is exit 3: leaving the file would make the
+    re-dispatch a no-op that consumes it again.
+    """
+    if dry_run:
+        print(kept)
+        return None
+    try:
+        archived = archive_file(Path(result_path))
+    except OSError as exc:
+        return _fail(failed(exc))
+    print(done(archived))
+    return None
+
+
 def _fail(message: str) -> int:
     print(message, file=sys.stderr)
     unattended_mod.mark_needs_human(MODE_NAME)
@@ -661,15 +687,11 @@ def _resolve_scope_policy(
     choice = scope_policy_runs.resolve_run_choice(
         getattr(args, "scope_policy", None), state.state, MODE_NAME,
         new_run=bool(getattr(args, "force", False)))
-    policy, source = scope_policy_runs.effective_choice(choice)
-    if not getattr(args, "dry_run_subagents", False):
-        if scope_policy_runs.record_scope_run_start(state, MODE_NAME, choice):
-            state.save()
-    if source != scope_policy_runs.sp.SOURCE_EXPLICIT:
-        scope_policy_runs.announce(
-            phase_dir, policy, source, unattended=bool(getattr(args, "yes", False)),
-            mode=MODE_NAME,
-        )
+    policy, _source, _decision = scope_policy_runs.open_run(
+        None if getattr(args, "dry_run_subagents", False) else state,
+        MODE_NAME, choice,
+        phase_dir=phase_dir, unattended=bool(getattr(args, "yes", False)),
+    )
     return policy
 
 
@@ -755,26 +777,27 @@ def run_generate_tasks(
         summary = problems[0] + (
             f" (+{len(problems) - 1} more)" if len(problems) > 1 else ""
         )
-        if getattr(args, "dry_run_subagents", False):
-            print(
+        refused = _move_result_aside(
+            result_path,
+            getattr(args, "dry_run_subagents", False),
+            kept=(
                 f"[dry-run-subagents] the existing {RESULT_NAME} is invalid "
                 f"({summary}); keeping it, since no child is started to replace "
                 f"it. The real run archives it and re-dispatches task {TASK_ID}."
-            )
-        else:
-            try:
-                archived = archive_file(Path(result_path))
-            except OSError as exc:
-                return _fail(
-                    f"ERROR: the existing {RESULT_NAME} in {phase_dir} is invalid "
-                    f"({summary}) and could not be moved aside: {exc}\n"
-                    f"       Remove or rename it by hand, then re-run."
-                )
-            print(
+            ),
+            failed=lambda exc: (
+                f"ERROR: the existing {RESULT_NAME} in {phase_dir} is invalid "
+                f"({summary}) and could not be moved aside: {exc}\n"
+                f"       Remove or rename it by hand, then re-run."
+            ),
+            done=lambda archived: (
                 f"[resume] the existing {RESULT_NAME} is invalid ({summary}); "
                 f"archived it as {archived} and re-dispatching task {TASK_ID} "
                 f"instead of consuming it."
-            )
+            ),
+        )
+        if refused is not None:
+            return refused
 
     if args.force and os.path.exists(result_path):
         # Skipping the branch above is not enough: the executor's resume rule is
@@ -784,27 +807,27 @@ def run_generate_tasks(
         # document `--force` was invoked to replace. Move it aside *before*
         # materialization, and archive rather than delete: a result that cost a
         # dispatch is never thrown away silently.
-        if getattr(args, "dry_run_subagents", False):
-            # D3l: this run starts no child, so there is nothing to replace the
-            # old result with — archiving it here would change the phase dir
-            # under a flag whose promise is that nothing else changes.
-            print(
+        refused = _move_result_aside(
+            result_path,
+            getattr(args, "dry_run_subagents", False),
+            kept=(
                 f"[dry-run-subagents] keeping the existing {RESULT_NAME}: no child "
                 f"is started, so nothing would replace it. The real --force run "
                 f"archives it."
-            )
-        else:
-            try:
-                archived = archive_file(Path(result_path))
-            except OSError as exc:
-                return _fail(
-                    f"ERROR: --force could not move the existing {RESULT_NAME} in "
-                    f"{phase_dir} aside: {exc}\n"
-                    f"       Leaving it would make the re-dispatch a no-op and this "
-                    f"phase would consume the stale document instead. Remove or "
-                    f"rename it by hand, then re-run."
-                )
-            print(f"[force] archived the previous {RESULT_NAME} as {archived}")
+            ),
+            failed=lambda exc: (
+                f"ERROR: --force could not move the existing {RESULT_NAME} in "
+                f"{phase_dir} aside: {exc}\n"
+                f"       Leaving it would make the re-dispatch a no-op and this "
+                f"phase would consume the stale document instead. Remove or "
+                f"rename it by hand, then re-run."
+            ),
+            done=lambda archived: (
+                f"[force] archived the previous {RESULT_NAME} as {archived}"
+            ),
+        )
+        if refused is not None:
+            return refused
 
     policy = _resolve_scope_policy(args, plan_path, phase_dir)
     try:

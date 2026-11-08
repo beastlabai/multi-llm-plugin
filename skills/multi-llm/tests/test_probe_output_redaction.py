@@ -40,6 +40,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import subagent_executor  # noqa: E402
+from tests.conftest import stand_in  # noqa: E402
 from utils.providers.cursor_agent import (  # noqa: E402
     CURSOR_ABOUT_IDENTITY_KEYS,
     CURSOR_ABOUT_KEYS,
@@ -171,7 +172,7 @@ def _detect_auth_refusal(monkeypatch, stream, *, on_stderr=False):
         stdout="" if on_stderr else stream,
         stderr=stream if on_stderr else "",
     )
-    monkeypatch.setattr(subagent_executor, "_run_probe", lambda argv: completed)
+    monkeypatch.setattr(subagent_executor, "_run_probe", stand_in(lambda argv: completed))
     with pytest.raises(subagent_executor.RunnerRejected) as excinfo:
         subagent_executor._detect_auth(
             "cursor-agent",

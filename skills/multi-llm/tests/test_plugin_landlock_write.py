@@ -371,17 +371,16 @@ class TestTheWriteTargetIsCheckedAtConstruction:
 
 class TestTheWriteScopeMap:
 
-    def test_the_fallback_map_names_every_write_kind(self, monkeypatch):
-        monkeypatch.delattr(executor, "WRITE_SCOPE_BY_KIND", raising=False)
+    def test_every_write_kind_has_a_scope(self):
         assert wbs.write_scope_for_kind("apply_suggestions") == "plan-file"
         assert wbs.write_scope_for_kind("apply_task_suggestions") == "tasks"
         assert wbs.write_scope_for_kind("apply_code_fixes") == "repo-wide"
         assert wbs.write_scope_for_kind("implement") == "repo-wide"
         assert wbs.write_scope_for_kind("validation") is None
 
-    def test_the_executors_map_wins_when_it_exists(self, monkeypatch):
+    def test_the_executors_map_is_the_one_in_force(self, monkeypatch):
         monkeypatch.setattr(executor, "WRITE_SCOPE_BY_KIND",
-                            {"apply_suggestions": "plan-file"}, raising=False)
+                            {"apply_suggestions": "plan-file"})
         assert wbs.write_scope_for_kind("apply_suggestions") == "plan-file"
         assert wbs.write_scope_for_kind("implement") is None
 
@@ -561,41 +560,6 @@ class TestTheGrantReachesTheExecutor:
             [repo.task(0, kind="apply_task_suggestions", target=repo.tasks)],
             kind="apply_task_suggestions",
         ).run()
-        assert result.exit_code == 0, result.messages
-        assert result.outcomes[0].write_outcome == executor.WRITE_APPLIED
-
-    def test_an_executor_without_the_new_keywords_still_dispatches(
-        self, repo, monkeypatch
-    ):
-        """The executor package lands separately (2026-09-30): against the old
-        signatures the scheduler passes no ``jail_request`` and still runs."""
-        seen: Dict[str, Any] = {}
-
-        def old_preflight(spec, *, profile, anchor=None, key=""):
-            seen["preflight"] = True
-            return {"version": "0.158.0"}
-
-        def old_dispatch(task, *, phase_dir, runner, anchor=None, cwd=None,
-                         prompt=None, before_attempt=None, after_result=None,
-                         changed_files=None):
-            repo.plan.write_text(repo.plan.read_text() + "\nx\n", encoding="utf-8")
-            outcome = executor.TaskOutcome(
-                task_id=task["task_id"], kind=task["kind"], runner=runner,
-                status=executor.STATUS_OK, profile=PROFILE_AGENT_WRITE,
-            )
-            data = claim("applied", ids=task["expected_ids"])
-            outcome.output_path = executor.persist_result(task, phase_dir, data)
-            after_result({"outcome": outcome, "result": data, "attempt": 1,
-                          "exit_code": 0, "duration_seconds": 0.1})
-            return outcome
-
-        monkeypatch.setattr(wbs, "preflight_runner", old_preflight)
-        monkeypatch.setattr(wbs, "dispatch_task", old_dispatch)
-        monkeypatch.setattr(executor, "sandbox_rung",
-                            lambda spec, profile: None)
-        monkeypatch.delattr(executor, "write_rung_notice", raising=False)
-        result = repo.scheduler([repo.task(0)]).run()
-        assert seen["preflight"]
         assert result.exit_code == 0, result.messages
         assert result.outcomes[0].write_outcome == executor.WRITE_APPLIED
 

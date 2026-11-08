@@ -27,6 +27,7 @@ sys.path.insert(0, str(SKILL_ROOT))
 from utils import cli_common, run_status, status_file  # noqa: E402
 from utils import review_orchestrator_base as rob  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from tests.conftest import stand_in  # noqa: E402
 from utils.subagent_tasks import batch_manifest, file_bytes_sha256  # noqa: E402
 from utils.validation import (  # noqa: E402
     prepare_batched_validation_tasks,
@@ -377,6 +378,7 @@ def _executor_round(tmp_path, monkeypatch, n_groups=8):
     )
     assert len(document["batches"]) >= 2
 
+    @stand_in
     def fake_dispatch(task, *, phase_dir, runner, anchor=None, cwd=None):
         path = _write_batch(Path(phase_dir), task, "valid",
                             model="self-reported-name-copied-from-a-suggestion")

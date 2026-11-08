@@ -753,24 +753,6 @@ class TestTheStructuralLeg:
         # Nothing spawned: no version, no `auth list`, no `opencode models`.
         assert probes == []
 
-    def test_a_narrow_double_without_the_keywords_still_works(self, monkeypatch):
-        class Narrow:
-            def describe_unresolvable_model(self, model):
-                return "refused: " + model
-
-        provider = registry.get_provider("opencode")
-        # Patched on the class: `monkeypatch.setattr(instance, ...)` undoes by
-        # writing the bound method back onto the shared registry instance,
-        # which then shadows every later class-level patch of it.
-        monkeypatch.setattr(
-            type(provider), "describe_unresolvable_model",
-            lambda self, model: Narrow().describe_unresolvable_model(model),
-        )
-        monkeypatch.setattr(type(provider), "is_available", lambda self: True)
-        with pytest.raises(executor.RunnerRejected) as excinfo:
-            executor.preflight_runner("opencode:x/y", key=KEY)
-        assert "refused: x/y" in str(excinfo.value)
-
 
 # --------------------------------------------------------------------------- #
 # T8.4 + T8.13 — _detect_auth

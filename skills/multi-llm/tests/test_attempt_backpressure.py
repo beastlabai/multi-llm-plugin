@@ -31,6 +31,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from tests.conftest import stand_in  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
 from utils.subagent_tasks import build_inputs, make_task  # noqa: E402
 
@@ -262,6 +263,7 @@ class TestTheWrapperNarrowsOnTheAttempt:
 
         monkeypatch.setattr(executor._ProviderBackpressure, "narrow", signalling)
 
+        @stand_in
         def fake_dispatch(task, *, phase_dir, runner, anchor=None, cwd=None,
                           after_attempt=None):
             name = task["task_id"]
@@ -303,6 +305,7 @@ class TestTheWrapperNarrowsOnTheAttempt:
         )
 
     def test_one_narrowing_per_task(self, tmp_path, monkeypatch, narrow_calls):
+        @stand_in
         def fake_dispatch(task, *, phase_dir, runner, anchor=None, cwd=None,
                           after_attempt=None):
             attempts = [
@@ -322,6 +325,7 @@ class TestTheWrapperNarrowsOnTheAttempt:
     def test_no_narrowing_on_a_non_rate_limited_attempt(
         self, tmp_path, monkeypatch, narrow_calls
     ):
+        @stand_in
         def fake_dispatch(task, *, phase_dir, runner, anchor=None, cwd=None,
                           after_attempt=None):
             attempts = [
@@ -349,6 +353,7 @@ class TestTheWrapperNarrowsOnTheAttempt:
             _attempt(2, executor.STATUS_OK),
         ]
 
+        @stand_in
         def fake_dispatch(task, *, phase_dir, runner, anchor=None, cwd=None,
                           after_attempt=None):
             after_attempt(attempts[0])
@@ -376,19 +381,21 @@ class TestTheWrapperNarrowsOnTheAttempt:
         assert "reported a rate limit" not in captured.out
 
 
-class TestTheHookIsPassedOnlyWhenNeeded:
-    """§F6: a stand-in ``dispatch_task`` is never handed a keyword it rejects."""
+class TestTheHookIsLiveOnlyWhenNeeded:
+    """§F6: ``after_attempt`` is a hook only when narrowing can still change
+    something; otherwise it is passed as ``None``."""
 
-    def test_a_double_without_the_keyword_still_narrows_after_return(
+    def test_a_dispatch_that_never_calls_the_hook_still_narrows_after_return(
         self, tmp_path, monkeypatch, narrow_calls
     ):
-        def legacy_dispatch(task, *, phase_dir, runner, anchor=None, cwd=None):
+        @stand_in
+        def dispatch(task, *, phase_dir, runner, anchor=None, cwd=None):
             return _outcome(
                 task, runner, [_attempt(1, executor.STATUS_RATE_LIMITED)],
                 executor.STATUS_RATE_LIMITED,
             )
 
-        monkeypatch.setattr(executor, "dispatch_task", legacy_dispatch)
+        monkeypatch.setattr(executor, "dispatch_task", dispatch)
         _gather(tmp_path, monkeypatch, [{"task_id": "A", "kind": "validation"}],
                 limit=4)
         assert narrow_calls == [(PROVIDER, 2)]
@@ -398,28 +405,27 @@ class TestTheHookIsPassedOnlyWhenNeeded:
     ):
         received = []
 
-        def dispatch(task, *, phase_dir, runner, anchor=None, cwd=None, **kwargs):
-            received.append(sorted(kwargs))
+        @stand_in
+        def dispatch(task, *, phase_dir, runner, after_attempt=None):
+            received.append(after_attempt)
             return _outcome(task, runner, [_attempt(1, executor.STATUS_OK)],
                             executor.STATUS_OK)
 
         monkeypatch.setattr(executor, "dispatch_task", dispatch)
         _gather(tmp_path, monkeypatch, [{"task_id": "A", "kind": "validation"}],
                 limit=1)
-        assert received == [[]]
+        assert received == [None]
 
     def test_a_narrowable_provider_gets_the_hook(self, tmp_path, monkeypatch):
         received = []
 
-        def dispatch(task, *, phase_dir, runner, anchor=None, cwd=None, **kwargs):
-            received.append(sorted(kwargs))
+        @stand_in
+        def dispatch(task, *, phase_dir, runner, after_attempt=None):
+            received.append(after_attempt)
             return _outcome(task, runner, [_attempt(1, executor.STATUS_OK)],
                             executor.STATUS_OK)
 
         monkeypatch.setattr(executor, "dispatch_task", dispatch)
         _gather(tmp_path, monkeypatch, [{"task_id": "A", "kind": "validation"}],
                 limit=2)
-        assert received == [["after_attempt"]]
-
-    def test_the_real_dispatch_task_accepts_the_keyword(self):
-        assert executor._accepts_keyword(executor.dispatch_task, "after_attempt")
+        assert len(received) == 1 and callable(received[0])

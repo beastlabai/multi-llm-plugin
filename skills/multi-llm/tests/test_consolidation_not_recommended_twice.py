@@ -44,7 +44,7 @@ from utils.review_orchestrator_base import (  # noqa: E402
 from utils.state_manager import (  # noqa: E402
     StateManager, save_groups_payload, stamp_stable_ids,
 )
-from utils.subagent_executor import simulate_native_invoker  # noqa: E402
+from tests.harness.native_invoker import simulate_native_invoker  # noqa: E402
 
 THRESHOLD = 2
 LINE = "consolidation recommended:"

@@ -44,7 +44,7 @@ from harness import SkillRunner  # noqa: E402
 from mocks.mock_llm import echo_subagent_answer  # noqa: E402
 from utils import task_decomposer  # noqa: E402
 from utils.cli_common import parse_result_line  # noqa: E402
-from utils.subagent_executor import simulate_native_invoker  # noqa: E402
+from tests.harness.native_invoker import simulate_native_invoker  # noqa: E402
 
 PLAN_BODY = """# Task Generation Plan
 
@@ -427,6 +427,44 @@ class TestDocumentValidation:
         err = capsys.readouterr().err
         assert code == 3
         assert "parses to 1 task(s)" in err and "declared 2" in err
+        assert plan.read_bytes() == before
+
+    def test_the_consumer_is_called_with_the_document_not_through_argv(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """`apply_tasks_document` gets the validated document; the CLI wrapper
+        (and its second read of the file) is never involved."""
+        plan = _plan(tmp_path)
+        _materialize(plan)
+        _persist(plan, _valid_document())
+
+        import update_plan_tasks
+
+        def no_cli(argv=None):
+            raise AssertionError("consume_document must not call main()")
+
+        monkeypatch.setattr(update_plan_tasks, "main", no_cli)
+        code = multi_llm.main(["generate-tasks", str(plan), "--yes", "--reaggregate"])
+        assert code == 0, capsys.readouterr().err
+        assert _tasks_md(plan).exists()
+
+    def test_a_refused_document_restores_the_plan(self, tmp_path, monkeypatch, capsys):
+        plan = _plan(tmp_path)
+        _materialize(plan)
+        _persist(plan, _valid_document())
+        before = plan.read_bytes()
+
+        import update_plan_tasks
+
+        def refuse(plan_path, data, *, dry_run=False):
+            update_plan_tasks.replace_file(Path(plan_path), "half-done\n")
+            raise update_plan_tasks.TasksDocumentError("SOURCE_DATE_EPOCH is bad")
+
+        monkeypatch.setattr(update_plan_tasks, "apply_tasks_document", refuse)
+        code = multi_llm.main(["generate-tasks", str(plan), "--yes", "--reaggregate"])
+        err = capsys.readouterr().err
+        assert code == 3
+        assert "refused the document (SOURCE_DATE_EPOCH is bad)" in err
         assert plan.read_bytes() == before
 
     def test_an_unreadable_result_is_exit_three(self, tmp_path, capsys):

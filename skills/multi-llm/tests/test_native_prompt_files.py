@@ -33,7 +33,7 @@ from mocks.mock_llm import echo_subagent_answer  # noqa: E402
 from utils import validation as validation_mod  # noqa: E402
 from utils.output_handler import output_dir_path  # noqa: E402
 from utils.state_manager import save_groups_payload, stamp_stable_ids  # noqa: E402
-from utils.subagent_executor import simulate_native_invoker  # noqa: E402
+from tests.harness.native_invoker import simulate_native_invoker  # noqa: E402
 from utils.subagent_tasks import (  # noqa: E402
     validate_subagent_task, validate_subagent_task_file,
 )

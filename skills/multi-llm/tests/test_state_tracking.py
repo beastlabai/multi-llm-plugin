@@ -63,17 +63,26 @@ class TestReviewPlanStateTracking:
         assert not state2.is_phase_completed("code-review")
 
 
+def _tasks_document(title: str, description: str) -> dict:
+    """A one-task document ``util update-tasks`` accepts (the task-generation
+    schema and graph rules)."""
+    return {
+        "plan_preamble": "Shared context.",
+        "tasks": [{
+            "id": "T001", "title": title, "description": description,
+            "acceptance_criteria": ["Done."], "estimated_complexity": "low",
+            "executor_role": "agent",
+        }],
+    }
+
+
 class TestUpdatePlanTasksStateTracking:
     """Tests for update_plan_tasks state tracking."""
 
     def test_marks_phase_completed_after_tasks_created(self, sample_plan, temp_dir):
         """update_plan_tasks marks generate-tasks phase as completed."""
         # Create a tasks JSON file
-        tasks_json = {
-            "tasks": [
-                {"id": "T001", "title": "Test task", "description": "Test"}
-            ]
-        }
+        tasks_json = _tasks_document("Test task", "Test")
         tasks_path = temp_dir / "tasks.json"
         tasks_path.write_text(json.dumps(tasks_json), encoding="utf-8")
 
@@ -96,11 +105,7 @@ class TestUpdatePlanTasksStateTracking:
 
     def test_tasks_file_created_in_correct_location(self, sample_plan, temp_dir):
         """update_plan_tasks creates tasks.md in the correct output directory."""
-        tasks_json = {
-            "tasks": [
-                {"id": "T001", "title": "Setup task", "description": "Initial setup"}
-            ]
-        }
+        tasks_json = _tasks_document("Setup task", "Initial setup")
         tasks_path = temp_dir / "tasks.json"
         tasks_path.write_text(json.dumps(tasks_json), encoding="utf-8")
 
@@ -121,11 +126,7 @@ class TestUpdatePlanTasksStateTracking:
 
     def test_dry_run_does_not_mark_phase_completed(self, sample_plan, temp_dir):
         """--dry-run flag does not mark generate-tasks phase as completed."""
-        tasks_json = {
-            "tasks": [
-                {"id": "T001", "title": "Test task", "description": "Test"}
-            ]
-        }
+        tasks_json = _tasks_document("Test task", "Test")
         tasks_path = temp_dir / "tasks.json"
         tasks_path.write_text(json.dumps(tasks_json), encoding="utf-8")
 

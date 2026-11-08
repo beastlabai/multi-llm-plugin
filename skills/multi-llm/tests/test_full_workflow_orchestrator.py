@@ -40,7 +40,7 @@ from mocks.mock_llm import echo_subagent_answer  # noqa: E402
 from utils import unattended as un  # noqa: E402
 from utils.cli_common import parse_result_line, record_next  # noqa: E402
 from utils.state_manager import StateManager  # noqa: E402
-from utils.subagent_executor import simulate_native_invoker  # noqa: E402
+from tests.harness.native_invoker import simulate_native_invoker  # noqa: E402
 
 PLAN_BODY = """# Full Workflow Plan
 

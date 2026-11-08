@@ -37,6 +37,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import subagent_executor as executor  # noqa: E402
+from tests.conftest import stand_in  # noqa: E402
+from tests.harness.native_invoker import simulate_native_invoker  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     PROFILE_AGENT_READONLY,
@@ -1471,7 +1473,7 @@ class TestResultContractEquivalence:
                 provider, completed.stdout, completed.stderr, prefer_arrays=False
             )
 
-        native_report = executor.simulate_native_invoker(
+        native_report = simulate_native_invoker(
             [native_task], phase_dir=str(native_dir), respond=respond,
             kind="validation",
         )
@@ -1485,7 +1487,7 @@ class TestResultContractEquivalence:
         """Neither invoker has an inline-json path; both refuse the task."""
         task = _validation_batch(tmp_path)
         task["result_channel"] = "inline-json"
-        report = executor.simulate_native_invoker(
+        report = simulate_native_invoker(
             [task], phase_dir=str(tmp_path), respond=lambda t: {"groups": []},
             kind="validation",
         )
@@ -1515,7 +1517,7 @@ class TestResultContractEquivalence:
                     [task], phase_dir=str(phase_dir), kind="validation"
                 ).ok
             else:
-                executor.simulate_native_invoker(
+                simulate_native_invoker(
                     [task], phase_dir=str(phase_dir), kind="validation",
                     respond=lambda t: {
                         "groups": [
@@ -1813,7 +1815,7 @@ class TestEveryKindReachesItsConsumer:
             task_list_key="batches",
             extra={"total_batches": 1, "phase_dir": str(validation_dir)},
         )
-        assert executor.simulate_native_invoker(
+        assert simulate_native_invoker(
             [task], phase_dir=str(validation_dir), kind="validation",
             respond=lambda t: {
                 "groups": [{"group_index": 0, "group_hash": "aaaa000000000000",
@@ -1843,7 +1845,7 @@ class TestEveryKindReachesItsConsumer:
                        {"group_index": 1, "status": "validation_failed"},
                    ]},
         )
-        assert executor.simulate_native_invoker(
+        assert simulate_native_invoker(
             [reval_task], phase_dir=str(reval_dir), kind="revalidation",
             respond=lambda t: {
                 "groups": [{"group_index": 0, "group_hash": "aaaa000000000000",
@@ -1870,7 +1872,7 @@ class TestEveryKindReachesItsConsumer:
         judge_document = build_judge_tasks(
             items=[judge_item_from_group(group)], phase_dir=str(judge_dir)
         )
-        assert executor.simulate_native_invoker(
+        assert simulate_native_invoker(
             judge_document["tasks"], phase_dir=str(judge_dir),
             kind="human_decision_judge",
             respond=lambda t: {
@@ -1907,7 +1909,7 @@ class TestEveryKindReachesItsConsumer:
             extra={"total_batches": 1, "phase_dir": str(cons_dir),
                    "singleton_sections": {}},
         )
-        assert executor.simulate_native_invoker(
+        assert simulate_native_invoker(
             [cons_task], phase_dir=str(cons_dir), kind="consolidation",
             respond=lambda t: {
                 "verification": "passed", "clusters": [],
@@ -1979,7 +1981,7 @@ class TestEveryKindReachesItsConsumer:
     def test_the_native_invoker_refuses_a_schema_invalid_reply(self, tmp_path):
         """The native path validates too — it is not a trusted write channel."""
         task = _validation_batch(tmp_path)
-        report = executor.simulate_native_invoker(
+        report = simulate_native_invoker(
             [task], phase_dir=str(tmp_path), kind="validation",
             respond=lambda t: {"groups": [{"status": "valid"}]},  # no group_hash
         )
@@ -2176,7 +2178,7 @@ class TestSalvageFoundNothing:
         task_file = self._salvage_task_file(tmp_path)
         tasks = tasks_of(json.loads(Path(task_file).read_text(encoding="utf-8")))
 
-        report = executor.simulate_native_invoker(
+        report = simulate_native_invoker(
             tasks, phase_dir=str(tmp_path), kind="salvage",
             respond=lambda _t: self._sentinel(),
         )
@@ -2187,7 +2189,7 @@ class TestSalvageFoundNothing:
         assert not (tmp_path / "codex_gpt-5_5.json").exists()
 
         # ... and it still persists the two answers that ARE results.
-        assert executor.simulate_native_invoker(
+        assert simulate_native_invoker(
             tasks, phase_dir=str(tmp_path), kind="salvage", respond=lambda _t: [],
         ).ok
         assert json.loads(
@@ -2312,7 +2314,7 @@ class TestSalvageFoundNothing:
         tasks = tasks_of(json.loads(Path(task_file).read_text(encoding="utf-8")))
 
         for envelope in (self.PROVIDER_ERROR_BODY, self.EVENT_ENVELOPE):
-            report = executor.simulate_native_invoker(
+            report = simulate_native_invoker(
                 tasks, phase_dir=str(tmp_path), kind="salvage",
                 respond=lambda _t, body=envelope: body,
             )
@@ -2324,7 +2326,7 @@ class TestSalvageFoundNothing:
 
         # ... and a genuine recovery still lands on the model's result path, so
         # the rule is not simply refusing everything this lane hands it.
-        assert executor.simulate_native_invoker(
+        assert simulate_native_invoker(
             tasks, phase_dir=str(tmp_path), kind="salvage", respond=lambda _t: [],
         ).ok
         assert json.loads(
@@ -2389,7 +2391,7 @@ class TestATimedOutRunsEmptySalvageIsRefused:
 
         task_file = self._salvage_task_file(tmp_path, timed_out=timed_out)
         tasks = tasks_of(json.loads(Path(task_file).read_text(encoding="utf-8")))
-        return executor.simulate_native_invoker(
+        return simulate_native_invoker(
             tasks, phase_dir=str(tmp_path), kind="salvage",
             respond=lambda _t: response,
         )
@@ -2621,6 +2623,7 @@ class TestLongestFirstDispatch:
         tasks = self._sized_batches(tmp_path)
         dispatched = []
 
+        @stand_in
         def recording_dispatch(task, *, phase_dir, runner, anchor=None, cwd=None):
             dispatched.append(task["task_id"])
             return executor.TaskOutcome(
@@ -2694,6 +2697,7 @@ class TestTheBatchDeadline:
             path.write_text(json.dumps(reply), encoding="utf-8")
             return str(path)
 
+        @stand_in
         def dispatch(task, *, phase_dir, runner, anchor=None, cwd=None):
             index = task["batch_index"]
             if index:
@@ -2755,6 +2759,7 @@ class TestTheBatchDeadline:
         tasks = [_validation_batch(tmp_path, i, hashes=(f"{i:04d}" + "0" * 12,))
                  for i in range(16)]
 
+        @stand_in
         def dispatch(task, *, phase_dir, runner, anchor=None, cwd=None):
             if task["batch_index"] < 2:
                 return executor.TaskOutcome(
@@ -3053,7 +3058,7 @@ class TestRunnerAuthPreflight:
 
     def test_an_unreadable_probe_never_blocks(self, tmp_path, runner_env, monkeypatch):
         """A probe that cannot run at all is `unknown`, not a refusal."""
-        monkeypatch.setattr(executor, "_run_probe", lambda argv: None)
+        monkeypatch.setattr(executor, "_run_probe", stand_in(lambda argv: None))
         runner_env.use("codex:gpt-5.5")
         info = executor.preflight_runner("codex:gpt-5.5")
         assert info["auth"] == "unknown"
@@ -4932,7 +4937,7 @@ class TestCredentialFreeModels:
             args=["opencode", "auth", "list"], returncode=0,
             stdout=self._ZERO_CREDENTIALS, stderr="",
         )
-        monkeypatch.setattr(executor, "_run_probe", lambda argv: completed)
+        monkeypatch.setattr(executor, "_run_probe", stand_in(lambda argv: completed))
 
     def test_the_default_declares_the_measured_id_and_nothing_else(self):
         provider = registry.get_provider("opencode")
@@ -4994,7 +4999,7 @@ class TestCredentialFreeModels:
             args=["opencode", "auth", "list"], returncode=fixture["exit"],
             stdout=fixture["stdout"], stderr=fixture["stderr"],
         )
-        monkeypatch.setattr(executor, "_run_probe", lambda argv: completed)
+        monkeypatch.setattr(executor, "_run_probe", stand_in(lambda argv: completed))
         executor.reset_auth_cache()
         with pytest.raises(executor.RunnerRejected) as excinfo:
             executor._detect_auth(
@@ -5018,7 +5023,7 @@ class TestCredentialFreeModels:
             stdout="┌  Credentials\n│\n●  OpenRouter api\n│\n└  1 credentials\n",
             stderr="",
         )
-        monkeypatch.setattr(executor, "_run_probe", lambda argv: completed)
+        monkeypatch.setattr(executor, "_run_probe", stand_in(lambda argv: completed))
         executor.reset_auth_cache()
         state = executor._detect_auth(
             "opencode", "opencode/big-pickle",

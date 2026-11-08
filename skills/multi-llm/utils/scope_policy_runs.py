@@ -303,6 +303,34 @@ def announce(
     return decision
 
 
+def open_run(
+    manager: Optional[Any],
+    key: str,
+    choice: Optional[Choice],
+    *,
+    phase_dir: Optional[str],
+    unattended: bool,
+    announce_default: bool = True,
+) -> Tuple[str, str, Optional[str]]:
+    """Open a run of *key* under *choice*: the one opening ``generate-tasks``,
+    ``implement`` and ``full`` share.
+
+    Persists the choice in *manager* (a ``StateManager``; ``None`` on a dry
+    run, which writes nothing), then announces a policy nobody typed as D6
+    row 16's resolution (:func:`announce`, under ``--yes`` only). A composite
+    with no choice forwards no flag and leaves each step to announce its own
+    default, so it passes ``announce_default=False``. Returns the effective
+    ``(policy, source)`` and the decision text recorded, or ``None``.
+    """
+    if manager is not None and record_scope_run_start(manager, key, choice):
+        manager.save()
+    policy, source = effective_choice(choice)
+    decision = None
+    if choice is not None or announce_default:
+        decision = announce(phase_dir, policy, source, unattended=unattended, mode=key)
+    return policy, source, decision
+
+
 # ---------------------------------------------------------------------------
 # generate-tasks and implement: the preserve-only prompt blocks
 # ---------------------------------------------------------------------------
@@ -358,6 +386,7 @@ def with_guidance(prompt: str, block: str, *, before: Optional[str] = None) -> s
 __all__ = [
     "Choice", "RUNS_KEY", "SITE_ID", "announce", "close_run_choice",
     "effective_choice", "ending_phases", "forwarded_flags", "generation_guidance",
-    "implementation_guidance", "live_run_choice", "record_run_choice", "record_run_start",
+    "implementation_guidance", "live_run_choice", "open_run", "record_run_choice",
+    "record_run_start",
     "resolution_text", "resolve_run_choice", "run_record", "with_guidance",
 ]

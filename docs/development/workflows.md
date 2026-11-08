@@ -18,8 +18,11 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 **`generate-tasks` is Python (`generate_tasks_orchestrator.py`), and it is the one phase whose subagent
 sees the repository.** The sequence is: `ensure_prerequisites` (row 5, called — never reimplemented)
 → materialize **one** `task_generation` task into `{plan}/generate-tasks/task_generation_tasks.json` (the standard
-envelope, so the executor needs no special case) → dispatch → validate → `update_plan_tasks.main(...)`
-**in-process** → verify the outcome.
+envelope, so the executor needs no special case) → dispatch → validate → `update_plan_tasks.apply_tasks_document(...)`
+**in-process** → verify the outcome. `util update-tasks` reaches the same function through
+`update_plan_tasks.main`, so a hand-written list gets the same schema and graph rules
+(`validate_result("task_generation", …)`), and both plan writes go through a temp file and
+`os.replace` (`update_plan_tasks.replace_file`), so a crash mid-write leaves the old plan.
 
 The task is `context_mode: workspace-read` with the pinned repo root as the only path its prompt names, and
 it requires **both** `supports_workspace_reads` and the `agent-readonly` profile: a runner with
@@ -141,7 +144,7 @@ Before validation, `subagent_executor.normalize_result` supplies `[]` for any of
 `depends_on`/`files_to_create`/`files_to_modify` (`TASK_GENERATION_LIST_KEYS`) a task
 left *out* — on both executor parse lanes and, for the native host's file, in
 `consume_document`, which writes the completed document back before validating because
-`update_plan_tasks` reads the file. Absent and empty mean the same thing to every consumer, and a
+`task_is_complete` re-reads the file. Absent and empty mean the same thing to every consumer, and a
 small model spells "none" by omission (measured 2026-09-14: `opencode/nemotron-3-ultra-free` returned ten
 well-formed single-file tasks with no `files_to_create` on any and failed rung 6 twice); a key
 present with the wrong type is left for the schema to name, and no other kind is completed.

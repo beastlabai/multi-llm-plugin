@@ -34,7 +34,6 @@ from __future__ import annotations
 import glob
 import json
 import os
-import re
 import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -57,6 +56,7 @@ try:
         file_bytes_sha256,
         make_task,
         make_task_file,
+        safe_output_token,
         write_task_file,
     )
 except ImportError:  # pragma: no cover - direct-script import shim
@@ -77,6 +77,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         file_bytes_sha256,
         make_task,
         make_task_file,
+        safe_output_token,
         write_task_file,
     )
 
@@ -111,10 +112,6 @@ JUDGE_TASKS_FILENAME = "human_decision_tasks.json"
 #: judged item's stable id (see :func:`verdict_output_name`), never its position,
 #: so the glob is deliberately wider than ``_\d+``.
 VERDICT_FILE_PATTERN = "human_decision_batch_*.json"
-
-#: The basename charset ``schemas/subagent_tasks.schema.json`` allows for
-#: ``output_name``. A token outside it is hashed rather than rejected.
-_SAFE_VERDICT_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 DECISION_APPROVE = "approve"
 DECISION_SALVAGE = "salvage"
@@ -246,25 +243,14 @@ def judge_item_from_group(group: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def verdict_output_name(token: str) -> str:
-    """Return the verdict basename for one judging task, keyed by *token*.
+    """Return the verdict basename for one judging task, keyed by *token*
+    (``subagent_tasks.safe_output_token``).
 
-    The token is the item's stable ``group_id`` — **never its position** in the
-    materialized list. ``build_judge_tasks`` is called with whatever items are
-    still unjudged, so a re-enumerated index names a *different* group's verdict
-    file on the next invocation; and because a task counts as done iff its
-    ``output_name`` exists, parses and validates, the resumed task would read the
-    previous round's already-ingested verdict, never be dispatched, and leave its
-    own group unjudged (silently skipped under ``--yes``) — while a native
-    invoker would instead overwrite the earlier group's file. Keying by
-    ``group_id`` is what makes "resume by id" true of the filenames too.
-
-    A token outside the task schema's basename charset is hashed rather than
-    rejected, so an exotic id still names exactly one stable file.
+    The token is the item's stable ``group_id`` — **never its position**: the
+    tasks are rebuilt from whatever is still unjudged, so a position names
+    another group's verdict file, which then reads as done.
     """
-    token = str(token or "")
-    if not _SAFE_VERDICT_TOKEN.match(token):
-        token = content_hash(token)
-    return f"human_decision_batch_{token}.json"
+    return f"human_decision_batch_{safe_output_token(token)}.json"
 
 
 def build_judge_tasks(

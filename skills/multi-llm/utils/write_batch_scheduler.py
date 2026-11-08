@@ -22,8 +22,8 @@ from the read path — make a write phase a loop with state rather than a fan-ou
    propagate through ``depends_on``.
 
 Everything here is stated **once** and driven by both invokers: the executor under
-``--exec-subagents``, and (through ``respond=``) the simulated native invoker the
-equivalence tests use. Finalization is part of the loop's contract, not a caller's
+``--exec-subagents``, and (through the ``dispatcher=`` seam) the simulated native
+invoker the equivalence tests inject (``tests/harness/native_invoker.py``). Finalization is part of the loop's contract, not a caller's
 courtesy: *a run that dispatched every batch and produced no summary, no
 ``prior_changes`` entries and no completed phase is a **failed** run, not a partial
 one.*
@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import inspect
 import json
 import os
 import posixpath
@@ -77,7 +76,6 @@ from .text_clip import (
 from .providers.base import (
     SANDBOX_RUNG_PLUGIN_LANDLOCK,
     host_write_posture_consent,
-    WRITE_SCOPE_PLAN_FILE,
     WRITE_SCOPE_REPO_WIDE,
     WRITE_SCOPE_TASKS,
     WRITE_SCOPES_ON_RUNG,
@@ -114,7 +112,6 @@ from .subagent_executor import (
     _host_ceiling,
     _host_env_guards,
     dispatch_task,
-    persist_result,
     preflight_runner,
     profile_for_kind,
     resolve_output_target,
@@ -156,7 +153,6 @@ from .state_manager import (
     predates_review,
     stamp_or_mtime,
 )
-from .subagent_prompts import build_nothing_changed_resend_prompt
 from .write_phase_bridge import WRITE_TASK_FILENAME
 from .write_safety import (
     CONTEXT_PLAN_RULE,
@@ -973,50 +969,18 @@ def review_completed_at(recorded: Any, write_kind: Any) -> Optional[datetime]:
 # codex-sandbox-unavailable-findings-and-fixes, step 3 option (b), 2026-09-30)
 # ---------------------------------------------------------------------------
 
-#: The kind → ``write_scope`` map, as a fallback for an executor that predates
-#: ``subagent_executor.WRITE_SCOPE_BY_KIND`` (2026-09-30: the two packages land
-#: separately). The executor's table wins whenever it exists
-#: (:func:`write_scope_for_kind`), so there is one map in force, never two that
-#: can disagree. The scope comes from the phase's kind, never from the task
-#: JSON (F1 "How a dispatch receives its grant").
-_WRITE_SCOPE_BY_KIND_FALLBACK: Dict[str, str] = {
-    "apply_suggestions": WRITE_SCOPE_PLAN_FILE,
-    "apply_task_suggestions": WRITE_SCOPE_TASKS,
-    "apply_code_fixes": WRITE_SCOPE_REPO_WIDE,
-    "implement": WRITE_SCOPE_REPO_WIDE,
-}
-
-
 def write_scope_for_kind(kind: str) -> Optional[str]:
     """The ``write_scope`` a write kind's dispatches carry, or ``None``.
 
     ``plan-file`` for apply-suggestions, ``tasks`` for apply-task-suggestions,
     ``repo-wide`` for apply-code-fixes and implement (on the rung since plan
-    step 3b, 2026-10-02). An unmapped kind gets ``None``, which the executor
-    refuses on the rung rather than widening it.
+    step 3b, 2026-10-02), read from the executor's one table
+    (``subagent_executor.WRITE_SCOPE_BY_KIND``). The scope comes from the
+    phase's kind, never from the task JSON (F1 "How a dispatch receives its
+    grant"). An unmapped kind gets ``None``, which the executor refuses on the
+    rung rather than widening it.
     """
-    table = getattr(_executor, "WRITE_SCOPE_BY_KIND", None)
-    if not isinstance(table, dict):
-        table = _WRITE_SCOPE_BY_KIND_FALLBACK
-    return table.get(kind)
-
-
-def _accepts_keyword(func: Any, name: str) -> bool:
-    """Whether ``func`` takes keyword ``name`` (or ``**kwargs``).
-
-    The scheduler hands the executor a ``jail_request=`` / ``write_scope=``
-    only where the executor's signature takes one, so it keeps working against
-    an executor that predates plan step 3 (2026-09-30) and against a test's
-    stand-in with the historical keyword set — the same courtesy
-    ``dispatch_task`` already pays ``_spawn`` for ``read_dirs``.
-    """
-    try:
-        params = inspect.signature(func).parameters
-    except (TypeError, ValueError):
-        return False
-    if name in params:
-        return True
-    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    return _executor.WRITE_SCOPE_BY_KIND.get(kind)
 
 
 def _tighter_cap(first: Optional[int], second: Optional[int]) -> Optional[int]:
@@ -4511,10 +4475,16 @@ class WriteBatchScheduler:
             ``subagent_executor.effective_ceiling``'s parameter of the same name.
             No orchestrator passes it; a caller that already knows the number
             still may.
-        respond: When given, the **simulated native invoker** runs instead of a
-            subprocess: ``(task, dispatched_prompt) -> result JSON``. Same
-            containment, same classification, same prior-changes append — which is
-            what makes "either invoker, same terminal state" a property of the code.
+        dispatcher: How each admitted task is dispatched, called as
+            ``dispatcher(scheduler, task, prompt, snapshot, profile, declared,
+            batch_index=...)``. ``None`` is :meth:`_dispatch_executor`, the
+            executor under ``--exec-subagents``; no orchestrator passes another.
+            An injected one (the equivalence tests' simulated native invoker)
+            names itself in its ``invoker`` attribute and starts no runner, so
+            no runner preflight decides rollback storage for it. Containment,
+            classification and the prior-changes append are the loop's, the
+            same for either — which is what makes "either invoker, same
+            terminal state" a property of the code.
         dry_run: ``--dry-run-subagents``. Renders every command, applies every
             admission and policy check, writes ``subagent_dry_run.json`` and starts
             **no** child.
@@ -4554,7 +4524,7 @@ class WriteBatchScheduler:
         dry_run: bool = False,
         human_task_strategy: Optional[str] = None,
         human_task_decisions: Optional[Dict[str, str]] = None,
-        respond: Optional[Callable[[Dict[str, Any], str], Any]] = None,
+        dispatcher: Optional[Callable[..., TaskOutcome]] = None,
         finalize: bool = True,
         log: Optional[Callable[[str], None]] = None,
         write_target: Optional[str] = None,
@@ -4611,7 +4581,13 @@ class WriteBatchScheduler:
         self.dry_run = dry_run
         self.human_task_strategy = human_task_strategy
         self.human_task_decisions = dict(human_task_decisions or {})
-        self.respond = respond
+        #: The dispatch seam (see ``dispatcher`` above), an unbound callable
+        #: taking this scheduler first.
+        self._dispatcher: Callable[..., TaskOutcome] = (
+            dispatcher or WriteBatchScheduler._dispatch_executor
+        )
+        #: True when dispatches go through the executor, which spawns runners.
+        self._executor_dispatch = dispatcher is None
         self.finalize = finalize
         self.log = log or (lambda line: print(line))
         #: The way forward after a stop, spelled the way this host's user
@@ -4682,7 +4658,7 @@ class WriteBatchScheduler:
         #: with its no-op claim" (N2, 2026-09-16) — the two read identically
         #: from the bytes alone.
         self._snapshot_reused: set = set()
-        self.invoker = "native-simulated" if respond is not None else "executor"
+        self.invoker = "executor" if dispatcher is None else str(dispatcher.invoker)
         #: Serializes the per-dispatch bookkeeping (`_record_batch_effects`).
         #: With `driver.max_concurrent_write_subagents` > 1 a disjoint group runs
         #: in a thread pool, and every member reaches the SAME in-memory
@@ -4906,7 +4882,7 @@ class WriteBatchScheduler:
         its actual dispatch still reports its own refusal, and a later
         successful preflight cannot strand evidence inside a writable grant.
         """
-        if self.dry_run or self.respond is not None:
+        if self.dry_run or not self._executor_dispatch:
             return
         with self._rollback_storage_lock:
             if self._rollback_storage_decided:
@@ -5130,33 +5106,25 @@ class WriteBatchScheduler:
     def _preflight(
         self, runner: str, profile: str, **extra: Any
     ) -> Dict[str, Any]:
-        """``preflight_runner`` with this phase's request when it takes one.
+        """``preflight_runner`` with this phase's request.
 
         For ``agent-write`` the request's scope joins the executor's sandbox
         decision key, so a ``plan-file`` decision is never replayed for a
         ``repo-wide`` dispatch of the same runner.
         """
-        kwargs: Dict[str, Any] = dict(
-            profile=profile, anchor=self.anchor, key="driver.subagent_runner",
+        return preflight_runner(
+            runner, profile=profile, anchor=self.anchor,
+            key="driver.subagent_runner", jail_request=self.jail_request,
             **extra,
         )
-        if self.jail_request is not None and _accepts_keyword(
-            preflight_runner, "jail_request"
-        ):
-            kwargs["jail_request"] = self.jail_request
-        return preflight_runner(runner, **kwargs)
 
     def _recorded_rung(self, runner: str, profile: str) -> Optional[str]:
         """The fallback rung the preflight recorded for this runner, profile
         and scope, or ``None`` (codex's own sandbox, or another runner)."""
-        lookup = getattr(_executor, "sandbox_rung", None)
-        if lookup is None:
-            return None
         try:
-            if self.write_scope and _accepts_keyword(lookup, "write_scope"):
-                rung = lookup(runner, profile, write_scope=self.write_scope)
-            else:
-                rung = lookup(runner, profile)
+            rung = _executor.sandbox_rung(
+                runner, profile, write_scope=self.write_scope or None
+            )
         except Exception:  # noqa: BLE001 - a lookup must never fail a dispatch
             return None
         return str(rung) if rung else None
@@ -5170,14 +5138,13 @@ class WriteBatchScheduler:
         sandbox, which therefore prints nothing (§8.2 "The stray-writes-only
         line").
         """
-        notice_for = getattr(_executor, "write_rung_notice", None)
-        if notice_for is None or self.jail_request is None:
+        if self.jail_request is None:
             return
         key = batch_index if batch_index is not None else runner
         if key in self._rung_noticed:
             return
         try:
-            notice = notice_for(runner, self.jail_request)
+            notice = _executor.write_rung_notice(runner, self.jail_request)
         except Exception:  # noqa: BLE001 - a notice must never fail a dispatch
             return
         if notice:
@@ -6858,13 +6825,10 @@ class WriteBatchScheduler:
         started = time.time()
         self._git_meta_before[task_id] = self._git_metadata_fingerprint()
         try:
-            if self.respond is not None:
-                outcome = self._dispatch_native(task, prompt, snapshot, profile)
-            else:
-                outcome = self._dispatch_executor(
-                    task, prompt, snapshot, profile, declared,
-                    batch_index=batch_index,
-                )
+            outcome = self._dispatcher(
+                self, task, prompt, snapshot, profile, declared,
+                batch_index=batch_index,
+            )
             self._warn_git_metadata_changed(task_id)
             outcome.snapshot_dir = snapshot.directory
             if not outcome.duration_seconds:
@@ -7633,7 +7597,7 @@ class WriteBatchScheduler:
         """
         if outcome.task_id in self._audited:
             return
-        if self.respond is None and not outcome.attempts:
+        if self._executor_dispatch and not outcome.attempts:
             # `dispatch_task` refused before its first `before_attempt`, so no
             # `dispatched` line was written either. A lone completion here would
             # claim a run that never started.
@@ -8565,21 +8529,6 @@ class WriteBatchScheduler:
                 for relative in sorted(paths)
             }
 
-        extra: Dict[str, Any] = {}
-        if request is not None and _accepts_keyword(dispatch_task, "jail_request"):
-            extra["jail_request"] = request
-        if _accepts_keyword(dispatch_task, "tree_fingerprint"):
-            extra["tree_fingerprint"] = tree_fingerprint
-        if _accepts_keyword(dispatch_task, "nothing_changed"):
-            extra["nothing_changed"] = nothing_changed
-        if self.kind in APPLY_WRITE_KINDS and _accepts_keyword(
-            dispatch_task, "incomplete_report"
-        ):
-            extra["incomplete_report"] = incomplete_report
-        if self.kind == "implement" and _accepts_keyword(
-            dispatch_task, "restate_findings"
-        ):
-            extra["restate_findings"] = restate_findings
         return dispatch_task(
             task,
             phase_dir=self.phase_dir,
@@ -8590,87 +8539,16 @@ class WriteBatchScheduler:
             before_attempt=before_attempt,
             after_result=after_result,
             changed_files=changed_files,
-            **extra,
+            jail_request=request,
+            tree_fingerprint=tree_fingerprint,
+            nothing_changed=nothing_changed,
+            incomplete_report=(
+                incomplete_report if self.kind in APPLY_WRITE_KINDS else None
+            ),
+            restate_findings=(
+                restate_findings if self.kind == "implement" else None
+            ),
         )
-
-    def _dispatch_native(
-        self,
-        task: Dict[str, Any],
-        prompt: str,
-        snapshot: TaskSnapshot,
-        profile: str,
-    ) -> TaskOutcome:
-        """The simulated native invoker: same persist, same classification (D3a).
-
-        A driving agent runs ``task.prompt`` with its own subagent tool and writes
-        the JSON it got back. That write is :func:`persist_result` and the verdict is
-        :meth:`_classify` — the *same* functions the executor path uses — so the two
-        invokers produce byte-identical result files and identical terminal states
-        by construction rather than by convention.
-        """
-        task_id = str(task.get("task_id", ""))
-        outcome = TaskOutcome(
-            task_id=task_id, kind=self.kind, runner="native", status=STATUS_OK,
-            profile=profile,
-        )
-        started = time.time()
-        declared = [
-            relative_to_root(p, self.repo_root) for p in declared_file_set(task)
-        ]
-        # Rule 9 (fix round 14), the same as the executor's: a reply that
-        # said `applied` while not one byte moved is sent once more, told so.
-        allowance = _executor.RESENDS_BY_KIND.get(self.kind, 0)
-        sent = prompt
-        attempt = 0
-        while True:
-            attempt += 1
-            self.audit.dispatched(
-                task_id=task_id, kind=self.kind, attempt=attempt, runner="native",
-                profile=profile, cwd=self.repo_root, sandbox_root=self.repo_root,
-                argv=["<native subagent>"], prompt=sent,
-                declared_files=declared,
-                snapshot_dir=snapshot.directory,
-                snapshot_before={e.relative: e.sha256 for e in snapshot.entries},
-            )
-            self._keep_dispatched_prompt(task_id, attempt, sent, prompt)
-            data = self.respond(task, sent)  # type: ignore[misc]
-            if isinstance(data, str):
-                from .json_extractor import extract_json_from_text
-                extracted = extract_json_from_text(data, prefer_arrays=False)
-                if not extracted.get("success"):
-                    outcome.status = STATUS_SCHEMA_INVALID
-                    outcome.write_outcome = WRITE_SCHEMA_REJECTED
-                    outcome.reason = extracted.get("error") or "no JSON in the reply"
-                    return outcome
-                # Fix round 28: the report object, as the executor reads it.
-                data = _executor.the_reply_object(self.kind, extracted["data"], extracted)
-            errors = validate_result(self.kind, data)
-            if errors:
-                outcome.status = STATUS_SCHEMA_INVALID
-                outcome.write_outcome = WRITE_SCHEMA_REJECTED
-                outcome.reason = (
-                    f"the reply does not match the {self.kind} result shape: "
-                    + "; ".join(errors[:5])
-                )
-                return outcome
-            outcome.output_path = persist_result(task, self.phase_dir, data)
-            asked: Dict[str, Any] = {"result": data, "exit_code": 0}
-            if attempt > allowance or not self._applied_without_changes(
-                task, snapshot, asked,
-            ):
-                break
-            sent = build_nothing_changed_resend_prompt(
-                prompt, declared=declared,
-                named=[
-                    str(path) for path in (data.get("files_touched") or [])
-                    if isinstance(path, str)
-                ],
-                outside=list(asked.get("moved_outside") or []),
-            )
-        self._classify(task, outcome, snapshot, data, runner="native",
-                       profile=profile, attempt=attempt, exit_code=0,
-                       duration=time.time() - started, resent=attempt > 1)
-        return outcome
 
     def _render_argv(self, runner: str, prompt: str, profile: str) -> List[str]:
         """The rendered argv for the audit record / dry run, never executed here.
@@ -8700,14 +8578,8 @@ class WriteBatchScheduler:
             # refuses leaves today's argv.
             try:
                 consent = host_write_posture_consent(write_scope=self.write_scope)
-                if consent is not None and _accepts_keyword(
-                    provider.apply_sandbox_fallback, "consent"
-                ):
-                    return list(provider.apply_sandbox_fallback(
-                        list(argv), profile, rung_id, consent=consent,
-                    ))
                 return list(provider.apply_sandbox_fallback(
-                    list(argv), profile, rung_id,
+                    list(argv), profile, rung_id, consent=consent,
                 ))
             except Exception:  # noqa: BLE001 - a preview must never fail a dispatch
                 return argv

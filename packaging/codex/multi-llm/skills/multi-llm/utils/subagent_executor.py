@@ -40,7 +40,6 @@ import asyncio
 import contextlib
 import copy
 import hashlib
-import inspect
 import json
 import os
 import re
@@ -399,7 +398,6 @@ __all__ = [
     "dispatch_task",
     "run_tasks",
     "run_task_file",
-    "simulate_native_invoker",
     "continue_past_marker",
     "dry_run_report",
     "preflight_runner",
@@ -1332,11 +1330,10 @@ def row_batch_check_findings(row: Dict[str, Any]) -> List[str]:
     return [str(item) for item in (check.get("findings") or []) if str(item)]
 
 
-def row_batch_check_accepted(row: Dict[str, Any]) -> Dict[str, List[str]]:
-    """A serialized row's own-check findings that only repeat what the user
-    accepted, by check id (its ``batch_check_accepted``, fix round 22), else
-    ``{}``."""
-    found = row.get("batch_check_accepted") if isinstance(row, dict) else None
+def _row_findings_by_check(row: Dict[str, Any], key: str) -> Dict[str, List[str]]:
+    """A serialized row's ``{check id: [finding, ...]}`` map under *key*,
+    empty findings and empty lists dropped, else ``{}``."""
+    found = row.get(key) if isinstance(row, dict) else None
     if not isinstance(found, dict):
         return {}
     return {
@@ -1344,20 +1341,19 @@ def row_batch_check_accepted(row: Dict[str, Any]) -> Dict[str, List[str]]:
         for check_id, items in found.items()
         if isinstance(items, list) and any(str(item) for item in items)
     }
+
+
+def row_batch_check_accepted(row: Dict[str, Any]) -> Dict[str, List[str]]:
+    """A serialized row's own-check findings that only repeat what the user
+    accepted, by check id (its ``batch_check_accepted``, fix round 22)."""
+    return _row_findings_by_check(row, "batch_check_accepted")
 
 
 def row_batch_check_repeats(row: Dict[str, Any]) -> Dict[str, List[str]]:
     """A serialized row's own-check findings that are the same findings a
     check task of the run reported, by that check's id (its
-    ``batch_check_repeats``, fix round 28), else ``{}``."""
-    found = row.get("batch_check_repeats") if isinstance(row, dict) else None
-    if not isinstance(found, dict):
-        return {}
-    return {
-        str(check_id): [str(item) for item in items if str(item)]
-        for check_id, items in found.items()
-        if isinstance(items, list) and any(str(item) for item in items)
-    }
+    ``batch_check_repeats``, fix round 28)."""
+    return _row_findings_by_check(row, "batch_check_repeats")
 
 
 def row_batch_check_note(row: Dict[str, Any]) -> Optional[str]:
@@ -2539,15 +2535,11 @@ def preflight_runner(
         # Plan §8 T8.3: `profile` and `anchor` let opencode answer the hermetic
         # reconstructibility question here, ahead of the auth leg, so a
         # user-config-only provider gets the `config_providers` sentence rather
-        # than "run `opencode auth login`". A narrow double declaring only
-        # `(model)` keeps working through the TypeError fallback.
+        # than "run `opencode auth login`".
         try:
-            try:
-                unresolvable = describe_unresolvable(
-                    model, profile=profile, anchor=anchor
-                )
-            except TypeError:
-                unresolvable = describe_unresolvable(model)
+            unresolvable = describe_unresolvable(
+                model, profile=profile, anchor=anchor
+            )
         except Exception:  # noqa: BLE001 - a diagnostic may not break a preflight
             unresolvable = None
         if unresolvable:
@@ -3119,28 +3111,6 @@ _CREDENTIAL_NAME = re.compile(
 )
 
 
-def _accepts_keyword(func: Callable[..., Any], name: str) -> bool:
-    """Does ``func`` take ``name`` as a keyword (explicitly or via ``**kwargs``)?
-
-    The F6 rule, applied to an optional hook or argument: a stand-in patched
-    over :func:`_run_probe` (a narrow ``(argv)`` test double) or
-    ``dispatch_task`` is never handed a keyword it does not accept. A callable
-    whose signature cannot be read is treated as not accepting it.
-    """
-    try:
-        params = inspect.signature(func).parameters.values()
-    except (TypeError, ValueError):
-        return False
-    return any(
-        param.kind is inspect.Parameter.VAR_KEYWORD
-        or (param.name == name and param.kind in (
-            inspect.Parameter.KEYWORD_ONLY,
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        ))
-        for param in params
-    )
-
-
 def _auth_cache_key(
     provider: Any,
     provider_name: str,
@@ -3284,10 +3254,7 @@ def _detect_auth(
         # asked — an env we could not build cannot vouch for a credential.
         probe_env = None
         env_build_failed = True
-    if _accepts_keyword(_run_probe, "env"):
-        completed = _run_probe(argv, env=probe_env)
-    else:  # a narrow `(argv)` test double
-        completed = _run_probe(argv)
+    completed = _run_probe(argv, env=probe_env)
     verdict: Optional[bool] = None
     if completed is not None:
         try:
@@ -5739,8 +5706,9 @@ def persist_result(task: Dict[str, Any], phase_dir: str, data: Any) -> str:
     """The invoker-persists leg of the D3a contract. Returns the path written.
 
     **Shared by both invokers.** The executor calls it with the JSON it extracted
-    from captured stdout; :func:`simulate_native_invoker` calls it with the JSON a
-    driving agent's subagent returned. Same containment, same serialization, same
+    from captured stdout; the equivalence tests' simulated native invoker
+    (``tests/harness/native_invoker.py``) calls it with the JSON a driving
+    agent's subagent returned. Same containment, same serialization, same
     bytes — which is what makes the result-contract equivalence assertion possible
     rather than aspirational.
 
@@ -6695,26 +6663,15 @@ def _spawn(
 
 def _spawn_with_schema(*, jail: Optional[_JailSpawn], **common: Any) -> _Capture:
     """:func:`_spawn`'s sidecar leg: the schema file for a file-transport CLI,
-    removed in the same ``with`` that spawned the child. ``jail`` and
-    ``write_consent`` reach :func:`_spawn_child` only when set, so a stand-in
-    with the historical keyword set is called as it always was."""
-    extra: Dict[str, Any] = {}
-    if jail is not None:
-        extra["jail"] = jail
-    consent = common.pop("write_consent", None)
-    if consent is not None:
-        extra["write_consent"] = consent
-    read_dirs = common.pop("read_dirs", ())
+    removed in the same ``with`` that spawned the child."""
     provider = common["provider"]
     schema = common.pop("schema", None)
     if schema is not None and getattr(
         provider, "structured_output_transport", "inline"
     ) == "file":
         with structured_output.schema_sidecar(schema) as materialized:
-            return _spawn_child(
-                schema=materialized, read_dirs=read_dirs, **common, **extra,
-            )
-    return _spawn_child(schema=schema, read_dirs=read_dirs, **common, **extra)
+            return _spawn_child(schema=materialized, jail=jail, **common)
+    return _spawn_child(schema=schema, jail=jail, **common)
 
 
 def _spawn_child(
@@ -6761,15 +6718,7 @@ def _spawn_child(
     its ``XDG_CONFIG_HOME``). The ``with`` is the ``finally`` half of that
     lifecycle — it is left on a clean return, on a per-slot timeout, on
     ``KeyboardInterrupt`` and on the §8 process-group teardown alike.
-
-    ``jail`` (a wrapping rung's attempt) and ``write_consent`` (F5) are
-    handed on to :func:`_spawn_in_context` only when set.
     """
-    extra: Dict[str, Any] = {}
-    if jail is not None:
-        extra["jail"] = jail
-    if write_consent is not None:
-        extra["write_consent"] = write_consent
     with provider_dispatch_context(
         provider, model, profile, anchor=anchor,
         runner_version=_preflight_version(provider),
@@ -6785,7 +6734,7 @@ def _spawn_child(
             provider=provider, model=model, prompt=prompt, profile=profile,
             transport=transport, timeout=timeout, cwd=cwd, schema=schema,
             anchor=anchor, sandbox_fallback=sandbox_fallback,
-            read_dirs=read_dirs, **extra,
+            read_dirs=read_dirs, jail=jail, write_consent=write_consent,
         )
 
 
@@ -7913,13 +7862,11 @@ def dispatch_task(
                 schema=schema,
                 anchor=anchor,
                 sandbox_fallback=fallback,
-                # Only when there is something to widen, so a stand-in `_spawn`
-                # with the historical keyword set is called as it always was.
-                **({"read_dirs": read_dirs} if read_dirs else {}),
-                # The same rule for the jail's grant and F5's consent: handed
-                # on only to a dispatch on the rung that needs them.
-                **({"jail_request": jail_request} if wrapping is not None else {}),
-                **({"write_consent": write_consent} if write_consent is not None else {}),
+                read_dirs=read_dirs,
+                # The jail's grant reaches only a dispatch on the rung that
+                # needs it.
+                jail_request=jail_request if wrapping is not None else None,
+                write_consent=write_consent,
             )
         except (
             StructuredOutputUnavailable, structured_output.SchemaConfigError
@@ -8521,28 +8468,39 @@ def _denied_write_turn(
     )
 
 
-def _ask_nothing_changed(
-    hook: Optional[Callable[[Dict[str, Any]], Optional[str]]],
+def _ask_write_hook(
+    hook: Optional[Callable[[Dict[str, Any]], Any]],
     context: Dict[str, Any],
-) -> Optional[str]:
-    """Rule 9's question to the write lane's ``nothing_changed`` hook.
+    what: str,
+) -> Any:
+    """A write-lane hook's answer, or ``None`` when there is no hook or it raised.
 
-    ``None`` — no re-send, the classification decides — when there is no
-    hook, it answers nothing, or it raises: a re-send is granted only on a
-    measured "not one byte moved", never on "could not tell".
+    Fail closed: a re-send or a report re-ask is sent only on an answer, never
+    on "could not tell", so a hook that raises leaves the reply to be
+    classified as it stands. *what* finishes the warning's "could not tell
+    whether <task id>…".
     """
     if hook is None:
         return None
     try:
-        answer = hook(context)
-    except Exception as exc:  # noqa: BLE001 - no re-send without a measurement
+        return hook(context)
+    except Exception as exc:  # noqa: BLE001 - no re-send or re-ask without an answer
         print(
             f"[exec-subagents] warning: could not tell whether "
-            f"{context.get('task_id')} changed any file "
+            f"{context.get('task_id')}{what} "
             f"({type(exc).__name__}); its reply is classified as it stands.",
             file=sys.stderr,
         )
         return None
+
+
+def _ask_nothing_changed(
+    hook: Optional[Callable[[Dict[str, Any]], Optional[str]]],
+    context: Dict[str, Any],
+) -> Optional[str]:
+    """Rule 9's question to the write lane's ``nothing_changed`` hook: a
+    re-send is granted only on a measured "not one byte moved"."""
+    answer = _ask_write_hook(hook, context, " changed any file")
     return str(answer) if answer else None
 
 
@@ -8567,20 +8525,10 @@ def _ask_incomplete_report(
     context: Dict[str, Any],
 ) -> Optional[str]:
     """The ``incomplete_report`` hook's answer: why a readable write report
-    leaves items out, or ``None`` (no hook, no answer, or it raised — a re-ask
-    is never sent on "could not tell")."""
-    if hook is None:
-        return None
-    try:
-        answer = hook(context)
-    except Exception as exc:  # noqa: BLE001 - no re-ask without an answer
-        print(
-            f"[exec-subagents] warning: could not tell whether "
-            f"{context.get('task_id')}'s report accounts for every item "
-            f"({type(exc).__name__}); its reply is classified as it stands.",
-            file=sys.stderr,
-        )
-        return None
+    leaves items out, or ``None``."""
+    answer = _ask_write_hook(
+        hook, context, "'s report accounts for every item"
+    )
     return str(answer) if answer else None
 
 
@@ -8589,20 +8537,10 @@ def _ask_restate_findings(
     context: Dict[str, Any],
 ) -> Optional[Tuple[str, List[str]]]:
     """The ``restate_findings`` hook's answer (fix round 28): ``(problem,
-    accepted findings)``, or ``None`` (no hook, no answer, a malformed one,
-    or it raised — a re-ask is never sent on "could not tell")."""
-    if hook is None:
-        return None
-    try:
-        answer = hook(context)
-    except Exception as exc:  # noqa: BLE001 - no re-ask without an answer
-        print(
-            f"[exec-subagents] warning: could not tell whether "
-            f"{context.get('task_id')}'s check findings need restating "
-            f"({type(exc).__name__}); its reply is classified as it stands.",
-            file=sys.stderr,
-        )
-        return None
+    accepted findings)``, or ``None`` (no hook, no answer or a malformed one)."""
+    answer = _ask_write_hook(
+        hook, context, "'s check findings need restating"
+    )
     if not answer or len(answer) != 2 or not str(answer[0] or "").strip():
         return None
     allowed = [str(item) for item in (answer[1] or []) if str(item).strip()]
@@ -10336,33 +10274,14 @@ async def _gather(
         await backpressure.acquire(provider_name)
         # F6: route the judging dispatch through `subagent_audit.jsonl` too —
         # see `_judge_audit_before_attempt`. Every other kind passes `None` and
-        # dispatches exactly as it always has — and the call stays the exact
-        # kwargs it always took, `before_attempt` included, for every non-judge
-        # dispatch (a test double patched in for `dispatch_task` need not accept
-        # a keyword it never receives).
+        # dispatches exactly as it always has.
         is_judge = str(task.get("kind", "")) == "human_decision_judge"
-        judge_kwargs: Dict[str, Any] = (
-            {"before_attempt": _judge_audit_before_attempt(phase_dir, anchor)}
-            if is_judge else {}
-        )
         # §5: narrow on the rate-limited *attempt*, not on the finished task —
         # a task that backs off and retries can hold its verdict for many
         # minutes, and every sibling acquiring meanwhile should already see the
-        # narrower gate. Passed under the same F6 rule as `before_attempt`: only
-        # when narrowing can still change something, and only to a
-        # `dispatch_task` that takes the keyword, so a stand-in double keeps
-        # the exact kwargs it always received. A dispatch without it still
-        # narrows below, after it returns.
+        # narrower gate. Only when narrowing can still change something; a
+        # dispatch without it still narrows below, after it returns.
         narrowing = {"done": False}
-        attempt_kwargs: Dict[str, Any] = (
-            {"after_attempt": _narrow_on_rate_limited_attempt(
-                backpressure, provider_name, asyncio.get_running_loop(),
-                str(task.get("task_id", index)), narrowing,
-            )}
-            if backpressure.can_narrow(provider_name)
-            and _accepts_keyword(dispatch_task, "after_attempt")
-            else {}
-        )
         try:
             outcome = await asyncio.to_thread(
                 dispatch_task,
@@ -10371,8 +10290,17 @@ async def _gather(
                 runner=runner,
                 anchor=anchor,
                 cwd=cwd,
-                **judge_kwargs,
-                **attempt_kwargs,
+                before_attempt=(
+                    _judge_audit_before_attempt(phase_dir, anchor)
+                    if is_judge else None
+                ),
+                after_attempt=(
+                    _narrow_on_rate_limited_attempt(
+                        backpressure, provider_name, asyncio.get_running_loop(),
+                        str(task.get("task_id", index)), narrowing,
+                    )
+                    if backpressure.can_narrow(provider_name) else None
+                ),
             )
         finally:
             await backpressure.release(provider_name)
@@ -10745,86 +10673,6 @@ def run_task_file(
 # ---------------------------------------------------------------------------
 # The native invoker, simulated (D3a equivalence)
 # ---------------------------------------------------------------------------
-
-def simulate_native_invoker(
-    tasks: Sequence[Dict[str, Any]],
-    *,
-    phase_dir: str,
-    respond: Callable[[Dict[str, Any]], Any],
-    phase: str = "",
-    kind: str = "",
-    write_report: bool = False,
-) -> BatchReport:
-    """Play the *native* invoker half of the D3a contract as real code.
-
-    On a native-subagent host the driving agent runs ``task.prompt`` and writes the
-    JSON its subagent returned to the task's ``output_path``. That write is
-    :func:`persist_result` — the same containment, the same per-kind validation and
-    the same serialization the executor uses — so the two invokers produce
-    byte-identical files by construction rather than by convention, and the
-    equivalence assertion has something real to compare.
-
-    Args:
-        respond: ``task -> the JSON the subagent returned`` (a dict/list), or the
-            raw text it printed (a string, run through the same extraction the
-            executor uses).
-    """
-    report = BatchReport(
-        phase=phase, kind=kind, phase_dir=phase_dir, invoker="native-simulated",
-    )
-    for index, task in enumerate(tasks):
-        task_id = str(task.get("task_id", index))
-        task_kind = str(task.get("kind", kind))
-        outcome = TaskOutcome(
-            task_id=task_id, kind=task_kind, runner="native", status=STATUS_REJECTED,
-            profile=PROFILE_AGENT_READONLY,
-        )
-        if task.get("executor_role") == "human":
-            outcome.reason = "executor_role: human — never dispatched by any invoker"
-            report.outcomes.append(outcome)
-            continue
-        reason = refuse_reason(task, supports_workspace_reads=True, runner="native")
-        if reason is not None:
-            outcome.reason = reason
-            report.outcomes.append(outcome)
-            continue
-        data = respond(task)
-        if isinstance(data, str):
-            extracted = extract_json_from_text(
-                data, prefer_arrays=task_kind == "salvage"
-            )
-            if not extracted.get("success"):
-                outcome.status = STATUS_UNPARSEABLE
-                outcome.reason = extracted.get("error") or "no JSON in the reply"
-                report.outcomes.append(outcome)
-                continue
-            data = the_reply_object(task_kind, extracted["data"], extracted)
-        gave_up = _salvage_gave_up(
-            task_kind, data, salvage_failure_of(task, phase_dir)
-        )
-        if gave_up is not None:
-            # The same rule the executor lane applies in `_parse_and_validate`,
-            # at the same point: after extraction, before validation, and before
-            # anything can be written over the model's own result file. Two call
-            # sites because the D3a contract is two invokers, not one loop — the
-            # predicate they share is what keeps them equivalent.
-            outcome.status = STATUS_SALVAGE_UNRECOVERABLE
-            outcome.reason = gave_up
-            report.outcomes.append(outcome)
-            continue
-        errors = validate_result(task_kind, data)
-        if errors:
-            outcome.status = STATUS_SCHEMA_INVALID
-            outcome.reason = "; ".join(errors[:5])
-            report.outcomes.append(outcome)
-            continue
-        outcome.output_path = persist_result(task, phase_dir, data)
-        outcome.status = STATUS_OK
-        report.outcomes.append(outcome)
-    if write_report:
-        report.write()
-    return report
-
 
 # ---------------------------------------------------------------------------
 # D3l — --dry-run-subagents for the read half

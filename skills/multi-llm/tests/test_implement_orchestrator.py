@@ -595,7 +595,7 @@ class TestBuildTaskPromptAcceptanceCriteria:
         runner read them as its own checklist — 10 of an 11-minute task spent
         driving headless Chrome, an orphaned server left behind, and finally a
         `killall -9 … python3` that SIGKILLed the orchestrator. The frame goes
-        above the checklist so it survives `_enforce_token_budget`, which
+        above the checklist so it survives `_enforce_char_budget`, which
         truncates from the end."""
         from implement_orchestrator import (
             ACCEPTANCE_CRITERIA_FRAMING,
@@ -955,27 +955,27 @@ Connect Track.surfaceAt into the Game simulation step.
 
 
 class TestTokenBudgetEnforcement:
-    """Tests for _enforce_token_budget."""
+    """Tests for _enforce_char_budget."""
 
     def test_no_truncation_under_budget(self):
         """Test that sections are not truncated when under budget."""
-        from implement_orchestrator import _enforce_token_budget
+        from implement_orchestrator import _enforce_char_budget
 
         acceptance = "## Acceptance Criteria\n- [ ] Short\n"
         dependency = "## Preceding Tasks\n- **T001: Short**\n"
 
-        result_acc, result_dep = _enforce_token_budget(acceptance, dependency, budget=2000)
+        result_acc, result_dep = _enforce_char_budget(acceptance, dependency, budget=2000)
         assert result_acc == acceptance
         assert result_dep == dependency
 
     def test_truncates_dependency_first(self):
         """Test that dependency section is truncated first when over budget."""
-        from implement_orchestrator import _enforce_token_budget
+        from implement_orchestrator import _enforce_char_budget
 
         acceptance = "Short acceptance section"
         dependency = "X" * 3000  # Very long dependency section
 
-        result_acc, result_dep = _enforce_token_budget(acceptance, dependency, budget=200)
+        result_acc, result_dep = _enforce_char_budget(acceptance, dependency, budget=200)
 
         # Acceptance should be preserved or close to original
         # Dependency should be truncated
@@ -983,12 +983,12 @@ class TestTokenBudgetEnforcement:
 
     def test_truncates_acceptance_if_still_over_budget(self):
         """Test acceptance section is truncated if still over budget after dependency truncation."""
-        from implement_orchestrator import _enforce_token_budget
+        from implement_orchestrator import _enforce_char_budget
 
         acceptance = "A" * 3000
         dependency = ""
 
-        result_acc, result_dep = _enforce_token_budget(acceptance, dependency, budget=200)
+        result_acc, result_dep = _enforce_char_budget(acceptance, dependency, budget=200)
 
         # Combined should be within budget or acceptance truncated
         assert len(result_acc) + len(result_dep) <= 200 or result_acc == ""

@@ -415,6 +415,39 @@ def _advisory_mode(request, monkeypatch):
     yield
 
 
+def stand_in(double):
+    """Make *double* a stand-in for a production callable called with keywords.
+
+    Production never inspects a double's signature: it passes every keyword
+    it has, unconditionally (a hook that is off is ``None``). So every double
+    takes ``**_`` — and this is the one place that rule lives. *double*
+    receives the keywords its own signature names; the rest are accepted and
+    dropped. A double that already takes ``**kwargs`` is returned as is::
+
+        @stand_in
+        def fake_dispatch(task, *, phase_dir, runner, after_attempt=None):
+            ...
+
+        monkeypatch.setattr(executor, "_run_probe", stand_in(lambda argv: done))
+    """
+    import functools
+    import inspect
+
+    params = inspect.signature(double).parameters.values()
+    if any(param.kind is param.VAR_KEYWORD for param in params):
+        return double
+    named = {
+        param.name for param in params
+        if param.kind in (param.KEYWORD_ONLY, param.POSITIONAL_OR_KEYWORD)
+    }
+
+    @functools.wraps(double)
+    def accepting(*args, **kwargs):
+        return double(*args, **{k: v for k, v in kwargs.items() if k in named})
+
+    return accepting
+
+
 @pytest.fixture
 def lenient_advisory(monkeypatch):
     """The production (silent) guard inside a strict file, for a test that

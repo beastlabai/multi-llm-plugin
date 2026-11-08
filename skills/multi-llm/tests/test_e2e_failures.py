@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import code_review_orchestrator as cro
 from utils import subagent_executor as executor
+from tests.harness.native_invoker import simulate_native_invoker
 from utils.llm_client import invoke_with_provider
 from utils import review_orchestrator_base as base
 from utils.review_orchestrator_base import save_model_result as base_save_model_result
@@ -2120,7 +2121,7 @@ def _native_salvage_reply(reply: Any):
     """
     def _run(task_file, *, phase_dir=None, phase="", **_ignored):
         document = json.loads(Path(task_file).read_text(encoding="utf-8"))
-        return executor.simulate_native_invoker(
+        return simulate_native_invoker(
             tasks_of(document),
             phase_dir=phase_dir or os.path.dirname(os.path.abspath(task_file)),
             phase=phase,

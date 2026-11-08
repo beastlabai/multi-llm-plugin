@@ -81,7 +81,7 @@ from utils.output_handler import get_output_dir, get_phase_dir
 from utils.state_manager import StateManager
 from utils.stream_bootstrap import bootstrap_streams
 from utils.text_clip import clip, drop_said_clauses, join_clauses
-from utils import scope_policy, scope_policy_runs
+from utils import scope_policy_runs
 from utils import unattended as unattended_mod
 from utils.unattended import NeedsHuman
 
@@ -470,18 +470,11 @@ class FullWorkflow:
         """Keep a typed choice for this workflow's own resume, and announce an
         inherited one under ``--yes`` (D6 row 16)."""
         choice = self.scope_policy_choice()
-        if not getattr(self.args, "dry_run_subagents", False):
-            state = self.state
-            if scope_policy_runs.record_scope_run_start(state, self.MODE_NAME, choice):
-                state.save()
-        if choice is None:
-            return
-        policy, source = choice
-        if source == scope_policy.SOURCE_EXPLICIT:
-            return
-        scope_policy_runs.announce(
-            str(self.run_dir), policy, source, unattended=self.unattended,
-            mode=self.MODE_NAME,
+        scope_policy_runs.open_run(
+            None if getattr(self.args, "dry_run_subagents", False) else self.state,
+            self.MODE_NAME, choice,
+            phase_dir=str(self.run_dir), unattended=self.unattended,
+            announce_default=False,
         )
 
     def _close_scope_policy(self) -> None:

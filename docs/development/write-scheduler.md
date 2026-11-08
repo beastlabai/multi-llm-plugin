@@ -22,8 +22,10 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 **The write half is a *scheduler*, not a dispatcher (D3f/D3g/D3h/D3l/D3n).** `utils/write_batch_scheduler.py`
 drives the four write kinds (`apply_suggestions`, `apply_task_suggestions`, `apply_code_fixes`,
 `implement`, added to `subagent_tasks.KINDS` and the schema alongside the six read
-kinds), under `--exec-subagents` *and* — via `respond=` — under the simulated native
-invoker, so both paths schedule identically.
+kinds), under `--exec-subagents` *and* — through its one dispatch seam,
+`WriteBatchScheduler(dispatcher=...)`, defaulting to `_dispatch_executor` — under the
+simulated native invoker the equivalence tests inject (`tests/harness/native_invoker.py`), so
+both paths schedule identically. No shipped path passes a dispatcher.
 
 One loop: batches in ascending `batch_index` with each batch's verification **completed and
 recorded before the next dispatch**; `{prior_changes_context}` bound **late, in Python, per dispatch**
