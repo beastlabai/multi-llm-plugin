@@ -1464,6 +1464,11 @@ RESERVED_OUTPUT_NAMES = frozenset({
     # "any plain .json basename" pattern would otherwise permit.
     "write_tasks.json",
     "task_generation_tasks.json",
+    # The apply phases' host summary, written beside `orchestrator_output.json`,
+    # and the directory of its batch details (an output name is a bare
+    # basename, so nothing can land inside it).
+    "orchestrator_summary.json",
+    "orchestrator_batches",
 })
 
 #: Basename prefixes an executor write may never land on (a task file, a salvage
@@ -1471,9 +1476,10 @@ RESERVED_OUTPUT_NAMES = frozenset({
 RESERVED_OUTPUT_PREFIXES = ("salvage_", "error_", "orchestrator-run.")
 
 #: Basename suffixes an executor write may never land on. Every materialized task
-#: file is ``<phase>_tasks.json``, so the suffix — not the enumeration above — is
-#: what keeps a later phase's task file safe without a second edit here.
-RESERVED_OUTPUT_SUFFIXES = ("_tasks.json",)
+#: file is ``<phase>_tasks.json`` (with its host index ``<phase>_tasks.index.json``
+#: beside it), so the suffix — not the enumeration above — is what keeps a later
+#: phase's task file safe without a second edit here.
+RESERVED_OUTPUT_SUFFIXES = ("_tasks.json", "_tasks.index.json")
 
 #: Statuses mirrored into ``.status.json`` under ``progress`` (display only).
 _STATUS_MIRROR_KEY = "subagents"

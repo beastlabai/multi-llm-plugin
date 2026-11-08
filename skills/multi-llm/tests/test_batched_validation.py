@@ -919,8 +919,12 @@ class TestPromptSidecars:
         )
         # The failing write's own temp file goes too: it is hidden, matched by
         # no glob and cleaned by nothing else, so leaving it would strand a
-        # partial prompt in the phase dir for as long as the dir lives.
-        assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
+        # partial prompt in the phase dir for as long as the dir lives. The
+        # phase dir's views mutex is a lock file, kept on purpose.
+        assert [
+            p.name for p in tmp_path.iterdir()
+            if p.name.startswith(".") and p.name != validation_module.HOST_VIEWS_LOCK_FILENAME
+        ] == []
 
         skipped = [
             line for line in capsys.readouterr().err.splitlines()

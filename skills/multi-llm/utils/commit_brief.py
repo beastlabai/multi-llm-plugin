@@ -98,7 +98,10 @@ TABLE_AUTHOR_CHARS = 40
 
 #: What a restart leaves in ``<slug>/code-review/``: what the run that now owns
 #: the dir uses (§2.4 "What moves").
-RESTART_KEEP: Tuple[str, ...] = (".lock", ".status.lock", ".status.json", "orchestrator-run.log")
+RESTART_KEEP: Tuple[str, ...] = (
+    ".lock", ".status.lock", ".status.json", "orchestrator-run.log",
+    ".views.lock",  # validation.HOST_VIEWS_LOCK_FILENAME: a held views mutex stays put
+)
 
 #: A detach launch's stage file in the phase dir (§2.1): kept by a restart
 #: whatever its launch-unique suffix.

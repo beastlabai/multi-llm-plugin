@@ -243,7 +243,7 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[WRITE_PROMPT_ORDER]` | `utils/write_prompt.py` `MARKER_ORDER` | `instructions/apply-code-fixes.md`<br>`instructions/apply-suggestions.md`<br>`instructions/apply-task-suggestions.md`<br>`instructions/implement.md` | The warning a prompt bound out of order prints (stderr; never a refusal) |
 | `[WRITE_PROMPT_REFUSED]` | `utils/write_prompt.py` `MARKER_REFUSED` | `instructions/implement.md` | The refusal for a task the write policy forbids (stderr, exit 3) |
 | `[WRITE_SNAPSHOT]` | `utils/write_prompt.py` `MARKER_SNAPSHOT` | `instructions/apply-suggestions.md`<br>`instructions/apply-task-suggestions.md` | The marker lines naming the snapshot and the file it copies |
-| `[WRITE_TASKS_FILE]` | `implement_orchestrator.py`<br>`utils/apply_orchestrator_base.py` | `instructions/apply-suggestions.md`<br>`instructions/implement.md` | — |
+| `[WRITE_TASKS_FILE]` | `implement_orchestrator.py`<br>`utils/apply_orchestrator_base.py` | `instructions/apply-code-fixes.md`<br>`instructions/apply-suggestions.md`<br>`instructions/apply-task-suggestions.md`<br>`instructions/implement.md` | — |
 
 ## Not-for-the-host reasons
 

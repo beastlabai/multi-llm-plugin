@@ -38,6 +38,8 @@ from .apply_output_helpers import (
     build_confirmation_needed_output,
     build_skipped_output,
     emit_json_output,
+    invalidate_orchestrator_views,
+    publish_orchestrator_views,
     write_and_emit_output,
 )
 from .apply_path_helpers import load_json_file
@@ -81,6 +83,7 @@ from .suggestion_batcher import (
 )
 from .validation import (
     ERROR_TYPE_AMBIGUOUS,
+    host_views_lock,
     prepare_batched_revalidation_tasks,
     save_validation_results,
 )
@@ -2896,6 +2899,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
 
         output_dir = os.path.dirname(output_path)
         os.makedirs(output_dir, exist_ok=True)
+        # The host's views of the output this one replaces go first; the native
+        # leg publishes this output's once `write_tasks.json` names its task
+        # ids (docs/development/write-scheduler.md#the-host-summary).
+        invalidate_orchestrator_views(output_path)
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(output, f, indent=2)
         print(f"[OUTPUT_FILE] {output_path}", file=sys.stderr)
@@ -2989,6 +2996,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 # twice, so the resume stops here (exit 3) naming the batch
                 # and the record command (reviewer repro, 2026-10-05).
                 self._refuse_unrecorded_native_resume()
+            # The summary and batch details, from the output and the task ids
+            # just written; none when a batch has no task to pair with.
+            publish_orchestrator_views(
+                output, output_path,
+                getattr(self, "_native_write_tasks", None) if task_file else None,
+            )
 
         # The native leg: the batches are now the host's to apply, so the phase
         # is recorded *started*, never completed — completion is the host's
@@ -4275,43 +4288,46 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         context_document = self.get_revalidation_document(review_dir)
         if context_document is not None:
             context = context_document.text
-        revalidation_tasks = prepare_batched_revalidation_tasks(
-            groups=self.groups,
-            validation_results=self.validation,
-            context=context,
-            output_dir=review_dir,
-            plan_file=str(self.plan_path),
-            include_all_human=include_all_human,
-            model=model,
-            orchestrator=os.path.basename(sys.argv[0])
-            if sys.argv
-            else f"{self.phase_name}_orchestrator.py",
-            base_ref=base_ref,
-            context_document=context_document,
-            context_kind=(
-                context_document.label if context_document is not None else None
-            ),
-            phase=os.path.basename(os.path.normpath(review_dir)),
-            extra_instructions=self.get_revalidation_instructions(),
-            # The apply's effective policy (step 10b: explicit flag, the
-            # round's recorded apply override, its review policy, expand);
-            # the raw flag only when step 10b never ran.
-            scope_policy=(
-                self.scope_gate.policy.policy if self.scope_gate.policy is not None
-                else getattr(self.args, "scope_policy", None)
-            ),
-        )
+        # One views transaction: the round's sidecars and its task file
+        # (docs/development/delegation.md#the-host-index).
+        with host_views_lock(review_dir):
+            revalidation_tasks = prepare_batched_revalidation_tasks(
+                groups=self.groups,
+                validation_results=self.validation,
+                context=context,
+                output_dir=review_dir,
+                plan_file=str(self.plan_path),
+                include_all_human=include_all_human,
+                model=model,
+                orchestrator=os.path.basename(sys.argv[0])
+                if sys.argv
+                else f"{self.phase_name}_orchestrator.py",
+                base_ref=base_ref,
+                context_document=context_document,
+                context_kind=(
+                    context_document.label if context_document is not None else None
+                ),
+                phase=os.path.basename(os.path.normpath(review_dir)),
+                extra_instructions=self.get_revalidation_instructions(),
+                # The apply's effective policy (step 10b: explicit flag, the
+                # round's recorded apply override, its review policy, expand);
+                # the raw flag only when step 10b never ran.
+                scope_policy=(
+                    self.scope_gate.policy.policy if self.scope_gate.policy is not None
+                    else getattr(self.args, "scope_policy", None)
+                ),
+            )
 
-        if revalidation_tasks["items_to_revalidate"] == 0:
-            print("No items need revalidation.", file=sys.stderr)
-            return
+            if revalidation_tasks["items_to_revalidate"] == 0:
+                print("No items need revalidation.", file=sys.stderr)
+                return
 
-        # Save revalidation task instructions
-        revalidation_task_path = os.path.join(
-            review_dir, "revalidation_tasks.json"
-        )
-        with open(revalidation_task_path, "w", encoding="utf-8") as f:
-            json.dump(revalidation_tasks, f, indent=2)
+            # Save revalidation task instructions
+            revalidation_task_path = os.path.join(
+                review_dir, "revalidation_tasks.json"
+            )
+            with open(revalidation_task_path, "w", encoding="utf-8") as f:
+                json.dump(revalidation_tasks, f, indent=2)
 
         total_batches = revalidation_tasks.get("total_batches", 1)
         if total_batches == 1:

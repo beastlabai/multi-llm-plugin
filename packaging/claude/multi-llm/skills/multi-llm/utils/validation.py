@@ -7,14 +7,17 @@ which filter false positives and identify items needing human review, then
 merges and records their verdicts.
 """
 
+import contextlib
 import json
 import os
 import re
 import sys
+import threading
+import time
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 try:
     from .state_manager import generate_group_id, CURRENT_FORMAT_VERSION
@@ -127,6 +130,42 @@ VALIDATION_TASKS_TOTAL_CHARS_CEILING = 2_000_000
 #: three real runs improvised the same dump-to-file by hand before this existed.
 #: ``prompt`` stays the source of truth; the executor never opens this file.
 PROMPT_SIDECAR_TEMPLATE = "validation_batch_{index}.prompt.txt"
+
+#: The host index beside a task file: ``validation_tasks.json`` →
+#: ``validation_tasks.index.json``. A view a native host reads instead of the
+#: full file, whose ``prompt`` strings are ~90% of its bytes and are never read
+#: by a host that hands its subagent the sidecar. The full file stays the source
+#: of truth for the executor, ``check-reply``, the audit and the container
+#: digest; nothing but a host reads the index
+#: (docs/development/delegation.md#the-host-index).
+HOST_INDEX_SUFFIX = ".index.json"
+
+#: Per-task keys the index copies, in this order, from each task that has them.
+#: A task whose sidecar was skipped has no ``prompt_path``, so its entry has none
+#: either, and the host runs that task's ``prompt`` from the full file.
+HOST_INDEX_TASK_KEYS = (
+    "task_id", "batch_index", "prompt_path", "prompt_lines", "output_path",
+    "subagent_type", "context_mode",
+)
+
+#: File-level keys the index copies when the task file has them: the batch
+#: count and the durable pair the reaggregation command is rebuilt from.
+HOST_INDEX_DOCUMENT_KEYS = ("total_batches", "reaggregate_mode", "plan_file")
+
+#: The task files that have a host index beside them.
+HOST_INDEXED_TASK_FILES = frozenset({
+    "validation_tasks.json", "revalidation_tasks.json", "consolidation_tasks.json",
+})
+
+#: The phase dir's views mutex (:func:`host_views_lock`): held across every
+#: invalidate → source or sidecar change → publish sequence of a host index.
+#: Like every lock file here it is never unlinked.
+HOST_VIEWS_LOCK_FILENAME = ".views.lock"
+
+#: How long a views transaction waits for another holder before the run stops
+#: with exit 3. A holder keeps it for one materialization and its task-file
+#: write, one repair and its commit, or one read-and-publish.
+HOST_VIEWS_LOCK_TIMEOUT_S = 60.0
 
 
 def excerpt_context(context: str, limit: int = VALIDATION_CONTEXT_LIMIT) -> str:
@@ -1030,6 +1069,222 @@ def write_prompt_sidecars(
     return True
 
 
+def host_index_path(task_file: str) -> str:
+    """The host index beside *task_file* (:data:`HOST_INDEX_SUFFIX`)."""
+    stem, _ext = os.path.splitext(task_file)
+    return stem + HOST_INDEX_SUFFIX
+
+
+def task_file_for_kind(phase_dir: str, kind: str) -> str:
+    """Where a sidecar-carrying kind's task file lives: ``<kind>_tasks.json``.
+
+    True of all four (``validation``, ``revalidation``, ``consolidation``,
+    ``task_generation``); ``subagent_executor.RESERVED_OUTPUT_SUFFIXES`` keys
+    on the same shape.
+    """
+    return os.path.join(phase_dir, f"{kind}_tasks.json")
+
+
+def build_host_index(document: Dict[str, Any], task_file: str) -> Dict[str, Any]:
+    """The host's view of *document*: what a host dispatches from, no prompts."""
+    list_key = "batches" if "batches" in document else "tasks"
+    index: Dict[str, Any] = {"index_of": os.path.basename(task_file)}
+    for key in HOST_INDEX_DOCUMENT_KEYS:
+        if key in document:
+            index[key] = document[key]
+    index[list_key] = [
+        {key: task[key] for key in HOST_INDEX_TASK_KEYS if key in task}
+        for task in tasks_of(document)
+        if isinstance(task, dict)
+    ]
+    return index
+
+
+def remove_host_view(path: str) -> None:
+    """Remove the host view at *path*, or stop the run with exit 3 naming it.
+
+    A view (a task file's index, an apply phase's summary or batch detail) goes
+    before the file it describes changes, and whenever it cannot be rebuilt, so
+    a host finds a view of that file as it is or none, and then reads the file.
+    One that cannot be removed would be read in the file's place, so the run
+    stops instead of going on beside it
+    (docs/development/delegation.md#the-host-index).
+    """
+    if not os.path.lexists(path):
+        return
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        print(
+            f"ERROR: Cannot remove {path} ({exc}). It is a host's view of a file "
+            f"this run is changing, and a host would read it in that file's "
+            f"place. Nothing was handed out: make "
+            f"{os.path.dirname(os.path.abspath(path))} writable or remove the "
+            f"file, then run the command again.",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+
+
+def publish_host_view(path: str, text: str) -> bool:
+    """Write the host view *path* atomically; ``False``, with none on disk, if not.
+
+    Degrades like the sidecars: a host that finds no view reads the file it
+    would have described, the fallback every instruction names.
+    """
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        _write_one_sidecar(path, text)
+    except OSError as exc:
+        remove_host_view(path)
+        print(
+            f"WARNING: {os.path.basename(path)} not written ({exc}); a host reads "
+            "the file it describes instead",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+class _ViewsLockState:
+    """One phase dir's views lock in this process: a thread lock, then the file."""
+
+    def __init__(self) -> None:
+        self.thread_lock = threading.RLock()
+        self.depth = 0
+        self.mutex: Any = None
+
+
+_VIEWS_LOCKS_GUARD = threading.Lock()
+_VIEWS_LOCKS: Dict[str, _ViewsLockState] = {}
+
+
+def host_views_lock_path(phase_dir: str) -> str:
+    """The phase dir's views mutex (:data:`HOST_VIEWS_LOCK_FILENAME`)."""
+    return os.path.join(str(phase_dir), HOST_VIEWS_LOCK_FILENAME)
+
+
+@contextlib.contextmanager
+def host_views_lock(phase_dir: str) -> Iterator[bool]:
+    """Hold *phase_dir*'s views mutex, across threads and processes.
+
+    Every sequence that invalidates a host index, changes its task file or the
+    sidecars the index points at, and publishes the index again runs inside one
+    of these, so a refresh never reads the file before a change and publishes
+    after it (docs/development/delegation.md#the-host-index). Reentrant in one
+    thread: only the outermost frame takes the interprocess lock, which is held
+    per open file description.
+
+    Yields whether the interprocess lock is held. A lock file that cannot be
+    opened or locked at all (a missing or read-only phase dir, a file system
+    without locks) yields ``False`` at once: the body still runs and still
+    invalidates, but publishes no view, so a host reads the full file. Another
+    holder that keeps the lock for :data:`HOST_VIEWS_LOCK_TIMEOUT_S` stops the
+    run with exit 3 naming the lock file.
+    """
+    try:
+        from . import process_control
+    except ImportError:  # pragma: no cover - flat import layout
+        from utils import process_control  # type: ignore
+    key = os.path.realpath(host_views_lock_path(phase_dir))
+    with _VIEWS_LOCKS_GUARD:
+        state = _VIEWS_LOCKS.setdefault(key, _ViewsLockState())
+    deadline = time.monotonic() + HOST_VIEWS_LOCK_TIMEOUT_S
+    if not state.thread_lock.acquire(timeout=HOST_VIEWS_LOCK_TIMEOUT_S):
+        _views_lock_timeout(key)
+    try:
+        if state.depth == 0:
+            mutex = process_control.FileMutex(key)
+            taken = mutex.acquire(
+                timeout_s=max(0.0, deadline - time.monotonic()), poll_interval_s=0.02,
+            )
+            if not taken and time.monotonic() >= deadline:
+                _views_lock_timeout(key)
+            state.mutex = mutex if taken else None
+        state.depth += 1
+        try:
+            yield state.mutex is not None
+        finally:
+            state.depth -= 1
+            if state.depth == 0 and state.mutex is not None:
+                state.mutex.release()
+                state.mutex = None
+    finally:
+        state.thread_lock.release()
+
+
+def _views_lock_timeout(key: str) -> None:
+    print(
+        f"ERROR: {key} was not free within {HOST_VIEWS_LOCK_TIMEOUT_S:g}s: another "
+        f"multi-llm command is updating this phase's task file and its host "
+        f"index. Nothing was handed out: run the command again once that one has "
+        f"finished.",
+        file=sys.stderr,
+    )
+    sys.exit(3)
+
+
+def _view_bytes(path: str) -> Optional[bytes]:
+    try:
+        with open(path, "rb") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+def invalidate_host_index(task_file: str) -> None:
+    """Remove *task_file*'s host index before the file or its sidecars change.
+
+    Under the views lock (:func:`host_views_lock`). Exit 3 when it cannot be
+    removed (:func:`remove_host_view`).
+    """
+    with host_views_lock(os.path.dirname(os.path.abspath(task_file))):
+        remove_host_view(host_index_path(task_file))
+
+
+def refresh_host_index(task_file: str) -> bool:
+    """Rebuild *task_file*'s host index from the file as it is on disk.
+
+    The only writer of an index, run once the file has been written: at every
+    hand-back of a round to the host (``dispatch_subagent_tasks``) and by
+    ``prepare_consolidation_tasks``. Built from the committed file, never from a
+    document in memory, so the index never describes a file newer or older than
+    the one beside it. The read and the publication are one step under the
+    views lock (:func:`host_views_lock`). An index whose bytes are already the
+    ones it would write is left alone: nothing is replaced or removed. A
+    missing or unreadable task file leaves no index; a file not in
+    :data:`HOST_INDEXED_TASK_FILES` is left alone. Returns whether an index is
+    on disk.
+    """
+    if os.path.basename(task_file) not in HOST_INDEXED_TASK_FILES:
+        return False
+    target = host_index_path(task_file)
+    with host_views_lock(os.path.dirname(os.path.abspath(task_file))) as serialized:
+        try:
+            with open(task_file, "r", encoding="utf-8") as handle:
+                document = json.load(handle)
+        except (OSError, ValueError):
+            document = None
+        if not isinstance(document, dict):
+            remove_host_view(target)
+            return False
+        text = json.dumps(build_host_index(document, task_file), indent=2) + "\n"
+        if _view_bytes(target) == text.encode("utf-8"):
+            return True
+        if not serialized:
+            remove_host_view(target)
+            print(
+                f"WARNING: {os.path.basename(target)} not written (its views lock "
+                f"{HOST_VIEWS_LOCK_FILENAME} cannot be taken); a host reads the "
+                "file it describes instead",
+                file=sys.stderr,
+            )
+            return False
+        return publish_host_view(target, text)
+
+
 def ensure_prompt_sidecars(document: Dict[str, Any], phase_dir: str) -> bool:
     """Rewrite any sidecar that is missing or whose bytes differ from ``prompt``.
 
@@ -1043,43 +1298,53 @@ def ensure_prompt_sidecars(document: Dict[str, Any], phase_dir: str) -> bool:
     compare against, so a ``prompt_sha256`` field would only restate it.
 
     Returns whether task metadata changed. The caller must persist those
-    changes before handing the task file back to a native host.
+    changes before handing the task file back to a native host, holding
+    :func:`host_views_lock` across this call and that write.
+
+    The round's host index is removed before the first sidecar or pointer
+    changes, and left alone when nothing does: the caller may persist the
+    document next, and the hand-back rebuilds the index from the file it
+    persisted (:func:`refresh_host_index`).
     """
-    changed = False
-    for task in document.get("batches", []):
-        if not task.get("prompt_path"):
-            continue
-        expected = sidecar_path(os.path.abspath(phase_dir), task["batch_index"])
-        try:
-            with open(expected, "rb") as handle:
-                same = handle.read() == task["prompt"].encode("utf-8")
-        except OSError:
-            same = False
-        if not same:
+    index_of = task_file_for_kind(phase_dir, str(document.get("kind") or "validation"))
+    with host_views_lock(phase_dir):
+        changed = False
+        for task in document.get("batches", []):
+            if not task.get("prompt_path"):
+                continue
+            expected = sidecar_path(os.path.abspath(phase_dir), task["batch_index"])
             try:
-                _write_one_sidecar(expected, task["prompt"])
-            except OSError as exc:
-                # The incorrect file may still exist. Remove its advertised
-                # pointer so the native host actually takes the inline fallback.
-                task.pop("prompt_path", None)
-                task.pop("prompt_lines", None)
-                changed = True
+                with open(expected, "rb") as handle:
+                    same = handle.read() == task["prompt"].encode("utf-8")
+            except OSError:
+                same = False
+            if not same:
+                invalidate_host_index(index_of)
+                try:
+                    _write_one_sidecar(expected, task["prompt"])
+                except OSError as exc:
+                    # The incorrect file may still exist. Remove its advertised
+                    # pointer so the native host actually takes the inline fallback.
+                    task.pop("prompt_path", None)
+                    task.pop("prompt_lines", None)
+                    changed = True
+                    print(
+                        f"[PROMPT_SIDECAR_SKIPPED] {exc}; "
+                        f"{os.path.basename(expected)} keeps `prompt` only",
+                        file=sys.stderr,
+                    )
+                    continue
                 print(
-                    f"[PROMPT_SIDECAR_SKIPPED] {exc}; "
-                    f"{os.path.basename(expected)} keeps `prompt` only",
+                    f"[PROMPT_SIDECAR_REWRITTEN] {os.path.basename(expected)}",
                     file=sys.stderr,
                 )
-                continue
-            print(
-                f"[PROMPT_SIDECAR_REWRITTEN] {os.path.basename(expected)}",
-                file=sys.stderr,
-            )
-        lines = task["prompt"].count("\n") + 1
-        if task["prompt_path"] != expected or task.get("prompt_lines") != lines:
-            task["prompt_path"] = expected
-            task["prompt_lines"] = lines
-            changed = True
-    return changed
+            lines = task["prompt"].count("\n") + 1
+            if task["prompt_path"] != expected or task.get("prompt_lines") != lines:
+                invalidate_host_index(index_of)
+                task["prompt_path"] = expected
+                task["prompt_lines"] = lines
+                changed = True
+        return changed
 
 
 # Error type constants - ALWAYS use these constants, never raw strings
@@ -2209,6 +2474,11 @@ def materialize_validation_round(round_: ValidationRound) -> Dict[str, Any]:
     groups, output_dir, plan_file, kind = (
         round_.groups, round_.output_dir, round_.plan_file, round_.kind,
     )
+    # The index describes the task file this round replaces: it goes before a
+    # sidecar changes, and the hand-back rebuilds it from the file the caller
+    # commits. The caller holds `host_views_lock` across this call and that
+    # write (docs/development/delegation.md#the-host-index).
+    invalidate_host_index(task_file_for_kind(output_dir, kind))
     context, context_label, context_document = (
         round_.primary.text, round_.primary.label, round_.primary.document,
     )

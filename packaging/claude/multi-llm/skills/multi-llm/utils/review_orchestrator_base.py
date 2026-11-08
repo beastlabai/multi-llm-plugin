@@ -154,6 +154,9 @@ from .validation import (
     bind_document_file,
     decode_document,
     ensure_prompt_sidecars,
+    host_views_lock,
+    invalidate_host_index,
+    refresh_host_index,
     legacy_context_round_reason,
     PLAN_CONTEXT_LABEL,
     ContextBlock,
@@ -1312,19 +1315,23 @@ def verify_round_context(
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(exc.exit_code)
     if rebound:
-        ensure_prompt_sidecars(document, phase_dir)
-        if task_file:
-            from .subagent_executor import _atomic_write_json
+        # One views transaction: the repair and the commit of the rebound file
+        # (docs/development/delegation.md#the-host-index).
+        with host_views_lock(phase_dir):
+            ensure_prompt_sidecars(document, phase_dir)
+            if task_file:
+                from .subagent_executor import _atomic_write_json
 
-            try:
-                _atomic_write_json(task_file, document)
-            except OSError as exc:
-                print(
-                    f"ERROR: Could not persist the rebound prompts to "
-                    f"{task_file}: {exc}. Nothing was dispatched.",
-                    file=sys.stderr,
-                )
-                sys.exit(3)
+                invalidate_host_index(task_file)
+                try:
+                    _atomic_write_json(task_file, document)
+                except OSError as exc:
+                    print(
+                        f"ERROR: Could not persist the rebound prompts to "
+                        f"{task_file}: {exc}. Nothing was dispatched.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(3)
 
 
 def dispatch_subagent_tasks(
@@ -1366,7 +1373,12 @@ def dispatch_subagent_tasks(
     standalone dry run silently fall back to the native marker on every read,
     generation, consolidation and judging phase — no child *and* no report, which
     is the one outcome the flag must never produce.
+
+    Every call is a hand-back of a committed task file, so it rebuilds the
+    file's host index from the file on disk first
+    (docs/development/delegation.md#the-host-index).
     """
+    refresh_host_index(task_file)
     dry_run = bool(getattr(args, "dry_run_subagents", False))
     if not exec_subagents_requested(args) and not dry_run:
         return False
@@ -1765,6 +1777,8 @@ def retire_stale_validation_round(phase_dir: str, *, reason: str) -> List[str]:
         The new paths, in ``validation.json``, ``validation_tasks.json``,
         batch-index, then prompt-sidecar order. Empty when nothing was on disk.
     """
+    # The host index goes before any of the round (docs/development/delegation.md#the-host-index).
+    invalidate_host_index(os.path.join(phase_dir, "validation_tasks.json"))
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     names = ["validation.json", "validation_tasks.json"]
     batch_names = sorted(
@@ -7734,21 +7748,22 @@ async def reaggregate_from_existing_files(
             # that is missing, or one somebody edited. Re-derive from the
             # loaded-from dir and rewrite anything that is not `prompt` byte for
             # byte, before a single batch is dispatched.
-            if ensure_prompt_sidecars(batch_metadata, phase_dir):
-                # Native hosts reread the JSON, not this in-memory document. Publish
-                # rebound pointers and removed fallback fields before handing off.
-                from .subagent_executor import _atomic_write_json
+            with host_views_lock(phase_dir):
+                if ensure_prompt_sidecars(batch_metadata, phase_dir):
+                    # Native hosts reread the JSON, not this in-memory document. Publish
+                    # rebound pointers and removed fallback fields before handing off.
+                    from .subagent_executor import _atomic_write_json
 
-                try:
-                    _atomic_write_json(validation_tasks_path, batch_metadata)
-                except OSError as exc:
-                    print(
-                        f"ERROR: Could not persist repaired prompt metadata to "
-                        f"{validation_tasks_path}: {exc}. Fix task-file write access "
-                        "and retry reaggregation before dispatching native subagents.",
-                        file=sys.stderr,
-                    )
-                    sys.exit(3)
+                    try:
+                        _atomic_write_json(validation_tasks_path, batch_metadata)
+                    except OSError as exc:
+                        print(
+                            f"ERROR: Could not persist repaired prompt metadata to "
+                            f"{validation_tasks_path}: {exc}. Fix task-file write access "
+                            "and retry reaggregation before dispatching native subagents.",
+                            file=sys.stderr,
+                        )
+                        sys.exit(3)
             total_batches = batch_metadata.get("total_batches", 0)
             batches_found = 0
             for batch in batch_metadata.get("batches", []):
@@ -7811,18 +7826,19 @@ async def reaggregate_from_existing_files(
             # A re-materialized round is a new round with a new snapshot
             # (§2.3 step 5), bound from one read of the plan as it is now.
             plan_document = bind_plan_for_validation(str(plan_path), phase_dir)
-            batched_tasks = materialize_validation_round(review_validation_round(
-                grouped, args=args, phase_name=phase_name, phase_dir=phase_dir,
-                plan_path=plan_path, plan_content=plan_content,
-                plan_document=plan_document, orchestrator_script=orchestrator_script,
-                extra_validation_metadata=extra_validation_metadata,
-                scope_round_policy=scope_round_policy, scope_state=scope_state,
-                scope_recorded_baseline=scope_recorded_baseline,
-            ))
-            batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
+            with host_views_lock(phase_dir):
+                batched_tasks = materialize_validation_round(review_validation_round(
+                    grouped, args=args, phase_name=phase_name, phase_dir=phase_dir,
+                    plan_path=plan_path, plan_content=plan_content,
+                    plan_document=plan_document, orchestrator_script=orchestrator_script,
+                    extra_validation_metadata=extra_validation_metadata,
+                    scope_round_policy=scope_round_policy, scope_state=scope_state,
+                    scope_recorded_baseline=scope_recorded_baseline,
+                ))
+                batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
 
-            with open(validation_tasks_path, 'w', encoding='utf-8') as f:
-                json.dump(batched_tasks, f, indent=2)
+                with open(validation_tasks_path, 'w', encoding='utf-8') as f:
+                    json.dump(batched_tasks, f, indent=2)
 
             # The phase machine's own word for this stretch. `status` printed
             # `phase state: grouping_complete` beside `progress: validating` for
@@ -8715,19 +8731,20 @@ async def run_review_orchestration(
                 # opencode-driven run printed this beside 11 lines correctly
                 # naming opencode).
                 print("\nPreparing batched validation for subagent execution...")
-                batched_tasks = materialize_validation_round(review_validation_round(
-                    grouped, args=args, phase_name=phase_name, phase_dir=phase_dir,
-                    plan_path=plan_path, plan_content=plan_content,
-                    plan_document=plan_document, orchestrator_script=orchestrator_script,
-                    extra_validation_metadata=extra_validation_metadata,
-                    scope_round_policy=scope_round_policy, scope_state=scope_state,
-                    scope_recorded_baseline=scope_recorded_baseline,
-                ))
-                batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
+                with host_views_lock(phase_dir):
+                    batched_tasks = materialize_validation_round(review_validation_round(
+                        grouped, args=args, phase_name=phase_name, phase_dir=phase_dir,
+                        plan_path=plan_path, plan_content=plan_content,
+                        plan_document=plan_document, orchestrator_script=orchestrator_script,
+                        extra_validation_metadata=extra_validation_metadata,
+                        scope_round_policy=scope_round_policy, scope_state=scope_state,
+                        scope_recorded_baseline=scope_recorded_baseline,
+                    ))
+                    batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
 
-                validation_tasks_path = os.path.join(phase_dir, "validation_tasks.json")
-                with open(validation_tasks_path, 'w', encoding='utf-8') as f:
-                    json.dump(batched_tasks, f, indent=2)
+                    validation_tasks_path = os.path.join(phase_dir, "validation_tasks.json")
+                    with open(validation_tasks_path, 'w', encoding='utf-8') as f:
+                        json.dump(batched_tasks, f, indent=2)
 
                 # The phase machine's own word for this stretch — see the
                 # matching write on the reaggregate path.

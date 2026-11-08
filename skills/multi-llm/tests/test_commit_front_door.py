@@ -83,7 +83,8 @@ def _stand_in_commit_brief() -> types.ModuleType:
     module.CONTEXT_PLAN_SNAPSHOT = "context-plan.md"
     module.STAGE_FILE_PATTERN = ".commit-stage-*"
     module.ARCHIVE_PREFIX = "restarted-"
-    module.RESTART_KEEP = (".lock", ".status.lock", ".status.json", "orchestrator-run.log")
+    module.RESTART_KEEP = (".lock", ".status.lock", ".status.json", "orchestrator-run.log",
+                           ".views.lock")
     module.DecisionCounts = _Counts
 
     def header_identity(*, base, head, focus, plan, plan_sha256):

@@ -7,6 +7,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 ## Contents
 
 - [Materialized task contract](#materialized-task-contract)
+- [The host index](#the-host-index)
 - [Code-review validation context](#code-review-validation-context)
 - [Cited plan sections](#cited-plan-sections)
 - [Read and analyze executor](#read-and-analyze-executor)
@@ -218,6 +219,59 @@ The reply template's `group_index` example is a placeholder, never a number (mod
 `0`: 41 of 46 and 18 of 32 verdicts echoed batch-local ordinals), and
 `_reported_group_index` coerces whatever comes back — a copied placeholder joins by hash and counts
 in the summary line; with no hash it falls through as `-1` instead of raising.
+
+## The host index
+
+`validation_tasks.json`, `revalidation_tasks.json` and `consolidation_tasks.json` each have a host
+index beside them, `<stem>.index.json` (`refresh_host_index` in `utils/validation.py`). It copies
+`total_batches`, `reaggregate_mode` and `plan_file` when the file has them, and per task `task_id`,
+`batch_index`, `prompt_path`, `prompt_lines`, `output_path`, `subagent_type` and `context_mode`:
+what a native host dispatches from, without the `prompt` strings, which are about 90% of the full
+file and which a host that hands its subagent the sidecar never reads. The instructions name the
+index on their "Read" lines, and the full file when there is no index.
+
+- **A view, not a contract.** The executor, `util check-reply`, the audit and the container digest
+  read the full file, which stays byte-identical, and so do the sidecars. Nothing but a host reads
+  the index.
+- **Every derived view follows one rule** (this index, and the apply phases' summary and batch
+  details, [write-scheduler.md](write-scheduler.md#the-host-summary)): it is published only after
+  its source is written, removed before its source or the sidecars it names change, and rebuilt
+  from the source at every hand-back to the host. A host then never reads a view newer or older
+  than the file beside it, and finding none always means reading the file.
+- **Removed before the file changes.** `materialize_validation_round` removes the round's index
+  before it writes a sidecar, `prepare_consolidation_tasks` before it writes anything,
+  `ensure_prompt_sidecars` before it rewrites a sidecar or a pointer its caller then persists (and
+  not at all when nothing needs repair), and `retire_stale_validation_round` before it moves any
+  of the round aside: an index it cannot remove stops it with nothing retired. An interrupted
+  rematerialisation or retirement therefore leaves no index beside what is left of the round.
+- **Rebuilt from the file on disk, never from a document in memory.** `dispatch_subagent_tasks`
+  rebuilds it on every call, the hand-back of a fresh round, a `--reaggregate` and the fan-out's
+  continuation alike, and `prepare_consolidation_tasks` right after its write. A task file that is
+  missing or unreadable leaves no index. An index whose bytes are already the ones it would write
+  is left in place, neither replaced nor removed, so a healthy hand-back never stops on a file a
+  host holds open (a Windows sharing violation).
+- **One views mutex per phase dir.** `host_views_lock` (`{phase}/.views.lock`, a
+  `process_control.FileMutex`, reentrant within a thread) is held across each sequence that
+  removes an index, changes its task file or sidecars, and publishes it again:
+  `materialize_validation_round` together with its caller's write of the full file (the
+  revalidation round's as well), `ensure_prompt_sidecars` together with the commit of the repaired
+  file, `prepare_consolidation_tasks`, and the refresh's read of the file and publication of its
+  index. A refresh that read the file before a repair therefore publishes before that repair
+  removes the index, never after it. A lock file that cannot be opened or locked at all lets the
+  sequence run, removing as before, but publishes no index, so a host reads the full file; one
+  another command holds for `HOST_VIEWS_LOCK_TIMEOUT_S` (60 s) stops the run with exit 3 naming
+  it. A phase lock that serialises whole runs over one phase dir, once there is one, orders these
+  sequences too; the views mutex does not depend on it.
+- **Fail closed.** An index that cannot be written leaves none (`publish_host_view`), and one that
+  cannot be removed stops the run with exit 3 naming it (`remove_host_view`): a phase dir made
+  read-only after a round was written would otherwise keep an index of that round beside a newer
+  full file.
+- **The sidecar fallback carries over.** A task whose sidecar was skipped (`[PROMPT_SIDECAR_SKIPPED]`)
+  has no `prompt_path` in the full file, so its index entry has none either, and the host runs that
+  task's `prompt` from the full file.
+- `RESERVED_OUTPUT_SUFFIXES` keeps a subagent result off it, and its name contains `validation`
+  or `consolidation`, so no reaggregation glob reads it as a model's result.
+- `task_generation_tasks.json` has no index: it holds one task.
 
 ## Code-review validation context
 

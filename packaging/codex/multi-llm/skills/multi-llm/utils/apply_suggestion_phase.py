@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from . import importance as _importance
 from .apply_orchestrator_base import ApplyOrchestratorBase, OrchestratorError
+from .apply_output_helpers import detail_pointer_lines
 from .apply_path_helpers import load_json_file
 from .apply_selection_helpers import merge_edited_descriptions
 from .judge_vocab import JUDGE_AUTO_DECIDE, JUDGE_DECIDE
@@ -31,7 +32,6 @@ from .report_parser import (
 )
 from .state_manager import CURRENT_FORMAT_VERSION, load_groups_payload, stamp_stable_ids
 from .suggestion_batcher import SuggestionBatch
-from .text_clip import clip
 from .validation import load_validation_results
 
 
@@ -262,44 +262,15 @@ class SuggestionApplyPhase(
             print(f"  Subagent calls saved: {self.batching_stats.get('subagent_calls_saved', 0)}")
             print(f"  Efficiency gain: {self.batching_stats.get('efficiency_gain_percent', 0)}%")
 
-        # `generate_batch_prompts` has made every batch a dict by now.
-        for i, batch in enumerate(batches):
-            batch_suggestions = batch.get("suggestions", [])
-            batch_section = batch.get("section_key", "")
-            batch_type = batch.get("batch_type", "")
-            batch_size = batch.get("suggestion_count", len(batch_suggestions))
-            batch_priority = batch.get("priority_score", 0)
-
-            print(f"\n{'=' * 60}")
-            print(f"BATCH {i + 1} ({batch_size} suggestion(s))")
-            print(f"{'=' * 60}")
-            print(f"Section: {batch_section}")
-            print(f"Type: {batch_type}")
-            print(f"Priority score: {batch_priority}")
-
-            for j, s in enumerate(batch_suggestions):
-                print(f"\n  --- Suggestion {j + 1} ---")
-                print(f"  Title: {s['title']}")
-                print(f"  Type: {s['type']}")
-                print(f"  Importance: {s['importance']}")
-                print(f"  {self._summary_reference_line(s)}")
-                print(f"  Description:\n  {clip(s['description'], 200)}")
-
-        if self.formatted_human:
-            print(f"\n{'=' * 60}")
-            print("NEEDS HUMAN REVIEW")
-            print(f"{'=' * 60}")
-            for s in self.formatted_human:
-                print(f"\n- {s['title']}")
-                print(f"  Reason: {s['validation_reason']}")
+        # The counts only: each batch's items are in the files named here, and
+        # `util decisions` shows them to the user (instructions, step 3).
+        print()
+        for line in detail_pointer_lines(output_path):
+            print(line)
 
     def _summary_target_lines(self) -> List[str]:
         """Summary lines naming the phase's target, after the plan's."""
         return []
-
-    def _summary_reference_line(self, item: Dict[str, Any]) -> str:
-        """Where a summarised suggestion applies."""
-        return f"Section: {item['reference']}"
 
 
 __all__ = ["SuggestionApplyPhase"]

@@ -65,12 +65,18 @@ step.
 A `workspace-read` subagent must be able to read that path, so do not run it where
 it cannot. Never treat such a batch as having the full plan inline.
 
+Read `revalidation_tasks.index.json` beside it instead: the same tasks without
+their prompts (`task_id`, `batch_index`, `prompt_path`, `prompt_lines`,
+`output_path`, `context_mode`) and `total_batches`. Read `revalidation_tasks.json`
+only when there is no index.
+
 **For each task in the file: when the task carries `prompt_path`, run a subagent
 that reads that file in full (through line `prompt_lines`, paging if a single read
 stops short) and follows it verbatim; otherwise, or if the file is absent, run
-`task.prompt` as a subagent. Either way, write the JSON it returns to
-`task.output_path`.** That is the whole contract: do not assemble a prompt beyond
-that one read instruction, and do not tell the subagent to write the file itself.
+that task's `prompt` from `revalidation_tasks.json` as a subagent. Either way,
+write the JSON it returns to `task.output_path`.** That is the whole contract: do
+not assemble a prompt beyond that one read instruction, and do not tell the
+subagent to write the file itself.
 
 A file whose `tasks_schema_version` is missing or not `2`, or whose recorded
 `inputs` hashes no longer match their sources, is refused with exit 3: re-run the
@@ -89,7 +95,7 @@ yourself, and never assemble one from the parts of two replies. A batch still
 
 ### Single batch: `[REVALIDATION_PENDING]`
 
-1. Read `revalidation_tasks.json` from `{plan}/{review}/`.
+1. Read `revalidation_tasks.index.json` from `{plan}/{review}/` (no index: `revalidation_tasks.json`).
 2. Run the single task as the contract above says (the sidecar at `prompt_path`
    when it has one, `task.prompt` otherwise) and write its JSON reply to that
    task's `output_path`.
@@ -98,7 +104,7 @@ yourself, and never assemble one from the parts of two replies. A batch still
 
 ### Multiple batches: `[REVALIDATION_BATCHES_PENDING]`
 
-1. Read `revalidation_tasks.json` from `{plan}/{review}/`.
+1. Read `revalidation_tasks.index.json` from `{plan}/{review}/` (no index: `revalidation_tasks.json`).
 2. Count the batches and choose a strategy:
    - **Strategy A (≤ 4 batches):** for each task in `batches`, run it exactly as the
      contract above says and write the JSON it returns to its `output_path`. Run

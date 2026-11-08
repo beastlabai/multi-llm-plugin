@@ -210,13 +210,16 @@ This prints a formatted summary with each suggestion's title and status. Display
 
 ### 4. Read the Orchestrator Output
 
-Read `{plan}/apply-task-suggestions/orchestrator_output.json`.
+Read `{plan}/apply-task-suggestions/orchestrator_summary.json`, written beside `orchestrator_output.json`: what the batch loop needs from that file and from `write_tasks.json`. When there is no summary, read `orchestrator_output.json` and `write_tasks.json` (printed as `[WRITE_TASKS_FILE]`: the same batches in the same order, with their task ids) instead.
 
 Extract the following key fields directly from the Read output (do NOT use Bash/python to parse — just read the JSON and understand it):
-- `batches`: Array of batch objects, each with `prompt`, `section_key`, `prior_changes_id`, `suggestions`
+- `batches`: one entry per batch, in dispatch order, with `task_id` (`apply-task-batch-0`, `apply-task-batch-1`, …), `batch_index`, `section_key`, `prior_changes_id`, `task_title` and `expected_ids`, the values `write_tasks.json` holds, and `detail_path`, the batch's detail file
 - `needs_human_review`: Items requiring human decision
 - `human_review_config`: Batch mode config for human review
 - `summary`: Counts of valid, skipped, batches, etc.
+- `tasks_file`: the tasks.md every batch edits, the same path `orchestrator_output.json` names
+
+The batch loop below is keyed on `task_id`. Each batch's `suggestions` are in its detail file at `detail_path` (`orchestrator_batches/<task_id>.json`: the batch's record in `orchestrator_output.json` without its prompt), read once at step 1 below and used again at step 5. The **unbound** `prompt` stays in `orchestrator_output.json` and is never handed to a subagent.
 
 ### 5. Process Batches Sequentially
 
@@ -235,7 +238,7 @@ When the command that runs this phase carries `--exec-subagents`, `--detach` (wh
 
 For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
-1. **Bind the batch prompt** — Run:
+1. **Bind the batch prompt** — First read this batch's detail file at its `detail_path` (with no summary, its entry in `orchestrator_output.json`'s `batches`, already read): its `suggestions` are what the batch applies and what step 5 checks. Then run:
    ```bash
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util write-prompt \
      --phase-dir "{plan}/apply-task-suggestions" --task-id "{task.task_id}"
@@ -258,7 +261,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
    diff -u "{snapshot_path}" "{tasks_path}"
    ```
    `{snapshot_path}` and `{tasks_path}` are the `[WRITE_SNAPSHOT]` and `[WRITE_ARTIFACT]` paths from step 1, written out literally (a shell variable from an earlier Bash call does not exist in this one); if you no longer have them, run step 1's command again for this same batch: it keeps this batch's snapshot and prints the same two lines. An empty diff means the file is byte-for-byte unchanged; a non-empty diff means it was modified. The snapshot diff is the authoritative, fully git-independent detector — no git intent-to-add step is needed here (flows that genuinely need untracked files visible to git diffs, like code review, handle that inside their Python orchestrator via `utils/git_utils.intent_to_add_untracked`). Classify the result:
-   - **Success**: The snapshot diff is non-empty **and** the expected changes are present (grep spot-check the modified tasks.md for the intended task IDs / fields from the batch).
+   - **Success**: The snapshot diff is non-empty **and** the expected changes are present (grep spot-check the modified tasks.md for the intended task IDs / fields from the batch's suggestions, which its detail file lists: you read it at step 1; read it again only if it is no longer in your context).
    - **Failure (clean)**: The subagent failed **and** the snapshot diff is empty (tasks.md is byte-for-byte identical to its pre-batch snapshot).
    - **Not applied**: The subagent reported `applied` **and** the snapshot diff is empty: its edits did not land. Dispatch the batch once more, with one sentence added to its prompt saying the previous attempt answered `applied` but changed no file, and verify again; if nothing changed this time either, it is a clean failure (record it `failed`), never a success.
    - **Partial application**: The snapshot diff is non-empty but the expected changes are incomplete, **or** the subagent failed but the snapshot diff is non-empty.

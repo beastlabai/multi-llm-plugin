@@ -159,6 +159,7 @@ from utils.validation import (
     decode_document,
     ensure_prompt_sidecars,
     excerpt_context_reported,
+    host_views_lock,
     legacy_context_round_reason,
     PLAN_CONTEXT_LABEL,
     ContextBlock,
@@ -5474,20 +5475,21 @@ async def reaggregate_from_existing_files(
             # dispatched under `--exec-subagents` or waited for, never merged:
             # the merge reads a missing file as `validation_failed`
             # (docs/development/review-results.md).
-            if ensure_prompt_sidecars(batch_metadata, str(phase_dir)):
-                # Native hosts reread the JSON, not this in-memory document.
-                from utils.subagent_executor import _atomic_write_json
+            with host_views_lock(str(phase_dir)):
+                if ensure_prompt_sidecars(batch_metadata, str(phase_dir)):
+                    # Native hosts reread the JSON, not this in-memory document.
+                    from utils.subagent_executor import _atomic_write_json
 
-                try:
-                    _atomic_write_json(str(validation_tasks_path), batch_metadata)
-                except OSError as exc:
-                    print(
-                        f"ERROR: Could not persist repaired prompt metadata to "
-                        f"{validation_tasks_path}: {exc}. Fix task-file write access "
-                        "and retry reaggregation before dispatching native subagents.",
-                        file=sys.stderr,
-                    )
-                    sys.exit(EXIT_NEEDS_HUMAN)
+                    try:
+                        _atomic_write_json(str(validation_tasks_path), batch_metadata)
+                    except OSError as exc:
+                        print(
+                            f"ERROR: Could not persist repaired prompt metadata to "
+                            f"{validation_tasks_path}: {exc}. Fix task-file write access "
+                            "and retry reaggregation before dispatching native subagents.",
+                            file=sys.stderr,
+                        )
+                        sys.exit(EXIT_NEEDS_HUMAN)
             total_batches = batch_metadata.get("total_batches", 0)
             batches_found = sum(
                 1 for batch in batch_metadata.get("batches", [])
@@ -5537,18 +5539,19 @@ async def reaggregate_from_existing_files(
             # One read of the plan, bound to this phase dir's own snapshot
             # (§2.3 step 5): the plan block names it, never the live plan.
             plan_document = bind_plan_for_validation(str(plan_path), str(phase_dir))
-            batched_tasks = materialize_validation_round(code_review_validation_round(
-                [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
-                args=args, plan_path=plan_path, phase_dir=phase_dir,
-                plan_document=plan_document, base_ref=base_ref,
-                project_root=project_root, git_root=git_root, pinned=pinned,
-                plan_snapshot=plan_snapshot, plan_sha256=plan_sha256,
-                scope_round_policy=scope_round_policy, state=state,
-            ))
+            with host_views_lock(str(phase_dir)):
+                batched_tasks = materialize_validation_round(code_review_validation_round(
+                    [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
+                    args=args, plan_path=plan_path, phase_dir=phase_dir,
+                    plan_document=plan_document, base_ref=base_ref,
+                    project_root=project_root, git_root=git_root, pinned=pinned,
+                    plan_snapshot=plan_snapshot, plan_sha256=plan_sha256,
+                    scope_round_policy=scope_round_policy, state=state,
+                ))
 
-            # Save validation task instructions
-            with open(validation_tasks_path, 'w', encoding='utf-8') as f:
-                json.dump(batched_tasks, f, indent=2)
+                # Save validation task instructions
+                with open(validation_tasks_path, 'w', encoding='utf-8') as f:
+                    json.dump(batched_tasks, f, indent=2)
 
             # 2026-09-21, the remaining lane-parity gap: the phase machine's own
             # word for the stretch that starts here, written UNCONDITIONALLY the
@@ -6837,19 +6840,20 @@ async def main(argv: Optional[List[str]] = None) -> int:
                     # has no `group_hash`, which is the key `_overlay_human_decisions`
                     # joins on; the decisions overlay then matches nothing and
                     # reports success anyway.
-                    batched_tasks = materialize_validation_round(code_review_validation_round(
-                        grouped_list,
-                        args=args, plan_path=plan_path, phase_dir=phase_dir,
-                        plan_document=plan_document, base_ref=base_ref,
-                        project_root=project_root, git_root=git_root, pinned=pinned,
-                        plan_snapshot=plan_snapshot, plan_sha256=plan_sha256,
-                        scope_round_policy=scope_round_policy, state=state,
-                    ))
+                    with host_views_lock(str(phase_dir)):
+                        batched_tasks = materialize_validation_round(code_review_validation_round(
+                            grouped_list,
+                            args=args, plan_path=plan_path, phase_dir=phase_dir,
+                            plan_document=plan_document, base_ref=base_ref,
+                            project_root=project_root, git_root=git_root, pinned=pinned,
+                            plan_snapshot=plan_snapshot, plan_sha256=plan_sha256,
+                            scope_round_policy=scope_round_policy, state=state,
+                        ))
 
-                    # Save validation task instructions
-                    validation_tasks_path = phase_dir / "validation_tasks.json"
-                    with open(validation_tasks_path, 'w', encoding='utf-8') as f:
-                        json.dump(batched_tasks, f, indent=2)
+                        # Save validation task instructions
+                        validation_tasks_path = phase_dir / "validation_tasks.json"
+                        with open(validation_tasks_path, 'w', encoding='utf-8') as f:
+                            json.dump(batched_tasks, f, indent=2)
 
                     # The same unconditional write as the `--reaggregate` site
                     # above, and the same reason: the stretch starts here, not at

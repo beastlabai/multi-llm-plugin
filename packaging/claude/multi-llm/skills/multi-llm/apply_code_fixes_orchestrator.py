@@ -28,10 +28,10 @@ from utils.apply_orchestrator_base import (
     build_common_arg_parser,
 )
 from utils.cli_common import dispatcher_prefix
-from utils.text_clip import clip
 from utils.judge_vocab import JUDGE_AUTO_DECIDE, JUDGE_DECIDE, canonical_value
 from utils.apply_output_helpers import (
     build_skipped_output,
+    detail_pointer_lines,
     write_and_emit_output,
 )
 from utils.apply_path_helpers import load_json_file
@@ -1307,42 +1307,11 @@ Finalization (run by the host AFTER every batch has been applied and verified):
             print(f"  Subagent calls saved: {self.batching_stats.get('subagent_calls_saved', 0)}")
             print(f"  Efficiency gain: {self.batching_stats.get('efficiency_gain_percent', 0)}%")
 
-        for i, batch in enumerate(batches):
-            batch_fixes = batch.get("fixes", []) if isinstance(batch, dict) else batch.fixes
-            batch_file = batch.get("file_key", "") if isinstance(batch, dict) else batch.file_key
-            batch_type = batch.get("batch_type", "") if isinstance(batch, dict) else batch.batch_type
-            batch_executor = (
-                batch.get("executor_role", "agent") if isinstance(batch, dict)
-                else batch.executor_role
-            )
-            batch_size = batch.get("fix_count", len(batch_fixes)) if isinstance(batch, dict) else batch.size
-            batch_priority = batch.get("priority_score", 0) if isinstance(batch, dict) else batch.priority_score
-
-            print(f"\n{'='*60}")
-            print(f"BATCH {i+1} ({batch_size} fix(es))")
-            print(f"{'='*60}")
-            print(f"File: {batch_file}")
-            print(f"Type: {batch_type}")
-            print(f"Executor: {batch_executor}")
-            print(f"Priority score: {batch_priority}")
-
-            for j, f in enumerate(batch_fixes):
-                print(f"\n  --- Fix {j+1} ---")
-                print(f"  Title: {f['title']}")
-                print(f"  Type: {f['type']}")
-                print(f"  Importance: {f['importance']}")
-                print(f"  File: {f.get('file', 'unknown')}")
-                desc = clip(f.get('description', f.get('desc', '')), 200)
-                print(f"  Description:\n  {desc}")
-
-        if self.formatted_human:
-            print(f"\n{'='*60}")
-            print("NEEDS HUMAN REVIEW")
-            print(f"{'='*60}")
-            for f in self.formatted_human:
-                print(f"\n- {f['title']}")
-                print(f"  File: {f.get('file', 'unknown')}")
-                print(f"  Reason: {f['validation_reason']}")
+        # The counts only: each batch's fixes are in the files named here, and
+        # `util decisions` shows them to the user (instructions, step 3).
+        print()
+        for line in detail_pointer_lines(output_path):
+            print(line)
 
 
 def main(argv=None) -> int:

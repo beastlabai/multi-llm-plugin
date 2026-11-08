@@ -216,13 +216,15 @@ This prints a formatted summary with each fix's title and status. Display this o
 
 ### 4. Read the Orchestrator Output
 
-Read `{plan}/apply-fixes/orchestrator_output.json`.
+Read `{plan}/apply-fixes/orchestrator_summary.json`, written beside `orchestrator_output.json`: what the batch loop needs from that file and from `write_tasks.json`. When there is no summary, read `orchestrator_output.json` and `write_tasks.json` (printed as `[WRITE_TASKS_FILE]`: the same batches in the same order, with their task ids) instead.
 
 Extract the following key fields directly from the Read output (do NOT use Bash/python to parse — just read the JSON and understand it):
-- `batches`: Array of batch objects, each with `prompt`, `file_key`, `prior_changes_id`, `executor_role`, `fixes`
+- `batches`: one entry per batch, in dispatch order, with `task_id` (`apply-fix-batch-0`, `apply-fix-batch-1`, …), `batch_index`, `file_key`, `executor_role`, `prior_changes_id`, `task_title` and `expected_ids`, the values `write_tasks.json` holds, and `detail_path`, the batch's detail file
 - `needs_human_review`: Items requiring human decision
 - `human_review_config`: Batch mode config for human review
 - `summary`: Counts of valid, skipped, batches, etc.
+
+The batch loop below is keyed on `task_id`. Each batch's `fixes` are in its detail file at `detail_path` (`orchestrator_batches/<task_id>.json`: the batch's record in `orchestrator_output.json` without its prompt), read once at step 1 below and used again at step 4. The **unbound** `prompt` stays in `orchestrator_output.json` and is never handed to a subagent.
 
 ### 5. Process Batches Sequentially
 
@@ -241,7 +243,7 @@ When the command that runs this phase carries `--exec-subagents`, `--detach` (wh
 
 For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
-1. **Bind the batch prompt** — Run:
+1. **Bind the batch prompt** — First read this batch's detail file at its `detail_path` (with no summary, its entry in `orchestrator_output.json`'s `batches`, already read): its `fixes`, each with its `file`, are what the batch applies and what step 4 checks. Then run:
    ```bash
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util write-prompt \
      --phase-dir "{plan}/apply-fixes" --task-id "{task.task_id}"
@@ -258,7 +260,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 3. **Wait for completion** - Do NOT parallelize batch processing
 
 4. **Verify batch outcome** — After the subagent completes (or fails), determine the batch outcome by inspecting actual file/diff state rather than relying solely on the subagent's exit status. Classify the result:
-   - **Success**: The expected changes are present in the target files (verified via diff or content check).
+   - **Success**: The expected changes are present in the target files (verified via diff or content check against the batch's fixes, which its detail file lists: you read it at step 1; read it again only if it is no longer in your context).
    - **Failure (clean)**: The subagent failed and no file modifications were made (verified by checking that target files are unchanged from their pre-batch state).
    - **Not applied**: The subagent reported `applied` **and** no file was modified: its edits did not land. Dispatch the batch once more, with one sentence added to its prompt saying the previous attempt answered `applied` but changed no file, and verify again; if nothing changed this time either, it is a clean failure (record it `failed`), never a success.
    - **Partial application**: Some but not all expected changes are present, or the subagent failed but file modifications were detected.

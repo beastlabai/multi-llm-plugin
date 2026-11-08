@@ -648,7 +648,49 @@ def prepare_consolidation_tasks(
     writing invocation's own selection flags (D2), so the merge is retried
     under the panel the caller asked for.
     """
+    try:
+        from .validation import host_views_lock
+    except ImportError:  # pragma: no cover - direct script runs
+        from utils.validation import host_views_lock  # type: ignore
+
+    # One views transaction: the old index goes, the sidecars and the task file
+    # are written, and the index is rebuilt from that file
+    # (docs/development/delegation.md#the-host-index). The lock file lives in
+    # the phase dir, so the dir exists first.
+    Path(phase_dir).mkdir(parents=True, exist_ok=True)
+    with host_views_lock(phase_dir):
+        return _prepare_consolidation_tasks(
+            groups, section_groups, phase_dir, plan_file, prompt_budget,
+        )
+
+
+def _prepare_consolidation_tasks(
+    groups: List[Dict[str, Any]],
+    section_groups: Dict[str, List[int]],
+    phase_dir: str,
+    plan_file: str,
+    prompt_budget: Optional[PromptBudget],
+) -> Dict[str, Any]:
+    """:func:`prepare_consolidation_tasks`, inside the phase's views lock."""
+    try:
+        from .validation import (
+            invalidate_host_index,
+            refresh_host_index,
+            write_prompt_sidecars,
+        )
+    except ImportError:  # pragma: no cover - direct script runs
+        from utils.validation import (  # type: ignore
+            invalidate_host_index,
+            refresh_host_index,
+            write_prompt_sidecars,
+        )
+
     phase_path = Path(phase_dir)
+    tasks_path = phase_path / "consolidation_tasks.json"
+    # The host index describes the task file this call replaces: it goes before
+    # a sidecar changes, and is rebuilt from the file once that is written
+    # (docs/development/delegation.md#the-host-index).
+    invalidate_host_index(str(tasks_path))
 
     # Pre-compute group_ids for all groups
     group_ids = consolidation_group_ids(groups)
@@ -737,10 +779,6 @@ def prepare_consolidation_tasks(
 
     # The prompt files a native host hands its subagents, written beside the
     # batches (validation's sidecar rule: all or none, `prompt` stays the source).
-    try:
-        from .validation import write_prompt_sidecars
-    except ImportError:  # pragma: no cover - direct script runs
-        from utils.validation import write_prompt_sidecars  # type: ignore
     write_prompt_sidecars(
         batches, str(phase_path),
         stale_glob=CONSOLIDATION_PROMPT_TEMPLATE.format(index="*"),
@@ -765,10 +803,10 @@ def prepare_consolidation_tasks(
     )
 
     # Write consolidation_tasks.json
-    tasks_path = phase_path / "consolidation_tasks.json"
     tasks_path.parent.mkdir(parents=True, exist_ok=True)
     with open(tasks_path, "w", encoding="utf-8") as f:
         json.dump(tasks_metadata, f, indent=2)
+    refresh_host_index(str(tasks_path))
 
     logger.info(
         "Prepared %d consolidation batches across %d sections "

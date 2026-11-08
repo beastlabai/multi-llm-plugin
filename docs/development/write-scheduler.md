@@ -17,6 +17,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Prompt order](#prompt-order)
 - [Write reply extraction](#write-reply-extraction)
 - [Scope policy at the write seam](#scope-policy-at-the-write-seam)
+- [The host summary](#the-host-summary)
 
 ## Where the scheduler's helpers live
 
@@ -519,8 +520,9 @@ writes and makes `save()` raise.
 only on the native leg, which `--exec-subagents` never reaches, so the first run that judged
 anything had no durable human-readable home for the decision. The overlay is called as a function,
 not shelled out as `util report regenerate-decisions`, and is a quiet no-op when the review predates
-`report_data.json`. The native leg keeps `print_text_summary` byte-for-byte: there it really
-is a plan of work the host is about to execute.
+`report_data.json`. The native leg keeps `print_text_summary`: there it really is a plan of work
+the host is about to execute, its counts and the two files that hold the rest
+([The host summary](#the-host-summary)).
 
 F10 (2026-09-16) gave `write_apply_summary_report` the per-fix detail its own template promises — each
 batch's own fix/suggestion titles and `file`/`line_range` from
@@ -931,3 +933,39 @@ executor's finished loop, the empty loop, the all-deferred exit and step 27 when
 remains) derives the blockers from `processed_<phase>` through `_scope_close`, so a `--resume`
 that drops the declined item stays blocked; only a completion that finds none (an `expand` apply)
 or a fresh review round clears it, never `persist_deferrals`.
+
+## The host summary
+
+A native apply host reads `orchestrator_summary.json` beside `orchestrator_output.json` instead of
+the output (`publish_orchestrator_views` in `utils/apply_output_helpers.py`): the outcome (`status`,
+`message`), the target files, `summary`, `needs_human_review`, `human_review_config`, the skipped
+items and `skipped_count`, and one entry per batch with its position, `section_key` or `file_key`,
+`executor_role` and `prior_changes_id`, its write task's `task_id`, `batch_index`, `task_title` and
+`expected_ids` (the ids `util write-prompt` and `util batch-done` are keyed on), and `detail_path`.
+That names the batch's detail file, `orchestrator_batches/<task_id>.json`: the batch's output record
+without its `prompt`, its suggestions or fixes with their targets. The host reads it before it
+binds the batch and again before it verifies the batch's edits, so two batches with the same titles
+and ids but opposite requested edits are told apart, and reads one batch's items at a time instead
+of all of them.
+
+The views follow the rule every derived view does
+([delegation.md](delegation.md#the-host-index)):
+
+- **Removed before the output changes.** `invalidate_orchestrator_views` removes the summary and
+  every detail file before `orchestrator_output.json` is rewritten, by `_write_outputs` and by
+  `write_and_emit_output`; one that cannot be removed stops the run with exit 3 naming it.
+- **Published after their sources are written.** On the native leg, once `write_tasks.json` is
+  written: the detail files first, then the summary that names them. An output with batches gets
+  no views unless each batch pairs with its write task, and a view that cannot be written leaves no
+  summary. `write_and_emit_output` writes outputs with no batch and publishes their summary at
+  once. The executor leg publishes none: its host runs no batch loop.
+- **Absence means the full files.** A host that finds no summary reads `orchestrator_output.json`
+  and `write_tasks.json`, the fallback each instruction names.
+
+The full output stays the source of truth: its batches carry the unbound `prompt` and every item
+record, `to_apply` repeats those records, and `util write-prompt`, `util batch-done`, the scheduler,
+`util decisions` and `--output-format json` read it. `RESERVED_OUTPUT_NAMES` holds
+`orchestrator_summary.json` and `orchestrator_batches`. `print_text_summary` prints the counts and
+the paths of the two files, never the batches: at 76 groups the old per-batch listing was 33 KB of
+output the host received as its command's result, and `util decisions` already shows the user every
+item (`detail_pointer_lines`).

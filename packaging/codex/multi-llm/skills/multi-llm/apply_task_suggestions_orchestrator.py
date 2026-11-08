@@ -280,9 +280,6 @@ Bulk Approval Examples:
     def _summary_target_lines(self) -> List[str]:
         return [f"Tasks file: {self.tasks_file}"]
 
-    def _summary_reference_line(self, item: Dict[str, Any]) -> str:
-        return f"Task reference: {item.get('task_reference', item['reference'])}"
-
     # ----------------------------------------------------------------
     # Private helpers
     # ----------------------------------------------------------------

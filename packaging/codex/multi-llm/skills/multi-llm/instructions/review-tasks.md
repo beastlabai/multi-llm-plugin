@@ -362,13 +362,19 @@ in this phase dir (`validation-snapshot.md` for the plan; `tasks-backup.md` or
 so do not run it where it cannot. Never treat such a batch as having that
 document inline in full.
 
+Read `validation_tasks.index.json` beside it instead: the same tasks without
+their prompts (`task_id`, `batch_index`, `prompt_path`, `prompt_lines`,
+`output_path`, `context_mode`), plus `total_batches`, `reaggregate_mode` and
+`plan_file`. Read `validation_tasks.json` only when there is no index.
+
 **For each task in the file: when the task carries `prompt_path`, run a subagent
 that reads that file in full — through line `prompt_lines`, paging if a single
 read stops short — and follows it verbatim; otherwise, or if the file is absent,
-run `task.prompt` as a subagent. Either way, write the JSON it returns to
-`task.output_path`.** That is the whole contract — do not assemble a prompt
-beyond that one read instruction, and do not tell the subagent to write the file
-itself. The file's bytes are exactly `task.prompt`; the two are interchangeable.
+run that task's `prompt` from `validation_tasks.json` as a subagent. Either way,
+write the JSON it returns to `task.output_path`.** That is the whole contract —
+do not assemble a prompt beyond that one read instruction, and do not tell the
+subagent to write the file itself. The file's bytes are exactly `task.prompt`;
+the two are interchangeable.
 
 A file whose `tasks_schema_version` is missing or not `2`, or whose recorded
 `inputs` hashes no longer match their sources, is refused with exit 3: re-run the
@@ -377,7 +383,7 @@ phase with `--force` to re-materialize it.
 #### Single Batch: `[VALIDATION_PENDING]`
 
 If `[VALIDATION_PENDING]` marker is present:
-1. Read `validation_tasks.json` from `{plan}/review-tasks/`
+1. Read `validation_tasks.index.json` from `{plan}/review-tasks/` (no index: `validation_tasks.json`)
 2. Run the single task as the contract above says — the sidecar at `prompt_path`
    when it has one, `task.prompt` otherwise — and write its JSON reply to that
    task's `output_path`; do not run the next step, or end your turn, until that file exists and is not empty
@@ -386,7 +392,7 @@ If `[VALIDATION_PENDING]` marker is present:
 #### Multiple Batches: `[VALIDATION_BATCHES_PENDING]`
 
 If `[VALIDATION_BATCHES_PENDING]` marker is present (for 5+ finding groups):
-1. Read `validation_tasks.json` once from `{plan}/review-tasks/`
+1. Read `validation_tasks.index.json` once from `{plan}/review-tasks/` (no index: `validation_tasks.json`)
 2. Count the number of batches as `{total_batches}` and mark the phase start:
    ```bash
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \

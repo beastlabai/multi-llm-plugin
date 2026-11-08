@@ -450,7 +450,7 @@ prints what was cut. The fencing and the caps are presentation only: neither ent
 - **A restart archives the replaced round.** A changed identity rewrites the header only after step 4 and
   passes `--force --rerun-all` with `[COMMIT_REVIEW_RESTARTED]`. First, `commit_brief.archive_round`
   renames every entry of `<slug>/code-review/` except `RESTART_KEEP` (`.lock`, `.status.lock`,
-  `.status.json`, `orchestrator-run.log`), the stage file and earlier archives into
+  `.status.json`, `orchestrator-run.log`, `.views.lock`), the stage file and earlier archives into
   `restarted-<YYYYmmdd-HHMMSS>[.<µs>]/`, which the phase's non-recursive globs never read. `--rerun-all`
   alone would leave an old-set-only model's `<model>.json`, which `retire_result_from_another_scope`
   misses because a changed focus keeps the scope id, and apply would read the old `user_selections.json`
