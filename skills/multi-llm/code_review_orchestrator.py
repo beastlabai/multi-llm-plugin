@@ -165,6 +165,7 @@ from utils.validation import (
     ValidationContextError,
     bind_document_text,
     decode_document,
+    ensure_prompt_sidecars,
     excerpt_context_reported,
     legacy_context_round_reason,
     prepare_batched_validation_tasks,
@@ -4928,7 +4929,7 @@ async def reaggregate_from_existing_files(
     template_style: str = 'pr',
     base_ref: Optional[str] = None,
     pinned: Optional[PinnedRange] = None,
-) -> None:
+) -> int:
     """Re-aggregate all model results after salvage operations complete.
 
     This function scans the output directory for model result files (including
@@ -4951,6 +4952,11 @@ async def reaggregate_from_existing_files(
             a regenerated diff set, the validation excerpts and the report are
             all read at its head, so ``reviewed_code_sha256`` is stable however
             the working tree moved.
+
+    Returns:
+        The process exit code: :func:`finish_code_review`'s on a completed
+        phase (``--fail-on-high`` holds there), ``EXIT_OK`` on every ending
+        that leaves the phase open. Refusals ``sys.exit`` themselves.
     """
     import glob as glob_module
 
@@ -4990,7 +4996,7 @@ async def reaggregate_from_existing_files(
             str(phase_dir), no_results,
             mode="review-code", plan_path=str(plan_path),
         )
-        return
+        return EXIT_OK
 
     # Collect all issues and build synthetic results dict for report generation
     all_issues = []
@@ -5075,7 +5081,7 @@ async def reaggregate_from_existing_files(
             str(phase_dir), no_results,
             mode="review-code", plan_path=str(plan_path),
         )
-        return
+        return EXIT_OK
 
     # A model whose result file is on disk has completed as far as this
     # report is concerned, whatever the fan-out recorded about it: a salvage
@@ -5356,24 +5362,82 @@ async def reaggregate_from_existing_files(
             except TaskFileError as task_file_error:
                 print(f"ERROR: {task_file_error}", file=sys.stderr)
                 # Identical to the sibling guard in review_orchestrator_base: the
-                # refusal has to reach the *process* exit code. main()'s
-                # reaggregate branch discards this coroutine's return value, so a
-                # `return 3` here would surface to a polling host as exit 0 —
-                # "done" on a run that produced no report and needs --force.
+                # refusal exits here, outside any handler, so nothing below can
+                # go on to complete the phase.
                 sys.exit(task_file_error.exit_code)
             # §2.3 step 5 / 2.9: re-hash the snapshots the stored prompts name,
             # rebinding a moved phase dir; a changed or missing one is exit 3.
             verify_round_context(
                 batch_metadata, str(phase_dir), str(validation_tasks_path)
             )
+            # The base lane's round resolution, step for step
+            # (`review_orchestrator_base.reaggregate_from_existing_files`): a
+            # stale `prompt_path` is rebound and persisted before any batch is
+            # handed out, then only a whole round is merged. A missing batch is
+            # dispatched under `--exec-subagents` or waited for, never merged:
+            # the merge reads a missing file as `validation_failed`
+            # (docs/development/review-results.md).
+            if ensure_prompt_sidecars(batch_metadata, str(phase_dir)):
+                # Native hosts reread the JSON, not this in-memory document.
+                from utils.subagent_executor import _atomic_write_json
+
+                try:
+                    _atomic_write_json(str(validation_tasks_path), batch_metadata)
+                except OSError as exc:
+                    print(
+                        f"ERROR: Could not persist repaired prompt metadata to "
+                        f"{validation_tasks_path}: {exc}. Fix task-file write access "
+                        "and retry reaggregation before dispatching native subagents.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(EXIT_NEEDS_HUMAN)
+            total_batches = batch_metadata.get("total_batches", 0)
+            batches_found = sum(
+                1 for batch in batch_metadata.get("batches", [])
+                if (phase_dir / f"validation_batch_{batch['batch_index']}.json").exists()
+            )
 
             # The shared merge: batch files -> validation.json (with the
-            # executor's own runner attribution, F3) -> groups. This branch
-            # used to re-implement the three steps, importing the base's
-            # private runner lookup to do it.
-            validated_groups_for_report = merge_validation_batches(
-                str(phase_dir), batch_metadata, grouped, str(validation_path)
-            )
+            # executor's own runner attribution, F3) -> groups. No broad
+            # `except` around it: a merge that raises is an error, not a
+            # completed phase with no verdicts.
+            if batches_found == total_batches and total_batches > 0:
+                print(f"All {total_batches} batch files found, merging...")
+                validated_groups_for_report = merge_validation_batches(
+                    str(phase_dir), batch_metadata, grouped, str(validation_path)
+                )
+            else:
+                # An unfinished round reopens the phase before any batch is
+                # handed out, the state a fresh hand-off leaves: an earlier
+                # `--reaggregate --skip-validation` recorded it complete, and
+                # neither record may say so while validation is still owed.
+                # The completion is dropped the way `--force` drops it.
+                reopened = get_or_create_state(plan_path)
+                if reopened.state.get("phases_completed", {}).pop("code-review", None):
+                    reopened.save()
+                update_status(str(phase_dir), {"state": "validation_pending"})
+                if await asyncio.to_thread(
+                    dispatch_subagent_tasks,
+                    args,
+                    task_file=str(validation_tasks_path),
+                    phase_dir=str(phase_dir),
+                    phase="code-review",
+                    document=batch_metadata,
+                    plan_path=str(plan_path),
+                    label="validation",
+                    retry_command=resolved_reaggregate_command(batch_metadata),
+                ):
+                    # D3b: the still-incomplete batches ran in this process (the
+                    # completed ones are skipped by their result files, D3i).
+                    validated_groups_for_report = merge_validation_batches(
+                        str(phase_dir), batch_metadata, grouped, str(validation_path)
+                    )
+                else:
+                    # The host hand-off's pair, as at the materialization site.
+                    report_progress(str(phase_dir), step="validation_pending")
+                    print(f"Only {batches_found}/{total_batches} batch files found.")
+                    print("Wait for all validation subagents to complete before reaggregating.")
+                    return EXIT_OK
         elif not args.skip_validation:
             # No validation batches exist - need to prepare them
             print("\nPreparing batched validation for subagent execution...")
@@ -5501,7 +5565,7 @@ async def reaggregate_from_existing_files(
                 # `CHECKPOINT_TERMINAL_STATES` / `CHECKPOINT_TERMINAL_STEPS`.
                 update_status(str(phase_dir), {"state": "validation_pending"})
                 report_progress(str(phase_dir), step="validation_pending")
-                return  # Exit early - Claude Code handles validation
+                return EXIT_OK  # Exit early - the host handles validation
         else:
             print("\nSkipping validation (--skip-validation flag set)")
 
@@ -5579,6 +5643,51 @@ async def reaggregate_from_existing_files(
         state.save()
         update_status(str(phase_dir), {"state": "complete"})
         report_progress(str(phase_dir), step="complete")
+
+        # The fan-out's ending, shared: a host-driven review finishes here.
+        # With no verdicts (`--skip-validation`) the groups on disk are counted,
+        # as the base lane's report does.
+        return finish_code_review(
+            phase_dir, validated_groups_for_report or grouped, args,
+            total_issues=len(all_issues),
+        )
+
+
+def finish_code_review(
+    phase_dir: Path,
+    groups: Optional[List[Dict[str, Any]]],
+    args: argparse.Namespace,
+    *,
+    total_issues: int,
+) -> int:
+    """The summary, the HIGH-group record and the ``--fail-on-high`` gate.
+
+    Called by both of the phase's completion sites, the fan-out and
+    ``--reaggregate``, after the phase is recorded complete: the gate's exit 3
+    is ``modes.REVIEW_GATE``, which hosts read as "completed, wants a decision".
+    Returns the exit code.
+
+    The count is distinct HIGH-importance *groups*, not raw issues, recorded in
+    ``.status.json`` and on the result line by the base's
+    ``record_high_priority_groups`` (which clears a stale count), because a
+    bare print reaches no detached caller (docs/development/review-results.md).
+    The bracketed marker is printed only when there is a finding.
+
+    A review that found HIGH issues *worked*, so it is exit 0: a non-zero exit
+    would stop ``full`` one phase before ``apply-code-fixes`` and put
+    ``state: "error"`` on the result line (docs/development/dispatcher.md).
+    ``--fail-on-high`` is the opt-in for a standalone CI gate, exit 3 and never
+    1, since nothing errored.
+    """
+    high_count = record_high_priority_groups(str(phase_dir), groups)
+    print("\n=== Review Summary ===")
+    print(f"Total issues: {total_issues}")
+    print(f"High priority: {high_count} group(s)")
+    if high_count > 0:
+        print(f"[HIGH_PRIORITY_ISSUES] {high_count}")
+    if high_count > 0 and getattr(args, "fail_on_high", False):
+        return EXIT_NEEDS_HUMAN
+    return EXIT_OK
 
 
 def _plan_file_label(plan_path: Path, args: Any = None) -> str:
@@ -5759,7 +5868,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
         # run's `step: complete` (dogfood 2026-09-25): dropped on that ending.
         refused = False
         try:
-            await reaggregate_from_existing_files(
+            reaggregate_exit = await reaggregate_from_existing_files(
                 prefix, out_dir, plan_path, args,
                 template_style=args.report_style,
                 **(
@@ -5772,7 +5881,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
             raise
         finally:
             await phase_ticker.stop_ticker(final_line=not refused)
-        return
+        return reaggregate_exit
 
     # Guard against re-running already-completed phase (expensive LLM calls)
     state_guard = get_or_create_state(plan_path)
@@ -6930,22 +7039,10 @@ async def main(argv: Optional[List[str]] = None) -> int:
             # slots, repeated — on every ending this `finally` covers.
             print_closing_summary(str(phase_dir))
 
-    # Summary
-    # F4: distinct HIGH-importance *groups*, not raw issues (the old per-issue
-    # count printed `[HIGH_PRIORITY_ISSUES] 3` for one 3-model finding), and
-    # recorded in `.status.json` and on the result line — a bare print is
-    # nothing a detached caller sees. The count and the record are the base's,
-    # shared with review-plan and review-tasks.
-    high_count = record_high_priority_groups(str(phase_dir), validated_groups_for_report)
-    print("\n=== Review Summary ===")
-    print(f"Total issues: {len(all_issues)}")
-    print(f"High priority: {high_count} group(s)")
-    if high_count > 0:
-        # The finding, in the channel this skill already uses for every other
-        # "you must act on this" fact ([VALIDATION_PENDING], [PARTIAL_RESULTS: …],
-        # [REAGGREGATE_AFTER_SALVAGE], [CONSOLIDATION_RECOMMENDED]). It carries the
-        # count, which the exit code it replaces could not.
-        print(f"[HIGH_PRIORITY_ISSUES] {high_count}")
+    # Summary, HIGH-group record and gate: the ending `--reaggregate` shares.
+    exit_code = finish_code_review(
+        phase_dir, validated_groups_for_report, args, total_issues=len(all_issues),
+    )
 
     # Report fix tasks if prepared
     if args.apply_fixes and fix_tasks_path:
@@ -7020,23 +7117,9 @@ async def main(argv: Optional[List[str]] = None) -> int:
         # driving, not only Claude Code.
         print("After all salvage subagents complete, run the above command to regenerate grouped/validation/report files.")
 
-    # A review that found HIGH-importance issues *worked*: the report is written
-    # and `code-review` is recorded completed in state.json. Under the uniform
-    # contract (0 done, 1 unexpected error, 2 nothing to do, 3 needs a human) that
-    # is exit 0, and the 1 this shipped with claimed an error that never happened.
-    # Two things read that claim. `full` routes every phase through
-    # `_verify(phase, code)`, which stops the chain on any non-zero — so the
-    # workflow aborted at review-code, one step before `apply-code-fixes`, the
-    # phase that exists to fix exactly what the review found. And
-    # `cli_common._STATE_BY_EXIT` maps 1 to "error", so the single
-    # MULTI_LLM_RESULT line every host reads reported `state: "error"` for a
-    # successful run. The finding itself is not lost: it is printed as
-    # [HIGH_PRIORITY_ISSUES] <n> above, and `--fail-on-high` restores a non-zero
-    # exit for a standalone CI gate. The sibling fan-outs (`review-plan`,
-    # `review-tasks`) already return 0 regardless of what they found.
-    if high_count > 0 and getattr(args, "fail_on_high", False):
-        return EXIT_NEEDS_HUMAN
-    return EXIT_OK
+    # `finish_code_review`'s exit: 0 whatever the review found, 3 under
+    # `--fail-on-high` with a HIGH group.
+    return exit_code
 
 
 if __name__ == "__main__":

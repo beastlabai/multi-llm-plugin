@@ -45,6 +45,20 @@ because ask and review-code reach it without going through the review base at al
 `review_orchestrator_base`), and review-code's on-disk batch merge goes through the shared
 `merge_validation_batches`; none of them is copied into `code_review_orchestrator.py` any more.
 
+review-code's two completion sites, the fan-out and `--reaggregate`, end in one
+`finish_code_review` (the summary, `record_high_priority_groups` and the `--fail-on-high`
+gate), reached after the phase is recorded complete, so the host-driven route records the
+count and holds the gate too; a `--skip-validation` reaggregate counts the groups on disk,
+as the base report does. Its `--reaggregate` resolves a validation round the way the base
+lane does: stale prompt sidecars are rebound and persisted, a whole round of
+`validation_batch_<n>.json` is merged, a partial one is dispatched under `--exec-subagents`
+or answered `Only n/m batch files found.` with the phase left open. A partial round first
+reopens the phase as a fresh hand-off leaves it: `state: validation_pending` (and the
+progress step on the hand-off), and a completion an earlier `--reaggregate --skip-validation`
+recorded in `state.json` is dropped, as `--force` drops it. The merge reads a
+missing batch as `validation_failed`, so it is never handed a partial round, and no broad
+`except` turns a failed merge into a completed phase.
+
 **An empty review outcome reaches its apply phase as a completion** (2026-10-09). review-plan's
 fan-out with zero groups (the `else` of `run_review_orchestration`'s
 `if all_suggestions:`) and the base `--reaggregate` that finds none retire the previous

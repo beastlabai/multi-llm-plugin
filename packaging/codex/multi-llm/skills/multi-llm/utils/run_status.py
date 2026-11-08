@@ -75,6 +75,7 @@ from .cli_common import (
     record_artifact,
     record_commit_fixes_result,
     record_consolidation_recommended,
+    record_high_priority_groups,
     record_mode_phase,
     record_validation_context,
     record_validation_counts,
@@ -5372,6 +5373,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     if counts:
         record_validation_counts(counts)
+    # F4: the distinct-HIGH-group count, re-recorded under the same pinned-run
+    # rule: a detached `--fail-on-high` review that the gate held at exit 3 is
+    # "completed" to a host only with a positive count on this line
+    # (`modes.REVIEW_GATE`). Only for a finished run whose phase recorded
+    # itself complete, the one point the count is written. That state outlives
+    # the run, so freshness is `claim_run`'s: it drops the predecessor's count,
+    # and a run that stopped short of its own (a refused retry) has none.
+    high_priority = (
+        views[0].get("high_priority_groups")
+        if len(views) == 1 and (args.phase or args.question or args.run_id)
+        and terminal_run and views[0].get("state") == "complete"
+        else None
+    )
+    if isinstance(high_priority, dict):
+        record_high_priority_groups(high_priority)
     # plans/ask-answer-recovery-and-false-success.md D7.2: a finished ask's
     # answer counts by origin, re-recorded under the same pinned-run rule and
     # for the same reason — a detached ask's own result line never reached the

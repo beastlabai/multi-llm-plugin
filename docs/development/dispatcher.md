@@ -92,6 +92,13 @@ predicate (every file-capable answer was recovered from stdout), so a host that 
 result line sees the condition; it never moves `state` or the exit
 (plans/ask-answer-recovery-and-false-success.md D7.2).
 
+`high_priority_groups` (`{count}`) takes that route as well, for a terminal run whose
+checkpoint `state` is `complete`, the one point the count is written: a detached
+`review-code --fail-on-high` held at exit 3 reads as completed to a host only with a positive
+count on the poll's line (`modes.REVIEW_GATE`). The `state` outlives the run that wrote it, so
+`claim_run` drops the count when the next run starts: a retry refused before it completes
+(an edited plan, exit 3) never relays the earlier review's count as its own.
+
 **`user_next_step`** is the workflow's next phase as the command the *user* types
 (plans/next-phase-command.md): `{"phase", "command", "optional_before": [{"phase", "command", "why"}], "complete": false}` (`optional_before` omitted when empty,
 and every rendering puts the primary first; since fix round 16 it also carries

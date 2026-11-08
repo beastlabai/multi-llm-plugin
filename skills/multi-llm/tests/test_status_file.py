@@ -233,6 +233,23 @@ class TestDetachFieldsAreAdditive:
         )
         assert data["question"], "the checkpoint keys still survive a takeover"
 
+    def test_claim_drops_a_predecessor_runs_high_priority_count(self, tmp_path):
+        """The count is one review run's finding; the top-level `state` beside
+        it is the phase's and survives, so a poll of the new run must not find
+        the old count there (docs/development/runtime.md)."""
+        _checkpoint(tmp_path)
+        status_file.claim_run(str(tmp_path), _run_record("run-old", "running"))
+        status_file.update_status(str(tmp_path), {
+            "state": "complete", "high_priority_groups": {"count": 2},
+        })
+        assert status_file.update_run(str(tmp_path), {"state": "done", "exit_code": 0},
+                                      expect_run_id="run-old")
+        status_file.claim_run(str(tmp_path), _run_record("run-new", "starting"))
+        data = json.loads((tmp_path / ".status.json").read_text(encoding="utf-8"))
+        assert "high_priority_groups" not in data
+        assert data["state"] == "complete"
+        assert data["run"]["run_id"] == "run-new"
+
     def test_resolutions_are_appended_for_the_audit_trail(self, tmp_path):
         _checkpoint(tmp_path)
         status_file.claim_run(str(tmp_path), _run_record())

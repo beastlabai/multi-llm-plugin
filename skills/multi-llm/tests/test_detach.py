@@ -2990,13 +2990,15 @@ class TestStatusSurface:
         """
         plan = _plan(tmp_path)
         phase = _phase_dir(plan, phase="code-review")
-        status_file.write_status(str(phase), {
-            "phase": "code-review", "state": "complete",
-            "high_priority_groups": {"count": 1},
-        })
+        # The run's own count, written after its claim (`claim_run` drops a
+        # predecessor's).
         status_file.claim_run(str(phase), {
             "run_id": "run-highpri-001", "state": "done", "exit_code": 0,
             "detached": True,
+        })
+        status_file.write_status(str(phase), {
+            "phase": "code-review", "state": "complete",
+            "high_priority_groups": {"count": 1},
         })
         assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 0
         out = capsys.readouterr().out
@@ -3010,13 +3012,13 @@ class TestStatusSurface:
         """
         plan = _plan(tmp_path)
         phase = _phase_dir(plan, phase="code-review")
-        status_file.write_status(str(phase), {
-            "phase": "code-review", "state": "models_running",
-            "high_priority_groups": {"count": 1},
-        })
         status_file.claim_run(str(phase), {
             "run_id": "run-highpri-002", "state": "running", "detached": True,
             "heartbeat_at": status_file.now_iso(), "heartbeat_interval_s": 10.0,
+        })
+        status_file.write_status(str(phase), {
+            "phase": "code-review", "state": "models_running",
+            "high_priority_groups": {"count": 1},
         })
         assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
         out = capsys.readouterr().out
@@ -3030,17 +3032,133 @@ class TestStatusSurface:
         """
         plan = _plan(tmp_path)
         phase = _phase_dir(plan, phase="review-plan")
-        status_file.write_status(str(phase), {
-            "phase": "review-plan", "state": "complete",
-            "high_priority_groups": {"count": 1},
-        })
         status_file.claim_run(str(phase), {
             "run_id": "run-highpri-003", "state": "done", "exit_code": 0,
             "detached": True,
         })
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "complete",
+            "high_priority_groups": {"count": 1},
+        })
         assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 0
         out = capsys.readouterr().out
         assert "high-priority groups" not in out
+
+    def _poll_high_priority(self, plan, phase, *, checkpoint_state, run, argv=()):
+        """The result payload of a poll of a code-review run left with a count.
+
+        Claimed first, then written, the order a run takes: `claim_run` drops a
+        predecessor's count."""
+        status_file.claim_run(str(phase), {"detached": True, **run})
+        status_file.write_status(str(phase), {
+            "phase": "code-review", "state": checkpoint_state,
+            "high_priority_groups": {"count": 2},
+            "validation_counts": {
+                "valid": 2, "invalid": 0,
+                "needs_human_decision": 0, "validation_failed": 0,
+            },
+        })
+        ctx = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            code = run_status.main(["--plan-file", str(plan), "--view", "run", *argv])
+            return code, ctx.payload(code)
+        finally:
+            cli_common.deactivate_result()
+
+    def test_a_gate_held_review_carries_its_count_on_the_poll(
+        self, tmp_path, capsys
+    ):
+        """STATE-3: a detached `--fail-on-high` review is completed and held at
+        exit 3; a host reads that as "completed, wants a decision" only with a
+        positive count on the poll's result line (`modes.REVIEW_GATE`)."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, phase="code-review")
+        code, payload = self._poll_high_priority(
+            plan, phase, checkpoint_state="complete",
+            run={"run_id": "run-gate-001", "state": "failed", "exit_code": 3,
+                 "error": "needs_human (exit 3)"},
+            argv=("--phase", "code-review"),
+        )
+        capsys.readouterr()
+        assert code == 3
+        assert payload["high_priority_groups"] == {"count": 2}
+        assert payload["validation_counts"]["valid"] == 2
+
+    def test_a_finished_review_carries_its_count_on_the_poll(self, tmp_path, capsys):
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, phase="code-review")
+        code, payload = self._poll_high_priority(
+            plan, phase, checkpoint_state="complete",
+            run={"run_id": "run-gate-002", "state": "done", "exit_code": 0},
+            argv=("--phase", "code-review"),
+        )
+        capsys.readouterr()
+        assert code == 0
+        assert payload["high_priority_groups"] == {"count": 2}
+
+    def test_an_unpinned_listing_does_not_carry_the_count(self, tmp_path, capsys):
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, phase="code-review")
+        _code, payload = self._poll_high_priority(
+            plan, phase, checkpoint_state="complete",
+            run={"run_id": "run-gate-003", "state": "done", "exit_code": 0},
+        )
+        capsys.readouterr()
+        assert "high_priority_groups" not in payload
+
+    def test_a_run_that_stopped_short_does_not_carry_an_earlier_count(
+        self, tmp_path, capsys
+    ):
+        """The count is written only where the phase records itself complete,
+        so one beside any other checkpoint state is an earlier review's."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, phase="code-review")
+        _code, payload = self._poll_high_priority(
+            plan, phase, checkpoint_state="models_complete",
+            run={"run_id": "run-gate-004", "state": "failed", "exit_code": 3,
+                 "error": "needs_human (exit 3)"},
+            argv=("--phase", "code-review"),
+        )
+        capsys.readouterr()
+        assert "high_priority_groups" not in payload
+
+    def test_a_refused_retry_does_not_relay_the_previous_runs_count(
+        self, tmp_path, capsys
+    ):
+        """A completed review recorded two HIGH groups; the retry (an edited
+        plan, refused by task-file validation with exit 3) kept the checkpoint's
+        `state: complete` and wrote nothing, so a count on its poll would read
+        as "completed, held by the HIGH gate" (`modes.REVIEW_GATE`)."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, phase="code-review")
+        status_file.claim_run(str(phase), {
+            "run_id": "run-gate-005", "state": "running", "detached": True,
+        })
+        status_file.write_status(str(phase), {
+            "phase": "code-review", "state": "complete",
+            "high_priority_groups": {"count": 2},
+        })
+        assert status_file.update_run(
+            str(phase), {"state": "done", "exit_code": 0},
+            expect_run_id="run-gate-005",
+        )
+        status_file.claim_run(str(phase), {
+            "run_id": "run-gate-006", "state": "failed", "exit_code": 3,
+            "error": "needs_human (exit 3)", "detached": True,
+        })
+        ctx = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            code = run_status.main([
+                "--plan-file", str(plan), "--view", "run", "--phase", "code-review",
+            ])
+            payload = ctx.payload(code)
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+
+        assert code == 3
+        assert status_file.read_status(str(phase))["state"] == "complete"
+        assert "high_priority_groups" not in payload
 
     def test_a_terminal_run_carries_the_workflow_notice_into_view_run(
         self, tmp_path, capsys

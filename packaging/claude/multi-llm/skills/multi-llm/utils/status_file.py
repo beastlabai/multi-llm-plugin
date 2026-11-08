@@ -164,6 +164,10 @@ _MERGED_OBJECTS: Tuple[str, ...] = ("output_files", "run", "progress")
 #: checkpoint path must not erase them (see :func:`write_status`).
 _RESERVED_OBJECTS: Tuple[str, ...] = ("run", "progress")
 
+#: Top-level checkpoint keys that are one run's result, not the phase's state:
+#: :func:`claim_run` drops them with the predecessor's ``run`` and ``progress``.
+RUN_SCOPED_KEYS: Tuple[str, ...] = ("high_priority_groups",)
+
 #: The process state machine. ``stale`` is deliberately absent: it is a *view* of
 #: a ``running`` record whose heartbeat expired, never a stored state.
 RUN_STATE_STARTING = "starting"
@@ -414,8 +418,12 @@ def claim_run(phase_dir: str, record: Dict[str, Any]) -> None:
     # compare-and-set takes — so no writer, in this process or another, can
     # observe (or write into) the momentary run-less document between them and
     # mistake it for a dir with no owner.
+    # `high_priority_groups` goes with them: it is a review run's finding, and the
+    # top-level `state` this keeps would let a poll relay it as the new run's
+    # (docs/development/runtime.md, "Status file schema").
     with checkpoint_lock(phase_dir):
         update_status(phase_dir, {"run": None, "progress": None})
+        remove_status_keys(phase_dir, RUN_SCOPED_KEYS)
         update_status(phase_dir, {"run": dict(record)})
 
 
