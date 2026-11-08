@@ -232,6 +232,39 @@ class TestReviewPlanMultipleModels:
         # Should have groups (from the happy_path fixture)
         assert len(groups) > 0, "No groups in aggregated results"
 
+    def test_twelve_models_returning_the_same_answer_complete_grouping(
+        self,
+        skill_runner: SkillRunner,
+        fixture_manager: FixtureManager,
+        mock_provider: MockProvider,
+    ):
+        """Every mock model returns the same fixture, so each suggestion
+        arrives twelve times word for word. The id stamp used to give up on
+        the 12th copy and fail the phase at the grouping step."""
+        _configure_scenario(skill_runner, mock_provider, "happy_path")
+
+        plan = fixture_manager.load_plan("auth-feature")
+        models = [f"cursor-agent:m{i}" for i in range(12)]
+
+        result = skill_runner.run_orchestrator(
+            "review_plan",
+            plan.plan_path,
+            "--models", *models,
+            "--skip-validation",
+            timeout=120,
+        )
+
+        assert result.success, f"review_plan failed: {result.stderr}"
+        grouped = json.loads(
+            (plan.output_dir / "review-plan" / "grouped.json").read_text(encoding="utf-8")
+        )
+        groups = grouped["groups"] if isinstance(grouped, dict) else grouped
+        assert groups
+        for group in groups:
+            members = group["suggestions"]
+            assert len(members) == len(models)
+            assert len({s["suggestion_hash"] for s in members}) == len(models)
+
     def test_handles_one_provider_failure_gracefully(
         self,
         skill_runner: SkillRunner,

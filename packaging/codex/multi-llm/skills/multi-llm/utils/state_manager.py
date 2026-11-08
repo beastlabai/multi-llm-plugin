@@ -913,15 +913,22 @@ def stamp_stable_ids(groups: List[Dict[str, Any]]) -> None:
         """The first of ``hash_of(0)``, ``hash_of(1)``, … not yet stamped on
         a *kind*. Deterministic: the n-th same-content item in stamping order
         always gets discriminator n-1, so a re-stamp of the same groups
-        reproduces every id."""
+        reproduces every id.
+
+        No fixed cap: any number of models may return the same suggestion,
+        and one boilerplate finding may land in any number of files. Each
+        discriminator hashes to a new value and at most ``len(all_hashes)``
+        are taken, so a free one turns up within that many steps; running
+        past it means the truncated hash itself repeated."""
+        limit = len(all_hashes)
         discriminator = 0
         candidate = hash_of(discriminator)
         while candidate in all_hashes and all_hashes[candidate][0] == kind:
             discriminator += 1
-            if discriminator > 10:
+            if discriminator > limit:
                 raise ValueError(
                     f"Cannot resolve hash collision for {kind} {label} "
-                    f"after 10 attempts"
+                    f"after {limit} attempts"
                 )
             candidate = hash_of(discriminator)
         return candidate
@@ -954,6 +961,68 @@ def stamp_stable_ids(groups: List[Dict[str, Any]]) -> None:
 
     # Now compute display hashes (8-char prefix, extended on collision)
     _assign_display_hashes(groups)
+
+
+def stamped_group_id(group: Any) -> str:
+    """The id to file a record about *group* under: the ``group_hash``
+    :func:`stamp_stable_ids` stamped, else the plain content hash.
+
+    Never recompute :func:`generate_group_id` for this: same-content groups
+    share the plain hash, so every one of them would get the first one's id
+    (docs/development/review-results.md, "Stable group IDs")."""
+    data = group.to_dict() if hasattr(group, "to_dict") else group
+    return str(data.get("group_hash") or "") or generate_group_id(data)
+
+
+def group_join_ids(groups: Sequence[Any]) -> List[Tuple[str, ...]]:
+    """For each of *groups*, the ids a record about it may be filed under.
+
+    The stamped ``group_hash``, and the plain content hash when it differs
+    (the key records were filed under before every writer used the stamp),
+    but each only when it names this one group: same-content groups share
+    the plain hash, so a record under it cannot say which of them it meant.
+    The first of them keeps it as its stamp; the rest are not joined on it
+    (docs/development/review-results.md, "Stable group IDs")."""
+    dicts = [g.to_dict() if hasattr(g, "to_dict") else g for g in groups]
+    stamped = [str(d.get("group_hash") or "") for d in dicts]
+    plain = [generate_group_id(d) for d in dicts]
+    by_stamp: Dict[str, set] = {}
+    by_any: Dict[str, set] = {}
+    for index, (stamp, content) in enumerate(zip(stamped, plain)):
+        if stamp:
+            by_stamp.setdefault(stamp, set()).add(index)
+            by_any.setdefault(stamp, set()).add(index)
+        by_any.setdefault(content, set()).add(index)
+    ids: List[Tuple[str, ...]] = []
+    for index, (stamp, content) in enumerate(zip(stamped, plain)):
+        keys: Tuple[str, ...] = ()
+        if stamp and by_stamp[stamp] == {index}:
+            keys += (stamp,)
+        if content != stamp and by_any[content] == {index}:
+            keys += (content,)
+        ids.append(keys)
+    return ids
+
+
+def records_by_unique_id(
+    records: Iterable[Any], *id_keys: str,
+) -> Dict[str, Dict[str, Any]]:
+    """``{id: record}`` over *records*, the id read from the first of
+    *id_keys* a record carries. An id more than one record carries is left
+    out: it cannot say which group each record was about (a validation file
+    written before verdicts carried the stamped id gives every same-content
+    group the first one's id)."""
+    found: Dict[str, Dict[str, Any]] = {}
+    shared: set = set()
+    for record in records:
+        if not isinstance(record, Mapping):
+            continue
+        rid = next((str(record[k]) for k in id_keys if record.get(k)), "")
+        if rid in found:
+            shared.add(rid)
+        elif rid:
+            found[rid] = record  # type: ignore[assignment]
+    return {rid: record for rid, record in found.items() if rid not in shared}
 
 
 def _assign_display_hashes(groups: List[Dict[str, Any]]) -> None:

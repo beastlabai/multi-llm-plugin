@@ -678,7 +678,7 @@ def scope_decisions_for(
     determines it (plan §5) — a read-only review included. ``None`` (and
     nothing stored) under ``expand``.
     """
-    from .state_manager import generate_group_id
+    from .state_manager import stamped_group_id
 
     counts = _scope_round.annotate_decisions(
         validated, scope_meta.get("policy"),
@@ -686,7 +686,7 @@ def scope_decisions_for(
     )
     if counts is None:
         return None
-    by_hash = {generate_group_id(g): g for g in validated if isinstance(g, dict)}
+    by_hash = {stamped_group_id(g): g for g in validated if isinstance(g, dict)}
     for record in validation_results:
         group = by_hash.get(record.get("group_id")) if isinstance(record, dict) else None
         if group is not None and _sp.DECISION_KEY in group:

@@ -116,6 +116,23 @@ because `{diff_access}` alone decides that.
 Group IDs are 16-char hex content hashes — use `state_manager.py` hashing, don't generate random
 IDs
 
+**Records join on the stamped id, never on a recomputed one.** `generate_group_id` reads neither
+`file` nor `line_range`, so one finding in twelve files is twelve groups with one content hash.
+`stamp_stable_ids` gives the n-th of them discriminator n-1, with no cap (PERF-11: the loop used to
+give up after 10), and stamps the result as `group_hash`. Every writer files under that stamp:
+validation task ids and the verdicts that echo them (`stamped_group_id`), `validation.json`,
+`processed_<phase>` (a batch's `expected_ids`) and human decisions (`group_id_of`). Readers join
+through `group_join_ids`, which gives each group its stamp plus the plain hash where that differs
+(the key records had before every writer used the stamp, such as a resume record for an edited group),
+each only where it names one group. `records_by_unique_id` leaves out an id two records carry. A
+shared plain hash therefore stays with the group whose stamp it is: a `validation.json` from before
+the stamp leaves its same-content groups undecided on the review side and joins them by index on
+the apply side, and a validation batch whose task file gave two groups one id discards the verdicts
+that echo it, so those groups are revalidated. Recomputing the plain hash gave every same-content
+group the first one's verdict, resume record and decision (2026-11-08: eleven invalid findings read
+valid and were applied, and a `--resume` dropped eleven unapplied groups).
+`tests/test_same_content_group_identity.py` drives the real merge, apply and resume paths.
+
 ## Output paths
 
 All output paths are plan-relative for portability

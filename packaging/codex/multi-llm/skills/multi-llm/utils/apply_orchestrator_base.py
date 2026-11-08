@@ -67,7 +67,7 @@ from .report_parser import load_html_selections, merge_selections
 from .state_manager import (
     CURRENT_FORMAT_VERSION,
     StateManager,
-    generate_group_id,
+    group_join_ids,
     processed_record_counts,
 )
 from .text_clip import join_clauses
@@ -1682,7 +1682,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # record drops it (`processed_record_counts`). On the
         # executor leg a record the executor wrote drops nothing: its resume
         # evidence is the result file on disk (`_done_evidence`), under the
-        # batch's own id.
+        # batch's own id. Records and human decisions are looked up by
+        # `group_join_ids`: the stamped id, or the plain content hash only
+        # where it names one group, so one same-content group's record never
+        # drops or decides the others.
         if getattr(self.args, "resume", False) and self.state is not None:
             previous_decisions = self.state.get_all_human_decisions(self.phase_name)
             executor_leg = bool(self.write_kind) and bool(
@@ -1700,22 +1703,15 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     record, review_stamp=review_stamp, executor_leg=executor_leg)
             }
 
-            for group in self.merged:
-                group["_group_id"] = generate_group_id(group)
-
-            def _recorded_done(group: Dict[str, Any]) -> bool:
-                return any(
-                    str(key or "") in processed_items
-                    for key in (group.get("_group_id"), group.get("group_hash"))
-                )
-
             unprocessed_merged = []
-            for g in self.merged:
-                gid = g["_group_id"]
-                if _recorded_done(g):
+            for g, ids in zip(self.merged, group_join_ids(self.merged)):
+                if any(key in processed_items for key in ids):
                     continue
-                if gid in previous_decisions:
-                    decision = previous_decisions[gid]
+                decision = next(
+                    (previous_decisions[key] for key in ids if key in previous_decisions),
+                    None,
+                )
+                if decision is not None:
                     if decision["decision"] == "approved":
                         g["validation_status"] = "valid"
                         g["validation_reason"] = (

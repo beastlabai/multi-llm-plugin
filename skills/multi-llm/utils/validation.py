@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from .state_manager import generate_group_id, CURRENT_FORMAT_VERSION
+    from .state_manager import group_join_ids, records_by_unique_id, stamped_group_id
     from .cli_common import (
         current_replay_flags, durable_reaggregate_fields, retry_command,
     )
@@ -39,6 +40,7 @@ try:
     )
 except ImportError:
     from utils.state_manager import generate_group_id, CURRENT_FORMAT_VERSION
+    from utils.state_manager import group_join_ids, records_by_unique_id, stamped_group_id
     from utils.cli_common import (
         current_replay_flags, durable_reaggregate_fields, retry_command,
     )
@@ -1048,9 +1050,12 @@ def apply_validation_to_groups(
     """
     Apply validation results to groups by adding validation status.
 
-    Uses group_id (stable content hash) for matching when available. This
-    ensures validation results remain correctly associated with groups even
-    after reaggregation changes the sort order.
+    Uses group_id (the group's stamped ``group_hash``) for matching when
+    available. This ensures validation results remain correctly associated
+    with groups even after reaggregation changes the sort order, and keeps
+    same-content groups apart: each joins only a record filed under an id
+    that names it alone (``state_manager.group_join_ids``), and an id two
+    records carry joins neither.
 
     The ``group_index`` fallback exists for *hash-less* records only — the
     pre-hash ``validation.json`` format, where the index was the identity. A
@@ -1074,11 +1079,7 @@ def apply_validation_to_groups(
         Groups with validation_status and validation_reason added
     """
     # Build lookups - group_id for hashed records, group_index for the rest
-    validation_by_id = {
-        r.get("group_id"): r
-        for r in validation_results
-        if r.get("group_id")
-    }
+    validation_by_id = records_by_unique_id(validation_results, "group_id")
     validation_by_index = {
         r["group_index"]: r
         for r in validation_results
@@ -1093,6 +1094,7 @@ def apply_validation_to_groups(
 
     updated_groups = []
     unmatched = 0
+    join_ids = group_join_ids(groups)
     for i, group in enumerate(groups):
         # Handle both dict and SuggestionGroup objects
         if hasattr(group, 'to_dict'):
@@ -1100,11 +1102,11 @@ def apply_validation_to_groups(
         else:
             group_dict = dict(group)
 
-        # Compute group_id for matching
-        gid = generate_group_id(group_dict)
-
         # group_id first; the index only reaches records that carry no hash
-        by_hash = validation_by_id.get(gid)
+        by_hash = next(
+            (validation_by_id[key] for key in join_ids[i] if key in validation_by_id),
+            None,
+        )
         validation = by_hash or validation_by_index.get(i)
         if validation is None:
             validation = default_validation
@@ -1445,8 +1447,8 @@ def save_validation_results(
     """
     Save validation results to a JSON file with metadata.
 
-    When groups are provided, computes and stores group_id for each result
-    to enable stable matching after reaggregation.
+    When groups are provided, stores each group's stamped id as the result's
+    group_id to enable stable matching after reaggregation.
 
     ``metadata.grouped_sha256`` binds the file to the ``grouped.json`` it was
     produced for (D7) — the same ``file_content_hash`` value
@@ -1467,7 +1469,7 @@ def save_validation_results(
             call sites merge then save without ever naming a model, which used
             to write the literal string ``"unknown"`` even though every batch
             file on disk carried its own ``metadata.model``.
-        groups: Optional list of groups to compute group_ids from
+        groups: Optional list of groups to read group_ids from
         grouped_file: The ``grouped.json`` this validation belongs to
         runner: The executor's own dispatch record for this batch (F3) —
             e.g. ``opencode:openrouter/~deepseek/deepseek-flash-latest``, read
@@ -1517,7 +1519,7 @@ def save_validation_results(
                 group_dict = group.to_dict()
             else:
                 group_dict = group
-            group_id_by_index[i] = generate_group_id(group_dict)
+            group_id_by_index[i] = stamped_group_id(group_dict)
 
     # Build validation data with metadata
     saved_groups = []
@@ -1660,8 +1662,8 @@ def prepare_validation_task(
         else:
             group_dict = group
 
-        # Compute group_id for stable matching after reaggregation
-        gid = generate_group_id(group_dict)
+        # The stamped id, for stable matching after reaggregation
+        gid = stamped_group_id(group_dict)
 
         validation_input.append({
             "index": i,
@@ -2177,14 +2179,10 @@ def prepare_batched_validation_tasks(
         isolate_high=True
     )
 
-    # Pre-compute group_ids for all groups
-    group_ids = []
-    for group in groups:
-        if hasattr(group, 'to_dict'):
-            group_dict = group.to_dict()
-        else:
-            group_dict = group
-        group_ids.append(generate_group_id(group_dict))
+    # Each group's stamped id: the one key that tells same-content groups
+    # apart, so each verdict joins its own group (docs/development/
+    # review-results.md, "Stable group IDs").
+    group_ids = [stamped_group_id(group) for group in groups]
 
     # The one shared excerpt, reused verbatim by every batch below. A second
     # document is excerpted on its own budget rather than appended to the first:
@@ -2525,6 +2523,25 @@ def merge_batched_validation_results(
             for local_idx, gidx in enumerate(group_indices):
                 if local_idx < len(batch_group_ids):
                     hash_to_original_index[batch_group_ids[local_idx]] = gidx
+
+            # An id this batch assigned to more than one group (a task file
+            # written before ids were stamped) cannot say which of them a
+            # verdict echoing it judged: like a foreign hash, the verdict is
+            # discarded and its groups are left for revalidation.
+            shared_ids = {
+                gid for gid in batch_group_ids if batch_group_ids.count(gid) > 1
+            }
+            if shared_ids:
+                kept = [
+                    r for r in batch_results
+                    if (r.get("group_hash") or r.get("group_id")) not in shared_ids
+                ]
+                if len(kept) != len(batch_results):
+                    print(f"[merge] Warning: Batch {batch_index}: discarding "
+                          f"{len(batch_results) - len(kept)} result(s) whose "
+                          f"group_hash names more than one group of this batch; "
+                          f"leaving those groups for revalidation")
+                batch_results = kept
 
             # Strategy 0: Hash-based matching (group_hash is AUTHORITATIVE).
             # Whenever a result echoes a group_hash, route it by hash and ignore

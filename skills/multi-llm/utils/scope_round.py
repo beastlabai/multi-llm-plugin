@@ -498,17 +498,17 @@ def group_dict(group: Any) -> Dict[str, Any]:
 
 
 def groups_by_hash(groups: Optional[Sequence[Any]]) -> Dict[str, Dict[str, Any]]:
-    """``{stable group id: host group}`` for a list of groups."""
+    """``{stamped group id: host group}`` for a list of groups."""
     if not groups:
         return {}
     try:
-        from .state_manager import generate_group_id
+        from .state_manager import stamped_group_id
     except ImportError:  # pragma: no cover
-        from utils.state_manager import generate_group_id  # type: ignore
+        from utils.state_manager import stamped_group_id  # type: ignore
     table: Dict[str, Dict[str, Any]] = {}
     for group in groups:
         data = group_dict(group)
-        table.setdefault(generate_group_id(data), data)
+        table.setdefault(stamped_group_id(data), data)
     return table
 
 
@@ -595,17 +595,13 @@ def attach_verdicts(groups: Optional[List[Dict[str, Any]]],
     if not groups:
         return
     try:
-        from .state_manager import generate_group_id
+        from .state_manager import group_join_ids, records_by_unique_id
     except ImportError:  # pragma: no cover
-        from utils.state_manager import generate_group_id  # type: ignore
-    by_hash = {
-        r.get("group_id") or r.get("group_hash"): r
-        for r in records or [] if isinstance(r, Mapping) and (r.get("group_id") or r.get("group_hash"))
-    }
-    for group in groups:
-        if not isinstance(group, dict):
-            continue
-        record = by_hash.get(generate_group_id(group))
+        from utils.state_manager import group_join_ids, records_by_unique_id  # type: ignore
+    by_hash = records_by_unique_id(records or [], "group_id", "group_hash")
+    dict_groups = [group for group in groups if isinstance(group, dict)]
+    for group, ids in zip(dict_groups, group_join_ids(dict_groups)):
+        record = next((by_hash[key] for key in ids if key in by_hash), None)
         sp.attach_verdict(group, record, hash_matched=record is not None)
 
 
