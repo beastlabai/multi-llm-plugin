@@ -146,7 +146,7 @@ a resume that dispatches nothing keeps implement's completion date on both legs 
 records, never from tasks.md, scoped to the decomposition implement ran last
 (`implement_task_ids`) and to deferrals — a pause-and-ask "Skip" and its dependents are not owed;
 additive, 2026-10-05; the native leg's emit writes those statuses itself through the executor's own
-`write_batch_scheduler.persist_human_task_plan`, and a manual task of a completed implement with no answer on record at all
+`human_task_plan.persist_human_task_plan`, and a manual task of a completed implement with no answer on record at all
 is owed too, via `implement_human_task_ids` — fix round 7) — a complete workflow is an answer, so the
 key is present then and **absent always means "no answer"** (not a workflow phase, the gate found
 the phase unfinished, a failed run, or an excluded invocation), never "complete".
@@ -344,7 +344,7 @@ When it answers implement `--resume`, this lookup alone also prints
 `[NEXT_COMMAND_ANSWERS_WHY]`/`[NEXT_COMMAND_ANSWERS]` (`user_next_step.answers`, `next_phase.implement_answers`): one
 resume carrying `=done` for each check that holds tasks and `=skip`
 for each failed task, the native stop's combined answer (fix round 14), then each answer alone, the
-same list and whys the tool routes' `resume_answers` give (`write_batch_scheduler.native_stop_answers` over
+same list and whys the tool routes' `resume_answers` give (`stop_answers.native_stop_answers` over
 `compose_stop_answers`, the executor stop's own composer, fix round 20; fix round 21: a failed task
 `util batch-done --partial` recorded half-applied, `HALF_APPLIED_PREFIX`, gets none, and one recorded
 `said applied, no file changed` gets `skip` before `done`, as the executor
@@ -352,7 +352,7 @@ answers a partial application and an unlanded reply); `util report-check` holds 
 each like the other commands.
 
 Above them it prints `[TESTS_NOT_RUN]` when no `driver.verify_command` is set and a code task is
-recorded completed (`write_batch_scheduler.native_stop_unverified_line`, the executor stop's line, which the native leg never
+recorded completed (`verification_lines.native_stop_unverified_line`, the executor stop's line, which the native leg never
 printed — fix round 18); the report gives its text, and the Stop hook does not check it.
 
 Fix round 24: below the block it prints the answer's `markdown` between
@@ -364,7 +364,7 @@ reads no marker line; `--blocked` carries the same section as `user_resume.markd
 character could open a block is escaped (`markdown_text`).
 
 Since fix round 22 it also prints `[NEXT_COMMAND_WHY]` above that resume (`user_next_step.why`,
-`write_batch_scheduler.native_resume_why`): what the plain resume does on an unchanged tree, from the stop's facts
+`stop_answers.native_resume_why`): what the plain resume does on an unchanged tree, from the stop's facts
 (`compose_resume_why`), which the executor stop records as `resume_why`,
 `--blocked` hands the tool routes (`user_resume.why` → `resume_why` and
 the `needs_human_message.resume_why` clause) and `status` prints under `resume with:`.
@@ -420,7 +420,7 @@ the counts.
 `util write-prompt --phase-dir <phase> --task-id <id>` (2026-10-05) is the native write leg's per-batch prompt: the four write
 phases' emit path now materializes the executor's own `{phase}/write_tasks.json`
 (`[WRITE_TASKS_FILE]`), and this binds one task's prompt through the scheduler's two module-level
-seams — `write_batch_scheduler.bind_prior_changes` (late, from the **plan dir's** `prior_changes.jsonl` as it is at
+seams — `batch_prompt.bind_prior_changes` (late, from the **plan dir's** `prior_changes.jsonl` as it is at
 that moment, phase-scoped) and `with_result_contract` — writes it to `{phase}/prompts/<id>.prompt.txt` and
 prints `[WRITE_PROMPT] <path>` / `[WRITE_PROMPT_LINES] <n>` / `[WRITE_PROMPT_CONTEXT] …`
 (`--stdout` prints the text alone); `tests/test_write_prompt.py` pins it byte-identical to

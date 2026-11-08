@@ -83,7 +83,7 @@ NEXT_COMMAND_ANSWERS_MARKER = "[NEXT_COMMAND_ANSWERS]"
 
 #: The line ``util next-command`` prints directly above the ``--resume`` of a
 #: stopped native implement (fix round 22): what that plain resume does on an
-#: unchanged tree (``write_batch_scheduler.native_resume_why``), as the
+#: unchanged tree (``stop_answers.native_resume_why``), as the
 #: answers' why lines say what each answer does. Not a command marker.
 NEXT_COMMAND_WHY_MARKER = "[NEXT_COMMAND_WHY]"
 
@@ -94,7 +94,7 @@ MAX_RECORDED_WHY_CHARS = 600
 
 #: One ``--human-task`` value a stop's recorded answer may carry: the shapes
 #: the executor composes — an implement task's ``done``/``skip``/``retry``
-#: (``write_batch_scheduler.compose_stop_answers``) and an apply batch's
+#: (``stop_answers.compose_stop_answers``) and an apply batch's
 #: ``skip`` of a partial application (``WriteBatchScheduler._stop_answers``).
 #: Matched whole (fix round 23).
 _RECORDED_ANSWER = re.compile(
@@ -106,7 +106,7 @@ RESUME_COMMAND_MARKER = "[RESUME_COMMAND]"
 
 #: The line ``util next-command`` prints above a stopped native implement's
 #: commands when nothing ran the repository's tests
-#: (``write_batch_scheduler.native_stop_unverified_line``, fix round 18): the
+#: (``verification_lines.native_stop_unverified_line``, fix round 18): the
 #: executor stop's own line, for the report. Not a command marker: the text
 #: after it is a sentence that names a setting, never a command to copy.
 TESTS_NOT_RUN_MARKER = "[TESTS_NOT_RUN]"
@@ -599,7 +599,7 @@ def manual_gate_decline_answers(implement: Mapping[str, Any]) -> List[Dict[str, 
     (:func:`manual_gate_ids`), ``--human-task <id>=skip``: the user's call
     that they will not do it, which skips it and the code tasks that wait
     on it; the combined answer first when the gate holds on more than one,
-    the order ``write_batch_scheduler.compose_stop_answers`` gives a stop's
+    the order ``stop_answers.compose_stop_answers`` gives a stop's
     answers. The executor records them on its stop and every reader of a
     native gate derives them from ``state.json``, so both legs word them
     alike."""
@@ -1879,7 +1879,7 @@ def implement_answers(
     answer alone too (``T005=skip`` alone, ``T002=done`` alone, …), so the
     host described answers the plugin never printed and the fix path had no
     T005-only command to run. The answers now come from the executor's own
-    composer (``write_batch_scheduler.native_stop_answers`` →
+    composer (``stop_answers.native_stop_answers`` →
     ``compose_stop_answers``) over ``state.json`` as recorded: the combined
     command first when more than one task waits, then each task's answers,
     each with its why, in the tool routes' words, every command in this
@@ -1895,7 +1895,7 @@ def implement_answers(
         return ()
     if not isinstance(state, dict):
         return ()
-    from .write_batch_scheduler import native_stop_answers
+    from .stop_answers import native_stop_answers
 
     steps: List[AnswersStep] = []
     for entry in native_stop_answers(state):
@@ -1941,7 +1941,7 @@ def implement_resume_why(
     plan_arg: str, *, plan_path: Optional[Union[str, Path]] = None,
 ) -> Optional[str]:
     """What the plain ``--resume`` of a stopped native implement does on an
-    unchanged tree (``write_batch_scheduler.native_resume_why`` over
+    unchanged tree (``stop_answers.native_resume_why`` over
     ``state.json`` as recorded, and the implement folder for the executor's
     check stamps), or ``None`` (fix round 22)."""
     import json as _json
@@ -1955,7 +1955,7 @@ def implement_resume_why(
         return None
     if not isinstance(state, dict):
         return None
-    from .write_batch_scheduler import native_resume_why
+    from .stop_answers import native_resume_why
 
     return native_resume_why(
         state, phase_dir=str(phase_dir_path(Path(source), "implement")))
@@ -2091,7 +2091,7 @@ def emit_answer(
             # Fix round 18 (live run 7, Claude Code stop 01): the native
             # stop's line saying nothing ran the repository's tests, which
             # the executor stop prints itself.
-            from .write_batch_scheduler import native_stop_unverified_line
+            from .verification_lines import native_stop_unverified_line
 
             tests = native_stop_unverified_line(
                 os.path.abspath(str(plan_arg if plan_path is None else plan_path))
@@ -2421,7 +2421,7 @@ def stop_headlines_on_record(
 ) -> Optional[Tuple[str, str]]:
     """``(headline, beside_section)`` of the phase's last stop, as it
     recorded them (``progress.write_subagents.stop``: ``headline`` and
-    ``write_batch_scheduler.HEADLINE_BESIDE_SECTION_KEY``), or ``None``
+    ``stop_answers.HEADLINE_BESIDE_SECTION_KEY``), or ``None``
     (fix round 28, live run 12 #5).
 
     The second is the first without the ways forward the stop's resume
@@ -2441,7 +2441,7 @@ def stop_headlines_on_record(
     from . import cli_common
     from .output_handler import phase_dir_path
     from .status_file import read_status
-    from .write_batch_scheduler import HEADLINE_BESIDE_SECTION_KEY
+    from .stop_answers import HEADLINE_BESIDE_SECTION_KEY
 
     modes = _skill_module("modes")
     mode = modes.resolve(mode_word)

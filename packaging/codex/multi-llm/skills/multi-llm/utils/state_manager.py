@@ -251,7 +251,7 @@ TASK_CHECK_FINDINGS_KEY = "task_check_findings"
 #: the unfinished tasks, so a walk over ``write_tasks.json`` alone lost every
 #: edge through a finished one: a check's findings held back T004 but not
 #: T006, whose chain to the check ran through a manual task answered done
-#: (fix round 12). ``write_batch_scheduler.decomposition_graph`` reads it.
+#: (fix round 12). ``check_records.decomposition_graph`` reads it.
 IMPLEMENT_TASK_GRAPH_KEY = "implement_task_depends_on"
 
 
@@ -468,7 +468,7 @@ def set_task_batch_check_in_state(
 
 #: ``state.json``'s map of what an implement task with a failing own check
 #: (:data:`TASK_BATCH_CHECK_KEY`) itself says — its title, ``## Task``
-#: section and acceptance criteria (``write_batch_scheduler.task_own_text``)
+#: section and acceptance criteria (``check_records.task_own_text``)
 #: — ``{task_id: text}``, present only while some such task has one (fix
 #: round 29, review of round 28, checks #1). A check task that reports the
 #: same finding in a later run (a ``--resume`` materializes only what it
@@ -523,7 +523,7 @@ def set_task_own_check_note_in_state(
 #: own check was recorded nowhere). Written by both legs (``util batch-done
 #: --own-check``, the scheduler from ``TaskOutcome.batch_check``); every
 #: other record of the task clears it; the tests line reads it
-#: (``write_batch_scheduler.implement_checks_ran``).
+#: (``verification_lines.implement_checks_ran``).
 TASK_OWN_CHECK_RAN_KEY = "task_own_check_ran"
 
 
@@ -542,7 +542,7 @@ def set_task_own_check_ran_in_state(
 #: row and the printed line, so ``status`` showed the task as plainly
 #: ``completed``). Beside :data:`TASK_BATCH_CHECK_KEY`, never in it: they
 #: are not the task's own failure. Written by both legs
-#: (``write_batch_scheduler.split_accepted_findings``: the scheduler and
+#: (``check_records.split_accepted_findings``: the scheduler and
 #: ``util batch-done --own-check findings``); every other record of the task
 #: clears it; ``status`` reads it through
 #: :meth:`StateManager.implementation_batch_check_accepted`.
@@ -561,12 +561,12 @@ def set_task_batch_check_accepted_in_state(
 
 #: ``state.json``'s map of what an implement task's own check reported that
 #: is the same finding a check task of the run reported (the strict
-#: comparison of ``write_batch_scheduler.split_accepted_findings``), by that
+#: comparison of ``check_records.split_accepted_findings``), by that
 #: check: ``{task_id: {check_id: [finding, ...]}}``, present only while some
 #: task has one (fix round 28, live run 12 OpenCode accept 01: T001 ran
 #: T002's release check and was recorded as failing it). Beside
 #: :data:`TASK_BATCH_CHECK_KEY`, never in it: T002's own record covers the
-#: finding. Written by both legs (``write_batch_scheduler.repeated_findings_for``:
+#: finding. Written by both legs (``check_records.repeated_findings_for``:
 #: the scheduler and ``util batch-done``, when the code task's record comes
 #: second and when the check's does); every other record of the task clears
 #: it; ``status`` reads it through

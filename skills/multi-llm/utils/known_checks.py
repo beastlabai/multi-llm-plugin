@@ -27,7 +27,7 @@ list edited since, which a batch may have written), in a check task's
 description and acceptance criteria and a code task's acceptance criteria (a
 plain check command in backticks, :func:`is_check_command`); and the test
 command a ``package.json`` (or the like)
-declares (``write_batch_scheduler.verify_command_candidate``). Shown as
+declares (``verification_lines.verify_command_candidate``). Shown as
 found; never run by the plugin.
 """
 
@@ -514,9 +514,9 @@ def known_check_commands(
             root = None
     try:
         try:
-            from .write_batch_scheduler import verify_command_candidate
+            from .verification_lines import verify_command_candidate
         except ImportError:  # pragma: no cover - direct script invocation
-            from utils.write_batch_scheduler import verify_command_candidate  # type: ignore
+            from utils.verification_lines import verify_command_candidate  # type: ignore
         candidate = verify_command_candidate(root)
     except Exception:  # noqa: BLE001
         candidate = None

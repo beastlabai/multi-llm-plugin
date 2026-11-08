@@ -150,16 +150,17 @@ from .write_safety import file_sha256
 from .text_clip import clip, with_closing_mark
 from .subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set
 from .write_phase_bridge import WRITE_TASK_FILENAME
-from .write_batch_scheduler import (
-    BATCH_CHECK_MARKER,
+from .commit_write_guard import (
     batch_fixes_for,
     commit_group_files,
     commit_guard_of,
     commit_head7,
     load_commit_apply,
     load_orchestrator_batches,
+)
+from .check_records import (
+    BATCH_CHECK_MARKER,
     check_findings_line,
-    HALF_APPLIED_PREFIX,
     accepted_findings_for,
     accepted_findings_with_words_added,
     batch_check_accepted_line,
@@ -167,16 +168,19 @@ from .write_batch_scheduler import (
     batch_check_repeated_line,
     repeated_findings_for,
     BLOCKED_BY_CHECK_PREFIX,
-    CODE_WRITE_KINDS,
     blocked_by_check_reason,
     decomposition_graph,
-    is_check_task,
     rerunnable_checks,
     split_accepted_findings,
     split_repeated_findings,
     transitive_dependents,
     upstream_held_check,
     words_added_to,
+)
+from .stop_answers import HALF_APPLIED_PREFIX
+from .batch_prompt import (
+    CODE_WRITE_KINDS,
+    is_check_task,
 )
 from .write_record import BatchFacts, record_batch_facts
 from .write_prompt import (
@@ -505,7 +509,8 @@ def _tracked_after_batch(
     phases edit are never tracked. Never fatal: the batch record is this
     command's job.
     """
-    from .write_batch_scheduler import CODE_WRITE_KINDS, load_finalize_tracking
+    from .write_batch_scheduler import load_finalize_tracking
+    from .batch_prompt import CODE_WRITE_KINDS
     if kind not in CODE_WRITE_KINDS:
         return None
     finalize_tracking = load_finalize_tracking()
@@ -549,7 +554,7 @@ def record_batch(
     *partial* (``--partial``, fix round 21) is a ``failed`` task whose
     subagent changed files before it failed: the executor's partial
     application. Its reason is recorded opening with
-    ``write_batch_scheduler.HALF_APPLIED_PREFIX``, so the native stop offers
+    ``stop_answers.HALF_APPLIED_PREFIX``, so the native stop offers
     no ``--human-task`` answer for it until the half-applied state is
     inspected (``native_stop_answers``), as the executor's stop offers none.
     Only with ``--status failed``.
@@ -929,7 +934,7 @@ def finding_restate_line(
     that records the task again with the accepted finding alone and the
     added words as its ``--note`` — for the host to run only when those
     words are its subagent's comment. The plugin never records it as
-    accepted itself (``write_batch_scheduler.accepted_findings_with_words_added``).
+    accepted itself (``check_records.accepted_findings_with_words_added``).
     Fix round 29 (review of round 28, checks #3): it says plainly that a
     note is a comment, never a failure, so a failure the added words report
     stays a finding."""
@@ -1265,7 +1270,7 @@ def _hold_or_release_dependents(
     check with findings is still upstream of it, whose reason it then
     carries (fix round 12: with two checks holding D, recording the first
     passed cleared D's reason while the second's findings stood). The walk
-    is over the whole decomposition (``write_batch_scheduler.decomposition_graph``:
+    is over the whole decomposition (``check_records.decomposition_graph``:
     the task file plus ``state.json``'s recorded graph), not only the tasks
     a resume put in the file (fix round 12). Returns the tasks held (empty
     on a release).

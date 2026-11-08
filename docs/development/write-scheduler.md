@@ -6,6 +6,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 
 ## Contents
 
+- [Where the scheduler's helpers live](#where-the-schedulers-helpers-live)
 - [Write scheduler contract](#write-scheduler-contract)
 - [The verdict table](#the-verdict-table)
 - [Retry after edits](#retry-after-edits)
@@ -16,6 +17,31 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Prompt order](#prompt-order)
 - [Write reply extraction](#write-reply-extraction)
 - [Scope policy at the write seam](#scope-policy-at-the-write-seam)
+
+## Where the scheduler's helpers live
+
+**`utils/write_batch_scheduler.py` is the loop; what both legs share lives in six modules below
+it.** The scheduler holds `WriteBatchScheduler`, `SchedulerResult`, `run_write_phase` and the
+constants and helpers only the loop reads. The helpers that the executor's loop, `util
+write-prompt`, `util batch-done`, implement's native handoff and `status` all call live in six
+modules, lowest first. Each imports only the ones before it, and none imports the scheduler:
+
+| Module | What it owns |
+|--------|--------------|
+| `utils/commit_write_guard.py` | The commit write policy's write legs: what a batch of a commit review's apply is re-checked against before dispatch (`commit_guard_of`, `commit_recheck_failing`, `commit_stale_split`). |
+| `utils/check_records.py` | Check findings and a code batch's own check: the `[CHECK_FINDINGS]` and `[BATCH_CHECK_*]` lines, `rerunnable_checks`, `decomposition_graph` and the dependents a check with findings holds back, the accepted and repeated findings (`split_accepted_findings`, `repeated_findings_for`), and the id shape of implement's own tasks. |
+| `utils/verification_lines.py` | The tests line: `unverified_line` and its native twins, `implement_checks_ran`, `verify_command_candidate`. |
+| `utils/human_task_plan.py` | The failure strategies, `HumanTaskPlan` and its resolution from `--human-task` answers (`resolve_human_task_plan`), the manual gates (`plan_manual_gates`) and the labels an answered task is recorded under. |
+| `utils/stop_answers.py` | A stop's answers and the resume's why on both legs (`compose_stop_answers`, `native_stop_answers`, `compose_resume_why`, `native_resume_why`) and its headline (`fit_stop_headline`). |
+| `utils/batch_prompt.py` | The dispatched prompt: `bind_prior_changes`, `with_result_contract` and the contract texts it appends, where a dispatched prompt is kept, and the code write kinds. |
+
+**The scheduler re-exports every moved name for reading only** (`write_batch_scheduler._MOVED`, the
+contract `git_utils` and `run_status` already follow): `write_batch_scheduler.X` returns the owner's
+current object, and a patch of `write_batch_scheduler.X` reaches no code. The scheduler and the
+helper modules read a moved name through its owner at each call (`_check_records.decomposition_graph`),
+never a copy, so one patch of the owner reaches them all. Patch the owner:
+`tests/test_write_batch_scheduler_moved_names.py` fails a test that patches a moved name on the
+scheduler, and holds the layering. `tests/test_import_layers.py` puts all six at L3.
 
 ## Write scheduler contract
 

@@ -88,17 +88,17 @@ logger = logging.getLogger(__name__)
 
 
 def rerunnable_checks(state: Any) -> List[str]:
-    """``write_batch_scheduler.rerunnable_checks``, imported when first used
-    (the scheduler stays off this module's import path)."""
-    from utils.write_batch_scheduler import rerunnable_checks as _rerunnable
+    """``check_records.rerunnable_checks``, imported when first used
+    (it stays off this module's import path)."""
+    from utils.check_records import rerunnable_checks as _rerunnable
 
     return _rerunnable(state)
 
 
 def _unlanded_on_record(plan_path: Path, state: Any) -> List[str]:
-    """``write_batch_scheduler.unlanded_on_record`` for this plan, each id
+    """``check_records.unlanded_on_record`` for this plan, each id
     named on stdout with why it runs again (fix round 15)."""
-    from utils.write_batch_scheduler import unlanded_on_record
+    from utils.check_records import unlanded_on_record
 
     phase_dir = get_phase_dir(plan_path, "implement")
     unlanded = unlanded_on_record(str(phase_dir), state.state)
@@ -784,7 +784,7 @@ def format_batches_for_output(
     scheduler re-resolves the same plan from the recorded strategy and
     answers, so the task is skipped again, never dispatched.
 
-    *rerun_ids* (``write_batch_scheduler.rerunnable_checks``) are ``completed``
+    *rerun_ids* (``check_records.rerunnable_checks``) are ``completed``
     check tasks whose findings hold back the tasks after them, kept as well
     (fix round 11): dropped, the check could never run again and the tasks
     it held never ran. The executor runs it again only when the files
@@ -1120,7 +1120,7 @@ def _has_earlier_implement_records(
         TASK_BATCH_CHECK_KEY, TASK_CHECK_FINDINGS_KEY, TASK_CHECK_TREES_KEY,
     )
     from utils.subagent_tasks import implement_output_name
-    from utils.write_batch_scheduler import DISPATCHED_PROMPTS_SUBDIR
+    from utils.batch_prompt import DISPATCHED_PROMPTS_SUBDIR
     from utils.write_safety import TaskSnapshot, WriteSafetyError
 
     ids = set(code_ids)
@@ -1187,7 +1187,7 @@ def _remove_kept_prompts(phase_dir: Path) -> int:
     """
     import stat as _stat
 
-    from utils.write_batch_scheduler import DISPATCHED_PROMPTS_SUBDIR
+    from utils.batch_prompt import DISPATCHED_PROMPTS_SUBDIR
 
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     directory = getattr(os, "O_DIRECTORY", 0)
@@ -1252,7 +1252,7 @@ def _remove_kept_prompts_by_path(phase_dir: Path) -> int:
     like the descriptor walk."""
     import stat as _stat
 
-    from utils.write_batch_scheduler import DISPATCHED_PROMPTS_SUBDIR
+    from utils.batch_prompt import DISPATCHED_PROMPTS_SUBDIR
 
     reparse = getattr(_stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     folder = os.path.join(str(phase_dir), DISPATCHED_PROMPTS_SUBDIR)
@@ -1309,7 +1309,7 @@ def _manual_close_note(
 def _native_manual_gates(
     plan: Any, output_data: Dict[str, Any], state: StateManager,
 ) -> Optional[Dict[str, Any]]:
-    """``write_batch_scheduler.plan_manual_gates`` over the native handoff's
+    """``human_task_plan.plan_manual_gates`` over the native handoff's
     tasks, the recorded decomposition and ``state.json`` as it stands (the
     emit has not persisted *plan* yet); ``None`` when it cannot be read
     (fix round 28).
@@ -1323,7 +1323,8 @@ def _native_manual_gates(
     after, and the report's lookup, made once the batches are recorded,
     gives its command."""
     try:
-        from utils.write_batch_scheduler import decomposition_graph, plan_manual_gates
+        from utils.check_records import decomposition_graph
+        from utils.human_task_plan import plan_manual_gates
 
         entries = [
             task for batch in output_data.get("batches") or []
@@ -1357,7 +1358,7 @@ def _native_manual_gate_stop(
     gates = _native_manual_gates(plan, output_data, state)
     if not gates or not gates.get("gated") or not gates.get("waiting"):
         return None
-    from utils.write_batch_scheduler import manual_gate_head, manual_gate_way_on
+    from utils.human_task_plan import manual_gate_head, manual_gate_way_on
 
     titles = dict(state.get("task_titles") or {})
     waiting = {k: list(v) for k, v in sorted(gates["waiting"].items()) if v}
@@ -1601,7 +1602,8 @@ def run_implement_write_phase(
             or getattr(args, "dry_run_subagents", False)):
         return None
 
-    from utils.write_batch_scheduler import WriteBatchScheduler, write_result_notice
+    from utils.write_batch_scheduler import WriteBatchScheduler
+    from utils.check_records import write_result_notice
     from utils.write_phase_bridge import (
         materialize_write_tasks,
         write_task_file_for_phase,
@@ -1750,7 +1752,7 @@ def _native_human_task_plan(
     the task out again as ``failed`` — whose ``util batch-done`` then
     overwrote the acceptance (reviewer repro, 2026-10-05).
 
-    *on_record* is ``write_batch_scheduler.answered_done_on_record``'s
+    *on_record* is ``human_task_plan.answered_done_on_record``'s
     ``(accepted, completed_manual)`` for the tasks this emit did not
     materialize: an answer an earlier run recorded keeps its place in
     ``accepted_tasks``, and a manual task answered ``done`` is named in a
@@ -1760,11 +1762,11 @@ def _native_human_task_plan(
     A task *recorded_statuses* (``state.json``'s ``task_status``) says
     ``skipped`` that this plan no longer skips — ``--resume --force-strategy
     skip-continue`` after a ``skip-dependents`` run — is handed out
-    ``pending`` and recorded so (``write_batch_scheduler.mark_no_longer_skipped``),
+    ``pending`` and recorded so (``human_task_plan.mark_no_longer_skipped``),
     never left ``skipped`` for the host to pass over (fix round 9).
     """
-    from utils.write_batch_scheduler import (
-        decomposition_graph,
+    from utils.check_records import decomposition_graph
+    from utils.human_task_plan import (
         mark_no_longer_skipped,
         resolve_human_task_plan,
     )
@@ -1927,8 +1929,8 @@ def _executor_check_stamp(
     the one on record. ``None`` otherwise.
     """
     # One reader for both the resume and its why (fix round 23:
-    # `write_batch_scheduler.check_kept_on_resume`).
-    from utils.write_batch_scheduler import executor_check_stamp
+    # `stop_answers.check_kept_on_resume`).
+    from utils.stop_answers import executor_check_stamp
 
     return executor_check_stamp(
         get_phase_dir(plan_path, "implement"), check_id, findings)
@@ -1967,12 +1969,12 @@ def _native_withheld(
 
     ``pending_tasks`` is recounted from what is left.
     """
-    from utils.write_batch_scheduler import (
-        NATIVE_REFUSED_PREFIX,
+    from utils.check_records import (
         blocked_by_check_reason,
         decomposition_graph,
         transitive_dependents,
     )
+    from utils.stop_answers import NATIVE_REFUSED_PREFIX
 
     batches = output_data.get("batches") or []
     entries = [task for batch in batches for task in batch.get("tasks") or []]
@@ -2142,17 +2144,17 @@ def _kept_labels(state: StateManager, plan: Any = None) -> Dict[str, str]:
     list — "accepted with its check findings", "accepted after failing",
     "completed by hand" — from *plan* (this run's human-task plan) and the
     answers on record, in the words the executor's ``resume: kept`` line and
-    summary.md use (``write_batch_scheduler.answered_done_label``); and a
+    summary.md use (``human_task_plan.answered_done_label``); and a
     check whose findings stand, not accepted, as
     ``write_batch_scheduler.KEPT_WITH_FINDINGS_LABEL`` (fix round 20, live
     run 8 #6: 01b and 01c listed T002 as if it had passed)."""
     from types import SimpleNamespace
 
-    from utils.write_batch_scheduler import (
-        KEPT_WITH_FINDINGS_LABEL,
+    from utils.write_batch_scheduler import KEPT_WITH_FINDINGS_LABEL
+    from utils.check_records import rerunnable_checks
+    from utils.human_task_plan import (
         answered_done_label,
         answered_done_on_record,
-        rerunnable_checks,
     )
 
     accepted, completed = answered_done_on_record(state)
@@ -2246,7 +2248,8 @@ def _waiting_on_checks(
     and ``util write-prompt`` (``[WRITE_PROMPT_BLOCKED]``); this only names it
     in advance. A manual task waits on nothing (no subagent runs it).
     """
-    from utils.write_batch_scheduler import is_check_task, transitive_dependents
+    from utils.check_records import transitive_dependents
+    from utils.batch_prompt import is_check_task
 
     entries = [task for batch in batches for task in batch.get("tasks") or []]
 
@@ -2289,7 +2292,7 @@ def _dispatch_line(output_data: Dict[str, Any]) -> str:
     counted from the batches as handed out (the native emit and ``--dry-run``;
     the executor's run prints its own, ``WriteBatchScheduler._dispatch_preview``,
     in the same words)."""
-    from utils.write_batch_scheduler import dispatch_line
+    from utils.batch_prompt import dispatch_line
 
     counts = _handoff_counts(output_data)
     return dispatch_line(
@@ -3290,7 +3293,7 @@ def prepare_native_emit(run: ImplementRun) -> Optional[int]:
     )
     # The tasks the plan set aside, which the host's N/N `[ETA]` line names,
     # as the executor's does. Replaced by every native emit.
-    from utils.write_batch_scheduler import set_aside_by_plan
+    from utils.human_task_plan import set_aside_by_plan
 
     state.set_metrics_set_aside(
         "implement", set_aside_by_plan(run.native_human_plan, run.human_task_ids),
@@ -3325,7 +3328,7 @@ def _plan_native_human_tasks(run: ImplementRun) -> None:
     ``done``/``skip`` must change what this leg hands out.
     """
     args, state, output_data = run.args, run.state, run.output_data
-    from utils.write_batch_scheduler import answered_done_on_record
+    from utils.human_task_plan import answered_done_on_record
 
     answered_on_record = answered_done_on_record(
         state,
@@ -3499,7 +3502,7 @@ def _stop_on_native_gate(run: ImplementRun) -> int:
         print(line)
     state.set_metrics_left_out("implement", {})
     state.set_metrics_set_aside("implement", {})
-    from utils.write_batch_scheduler import persist_human_task_plan
+    from utils.human_task_plan import persist_human_task_plan
 
     persist_human_task_plan(state, run.native_human_plan)
     state.mark_phase_started("implement")
@@ -3602,7 +3605,7 @@ def _human_plan_lines(run: ImplementRun, named: Callable[[str], str]) -> List[st
         # A check whose findings the user accepted never failed, so the words
         # are the executor's (`answered_done_label`), never "accepted after
         # failing" for every one.
-        from utils.write_batch_scheduler import answered_done_label
+        from utils.human_task_plan import answered_done_label
 
         labels = {
             task_id: answered_done_label(plan, task_id)
@@ -3719,7 +3722,7 @@ def record_emit(run: ImplementRun) -> Optional[int]:
     """
     state = run.state
     if run.native_human_plan is not None:
-        from utils.write_batch_scheduler import persist_human_task_plan
+        from utils.human_task_plan import persist_human_task_plan
 
         persist_human_task_plan(state, run.native_human_plan)
     if not run.closes:

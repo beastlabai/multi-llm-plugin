@@ -1166,7 +1166,7 @@ explanation. Do not write any file; whoever invoked you persists your reply.
 
 #: The reply shape implement's re-ask restates: the batch result contract
 #: (``schemas/write_batch_result.schema.json``) in the spelling the dispatched
-#: prompt already used (``write_batch_scheduler.with_result_contract``).
+#: prompt already used (``batch_prompt.with_result_contract``).
 WRITE_REPORT_REPLY_SHAPE = '''{"status": "applied", "ids": ["<id>"], "files_touched": ["<repo-relative path>"], "summary": "<one line, at most 200 characters>", "notes": "<optional detail>"}
 
 - `status`: "applied" if the previous turn edited any file, "no-op" if it edited
@@ -1414,7 +1414,7 @@ def _batch_ids_block(kind: str, ids: Sequence[str]) -> str:
     """The write re-ask's list of the batch's ids, numbered in prompt order.
 
     Spelled the way the dispatched prompt's result contract numbers them
-    (``write_batch_scheduler.with_result_contract``: "suggestion 1 = `<id>`"),
+    (``batch_prompt.with_result_contract``: "suggestion 1 = `<id>`"),
     so a reply that named its items by position maps back by that number.
     """
     item = {"apply_code_fixes": "fix", "implement": "task"}.get(kind, "suggestion")

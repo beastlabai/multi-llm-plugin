@@ -996,7 +996,7 @@ def batch_check_note(result: Any) -> Optional[str]:
     accepted T002 problem (…), not caused by this note"), and the strict
     match read the finding as T007's own failure. The contract asks for
     each finding as the check reported it and for any comment here instead
-    (:data:`write_batch_scheduler.WRITE_CHECK_CONTRACT`). Recorded and shown
+    (:data:`batch_prompt.WRITE_CHECK_CONTRACT`). Recorded and shown
     beside the check on both legs (``util batch-done --note``); never read
     as a finding and never matched on."""
     check = result.get("check") if isinstance(result, dict) else None
@@ -1655,14 +1655,14 @@ class TaskOutcome:
     batch_check: Optional[List[str]] = None
     #: The own-check findings of an implement task that only repeat what the
     #: user accepted for a check (``--human-task <check>=done``), by check id
-    #: (``write_batch_scheduler.split_accepted_findings``, fix round 22): taken
+    #: (``check_records.split_accepted_findings``, fix round 22): taken
     #: out of ``batch_check``, so they never make the task's own failure, and
     #: named beside that check's accepted findings instead. Empty otherwise.
     batch_check_accepted: Dict[str, List[str]] = field(default_factory=dict)
     #: The own-check findings of an implement task that are the same
     #: findings a check task of the run reported (the strict comparison of
-    #: ``write_batch_scheduler.split_repeated_findings``), by that check's id
-    #: (``write_batch_scheduler.repeated_findings_for``, fix round 28, live
+    #: ``check_records.split_repeated_findings``), by that check's id
+    #: (``check_records.repeated_findings_for``, fix round 28, live
     #: run 12 OpenCode accept 01: T001 ran T002's release check and was
     #: blamed for T002's finding). Taken out of ``batch_check`` whichever of
     #: the two finished first, and named beside that check's findings.
@@ -8569,7 +8569,7 @@ def merge_restated_check(
     * its ``note``, when it is a non-blank string.
 
     Never a classification: what is accepted is still decided by
-    ``write_batch_scheduler.split_accepted_findings`` on what this returns.
+    ``check_records.split_accepted_findings`` on what this returns.
     """
     merged = copy.deepcopy(original)
     if not isinstance(restated, dict):

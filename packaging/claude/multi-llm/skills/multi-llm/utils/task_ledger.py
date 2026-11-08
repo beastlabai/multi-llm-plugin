@@ -1,7 +1,7 @@
 """What happened to a write phase's tasks: the one classifier both legs answer
 through.
 
-The executor leg answers from its run (``write_batch_scheduler.HumanTaskPlan``
+The executor leg answers from its run (``human_task_plan.HumanTaskPlan``
 and the write mirror it writes to ``.status.json``); the native leg, and
 ``status`` after either, answer from ``state.json`` (``run_status``'s
 ``state_implement_view`` and ``implement_task_tally``, ``StateManager``'s
@@ -56,11 +56,11 @@ USER_DECLINED_REASON = "skipped by user during pause-and-ask"
 #: The prefix of the recorded reason of a task the user answered
 #: ``--human-task <id>=skip``: a failed code task (the sentence ends
 #: ``<id>=skip after it failed``) or a manual task declined under a skip
-#: strategy (``write_batch_scheduler.MANUAL_DECLINED_TAIL``). A decline too.
+#: strategy (``human_task_plan.MANUAL_DECLINED_TAIL``). A decline too.
 ANSWERED_SKIP_PREFIX = "skipped — you answered --human-task "
 
 #: The prefix of the recorded reason of a failed task the user answered
-#: ``--human-task <id>=done`` (``write_batch_scheduler.resolve_human_task_plan``
+#: ``--human-task <id>=done`` (``human_task_plan.resolve_human_task_plan``
 #: writes the whole sentence into ``HumanTaskPlan.accepted``).
 ACCEPTED_REASON_PREFIX = "accepted — "
 
@@ -70,7 +70,7 @@ ACCEPTED_REASON_PREFIX = "accepted — "
 ACCEPTED_WITH_FINDINGS_MARK = "after its check reported problems"
 
 #: The recorded reason of a manual task answered ``--human-task <id>=done``
-#: (``write_batch_scheduler.persist_human_task_plan``; the ``<id>`` is literal).
+#: (``human_task_plan.persist_human_task_plan``; the ``<id>`` is literal).
 COMPLETED_MANUAL_REASON = "answered --human-task <id>=done"
 
 
@@ -78,7 +78,7 @@ COMPLETED_MANUAL_REASON = "answered --human-task <id>=done"
 
 #: How a check the user accepted with its findings and a failed task the user
 #: accepted read in a kept list, summary.md's rows and ``status``'s tally
-#: (``write_batch_scheduler.answered_done_label``: one spelling everywhere).
+#: (``human_task_plan.answered_done_label``: one spelling everywhere).
 ACCEPTED_WITH_FINDINGS_LABEL = "accepted with its check findings"
 ACCEPTED_AFTER_FAILING_LABEL = "accepted after failing"
 #: How a manual task the user answered ``--human-task <id>=done`` reads.

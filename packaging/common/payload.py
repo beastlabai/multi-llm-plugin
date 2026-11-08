@@ -975,10 +975,13 @@ def target_module_paths(base: Optional[Path] = None) -> Tuple[str, ...]:
 DISTRIBUTION_BUDGETS: Dict[str, Tuple[int, int]] = {
     # Raised 2026-11-08 for the code-health split (about 26 new runtime modules,
     # references and schemas, none of them development files); measured then:
-    # claude-code 243 files / 10,527,413 bytes, codex 244 / 10,689,125.
-    "claude-code": (285, 11_500_000),
-    "codex": (270, 11_300_000),
-    "opencode": (270, 11_400_000),     # unpacked; tracks the codex tree
+    # claude-code 243 files / 10,527,413 bytes, codex 244 / 10,689,125. Raised
+    # again the same day for the module splits (U42a's six scheduler modules, with
+    # the provider and executor splits to come); measured at U42a: claude-code 272
+    # files, codex 273 / 10,793,263 bytes.
+    "claude-code": (310, 11_500_000),
+    "codex": (300, 11_300_000),
+    "opencode": (300, 11_400_000),     # unpacked; tracks the codex tree
 }
 
 

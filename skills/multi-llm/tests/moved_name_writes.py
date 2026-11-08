@@ -96,7 +96,18 @@ class MovedNameWriteScanner:
     def _call(self, node, aliases):
         func = _dotted(node.func) or ""
         last = func.rpartition(".")[2]
-        args = node.args
+        if last == "patch":
+            args = _positional(node, ("target",))
+        elif func.endswith("patch.object"):
+            args = _positional(node, ("target", "attribute"))
+        elif func.endswith("patch.multiple"):
+            args = _positional(node, ("target",))
+        elif func.endswith("patch.dict"):
+            args = _positional(node, ("in_dict", "values"))
+        elif last in ("setattr", "delattr"):
+            args = _positional(node, ("target", "name"))
+        else:
+            args = list(node.args)
         if last == "patch" and args and _string(args[0]):
             match = self.dotted_target.search(_string(args[0]))
             if match:
@@ -108,7 +119,8 @@ class MovedNameWriteScanner:
             or (_string(args[0]) or "").split(".")[-1] == self.module
         ):
             for keyword in node.keywords:
-                yield node.lineno, f"{func}(...)", keyword.arg
+                if keyword.arg != "target":
+                    yield node.lineno, f"{func}(...)", keyword.arg
         elif func.endswith("patch.dict") and args and self._is_namespace(args[0], aliases):
             if len(args) > 1 and isinstance(args[1], ast.Dict):
                 for key in args[1].keys:
@@ -120,3 +132,18 @@ class MovedNameWriteScanner:
                 match = self.dotted_target.search(_string(args[0]))
                 if match:
                     yield node.lineno, f"{func}(...)", match.group(1)
+
+
+def _positional(node, names):
+    """*node*'s leading arguments as a positional list, filling each position
+    from the keyword that names it when it was passed by keyword
+    (``mock.patch(target=...)``, ``monkeypatch.setattr(target=..., name=...)``),
+    so a keyword spelling is scanned like a positional one."""
+    args = list(node.args)
+    keywords = {keyword.arg: keyword.value for keyword in node.keywords if keyword.arg}
+    for index, name in enumerate(names):
+        if index >= len(args):
+            if name not in keywords:
+                break
+            args.append(keywords[name])
+    return args

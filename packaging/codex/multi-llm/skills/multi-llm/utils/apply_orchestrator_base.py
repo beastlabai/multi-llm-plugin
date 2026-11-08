@@ -3558,7 +3558,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # Fix round 14: a batch whose own check failed after its edits, and
         # a code phase nothing verified, are on the result line a host relays.
         from .cli_common import record_error, record_notice
-        from .write_batch_scheduler import write_result_notice
+        from .check_records import write_result_notice
 
         stop = getattr(result, "stop", None) or {}
         if stop.get("headline"):
@@ -4437,7 +4437,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """
         if self.write_kind != "apply_code_fixes":
             return
-        from .write_batch_scheduler import native_apply_fixes_unverified_line
+        from .verification_lines import native_apply_fixes_unverified_line
 
         tests = native_apply_fixes_unverified_line(self.plan_path)
         if tests:

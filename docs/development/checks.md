@@ -23,7 +23,7 @@ back only the tasks that depend on it** (racing re-run 4, 2026-10-05: Codex T007
 task read VERIFIED; in run 3 the same kind of check, worded "must exit 0", claimed
 `failed` and stopped implement for good).
 
-A check task's result contract (`write_batch_scheduler.CHECK_RESULT_CONTRACT`, appended by `with_result_contract` on both
+A check task's result contract (`batch_prompt.CHECK_RESULT_CONTRACT`, appended by `with_result_contract` on both
 legs when `is_check_task`) asks for a structured `check: {passed, findings}` (optional and untyped
 in `write_batch_result.schema.json`: an older reply stays valid and a near-miss shape is read, never a schema
 failure — fix round 11, when implement had no report re-ask; it has one since fix round 14, and the
@@ -132,7 +132,7 @@ round 28, live run 12, Codex racing 06: T010 gated nine code tasks, `--yes`'s
 into 0 execution batches", review-code next on an empty tree).
 
 One pure rule, `state_manager.manual_task_gates` (over `implement_task_depends_on`; `StateManager.manual_task_gates` from
-`state.json`, `write_batch_scheduler.plan_manual_gates` from a resolved plan): `closable`, the
+`state.json`, `human_task_plan.plan_manual_gates` from a resolved plan): `closable`, the
 owed manual tasks whose own dependencies are done (a later manual task that comes after code not run
 yet, `after`, is never in a close command: `manual_close_ids` is
 `manual_tasks_to_close` over it), `waiting`, the code tasks a resume runs once those are
@@ -259,7 +259,7 @@ under `reported problems` (fix round 25), apply-code-fixes' tally when a batch r
 `checks_report`) in its messages, `write_batch_report.json`, the mirror, the Verification line
 and the notice — and, on a stop, at the end of the stop's headline, the result line's
 `error`, which the hosts relay where they never relayed `notice` (fix
-round 18; fitted to `cli_common.ERROR_MAX_CHARS` by `write_batch_scheduler.fit_stop_headline`: the model's quoted words give
+round 18; fitted to `cli_common.ERROR_MAX_CHARS` by `stop_answers.fit_stop_headline`: the model's quoted words give
 way first, then the not-run list and the task titles, never the remedy, the answers or this line —
 fix round 19), as an apply phase's stop now records its headline as `error` too.
 
@@ -310,7 +310,7 @@ reported the accepted failure in its own `check`, and the phase read
 are known, not its to fix and not a failure of its own check, that it may cite them and need not run
 the check again.
 
-`write_batch_scheduler.split_accepted_findings` takes out of an implement task's own-check findings each one that names the
+`check_records.split_accepted_findings` takes out of an implement task's own-check findings each one that names the
 same command as an accepted finding (since fix round 23 `accepted_findings_for`: only the accepted
 checks upstream of the task, which its prompt's section named, and none whose command the task's own
 title, `## Task` section or criteria name or whose findings they ask it to fix or make

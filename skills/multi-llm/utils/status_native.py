@@ -123,7 +123,7 @@ def state_implement_view(
         resumable and not in_progress_since and native_run_stopped(record, statuses))
     gate_flags: List[str] = []
     if resumable:
-        from .write_batch_scheduler import native_resume_why, native_stop_answers
+        from .stop_answers import native_resume_why, native_stop_answers
 
         stop_answers = native_stop_answers(record)
         # Fix round 22: what the plain resume does, as `util next-command`
@@ -200,7 +200,7 @@ def native_still_runnable(
     is not manual, not held by a check's findings and not after a failed
     task. ``[]`` when nothing waits for an answer, or the record cannot be
     read."""
-    from .write_batch_scheduler import _native_stop_facts
+    from .stop_answers import _native_stop_facts
 
     try:
         scope = [str(t) for t in record.get("implement_task_ids") or []]
@@ -271,7 +271,7 @@ def native_run_stopped(
       ``failed`` (a refusal before dispatch included, which the emit records
       itself) or a check whose findings hold tasks back — what the stop's
       answers are composed from
-      (``write_batch_scheduler.native_stop_answers``);
+      (``stop_answers.native_stop_answers``);
     * and either no task is left that the host could still run without that
       answer (every task not completed, skipped or failed is a manual one,
       held by a check, or after a failed task), or the host closed the loop
@@ -289,7 +289,7 @@ def native_run_stopped(
     between the emit and the host's records never read as a stop. Advisory:
     an unreadable record is not a stop.
     """
-    from .write_batch_scheduler import _native_stop_facts
+    from .stop_answers import _native_stop_facts
 
     try:
         scope = [str(t) for t in record.get("implement_task_ids") or []]

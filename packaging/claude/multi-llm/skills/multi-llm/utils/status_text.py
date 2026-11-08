@@ -686,9 +686,9 @@ def _write_result_notice_parts(views: Sequence[Dict[str, Any]]) -> List[str]:
     """:func:`_write_result_notice`'s parts, unjoined (fix round 26: a stop's
     poll leaves out a part its `error` already says)."""
     try:
-        from .write_batch_scheduler import batch_check_summary
+        from .check_records import batch_check_summary
     except ImportError:  # pragma: no cover - direct script runs
-        from utils.write_batch_scheduler import batch_check_summary  # type: ignore
+        from utils.check_records import batch_check_summary  # type: ignore
     parts: List[str] = []
     for view in views:
         mirror = (view.get("progress") or {}).get("write_subagents")

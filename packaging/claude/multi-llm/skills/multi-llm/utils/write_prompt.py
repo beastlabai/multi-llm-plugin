@@ -24,8 +24,8 @@ Both invokers therefore produce byte-identical text for the same
 prior-changes log (each leg appends a
 summary per finished batch and a failure line per failed one, fix round 15;
 a native host words a failure's reason itself): it calls the scheduler's own
-:func:`utils.write_batch_scheduler.bind_prior_changes` and
-:func:`utils.write_batch_scheduler.with_result_contract`, and
+:func:`utils.batch_prompt.bind_prior_changes` and
+:func:`utils.batch_prompt.with_result_contract`, and
 ``tests/test_write_prompt.py`` pins the two renderings against each other.
 
 Usage::
@@ -103,7 +103,8 @@ try:
     from .subagent_tasks import (
         APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, TASKS_SCHEMA_VERSION, declared_file_set,
     )
-    from .write_batch_scheduler import (
+    from .write_batch_scheduler import SWEEP_MAX_FILES
+    from .commit_write_guard import (
         COMMIT_GUARD_KIND,
         batch_fixes_for,
         commit_group_files,
@@ -115,17 +116,20 @@ try:
         commit_stale_split,
         load_commit_apply,
         load_orchestrator_batches,
+    )
+    from .check_records import (
+        accepted_upstream_checks,
+        decomposition_graph,
+        rerunnable_checks,
+        upstream_held_check,
+    )
+    from .batch_prompt import (
         DISPATCHED_PROMPTS_SUBDIR,
         OWN_RUN_CONTEXT_PHASES,
-        SWEEP_MAX_FILES,
-        accepted_upstream_checks,
         bind_prior_changes,
-        decomposition_graph,
         dispatched_prompt_path,
         is_check_task,
         last_phase_end,
-        rerunnable_checks,
-        upstream_held_check,
         with_result_contract,
     )
     from .write_phase_bridge import WRITE_TASK_FILENAME
@@ -153,7 +157,8 @@ except ImportError:  # pragma: no cover - direct script invocation
     from utils.subagent_tasks import (  # type: ignore
         APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, TASKS_SCHEMA_VERSION, declared_file_set,
     )
-    from utils.write_batch_scheduler import (  # type: ignore
+    from utils.write_batch_scheduler import SWEEP_MAX_FILES  # type: ignore
+    from utils.commit_write_guard import (  # type: ignore
         COMMIT_GUARD_KIND,
         batch_fixes_for,
         commit_group_files,
@@ -165,17 +170,20 @@ except ImportError:  # pragma: no cover - direct script invocation
         commit_stale_split,
         load_commit_apply,
         load_orchestrator_batches,
+    )
+    from utils.check_records import (  # type: ignore
+        accepted_upstream_checks,
+        decomposition_graph,
+        rerunnable_checks,
+        upstream_held_check,
+    )
+    from utils.batch_prompt import (  # type: ignore
         DISPATCHED_PROMPTS_SUBDIR,
         OWN_RUN_CONTEXT_PHASES,
-        SWEEP_MAX_FILES,
-        accepted_upstream_checks,
         bind_prior_changes,
-        decomposition_graph,
         dispatched_prompt_path,
         is_check_task,
         last_phase_end,
-        rerunnable_checks,
-        upstream_held_check,
         with_result_contract,
     )
     from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
@@ -376,7 +384,7 @@ def _accepted_checks(
     phase_dir: Path, document: Dict[str, Any], task_id: str,
 ) -> List[Tuple[str, str, List[str]]]:
     """The checks upstream of an implement task whose findings the user
-    accepted (``write_batch_scheduler.accepted_upstream_checks``), from the
+    accepted (``check_records.accepted_upstream_checks``), from the
     plan dir's ``state.json`` as it is now — what the executor leg reads at
     dispatch (fix round 14). ``[]`` for any other kind, or a state that
     cannot be read: the note is advisory and never a refusal."""
@@ -678,11 +686,11 @@ def held_by_check(phase_dir: Path, task_id: str) -> Optional[Tuple[str, List[str
     the plugin's hold on the tasks that depend on a check that reported
     problems (the executor leg's ``WriteBatchScheduler._block_dependents_of_checks``)
     is enforced here, where the host gets each task's prompt. The held
-    checks are ``state.json``'s (``write_batch_scheduler.rerunnable_checks``:
+    checks are ``state.json``'s (``check_records.rerunnable_checks``:
     findings on record, recorded completed, not accepted with
     ``--human-task <id>=done``); the graph is ``write_tasks.json``'s
     ``depends_on`` plus ``state.json``'s recorded decomposition
-    (``write_batch_scheduler.decomposition_graph``, fix round 12: a
+    (``check_records.decomposition_graph``, fix round 12: a
     ``--resume`` leaves a finished task out of the file, and a chain through
     it used to end there). ``None`` for an implement task nothing holds, any other
     kind, or a state or task file that cannot be read (the prompt step is

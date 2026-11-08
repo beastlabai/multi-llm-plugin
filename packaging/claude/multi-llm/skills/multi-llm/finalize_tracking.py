@@ -353,7 +353,7 @@ def _restamp_check_trees(state_path: Path) -> None:
             TASK_CHECK_TREES_KEY,
             set_task_check_tree_in_state,
         )
-        from utils.write_batch_scheduler import rerunnable_checks
+        from utils.check_records import rerunnable_checks
         from utils.write_prompt import check_tree_fingerprint
     except ImportError:  # pragma: no cover - the skill is always on the path
         return
@@ -502,7 +502,7 @@ def _held_by_a_check(
     """``(task id, check id)`` for each implement task still held back.
 
     Computed the way ``util write-prompt`` decides
-    (``write_batch_scheduler.held_back_by_checks``): every task that has not
+    (``check_records.held_back_by_checks``): every task that has not
     run (neither ``completed`` nor ``skipped``) with a check whose findings
     hold (``rerunnable_checks``) upstream of it in the whole decomposition —
     ``state.json``'s recorded graph plus the phase's ``write_tasks.json``
@@ -515,7 +515,7 @@ def _held_by_a_check(
     to the decomposition implement ran last when it is on record.
     """
     try:
-        from utils.write_batch_scheduler import (
+        from utils.check_records import (
             BLOCKED_BY_CHECK_PREFIX,
             held_back_by_checks,
         )

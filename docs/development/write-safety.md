@@ -382,7 +382,7 @@ held-copy sharing cases run on Windows CI, the EFS one skipping where EFS is una
 `tasks.md`, a partial implement recorded nothing, and review-code reviewed
 `tasks.md` as code while the `index.html` implement created was out of scope).
 
-Only `implement` and `apply-code-fixes` write it (`write_batch_scheduler.CODE_WRITE_KINDS`; the
+Only `implement` and `apply-code-fixes` write it (`batch_prompt.CODE_WRITE_KINDS`; the
 planning phases' `_finalize` no longer calls `finalize_tracking`), each entry's
 `task_id` names the phase that recorded it (`finalize_tracking.TRACKING_LABELS`:
 `implementation`, `apply-code-fixes`; `util finalize-tracking --phase`), and `finalize_tracking.phase_tracked_files`

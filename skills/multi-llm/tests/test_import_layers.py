@@ -116,13 +116,17 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
     )),
     3: ("execution", (
         "utils.batch_done",
+        "utils.batch_prompt",
+        "utils.check_records",
         "utils.check_reply",
         "utils.check_tree",
         "utils.code_fix_batcher",
         "utils.commit_paths",
         "utils.commit_range",
+        "utils.commit_write_guard",
         "utils.detach",
         "utils.human_decisions",
+        "utils.human_task_plan",
         "utils.known_checks",
         "utils.plan_updater",
         "utils.prior_changes",
@@ -130,6 +134,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.report_check",
         "utils.restore_batch",
         "utils.scope_apply",
+        "utils.stop_answers",
         "utils.subagent_executor",
         "utils.subagent_prompts",
         "utils.subagent_tasks",
@@ -137,6 +142,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.task_decomposer",
         "utils.tasks_file",
         "utils.validation_batcher",
+        "utils.verification_lines",
         "utils.wakeup_check",
         "utils.write_batch_scheduler",
         "utils.write_phase_bridge",
@@ -248,8 +254,10 @@ KNOWN_UPWARD: Dict[Tuple[str, str], str] = {
     ("utils.detach", "utils.next_phase"):
         "resolve_route, _skill_module: belong in a routes module at L1",
     ("utils.write_batch_scheduler", "utils.next_phase"):
-        "manual_close_note, manual_gate_why, manual_gate_decline_answers, "
-        "MAX_RECORDED_WHY_CHARS: belong in a manual-tasks module at L3",
+        "manual_close_note, manual_gate_why, manual_gate_decline_answers: "
+        "belong in a manual-tasks module at L3",
+    ("utils.stop_answers", "utils.next_phase"):
+        "MAX_RECORDED_WHY_CHARS: belongs in a manual-tasks module at L3",
     ("utils.apply_orchestrator_base", "utils.next_phase"):
         "resolve_route, phase_command: belong in routes (L1) and a command-words module at L4",
     ("implement_orchestrator", "utils.next_phase"):
@@ -257,12 +265,12 @@ KNOWN_UPWARD: Dict[Tuple[str, str], str] = {
         "belong in routes, manual-tasks and command-words modules",
     ("full_workflow_orchestrator", "utils.next_phase"):
         "commit_mode_word, commit_view_for: belong in a command-words module at L4",
-    # The scheduler reaches up for tracking and the commit guard.
+    # The scheduler reaches up for tracking, its commit-guard helpers for the guard.
     ("utils.write_batch_scheduler", "finalize_tracking"):
         "the tracking body: belongs in a utils module; the script stays a thin CLI",
-    ("utils.write_batch_scheduler", "utils.commit_apply"):
+    ("utils.commit_write_guard", "utils.commit_apply"):
         "save_guard, recheck_files, repin_after_batch and the rest of the commit guard: "
-        "belong in a commit-guard module at L3",
+        "belong in this commit-guard module at L3",
     # The front door (L5) also holds the stage a detached worker applies.
     ("utils.detach", "utils.commit_front_door"):
         "apply_stage, stage_takes_over: belong in a commit-stage module at L3",

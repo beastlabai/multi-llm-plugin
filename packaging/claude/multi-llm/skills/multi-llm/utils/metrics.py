@@ -379,7 +379,7 @@ def mark_failed_in_progress(
 #: duration in or counts it as progress (:func:`_compute_eta`).
 FAILED_ENTRY_KEY = "failed"
 #: How a half-applied task's reason starts on record (``util batch-done
-#: --partial``; ``write_batch_scheduler.HALF_APPLIED_PREFIX``, spelled here so
+#: --partial``; ``stop_answers.HALF_APPLIED_PREFIX``, spelled here so
 #: this module imports nothing heavy: a test holds the two together).
 HALF_APPLIED_PREFIX = "half-applied: "
 #: What a failed task's line adds when it changed files before it failed.
