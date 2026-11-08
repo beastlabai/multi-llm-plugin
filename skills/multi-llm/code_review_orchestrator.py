@@ -6770,10 +6770,11 @@ async def main(argv: Optional[List[str]] = None) -> int:
             validated_groups_for_report = None
             commit_attribution_pass = None
             if all_issues:
-                # Add source_model field for grouping
+                # The slot that returned an issue is its reviewer, whatever
+                # `source_model` the reply claims: grouping attributes by it
+                # and the reports print it (docs/development.md#vendored-report-scripts).
                 for issue in all_issues:
-                    if "source_model" not in issue:
-                        issue["source_model"] = issue.get("model", "unknown")
+                    issue["source_model"] = issue["model"]
 
                 grouped = group_similar_suggestions(all_issues)
                 # Stamp stable content-based hashes on groups and suggestions

@@ -1119,5 +1119,5 @@ class TestTheConsolidatedPageNamesAFailedReviewer:
         assert '<div id="report-notices"></div>' in template
         assert "escapeHtml(n.message)" in template
         init = template[template.index("function init()"):]
-        init = init[: init.index("function waitForDeps")]
+        init = init[: init.index("if (document.readyState")]
         assert init.index("renderNotices();") < init.index("renderGroups();")

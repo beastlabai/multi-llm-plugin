@@ -1028,8 +1028,7 @@
     </div>
   </main>
 
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/dompurify/dist/purify.min.js"></script>
+  <!--MLLM:vendor-scripts-->
 
   <script>
     // Header collapse/expand
@@ -1104,21 +1103,38 @@
       localStorage.setItem(getStorageKey(), JSON.stringify(selections));
     }
 
+    // BEGIN SAFE MARKDOWN (identical in the three report templates)
+    // Model, plan and repository text is untrusted, and so is every field that
+    // carries it: titles, statuses, importances, model names, ids, paths. Each
+    // reaches the page one way only (docs/development.md#vendored-report-scripts):
+    // a markdown body through renderMarkdown; any other text, and every quoted
+    // attribute value, through escapeHtml (escapeAttr is the same escaper, named
+    // for attribute sites); a value inside an inline handler's JS string through
+    // escapeJsAttr. A class name never comes from data: the badge helpers map a
+    // status or an importance onto a fixed list.
     function escapeHtml(text) {
       if (text === null || text === undefined) return '';
-      var div = document.createElement('div');
-      div.textContent = String(text);
-      return div.innerHTML;
+      return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
-    function renderMarkdown(text) {
-      if (!text) return '';
-      var raw = marked.parse(text);
-      return DOMPurify.sanitize(raw);
+    function escapeAttr(text) {
+      return escapeHtml(text);
+    }
+
+    // A value inside a single-quoted JS string in an inline handler
+    // (onclick="f('…')"). The browser decodes the attribute's entities before
+    // the handler runs, so escapeAttr alone would hand a quote back to the JS
+    // parser: escape for the JS string first, then for the attribute.
+    function escapeJsAttr(text) {
+      if (text === null || text === undefined) return '';
+      return escapeAttr(String(text).replace(/\\/g, '\\\\').replace(/'/g, '\\\'')
+        .replace(/\r/g, '\\r').replace(/\n/g, '\\n')
+        .replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029'));
     }
 
     function getImportanceBadgeClass(importance) {
-      switch (importance ? importance.toUpperCase() : '') {
+      switch (importance === null || importance === undefined ? '' : String(importance).toUpperCase()) {
         case 'HIGH': return 'badge-importance-high';
         case 'MEDIUM': return 'badge-importance-medium';
         case 'LOW': return 'badge-importance-low';
@@ -1135,6 +1151,32 @@
         default: return 'badge-category';
       }
     }
+
+    // marked renders a markdown body, then DOMPurify keeps only the markdown
+    // vocabulary below: no script, handler, style, image, form control, id,
+    // class or data attribute, and only safe link URLs. Without both libraries
+    // the text is escaped instead. The generator inlines them.
+    function renderMarkdown(text) {
+      if (!text) return '';
+      if (typeof marked !== 'undefined' && typeof marked.parse === 'function' &&
+          typeof DOMPurify !== 'undefined' && typeof DOMPurify.sanitize === 'function' &&
+          DOMPurify.isSupported === true) {
+        try {
+          return DOMPurify.sanitize(marked.parse(String(text), { breaks: true }), {
+            ALLOWED_TAGS: ['a', 'abbr', 'b', 'blockquote', 'br', 'code', 'dd', 'del', 'details',
+              'div', 'dl', 'dt', 'em', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'i', 'ins', 'kbd',
+              'li', 'mark', 'ol', 'p', 'pre', 'q', 's', 'samp', 'small', 'span', 'strong', 'sub',
+              'summary', 'sup', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'u', 'ul',
+              'var'],
+            ALLOWED_ATTR: ['align', 'colspan', 'href', 'open', 'rowspan', 'start', 'title'],
+            ALLOW_DATA_ATTR: false,
+            ALLOW_ARIA_ATTR: false
+          });
+        } catch (e) { /* fall through to the escaped text */ }
+      }
+      return '<p>' + escapeHtml(text).replace(/\n/g, '<br>') + '</p>';
+    }
+    // END SAFE MARKDOWN
 
     function getValidationLabel(status) {
       switch (status) {
@@ -1153,16 +1195,16 @@
       }
       var html = '<span class="model-badge-group">';
       if (metadata.provider_icon) {
-        html += '<img class="model-icon" src="' + metadata.provider_icon + '" alt="" />';
+        html += '<img class="model-icon" src="' + escapeAttr(metadata.provider_icon) + '" alt="" />';
       }
       if (metadata.icon) {
-        html += '<img class="model-icon" src="' + metadata.icon + '" alt="" />';
+        html += '<img class="model-icon" src="' + escapeAttr(metadata.icon) + '" alt="" />';
       }
       if (metadata.provider) {
-        html += '<span class="badge badge-provider" style="background: ' + metadata.provider_color + ';">' +
+        html += '<span class="badge badge-provider" style="background: ' + escapeAttr(metadata.provider_color) + ';">' +
                 escapeHtml(metadata.provider) + '</span>';
       }
-      html += '<span class="badge badge-model" style="background: ' + metadata.model_color + ';">' +
+      html += '<span class="badge badge-model" style="background: ' + escapeAttr(metadata.model_color) + ';">' +
               escapeHtml(metadata.model) + '</span>';
       // Stage U: what this slot spent, when the adapter reported it. The text
       // is `usage_label`, rendered server-side by the one `describe_usage` the
@@ -1479,7 +1521,7 @@
       var sectionFilter = document.getElementById('section-filter');
       sectionFilter.innerHTML = '<option value="">All Sections</option>';
       Array.from(sections).sort().forEach(function(sec) {
-        sectionFilter.innerHTML += '<option value="' + escapeHtml(sec) + '">' + escapeHtml(sec) + '</option>';
+        sectionFilter.innerHTML += '<option value="' + escapeAttr(sec) + '">' + escapeHtml(sec) + '</option>';
       });
 
       // Show validation filter if any groups have validation status
@@ -1536,12 +1578,12 @@
         var validationStatus = cg.validationStatus || '';
 
         html += '<div class="' + cardClasses + '"' +
-          ' data-cg-id="' + escapeHtml(cgId) + '"' +
-          ' data-importance="' + escapeHtml(cg.importance || '') + '"' +
-          ' data-reference="' + escapeHtml(cg.reference || '') + '"' +
+          ' data-cg-id="' + escapeAttr(cgId) + '"' +
+          ' data-importance="' + escapeAttr(cg.importance || '') + '"' +
+          ' data-reference="' + escapeAttr(cg.reference || '') + '"' +
           ' data-singleton="' + (cg.isSingleton ? 'true' : 'false') + '"' +
-          ' data-validation="' + escapeHtml(validationStatus) + '"' +
-          ' data-original-index="' + cg.displayIndex + '">';
+          ' data-validation="' + escapeAttr(validationStatus) + '"' +
+          ' data-original-index="' + escapeAttr(cg.displayIndex) + '">';
 
         // Header
         html += '<div class="group-header">' +
@@ -1570,7 +1612,7 @@
 
         // Validation status badge
         if (validationStatus) {
-          html += '<span class="badge ' + getValidationBadgeClass(validationStatus) + '">' + getValidationLabel(validationStatus) + '</span>';
+          html += '<span class="badge ' + getValidationBadgeClass(validationStatus) + '">' + escapeHtml(getValidationLabel(validationStatus)) + '</span>';
         }
 
         // The umbrella's scope tag, derived from its underlying groups
@@ -1585,7 +1627,7 @@
 
         // Controls row: skip checkbox + validation override
         html += '<div class="controls-row">' +
-          '<select class="validation-override" data-cg-id="' + escapeHtml(cgId) + '">' +
+          '<select class="validation-override" data-cg-id="' + escapeAttr(cgId) + '">' +
           '<option value=""' + (overrideVal === '' ? ' selected' : '') + '>-- No override --</option>' +
           '<option value="valid"' + (overrideVal === 'valid' ? ' selected' : '') + '>Mark Valid</option>' +
           '<option value="invalid"' + (overrideVal === 'invalid' ? ' selected' : '') + '>Mark Invalid</option>' +
@@ -1594,7 +1636,7 @@
             '<option value="judge_decide"' + (overrideVal === 'judge_decide' ? ' selected' : '') + '>Let the agent decide</option>' : '') +
           '</select>' +
           '<label class="skip-control">' +
-          '<input type="checkbox" data-cg-id="' + escapeHtml(cgId) + '"' + (isSkipped ? ' checked' : '') + '>' +
+          '<input type="checkbox" data-cg-id="' + escapeAttr(cgId) + '"' + (isSkipped ? ' checked' : '') + '>' +
           'Skip ' + escapeHtml(displayId) +
           '</label>' +
           '</div>';
@@ -1649,7 +1691,7 @@
 
             // Validation badge for this underlying group
             if (ug.validationStatus) {
-              html += '<span class="badge ' + getValidationBadgeClass(ug.validationStatus) + '">' + getValidationLabel(ug.validationStatus) + '</span>';
+              html += '<span class="badge ' + getValidationBadgeClass(ug.validationStatus) + '">' + escapeHtml(getValidationLabel(ug.validationStatus)) + '</span>';
             }
 
             // Its own validated scope tag (a mixed umbrella keeps member detail)
@@ -1949,8 +1991,6 @@
         return;
       }
 
-      marked.setOptions({ breaks: true });
-
       renderHeader();
       loadSelections();
       updateExportIndicator();
@@ -1988,19 +2028,11 @@
       document.getElementById('btn-skip-low').addEventListener('click', skipAllLowImportance);
     }
 
-    // Wait for CDN scripts to load
-    function waitForDeps() {
-      if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
-        init();
-      } else {
-        setTimeout(waitForDeps, 50);
-      }
-    }
-
+    // The vendored libraries are inline above this script: start at once.
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', waitForDeps);
+      document.addEventListener('DOMContentLoaded', init);
     } else {
-      waitForDeps();
+      init();
     }
   </script>
 </body>

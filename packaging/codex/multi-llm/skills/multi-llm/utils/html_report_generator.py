@@ -1637,8 +1637,9 @@ def embed_consolidated_report_data(report_data: Mapping[str, Any], template: str
 
     The same script-safe JSON as the flat/PR pages (:func:`script_json`); a
     template without the placeholder is an error rather than a page with no
-    data.
+    data. The vendored scripts go in first, as on the other two pages.
     """
+    template = template.replace(SLOT_VENDOR_SCRIPTS, vendor_scripts_html())
     payload = script_json(report_data)
     for placeholder in ("/* REPORT_DATA_PLACEHOLDER */null", "/* REPORT_DATA_PLACEHOLDER */",
                         "REPORT_DATA_PLACEHOLDER"):
@@ -2360,6 +2361,66 @@ SLOT_DOCUMENT_LABEL = "<!--MLLM:document-label-->"
 SLOT_APPLY_COMMANDS = "<!--MLLM:apply-commands-->"
 SLOT_EXPORT_HELP = "<!--MLLM:export-help-->"
 
+#: Where every report page (flat, PR and consolidated) receives the vendored
+#: markdown libraries, inlined: a report is one self-contained file that loads
+#: nothing from the network. Without them, each template's ``renderMarkdown``
+#: escapes model text instead of rendering it.
+SLOT_VENDOR_SCRIPTS = "<!--MLLM:vendor-scripts-->"
+
+_VENDOR_DIR = Path(__file__).parent.parent / "templates" / "vendor"
+
+#: ``(file under templates/vendor/, npm package, version, sha256 of the file)``,
+#: in load order. Each file is its npm tarball's own bytes, unmodified. A file
+#: whose digest differs is not inlined, so the page escapes rather than run
+#: unpinned code. Update steps: docs/development.md#vendored-report-scripts.
+VENDORED_SCRIPTS: Tuple[Tuple[str, str, str, str], ...] = (
+    ("marked.umd.js", "marked", "18.1.1",
+     "b82b9334406d8bdd16b6236c08de1cb65b2a859873ca9503d9cc0b292ca3c12a"),
+    ("purify.min.js", "dompurify", "3.4.17",
+     "cd37898f9782adf54820c413191b5691803f0f137c799d6edcfd38523b4c2c31"),
+)
+
+#: A tag the HTML tokenizer would act on inside an inline script: ``</script``
+#: ends it early, and ``<script`` after ``<!--`` stops ``</script>`` ending it.
+_SCRIPT_TAG = re.compile(r"</?script", re.IGNORECASE)
+
+#: The bundles' trailing source-map comment; the maps are not vendored.
+_SOURCE_MAP_LINE = re.compile(r"\n//# sourceMappingURL=[^\n]*\s*\Z")
+
+
+def _vendored_script(filename: str, package: str, version: str, sha256: str) -> str:
+    """One vendored library as an inline ``<script>``, or ``""`` (with a
+    warning) when the file is missing, differs from its pin or cannot be
+    inlined safely."""
+    path = _VENDOR_DIR / filename
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        logger.warning("report script %s@%s not inlined: %s", package, version, exc)
+        return ""
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != sha256:
+        logger.warning("report script %s@%s not inlined: %s has sha256 %s, pinned %s",
+                       package, version, path, digest, sha256)
+        return ""
+    text = _SOURCE_MAP_LINE.sub("\n", raw.decode("utf-8"))
+    if _SCRIPT_TAG.search(text):
+        logger.warning("report script %s@%s not inlined: it holds a script tag", package, version)
+        return ""
+    return f'<script data-vendored="{package}@{version}">\n{text}</script>'
+
+
+_vendor_scripts_cache: Optional[str] = None
+
+
+def vendor_scripts_html() -> str:
+    """The inline ``<script>`` blocks for :data:`SLOT_VENDOR_SCRIPTS`."""
+    global _vendor_scripts_cache
+    if _vendor_scripts_cache is None:
+        _vendor_scripts_cache = "\n".join(
+            block for block in (_vendored_script(*entry) for entry in VENDORED_SCRIPTS) if block)
+    return _vendor_scripts_cache
+
 
 def commit_range_report_data(
     commit_review: Mapping[str, Any], groups_data: List[Dict[str, Any]]
@@ -2400,7 +2461,8 @@ def _join_commands(commands: Sequence[str]) -> str:
 
 
 def _fill_template_slots(template: str, report_data: Mapping[str, Any]) -> str:
-    """Fill the label and export-help slots from *report_data*.
+    """Fill the label and export-help slots from *report_data*, and the
+    vendored scripts (:func:`vendor_scripts_html`).
 
     A plan's review gets exactly the text the templates used to carry
     (``Plan:``, the three apply commands, no PR-template help); a commit
@@ -2425,6 +2487,7 @@ def _fill_template_slots(template: str, report_data: Mapping[str, Any]) -> str:
         .replace(SLOT_DOCUMENT_LABEL, _html.escape(f"{label}:", quote=False))
         .replace(SLOT_APPLY_COMMANDS, joined)
         .replace(SLOT_EXPORT_HELP, help_html)
+        .replace(SLOT_VENDOR_SCRIPTS, vendor_scripts_html())
     )
 
 

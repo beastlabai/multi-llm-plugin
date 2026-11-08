@@ -107,6 +107,48 @@ uv run --project skills/multi-llm -- python skills/multi-llm/hosts/render_capabi
 
 ---
 
+## Vendored report scripts
+
+The HTML reports (`report.html` in both styles, and `consolidated-report.html`) render
+model and plan text as Markdown with [marked](https://github.com/markedjs/marked) and then
+sanitise it with [DOMPurify](https://github.com/cure53/DOMPurify). Both are vendored under
+`skills/multi-llm/templates/vendor/`, and `utils/html_report_generator.py` inlines them
+into every page at the `<!--MLLM:vendor-scripts-->` slot. The rules:
+
+- **No page loads a script from the network.** A report is one file that reads the same
+  offline, and opening it tells no CDN anything. `tests/test_html_report_scripts.py`
+  fails on any `<script src>`, any module import from a URL, and any unpinned or
+  integrity-less script.
+- **The files are the npm tarballs' own bytes**, with their licence files beside them.
+  `VENDORED_SCRIPTS` pins each file's sha256. The generator inlines a file only when its
+  digest matches. When one does not match, or is missing, the page escapes model text
+  instead of rendering it.
+- **One renderer.** Each template carries the same `BEGIN SAFE MARKDOWN` block, and
+  nothing outside it calls marked or DOMPurify. DOMPurify is given a markdown-only
+  profile: no `script`, `style` or `img` element, no form control, and no `id`, `class`,
+  `style` or `data-*` attribute. That matters because the pages' own export code queries checkboxes by
+  attribute. Without both libraries, or when DOMPurify reports `isSupported` false (it
+  then returns its input unchanged), the text is escaped.
+- **Everything else is escaped, in the same block.** Statuses, importances, model names,
+  ids, labels, file paths and references come from model or validator output too. The
+  block's `escapeHtml` escapes `& < > " '` and serves text and quoted attributes alike
+  (`escapeAttr` is the same function, named for attribute sites); a value inside an
+  inline handler's JS string takes `escapeJsAttr`. No class name is built from data:
+  `getValidationBadgeClass` and `getImportanceBadgeClass` map onto a fixed list. The
+  tests scan every template for a raw value in an attribute and load hostile metadata
+  into all three pages in headless Chrome. A reviewer's identity is the slot that ran it:
+  code-review aggregation stamps `source_model` from the slot, whatever the reply claims.
+
+To update a library, choose a release at least two weeks old. Download its tarball from
+`registry.npmjs.org` and check it against the registry's `dist.integrity`. Then copy the
+same file (`lib/marked.umd.js` or `dist/purify.min.js`) and its `LICENSE` over the old ones,
+and update the version and sha256 in `VENDORED_SCRIPTS`. The current pins are marked
+18.1.1 (tarball `sha512-zEGgrtUG8crk+TrMacJSVABU4DYDDkS8uqgU3ohrn/2fW9C2AEfUrO3m6IhpIpQpl7YcVpiXXC9cSMWDANT3dg==`)
+and DOMPurify 3.4.17 (`sha512-B/pSlYVHQ58kqISD/yDjuJ1yfzI34m1gF4lAod2bwSRhiN4K5Cl3H8Af7hqB2PmTL911tdEudnnXn5FnhRoz0w==`).
+A changed file changes what every package ships, so it needs a release bump.
+
+---
+
 ## Validating the plugin
 
 ```bash

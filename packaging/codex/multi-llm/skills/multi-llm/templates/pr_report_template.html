@@ -2178,13 +2178,7 @@
     </div>
   </div>
 
-  <!-- Load marked.js for markdown rendering (plan review sections, descriptions) -->
-  <script type="module">
-    import { marked } from "https://cdn.jsdelivr.net/npm/marked/lib/marked.esm.js";
-    marked.setOptions({ breaks: true });
-    window.markedParse = marked.parse.bind(marked);
-    window.dispatchEvent(new Event('marked-ready'));
-  </script>
+  <!--MLLM:vendor-scripts-->
 
   <script>
     // ================================================================
@@ -2232,29 +2226,6 @@
     // ================================================================
     // Utilities
     // ================================================================
-    function escapeHtml(str) {
-      if (!str) return '';
-      var div = document.createElement('div');
-      div.appendChild(document.createTextNode(str));
-      return div.innerHTML;
-    }
-
-    function escapeAttr(str) {
-      if (!str) return '';
-      return escapeHtml(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-    }
-
-    // A value inside a single-quoted JS string in an inline handler
-    // (onclick="f('…')"). The browser decodes the attribute's entities before
-    // the handler runs, so escapeAttr alone would hand a quote back to the JS
-    // parser: escape for the JS string first, then for the attribute.
-    function escapeJsAttr(str) {
-      if (str === null || str === undefined) return '';
-      return escapeAttr(String(str).replace(/\\/g, '\\\\').replace(/'/g, '\\\'')
-        .replace(/\r/g, '\\r').replace(/\n/g, '\\n')
-        .replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029'));
-    }
-
     function getStorageKey() {
       return 'multi-llm-selections-' + selections.phase + '-' + selections.plan_path;
     }
@@ -2295,14 +2266,80 @@
       localStorage.setItem(getStorageKey(), JSON.stringify(selections));
     }
 
+    // BEGIN SAFE MARKDOWN (identical in the three report templates)
+    // Model, plan and repository text is untrusted, and so is every field that
+    // carries it: titles, statuses, importances, model names, ids, paths. Each
+    // reaches the page one way only (docs/development.md#vendored-report-scripts):
+    // a markdown body through renderMarkdown; any other text, and every quoted
+    // attribute value, through escapeHtml (escapeAttr is the same escaper, named
+    // for attribute sites); a value inside an inline handler's JS string through
+    // escapeJsAttr. A class name never comes from data: the badge helpers map a
+    // status or an importance onto a fixed list.
+    function escapeHtml(text) {
+      if (text === null || text === undefined) return '';
+      return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function escapeAttr(text) {
+      return escapeHtml(text);
+    }
+
+    // A value inside a single-quoted JS string in an inline handler
+    // (onclick="f('…')"). The browser decodes the attribute's entities before
+    // the handler runs, so escapeAttr alone would hand a quote back to the JS
+    // parser: escape for the JS string first, then for the attribute.
+    function escapeJsAttr(text) {
+      if (text === null || text === undefined) return '';
+      return escapeAttr(String(text).replace(/\\/g, '\\\\').replace(/'/g, '\\\'')
+        .replace(/\r/g, '\\r').replace(/\n/g, '\\n')
+        .replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029'));
+    }
+
+    function getImportanceBadgeClass(importance) {
+      switch (importance === null || importance === undefined ? '' : String(importance).toUpperCase()) {
+        case 'HIGH': return 'badge-importance-high';
+        case 'MEDIUM': return 'badge-importance-medium';
+        case 'LOW': return 'badge-importance-low';
+        default: return 'badge-category';
+      }
+    }
+
+    function getValidationBadgeClass(status) {
+      switch (status) {
+        case 'valid': return 'badge-validation-valid';
+        case 'invalid': return 'badge-validation-invalid';
+        case 'needs-human-decision': return 'badge-validation-needs-human';
+        case 'validation_failed': return 'badge-validation-failed';
+        default: return 'badge-category';
+      }
+    }
+
+    // marked renders a markdown body, then DOMPurify keeps only the markdown
+    // vocabulary below: no script, handler, style, image, form control, id,
+    // class or data attribute, and only safe link URLs. Without both libraries
+    // the text is escaped instead. The generator inlines them.
     function renderMarkdown(text) {
       if (!text) return '';
-      if (window.markedParse) {
-        try { return window.markedParse(text); } catch (e) { /* fall through */ }
+      if (typeof marked !== 'undefined' && typeof marked.parse === 'function' &&
+          typeof DOMPurify !== 'undefined' && typeof DOMPurify.sanitize === 'function' &&
+          DOMPurify.isSupported === true) {
+        try {
+          return DOMPurify.sanitize(marked.parse(String(text), { breaks: true }), {
+            ALLOWED_TAGS: ['a', 'abbr', 'b', 'blockquote', 'br', 'code', 'dd', 'del', 'details',
+              'div', 'dl', 'dt', 'em', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'i', 'ins', 'kbd',
+              'li', 'mark', 'ol', 'p', 'pre', 'q', 's', 'samp', 'small', 'span', 'strong', 'sub',
+              'summary', 'sup', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'u', 'ul',
+              'var'],
+            ALLOWED_ATTR: ['align', 'colspan', 'href', 'open', 'rowspan', 'start', 'title'],
+            ALLOW_DATA_ATTR: false,
+            ALLOW_ARIA_ATTR: false
+          });
+        } catch (e) { /* fall through to the escaped text */ }
       }
-      // Fallback: escape and preserve line breaks
       return '<p>' + escapeHtml(text).replace(/\n/g, '<br>') + '</p>';
     }
+    // END SAFE MARKDOWN
 
     function getModelBadgeHtml(modelString) {
       var metadata = reportData && reportData.modelMetadata ? reportData.modelMetadata[modelString] : null;
@@ -2311,16 +2348,16 @@
       }
       var html = '<span class="model-badge-group">';
       if (metadata.provider_icon) {
-        html += '<img class="model-icon" src="' + metadata.provider_icon + '" alt="" />';
+        html += '<img class="model-icon" src="' + escapeAttr(metadata.provider_icon) + '" alt="" />';
       }
       if (metadata.icon) {
-        html += '<img class="model-icon" src="' + metadata.icon + '" alt="" />';
+        html += '<img class="model-icon" src="' + escapeAttr(metadata.icon) + '" alt="" />';
       }
       if (metadata.provider) {
-        html += '<span class="badge badge-provider" style="background: ' + metadata.provider_color + ';">' +
+        html += '<span class="badge badge-provider" style="background: ' + escapeAttr(metadata.provider_color) + ';">' +
                 escapeHtml(metadata.provider) + '</span>';
       }
-      html += '<span class="badge badge-model" style="background: ' + (metadata.model_color || '#6B7280') + ';">' + escapeHtml(metadata.model || modelString) + '</span>';
+      html += '<span class="badge badge-model" style="background: ' + escapeAttr(metadata.model_color || '#6B7280') + ';">' + escapeHtml(metadata.model || modelString) + '</span>';
       // Stage U: what this slot spent, when the adapter reported it. The text
       // is `usage_label`, rendered server-side by the one `describe_usage` the
       // markdown report and the failed-slot log line also use — this template
@@ -4991,10 +5028,9 @@
       if (vs && validationReason) {
         var confidencePercent = Math.round(validationConfidence * 100);
         var confidenceClass = confidencePercent >= 70 ? 'high' : (confidencePercent >= 40 ? 'medium' : 'low');
-        var valBadgeClass = 'badge-validation-' + (vs === 'needs-human-decision' ? 'needs-human' : vs.replace('_', '-'));
         html += '<details class="inline-validation-section">';
         html += '<summary>';
-        html += '<span class="badge ' + valBadgeClass + '">' + escapeHtml(vs) + '</span>';
+        html += '<span class="badge ' + getValidationBadgeClass(vs) + '">' + escapeHtml(vs) + '</span>';
         html += ' Validation';
         if (confidencePercent > 0) {
           html += ' <span class="confidence-bar"><span class="confidence-fill ' + confidenceClass + '" style="width: ' + confidencePercent + '%"></span></span>';
@@ -5211,7 +5247,7 @@
           var confidenceClass = confidencePercent >= 70 ? 'high' : (confidencePercent >= 40 ? 'medium' : 'low');
           html += '<details class="flat-validation-section">' +
             '<summary>' +
-            '<span class="badge badge-validation-' + (validationStatus === 'needs-human-decision' ? 'needs-human' : validationStatus.replace('_', '-')) + '">' + escapeHtml(validationStatus) + '</span>' +
+            '<span class="badge ' + getValidationBadgeClass(validationStatus) + '">' + escapeHtml(validationStatus) + '</span>' +
             ' Validation' +
             ' <span class="confidence-bar"><span class="confidence-fill ' + confidenceClass + '" style="width: ' + confidencePercent + '%"></span></span>' +
             ' (' + confidencePercent + '%)' +
@@ -5720,23 +5756,11 @@
       setupScrollObserver();
     }
 
-    // Run on DOM ready, waiting for marked library to load
-    function startInit() {
-      if (window.markedParse) {
-        init();
-      } else {
-        window.addEventListener('marked-ready', init, { once: true });
-        // Fallback: if marked doesn't load within 3 seconds, init anyway
-        setTimeout(function() {
-          if (!window._initDone) init();
-        }, 3000);
-      }
-    }
-
+    // The vendored libraries are inline above this script: start at once.
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', startInit);
+      document.addEventListener('DOMContentLoaded', init);
     } else {
-      startInit();
+      init();
     }
   </script>
 </body>

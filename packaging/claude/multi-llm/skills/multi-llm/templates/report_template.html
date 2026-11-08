@@ -1362,12 +1362,7 @@
     </div>
   </main>
 
-  <script type="module">
-    import { marked } from "https://cdn.jsdelivr.net/npm/marked/lib/marked.esm.js";
-    marked.setOptions({ breaks: true });
-    window.markedParse = marked.parse.bind(marked);
-    window.dispatchEvent(new Event('marked-ready'));
-  </script>
+  <!--MLLM:vendor-scripts-->
 
   <script>
     // Header collapse/expand
@@ -1475,22 +1470,22 @@
 
       // Provider icon (only when distinct from model icon)
       if (metadata.provider_icon) {
-        html += '<img class="model-icon" src="' + metadata.provider_icon + '" alt="" />';
+        html += '<img class="model-icon" src="' + escapeAttr(metadata.provider_icon) + '" alt="" />';
       }
 
       // Model icon
       if (metadata.icon) {
-        html += '<img class="model-icon" src="' + metadata.icon + '" alt="" />';
+        html += '<img class="model-icon" src="' + escapeAttr(metadata.icon) + '" alt="" />';
       }
 
       // Provider badge (only if provider exists)
       if (metadata.provider) {
-        html += '<span class="badge badge-provider" style="background: ' + metadata.provider_color + ';">' +
+        html += '<span class="badge badge-provider" style="background: ' + escapeAttr(metadata.provider_color) + ';">' +
                 escapeHtml(metadata.provider) + '</span>';
       }
 
       // Model badge
-      html += '<span class="badge badge-model" style="background: ' + metadata.model_color + ';">' +
+      html += '<span class="badge badge-model" style="background: ' + escapeAttr(metadata.model_color) + ';">' +
               escapeHtml(metadata.model) + '</span>';
 
       // Stage U: what this slot spent, when the adapter reported it. The text
@@ -1510,8 +1505,38 @@
       return html;
     }
 
+    // BEGIN SAFE MARKDOWN (identical in the three report templates)
+    // Model, plan and repository text is untrusted, and so is every field that
+    // carries it: titles, statuses, importances, model names, ids, paths. Each
+    // reaches the page one way only (docs/development.md#vendored-report-scripts):
+    // a markdown body through renderMarkdown; any other text, and every quoted
+    // attribute value, through escapeHtml (escapeAttr is the same escaper, named
+    // for attribute sites); a value inside an inline handler's JS string through
+    // escapeJsAttr. A class name never comes from data: the badge helpers map a
+    // status or an importance onto a fixed list.
+    function escapeHtml(text) {
+      if (text === null || text === undefined) return '';
+      return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function escapeAttr(text) {
+      return escapeHtml(text);
+    }
+
+    // A value inside a single-quoted JS string in an inline handler
+    // (onclick="f('…')"). The browser decodes the attribute's entities before
+    // the handler runs, so escapeAttr alone would hand a quote back to the JS
+    // parser: escape for the JS string first, then for the attribute.
+    function escapeJsAttr(text) {
+      if (text === null || text === undefined) return '';
+      return escapeAttr(String(text).replace(/\\/g, '\\\\').replace(/'/g, '\\\'')
+        .replace(/\r/g, '\\r').replace(/\n/g, '\\n')
+        .replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029'));
+    }
+
     function getImportanceBadgeClass(importance) {
-      switch (importance ? importance.toUpperCase() : '') {
+      switch (importance === null || importance === undefined ? '' : String(importance).toUpperCase()) {
         case 'HIGH': return 'badge-importance-high';
         case 'MEDIUM': return 'badge-importance-medium';
         case 'LOW': return 'badge-importance-low';
@@ -1529,23 +1554,31 @@
       }
     }
 
-    function escapeHtml(text) {
-      if (text === null || text === undefined) return '';
-      const div = document.createElement('div');
-      div.textContent = String(text);
-      return div.innerHTML;
-    }
-
-    function escapeAttr(text) {
-      if (text === null || text === undefined) return '';
-      return escapeHtml(text).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-    }
-
-    // Markdown renderer using marked library (loaded from CDN)
+    // marked renders a markdown body, then DOMPurify keeps only the markdown
+    // vocabulary below: no script, handler, style, image, form control, id,
+    // class or data attribute, and only safe link URLs. Without both libraries
+    // the text is escaped instead. The generator inlines them.
     function renderMarkdown(text) {
       if (!text) return '';
-      return window.markedParse(text);
+      if (typeof marked !== 'undefined' && typeof marked.parse === 'function' &&
+          typeof DOMPurify !== 'undefined' && typeof DOMPurify.sanitize === 'function' &&
+          DOMPurify.isSupported === true) {
+        try {
+          return DOMPurify.sanitize(marked.parse(String(text), { breaks: true }), {
+            ALLOWED_TAGS: ['a', 'abbr', 'b', 'blockquote', 'br', 'code', 'dd', 'del', 'details',
+              'div', 'dl', 'dt', 'em', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'i', 'ins', 'kbd',
+              'li', 'mark', 'ol', 'p', 'pre', 'q', 's', 'samp', 'small', 'span', 'strong', 'sub',
+              'summary', 'sup', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'u', 'ul',
+              'var'],
+            ALLOWED_ATTR: ['align', 'colspan', 'href', 'open', 'rowspan', 'start', 'title'],
+            ALLOW_DATA_ATTR: false,
+            ALLOW_ARIA_ATTR: false
+          });
+        } catch (e) { /* fall through to the escaped text */ }
+      }
+      return '<p>' + escapeHtml(text).replace(/\n/g, '<br>') + '</p>';
     }
+    // END SAFE MARKDOWN
 
     // Get unique values from data
     function getUniqueModels() {
@@ -1985,16 +2018,16 @@
             var suggestionDisplayLabel = suggestion.displayLabel || (groupId + 'S' + (suggestionIndex + 1));
 
             suggestionsHtml += '<div class="suggestion-item' + (isSuggestionSkipped ? ' skipped' : '') + '"' +
-              ' data-suggestion-id="' + suggestionId + '"' +
+              ' data-suggestion-id="' + escapeAttr(suggestionId) + '"' +
               ' data-model="' + escapeAttr(suggestion.model || '') + '"' +
               ' data-importance="' + escapeAttr(suggestion.importance || group.importance || '') + '"' +
               ' data-category="' + escapeAttr(suggestion.category || group.category || '') + '">' +
               '<div class="suggestion-header">' +
-              '<span class="suggestion-id">' + suggestionDisplayLabel + ':</span>' +
+              '<span class="suggestion-id">' + escapeHtml(suggestionDisplayLabel) + ':</span>' +
               '<span class="suggestion-title">' + escapeHtml(suggestion.title || suggestion.summary || 'Untitled') + '</span>';
 
             if (suggestion.importance) {
-              suggestionsHtml += '<span class="badge ' + getImportanceBadgeClass(suggestion.importance) + '">' + suggestion.importance + '</span>';
+              suggestionsHtml += '<span class="badge ' + getImportanceBadgeClass(suggestion.importance) + '">' + escapeHtml(suggestion.importance) + '</span>';
             }
             if (suggestion.type) {
               suggestionsHtml += '<span class="badge badge-category">' + escapeHtml(suggestion.type) + '</span>';
@@ -2009,12 +2042,12 @@
               suggestionsHtml +=
                 '<label class="skip-control">' +
                 '<input type="checkbox"' + (isSuggestionSkipped ? ' checked' : '') +
-                ' onchange="toggleSuggestionSkip(\'' + suggestionId + '\', this.checked)">' +
+                ' onchange="toggleSuggestionSkip(\'' + escapeJsAttr(suggestionId) + '\', this.checked)">' +
                 'Skip</label>';
               if ((validationStatus === 'needs-human-decision' || validationStatus === 'validation_failed') && group.suggestions.length > 1) {
                 var suggOverride = selections.validation_overrides[suggestionId] || '';
                 suggestionsHtml +=
-                  '<select class="validation-override suggestion-override" onclick="event.stopPropagation()" onchange="setSuggestionValidationOverride(\'' + suggestionId + '\', this.value)">' +
+                  '<select class="validation-override suggestion-override" onclick="event.stopPropagation()" onchange="setSuggestionValidationOverride(\'' + escapeJsAttr(suggestionId) + '\', this.value)">' +
                   '<option value=""' + (!suggOverride ? ' selected' : '') + '>-- No override --</option>' +
                   '<option value="valid"' + (suggOverride === 'valid' ? ' selected' : '') + '>Mark Valid</option>' +
                   '<option value="invalid"' + (suggOverride === 'invalid' ? ' selected' : '') + '>Mark Invalid</option>' +
@@ -2026,9 +2059,9 @@
             suggestionsHtml +=
               '</div>' +
               '<div class="description-rendered' + (isModified ? ' modified' : '') + '"' +
-              ' data-suggestion-id="' + suggestionId + '"';
+              ' data-suggestion-id="' + escapeAttr(suggestionId) + '"';
             if (!isReadOnly) {
-              suggestionsHtml += ' onclick="switchToEdit(\'' + suggestionId + '\')"';
+              suggestionsHtml += ' onclick="switchToEdit(\'' + escapeJsAttr(suggestionId) + '\')"';
             }
             suggestionsHtml += '>' +
               renderMarkdown(displayDescription);
@@ -2039,11 +2072,11 @@
             if (!isReadOnly) {
               suggestionsHtml +=
                 '<textarea class="description-editor hidden' + (isModified ? ' modified' : '') + '"' +
-                ' data-suggestion-id="' + suggestionId + '"' +
+                ' data-suggestion-id="' + escapeAttr(suggestionId) + '"' +
                 ' data-original="' + escapeAttr(originalDescription) + '"' +
-                ' onchange="handleDescriptionEdit(\'' + suggestionId + '\', this)"' +
-                ' oninput="handleDescriptionEdit(\'' + suggestionId + '\', this)"' +
-                ' onblur="switchToView(\'' + suggestionId + '\')">' +
+                ' onchange="handleDescriptionEdit(\'' + escapeJsAttr(suggestionId) + '\', this)"' +
+                ' oninput="handleDescriptionEdit(\'' + escapeJsAttr(suggestionId) + '\', this)"' +
+                ' onblur="switchToView(\'' + escapeJsAttr(suggestionId) + '\')">' +
                 escapeHtml(displayDescription) + '</textarea>';
             }
 
@@ -2057,7 +2090,7 @@
               else if (validationStatus === 'validation_failed') validationColorClass = ' validation-failed';
               suggestionsHtml += '<details class="suggestion-validation' + validationColorClass + '">' +
                 '<summary>' +
-                '<span class="badge ' + getValidationBadgeClass(validationStatus) + '">' + validationStatus + '</span>' +
+                '<span class="badge ' + getValidationBadgeClass(validationStatus) + '">' + escapeHtml(validationStatus) + '</span>' +
                 '<span class="validation-label">Validation</span>' +
                 '<span class="confidence-bar">' +
                 '<span class="confidence-fill ' + confidenceClass + '" style="width: ' + confidencePercent + '%"></span>' +
@@ -2081,7 +2114,7 @@
         var validationHtml = '';
         if (validationStatus) {
           validationHtml = '<details class="validation-section">' +
-            '<summary>Validation: ' + validationStatus;
+            '<summary>Validation: ' + escapeHtml(validationStatus);
           if (validationConfidence) {
             validationHtml += '<span class="confidence-bar">' +
               '<span class="confidence-fill" style="width: ' + confidencePercent + '%"></span>' +
@@ -2101,26 +2134,26 @@
         }
 
         html += '<div class="group-card' + (isGroupSkipped ? ' skipped' : '') + '"' +
-          ' data-group-id="' + groupHashKey + '"' +
+          ' data-group-id="' + escapeAttr(groupHashKey) + '"' +
           ' data-original-index="' + groupNum + '"' +
           ' data-importance="' + escapeAttr(maxImportance) + '"' +
           ' data-category="' + escapeAttr(group.category || '') + '"' +
           ' data-validation="' + escapeAttr(validationStatus) + '"' +
           (reportData.commitRange ? ' data-commit="' + escapeAttr(commitKeyOf(group)) + '"' : '') +
-          ' data-models="' + groupModels.join(',') + '">' +
-          '<div class="group-header" onclick="toggleGroup(\'' + groupHashKey + '\')">' +
+          ' data-models="' + escapeAttr(groupModels.join(',')) + '">' +
+          '<div class="group-header" onclick="toggleGroup(\'' + escapeJsAttr(groupHashKey) + '\')">' +
           '<div class="group-header-top">' +
           '<span class="group-toggle">&#9660;</span>' +
-          '<span class="group-id">' + groupId + ':</span>' +
+          '<span class="group-id">' + escapeHtml(groupId) + ':</span>' +
           '<span class="group-title">' + escapeHtml(group.theme || group.title || 'Untitled Group') + '</span>' +
           (isReadOnly ? '' :
             '<label class="skip-control" onclick="event.stopPropagation()">' +
             '<input type="checkbox"' + (isGroupSkipped ? ' checked' : '') +
-            ' onchange="toggleGroupSkip(\'' + groupHashKey + '\', this.checked)">' +
+            ' onchange="toggleGroupSkip(\'' + escapeJsAttr(groupHashKey) + '\', this.checked)">' +
             'Skip this group</label>') +
           (isReadOnly ? '' :
             (validationStatus === 'needs-human-decision' || validationStatus === 'validation_failed' ?
-              '<select class="validation-override" onclick="event.stopPropagation()" onchange="setValidationOverride(\'' + groupHashKey + '\', this.value)">' +
+              '<select class="validation-override" onclick="event.stopPropagation()" onchange="setValidationOverride(\'' + escapeJsAttr(groupHashKey) + '\', this.value)">' +
               '<option value=""' + (!selections.validation_overrides[groupHashKey] ? ' selected' : '') + '>-- No override --</option>' +
               '<option value="valid"' + (selections.validation_overrides[groupHashKey] === 'valid' ? ' selected' : '') + '>Mark Valid</option>' +
               '<option value="invalid"' + (selections.validation_overrides[groupHashKey] === 'invalid' ? ' selected' : '') + '>Mark Invalid</option>' +
@@ -2132,13 +2165,13 @@
           '<div class="group-badges">';
 
         if (maxImportance) {
-          html += '<span class="badge ' + getImportanceBadgeClass(maxImportance) + '">' + maxImportance + '</span>';
+          html += '<span class="badge ' + getImportanceBadgeClass(maxImportance) + '">' + escapeHtml(maxImportance) + '</span>';
         }
         if (group.category) {
           html += '<span class="badge badge-category">' + escapeHtml(group.category) + '</span>';
         }
         if (validationStatus) {
-          html += '<span class="badge ' + getValidationBadgeClass(validationStatus) + '">' + validationStatus + '</span>';
+          html += '<span class="badge ' + getValidationBadgeClass(validationStatus) + '">' + escapeHtml(validationStatus) + '</span>';
         }
         html += scopeGroupHtml(group);
 
@@ -2695,19 +2728,11 @@
       document.getElementById('btn-copy').addEventListener('click', copyAsText);
     }
 
-    // Run on DOM ready, waiting for marked library to load
-    function startWhenReady() {
-      if (window.markedParse) {
-        init();
-      } else {
-        window.addEventListener('marked-ready', init, { once: true });
-      }
-    }
-
+    // The vendored libraries are inline above this script: start at once.
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', startWhenReady);
+      document.addEventListener('DOMContentLoaded', init);
     } else {
-      startWhenReady();
+      init();
     }
   </script>
 </body>

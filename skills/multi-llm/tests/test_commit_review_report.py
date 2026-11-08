@@ -352,9 +352,8 @@ class TestReportHtml:
 HOSTILE = "src/a\"b'c<d>&e.py"
 NODE = shutil.which("node")
 
-#: Enough of ``document`` for both templates' ``escapeHtml`` (``textContent``
-#: then ``innerHTML``, or ``appendChild(createTextNode(...))``): text
-#: serialised as a browser does, escaping ``&``, ``<`` and ``>`` only.
+#: A minimal ``document`` for page functions run under Node. The templates'
+#: ``escapeHtml`` is a plain string function now and does not use it.
 DOM_SHIM = r"""
 var document = {
   createElement: function () {
@@ -464,9 +463,9 @@ class TestTheBlocksDriftLine:
 
 class TestAttributesAreEscapedAsAttributes:
     """A file name a commit controls reaches HTML attributes (``title``,
-    ``data-target``, ``id``, inline handlers): ``escapeHtml`` leaves quotes
-    alone, so every such site takes ``escapeAttr``, and a value inside an
-    inline handler's JS string takes ``escapeJsAttr``."""
+    ``data-target``, ``id``, inline handlers): every such site names
+    ``escapeAttr`` (the reports' one escaper, which escapes both quotes), and a
+    value inside an inline handler's JS string takes ``escapeJsAttr``."""
 
     @pytest.mark.parametrize("style", ["pr", "flat"])
     def test_no_attribute_takes_the_text_escaper(self, tmp_path, style):
@@ -538,7 +537,7 @@ class TestTheAbsentAtHeadLabel:
             html, ["escapeHtml", "fileLabelHtml"],
             "console.log(JSON.stringify([fileLabelHtml('old.py'), fileLabelHtml('old.py:3-4'),"
             " fileLabelHtml(" + json.dumps(HOSTILE) + ")]));")
-        label = ' <span class="file-absent-label">(renamed to new"&lt;i&gt;.py in 0000001..3333333)</span>'
+        label = ' <span class="file-absent-label">(renamed to new&quot;&lt;i&gt;.py in 0000001..3333333)</span>'
         assert rendered == [label, label, ""]
 
     def test_a_plan_report_has_no_label(self, tmp_path):

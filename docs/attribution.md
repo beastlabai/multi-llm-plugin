@@ -16,3 +16,7 @@ BeastLab.ai provides this plugin as-is, with no warranties or liabilities of any
 ## Brand marks in HTML reports
 
 HTML reports embed small brand marks to label which harness and which model produced each suggestion — nominative use only, and no endorsement is implied. Each bundled mark is fetched from its vendor's own favicon or brand source (see the provenance comment beside every entry in `utils/html_report_generator.py`'s `_ICON_DEFS`), except Primer Octicons' `copilot-16`, which is MIT-licensed. Where no first-party mark is reachable the report renders a generated letter badge instead of a redrawn or re-hosted logo.
+
+## JavaScript bundled into HTML reports
+
+Every HTML report inlines two open-source libraries, unmodified, from `skills/multi-llm/templates/vendor/`, so a report loads nothing from the network: [marked](https://github.com/markedjs/marked) 18.1.1 (MIT, `marked.LICENSE.txt`) renders Markdown, and [DOMPurify](https://github.com/cure53/DOMPurify) 3.4.17 (Apache-2.0 or MPL-2.0; used under Apache-2.0, `dompurify.LICENSE.txt`) sanitises the result. Each library's copyright header stays in the inlined copy.
