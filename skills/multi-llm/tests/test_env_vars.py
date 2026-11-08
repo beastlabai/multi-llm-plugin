@@ -149,9 +149,20 @@ class TestTable:
         counts = env_vars.counts_by_kind()
         assert sum(counts.values()) == len(env_vars.ENV_VARS)
 
-    def test_debug_is_reserved_not_read(self):
-        row = env_vars.by_name()[env_vars.DEBUG]
-        assert row.kind == env_vars.RESERVED and not row.forwarded_to_codex
+    def test_the_advisory_switches_are_read_by_the_advisory_guard(self):
+        """``MULTI_LLM_DEBUG`` is a setting the Codex tool server does not
+        forward (run the command in a shell to use it); the strict switch is a
+        test seam. Both are read by ``utils/advisory.py``."""
+        from utils import advisory
+
+        rows = env_vars.by_name()
+        debug, strict = rows[env_vars.DEBUG], rows[env_vars.STRICT_ADVISORY]
+        assert (debug.kind, debug.owner, debug.forwarded_to_codex) == (
+            env_vars.SETTING, "utils/advisory.py", False)
+        assert (strict.kind, strict.owner, strict.forwarded_to_codex) == (
+            env_vars.TEST, "utils/advisory.py", False)
+        assert (advisory.DEBUG_ENV, advisory.STRICT_ENV) == (
+            env_vars.DEBUG, env_vars.STRICT_ADVISORY)
 
 
 class TestDocsTable:

@@ -4737,7 +4737,7 @@ class TestWaitTimeoutResolution:
         assert "Traceback" not in captured.err
 
     def test_an_unrelated_config_error_does_not_end_the_poll_loop_on_a_lie(
-        self, tmp_path, monkeypatch, capsys
+        self, tmp_path, monkeypatch, capsys, lenient_advisory
     ):
         """F4, 2026-09-20: `--wait` died on *any* ConfigError, not only `poll_s`'s.
 
@@ -4780,6 +4780,8 @@ class TestWaitTimeoutResolution:
         assert captured.err.startswith("ERROR: ")
         assert "not_a_driver_key" in captured.err
         assert "Traceback" not in captured.err
+        # The control's runner line read the same broken config and was dropped.
+        assert lenient_advisory == ["status: runner text"]
 
     @pytest.mark.parametrize("value", ["nan", "inf", "-inf", "-1", "0"])
     def test_a_timeout_that_is_not_a_positive_finite_number_is_refused(
@@ -5845,7 +5847,7 @@ class TestOneBadModelRowCostsItsOwnColumn:
         return phase
 
     def test_a_clock_that_raises_costs_that_row_its_clock_only(
-        self, tmp_path, monkeypatch, capsys
+        self, tmp_path, monkeypatch, capsys, lenient_advisory
     ):
         """The renderer's own guard, pinned independently of the parser's.
 
@@ -5885,9 +5887,10 @@ class TestOneBadModelRowCostsItsOwnColumn:
         assert [row.split() for row in rows] == [
             ["codex:gpt-5.6-sol", "running"], ["opencode:auto", "running"]
         ], rows
+        assert lenient_advisory == ["status: model elapsed time"] * 2
 
     def test_a_wait_that_raises_costs_only_the_wait(
-        self, tmp_path, monkeypatch, capsys
+        self, tmp_path, monkeypatch, capsys, lenient_advisory
     ):
         """The wait is read under its own guard, beside the run time's.
 
@@ -5938,6 +5941,8 @@ class TestOneBadModelRowCostsItsOwnColumn:
             ["codex:gpt-5.6-sol", "failed", "2m10s/30m", "boom"],
             ["opencode:auto", "queued"],
         ], rows
+        assert lenient_advisory == [
+            "status: finished model queued time", "status: queued model wait"]
 
     def test_an_aware_started_at_does_not_take_the_command_down(
         self, tmp_path, capsys
@@ -6657,7 +6662,7 @@ class TestJustFinishedNamesWhatCrossedTheLineDuringTheWait:
         assert "finished_during_wait" not in payload["runs"][0], payload["runs"][0]
 
     def test_a_malformed_entry_costs_its_own_clause_never_the_command(
-        self, tmp_path, monkeypatch, capsys
+        self, tmp_path, monkeypatch, capsys, lenient_advisory
     ):
         """`status` is the command a poll loop runs, so it must answer.
 
@@ -6704,6 +6709,9 @@ class TestJustFinishedNamesWhatCrossedTheLineDuringTheWait:
             "gemini:gemini-3.5-pro (done)"
         ) in out
         assert "pi:auto (" not in out
+        # The raising clock is read twice: the clause, then the row's own cell.
+        assert lenient_advisory == [
+            "status: finished-during-wait elapsed time", "status: model elapsed time"]
 
     def test_a_phase_dir_that_appeared_mid_wait_is_not_claimed_as_just_finished(
         self, tmp_path, monkeypatch, capsys
@@ -6888,7 +6896,7 @@ class TestTheLaunchAnnouncesTheRosterItResolved:
         assert "progress_lines" not in payload
 
     def test_an_unreadable_config_costs_the_line_and_not_the_launch(
-        self, tmp_path, monkeypatch, capsys
+        self, tmp_path, monkeypatch, capsys, lenient_advisory
     ):
         """Narration, at the one point where the worker is already running.
 
@@ -6907,6 +6915,7 @@ class TestTheLaunchAnnouncesTheRosterItResolved:
         capsys.readouterr()
         assert "progress_lines" not in payload
         assert payload["next"], "the launch still reported its poll command"
+        assert lenient_advisory == ["detach: launch roster line"]
 
 
 class TestTheRenderedProgressLinesRideTheResultLine:

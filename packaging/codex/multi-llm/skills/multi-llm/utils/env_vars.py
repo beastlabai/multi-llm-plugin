@@ -135,10 +135,8 @@ E2E_ENV = "MULTI_LLM_E2E_ENV"
 PROBE = "MULTI_LLM_PROBE"
 PROBE_OVERRIDE = "MULTI_LLM_PROBE_OVERRIDE"
 LEGACY_INSTRUCTIONS = "MULTI_LLM_LEGACY_INSTRUCTIONS"
-#: Named in a comment in ``utils/validation.py`` (a "debug/verbose convention");
-#: no code reads it. Listed as reserved, not omitted, so the unit that
-#: implements it (STATE-10) changes this row instead of adding a hidden read.
 DEBUG = "MULTI_LLM_DEBUG"
+STRICT_ADVISORY = "MULTI_LLM_STRICT_ADVISORY"
 
 
 def _v(name: str, kind: str, owner: str, forwarded: bool, summary: str) -> EnvVar:
@@ -192,6 +190,12 @@ ENV_VARS: Tuple[EnvVar, ...] = (
        "`plugin-landlock` skips that sandbox rung alone for the process; any "
        "other value is rejected at start-up. Use it to tell a jail denial from "
        "a codex fault."),
+    _v(DEBUG, SETTING, "utils/advisory.py", False,
+       "`1` (also `true`, `yes`, `on`) writes each exception an advisory read "
+       "swallowed (a status block, a hint line, a recorded route) to stderr, "
+       "with the site's label and the traceback. Stdout and exit codes do not "
+       "change. The Codex tool server does not forward it: run the command in "
+       "a shell instead."),
     # --- set by a host shim or tool server, per call ----------------------
     _v(SKILL_DIR, HOST_INPUT, "packaging/codex/mcp_server.py", True,
        "The Codex tool server exports the skill directory to the dispatcher it "
@@ -273,12 +277,15 @@ ENV_VARS: Tuple[EnvVar, ...] = (
        "dispatcher's login shell and its child."),
     _v(PROBE_OVERRIDE, TEST, "tests/container/entrypoint.py", False,
        "Container probe: the second launch-only marker, reported the same way."),
+    _v(STRICT_ADVISORY, TEST, "utils/advisory.py", False,
+       "Test seam read by shipped code: `1` re-raises what an advisory read "
+       "would swallow, only inside a pytest process; anywhere else, a "
+       "detached worker a test spawns included, it is ignored. "
+       "`tests/conftest.py` sets it for the files that cover the converted "
+       "modules."),
     _v(LEGACY_INSTRUCTIONS, RETIRED, "multi_llm.py", False,
        "No longer switches anything: the frozen core it once served is gone. "
        "A set value is answered on stderr and the current core is served."),
-    _v(DEBUG, RESERVED, "utils/validation.py", False,
-       "Reserved, not read: only a comment names it. A debug/verbose switch "
-       "is planned (STATE-10); change this row's kind when it is."),
 )
 
 _BY_NAME: Dict[str, EnvVar] = {row.name: row for row in ENV_VARS}

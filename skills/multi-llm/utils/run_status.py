@@ -61,6 +61,7 @@ from . import (
     process_control,
     status_file,
 )
+from .advisory import note_swallowed
 from .cli_common import (
     ERROR_MAX_CHARS,
     EXIT_ERROR,
@@ -542,7 +543,8 @@ def _document_word(plan_path: Path) -> str:
         from .commit_paths import document_label, read_commit_range
 
         return document_label({"commit_range": read_commit_range(plan_path)})
-    except Exception:  # noqa: BLE001 - advisory: the plan's word stands
+    except Exception as exc:  # noqa: BLE001 - advisory: the plan's word stands
+        note_swallowed("status: document word", exc)
         return "plan"
 
 
@@ -599,7 +601,8 @@ def manual_close_note(
             host, next_phase.resolve_route(
                 host, stderr=io.StringIO(), recorded=recorded_route),
         )
-    except Exception:  # noqa: BLE001 - advisory: the list still stands
+    except Exception as exc:  # noqa: BLE001 - advisory: the list still stands
+        note_swallowed("status: manual close note", exc)
         return None
     return next_phase.manual_close_note(
         next_phase.close_command(template, plan_spelling, ids), len(ids),
@@ -1027,7 +1030,8 @@ def _failed_model_specs(view: Dict[str, Any]) -> List[str]:
     """
     try:
         failed = status_file.read_status(view["phase_dir"]).get("models_failed")
-    except Exception:  # advisory text only; never fail the poll over it
+    except Exception as exc:  # advisory text only; never fail the poll over it
+        note_swallowed("status: failed model specs", exc)
         failed = None
     if isinstance(failed, dict) and failed:
         return sorted(str(spec) for spec in failed)
@@ -1522,12 +1526,14 @@ def _model_timing_text(entry: Dict[str, Any]) -> str:
     if not terminal and awaits_first_dispatch(entry):
         try:
             wait = entry_queued_s(entry)
-        except Exception:
+        except Exception as exc:
+            note_swallowed("status: queued model wait", exc)
             return ""
         return f"waiting {format_elapsed(wait)}" if wait is not None else ""
     try:
         elapsed = entry_elapsed_s(entry)
-    except Exception:
+    except Exception as exc:
+        note_swallowed("status: model elapsed time", exc)
         return ""
     if elapsed is None:
         return ""
@@ -1539,7 +1545,8 @@ def _model_timing_text(entry: Dict[str, Any]) -> str:
     if terminal:
         try:
             wait = entry_queued_s(entry)
-        except Exception:
+        except Exception as exc:
+            note_swallowed("status: finished model queued time", exc)
             wait = None
         if wait is not None and wait >= 1.0:
             text += f", queued {format_elapsed(wait)}"
@@ -1621,7 +1628,8 @@ def _model_row_specs(view: Dict[str, Any], models: Dict[str, Any]) -> List[str]:
             requested = status_file.read_status(
                 str(view.get("phase_dir") or "")
             ).get("models_requested")
-        except Exception:  # pragma: no cover - an unreadable dir renders the map
+        except Exception as exc:  # pragma: no cover - an unreadable dir renders the map
+            note_swallowed("status: requested model order", exc)
             requested = None
     if not isinstance(requested, list):
         return specs
@@ -2090,10 +2098,11 @@ def _attach_finished_during_wait(
                 continue
             try:
                 elapsed = entry_elapsed_s(entry)
-            except Exception:
+            except Exception as exc:
                 # The `started_at: "...Z"` shape that used to take the whole
                 # command down (F5, 2026-09-20). A clause with no clock is worth
                 # more than a traceback.
+                note_swallowed("status: finished-during-wait elapsed time", exc)
                 elapsed = None
             if isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)):
                 elapsed = None
@@ -2239,7 +2248,8 @@ def state_implement_view(
             return None
     try:
         state = StateManager(plan_path, read_only=True)
-    except Exception:  # noqa: BLE001 - advisory: the run view is not
+    except Exception as exc:  # noqa: BLE001 - advisory: the run view is not
+        note_swallowed("status: native implement state read", exc)
         return None
     record = state.state
     decomposition = record.get("implement_task_ids")
@@ -2363,7 +2373,8 @@ def native_still_runnable(
         kept_out = set(facts["failed_ids"]) | set(facts["blocked"])
         for task_id in facts["failed_ids"]:
             kept_out.update(facts["undone_with"](task_id))
-    except Exception:  # noqa: BLE001 - advisory: the run view is not
+    except Exception as exc:  # noqa: BLE001 - advisory: the run view is not
+        note_swallowed("status: native still runnable", exc)
         return []
     return [
         task_id for task_id in scope
@@ -2398,7 +2409,8 @@ def _native_manual_gate(
             return [], None, []
         return (flags, next_phase.manual_gate_why(entry),
                 next_phase.manual_gate_decline_answers(entry))
-    except Exception:  # noqa: BLE001 - advisory: the plain resume stands
+    except Exception as exc:  # noqa: BLE001 - advisory: the plain resume stands
+        note_swallowed("status: native manual gate", exc)
         return [], None, []
 
 
@@ -2451,7 +2463,8 @@ def native_run_stopped(
             return True
         left = record.get("metrics_left_out")
         return not (isinstance(left, Mapping) and left.get(_IMPLEMENT_PHASE))
-    except Exception:  # noqa: BLE001 - advisory: the run view is not
+    except Exception as exc:  # noqa: BLE001 - advisory: the run view is not
+        note_swallowed("status: native run stopped", exc)
         return False
 
 
@@ -2699,7 +2712,10 @@ def native_leg_stamp(directory: Path) -> Optional[Dict[str, str]]:
     unreadable file is no stamp."""
     try:
         document = json.loads((Path(directory) / _WRITE_TASKS).read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 - advisory
+    except FileNotFoundError:  # no emit on record: no stamp
+        return None
+    except Exception as exc:  # noqa: BLE001 - advisory
+        note_swallowed("status: native leg stamp", exc)
         return None
     if not isinstance(document, dict) or document.get("leg") != "native":
         return None
@@ -2754,7 +2770,10 @@ def _native_emit_time(directory: Path) -> Optional[float]:
     path = Path(directory) / _WRITE_TASKS
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 - advisory
+    except FileNotFoundError:  # no emit on record: no time
+        document = None
+    except Exception as exc:  # noqa: BLE001 - advisory
+        note_swallowed("status: native emit time", exc)
         document = None
     record = document.get("native_run") if isinstance(document, dict) else None
     emitted = detach._parse_stamp(
@@ -2948,7 +2967,8 @@ def state_apply_views(
         record = manager.state
         if workflow is None:
             workflow = _workflow_payload(plan_path, host_id=host_id)
-    except Exception:  # noqa: BLE001 - advisory: the run view is not
+    except Exception as exc:  # noqa: BLE001 - advisory: the run view is not
+        note_swallowed("status: native apply state read", exc)
         return []
     changed = _state_changed_at(manager.state_file)
     phases = (workflow or {}).get("phases") or {}
@@ -3143,7 +3163,10 @@ def _native_apply_not_applied(
 
     try:
         document = json.loads((directory / _WRITE_TASKS).read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 - advisory
+    except FileNotFoundError:  # no emit on record: nothing handed out
+        return {}
+    except Exception as exc:  # noqa: BLE001 - advisory
+        note_swallowed("status: native apply not applied", exc)
         return {}
     processed = record.get(f"processed_{directory.name}")
     tasks = document.get("batches") or document.get("tasks") if isinstance(
@@ -3301,7 +3324,8 @@ def _native_apply_batch_checks(record: Dict[str, Any], directory: Path) -> List[
             {"id": task_id, "findings": findings}
             for task_id, findings in earlier_batch_check_failures(record, tasks, "")
         ]
-    except Exception:  # noqa: BLE001 - advisory
+    except Exception as exc:  # noqa: BLE001 - advisory
+        note_swallowed("status: native apply batch checks", exc)
         return []
 
 
@@ -3431,7 +3455,8 @@ def implement_task_tally(plan_path: Path) -> Optional[Dict[str, Any]]:
 
     try:
         state = StateManager(plan_path, read_only=True)
-    except Exception:  # noqa: BLE001 - advisory: the run view is not
+    except Exception as exc:  # noqa: BLE001 - advisory: the run view is not
+        note_swallowed("status: implement tally state read", exc)
         return None
     decomposition = state.state.get("implement_task_ids")
     if not isinstance(decomposition, list) or not decomposition:
@@ -3610,7 +3635,8 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
         # the whole poll down instead of costing this row its `(since …)`.
         try:
             elapsed = detach._elapsed_since(row.get("dispatched_at"))
-        except Exception:
+        except Exception as exc:
+            note_swallowed("status: write mirror in-flight time", exc)
             elapsed = None
         since = (
             f" (since {metrics.format_duration(int(elapsed * 1000))})"
@@ -3889,7 +3915,8 @@ def user_speller(
         host = host_capabilities.resolve_host_id(explicit=host_id)
         if next_phase.resolve_route(host, stderr=io.StringIO()) in modes.TOOL_ROUTES:
             return None
-    except Exception:  # noqa: BLE001 - advisory: the dispatcher command stands
+    except Exception as exc:  # noqa: BLE001 - advisory: the dispatcher command stands
+        note_swallowed("status: user speller route", exc)
         return None
     brief = next_phase.brief_view(plan_arg, plan_path)
 
@@ -3916,7 +3943,8 @@ def user_speller(
                 cli_common._HOST_COMPOSED if chosen in modes.TOOL_ROUTES
                 else cli_common.file_route_composed_flags(host)
             )
-        except Exception:  # noqa: BLE001 - advisory: the dispatcher command stands
+        except Exception as exc:  # noqa: BLE001 - advisory: the dispatcher command stands
+            note_swallowed("status: user speller template", exc)
             return None
         # What the run's own host composed too, when another host reads it
         # (its `--host` is in the replay): never something the user typed.
@@ -3925,8 +3953,10 @@ def user_speller(
         if run_host and run_host != host:
             try:
                 table.update(cli_common.file_route_composed_flags(run_host))
-            except Exception:  # noqa: BLE001 - an unknown id adds nothing
+            except host_capabilities.UnknownHost:  # an unknown id adds nothing
                 pass
+            except Exception as exc:  # noqa: BLE001 - advisory: the table stands
+                note_swallowed("status: user speller run host flags", exc)
         kept = [str(token) for token in [
             *extra, *cli_common.drop_host_composed_flags(tokens, table)]]
         # A token this one-line spelling cannot carry as it is — an `ask`
@@ -4096,7 +4126,8 @@ def _manual_gate_answers(
         from . import next_phase
 
         return next_phase._resume_flags(workflow.get("phases") or {}, _IMPLEMENT_PHASE)[1:]
-    except Exception:  # noqa: BLE001 - advisory: the plain resume stands
+    except Exception as exc:  # noqa: BLE001 - advisory: the plain resume stands
+        note_swallowed("status: manual gate answers", exc)
         return []
 
 
@@ -4253,7 +4284,8 @@ def _reason_explanation(reason_code: Optional[str]) -> Optional[str]:
         return None
     try:
         from .subagent_executor import _REASON_EXPLANATION
-    except Exception:  # pragma: no cover - a broken install still prints the code
+    except Exception as exc:  # pragma: no cover - a broken install still prints the code
+        note_swallowed("status: reason explanation import", exc)
         return None
     return _REASON_EXPLANATION.get(reason_code)
 
@@ -4300,7 +4332,8 @@ def _phase_in_progress(
     if workflow is None:
         try:
             workflow = _workflow_payload(plan_path)
-        except Exception:  # noqa: BLE001 - advisory: keep the old line
+        except Exception as exc:  # noqa: BLE001 - advisory: keep the old line
+            note_swallowed("status: phase in progress", exc)
             return True
     phase = view.get("phase") or cli_common._modes().phase_for(
         str((view.get("run") or {}).get("mode") or ""))
@@ -4391,7 +4424,8 @@ def _implement_tasks_done(
     if workflow is None:
         try:
             workflow = _workflow_payload(plan_path)
-        except Exception:  # noqa: BLE001 - advisory: the mirror count stands
+        except Exception as exc:  # noqa: BLE001 - advisory: the mirror count stands
+            note_swallowed("status: implement tasks done", exc)
             return None
     done = ((workflow.get("phases") or {}).get(_IMPLEMENT_PHASE) or {}).get("tasks_done")
     return done if isinstance(done, int) and not isinstance(done, bool) else None
@@ -4542,7 +4576,10 @@ def render_runner_text(
             )
             source = f"supplied by {layer}"
         native = str(caps.entry(resolved_host).get("subagents")) == "native"
-    except Exception:
+    except host_capabilities.UnknownHost:  # an unknown host prints nothing (above)
+        return []
+    except Exception as exc:  # noqa: BLE001 - reported, never resolved (above)
+        note_swallowed("status: runner text", exc)
         return []
     scope = (
         f"{resolved_host} dispatches subagents natively, so it is consulted "
@@ -4718,7 +4755,8 @@ def _discovery_report(plan_path: Path, args: argparse.Namespace) -> Dict[str, An
     for directory in discover_phase_dirs(plan_path, phase=phase):
         try:
             status = status_file.read_status(str(directory))
-        except Exception:
+        except Exception as exc:
+            note_swallowed("status: discovery report", exc)
             continue
         run = status.get("run") if isinstance(status.get("run"), dict) else {}
         stubs.append(
@@ -4866,7 +4904,8 @@ def _commit_fixes_view(
             return None
         state = json.loads(state_file.read_text(encoding="utf-8"))
         return fixes_from_state(state) if isinstance(state, dict) else None
-    except Exception:  # noqa: BLE001 - advisory: the run view is not
+    except Exception as exc:  # noqa: BLE001 - advisory: the run view is not
+        note_swallowed("status: commit fixes view", exc)
         return None
 
 
@@ -4932,7 +4971,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         try:
             views, superseded = set_aside_superseded_runs(
                 plan_path, views, host_id=_reader_host(args))
-        except Exception:  # noqa: BLE001 - advisory: the run view is not
+        except Exception as exc:  # noqa: BLE001 - advisory: the run view is not
+            note_swallowed("status: superseded runs", exc)
             superseded = {}
 
     # Fix round 16 (run 6): an executor implement run's own counts are that
@@ -4941,7 +4981,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if any(_is_executor_implement_view(view) for view in views):
         try:
             implement_tally = implement_task_tally(plan_path)
-        except Exception:  # noqa: BLE001 - advisory: the run view is not
+        except Exception as exc:  # noqa: BLE001 - advisory: the run view is not
+            note_swallowed("status: implement task tally", exc)
             implement_tally = None
 
     # N5, 2026-09-16: the dispatcher stamped `ctx.mode = "status"`,
@@ -5071,10 +5112,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     workflow_trailer: List[str] = []
     terminal_notice: Optional[str] = None
     terminal_workflow: Optional[Dict[str, Any]] = None
-    if args.view == VIEW_RUN and terminal_run:
+    # An ask is no workflow step: a poll that lists only ask runs reads no
+    # workflow and names no next phase (`_is_workflow_step_run`).
+    if (args.view == VIEW_RUN and terminal_run
+            and any(_is_workflow_step_run(view) for view in views)):
         try:
             terminal_workflow = _workflow_payload(plan_path, host_id=_reader_host(args))
-        except Exception:
+        except Exception as exc:
+            note_swallowed("status: terminal workflow", exc)
             terminal_workflow = None
         if terminal_workflow:
             close_note = manual_close_note(
@@ -5119,7 +5164,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             and _resolve_phase(args.phase) in (None, _IMPLEMENT_PHASE)):
         try:
             implement_tasks = state_implement_view(plan_path, views)
-        except Exception:  # noqa: BLE001 - advisory: the run view is not
+        except Exception as exc:  # noqa: BLE001 - advisory: the run view is not
+            note_swallowed("status: native implement view", exc)
             implement_tasks = None
     # Fix round 18: and the apply phases the same native host ran.
     apply_tasks: List[Dict[str, Any]] = []
@@ -5129,7 +5175,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 plan_path, views, workflow or terminal_workflow,
                 only=_resolve_phase(args.phase), host_id=_reader_host(args),
             )
-        except Exception:  # noqa: BLE001 - advisory: the run view is not
+        except Exception as exc:  # noqa: BLE001 - advisory: the run view is not
+            note_swallowed("status: native apply views", exc)
             apply_tasks = []
     for phase, record in superseded.items():
         entry = implement_tasks if phase == _IMPLEMENT_PHASE else next(
@@ -5478,6 +5525,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     return exit_code
 
 
+def _is_workflow_step_run(view: Dict[str, Any]) -> bool:
+    """Whether *view*'s run is a step of the plan's workflow: a phase or a
+    composite (``modes.Mode.is_workflow_phase`` / ``is_composite``), read from
+    its record's ``mode``, else its phase dir. An ``ask`` is not, nor a view
+    with no mode on record, so nothing a poll of one prints is the
+    workflow's next phase (docs/development/status.md, "Only a workflow
+    step's run carries them").
+    A commit front door's run is recorded under the phase it fronts."""
+    from .cli_common import _modes
+
+    run = view.get("run") or {}
+    finished_mode = str(run.get("mode") or view.get("phase") or "") or None
+    mode = _modes().resolve(finished_mode) if finished_mode else None
+    return mode is not None and (mode.is_workflow_phase or mode.is_composite)
+
+
 def _emit_user_next_step(
     plan_path: Path,
     args: argparse.Namespace,
@@ -5505,12 +5568,10 @@ def _emit_user_next_step(
     ``suggested_next`` for ``full``.
     """
     from . import host_capabilities, next_phase
-    from .cli_common import _modes
 
     run = view.get("run") or {}
     finished_mode = str(run.get("mode") or view.get("phase") or "") or None
-    mode = _modes().resolve(finished_mode) if finished_mode else None
-    if mode is None or not (mode.is_workflow_phase or mode.is_composite):
+    if not _is_workflow_step_run(view):
         return None  # an ask, or no mode on record: no phase finished, no answer
     plan_arg = next_phase.recorded_plan_spelling(
         run.get("plan_arg"), str(plan_path)
@@ -5546,7 +5607,8 @@ def _read_by_a_tool_route(args: argparse.Namespace) -> bool:
 
     try:
         route = next_phase.resolve_route(_reader_host(args), stderr=io.StringIO())
-    except Exception:  # noqa: BLE001 - advisory: the text stays whole
+    except Exception as exc:  # noqa: BLE001 - advisory: the text stays whole
+        note_swallowed("status: tool route reader", exc)
         return False
     return route in _modes().TOOL_ROUTES
 
@@ -5575,7 +5637,8 @@ def _wait_clamp_ceiling(host_id: Optional[str]) -> Optional[Tuple[str, int]]:
             ceiling = caps.timeout_ceiling_s(host_id)
             return (host_id, ceiling) if ceiling else None
         return caps.tightest_timeout_ceiling()
-    except Exception:
+    except Exception as exc:
+        note_swallowed("status: wait clamp ceiling", exc)
         return None
 
 

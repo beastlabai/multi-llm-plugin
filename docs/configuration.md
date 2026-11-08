@@ -183,6 +183,7 @@ owners, in `skills/multi-llm/utils/env_vars.py`.
 | `MULTI_LLM_VALIDATION_CONTEXT` | How much plan and code each validation batch embeds: unset (whole plan plus the code its issues cite), `cited` (plan scoped per batch) or `full` (round-wide blocks in every batch). Anything else reads as `full`. | forwarded |
 | `MULTI_LLM_CODEX_UNSANDBOXED_WRITES` | Codex plugin only: `1` lifts the tool's own refusal of write-capable modes under a read-only or unreadable session posture. It never changes which sandbox the runners use. Set it in the environment that starts Codex. | forwarded |
 | `MULTI_LLM_CODEX_SKIP_RUNG` | `plugin-landlock` skips that sandbox rung alone for the process; any other value is rejected at start-up. Use it to tell a jail denial from a codex fault. | not forwarded |
+| `MULTI_LLM_DEBUG` | `1` (also `true`, `yes`, `on`) writes each exception an advisory read swallowed (a status block, a hint line, a recorded route) to stderr, with the site's label and the traceback. Stdout and exit codes do not change. The Codex tool server does not forward it: run the command in a shell instead. | not forwarded |
 <!-- END GENERATED: environment-variables -->
 
 ## Safety

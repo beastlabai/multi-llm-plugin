@@ -364,6 +364,64 @@ def _isolate_cli_version_cache(tmp_path, monkeypatch):
     yield
 
 
+#: The test files that run with ``MULTI_LLM_STRICT_ADVISORY=1``: an exception an
+#: advisory read of ``run_status``, ``detach`` or ``next_phase`` swallows
+#: (``utils/advisory.py``) fails the test instead of vanishing. A test in them
+#: that feeds a malformed input on purpose asserts the swallow with
+#: :func:`lenient_advisory` (docs/development/runtime.md#advisory-guards).
+STRICT_ADVISORY_FILES = frozenset({
+    "test_detach.py",
+    "test_next_command_emitters.py",
+    "test_next_phase.py",
+    "test_status_after_a_stop.py",
+    "test_status_after_switching_to_native.py",
+    "test_status_file.py",
+    "test_status_native_stop_head.py",
+    "test_status_phase_dirs.py",
+    "test_status_recorded_route.py",
+    "test_status_run_view_every_leg.py",
+    "test_status_tallies_every_task.py",
+    "test_status_why_punctuation.py",
+})
+
+
+@pytest.fixture(autouse=True)
+def _advisory_mode(request, monkeypatch):
+    """Strict advisory guards for :data:`STRICT_ADVISORY_FILES`, and the
+    default (silent) everywhere else, whatever the developer's shell exports:
+    a ``MULTI_LLM_DEBUG=1`` left set would put tracebacks on the stderr that
+    tests compare."""
+    monkeypatch.delenv("MULTI_LLM_DEBUG", raising=False)
+    monkeypatch.delenv("MULTI_LLM_STRICT_ADVISORY", raising=False)
+    if request.path.name in STRICT_ADVISORY_FILES:
+        monkeypatch.setenv("MULTI_LLM_STRICT_ADVISORY", "1")
+    yield
+
+
+@pytest.fixture
+def lenient_advisory(monkeypatch):
+    """The production (silent) guard inside a strict file, for a test that
+    feeds a malformed input on purpose. Yields the labels of the sites that
+    swallowed something, in order, so the test asserts the swallow it expects
+    rather than merely tolerating any. In-process only: a child process's
+    swallow is not recorded."""
+    import importlib
+
+    from utils import advisory
+
+    monkeypatch.delenv("MULTI_LLM_STRICT_ADVISORY", raising=False)
+    labels: List[str] = []
+    real = advisory.note_swallowed
+
+    def record(label, exc):
+        labels.append(label)
+        real(label, exc)
+
+    for name in ("advisory", "run_status", "detach", "next_phase"):
+        monkeypatch.setattr(importlib.import_module(f"utils.{name}"), "note_swallowed", record)
+    yield labels
+
+
 @pytest.fixture(autouse=True)
 def _pin_opencode_debug_config(request, monkeypatch):
     """Keep the default suite from spawning `opencode debug config` (plan §8).

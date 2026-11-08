@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from . import phase_walk
+from .advisory import note_swallowed
 from .text_clip import plain_line
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only
@@ -1042,7 +1043,8 @@ def recorded_route(
             started = str(run.get("started_at") or "")
             if newest is None or started > newest[0]:
                 newest = (started, run)
-    except Exception:  # noqa: BLE001 - advisory: the default route stands
+    except Exception as exc:  # noqa: BLE001 - advisory: the default route stands
+        note_swallowed("next phase: recorded route", exc)
         return None
     return route_of(newest[1]) if newest else None
 
@@ -1078,7 +1080,8 @@ def brief_view(
     try:
         source = plan_arg if plan_path is None else plan_path
         return commit_view(os.path.abspath(str(source)), plan=str(plan_arg))
-    except Exception:  # noqa: BLE001 - advisory: the plan spelling stands
+    except Exception as exc:  # noqa: BLE001 - advisory: the plan spelling stands
+        note_swallowed("next phase: commit brief view", exc)
         return None
 
 
@@ -1162,7 +1165,8 @@ def _pinned_brief(text: str) -> Optional[str]:
         from .commit_paths import brief_for_pinned
 
         brief = brief_for_pinned(str(text))
-    except Exception:  # noqa: BLE001 - not a pinned range here
+    except Exception as exc:  # noqa: BLE001 - not a pinned range here
+        note_swallowed("next phase: pinned brief", exc)
         return None
     return str(brief) if brief is not None else None
 

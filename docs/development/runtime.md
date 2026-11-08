@@ -11,6 +11,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [uv bootstrap](#uv-bootstrap)
 - [uv runtime flags](#uv-runtime-flags)
 - [Process primitives](#process-primitives)
+- [Advisory guards](#advisory-guards)
 - [Durable retry commands](#durable-retry-commands)
 
 ## Detach boundary and worker lifecycle
@@ -365,6 +366,43 @@ By number, the `child` argument is ignored and the kill is the one it was before
 the child's zombie still counts as running, so a timeout kill sits out the grace and the
 `_KILL_CONFIRM_S` (5 s) SIGKILL window, then reports `survived`. Slow and pessimistic, never
 aimed at a number the proof does not cover.
+
+## Advisory guards
+
+Code that decorates a command rather than doing its work (a `status` block, a hint line, a
+recorded route, the launch roster) catches broadly and falls back, so one unreadable record never
+fails a poll or a launch. Such a catch hands what it caught to
+`utils/advisory.note_swallowed(label, exc)`, or wraps its block in `advisory(label)`:
+
+- by default nothing is printed, exactly as with a bare `except Exception`;
+- `MULTI_LLM_DEBUG=1` writes `multi-llm debug: swallowed in <label>:` and the traceback to stderr.
+  Stdout, the `MULTI_LLM_RESULT` line and the exit code do not change. The Codex tool server does
+  not forward the variable: run the dispatcher command in a shell to use it;
+- `MULTI_LLM_STRICT_ADVISORY=1` re-raises, **only inside a pytest process** (`"pytest"` in the
+  process's own `sys.modules`). Anywhere else the variable is ignored and the default holds: a
+  detached worker a test spawns inherits it but `execve`s a fresh interpreter that imports no
+  pytest, and a host or a shell that exports it gets the silent guard too, so strict mode never
+  reaches a real run. `tests/conftest.py` sets it for the files in `STRICT_ADVISORY_FILES` (the
+  tests of `run_status`, `detach`, `next_phase` and the next-step emitters). A test there that
+  feeds a malformed input on purpose takes the `lenient_advisory` fixture, which restores the
+  silent guard and yields the labels that swallowed something, and asserts that list. A swallow
+  in a child process is neither raised nor recorded.
+
+Rules for a site:
+
+- What a healthy run meets (no `write_tasks.json` before any emit, a host id the capability data
+  does not list) gets a narrower `except` before the broad one and stays silent in every mode.
+  The broad clause is for what nobody expected.
+- Signal handlers, `atexit` and the close-outs (`RunHandle.finish` and what it calls,
+  `close_out_dead_run`, `abort_run`, a failed handshake's kill) keep their plain silent excepts.
+  They must never raise, strict mode included, and a signal handler prints only through
+  `stream_bootstrap._FdWriter`.
+- The label names the site the way a reader searches for it: `"status: native implement view"`.
+- The debug report goes through `sys.stderr` and falls back to fd 2 through `_FdWriter`; it never
+  raises.
+
+`utils/run_status.py`, `utils/detach.py` and `utils/next_phase.py` use the guard; the broad
+excepts elsewhere in the tree are still silent.
 
 ## Durable retry commands
 

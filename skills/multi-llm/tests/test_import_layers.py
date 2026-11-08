@@ -62,6 +62,7 @@ _SKIPPED_PARTS = {"tests", "__pycache__", ".venv"}
 LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
     0: ("core", (
         "modes",
+        "utils.advisory",
         "utils.env_vars",
         "utils.importance",
         "utils.json_extractor",

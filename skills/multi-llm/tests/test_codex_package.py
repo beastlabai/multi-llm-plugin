@@ -659,17 +659,23 @@ class TestEnvironmentGuarantee:
 
     @pytest.mark.parametrize("function, statement", [
         # a local bound to ``os.environ if environ is None else environ``
-        ("skip_rung_requested", "env.get('MULTI_LLM_DEBUG')"),
+        ("skip_rung_requested", "env.get('MULTI_LLM_X')"),
         # an ``env`` parameter
-        ("skill_environment_names", "env['MULTI_LLM_DEBUG']"),
+        ("skill_environment_names", "env['MULTI_LLM_X']"),
         # a membership test is a read too
-        ("skip_rung_requested", "'MULTI_LLM_DEBUG' in env"),
+        ("skip_rung_requested", "'MULTI_LLM_X' in env"),
     ])
     def test_a_read_of_a_reserved_row_fails(self, function, statement):
-        """A read of a ``reserved`` row fails, through any receiver."""
-        problems = environment_problems(_with_injection(self.BASE, function, statement))
+        """A read of a ``reserved`` row fails, through any receiver. The table
+        has no reserved row today, so the test adds a made-up one."""
+        rows = env_vars.ENV_VARS + (env_vars.EnvVar(
+            "MULTI_LLM_X", env_vars.RESERVED, "utils/providers/base.py", False,
+            "a made-up reserved name"),)
+        assert environment_problems(rows=rows) == []
+        problems = environment_problems(
+            _with_injection(self.BASE, function, statement), rows=rows)
         assert len(problems) == 1
-        assert "['MULTI_LLM_DEBUG'] became real environment reads" in problems[0]
+        assert "['MULTI_LLM_X'] became real environment reads" in problems[0]
 
     def test_a_mapping_read_is_classified(self):
         """``MULTI_LLM_ROUTE`` is read only through a mapping

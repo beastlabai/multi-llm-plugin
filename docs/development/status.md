@@ -102,6 +102,14 @@ the workflow at all, so the real follow-up for a finished `review-tasks` lived o
 polled, said "nothing further to run" and then invented `--apply-task-suggestions` from general
 knowledge (F7, 2026-09-16). A still-running poll carries neither.
 
+**Only a workflow step's run carries them.** The lines, the `notice` and `user_next_step` are
+read for a listed run whose record's `mode` (else its phase dir) is a workflow phase or a
+composite (`run_status._is_workflow_step_run`). An `ask` is neither: a poll that lists only ask
+runs (`--phase ask`, `--question`, `--run-id` of an ask) reads no workflow and prints no next
+phase, whatever `state.json` holds. A commit front door's run is recorded under the phase it fronts
+and answers as that phase. `--view all` and `--view workflow` still print the workflow section the
+poll asked for.
+
 **A terminal poll pinned to one run that exits `0` also carries
 `user_next_step`** beside F7's `notice` (plans/next-phase-command.md): built for
 the run record's `mode`, its `plan_arg` when `next_phase.recorded_plan_spelling`

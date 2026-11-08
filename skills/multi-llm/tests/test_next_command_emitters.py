@@ -864,23 +864,43 @@ class TestTheTerminalPoll:
         assert code == 3
         _assert_neither(out, err, result)
 
+    @pytest.mark.parametrize("pin", [
+        ("--phase", "ask"), ("--run-id", "run-ask-0001"), ("--question", "why?"),
+    ], ids=["phase", "run-id", "question"])
     def test_a_terminal_ask_poll_carries_neither_and_reads_no_workflow(
-        self, workdir, capsys, monkeypatch
+        self, workdir, capsys, monkeypatch, pin
     ):
+        """An ask is no workflow step (docs/development/status.md, "Only a
+        workflow step's run carries them"): its poll never reads the workflow,
+        so the review-plan that state.json records completed names no next
+        phase there, in the text, the notice or ``user_next_step``."""
+        from utils.output_handler import slugify_question
+
         plan = build(workdir, S(("review-plan",), files=RP_VALID))
-        _terminal_record(plan, "ask/why-0badc0de", mode="ask", plan_file=str(plan),
-                         plan_arg=P)
+        _terminal_record(plan, "review-plan", mode="review-plan",
+                         plan_file=str(plan), plan_arg=P)
+        _terminal_record(plan, f"ask/{slugify_question('why?')}", mode="ask",
+                         plan_file=str(plan), plan_arg=P, run_id="run-ask-0001")
+        real = run_status._workflow_payload
+        calls = []
 
-        def unreadable(plan_path, **_kw):
-            raise AssertionError("an ask poll has no phase to answer for")
+        def counted(plan_path, **kw):
+            calls.append(plan_path)
+            return real(plan_path, **kw)
 
-        monkeypatch.setattr(run_status, "_workflow_payload", unreadable)
-        code, out, err, result = _run(
-            ["status", P, "--view", "run", "--phase", "ask"], capsys
-        )
+        monkeypatch.setattr(run_status, "_workflow_payload", counted)
+        # The control: the same state, polled as the review-plan run, names it.
+        _code, _out, _err, control = _run(_poll(P, "--view", "run"), capsys)
+        assert control["user_next_step"]["command"] == EXPECTED_POLL, control
+        assert calls, "the review-plan poll read the workflow"
+
+        calls.clear()
+        code, out, err, result = _run(["status", P, "--view", "run", *pin], capsys)
         assert code == 0, err
         assert result["mode"] == "ask"
         _assert_neither(out, err, result)
+        assert "suggested next" not in out and "notice" not in result, (out, result)
+        assert calls == [], "an ask poll read the workflow"
         assert err == ""
 
     def test_an_unpinned_poll_carries_neither(self, finished_review, capsys):
@@ -889,7 +909,7 @@ class TestTheTerminalPoll:
         _assert_neither(out, err, result)
 
     def test_a_failed_workflow_read_costs_one_stderr_line(
-        self, finished_review, capsys, monkeypatch
+        self, finished_review, capsys, monkeypatch, lenient_advisory
     ):
         _code, _out, _err, before = _run(_poll(P, "--view", "run"), capsys)
 
@@ -909,6 +929,8 @@ class TestTheTerminalPoll:
             payload.pop("user_next_step", None)
             payload.pop("notice", None)
         assert result == before
+        # F7's read swallows it; the next-step read says so on stderr.
+        assert lenient_advisory == ["status: terminal workflow"]
 
     def test_a_builder_raise_on_the_poll_leaves_the_exit_code(
         self, finished_review, capsys, monkeypatch

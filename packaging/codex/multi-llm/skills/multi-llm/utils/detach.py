@@ -59,6 +59,7 @@ from . import (
     status_file,
     stream_bootstrap,
 )
+from .advisory import note_swallowed
 from .cli_common import (
     EXIT_ERROR,
     EXIT_NEEDS_HUMAN,
@@ -459,7 +460,8 @@ def _spec_binary(spec: str, anchor: Optional[str] = None) -> Optional[str]:
     """
     try:
         from .provider_registry import get_provider, parse_model_spec
-    except Exception:  # pragma: no cover - import guard
+    except Exception as exc:  # pragma: no cover - import guard
+        note_swallowed("detach: provider binary import", exc)
         return None
     try:
         provider_name, model = parse_model_spec(spec, anchor=anchor)
@@ -467,7 +469,8 @@ def _spec_binary(spec: str, anchor: Optional[str] = None) -> Optional[str]:
         if provider is None:
             return None
         return provider.build_command("preflight", model)[0] or None
-    except Exception:
+    except Exception as exc:
+        note_swallowed("detach: provider binary for a spec", exc)
         return None
 
 
@@ -501,13 +504,15 @@ def configured_runner_specs(anchor: Optional[str] = None) -> List[str]:
     """
     try:
         from .provider_registry import get_subagent_runner
-    except Exception:  # pragma: no cover - import guard
+    except Exception as exc:  # pragma: no cover - import guard
+        note_swallowed("detach: subagent runner import", exc)
         return []
     specs: List[str] = []
     for tier in ("full", "cheap"):
         try:
             spec = get_subagent_runner(tier, anchor=anchor)
-        except Exception:
+        except Exception as exc:
+            note_swallowed("detach: configured subagent runner", exc)
             continue  # a config that cannot resolve is D3's refusal, not ours
         if spec and str(spec) not in specs:
             specs.append(str(spec))
@@ -662,8 +667,8 @@ def _open_recommendation(phase_dir: str, recommendation: Any) -> Any:
     try:
         if consolidation_is_current(phase_dir):
             return None
-    except Exception:  # noqa: BLE001 - advisory: keep what the checkpoint says
-        pass
+    except Exception as exc:  # noqa: BLE001 - advisory: keep what the checkpoint says
+        note_swallowed("detach: consolidation recommendation", exc)
     return recommendation
 
 
@@ -1185,9 +1190,13 @@ def _tool_route(host: Optional[str]) -> Optional[str]:
         from . import host_capabilities, next_phase
 
         modes = next_phase._skill_module("modes")
-        host_id = host_capabilities.resolve_host_id(explicit=host)
-        route = next_phase.resolve_route(host_id, stderr=io.StringIO())
-    except Exception:  # noqa: BLE001 - the record stands without it
+        try:
+            host_id = host_capabilities.resolve_host_id(explicit=host)
+            route = next_phase.resolve_route(host_id, stderr=io.StringIO())
+        except host_capabilities.UnknownHost:
+            return None  # a host the capability data does not list has no tool route
+    except Exception as exc:  # noqa: BLE001 - the record stands without it
+        note_swallowed("detach: tool route", exc)
         return None
     return route if route in modes.TOOL_ROUTES else None
 
@@ -2288,7 +2297,8 @@ def _launch_roster(
         return progress_tracker.roster_line_for_specs(
             model_specs, anchor=plan_file, timeout=getattr(args, "timeout", None)
         )
-    except Exception:  # noqa: BLE001 - narration never fails a launch
+    except Exception as exc:  # noqa: BLE001 - narration never fails a launch
+        note_swallowed("detach: launch roster line", exc)
         return ""
 
 

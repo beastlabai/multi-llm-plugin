@@ -122,6 +122,32 @@ class TestTheWorkerRecordsItsRoute:
         monkeypatch.setenv("MULTI_LLM_ROUTE", "plugin")
         assert "route" not in self._start(tmp_path, monkeypatch, "codex")
 
+    def test_an_import_failure_costs_the_route_and_not_the_run(
+        self, tmp_path, monkeypatch, lenient_advisory,
+    ):
+        """The route is advisory: a failed import inside the route lookup
+        records nothing, the run still starts, and the swallow is noted."""
+        import builtins
+
+        real_import = builtins.__import__
+
+        def planted(name, globals=None, locals=None, fromlist=(), level=0):
+            if (level == 1 and (globals or {}).get("__name__") == "utils.detach"
+                    and {"host_capabilities", "next_phase"} <= set(fromlist or ())):
+                raise ImportError("planted: the route lookup cannot import")
+            return real_import(name, globals, locals, fromlist, level)
+
+        monkeypatch.setattr(builtins, "__import__", planted)
+        monkeypatch.setenv("MULTI_LLM_ROUTE", "package")
+        record = self._start(tmp_path, monkeypatch, "codex")
+        assert record["run_id"] == "run-route" and "route" not in record
+        assert lenient_advisory == ["detach: tool route"]
+
+    def test_a_host_the_capability_data_does_not_list_is_silent(self, monkeypatch):
+        """Expected, so silent even under the strict guard this file runs in."""
+        monkeypatch.setenv("MULTI_LLM_ROUTE", "package")
+        assert detach._tool_route("no-such-host") is None
+
 
 class TestStatusSpellsTheRunsOwnRoute:
 
