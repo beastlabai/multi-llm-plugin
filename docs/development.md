@@ -34,11 +34,20 @@ uv run --project skills/multi-llm -- pytest skills/multi-llm/tests/test_filterin
 uv run --project skills/multi-llm -- pytest -m robustness
 ```
 
-Two marker groups are excluded from a bare run. Tests marked `live` require
-provider CLIs and real API access and are skipped in CI. Tests marked `container`
-need a Docker daemon: `pyproject.toml` sets `addopts = -m 'not container'`, so a
-bare `pytest` stays green without one, and each container-marked module also
-carries a daemon probe that skips with a named reason.
+Three marker groups are excluded from a bare run: `pyproject.toml` sets
+`addopts = -m 'not container and not package and not codex_jail'`. Tests marked
+`container` need a Docker daemon (each container-marked module also carries a
+daemon probe that skips with a named reason), `package` rows need a packaging
+artifact plain CI does not build, and `codex_jail` drives the developer's own
+`codex` binary. Tests marked `live` require provider CLIs and real API access;
+they are not in that default, so CI passes `-m "not live and not container and
+not package and not codex_jail"` itself.
+
+To find the tests for the module you are editing, run
+`make test-for MODULE=utils/foo.py` (or read
+[`skills/multi-llm/tests/MODULE_TESTS.md`](../skills/multi-llm/tests/MODULE_TESTS.md)).
+It is an advisory import map and never replaces the CI selection; see
+[`skills/multi-llm/tests/README.md`](../skills/multi-llm/tests/README.md).
 
 ### CI trial: parallel suite
 

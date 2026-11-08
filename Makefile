@@ -41,6 +41,17 @@ PYTEST := uv run --project skills/multi-llm -- pytest skills/multi-llm/tests
 # by `e2e-container-latest-host` before its image is built and after its pytest.
 LANE_GUARD := uv run --project skills/multi-llm -- python $(CONTAINER_DIR)/lane_guard.py
 
+# --- Which tests cover a module (skills/multi-llm/tests/README.md) ----------- #
+# `make test-for MODULE=utils/foo.py [TOP=n]` prints the test files that import the
+# module (best name match first), then runs only those at -n 4 with the ordinary CI
+# marker filter. ADVISORY: the map is a static import scan and misses indirect
+# coverage, so it picks a focused first run and never replaces the CI command.
+# `make tests-map` regenerates the committed tests/MODULE_TESTS.md that
+# tests/test_module_tests_map.py keeps fresh.
+TESTS_FOR := uv run --project skills/multi-llm -- python skills/multi-llm/tests/tools/tests_for.py
+TESTS_FOR_TOP := $(if $(TOP),--top $(TOP),)
+TESTS_FOR_MARKERS := not live and not container and not package and not codex_jail
+
 # --- The opencode npm package (packaging/opencode/) -------------------------- #
 # A different layer of npm from the container's pinned CLIs above: those are
 # `npm ci`-installed INTO the image, this one is a package we publish. They share
@@ -217,9 +228,15 @@ export MLLM_E2E_MATRIX_TIMEOUT_S
         codex-gate-derived codex-publish \
         claude-regen claude-package claude-check-release claude-check-bump \
         claude-package-check-ci claude-package-container \
-        bump-version claude-publish claude-hook-install claude-hook-uninstall
+        bump-version claude-publish claude-hook-install claude-hook-uninstall \
+        test-for tests-map
 
 help:
+	@echo "Tests"
+	@echo
+	@echo "  make test-for MODULE=utils/foo.py [TOP=n]  list the tests that import a module, then run only those (-n 4)"
+	@echo "  make tests-map                    regenerate skills/multi-llm/tests/MODULE_TESTS.md"
+	@echo
 	@echo "Containerized E2E harness (see $(CONTAINER_DIR)/README.md)"
 	@echo
 	@echo "  make e2e-container                 pinned build; provider lane (no secrets, --network none)"
@@ -1197,3 +1214,16 @@ codex-publish:
 	git tag -a "$$tag" -m "codex plugin $$version" && \
 	git push origin HEAD "$$tag" && \
 	echo "codex-publish: pushed $$tag. The tag publishes nothing; the promote job moves 'release'."
+
+# --- Tests: pick the files for a module ----------------------------------------- #
+
+test-for:
+	@test -n "$(MODULE)" || { echo "usage: make test-for MODULE=utils/foo.py [TOP=n]" >&2; exit 2; }
+	@$(TESTS_FOR) $(TESTS_FOR_TOP) "$(MODULE)"
+	@files=$$($(TESTS_FOR) --paths $(TESTS_FOR_TOP) "$(MODULE)"); \
+	  if [ -z "$$files" ]; then echo "no test file imports $(MODULE); nothing to run" >&2; exit 0; fi; \
+	  uv run --project skills/multi-llm -- pytest $$files -n 4 --dist loadfile \
+	    -m "$(TESTS_FOR_MARKERS)" -q -p no:cacheprovider
+
+tests-map:
+	@$(TESTS_FOR) --write

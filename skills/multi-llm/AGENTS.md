@@ -20,6 +20,9 @@ Run these from the **repository root**. Use `uv run --project`, not
 # Focused test file
 uv run --project skills/multi-llm -- pytest skills/multi-llm/tests/test_filtering.py -v
 
+# Tests that import a module (advisory; see tests/MODULE_TESTS.md), run at -n 4
+make test-for MODULE=utils/status_file.py
+
 # Ordinary CI suite, excluding explicitly provisioned integrations
 uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -m "not live and not container and not package and not codex_jail"
 
