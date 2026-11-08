@@ -3,14 +3,16 @@
 Every report page (flat, PR, consolidated) gets ``marked`` and ``DOMPurify``
 inlined from ``templates/vendor/`` at generation, so a page loads no script
 from the network and reads the same offline. Model and plan text goes through
-one ``renderMarkdown`` (identical in the three templates): marked renders it,
+one ``renderMarkdown``, in the script the three pages share
+(``templates/shared/report_core.js``, inlined into each): marked renders it,
 DOMPurify keeps the markdown vocabulary, and without both libraries the text is
 escaped. See docs/development.md#vendored-report-scripts.
 
-The Node checks run the real vendored ``marked`` and the templates' own
+The Node checks run the real vendored ``marked`` and the pages' own
 ``renderMarkdown``; DOMPurify needs a DOM that Node lacks, so they check that
 its output is what the page returns and what profile it is given, not what it
-strips. They skip without ``node``; the static checks still run.
+strips (tests/test_report_templates_js.py runs the real one under a DOM).
+They skip without ``node``; the static checks still run.
 
 Every other field (status, importance, model, id, label, path, reference) goes
 through the block's escapers or badge allow-lists. A static scan holds each
@@ -37,9 +39,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import html_report_generator as hrg  # noqa: E402
 from utils.consolidation import generate_consolidated_html  # noqa: E402
 from utils.html_report_generator import (  # noqa: E402
+    SHARED_ASSETS,
     SLOT_VENDOR_SCRIPTS,
     VENDORED_SCRIPTS,
     generate_html_report,
+    inline_shared_slots,
     regenerate_report_with_human_decisions,
 )
 
@@ -48,6 +52,7 @@ TEMPLATES = SKILL / "templates"
 VENDOR = TEMPLATES / "vendor"
 TEMPLATE_NAMES = ("report_template.html", "pr_report_template.html",
                   "consolidated_report_template.html")
+CORE_JS = TEMPLATES / "shared" / "report_core.js"
 NODE = shutil.which("node")
 
 #: A description a model controls: an event handler, a script URL, a script
@@ -223,6 +228,8 @@ class TestThePagesLoadNoScriptFromTheNetwork:
             assert unpinned_external_scripts(text) == [], name
             assert not [a for t, a in parse(text).tags if t == "script" and "src" in a], name
             assert text.count(SLOT_VENDOR_SCRIPTS) == 1, name
+            for slot in SHARED_ASSETS:
+                assert text.count(slot) == 1, (name, slot)
 
     def test_a_generated_page_has_no_unpinned_or_external_script(self, page):
         assert unpinned_external_scripts(page) == []
@@ -235,10 +242,11 @@ class TestThePagesLoadNoScriptFromTheNetwork:
         scripts = parse(page).scripts
         vendored = [a.get("data-vendored") for a, _ in scripts if "data-vendored" in a]
         assert vendored == [f"{pkg}@{ver}" for _f, pkg, ver, _h in VENDORED_SCRIPTS]
-        # The page's own script (the one defining renderMarkdown) comes last,
-        # so both globals exist when it starts.
-        last_attrs, last_text = scripts[-1]
-        assert last_attrs == {} and "function renderMarkdown(" in last_text
+        # Then the shared script (the one defining renderMarkdown) and the
+        # page's own, last, so both globals exist when either starts.
+        (shared_attrs, shared_text), (last_attrs, _last_text) = scripts[-2:]
+        assert shared_attrs == {"data-shared": "report_core.js"}
+        assert "function renderMarkdown(" in shared_text and last_attrs == {}
         # No wait on a library event: init runs at once, also offline.
         assert "marked-ready" not in page and "waitForDeps" not in page
 
@@ -319,7 +327,7 @@ class TestAFileOffItsPinIsNotInlined:
 # One renderer, in every template
 # ---------------------------------------------------------------------------
 
-_BLOCK = re.compile(r"    // BEGIN SAFE MARKDOWN.*?// END SAFE MARKDOWN\n", re.S)
+_BLOCK = re.compile(r"^// BEGIN SAFE MARKDOWN.*?// END SAFE MARKDOWN\n", re.S | re.M)
 
 
 def safe_markdown_block(text: str) -> str:
@@ -330,22 +338,25 @@ def safe_markdown_block(text: str) -> str:
 
 class TestOneRendererEverywhere:
 
-    def test_the_block_is_identical_in_the_three_templates(self):
-        blocks = {name: safe_markdown_block((TEMPLATES / name).read_text(encoding="utf-8"))
-                  for name in TEMPLATE_NAMES}
-        assert len(set(blocks.values())) == 1, list(blocks)
-
     @pytest.mark.parametrize("name", TEMPLATE_NAMES)
+    def test_each_page_gets_the_one_block(self, name):
+        """The block lives in the shared script, which every page inlines."""
+        text = (TEMPLATES / name).read_text(encoding="utf-8")
+        assert "SAFE MARKDOWN" not in text
+        assert safe_markdown_block(inline_shared_slots(text)) == safe_markdown_block(
+            CORE_JS.read_text(encoding="utf-8"))
+
+    @pytest.mark.parametrize("name", TEMPLATE_NAMES + ("shared/report_core.js",))
     def test_markdown_is_parsed_only_inside_it(self, name):
         text = (TEMPLATES / name).read_text(encoding="utf-8")
         outside = _BLOCK.sub("", text)
-        assert text.count("function renderMarkdown(") == 1
+        assert text.count("function renderMarkdown(") == (1 if name.startswith("shared/") else 0)
         assert "function renderMarkdown(" not in outside
         for raw_call in ("marked.parse", "markedParse", "marked(", "DOMPurify"):
             assert raw_call not in outside, (name, raw_call)
 
     def test_the_block_sanitises_what_marked_returns(self):
-        block = safe_markdown_block((TEMPLATES / TEMPLATE_NAMES[0]).read_text(encoding="utf-8"))
+        block = safe_markdown_block(CORE_JS.read_text(encoding="utf-8"))
         assert "DOMPurify.sanitize(marked.parse(String(text), { breaks: true })," in block
         assert "DOMPurify.isSupported === true" in block
         assert "escapeHtml(text)" in block
@@ -387,11 +398,11 @@ const fs = require('fs');
 
 def run_renderer(template: str, body: str) -> Any:
     """Load the vendored libraries as classic scripts (globals, as a browser
-    does) and the template's SAFE MARKDOWN block (which holds the escapers),
-    then run *body*, which prints one JSON value."""
+    does) and the SAFE MARKDOWN block (which holds the escapers) as the
+    template inlines it, then run *body*, which prints one JSON value."""
     if NODE is None:
         pytest.skip("node is not on PATH; the static checks above still ran")
-    text = (TEMPLATES / template).read_text(encoding="utf-8")
+    text = inline_shared_slots((TEMPLATES / template).read_text(encoding="utf-8"))
     page_js = safe_markdown_block(text)
     files = {e[1]: str(VENDOR / e[0]) for e in VENDORED_SCRIPTS}
     script = (
@@ -545,11 +556,11 @@ class TestEveryAttributeValueIsEscaped:
     concatenated raw into attributes and class names) and any new one fail
     here: each value takes an escaper or a fixed list."""
 
-    @pytest.mark.parametrize("name", TEMPLATE_NAMES)
+    @pytest.mark.parametrize("name", TEMPLATE_NAMES + ("shared/report_core.js",))
     def test_no_raw_value_in_an_attribute(self, name):
         source = (TEMPLATES / name).read_text(encoding="utf-8")
         sites = open_attribute_values(source)
-        assert len(sites) > 20, "the scan found no attribute sites: the pattern broke"
+        assert len(sites) > 10, "the scan found no attribute sites: the pattern broke"
         raw = [(line, expr) for line, expr, _js in sites
                if not _ATTR_SAFE.match(expr)
                and re.match(r"[\w$]+", expr).group(0) not in _ATTR_LITERAL_NAMES]
@@ -569,12 +580,16 @@ class TestEveryAttributeValueIsEscaped:
 
     @pytest.mark.parametrize("name", TEMPLATE_NAMES)
     def test_one_escaper_lives_in_the_block(self, name):
+        """Each page's escapers are the shared block's: the template defines
+        none of its own, and the page it generates has exactly one of each."""
         text = (TEMPLATES / name).read_text(encoding="utf-8")
-        outside = _BLOCK.sub("", text)
+        page = inline_shared_slots(text)
+        outside = _BLOCK.sub("", CORE_JS.read_text(encoding="utf-8"))
         for fn in ("escapeHtml", "escapeAttr", "escapeJsAttr", "getImportanceBadgeClass",
                    "getValidationBadgeClass"):
-            assert text.count(f"function {fn}(") == 1, (name, fn)
-            assert f"function {fn}(" not in outside, (name, fn)
+            assert f"function {fn}(" not in text, (name, fn)
+            assert page.count(f"function {fn}(") == 1, (name, fn)
+            assert f"function {fn}(" not in outside, fn
 
 
 # ---------------------------------------------------------------------------

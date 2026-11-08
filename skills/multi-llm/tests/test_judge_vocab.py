@@ -239,9 +239,10 @@ class TestWritersUseOnlyTheNewNames:
         """The one legacy literal a template may hold is in its localStorage
         migration, which turns an old saved selection into the new value."""
         for name in ("report_template.html", "pr_report_template.html",
-                     "consolidated_report_template.html"):
+                     "consolidated_report_template.html", "shared/report_core.js"):
             text = (SKILL_ROOT / "templates" / name).read_text(encoding="utf-8")
-            assert "value=\"judge_decide\"" in text, name
+            if not name.startswith("shared/"):
+                assert "value=\"judge_decide\"" in text, name
             for line in text.splitlines():
                 if LEGACY_TOKEN.search(line):
                     assert ("overrides[k] === 'claude_decide'" in line

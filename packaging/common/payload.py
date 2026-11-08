@@ -99,6 +99,8 @@ _BLOCK_END = "--- the rig that drives it ---"
 #: * ``templates/config/providers.override.yaml`` — the ``--init`` contract;
 #: * ``templates/consolidated_report_template.html`` — loaded by
 #:   ``utils/consolidation.py``;
+#: * ``templates/shared/report_core.{js,css}`` — inlined into every HTML
+#:   report; absent, report generation writes an error page instead;
 #: * ``references/`` — cited by ``instructions/*.md`` at run time;
 #: * ``assets/icons/`` — inlined by the HTML report.
 #: * ``assets/omp/overlay.yml`` — passed to ``--config`` on every omp
@@ -127,6 +129,8 @@ REQUIRED_INVENTORY: Tuple[str, ...] = (
     "hosts/codex/shim.md.tmpl",
     "templates/config/providers.override.yaml",
     "templates/consolidated_report_template.html",
+    "templates/shared/report_core.js",
+    "templates/shared/report_core.css",
     "assets/omp/overlay.yml",
     "utils/landlock_exec.py",
 )

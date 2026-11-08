@@ -156,8 +156,9 @@ into every page at the `<!--MLLM:vendor-scripts-->` slot. The rules:
   `VENDORED_SCRIPTS` pins each file's sha256. The generator inlines a file only when its
   digest matches. When one does not match, or is missing, the page escapes model text
   instead of rendering it.
-- **One renderer.** Each template carries the same `BEGIN SAFE MARKDOWN` block, and
-  nothing outside it calls marked or DOMPurify. DOMPurify is given a markdown-only
+- **One renderer.** The `BEGIN SAFE MARKDOWN` block lives once, in the
+  [shared report code](#shared-report-code) every page inlines, and nothing outside it
+  calls marked or DOMPurify. DOMPurify is given a markdown-only
   profile: no `script`, `style` or `img` element, no form control, and no `id`, `class`,
   `style` or `data-*` attribute. That matters because the pages' own export code queries checkboxes by
   attribute. Without both libraries, or when DOMPurify reports `isSupported` false (it
@@ -168,8 +169,9 @@ into every page at the `<!--MLLM:vendor-scripts-->` slot. The rules:
   (`escapeAttr` is the same function, named for attribute sites); a value inside an
   inline handler's JS string takes `escapeJsAttr`. No class name is built from data:
   `getValidationBadgeClass` and `getImportanceBadgeClass` map onto a fixed list. The
-  tests scan every template for a raw value in an attribute and load hostile metadata
-  into all three pages in headless Chrome. A reviewer's identity is the slot that ran it:
+  tests scan every template and the shared script for a raw value in an attribute, load
+  hostile metadata into all three pages in headless Chrome, and run the real sanitiser
+  there on hostile markdown (`tests/test_report_templates_js.py`). A reviewer's identity is the slot that ran it:
   code-review aggregation stamps `source_model` from the slot, whatever the reply claims.
 
 To update a library, choose a release at least two weeks old. Download its tarball from
@@ -179,6 +181,44 @@ and update the version and sha256 in `VENDORED_SCRIPTS`. The current pins are ma
 18.1.1 (tarball `sha512-zEGgrtUG8crk+TrMacJSVABU4DYDDkS8uqgU3ohrn/2fW9C2AEfUrO3m6IhpIpQpl7YcVpiXXC9cSMWDANT3dg==`)
 and DOMPurify 3.4.17 (`sha512-B/pSlYVHQ58kqISD/yDjuJ1yfzI34m1gF4lAod2bwSRhiN4K5Cl3H8Af7hqB2PmTL911tdEudnnXn5FnhRoz0w==`).
 A changed file changes what every package ships, so it needs a release bump.
+
+---
+
+## Shared report code
+
+The three report pages (`report.html` in the flat and PR styles, and
+`consolidated-report.html`) share their escaping, markdown, badges, notices, selection
+storage and export, card order, commit-review badges and scope tags. That code lives once,
+in `skills/multi-llm/templates/shared/report_core.js`, with the styles they share in
+`report_core.css`. `utils/html_report_generator.py` inlines both into every page:
+
+- **Where.** The style goes at `<!--MLLM:report-core-style-->`, before the page's own
+  `<style>`, so a page's rule wins a tie. The script goes at
+  `<!--MLLM:report-core-script-->`, after the vendored libraries and before the page's
+  own `<script>`. Each is an element of its own, marked `data-shared`.
+- **When.** These slots and the vendored scripts are filled first, then the slots derived
+  from the data, then the data itself. Text in the data is never searched for a slot.
+- **What may not be in them.** A missing file is a missing template: generation writes
+  the error page. A file holding `<script`, `</script`, `</style`, `<!--` or the data
+  placeholder is refused.
+- **What a page supplies.** The shared script only declares functions and constants;
+  nothing in it runs at load. It reads the page's `reportData` and three page hooks:
+  `selections` (the fields the page keeps), `getStorageKey()` and `selectionsFile(now)`
+  (the name and content its Export saves). That is how one `exportSelections` serves
+  report.html, which saves the whole selection as `user_selections.json`, and the
+  consolidated page, which saves only its groups' decisions as
+  `consolidated_user_selections.json`.
+- **What stays per page.** A function a page needs differently stays in its template:
+  the filters, the renderers and `init`, the commit-review header and filter, the header
+  panel, and each page's `:root` palette and component sizes. No page may declare a
+  shared function again, because that would silently replace it for that page.
+
+`tests/test_report_templates_js.py` generates every page kind and runs its code. Under
+Node it parses every inline script and checks no page redefines a shared function. It
+runs the escapers on hostile text, and a selection through export, reload and the Python
+reader the apply phase uses. In headless Chrome it runs the real marked and DOMPurify on
+hostile markdown. The Node checks skip without `node`, and the browser checks without
+Chrome.
 
 ---
 

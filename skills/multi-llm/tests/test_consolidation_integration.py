@@ -1109,8 +1109,11 @@ class TestTheConsolidatedPageNamesAFailedReviewer:
         assert "requestedModels" not in data
 
     def test_the_template_reads_failed_models_as_an_object(self):
-        """Static: the tests never run the template's JavaScript."""
-        template = _TEMPLATE.read_text(encoding="utf-8")
+        """Static, on the page's code: the template with its shared script
+        (templates/shared/report_core.js) inlined."""
+        from utils.html_report_generator import inline_shared_slots
+
+        template = inline_shared_slots(_TEMPLATE.read_text(encoding="utf-8"))
         assert "failedModels.join" not in template
         assert "failedModels.length" not in template
         assert "Object.keys(failedModels)" in template

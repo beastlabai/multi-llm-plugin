@@ -418,8 +418,9 @@ The HTML payloads persist each `scope` entry (classification, authority state, b
 digest, selected remedy, decision) and a `scopePolicy` block; regeneration recomputes only the
 decision for the recorded effective policy and deferrals (`scope_report.replay_decision`, the one
 gate), keeping the classification, and refreshes a report whose policy moved even with no decision
-recorded (`scope_regeneration_needed`). The three templates carry one identical JS block between
-`BEGIN SCOPE TAGS`/`END SCOPE TAGS`; an edited description in the page marks its tags stale, and
+recorded (`scope_regeneration_needed`). The three pages share one JS block between
+`BEGIN SCOPE TAGS`/`END SCOPE TAGS`, in `templates/shared/report_core.js`
+([shared report code](../development.md#shared-report-code)); an edited description in the page marks its tags stale, and
 scope- or policy-like keys in a stored or imported selection are dropped (`report_parser` drops them
 from `user_selections.json` too). Tests: `tests/test_scope_report_tags.py` (runs the templates under
 Node; skips without it).

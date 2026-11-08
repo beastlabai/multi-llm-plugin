@@ -166,7 +166,8 @@ def build_model_metadata(
 ) -> Dict[str, Dict[str, Any]]:
     """``modelMetadata``: each model's badge data, for every report page.
 
-    The badge text is ``metadata.model`` in every template, so what it says is
+    The badge text is ``metadata.model`` on every page (``getModelBadgeHtml``,
+    templates/shared/report_core.js), so what it says is
     settled here once, from *served* (``models_served``) and *usage*:
 
     - a fallback model served the turn: ``<model> (fallback: <served>)``,

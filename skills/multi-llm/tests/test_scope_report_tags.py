@@ -836,9 +836,12 @@ console.error = function () {}; console.warn = function () {};
 
 
 def _template_script(page: str) -> str:
-    scripts = re.findall(r"<script>(.*?)</script>", page, re.S)
-    assert scripts, "no inline script"
-    return scripts[-1]
+    """The page's own code, in page order: the shared script
+    (``templates/shared/report_core.js``) and the template's, without the
+    vendored libraries."""
+    scripts = re.findall(r'<script(?: data-shared="report_core\.js")?>(.*?)</script>', page, re.S)
+    assert len(scripts) == 2, "expected the shared script and the page's"
+    return "\n;\n".join(scripts)
 
 
 def run_page(page: str, body: str, store: Optional[Dict[str, str]] = None) -> Any:
@@ -1102,18 +1105,18 @@ class TestConsolidatedTemplate:
         assert "scope_policy" not in out["selections"]
 
 
-def test_the_three_templates_carry_the_same_scope_block():
-    """One block, three copies: the badge words cannot drift between pages."""
-    copies = set()
+def test_the_three_pages_share_one_scope_block():
+    """One block, in the shared script every page inlines: the badge words
+    cannot drift between pages, and they are the generator's."""
+    core = (SKILL_ROOT / "templates" / "shared" / "report_core.js").read_text(encoding="utf-8")
+    assert core.count("BEGIN SCOPE TAGS") == 1 and core.count("// END SCOPE TAGS") == 1
+    for label in sp.LABELS.values():
+        assert f"'{label}'" in core
+    assert f"'{sp.DEFERRED_OUTCOME}'" in core
     for name in ("report_template.html", "pr_report_template.html", "consolidated_report_template.html"):
         text = (SKILL_ROOT / "templates" / name).read_text(encoding="utf-8")
-        start = text.index("    // ================================================================\n"
-                           "    // Scope tags (plans/scope-policy-and-report-tags.md §6). BEGIN SCOPE TAGS")
-        copies.add(text[start:text.index("    // END SCOPE TAGS", start)])
-        for label in sp.LABELS.values():
-            assert f"'{label}'" in text
-        assert f"'{sp.DEFERRED_OUTCOME}'" in text
-    assert len(copies) == 1
+        assert "SCOPE TAGS" not in text and "function scope" not in text, name
+        assert text.count("<!--MLLM:report-core-script-->") == 1, name
 
 
 class TestEveryPrView:
@@ -1167,10 +1170,9 @@ def _luminance(hex_colour: str) -> float:
     return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
 
 
-@pytest.mark.parametrize("name", ["report_template.html", "pr_report_template.html",
-                                  "consolidated_report_template.html"])
-def test_scope_badges_have_accessible_contrast_in_both_schemes(name):
-    text = (SKILL_ROOT / "templates" / name).read_text(encoding="utf-8")
+def test_scope_badges_have_accessible_contrast_in_both_schemes():
+    """The badge colours live once, in the shared style every page inlines."""
+    text = (SKILL_ROOT / "templates" / "shared" / "report_core.css").read_text(encoding="utf-8")
     rules = re.findall(r"\.(scope-(?:in|extension|unclear|deferred)) \{ background: (#[0-9a-f]{6}); "
                        r"color: (#[0-9a-f]{6}); \}", text)
     assert len(rules) == 8, rules  # four classes, light and dark

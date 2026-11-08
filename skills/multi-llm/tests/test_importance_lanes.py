@@ -263,8 +263,11 @@ class TestTemplatesUseTheGeneratorsImportance:
                  "consolidated_report_template.html")
 
     def _template(self, name):
+        """The template with the shared code it inlines (templates/shared/)."""
+        from utils.html_report_generator import inline_shared_slots
+
         root = Path(__file__).parent.parent / "templates"
-        return (root / name).read_text(encoding="utf-8")
+        return inline_shared_slots((root / name).read_text(encoding="utf-8"))
 
     @pytest.mark.parametrize("name", TEMPLATES)
     def test_no_template_derives_a_groups_importance(self, name):
@@ -286,7 +289,9 @@ class TestTemplatesUseTheGeneratorsImportance:
 
         config = build_sort_config()
         text = self._template(name)
-        for literal in re.findall(r"importanceOrder\s*=\s*(\{[^}]*\})", text):
+        literals = re.findall(r"importanceOrder\s*[=:]\s*(\{[^}]*\})", text)
+        assert literals, name  # the shared card order's fallback, on every page
+        for literal in literals:
             assert json.loads(literal) == config["importanceOrder"]
-        for number in re.findall(r"unknownImportanceRank\s*(?:=|\|\|)\s*(\d+)", text):
+        for number in re.findall(r"unknownImportanceRank\s*(?:=|:|\|\|)\s*(\d+)", text):
             assert int(number) == config["unknownImportanceRank"]

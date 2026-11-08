@@ -1789,14 +1789,13 @@ def generate_html_report(
         head_ref=head_ref, repo_root=repo_root, file_labels=file_labels,
         scope_state=scope_state,
     ))
-    try:
-        template = load_report_template(template_style)
-    except FileNotFoundError as exc:
-        return _missing_template_page(exc.filename)
-
     # Each group once: the views name theirs by index (utils/report_view.py).
     payload = compact_views(view)
-    html = embed_report_data(payload, template)
+    try:
+        html = embed_report_data(payload, load_report_template(template_style))
+    except FileNotFoundError as exc:
+        # The template or a file it inlines (templates/shared/).
+        return _missing_template_page(exc.filename)
 
     # Persist the assembled report_data so the apply phase can overlay human
     # decisions onto it and re-embed without reconstructing runtime inputs
@@ -1832,8 +1831,8 @@ SLOT_EXPORT_HELP = "<!--MLLM:export-help-->"
 
 #: Where every report page (flat, PR and consolidated) receives the vendored
 #: markdown libraries, inlined: a report is one self-contained file that loads
-#: nothing from the network. Without them, each template's ``renderMarkdown``
-#: escapes model text instead of rendering it.
+#: nothing from the network. Without them, the pages' ``renderMarkdown`` (in
+#: ``templates/shared/report_core.js``) escapes model text instead of rendering it.
 SLOT_VENDOR_SCRIPTS = "<!--MLLM:vendor-scripts-->"
 
 _VENDOR_DIR = Path(__file__).parent.parent / "templates" / "vendor"
@@ -1891,6 +1890,60 @@ def vendor_scripts_html() -> str:
     return _vendor_scripts_cache
 
 
+#: Where every report page receives the code the three pages share, inlined
+#: from ``templates/shared/``: its styles before the page's own ``<style>``
+#: (so the page's rules win a tie), its script after the vendored libraries
+#: and before the page's own ``<script>``. See
+#: docs/development.md#shared-report-code.
+SLOT_CORE_STYLE = "<!--MLLM:report-core-style-->"
+SLOT_CORE_SCRIPT = "<!--MLLM:report-core-script-->"
+
+_SHARED_DIR = Path(__file__).parent.parent / "templates" / "shared"
+
+#: ``slot: (file under templates/shared/, element)``.
+SHARED_ASSETS: Dict[str, Tuple[str, str]] = {
+    SLOT_CORE_STYLE: ("report_core.css", "style"),
+    SLOT_CORE_SCRIPT: ("report_core.js", "script"),
+}
+
+#: What a shared file may not hold: a tag the HTML tokenizer would act on
+#: inside its element (``</script``, ``<script``, ``</style``), a comment
+#: opener (``<!--``, which every slot starts with), or the data placeholder.
+_SHARED_FORBIDDEN = re.compile(r"</?script|</style|<!--|REPORT_DATA_PLACEHOLDER", re.IGNORECASE)
+
+
+def shared_asset_html(slot: str) -> str:
+    """The inline element for one of :data:`SHARED_ASSETS`' slots.
+
+    The pages cannot run without it, so a missing file is a
+    ``FileNotFoundError`` (``filename`` set), as a missing template is, and a
+    file holding what :data:`_SHARED_FORBIDDEN` names is a ``ValueError``."""
+    filename, element = SHARED_ASSETS[slot]
+    path = _SHARED_DIR / filename
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        missing = FileNotFoundError(f"Report template file not found: {path}")
+        missing.filename = str(path)
+        raise missing from None
+    found = _SHARED_FORBIDDEN.search(text)
+    if found:
+        raise ValueError(f"{path} cannot be inlined: it holds {found.group(0)!r}")
+    return f'<{element} data-shared="{filename}">\n{text}</{element}>'
+
+
+def inline_shared_slots(template: str) -> str:
+    """*template* with the slots that take no report data filled: the shared
+    style and script (:func:`shared_asset_html`) and the vendored libraries
+    (:func:`vendor_scripts_html`). The text a page's script sees, data aside."""
+    for slot in SHARED_ASSETS:
+        if slot in template:
+            template = template.replace(slot, shared_asset_html(slot))
+    if SLOT_VENDOR_SCRIPTS in template:
+        template = template.replace(SLOT_VENDOR_SCRIPTS, vendor_scripts_html())
+    return template
+
+
 def commit_range_report_data(
     commit_review: Mapping[str, Any], groups_data: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
@@ -1930,8 +1983,10 @@ def _join_commands(commands: Sequence[str]) -> str:
 
 
 def _fill_template_slots(template: str, report_data: Mapping[str, Any]) -> str:
-    """Fill the label and export-help slots from *report_data*, and the
-    vendored scripts (:func:`vendor_scripts_html`).
+    """Fill the slots that take no data (:func:`inline_shared_slots`: the
+    shared style and script, the vendored libraries), then the label and
+    export-help slots from *report_data*. The fixed text goes in first, so no
+    text derived from the data is ever searched for a slot.
 
     A plan's review gets exactly the text the templates used to carry
     (``Plan:``, the three apply commands, no PR-template help); a commit
@@ -1939,6 +1994,7 @@ def _fill_template_slots(template: str, report_data: Mapping[str, Any]) -> str:
     the generator stored, so a regenerated report says the same."""
     import html as _html
 
+    template = inline_shared_slots(template)
     commit = report_data.get(COMMIT_RANGE_KEY)
     commit = commit if isinstance(commit, Mapping) else None
     label = (commit or {}).get("documentLabel") or DEFAULT_DOCUMENT_LABEL
@@ -1956,7 +2012,6 @@ def _fill_template_slots(template: str, report_data: Mapping[str, Any]) -> str:
         .replace(SLOT_DOCUMENT_LABEL, _html.escape(f"{label}:", quote=False))
         .replace(SLOT_APPLY_COMMANDS, joined)
         .replace(SLOT_EXPORT_HELP, help_html)
-        .replace(SLOT_VENDOR_SCRIPTS, vendor_scripts_html())
     )
 
 
@@ -1994,9 +2049,9 @@ def embed_report_data(report_data: Mapping[str, Any], template: str) -> str:
 
     Shared by initial generation and post-apply regeneration so every path
     escapes (:func:`script_json`) and injects the data identically. The
-    template's slots (:func:`_fill_template_slots`, the vendored scripts
-    included) are filled first, before any data is in it, so text inside the
-    data can never be taken for a slot. A template without the placeholder is
+    template's slots (:func:`_fill_template_slots`: the shared code, the
+    vendored scripts, the labels) are filled first, before any data is in it,
+    so text inside the data can never be taken for a slot. A template without the placeholder is
     an error (``ValueError``) rather than a page with no data.
     """
     template = _fill_template_slots(template, report_data)
