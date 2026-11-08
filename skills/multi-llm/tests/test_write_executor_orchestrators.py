@@ -1932,10 +1932,9 @@ class TestImplementsApplySuggestionsGateReadsEveryValidationShape:
         state.mark_phase_completed("generate-tasks")
         state.save()
         self._review_plan_with_valid_groups(repo)
-        with pytest.raises(SystemExit) as exc:
-            implement_orchestrator.main(["--plan-file", str(repo.plan), "--yes"])
+        code = implement_orchestrator.main(["--plan-file", str(repo.plan), "--yes"])
         out = capsys.readouterr().out
-        assert exc.value.code == 3, out
+        assert code == 3, out
         assert "PREREQUISITE_UNMET" in out
         assert "1 valid suggestions not yet applied" in out
 

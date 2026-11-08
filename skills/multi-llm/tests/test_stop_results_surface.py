@@ -513,7 +513,7 @@ Open the page and race.
             "--yes", "--resume", "--human-task", "T005=done",
         ]) == 0
         out = capsys.readouterr().out
-        steps = out.split("Claude Code should now:", 1)[1]
+        steps = out.split("The driving agent should now:", 1)[1]
         assert "--mark-completed" not in steps
         assert "generate the implementation summary" not in steps
         assert "Read the output JSON file" not in steps

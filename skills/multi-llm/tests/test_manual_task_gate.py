@@ -429,7 +429,7 @@ class TestTheNativeLegStops:
         # Never the generic "go on to step 7" of an emit with nothing left,
         # and no summary or second copy of the resume asked for.
         assert "Nothing to dispatch: every task is done" not in out
-        assert "Claude Code should now:" not in out
+        assert "The driving agent should now:" not in out
         assert "[MANUAL_TASK_NOTE]" not in out
         assert "Manual Tasks (Deferred) section" not in out
         assert "Tasks to dispatch:" not in out  # no `util metrics start` asked

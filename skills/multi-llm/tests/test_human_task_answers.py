@@ -368,7 +368,7 @@ class TestAResumeKeepsEverySkippedTask:
         assert [t["id"] for t in result[0]["tasks"]] == ["T006"]
 
     def test_a_recorded_skip_still_applies_once_the_task_is_skipped(self, tmp_path):
-        """``_applicable_task_decisions`` keeps a ``skip`` for a task whose
+        """``_applicable_from_state`` keeps a ``skip`` for a task whose
         state says ``skipped`` (it is materialized again now) and drops a
         ``done`` once the task is no longer ``failed``."""
         plan = tmp_path / "plans" / "p.md"
@@ -378,7 +378,7 @@ class TestAResumeKeepsEverySkippedTask:
         state.set("human_task_decisions", {"T002": "skip", "T003": "done", "T005": "done"})
         state.update_task_status("T002", "skipped", reason="skipped — you answered")
         state.update_task_status("T003", "completed", reason="accepted —")
-        applicable = implement_orchestrator._applicable_task_decisions(
+        applicable = implement_orchestrator._applicable_from_state(
             state, ["T005"], {},
         )
         assert applicable == {"T002": "skip", "T005": "done"}
