@@ -102,6 +102,8 @@ NOT_REGISTERED: Dict[str, str] = {
         "a running phase's closing lines, keyed by its directory and popped "
         "at its close",
     "utils.status_file._HELD_MUTEXES": "interprocess mutexes this process holds",
+    "utils.validation._VIEWS_LOCKS":
+        "the per-phase host-views mutexes this process holds (re-entrant per thread)",
     "utils.write_safety._HELD_COPY_CALLS":
         "the lazily bound Windows held-copy API, fixed for the process",
 }
