@@ -7,8 +7,8 @@ emitting sources and the citing instructions into the registry page, and this
 module holds the page and the join to account:
 
 1. the committed page is a fresh render;
-2. every marker ``SKILL.md``, ``instructions/`` or ``references/`` cites is
-   emitted by a source (a renamed marker fails here);
+2. every marker ``SKILL.md``, a host shim template, ``instructions/`` or
+   ``references/`` cites is emitted by a source (a renamed marker fails here);
 3. every emitted marker is cited by one of those documents or is on the
    ``NOT_FOR_HOST`` list with a reason, so a *new* marker forces a decision;
 4. no printed marker is built from upper-case text and a run-time value, so
@@ -86,7 +86,7 @@ class TestEveryCitedMarkerIsEmitted:
         assert len(cited) >= 80 and len(emitted) >= 150, (len(cited), len(emitted))
         missing = {m: files for m, files in cited.items() if m not in emitted}
         assert not missing, (
-            "markers cited by SKILL.md, instructions/ or references/ that no source "
+            "markers cited by SKILL.md, a shim template, instructions/ or references/ that no source "
             "prints (a marker was renamed or removed without its citations; hosts and "
             f"the opencode/codex servers parse these strings): {missing}"
         )

@@ -60,7 +60,10 @@ except ImportError:  # pragma: no cover - direct script runs with utils/ on path
 #: case above did.
 #: 5: the OpenCode shim's load step gained ``--to-file`` and reads the core from
 #: the ``[CORE_FILE]`` path it prints. Another changed command form.
-SHIM_VERSION = 5
+#: 6: the Codex shim's load step gained ``--page`` and reads the core page by
+#: page, checking each ``[CORE_PAGE]`` header and ``[CORE_PAGE_END]`` line.
+#: Another changed command form.
+SHIM_VERSION = 6
 
 #: The key that identifies a file as ours. ``uninstall-host`` removes files by
 #: this block and **never** by filename, so a user's own `multi-llm.md` is safe.

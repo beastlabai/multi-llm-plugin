@@ -577,6 +577,9 @@ class TestShim:
             # on `utils/run_status.py`'s parser.
             "wait", "timeout", "view", "run-id", "phase", "question", "abort",
             "exit-zero",
+            # `util instructions`' paging flags (multi_llm._split_instructions_host),
+            # which the Codex shim's read step names in prose.
+            "page", "page-size",
         }
         for word in named - flags:
             assert mode_table.resolve(word) is not None, (

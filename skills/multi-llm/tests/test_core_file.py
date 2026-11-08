@@ -288,7 +288,7 @@ def test_the_banner_counts_a_host_truncation_note_as_an_incomplete_core():
         assert notice.endswith("=== the core begins on the next line ===\n")
 
 
-def test_an_unknown_option_names_both_options(repo, capsys):
+def test_an_unknown_option_names_every_option(repo, capsys):
     code, _body, err = _run(["review-plan", "--to-files"], capsys)
     assert code == 3
-    assert "`--host <id>` and `--to-file`" in err
+    assert "`--host <id>`, `--to-file`, `--page <i>` and `--page-size <bytes>`" in err

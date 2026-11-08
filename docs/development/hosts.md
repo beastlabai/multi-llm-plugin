@@ -143,7 +143,7 @@ manifest, whose one non-zero `${CLAUDE_SKILL_DIR}` row is `SKILL.md` — the Cla
 shim, where the host expands the variable at load time. Each verb is resolved to exactly one
 concrete mechanism *in the shim*; the matrix is never on an agent read path.
 
-**The read step comes in two forms, and the printed one never changes.** `util instructions <mode>`
+**The read step comes in three forms, and the printed one never changes.** `util instructions <mode>`
 prints a head banner, the rendered core and the `MULTI_LLM_CORE_END: <mode>` line (`CORE_END_MARKER`),
 then the `--host` verb section when asked. The two package routes read that stdout through a pipe:
 they check the end line and drop the banner by `TRUNCATION_BANNER_OPENING`, so it stays byte for byte.
@@ -165,12 +165,55 @@ file shim's host (1.19.5, read off the shipped binary on 2026-11-08) cuts a tool
 bytes or 2,000 lines, keeps the head and tells the model to hand the saved output to a subagent
 rather than read it. Four cores are over that (`apply-suggestions`, `apply-task-suggestions`,
 `apply-code-fixes`, `implement`), so both shims read the file, through line `<n>`, paging as their
-read tool asks. The Codex file shim keeps the printed form: codex has no file-read tool, and its
-shell output is cut in the middle (`…N tokens truncated…`), so a `cat` of the file loses the same
-middle until a measured paging rule exists. That cut keeps the end line, so the end-line check
-alone passes on a core that lost its middle; the banner therefore also counts a truncation or
-omission note from the host as an incomplete core, end line or not. A rule that gets the reader the
-whole core on that route is still owed, and the larger cores are exposed there today.
+read tool asks. The Codex file shim reads pages instead: codex has no file-read tool, and its shell
+keeps the head and the tail of an output over its budget and drops the middle (`…N tokens
+truncated…`), so a printed core, or a `cat` of the file, loses workflow steps while its end line
+survives. The printed banner therefore also counts a truncation or omission note from the host as an
+incomplete core, end line or not.
+
+**Paged delivery** (`--page <i>`, optionally `--page-size <bytes>`) prints one page of the text
+`--to-file` writes: the core, its end line and the `--host` section, placeholders substituted. A page
+opens with `[CORE_PAGE] mode=<m> page=<i>/<n> sha=<sha12> bytes=<b>` and closes with
+`[CORE_PAGE_END] mode=<m> page=<i>/<n> sha=<sha12>`; `sha` is the first 12 hex digits of the sha256
+of that whole text (the digest the core file is named by) and `bytes` the page's share of it. Pages
+split on line boundaries, packed greedily from the start, so every byte is on exactly one page and
+the pages' bodies joined are the `--to-file` text byte for byte; a line longer than the page size gets
+a page of its own. Page 1 carries, after its header, a banner that opens with
+`TRUNCATION_BANNER_OPENING` and replaces the printed banner, whose one-end-line test is the wrong
+test for a page; its room is the page size less the longest banner it could carry, so no page prints
+more than `--page-size` bytes between its two lines unless one line alone is longer. The completeness
+rule, stated in that banner and in the Codex shim's step 3:
+
+- fetch pages 1 to `<n>` with one page size, changing only `--page`;
+- each page must open with its header and close with its end line, and every one of those lines
+  carries the same `sha`;
+- a note from the host anywhere in a page's output that it truncated or omitted part of it makes the
+  page incomplete, both lines or not. The reader fetches again at half the size (the banner names
+  the number); a new size cuts the core afresh, so it starts over at page 1 and never combines pages
+  of two sizes. At `CORE_PAGE_SIZE_MIN` (2,000 bytes) it stops and tells the user instead.
+
+The composite cores (`full-workflow`, the `improve-*` cores and the commit modes) load each phase's
+core with the host-neutral `util instructions <phase>`, which carries no read form of its own, so
+the Codex shim says to load every core the paged way, those phase cores included.
+
+The default size, `CORE_PAGE_SIZE_DEFAULT`, is 16,000 bytes: about 4,000 tokens as codex counts them
+(4 bytes a token), 40% of the 10,000-token budget its models' `truncation_policy` and both its shell
+tools document (codex-cli 0.167.0; `hosts/capabilities.yaml` has the source). The model may lower that
+budget per call (the code-mode `exec` tool's own example passes 1,000, and one measured read kept
+about 4,600 tokens), so the default sits well below the documented figure rather than filling it:
+the biggest core takes four pages, and a page cut anyway costs one re-read at half the size. A page
+number past the last, `--page-size` without `--page`, `--page` with `--to-file` and a size under the
+minimum are exit 3, with the core printed nowhere. Without `--page` both other forms are byte for
+byte what they were.
+
+The Codex package route is cut the same way and is not paged yet. Its server reads the printed core
+through a pipe, whole, but attaches it to a tool result as `runbook`, and codex cuts a tool result as
+it cuts shell output: measured on 0.160.0 (racing re-run 3, 06b), a 50,355-character result read
+through a code-mode `exec` cell kept its head and tail, and the runbook sat in the dropped middle.
+The server orders its keys so that a cut loses runbook text, never the way forward
+(`WAY_FORWARD_KEYS`, `LAST_KEYS`), and drops the banner, so the model there is not told that a cut
+runbook is incomplete. Paging it needs a page argument on the tool and so a surface schema bump,
+which the OpenCode package shares.
 
 **Steps a clean run never takes live in `references/`, behind a trigger sentence.** A served core
 stays in the host's context for the whole phase, so a conditional branch (interrupted-run recovery,

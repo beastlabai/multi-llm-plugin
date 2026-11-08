@@ -39,8 +39,10 @@ What counts, decided here and nowhere else:
 * **The construction rule**: a printed bracket that mixes upper-case text with a
   hole (``f"[BATCH_{kind}]"``) is refused, since no scan can list what it
   prints. Write the marker whole, as a literal or a constant.
-* A marker is **consumed** where ``SKILL.md``, ``instructions/*.md`` or
-  ``references/*.md`` cite it with the same brackets. A wildcard such as
+* A marker is **consumed** where ``SKILL.md``, ``instructions/*.md``,
+  ``references/*.md`` or an installable host's shim template
+  (``hosts/*/shim.md.tmpl``, to its host what ``SKILL.md`` is to Claude Code)
+  cite it with the same brackets. A wildcard such as
   ``[PREREQUISITE_*]`` is not a citation of any one marker.
 * The **emitter column names a file and, where the marker's text comes from a
   module constant or a helper's argument, that constant or ``helper()``**
@@ -105,6 +107,10 @@ PACKAGING_SUFFIXES = (".py", ".mjs", ".js")
 
 #: Where instructions live, relative to the skill root. ``SKILL.md`` is added by name.
 CITING_DIRS = ("instructions", "references")
+
+#: The installable hosts' shim templates, relative to the skill root: each is its
+#: host's ``SKILL.md``, so a marker only a shim acts on is handled there.
+CITING_SHIMS = "hosts/*/shim.md.tmpl"
 
 #: Cells list at most this many emitters / consumers, then ``+N more``.
 MAX_EMITTERS = 4
@@ -1126,13 +1132,14 @@ def scan_constructions(skill_root: Path = SKILL_ROOT) -> List[Construction]:
 
 def citing_files(skill_root: Path = SKILL_ROOT) -> List[Path]:
     files = [skill_root / "SKILL.md"]
+    files.extend(sorted(skill_root.glob(CITING_SHIMS)))
     for directory in CITING_DIRS:
         files.extend(sorted((skill_root / directory).glob("*.md")))
     return [path for path in files if path.is_file()]
 
 
 def scan_citations(skill_root: Path = SKILL_ROOT) -> Dict[str, List[str]]:
-    """Marker -> the instruction, reference or SKILL.md files that cite it."""
+    """Marker -> the instruction, reference, SKILL.md or shim files that cite it."""
     cited: Dict[str, Set[str]] = {}
     for path in citing_files(skill_root):
         relative = path.relative_to(skill_root).as_posix()
@@ -1148,7 +1155,7 @@ def scan_citations(skill_root: Path = SKILL_ROOT) -> Dict[str, List[str]]:
 _HEADER = """<!-- GENERATED FILE — DO NOT EDIT.
      Rendered by skills/multi-llm/tests/tools/render_markers.py from the skill's
      Python sources, the hand-written packaging/ sources and the skill's SKILL.md,
-     instructions/ and references/. Regenerate with
+     host shim templates, instructions/ and references/. Regenerate with
      `uv run --project skills/multi-llm -- python skills/multi-llm/tests/tools/render_markers.py`;
      `tests/test_markers_registry.py` fails when this file differs from a fresh render. -->
 
@@ -1162,7 +1169,7 @@ without changing every file in its row.
 Four tests keep this page honest (`tests/test_markers_registry.py`):
 
 - the page matches a fresh render of the sources;
-- every marker `SKILL.md`, `instructions/` or `references/` cites is emitted by a
+- every marker `SKILL.md`, a host shim template, `instructions/` or `references/` cites is emitted by a
   source;
 - every emitted marker is either cited by one of those documents or listed as
   not-for-the-host in `NOT_FOR_HOST` in the generator, with a reason. The page cannot
@@ -1185,7 +1192,7 @@ docstring has the full rules.
 `packaging/…` from the repository root) and, where the marker's text comes from a
 module constant or a helper's argument, the constant or `helper()` to grep for; there
 are no line numbers because they would make the page stale after any edit above them.
-*Consumed by* is where an instruction, reference or `SKILL.md` cites the marker; where
+*Consumed by* is where an instruction, reference, `SKILL.md` or shim template cites the marker; where
 none does, it shows the reason key from the legend below. *Meaning* is the first
 sentence of the comment or docstring on the constant, and `—` where the marker is an
 inline literal or has none. Cells list a few entries and then `+N more`; grep for the
@@ -1229,7 +1236,7 @@ def render(skill_root: Path = SKILL_ROOT) -> str:
     unhandled = sum(1 for m in emitted if m not in cited and m not in NOT_FOR_HOST)
     out = [_HEADER, "## Counts", ""]
     out.append(f"- Emitted markers: {len(emitted)}")
-    out.append(f"- Cited by an instruction, reference or `SKILL.md`: {host_handled}")
+    out.append(f"- Cited by an instruction, reference, `SKILL.md` or shim template: {host_handled}")
     out.append(f"- Declared not-for-the-host: {len([m for m in emitted if m in NOT_FOR_HOST and m not in cited])}")
     out.append(f"- Neither (must be zero): {unhandled}")
     out += ["", "## Registry", "", "| Marker | Emitted by | Consumed by | Meaning |",

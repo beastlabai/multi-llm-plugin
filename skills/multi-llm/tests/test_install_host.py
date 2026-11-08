@@ -401,7 +401,7 @@ class TestInstalledShimPassesTheShippedGuard:
 #: asserts nothing. A template edit therefore lands as a failing test naming the
 #: file, which is where the author is asked whether the edit also moved the
 #: rendered *shape* and so owes ``SHIM_VERSION`` a bump.
-PINNED_SHIM_VERSION = 5
+PINNED_SHIM_VERSION = 6
 
 #: Re-pinned with SHIM_VERSION unmoved for plans/review-commits.md §2.9: step 2
 #: gained the commit modes' range rule, prose beside the plan rule, with no new
@@ -412,9 +412,12 @@ PINNED_SHIM_VERSION = 5
 #: `implement` beside the fan-out modes: under the executor those run every
 #: write batch inside one command (codex-apply-executor, 2026-11-06). Prose
 #: inside an existing line; no step, slot or command form changed.
+#: Codex re-pinned at generation 6: step 3 reads the core with `--page` and
+#: states the paged completeness rule (a changed command form). OpenCode's
+#: template is unchanged and keeps its digest.
 PINNED_TEMPLATE_SHA256 = {
     "codex":
-        "3e6cc33df9b73b0a9369d22b636b2348ef213892db3dd5e9d4d3195bfa1478e1",
+        "8c748c4b9325f6794f5cbc53fea2c9c778b613802744b045617e378fa8c3bafc",
     "opencode":
         "492a6378a4745758d01a504c974d9405f5acec7e6d2952b68bed72e89c20e7a3",
 }

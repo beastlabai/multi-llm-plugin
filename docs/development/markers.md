@@ -1,7 +1,7 @@
 <!-- GENERATED FILE — DO NOT EDIT.
      Rendered by skills/multi-llm/tests/tools/render_markers.py from the skill's
      Python sources, the hand-written packaging/ sources and the skill's SKILL.md,
-     instructions/ and references/. Regenerate with
+     host shim templates, instructions/ and references/. Regenerate with
      `uv run --project skills/multi-llm -- python skills/multi-llm/tests/tools/render_markers.py`;
      `tests/test_markers_registry.py` fails when this file differs from a fresh render. -->
 
@@ -15,7 +15,7 @@ without changing every file in its row.
 Four tests keep this page honest (`tests/test_markers_registry.py`):
 
 - the page matches a fresh render of the sources;
-- every marker `SKILL.md`, `instructions/` or `references/` cites is emitted by a
+- every marker `SKILL.md`, a host shim template, `instructions/` or `references/` cites is emitted by a
   source;
 - every emitted marker is either cited by one of those documents or listed as
   not-for-the-host in `NOT_FOR_HOST` in the generator, with a reason. The page cannot
@@ -38,7 +38,7 @@ docstring has the full rules.
 `packaging/…` from the repository root) and, where the marker's text comes from a
 module constant or a helper's argument, the constant or `helper()` to grep for; there
 are no line numbers because they would make the page stale after any edit above them.
-*Consumed by* is where an instruction, reference or `SKILL.md` cites the marker; where
+*Consumed by* is where an instruction, reference, `SKILL.md` or shim template cites the marker; where
 none does, it shows the reason key from the legend below. *Meaning* is the first
 sentence of the comment or docstring on the constant, and `—` where the marker is an
 inline literal or has none. Cells list a few entries and then `+N more`; grep for the
@@ -50,8 +50,8 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 
 ## Counts
 
-- Emitted markers: 183
-- Cited by an instruction, reference or `SKILL.md`: 111
+- Emitted markers: 185
+- Cited by an instruction, reference, `SKILL.md` or shim template: 113
 - Declared not-for-the-host: 72
 - Neither (must be zero): 0
 
@@ -74,7 +74,7 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[CHECK_NOT_RECORDED]` | `utils/batch_done.py` `CHECK_NOT_RECORDED_MARKER` | `instructions/implement.md` | — |
 | `[CHECK_NOT_RERUN]` | `implement_orchestrator.py` | `instructions/implement.md` | — |
 | `[CODEX_HOME_CHECK]` | `utils/providers/base.py` `CODEX_HOME_CHECK_MARKER` | not for the host: runner-diagnostic | — |
-| `[COMMIT_BRIEF]` | `utils/commit_front_door.py` `COMMIT_BRIEF`<br>`utils/improve_steps.py` | `SKILL.md`<br>`instructions/apply-commit-fixes.md`<br>`instructions/improve-commits.md`<br>`instructions/review-commits.md` | Markers this core prints (the commit block's own are commit_range's) |
+| `[COMMIT_BRIEF]` | `utils/commit_front_door.py` `COMMIT_BRIEF`<br>`utils/improve_steps.py` | `SKILL.md`<br>`hosts/codex/shim.md.tmpl`<br>`hosts/opencode/shim.md.tmpl`<br>`instructions/apply-commit-fixes.md`<br>`instructions/improve-commits.md`<br>`instructions/review-commits.md` | Markers this core prints (the commit block's own are commit_range's) |
 | `[COMMIT_DECISIONS_DROPPED]` | `utils/commit_front_door.py` `COMMIT_DECISIONS_DROPPED` | `instructions/improve-commits.md`<br>`instructions/review-commits.md` | — |
 | `[COMMIT_FIXES]` | `utils/commit_range.py` `COMMIT_FIXES` | `instructions/apply-commit-fixes.md`<br>`instructions/improve-commits.md` | — |
 | `[COMMIT_FIXES_END]` | `utils/commit_range.py` `COMMIT_FIXES_END` | `instructions/apply-commit-fixes.md`<br>`instructions/improve-commits.md` | — |
@@ -98,7 +98,9 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[CONSOLIDATION_SKIPPED]` | `review_plan_orchestrator.py`<br>`utils/consolidation.py` | not for the host: phase-progress | — |
 | `[CONTEXT_PLAN_CHANGED]` | `utils/commit_front_door.py` `CONTEXT_PLAN_CHANGED` | `instructions/improve-commits.md`<br>`instructions/review-commits.md` | — |
 | `[CONTEXT_PLAN_SNAPSHOT_CHANGED]` | `code_review_orchestrator.py`<br>`utils/commit_front_door.py` | not for the host: run-notice | — |
-| `[CORE_FILE]` | `multi_llm.py` `CORE_FILE_MARKER` | `SKILL.md` | The line `--to-file` prints, and the only line it prints on success |
+| `[CORE_FILE]` | `multi_llm.py` `CORE_FILE_MARKER` | `SKILL.md`<br>`hosts/opencode/shim.md.tmpl` | The line `--to-file` prints, and the only line it prints on success |
+| `[CORE_PAGE]` | `multi_llm.py` `CORE_PAGE_MARKER` | `hosts/codex/shim.md.tmpl` | Opens every page: `[CORE_PAGE] mode=<m> page=<i>/<n> sha=<sha12> bytes=<n>` |
+| `[CORE_PAGE_END]` | `multi_llm.py` `CORE_PAGE_END_MARKER` | `hosts/codex/shim.md.tmpl` | Closes every page: `[CORE_PAGE_END] mode=<m> page=<i>/<n> sha=<sha12>` |
 | `[DEADLINE]` | `ask_orchestrator.py` | not for the host: phase-progress | — |
 | `[DEADLINE_SWEEP]` | `ask_orchestrator.py` `sweep_live_clis()` | not for the host: runner-diagnostic | — |
 | `[DEPRECATED]` | `utils/apply_orchestrator_base.py` | `instructions/apply-code-fixes.md`<br>`instructions/apply-suggestions.md` | — |
@@ -154,7 +156,7 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[PROGRESS]` | `utils/progress_tracker.py` `PROGRESS_PREFIX` | `instructions/review-code.md`<br>`instructions/review-plan.md`<br>`instructions/review-tasks.md` | The greppable marker, in the style of the existing `[SALVAGE_NEEDED]` lines |
 | `[PROMPT_SIDECAR_REWRITTEN]` | `utils/validation.py` | not for the host: run-notice | — |
 | `[PROMPT_SIDECAR_SKIPPED]` | `utils/validation.py` | not for the host: run-notice | — |
-| `[RANGE_AFTER_FLAGS]` | `utils/commit_front_door.py` `RANGE_AFTER_FLAGS` | `SKILL.md`<br>`instructions/apply-commit-fixes.md`<br>`instructions/improve-commits.md`<br>`instructions/review-commits.md` | — |
+| `[RANGE_AFTER_FLAGS]` | `utils/commit_front_door.py` `RANGE_AFTER_FLAGS` | `SKILL.md`<br>`hosts/codex/shim.md.tmpl`<br>`hosts/opencode/shim.md.tmpl`<br>`instructions/apply-commit-fixes.md`<br>`instructions/improve-commits.md`<br>`instructions/review-commits.md` | — |
 | `[RANGE_BAD_REF]` | `code_review_orchestrator.py`<br>`utils/commit_range.py` `RANGE_BAD_REF` | `instructions/apply-commit-fixes.md`<br>`instructions/improve-commits.md`<br>`instructions/review-commits.md` | — |
 | `[RANGE_DIVERGED]` | `utils/commit_range.py` `RANGE_DIVERGED` | `instructions/apply-commit-fixes.md`<br>`instructions/improve-commits.md`<br>`instructions/review-commits.md` | — |
 | `[RANGE_LARGE]` | `utils/commit_range.py` `RANGE_LARGE` | `instructions/improve-commits.md`<br>`instructions/review-commits.md` | — |

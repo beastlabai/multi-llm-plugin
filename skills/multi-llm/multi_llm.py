@@ -286,7 +286,10 @@ def render_util_help() -> str:
         "skill-dir placeholder replaced by the running skill dir, so the text a host",
         "agent reads contains no unexpanded token. With --to-file it writes that",
         "text to a file under <repository root>/.multi-llm/tmp/cores/ instead and",
-        "prints one [CORE_FILE] <path> lines=<n> bytes=<n> line.",
+        "prints one [CORE_FILE] <path> lines=<n> bytes=<n> line. With --page <i>",
+        "[--page-size <bytes>] it prints page <i> of that text, between a",
+        "[CORE_PAGE] header and a [CORE_PAGE_END] line, for a host whose shell",
+        "output loses the middle of long text.",
         "",
         "`util resume-state <mode> <plan>` reads a review phase's folder (review-plan,",
         "review-tasks, review-code) and prints one [RESUME_STATE] line: the resume",
@@ -1062,19 +1065,31 @@ def _run_util_instructions(args: Sequence[str], ctx: ResultContext) -> int:
     """
     if not args or args[0] in ("--help", "-h"):
         served = [m.name for m in mode_table.MODES if m.instruction_file]
-        print("usage: multi_llm.py util instructions <mode> [--host <id>] [--to-file]")
+        print(
+            "usage: multi_llm.py util instructions <mode> [--host <id>] "
+            "[--to-file | --page <i> [--page-size <bytes>]]"
+        )
         print(f"modes with a core instruction file: {', '.join(served)}")
         print(
-            "  --host <id>  append this host's three resolved capability-verb "
+            "  --host <id>         append this host's three resolved capability-verb "
             "sentences"
         )
         print(
-            "  --to-file    write the core to a file under "
+            "  --to-file           write the core to a file under "
             f"<repository root>/{'/'.join(CORE_FILE_DIR)}/ and print "
             f"`{CORE_FILE_MARKER} <path> lines=<n> bytes=<n>` instead of the core"
         )
+        print(
+            "  --page <i>          print page <i> of the core, framed by a "
+            f"`{CORE_PAGE_MARKER}` header and a `{CORE_PAGE_END_MARKER}` line"
+        )
+        print(
+            "  --page-size <bytes> the most core bytes one page holds (default "
+            f"{CORE_PAGE_SIZE_DEFAULT}, at least {CORE_PAGE_SIZE_MIN}); a longer "
+            "line gets a page of its own"
+        )
         return EXIT_OK
-    positional, host_id, to_file = _split_instructions_host(args)
+    positional, host_id, to_file, page, page_size = _split_instructions_host(args)
     if len(positional) > 1:
         raise DispatchError(
             "ERROR: `util instructions` takes exactly one mode word, got: "
@@ -1100,6 +1115,8 @@ def _run_util_instructions(args: Sequence[str], ctx: ResultContext) -> int:
         answer = _dispatcher_only_answer(mode.name)
         if to_file:
             return _serve_core_file(mode.name, answer, answer, ctx)
+        if page is not None:
+            return _serve_core_page(mode.name, answer, page, page_size)
         sys.stdout.write(answer)
         return EXIT_OK
     path = skill_dir() / relative
@@ -1126,6 +1143,12 @@ def _run_util_instructions(args: Sequence[str], ctx: ResultContext) -> int:
     if host_id is not None:
         body += _verb_section(host_id)
     ctx.add_artifact(path)
+    if page is not None:
+        # The paged form replaces the head banner, never the body: its own
+        # banner on page 1 states the paged completeness rule, because the
+        # printed banner's test (one end line in what arrived) is the wrong
+        # test for a page.
+        return _serve_core_page(mode.name, body, page, page_size)
     served = _truncation_notice(mode.name, core) + body
     if to_file:
         return _serve_core_file(mode.name, body, served, ctx)
@@ -1351,6 +1374,171 @@ def _truncation_notice(mode_name: str, core: str) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# `util instructions --page`: the core in pieces a cutting shell passes whole
+# ---------------------------------------------------------------------------
+# Codex has no file-read tool, and its shell keeps the head and the tail of an
+# output over its budget and drops the middle, so the printed core's end line
+# survives a cut that lost workflow steps (docs/development/hosts.md, "Paged
+# delivery"). Pages bounded under that budget arrive whole; each one says which
+# page it is and closes with its own end line, and a page that was cut anyway
+# is fetched again smaller.
+
+#: Opens every page: ``[CORE_PAGE] mode=<m> page=<i>/<n> sha=<sha12> bytes=<n>``.
+CORE_PAGE_MARKER = "[CORE_PAGE]"
+
+#: Closes every page: ``[CORE_PAGE_END] mode=<m> page=<i>/<n> sha=<sha12>``.
+CORE_PAGE_END_MARKER = "[CORE_PAGE_END]"
+
+#: The most core bytes one page holds when ``--page-size`` is not given:
+#: 4,000 tokens as codex counts them (4 bytes a token), 40% of the 10,000-token
+#: budget its shell and code-mode ``exec`` results default to. The model can
+#: lower that budget per call, and has (about 4,600 tokens in one measured
+#: read), so the default leaves room below the documented figure rather than
+#: filling it; a page cut anyway is fetched again at half the size.
+CORE_PAGE_SIZE_DEFAULT = 16_000
+
+#: The smallest ``--page-size`` served. The longest core line (about 2,500
+#: bytes) already gets a page of its own at this size, so a smaller one only
+#: multiplies the pages; and a typo (``8`` meant as 8 KB) is refused rather
+#: than served as a page per line.
+CORE_PAGE_SIZE_MIN = 2_000
+
+
+def _core_pages(text: str, size: int, first: int) -> List[str]:
+    """*text* cut into pages on line boundaries: the first of at most *first*
+    UTF-8 bytes, every later one of at most *size*.
+
+    Packed greedily from the start, so every page but the last is as full as
+    whole lines allow. A line longer than its page's room gets a page of its
+    own rather than being split. ``"".join`` of the result is *text*, byte for
+    byte.
+    """
+    pages: List[str] = []
+    current: List[str] = []
+    filled = 0
+    for line in re.findall(r"[^\n]*\n|[^\n]+$", text):
+        length = len(line.encode("utf-8"))
+        room = first if not pages else size
+        if current and filled + length > room:
+            pages.append("".join(current))
+            current, filled = [], 0
+        current.append(line)
+        filled += length
+    if current or not pages:
+        pages.append("".join(current))
+    return pages
+
+
+def _core_sha(text: str) -> str:
+    """The sha every page carries: sha256 of the whole paged text, 12 hex digits.
+
+    The same digest ``--to-file`` names its file by, so a paged read and the
+    file form of one render agree on it.
+    """
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _serve_core_page(mode_name: str, text: str, page: int, size: Optional[int]) -> int:
+    """Print page *page* of *text*: header, page 1's banner, the page, end line.
+
+    *text* is what ``--to-file`` writes (the core, its end line, the ``--host``
+    section), so the pages' bodies joined are that text exactly. Between its
+    header and its end line a page prints at most *size* bytes, page 1's banner
+    included, unless one line alone is longer.
+    """
+    size = size or CORE_PAGE_SIZE_DEFAULT
+    sha = _core_sha(text)
+    # Page 1's room is the size less the longest banner it could carry (both
+    # wordings, a four-digit count), so the cut never depends on the count the
+    # cut produces.
+    allowance = max(
+        len(_paged_notice(mode_name, text, count, sha, size).encode("utf-8"))
+        for count in (1, 9999)
+    )
+    pages = _core_pages(text, size, first=max(0, size - allowance))
+    count = len(pages)
+    if page > count:
+        raise DispatchError(
+            f"ERROR: `util instructions {mode_name} --page {page}`: at "
+            f"--page-size {size} the core has {count} page"
+            f"{'' if count == 1 else 's'}, so --page takes 1 to {count}."
+        )
+    body = pages[page - 1]
+    where = f"mode={mode_name} page={page}/{count} sha={sha}"
+    out = f"{CORE_PAGE_MARKER} {where} bytes={len(body.encode('utf-8'))}\n"
+    if page == 1:
+        out += _paged_notice(mode_name, text, count, sha, size)
+    out += body + f"{CORE_PAGE_END_MARKER} {where}\n"
+    sys.stdout.write(out)
+    return EXIT_OK
+
+
+def _paged_notice(mode_name: str, text: str, count: int, sha: str, size: int) -> str:
+    """Page 1's banner: the paged completeness rule, after the header line.
+
+    It opens with :data:`TRUNCATION_BANNER_OPENING` and closes with the printed
+    banner's closing line, so a reader that drops the printed banner drops this
+    one the same way. It sits at the head, which a middle cut keeps.
+    """
+    import textwrap
+
+    smaller = max(CORE_PAGE_SIZE_MIN, size // 2)
+    total = len(text.encode("utf-8"))
+    if count == 1:
+        whole = (
+            f"The core is {total:,} bytes, all on this page: there is no other "
+            "page to fetch. You hold the whole core only when this page arrived "
+            "whole: it starts with its header line and ends with its end line, "
+            f"both carrying page=1/1 and sha={sha}:"
+        )
+    else:
+        whole = (
+            f"The core is {total:,} bytes in {count} pages. Run the same command "
+            f"for pages 2 to {count}, changing only the --page number. You hold "
+            f"the whole core only when every page from 1 to {count} arrived "
+            "whole: each starts with its header line and ends with its end "
+            f"line, both carrying its page=<i>/{count} and the same sha={sha}:"
+        )
+    if smaller < size:
+        again = (
+            f"Fetch it again with --page-size {smaller}. A new size cuts the "
+            "core afresh, so start again at page 1 with that size and keep it "
+            "for every later page; never combine pages of two sizes."
+        )
+    else:
+        again = (
+            f"--page-size {size} is already the smallest this command serves, "
+            "so your host cannot pass a page whole: stop and tell the user."
+        )
+    cut = (
+        "A note from your host, anywhere in a page's output, that it truncated "
+        "or omitted part of that output means the page is incomplete, even with "
+        "both of its lines there: a host that cuts the middle keeps the head and "
+        f"the end. {again}"
+    )
+    where = f"mode={mode_name} page=<i>/{count} sha={sha}"
+    return (
+        f"{TRUNCATION_BANNER_OPENING} · multi-llm core instructions · "
+        f"{mode_name} · page 1 of {count} ===\n"
+        f"{textwrap.fill(whole, 78)}\n"
+        "\n"
+        f"    {CORE_PAGE_MARKER} {where} bytes=<n>\n"
+        f"    {CORE_PAGE_END_MARKER} {where}\n"
+        "\n"
+        "The last page's core ends with this line:\n"
+        "\n"
+        f"    {CORE_END_MARKER} {mode_name}\n"
+        "\n"
+        f"{textwrap.fill(cut, 78)}\n"
+        "\n"
+        "Do not run any command from the core until you hold every page.\n"
+        "=== the core begins on the next line ===\n"
+    )
+
+
 #: Heading the ``--host`` verb block is served under. The core files name the
 #: three capability verbs abstractly and it has always been the *shim's* section 4
 #: that resolved them; a host with no prose left to carry that section — the
@@ -1372,11 +1560,39 @@ def _verb_section(host_id: str) -> str:
     )
 
 
+#: ``util instructions``'s options, as its refusal of any other one names them.
+_INSTRUCTIONS_OPTIONS = (
+    "`--host <id>`, `--to-file`, `--page <i>` and `--page-size <bytes>`"
+)
+
+
+def _option_value(args: Sequence[str], index: int, name: str, what: str) -> "tuple[str, int]":
+    """The value of option *name* at ``args[index]`` (inline ``=`` or the next
+    token) and the index of the last token it used. Raises on a missing value."""
+    _head, separator, inline = args[index].partition("=")
+    if not separator:
+        index += 1
+        inline = args[index] if index < len(args) else ""
+    if not inline:
+        raise DispatchError(f"ERROR: `util instructions {name}` needs {what}.")
+    return inline, index
+
+
+def _positive_count(value: str, name: str, least: int) -> int:
+    """*value* as a whole number of at least *least*, or a refusal naming *name*."""
+    if not re.fullmatch(r"[0-9]+", value) or int(value) < least:
+        raise DispatchError(
+            f"ERROR: `util instructions {name}` takes a whole number of at least "
+            f"{least}, got {value!r}."
+        )
+    return int(value)
+
+
 def _split_instructions_host(
     args: Sequence[str],
-) -> "tuple[list[str], Optional[str], bool]":
-    """Split ``util instructions`` argv into positionals, a ``--host`` value
-    and whether ``--to-file`` was given.
+) -> "tuple[list[str], Optional[str], bool, Optional[int], Optional[int]]":
+    """Split ``util instructions`` argv into positionals, a ``--host`` value,
+    whether ``--to-file`` was given, the ``--page`` number and ``--page-size``.
 
     Hand-parsed rather than argparse'd because this command's whole contract is
     that its stdout **is** the core text: an argparse error would print a usage
@@ -1386,12 +1602,20 @@ def _split_instructions_host(
     positional: list = []
     host_id: Optional[str] = None
     to_file = False
+    page: Optional[int] = None
+    page_size: Optional[int] = None
     index = 0
     while index < len(args):
         token = args[index]
         head, separator, inline = token.partition("=")
         if token == "--to-file":
             to_file = True
+        elif head == "--page":
+            value, index = _option_value(args, index, "--page", "a page number")
+            page = _positive_count(value, "--page", 1)
+        elif head == "--page-size":
+            value, index = _option_value(args, index, "--page-size", "a size in bytes")
+            page_size = _positive_count(value, "--page-size", CORE_PAGE_SIZE_MIN)
         elif head == "--host":
             if separator:
                 value = inline
@@ -1410,12 +1634,23 @@ def _split_instructions_host(
         elif token.startswith("-"):
             raise DispatchError(
                 f"ERROR: `util instructions` does not take {token!r}. Its "
-                "options are `--host <id>` and `--to-file`."
+                f"options are {_INSTRUCTIONS_OPTIONS}."
             )
         else:
             positional.append(token)
         index += 1
-    return positional, host_id, to_file
+    if page_size is not None and page is None:
+        raise DispatchError(
+            "ERROR: `util instructions --page-size` sizes the pages of a paged "
+            "read; add `--page <i>`."
+        )
+    if page is not None and to_file:
+        raise DispatchError(
+            "ERROR: `util instructions` takes `--to-file` or `--page`, not both: "
+            "the file form is for a host that reads files, pages for one that "
+            "cannot."
+        )
+    return positional, host_id, to_file, page, page_size
 
 
 def _dispatch(argv: Sequence[str], ctx: ResultContext) -> int:

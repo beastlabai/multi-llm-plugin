@@ -312,8 +312,9 @@ from `argument-hint` and from `--help`'s mode list, documented only under
 rendered into a `MULTI_LLM_RESULT.next` value. `util instructions <mode>` prints a mode's core
 instruction file with every skill-dir placeholder replaced by the running skill dir, so the text a
 host agent reads carries no unexpanded token; `--to-file` writes that text to a file and prints its
-`[CORE_FILE]` line instead ([host integration](hosts.md#host-neutral-instruction-core) says which
-shim uses which form). `util resume-state <mode> <plan>` is a review core's resume step: read-only,
+`[CORE_FILE]` line instead, and `--page <i>` prints one bounded page of it between a `[CORE_PAGE]`
+header and a `[CORE_PAGE_END]` line ([host integration](hosts.md#host-neutral-instruction-core) says
+which shim uses which form, and the paged completeness rule). `util resume-state <mode> <plan>` is a review core's resume step: read-only,
 it prints one `[RESUME_STATE]` line (case, action, models, batches, flags, ownership) from the files
 the orchestrators' own guards read, and `references/resume-detection.md`'s case list is rendered from
 its table (`tests/tools/render_resume_cases.py`). Only `state.json`'s completion (the primary guard)
