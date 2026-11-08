@@ -14,7 +14,8 @@ fix round 5).
 This command is the record. The host runs it once per batch, right after
 it verified the batch's outcome and before it appends the batch's summary
 to the prior-changes log, and it writes the same ``state.json`` keys the
-executor leg's ``WriteBatchScheduler`` writes for the same batch:
+executor leg's ``WriteBatchScheduler`` writes for the same batch, through
+the writer both legs share (:func:`write_record.record_batch_facts`):
 
 * ``task_status[<task id>]`` = ``completed`` | ``failed`` (plus
   ``task_status_reasons`` when ``--reason`` is given) — what
@@ -137,15 +138,6 @@ from .state_manager import (
     PROCESSED_LEG_NATIVE,
     TASK_RESET_AT_KEY,
     _parse_completion_time,
-    record_batch_items_in_state,
-    set_task_batch_check_accepted_in_state,
-    set_task_batch_check_in_state,
-    set_task_batch_check_repeats_in_state,
-    set_task_own_check_note_in_state,
-    set_task_own_check_ran_in_state,
-    set_task_own_text_in_state,
-    set_task_check_findings_in_state,
-    set_task_check_tree_in_state,
     update_task_status_in_state,
 )
 from .git_utils import pin_repo_root
@@ -173,7 +165,6 @@ from .write_batch_scheduler import (
     batch_check_accepted_line,
     batch_check_line,
     batch_check_repeated_line,
-    move_check_repeats_in_state,
     repeated_findings_for,
     BLOCKED_BY_CHECK_PREFIX,
     CODE_WRITE_KINDS,
@@ -183,11 +174,11 @@ from .write_batch_scheduler import (
     rerunnable_checks,
     split_accepted_findings,
     split_repeated_findings,
-    task_own_text,
     transitive_dependents,
     upstream_held_check,
     words_added_to,
 )
+from .write_record import BatchFacts, record_batch_facts
 from .write_prompt import (
     WritePromptError, changed_since_bound, check_tree_fingerprint,
     completion_stamp, discard_check_tree, load_write_task,
@@ -775,12 +766,9 @@ def record_batch(
             # Any record of the batch consumes its bind-time ids.
             _commit_release(state, task_id, kind)
 
-        update_task_status_in_state(state, task_id, status, reason)
         record_completion_stamp(state, _processed_phase_word(phase_dir), task_id, stamp)
-        blocked: List[str] = []
         accepted_again: Dict[str, List[str]] = {}
         echoed: Dict[str, List[str]] = {}
-        echoes_moved: Dict[str, Any] = {}
         restate: Optional[Dict[str, Any]] = None
         phase_tasks = [
             t for t in (document.get("batches") or document.get("tasks") or [])
@@ -817,33 +805,20 @@ def record_batch(
                     "note": clip("; ".join(
                         part for part in [note or "", *added] if part), CHECK_NOTE_MAX_CHARS),
                 }
+        # The record the executor's scheduler writes for the same outcome,
+        # through the same writer (`write_record`).
+        record = record_batch_facts(state, task, BatchFacts(
+            task_id=task_id, kind=kind, status=status, reason=reason,
+            leg=PROCESSED_LEG_NATIVE, processed_phase=_processed_phase_word(phase_dir),
+            check_findings=check_findings, check_tree=tree, batch_check=batch_check,
+            own_check_ran=own_check not in (None, OWN_CHECK_NONE),
+            batch_check_accepted=accepted_again, batch_check_repeats=echoed,
+            note=note, listed=listed_outcomes,
+            declined={i: why for i, (w, why) in not_applied.items() if w == "declined"},
+            skipped={i: why for i, (w, why) in not_applied.items() if w == "skipped"},
+        ), tasks=phase_tasks)
+        blocked: List[str] = []
         if kind == "implement":
-            set_task_check_findings_in_state(state, task_id, check_findings)
-            set_task_check_tree_in_state(state, task_id, tree)
-            # A code task's own failing check, on record beside the check
-            # findings and never among them (fix round 15): it holds
-            # nothing back, and every other record of the task clears it.
-            set_task_batch_check_in_state(state, task_id, batch_check)
-            # Fix round 29: its own words beside a failing own check, for a
-            # check that reports the same finding in a later run.
-            set_task_own_text_in_state(state, task_id, task_own_text(task))
-            # Fix round 24: that its own check reported at all, a pass
-            # included, for the tests line (`implement_checks_ran`).
-            set_task_own_check_ran_in_state(
-                state, task_id,
-                own_check not in (None, OWN_CHECK_NONE) and status == "completed")
-            # Fix round 23: what it reported again of the accepted findings,
-            # by check, beside it (and cleared by any other record).
-            set_task_batch_check_accepted_in_state(state, task_id, accepted_again)
-            # Fix round 28: what it reported of a check task's findings.
-            set_task_batch_check_repeats_in_state(state, task_id, echoed)
-            if check_findings and status == "completed":
-                # Fix round 28: a code task recorded earlier whose own check
-                # reported the finding this check now has on record.
-                echoes_moved = move_check_repeats_in_state(state, phase_tasks, task_id)
-            # Fix round 28: its own words about its checks, never a finding.
-            set_task_own_check_note_in_state(
-                state, task_id, note if status == "completed" else None)
             blocked = _hold_or_release_dependents(
                 state, document, task_id, held=bool(check_findings),
             )
@@ -852,33 +827,9 @@ def record_batch(
         # stopped", as the executor's does, and one refused before dispatch
         # leaves its total.
         _settle_eta_total(state, document, task_id, status, reason, blocked)
-        if kind == "apply_code_fixes":
-            # Fix round 20: what the batch's own checks reported, for the next
-            # batch's prompt and the tests-not-run line; any other record of
-            # the batch clears an earlier one.
-            completed = status == "completed"
-            _known_checks.set_batch_check_report_in_state(
-                state, task_id,
-                prior_changes_id=str(task.get("prior_changes_id") or ""),
-                grouped_sha256=_known_checks.review_stamp(task),
-                findings=batch_check if completed else None,
-                listed=listed_outcomes if completed else None,
-                note=note if completed else None,
-            )
         tracked = _tracked_after_batch(state, target, kind)
         if tracked is not None:
             state["tracked_files"] = tracked
-        items: List[str] = []
-        if kind != "implement":
-            # Fix round 18: an item declined by the batch, or skipped at the
-            # user's request, is recorded with its reason, never applied. Fix
-            # round 22: in the shape the executor's scheduler writes too.
-            items = record_batch_items_in_state(
-                state, _processed_phase_word(phase_dir), task,
-                completed=status == "completed", leg=PROCESSED_LEG_NATIVE,
-                declined={i: why for i, (w, why) in not_applied.items() if w == "declined"},
-                skipped={i: why for i, (w, why) in not_applied.items() if w == "skipped"},
-            )
         state["updated_at"] = datetime.now().isoformat()
         _write_state(target, state)
     if checking:
@@ -894,7 +845,7 @@ def record_batch(
         else None
     )
     return {
-        "task_id": task_id, "status": status, "items": items,
+        "task_id": task_id, "status": status, "items": record.items,
         "state_file": str(target), "check_findings": check_findings or [],
         "batch_check": batch_check or [],
         "batch_check_accepted": accepted_again,
@@ -915,7 +866,7 @@ def record_batch(
         "restate": restate,
         "batch_check_repeats": echoed,
         "repeats_moved": {
-            moved_id: merged for moved_id, (_own, merged) in echoes_moved.items()
+            moved_id: merged for moved_id, (_own, merged) in record.repeats_moved.items()
         },
     }
 

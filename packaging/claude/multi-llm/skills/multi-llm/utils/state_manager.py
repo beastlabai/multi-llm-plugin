@@ -15,6 +15,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from .git_utils import get_branch_name, head_or_empty_tree
 from .judge_vocab import upgrade_legacy
 from .schema_validator import validate_state_file
+from . import task_ledger as _task_ledger
 
 logger = logging.getLogger(__name__)
 
@@ -160,11 +161,9 @@ def _pop_phase_started(state: Dict[str, Any], phase: str) -> None:
 #: (``implement_orchestrator`` writes it; ``retry`` is never recorded).
 HUMAN_TASK_DECISIONS_KEY = "human_task_decisions"
 
-#: Twins of ``write_batch_scheduler.ACCEPTED_REASON_PREFIX`` and
-#: ``COMPLETED_MANUAL_REASON``: the reasons a ``done`` answer writes. Restated
-#: here so this low-level module imports nothing from the scheduler.
-_ACCEPTED_REASON_PREFIX = "accepted — "
-_COMPLETED_MANUAL_REASON = "answered --human-task <id>=done"
+#: The reasons a ``done`` answer writes (``task_ledger``'s words).
+_ACCEPTED_REASON_PREFIX = _task_ledger.ACCEPTED_REASON_PREFIX
+_COMPLETED_MANUAL_REASON = _task_ledger.COMPLETED_MANUAL_REASON
 
 
 def _answer_produced(action: str, status: str, reason: Optional[str]) -> bool:
@@ -2317,41 +2316,39 @@ class StateManager:
         self._touch("decomposition")
         return True
 
-    #: The recorded reason of an implement task the USER declined at
-    #: pause-and-ask (``write_batch_scheduler.resolve_human_task_plan``, and
-    #: the same words ``instructions/implement.md`` gives the native host). A
-    #: decision, not a deferral: the task is not left for them to do.
-    _USER_DECLINED_REASON = "skipped by user during pause-and-ask"
-
-    #: The recorded reason's prefix for a failed code task the user answered
-    #: ``--human-task <id>=skip`` (``write_batch_scheduler.ANSWERED_SKIP_PREFIX``
-    #: spells it). A decision too: the user gave the task up, so it is not
-    #: owed as manual work, and neither is a dependent skipped with it.
-    _ANSWERED_SKIP_PREFIX = "skipped — you answered --human-task "
+    #: The recorded reasons of a task the USER declined (a pause-and-ask
+    #: "Skip", a ``--human-task <id>=skip`` answer): a decision, not a
+    #: deferral, so the task is not owed as manual work, and neither is a
+    #: dependent skipped with it (``task_ledger.is_declined_reason``).
+    _USER_DECLINED_REASON = _task_ledger.USER_DECLINED_REASON
+    _ANSWERED_SKIP_PREFIX = _task_ledger.ANSWERED_SKIP_PREFIX
 
     #: The recorded reason of a dependent the transitive skip walk took with
     #: its parent (both legs spell it ``skipped — depends on skipped task
     #: {parent_id} ({parent_title})``); owed exactly when the parent is.
     _DEPENDS_ON_SKIPPED = re.compile(r"^skipped — depends on skipped task (T[0-9]{3})\b")
 
-    def _deferred_to_user(self, task_id: str, seen: Optional[set] = None) -> bool:
+    def _skip_parent(self, task_id: str) -> Optional[str]:
+        """The skipped task *task_id*'s recorded skip reason names
+        (:attr:`_DEPENDS_ON_SKIPPED`), or ``None``: one link of the skip
+        chain ``task_ledger`` walks."""
+        reasons = self.state.get("task_status_reasons") or {}
+        match = self._DEPENDS_ON_SKIPPED.match(str(reasons.get(task_id) or ""))
+        return match.group(1) if match else None
+
+    def _deferred_to_user(self, task_id: str) -> bool:
         """Whether *task_id*'s skip leaves the task for the user to do.
 
         A deferral (a human task under a skip strategy, ``deferred — …``) and
         a dependent of one are owed; a pause-and-ask "Skip", a failed code
         task answered ``--human-task <id>=skip``, and a dependent of either
-        are not. A reason this does not recognise — none recorded, a state
-        written before reasons were — stays owed, as every skip used to be.
+        are not (``task_ledger.chain_declined``). A reason this does not
+        recognise — none recorded, a state written before reasons were —
+        stays owed, as every skip used to be.
         """
-        reason = str((self.state.get("task_status_reasons") or {}).get(task_id) or "")
-        if reason.startswith((self._USER_DECLINED_REASON, self._ANSWERED_SKIP_PREFIX)):
-            return False
-        match = self._DEPENDS_ON_SKIPPED.match(reason)
-        seen = set() if seen is None else seen
-        if match is None or task_id in seen:
-            return True
-        seen.add(task_id)
-        return self._deferred_to_user(match.group(1), seen)
+        reasons = self.state.get("task_status_reasons") or {}
+        return not _task_ledger.chain_declined(
+            task_id, self._skip_parent, lambda current: reasons.get(current))
 
     def deferral_root(self, task_id: str) -> Optional[str]:
         """The task a dependent skipped with a deferral waits on: the end of
@@ -2364,17 +2361,7 @@ class StateManager:
         apart: ``waits_on`` on its :meth:`deferred_implementation_tasks`
         entry, "skipped (depends on manual T005)" on ``status``.
         """
-        reasons = self.state.get("task_status_reasons") or {}
-        root: Optional[str] = None
-        current = task_id
-        seen: set = set()
-        while current not in seen:
-            seen.add(current)
-            match = self._DEPENDS_ON_SKIPPED.match(str(reasons.get(current) or ""))
-            if match is None:
-                break
-            root = current = match.group(1)
-        return root
+        return _task_ledger.skip_chain_root(task_id, self._skip_parent)
 
     def deferred_implementation_tasks(self) -> List[Dict[str, Optional[str]]]:
         """The implement tasks the run left for the user, as ``{id, title}``, by id.

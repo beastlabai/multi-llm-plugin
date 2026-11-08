@@ -58,6 +58,19 @@ from . import prompt_files as _prompt_files
 from . import prior_changes as _prior_changes
 from . import process_control as _process_control
 from . import subagent_executor as _executor
+from . import task_ledger
+from .task_ledger import (
+    ACCEPTED_AFTER_FAILING_LABEL,
+    ACCEPTED_REASON_PREFIX,
+    ACCEPTED_WITH_FINDINGS_LABEL,
+    ACCEPTED_WITH_FINDINGS_MARK,
+    ANSWERED_SKIP_PREFIX,
+    COMPLETED_BY_HAND_LABEL,
+    COMPLETED_MANUAL_REASON,
+    KEPT_WITH_FINDINGS_LABEL,
+    USER_DECLINED_REASON,
+    is_declined_reason,
+)
 from .text_clip import (
     clip, join_clauses, plain_line, with_closing_mark, without_closing_mark,
 )
@@ -141,8 +154,6 @@ from .state_manager import (
     _parse_completion_time,
     manual_task_gates,
     predates_review,
-    record_batch_items_in_state,
-    set_task_check_findings_in_state,
     stamp_or_mtime,
 )
 from .subagent_prompts import build_nothing_changed_resend_prompt
@@ -172,6 +183,7 @@ from .write_safety import (
     safety_dir,
     write_copy,
 )
+from .write_record import BatchFacts, BatchRecord, record_batch_facts
 from .write_verdict import (
     DECLARED_NAMES_ROWS,
     JailFacts,
@@ -1103,7 +1115,7 @@ class HumanTaskPlan:
         """
         declined: Dict[str, str] = {}
         for task_id, reason in self.skipped.items():
-            if reason.startswith((USER_DECLINED_REASON, ANSWERED_SKIP_PREFIX)):
+            if is_declined_reason(reason):
                 declined[task_id] = reason
         changed = True
         while changed:
@@ -1130,15 +1142,19 @@ def _declined_split(plan: "HumanTaskPlan") -> Dict[str, List[str]]:
     pause-and-ask "Skip", ``--human-task <id>=skip``);
     ``declined_dependent_task_ids``: the tasks skipped because they depend on
     one of those. Both are in ``skipped_task_ids`` too, and neither is a
-    deferral: :meth:`HumanTaskPlan.declined` is the one rule. Empty lists
-    are left out, so a run that declined nothing mirrors what it did before.
+    deferral: :meth:`HumanTaskPlan.declined` is the one rule, and
+    ``task_ledger.skip_bucket`` names each, as ``status`` names the same
+    tasks from ``state.json``. Empty lists are left out, so a run that
+    declined nothing mirrors what it did before.
     """
-    declined = plan.declined()
-    seeds = sorted(
-        task_id for task_id, reason in declined.items()
-        if reason.startswith((USER_DECLINED_REASON, ANSWERED_SKIP_PREFIX))
-    )
-    dependents = sorted(task_id for task_id in declined if task_id not in seeds)
+    buckets = {
+        task_id: task_ledger.skip_bucket(
+            task_id, reason, declined=lambda: True, root=lambda: None)[0]
+        for task_id, reason in plan.declined().items()
+    }
+    seeds = sorted(task_id for task_id, bucket in buckets.items() if bucket == "declined")
+    dependents = sorted(
+        task_id for task_id, bucket in buckets.items() if bucket == "declined_dependents")
     out: Dict[str, List[str]] = {}
     if seeds:
         out["declined_task_ids"] = seeds
@@ -1151,19 +1167,21 @@ def _deferred_split(plan: "HumanTaskPlan") -> Dict[str, Dict[str, str]]:
     """The write mirror's key for the tasks skipped with a deferred manual
     task (fix round 17): ``deferred_waits_on``, ``{task: manual task}``,
     each followed up :attr:`HumanTaskPlan.chain` to the deferral it waits
-    on. They are in ``skipped_task_ids`` too; ``status`` names them
-    "skipped (depends on manual T005)" instead of "deferred manual", since
-    implement runs them once that task is recorded done. Left out when
-    empty, as :func:`_declined_split`'s keys are.
+    on (``task_ledger.skip_bucket``, the rule ``status`` reads from
+    ``state.json`` too). They are in ``skipped_task_ids`` too; ``status``
+    names them "skipped (depends on manual T005)" instead of "deferred
+    manual", since implement runs them once that task is recorded done.
+    Left out when empty, as :func:`_declined_split`'s keys are.
     """
     waits: Dict[str, str] = {}
-    for task_id in plan.deferred():
-        current, seen = task_id, set()
-        while current in plan.chain and current not in seen:
-            seen.add(current)
-            current = plan.chain[current]
-        if current != task_id:
-            waits[task_id] = current
+    for task_id, reason in plan.deferred().items():
+        bucket, root = task_ledger.skip_bucket(
+            task_id, reason, declined=lambda: False,
+            root=lambda task_id=task_id: task_ledger.skip_chain_root(
+                task_id, plan.chain.get),
+        )
+        if bucket == "deferred_dependents" and root is not None:
+            waits[task_id] = root
     return {"deferred_waits_on": dict(sorted(waits.items()))} if waits else {}
 
 
@@ -1286,7 +1304,7 @@ def set_aside_by_plan(
     }
     for task_id, reason in plan.skipped.items():
         if task_id in declined:
-            seed = str(reason).startswith((USER_DECLINED_REASON, ANSWERED_SKIP_PREFIX))
+            seed = is_declined_reason(reason)
             aside[str(task_id)] = (
                 _metrics.SET_ASIDE_SKIPPED if seed else _metrics.SET_ASIDE_WITH_SKIPPED
             )
@@ -1298,16 +1316,11 @@ def set_aside_by_plan(
     return aside
 
 
-#: The recorded reason of a human task the user declined at pause-and-ask.
-#: ``StateManager._USER_DECLINED_REASON`` spells the same words, so the
-#: workflow's manual-task list reads a declined task as not owed.
-USER_DECLINED_REASON = "skipped by user during pause-and-ask"
-
-#: The prefix of the recorded reason of a failed code task the user answered
-#: ``--human-task <id>=skip`` (``StateManager._ANSWERED_SKIP_PREFIX`` is its
-#: twin). The sentence ends ``<id>=skip after it failed``; for a manual task
-#: answered ``skip`` under a skip strategy, :data:`MANUAL_DECLINED_TAIL`.
-ANSWERED_SKIP_PREFIX = "skipped — you answered --human-task "
+# The reason words and the labels a task's outcome is named by live in
+# `task_ledger`, the classifier both legs and `status` read
+# (USER_DECLINED_REASON, ANSWERED_SKIP_PREFIX, ACCEPTED_REASON_PREFIX,
+# ACCEPTED_WITH_FINDINGS_MARK, COMPLETED_MANUAL_REASON and the *_LABEL
+# strings, imported above).
 
 #: What follows ``<id>=skip`` in the recorded reason of a manual task the
 #: user declined under a skip strategy (fix round 29, review of round 28 #1:
@@ -1315,53 +1328,6 @@ ANSWERED_SKIP_PREFIX = "skipped — you answered --human-task "
 #: manual-task gate re-stopped for good and only a false ``=done`` went on).
 MANUAL_DECLINED_TAIL = ": you will not do this manual task"
 
-#: The prefix of the recorded reason of a failed code task the user answered
-#: ``--human-task <id>=done`` (:func:`resolve_human_task_plan` writes the
-#: whole sentence into ``HumanTaskPlan.accepted``).
-ACCEPTED_REASON_PREFIX = "accepted — "
-
-#: The words in the recorded reason of a check accepted with its findings
-#: (``--human-task <id>=done`` on a check that reported problems, fix round
-#: 11): the account names it apart from a task accepted after failing.
-ACCEPTED_WITH_FINDINGS_MARK = "after its check reported problems"
-
-#: The recorded reason of a manual task answered ``--human-task <id>=done``
-#: (:func:`persist_human_task_plan`; the ``<id>`` is literal).
-COMPLETED_MANUAL_REASON = "answered --human-task <id>=done"
-
-
-#: How a check the user accepted with its findings (``--human-task <id>=done``)
-#: and a failed task the user accepted read in a kept list, summary.md's rows
-#: and ``status``'s tally (:func:`answered_done_label`; fix round 20: one
-#: spelling on every surface).
-ACCEPTED_WITH_FINDINGS_LABEL = "accepted with its check findings"
-ACCEPTED_AFTER_FAILING_LABEL = "accepted after failing"
-#: How a manual task the user answered ``--human-task <id>=done`` reads.
-COMPLETED_BY_HAND_LABEL = "completed by hand"
-
-#: How a check kept from an earlier run with its findings standing reads in a
-#: kept list (fix round 20, live run 8 #6: the stop fixture's 01b and 01c
-#: named T002 kept beside T001, T003 and T004 as if it had passed). True
-#: where the run is still to decide (a continued run's opening line: it runs
-#: again once the files changed) and once it decided (the closing ``resume:
-#: kept`` line). An accepted check reads :func:`answered_done_label`'s
-#: "accepted with its check findings" instead.
-KEPT_WITH_FINDINGS_LABEL = (
-    "its check reported problems, not run again while the files are unchanged"
-)
-
-
-def kept_named(ids: Sequence[str], labels: Mapping[str, str], *, limit: int = 8) -> str:
-    """Kept tasks as every kept list names them: the plain ones first (at
-    most *limit*, then ``…``), then each labelled one as ``<id> (<label>)``
-    — the ``resume: kept`` lines of both legs and the progress line's
-    ``(<n> kept from an earlier run: …)`` (fix round 20)."""
-    plain = [str(t) for t in ids if str(t) not in labels]
-    shown = ", ".join(plain[:limit]) + (", …" if len(plain) > limit else "")
-    labelled = ", ".join(
-        f"{t} ({labels[str(t)]})" for t in ids if str(t) in labels
-    )
-    return ", ".join(part for part in (shown, labelled) if part)
 
 
 def answered_done_label(plan: Any, task_id: str) -> str:
@@ -6780,15 +6746,16 @@ class WriteBatchScheduler:
             if self.state is not None:
                 with self._effects_lock:
                     self._remember_outcome(outcome)
-                    self.state.update_task_status(
-                        task_id, "completed",
-                        reason=(
-                            "not run again: nothing changed since its check "
-                            "reported problems" if kept_findings else
-                            f"resumed from {Path(outcome.output_path).name}"
-                        ),
+                    resumed_reason = (
+                        "not run again: nothing changed since its check "
+                        "reported problems" if kept_findings else
+                        f"resumed from {Path(outcome.output_path).name}"
                     )
-                    self._record_processed_items(task, outcome)
+                    # Its status and items again; its verdict stays as the
+                    # earlier run recorded it.
+                    self._write_record(task, replace(self._batch_facts(
+                        task, outcome, "completed", resumed_reason,
+                        dispatched=False, kept=False), resumed=True))
                     # §2.7: its completion's identities, should the earlier
                     # run have stopped before it saved them.
                     self._commit_repin(task, outcome)
@@ -9508,14 +9475,16 @@ class WriteBatchScheduler:
                                 outcome.batch_check_repeats)
 
     def _move_repeats_of(
-        self, check_id: str, findings: Sequence[str], result: SchedulerResult,
+        self, check_id: str,
+        moved: Mapping[str, Tuple[List[str], Dict[str, List[str]]]],
+        result: SchedulerResult,
     ) -> None:
         """The check task recording second (fix round 28): what
-        :func:`move_check_repeats_in_state` moved in ``state.json`` is moved
-        on the code task's outcome, its earlier run's row in *result* and its
-        verdict stamp too, with one log line. Caller holds the effects lock."""
+        :func:`move_check_repeats_in_state` *moved* in ``state.json`` (the
+        record ``write_record`` wrote) is moved on the code task's outcome,
+        its earlier run's row in *result* and its verdict stamp too, with one
+        log line. Caller holds the effects lock."""
         from .subagent_tasks import implement_output_name
-        moved = move_check_repeats_in_state(self.state.state, self.tasks, check_id)
         seen = self._recorded_outcomes
         for task_id, (own, merged) in moved.items():
             path: Optional[str] = None
@@ -9697,25 +9666,46 @@ class WriteBatchScheduler:
 
     # -- per-batch bookkeeping (D3n: append BEFORE the next substitution) ---
 
-    def _record_processed_items(self, task: Dict[str, Any], outcome: TaskOutcome) -> None:
-        """An apply batch's items in ``processed_<phase dir>`` (fix round 22).
+    def _write_record(self, task: Dict[str, Any], facts: BatchFacts) -> BatchRecord:
+        """Record *facts* in ``state.json`` through the writer both legs
+        share (``write_record``), the status journaled through
+        ``StateManager.update_task_status``; a state without a dict (a test
+        double) takes the status alone. Caller holds the effects lock."""
+        state_dict = getattr(self.state, "state", None)
+        if not isinstance(state_dict, dict):
+            self.state.update_task_status(facts.task_id, facts.status, reason=facts.reason)
+            return BatchRecord()
+        return record_batch_facts(
+            state_dict, task, facts, tasks=self.tasks,
+            set_status=self.state.update_task_status,
+        )
 
-        Live run 9: the native leg's ``util batch-done`` recorded a declined
-        fix there with its reason and this leg recorded nothing, so
-        ``state.json`` named the fix on Claude Code only. The same writer
-        (:func:`state_manager.record_batch_items_in_state`), so both legs
-        carry one shape: ``applied`` / ``no-op``, ``declined`` / ``skipped``
-        with the reason, ``failed`` for a batch that did not finish. This
-        leg's own resume still decides from its result files
-        (``state_manager.processed_record_counts``). Caller holds the lock.
-        """
-        if self.kind not in APPLY_WRITE_KINDS or not isinstance(
-            getattr(self.state, "state", None), dict
-        ):
-            return
-        record_batch_items_in_state(
-            self.state.state, os.path.basename(os.path.normpath(self.phase_dir)),
-            task, completed=outcome.ok, leg=PROCESSED_LEG_EXECUTOR,
+    def _batch_facts(
+        self, task: Dict[str, Any], outcome: TaskOutcome, status: str,
+        reason: Optional[str], *, dispatched: bool, kept: bool,
+    ) -> BatchFacts:
+        """*outcome* as the facts both legs record (``write_record``): what
+        ``util batch-done`` reads from the host's flags, read from the
+        outcome. Its own check reported when it passed, failed, or only
+        repeated findings that are not its own; an apply-code-fixes batch
+        refused before dispatch and read as done reports no checks."""
+        task_id = str(task.get("task_id", ""))
+        return BatchFacts(
+            task_id=task_id, kind=self.kind, status=status, reason=reason,
+            leg=PROCESSED_LEG_EXECUTOR,
+            processed_phase=os.path.basename(os.path.normpath(self.phase_dir)),
+            check_findings=outcome.check_findings,
+            batch_check=outcome.batch_check,
+            own_check_ran=(
+                outcome.batch_check is not None
+                or bool(outcome.batch_check_accepted)
+                or bool(outcome.batch_check_repeats)
+            ),
+            batch_check_accepted=outcome.batch_check_accepted or {},
+            batch_check_repeats=outcome.batch_check_repeats or {},
+            note=outcome.batch_check_note,
+            listed=self._listed_outcomes.get(task_id),
+            reports_checks=dispatched or kept or not outcome.ok,
             declined=dict(outcome.declined or {}),
             skipped=dict(outcome.skipped_items or {}),
             no_op=outcome.write_outcome == WRITE_NO_OP,
@@ -9845,85 +9835,11 @@ class WriteBatchScheduler:
                         f"kept at your request (--human-task {task_id}=skip): "
                         f"{len(outcome.skipped_items)} item(s) not applied"
                     )
-                self.state.update_task_status(task_id, status, reason=reason)
-                if self.kind == "implement" and isinstance(
-                    getattr(self.state, "state", None), dict
-                ):
-                    # What this run's check found, for `status` and review-code;
-                    # any other outcome clears an earlier run's record.
-                    set_task_check_findings_in_state(
-                        self.state.state, task_id,
-                        outcome.check_findings if outcome.ok else None,
-                    )
-                    if outcome.ok and outcome.check_findings:
-                        # Fix round 28: a code task recorded earlier whose
-                        # own check reported this same finding.
-                        self._move_repeats_of(task_id, outcome.check_findings, result)
-                    # A code task's own failing check, beside (never among)
-                    # them, as `util batch-done` records it (fix round 15).
-                    from .state_manager import (
-                        set_task_batch_check_accepted_in_state,
-                        set_task_batch_check_in_state,
-                        set_task_batch_check_repeats_in_state,
-                        set_task_own_check_note_in_state,
-                        set_task_own_check_ran_in_state,
-                        set_task_own_text_in_state,
-                    )
-                    set_task_batch_check_in_state(
-                        self.state.state, task_id,
-                        outcome.batch_check if outcome.ok else None,
-                    )
-                    # Fix round 29: its own words beside a failing own check,
-                    # for a check that reports the same finding in a later run.
-                    set_task_own_text_in_state(
-                        self.state.state, task_id, task_own_text(task),
-                    )
-                    # Fix round 28: its own words about its checks, as
-                    # `util batch-done --note` records them.
-                    set_task_own_check_note_in_state(
-                        self.state.state, task_id,
-                        outcome.batch_check_note if outcome.ok else None,
-                    )
-                    # Fix round 24: that it ran one at all, passing ones
-                    # included, for the tests line.
-                    set_task_own_check_ran_in_state(
-                        self.state.state, task_id,
-                        outcome.ok and (outcome.batch_check is not None
-                                        or bool(outcome.batch_check_accepted)
-                                        or bool(outcome.batch_check_repeats)),
-                    )
-                    # Fix round 23: what it reported again of the accepted
-                    # findings, by check, as `util batch-done` records it.
-                    set_task_batch_check_accepted_in_state(
-                        self.state.state, task_id,
-                        outcome.batch_check_accepted if outcome.ok else None,
-                    )
-                    # Fix round 28: what only repeats a check task's finding.
-                    set_task_batch_check_repeats_in_state(
-                        self.state.state, task_id,
-                        outcome.batch_check_repeats if outcome.ok else None,
-                    )
-                elif self.kind == "apply_code_fixes" and isinstance(
-                    getattr(self.state, "state", None), dict
-                ) and (dispatched or kept or not outcome.ok):
-                    # Fix round 20: what the batch's own checks reported, for
-                    # the next batch's prompt and the tests-not-run line, as
-                    # `util batch-done` records it; any other record of the
-                    # batch clears an earlier one.
-                    _known_checks.set_batch_check_report_in_state(
-                        self.state.state, task_id,
-                        prior_changes_id=str(task.get("prior_changes_id") or ""),
-                        grouped_sha256=_known_checks.review_stamp(task),
-                        findings=outcome.batch_check if outcome.ok else None,
-                        listed=(
-                            self._listed_outcomes.get(task_id)
-                            if outcome.ok else None
-                        ),
-                        note=outcome.batch_check_note if outcome.ok else None,
-                    )
-                # Fix round 22: an apply batch's items, as `util batch-done`
-                # records them on the native leg.
-                self._record_processed_items(task, outcome)
+                # The record `util batch-done` writes on the native leg.
+                record = self._write_record(task, self._batch_facts(
+                    task, outcome, status, reason, dispatched=dispatched, kept=kept))
+                if record.repeats_moved:
+                    self._move_repeats_of(task_id, record.repeats_moved, result)
                 # plans/review-commits.md §2.7: a completed batch re-pins its
                 # fix files to the bytes it left (no-op without a guard).
                 self._commit_repin(task, outcome)
@@ -11294,8 +11210,7 @@ class WriteBatchScheduler:
         # <id>=skip` on a failed task) is its own bucket: the seed is neither
         # deferred work nor "skipped with a skipped task".
         declined = sorted(
-            tid for tid, reason in plan.skipped.items()
-            if reason.startswith((USER_DECLINED_REASON, ANSWERED_SKIP_PREFIX))
+            tid for tid, reason in plan.skipped.items() if is_declined_reason(reason)
         )
         deferred = sorted(
             tid for tid in plan.skipped
@@ -13552,7 +13467,7 @@ class WriteBatchScheduler:
         plan = result.human_plan
         out: Dict[str, Tuple[str, str]] = {}
         for task_id, reason in (plan.declined() or {}).items():
-            seed = str(reason).startswith((USER_DECLINED_REASON, ANSWERED_SKIP_PREFIX))
+            seed = is_declined_reason(reason)
             out[str(task_id)] = (
                 "skipped at your request" if seed else "skipped with a skipped task",
                 str(reason),

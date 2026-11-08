@@ -10,6 +10,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [The verdict table](#the-verdict-table)
 - [Retry after edits](#retry-after-edits)
 - [Declined items and partial applications](#declined-items-and-partial-applications)
+- [One record writer for both legs](#one-record-writer-for-both-legs)
 - [Dispatch counts](#dispatch-counts)
 - [Prior-batch context](#prior-batch-context)
 - [Prompt order](#prompt-order)
@@ -695,6 +696,33 @@ through `processed_record_counts`: on the executor leg its own records drop noth
 batch from the result file under its own id, so the ids a stop's `=skip` names do not
 move), and an earlier review's declined or skipped record drops nothing on either leg (offered
 again; an applied record still counts).
+
+## One record writer for both legs
+
+**A finished batch's per-task record in `state.json` has one writer,
+`write_record.record_batch_facts`, which both legs call.** The executor's scheduler
+(`WriteBatchScheduler._record_batch_effects`, and its resume skip) reads a `TaskOutcome` into
+`write_record.BatchFacts` (`_batch_facts`); `util batch-done` (`batch_done.record_batch`) reads the
+host's flags into the same facts. The writer records, in order: the task's status and reason (through
+the caller's status writer, so the executor's `StateManager.update_task_status` still journals it);
+for an implement task its check findings and check tree, its own failing check and own text, that
+its own check ran, the accepted and repeated findings split out of it, the code tasks a check's new
+findings move (`move_check_repeats_in_state`) and its note; an apply-code-fixes batch's check report
+(`known_checks.set_batch_check_report_in_state`); an apply batch's items in `processed_<phase>`.
+
+It is a pure mutation of the state dict: each leg keeps its own lock and save (the scheduler's
+effects lock over its in-memory `StateManager`, `util batch-done`'s `state_file_lock` over the
+file). Two rules hold whatever a leg read: a record other than `completed` clears every earlier
+verdict of the task, and an apply-code-fixes check report is written unless the executor refused
+the batch before dispatch and read it as done (`dispatched or kept or not ok`). A resumed batch
+(`BatchFacts.resumed`) gets its status and items only; its verdict stays as its earlier run recorded
+it. What only one leg does stays with that leg: the commit guard, completion stamp, held dependents,
+`[ETA]` total and `tracked_files` on the native leg; the verdict stamp, prior-changes line, metric
+and the moved repeats' rows and stamps on the executor.
+
+A new per-task fact is a `BatchFacts` field that both builders set, or that one leaves at its
+default for a reason `tests/test_write_record.py` (`LEG_DEFAULTS`) names; that test fails
+otherwise.
 
 ## Dispatch counts
 

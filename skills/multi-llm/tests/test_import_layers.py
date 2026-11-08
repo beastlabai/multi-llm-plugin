@@ -98,6 +98,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.run_registry",
         "utils.state_manager",
         "utils.status_file",
+        "utils.task_ledger",
         "utils.unattended",
     )),
     2: ("providers", (
@@ -140,6 +141,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.write_batch_scheduler",
         "utils.write_phase_bridge",
         "utils.write_prompt",
+        "utils.write_record",
         "utils.write_safety",
         "utils.write_verdict",
     )),

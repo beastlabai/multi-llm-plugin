@@ -512,6 +512,16 @@ loop (no `metrics_left_out`), the block naming them `T003 can still run: the res
 exit code stays the no-run-record 2, fix round 24), and the native implement block prints the
 executor routes' `all tasks:` tally.
 
+**Both legs name a task's outcome through `utils/task_ledger.py`**: the reason words a record
+carries, the rule that reads a skip as the user's decline or a deferral (`is_declined_reason`,
+`chain_declined`), the walk to the manual task a skipped dependent waits on (`skip_chain_root`), the
+bucket of a skip (`skip_bucket`) and of every implement task (`classify`, behind
+`run_status._implement_buckets`), and the words of each bucket (`TALLY_LABELS`, `bucket_clauses`,
+`kept_named`). The executor's write mirror (`write_batch_scheduler._declined_split`,
+`_deferred_split`, from `HumanTaskPlan.chain`), `StateManager`'s deferral readers and `status`'s
+native view (from the reasons in `state.json`) all go through it, so one skip reads the same on
+every surface (`tests/test_task_ledger.py`). It imports nothing from the package.
+
 The unapplied-task-groups notice, which is the optional `--apply-task-suggestions` entry's
 `why`, names the valid groups waiting and what skipping them means, worded as the
 `--resume` its command is once a run of the phase started (`check_workflow_prerequisites.unapplied_task_groups_notice`, fix

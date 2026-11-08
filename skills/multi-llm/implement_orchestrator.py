@@ -2179,9 +2179,9 @@ def _kept_labels(state: StateManager, plan: Any = None) -> Dict[str, str]:
 def _kept_named(kept: Sequence[str], labels: Dict[str, str]) -> str:
     """The kept tasks as a resume line names them: the plain ones first (at
     most eight), then each labelled one with what it is
-    (``write_batch_scheduler.kept_named``, the executor's and the progress
+    (``task_ledger.kept_named``, the executor's and the progress
     line's words too)."""
-    from utils.write_batch_scheduler import kept_named
+    from utils.task_ledger import kept_named
 
     return kept_named(kept, labels)
 

@@ -60,8 +60,16 @@ from . import (
     metrics,
     process_control,
     status_file,
+    task_ledger,
 )
 from .advisory import note_swallowed
+from .task_ledger import (
+    BUCKET_LABELS as _BUCKET_LABELS,
+    TALLY_DONE as _TALLY_DONE,
+    TALLY_LABELS as _TALLY_LABELS,
+    VIEW_MERGE as _VIEW_MERGE,
+    bucket_clauses as _bucket_clauses,
+)
 from .cli_common import (
     ERROR_MAX_CHARS,
     EXIT_ERROR,
@@ -2132,84 +2140,16 @@ def _implement_buckets(
     state: Any, *, merge: Optional[Mapping[str, str]] = None,
 ) -> Tuple[Dict[str, List[str]], Dict[str, str]]:
     """Every task of implement's decomposition in one bucket of
-    :data:`_TALLY_LABELS`, in decomposition order, and ``{dependent: manual
-    task}`` for the ``deferred_dependents`` bucket: the one classifier
-    :func:`implement_task_tally` and :func:`state_implement_view` share
-    (fix round 17: they kept two copies, and both listed a code task skipped
-    with a manual one as "deferred manual"). *merge* folds a bucket into
-    another (the view's coarser ``accepted``). *state* is a read-only
+    :data:`task_ledger.TALLY_LABELS`, in decomposition order, and
+    ``{dependent: manual task}`` for the ``deferred_dependents`` bucket: the
+    one classifier :func:`implement_task_tally` and
+    :func:`state_implement_view` share (``task_ledger.classify``, which the
+    executor's write mirror names its skips by too). *merge* folds a bucket
+    into another (the view's coarser ``accepted``). *state* is a read-only
     ``StateManager``; the decomposition must be on record.
     """
-    from .write_batch_scheduler import (
-        ACCEPTED_REASON_PREFIX,
-        ACCEPTED_WITH_FINDINGS_MARK,
-    )
-
-    record = state.state
-    statuses = state.implementation_task_statuses()
-    reasons = record.get("task_status_reasons") or {}
-    human = {str(t) for t in (record.get("implement_human_task_ids") or [])}
-    findings = {entry["id"] for entry in state.implementation_check_findings()}
-    merge = merge or {}
-    buckets: Dict[str, List[str]] = {
-        merge.get(key, key): [] for key, _ in _TALLY_LABELS
-    }
-    waits_on: Dict[str, str] = {}
-    for task_id in [str(t) for t in record.get("implement_task_ids") or []]:
-        status = statuses.get(task_id)
-        reason = str(reasons.get(task_id) or "")
-        if status == "completed":
-            if reason.startswith(ACCEPTED_REASON_PREFIX):
-                key = ("accepted_findings" if ACCEPTED_WITH_FINDINGS_MARK in reason
-                       else "accepted_failed")
-            elif task_id in human and "--human-task" in reason:
-                key = "completed_manual"
-            elif task_id in findings:
-                key = "check_findings"
-            else:
-                key = "completed"
-        elif status == "failed":
-            key = "failed"
-        elif status == "skipped":
-            if reason.startswith((state._USER_DECLINED_REASON, state._ANSWERED_SKIP_PREFIX)):
-                key = "declined"
-            elif not state._deferred_to_user(task_id):
-                key = "declined_dependents"
-            else:
-                root = state.deferral_root(task_id)
-                if root is not None and root != task_id:
-                    key = "deferred_dependents"
-                    waits_on[task_id] = root
-                else:
-                    key = "deferred"
-        else:
-            key = "not_run"
-        buckets[merge.get(key, key)].append(task_id)
-    return buckets, waits_on
-
-
-def _bucket_clauses(
-    buckets: Mapping[str, Sequence[str]], waits_on: Mapping[str, str],
-    labels: Sequence[Tuple[str, str]], *, live: bool = False,
-) -> List[str]:
-    """``<label>: <ids>`` per non-empty bucket, in *labels*' order. The
-    dependents of a deferred manual task read "skipped (depends on manual
-    T005): T006", one clause per manual task (fix round 17)."""
-    parts: List[str] = []
-    for key, label in labels:
-        ids = list(buckets.get(key) or [])
-        if not ids:
-            continue
-        if key == "deferred_dependents":
-            for root in sorted({str(waits_on.get(tid) or "") for tid in ids}):
-                waiting = [tid for tid in ids if str(waits_on.get(tid) or "") == root]
-                named = f"skipped (depends on manual {root})" if root else label
-                parts.append(f"{named}: {', '.join(waiting)}")
-            continue
-        if key == "not_run" and live:
-            label = "pending"
-        parts.append(f"{label}: {', '.join(ids)}")
-    return parts
+    ledger = task_ledger.classify(state)
+    return ledger.buckets(merge), ledger.waits_on
 
 
 def state_implement_view(
@@ -3397,48 +3337,6 @@ def _id_list(value: Any) -> List[str]:
     return [str(item) for item in value] if isinstance(value, list) else []
 
 
-#: The buckets of :func:`implement_task_tally`, in the order the line names
-#: them, with their words. The first five are done. A task skipped with a
-#: deferred manual task reads "skipped (depends on manual T005)"
-#: (:func:`_bucket_clauses`, fix round 17).
-_TALLY_LABELS: Tuple[Tuple[str, str], ...] = (
-    ("completed", "completed"),
-    ("check_findings", "completed, its check reported problems"),
-    # Fix round 20 (run 8 #6): in the words of the `resume: kept` line and
-    # the progress line's kept note (`answered_done_label`).
-    ("accepted_findings", "accepted with its check findings"),
-    ("accepted_failed", "accepted after failing"),
-    ("completed_manual", "completed by hand"),
-    ("failed", "failed"),
-    ("declined", "skipped at your request"),
-    ("declined_dependents", "skipped (depend on a task you skipped)"),
-    ("deferred", "deferred manual"),
-    ("deferred_dependents", "skipped (depends on a manual task)"),
-    ("not_run", "not run"),
-)
-#: :func:`state_implement_view`'s coarser buckets, folded from the tally's.
-_VIEW_MERGE: Dict[str, str] = {
-    "check_findings": "completed",
-    "accepted_findings": "accepted",
-    "accepted_failed": "accepted",
-}
-_VIEW_LABELS: Tuple[Tuple[str, str], ...] = (
-    ("completed", "completed"),
-    ("accepted", "accepted with its check findings or after failing"),
-    ("completed_manual", "completed by hand"),
-    ("failed", "failed"),
-    ("declined", "skipped at your request"),
-    ("declined_dependents", "skipped (depend on a task you skipped)"),
-    ("deferred", "deferred manual"),
-    ("deferred_dependents", "skipped (depends on a manual task)"),
-    ("not_run", "not run"),
-)
-_TALLY_DONE = (
-    "completed", "check_findings", "accepted_findings", "accepted_failed",
-    "completed_manual",
-)
-
-
 def implement_task_tally(plan_path: Path) -> Optional[Dict[str, Any]]:
     """Every task of implement's decomposition as ``state.json`` records it.
 
@@ -3447,7 +3345,7 @@ def implement_task_tally(plan_path: Path) -> Optional[Dict[str, Any]]:
     batches ok, 1/2 items applied", then "1/1" on the accept path) and never
     added up to the fixture's seven tasks, while summary.md and the stop's
     own account did. The run mirror holds one run; ``state.json`` holds the
-    phase. ``{"total", "done", "buckets"}`` over :data:`_TALLY_LABELS`, each
+    phase. ``{"total", "done", "buckets"}`` over ``task_ledger.TALLY_LABELS``, each
     task in exactly one bucket; ``None`` without a decomposition on record.
     Read-only.
     """
@@ -3509,7 +3407,7 @@ def _kept_labels(mirror: Mapping[str, Any], kept: Sequence[str]) -> Dict[str, st
     failed task) and a manual task completed by hand
     (``completed_by_hand_task_ids``, fix round 23). Plain kept tasks carry
     no label."""
-    from .write_batch_scheduler import (
+    from .task_ledger import (
         ACCEPTED_AFTER_FAILING_LABEL,
         ACCEPTED_WITH_FINDINGS_LABEL,
         COMPLETED_BY_HAND_LABEL,
@@ -3536,11 +3434,9 @@ def _kept_labels(mirror: Mapping[str, Any], kept: Sequence[str]) -> Dict[str, st
 
 
 def _kept_text(kept: Sequence[str], labels: Mapping[str, str]) -> str:
-    """The kept note's list: ``write_batch_scheduler.kept_named``, at most
-    five plain ids as before."""
-    from .write_batch_scheduler import kept_named
-
-    return kept_named(kept, labels, limit=5)
+    """The kept note's list: ``task_ledger.kept_named``, at most five plain
+    ids as before."""
+    return task_ledger.kept_named(kept, labels, limit=5)
 
 
 def _mirror_text(key: str, mirror: Any) -> List[str]:
@@ -3745,9 +3641,11 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
         str(t) for t in accepted if str(t) not in with_findings and str(t) not in shown
     ]
     if accepted_checks:
-        parts.append(f"accepted with its check findings {', '.join(accepted_checks)}")
+        parts.append(
+            f"{task_ledger.ACCEPTED_WITH_FINDINGS_LABEL} {', '.join(accepted_checks)}")
     if accepted_failed:
-        parts.append(f"accepted after failing {', '.join(accepted_failed)}")
+        parts.append(
+            f"{task_ledger.ACCEPTED_AFTER_FAILING_LABEL} {', '.join(accepted_failed)}")
     # F9: `skipped_task_ids`/`human_task_strategy` (resolved before dispatch,
     # `write_batch_scheduler._mirror_status`) were on `.status.json` already
     # but rendered nowhere, so the one task `--yes`'s default strategy defers
@@ -3775,21 +3673,20 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     if deferred:
         strategy = mirror.get("human_task_strategy")
         suffix = f" ({strategy})" if strategy else ""
-        parts.append(f"deferred manual: {', '.join(deferred)}{suffix}")
+        parts.append(f"{_BUCKET_LABELS['deferred']}: {', '.join(deferred)}{suffix}")
     waiting = [
         str(task_id) for task_id in skipped_ids if str(task_id) in waits_on
     ]
     if waiting:
         parts.extend(_bucket_clauses(
             {"deferred_dependents": waiting}, waits_on,
-            (("deferred_dependents", "skipped (depends on a manual task)"),),
+            (("deferred_dependents", _BUCKET_LABELS["deferred_dependents"]),),
         ))
+    # The skip buckets in the words `status` names them by from state.json.
     if declined:
-        parts.append(f"skipped at your request: {', '.join(declined)}")
+        parts.append(f"{_BUCKET_LABELS['declined']}: {', '.join(declined)}")
     if with_them:
-        parts.append(
-            f"skipped (depend on a task you skipped): {', '.join(with_them)}"
-        )
+        parts.append(f"{_BUCKET_LABELS['declined_dependents']}: {', '.join(with_them)}")
     # F4: `driver.verify_command`'s outcome. Without it a run that applied every
     # batch and then failed the repository's own check renders as
     # `apply_code_fixes 3/3 batches ok` with no failed id anywhere — the only
