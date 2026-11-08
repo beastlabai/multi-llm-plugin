@@ -23,6 +23,7 @@ this file states *facts about hosts* and ships with the skill.
 from __future__ import annotations
 
 import os
+import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:  # normal import (utils is a package)
@@ -110,6 +111,9 @@ _CORRUPT_INSTALL = (
 )
 
 _CACHE: Dict[str, Dict[str, Any]] = {}
+# Held across a miss, so concurrent first readers (doctor's probe threads) wait
+# for one parse instead of each running their own.
+_CACHE_LOCK = threading.Lock()
 
 
 class UnknownHost(NeedsHuman):
@@ -142,19 +146,34 @@ def load(base: Optional[str] = None) -> Dict[str, Any]:
     cached = _CACHE.get(root)
     if cached is not None:
         return cached
-    import yaml
+    with _CACHE_LOCK:
+        cached = _CACHE.get(root)
+        if cached is None:
+            cached = _load_uncached(root)
+            _CACHE[root] = cached
+    return cached
+
+
+def _load_uncached(root: str) -> Dict[str, Any]:
+    """Parse and check ``<root>/hosts/capabilities.yaml``; :func:`load` caches it."""
+    # Imported here, not at module scope: most readers of this module never
+    # parse, and importing PyYAML costs about 7 ms.
+    try:
+        from . import yaml_io
+    except ImportError:  # pragma: no cover - direct script runs with utils/ on path
+        import yaml_io  # type: ignore
 
     path = os.path.join(root, CAPABILITIES_FILE)
     try:
         with open(path, "r", encoding="utf-8") as handle:
-            document = yaml.safe_load(handle) or {}
+            document = yaml_io.safe_load(handle) or {}
     except OSError as exc:
         raise NeedsHuman(
             f"ERROR: host capability data is missing or unreadable: {path}\n"
             f"       ({exc})\n"
             "       The install looks corrupt or partial; reinstall the skill."
         ) from exc
-    except yaml.YAMLError as exc:
+    except yaml_io.YAMLError as exc:
         # Without this the parser's own exception escapes as an unhandled crash
         # (exit 1, a traceback) rather than as this project's "needs a human"
         # exit 3 — and the traceback names the parser, not the install.
@@ -164,7 +183,6 @@ def load(base: Optional[str] = None) -> Dict[str, Any]:
             f"{_CORRUPT_INSTALL}"
         ) from exc
     _validate_document(document, path)
-    _CACHE[root] = document
     return document
 
 

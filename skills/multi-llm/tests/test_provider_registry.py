@@ -2712,17 +2712,26 @@ class TestForeignCwdAnchoring:
                 anchor=str(plan_file),
             )
 
-        with patch("utils.llm_client.subprocess.run") as spawn:
-            spawn.return_value = _completed()
+        real_run = subprocess.run
+
+        def provider_only(argv, *args, **kwargs):
+            # Config discovery asks git on every access (providers.md
+            # #configuration-and-runner-resolution); only the provider is stubbed.
+            if argv[0] == "git":
+                return real_run(argv, *args, **kwargs)
+            return _completed()
+
+        with patch("utils.llm_client.subprocess.run", side_effect=provider_only) as spawn:
             asyncio.run(
                 rob.run_models_concurrent(
                     specs, per_model, None, gate, anchor=str(plan_file)
                 )
             )
 
-        assert spawn.call_count == 1
-        argv = list(spawn.call_args[0][0])
-        spawn_timeout = spawn.call_args[1]["timeout"]
+        provider_spawns = [c for c in spawn.call_args_list if c[0][0][0] != "git"]
+        assert len(provider_spawns) == 1
+        argv = list(provider_spawns[0][0][0])
+        spawn_timeout = provider_spawns[0][1]["timeout"]
 
         assert specs == ["gemini:sonnet"], "row 6: resolve_models must canonicalise"
         assert os.path.basename(argv[0]) == "gemini", (

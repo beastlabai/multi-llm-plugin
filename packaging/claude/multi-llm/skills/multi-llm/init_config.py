@@ -41,12 +41,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-import yaml
-
 # The script ships inside the skill but runs with the *user's* repo as CWD.
 # Make the skill's own packages importable regardless of the caller's CWD.
 sys.path.insert(0, str(Path(__file__).parent))
 
+from utils import yaml_io  # noqa: E402
 from utils.stream_bootstrap import bootstrap_streams  # noqa: E402
 from utils.cli_common import build_parent_parser  # noqa: E402
 from utils.git_utils import get_project_root_from_dir  # noqa: E402
@@ -843,8 +842,8 @@ def _validate_generated_config(text: str, detected, base_config: dict) -> "str |
     provider was detected). Aborts the write on any failure.
     """
     try:
-        parsed = yaml.safe_load(text)
-    except yaml.YAMLError as e:
+        parsed = yaml_io.safe_load(text)
+    except yaml_io.YAMLError as e:
         return f"generated YAML does not parse: {e}"
     if not isinstance(parsed, dict):
         return "generated YAML is not a top-level mapping"
@@ -921,11 +920,9 @@ def _recheck_merged(target_dir: Path, expected_models: "list[str]", config_path:
         import utils.provider_registry as registry
 
         registry._config = None
-        registry._config_key = None
         merged = registry.load_config(anchor=str(target_dir))
         discovered = registry._find_project_config(anchor=str(target_dir))
         registry._config = None
-        registry._config_key = None
         # Only diagnose shadowing when the written file is the one discovery picks
         # up; otherwise 'resolved' is the base catalog, not our file, and the
         # mismatch would misattribute an env override that may not exist.
@@ -1107,7 +1104,6 @@ def _runner_warning_lines(args: argparse.Namespace, target_dir: Path) -> "list[s
         host_id = host_capabilities.resolve_host_id(explicit=getattr(args, "host", None))
         # The config this init just wrote, not whatever an earlier read cached.
         provider_registry._config = None
-        provider_registry._config_key = None
         spec, _layer = resolve_subagent_runner("full", anchor=str(target_dir), host_id=host_id)
         refusal = repo_wide_write_refusal(spec, anchor=str(target_dir))
     except Exception:  # noqa: BLE001 - advisory, never a failed init

@@ -20,8 +20,37 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 its **full** contents — including a `providers:` block — over base, identical to the env
 layer (no longer filtered to selection keys). Deep-merge, lists replace, `None`
 skipped. Discovery anchors on the optional `anchor` (plan path threaded from
-`resolve_models`) then CWD; cache keyed on the resolved anchor. Present-but-invalid explicit
+`resolve_models`) then CWD. Present-but-invalid explicit
 overrides fail fast (`ConfigError`); `MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE=1` restores warn-and-skip.
+
+**Config caching.** The merged config is cached per process, one entry per set of layer files
+a load read, keyed on each file's path and stat signature (device, inode, size, mtime, ctime of
+the file it leads to) plus the effective permissive flag (`_ConfigCache`). `/repo` and `/repo/plans`
+share an entry; two repositories, or a repository and a directory outside any, never do; and a
+layer that changes, appears or disappears is read again on the next access from any anchor, so
+a lowered `max_concurrent*` cap reaches the ordinary accessors at once. A load is cached only when
+every file it read was settled (older than `yaml_io.SETTLE_S`) before the read and kept its
+signature through it. Each load is one snapshot: the merged dict plus the layer that supplied
+each `driver.*` value, so a value and its provenance never come from two loads. Code that runs
+or logs a value with its source reads both in one call (`get_verify_settings` for
+`driver.verify_command`, `_driver_view` inside the registry). Which layer files a load reads is
+never cached: every access asks git for the project root (`git rev-parse --show-toplevel`, about
+1.5 ms) and checks whether `.multi-llm/providers.yaml` is there. git's answer depends on more than
+a process can cheaply watch (a re-pointed checkout symlink, a `.git` created or removed,
+`core.worktree` in a gitfile target's `config` or in `config.worktree`, `safe.directory` and the
+rest of the global config), and the project layer's `verify_command` is executed, so a remembered
+answer could run another repository's command. `registry._config = None` drops everything
+(`set_run_anchor`, `--init`, the tests).
+
+**YAML parsing** goes through `utils/yaml_io.py` and nowhere else
+(`tests/test_yaml_io.py` enforces it): `SAFE_LOADER` is libyaml's `CSafeLoader` when the PyYAML
+wheel has it, else `SafeLoader`, about 0.6 ms against 16 ms for `providers.yaml`. The two
+build equal documents for every YAML file in the repository; only parse-error marks differ
+(libyaml's carry no snippet). `load_file` caches a parse per resolved path, valid while the open
+file's `fstat` (device, inode, size, mtime, ctime) matches. It returns deep copies, and admits a
+parse only when that signature was settled (older than `SETTLE_S`) when taken, before the read,
+and is unchanged after it, because coarse timestamps let a same-size rewrite keep its signature. `host_capabilities.load` keeps its own per-root cache and parses
+under a lock, so concurrent first readers share one parse.
 
 Config `command` is metadata-only and NEVER executed (binaries are hardcoded in
 `utils/providers/`); a merged provider name with no hardcoded adapter is ignored at runtime.

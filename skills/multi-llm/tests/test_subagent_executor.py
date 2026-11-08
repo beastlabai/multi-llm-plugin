@@ -4585,15 +4585,15 @@ class TestModelCatalogPreflight:
                 registry, "host_default_runner",
                 lambda tier="full", host_id=None: None,
             )
-            real_driver = registry.get_driver_config()
-            monkeypatch.setattr(
-                registry, "get_driver_config",
-                lambda anchor=None: {**real_driver, "subagent_runner": _UNLISTED_SPEC},
-            )
-            monkeypatch.setattr(
-                registry, "get_driver_provenance",
-                lambda key, anchor=None: "base",
-            )
+            real_base = registry._load_base_config
+
+            def base_naming_the_spec():
+                base = real_base()
+                base["driver"]["subagent_runner"] = _UNLISTED_SPEC
+                return base
+
+            monkeypatch.setattr(registry, "_load_base_config", base_naming_the_spec)
+            registry._config = None
         spec, reported = registry.resolve_subagent_runner("full")
         assert (spec, reported) == (_UNLISTED_SPEC, layer)
 

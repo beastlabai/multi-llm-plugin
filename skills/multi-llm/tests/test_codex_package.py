@@ -366,9 +366,6 @@ DYNAMIC_READ_FILES = {
     "ask_orchestrator.py": "a per-call variable named on the command line",
     # iterates a tuple of cursor's own profile variables (none MULTI_LLM_*).
     "cursor_agent.py": "cursor's profile variables, iterated",
-    # `_truthy_env(name)`: every caller passes a module constant the walk
-    # already finds at its own read site.
-    "provider_registry.py": "a helper whose callers pass named constants",
     # names read out of the generated surface (D3e), never spelled.
     "mcp_server.py": "names read from dist/cli-surface.json",
 }

@@ -6,8 +6,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-import yaml
-
+from .. import yaml_io
 from ..json_extractor import extract_json_from_text
 from .base import (
     LLMProvider,
@@ -328,8 +327,10 @@ def _conf_values(path: Path, option: str, line_re: "re.Pattern[str]") -> List[An
     except OSError:
         return []
     try:
-        document = yaml.safe_load(text)
-    except yaml.YAMLError:
+        # yaml_io's loader is the one aider's configargparse picks: CSafeLoader
+        # when libyaml is there, else SafeLoader.
+        document = yaml_io.safe_load(text)
+    except yaml_io.YAMLError:
         return [
             match.group(1).split(" #", 1)[0].strip().strip("'\"")
             for match in map(line_re.match, text.splitlines())

@@ -5428,6 +5428,37 @@ class TestThePhaseRunsTheRepositorysOwnCheck:
         )
         assert mirror["progress"]["write_subagents"]["verification"]["exit_code"] == 0
 
+    def test_the_command_that_runs_and_its_logged_layer_come_from_one_load(
+        self, env, monkeypatch
+    ):
+        """The layer logged and recorded beside the executed command is the one
+        that supplied it. Here every config load answers differently (load
+        ``i`` names ``check.sh i`` from layer ``layer-i``), so a command read
+        in one load and its layer in another can never agree."""
+        check = self._script(env, 'echo "ran check $1"\nexit 0\n')
+        real = registry._load_snapshot
+        loads = []
+
+        def a_new_answer_every_load(anchor=None, permissive=None):
+            snapshot = real(anchor, permissive)
+            loads.append(anchor)
+            index = len(loads)
+            config = dict(snapshot.config)
+            config["driver"] = {**config["driver"], "verify_command": f"{check} {index}"}
+            layers = {**snapshot.driver_layers, "verify_command": f"layer-{index}"}
+            return registry._ConfigSnapshot(config, layers)
+
+        monkeypatch.setattr(registry, "_load_snapshot", a_new_answer_every_load)
+        lines = []
+        result = self._run(env, verify=check, log=lines)
+
+        assert result.exit_code == 0, result.messages
+        index = result.verification["source"].removeprefix("layer-")
+        assert result.verification["command"] == f"{check} {index}"
+        assert f"ran check {index}" in result.verification["output_tail"]
+        running = [l for l in lines if "running `" in l]
+        assert running and f"verification (layer-{index})" in running[0], running
+
     def test_a_failing_command_is_exit_three_and_reverts_nothing(self, env):
         verify = self._script(env, "echo 'a.py:1: type error'\nexit 2\n")
         state = FakeState(env.tmp_path / "state.json")

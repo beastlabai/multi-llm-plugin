@@ -72,11 +72,10 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         JailRequest,
     )
     from .provider_registry import (
-        get_driver_provenance,
         get_max_concurrent_write_subagents,
         get_provider_max_concurrent,
         get_verify_command,
-        get_verify_timeout_s,
+        get_verify_settings,
         parse_model_spec,
     )
     from .subagent_executor import (
@@ -191,11 +190,10 @@ except ImportError:  # pragma: no cover - direct-script import shim
         JailRequest,
     )
     from utils.provider_registry import (
-        get_driver_provenance,
         get_max_concurrent_write_subagents,
         get_provider_max_concurrent,
         get_verify_command,
-        get_verify_timeout_s,
+        get_verify_settings,
         parse_model_spec,
     )
     from utils.subagent_executor import (
@@ -13148,7 +13146,9 @@ class WriteBatchScheduler:
             return True
         if not self._phase_has_applied_batches(result):
             return True
-        command = get_verify_command(anchor=self.anchor)
+        # One load for the command, its timeout and the layer named in the log
+        # (docs/development/providers.md#configuration-and-runner-resolution).
+        command, timeout, source = get_verify_settings(anchor=self.anchor)
         if not command:
             self.log(
                 "[write-subagents] no driver.verify_command configured — "
@@ -13165,8 +13165,6 @@ class WriteBatchScheduler:
             result.unverified = self._unverified_text()
             result.messages.append(result.unverified)
             return True
-        timeout = get_verify_timeout_s(anchor=self.anchor)
-        source = get_driver_provenance("verify_command", anchor=self.anchor)
         # Announced BEFORE it runs, which is what `docs/configuration.md`'s
         # safety section already promises of the one config key whose value is
         # executed: the only line used to be written once the command returned,
