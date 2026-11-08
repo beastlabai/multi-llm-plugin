@@ -116,10 +116,15 @@ backstop, not the design.
 **How a save knows its own changes.** Two sources, for every unit below:
 
 - *The journal.* Each `StateManager` mutator records the unit it wrote (the table's "Journaled
-  by" column). A journaled unit is the saver's even when its value equals what the saver
-  loaded: a retry that records the same failure with the same reason, a `--human-task` answer
-  repeated after another writer consumed it, a scope record repeated within the second its
-  timestamp keeps, a clear of `metrics_left_out` this manager never saw filled. Each is a
+  by" column). A domain module that writes its own record with a raw-dict helper journals it
+  through the generic `StateManager.journal_entry(key, entry_id)`, which takes an entry-merged
+  map only: the scope-policy writers live beside their records in `scope_policy`, `scope_apply`
+  and `scope_policy_runs`, so `state_manager` (L1) imports no domain module
+  ([import layers](dispatcher.md#import-layers)). A journaled unit is the saver's even when its
+  value equals what the saver loaded: a retry that records the same failure with the same
+  reason, a `--human-task` answer repeated after another writer consumed it, a scope record
+  repeated within the second its timestamp keeps, a clear of `metrics_left_out` this manager
+  never saw filled. Each is a
   write, and what another writer recorded meanwhile does not win over it. A mutator that
   writes nothing (`close_scope_run` on a closed record, `attach_scope_baseline` on a round that
   has one, `finish_metrics_phase` with nothing to close) journals nothing. A save, `reload()`
@@ -150,7 +155,7 @@ file's:
 |------|------|--------------|--------|
 | A task's record | its entry in `task_status`, `task_status_reasons`, the check maps (`task_check_findings`, `task_batch_check`, `task_own_text`, `task_own_check_note`, `task_batch_check_accepted`, `task_batch_check_repeats`, `task_check_trees`), `implement_task_reset_at`, `human_task_decisions`, `dependency_overrides` and `apply_fix_batch_checks`; its membership of `task_own_check_ran` | `update_task_status`, `record_dependency_override`, `record_human_task_answers` (each task it answers) | by task id, the record whole |
 | A phase's record | its entries in `phases_completed`, `phases_started`, `phases_skipped` | `mark_phase_completed`/`_started`/`_skipped`, `reopen_phase` | by phase |
-| An entry's record | one entry of `processed_<phase>`, `human_decisions_<phase>`, `human_decision_verdicts_<phase>`, `metrics_progress`, `metrics_left_out`, `metrics_set_aside`, `scope_policy` (by review phase), `scope_policy_runs` (by mode) | `mark_item_processed`, `record_human_decision`, `record_judge_verdicts` (each verdict); `start_metrics_phase`, `set_metrics_total`, `set_metrics_left_out`, `set_metrics_set_aside`, `finish_metrics_phase` (what it closed); `record_scope_round`, `attach_scope_baseline`, `record_scope_apply_policy`, `record_scope_deferrals`, `record_scope_completion`, `record_scope_run_start`, `close_scope_run` | by entry id, the entry whole: never a fragment (`{"details": {"leg": …}}` with no status, which `processed_record_counts` would read as done) |
+| An entry's record | one entry of `processed_<phase>`, `human_decisions_<phase>`, `human_decision_verdicts_<phase>`, `metrics_progress`, `metrics_left_out`, `metrics_set_aside`, `scope_policy` (by review phase), `scope_policy_runs` (by mode) | `mark_item_processed`, `record_human_decision`, `record_judge_verdicts` (each verdict); `start_metrics_phase`, `set_metrics_total`, `set_metrics_left_out`, `set_metrics_set_aside`, `finish_metrics_phase` (what it closed); through `journal_entry`: `scope_policy.record_scope_round`, `scope_policy.attach_scope_baseline`, `scope_policy.record_scope_apply_policy`, `scope_apply.record_scope_deferrals`, `scope_apply.record_scope_completion`, `scope_policy_runs.record_scope_run_start`, `scope_policy_runs.close_scope_run` | by entry id, the entry whole: never a fragment (`{"details": {"leg": …}}` with no status, which `processed_record_counts` would read as done) |
 | The decomposition | `task_titles`, `implement_task_ids`, `implement_human_task_ids`, `implement_task_depends_on` | `record_task_titles`, `set` of one of its keys | together |
 | The plan-change record | `plan_hash`, `plan_changed` | the load's plan-change check, `clear_plan_changed_flag`, `refresh_plan_hash`, `set` of either key | together, so a hash travels with its own flag. An edit only the saver's load detected gives way to a file that records the hash it detected: whoever wrote that saw the same plan, and the flag beside it (raised or consumed) stands |
 | `metrics` | one list per phase | (value comparison) | entry by entry: `record_metric_in_state` only appends or replaces an entry in place, so an entry the saver replaced replaces the file's when the file still holds the original, and every other entry it added goes in by `record_metric_in_state`'s identity rule (`metrics.merge_recorded_metric`): a second record of one event `(phase, run_id, label, batch_index)` collapses into the file's, with its `[METRICS_DUPLICATE]` or `[METRICS_CONFLICT]` line, instead of counting one batch twice. A list of another shape is the saver's |

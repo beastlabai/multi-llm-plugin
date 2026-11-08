@@ -588,6 +588,33 @@ def record_completion(state: Dict[str, Any], phase: str, applied: Optional[Apply
     return outcome
 
 
+# Journaled writers: each takes a ``StateManager`` (*manager*), writes its
+# ``state`` through the raw-dict helper and journals the round record it wrote
+# (``scope_policy.journal_round``); see the twins in ``scope_policy``.
+
+
+def record_scope_deferrals(
+    manager: Any, phase: str, entries: Sequence[Mapping[str, Any]],
+) -> None:
+    """Replace the round's scope deferrals (``[]`` releases them) and drop
+    its stale completion (:func:`persist_deferrals`)."""
+    persist_deferrals(manager.state, phase, entries)
+    sp.journal_round(manager, phase)
+
+
+def record_scope_completion(
+    manager: Any, phase: str, applied: Optional[ApplyPolicy],
+    blockers: Sequence[Mapping[str, Any]] = (),
+) -> Optional[Dict[str, Any]]:
+    """Write the round's completion outcome (:func:`record_completion`),
+    which a round with no record does not have; returns the outcome."""
+    recorded = sp.round_record(manager.state, phase) is not None
+    outcome = record_completion(manager.state, phase, applied, blockers)
+    if recorded:
+        sp.journal_round(manager, phase)
+    return outcome
+
+
 def recorded_blockers(state: Mapping[str, Any], phase: str) -> List[Dict[str, Any]]:
     """The blockers the round's last completion recorded (none when a later run cleared them).
 

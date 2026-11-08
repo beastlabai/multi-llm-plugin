@@ -159,6 +159,30 @@ def record_run_start(state: Dict[str, Any], key: str, choice: Optional[Choice]) 
     return False
 
 
+# Journaled writers: each takes a ``StateManager`` (*manager*), writes its
+# ``state`` through the raw-dict helper above and journals *key*'s run record
+# when it wrote one (``StateManager.journal_entry``), so the manager's merging
+# save() keeps that record whole; see the twins in ``scope_policy``.
+
+
+def record_scope_run_start(manager: Any, key: str, choice: Optional[Choice]) -> bool:
+    """Persist *key*'s run choice (:func:`record_run_start`); ``True`` when
+    it wrote one, and the caller saves."""
+    wrote = record_run_start(manager.state, key, choice)
+    if wrote:
+        manager.journal_entry(RUNS_KEY, key)
+    return wrote
+
+
+def close_scope_run(manager: Any, key: str) -> bool:
+    """Mark *key*'s run choice finished (:func:`close_run_choice`); ``True``
+    when it changed."""
+    closed = close_run_choice(manager.state, key)
+    if closed:
+        manager.journal_entry(RUNS_KEY, key)
+    return closed
+
+
 def _finished_after(state: Mapping[str, Any], phase: str, since: datetime) -> bool:
     """Whether *phase* has a completion or skip recorded after *since*.
 

@@ -2776,7 +2776,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         new_run=bool(getattr(args, "fresh", False)))
     scope_policy_value, scope_source = scope_policy_runs.effective_choice(scope_choice)
     if not (args.dry_run or getattr(args, "dry_run_subagents", False)):
-        if state.record_scope_run_start("implement", scope_choice):
+        if scope_policy_runs.record_scope_run_start(state, "implement", scope_choice):
             state.save()
     if scope_source != scope_policy_runs.sp.SOURCE_EXPLICIT:
         scope_decision = scope_policy_runs.announce(

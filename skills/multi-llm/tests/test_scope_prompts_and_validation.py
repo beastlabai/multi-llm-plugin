@@ -993,13 +993,6 @@ class TestCodeReviewRound:
         fake_state.is_phase_completed = MagicMock(return_value=False)
         fake_state.phase_completion_is_stale = MagicMock(return_value=False)
         fake_state.state = state_dict
-        # The round is recorded through the manager's scope mutators.
-        fake_state.record_scope_round = MagicMock(
-            side_effect=lambda phase, policy, source, baseline=None:
-            sp.record_review_round(state_dict, phase, policy, source, baseline))
-        fake_state.attach_scope_baseline = MagicMock(
-            side_effect=lambda phase, baseline:
-            sp.update_round_baseline(state_dict, phase, baseline))
         issue = {"title": "OOB teleport skips resync", "desc": "Teleport skips the resync.",
                  "type": "bug", "importance": "high", "file": "index.html",
                  "scope_relation": "in_scope", "scope_reason": "Fixes a regression."}

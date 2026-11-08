@@ -1020,6 +1020,50 @@ def record_deferrals(state: Dict[str, Any], phase: str, deferrals: Sequence[Mapp
     record["deferrals"] = [dict(d) for d in deferrals]
 
 
+# Journaled writers: each takes a ``StateManager`` (*manager*), writes its
+# ``state`` through the raw-dict helper above and journals the round record
+# it wrote (``StateManager.journal_entry``), so the manager's merging save()
+# keeps that record whole, a write that repeats the recorded value included.
+# A call that writes nothing journals nothing: the file's record stands
+# (docs/development/write-scheduler.md, "Merge units").
+
+
+def journal_round(manager: Any, phase: str) -> None:
+    """Journal *phase*'s round record (the review phase's entry of
+    :data:`STATE_KEY`) as written by *manager*."""
+    manager.journal_entry(STATE_KEY, review_phase_of(phase))
+
+
+def record_scope_round(
+    manager: Any, phase: str, policy: str, source: str,
+    baseline: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Start *phase*'s review round record (:func:`record_review_round`);
+    returns the record."""
+    record = record_review_round(manager.state, phase, policy, source, baseline)
+    journal_round(manager, phase)
+    return record
+
+
+def attach_scope_baseline(manager: Any, phase: str, baseline: Mapping[str, Any]) -> None:
+    """Attach the round's scope baseline unless it has one
+    (:func:`update_round_baseline`: the first binding wins)."""
+    before = round_record(manager.state, phase)
+    update_round_baseline(manager.state, phase, baseline)
+    if round_record(manager.state, phase) != before:
+        journal_round(manager, phase)
+
+
+def record_scope_apply_policy(
+    manager: Any, phase: str, policy: str, source: str,
+) -> Dict[str, Any]:
+    """Record the round's effective apply policy (:func:`record_apply_policy`);
+    returns the record."""
+    record = record_apply_policy(manager.state, phase, policy, source)
+    journal_round(manager, phase)
+    return record
+
+
 def round_policies(state: Mapping[str, Any], phase: str) -> Dict[str, Any]:
     """``{"review_policy", "apply_policy", "baseline_id", ...}`` for display/resolution.
 

@@ -701,6 +701,31 @@ class TestTheJournal:
         assert "review-plan" not in completed
         assert "implement" in completed
 
+    def test_a_journaled_entry_repeating_its_value_is_still_a_write(self, plan):
+        """`journal_entry`, the generic API a domain module's raw-dict
+        writer journals through."""
+        seed = StateManager(plan)
+        seed.state["processed_apply-suggestions"] = {"g1": {"status": "applied"}}
+        seed.save()
+        first = StateManager(plan)
+        second = StateManager(plan)
+
+        first.state["processed_apply-suggestions"]["g1"] = {"status": "failed"}
+        first.save()
+        second.state["processed_apply-suggestions"]["g1"] = {"status": "applied"}
+        second.journal_entry("processed_apply-suggestions", "g1")
+        second.save()
+
+        assert _on_disk(second)["processed_apply-suggestions"]["g1"] == {"status": "applied"}
+
+    @pytest.mark.parametrize("key", ["task_status", "phases_completed", "plan_hash", "custom"])
+    def test_journal_entry_refuses_a_key_not_merged_entry_by_entry(self, plan, key):
+        manager = StateManager(plan)
+
+        with pytest.raises(ValueError):
+            manager.journal_entry(key, "x")
+        assert not manager._touched
+
 
 class TestIndependentRecordsOfOneKey:
     """Codex second review, point 2: `scope_policy` (by review phase),
@@ -1105,14 +1130,14 @@ class TestEveryWriterFamilyJournals:
 
         monkeypatch.setattr(scope_policy, "_now", lambda: "2026-11-08T10:00:00")
         seed = StateManager(plan)
-        seed.record_scope_round("code-review", "preserve", "explicit")
+        scope_policy.record_scope_round(seed, "code-review", "preserve", "explicit")
         seed.save()
         first = StateManager(plan)
         second = StateManager(plan)
 
-        first.record_scope_round("code-review", "expand", "explicit")
+        scope_policy.record_scope_round(first, "code-review", "expand", "explicit")
         first.save()
-        second.record_scope_round("code-review", "preserve", "explicit")
+        scope_policy.record_scope_round(second, "code-review", "preserve", "explicit")
         second.save()
 
         record = _on_disk(second)["scope_policy"]["code-review"]
@@ -1123,15 +1148,15 @@ class TestEveryWriterFamilyJournals:
 
         monkeypatch.setattr(scope_policy, "_now", lambda: "2026-11-08T10:00:00")
         seed = StateManager(plan)
-        seed.record_scope_round("code-review", "preserve", "explicit")
-        seed.record_scope_apply_policy("apply-code-fixes", "preserve", "explicit")
+        scope_policy.record_scope_round(seed, "code-review", "preserve", "explicit")
+        scope_policy.record_scope_apply_policy(seed, "apply-code-fixes", "preserve", "explicit")
         seed.save()
         first = StateManager(plan)
         second = StateManager(plan)
 
-        first.record_scope_apply_policy("apply-code-fixes", "expand", "explicit")
+        scope_policy.record_scope_apply_policy(first, "apply-code-fixes", "expand", "explicit")
         first.save()
-        second.record_scope_apply_policy("apply-code-fixes", "preserve", "explicit")
+        scope_policy.record_scope_apply_policy(second, "apply-code-fixes", "preserve", "explicit")
         second.save()
 
         assert scope_policy.round_policies(
@@ -1144,17 +1169,17 @@ class TestEveryWriterFamilyJournals:
         monkeypatch.setattr(scope_apply, "_now", lambda: "2026-11-08T10:00:00")
         deferred = [{"group_id": "g1", "title": "an extension"}]
         seed = StateManager(plan)
-        seed.record_scope_round("review-plan", "preserve", "explicit")
-        seed.record_scope_deferrals("apply-suggestions", deferred)
-        seed.record_scope_completion("apply-suggestions", None)
+        scope_policy.record_scope_round(seed, "review-plan", "preserve", "explicit")
+        scope_apply.record_scope_deferrals(seed, "apply-suggestions", deferred)
+        scope_apply.record_scope_completion(seed, "apply-suggestions", None)
         seed.save()
         first = StateManager(plan)
         second = StateManager(plan)
 
-        first.record_scope_deferrals("apply-suggestions", [])
+        scope_apply.record_scope_deferrals(first, "apply-suggestions", [])
         first.save()
-        second.record_scope_deferrals("apply-suggestions", deferred)
-        second.record_scope_completion("apply-suggestions", None)
+        scope_apply.record_scope_deferrals(second, "apply-suggestions", deferred)
+        scope_apply.record_scope_completion(second, "apply-suggestions", None)
         second.save()
 
         record = _on_disk(second)["scope_policy"]["review-plan"]
@@ -1162,16 +1187,19 @@ class TestEveryWriterFamilyJournals:
         assert record[scope_apply.COMPLETION_KEY]["deferred"] == 1
 
     def test_a_baseline_the_round_already_has_journals_nothing(self, plan):
+        from utils import scope_policy
+
         seed = StateManager(plan)
-        seed.record_scope_round("review-plan", "preserve", "explicit",
-                                {"baseline_id": "b-1"})
+        scope_policy.record_scope_round(seed, "review-plan", "preserve", "explicit",
+                                        {"baseline_id": "b-1"})
         seed.save()
         first = StateManager(plan)
         second = StateManager(plan)
 
-        first.record_scope_round("review-plan", "expand", "explicit", {"baseline_id": "b-2"})
+        scope_policy.record_scope_round(first, "review-plan", "expand", "explicit",
+                                        {"baseline_id": "b-2"})
         first.save()
-        second.attach_scope_baseline("review-plan", {"baseline_id": "b-3"})
+        scope_policy.attach_scope_baseline(second, "review-plan", {"baseline_id": "b-3"})
         second.save()
 
         record = _on_disk(second)["scope_policy"]["review-plan"]
@@ -1183,14 +1211,14 @@ class TestEveryWriterFamilyJournals:
 
         monkeypatch.setattr(scope_policy_runs, "_now", lambda: "2026-11-08T10:00:00.000001")
         seed = StateManager(plan)
-        assert seed.record_scope_run_start("implement", ("preserve", "explicit"))
+        assert scope_policy_runs.record_scope_run_start(seed, "implement", ("preserve", "explicit"))
         seed.save()
         first = StateManager(plan)
         second = StateManager(plan)
 
-        first.record_scope_run_start("implement", ("expand", "explicit"))
+        scope_policy_runs.record_scope_run_start(first, "implement", ("expand", "explicit"))
         first.save()
-        second.record_scope_run_start("implement", ("preserve", "explicit"))
+        scope_policy_runs.record_scope_run_start(second, "implement", ("preserve", "explicit"))
         second.save()
 
         assert scope_policy_runs.run_record(_on_disk(second), "implement")["policy"] == (
@@ -1200,15 +1228,15 @@ class TestEveryWriterFamilyJournals:
         from utils import scope_policy_runs
 
         seed = StateManager(plan)
-        seed.record_scope_run_start("full", ("preserve", "explicit"))
-        seed.close_scope_run("full")
+        scope_policy_runs.record_scope_run_start(seed, "full", ("preserve", "explicit"))
+        scope_policy_runs.close_scope_run(seed, "full")
         seed.save()
         first = StateManager(plan)
         second = StateManager(plan)
 
-        first.record_scope_run_start("full", ("expand", "explicit"))
+        scope_policy_runs.record_scope_run_start(first, "full", ("expand", "explicit"))
         first.save()
-        assert second.close_scope_run("full") is False
+        assert scope_policy_runs.close_scope_run(second, "full") is False
         second.save()
 
         record = scope_policy_runs.run_record(_on_disk(second), "full")

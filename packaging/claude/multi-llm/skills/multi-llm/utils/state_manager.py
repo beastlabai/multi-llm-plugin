@@ -1865,10 +1865,11 @@ class StateManager:
 
         A unit is this manager's change when one of its mutators wrote it
         (the journal: ``update_task_status``, ``mark_phase_completed``,
-        ``set_metrics_left_out``, ``record_scope_round``, ``set`` of a
-        whole-value key, the load's plan-change check, ...; a write that
-        repeats the recorded value counts) or when its value differs from the
-        baseline (the fallback, for a caller that edits ``state`` directly or
+        ``set_metrics_left_out``, ``set`` of a whole-value key, the load's
+        plan-change check, :meth:`journal_entry` for the scope-policy
+        records, ...; a write that repeats the recorded value counts) or
+        when its value differs from the baseline (the fallback, for a
+        caller that edits ``state`` directly or
         through a raw-dict helper: such a write that repeats the recorded
         value is not seen). This manager's changes are its own, whole,
         whatever the other writer did to them; every other unit is the
@@ -2033,6 +2034,25 @@ class StateManager:
     def _touch(self, *unit: str) -> None:
         """Journal *unit* as written by this manager (see :attr:`_touched`)."""
         self._touched.add(tuple(str(part) for part in unit))
+
+    def journal_entry(self, key: str, entry_id: str) -> None:
+        """Journal entry *entry_id* of the map *key* as written by this manager.
+
+        For a module that writes its own record into :attr:`state` with a
+        raw-dict helper (the scope-policy writers of ``scope_policy``,
+        ``scope_apply`` and ``scope_policy_runs``): :meth:`save` then keeps
+        that entry as this manager has it, whole, even when the write
+        repeated the recorded value. Journal only an entry the helper
+        wrote; one it left alone stays the file's.
+
+        *key* must be a map merged entry by entry (:data:`_ENTRY_MAPS`, or a
+        key with one of :data:`_ENTRY_MAP_PREFIXES`); any other key raises
+        ``ValueError``, since the merge would ignore the unit
+        (docs/development/write-scheduler.md, "Merge units").
+        """
+        if key not in _ENTRY_MAPS and not key.startswith(_ENTRY_MAP_PREFIXES):
+            raise ValueError(f"{key!r} is not a map merged entry by entry")
+        self._touch("entry", key, entry_id)
 
     # --- Metrics (in-memory; see utils/metrics.py for the file-level CLI) ---
 
@@ -3137,98 +3157,6 @@ class StateManager:
         stamps = dict(stamps) if isinstance(stamps, dict) else {}
         stamps[key] = datetime.now().isoformat()
         self.state[STATE_RESETS_KEY] = stamps
-
-    # --- Scope-policy records ---
-    #
-    # Each mutator writes through the scope module's own helper and journals
-    # the record the helper wrote: one review phase's entry of
-    # ``scope_policy`` (``scope_policy.review_phase_of``), one mode's entry
-    # of ``scope_policy_runs``. A helper call that wrote nothing journals
-    # nothing, so this manager's view of a record it left alone never
-    # overrides the file's.
-
-    def _touch_scope_round(self, phase: str) -> None:
-        from . import scope_policy as _sp
-
-        self._touch("entry", _SCOPE_POLICY_KEY, _sp.review_phase_of(phase))
-
-    def record_scope_round(
-        self, phase: str, policy: str, source: str,
-        baseline: Optional[Mapping[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Start *phase*'s review round record
-        (``scope_policy.record_review_round``); returns the record."""
-        from . import scope_policy as _sp
-
-        record = _sp.record_review_round(self.state, phase, policy, source, baseline)
-        self._touch_scope_round(phase)
-        return record
-
-    def attach_scope_baseline(self, phase: str, baseline: Mapping[str, Any]) -> None:
-        """Attach the round's scope baseline unless it has one
-        (``scope_policy.update_round_baseline``: the first binding wins)."""
-        from . import scope_policy as _sp
-
-        before = _sp.round_record(self.state, phase)
-        _sp.update_round_baseline(self.state, phase, baseline)
-        if _sp.round_record(self.state, phase) != before:
-            self._touch_scope_round(phase)
-
-    def record_scope_apply_policy(
-        self, phase: str, policy: str, source: str,
-    ) -> Dict[str, Any]:
-        """Record the round's effective apply policy
-        (``scope_policy.record_apply_policy``); returns the record."""
-        from . import scope_policy as _sp
-
-        record = _sp.record_apply_policy(self.state, phase, policy, source)
-        self._touch_scope_round(phase)
-        return record
-
-    def record_scope_deferrals(
-        self, phase: str, entries: Sequence[Mapping[str, Any]],
-    ) -> None:
-        """Replace the round's scope deferrals (``[]`` releases them) and drop
-        its stale completion (``scope_apply.persist_deferrals``)."""
-        from . import scope_apply as _scope
-
-        _scope.persist_deferrals(self.state, phase, entries)
-        self._touch_scope_round(phase)
-
-    def record_scope_completion(
-        self, phase: str, applied: Any, blockers: Sequence[Mapping[str, Any]] = (),
-    ) -> Optional[Dict[str, Any]]:
-        """Write the round's completion outcome
-        (``scope_apply.record_completion``), which a round with no record
-        does not have; returns the outcome."""
-        from . import scope_apply as _scope
-        from . import scope_policy as _sp
-
-        recorded = _sp.round_record(self.state, phase) is not None
-        outcome = _scope.record_completion(self.state, phase, applied, blockers)
-        if recorded:
-            self._touch_scope_round(phase)
-        return outcome
-
-    def record_scope_run_start(self, mode: str, choice: Optional[Tuple[str, str]]) -> bool:
-        """Persist *mode*'s run choice (``scope_policy_runs.record_run_start``);
-        ``True`` when it wrote one, and the caller saves."""
-        from . import scope_policy_runs as _runs
-
-        wrote = _runs.record_run_start(self.state, mode, choice)
-        if wrote:
-            self._touch("entry", _SCOPE_POLICY_RUNS_KEY, mode)
-        return wrote
-
-    def close_scope_run(self, mode: str) -> bool:
-        """Mark *mode*'s run choice finished
-        (``scope_policy_runs.close_run_choice``); ``True`` when it changed."""
-        from . import scope_policy_runs as _runs
-
-        closed = _runs.close_run_choice(self.state, mode)
-        if closed:
-            self._touch("entry", _SCOPE_POLICY_RUNS_KEY, mode)
-        return closed
 
 
 def get_or_create_state(plan_path: Path, state_dir: Optional[Path] = None) -> StateManager:

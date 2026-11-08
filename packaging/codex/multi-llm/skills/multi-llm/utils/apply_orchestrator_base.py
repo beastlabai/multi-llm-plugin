@@ -2310,8 +2310,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if (self.scope is None or self.scope.source != _sp.SOURCE_EXPLICIT
                 or self.state is None or self._scope_dry()):
             return
-        self.state.record_scope_apply_policy(self._scope_phase_word(),
-                                             self.scope.policy, _sp.SOURCE_EXPLICIT)
+        _sp.record_scope_apply_policy(self.state, self._scope_phase_word(),
+                                      self.scope.policy, _sp.SOURCE_EXPLICIT)
         self.state.save()
 
     def _scope_detect_change(self) -> None:
@@ -2481,7 +2481,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             return
         word = self._scope_phase_word()
         if self.scope.preserve:
-            self.state.record_scope_deferrals(word, self.scope_deferred)
+            _scope.record_scope_deferrals(self.state, word, self.scope_deferred)
             self.state.save()
             return
         if self.scope.recorded_deferrals:
@@ -2489,7 +2489,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 str(entry.get("group_id")) for entry in self.scope.recorded_deferrals
                 if entry.get("group_id")
             ]
-            self.state.record_scope_deferrals(word, [])
+            _scope.record_scope_deferrals(self.state, word, [])
             self.state.save()
             print(
                 f"[scope-policy] {word}: {len(self._scope_released)} item(s) an "
@@ -2584,8 +2584,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if state is None:
             return []
         blockers = self._scope_blockers(state)
-        state.record_scope_completion(
-            self._scope_phase_word(), self._scope_effective(state), blockers)
+        _scope.record_scope_completion(
+            state, self._scope_phase_word(), self._scope_effective(state), blockers)
         return blockers
 
     def _scope_report_blockers(self, blockers: Sequence[Dict[str, Any]]) -> None:
@@ -2653,7 +2653,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         word = self._scope_phase_word()
         blockers: List[Dict[str, Any]] = []
         if not self._scope_dry() and self.state is not None:
-            self.state.record_scope_deferrals(word, self.scope_deferred)
+            _scope.record_scope_deferrals(self.state, word, self.scope_deferred)
             self.state.mark_phase_completed(word)
             blockers = self._scope_close(self.state)
             if self.edits_the_plan and getattr(self.args, "resume", False):
