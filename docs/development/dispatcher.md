@@ -12,6 +12,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Repository-root path resolution](#repository-root-path-resolution)
 - [Utility commands](#utility-commands)
 - [Import safety](#import-safety)
+- [Import layers](#import-layers)
 - [uv project selection](#uv-project-selection)
 - [Shared flags](#shared-flags)
 - [Mode and help updates](#mode-and-help-updates)
@@ -419,6 +420,44 @@ plan's first phase it failed "state file not found" and the host shrugged it off
 `*_orchestrator.py` stays **supported but unadvertised** (the test suite and
 `--internal-*` re-entry rely on it); the instruction core and shims name only
 `multi_llm.py`.
+
+## Import layers
+
+`tests/test_import_layers.py` assigns every skill module to one of seven layers (`LAYERS`: L0 core,
+L1 state, L2 providers, L3 execution, L4 domain, L5 orchestrators, L6 CLI) and fails on an import
+that points to a higher layer. An edge counts wherever the import sits, inside a function too, and
+the spellings of one module are one module: `from .x`, `from utils.x`, `import utils.x` and a
+dual-import shim's bare `from x`. `from package import name` follows Python's lookup: a name the
+package's `__init__` binds wins and resolves through every re-export and alias to the module that
+defines it, and only an unbound name means the submodule, so `from utils import name` points past
+the barrel. Dynamic imports count too: calls of `importlib.import_module`, `__import__` and
+`next_phase._skill_module` (or an alias of one) are read from the syntax tree, so comments and
+strings never make an edge. A call with literal arguments is an edge, relative ones such as
+`import_module(".x", package="utils")` and `__import__("x", globals(), None, [...], 1)` included.
+`if TYPE_CHECKING:` blocks and the package `__init__` that Python runs implicitly do not count. The
+whole graph is parsed with `ast` in under a second.
+
+`KNOWN_UPWARD` in the same file lists the upward edges that existed when the map was drawn (28),
+each with the names that cross it and where they belong. It only shrinks:
+
+- **A new upward edge** fails with the importer, the target, every import site and the names that
+  cross. Move those names down to the importer's layer or lower and let the old module re-import
+  them, or pass the value in as an argument. A moved name that tests patch with
+  `monkeypatch.setattr(<old module>, ...)` stops reaching its callers, so grep `tests/` and update
+  those patches with the move. Add the edge to `KNOWN_UPWARD`, with a reason, only when it is
+  deliberate.
+- **A stale entry**, whose import is gone or no longer points upward, fails until it is deleted.
+- **A new module** fails until it has a layer; the message gives the range its imports and importers
+  allow. Choose by role: moving an existing module to another layer is a design change, reviewed
+  like one.
+- **A computed dynamic import**, whose module name is a variable (the dispatch tables), or a loader
+  used as a value (`load = importlib.import_module`), fails until `COMPUTED_IMPORTS` lists it. The
+  key is the importer and the call as `ast.unparse` prints it; the entry names every module the call
+  can load (names or `*` patterns) and why the name is computed, and those modules then count as
+  the importer's edges. Prefer a literal name when the set is fixed. An entry whose call is gone,
+  or that names no module, fails until it is fixed.
+- **A wildcard import** of a skill module (`from utils import *`) fails: name the imports, so each
+  edge points at the module that defines the name.
 
 ## uv project selection
 
