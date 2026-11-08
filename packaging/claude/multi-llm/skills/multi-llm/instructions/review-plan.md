@@ -398,9 +398,10 @@ to bare `python`.
    bytes of `prompt` (`prompt_lines` is its line count), so the two are
    interchangeable and a host that would otherwise re-emit the whole prompt can
    point the subagent at the file instead. The plan excerpt and this batch's
-   suggestion records travel **inside** `prompt`. For a plan within the inline
-   limit that is the whole plan, and the task is `context_mode: inline`. For a
-   larger plan, `prompt` keeps a head excerpt and names the full plan once under
+   suggestion records travel **inside** `prompt`. When that is the whole plan
+   the task is `context_mode: inline`. When it is not — a batch that carries
+   only the plan sections its suggestions cite, or a plan over the inline limit
+   cut to a head excerpt — `prompt` also names the full plan once under
    `## Plan file`: a hash-bound snapshot, `validation-snapshot.md` in this phase
    dir, and the task is `context_mode: workspace-read`. The subagent must be
    able to read that path, so do not run it where it cannot. Never treat such a

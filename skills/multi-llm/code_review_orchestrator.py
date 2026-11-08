@@ -167,6 +167,7 @@ from utils.review_orchestrator_base import (
 from utils.status_file import read_status
 from utils import result_files as _result_files
 from utils.validation_context import RECORD_CUT_REASON, report_header_lines
+from utils.validation_sections import batch_code_windows_enabled
 from utils.validation import (
     VALIDATION_CONTEXT_LIMIT,
     BoundDocument,
@@ -1849,9 +1850,9 @@ def build_reviewed_code_excerpt(
     open the file.
 
     **Windows, not the diff**, and deliberately: the second context block is
-    excerpted once per phase and reused by every batch
-    (``utils.validation.excerpt_context``, ``VALIDATION_CONTEXT_LIMIT``), so
-    what goes in it has to fit that budget for the whole phase. A review of a
+    held to ``VALIDATION_CONTEXT_LIMIT`` (each batch carries the windows its
+    own issues cite, :func:`reviewed_code_for_batch`), so what goes in it has
+    to fit that budget. A review of a
     file the implementation *created* has a diff the size of the file — the run
     this was measured on reviewed a 1 393-line, 61 KB ``index.html``, twice the
     budget — and truncating that would put the same hole back one block over.
@@ -2314,6 +2315,7 @@ def build_validation_secondary_context(
     project_root: Optional[str] = None,
     cut_report: Optional[Dict[str, Any]] = None,
     pinned: Optional[PinnedRange] = None,
+    per_batch: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, str]:
     """``(secondary_context, reviewed_code)`` for a code-review validation batch.
 
@@ -2365,6 +2367,15 @@ def build_validation_secondary_context(
     ``pinned`` (a review pinned to two commits) reads the windows at the head
     commit, and ``open_paths`` are then the dropped files' repository-relative
     names, for a validator to read at that commit, never on disk.
+
+    ``per_batch``, when given, receives ``for_batch``: a function from one
+    batch's indices into ``groups`` to that batch's ``(secondary_context,
+    cut_report)``, which carries the record and only the windows the batch's
+    own issues cite, fitted to the same budget (:func:`reviewed_code_for_batch`).
+    It selects from this one read, so a batch never re-reads a file and its
+    own files are dropped only when they alone are over the budget. Not filled
+    when ``MULTI_LLM_VALIDATION_CONTEXT=full``; the round-wide over-budget line
+    is then printed as before, and otherwise each batch reports its own drops.
     """
     raw_record = build_implementation_record(plan_path)
     record = excerpt_context_reported(
@@ -2388,6 +2399,8 @@ def build_validation_secondary_context(
         inside = {path: _readable_inside_repo(path, root) for path, _ in sections}
     else:
         inside = {path: pinned_git_name(path) for path, _ in sections}
+    unnamed = frozenset(path for path, on_disk in inside.items() if on_disk is None)
+    batch_view = per_batch is not None and batch_code_windows_enabled()
     if len(embedded) > code_budget:
         # Re-cut by whole files rather than letting the caller's shared excerpt
         # slice the last file mid-window. The files were read once, above; only
@@ -2395,40 +2408,174 @@ def build_validation_secondary_context(
         # char count, because "which cited file has no window" is the question
         # a verdict about an unshown file raises.
         embedded, dropped = _fit_reviewed_code_sections(
-            sections,
-            code_budget,
-            unnamed=frozenset(path for path, on_disk in inside.items() if on_disk is None),
+            sections, code_budget, unnamed=unnamed,
         )
-        print(
-            f"[VALIDATION_CONTEXT_TRUNCATED] reviewed-code "
-            f"{len(reviewed_code) - code_budget} chars over; windows for "
-            f"{len(dropped)} of {len(sections)} cited files not shown: "
-            + ", ".join(dropped),
-            file=sys.stderr,
-        )
+        if not batch_view:
+            print(
+                f"[VALIDATION_CONTEXT_TRUNCATED] reviewed-code "
+                f"{len(reviewed_code) - code_budget} chars over; windows for "
+                f"{len(dropped)} of {len(sections)} cited files not shown: "
+                + ", ".join(dropped),
+                file=sys.stderr,
+            )
     else:
         dropped = []
+    record_cut = len(raw_record) > IMPLEMENTATION_RECORD_CHARS
     if cut_report is not None:
-        cut_report["record_cut"] = len(raw_record) > IMPLEMENTATION_RECORD_CHARS
+        cut_report["record_cut"] = record_cut
         cut_report["record_chars"] = len(raw_record)
         cut_report["dropped_files"] = list(dropped)
         cut_report["files_total"] = len(sections)
-        open_paths: List[str] = []
-        for path in dropped:
-            on_disk = inside.get(path)
-            if pinned is not None:
-                # A name to read at `head`; the disk is never the reviewed code.
-                if on_disk and on_disk not in open_paths:
-                    open_paths.append(on_disk)
-                continue
-            if on_disk and os.path.isfile(on_disk) and on_disk not in open_paths:
-                open_paths.append(on_disk)
-        cut_report["open_paths"] = open_paths
+        cut_report["open_paths"] = _dropped_open_paths(dropped, inside, pinned)
+    if batch_view:
+        def for_batch(indices: Sequence[int]) -> Tuple[str, Dict[str, Any]]:
+            return reviewed_code_for_batch(
+                [groups[i] for i in indices if 0 <= i < len(groups)],
+                sections,
+                record_part=record_part,
+                code_heading=code_heading,
+                code_budget=code_budget,
+                inside=inside,
+                pinned=pinned,
+                record_cut=record_cut,
+                record_chars=len(raw_record),
+                label=", ".join(str(i) for i in indices),
+            )
+
+        per_batch["for_batch"] = for_batch
 
     parts = [record_part]
     if embedded:
         parts.append(f"{code_heading}{embedded}")
     return "\n\n".join(parts), reviewed_code
+
+
+def _dropped_open_paths(
+    dropped: Sequence[str],
+    inside: Mapping[str, Optional[str]],
+    pinned: Optional[PinnedRange],
+) -> List[str]:
+    """The dropped files a validator can open itself (``cut_report["open_paths"]``)."""
+    open_paths: List[str] = []
+    for path in dropped:
+        on_disk = inside.get(path)
+        if pinned is not None:
+            # A name to read at `head`; the disk is never the reviewed code.
+            if on_disk and on_disk not in open_paths:
+                open_paths.append(on_disk)
+            continue
+        if on_disk and os.path.isfile(on_disk) and on_disk not in open_paths:
+            open_paths.append(on_disk)
+    return open_paths
+
+
+def _windows_cited(rendered: str, windows: Sequence[Tuple[int, int]]) -> str:
+    """One file's section narrowed to the windows that overlap ``windows``.
+
+    A section is ``### <path>`` and fenced blocks of ``<n>: <line>`` rows
+    (:func:`_reviewed_code_sections`, :func:`_pinned_code_sections`); a block
+    is kept when its shown lines overlap one of ``windows``. A section that is
+    a note rather than blocks, or whose blocks would all go, is kept whole.
+    """
+    header, sep, body = rendered.partition("\n\n")
+    if not sep:
+        return rendered
+    blocks = body.split("\n\n")
+    kept: List[str] = []
+    for block in blocks:
+        rows = block.split("\n")
+        if len(rows) < 3 or rows[0] != "```" or rows[-1] != "```":
+            return rendered
+        try:
+            first = int(rows[1].split(":", 1)[0])
+            last = int(rows[-2].split(":", 1)[0])
+        except ValueError:
+            return rendered
+        if any(first <= end and last >= start for start, end in windows):
+            kept.append(block)
+    if not kept or len(kept) == len(blocks):
+        return rendered
+    return header + "\n\n" + "\n\n".join(kept)
+
+
+def reviewed_code_for_batch(
+    batch_groups: List[Any],
+    sections: List[Tuple[str, str]],
+    *,
+    record_part: str,
+    code_heading: str,
+    code_budget: int,
+    inside: Mapping[str, Optional[str]],
+    pinned: Optional[PinnedRange],
+    record_cut: bool,
+    record_chars: int,
+    label: str = "",
+) -> Tuple[str, Dict[str, Any]]:
+    """One batch's reviewed-code block and cut report, selected from the round's read.
+
+    The record, then for each file the batch's own issues cite, the windows
+    of the round's section that overlap those issues' windows
+    (:func:`_issue_line_windows` over this batch alone), fitted to
+    ``code_budget`` by whole files like the round-wide block. A window other
+    batches cite is not shown here: no group of this batch is about it. The
+    cut report has :func:`build_validation_secondary_context`'s keys, counted
+    over this batch's files.
+    """
+    own = _issue_line_windows(batch_groups, REVIEWED_CODE_CONTEXT_LINES)
+    selected = [
+        (path, _windows_cited(rendered, own[path]))
+        for path, rendered in sections
+        if path in own
+    ]
+    unnamed = frozenset(path for path, _ in selected if inside.get(path) is None)
+    embedded, dropped = _fit_reviewed_code_sections(selected, code_budget, unnamed=unnamed)
+    if dropped:
+        whole, _ = _fit_reviewed_code_sections(selected, None)
+        print(
+            f"[VALIDATION_CONTEXT_TRUNCATED] reviewed-code (groups {label}) "
+            f"{len(whole) - code_budget} chars over; windows for "
+            f"{len(dropped)} of {len(selected)} cited files not shown: "
+            + ", ".join(dropped),
+            file=sys.stderr,
+        )
+    report = {
+        "record_cut": record_cut,
+        "record_chars": record_chars,
+        "dropped_files": list(dropped),
+        "files_total": len(selected),
+        "open_paths": _dropped_open_paths(dropped, inside, pinned),
+    }
+    parts = [record_part]
+    if embedded:
+        parts.append(f"{code_heading}{embedded}")
+    return "\n\n".join(parts), report
+
+
+def reviewed_code_batch_view(
+    per_batch: Optional[Dict[str, Any]], **guidance_kwargs: Any,
+) -> Optional[Any]:
+    """``prepare_batched_validation_tasks``'s ``secondary_for_batch`` for review-code.
+
+    ``None`` when :func:`build_validation_secondary_context` filled no
+    ``for_batch`` (``MULTI_LLM_VALIDATION_CONTEXT=full``), so every batch
+    embeds the round-wide block as before. Otherwise each batch gets its own
+    block, its own ``reviewed-code`` source (:func:`reviewed_code_document`)
+    and its own extra instructions naming only its own dropped files, both
+    validation sites building them here so they materialize the same prompt.
+    """
+    for_batch = (per_batch or {}).get("for_batch")
+    if for_batch is None:
+        return None
+
+    def view(indices: List[int]) -> Tuple[str, BoundDocument, str]:
+        text, report = for_batch(indices)
+        return (
+            text,
+            reviewed_code_document(text, report),
+            validation_extra_instructions(report, **guidance_kwargs),
+        )
+
+    return view
 
 
 def validation_extra_instructions(
@@ -5490,9 +5637,10 @@ async def reaggregate_from_existing_files(
             # fan-out's own prep above; the two sites must materialize the same
             # prompt or a reaggregate re-validates against a different one.
             cut_report: Dict[str, Any] = {}
+            per_batch: Dict[str, Any] = {}
             secondary, reviewed_code = build_validation_secondary_context(
                 grouped, plan_path, project_root=project_root,
-                cut_report=cut_report, **pinned_kw,
+                cut_report=cut_report, per_batch=per_batch, **pinned_kw,
             )
             batched_tasks = prepare_batched_validation_tasks(
                 **pinned_validation_kwargs(pinned, plan_snapshot, plan_sha256, git_root),
@@ -5518,6 +5666,11 @@ async def reaggregate_from_existing_files(
                 ),
                 context_document=plan_document,
                 secondary_document=reviewed_code_document(secondary, cut_report),
+                # Each batch's own windows, from the one read above.
+                secondary_for_batch=reviewed_code_batch_view(
+                    per_batch,
+                    **pinned_guidance_kwargs(pinned, plan_snapshot, plan_sha256),
+                ),
                 runner_read_refusal=materialization_read_refusal(args, str(plan_path)),
                 phase="code-review",
                 scope=validation_scope_block(
@@ -6853,9 +7006,10 @@ async def main(argv: Optional[List[str]] = None) -> int:
                     # tunable-config table — reached no validator, while four of the
                     # nine verdicts cited exactly those sections.
                     cut_report: Dict[str, Any] = {}
+                    per_batch: Dict[str, Any] = {}
                     secondary, reviewed_code = build_validation_secondary_context(
                         grouped_list, plan_path, project_root=project_root,
-                        cut_report=cut_report, **pinned_kw,
+                        cut_report=cut_report, per_batch=per_batch, **pinned_kw,
                     )
                     # `grouped_list`, not `grouped`: it already carries the stable
                     # `group_hash`/`display_label` `stamp_stable_ids` stamped above
@@ -6890,6 +7044,11 @@ async def main(argv: Optional[List[str]] = None) -> int:
                         context_document=plan_document,
                         secondary_document=reviewed_code_document(
                             secondary, cut_report
+                        ),
+                        # Each batch's own windows, from the one read above.
+                        secondary_for_batch=reviewed_code_batch_view(
+                            per_batch,
+                            **pinned_guidance_kwargs(pinned, plan_snapshot, plan_sha256),
                         ),
                         runner_read_refusal=materialization_read_refusal(
                             args, str(plan_path)

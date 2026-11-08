@@ -355,8 +355,9 @@ its line count), so the two are interchangeable and a host that would otherwise
 re-emit the whole prompt can point the subagent at the file instead. This
 batch's records and **both** context excerpts — the plan, and the task list
 under review — travel inside `prompt`, each under its own `## Context (…)`
-heading. When both fit the inline limit they are complete, and the task is
-`context_mode: inline`. A document over the limit keeps a head excerpt and is
+heading. When both are complete the task is `context_mode: inline`. A
+document over the inline limit keeps a head excerpt, and a
+plan block may carry only the sections this batch's suggestions cite; either is
 also named once under `## Plan file` or `## Tasks file`: a hash-bound snapshot
 in this phase dir (`validation-snapshot.md` for the plan; `tasks-backup.md` or
 `validation-tasks-snapshot.md` for the task list), and the task is

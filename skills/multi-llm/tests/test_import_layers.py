@@ -156,6 +156,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.tasks_graph_check",
         "utils.validation",
         "utils.validation_context",
+        "utils.validation_sections",
     )),
     5: ("orchestrators", (
         "*_orchestrator",

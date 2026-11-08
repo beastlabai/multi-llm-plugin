@@ -8,6 +8,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 
 - [Materialized task contract](#materialized-task-contract)
 - [Code-review validation context](#code-review-validation-context)
+- [Cited plan sections](#cited-plan-sections)
 - [Read and analyze executor](#read-and-analyze-executor)
 - [In-process continuations](#in-process-continuations)
 - [Validation model capability](#validation-model-capability)
@@ -37,9 +38,10 @@ instruction markdown. **No generator interpolates `plan_file`, `grouped_file` or
 
 **Two named exceptions**, each declared as `context_mode: workspace-read` so `refuse_reason` stays
 the single gate: `task_generation` names the repo root, and **a validation/revalidation task
-names at most one path per document whose context exceeded `VALIDATION_CONTEXT_LIMIT`, each a hash-bound
-snapshot** (plans/validation-context-by-path-and-codex-0156-fallout.md §2.3). Under the limit
-nothing changes (`inline`, no path, goldens byte-identical). Over it, per document,
+names at most one path per document whose context exceeded `VALIDATION_CONTEXT_LIMIT` or whose
+plan block carries only the batch's cited sections ([Cited plan sections](#cited-plan-sections)),
+each a hash-bound snapshot** (plans/validation-context-by-path-and-codex-0156-fallout.md §2.3).
+Under the limit and uncited nothing changes (`inline`, no path, goldens byte-identical). Over it, per document,
 the prompt keeps the 60 000-char head excerpt, ends it with a marker naming the dropped sections and
 telling the validator to read the file before judging anything those sections, or an
 omission/absence claim, depends on, and names the file once under `## Plan file` /
@@ -55,7 +57,8 @@ Each task records `context_sources[]` (`label`
 `plan`|`tasks`|`reviewed-code`|`diff`,
 `kind`, phase-dir-relative `path`, `abs_path`, raw-byte
 `sha256`, `bytes`, `chars_shown`, `truncated`,
-`mode` `inline`|`path`|`truncated`); the
+`mode` `inline`|`path`|`truncated`, and `selection: cited` on a `path` source whose excerpt is the
+batch's cited plan sections); the
 snapshot hash is re-verified before dispatch, on resume and on `--reaggregate`
 (`validation snapshot changed/missing; re-run validation`, never a silent re-point), and a moved or copied phase dir rebinds the
 prompt to the copy's snapshot only after its hash verifies.
@@ -245,12 +248,121 @@ validator was told to open locations it was never given beside a code block nami
 saying nothing about which finding each belongs to. Keyed on presence, so plan-review records render
 byte-identically.
 
-Both context blocks are still **global** — excerpted once per phase, embedded verbatim in every
-batch (validation.py's `shared_context`/`shared_secondary`) — so a batch's prompt carries
-windows for files only *other* batches' groups cite (measured: 3–14% of each prompt, 71–80% of the
-code block in the single-HIGH batches). That, and choosing plan sections by relevance instead of by
-position, are the open design questions; the budget itself was not the problem, the cut's
-*placement* was.
+The code block is no longer global: each batch carries the windows its own issues cite, and the
+plan block carries only the sections they cite when the opt-in is on
+([Cited plan sections](#cited-plan-sections)). Before that, every batch repeated windows for files
+only *other* batches' groups cite (measured 2026-11-07: 72% of the code block and a third of all
+prompt chars on one round), and the round-wide budget dropped whole files from every batch.
+
+## Cited plan sections
+
+**Review-code batches carry the code windows their own issues cite. A batch's plan block can
+carry only the sections its suggestions cite, but that is opt-in (`MULTI_LLM_VALIDATION_CONTEXT=cited`)
+and the whole plan stays the default.** A round embeds one plan excerpt and used to embed one
+reviewed-code block in every batch: over 55 recorded rounds 84–98% of all validation prompt text
+repeated between batches, and the groups themselves were 3.7–13% of it
+(plans/2026-11-07-code-health-04-review-pipeline.md REVIEW-8, -08-performance.md PERF-2). Batching is
+unchanged; only what each batch embeds is.
+
+**Why plan scoping is opt-in.** Smaller prompts do not show that verdicts are as good. A batch that
+sees only its cited sections can uphold a suggestion that a section it was not shown forbids,
+without ever making the omission or disagreement claim that would send it to the full file. The
+code-health roadmap (plans/2026-11-07-code-health-13-roadmap.md, the REVIEW-8/PERF-2 row and owner
+decision 6, live spend) asks for a live check before the default changes: verdicts on the same
+recorded groups under cited and under full plan context. **That comparison is still owed.**
+Until it is done, `cited` is for measuring and trying the mode, and the default round is the whole
+plan in every batch, byte for byte what it was before cited sections existed (checked on all 622
+recorded review-plan batches). The code windows stay on by default: a validator was never promised
+the windows other batches' issues cite, the round-wide budget used to drop whole files from every
+batch, and a replay of 24 recorded code batches lost no code block that overlapped the batch's own
+citations.
+
+**The switch.** Unset: whole plan, per-batch code windows. `cited`: cited plan sections and
+per-batch code windows. `full`: the round-wide plan and code blocks in every batch. Any other value
+is reported once and read as `full`. The Codex plugin forwards it (`packaging/codex/mcp.json`
+`env_vars`); a name missing there never reaches the server.
+
+**The plan block** (`utils/validation_sections.py`, called from `prepare_batched_validation_tasks`).
+A round qualifies (`cited_plan_for_round`) only when every batch can reach the rest of the plan:
+the switch is `cited`, the block is the bound plan with a hash-bound snapshot, the runner may read
+it (no `runner_read_refusal`; on a native host the snapshot is inside the project root), and the
+plan is at least `CITED_MIN_CHARS` (12 000) long and has section headings. Then, per batch:
+
+- *Headings.* ATX headings outside code fences; a lone `#` title belongs to the preamble. A fence
+  closes only on a line of its own character (backtick or tilde) at least as long as its opener,
+  so a four-backtick example showing a three-backtick block stays one fence. Setext headings (a
+  line of text over `===` or `---`) are not parsed: a plan with one, or with a line that looks like
+  one, is never cited (none of the 41 recorded plans has one).
+- *What counts as cited.* Each suggestion's `reference` is split on ` / `, `; ` and a comma that
+  starts another reference, and each part resolves against those headings. First rule that matches
+  wins, and every heading it matches is taken: the heading text or its start at a word boundary
+  (`## 2` → `## 2. Uploads`, never `## 20`), and for a part with no section key also every heading
+  whose title without its key it starts (`Testing` → both `## Testing` and `## 3. Testing`); a
+  numeric range (`§2.3-2.5`); the same section key (`9.2`, `stage a`, `t4.2`, `d5`); the title
+  without its key; a heading title of six or more characters that starts the part; a key in
+  parentheses (`### Fix (D5)` → `## D5 — …`).
+- *Global sections.* A heading at the plan's shallowest section level whose title (without its
+  number) has one of the words goal, non-goal, objective, scope, constraint, requirement,
+  definition, glossary, terminology, assumption, invariant, principle or decision (singular or
+  plural) is global: it rides in every cited batch with its subtree, whatever the batch cites.
+  These are the sections any suggestion can conflict with. A nested `### Constraints` belongs to
+  its parent and comes along only when that is cited.
+- *What the batch embeds.* The preamble (text before the first section heading), the global
+  sections, each cited heading's whole subtree, and the intro of every heading above it, merged in
+  plan order; each omitted stretch becomes one `[... not cited by this batch, not shown: <first
+  three headings> (+n more) ...]` line. Only a cited batch's records carry each suggestion's
+  `reference`, so the validator sees which section each one names; every other batch's records
+  render as before.
+- *When it embeds the whole plan instead* (the default block, byte for byte): any suggestion in
+  the batch has no `reference`, or any part of any reference names no heading (one resolved part
+  never vouches for another, so the prompt never claims a section it does not show); the plan is
+  unscoped (setext); the selection is 60% of the plan or more (`CITED_MAX_SHARE`); or it is over
+  `VALIDATION_CONTEXT_LIMIT`. A batch is the unit, so one unresolved part gives its whole batch
+  the whole plan.
+
+A cited batch's plan source is `mode: path` with `selection: cited`: the prompt names the snapshot
+under `## Plan file` and the task is `workspace-read`, so dispatch refusal, the executor's read
+dirs, the resume re-hash and phase-dir rebinding (`verify_context_sources`) treat it exactly like
+an over-limit excerpt. The prompt's `## Task` (`subagent_prompts._cited_task_section`) says the
+block holds the opening, the global sections and the section each reference names as matched to
+the plan's headings; it judges each group against those, tells the validator to read the file
+before judging a group whose verdict needs a section not shown or whose reference seems to mean
+another section, and judges every omission, "never defined" or "sections disagree" claim against
+the full file, never the selection. A round whose only partial block is cited publishes no
+`validation_context` (every cited section is whole in its prompt and the rest is one read away)
+unless a verdict answered `insufficient-context:`; when another source publishes the round, the
+plan entry reads "cited sections inline + full snapshot by path". One stderr line per cited round:
+`[VALIDATION_CONTEXT_CITED] plan: 8 of 13 batches carry the plan sections their groups cite (…);
+whole plan in 5 (a group cites a part that names no section of the plan); 52/90 reference parts
+resolved`.
+
+**The code block** (review-code). `build_validation_secondary_context(per_batch=…)` reads the cited
+files once, as before, and hands back `for_batch`; `reviewed_code_for_batch` keeps, for each file
+the batch's own issues cite, the windows that overlap those issues' windows, fitted to the same
+budget by whole files. `reviewed_code_batch_view` turns it into the per-batch block, its own
+`reviewed-code` source and its own dropped-file instruction, at both validation sites.
+`reviewed_code_sha256` still hashes the round's whole untrimmed excerpt, so a round materialized
+before this change resumes and reaggregates unchanged; `task_round` never hashed prompts.
+
+**Determinism.** A selection is a pure function of the round's inputs and the batch's records, so
+the same plan, `grouped.json` and files render byte-identical prompts per batch; batches now
+differ from each other, which nothing compares.
+
+**Measured** (2026-11-08, read-only replay of the recorded rounds in `plans/`, prompt chars).
+review-plan, re-materialized from each round's `grouped.json` and snapshot (41 rounds, 622
+batches): the default is identical to the code before cited sections; with `cited`, 321 batches
+are cited and the round total goes 28.1 M → 21.0 M chars (−25.3%), median round −17.7% for the
+34 plans of 12 000 chars or more. 494 of 3 617 reference parts name no heading (a task id or a
+step inside a section, a quoted phrase, a heading renamed since): 244 batches fall back for that,
+18 for the 60% share and 4 for the limit. Global sections are in 33 of the 41 plans (median 6.3%
+of the plan) and cost 10 cited batches. An earlier rule, which let one resolved part stand for a
+whole group, cited 503 batches for −42.6%, but kept 28 unresolved parts in cited batches.
+review-code, approximated by re-selecting each recorded batch's code block from the round-wide
+block (15 rounds whose prompts are inline, 105 batches): 12.5 M → 7.9 M chars (−36.6%, median
+round −35.0%) from the code windows alone, by default. `cited` changes nothing there, because code
+issues cite files rather than plan sections. These are prompt sizes, not spend: a validator that
+reads the snapshot pays for that read, and per-batch prompts share a shorter prefix for provider
+caching.
 
 ## Read and analyze executor
 

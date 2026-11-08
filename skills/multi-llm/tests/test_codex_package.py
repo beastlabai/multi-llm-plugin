@@ -317,6 +317,7 @@ A2B_ENV_VARS = (
     "MULTI_LLM_UV_RUN_ARGS", "MULTI_LLM_SKILL_DIR", "MULTI_LLM_MAX_DETACHED",
     "MULTI_LLM_HEARTBEAT_INTERVAL_S", "MULTI_LLM_HANDSHAKE_TIMEOUT_S",
     "MULTI_LLM_REPLAY_FLAGS", "MULTI_LLM_CODEX_UNSANDBOXED_WRITES",
+    "MULTI_LLM_VALIDATION_CONTEXT",
     "UV_PROJECT_ENVIRONMENT", "UV_CACHE_DIR", "UV_OFFLINE",
     "PWD",
 )
@@ -397,6 +398,13 @@ def _module_constants(tree: ast.Module) -> dict:
 
 
 def _is_environ(node) -> bool:
+    """``os.environ`` or a bare ``environ``, including through a conditional
+    or ``or`` receiver (``(environ if environ is not None else os.environ)``,
+    ``(environ or os.environ)``): a read through either branch is a read."""
+    if isinstance(node, ast.IfExp):
+        return _is_environ(node.body) or _is_environ(node.orelse)
+    if isinstance(node, ast.BoolOp):
+        return any(_is_environ(value) for value in node.values)
     return (
         isinstance(node, ast.Attribute) and node.attr == "environ"
         and isinstance(node.value, ast.Name) and node.value.id == "os"
@@ -534,6 +542,30 @@ class TestEnvironment:
         keys = list(_env_read_keys(tree))
         assert len(keys) == 1 and isinstance(keys[0], ast.Name)
         assert _module_constants(tree)["WORKER"] == "MULTI_LLM_X"
+
+    def test_the_walk_sees_a_read_through_a_conditional_receiver(self):
+        """(src) A helper that takes an optional mapping and falls back to the
+        process environment still reads it: the walk must see the key, or a
+        name read only that way is silently dropped from ``env_vars``."""
+        tree = ast.parse(
+            'import os\nNAME = "MULTI_LLM_Y"\n'
+            'def f(environ=None):\n'
+            '    return (environ if environ is not None else os.environ).get(NAME, "")\n'
+            'def g(env=None):\n'
+            '    return (env or os.environ).get("MULTI_LLM_Z")\n'
+        )
+        keys = list(_env_read_keys(tree))
+        assert [type(k) for k in keys] == [ast.Name, ast.Constant]
+        assert keys[1].value == "MULTI_LLM_Z"
+
+    def test_the_validation_context_switch_is_seen_and_forwarded(self):
+        """(src) ``MULTI_LLM_VALIDATION_CONTEXT`` is read through such a
+        receiver (``validation_sections.context_setting``); the walk finds it
+        and the manifest forwards it, so the switch reaches a Codex host."""
+        names, _ = env_reads()
+        assert "MULTI_LLM_VALIDATION_CONTEXT" in names
+        allowlist = _load(codex_build.MCP_SOURCE)["mcpServers"]["multi_llm"]["env_vars"]
+        assert "MULTI_LLM_VALIDATION_CONTEXT" in allowlist
 
 
 # ===========================================================================

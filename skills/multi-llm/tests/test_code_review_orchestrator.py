@@ -3502,23 +3502,34 @@ class TestTheValidatorIsToldToOpenTheFilesItLost:
     def test_both_validation_sites_materialize_the_same_instruction(
         self, tmp_path
     ):
+        """Each batch carries the windows its own issues cite, so a drop is
+        per batch: every file here is ~20K chars at its window, and a batch of
+        four cites more than its block holds. Both sites name the same files
+        for the same batch, and a batch names only files its records cite."""
         plan_path = self._plan(tmp_path)
         names = [f"src/m{i:02d}.py" for i in range(20)]
         for name in names:
-            self._write(tmp_path / name)
+            self._write(tmp_path / name, pad=16000)
 
         fanout_dir = self._fanout(plan_path, tmp_path, names)
         reaggregate_dir = self._reaggregate(
             plan_path, tmp_path, names, tmp_path / "reagg" / "code-review"
         )
 
-        fanout = {self._instruction(p) for p in self._prompts(fanout_dir)}
-        reaggregate = {self._instruction(p) for p in self._prompts(reaggregate_dir)}
-        assert len(fanout) == 1
+        fanout_prompts = self._prompts(fanout_dir)
+        fanout = [self._instruction(p) for p in fanout_prompts]
+        reaggregate = [self._instruction(p) for p in self._prompts(reaggregate_dir)]
         assert fanout == reaggregate
-        (instruction,) = fanout
-        # Absolute, so in this OS's own spelling.
-        assert f"`{(tmp_path / 'src').resolve()}{os.sep}" in instruction
+        assert len(set(fanout)) == len(fanout) > 1
+        for prompt, instruction in zip(fanout_prompts, fanout):
+            # Absolute, so in this OS's own spelling.
+            assert f"`{(tmp_path / 'src').resolve()}{os.sep}" in instruction
+            cited = {name for name in names if f'"file": "{name}"' in prompt}
+            named = {
+                name for name in names
+                if f"`{(tmp_path / name).resolve()}`" in instruction
+            }
+            assert named and named <= cited, (named, cited)
 
     # -- T7.5 ------------------------------------------------------------
 
@@ -3552,30 +3563,42 @@ class TestTheValidatorIsToldToOpenTheFilesItLost:
 
         sidecars = sorted(phase_dir.glob("validation_batch_*.prompt.txt"))
         assert sidecars
-        contained = [str((repo / path).resolve()) for path in longs]
         target = str(secret.resolve())
-        without_the_link = 0
+        filled = 0
         for sidecar in sidecars:
             prompt = sidecar.read_text(encoding="utf-8")
             block = prompt.split(
                 f"## Context ({cro.REVIEWED_CODE_CONTEXT_LABEL})"
             )[1].split("## Suggestion groups to validate")[0]
+            cited = [path for path in longs if f'"file": "{path}"' in prompt]
+            assert target not in prompt
+            if f'"file": "{big}"' not in prompt:
+                # Each batch carries its own files' windows: one without the
+                # filler is not over its budget and shows every one of them.
+                assert "[... truncated ...]" not in block
+                for path in cited:
+                    assert f"### {path}" in block
+                # The escaping link shows only as its note, never resolved.
+                assert prompt.count(link) == (
+                    prompt.count(f'"file": "{link}"')
+                    + block.count(f"### {link}\n\n(outside the repository; not shown)")
+                )
+                continue
+            filled += 1
             # The precondition: the block really was filled, and its own note
             # (the only in-block list of the dropped files) was cut away.
             assert "[... truncated ...]" in block
             assert not any(path in block for path in longs + [link])
 
             instruction = self._instruction(prompt)
-            for path in contained:
-                assert f"`{path}`" in instruction
-            assert target not in prompt
+            assert cited
+            for path in cited:
+                assert f"`{(repo / path).resolve()}`" in instruction
             assert link not in instruction
             # The link's only mentions are its own finding's `file` field, the
             # record the validator is judging.
             assert prompt.count(link) == prompt.count(f'"file": "{link}"')
-            without_the_link += link not in prompt
-        if len(sidecars) > 1:
-            assert without_the_link >= 1
+        assert filled == 1
 
 
 # ---------------------------------------------------------------------------

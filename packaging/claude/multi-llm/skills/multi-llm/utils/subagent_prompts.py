@@ -279,7 +279,8 @@ class ContextSource(TypedDict, total=False):
     ``mode`` is ``inline`` (fits, no path), ``path`` (over the limit; the
     excerpt stays and ``abs_path`` names the hash-bound snapshot of the whole
     document) or ``truncated`` (over the limit, nothing readable). Only a
-    ``path`` source reaches the prompt as a path.
+    ``path`` source reaches the prompt as a path. ``selection: cited`` marks a
+    ``path`` source whose excerpt is the plan sections the batch cites.
     """
 
     label: str
@@ -291,11 +292,23 @@ class ContextSource(TypedDict, total=False):
     chars_shown: int
     truncated: bool
     mode: str
+    selection: str
 
 
 #: How a ``path`` source's document is named in the prompt.
 _FILE_HEADING = {"plan": "Plan file", "tasks": "Tasks file"}
 _FILE_NOUN = {"plan": "plan", "tasks": "tasks file"}
+
+
+#: The ``selection`` of a ``path`` source that carries the plan sections a
+#: batch's groups cite (``utils/validation_sections.py``) instead of the
+#: document's head. Spelled here too because this module may not import the
+#: domain layer that defines it (``utils.validation_context.SELECTION_CITED``).
+_SELECTION_CITED = "cited"
+
+
+def _is_cited(source: Dict[str, Any]) -> bool:
+    return source.get("selection") == _SELECTION_CITED
 
 
 def _file_sections(sources: Sequence[Dict[str, Any]]) -> str:
@@ -305,15 +318,29 @@ def _file_sections(sources: Sequence[Dict[str, Any]]) -> str:
         label = str(source.get("label") or "plan")
         heading = _FILE_HEADING.get(label, f"{label.capitalize()} file")
         noun = _FILE_NOUN.get(label, label)
+        if _is_cited(source):
+            shown = (
+                f"The context below carries only part of it: its opening, its "
+                f"top-level goal, scope, constraint, definition and decision "
+                f"sections, and the sections the suggestions in this batch "
+                f"cite ({source.get('chars_shown')} characters; the file is "
+                f"{source.get('bytes')} bytes), with each omitted stretch "
+                f"marked. Read the file whenever a judgement needs a section "
+                f"that is not shown.\n"
+            )
+        else:
+            shown = (
+                f"The context below carries only an excerpt of it (its first "
+                f"{source.get('chars_shown')} characters; the file is "
+                f"{source.get('bytes')} bytes) and ends in a truncation marker. "
+                f"Read the full {noun} from the path above.\n"
+            )
         blocks.append(
             f"## {heading}\n\n"
             f"The {noun} under review is on disk at this absolute path, which "
             f"you may read directly:\n\n"
             f"{source.get('abs_path') or source.get('path')}\n\n"
-            f"The context below carries only an excerpt of it (its first "
-            f"{source.get('chars_shown')} characters; the file is "
-            f"{source.get('bytes')} bytes) and ends in a truncation marker. "
-            f"Read the full {noun} from the path above.\n"
+            + shown
         )
     return "\n".join(blocks) + "\n"
 
@@ -372,6 +399,8 @@ for. Code that already does X does not make such a claim invalid; it makes it
 valid — document or decide it — and the reason should say that the code already
 does X. Where the artifact under review is a diff or a code change rather than a
 plan, that change is the text such a claim is judged against.'''
+    if any(_is_cited(source) for source in sources):
+        return _cited_task_section(count, sources, inline_blocks)
     docs = _documents_phrase(sources)
     headings = " / ".join(
         f"`## {_FILE_HEADING.get(str(s.get('label')), 'File')}`" for s in sources
@@ -436,6 +465,105 @@ back incomplete, or you cannot reach it, do not guess from its excerpt: answer
 names the sections you could not read.'''
 
 
+def _cited_task_section(
+    count: int,
+    sources: Sequence[Dict[str, Any]],
+    inline_blocks: int = 0,
+) -> str:
+    """The ``## Task`` sentences when a document carries its cited sections.
+
+    The path variant's rules, with one difference for a cited document
+    (``selection: cited``): its block shows in full the plan's global sections
+    and the section every reference part of the batch's suggestions resolved
+    to (a batch with an unresolved part embeds the whole plan instead), so a
+    group is judged against those and the file is read when a verdict needs a
+    section the block does not show or a reference was matched to the wrong
+    one. An omission,
+    "never defined" or "two sections disagree" claim is always judged against
+    the full file, which is why the snapshot is named in every such batch. A
+    head-excerpt document in the same round keeps the read-in-full rule.
+    """
+    cited = [s for s in sources if _is_cited(s)]
+    head = [s for s in sources if not _is_cited(s)]
+    docs = _documents_phrase(sources)
+    headings = " / ".join(
+        f"`## {_FILE_HEADING.get(str(s.get('label')), 'File')}`" for s in sources
+    )
+    verb = "is" if len(sources) == 1 else "are"
+    rules = (
+        f"\nThe context block of {_documents_phrase(cited)} holds, in full, its"
+        "\nopening, its top-level goal, scope, constraint, definition and decision"
+        "\nsections, and the section each suggestion's `reference` names, as"
+        "\nmatched to the plan's headings, with each omitted stretch marked"
+        "\n`[... not cited by this batch ...]`. Compare each group against the"
+        "\nsections it cites and those global sections. Read the file before"
+        "\njudging a group whose verdict depends on a section the block does not"
+        "\nshow, or whose `reference` seems to mean a section other than the one"
+        "\nshown."
+    )
+    if head:
+        rules += (
+            f"\nThe context block of {_documents_phrase(head)} is a convenience copy of"
+            "\nits head, authoritative only for the sections it shows in full: read"
+            "\nthat file in full and compare each group against it."
+        )
+    if inline_blocks:
+        inline_scope = (
+            "\n\nEvery other context block is not named by path: judge it as it is"
+            "\nshown, since it is the authority for the document it carries. A file"
+            "\nnamed above never settles a claim about a document it does not hold."
+        )
+        inline_rule = (
+            "\nA claim about a document that is not named by path is judged against"
+            "\nthat document's own context block."
+        )
+    else:
+        inline_scope = ""
+        inline_rule = ""
+    return f'''## Task
+
+For each of the {count} suggestion groups above, decide:
+- "valid": the issue is real and should be addressed
+- "invalid": a false positive — incorrect or not applicable
+- "needs-human-decision": a genuine judgment call (a product or design
+  trade-off) that the full documents cannot settle. It is never the answer for
+  a section the context block does not show: read the file instead.
+
+{docs[0].upper() + docs[1:]} {verb} named by path under {headings} above, and a
+file named there is the whole document.{rules} Judge only the groups listed
+above; ignore anything else.{inline_scope}
+
+When a suggestion claims something about existing code — a function name, a
+line number, current behaviour — and you can read the repository you are
+running in, open it and check the claim before answering. Reserve
+"needs-human-decision" for genuine judgment calls, never for a claim you could
+have checked but did not look at.
+
+Do not probe system paths, services or databases (anything outside the
+repository, a database client, a service status): the repository and the
+documents named above are the evidence.
+
+A claim that the plan or the tasks omit something — "the plan does not specify
+X", "the tasks never say to reset X" — and any claim that something is never
+defined, never reset or never tested, or that two sections disagree, is judged
+against the document it is about. For a document named by path it is judged
+against the full file named above for that document, never against the
+sections its context block shows: read the file before answering such a
+claim.{inline_rule}
+No such claim is judged against the working tree: the plan is what an
+implementer follows, and a partially implemented tree is exactly the situation
+this review exists for. Code that already does X does not make such a claim
+invalid; it makes it valid — document or decide it — and the reason should say
+that the code already does X. Where the artifact under review is a diff or a
+code change rather than a plan, that change is the text such a claim is judged
+against.
+
+Insufficient context is explicit. If reading a file named above fails, comes
+back incomplete, or you cannot reach it, do not guess from the sections shown:
+answer "needs-human-decision" with a reason that starts `insufficient-context:`
+and names the sections you could not read.'''
+
+
 def build_validation_prompt(
     *,
     plan_excerpt: str,
@@ -451,10 +579,11 @@ def build_validation_prompt(
     """Render the prompt for one validation or revalidation batch.
 
     Args:
-        plan_excerpt: The one shared context excerpt for this phase, already
-            truncated by the caller (excerpted once per phase and reused across
-            batches, so batches never re-truncate and prompts stay
-            deterministic).
+        plan_excerpt: This batch's context excerpt, already cut by the caller:
+            the phase's whole-document excerpt (cut once and reused, never
+            re-truncated per batch) or the plan sections this batch's groups
+            cite. Either is a pure function of the round's inputs, so prompts
+            stay deterministic.
         suggestion_records: This batch's suggestion records — the values, not a
             path to them. Each record carries at least ``group_hash``, ``theme``
             and its ``suggestions``.
@@ -482,8 +611,12 @@ def build_validation_prompt(
             context block not named by path stays complete as shown; an
             omission claim is judged against the document it is about; an
             unreadable file is an explicit ``insufficient-context:``
-            answer). With no ``path`` source the
-            prompt is byte-identical to what it was.
+            answer). A ``path`` source with ``selection: cited`` carries
+            the plan sections the batch's groups cite instead of the head:
+            its section says so, and the ``## Task`` sentences judge each
+            group against the sections it cites, reading the file for a
+            section not shown and for every omission claim. With no ``path``
+            source the prompt is byte-identical to what it was.
         scope_guidance: The round's validator scope block
             (``scope_policy.validator_guidance``), rendered per call by the
             caller for the round's own policy and phase. Its own argument, so

@@ -88,6 +88,37 @@ SUGGESTION_RECORDS = [
     },
 ]
 
+#: One batch's cited plan sections (``utils/validation_sections.py``): the
+#: preamble, the section its groups cite, and a marker for what is omitted.
+CITED_PLAN_EXCERPT = (
+    "# Fixture plan\n\nUploads go to the shared bucket.\n\n"
+    "## Step 1\nDo the thing.\n\n"
+    "[... not cited by this batch, not shown: ## Step 2, ## Step 3 ...]"
+)
+
+CITED_RECORDS = [
+    {**record, "suggestions": [
+        {**suggestion, "reference": "## Step 1"} for suggestion in record["suggestions"]
+    ]}
+    for record in SUGGESTION_RECORDS
+]
+
+CITED_SOURCE = {
+    "label": "plan",
+    "kind": "plan",
+    "path": "validation-snapshot.md",
+    "abs_path": "/abs/plans/fixture-plan/review-plan/validation-snapshot.md",
+    "sha256": "0" * 64,
+    "bytes": 14000,
+    "chars_shown": len(CITED_PLAN_EXCERPT),
+    "truncated": True,
+    "mode": "path",
+    "in_phase_dir": True,
+    "selection": "cited",
+    "sections_total": 3,
+    "sections_shown": 1,
+}
+
 GROUP_RECORDS = [
     {
         "index": 0,
@@ -160,6 +191,14 @@ def _prompts():
         "validation_scope_preserve": build_validation_prompt(
             plan_excerpt=PLAN_EXCERPT, suggestion_records=SUGGESTION_RECORDS,
             scope_guidance=validator_guidance("preserve", "review-plan"),
+        ),
+        # A batch that carries only the plan sections its groups cite, with
+        # the round's snapshot named by path (docs/development/delegation.md,
+        # "Cited plan sections").
+        "validation_cited": build_validation_prompt(
+            plan_excerpt=CITED_PLAN_EXCERPT,
+            suggestion_records=CITED_RECORDS,
+            context_sources=[CITED_SOURCE],
         ),
         "validation_code_review": build_validation_prompt(
             plan_excerpt=PLAN_EXCERPT,

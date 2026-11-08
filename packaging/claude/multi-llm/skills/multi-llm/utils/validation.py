@@ -13,7 +13,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
     from .state_manager import generate_group_id, CURRENT_FORMAT_VERSION
@@ -24,6 +24,7 @@ try:
     from .subagent_prompts import build_validation_prompt, code_review_validation_guidance
     from . import scope_policy as _sp
     from . import scope_round as _scope_round
+    from . import validation_sections as _sections
     from .schema_validator import VALIDATION_VERDICTS
     from .subagent_tasks import (
         PromptBudget,
@@ -47,6 +48,7 @@ except ImportError:
     from utils.subagent_prompts import build_validation_prompt, code_review_validation_guidance
     from utils import scope_policy as _sp
     from utils import scope_round as _scope_round
+    from utils import validation_sections as _sections
     from utils.schema_validator import VALIDATION_VERDICTS
     from utils.subagent_tasks import (
         PromptBudget,
@@ -64,9 +66,13 @@ except ImportError:
 
 
 #: The shared-context ceiling for a validation prompt, applied **per context
-#: block**. Excerpted **once per phase** and the identical excerpt reused across
-#: every batch: per-batch re-truncation would both bloat the file and break
-#: prompt determinism.
+#: block**. The whole-document excerpt is cut **once per phase** and reused by
+#: every batch that embeds it; a batch never re-truncates it. A batch may
+#: instead carry a *selection* — the plan sections its groups cite
+#: (:mod:`utils.validation_sections`) or the code windows its issues cite —
+#: which is a pure function of the round's inputs and the batch's records, so
+#: prompts stay deterministic (docs/development/delegation.md, "Cited plan
+#: sections").
 #:
 #: 60 000 rather than the original 30 000, because 30 000 was under the size of
 #: a real plan and the prompt asks the validator to judge against it. Measured
@@ -626,6 +632,87 @@ def build_context_source(
     if reason:
         print(f"  (reason: {reason})", file=sys.stderr)
     return excerpt, record
+
+
+def _path_inside(path: str, root: str) -> bool:
+    real_root = os.path.realpath(root)
+    real = os.path.realpath(path)
+    return real == real_root or real.startswith(real_root.rstrip(os.sep) + os.sep)
+
+
+def cited_plan_for_round(
+    context: str,
+    document: Optional[BoundDocument],
+    *,
+    read_refusal: Optional[str],
+    runner_read_refusal: Optional[Any] = None,
+) -> Optional["_sections.CitedPlan"]:
+    """The round's parsed plan when its batches may carry cited sections, else ``None``.
+
+    A batch that carries only the sections its groups cite still has to be able
+    to reach the rest — an omission claim, or a group whose verdict turns on a
+    section it does not cite — so a round qualifies only when every batch can
+    name a readable, hash-bound snapshot of the whole plan:
+
+    * the block is the bound ``plan`` document with a snapshot path;
+    * the runner may read it (``read_refusal is None``) and, on a native host,
+      the snapshot lies inside the project root the advisory checks;
+    * the plan is at least :data:`validation_sections.CITED_MIN_CHARS` long and
+      has section headings;
+    * ``MULTI_LLM_VALIDATION_CONTEXT`` is ``cited``: the whole plan is the
+      default until a live check shows verdicts hold up without it.
+
+    Every other round embeds the whole plan in every batch.
+    """
+    if document is None or document.label != "plan" or not document.path:
+        return None
+    if len(context) < _sections.CITED_MIN_CHARS:
+        return None
+    if read_refusal is not None:
+        return None
+    if getattr(runner_read_refusal, "advisory_only", False):
+        root = getattr(runner_read_refusal, "root", None)
+        if root and not _path_inside(str(document.path), str(root)):
+            return None
+    if not _sections.cited_context_enabled():
+        return None
+    return _sections.CitedPlan.parse(context)
+
+
+def cited_context_source(
+    document: BoundDocument,
+    excerpt: str,
+    selection: "_sections.CitedSelection",
+    *,
+    phase_dir: str,
+    sections_total: int,
+) -> Dict[str, Any]:
+    """The context source record of one batch's cited plan block.
+
+    ``mode: path`` like an over-limit excerpt — the prompt names the snapshot
+    and the task is ``workspace-read``, so dispatch, resume re-hashing and
+    phase-dir rebinding treat it the same — with ``selection: cited`` saying
+    the excerpt is the cited sections rather than the document's head.
+    """
+    abs_path = str(document.path)
+    return {
+        "label": "plan",
+        "kind": "plan",
+        "path": (
+            os.path.relpath(abs_path, os.path.abspath(phase_dir))
+            if document.in_phase_dir else abs_path
+        ),
+        "abs_path": abs_path,
+        "sha256": document.sha256,
+        "bytes": document.size,
+        "chars_shown": len(excerpt),
+        "truncated": True,
+        "mode": "path",
+        "in_phase_dir": bool(document.in_phase_dir),
+        "selection": _sections.SELECTION_CITED,
+        "sections_total": sections_total,
+        "sections_shown": selection.sections_shown,
+    }
 
 
 def context_sources_of(document: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1859,6 +1946,8 @@ def build_validation_batch_records(
     groups: List[Dict[str, Any]],
     group_indices: List[str],
     group_ids: List[str],
+    *,
+    with_reference: bool = False,
 ) -> List[Dict[str, Any]]:
     """Build the suggestion records one validation batch embeds in its prompt.
 
@@ -1890,6 +1979,13 @@ def build_validation_batch_records(
         located every one by reading the repository, which ``context_mode:
         inline`` does not promise. Keyed on presence, so a plan-review record
         (no location) renders byte-identically to before.
+
+        A suggestion's ``reference`` (the plan section a reviewer says it is
+        about) rides along only ``with_reference``: a batch that carries only
+        the plan sections its groups cite selects them from exactly these
+        values and shows them, so the validator sees which section each
+        suggestion names. Every other batch renders as it did before cited
+        sections existed.
     """
     records: List[Dict[str, Any]] = []
     for idx in group_indices:
@@ -1911,6 +2007,10 @@ def build_validation_batch_records(
                     "desc": s.get("desc", ""),
                     "importance": s.get("importance", "medium"),
                     "type": s.get("type", "unknown"),
+                    **(
+                        {"reference": s["reference"]}
+                        if with_reference and s.get("reference") else {}
+                    ),
                     **({"file": s["file"]} if s.get("file") else {}),
                     **(
                         {"line_range": s["line_range"]}
@@ -2007,6 +2107,9 @@ def prepare_batched_validation_tasks(
     context_plan_sha256: Optional[str] = None,
     context_plan_file: Optional[str] = None,
     scope: Optional[Dict[str, Any]] = None,
+    secondary_for_batch: Optional[
+        Callable[[List[int]], Tuple[str, Optional[BoundDocument], str]]
+    ] = None,
 ) -> Dict[str, Any]:
     """
     Prepare batched validation tasks for sequential subagent processing.
@@ -2025,13 +2128,23 @@ def prepare_batched_validation_tasks(
     ``context_mode: workspace-read`` — declared in the task and capability-gated,
     instead of implicit in who reads the file.
 
-    The shared context is excerpted **once** and the identical excerpt reused
-    across batches: per-batch re-truncation would break prompt determinism.
+    The whole-document excerpt is cut **once** and reused by every batch that
+    embeds it; a batch never re-truncates it. Two blocks may instead be
+    selected per batch, each a pure function of the round's inputs and the
+    batch's own records, so identical inputs still render identical prompts:
+
+    * the plan block carries only the sections the batch's groups cite, when
+      :func:`cited_plan_for_round` qualifies the round and
+      ``validation_sections.CitedPlan.select`` finds a section for every group
+      (else that batch embeds the whole plan);
+    * the second block comes from ``secondary_for_batch`` when given
+      (review-code: the windows its own issues cite).
 
     Args:
         groups: List of suggestion groups to validate
         context: Context for validation (plan content or diff); excerpted once
-            and embedded in every batch prompt
+            and embedded in every batch prompt that does not carry a cited
+            selection of it
         output_dir: Directory where subagents should write batch results
         plan_file: Path to the plan file (provenance and the ``inputs`` hash;
             never interpolated into prompt text)
@@ -2098,6 +2211,13 @@ def prepare_batched_validation_tasks(
             executor run the same prompts — and which the merge stamps each
             hash-joined verdict with. ``None`` is a default ``expand`` round
             with no baseline (its verdicts carry no scope authority).
+        secondary_for_batch: The second block per batch: called with a batch's
+            indices into ``groups``, it returns that batch's ``(text,
+            document, extra_instructions)``, which replace
+            ``secondary_context``, ``secondary_document`` and
+            ``extra_instructions`` for that batch. ``secondary_context`` is
+            then not embedded; ``reviewed_code`` still hashes the round's
+            whole excerpt.
 
     Returns:
         Dict with:
@@ -2184,10 +2304,11 @@ def prepare_batched_validation_tasks(
     # review-results.md, "Stable group IDs").
     group_ids = [stamped_group_id(group) for group in groups]
 
-    # The one shared excerpt, reused verbatim by every batch below. A second
-    # document is excerpted on its own budget rather than appended to the first:
-    # concatenating would let a plan at the limit truncate the artifact under
-    # review down to nothing, which is the failure two contexts exist to fix.
+    # The whole-document excerpts, reused verbatim by every batch that embeds
+    # them. A second document is excerpted on its own budget rather than
+    # appended to the first: concatenating would let a plan at the limit
+    # truncate the artifact under review down to nothing, which is the failure
+    # two contexts exist to fix.
     #
     # Each block becomes one context source record (§2.3 step 7): inline when
     # it fits, `path` when it is over the limit and a readable hash-bound
@@ -2210,6 +2331,11 @@ def prepare_batched_validation_tasks(
             ) else None
         return str(runner_read_refusal)
 
+    def secondary_label_for(document: Optional[BoundDocument]) -> str:
+        if document is not None:
+            return document.label
+        return "tasks" if tasks_file else "reviewed-code"
+
     # With no bound document the label names the block's kind explicitly
     # (plan | tasks | diff) — a "Tasks file" block is a tasks document, not a
     # diff, so its notice and recorded reason name the right document.
@@ -2227,12 +2353,11 @@ def prepare_batched_validation_tasks(
     )
     sources: List[Dict[str, Any]] = [primary_source]
     shared_secondary = ""
-    if secondary_context:
-        secondary_label = secondary_document.label if secondary_document is not None else (
-            "tasks" if tasks_file else "reviewed-code"
-        )
+    secondary_source: Optional[Dict[str, Any]] = None
+    if secondary_context and secondary_for_batch is None:
         shared_secondary, secondary_source = build_context_source(
-            secondary_context, secondary_document, label=secondary_label,
+            secondary_context, secondary_document,
+            label=secondary_label_for(secondary_document),
             block="secondary-context", phase_dir=output_dir,
             read_refusal=refusal_for(secondary_document),
         )
@@ -2246,13 +2371,15 @@ def prepare_batched_validation_tasks(
                 note = advisory(source.get("abs_path"))
                 if note:
                     source["reason"] = note
-    any_path = any(source["mode"] == "path" for source in sources)
-    context_mode = "workspace-read" if any_path else "inline"
-    # Only a round that is not wholly inline records its sources on the task:
-    # an under-limit task is byte-identical to what contract 1 wrote, so its
-    # goldens do not move.
-    task_sources = sources if any(s["mode"] != "inline" for s in sources) else None
-    prompt_sources = [s for s in sources if s["mode"] == "path"] or None
+    # The plan sections each batch's groups cite, when the round qualifies
+    # (docs/development/delegation.md, "Cited plan sections").
+    cited_plan = cited_plan_for_round(
+        context, context_document,
+        read_refusal=refusal_for(context_document),
+        runner_read_refusal=runner_read_refusal,
+    )
+    selections: List[Any] = []
+    published: List[Dict[str, Any]] = []
     budget = prompt_budget or PromptBudget(None)
 
     # Work list of (group_indices, is_high_priority). A batch whose materialized
@@ -2268,14 +2395,50 @@ def prepare_batched_validation_tasks(
     while pending:
         indices, is_high = pending.pop(0)
         records = build_validation_batch_records(groups, indices, group_ids)
+        batch_context, batch_primary = shared_context, primary_source
+        selection = None
+        if cited_plan is not None:
+            cited_records = build_validation_batch_records(
+                groups, indices, group_ids, with_reference=True,
+            )
+            selection = cited_plan.select(cited_records, limit=VALIDATION_CONTEXT_LIMIT)
+            if selection.excerpt is not None:
+                records = cited_records
+                batch_context = selection.excerpt
+                batch_primary = cited_context_source(
+                    context_document, selection.excerpt, selection,
+                    phase_dir=output_dir, sections_total=len(cited_plan.headings),
+                )
+        batch_secondary, batch_secondary_source = shared_secondary, secondary_source
+        batch_extra = extra_instructions
+        if secondary_for_batch is not None:
+            text, document, batch_extra = secondary_for_batch(list(indices))
+            batch_secondary, batch_secondary_source = "", None
+            if text:
+                batch_secondary, batch_secondary_source = build_context_source(
+                    text, document, label=secondary_label_for(document),
+                    block="secondary-context", phase_dir=output_dir,
+                    read_refusal=refusal_for(document),
+                )
+        batch_sources = [batch_primary] + (
+            [batch_secondary_source] if batch_secondary_source is not None else []
+        )
+        # Only a batch that is not wholly inline records its sources on the
+        # task: an under-limit task is byte-identical to what contract 1 wrote,
+        # so its goldens do not move.
+        task_sources = (
+            batch_sources if any(s["mode"] != "inline" for s in batch_sources) else None
+        )
+        prompt_sources = [s for s in batch_sources if s["mode"] == "path"] or None
+        context_mode = "workspace-read" if prompt_sources else "inline"
         prompt = build_validation_prompt(
-            plan_excerpt=shared_context,
+            plan_excerpt=batch_context,
             suggestion_records=records,
             kind=kind,
             context_label=context_label,
-            secondary_excerpt=shared_secondary,
+            secondary_excerpt=batch_secondary,
             secondary_label=secondary_context_label,
-            extra_instructions=extra_instructions,
+            extra_instructions=batch_extra,
             context_sources=prompt_sources,
             scope_guidance=scope_text,
         )
@@ -2306,6 +2469,9 @@ def prepare_batched_validation_tasks(
                 f"stdin/file prompt transport (driver.subagent_runner). The "
                 f"prompt is never truncated."
             )
+        if selection is not None:
+            selections.append(selection)
+        published.extend(batch_sources)
 
         output_name = f"validation_batch_{next_index}.json"
         batch_tasks.append(make_task(
@@ -2336,6 +2502,10 @@ def prepare_batched_validation_tasks(
         next_index += 1
 
     write_prompt_sidecars(batch_tasks, output_dir)
+    if cited_plan is not None:
+        line = _sections.summary_line(selections, len(context))
+        if line:
+            print(line, file=sys.stderr)
 
     stats = estimate_validation_batching_stats(groups, max_per_batch)
 
@@ -2383,7 +2553,9 @@ def prepare_batched_validation_tasks(
         extra=extra,
     )
     if publish:
-        publish_validation_context(output_dir, sources, phase=phase)
+        # Every batch's own records: a cited plan block or a per-batch second
+        # block differs between batches, and the aggregate keeps the worst.
+        publish_validation_context(output_dir, published or sources, phase=phase)
     return document
 
 

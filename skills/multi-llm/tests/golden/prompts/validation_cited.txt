@@ -1,0 +1,161 @@
+You are validating review suggestions for accuracy.
+
+## Plan file
+
+The plan under review is on disk at this absolute path, which you may read directly:
+
+/abs/plans/fixture-plan/review-plan/validation-snapshot.md
+
+The context below carries only part of it: its opening, its top-level goal, scope, constraint, definition and decision sections, and the sections the suggestions in this batch cite (141 characters; the file is 14000 bytes), with each omitted stretch marked. Read the file whenever a judgement needs a section that is not shown.
+
+## Context (Plan content)
+
+# Fixture plan
+
+Uploads go to the shared bucket.
+
+## Step 1
+Do the thing.
+
+[... not cited by this batch, not shown: ## Step 2, ## Step 3 ...]
+
+## Suggestion groups to validate (2)
+
+[
+  {
+    "category": "reliability",
+    "group_hash": "aaaa000000000000",
+    "group_id": "aaaa000000000000",
+    "index": 0,
+    "models": [
+      "model-a",
+      "model-b"
+    ],
+    "suggestions": [
+      {
+        "desc": "A transient 503 currently loses the file.",
+        "importance": "MEDIUM",
+        "reference": "## Step 1",
+        "title": "Retry uploads",
+        "type": "addition"
+      }
+    ],
+    "theme": "Add retry to the upload call"
+  },
+  {
+    "category": "docs",
+    "group_hash": "bbbb000000000000",
+    "group_id": "bbbb000000000000",
+    "index": 1,
+    "models": [
+      "model-a"
+    ],
+    "suggestions": [
+      {
+        "desc": "The plan never states the directory.",
+        "importance": "LOW",
+        "reference": "## Step 1",
+        "title": "Say where config lives",
+        "type": "clarification"
+      }
+    ],
+    "theme": "Document the config location"
+  }
+]
+
+## Task
+
+For each of the 2 suggestion groups above, decide:
+- "valid": the issue is real and should be addressed
+- "invalid": a false positive — incorrect or not applicable
+- "needs-human-decision": a genuine judgment call (a product or design
+  trade-off) that the full documents cannot settle. It is never the answer for
+  a section the context block does not show: read the file instead.
+
+The plan is named by path under `## Plan file` above, and a
+file named there is the whole document.
+The context block of the plan holds, in full, its
+opening, its top-level goal, scope, constraint, definition and decision
+sections, and the section each suggestion's `reference` names, as
+matched to the plan's headings, with each omitted stretch marked
+`[... not cited by this batch ...]`. Compare each group against the
+sections it cites and those global sections. Read the file before
+judging a group whose verdict depends on a section the block does not
+show, or whose `reference` seems to mean a section other than the one
+shown. Judge only the groups listed
+above; ignore anything else.
+
+When a suggestion claims something about existing code — a function name, a
+line number, current behaviour — and you can read the repository you are
+running in, open it and check the claim before answering. Reserve
+"needs-human-decision" for genuine judgment calls, never for a claim you could
+have checked but did not look at.
+
+Do not probe system paths, services or databases (anything outside the
+repository, a database client, a service status): the repository and the
+documents named above are the evidence.
+
+A claim that the plan or the tasks omit something — "the plan does not specify
+X", "the tasks never say to reset X" — and any claim that something is never
+defined, never reset or never tested, or that two sections disagree, is judged
+against the document it is about. For a document named by path it is judged
+against the full file named above for that document, never against the
+sections its context block shows: read the file before answering such a
+claim.
+No such claim is judged against the working tree: the plan is what an
+implementer follows, and a partially implemented tree is exactly the situation
+this review exists for. Code that already does X does not make such a claim
+invalid; it makes it valid — document or decide it — and the reason should say
+that the code already does X. Where the artifact under review is a diff or a
+code change rather than a plan, that change is the text such a claim is judged
+against.
+
+Insufficient context is explicit. If reading a file named above fails, comes
+back incomplete, or you cannot reach it, do not guess from the sections shown:
+answer "needs-human-decision" with a reason that starts `insufficient-context:`
+and names the sections you could not read.
+
+Scope: a plan is a design document. Breaking it into implementation tasks, with
+ids, dependencies and an order, is a later phase (task generation). A finding
+whose only complaint is that the plan has no task breakdown, task list,
+implementation order, dependency graph or milestones is "invalid": not
+applicable to a plan review. A finding that names a concrete design gap which
+would block writing those tasks is judged on that gap. A missing ordering
+constraint between parts of the design (a data migration that must precede the
+schema switch) is a design gap, judged on its merits.
+
+## Reply
+
+Print ONE JSON object and nothing else — no prose, no markdown fences, no
+explanation. Do not write any file; whoever invoked you persists your reply.
+Your reply is parsed as-is, and a reply that does not parse is thrown away:
+the first character is `{` and the last is the `}` that closes it. Keep every
+`reason` and `scope_reason` to one short line with no raw double quotes or line
+breaks inside it.
+`metadata` comes first and `groups` last, so the reply ends with the last
+result's `}`, the `]` that closes `groups` and the `}` that closes the object:
+`}]}`. Re-read the object once for balanced brackets before you finish.
+Settle every verdict, and check each result's `group_hash` against its group
+above, before you print anything, then print the object once: a reply that
+adds a correction, a note or a second object after the first does not parse.
+
+{
+  "metadata": {"model": "<the model you are>", "timestamp": "<ISO 8601>", "schema_version": "2.1"},
+  "groups": [
+    {"group_index": <the group's group_index value>, "group_hash": "<copy the group_hash of the group verbatim>", "status": "valid|invalid|needs-human-decision", "reason": "<one brief sentence>", "confidence": 0.0, "scope_relation": "in_scope|scope_extension|unclear", "scope_reason": "<one brief sentence>", "scope_reference": "<baseline section, or empty>"}
+  ]
+}
+
+Rules:
+1. Output EXACTLY one result per requested group — no more, no fewer.
+2. Each group above carries its own `group_index` — echo that group's
+   `group_index` value back into its result, and copy its `group_hash` value
+   verbatim too. The `group_index` you echo is advisory; the hash is what the
+   results are joined on, so a wrong hash discards the result, and the hash
+   of another group in this batch puts your verdict on that group.
+3. Confidence is a number between 0.0 and 1.0.
+4. Be conservative: when you cannot decide from the context given, answer
+   "needs-human-decision" rather than guessing.
+5. `scope_relation`, `scope_reason` and `scope_reference` classify the group's
+   proposed remedy against the scope baseline. They never change `status`;
+   when the context cannot settle the scope, answer "unclear".
