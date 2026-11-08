@@ -3919,7 +3919,7 @@ import re
 import subprocess as _subprocess
 from types import SimpleNamespace as _NS
 
-from utils import git_utils as _git_utils
+from utils import review_diff as _review_diff
 from utils import llm_client as _llm_client
 from utils.git_utils import (
     REVIEW_SCOPE_FILENAME as _MANIFEST,
@@ -4308,14 +4308,14 @@ class TestTheReportRecordsTheDiffCoverage:
         self, scope_repo, monkeypatch, capsys
     ):
         _record_scope(scope_repo.plan, scope_repo.base)
-        real = _git_utils._git_diff_output
+        real = _review_diff._git_diff_output
 
         def flaky(args, cwd):
             if args[0] == "diff" and args[-1] == "tests/test_app.py" and "--numstat" not in args:
                 return None, "fatal: simulated"
             return real(args, cwd)
 
-        monkeypatch.setattr(_git_utils, "_git_diff_output", flaky)
+        monkeypatch.setattr(_review_diff, "_git_diff_output", flaky)
 
         _scope_fanout(scope_repo.plan, monkeypatch, ["cursor-agent:auto"],
                       real_report=True)
@@ -4516,14 +4516,14 @@ class TestALaneThatCannotOpenTheArtifacts:
         self, scope_repo, monkeypatch, capsys
     ):
         _record_scope(scope_repo.plan, scope_repo.base)
-        real = _git_utils._git_diff_output
+        real = _review_diff._git_diff_output
 
         def flaky(args, cwd):
             if args[0] == "diff" and args[-1] == "src/app.py" and "--numstat" not in args:
                 return None, "fatal: simulated"
             return real(args, cwd)
 
-        monkeypatch.setattr(_git_utils, "_git_diff_output", flaky)
+        monkeypatch.setattr(_review_diff, "_git_diff_output", flaky)
 
         seen, _ = _scope_fanout(
             scope_repo.plan, monkeypatch, ["qwen-code:qwen3-coder", "cursor-agent:auto"],

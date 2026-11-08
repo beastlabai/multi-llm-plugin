@@ -24,6 +24,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import git_utils  # noqa: E402
+from utils import review_diff  # noqa: E402
 
 GOLDEN = Path(__file__).parent / "golden" / "git_two_commit_head_none.json"
 
@@ -198,19 +199,19 @@ def capture_head_none(root: Path, capsys_read) -> Dict[str, Any]:
         record[label] = _diff_set_record(result, target, root)
         record[label]["stdout"] = _normalize(capsys_read(), root)
 
-    real = git_utils._git_diff_output
+    real = review_diff._git_diff_output
 
     def flaky(args, cwd):
         if args[0] == "diff" and args[-1] == "src/new.py" and "--numstat" not in args:
             return None, "fatal: simulated"
         return real(args, cwd)
 
-    git_utils._git_diff_output = flaky
+    review_diff._git_diff_output = flaky
     try:
         target = root / "plans" / "one_failed" / "code-review"
         result = git_utils.write_review_diff("HEAD~1", GOLDEN_PATHS, target, cwd=str(root))
     finally:
-        git_utils._git_diff_output = real
+        review_diff._git_diff_output = real
     record["one_failed"] = _diff_set_record(result, target, root)
     record["one_failed"]["stdout"] = _normalize(capsys_read(), root)
 
@@ -371,14 +372,14 @@ class TestTwoCommitDiff:
     ):
         root, shas = golden_repo
         c0, c1 = shas["c0"], shas["c1"]
-        real = git_utils._git_diff_output
+        real = review_diff._git_diff_output
 
         def flaky(args, cwd):
             if "diff" in args and args[-1] == "src/new.py" and "--numstat" not in args:
                 return None, "fatal: simulated"
             return real(args, cwd)
 
-        monkeypatch.setattr(git_utils, "_git_diff_output", flaky)
+        monkeypatch.setattr(review_diff, "_git_diff_output", flaky)
         capsys.readouterr()
         result = git_utils.write_review_diff(
             c0, GOLDEN_PATHS, root / "plans" / "f" / "code-review", cwd=str(root),
@@ -491,14 +492,14 @@ class TestEmptyTreeBase:
     def test_the_empty_tree_is_never_resolved_as_a_commit(self, root_repo, monkeypatch):
         root, c0, _ = root_repo
         empty = git_utils.empty_tree_id(str(root))
-        real = git_utils._resolve_base_commit
+        real = review_diff._resolve_base_commit
         asked: List[str] = []
 
         def spy(ref, cwd):
             asked.append(ref)
             return real(ref, cwd)
 
-        monkeypatch.setattr(git_utils, "_resolve_base_commit", spy)
+        monkeypatch.setattr(review_diff, "_resolve_base_commit", spy)
         git_utils.write_review_diff(
             empty, ["src/a.py"], root / "plans" / "r" / "code-review", cwd=str(root),
             head_ref=c0,

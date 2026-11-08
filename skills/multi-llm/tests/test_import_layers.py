@@ -67,6 +67,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.json_extractor",
         "utils.judge_vocab",
         "utils.launch_limiter",
+        "utils.phase_walk",
         "utils.process_capture",
         "utils.process_control",
         "utils.prompt_files",
@@ -82,6 +83,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
     1: ("state", (
         "utils.cli_common",
         "utils.cli_version_cache",
+        "utils.git_diff",
         "utils.git_utils",
         "utils.host_capabilities",
         "utils.host_paths",
@@ -90,6 +92,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.host_shim",
         "utils.metrics",
         "utils.output_handler",
+        "utils.review_diff",
         "utils.run_registry",
         "utils.state_manager",
         "utils.status_file",

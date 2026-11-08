@@ -906,6 +906,7 @@ _ALLOWED_ABSOLUTE = {
     f"{PAYLOAD}/utils/write_batch_scheduler.py": {"/bin/sh"},
     f"{PAYLOAD}/multi_llm.py": {"/dev/null"},
     f"{PAYLOAD}/utils/git_utils.py": {"/dev/null"},
+    f"{PAYLOAD}/utils/git_diff.py": {"/dev/null"},
     f"{PAYLOAD}/utils/process_control.py": {
         "/dev/fd", "/dev/null", "/proc", "/proc/self/fd"},
     f"{PAYLOAD}/utils/run_registry.py": {"/proc"},

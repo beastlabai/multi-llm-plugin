@@ -102,8 +102,8 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[DEADLINE_SWEEP]` | `ask_orchestrator.py` `sweep_live_clis()` | not for the host: runner-diagnostic | — |
 | `[DEPRECATED]` | `utils/apply_orchestrator_base.py` | `instructions/apply-code-fixes.md`<br>`instructions/apply-suggestions.md` | — |
 | `[DETACHED_RUN]` | `utils/detach.py` | not for the host: unnamed-handler | — |
-| `[DIFF_FAILED]` | `utils/git_utils.py` | `instructions/review-code.md` | — |
-| `[DIFF_PARTIAL]` | `utils/git_utils.py` | `instructions/review-code.md` | — |
+| `[DIFF_FAILED]` | `utils/review_diff.py` | `instructions/review-code.md` | — |
+| `[DIFF_PARTIAL]` | `utils/review_diff.py` | `instructions/review-code.md` | — |
 | `[DRY_RUN]` | `utils/host_install.py` | not for the host: operator-cli | — |
 | `[DRY_RUN_COMPLETE]` | `review_plan_orchestrator.py` | not for the host: phase-progress | — |
 | `[ETA]` | `utils/metrics.py` | `instructions/apply-code-fixes.md`<br>`instructions/apply-suggestions.md`<br>`instructions/apply-task-suggestions.md`<br>`instructions/implement.md`<br>`instructions/review-code.md`<br>`instructions/review-tasks.md`<br>+2 more | — |

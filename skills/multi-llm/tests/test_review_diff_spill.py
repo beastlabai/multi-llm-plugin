@@ -20,6 +20,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import git_utils  # noqa: E402
+from utils import review_diff  # noqa: E402
 from utils.git_utils import (  # noqa: E402
     DIFF_COVERAGE_COMPLETE,
     DIFF_COVERAGE_PARTIAL,
@@ -336,7 +337,7 @@ class TestHostilePathsStayInsideTheDiffDir:
         _write(repo, "a.py", "a\n")
         _commit(repo, "base")
         _write(repo, "a.py", "b\n")
-        monkeypatch.setattr(git_utils, "review_diff_slug", lambda _path: "../../escape")
+        monkeypatch.setattr(review_diff, "review_diff_slug", lambda _path: "../../escape")
 
         with pytest.raises(ReviewDiffContainmentError):
             write_review_diff("HEAD", ["a.py"], _out(repo))
@@ -383,14 +384,14 @@ class TestGitFailuresDegradeTheSet:
         _commit(repo, "base")
         _write(repo, "a.py", "b\n")
         _write(repo, "b.py", "b\n")
-        real = git_utils._git_diff_output
+        real = review_diff._git_diff_output
 
         def flaky(args, cwd):
             if args[0] == "diff" and args[-1] == "b.py" and "--numstat" not in args:
                 return None, "fatal: simulated"
             return real(args, cwd)
 
-        monkeypatch.setattr(git_utils, "_git_diff_output", flaky)
+        monkeypatch.setattr(review_diff, "_git_diff_output", flaky)
 
         result = write_review_diff("HEAD", ["a.py", "b.py"], _out(repo))
 
@@ -502,14 +503,14 @@ class TestAnInterruptedWriteLeavesNoManifest:
         write_review_diff("HEAD", ["src/a.py"], out)
         assert (out / REVIEW_SCOPE_FILENAME).exists()
         _write(repo, "src/a.py", "three\n")
-        real = git_utils._write_diff_file
+        real = review_diff._write_diff_file
 
         def fail_on_a_diff(target, data):
             if str(target).endswith(".diff"):
                 raise OSError("disk full")
             real(target, data)
 
-        monkeypatch.setattr(git_utils, "_write_diff_file", fail_on_a_diff)
+        monkeypatch.setattr(review_diff, "_write_diff_file", fail_on_a_diff)
 
         with pytest.raises(OSError):
             write_review_diff("HEAD", ["src/a.py"], out)

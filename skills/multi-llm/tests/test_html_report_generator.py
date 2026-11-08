@@ -2243,7 +2243,7 @@ class TestFallbackChain:
         assert '"source": "diff"' in html
         assert '"available": true' in html
 
-    @patch("utils.git_utils.capture_file_context")
+    @patch("utils.git_diff.capture_file_context")
     def test_fallback_level2_file_content(
         self, mock_capture, sample_plan, phase_dir
     ):
@@ -2311,7 +2311,7 @@ class TestFallbackChain:
         assert '"source": "none"' in html
         assert '"available": false' in html
 
-    @patch("utils.git_utils.capture_file_context")
+    @patch("utils.git_diff.capture_file_context")
     def test_fallback_chain_mixed_files(
         self, mock_capture, sample_plan, phase_dir
     ):

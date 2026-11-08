@@ -99,7 +99,7 @@ them** (plan `review-run-scope-salvage-and-failure-visibility`).
 `review-code` resolves one scope (`resolve_review_scope`:
 `--files`/`--files-from`, then `tracked_files`, then the loud
 `git diff` fallback with `[SCOPE_FALLBACK]`/`[SCOPE_LARGE]`), orders it
-source → tests → fixtures → generated with the single classifier `git_utils.classify_review_paths`
+source → tests → fixtures → generated with the single classifier `review_diff.classify_review_paths`
 (`code_review.collapse_paths` in `providers.yaml` configures the fixture/generated globs), and
 before dispatch writes `code-review/review-scope.md` plus one whole, uncapped `code-review/diff/<n>-<slug>.diff` per
 source/test file (`write_review_diff`; git failures degrade coverage to `partial`

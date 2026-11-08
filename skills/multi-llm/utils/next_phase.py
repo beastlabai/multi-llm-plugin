@@ -12,7 +12,8 @@ The contract, briefly:
   reads that only through ``check_workflow_prerequisites.get_workflow_status``
   (or the payload a caller already computed with it). It adds no status logic
   of its own: which phases are completed, skipped, pending or ``in_progress``
-  is that payload's answer, never a second table's.
+  is that payload's answer, never a second table's, and the walk over them is
+  ``utils/phase_walk``'s, the rule ``suggested_next`` is picked by.
 * It never reads the environment. The route is resolved by the caller, once,
   with :func:`resolve_route` — the only code here that reads a route signal —
   and handed in.
@@ -42,6 +43,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
+from . import phase_walk
 from .text_clip import plain_line
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only
@@ -646,9 +648,8 @@ def gate_resume_suggested(workflow: Mapping[str, Any]) -> List[str]:
     primary = workflow.get("suggested_next")
     if implement.get("status") != "completed" or not primary:
         return []
-    order = list(_skill_module("modes").PREREQUISITE_PHASES)
-    if ("implement" not in order or primary not in order
-            or order.index(primary) <= order.index("implement")):
+    order = _skill_module("modes").PREREQUISITE_PHASES
+    if not phase_walk.comes_after(order, primary, "implement"):
         return []
     return manual_gate_flags(implement)
 
@@ -1286,13 +1287,12 @@ def next_phase_commands(
         workflow = _workflow_payload(Path(os.path.abspath(str(source))), host_id)
     phases: Dict[str, Dict[str, Any]] = workflow.get("phases") or {}
     order: List[str] = list(modes.PREREQUISITE_PHASES)
-    done = tuple(prereq.DONE_STATUSES)
 
     def status_of(phase: str) -> Optional[str]:
-        return (phases.get(phase) or {}).get("status")
+        return phase_walk.entry_of(phases, phase).get("status")
 
     def is_open(phase: str) -> bool:
-        return status_of(phase) not in done
+        return phase_walk.is_open(phase_walk.entry_of(phases, phase))
 
     def warning_of(phase: str) -> Optional[str]:
         return (phases.get(phase) or {}).get("warning") or None
@@ -1354,7 +1354,7 @@ def next_phase_commands(
         # `why` of one the walk listed.
         steps: List[OptionalStep] = []
         for phase in span:
-            if phase not in prereq.OPTIONAL_PHASES or not is_open(phase):
+            if phase_walk.is_required(phase) or not is_open(phase):
                 continue
             # Offered only once everything it needs is on record: after
             # generate-tasks, review-tasks is offered and apply-task-suggestions
@@ -1395,71 +1395,41 @@ def next_phase_commands(
             warning=warning_of(primary),
         ))
 
-    def is_stale(phase: str) -> bool:
-        return bool((phases.get(phase) or {}).get("stale"))
-
-    status = status_of(start)
-    if status == "in_progress":
+    # The walk from *start* (`phase_walk.next_step`, the rule `suggested_next`
+    # is picked by): the start itself in progress, else a required phase
+    # before it that was started and not finished, else a stale start, else
+    # the first open required phase after it.
+    step = phase_walk.next_step(phases, order, after=start)
+    if step.kind == phase_walk.RESUME:
         # A resumable phase is its own answer; the span walk does not run.
         return command_answer(NextPhase(
             phase=start, command=command_for(start), warning=warning_of(start),
         ))
-    if gated and status not in done:
+    if gated and is_open(start):
         # The finished phase is not on record: exit 0 at a pending marker, a
         # native first call, a fresh detach invoker. Not a finished phase.
         return None
 
     index = order.index(start)
-    # A required phase BEFORE the finished one that was STARTED and not
-    # finished comes first: the workflow is not complete, and not at the next
-    # phase, while it stands. `suggested_next` (the notice on the same result
-    # line, `status`) names it, so a walk that began after the finished phase
-    # named another phase than the notice beside it. Measured 2026-10-02 on the
-    # OpenCode and Codex racing runs: implement had ended `needs-human` after a
-    # write-gate refusal, and apply-code-fixes then answered `complete` while
-    # the notice said `suggested next: implement`; review-code answered
-    # `--apply-code-fixes` against the same notice. Started means `in_progress`,
-    # a seeded task list (`tasks_total`) or a `stale` completion (it ran to
-    # the end once; adversarial review, 2026-10-02: `--after apply-code-fixes`
-    # under a stale code-review answered `complete`): a phase never begun that
-    # sits before a standalone start stays skipped over (a standalone
-    # review-code on a fresh plan still walks to apply-code-fixes, "starting
-    # mid-workflow never sends the user back").
-    earlier = next(
-        (
-            phase for phase in order[:index]
-            if phase not in prereq.OPTIONAL_PHASES and is_open(phase)
-            and (status_of(phase) == "in_progress"
-                 or (phases.get(phase) or {}).get("tasks_total")
-                 or is_stale(phase))
-        ),
-        None,
-    )
-    if earlier is not None:
+    if step.kind == phase_walk.STARTED:
+        # An earlier phase started and not finished comes first, so this
+        # answer and `suggested_next` (the notice on the same result line,
+        # `status`) name the same phase; see docs/development/status.md.
+        earlier = step.phase
         return command_answer(NextPhase(
             phase=earlier,
             command=command_for(earlier),
             optional_before=optional_steps(order[: order.index(earlier)]),
             warning=warning_of(earlier),
         ))
-    if is_stale(start):
-        # A stale start (completed before implement's latest completion) is
-        # its own answer once nothing earlier is open — the gate is off here,
-        # since under it a stale start is "not on record" and returned None
-        # above (exit 0 at a pending marker must print nothing). `util
-        # next-command --after review-code` on the Codex run of 2026-10-02
-        # walked past the stale review to apply-code-fixes while the notice
-        # beside it said `suggested next: code-review`.
+    if step.kind == phase_walk.STALE:
+        # Reached only with the gate off: under it a stale start is "not on
+        # record" and returned None above (exit 0 at a pending marker must
+        # print nothing).
         return command_answer(NextPhase(
             phase=start, command=command_for(start), warning=warning_of(start),
         ))
-    primary = next(
-        (
-            phase for phase in order[index + 1:]
-            if phase not in prereq.OPTIONAL_PHASES and is_open(phase)
-        ),
-        None,
-    )
+    primary = step.phase
     if primary is None:
         # An optional phase never keeps a workflow open, and one the walk did
         # not reach is never suggested: no `optional_before` on completion.

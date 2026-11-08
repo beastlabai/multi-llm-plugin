@@ -153,11 +153,17 @@ builder and the completed-phase guard all agree, and `code_review_orchestrator` 
 `--force` path on a stale review instead of auto-healing it back from the artifacts it
 left.
 
-**The next-step walk never skips a started phase** (`next_phase_commands`): a required phase before
-the finished one that is `in_progress` or has a seeded `tasks_total` (an implement
-that ended `needs-human`) is the answer, so `user_next_step` and the result's
+**The next-step walk never skips a started phase** (`next_phase_commands`, through
+`utils/phase_walk.next_step`, the one owner of the rule): a required phase before
+the finished one that is `in_progress`, has a seeded `tasks_total` (an implement
+that ended `needs-human`) or a `stale` completion is the answer, so `user_next_step` and the result's
 `suggested next` notice cannot disagree and a workflow with an unfinished implement is never
-`complete`; a phase never begun still stays skipped over by a standalone start.
+`complete`; a phase never begun still stays skipped over by a standalone start. Measured
+2026-10-02 on the OpenCode and Codex racing runs: implement had ended `needs-human` after a
+write-gate refusal, and apply-code-fixes then answered `complete` while the notice said
+`suggested next: implement`. A stale start is its own answer once nothing earlier is open
+(`util next-command --after review-code` had walked past a stale review to apply-code-fixes),
+and only with the gate off: a finished phase not on record answers nothing.
 
 **An early warning for the refusal that waits at phase 6** (`check_workflow_prerequisites.repo_wide_sandbox_warning`): whenever
 `implement` / `apply-code-fixes` would be refused for the runner
@@ -179,7 +185,7 @@ the servers declare the host nowhere else, so the codex session rung is only rea
 `--reaggregate` makes older batches look stale, so the next command is bare rather than
 `--resume`.
 
-`suggested_next` is picked **once, after** those marks (`_suggested_next`: a started,
+`suggested_next` is picked **once, after** those marks (`phase_walk.next_step` with no start: a started,
 unfinished required phase first — `in_progress`, a seeded `tasks_total` or
 `stale` — else the first open required phase after the furthest completed phase,
 never one before it, so a plan whose review-plan never ran is not sent back to it; fix round 14), so
