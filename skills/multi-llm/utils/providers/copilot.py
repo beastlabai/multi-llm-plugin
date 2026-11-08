@@ -101,8 +101,6 @@ import os
 import re
 import shutil
 import sys
-import tempfile
-import threading
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
 from ..json_extractor import extract_json_from_text
@@ -114,6 +112,7 @@ from .base import (
     StructuredSchema,
     split_reasoning_effort,
 )
+from .private_home import PrivateHomes
 
 #: Levels accepted by ``copilot --effort`` at 1.0.80, measured one at a time
 #: (1.0.93's invalid-level error names the same seven, 2026-10-08).
@@ -182,11 +181,13 @@ _MODEL_ID_SPLIT_DECLINED = True
 #: and ``qwen-code``'s all follow.
 _HOME_PREFIX = "multi-llm-copilot-"
 
-_HOME_LOCK = threading.Lock()
-#: Every config root **this process created**. Nothing outside this list is ever
-#: removed: a user-pinned ``COPILOT_HOME`` is respected, never deleted.
-_HOME_DIRS: List[str] = []
-_HOME_ATEXIT_REGISTERED = False
+#: Every config root **this process created** (:class:`PrivateHomes`). Nothing
+#: else is ever removed: a user-pinned ``COPILOT_HOME`` is respected, never
+#: deleted.
+_HOMES = PrivateHomes(_HOME_PREFIX)
+isolated_home_dirs = _HOMES.isolated_home_dirs
+cleanup_home_dirs = _HOMES.cleanup
+reset_home_dirs = _HOMES.reset
 
 #: The B1 selector set (§2.2 rule 2), emitted as one indivisible set.
 #: ``COPILOT_PROVIDER_BASE_URL`` is the **activation switch** for BYOK, so a
@@ -397,46 +398,6 @@ def token_limits_for(model: str) -> Tuple[int, int]:
     prompt_budget = max(FLOOR_MAX_PROMPT_TOKENS, context_length - OUTPUT_RESERVE_TOKENS)
     output_budget = min(max_completion, OUTPUT_RESERVE_TOKENS)
     return prompt_budget, output_budget
-
-
-def _create_home_dir() -> str:
-    """A fresh 0700 config root, owned and tracked by this process."""
-    global _HOME_ATEXIT_REGISTERED
-
-    path = tempfile.mkdtemp(prefix=_HOME_PREFIX)
-    os.chmod(path, 0o700)  # mkdtemp already does this; asserted, not assumed
-    _HOME_DIRS.append(path)
-    if not _HOME_ATEXIT_REGISTERED:
-        import atexit
-
-        atexit.register(cleanup_home_dirs)
-        _HOME_ATEXIT_REGISTERED = True
-    return path
-
-
-def isolated_home_dirs() -> Tuple[str, ...]:
-    """Every config root this process created and has not yet removed."""
-    with _HOME_LOCK:
-        return tuple(_HOME_DIRS)
-
-
-def cleanup_home_dirs() -> None:
-    """Remove every config root this process created. Never raises.
-
-    Containment must never be the thing that fails a run, so a directory that
-    cannot be removed is left behind under a known prefix rather than
-    propagating an exception out of interpreter shutdown.
-    """
-    with _HOME_LOCK:
-        paths, _HOME_DIRS[:] = list(_HOME_DIRS), []
-    for path in paths:
-        shutil.rmtree(path, ignore_errors=True)
-
-
-def reset_home_dirs() -> None:
-    """Drop this process's tracking list without removing anything (tests)."""
-    with _HOME_LOCK:
-        _HOME_DIRS[:] = []
 
 
 class CopilotProvider(LLMProvider):
@@ -964,11 +925,10 @@ class CopilotProvider(LLMProvider):
         """
         if os.environ.get("COPILOT_HOME"):
             return None
-        with _HOME_LOCK:
-            try:
-                return _create_home_dir()
-            except OSError:  # noqa: BLE001 - containment must never fail a run
-                return None
+        try:
+            return _HOMES.create()
+        except OSError:  # noqa: BLE001 - containment must never fail a run
+            return None
 
     def get_remove_env(self) -> List[str]:
         """Strip the seat path, the tier-widening switch and the key that outranks ours.

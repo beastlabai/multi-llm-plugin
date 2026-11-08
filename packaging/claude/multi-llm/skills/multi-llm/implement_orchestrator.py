@@ -950,20 +950,9 @@ def _prepare_selected_task(
     state.update_task_status(task.id, TaskStatus.PENDING.value)
     # A fresh result replaces these; until then the old verdict is not the
     # selected attempt's verdict, including after a host dies mid-handoff.
-    from utils.state_manager import (
-        set_task_batch_check_accepted_in_state, set_task_batch_check_in_state,
-        set_task_batch_check_repeats_in_state,
-        set_task_check_findings_in_state, set_task_check_tree_in_state,
-        set_task_own_check_note_in_state, set_task_own_check_ran_in_state,
-    )
+    from utils.state_manager import clear_task_verdict
 
-    set_task_check_findings_in_state(state.state, task.id, None)
-    set_task_check_tree_in_state(state.state, task.id, None)
-    set_task_batch_check_in_state(state.state, task.id, None)
-    set_task_batch_check_accepted_in_state(state.state, task.id, None)
-    set_task_batch_check_repeats_in_state(state.state, task.id, None)
-    set_task_own_check_ran_in_state(state.state, task.id, False)
-    set_task_own_check_note_in_state(state.state, task.id, None)
+    clear_task_verdict(state.state, task.id)
     # Fix round 17: the log line its earlier run wrote is not this rerun's
     # (`batch_done.unrecorded_logged_batches`): a host gone before its
     # `batch-done` left T001 refused on the next plain emit.
@@ -991,8 +980,9 @@ def _start_over(
     * its status, including a code task skipped at the user's request or
       with another task, goes back to ``pending`` without a reason — a recorded
       ``--human-task`` answer for it goes with it
-      (``state_manager._consume_answer``) — and its check findings, check
-      tree stamp and own-check findings are dropped;
+      (``state_manager._consume_answer``) — and its verdict (check findings,
+      check tree stamp, own-check records: ``state_manager.TASK_VERDICT_KEYS``)
+      is dropped;
     * its result file is kept as ``<name>.rerun-<stamp>`` and its pre-batch
       snapshot set aside beside its slot (``TaskSnapshot.set_aside``, what
       the executor's own start-over does to a slot it dispatches into),
@@ -1011,12 +1001,7 @@ def _start_over(
     popped into an empty ``phases_started``): see
     :func:`_has_earlier_implement_records`.
     """
-    from utils.state_manager import (
-        set_task_batch_check_accepted_in_state, set_task_batch_check_in_state,
-        set_task_batch_check_repeats_in_state,
-        set_task_check_findings_in_state, set_task_check_tree_in_state,
-        set_task_own_check_note_in_state, set_task_own_check_ran_in_state,
-    )
+    from utils.state_manager import clear_task_verdict
     from utils.subagent_tasks import implement_output_name
     from utils.write_safety import TaskSnapshot, WriteSafetyError, resolve_repo_root
 
@@ -1063,13 +1048,7 @@ def _start_over(
             # A reason an earlier run gave it (held behind a check) is not
             # this run's.
             state.update_task_status(task_id, TaskStatus.PENDING.value)
-        set_task_check_findings_in_state(state.state, task_id, None)
-        set_task_check_tree_in_state(state.state, task_id, None)
-        set_task_batch_check_in_state(state.state, task_id, None)
-        set_task_batch_check_accepted_in_state(state.state, task_id, None)
-        set_task_batch_check_repeats_in_state(state.state, task_id, None)
-        set_task_own_check_ran_in_state(state.state, task_id, False)
-        set_task_own_check_note_in_state(state.state, task_id, None)
+        clear_task_verdict(state.state, task_id)
         if touched:
             set_aside.append(task_id)
     mark_tasks_reset_in_state(state.state, code_ids)

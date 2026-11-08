@@ -507,6 +507,9 @@ _CONFIG_HOME: Optional[str] = None
 #: directory per *process*, shared by every concurrent slot (no slot writes
 #: per-slot state there), removed when the last slot leaves.
 _CONFIG_HOME_USERS = 0
+#: The process that made :data:`_CONFIG_HOME`. A forked child neither reuses
+#: nor removes its parent's directory (``fx`` keeps the same guard).
+_CONFIG_HOME_PID: Optional[int] = None
 _ATEXIT_REGISTERED = False
 
 #: The active dispatch's hermetic state, or ``None``. A ``ContextVar`` rather
@@ -611,8 +614,11 @@ def acquire_config_home() -> str:
     the user's, no slot keeps state in it, and a per-slot directory would
     multiply `mkdtemp` calls and cleanup races for zero isolation.
     """
-    global _CONFIG_HOME, _CONFIG_HOME_USERS
+    global _CONFIG_HOME, _CONFIG_HOME_USERS, _CONFIG_HOME_PID
     with _CONFIG_HOME_LOCK:
+        if _CONFIG_HOME_PID != os.getpid():
+            _CONFIG_HOME, _CONFIG_HOME_USERS = None, 0
+            _CONFIG_HOME_PID = os.getpid()
         if _CONFIG_HOME is None or not os.path.isdir(_CONFIG_HOME):
             _CONFIG_HOME = tempfile.mkdtemp(prefix=HERMETIC_DIR_PREFIX)
             os.chmod(_CONFIG_HOME, 0o700)
@@ -634,7 +640,8 @@ def sweep_config_home() -> None:
     """Remove the directory this process created. Idempotent, never raises.
 
     **Never removes a directory this process did not create** — a user-supplied
-    ``XDG_CONFIG_HOME`` is overridden for opencode slots and never deleted. It is
+    ``XDG_CONFIG_HOME`` is overridden for opencode slots and never deleted, and a
+    forked child forgets its parent's directory instead of removing it. It is
     `rmtree`, not `rmdir`, because opencode seeds a stub config file there
     (measured, 1.18.18); a leak costs one inode and is sweepable by prefix under
     ``TMPDIR``.
@@ -642,7 +649,8 @@ def sweep_config_home() -> None:
     global _CONFIG_HOME, _CONFIG_HOME_USERS
     with _CONFIG_HOME_LOCK:
         path, _CONFIG_HOME, _CONFIG_HOME_USERS = _CONFIG_HOME, None, 0
-    if not path:
+        owned = _CONFIG_HOME_PID == os.getpid()
+    if not path or not owned:
         return
     shutil.rmtree(path, ignore_errors=True)
 

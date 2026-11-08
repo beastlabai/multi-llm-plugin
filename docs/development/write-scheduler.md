@@ -136,7 +136,8 @@ backstop, not the design.
   invisible to it. Every writer family whose repeated write means something has a journaled
   mutator; the direct writers left are safe without one: the scheduler's per-task check maps
   and `known_checks`' batch reports go with the journaled `update_task_status` of the same
-  task; a start-over's or `--task` rerun's clears of a task's check maps go with a fresh
+  task; a start-over's or `--task` rerun's clears of a task's check maps
+  (`state_manager.clear_task_verdict`, over `TASK_VERDICT_KEYS`) go with a fresh
   `implement_task_reset_at` stamp; processed-item records (`record_batch_items_in_state`) and
   `metrics` entries carry a full-precision timestamp; `move_check_repeats_in_state`, a
   `--force` drop of a phase completion and `stage_scope_files_record`'s pop of

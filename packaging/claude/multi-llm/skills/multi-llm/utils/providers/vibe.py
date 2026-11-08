@@ -121,8 +121,6 @@ import json
 import os
 import re
 import shutil
-import tempfile
-import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
@@ -133,6 +131,7 @@ from .base import (
     StructuredSchema,
     split_reasoning_effort,
 )
+from .private_home import PrivateHomes
 
 #: Levels accepted by the ``[[models]]`` key ``thinking`` at 2.24.1, read off the
 #: installed pydantic validator rather than from documentation: a bogus value
@@ -220,11 +219,13 @@ _MAX_WALL_S = max(
 #: follow.
 _HOME_PREFIX = "multi-llm-vibe-"
 
-_HOME_LOCK = threading.Lock()
-#: Every config root **this process created**. Nothing outside this list is ever
-#: removed: a user-pinned ``VIBE_HOME`` is respected, never deleted.
-_HOME_DIRS: List[str] = []
-_HOME_ATEXIT_REGISTERED = False
+#: Every config root **this process created** (:class:`PrivateHomes`). Nothing
+#: else is ever removed: a user-pinned ``VIBE_HOME`` is respected, never
+#: deleted.
+_HOMES = PrivateHomes(_HOME_PREFIX)
+isolated_home_dirs = _HOMES.isolated_home_dirs
+cleanup_home_dirs = _HOMES.cleanup
+reset_home_dirs = _HOMES.reset
 
 #: B3 and ambient names (§2.2 rule 3: adapter wins, ambient loses, no fallback).
 #:
@@ -282,46 +283,6 @@ def stopped_by_a_limit(stderr: str) -> Optional[str]:
     """
     match = _STOPPED_LINE.search(stderr or "")
     return match.group(1) if match else None
-
-
-def _create_home_dir() -> str:
-    """A fresh 0700 config root, owned and tracked by this process."""
-    global _HOME_ATEXIT_REGISTERED
-
-    path = tempfile.mkdtemp(prefix=_HOME_PREFIX)
-    os.chmod(path, 0o700)  # mkdtemp already does this; asserted, not assumed
-    _HOME_DIRS.append(path)
-    if not _HOME_ATEXIT_REGISTERED:
-        import atexit
-
-        atexit.register(cleanup_home_dirs)
-        _HOME_ATEXIT_REGISTERED = True
-    return path
-
-
-def isolated_home_dirs() -> Tuple[str, ...]:
-    """Every config root this process created and has not yet removed."""
-    with _HOME_LOCK:
-        return tuple(_HOME_DIRS)
-
-
-def cleanup_home_dirs() -> None:
-    """Remove every config root this process created. Never raises.
-
-    Containment must never be the thing that fails a run, so a directory that
-    cannot be removed is left behind under a known prefix rather than
-    propagating an exception out of interpreter shutdown.
-    """
-    with _HOME_LOCK:
-        paths, _HOME_DIRS[:] = list(_HOME_DIRS), []
-    for path in paths:
-        shutil.rmtree(path, ignore_errors=True)
-
-
-def reset_home_dirs() -> None:
-    """Drop this process's tracking list without removing anything (tests)."""
-    with _HOME_LOCK:
-        _HOME_DIRS[:] = []
 
 
 class VibeProvider(LLMProvider):
@@ -884,11 +845,10 @@ class VibeProvider(LLMProvider):
         """
         if os.environ.get("VIBE_HOME"):
             return None
-        with _HOME_LOCK:
-            try:
-                return _create_home_dir()
-            except OSError:  # noqa: BLE001 - containment must never fail a run
-                return None
+        try:
+            return _HOMES.create()
+        except OSError:  # noqa: BLE001 - containment must never fail a run
+            return None
 
     def get_remove_env(self) -> List[str]:
         """Strip the vendor key and every ``VIBE_*`` knob this adapter does not set.

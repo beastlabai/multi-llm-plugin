@@ -330,6 +330,49 @@ def manual_task_gates(
     }
 
 
+def _set_task_entry(
+    state: Dict[str, Any], key: str, task_id: str, value: Any,
+) -> None:
+    """Set *task_id*'s entry of the per-task map *key* to *value*, or drop
+    the entry when *value* is empty; the key is dropped when the map empties.
+
+    The one body of the ``set_task_*_in_state`` map writers: each normalizes
+    its value and calls this. The map is replaced by a fresh copy, never
+    edited in place; a recorded *key* that is not a map counts as an empty
+    one. These writers edit a raw dict and journal nothing: their writes go
+    with the journaled record of the same task
+    (docs/development/write-scheduler.md, "How a save knows its own changes").
+    """
+    recorded = state.get(key)
+    current = dict(recorded) if isinstance(recorded, dict) else {}
+    if value:
+        current[str(task_id)] = value
+    else:
+        current.pop(str(task_id), None)
+    if current:
+        state[key] = current
+    else:
+        state.pop(key, None)
+
+
+def _set_task_member(
+    state: Dict[str, Any], key: str, task_id: str, member: bool,
+) -> None:
+    """Add *task_id* to (or remove it from) the per-task list *key*, kept as
+    sorted distinct ids; the key is dropped when the list empties. The list
+    twin of :func:`_set_task_entry`."""
+    recorded = state.get(key)
+    current = {str(t) for t in recorded} if isinstance(recorded, list) else set()
+    if member:
+        current.add(str(task_id))
+    else:
+        current.discard(str(task_id))
+    if current:
+        state[key] = sorted(current)
+    else:
+        state.pop(key, None)
+
+
 def set_task_check_findings_in_state(
     state: Dict[str, Any], task_id: str, findings: Optional[Iterable[str]],
 ) -> None:
@@ -342,17 +385,8 @@ def set_task_check_findings_in_state(
     closing notice and review-code's implementation record read it. The key
     is dropped when the map empties, so a plan with no findings gains none.
     """
-    recorded = state.get(TASK_CHECK_FINDINGS_KEY)
-    current = dict(recorded) if isinstance(recorded, dict) else {}
     kept = [str(item) for item in (findings or []) if str(item).strip()]
-    if kept:
-        current[str(task_id)] = kept
-    else:
-        current.pop(str(task_id), None)
-    if current:
-        state[TASK_CHECK_FINDINGS_KEY] = current
-    else:
-        state.pop(TASK_CHECK_FINDINGS_KEY, None)
+    _set_task_entry(state, TASK_CHECK_FINDINGS_KEY, task_id, kept)
 
 
 #: ``state.json``'s map of what the checks an implement task ran on its OWN
@@ -370,20 +404,13 @@ def set_task_batch_check_in_state(
     state: Dict[str, Any], task_id: str, findings: Optional[Iterable[str]],
 ) -> None:
     """Record (or, with no findings, clear) *task_id*'s failing own check;
-    the key is dropped when the map empties."""
-    recorded = state.get(TASK_BATCH_CHECK_KEY)
-    current = dict(recorded) if isinstance(recorded, dict) else {}
+    the key is dropped when the map empties. Clearing it clears the task's
+    :data:`TASK_OWN_TEXT_KEY` entry too."""
     kept = [str(item) for item in (findings or []) if str(item).strip()]
-    if kept:
-        current[str(task_id)] = kept
-    else:
-        current.pop(str(task_id), None)
-        # Fix round 29: the words kept beside a failing own check go with it.
+    if not kept:
+        # The words kept beside a failing own check go with it.
         set_task_own_text_in_state(state, task_id, None)
-    if current:
-        state[TASK_BATCH_CHECK_KEY] = current
-    else:
-        state.pop(TASK_BATCH_CHECK_KEY, None)
+    _set_task_entry(state, TASK_BATCH_CHECK_KEY, task_id, kept)
 
 
 #: ``state.json``'s map of what an implement task with a failing own check
@@ -407,18 +434,11 @@ def set_task_own_text_in_state(
     """Record *task_id*'s own text while it has a failing own check on
     record (:data:`TASK_BATCH_CHECK_KEY`), else drop it; the key is dropped
     when the map empties."""
-    recorded = state.get(TASK_OWN_TEXT_KEY)
-    current = dict(recorded) if isinstance(recorded, dict) else {}
     failing = state.get(TASK_BATCH_CHECK_KEY)
     value = str(text or "").strip()
-    if value and isinstance(failing, dict) and failing.get(str(task_id)):
-        current[str(task_id)] = value
-    else:
-        current.pop(str(task_id), None)
-    if current:
-        state[TASK_OWN_TEXT_KEY] = current
-    else:
-        state.pop(TASK_OWN_TEXT_KEY, None)
+    if not (isinstance(failing, dict) and failing.get(str(task_id))):
+        value = ""
+    _set_task_entry(state, TASK_OWN_TEXT_KEY, task_id, value)
 
 
 #: ``state.json``'s map of an implement task's own words about the checks it
@@ -438,17 +458,8 @@ def set_task_own_check_note_in_state(
 ) -> None:
     """Record (or, with no note, clear) *task_id*'s own-check note; the key
     is dropped when the map empties."""
-    recorded = state.get(TASK_OWN_CHECK_NOTE_KEY)
-    current = dict(recorded) if isinstance(recorded, dict) else {}
-    text = str(note or "").strip()
-    if text:
-        current[str(task_id)] = text
-    else:
-        current.pop(str(task_id), None)
-    if current:
-        state[TASK_OWN_CHECK_NOTE_KEY] = current
-    else:
-        state.pop(TASK_OWN_CHECK_NOTE_KEY, None)
+    _set_task_entry(
+        state, TASK_OWN_CHECK_NOTE_KEY, task_id, str(note or "").strip())
 
 
 #: ``state.json``'s list of the implement tasks whose last record carried a
@@ -468,16 +479,7 @@ def set_task_own_check_ran_in_state(
 ) -> None:
     """Record (or clear) that *task_id*'s own check reported; the key is
     dropped when the list empties."""
-    recorded = state.get(TASK_OWN_CHECK_RAN_KEY)
-    current = {str(t) for t in recorded} if isinstance(recorded, list) else set()
-    if ran:
-        current.add(str(task_id))
-    else:
-        current.discard(str(task_id))
-    if current:
-        state[TASK_OWN_CHECK_RAN_KEY] = sorted(current)
-    else:
-        state.pop(TASK_OWN_CHECK_RAN_KEY, None)
+    _set_task_member(state, TASK_OWN_CHECK_RAN_KEY, task_id, bool(ran))
 
 
 #: ``state.json``'s map of what an implement task's own check reported again
@@ -534,21 +536,12 @@ def _set_by_check_in_state(
     matched: Optional[Mapping[str, Iterable[str]]],
 ) -> None:
     """One ``{task_id: {check_id: [finding, ...]}}`` map's writer."""
-    recorded = state.get(key)
-    current = dict(recorded) if isinstance(recorded, dict) else {}
     kept = {
         str(check_id): [str(item) for item in (findings or []) if str(item).strip()]
         for check_id, findings in sorted((matched or {}).items())
     }
     kept = {check_id: findings for check_id, findings in kept.items() if findings}
-    if kept:
-        current[str(task_id)] = kept
-    else:
-        current.pop(str(task_id), None)
-    if current:
-        state[key] = current
-    else:
-        state.pop(key, None)
+    _set_task_entry(state, key, task_id, kept)
 
 
 #: ``task id -> tree fingerprint`` for each check with findings on the native
@@ -565,16 +558,40 @@ def set_task_check_tree_in_state(
 ) -> None:
     """Record (or, with ``None``, drop) *task_id*'s check tree stamp; the key
     is dropped when the map empties."""
-    recorded = state.get(TASK_CHECK_TREES_KEY)
-    current = dict(recorded) if isinstance(recorded, dict) else {}
-    if fingerprint:
-        current[str(task_id)] = str(fingerprint)
-    else:
-        current.pop(str(task_id), None)
-    if current:
-        state[TASK_CHECK_TREES_KEY] = current
-    else:
-        state.pop(TASK_CHECK_TREES_KEY, None)
+    _set_task_entry(
+        state, TASK_CHECK_TREES_KEY, task_id,
+        str(fingerprint) if fingerprint else None)
+
+
+#: The per-task keys that hold an implement task's verdict: what its last
+#: record said about checks (a check's findings and tree stamp, the task's
+#: own check, its words, what it repeated). A run that hands the task out
+#: again clears them all (:func:`clear_task_verdict`), so an earlier run's
+#: verdict never shows on the rerun. A new per-task key goes here or in the
+#: test's not-a-verdict list (``tests/test_task_verdict_keys.py``).
+TASK_VERDICT_KEYS: Tuple[str, ...] = (
+    TASK_CHECK_FINDINGS_KEY,
+    TASK_CHECK_TREES_KEY,
+    TASK_BATCH_CHECK_KEY,
+    TASK_OWN_TEXT_KEY,
+    TASK_BATCH_CHECK_ACCEPTED_KEY,
+    TASK_BATCH_CHECK_REPEATS_KEY,
+    TASK_OWN_CHECK_RAN_KEY,
+    TASK_OWN_CHECK_NOTE_KEY,
+)
+
+
+def clear_task_verdict(state: Dict[str, Any], task_id: str) -> None:
+    """Drop *task_id*'s entry from every :data:`TASK_VERDICT_KEYS` map and
+    list on a raw state dict, each key dropped when it empties: what each
+    ``set_task_*_in_state`` writer does when given nothing. Journals nothing;
+    the caller stamps the task's reset (:func:`mark_tasks_reset_in_state`)
+    or writes its status beside it."""
+    for key in TASK_VERDICT_KEYS:
+        if key in _TASK_RECORD_LISTS:
+            _set_task_member(state, key, task_id, False)
+        else:
+            _set_task_entry(state, key, task_id, None)
 
 
 #: ``task id -> when a run that hands the implement task out again set its
