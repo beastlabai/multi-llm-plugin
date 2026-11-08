@@ -919,6 +919,9 @@ _ALLOWED_ABSOLUTE = {
     f"{PAYLOAD}/utils/process_control.py": {
         "/dev/fd", "/dev/null", "/proc", "/proc/self/fd", "/proc/self/exe"},
     f"{PAYLOAD}/utils/run_registry.py": {"/proc"},
+    # `/proc/self/fd`: the O_TMPFILE restore links its unnamed staging file
+    # through its own descriptor's entry (U87).
+    f"{PAYLOAD}/utils/write_safety.py": {"/proc/self/fd"},
     # `/dev/shm` beside `/tmp`: step 1b's denied toolchain paths, named in the
     # repo-wide developer message (plan codex-sandbox-unavailable step 1b).
     f"{PAYLOAD}/utils/providers/codex.py": {"/dev/null", "/tmp", "/dev/shm", "/dev/ptmx", "/dev/pts"},
