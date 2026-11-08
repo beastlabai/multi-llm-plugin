@@ -190,6 +190,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.host_install",
         "utils.improve_steps",
         "utils.next_phase",
+        "utils.resume_state",
         "utils.run_status",
     )),
 }

@@ -143,6 +143,35 @@ manifest, whose one non-zero `${CLAUDE_SKILL_DIR}` row is `SKILL.md` — the Cla
 shim, where the host expands the variable at load time. Each verb is resolved to exactly one
 concrete mechanism *in the shim*; the matrix is never on an agent read path.
 
+**The read step comes in two forms, and the printed one never changes.** `util instructions <mode>`
+prints a head banner, the rendered core and the `MULTI_LLM_CORE_END: <mode>` line (`CORE_END_MARKER`),
+then the `--host` verb section when asked. The two package routes read that stdout through a pipe:
+they check the end line and drop the banner by `TRUNCATION_BANNER_OPENING`, so it stays byte for byte.
+`--to-file` writes the same text without the banner to
+`<repository root>/.multi-llm/tmp/cores/core-<mode>-<sha12>.md` and prints one
+`[CORE_FILE] <path> lines=<n> bytes=<n>` line. `cores/` is this command's own folder inside the
+self-ignoring workspace temp dir the write phases use, inside the workspace so the host's file tool
+and its shell name the same file (the cwd stands in for the root outside a repository). The file is
+written link-safe and renamed into place (`utils/prompt_files`), named by the hash of its bytes so
+concurrent runs never read each other's. The next write removes core files older than seven days:
+only in `cores/`, only names of the generated format (`CORE_FILE_NAME`), and only regular files,
+each inspected through the folder's descriptor without following a link, so a link, a folder or a
+file of any other name stays. A folder that cannot be written prints the stdout form instead, after
+one stderr line, and still exits 0.
+
+Which shim uses which form follows each host's measured tool-result cap. Claude Code (`SKILL.md`
+section 4) persists a Bash result over about 30,000 characters behind a 2 KB stub, and the OpenCode
+file shim's host (1.19.5, read off the shipped binary on 2026-11-08) cuts a tool result at 51,200
+bytes or 2,000 lines, keeps the head and tells the model to hand the saved output to a subagent
+rather than read it. Four cores are over that (`apply-suggestions`, `apply-task-suggestions`,
+`apply-code-fixes`, `implement`), so both shims read the file, through line `<n>`, paging as their
+read tool asks. The Codex file shim keeps the printed form: codex has no file-read tool, and its
+shell output is cut in the middle (`…N tokens truncated…`), so a `cat` of the file loses the same
+middle until a measured paging rule exists. That cut keeps the end line, so the end-line check
+alone passes on a core that lost its middle; the banner therefore also counts a truncation or
+omission note from the host as an incomplete core, end line or not. A rule that gets the reader the
+whole core on that route is still owed, and the larger cores are exposed there today.
+
 **Steps a clean run never takes live in `references/`, behind a trigger sentence.** A served core
 stays in the host's context for the whole phase, so a conditional branch (interrupted-run recovery,
 review-plan's optional consolidation, apply revalidation, review-code's `--apply-fixes`, implement's

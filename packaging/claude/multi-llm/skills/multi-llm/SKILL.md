@@ -62,14 +62,12 @@ Pass them right after the mode word, before any flag, as typed: range words afte
 ## 4. Load the mode's core instructions, then execute them step by step
 
 ```bash
-uv run --frozen --no-dev --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/multi_llm.py" util instructions <mode>
+uv run --frozen --no-dev --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/multi_llm.py" util instructions <mode> --to-file
 ```
 
-This prints the core with every skill-dir placeholder already substituted — but most cores exceed this host's Bash-result cap, and what comes back is then a
-`<persisted-output>` stub: a file path plus the output's first 2 KB. **That stub is not the core**: it keeps what the mode is and how it is invoked, which reads like a finished
-overview, and drops the end, where the steps that do the work are. So first find, in the result, the line its opening lines say the core ends with; if it is missing, `Read` the
-path the stub names, in full, before your next tool call, and treat that file as the core. Never run a mode command from a core you have not seen the end of — the usage line in the
-surviving 2 KB runs cleanly, reports success, and applies nothing. The documented fallback, `${CLAUDE_SKILL_DIR}/instructions/<mode>.md`, leaves its path placeholder for you to fill.
+It writes the core, every path resolved, to a file and prints `[CORE_FILE] <path> lines=<n> bytes=<n>`: `Read` that file in full, through line `<n>` (paging if one read
+returns fewer), before you run anything else. No such line means it printed the core instead, and its first lines say how to check you have all of it.
+The documented fallback, `${CLAUDE_SKILL_DIR}/instructions/<mode>.md`, leaves its path placeholder for you to fill.
 
 ## 5. Capability verbs — how this host answers each one
 

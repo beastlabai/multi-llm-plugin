@@ -305,13 +305,23 @@ launch's result line says the command ran there (`ran_from_root`, set only when 
 
 ## Utility commands
 
-**`util` namespace, not a user-facing surface**: `multi_llm.py util metrics|prior-changes|report|decisions|update-tasks|prereq|finalize-tracking|backup|restore-batch|runs|report-check|next-command|check-reply|check-tasks|write-prompt|batch-done|improve-steps|instructions …` routes the
+**`util` namespace, not a user-facing surface**: `multi_llm.py util metrics|prior-changes|report|decisions|update-tasks|prereq|finalize-tracking|backup|restore-batch|runs|report-check|next-command|check-reply|check-tasks|write-prompt|batch-done|improve-steps|resume-state|instructions …` routes the
 utility scripts the same in-process `main(argv)` way, flags forwarded verbatim. Excluded
 from `argument-hint` and from `--help`'s mode list, documented only under
 `multi_llm.py util --help`, and — like the reserved hidden `--internal-*` prefix — never
 rendered into a `MULTI_LLM_RESULT.next` value. `util instructions <mode>` prints a mode's core
 instruction file with every skill-dir placeholder replaced by the running skill dir, so the text a
-host agent reads carries no unexpanded token.
+host agent reads carries no unexpanded token; `--to-file` writes that text to a file and prints its
+`[CORE_FILE]` line instead ([host integration](hosts.md#host-neutral-instruction-core) says which
+shim uses which form). `util resume-state <mode> <plan>` is a review core's resume step: read-only,
+it prints one `[RESUME_STATE]` line (case, action, models, batches, flags, ownership) from the files
+the orchestrators' own guards read, and `references/resume-detection.md`'s case list is rendered from
+its table (`tests/tools/render_resume_cases.py`). Only `state.json`'s completion (the primary guard)
+answers `report`, and only a `.status.json` reading `validation_pending` ties a task file to the run
+it records; no file date is read. Validation files nothing ties to that run answer a `--force`
+re-run marked `ownership=uncertain`, which may re-run work but never reports an earlier round's
+verdicts as this one's. No writer stamps a round identity into those files yet, so the
+checkpoint word is the only proof there is.
 
 `util finalize-tracking` also inserts the implementation summary's back-reference into the plan when
 `--plan-file`/`--summary-file-relative` are passed (it replaced an inline

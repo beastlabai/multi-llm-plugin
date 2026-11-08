@@ -50,8 +50,8 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 
 ## Counts
 
-- Emitted markers: 181
-- Cited by an instruction, reference or `SKILL.md`: 109
+- Emitted markers: 183
+- Cited by an instruction, reference or `SKILL.md`: 111
 - Declared not-for-the-host: 72
 - Neither (must be zero): 0
 
@@ -98,6 +98,7 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[CONSOLIDATION_SKIPPED]` | `review_plan_orchestrator.py`<br>`utils/consolidation.py` | not for the host: phase-progress | — |
 | `[CONTEXT_PLAN_CHANGED]` | `utils/commit_front_door.py` `CONTEXT_PLAN_CHANGED` | `instructions/improve-commits.md`<br>`instructions/review-commits.md` | — |
 | `[CONTEXT_PLAN_SNAPSHOT_CHANGED]` | `code_review_orchestrator.py`<br>`utils/commit_front_door.py` | not for the host: run-notice | — |
+| `[CORE_FILE]` | `multi_llm.py` `CORE_FILE_MARKER` | `SKILL.md` | The line `--to-file` prints, and the only line it prints on success |
 | `[DEADLINE]` | `ask_orchestrator.py` | not for the host: phase-progress | — |
 | `[DEADLINE_SWEEP]` | `ask_orchestrator.py` `sweep_live_clis()` | not for the host: runner-diagnostic | — |
 | `[DEPRECATED]` | `utils/apply_orchestrator_base.py` | `instructions/apply-code-fixes.md`<br>`instructions/apply-suggestions.md` | — |
@@ -170,6 +171,7 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[RESULT_STALE]` | `utils/result_files.py` | not for the host: run-notice | — |
 | `[RESUME_COMMAND]` | `utils/next_phase.py` `RESUME_COMMAND_MARKER` | `instructions/apply-commit-fixes.md` | The one line `emit_resume` prints: the command that resumes a stopped write phase, and nothing else on the line (same rule as… |
 | `[RESUME_REFUSED]` | `utils/batch_done.py` `RESUME_REFUSED_MARKER` | `instructions/apply-code-fixes.md`<br>`instructions/apply-suggestions.md`<br>`instructions/apply-task-suggestions.md`<br>`instructions/implement.md` | The first line of a refused native `--resume` (stderr) |
+| `[RESUME_STATE]` | `utils/resume_state.py` `MARKER` | `instructions/review-code.md`<br>`instructions/review-plan.md`<br>`instructions/review-tasks.md`<br>`references/resume-detection.md` | The line this command prints |
 | `[REVALIDATION_BATCHES_PENDING]` | `utils/apply_orchestrator_base.py` | `instructions/apply-code-fixes.md`<br>`instructions/apply-suggestions.md`<br>`references/revalidation.md` | — |
 | `[REVALIDATION_PENDING]` | `utils/apply_orchestrator_base.py` | `instructions/apply-code-fixes.md`<br>`instructions/apply-suggestions.md`<br>`references/revalidation.md` | — |
 | `[REVIEW_SCOPE_REGENERATED]` | `code_review_orchestrator.py` | not for the host: run-notice | — |

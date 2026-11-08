@@ -192,7 +192,17 @@ to bare `python`.
 
 4. **Resume Detection** (check BEFORE running orchestrator)
 
-   Check for existing output to avoid expensive duplicate runs. Follow the detection cases in `references/resume-detection.md`, using `{plan}/code-review/` as the phase directory.
+   Check for existing output to avoid expensive duplicate runs. Run this (read-only) and do what its one `[RESUME_STATE] case=… action=… models=… batches=… flags=… ownership=…` line says; `references/resume-detection.md` lists the cases behind it:
+
+   ```bash
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util resume-state review-code "$PLAN_PATH"
+   ```
+
+   - `action=run`: nothing to resume; go on to step 5.
+   - `action=rerun`: step 5's launch with `--models` set to the `models=` list (comma-separated there) and the `flags=` added (`-` is none; here it is `--force`, which a dir holding results needs): each model with a result keeps it (`[SKIP]`) and only the rest run. A composite's flags line already carries both: launch with it as it is. Never `--rerun-all`. `models=-` means none was recorded: select the models as for a fresh run. `ownership=uncertain` means validation files on disk may be an earlier round's: the `--force` in `flags=` re-runs the phase over them rather than reporting them.
+   - `action=validate`: skip the launch and go to step 7 with `{plan}/code-review/validation_tasks.json`; when `batches=` lists numbers, run only those batches (the ones with no `validation_batch_<N>.json` yet), then `--reaggregate` as step 7 says.
+   - `action=reaggregate`: skip the launch and run step 7's `--reaggregate`.
+   - `action=report`: the phase is complete: report results from `{plan}/code-review/report.md` (or `report.html`) and run no orchestrator.
 
    **Note**: The orchestrator has TWO guards as defense-in-depth:
    - **Primary**: Exits with code 2 if phase is already marked complete in state.json. Use `--force` to override.

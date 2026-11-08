@@ -278,9 +278,11 @@ PLACEHOLDER_MANIFEST = {
     # 32 -> 22: the optional consolidation pass (five commands) moved to
     # `references/consolidation.md`. Conditional steps a clean run never takes
     # live in `references/`, behind a trigger sentence the core keeps.
-    "instructions/review-code.md": (0, 26),
-    "instructions/review-plan.md": (0, 22),
-    "instructions/review-tasks.md": (0, 22),
+    # +2 each on review-code/-plan/-tasks: the resume step runs `util
+    # resume-state` instead of walking the reference's case list by hand.
+    "instructions/review-code.md": (0, 28),
+    "instructions/review-plan.md": (0, 24),
+    "instructions/review-tasks.md": (0, 24),
     # The shared shim partials (D5). Authored once, interpolated into a rendered
     # shim by `install-host`, and still counted against that shim's rendered line
     # budget because an agent reads them. `poll-loop.md` carries the one `status`

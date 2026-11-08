@@ -272,6 +272,7 @@ UTIL_CALLS = {
     "batch-done": ["--phase-dir", "plans/x/implement", "--task-id", "T001",
                    "--status", "completed"],
     "commit-brief": ["last", "2", "commits", "--context-plan", PLAN],
+    "resume-state": ["review-plan", PLAN],
 }
 
 

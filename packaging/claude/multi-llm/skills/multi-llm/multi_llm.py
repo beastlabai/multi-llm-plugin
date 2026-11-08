@@ -165,6 +165,9 @@ UTIL_COMMANDS: Dict[str, Tuple[Optional[str], str, str]] = {
     "batch-done": ("utils.batch_done", "main",
                    "Record one write batch's outcome in state.json (the "
                    "native leg's per-batch progress record)."),
+    "resume-state": ("utils.resume_state", "main",
+                     "Print a review phase's resume case and what to do "
+                     "about it (read-only)."),
     "instructions": (None, "", "Print a mode's core instruction file with every path resolved."),
 }
 
@@ -281,7 +284,15 @@ def render_util_help() -> str:
         "",
         "`util instructions <mode>` prints instructions/<mode>.md with every",
         "skill-dir placeholder replaced by the running skill dir, so the text a host",
-        "agent reads contains no unexpanded token.",
+        "agent reads contains no unexpanded token. With --to-file it writes that",
+        "text to a file under <repository root>/.multi-llm/tmp/cores/ instead and",
+        "prints one [CORE_FILE] <path> lines=<n> bytes=<n> line.",
+        "",
+        "`util resume-state <mode> <plan>` reads a review phase's folder (review-plan,",
+        "review-tasks, review-code) and prints one [RESUME_STATE] line: the resume",
+        "case, the action to take, the models, batches and flags it needs, and",
+        "ownership=uncertain when validation files on disk may be an earlier round's.",
+        "Read-only; references/resume-detection.md lists the cases.",
         "",
         "`util next-command <plan> [--after <mode>] [--host <id>]` prints the",
         "workflow's next phase as the next-command block (or the workflow-complete",
@@ -890,7 +901,12 @@ _UTIL_PATH_POSITIONAL: Dict[str, Tuple[str, ...]] = {
                       "--internal-run-id", "--scope-policy"),
     "check-tasks": (),
     "backup": (),
+    "resume-state": (),
 }
+
+#: The ``util`` commands whose path positional comes after this many other
+#: positionals: ``resume-state <mode> <plan>`` names the plan second.
+_UTIL_PATH_POSITIONAL_INDEX: Dict[str, int] = {"resume-state": 1}
 
 #: Of those options, the ones that take one or more values (``nargs="+"``):
 #: argparse hands such an option every token up to the next option, so none
@@ -911,13 +927,15 @@ def _is_option_token(token: str) -> bool:
 
 def _first_positional(
     args: Sequence[str], value_options: Sequence[str],
-    variadic_options: Sequence[str] = (),
+    variadic_options: Sequence[str] = (), skip: int = 0,
 ) -> Optional[str]:
+    """The first positional of *args* after *skip* others, or ``None``."""
     index = 0
     while index < len(args):
         token = args[index]
         if token == "--":
-            return args[index + 1] if index + 1 < len(args) else None
+            rest = args[index + 1:]
+            return rest[skip] if skip < len(rest) else None
         if _is_option_token(token):
             index += 1
             if "=" in token:
@@ -928,6 +946,10 @@ def _first_positional(
             elif token in value_options:
                 index += 1
             continue
+        if skip:
+            skip -= 1
+            index += 1
+            continue
         return token
     return None
 
@@ -937,6 +959,7 @@ def _util_input_paths(name: str, args: Sequence[str]) -> List[Optional[str]]:
     if name in _UTIL_PATH_POSITIONAL:
         paths.append(_first_positional(
             args, _UTIL_PATH_POSITIONAL[name], _UTIL_VARIADIC_OPTIONS.get(name, ()),
+            skip=_UTIL_PATH_POSITIONAL_INDEX.get(name, 0),
         ))
     return paths
 
@@ -1039,14 +1062,19 @@ def _run_util_instructions(args: Sequence[str], ctx: ResultContext) -> int:
     """
     if not args or args[0] in ("--help", "-h"):
         served = [m.name for m in mode_table.MODES if m.instruction_file]
-        print("usage: multi_llm.py util instructions <mode> [--host <id>]")
+        print("usage: multi_llm.py util instructions <mode> [--host <id>] [--to-file]")
         print(f"modes with a core instruction file: {', '.join(served)}")
         print(
             "  --host <id>  append this host's three resolved capability-verb "
             "sentences"
         )
+        print(
+            "  --to-file    write the core to a file under "
+            f"<repository root>/{'/'.join(CORE_FILE_DIR)}/ and print "
+            f"`{CORE_FILE_MARKER} <path> lines=<n> bytes=<n>` instead of the core"
+        )
         return EXIT_OK
-    positional, host_id = _split_instructions_host(args)
+    positional, host_id, to_file = _split_instructions_host(args)
     if len(positional) > 1:
         raise DispatchError(
             "ERROR: `util instructions` takes exactly one mode word, got: "
@@ -1069,35 +1097,10 @@ def _run_util_instructions(args: Sequence[str], ctx: ResultContext) -> int:
         # observed on OpenCode, where the agent had to improvise past an exit 3.
         # Answer with the one useful thing instead and exit 0; a mode that
         # *declares* a core file which is missing is still a hard error below.
-        print(
-            f"Mode '{mode.name}' has no core instruction file: it is driven "
-            "entirely by the dispatcher, so there are no workflow steps to "
-            "follow. Its flags are the whole interface:"
-        )
-        print()
-        print(f"  {dispatcher_command(mode.name)} --help")
-        if mode.name == "status":
-            # 2026-10-04 (Claude Code racing re-run): a host reading `status`
-            # only to report it showed "Exit code 2" as a tool error. The code
-            # is the poll contract and never moves; the read step says so.
-            print()
-            print(
-                "Read its output, not its exit code: exit code 2 is not a "
-                "failure — it means no run is recorded (every phase a host ran "
-                "in the foreground) or one is still running, the poll "
-                "contract; 0 and 3 are a finished run's verdict, and only 1 is "
-                "an error (the phase dir could not be read). To report it to "
-                "the user on a host that shows any non-zero exit as an error, "
-                "add --exit-zero: the call then exits 0 whenever the status was "
-                "read, and the run's state is still in its text. Keep that flag "
-                "off a poll whose loop reads the exit code."
-            )
-        # The end marker is unconditional across `util instructions`, so "search
-        # for the end line" is a rule with no exception for a reader to hold. This
-        # branch's answer is a few hundred characters and can never be truncated;
-        # it carries the marker anyway, because a check that is sometimes
-        # inapplicable is a check an agent has to decide about.
-        print(f"{CORE_END_MARKER} {mode.name}")
+        answer = _dispatcher_only_answer(mode.name)
+        if to_file:
+            return _serve_core_file(mode.name, answer, answer, ctx)
+        sys.stdout.write(answer)
         return EXIT_OK
     path = skill_dir() / relative
     if os.environ.get(LEGACY_INSTRUCTIONS_ENV) == "1":
@@ -1114,18 +1117,180 @@ def _run_util_instructions(args: Sequence[str], ctx: ResultContext) -> int:
             exit_code=EXIT_ERROR,
         )
     core = render_instruction_text(path.read_text(encoding="utf-8"), skill_dir())
-    sys.stdout.write(_truncation_notice(mode.name, core))
-    sys.stdout.write(core)
-    if not core.endswith("\n"):
-        sys.stdout.write("\n")
+    body = core if core.endswith("\n") else core + "\n"
     # The sentinel closes the *core*, before the optional verb appendix, because
     # `--host` has always appended to an unchanged core and a marker that moved
     # depending on the flag would be a second thing to reason about. Every shim
     # host runs the plain form, where this is the last line of content.
-    sys.stdout.write(f"{CORE_END_MARKER} {mode.name}\n")
+    body += f"{CORE_END_MARKER} {mode.name}\n"
     if host_id is not None:
-        sys.stdout.write(_verb_section(host_id))
+        body += _verb_section(host_id)
     ctx.add_artifact(path)
+    served = _truncation_notice(mode.name, core) + body
+    if to_file:
+        return _serve_core_file(mode.name, body, served, ctx)
+    sys.stdout.write(served)
+    return EXIT_OK
+
+
+def _dispatcher_only_answer(mode_name: str) -> str:
+    """What ``util instructions`` serves for a mode with no core file."""
+    lines = [
+        f"Mode '{mode_name}' has no core instruction file: it is driven "
+        "entirely by the dispatcher, so there are no workflow steps to "
+        "follow. Its flags are the whole interface:",
+        "",
+        f"  {dispatcher_command(mode_name)} --help",
+    ]
+    if mode_name == "status":
+        # 2026-10-04 (Claude Code racing re-run): a host reading `status`
+        # only to report it showed "Exit code 2" as a tool error. The code
+        # is the poll contract and never moves; the read step says so.
+        lines += [
+            "",
+            "Read its output, not its exit code: exit code 2 is not a "
+            "failure — it means no run is recorded (every phase a host ran "
+            "in the foreground) or one is still running, the poll "
+            "contract; 0 and 3 are a finished run's verdict, and only 1 is "
+            "an error (the phase dir could not be read). To report it to "
+            "the user on a host that shows any non-zero exit as an error, "
+            "add --exit-zero: the call then exits 0 whenever the status was "
+            "read, and the run's state is still in its text. Keep that flag "
+            "off a poll whose loop reads the exit code.",
+        ]
+    # The end marker is unconditional across `util instructions`, so "search
+    # for the end line" is a rule with no exception for a reader to hold. This
+    # answer is a few hundred characters and can never be truncated; it
+    # carries the marker anyway, because a check that is sometimes
+    # inapplicable is a check an agent has to decide about.
+    lines.append(f"{CORE_END_MARKER} {mode_name}")
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# `util instructions --to-file`: the core as a file the host reads
+# ---------------------------------------------------------------------------
+# A host whose tool results are capped (Claude Code persists a Bash result over
+# ~30 000 characters behind a 2 KB stub; OpenCode cuts a tool result at 51 200
+# bytes or 2 000 lines) reads a printed core as a fragment. The file form hands
+# it a path and a line count instead, so "did I read all of it" is a count to
+# reach, not a marker to hunt for. See docs/development/hosts.md.
+
+#: The line ``--to-file`` prints, and the only line it prints on success.
+CORE_FILE_MARKER = "[CORE_FILE]"
+
+#: Where the file goes, under the repository root: a folder of its own inside
+#: the self-ignoring workspace temp dir every run's scratch files use
+#: (``utils/write_prompt.WORKSPACE_TMP``, implement's task JSON), inside the
+#: workspace so the host's file tools and its shell name the same file on every
+#: OS. Its own folder because the seven-day sweep deletes there: nothing but
+#: this command writes ``cores/``, and the sweep reads no other folder.
+CORE_FILE_DIR: Tuple[str, str, str] = (".multi-llm", "tmp", "cores")
+
+#: ``core-<mode>-<sha12>.md``. The hash is of the bytes written, so two runs of
+#: one mode under one plugin write the same bytes to the same name, and a
+#: different plugin (or a changed core) writes a different file beside it:
+#: concurrent runs never read each other's half-written or different core.
+CORE_FILE_PREFIX = "core-"
+
+#: The name format this command writes, and the only names its sweep removes:
+#: ``core-`` + a mode word (lower-case words joined by ``-``) + ``-`` + twelve
+#: hex digits + ``.md``.
+CORE_FILE_NAME = re.compile(r"core-[a-z][a-z0-9]*(?:-[a-z0-9]+)*-[0-9a-f]{12}\.md")
+
+#: A core file older than this is removed when another one is written.
+CORE_FILE_MAX_AGE_S = 7 * 24 * 3600
+
+
+def _core_file_root() -> str:
+    """The repository root the core file goes under (the cwd outside one)."""
+    cwd = os.getcwd()
+    try:
+        from utils.git_utils import pin_repo_root
+
+        root, problem = pin_repo_root(cwd)
+    except Exception:  # noqa: BLE001 - no repository is the cwd's answer
+        return cwd
+    return root if root and not problem else cwd
+
+
+def _write_core_file(mode_name: str, text: str) -> str:
+    """Write *text* to ``<root>/.multi-llm/tmp/cores/core-<mode>-<sha12>.md``;
+    its path.
+
+    Written as a new file renamed into place, never through a link at the
+    name or in the folder chain (``utils/prompt_files``), so a reader sees the
+    previous complete file or the new one. Raises ``OSError``.
+    """
+    import hashlib
+
+    from utils import prompt_files
+
+    data = text.encode("utf-8")
+    root = _core_file_root()
+    try:
+        os.mkdir(os.path.join(root, CORE_FILE_DIR[0]))
+    except FileExistsError:
+        pass  # a link there is refused by the walk below
+    # `tmp` first, self-ignoring as the write phases leave it, then `cores`
+    # inside it: each opened below the one before without following a link.
+    tmp_pin = prompt_files.PhasePin(root=root, parts=CORE_FILE_DIR[:1])
+    with prompt_files.PromptFolder.open(tmp_pin, folder=CORE_FILE_DIR[1]) as tmp:
+        if ".gitignore" not in tmp.names():
+            tmp.write(".gitignore", "*\n")
+    pin = prompt_files.PhasePin(root=root, parts=CORE_FILE_DIR[:2])
+    name = f"{CORE_FILE_PREFIX}{mode_name}-{hashlib.sha256(data).hexdigest()[:12]}.md"
+    with prompt_files.PromptFolder.open(pin, folder=CORE_FILE_DIR[2]) as folder:
+        names = folder.names()
+        folder.write_bytes(name, data)
+        _sweep_core_files(folder, names, keep=name)
+        return os.path.join(folder.path, name)
+
+
+def _sweep_core_files(folder, names: Sequence[str], *, keep: str) -> None:
+    """Remove the core files in *folder* older than :data:`CORE_FILE_MAX_AGE_S`.
+
+    Only a name of :data:`CORE_FILE_NAME`'s format, and only a regular file:
+    each entry is inspected through the folder's own descriptor without
+    following a link (``PromptFolder.lstat``), so a link, a folder or any other
+    kind of entry stays, and so does every other name. Best effort: a file
+    left behind costs nothing.
+    """
+    import stat
+    import time
+
+    cutoff = time.time() - CORE_FILE_MAX_AGE_S
+    for old in names:
+        if old == keep or not CORE_FILE_NAME.fullmatch(old):
+            continue
+        try:
+            info = folder.lstat(old)
+            if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
+                folder.remove(old)
+        except OSError:
+            pass
+
+
+def _serve_core_file(mode_name: str, text: str, fallback: str, ctx: ResultContext) -> int:
+    """Write *text* as the core file and print its ``[CORE_FILE]`` line.
+
+    A folder that cannot be written (a read-only checkout, a link planted at
+    ``.multi-llm``) costs the file, never the core: *fallback*, the printed
+    form, goes to stdout instead, after one stderr line saying why.
+    """
+    try:
+        path = _write_core_file(mode_name, text)
+    except OSError as exc:
+        print(
+            f"multi-llm: could not write the core file ({exc}); "
+            "printing the core instead.",
+            file=sys.stderr,
+        )
+        sys.stdout.write(fallback)
+        return EXIT_OK
+    ctx.add_artifact(path)
+    lines, size = text.count("\n"), len(text.encode("utf-8"))
+    print(f"{CORE_FILE_MARKER} {path} lines={lines} bytes={size}")
     return EXIT_OK
 
 
@@ -1172,12 +1337,16 @@ def _truncation_notice(mode_name: str, core: str) -> str:
         "read that file to the end before your next tool call and follow it, not\n"
         "this excerpt.\n"
         "\n"
-        "Truncation keeps the head and drops the tail. The head is what the mode is\n"
-        "and how it is invoked; the tail is the loop that does the work. So a cut\n"
+        "A note from your host, anywhere in what you received, that it truncated\n"
+        "or omitted part of this output means you do not have the whole core, even\n"
+        "with that line there: a host that cuts the middle keeps the end line.\n"
+        "\n"
+        "Truncation keeps the head. The head is what the mode is and how it is\n"
+        "invoked; the rest is the loop that does the work. So a cut\n"
         "core reads like a complete overview, and the usage line you can still see\n"
         "runs cleanly — it starts the orchestrator, which reports success, and you\n"
         "end the turn having applied nothing. Do not run any command from a core\n"
-        "you have not seen the end of.\n"
+        "you have not seen all of.\n"
         "=== the core begins on the next line ===\n"
     )
 
@@ -1205,8 +1374,9 @@ def _verb_section(host_id: str) -> str:
 
 def _split_instructions_host(
     args: Sequence[str],
-) -> "tuple[list[str], Optional[str]]":
-    """Split ``util instructions`` argv into positionals and a ``--host`` value.
+) -> "tuple[list[str], Optional[str], bool]":
+    """Split ``util instructions`` argv into positionals, a ``--host`` value
+    and whether ``--to-file`` was given.
 
     Hand-parsed rather than argparse'd because this command's whole contract is
     that its stdout **is** the core text: an argparse error would print a usage
@@ -1215,11 +1385,14 @@ def _split_instructions_host(
     """
     positional: list = []
     host_id: Optional[str] = None
+    to_file = False
     index = 0
     while index < len(args):
         token = args[index]
         head, separator, inline = token.partition("=")
-        if head == "--host":
+        if token == "--to-file":
+            to_file = True
+        elif head == "--host":
             if separator:
                 value = inline
             else:
@@ -1236,13 +1409,13 @@ def _split_instructions_host(
             host_id = value
         elif token.startswith("-"):
             raise DispatchError(
-                f"ERROR: `util instructions` does not take {token!r}. Its only "
-                "option is `--host <id>`."
+                f"ERROR: `util instructions` does not take {token!r}. Its "
+                "options are `--host <id>` and `--to-file`."
             )
         else:
             positional.append(token)
         index += 1
-    return positional, host_id
+    return positional, host_id, to_file
 
 
 def _dispatch(argv: Sequence[str], ctx: ResultContext) -> int:

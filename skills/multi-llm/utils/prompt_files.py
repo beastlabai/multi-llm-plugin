@@ -232,8 +232,8 @@ class PromptFolder:
     ``folder=``, another folder directly below a pinned directory).
 
     ``with PromptFolder.open(pin) as folder:`` then :meth:`names`,
-    :meth:`remove`, :meth:`read_bytes`, :meth:`open_lock`, :meth:`write` and
-    :meth:`write_bytes`, each relative to the folder itself.
+    :meth:`lstat`, :meth:`remove`, :meth:`read_bytes`, :meth:`open_lock`,
+    :meth:`write` and :meth:`write_bytes`, each relative to the folder itself.
     """
 
     def __init__(self, handle: Optional[int], path: str) -> None:
@@ -298,6 +298,15 @@ class PromptFolder:
         if self._handle is None:
             return os.listdir(self.path)
         return os.listdir(self._handle)
+
+    def lstat(self, name: str) -> os.stat_result:
+        """The status of the entry ``name`` itself: a link there is reported
+        as the link, never followed. Raises ``OSError`` (``FileNotFoundError``
+        when there is none)."""
+        name = _check_name(name)
+        if self._handle is None:
+            return os.lstat(os.path.join(self.path, name))
+        return os.stat(name, dir_fd=self._handle, follow_symlinks=False)
 
     def remove(self, name: str) -> None:
         """Unlink ``name`` (never what a link names; a directory raises)."""

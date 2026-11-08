@@ -2969,6 +2969,53 @@ def retire_result_from_another_scope(
     return target
 
 
+class ExistingResult(NamedTuple):
+    """What the fan-out does with a model's existing ``<stem>.json``.
+
+    ``verdict`` is ``reuse`` (answered from disk, ``[SKIP]``; ``issues`` holds
+    the list), ``absent`` (no non-empty file), ``corrupt`` (unreadable, or not
+    JSON), ``not_a_list`` (JSON of another shape) or ``scope_changed`` (the
+    ledger ties it to ``reviewed_scope``, another scope, or to none). Every
+    verdict but ``reuse`` re-runs the model.
+    """
+
+    verdict: str
+    issues: Optional[List[Any]] = None
+    reviewed_scope: Optional[str] = None
+
+
+def existing_result_reuse(
+    phase_dir: Any, stem: str, scope_id: Optional[str]
+) -> ExistingResult:
+    """Whether the fan-out answers model ``stem`` from its existing result.
+
+    The one reuse test, shared by :func:`run_all_reviews` and ``util
+    resume-state`` (``utils/resume_state``): a non-empty ``<stem>.json``
+    holding a JSON list and, when ``scope_id`` is given, a scope ledger entry
+    recording that id for ``stem`` (D2.2). ``scope_id`` ``None`` reuses every
+    list. Read-only.
+    """
+    path = Path(phase_dir) / f"{stem}.json"
+    try:
+        present = path.exists() and path.stat().st_size > 0
+    except OSError:
+        present = False
+    if not present:
+        return ExistingResult("absent")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return ExistingResult("corrupt")
+    if not isinstance(data, list):
+        return ExistingResult("not_a_list")
+    if scope_id is not None:
+        reviewed = read_scope_ledger(phase_dir).get(stem)
+        if reviewed != scope_id:
+            return ExistingResult("scope_changed", reviewed_scope=reviewed)
+    return ExistingResult("reuse", issues=data)
+
+
 #: How many omitted paths ``report.md``'s coverage line names before "… and N
 #: more"; ``report_data.json`` and ``review-scope.md`` carry every one.
 REPORT_OMITTED_SAMPLE = 10
@@ -4157,55 +4204,46 @@ async def run_all_reviews(
         if skip_existing:
             sanitized = sanitize_model_name(model_spec)
             phase_dir = get_phase_dir(plan_path, 'code-review')
-            existing_path = phase_dir / f"{sanitized}.json"
-            if existing_path.exists() and existing_path.stat().st_size > 0:
-                try:
-                    with open(existing_path, 'r', encoding='utf-8') as f:
-                        existing_data = json.load(f)
-                    # D2.2: a result is reused only when it reviewed the diff
-                    # set this run's reviewers are shown. One written against
-                    # an earlier change — or before the ledger existed, which
-                    # is `unknown` — re-runs, and `run_single_review` retires
-                    # the old file at its attempt start. The alternative
-                    # reports a review of another change as a review of this
-                    # one.
-                    scope_changed = False
-                    if isinstance(existing_data, list) and scope_id is not None:
-                        reviewed_scope = read_scope_ledger(phase_dir).get(sanitized)
-                        if reviewed_scope != scope_id:
-                            scope_changed = True
-                            print(
-                                f"[SCOPE_CHANGED] {display_name}: result reviewed "
-                                f"scope {reviewed_scope or SCOPE_UNKNOWN}, this "
-                                f"run's is {scope_id}; re-running"
-                            )
-                    if isinstance(existing_data, list) and not scope_changed:
-                        print(f"[SKIP] {display_name} - already has results ({len(existing_data)} issues)")
-                        # Stage U: the result is reused, so what it cost is
-                        # reused with it. Nothing else can refill this entry —
-                        # no adapter runs for a skipped slot — and without it
-                        # the run's own `models_complete` write drops a number
-                        # an earlier attempt really paid for.
-                        if usage is not None:
-                            spent = (prior_usage or {}).get(model_spec)
-                            if isinstance(spent, dict) and spent:
-                                usage[model_spec] = spent
-                        # A slot answered from disk is terminal the moment it
-                        # is seeded — no attempt is ever dispatched, so
-                        # `attempt: 0` and `elapsed_s: 0` — and it counts in
-                        # `models_done` *and* in `models_succeeded`, because it
-                        # has a usable result. A resumed run of four models that
-                        # finds three on disk therefore reads `3/4` at the first
-                        # poll rather than `0/4`, which is D4a itself landing on
-                        # the one lane where nothing dispatches at all. The
-                        # `source` is supplied here because this branch's return
-                        # tuple carries none of its own; there is no `skipped`
-                        # state, so a renderer labels the row from
-                        # `source in RESUME_SOURCES`.
-                        tracker.done(model_spec, source="existing_file")
-                        return (model_spec, (True, existing_data, None))
-                except (json.JSONDecodeError, IOError):
-                    print(f"[{display_name}] Existing result file corrupt, re-running...")
+            # D2.2: a result is reused only when it reviewed the diff set this
+            # run's reviewers are shown. One written against an earlier change
+            # — or before the ledger existed, which is `unknown` — re-runs, and
+            # `run_single_review` retires the old file at its attempt start.
+            # The alternative reports a review of another change as a review of
+            # this one. `util resume-state` applies the same test.
+            existing = existing_result_reuse(phase_dir, sanitized, scope_id)
+            if existing.verdict == "corrupt":
+                print(f"[{display_name}] Existing result file corrupt, re-running...")
+            elif existing.verdict == "scope_changed":
+                print(
+                    f"[SCOPE_CHANGED] {display_name}: result reviewed "
+                    f"scope {existing.reviewed_scope or SCOPE_UNKNOWN}, this "
+                    f"run's is {scope_id}; re-running"
+                )
+            elif existing.verdict == "reuse":
+                existing_data = existing.issues
+                print(f"[SKIP] {display_name} - already has results ({len(existing_data)} issues)")
+                # Stage U: the result is reused, so what it cost is reused
+                # with it. Nothing else can refill this entry — no adapter
+                # runs for a skipped slot — and without it the run's own
+                # `models_complete` write drops a number an earlier attempt
+                # really paid for.
+                if usage is not None:
+                    spent = (prior_usage or {}).get(model_spec)
+                    if isinstance(spent, dict) and spent:
+                        usage[model_spec] = spent
+                # A slot answered from disk is terminal the moment it is
+                # seeded — no attempt is ever dispatched, so `attempt: 0` and
+                # `elapsed_s: 0` — and it counts in `models_done` *and* in
+                # `models_succeeded`, because it has a usable result. A resumed
+                # run of four models that finds three on disk therefore reads
+                # `3/4` at the first poll rather than `0/4`, which is D4a
+                # itself landing on the one lane where nothing dispatches at
+                # all. The `source` is supplied here because this branch's
+                # return tuple carries none of its own; there is no `skipped`
+                # state, so a renderer labels the row from
+                # `source in RESUME_SOURCES`.
+                tracker.done(model_spec, source="existing_file")
+                return (model_spec, (True, existing_data, None))
 
         # Acquire provider semaphore first (if any), then global semaphore.
         # This order prevents capped providers from hogging global slots while
