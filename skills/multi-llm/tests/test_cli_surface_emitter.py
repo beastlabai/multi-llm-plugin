@@ -48,6 +48,7 @@ import modes as mode_table  # noqa: E402
 import multi_llm  # noqa: E402
 from common import surface  # noqa: E402
 from utils import host_capabilities, subagent_tasks, unattended  # noqa: E402
+from tests.source_cache import source_tree  # noqa: E402
 
 #: Every host a package route ships this surface for.
 HOSTS = ("opencode", "codex")
@@ -106,14 +107,12 @@ def test_uninstall_command_is_the_owners_line_with_the_default_flags(
 
 def test_the_emitter_reads_no_environment():
     """No ``os.environ``/``getenv`` read and no ``uv_run_args()`` call."""
-    source = (REPO_ROOT / "packaging" / "common" / "surface.py").read_text(
-        encoding="utf-8"
-    )
+    surface_path = REPO_ROOT / "packaging" / "common" / "surface.py"
     # Parsed rather than grepped: the module docstring names both to explain
     # the rule, and a docstring is not a read.
     offenders = [
         f"line {node.lineno}: {name}"
-        for node in ast.walk(ast.parse(source))
+        for node in ast.walk(source_tree(surface_path))
         for name in [
             node.attr if isinstance(node, ast.Attribute)
             else node.id if isinstance(node, ast.Name) else None

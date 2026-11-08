@@ -65,6 +65,7 @@ from utils.report_parser import (  # noqa: E402
     parse_validation_overrides_groups,
 )
 from utils.state_manager import StateManager  # noqa: E402
+from tests.source_cache import python_files, source_tree  # noqa: E402
 
 FIXTURES = SKILL_ROOT / "tests" / "fixtures" / "legacy_judge_keys"
 
@@ -213,7 +214,7 @@ _LEGACY_LITERAL = re.compile(
 
 
 def _runtime_modules():
-    for path in sorted(SKILL_ROOT.rglob("*.py")):
+    for path in python_files(SKILL_ROOT):
         rel = path.relative_to(SKILL_ROOT).as_posix()
         if rel.startswith(("tests/", ".venv/")) or "/." in rel:
             continue
@@ -227,7 +228,7 @@ class TestWritersUseOnlyTheNewNames:
         for rel, path in _runtime_modules():
             if rel == "utils/judge_vocab.py":
                 continue
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+            tree = source_tree(path)
             for node in ast.walk(tree):
                 if (isinstance(node, ast.Constant) and isinstance(node.value, str)
                         and _LEGACY_LITERAL.match(node.value)):

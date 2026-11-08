@@ -38,6 +38,7 @@ from utils.subagent_prompts import (  # noqa: E402
     extract_reference_section,
     render_reference_section,
 )
+from tests.source_cache import source_tree  # noqa: E402
 
 GOLDEN_DIR = SKILL_ROOT / "tests" / "golden" / "prompts"
 
@@ -253,9 +254,7 @@ class TestGeneratorsArePure:
     }
 
     def _generator_functions(self):
-        tree = ast.parse(
-            (SKILL_ROOT / "utils" / "subagent_prompts.py").read_text(encoding="utf-8")
-        )
+        tree = source_tree(SKILL_ROOT / "utils" / "subagent_prompts.py")
         wanted = {
             "build_validation_prompt",
             "build_consolidation_prompt",
@@ -289,9 +288,7 @@ class TestGeneratorsArePure:
     def test_module_imports_nothing_that_does_io(self):
         """The module's own imports are `json` and typing only, so importing it
         cannot read a file, a clock or the config."""
-        tree = ast.parse(
-            (SKILL_ROOT / "utils" / "subagent_prompts.py").read_text(encoding="utf-8")
-        )
+        tree = source_tree(SKILL_ROOT / "utils" / "subagent_prompts.py")
         top_level = [
             node for node in tree.body
             if isinstance(node, (ast.Import, ast.ImportFrom))

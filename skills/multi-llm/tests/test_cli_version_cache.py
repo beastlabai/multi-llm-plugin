@@ -33,6 +33,7 @@ from utils import cli_version_cache as cvc  # noqa: E402
 from utils import doctor  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from tests.source_cache import python_files, source_tree
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 
@@ -695,10 +696,10 @@ class TestTheExecutorNeverReadsTheCache:
 
     def test_no_module_but_doctor_imports_the_cache(self):
         importers = []
-        for path in SKILL_ROOT.rglob("*.py"):
+        for path in python_files(SKILL_ROOT):
             if {"tests", ".venv", "__pycache__"} & set(path.relative_to(SKILL_ROOT).parts):
                 continue
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            tree = source_tree(path)
             for node in ast.walk(tree):
                 names = []
                 if isinstance(node, ast.ImportFrom):

@@ -43,6 +43,7 @@ SERVER_SRC = REPO_ROOT / "packaging" / "codex" / "mcp_server.py"
 
 sys.path.insert(0, str(REPO_ROOT / "packaging"))
 from common import surface as surface_mod  # noqa: E402
+from tests.source_cache import source_text, source_tree  # noqa: E402
 
 SURFACE = surface_mod.cli_surface("codex")
 DISPATCHER = SURFACE["dispatcher"]
@@ -72,7 +73,7 @@ RELAY_KEYS = {"attempted", "delivered", "rejected", "unavailable", "logged"}
 
 def _server_module_constants() -> dict:
     """The server's module-level literal constants, read by AST (no import)."""
-    tree = ast.parse(SERVER_SRC.read_text(encoding="utf-8"))
+    tree = source_tree(SERVER_SRC)
     out = {}
     for node in tree.body:
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(
@@ -691,10 +692,10 @@ EXEMPT_EQUAL = {
 
 
 def test_server_source_parses_at_the_python_floor():
-    src = SERVER_SRC.read_text(encoding="utf-8")
+    src = source_text(SERVER_SRC)
     ast.parse(src, feature_version=(3, 9))
     # Stdlib only: every import is a top-level stdlib module.
-    tree = ast.parse(src)
+    tree = source_tree(SERVER_SRC)
     imported = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -726,7 +727,7 @@ def test_named_constants():
 class TestNoWordOfItsOwn:
     def test_server_holds_no_word_of_its_own(self, harness):
         """(src) no surface word is a literal; (build) tools/list is the surface."""
-        tree = ast.parse(SERVER_SRC.read_text(encoding="utf-8"))
+        tree = source_tree(SERVER_SRC)
         literals = _string_constants(tree)
         literal_set = set(_string_constants(tree, keys=False))
 
@@ -823,7 +824,7 @@ class TestNoWordOfItsOwn:
         """The degraded words each appear once, in their named constants."""
         assert CONST["DEGRADED_TOOL_NAME"] == SURFACE["tool_name"]
         assert CONST["DEGRADED_STATE"] == STATES["needs_human"]
-        tree = ast.parse(SERVER_SRC.read_text(encoding="utf-8"))
+        tree = source_tree(SERVER_SRC)
         literals = _string_constants(tree)
         assert literals.count(SURFACE["tool_name"]) == 1
         assert literals.count(STATES["needs_human"]) == 1
@@ -1283,8 +1284,8 @@ class TestArguments:
 
     def test_the_server_spawns_at_one_site_and_never_through_a_shell_string(self):
         """Inverted from the reference: exactly one shell, one site, a constant -c."""
-        src = SERVER_SRC.read_text(encoding="utf-8")
-        tree = ast.parse(src)
+        src = source_text(SERVER_SRC)
+        tree = source_tree(SERVER_SRC)
         assert "shlex" not in src
         popens = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
                   and isinstance(node.func, ast.Attribute) and node.func.attr == "Popen"]
@@ -2332,7 +2333,7 @@ class TestBudgetHandoff:
                     if n["method"] == "notifications/message"]
         assert "SLOW-POLL-NEWS" in messages
         # Structurally: the bound times no child.
-        tree = ast.parse(SERVER_SRC.read_text(encoding="utf-8"))
+        tree = source_tree(SERVER_SRC)
         uses = [n for n in ast.walk(tree) if isinstance(n, ast.Name)
                 and n.id == "CANCEL_LATENCY_BOUND_S" and isinstance(n.ctx, ast.Load)]
         assert uses == []
@@ -2484,7 +2485,7 @@ class TestInstructionsSurface:
 
 class TestRedaction:
     def test_no_write_safety_reuse(self):
-        src = SERVER_SRC.read_text(encoding="utf-8")
+        src = source_text(SERVER_SRC)
         assert "write_safety" not in src and "redact_text" not in src
 
     def test_next_the_parsed_result_and_the_tails(self, harness):
@@ -2577,7 +2578,7 @@ class TestRouteSignal:
         assert [c["env"][ROUTE_ENV["name"]] for c in calls] == [ROUTE_ENV["value"]]
 
     def test_the_server_spells_neither_the_name_nor_the_value(self):
-        tree = ast.parse(SERVER_SRC.read_text(encoding="utf-8"))
+        tree = source_tree(SERVER_SRC)
         literals = _string_constants(tree)
         for word in (ROUTE_ENV["name"], ROUTE_ENV["value"]):
             assert not any(word in lit for lit in literals), (
@@ -2866,7 +2867,7 @@ class TestResumeCommand:
         assert envelope["state"] == STATES["needs_human"]
 
     def test_the_server_spells_none_of_the_lookup(self):
-        source = SERVER_SRC.read_text()
+        source = source_text(SERVER_SRC)
         for word in [*DISPATCHER["resume"]["argv"], DISPATCHER["resume"]["option"]]:
             assert '"{}"'.format(word) not in source, word
 
@@ -4357,7 +4358,7 @@ class TestAnchor:
         assert client.close() == 0
 
     def test_getcwd_is_never_a_fallback(self):
-        src = SERVER_SRC.read_text(encoding="utf-8")
+        src = source_text(SERVER_SRC)
         assert "getcwd" not in src and "Path.cwd" not in src
 
 
@@ -4367,7 +4368,7 @@ class TestAnchor:
 
 class TestProtocolChannel:
     def test_nothing_prints_and_sys_stdout_lives_in_the_guard(self):
-        tree = ast.parse(SERVER_SRC.read_text(encoding="utf-8"))
+        tree = source_tree(SERVER_SRC)
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
                 assert node.func.id != "print", "print() at line {}".format(node.lineno)

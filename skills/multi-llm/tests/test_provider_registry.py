@@ -21,6 +21,7 @@ import sys
 
 import pytest
 import yaml
+from tests.source_cache import python_files, source_tree
 
 
 def _can_symlink() -> bool:
@@ -3029,7 +3030,7 @@ UNANCHORED_ALLOWLIST = {
 
 def _runtime_python_files():
     root = Path(__file__).parent.parent
-    for path in sorted(root.rglob("*.py")):
+    for path in python_files(root):
         if _NOT_RUNTIME_DIRS & set(path.relative_to(root).parts):
             continue
         yield root, path
@@ -3143,27 +3144,32 @@ def _walk_calls(tree):
     yield from visit(tree)
 
 
-def _unanchored_calls_in(source: str):
+def _parsed(source):
+    """*source* as a tree: text is parsed, a tree (from ``source_tree``) is used as is."""
+    return source if isinstance(source, ast.AST) else ast.parse(source)
+
+
+def _unanchored_calls_in(source):
     """``<enclosing function>::<callee>`` for every unanchored accessor call."""
     return [
         f"{where}::{_callee(call)}"
-        for call, where, function in _walk_calls(ast.parse(source))
+        for call, where, function in _walk_calls(_parsed(source))
         if _callee(call) in ANCHORED_ACCESSORS
         and not _call_is_anchored(call, function)
     ]
 
 
 def _unanchored_accessor_calls(path: Path):
-    return _unanchored_calls_in(path.read_text(encoding="utf-8"))
+    return _unanchored_calls_in(source_tree(path))
 
 
-def _untraced_snapshot_calls_in(source: str):
+def _untraced_snapshot_calls_in(source):
     """``<enclosing function>::<callee>`` for every snapshot reader call whose
     ``snapshot=`` names no anchored load, or that passes an ``anchor=`` beside
     it outside a reader (``require_one_config_source`` refuses the pair; only
     a reader forwards both, one of them None)."""
     found = []
-    for call, where, function in _walk_calls(ast.parse(source)):
+    for call, where, function in _walk_calls(_parsed(source)):
         if _callee(call) not in SNAPSHOT_READERS:
             continue
         keywords = {keyword.arg: keyword.value for keyword in call.keywords}
@@ -3215,7 +3221,7 @@ class TestNoUnanchoredAccessorCall:
             relative = path.relative_to(root).as_posix()
             offenders.extend(
                 f"{relative}::{site}"
-                for site in _untraced_snapshot_calls_in(path.read_text(encoding="utf-8"))
+                for site in _untraced_snapshot_calls_in(source_tree(path))
             )
         assert not offenders, (
             "a snapshot reader was handed a snapshot that is not an anchored "

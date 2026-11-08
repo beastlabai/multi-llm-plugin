@@ -37,6 +37,7 @@ from tests.test_generate_tasks_orchestrator import (  # noqa: E402
     PLAN_BODY,
     _valid_document,
 )
+from tests.source_cache import source_tree
 
 SKILL_ROOT = Path(__file__).parent.parent
 PLAN = "plans/x.md"
@@ -621,7 +622,7 @@ def _parser_options(module_name: str):
     import importlib.util
 
     spec = importlib.util.find_spec(module_name)
-    tree = ast.parse(Path(spec.origin).read_text(encoding="utf-8"))
+    tree = source_tree(spec.origin)
     found = set()
     for node in ast.walk(tree):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)

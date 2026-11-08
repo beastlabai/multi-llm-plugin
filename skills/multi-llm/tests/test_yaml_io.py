@@ -21,6 +21,7 @@ import yaml
 
 import utils.provider_registry as registry
 from utils import host_capabilities, yaml_io
+from tests.source_cache import python_files, source_tree
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = SKILL_DIR.parent.parent
@@ -112,11 +113,11 @@ class TestTheLoader:
     def test_no_product_module_parses_yaml_itself(self):
         """Every runtime parse goes through yaml_io (one loader, one cache)."""
         offenders = []
-        for path in sorted(SKILL_DIR.rglob("*.py")):
+        for path in python_files(SKILL_DIR):
             rel = path.relative_to(SKILL_DIR)
             if rel.parts[0] in _PRUNE | {"tests"} or rel == Path("utils/yaml_io.py"):
                 continue
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = source_tree(path)
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import) and any(a.name == "yaml" for a in node.names):
                     offenders.append(f"{rel}:{node.lineno} import yaml")

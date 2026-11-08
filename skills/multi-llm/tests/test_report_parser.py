@@ -1,5 +1,7 @@
 """Tests for report_parser utility."""
 
+import json
+
 import pytest
 import tempfile
 import os
@@ -24,13 +26,60 @@ from utils.report_parser import (
 )
 
 
+def _write_report(tmp_path, markdown):
+    """Write ``markdown`` to ``report.md`` under ``tmp_path`` and return its path as a str."""
+    report = tmp_path / "report.md"
+    report.write_text(markdown, encoding="utf-8")
+    return str(report)
+
+
+def _parse(tmp_path, parser, markdown):
+    """Write ``markdown`` as the report and return what ``parser`` makes of it."""
+    return parser(_write_report(tmp_path, markdown))
+
+
+def _write_selections(tmp_path, text, name="consolidated_user_selections.json"):
+    """Write the HTML export's selections file ``name`` under ``tmp_path``."""
+    (tmp_path / name).write_text(text, encoding="utf-8")
+
+
+def _find_edited(tmp_path, markdown, suggestions):
+    """``find_edited_descriptions`` over ``markdown`` against one group holding ``suggestions``."""
+    grouped = [{"theme": "Group 1", "suggestions": suggestions}]
+    return find_edited_descriptions(_write_report(tmp_path, markdown), grouped)
+
+
+class TestMissingReportFile:
+    """A report that does not exist is an empty result, never an error."""
+
+    @pytest.mark.parametrize(
+        "parser, expected",
+        [
+            pytest.param(parse_skipped_suggestions, set(), id="ParseSkippedSuggestions"),
+            pytest.param(parse_skipped_issues, set(), id="ParseSkippedIssues"),
+            pytest.param(parse_skipped_groups, set(), id="ParseSkippedGroups"),
+            pytest.param(parse_skipped_group_suggestions, set(), id="ParseSkippedGroupSuggestions"),
+            pytest.param(parse_suggestion_descriptions, {}, id="ParseSuggestionDescriptions"),
+            pytest.param(parse_issue_descriptions, {}, id="ParseIssueDescriptions"),
+            pytest.param(parse_validation_overrides_groups, {}, id="ParseValidationOverridesGroups"),
+            pytest.param(parse_suggestion_validation_overrides, {}, id="ParseSuggestionValidationOverrides"),
+            pytest.param(parse_validation_overrides_issues, {}, id="ParseValidationOverridesIssues"),
+            pytest.param(parse_consolidated_skipped_groups, set(), id="ParseConsolidatedSkippedGroups"),
+            pytest.param(parse_consolidated_validation_overrides, {}, id="ParseConsolidatedValidationOverrides"),
+        ],
+    )
+    def test_missing_file_is_empty(self, tmp_path, parser, expected):
+        assert parser(str(tmp_path / "nonexistent.md")) == expected
+
+
 class TestParseSkippedSuggestions:
     """Tests for parse_skipped_suggestions function."""
 
-    def test_parse_skipped_no_skips(self, tmp_path):
-        """Returns empty set when no [x] markers."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+    @pytest.mark.parametrize(
+        "markdown, expected",
+        [
+            # Returns empty set when no [x] markers.
+            pytest.param("""# Review Report
 
 ## HIGH
 
@@ -49,14 +98,9 @@ Description here.
 Another description.
 
 ---
-""", encoding="utf-8")
-        result = parse_skipped_suggestions(str(report))
-        assert result == set()
-
-    def test_parse_skipped_single(self, tmp_path):
-        """Correctly parses one [x] Skip."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+""", set(), id="parse_skipped_no_skips"),
+            # Correctly parses one [x] Skip.
+            pytest.param("""# Review Report
 
 ## HIGH
 
@@ -75,14 +119,9 @@ Description here.
 Another description.
 
 ---
-""", encoding="utf-8")
-        result = parse_skipped_suggestions(str(report))
-        assert result == {"S002"}
-
-    def test_parse_skipped_multiple(self, tmp_path):
-        """Correctly parses multiple skips."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+""", {"S002"}, id="parse_skipped_single"),
+            # Correctly parses multiple skips.
+            pytest.param("""# Review Report
 
 ## HIGH
 
@@ -111,14 +150,9 @@ Another description.
 Third description.
 
 ---
-""", encoding="utf-8")
-        result = parse_skipped_suggestions(str(report))
-        assert result == {"S001", "S003"}
-
-    def test_parse_skipped_case_insensitive(self, tmp_path):
-        """Handles [x] skip and [x] SKIP."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+""", {"S001", "S003"}, id="parse_skipped_multiple"),
+            # Handles [x] skip and [x] SKIP.
+            pytest.param("""# Review Report
 
 ### S001: First
 - [x] skip
@@ -143,19 +177,9 @@ Description.
 Description.
 
 ---
-""", encoding="utf-8")
-        result = parse_skipped_suggestions(str(report))
-        assert result == {"S001", "S002", "S003"}
-
-    def test_parse_skipped_missing_file(self, tmp_path):
-        """Returns empty set if report doesn't exist."""
-        result = parse_skipped_suggestions(str(tmp_path / "nonexistent.md"))
-        assert result == set()
-
-    def test_parse_skipped_whitespace_flexibility(self, tmp_path):
-        """Handles extra whitespace around checkbox."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+""", {"S001", "S002", "S003"}, id="parse_skipped_case_insensitive"),
+            # Handles extra whitespace around checkbox.
+            pytest.param("""# Review Report
 
 ### S001: First
 -  [x]  Skip
@@ -172,14 +196,9 @@ Description.
 Description.
 
 ---
-""", encoding="utf-8")
-        result = parse_skipped_suggestions(str(report))
-        assert result == {"S001", "S002"}
-
-    def test_parse_skipped_whitespace_inside_checkbox(self, tmp_path):
-        """Handles whitespace inside checkbox brackets."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+""", {"S001", "S002"}, id="parse_skipped_whitespace_flexibility"),
+            # Handles whitespace inside checkbox brackets.
+            pytest.param("""# Review Report
 
 ### S001: Space after x
 - [x ] Skip
@@ -204,15 +223,24 @@ Description.
 **Validation:** ✓ Valid
 
 ---
-""", encoding="utf-8")
-        result = parse_skipped_suggestions(str(report))
-        assert result == {"S001", "S002", "S003", "S004"}
+""", {"S001", "S002", "S003", "S004"}, id="parse_skipped_whitespace_inside_checkbox"),
+            # Accepts non-x characters with surrounding whitespace.
+            pytest.param("""# Review Report
 
+### S001: Spaced checkmark
+- [ ✓ ] Skip
+**Validation:** ✓ Valid
 
-    def test_parse_skipped_non_x_characters(self, tmp_path):
-        """Accepts non-x characters like v, ✓, 1 as skip markers."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+---
+
+### S002: Spaced v
+- [ v ] Skip
+**Validation:** ✓ Valid
+
+---
+""", {"S001", "S002"}, id="parse_skipped_non_x_with_whitespace"),
+            # Accepts non-x characters like v, ✓, 1 as skip markers.
+            pytest.param("""# Review Report
 
 ### S001: Checkmark
 - [✓] Skip
@@ -243,39 +271,21 @@ Description.
 **Validation:** ✓ Valid
 
 ---
-""", encoding='utf-8')
-        result = parse_skipped_suggestions(str(report))
-        assert result == {"S001", "S002", "S003", "S004"}
-        assert "S005" not in result
-
-    def test_parse_skipped_non_x_with_whitespace(self, tmp_path):
-        """Accepts non-x characters with surrounding whitespace."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
-
-### S001: Spaced checkmark
-- [ ✓ ] Skip
-**Validation:** ✓ Valid
-
----
-
-### S002: Spaced v
-- [ v ] Skip
-**Validation:** ✓ Valid
-
----
-""", encoding='utf-8')
-        result = parse_skipped_suggestions(str(report))
-        assert result == {"S001", "S002"}
+""", {"S001", "S002", "S003", "S004"}, id="parse_skipped_non_x_characters"),
+        ],
+    )
+    def test_parses(self, tmp_path, markdown, expected):
+        assert _parse(tmp_path, parse_skipped_suggestions, markdown) == expected
 
 
 class TestParseSkippedIssues:
     """Tests for parse_skipped_issues function (code review reports)."""
 
-    def test_parse_no_skips(self, tmp_path):
-        """Returns empty set when no [x] markers."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Code Review Report
+    @pytest.mark.parametrize(
+        "markdown, expected",
+        [
+            # Returns empty set when no [x] markers.
+            pytest.param("""# Code Review Report
 
 ## HIGH Priority
 
@@ -294,14 +304,9 @@ Description.
 Description.
 
 ---
-""", encoding="utf-8")
-        result = parse_skipped_issues(str(report))
-        assert result == set()
-
-    def test_parse_single_skip(self, tmp_path):
-        """Correctly parses one [x] Skip."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Code Review Report
+""", set(), id="parse_no_skips"),
+            # Correctly parses one [x] Skip.
+            pytest.param("""# Code Review Report
 
 ## HIGH Priority
 
@@ -320,14 +325,9 @@ Description.
 Description.
 
 ---
-""", encoding="utf-8")
-        result = parse_skipped_issues(str(report))
-        assert result == {2}
-
-    def test_parse_multiple_skips(self, tmp_path):
-        """Correctly parses multiple skips."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Code Review Report
+""", {2}, id="parse_single_skip"),
+            # Correctly parses multiple skips.
+            pytest.param("""# Code Review Report
 
 ### 1. First issue
 - [x] Skip
@@ -346,19 +346,9 @@ Description.
 **Validation:** ✗ Invalid
 
 ---
-""", encoding="utf-8")
-        result = parse_skipped_issues(str(report))
-        assert result == {1, 3}
-
-    def test_parse_missing_file(self, tmp_path):
-        """Returns empty set if report doesn't exist."""
-        result = parse_skipped_issues(str(tmp_path / "nonexistent.md"))
-        assert result == set()
-
-    def test_parse_non_x_characters(self, tmp_path):
-        """Accepts non-x characters like v, ✓, 1 as skip markers."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Code Review Report
+""", {1, 3}, id="parse_multiple_skips"),
+            # Accepts non-x characters like v, ✓, 1 as skip markers.
+            pytest.param("""# Code Review Report
 
 ### 1. Checkmark issue
 - [✓] Skip
@@ -377,19 +367,21 @@ Description.
 **Validation:** ✓ Valid
 
 ---
-""", encoding='utf-8')
-        result = parse_skipped_issues(str(report))
-        assert result == {1, 2}
-        assert 3 not in result
+""", {1, 2}, id="parse_non_x_characters"),
+        ],
+    )
+    def test_parses(self, tmp_path, markdown, expected):
+        assert _parse(tmp_path, parse_skipped_issues, markdown) == expected
 
 
 class TestParseSkippedGroups:
     """Tests for parse_skipped_groups function."""
 
-    def test_parse_no_skipped_groups(self, tmp_path):
-        """Returns empty set when no groups skipped."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+    @pytest.mark.parametrize(
+        "markdown, expected",
+        [
+            # Returns empty set when no groups skipped.
+            pytest.param("""# Review Report
 
 ## G1: Error handling improvements
 - [ ] Skip this group
@@ -398,14 +390,9 @@ class TestParseSkippedGroups:
 - [ ] Skip
 
 ---
-""", encoding="utf-8")
-        result = parse_skipped_groups(str(report))
-        assert result == set()
-
-    def test_parse_single_skipped_group(self, tmp_path):
-        """Correctly parses single group with [x] Skip this group (v2 bracket hash)."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+""", set(), id="parse_no_skipped_groups"),
+            # Correctly parses single group with [x] Skip this group (v2 bracket hash).
+            pytest.param("""# Review Report
 
 ## G1 [aabb000000000001]: Error handling improvements
 - [x] Skip this group
@@ -414,14 +401,9 @@ class TestParseSkippedGroups:
 - [ ] Skip
 
 ---
-""", encoding="utf-8")
-        result = parse_skipped_groups(str(report))
-        assert result == {"aabb000000000001"}
-
-    def test_parse_multiple_skipped_groups(self, tmp_path):
-        """Correctly parses multiple skipped groups (v2 bracket hash)."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+""", {"aabb000000000001"}, id="parse_single_skipped_group"),
+            # Correctly parses multiple skipped groups (v2 bracket hash).
+            pytest.param("""# Review Report
 
 ## G1 [aabb000000000001]: Error handling improvements
 - [x] Skip this group
@@ -446,14 +428,9 @@ class TestParseSkippedGroups:
 - [ ] Skip
 
 ---
-""", encoding="utf-8")
-        result = parse_skipped_groups(str(report))
-        assert result == {"aabb000000000001", "aabb000000000003"}
-
-    def test_whitespace_flexibility(self, tmp_path):
-        """Handles extra whitespace around checkbox (v2 bracket hash)."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+""", {"aabb000000000001", "aabb000000000003"}, id="parse_multiple_skipped_groups"),
+            # Handles extra whitespace around checkbox (v2 bracket hash).
+            pytest.param("""# Review Report
 
 ## G1 [aabb000000000001]: First
 -  [x]  Skip this group
@@ -464,14 +441,9 @@ class TestParseSkippedGroups:
 - [ x ] skip this group
 
 ---
-""", encoding="utf-8")
-        result = parse_skipped_groups(str(report))
-        assert result == {"aabb000000000001", "aabb000000000002"}
-
-    def test_case_insensitive(self, tmp_path):
-        """Handles SKIP THIS GROUP, skip this group, etc. (v2 bracket hash)."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+""", {"aabb000000000001", "aabb000000000002"}, id="whitespace_flexibility"),
+            # Handles SKIP THIS GROUP, skip this group, etc. (v2 bracket hash).
+            pytest.param("""# Review Report
 
 ## G1 [aabb000000000001]: First
 - [x] SKIP THIS GROUP
@@ -487,14 +459,9 @@ class TestParseSkippedGroups:
 - [x] Skip This Group
 
 ---
-""", encoding="utf-8")
-        result = parse_skipped_groups(str(report))
-        assert result == {"aabb000000000001", "aabb000000000002", "aabb000000000003"}
-
-    def test_does_not_match_suggestion_skip(self, tmp_path):
-        """Ensures '- [x] Skip' without 'this group' is not a group skip."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+""", {"aabb000000000001", "aabb000000000002", "aabb000000000003"}, id="case_insensitive"),
+            # Ensures '- [x] Skip' without 'this group' is not a group skip.
+            pytest.param("""# Review Report
 
 ## G1: Error handling
 - [ ] Skip this group
@@ -503,19 +470,18 @@ class TestParseSkippedGroups:
 - [x] Skip
 
 ---
-""", encoding="utf-8")
-        result = parse_skipped_groups(str(report))
-        assert result == set()
+""", set(), id="does_not_match_suggestion_skip"),
+            # Handles blank lines between group header and checkbox (v2 bracket hash).
+            pytest.param("""# Review Report
 
-    def test_parse_missing_file(self, tmp_path):
-        """Returns empty set if report doesn't exist."""
-        result = parse_skipped_groups(str(tmp_path / "nonexistent.md"))
-        assert result == set()
+## G1 [aabb000000000001]: First
 
-    def test_parse_non_x_characters(self, tmp_path):
-        """Accepts non-x characters like v, checkmark as skip markers (v2 bracket hash)."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+- [x] Skip this group
+
+---
+""", {"aabb000000000001"}, id="blank_lines_between_header_and_checkbox"),
+            # Accepts non-x characters like v, checkmark as skip markers (v2 bracket hash).
+            pytest.param("""# Review Report
 
 ## G1 [aabb000000000001]: Checkmark group
 - [✓] Skip this group
@@ -531,33 +497,21 @@ class TestParseSkippedGroups:
 - [ ] Skip this group
 
 ---
-""", encoding='utf-8')
-        result = parse_skipped_groups(str(report))
-        assert result == {"aabb000000000001", "aabb000000000002"}
-        assert "aabb000000000003" not in result
-
-    def test_blank_lines_between_header_and_checkbox(self, tmp_path):
-        """Handles blank lines between group header and checkbox (v2 bracket hash)."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
-
-## G1 [aabb000000000001]: First
-
-- [x] Skip this group
-
----
-""", encoding="utf-8")
-        result = parse_skipped_groups(str(report))
-        assert result == {"aabb000000000001"}
+""", {"aabb000000000001", "aabb000000000002"}, id="parse_non_x_characters"),
+        ],
+    )
+    def test_parses(self, tmp_path, markdown, expected):
+        assert _parse(tmp_path, parse_skipped_groups, markdown) == expected
 
 
 class TestParseSkippedGroupSuggestions:
     """Tests for parse_skipped_group_suggestions function."""
 
-    def test_parse_no_skipped_suggestions(self, tmp_path):
-        """Returns empty set when no suggestions skipped."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+    @pytest.mark.parametrize(
+        "markdown, expected",
+        [
+            # Returns empty set when no suggestions skipped.
+            pytest.param("""# Review Report
 
 ## G1: Error handling
 - [ ] Skip this group
@@ -569,14 +523,9 @@ class TestParseSkippedGroupSuggestions:
 - [ ] Skip
 
 ---
-""", encoding="utf-8")
-        result = parse_skipped_group_suggestions(str(report))
-        assert result == set()
-
-    def test_parse_single_skipped_suggestion(self, tmp_path):
-        """Correctly parses single suggestion with [x] Skip (v2 bracket hash)."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+""", set(), id="parse_no_skipped_suggestions"),
+            # Correctly parses single suggestion with [x] Skip (v2 bracket hash).
+            pytest.param("""# Review Report
 
 ## G1 [aabb000000000001]: Error handling
 - [ ] Skip this group
@@ -588,14 +537,9 @@ class TestParseSkippedGroupSuggestions:
 - [ ] Skip
 
 ---
-""", encoding="utf-8")
-        result = parse_skipped_group_suggestions(str(report))
-        assert result == {"ccdd000000000001"}
-
-    def test_parse_multiple_across_groups(self, tmp_path):
-        """Correctly parses multiple skipped suggestions across groups (v2 bracket hash)."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+""", {"ccdd000000000001"}, id="parse_single_skipped_suggestion"),
+            # Correctly parses multiple skipped suggestions across groups (v2 bracket hash).
+            pytest.param("""# Review Report
 
 ## G1 [aabb000000000001]: Error handling
 - [ ] Skip this group
@@ -623,14 +567,9 @@ class TestParseSkippedGroupSuggestions:
 - [x] Skip
 
 ---
-""", encoding="utf-8")
-        result = parse_skipped_group_suggestions(str(report))
-        assert result == {"ccdd000000000002", "ccdd000000000004"}
-
-    def test_does_not_match_group_skip(self, tmp_path):
-        """Ensures 'Skip this group' is not matched as individual skip."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+""", {"ccdd000000000002", "ccdd000000000004"}, id="parse_multiple_across_groups"),
+            # Ensures 'Skip this group' is not matched as individual skip.
+            pytest.param("""# Review Report
 
 ## G1: Error handling
 - [x] Skip this group
@@ -639,14 +578,9 @@ class TestParseSkippedGroupSuggestions:
 - [ ] Skip
 
 ---
-""", encoding="utf-8")
-        result = parse_skipped_group_suggestions(str(report))
-        assert result == set()
-
-    def test_whitespace_and_case(self, tmp_path):
-        """Handles flexible whitespace and case insensitive (v2 bracket hash)."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+""", set(), id="does_not_match_group_skip"),
+            # Handles flexible whitespace and case insensitive (v2 bracket hash).
+            pytest.param("""# Review Report
 
 ## G1 [aabb000000000001]: Error handling
 - [ ] Skip this group
@@ -661,19 +595,9 @@ class TestParseSkippedGroupSuggestions:
 - [x] skip
 
 ---
-""", encoding="utf-8")
-        result = parse_skipped_group_suggestions(str(report))
-        assert result == {"ccdd000000000001", "ccdd000000000002", "ccdd000000000003"}
-
-    def test_parse_missing_file(self, tmp_path):
-        """Returns empty set if report doesn't exist."""
-        result = parse_skipped_group_suggestions(str(tmp_path / "nonexistent.md"))
-        assert result == set()
-
-    def test_parse_non_x_characters(self, tmp_path):
-        """Accepts non-x characters like v, checkmark as skip markers (v2 bracket hash)."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+""", {"ccdd000000000001", "ccdd000000000002", "ccdd000000000003"}, id="whitespace_and_case"),
+            # Accepts non-x characters like v, checkmark as skip markers (v2 bracket hash).
+            pytest.param("""# Review Report
 
 ## G1 [aabb000000000001]: Error handling
 - [ ] Skip this group
@@ -688,10 +612,11 @@ class TestParseSkippedGroupSuggestions:
 - [ ] Skip
 
 ---
-""", encoding='utf-8')
-        result = parse_skipped_group_suggestions(str(report))
-        assert result == {"ccdd000000000001", "ccdd000000000002"}
-        assert "ccdd000000000003" not in result
+""", {"ccdd000000000001", "ccdd000000000002"}, id="parse_non_x_characters"),
+        ],
+    )
+    def test_parses(self, tmp_path, markdown, expected):
+        assert _parse(tmp_path, parse_skipped_group_suggestions, markdown) == expected
 
 
 class TestNormalizeDescription:
@@ -745,10 +670,11 @@ Actual description here."""
 class TestParseSuggestionDescriptions:
     """Tests for parse_suggestion_descriptions function."""
 
-    def test_extracts_single_suggestion(self, tmp_path):
-        """Extracts description for a single G1S1 suggestion."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+    @pytest.mark.parametrize(
+        "markdown, expected",
+        [
+            # Extracts description for a single G1S1 suggestion.
+            pytest.param("""# Review Report
 
 ## G1: Error handling
 - [ ] Skip this group
@@ -760,14 +686,9 @@ class TestParseSuggestionDescriptions:
 Description for G1S1.
 
 ---
-""", encoding="utf-8")
-        result = parse_suggestion_descriptions(str(report))
-        assert result == {"G1S1": "Description for G1S1."}
-
-    def test_extracts_multiple_suggestions_same_group(self, tmp_path):
-        """Extracts G1S1, G1S2, G1S3 all from same group."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+""", {"G1S1": "Description for G1S1."}, id="extracts_single_suggestion"),
+            # Extracts G1S1, G1S2, G1S3 all from same group.
+            pytest.param("""# Review Report
 
 ## G1: Error handling
 - [ ] Skip this group
@@ -795,18 +716,13 @@ Second description.
 Third description.
 
 ---
-""", encoding="utf-8")
-        result = parse_suggestion_descriptions(str(report))
-        assert result == {
-            "G1S1": "First description.",
-            "G1S2": "Second description.",
-            "G1S3": "Third description.",
-        }
-
-    def test_extracts_multiple_groups(self, tmp_path):
-        """Extracts G1S1, G2S1, G3S1 from different groups."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+""", {
+                "G1S1": "First description.",
+                "G1S2": "Second description.",
+                "G1S3": "Third description.",
+            }, id="extracts_multiple_suggestions_same_group"),
+            # Extracts G1S1, G2S1, G3S1 from different groups.
+            pytest.param("""# Review Report
 
 ## G1: Error handling
 - [ ] Skip this group
@@ -840,18 +756,13 @@ Description G2S1.
 Description G3S1.
 
 ---
-""", encoding="utf-8")
-        result = parse_suggestion_descriptions(str(report))
-        assert result == {
-            "G1S1": "Description G1S1.",
-            "G2S1": "Description G2S1.",
-            "G3S1": "Description G3S1.",
-        }
-
-    def test_extracts_multiline_description(self, tmp_path):
-        """Extracts description that spans multiple lines."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+""", {
+                "G1S1": "Description G1S1.",
+                "G2S1": "Description G2S1.",
+                "G3S1": "Description G3S1.",
+            }, id="extracts_multiple_groups"),
+            # Extracts description that spans multiple lines.
+            pytest.param("""# Review Report
 
 ### G1S1: Multiline
 - [ ] Skip
@@ -863,16 +774,46 @@ This is line two.
 This is a new paragraph.
 
 ---
-""", encoding="utf-8")
-        result = parse_suggestion_descriptions(str(report))
-        assert result == {
-            "G1S1": "This is line one.\nThis is line two.\n\nThis is a new paragraph."
-        }
+""", {
+                "G1S1": "This is line one.\nThis is line two.\n\nThis is a new paragraph."
+            }, id="extracts_multiline_description"),
+            # Handles case with no text between metadata and separator.
+            pytest.param("""# Review Report
+
+### G1S1: Empty
+- [ ] Skip
+**Validation:** Valid
+
+---
+""", {}, id="handles_empty_description"),
+            # Handles case with no --- after description.
+            pytest.param("""# Review Report
+
+### G1S1: No separator
+- [ ] Skip
+**Validation:** Valid
+
+Description without separator.
+""", {"G1S1": "Description without separator."}, id="handles_missing_separator"),
+            # Preserves emoji and CJK characters in description.
+            pytest.param("""# Review Report
+
+### G1S1: Unicode test
+- [ ] Skip
+**Validation:** Valid
+
+This has emoji: 🎉 and CJK: 你好世界
+
+---
+""", {"G1S1": "This has emoji: 🎉 and CJK: 你好世界"}, id="handles_unicode_in_description"),
+        ],
+    )
+    def test_parses(self, tmp_path, markdown, expected):
+        assert _parse(tmp_path, parse_suggestion_descriptions, markdown) == expected
 
     def test_extracts_description_with_code_block(self, tmp_path):
         """Extracts description containing a code block."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+        result = _parse(tmp_path, parse_suggestion_descriptions, """# Review Report
 
 ### G1S1: Code example
 - [ ] Skip
@@ -888,8 +829,7 @@ except Exception as e:
 ```
 
 ---
-""", encoding="utf-8")
-        result = parse_suggestion_descriptions(str(report))
+""")
         expected = """Add error handling like this:
 
 ```python
@@ -902,8 +842,7 @@ except Exception as e:
 
     def test_excludes_validation_reason(self, tmp_path):
         """Validation blockquote is not included in extracted description."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+        result = _parse(tmp_path, parse_suggestion_descriptions, """# Review Report
 
 ### G1S1: With validation
 - [ ] Skip
@@ -914,71 +853,21 @@ except Exception as e:
 The actual description.
 
 ---
-""", encoding="utf-8")
-        result = parse_suggestion_descriptions(str(report))
+""")
         # The description includes the validation blockquote as raw text
         # (parse_suggestion_descriptions doesn't normalize, that's for comparison)
         assert "G1S1" in result
         assert "The actual description." in result["G1S1"]
 
-    def test_handles_empty_description(self, tmp_path):
-        """Handles case with no text between metadata and separator."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
-
-### G1S1: Empty
-- [ ] Skip
-**Validation:** Valid
-
----
-""", encoding="utf-8")
-        result = parse_suggestion_descriptions(str(report))
-        # Empty descriptions are not included
-        assert result == {}
-
-    def test_handles_missing_separator(self, tmp_path):
-        """Handles case with no --- after description."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
-
-### G1S1: No separator
-- [ ] Skip
-**Validation:** Valid
-
-Description without separator.
-""", encoding="utf-8")
-        result = parse_suggestion_descriptions(str(report))
-        assert result == {"G1S1": "Description without separator."}
-
-    def test_file_not_found(self, tmp_path):
-        """Returns empty dict for nonexistent file."""
-        result = parse_suggestion_descriptions(str(tmp_path / "nonexistent.md"))
-        assert result == {}
-
-    def test_handles_unicode_in_description(self, tmp_path):
-        """Preserves emoji and CJK characters in description."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
-
-### G1S1: Unicode test
-- [ ] Skip
-**Validation:** Valid
-
-This has emoji: 🎉 and CJK: 你好世界
-
----
-""", encoding='utf-8')
-        result = parse_suggestion_descriptions(str(report))
-        assert result == {"G1S1": "This has emoji: 🎉 and CJK: 你好世界"}
-
 
 class TestParseIssueDescriptions:
     """Tests for parse_issue_descriptions function."""
 
-    def test_extracts_single_issue(self, tmp_path):
-        """Extracts description for a single issue with ### 1. format."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Code Review Report
+    @pytest.mark.parametrize(
+        "markdown, expected",
+        [
+            # Extracts description for a single issue with ### 1. format.
+            pytest.param("""# Code Review Report
 
 ### 1. Missing error handling
 - [ ] Skip
@@ -987,14 +876,9 @@ class TestParseIssueDescriptions:
 Description for issue 1.
 
 ---
-""", encoding="utf-8")
-        result = parse_issue_descriptions(str(report))
-        assert result == {1: "Description for issue 1."}
-
-    def test_extracts_multiple_issues(self, tmp_path):
-        """Extracts issues 1, 2, 3 all correctly."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Code Review Report
+""", {1: "Description for issue 1."}, id="extracts_single_issue"),
+            # Extracts issues 1, 2, 3 all correctly.
+            pytest.param("""# Code Review Report
 
 ### 1. First issue
 - [ ] Skip
@@ -1019,18 +903,13 @@ Second description.
 Third description.
 
 ---
-""", encoding="utf-8")
-        result = parse_issue_descriptions(str(report))
-        assert result == {
-            1: "First description.",
-            2: "Second description.",
-            3: "Third description.",
-        }
-
-    def test_handles_non_sequential_indices(self, tmp_path):
-        """Extracts issues 1, 3, 5 with gaps correctly."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Code Review Report
+""", {
+                1: "First description.",
+                2: "Second description.",
+                3: "Third description.",
+            }, id="extracts_multiple_issues"),
+            # Extracts issues 1, 3, 5 with gaps correctly.
+            pytest.param("""# Code Review Report
 
 ### 1. First
 - [ ] Skip
@@ -1055,38 +934,9 @@ Desc 3.
 Desc 5.
 
 ---
-""", encoding="utf-8")
-        result = parse_issue_descriptions(str(report))
-        assert result == {1: "Desc 1.", 3: "Desc 3.", 5: "Desc 5."}
-
-    def test_excludes_validation_reason(self, tmp_path):
-        """Validation blockquote is present but can be filtered in comparison."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Code Review Report
-
-### 1. Issue with validation
-- [ ] Skip
-**Validation:** Valid
-
-> **Validation Reason:** This was validated because...
-
-The actual description.
-
----
-""", encoding="utf-8")
-        result = parse_issue_descriptions(str(report))
-        assert 1 in result
-        assert "The actual description." in result[1]
-
-    def test_file_not_found(self, tmp_path):
-        """Returns empty dict for nonexistent file."""
-        result = parse_issue_descriptions(str(tmp_path / "nonexistent.md"))
-        assert result == {}
-
-    def test_ignores_grouped_format(self, tmp_path):
-        """Only extracts numeric format, ignores G1S1 format."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+""", {1: "Desc 1.", 3: "Desc 3.", 5: "Desc 5."}, id="handles_non_sequential_indices"),
+            # Only extracts numeric format, ignores G1S1 format.
+            pytest.param("""# Review Report
 
 ### 1. Numeric issue
 - [ ] Skip
@@ -1111,12 +961,31 @@ Grouped description.
 Another numeric description.
 
 ---
-""", encoding="utf-8")
-        result = parse_issue_descriptions(str(report))
-        assert result == {
-            1: "Numeric description.",
-            2: "Another numeric description.",
-        }
+""", {
+                1: "Numeric description.",
+                2: "Another numeric description.",
+            }, id="ignores_grouped_format"),
+        ],
+    )
+    def test_parses(self, tmp_path, markdown, expected):
+        assert _parse(tmp_path, parse_issue_descriptions, markdown) == expected
+
+    def test_excludes_validation_reason(self, tmp_path):
+        """Validation blockquote is present but can be filtered in comparison."""
+        result = _parse(tmp_path, parse_issue_descriptions, """# Code Review Report
+
+### 1. Issue with validation
+- [ ] Skip
+**Validation:** Valid
+
+> **Validation Reason:** This was validated because...
+
+The actual description.
+
+---
+""")
+        assert 1 in result
+        assert "The actual description." in result[1]
 
 
 class TestFindEditedDescriptions:
@@ -1124,8 +993,7 @@ class TestFindEditedDescriptions:
 
     def test_detects_single_edit(self, tmp_path):
         """Detects when a suggestion description differs."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+        result = _find_edited(tmp_path, """# Review Report
 
 ### G1S1: First
 - [ ] Skip
@@ -1134,16 +1002,9 @@ class TestFindEditedDescriptions:
 Edited description.
 
 ---
-""", encoding="utf-8")
-        grouped = [
-            {
-                "theme": "Group 1",
-                "suggestions": [
-                    {"title": "First", "desc": "Original description."}
-                ]
-            }
-        ]
-        result = find_edited_descriptions(str(report), grouped)
+""", [
+            {"title": "First", "desc": "Original description."}
+        ])
         assert len(result) == 1
         # Key is suggestion_hash (content-based hex string)
         vals = list(result.values())
@@ -1151,8 +1012,7 @@ Edited description.
 
     def test_detects_multiple_edits(self, tmp_path):
         """Detects multiple edited items."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+        result = _find_edited(tmp_path, """# Review Report
 
 ### G1S1: First
 - [ ] Skip
@@ -1169,17 +1029,10 @@ Edited first.
 Edited second.
 
 ---
-""", encoding="utf-8")
-        grouped = [
-            {
-                "theme": "Group 1",
-                "suggestions": [
-                    {"title": "First", "desc": "Original first."},
-                    {"title": "Second", "desc": "Original second."},
-                ]
-            }
-        ]
-        result = find_edited_descriptions(str(report), grouped)
+""", [
+            {"title": "First", "desc": "Original first."},
+            {"title": "Second", "desc": "Original second."},
+        ])
         assert len(result) == 2
         vals = sorted(result.values())
         assert ("Original first.", "Edited first.") in vals
@@ -1187,8 +1040,7 @@ Edited second.
 
     def test_ignores_unchanged(self, tmp_path):
         """Matching descriptions are not in result."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+        result = _find_edited(tmp_path, """# Review Report
 
 ### G1S1: First
 - [ ] Skip
@@ -1197,22 +1049,14 @@ Edited second.
 Same description.
 
 ---
-""", encoding="utf-8")
-        grouped = [
-            {
-                "theme": "Group 1",
-                "suggestions": [
-                    {"title": "First", "desc": "Same description."}
-                ]
-            }
-        ]
-        result = find_edited_descriptions(str(report), grouped)
+""", [
+            {"title": "First", "desc": "Same description."}
+        ])
         assert result == {}
 
     def test_ignores_whitespace_only_change(self, tmp_path):
         """Whitespace-only changes are not flagged as edits."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+        result = _find_edited(tmp_path, """# Review Report
 
 ### G1S1: First
 - [ ] Skip
@@ -1221,22 +1065,14 @@ Same description.
 Same description.
 
 ---
-""", encoding="utf-8")
-        grouped = [
-            {
-                "theme": "Group 1",
-                "suggestions": [
-                    {"title": "First", "desc": "Same description."}
-                ]
-            }
-        ]
-        result = find_edited_descriptions(str(report), grouped)
+""", [
+            {"title": "First", "desc": "Same description."}
+        ])
         assert result == {}
 
     def test_detects_added_content(self, tmp_path):
         """Detects when user appends text to description."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+        result = _find_edited(tmp_path, """# Review Report
 
 ### G1S1: First
 - [ ] Skip
@@ -1247,16 +1083,9 @@ Original description.
 User added this additional context.
 
 ---
-""", encoding="utf-8")
-        grouped = [
-            {
-                "theme": "Group 1",
-                "suggestions": [
-                    {"title": "First", "desc": "Original description."}
-                ]
-            }
-        ]
-        result = find_edited_descriptions(str(report), grouped)
+""", [
+            {"title": "First", "desc": "Original description."}
+        ])
         assert len(result) == 1
         val = list(result.values())[0]
         assert val[0] == "Original description."
@@ -1264,8 +1093,7 @@ User added this additional context.
 
     def test_detects_replaced_content(self, tmp_path):
         """Detects when description is completely different."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+        result = _find_edited(tmp_path, """# Review Report
 
 ### G1S1: First
 - [ ] Skip
@@ -1274,24 +1102,16 @@ User added this additional context.
 Completely different text.
 
 ---
-""", encoding="utf-8")
-        grouped = [
-            {
-                "theme": "Group 1",
-                "suggestions": [
-                    {"title": "First", "desc": "Original description here."}
-                ]
-            }
-        ]
-        result = find_edited_descriptions(str(report), grouped)
+""", [
+            {"title": "First", "desc": "Original description here."}
+        ])
         assert len(result) == 1
         val = list(result.values())[0]
         assert val == ("Original description here.", "Completely different text.")
 
     def test_handles_missing_suggestion_in_report(self, tmp_path):
         """Gracefully handles suggestion in grouped but not in report."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+        result = _find_edited(tmp_path, """# Review Report
 
 ### G1S1: First
 - [ ] Skip
@@ -1300,17 +1120,10 @@ Completely different text.
 Description.
 
 ---
-""", encoding="utf-8")
-        grouped = [
-            {
-                "theme": "Group 1",
-                "suggestions": [
-                    {"title": "First", "desc": "Different."},
-                    {"title": "Second", "desc": "Not in report."},
-                ]
-            }
-        ]
-        result = find_edited_descriptions(str(report), grouped)
+""", [
+            {"title": "First", "desc": "Different."},
+            {"title": "Second", "desc": "Not in report."},
+        ])
         # Only the suggestion present in report with different desc should be flagged
         assert len(result) == 1
         val = list(result.values())[0]
@@ -1319,8 +1132,7 @@ Description.
 
     def test_handles_extra_suggestion_in_report(self, tmp_path):
         """Extra suggestions in report (not in grouped) are ignored."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Review Report
+        result = _find_edited(tmp_path, """# Review Report
 
 ### G1S1: First
 - [ ] Skip
@@ -1337,16 +1149,9 @@ Same description.
 Extra suggestion.
 
 ---
-""", encoding="utf-8")
-        grouped = [
-            {
-                "theme": "Group 1",
-                "suggestions": [
-                    {"title": "First", "desc": "Same description."}
-                ]
-            }
-        ]
-        result = find_edited_descriptions(str(report), grouped)
+""", [
+            {"title": "First", "desc": "Same description."}
+        ])
         # G1S2 only exists in report, not in grouped, so it's ignored
         assert result == {}
 
@@ -1354,56 +1159,37 @@ Extra suggestion.
 class TestParseValidationOverridesGroups:
     """Tests for parse_validation_overrides_groups()."""
 
-    def test_no_overrides_returns_empty_dict(self, tmp_path):
-        """Report with no override checkboxes returns empty dict."""
-        report = tmp_path / "report.md"
-        report.write_text("""## G1: Theme
+    @pytest.mark.parametrize(
+        "markdown, expected",
+        [
+            # Report with no override checkboxes returns empty dict.
+            pytest.param("""## G1: Theme
 - [ ] Skip this group
 **Validation:** Valid
-""", encoding="utf-8")
-        result = parse_validation_overrides_groups(str(report))
-        assert result == {}
-
-    def test_single_valid_override(self, tmp_path):
-        """Single group with 'Mark valid' checked (v2 bracket hash)."""
-        report = tmp_path / "report.md"
-        report.write_text("""## G1 [aabb000000000001]: Theme
+""", {}, id="no_overrides_returns_empty_dict"),
+            # Single group with 'Mark valid' checked (v2 bracket hash).
+            pytest.param("""## G1 [aabb000000000001]: Theme
 - [ ] Skip this group
 - [x] Mark valid
 - [ ] Mark invalid
 **Validation:** ? Needs Review
-""", encoding="utf-8")
-        result = parse_validation_overrides_groups(str(report))
-        assert result == {"aabb000000000001": "valid"}
-
-    def test_single_invalid_override(self, tmp_path):
-        """Single group with 'Mark invalid' checked (v2 bracket hash)."""
-        report = tmp_path / "report.md"
-        report.write_text("""## G1 [aabb000000000001]: Theme
+""", {"aabb000000000001": "valid"}, id="single_valid_override"),
+            # Single group with 'Mark invalid' checked (v2 bracket hash).
+            pytest.param("""## G1 [aabb000000000001]: Theme
 - [ ] Skip this group
 - [ ] Mark valid
 - [x] Mark invalid
 **Validation:** ? Needs Review
-""", encoding="utf-8")
-        result = parse_validation_overrides_groups(str(report))
-        assert result == {"aabb000000000001": "invalid"}
-
-    def test_both_checked_invalid_wins(self, tmp_path):
-        """When both valid and invalid are checked, invalid wins (safety-first)."""
-        report = tmp_path / "report.md"
-        report.write_text("""## G1 [aabb000000000001]: Theme
+""", {"aabb000000000001": "invalid"}, id="single_invalid_override"),
+            # When both valid and invalid are checked, invalid wins (safety-first).
+            pytest.param("""## G1 [aabb000000000001]: Theme
 - [ ] Skip this group
 - [x] Mark valid
 - [x] Mark invalid
 **Validation:** ? Needs Review
-""", encoding="utf-8")
-        result = parse_validation_overrides_groups(str(report))
-        assert result == {"aabb000000000001": "invalid"}
-
-    def test_multiple_groups_different_overrides(self, tmp_path):
-        """Multiple groups with different overrides (v2 bracket hash)."""
-        report = tmp_path / "report.md"
-        report.write_text("""## G1 [aabb000000000001]: First Theme
+""", {"aabb000000000001": "invalid"}, id="both_checked_invalid_wins"),
+            # Multiple groups with different overrides (v2 bracket hash).
+            pytest.param("""## G1 [aabb000000000001]: First Theme
 - [ ] Skip this group
 - [x] Mark valid
 - [ ] Mark invalid
@@ -1424,26 +1210,16 @@ class TestParseValidationOverridesGroups:
 **Validation:** ? Validation Failed
 
 ---
-""", encoding="utf-8")
-        result = parse_validation_overrides_groups(str(report))
-        assert result == {"aabb000000000001": "valid", "aabb000000000003": "invalid"}
-
-    def test_case_insensitive_matching(self, tmp_path):
-        """Checkbox labels matched case-insensitively (v2 bracket hash)."""
-        report = tmp_path / "report.md"
-        report.write_text("""## G1 [aabb000000000001]: Theme
+""", {"aabb000000000001": "valid", "aabb000000000003": "invalid"}, id="multiple_groups_different_overrides"),
+            # Checkbox labels matched case-insensitively (v2 bracket hash).
+            pytest.param("""## G1 [aabb000000000001]: Theme
 - [ ] Skip this group
 - [x] MARK VALID
 - [ ] mark invalid
 **Validation:** ? Needs Review
-""", encoding="utf-8")
-        result = parse_validation_overrides_groups(str(report))
-        assert result == {"aabb000000000001": "valid"}
-
-    def test_flexible_checkbox_markers(self, tmp_path):
-        """Supports various checkbox markers like [v], [X] (v2 bracket hash)."""
-        report = tmp_path / "report.md"
-        report.write_text("""## G1 [aabb000000000001]: Theme
+""", {"aabb000000000001": "valid"}, id="case_insensitive_matching"),
+            # Supports various checkbox markers like [v], [X] (v2 bracket hash).
+            pytest.param("""## G1 [aabb000000000001]: Theme
 - [ ] Skip this group
 - [v] Mark valid
 - [ ] Mark invalid
@@ -1456,31 +1232,16 @@ class TestParseValidationOverridesGroups:
 - [ ] Mark valid
 - [X] Mark invalid
 **Validation:** ? Validation Failed
-""", encoding='utf-8')
-        result = parse_validation_overrides_groups(str(report))
-        assert result == {"aabb000000000001": "valid", "aabb000000000002": "invalid"}
-
-    def test_unchecked_overrides_ignored(self, tmp_path):
-        """Groups with unchecked override checkboxes are not in result."""
-        report = tmp_path / "report.md"
-        report.write_text("""## G1: Theme
+""", {"aabb000000000001": "valid", "aabb000000000002": "invalid"}, id="flexible_checkbox_markers"),
+            # Groups with unchecked override checkboxes are not in result.
+            pytest.param("""## G1: Theme
 - [ ] Skip this group
 - [ ] Mark valid
 - [ ] Mark invalid
 **Validation:** ? Needs Review
-""", encoding="utf-8")
-        result = parse_validation_overrides_groups(str(report))
-        assert result == {}
-
-    def test_missing_file_returns_empty_dict(self, tmp_path):
-        """Non-existent file returns empty dict."""
-        result = parse_validation_overrides_groups(str(tmp_path / "nonexistent.md"))
-        assert result == {}
-
-    def test_groups_without_override_checkboxes(self, tmp_path):
-        """Groups without override checkboxes are ignored (v2 bracket hash)."""
-        report = tmp_path / "report.md"
-        report.write_text("""## G1 [aabb000000000001]: Theme
+""", {}, id="unchecked_overrides_ignored"),
+            # Groups without override checkboxes are ignored (v2 bracket hash).
+            pytest.param("""## G1 [aabb000000000001]: Theme
 - [ ] Skip this group
 **Validation:** Valid
 
@@ -1491,18 +1252,21 @@ class TestParseValidationOverridesGroups:
 - [x] Mark valid
 - [ ] Mark invalid
 **Validation:** ? Needs Review
-""", encoding="utf-8")
-        result = parse_validation_overrides_groups(str(report))
-        assert result == {"aabb000000000002": "valid"}
+""", {"aabb000000000002": "valid"}, id="groups_without_override_checkboxes"),
+        ],
+    )
+    def test_parses(self, tmp_path, markdown, expected):
+        assert _parse(tmp_path, parse_validation_overrides_groups, markdown) == expected
 
 
 class TestParseSuggestionValidationOverrides:
     """Tests for parse_suggestion_validation_overrides()."""
 
-    def test_no_overrides_returns_empty(self, tmp_path):
-        """Report with unchecked suggestion override boxes returns empty dict."""
-        report = tmp_path / "report.md"
-        report.write_text("""## G1: Theme
+    @pytest.mark.parametrize(
+        "markdown, expected",
+        [
+            # Report with unchecked suggestion override boxes returns empty dict.
+            pytest.param("""## G1: Theme
 - [ ] Skip this group
 
 ### G1S1: Add error handling
@@ -1520,14 +1284,9 @@ class TestParseSuggestionValidationOverrides:
 **Validation:** Valid
 
 ---
-""", encoding="utf-8")
-        result = parse_suggestion_validation_overrides(str(report))
-        assert result == {}
-
-    def test_mark_valid_single_suggestion(self, tmp_path):
-        """Suggestion with 'Mark valid' checked (v2 bracket hash)."""
-        report = tmp_path / "report.md"
-        report.write_text("""## G1 [aabb000000000001]: Theme
+""", {}, id="no_overrides_returns_empty"),
+            # Suggestion with 'Mark valid' checked (v2 bracket hash).
+            pytest.param("""## G1 [aabb000000000001]: Theme
 - [ ] Skip this group
 
 ### G1S1 [ccdd000000000001]: Add error handling
@@ -1545,14 +1304,9 @@ class TestParseSuggestionValidationOverrides:
 **Validation:** ? Needs Review
 
 ---
-""", encoding="utf-8")
-        result = parse_suggestion_validation_overrides(str(report))
-        assert result == {"ccdd000000000002": "valid"}
-
-    def test_mark_invalid_single_suggestion(self, tmp_path):
-        """Suggestion with 'Mark invalid' checked (v2 bracket hash)."""
-        report = tmp_path / "report.md"
-        report.write_text("""## G1 [aabb000000000001]: Theme
+""", {"ccdd000000000002": "valid"}, id="mark_valid_single_suggestion"),
+            # Suggestion with 'Mark invalid' checked (v2 bracket hash).
+            pytest.param("""## G1 [aabb000000000001]: Theme
 - [ ] Skip this group
 
 ### G1S1 [ccdd000000000001]: Add error handling
@@ -1562,28 +1316,18 @@ class TestParseSuggestionValidationOverrides:
 **Validation:** ? Needs Review
 
 ---
-""", encoding="utf-8")
-        result = parse_suggestion_validation_overrides(str(report))
-        assert result == {"ccdd000000000001": "invalid"}
-
-    def test_both_checked_invalid_wins(self, tmp_path):
-        """When both Mark valid and Mark invalid are checked, invalid wins."""
-        report = tmp_path / "report.md"
-        report.write_text("""### G1S1 [ccdd000000000001]: Add error handling
+""", {"ccdd000000000001": "invalid"}, id="mark_invalid_single_suggestion"),
+            # When both Mark valid and Mark invalid are checked, invalid wins.
+            pytest.param("""### G1S1 [ccdd000000000001]: Add error handling
 - [ ] Skip
 - [x] Mark valid
 - [x] Mark invalid
 **Validation:** ? Needs Review
 
 ---
-""", encoding="utf-8")
-        result = parse_suggestion_validation_overrides(str(report))
-        assert result == {"ccdd000000000001": "invalid"}
-
-    def test_multiple_suggestions_different_overrides(self, tmp_path):
-        """Multiple suggestions with different overrides (v2 bracket hash)."""
-        report = tmp_path / "report.md"
-        report.write_text("""## G1 [aabb000000000001]: First Theme
+""", {"ccdd000000000001": "invalid"}, id="both_checked_invalid_wins"),
+            # Multiple suggestions with different overrides (v2 bracket hash).
+            pytest.param("""## G1 [aabb000000000001]: First Theme
 - [ ] Skip this group
 
 ### G1S1 [ccdd000000000001]: Add error handling
@@ -1624,14 +1368,9 @@ class TestParseSuggestionValidationOverrides:
 **Validation:** ? Validation Failed
 
 ---
-""", encoding="utf-8")
-        result = parse_suggestion_validation_overrides(str(report))
-        assert result == {"ccdd000000000001": "valid", "ccdd000000000005": "invalid"}
-
-    def test_skip_not_confused_with_override(self, tmp_path):
-        """'[x] Skip' alone should NOT create a validation override."""
-        report = tmp_path / "report.md"
-        report.write_text("""### G1S1: Add error handling
+""", {"ccdd000000000001": "valid", "ccdd000000000005": "invalid"}, id="multiple_suggestions_different_overrides"),
+            # '[x] Skip' alone should NOT create a validation override.
+            pytest.param("""### G1S1: Add error handling
 - [x] Skip
 - [ ] Mark valid
 - [ ] Mark invalid
@@ -1644,14 +1383,11 @@ class TestParseSuggestionValidationOverrides:
 **Validation:** Valid
 
 ---
-""", encoding="utf-8")
-        result = parse_suggestion_validation_overrides(str(report))
-        assert result == {}
-
-    def test_nonexistent_file_returns_empty(self, tmp_path):
-        """Nonexistent path returns empty dict."""
-        result = parse_suggestion_validation_overrides(str(tmp_path / "nonexistent.md"))
-        assert result == {}
+""", {}, id="skip_not_confused_with_override"),
+        ],
+    )
+    def test_parses(self, tmp_path, markdown, expected):
+        assert _parse(tmp_path, parse_suggestion_validation_overrides, markdown) == expected
 
     def test_mixed_group_and_suggestion_checkboxes(self, tmp_path):
         """Report with BOTH group-level and suggestion-level override checkboxes.
@@ -1659,8 +1395,7 @@ class TestParseSuggestionValidationOverrides:
         Verify parse_suggestion_validation_overrides only returns suggestion-level entries,
         not group-level ones.
         """
-        report = tmp_path / "report.md"
-        report.write_text("""## G1 [aabb000000000001]: First Theme
+        result = _parse(tmp_path, parse_suggestion_validation_overrides, """## G1 [aabb000000000001]: First Theme
 - [ ] Skip this group
 - [x] Mark valid
 - [ ] Mark invalid
@@ -1693,8 +1428,7 @@ class TestParseSuggestionValidationOverrides:
 **Validation:** ? Needs Review
 
 ---
-""", encoding="utf-8")
-        result = parse_suggestion_validation_overrides(str(report))
+""")
         # Should only contain suggestion-level entries, not group-level ones
         assert result == {"ccdd000000000002": "invalid", "ccdd000000000003": "valid"}
         # Verify keys are hash strings (16-char hex), not positional IDs
@@ -1705,56 +1439,37 @@ class TestParseSuggestionValidationOverrides:
 class TestParseValidationOverridesIssues:
     """Tests for parse_validation_overrides_issues()."""
 
-    def test_no_overrides_returns_empty_dict(self, tmp_path):
-        """Report with no override checkboxes returns empty dict."""
-        report = tmp_path / "report.md"
-        report.write_text("""### 1. Issue Title
+    @pytest.mark.parametrize(
+        "markdown, expected",
+        [
+            # Report with no override checkboxes returns empty dict.
+            pytest.param("""### 1. Issue Title
 - [ ] Skip
 **Validation:** Valid
-""", encoding="utf-8")
-        result = parse_validation_overrides_issues(str(report))
-        assert result == {}
-
-    def test_single_valid_override(self, tmp_path):
-        """Single issue with 'Mark valid' checked."""
-        report = tmp_path / "report.md"
-        report.write_text("""### 1. Issue Title
+""", {}, id="no_overrides_returns_empty_dict"),
+            # Single issue with 'Mark valid' checked.
+            pytest.param("""### 1. Issue Title
 - [ ] Skip
 - [x] Mark valid
 - [ ] Mark invalid
 **Validation:** ? Needs Review
-""", encoding="utf-8")
-        result = parse_validation_overrides_issues(str(report))
-        assert result == {1: "valid"}
-
-    def test_single_invalid_override(self, tmp_path):
-        """Single issue with 'Mark invalid' checked."""
-        report = tmp_path / "report.md"
-        report.write_text("""### 1. Issue Title
+""", {1: "valid"}, id="single_valid_override"),
+            # Single issue with 'Mark invalid' checked.
+            pytest.param("""### 1. Issue Title
 - [ ] Skip
 - [ ] Mark valid
 - [x] Mark invalid
 **Validation:** ? Needs Review
-""", encoding="utf-8")
-        result = parse_validation_overrides_issues(str(report))
-        assert result == {1: "invalid"}
-
-    def test_both_checked_invalid_wins(self, tmp_path):
-        """When both valid and invalid are checked, invalid wins (safety-first)."""
-        report = tmp_path / "report.md"
-        report.write_text("""### 1. Issue Title
+""", {1: "invalid"}, id="single_invalid_override"),
+            # When both valid and invalid are checked, invalid wins (safety-first).
+            pytest.param("""### 1. Issue Title
 - [ ] Skip
 - [x] Mark valid
 - [x] Mark invalid
 **Validation:** ? Needs Review
-""", encoding="utf-8")
-        result = parse_validation_overrides_issues(str(report))
-        assert result == {1: "invalid"}
-
-    def test_multiple_issues_different_overrides(self, tmp_path):
-        """Multiple issues with different overrides."""
-        report = tmp_path / "report.md"
-        report.write_text("""### 1. First Issue
+""", {1: "invalid"}, id="both_checked_invalid_wins"),
+            # Multiple issues with different overrides.
+            pytest.param("""### 1. First Issue
 - [ ] Skip
 - [x] Mark valid
 - [ ] Mark invalid
@@ -1781,26 +1496,16 @@ Description.
 Description.
 
 ---
-""", encoding="utf-8")
-        result = parse_validation_overrides_issues(str(report))
-        assert result == {1: "valid", 3: "invalid"}
-
-    def test_case_insensitive_matching(self, tmp_path):
-        """Checkbox labels matched case-insensitively."""
-        report = tmp_path / "report.md"
-        report.write_text("""### 1. Issue
+""", {1: "valid", 3: "invalid"}, id="multiple_issues_different_overrides"),
+            # Checkbox labels matched case-insensitively.
+            pytest.param("""### 1. Issue
 - [ ] Skip
 - [x] MARK VALID
 - [ ] mark invalid
 **Validation:** ? Needs Review
-""", encoding="utf-8")
-        result = parse_validation_overrides_issues(str(report))
-        assert result == {1: "valid"}
-
-    def test_flexible_checkbox_markers(self, tmp_path):
-        """Supports various checkbox markers like [v], [X]."""
-        report = tmp_path / "report.md"
-        report.write_text("""### 1. Issue One
+""", {1: "valid"}, id="case_insensitive_matching"),
+            # Supports various checkbox markers like [v], [X].
+            pytest.param("""### 1. Issue One
 - [ ] Skip
 - [v] Mark valid
 - [ ] Mark invalid
@@ -1813,35 +1518,28 @@ Description.
 - [ ] Mark valid
 - [X] Mark invalid
 **Validation:** ? Validation Failed
-""", encoding="utf-8")
-        result = parse_validation_overrides_issues(str(report))
-        assert result == {1: "valid", 2: "invalid"}
-
-    def test_missing_file_returns_empty_dict(self, tmp_path):
-        """Non-existent file returns empty dict."""
-        result = parse_validation_overrides_issues(str(tmp_path / "nonexistent.md"))
-        assert result == {}
-
-    def test_unchecked_overrides_ignored(self, tmp_path):
-        """Issues with unchecked override checkboxes are not in result."""
-        report = tmp_path / "report.md"
-        report.write_text("""### 1. Issue
+""", {1: "valid", 2: "invalid"}, id="flexible_checkbox_markers"),
+            # Issues with unchecked override checkboxes are not in result.
+            pytest.param("""### 1. Issue
 - [ ] Skip
 - [ ] Mark valid
 - [ ] Mark invalid
 **Validation:** ? Needs Review
-""", encoding="utf-8")
-        result = parse_validation_overrides_issues(str(report))
-        assert result == {}
+""", {}, id="unchecked_overrides_ignored"),
+        ],
+    )
+    def test_parses(self, tmp_path, markdown, expected):
+        assert _parse(tmp_path, parse_validation_overrides_issues, markdown) == expected
 
 
 class TestParseConsolidatedSkippedGroups:
     """Tests for parse_consolidated_skipped_groups()."""
 
-    def test_no_skipped_groups(self, tmp_path):
-        """Returns empty set when no groups are skipped."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Consolidated Report
+    @pytest.mark.parametrize(
+        "markdown, expected",
+        [
+            # Returns empty set when no groups are skipped.
+            pytest.param("""# Consolidated Report
 
 ## CG1 [abc123def456]: Section A
 - [ ] Skip this group
@@ -1850,14 +1548,9 @@ class TestParseConsolidatedSkippedGroups:
 - [ ] Needs human attention
 
 Description.
-""", encoding="utf-8")
-        result = parse_consolidated_skipped_groups(str(report))
-        assert result == set()
-
-    def test_single_skipped_group(self, tmp_path):
-        """Returns consolidated_id when one group is skipped."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Consolidated Report
+""", set(), id="no_skipped_groups"),
+            # Returns consolidated_id when one group is skipped.
+            pytest.param("""# Consolidated Report
 
 ## CG1 [abc123def456]: Section A
 - [x] Skip this group
@@ -1866,14 +1559,9 @@ Description.
 - [ ] Needs human attention
 
 Description.
-""", encoding="utf-8")
-        result = parse_consolidated_skipped_groups(str(report))
-        assert result == {"abc123def456"}
-
-    def test_multiple_skipped_groups(self, tmp_path):
-        """Returns multiple consolidated_ids when several groups are skipped."""
-        report = tmp_path / "report.md"
-        report.write_text("""# Consolidated Report
+""", {"abc123def456"}, id="single_skipped_group"),
+            # Returns multiple consolidated_ids when several groups are skipped.
+            pytest.param("""# Consolidated Report
 
 ## CG1 [abc123def456]: Section A
 - [x] Skip this group
@@ -1889,171 +1577,142 @@ Description B.
 - [x] Skip this group
 
 Description C.
-""", encoding="utf-8")
-        result = parse_consolidated_skipped_groups(str(report))
-        assert result == {"abc123def456", "ddd444eee555"}
-
-    def test_case_insensitive(self, tmp_path):
-        """Checkbox label matched case-insensitively."""
-        report = tmp_path / "report.md"
-        report.write_text("""## CG1 [abc123def456]: Section
+""", {"abc123def456", "ddd444eee555"}, id="multiple_skipped_groups"),
+            # Checkbox label matched case-insensitively.
+            pytest.param("""## CG1 [abc123def456]: Section
 - [x] SKIP THIS GROUP
-""", encoding="utf-8")
-        result = parse_consolidated_skipped_groups(str(report))
-        assert result == {"abc123def456"}
-
-    def test_flexible_checkbox_markers(self, tmp_path):
-        """Supports various checkbox markers like [v], [X], etc."""
-        report = tmp_path / "report.md"
-        report.write_text("""## CG1 [abc123def456]: Section A
+""", {"abc123def456"}, id="case_insensitive"),
+            # Supports various checkbox markers like [v], [X], etc.
+            pytest.param("""## CG1 [abc123def456]: Section A
 - [v] Skip this group
 
 ## CG2 [bbb222ccc333]: Section B
 - [X] Skip this group
-""", encoding="utf-8")
-        result = parse_consolidated_skipped_groups(str(report))
-        assert result == {"abc123def456", "bbb222ccc333"}
-
-    def test_blank_lines_between_header_and_checkbox(self, tmp_path):
-        """Handles blank lines between ## header and checkbox."""
-        report = tmp_path / "report.md"
-        report.write_text("""## CG1 [abc123def456]: Section A
+""", {"abc123def456", "bbb222ccc333"}, id="flexible_checkbox_markers"),
+            # Handles blank lines between ## header and checkbox.
+            pytest.param("""## CG1 [abc123def456]: Section A
 
 - [x] Skip this group
-""", encoding="utf-8")
-        result = parse_consolidated_skipped_groups(str(report))
-        assert result == {"abc123def456"}
-
-    def test_missing_file_returns_empty_set(self, tmp_path):
-        """Non-existent file returns empty set."""
-        result = parse_consolidated_skipped_groups(str(tmp_path / "nonexistent.md"))
-        assert result == set()
-
-    def test_unchecked_skips_ignored(self, tmp_path):
-        """Empty checkboxes are not treated as skipped."""
-        report = tmp_path / "report.md"
-        report.write_text("""## CG1 [abc123def456]: Section
+""", {"abc123def456"}, id="blank_lines_between_header_and_checkbox"),
+            # Empty checkboxes are not treated as skipped.
+            pytest.param("""## CG1 [abc123def456]: Section
 - [ ] Skip this group
-""", encoding="utf-8")
-        result = parse_consolidated_skipped_groups(str(report))
-        assert result == set()
-
-    def test_does_not_match_non_consolidated_headers(self, tmp_path):
-        """Does not match G1, G2 style headers (only CG format)."""
-        report = tmp_path / "report.md"
-        report.write_text("""## G1: Regular Group
+""", set(), id="unchecked_skips_ignored"),
+            # Does not match G1, G2 style headers (only CG format).
+            pytest.param("""## G1: Regular Group
 - [x] Skip this group
 
 ## CG1 [abc123def456]: Consolidated Group
 - [ ] Skip this group
-""", encoding="utf-8")
-        result = parse_consolidated_skipped_groups(str(report))
-        assert result == set()
+""", set(), id="does_not_match_non_consolidated_headers"),
+        ],
+    )
+    def test_parses(self, tmp_path, markdown, expected):
+        assert _parse(tmp_path, parse_consolidated_skipped_groups, markdown) == expected
 
 
 class TestParseConsolidatedValidationOverrides:
     """Tests for parse_consolidated_validation_overrides()."""
 
-    def test_no_overrides_returns_empty_dict(self, tmp_path):
-        """Report with no override checkboxes returns empty dict."""
-        report = tmp_path / "report.md"
-        report.write_text("""## CG1 [abc123def456]: Section
+    @pytest.mark.parametrize(
+        "markdown, expected",
+        [
+            # Report with no override checkboxes returns empty dict.
+            pytest.param("""## CG1 [abc123def456]: Section
 - [ ] Skip this group
 - [ ] Mark valid
 - [ ] Mark invalid
 - [ ] Needs human attention
-""", encoding="utf-8")
-        result = parse_consolidated_validation_overrides(str(report))
-        assert result == {}
-
-    def test_single_valid_override(self, tmp_path):
-        """Single group with 'Mark valid' checked."""
-        report = tmp_path / "report.md"
-        report.write_text("""## CG1 [abc123def456]: Section
+""", {}, id="no_overrides_returns_empty_dict"),
+            # Single group with 'Mark valid' checked.
+            pytest.param("""## CG1 [abc123def456]: Section
 - [ ] Skip this group
 - [x] Mark valid
 - [ ] Mark invalid
 - [ ] Needs human attention
-""", encoding="utf-8")
-        result = parse_consolidated_validation_overrides(str(report))
-        assert result == {"abc123def456": "valid"}
-
-    def test_single_invalid_override(self, tmp_path):
-        """Single group with 'Mark invalid' checked."""
-        report = tmp_path / "report.md"
-        report.write_text("""## CG1 [abc123def456]: Section
+""", {"abc123def456": "valid"}, id="single_valid_override"),
+            # Single group with 'Mark invalid' checked.
+            pytest.param("""## CG1 [abc123def456]: Section
 - [ ] Skip this group
 - [ ] Mark valid
 - [x] Mark invalid
 - [ ] Needs human attention
-""", encoding="utf-8")
-        result = parse_consolidated_validation_overrides(str(report))
-        assert result == {"abc123def456": "invalid"}
-
-    def test_single_needs_human_override(self, tmp_path):
-        """Single group with 'Needs human attention' checked."""
-        report = tmp_path / "report.md"
-        report.write_text("""## CG1 [abc123def456]: Section
+""", {"abc123def456": "invalid"}, id="single_invalid_override"),
+            # Single group with 'Needs human attention' checked.
+            pytest.param("""## CG1 [abc123def456]: Section
 - [ ] Skip this group
 - [ ] Mark valid
 - [ ] Mark invalid
 - [x] Needs human attention
-""", encoding="utf-8")
-        result = parse_consolidated_validation_overrides(str(report))
-        assert result == {"abc123def456": "needs-human-decision"}
-
-    def test_priority_invalid_over_needs_human(self, tmp_path):
-        """When invalid and needs-human both checked, invalid wins."""
-        report = tmp_path / "report.md"
-        report.write_text("""## CG1 [abc123def456]: Section
+""", {"abc123def456": "needs-human-decision"}, id="single_needs_human_override"),
+            # When invalid and needs-human both checked, invalid wins.
+            pytest.param("""## CG1 [abc123def456]: Section
 - [ ] Skip this group
 - [ ] Mark valid
 - [x] Mark invalid
 - [x] Needs human attention
-""", encoding="utf-8")
-        result = parse_consolidated_validation_overrides(str(report))
-        assert result == {"abc123def456": "invalid"}
-
-    def test_priority_invalid_over_valid(self, tmp_path):
-        """When invalid and valid both checked, invalid wins."""
-        report = tmp_path / "report.md"
-        report.write_text("""## CG1 [abc123def456]: Section
+""", {"abc123def456": "invalid"}, id="priority_invalid_over_needs_human"),
+            # When invalid and valid both checked, invalid wins.
+            pytest.param("""## CG1 [abc123def456]: Section
 - [ ] Skip this group
 - [x] Mark valid
 - [x] Mark invalid
 - [ ] Needs human attention
-""", encoding="utf-8")
-        result = parse_consolidated_validation_overrides(str(report))
-        assert result == {"abc123def456": "invalid"}
-
-    def test_priority_needs_human_over_valid(self, tmp_path):
-        """When needs-human and valid both checked, needs-human wins."""
-        report = tmp_path / "report.md"
-        report.write_text("""## CG1 [abc123def456]: Section
+""", {"abc123def456": "invalid"}, id="priority_invalid_over_valid"),
+            # When needs-human and valid both checked, needs-human wins.
+            pytest.param("""## CG1 [abc123def456]: Section
 - [ ] Skip this group
 - [x] Mark valid
 - [ ] Mark invalid
 - [x] Needs human attention
-""", encoding="utf-8")
-        result = parse_consolidated_validation_overrides(str(report))
-        assert result == {"abc123def456": "needs-human-decision"}
-
-    def test_all_three_checked_invalid_wins(self, tmp_path):
-        """When all three are checked, invalid wins (highest priority)."""
-        report = tmp_path / "report.md"
-        report.write_text("""## CG1 [abc123def456]: Section
+""", {"abc123def456": "needs-human-decision"}, id="priority_needs_human_over_valid"),
+            # When all three are checked, invalid wins (highest priority).
+            pytest.param("""## CG1 [abc123def456]: Section
 - [ ] Skip this group
 - [x] Mark valid
 - [x] Mark invalid
 - [x] Needs human attention
-""", encoding="utf-8")
-        result = parse_consolidated_validation_overrides(str(report))
-        assert result == {"abc123def456": "invalid"}
+""", {"abc123def456": "invalid"}, id="all_three_checked_invalid_wins"),
+            # Checkbox labels matched case-insensitively.
+            pytest.param("""## CG1 [abc123def456]: Section
+- [ ] Skip this group
+- [x] MARK VALID
+- [ ] MARK INVALID
+- [ ] NEEDS HUMAN ATTENTION
+""", {"abc123def456": "valid"}, id="case_insensitive_matching"),
+            # Supports various checkbox markers like [v], [X].
+            pytest.param("""## CG1 [abc123def456]: Section A
+- [ ] Skip this group
+- [v] Mark valid
+- [ ] Mark invalid
+- [ ] Needs human attention
+
+## CG2 [bbb222ccc333]: Section B
+- [ ] Skip this group
+- [ ] Mark valid
+- [X] Mark invalid
+- [ ] Needs human attention
+""", {"abc123def456": "valid", "bbb222ccc333": "invalid"}, id="flexible_checkbox_markers"),
+            # Does not match G1 style headers (only CG format).
+            pytest.param("""## G1: Regular Group
+- [ ] Skip this group
+- [x] Mark valid
+- [ ] Mark invalid
+
+## CG1 [abc123def456]: Consolidated Group
+- [ ] Skip this group
+- [ ] Mark valid
+- [ ] Mark invalid
+- [ ] Needs human attention
+""", {}, id="does_not_match_non_consolidated_headers"),
+        ],
+    )
+    def test_parses(self, tmp_path, markdown, expected):
+        assert _parse(tmp_path, parse_consolidated_validation_overrides, markdown) == expected
 
     def test_multiple_groups_different_overrides(self, tmp_path):
         """Multiple groups with different overrides."""
-        report = tmp_path / "report.md"
-        report.write_text("""## CG1 [abc123def456]: Section A
+        result = _parse(tmp_path, parse_consolidated_validation_overrides, """## CG1 [abc123def456]: Section A
 - [ ] Skip this group
 - [x] Mark valid
 - [ ] Mark invalid
@@ -2076,8 +1735,7 @@ class TestParseConsolidatedValidationOverrides:
 - [ ] Mark valid
 - [ ] Mark invalid
 - [x] Needs human attention
-""", encoding="utf-8")
-        result = parse_consolidated_validation_overrides(str(report))
+""")
         assert result == {
             "abc123def456": "valid",
             "ddd444eee555": "invalid",
@@ -2086,65 +1744,12 @@ class TestParseConsolidatedValidationOverrides:
         # CG2 has no overrides, so it should not be in the dict
         assert "bbb222ccc333" not in result
 
-    def test_case_insensitive_matching(self, tmp_path):
-        """Checkbox labels matched case-insensitively."""
-        report = tmp_path / "report.md"
-        report.write_text("""## CG1 [abc123def456]: Section
-- [ ] Skip this group
-- [x] MARK VALID
-- [ ] MARK INVALID
-- [ ] NEEDS HUMAN ATTENTION
-""", encoding="utf-8")
-        result = parse_consolidated_validation_overrides(str(report))
-        assert result == {"abc123def456": "valid"}
-
-    def test_flexible_checkbox_markers(self, tmp_path):
-        """Supports various checkbox markers like [v], [X]."""
-        report = tmp_path / "report.md"
-        report.write_text("""## CG1 [abc123def456]: Section A
-- [ ] Skip this group
-- [v] Mark valid
-- [ ] Mark invalid
-- [ ] Needs human attention
-
-## CG2 [bbb222ccc333]: Section B
-- [ ] Skip this group
-- [ ] Mark valid
-- [X] Mark invalid
-- [ ] Needs human attention
-""", encoding="utf-8")
-        result = parse_consolidated_validation_overrides(str(report))
-        assert result == {"abc123def456": "valid", "bbb222ccc333": "invalid"}
-
-    def test_missing_file_returns_empty_dict(self, tmp_path):
-        """Non-existent file returns empty dict."""
-        result = parse_consolidated_validation_overrides(str(tmp_path / "nonexistent.md"))
-        assert result == {}
-
-    def test_does_not_match_non_consolidated_headers(self, tmp_path):
-        """Does not match G1 style headers (only CG format)."""
-        report = tmp_path / "report.md"
-        report.write_text("""## G1: Regular Group
-- [ ] Skip this group
-- [x] Mark valid
-- [ ] Mark invalid
-
-## CG1 [abc123def456]: Consolidated Group
-- [ ] Skip this group
-- [ ] Mark valid
-- [ ] Mark invalid
-- [ ] Needs human attention
-""", encoding="utf-8")
-        result = parse_consolidated_validation_overrides(str(report))
-        assert result == {}
-
 
 class TestLoadConsolidatedHtmlSelections:
     """Tests for load_consolidated_html_selections()."""
 
     def test_loads_existing_file(self, tmp_path):
         """Loads and parses valid consolidated_user_selections.json."""
-        import json
         selections = {
             "plan_path": "plans/test.md",
             "phase": "review-plan",
@@ -2152,9 +1757,7 @@ class TestLoadConsolidatedHtmlSelections:
             "skipped_groups": ["abc123def456"],
             "validation_overrides": {"bbb222ccc333": "valid"},
         }
-        (tmp_path / "consolidated_user_selections.json").write_text(
-            json.dumps(selections), encoding="utf-8"
-        )
+        _write_selections(tmp_path, json.dumps(selections))
         result = load_consolidated_html_selections(tmp_path)
         assert result == selections
 
@@ -2165,35 +1768,25 @@ class TestLoadConsolidatedHtmlSelections:
 
     def test_returns_none_for_invalid_json(self, tmp_path):
         """Returns None when file contains invalid JSON."""
-        (tmp_path / "consolidated_user_selections.json").write_text(
-            "not valid json {{{", encoding="utf-8"
-        )
+        _write_selections(tmp_path, "not valid json {{{")
         result = load_consolidated_html_selections(tmp_path)
         assert result is None
 
     def test_returns_none_for_empty_file(self, tmp_path):
         """Returns None when file is empty."""
-        (tmp_path / "consolidated_user_selections.json").write_text(
-            "", encoding="utf-8"
-        )
+        _write_selections(tmp_path, "")
         result = load_consolidated_html_selections(tmp_path)
         assert result is None
 
     def test_loads_minimal_structure(self, tmp_path):
         """Loads a minimal JSON object."""
-        import json
-        (tmp_path / "consolidated_user_selections.json").write_text(
-            json.dumps({}), encoding="utf-8"
-        )
+        _write_selections(tmp_path, json.dumps({}))
         result = load_consolidated_html_selections(tmp_path)
         assert result == {}
 
     def test_does_not_load_regular_user_selections(self, tmp_path):
         """Does not load user_selections.json (only consolidated variant)."""
-        import json
-        (tmp_path / "user_selections.json").write_text(
-            json.dumps({"skipped_groups": [1, 2]}), encoding="utf-8"
-        )
+        _write_selections(tmp_path, json.dumps({"skipped_groups": [1, 2]}), "user_selections.json")
         result = load_consolidated_html_selections(tmp_path)
         assert result is None
 
@@ -2203,39 +1796,30 @@ class TestConsolidatedHtmlSelectionsPlanPathValidation:
 
     def test_matching_plan_path_returns_data(self, tmp_path):
         """When plan_path matches, data is returned normally."""
-        import json
         selections = {
             "plan_path": "/plans/my-plan.md",
             "skipped_groups": {"abc123def456": True},
             "validation_overrides": {},
         }
-        (tmp_path / "consolidated_user_selections.json").write_text(
-            json.dumps(selections), encoding="utf-8"
-        )
+        _write_selections(tmp_path, json.dumps(selections))
         result = load_consolidated_html_selections(tmp_path, plan_path="/plans/my-plan.md")
         assert result is not None
 
     def test_mismatched_plan_path_raises_value_error(self, tmp_path):
         """When plan_path differs, raises ValueError."""
-        import json
         selections = {
             "plan_path": "/plans/plan-a.md",
             "skipped_groups": {},
             "validation_overrides": {},
         }
-        (tmp_path / "consolidated_user_selections.json").write_text(
-            json.dumps(selections), encoding="utf-8"
-        )
+        _write_selections(tmp_path, json.dumps(selections))
         with pytest.raises(ValueError, match="Plan path mismatch"):
             load_consolidated_html_selections(tmp_path, plan_path="/plans/plan-b.md")
 
     def test_missing_plan_path_warns_for_old_exports(self, tmp_path, capsys):
         """When JSON lacks plan_path, prints warning but returns data."""
-        import json
         selections = {"skipped_groups": {}, "validation_overrides": {}}
-        (tmp_path / "consolidated_user_selections.json").write_text(
-            json.dumps(selections), encoding="utf-8"
-        )
+        _write_selections(tmp_path, json.dumps(selections))
         result = load_consolidated_html_selections(tmp_path, plan_path="/plans/my-plan.md")
         assert result is not None
         captured = capsys.readouterr()
@@ -2244,29 +1828,23 @@ class TestConsolidatedHtmlSelectionsPlanPathValidation:
 
     def test_no_plan_path_arg_skips_validation(self, tmp_path):
         """When plan_path=None (default), no validation occurs."""
-        import json
         selections = {
             "plan_path": "/completely/different/path.md",
             "skipped_groups": {},
             "validation_overrides": {},
         }
-        (tmp_path / "consolidated_user_selections.json").write_text(
-            json.dumps(selections), encoding="utf-8"
-        )
+        _write_selections(tmp_path, json.dumps(selections))
         result = load_consolidated_html_selections(tmp_path)
         assert result is not None
 
     def test_plan_path_normalization(self, tmp_path):
         """Paths that normalize to the same value are treated as equal."""
-        import json
         selections = {
             "plan_path": "/plans/../plans/my-plan.md",
             "skipped_groups": {},
             "validation_overrides": {},
         }
-        (tmp_path / "consolidated_user_selections.json").write_text(
-            json.dumps(selections), encoding="utf-8"
-        )
+        _write_selections(tmp_path, json.dumps(selections))
         result = load_consolidated_html_selections(tmp_path, plan_path="/plans/my-plan.md")
         assert result is not None
 
@@ -2331,40 +1909,29 @@ class TestMergeConsolidatedSelections:
 class TestParseAgentDecideOverrides:
     """`Let the agent decide` checkbox -> "judge_decide" across all parsers."""
 
-    def test_group(self, tmp_path):
-        report = tmp_path / "report.md"
-        report.write_text("""## G1 [aabb000000000001]: Theme
+    @pytest.mark.parametrize(
+        "parser, markdown, expected",
+        [
+            pytest.param(parse_validation_overrides_groups, """## G1 [aabb000000000001]: Theme
 - [ ] Mark valid
 - [x] Let the agent decide
-""", encoding="utf-8")
-        assert parse_validation_overrides_groups(str(report)) == {
-            "aabb000000000001": "judge_decide"}
-
-    def test_suggestion(self, tmp_path):
-        report = tmp_path / "report.md"
-        report.write_text("""### G1S1 [ccdd000000000001]: Title
+""", {"aabb000000000001": "judge_decide"}, id="group"),
+            pytest.param(parse_suggestion_validation_overrides, """### G1S1 [ccdd000000000001]: Title
 - [ ] Mark valid
 - [x] Let the agent decide
-""", encoding="utf-8")
-        assert parse_suggestion_validation_overrides(str(report)) == {
-            "ccdd000000000001": "judge_decide"}
-
-    def test_issue(self, tmp_path):
-        report = tmp_path / "report.md"
-        report.write_text("""### 1. Title
+""", {"ccdd000000000001": "judge_decide"}, id="suggestion"),
+            pytest.param(parse_validation_overrides_issues, """### 1. Title
 - [ ] Mark valid
 - [x] Let the agent decide
-""", encoding="utf-8")
-        assert parse_validation_overrides_issues(str(report)) == {1: "judge_decide"}
-
-    def test_consolidated(self, tmp_path):
-        report = tmp_path / "report.md"
-        report.write_text("""## CG1 [abc123def456]: Section
+""", {1: "judge_decide"}, id="issue"),
+            pytest.param(parse_consolidated_validation_overrides, """## CG1 [abc123def456]: Section
 - [ ] Mark valid
 - [x] Let the agent decide
-""", encoding="utf-8")
-        assert parse_consolidated_validation_overrides(str(report)) == {
-            "abc123def456": "judge_decide"}
+""", {"abc123def456": "judge_decide"}, id="consolidated"),
+        ],
+    )
+    def test_parses(self, tmp_path, parser, markdown, expected):
+        assert _parse(tmp_path, parser, markdown) == expected
 
 
 class TestParseClaudeDecideOverrides:
@@ -2372,120 +1939,97 @@ class TestParseClaudeDecideOverrides:
     still maps to "judge_decide" across all parsers."""
 
     # --- Group parser ---
-    def test_group_judge_decide(self, tmp_path):
-        report = tmp_path / "report.md"
-        report.write_text("""## G1 [aabb000000000001]: Theme
+    @pytest.mark.parametrize(
+        "markdown, expected",
+        [
+            pytest.param("""## G1 [aabb000000000001]: Theme
 - [ ] Skip this group
 - [ ] Mark valid
 - [ ] Mark invalid
 - [x] Let Claude decide
 **Validation:** ? Needs Review
-""", encoding="utf-8")
-        result = parse_validation_overrides_groups(str(report))
-        assert result == {"aabb000000000001": "judge_decide"}
-
-    def test_group_precedence_invalid_over_judge_decide(self, tmp_path):
-        report = tmp_path / "report.md"
-        report.write_text("""## G1 [aabb000000000001]: Theme
+""", {"aabb000000000001": "judge_decide"}, id="group_judge_decide"),
+            pytest.param("""## G1 [aabb000000000001]: Theme
 - [ ] Mark valid
 - [x] Mark invalid
 - [x] Let Claude decide
-""", encoding="utf-8")
-        result = parse_validation_overrides_groups(str(report))
-        assert result == {"aabb000000000001": "invalid"}
-
-    def test_group_precedence_valid_over_judge_decide(self, tmp_path):
-        report = tmp_path / "report.md"
-        report.write_text("""## G1 [aabb000000000001]: Theme
+""", {"aabb000000000001": "invalid"}, id="group_precedence_invalid_over_judge_decide"),
+            pytest.param("""## G1 [aabb000000000001]: Theme
 - [x] Mark valid
 - [ ] Mark invalid
 - [x] Let Claude decide
-""", encoding="utf-8")
-        result = parse_validation_overrides_groups(str(report))
-        assert result == {"aabb000000000001": "valid"}
+""", {"aabb000000000001": "valid"}, id="group_precedence_valid_over_judge_decide"),
+        ],
+    )
+    def test_parses_validation_overrides_groups(self, tmp_path, markdown, expected):
+        assert _parse(tmp_path, parse_validation_overrides_groups, markdown) == expected
 
     # --- Suggestion parser ---
-    def test_suggestion_judge_decide(self, tmp_path):
-        report = tmp_path / "report.md"
-        report.write_text("""### G1S1 [ccdd000000000001]: Title
+    @pytest.mark.parametrize(
+        "markdown, expected",
+        [
+            pytest.param("""### G1S1 [ccdd000000000001]: Title
 - [ ] Skip
 - [ ] Mark valid
 - [ ] Mark invalid
 - [x] Let Claude decide
-""", encoding="utf-8")
-        result = parse_suggestion_validation_overrides(str(report))
-        assert result == {"ccdd000000000001": "judge_decide"}
-
-    def test_suggestion_precedence_valid_over_judge_decide(self, tmp_path):
-        report = tmp_path / "report.md"
-        report.write_text("""### G1S1 [ccdd000000000001]: Title
+""", {"ccdd000000000001": "judge_decide"}, id="suggestion_judge_decide"),
+            pytest.param("""### G1S1 [ccdd000000000001]: Title
 - [x] Mark valid
 - [x] Let Claude decide
-""", encoding="utf-8")
-        result = parse_suggestion_validation_overrides(str(report))
-        assert result == {"ccdd000000000001": "valid"}
+""", {"ccdd000000000001": "valid"}, id="suggestion_precedence_valid_over_judge_decide"),
+        ],
+    )
+    def test_parses_suggestion_validation_overrides(self, tmp_path, markdown, expected):
+        assert _parse(tmp_path, parse_suggestion_validation_overrides, markdown) == expected
 
     # --- Issues parser (code review) ---
-    def test_issue_judge_decide(self, tmp_path):
-        report = tmp_path / "report.md"
-        report.write_text("""### 1. Title
+    @pytest.mark.parametrize(
+        "markdown, expected",
+        [
+            pytest.param("""### 1. Title
 - [ ] Skip
 - [ ] Mark valid
 - [ ] Mark invalid
 - [x] Let Claude decide
-""", encoding="utf-8")
-        result = parse_validation_overrides_issues(str(report))
-        assert result == {1: "judge_decide"}
-
-    def test_issue_precedence_invalid_over_judge_decide(self, tmp_path):
-        report = tmp_path / "report.md"
-        report.write_text("""### 1. Title
+""", {1: "judge_decide"}, id="issue_judge_decide"),
+            pytest.param("""### 1. Title
 - [x] Mark invalid
 - [x] Let Claude decide
-""", encoding="utf-8")
-        result = parse_validation_overrides_issues(str(report))
-        assert result == {1: "invalid"}
+""", {1: "invalid"}, id="issue_precedence_invalid_over_judge_decide"),
+        ],
+    )
+    def test_parses_validation_overrides_issues(self, tmp_path, markdown, expected):
+        assert _parse(tmp_path, parse_validation_overrides_issues, markdown) == expected
 
     # --- Consolidated parser (4-state precedence) ---
-    def test_consolidated_judge_decide_alone(self, tmp_path):
-        report = tmp_path / "report.md"
-        report.write_text("""## CG1 [abc123def456]: Section
+    @pytest.mark.parametrize(
+        "markdown, expected",
+        [
+            pytest.param("""## CG1 [abc123def456]: Section
 - [ ] Mark valid
 - [ ] Mark invalid
 - [ ] Needs human attention
 - [x] Let Claude decide
-""", encoding="utf-8")
-        result = parse_consolidated_validation_overrides(str(report))
-        assert result == {"abc123def456": "judge_decide"}
-
-    def test_consolidated_invalid_beats_judge_decide(self, tmp_path):
-        report = tmp_path / "report.md"
-        report.write_text("""## CG1 [abc123def456]: Section
+""", {"abc123def456": "judge_decide"}, id="consolidated_judge_decide_alone"),
+            pytest.param("""## CG1 [abc123def456]: Section
 - [x] Mark invalid
 - [x] Let Claude decide
-""", encoding="utf-8")
-        result = parse_consolidated_validation_overrides(str(report))
-        assert result == {"abc123def456": "invalid"}
-
-    def test_consolidated_valid_beats_judge_decide(self, tmp_path):
-        report = tmp_path / "report.md"
-        report.write_text("""## CG1 [abc123def456]: Section
+""", {"abc123def456": "invalid"}, id="consolidated_invalid_beats_judge_decide"),
+            pytest.param("""## CG1 [abc123def456]: Section
 - [x] Mark valid
 - [x] Let Claude decide
-""", encoding="utf-8")
-        result = parse_consolidated_validation_overrides(str(report))
-        assert result == {"abc123def456": "valid"}
-
-    def test_consolidated_needs_human_beats_judge_decide(self, tmp_path):
-        report = tmp_path / "report.md"
-        report.write_text("""## CG1 [abc123def456]: Section
+""", {"abc123def456": "valid"}, id="consolidated_valid_beats_judge_decide"),
+            pytest.param("""## CG1 [abc123def456]: Section
 - [ ] Mark valid
 - [ ] Mark invalid
 - [x] Needs human attention
 - [x] Let Claude decide
-""", encoding="utf-8")
-        result = parse_consolidated_validation_overrides(str(report))
-        assert result == {"abc123def456": "needs-human-decision"}
+""", {"abc123def456": "needs-human-decision"}, id="consolidated_needs_human_beats_judge_decide"),
+        ],
+    )
+    def test_parses_consolidated_validation_overrides(self, tmp_path, markdown, expected):
+        assert _parse(tmp_path, parse_consolidated_validation_overrides, markdown) == expected
 
 
 class TestAnIssueHeaderIsOnlyTheRenderersOwn:

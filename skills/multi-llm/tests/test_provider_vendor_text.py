@@ -21,6 +21,7 @@ from utils.retry_ladder import (
 from utils.providers import base as base_module
 from utils.providers.goose import GooseProvider
 from tests.provider_test_support import C1_FIXTURES, _c1_adapter, _c1_capture, _c1_without_the_hook
+from tests.source_cache import python_files, source_text, source_tree
 
 
 #: The whole committed goose corpus and its verdict on both sides of the fix.
@@ -127,12 +128,9 @@ class TestVendorTextContract:
         this module while the suite runs makes it return the wrong lines. The
         source is parsed here instead, which has no such coupling.
         """
-        import ast
-
         from utils.providers import base as base_module
 
-        text = Path(base_module.__file__).read_text(encoding="utf-8")
-        return text, ast.parse(text)
+        return source_text(base_module.__file__), source_tree(base_module.__file__)
 
     @staticmethod
     def _c1_body_of(tree, name, cls=None):
@@ -179,11 +177,11 @@ class TestVendorTextContract:
 
         utils_dir = Path(base_module.__file__).parent.parent
         executor_path = utils_dir / "subagent_executor.py"
-        executor_text = executor_path.read_text(encoding="utf-8")
+        executor_text = source_text(executor_path)
         assert executor_text.count("vendor_text(") == 1, (
             "subagent_executor.py applies the hook more than once"
         )
-        executor_tree = ast.parse(executor_text)
+        executor_tree = source_tree(executor_path)
         applier = next(
             node for node in executor_tree.body
             if isinstance(node, ast.FunctionDef)
@@ -193,7 +191,7 @@ class TestVendorTextContract:
             "the executor's one application is not inside _classify_failed_run"
         )
 
-        for path in sorted(utils_dir.rglob("*.py")):
+        for path in python_files(utils_dir):
             if path in (executor_path, Path(base_module.__file__)):
                 continue
             calls = [
@@ -513,7 +511,7 @@ class TestAiderStillComposesWithTheHook:
         import sys
 
         module = sys.modules[AiderProvider.__module__]
-        tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+        tree = source_tree(module.__file__)
         cls = next(
             node for node in tree.body
             if isinstance(node, ast.ClassDef) and node.name == "AiderProvider"

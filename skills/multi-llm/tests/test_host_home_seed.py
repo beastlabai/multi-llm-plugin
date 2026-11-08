@@ -44,6 +44,7 @@ import pytest
 # there is nothing of it to test, and the module says so instead of erroring.
 pytest.importorskip("fcntl", reason="tests/container/entrypoint.py runs only in the Linux image (POSIX-only imports)")
 from .container import entrypoint
+from tests.source_cache import source_tree
 
 CONTAINER_DIR = Path(entrypoint.__file__).resolve().parent
 HOME_SEED = CONTAINER_DIR / "home_seed"
@@ -179,7 +180,7 @@ class TestTheTokenListIsWrappersOwn:
         literal `{{…}}` in it, which no assertion here or in the container would
         otherwise catch.
         """
-        tree = ast.parse((CONTAINER_DIR / "wrapper.py").read_text(encoding="utf-8"))
+        tree = source_tree(CONTAINER_DIR / "wrapper.py")
         found: set[str] = set()
         for node in ast.walk(tree):
             if not (isinstance(node, ast.FunctionDef)
@@ -211,8 +212,7 @@ class TestTheDiscoveryTierReallyCallsIt:
 
     @staticmethod
     def _main() -> ast.FunctionDef:
-        tree = ast.parse((CONTAINER_DIR / "entrypoint.py")
-                         .read_text(encoding="utf-8"))
+        tree = source_tree(CONTAINER_DIR / "entrypoint.py")
         for node in tree.body:
             if isinstance(node, ast.FunctionDef) and node.name == "main":
                 return node

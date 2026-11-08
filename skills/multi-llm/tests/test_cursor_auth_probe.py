@@ -59,6 +59,7 @@ from utils.providers.cursor_agent import (  # noqa: E402
 )
 from utils.provider_registry import _PROVIDERS  # noqa: E402
 from utils.write_safety import redact_text  # noqa: E402
+from tests.source_cache import source_text, source_tree
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 
@@ -450,10 +451,10 @@ class TestTheAvailabilityRowIsUpgraded:
         import ast
 
         path = SKILL_DIR / "utils/providers/cursor_agent.py"
-        source = path.read_text(encoding="utf-8")
+        source = source_text(path)
         probes = {"CURSOR_STATUS_ARGS", "CURSOR_ABOUT_ARGS"}
         spawned = []
-        for node in ast.walk(ast.parse(source)):
+        for node in ast.walk(source_tree(path)):
             if not isinstance(node, ast.Call):
                 continue
             rendered = ast.dump(node.func)

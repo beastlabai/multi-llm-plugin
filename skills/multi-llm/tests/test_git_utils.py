@@ -44,6 +44,7 @@ from utils.git_utils import (
     subtract_baseline,
     unstage_files,
 )
+from tests.source_cache import python_files, source_tree
 
 
 class TestGitError:
@@ -2651,11 +2652,11 @@ class TestThePluginsGitCallsRunNothingPlanted:
         import ast
         skill_root = Path(__file__).resolve().parent.parent
         offenders = []
-        for path in sorted(skill_root.rglob("*.py")):
+        for path in python_files(skill_root):
             rel = path.relative_to(skill_root).as_posix()
             if rel.startswith(("tests/", ".venv/", "packaging/")):
                 continue
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            tree = source_tree(path)
             admitted = set()
             for node in ast.walk(tree):
                 if isinstance(node, ast.FunctionDef) and node.name == "_hardened_argv" \

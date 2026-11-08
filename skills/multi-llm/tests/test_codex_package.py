@@ -65,6 +65,7 @@ sys.modules["codex_build"] = codex_build
 _spec.loader.exec_module(codex_build)
 import ingestion_rules  # noqa: E402
 import release_gate  # noqa: E402
+from tests.source_cache import source_tree  # noqa: E402
 
 #: Set by the package job: a row that would skip fails instead.
 REQUIRE_ROWS_ENV = "MLLM_REQUIRE_PACKAGE_ROWS"
@@ -444,7 +445,7 @@ def env_reads():
     ``WORKER_ENV`` indirection in ``utils/detach.py``), or an attribute or
     imported name whose target is such a constant somewhere in the tree.
     """
-    parsed = {path: ast.parse(path.read_text(encoding="utf-8")) for path in _shipped_python()}
+    parsed = {path: source_tree(path) for path in _shipped_python()}
     local = {path: _module_constants(tree) for path, tree in parsed.items()}
     global_constants: dict = {}
     for constants in local.values():
@@ -819,7 +820,7 @@ def _json_strings(node, keys=()):
 
 def _server_payload_inventory() -> tuple:
     """The server's own call-time ``PAYLOAD_INVENTORY``, read by AST."""
-    tree = ast.parse(codex_build.SERVER_SOURCE.read_text(encoding="utf-8"))
+    tree = source_tree(codex_build.SERVER_SOURCE)
     for node in tree.body:
         if (isinstance(node, ast.Assign) and len(node.targets) == 1
                 and isinstance(node.targets[0], ast.Name)

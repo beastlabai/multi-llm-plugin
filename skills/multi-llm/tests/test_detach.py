@@ -33,6 +33,7 @@ import signal
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,7 @@ import multi_llm  # noqa: E402
 import modes as mode_table  # noqa: E402
 from utils import cli_common, detach, process_control, run_registry, run_status, unattended  # noqa: E402
 from utils import progress_tracker, status_file  # noqa: E402
+from tests.source_cache import python_files, source_text, source_tree
 
 SKILL_ROOT = Path(__file__).parent.parent
 POSIX_ONLY = pytest.mark.skipif(
@@ -2599,12 +2601,13 @@ class TestStatusSurface:
             )
         status_file.write_status(str(phase), checkpoint)
         assert "run" not in status_file.read_status(str(phase))
-        start = time.monotonic()
+        clock = _WaitClock(monkeypatch)
+        clock.start()
         code = run_status.main([
             "--plan-file", str(plan), "--view", "run", "--host", "opencode",
             "--wait",
         ])
-        elapsed = time.monotonic() - start
+        elapsed = clock.elapsed
         out = capsys.readouterr().out
         assert code == 2
         assert elapsed < 30, f"--wait did not come back ({elapsed:.1f}s)"
@@ -3764,14 +3767,14 @@ class TestRegistry:
 class TestProcessControlFacade:
     def test_no_runtime_module_imports_fcntl_or_msvcrt_directly(self):
         offenders = []
-        for path in sorted(SKILL_ROOT.rglob("*.py")):
+        for path in python_files(SKILL_ROOT):
             parts = path.relative_to(SKILL_ROOT).parts
             if any(p in {"tests", "__pycache__", ".venv"} or p.startswith(".")
                    for p in parts):
                 continue
             if path.name == "process_control.py":
                 continue
-            text = path.read_text(encoding="utf-8")
+            text = source_text(path)
             for module in ("fcntl", "msvcrt"):
                 if f"import {module}" in text:
                     offenders.append(f"{path.relative_to(SKILL_ROOT)}: {module}")
@@ -4458,6 +4461,35 @@ class TestWindowsSeam:
 # ===========================================================================
 # The documented poll loop
 # ===========================================================================
+
+class _WaitClock:
+    """A clock for ``run_status``'s ``--wait`` loop whose ``sleep`` advances it.
+
+    The loop's deadline arithmetic and its 5 s re-check grid run for real; only
+    the passing of time is simulated, so a ``poll_s: 5`` wait costs no wall
+    clock. ``TestWaitTimeoutResolution.test_a_configured_poll_s_is_really_waited_not_only_computed``
+    keeps the one real-time wait.
+    """
+
+    def __init__(self, monkeypatch):
+        self.now = time.time()
+        self.sleeps = []
+        proxy = types.SimpleNamespace(**vars(time))
+        proxy.time = lambda: self.now
+        proxy.sleep = self._sleep
+        monkeypatch.setattr(run_status, "time", proxy)
+
+    def _sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    def start(self):
+        self.began = self.now
+
+    @property
+    def elapsed(self):
+        return self.now - self.began
+
 
 class TestWaitTimeoutResolution:
     """``--wait``'s deadline: which source wins, and what the clamp binds.
@@ -5262,12 +5294,13 @@ class TestAReusedPhaseDirDoesNotFakeATerminalRun:
         plan = _plan(tmp_path)
         self._inherited_run_over_a_live_checkpoint(plan)
 
-        start = time.monotonic()
+        clock = _WaitClock(monkeypatch)
+        clock.start()
         code = run_status.main([
             "--plan-file", str(plan), "--view", "run", "--host", "opencode",
             "--wait",
         ])
-        elapsed = time.monotonic() - start
+        elapsed = clock.elapsed
         capsys.readouterr()
 
         assert elapsed >= 4.0, (
@@ -5346,9 +5379,7 @@ class TestTheAskLanesTerminalWordsAreTerminal:
         """
         import ast
 
-        tree = ast.parse(
-            (SKILL_ROOT / "ask_orchestrator.py").read_text(encoding="utf-8")
-        )
+        tree = source_tree(SKILL_ROOT / "ask_orchestrator.py")
         words = {
             node.value.value
             for node in ast.walk(tree)
@@ -5492,10 +5523,7 @@ class TestTheRefusalCloseOutWordsAreTerminal:
         """
         import ast
 
-        tree = ast.parse(
-            (SKILL_ROOT / "utils" / "review_orchestrator_base.py")
-            .read_text(encoding="utf-8")
-        )
+        tree = source_tree(SKILL_ROOT / "utils" / "review_orchestrator_base.py")
         func = next(
             (node for node in ast.walk(tree)
              if isinstance(node, ast.FunctionDef)
@@ -5701,12 +5729,13 @@ class TestAPollThatNamesTheRunIsNotHeldByAStaleCheckpoint:
         plan = _plan(tmp_path)
         self._dead_run_over_a_stale_checkpoint(plan, state="failed")
 
-        start = time.monotonic()
+        clock = _WaitClock(monkeypatch)
+        clock.start()
         run_status.main([
             "--plan-file", str(plan), "--view", "run", "--host", "opencode",
             "--wait",
         ])
-        elapsed = time.monotonic() - start
+        elapsed = clock.elapsed
         capsys.readouterr()
         assert elapsed >= 4.0, (
             "a poll that named no run skipped the checkpoint's vote, which is "

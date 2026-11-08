@@ -337,7 +337,10 @@ class TestHangingHelper:
             # Group teardown, then reap — the order `_kill_timed_out` +
             # `_drain_after_kill` use. Without the reap the leader lingers as a
             # zombie and `process_alive` keeps answering True for it, which is an
-            # artifact of this test being the parent, not of the kill.
+            # artifact of this test being the parent, not of the kill. A reaper
+            # thread collects the leader the moment it dies, so `kill_tree`
+            # does not spend its whole post-SIGKILL window on that zombie.
+            threading.Thread(target=proc.wait, daemon=True).start()
             verdict = process_control.kill_tree(proc.pid, pgid=pgid, escalate_after_s=2.0)
             assert verdict != "skipped", verdict
             proc.communicate(timeout=10)

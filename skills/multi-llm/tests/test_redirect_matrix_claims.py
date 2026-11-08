@@ -70,6 +70,7 @@ from .container import harness  # noqa: E402
 #: `lru_cache`d and already paid by every plain-CI collection of the tests
 #: directory.
 from . import test_container_full_chain as chain_lane  # noqa: E402
+from tests.source_cache import source_tree
 
 TESTS_DIR = Path(__file__).resolve().parent
 REDIRECT = TESTS_DIR / "container" / "redirect.yaml"
@@ -1236,8 +1237,7 @@ class TestTheContainerModulesAreGated:
                              ids=[m.stem for m in CONTAINER_MODULES])
     def test_each_module_carries_the_marker_and_the_skipif(self, module):
         """Source-level, so it holds on a machine that has no daemon to probe."""
-        source = module.read_text(encoding="utf-8")
-        tree = ast.parse(source)
+        tree = source_tree(module)
         assignments = [
             node for node in tree.body
             if isinstance(node, ast.Assign)

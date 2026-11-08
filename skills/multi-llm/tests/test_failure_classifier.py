@@ -50,6 +50,7 @@ from utils.retry_ladder import (  # noqa: E402
 )
 from utils.subagent_tasks import build_inputs, make_task  # noqa: E402
 from tests import opencode_fixtures as oc_pin  # noqa: E402
+from tests.source_cache import python_files, source_tree
 
 
 SKILL_DIR = Path(__file__).parent.parent
@@ -915,7 +916,7 @@ GUARD_EXEMPT = {"utils/providers/base.py"}
 
 
 def _runtime_modules():
-    for path in sorted(SKILL_DIR.rglob("*.py")):
+    for path in python_files(SKILL_DIR):
         rel = path.relative_to(SKILL_DIR).as_posix()
         if rel.startswith(("tests/", "legacy/", ".venv/", "build/")):
             continue
@@ -997,7 +998,7 @@ class TestNoDuplicateSubstringClassifiers:
         found = []
         for rel, path in _runtime_modules():
             try:
-                tree = ast.parse(path.read_text(encoding="utf-8"))
+                tree = source_tree(path)
             except (SyntaxError, UnicodeDecodeError):  # pragma: no cover
                 continue
             found.extend(_substring_classifier_sites(rel, tree))

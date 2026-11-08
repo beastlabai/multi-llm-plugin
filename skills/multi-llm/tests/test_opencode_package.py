@@ -73,6 +73,7 @@ sys.path.insert(0, str(PACKAGE_DIR))
 import build as pkg_build  # noqa: E402
 from common import payload  # noqa: E402
 from tests.generated_distributions import DISTRIBUTIONS  # noqa: E402
+from tests.source_cache import source_tree  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -8478,10 +8479,8 @@ class TestRouteStaging:
 
         Read as text, never imported: the module's POSIX-only imports would
         skip this row on a runner that can perfectly well parse it."""
-        source = (Path(__file__).parent / "container" / "entrypoint.py").read_text(
-            encoding="utf-8"
-        )
-        main = next(node for node in ast.walk(ast.parse(source))
+        entrypoint = Path(__file__).parent / "container" / "entrypoint.py"
+        main = next(node for node in ast.walk(source_tree(entrypoint))
                     if isinstance(node, ast.FunctionDef) and node.name == "main")
         calls = [node for node in ast.walk(main)
                  if isinstance(node, ast.Call)

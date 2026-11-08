@@ -55,6 +55,7 @@ from utils.apply_orchestrator_base import (
 from utils.cli_common import build_parent_parser, flag_value, parse_result_line
 from utils.filtering import should_bypass_no_selection_confirmation
 from utils.state_manager import StateManager
+from tests.source_cache import python_files, source_tree  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -762,7 +763,7 @@ _NOT_OURS = {"tests", "__pycache__", ".venv", "plans", "assets", "templates"}
 
 def _runtime_python_files():
     """Every runtime .py file this skill ships (tests and vendored code excluded)."""
-    for path in sorted(SKILL_ROOT.rglob("*.py")):
+    for path in python_files(SKILL_ROOT):
         if _NOT_OURS & set(path.relative_to(SKILL_ROOT).parts):
             continue
         yield path
@@ -776,7 +777,7 @@ def _code_signals(path_str):
     calls ``isatty()`` does not read as a call to it — the AST sees only real
     code. Docstrings are excluded for the same reason.
     """
-    tree = ast.parse(Path(path_str).read_text(encoding="utf-8"))
+    tree = source_tree(path_str)
     docstrings = set()
     for node in ast.walk(tree):
         body = getattr(node, "body", None)
@@ -940,7 +941,7 @@ class TestNoHostSniffing:
         """The set is derived data: every prefix pair the parsers really have."""
         registered = set()
         for path in _runtime_python_files():
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = source_tree(path)
             for node in ast.walk(tree):
                 if not (isinstance(node, ast.Call)
                         and isinstance(node.func, ast.Attribute)

@@ -496,30 +496,53 @@ def _plant(path, secret):
         fh.write(f"\n# {secret}\n")
 
 
-def _plant_case(tmp_path, rel_path, vector):
-    """Copy ``rel_path`` into a scratch repo, plant a vector, stage it, scan it."""
+def _plant_cases(tmp_path, rel_paths, vector):
+    """Copy each of ``rel_paths`` into one scratch repo, plant ``vector`` in each, scan once.
+
+    Returns ``({rel_path: secret}, findings)``. One scan covers every file, and the
+    caller still asserts per file, so a swallowed plant fails its own case. Each
+    file carries one plant, as it would alone: an exception is scoped by file and
+    value, so sharing a tree changes nothing it can see.
+    """
     repo = _scratch_repo(tmp_path)
-    src = REPO_ROOT / rel_path
-    assert src.is_file(), f"plant target no longer exists: {rel_path}"
-    dst = repo / rel_path
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dst)
+    secrets = {}
+    for rel_path in rel_paths:
+        src = REPO_ROOT / rel_path
+        assert src.is_file(), f"plant target no longer exists: {rel_path}"
+        dst = repo / rel_path
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
 
-    secret = _synthesize(vector, rel_path)
-    _plant(dst, secret)
+        secrets[rel_path] = _synthesize(vector, rel_path)
+        _plant(dst, secrets[rel_path])
 
-    ignored, location, pattern = _check_ignore(repo, rel_path)
-    assert not ignored, (
-        f"ignore-rule collision: {rel_path} is ignored by {location}:{pattern}, so the "
-        "plant would never be walked. Fix the .gitignore pattern — never paper over "
-        "this with a path allowlist."
-    )
+        ignored, location, pattern = _check_ignore(repo, rel_path)
+        assert not ignored, (
+            f"ignore-rule collision: {rel_path} is ignored by {location}:{pattern}, so the "
+            "plant would never be walked. Fix the .gitignore pattern — never paper over "
+            "this with a path allowlist."
+        )
     _git(["add", "-A"], cwd=repo)
     tracked = {p for p in _git(["ls-files", "-z"], cwd=repo).stdout.split("\0") if p}
-    assert rel_path in tracked, f"{rel_path} did not stage into the scratch repo"
+    for rel_path in rel_paths:
+        assert rel_path in tracked, f"{rel_path} did not stage into the scratch repo"
 
     findings, _ = _run_gitleaks(repo, repo / ".gitleaks.toml", tmp_path / "out")
-    return rel_path, secret, findings
+    return secrets, findings
+
+
+@pytest.fixture(scope="module")
+def planted_scan(tmp_path_factory):
+    """``planted_scan(vector, rel_paths)``: one scan per distinct (vector, files), per module."""
+    cache = {}
+
+    def scan(vector, rel_paths):
+        key = (vector, tuple(rel_paths))
+        if key not in cache:
+            cache[key] = _plant_cases(tmp_path_factory.mktemp("planted"), list(rel_paths), vector)
+        return cache[key]
+
+    return scan
 
 
 # Representative published surfaces: a JSON fixture (the one whose anchor text is
@@ -830,8 +853,9 @@ class TestPlantedCredentialsAreDetected:
 
     @pytest.mark.parametrize("rel_path", PLANT_TARGETS)
     @pytest.mark.parametrize("vector", sorted(VECTORS))
-    def test_planted_vector_is_detected(self, tmp_path, rel_path, vector):
-        rel, secret, findings = _plant_case(tmp_path, rel_path, vector)
+    def test_planted_vector_is_detected(self, planted_scan, rel_path, vector):
+        secrets, findings = planted_scan(vector, PLANT_TARGETS)
+        rel, secret = rel_path, secrets[rel_path]
         hits = [f for f in findings if f["File"] == rel and secret in f["Match"]]
         assert hits, (
             f"a genuine-shape {vector} planted into {rel} was NOT detected. Everything "
@@ -841,11 +865,11 @@ class TestPlantedCredentialsAreDetected:
 
     @requires_tomllib
     @pytest.mark.parametrize("vector", sorted(VECTORS))
-    def test_allowlisted_files_still_detect_a_real_key(self, tmp_path, vector):
+    def test_allowlisted_files_still_detect_a_real_key(self, planted_scan, vector):
         """Each exception must be scoped to its one known value, not to its file."""
         targets = [
-            (index, label, rel_path)
-            for index, (label, _, entry) in enumerate(_entries())
+            (label, rel_path)
+            for label, _, entry in _entries()
             for rel_path in _entry_files(entry)
         ]
         if not targets:
@@ -854,10 +878,9 @@ class TestPlantedCredentialsAreDetected:
                 "an exception to test — see TestAllowlistEntriesAreLive, which asserts "
                 "that empty set is a measurement rather than an omission"
             )
-        for index, label, rel_path in targets:
-            rel, secret, findings = _plant_case(
-                tmp_path / f"e{index}-{Path(rel_path).name}", rel_path, vector
-            )
+        secrets, findings = planted_scan(vector, sorted({rel for _, rel in targets}))
+        for label, rel_path in targets:
+            rel, secret = rel_path, secrets[rel_path]
             hits = [f for f in findings if f["File"] == rel and secret in f["Match"]]
             assert hits, (
                 f"{label} is broad enough to swallow a real {vector} planted into "

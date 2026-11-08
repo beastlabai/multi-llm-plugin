@@ -50,6 +50,7 @@ from utils.providers.base import (
     JailContext,
     JailRequest,
 )
+from tests.source_cache import source_tree
 
 PROMPT = "Analyze this plan carefully"
 
@@ -789,7 +790,7 @@ class TestTheYoloClassNegativeSet:
         an assertion about anyone's CLI — a vendor re-adding `--yolo` upstream
         changes nothing about what this repo emits.
         """
-        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+        tree = source_tree(__file__)
         imported = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):

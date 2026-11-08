@@ -16,6 +16,7 @@ import ast
 from pathlib import Path
 
 import pytest
+from tests.source_cache import python_files, source_tree
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 
@@ -103,12 +104,12 @@ def _import_time_bootstrap_calls(node: ast.AST) -> list[ast.Call]:
 
 def _source_files() -> list[Path]:
     return sorted(
-        p for p in SKILL_ROOT.rglob("*.py") if not _is_excluded(p)
+        p for p in python_files(SKILL_ROOT) if not _is_excluded(p)
     )
 
 
 def _parse(path: Path) -> ast.Module:
-    return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return source_tree(path)
 
 
 def _entry_points() -> list[Path]:

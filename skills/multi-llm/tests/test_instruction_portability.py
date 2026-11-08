@@ -82,6 +82,7 @@ from utils import host_capabilities  # noqa: E402
 from utils import unattended  # noqa: E402
 
 from tests.generated_distributions import CLAUDE, CODEX, DISTRIBUTIONS  # noqa: E402
+from tests.source_cache import python_files, source_tree  # noqa: E402
 
 
 def _scanned_files():
@@ -3262,7 +3263,7 @@ def _production_python_files():
     excluded = {"tests", "__pycache__", ".venv"}
     return sorted(
         p
-        for p in SKILL_ROOT.rglob("*.py")
+        for p in python_files(SKILL_ROOT)
         if not any(part in excluded or part.startswith(".") for part in
                    p.relative_to(SKILL_ROOT).parts)
     )
@@ -3338,7 +3339,7 @@ class TestDispatchTargetsImportCleanly:
     def test_no_module_level_argparse_or_argv(self, module):
         """AST guard: argparse and argv stay inside ``main(argv)``."""
         path = SKILL_ROOT / (module.replace(".", "/") + ".py")
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = source_tree(path)
         offenders = []
 
         def walk(node, inside_function):

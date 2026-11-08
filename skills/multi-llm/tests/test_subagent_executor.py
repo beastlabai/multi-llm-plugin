@@ -58,6 +58,7 @@ from tests.mock_launchers import (  # noqa: E402
     remove_launcher,
     write_launcher,
 )
+from tests.source_cache import source_text, source_tree
 
 #: What codex's sandbox probe runs inside `codex sandbox --`: `sh`, except on
 #: Windows, where `sh` is not on PATH and the plugin's interpreter takes its steps.
@@ -747,6 +748,9 @@ class TestFailureLadder:
                 f"""\
                 #!/bin/sh
                 case "$1" in --version|-V) echo "opencode 9.9.9"; exit 0;; esac
+                # The adapter's `run --help` capability probe is not the dispatch
+                # under test: answer it, or it spends its own 5 s timeout first.
+                case "$*" in *--help*) echo "usage: opencode run"; exit 0;; esac
                 # A tool child that inherits stdout and outlives its parent.
                 sh -c 'echo $$ > "{marker}"; sleep 30' &
                 sleep 30
@@ -5634,10 +5638,9 @@ class TestSandboxUnavailable:
         lives in this module and nowhere a sub-second command imports."""
         import ast
 
-        source = (Path(executor.__file__).parent / "provider_registry.py").read_text(
-            encoding="utf-8"
-        )
-        tree = ast.parse(source)
+        registry_path = Path(executor.__file__).parent / "provider_registry.py"
+        source = source_text(registry_path)
+        tree = source_tree(registry_path)
         imported = {
             alias.name for node in ast.walk(tree) if isinstance(node, ast.Import)
             for alias in node.names

@@ -16,6 +16,7 @@ import json
 import pytest
 
 from utils.providers.result_envelope import parse_result_envelope
+from tests.source_cache import source_tree
 
 # --- The nine envelope shapes ---------------------------------------------
 #
@@ -199,8 +200,7 @@ class TestBothAdaptersDelegate:
         from utils.providers.cursor_agent import CursorAgentProvider
 
         for cls in (CursorAgentProvider, ClaudeCodeProvider):
-            with open(inspect.getfile(cls), encoding="utf-8") as handle:
-                module = ast.parse(handle.read())
+            module = source_tree(inspect.getfile(cls))
             functions = [
                 node for node in ast.walk(module)
                 if isinstance(node, ast.FunctionDef) and node.name == "parse_output"

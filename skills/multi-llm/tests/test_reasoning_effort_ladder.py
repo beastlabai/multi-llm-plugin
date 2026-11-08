@@ -17,7 +17,6 @@ losing the thing it records.
 """
 import ast
 import importlib
-import pathlib
 
 import pytest
 
@@ -31,6 +30,7 @@ from utils.providers.base import (
     ReasoningLadder,
     split_reasoning_effort,
 )
+from tests.source_cache import source_text, source_tree
 
 
 def _registry_provider_names():
@@ -588,8 +588,7 @@ class TestTheSweepsCannotMissANewAdapter:
 
     @staticmethod
     def _module_tree():
-        source = pathlib.Path(__file__).read_text(encoding="utf-8")
-        return source, ast.parse(source)
+        return source_text(__file__), source_tree(__file__)
 
     def test_every_parametrized_sweep_draws_from_the_registry(self):
         """Each ``provider_name`` sweep's argument is the registry helper's call."""

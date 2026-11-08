@@ -47,6 +47,7 @@ from utils.providers.cursor_agent import (  # noqa: E402
 )
 from utils.retry_ladder import STATUS_AUTH_FAILED  # noqa: E402
 from utils.write_safety import redact_text  # noqa: E402
+from tests.source_cache import source_tree
 
 # ---------------------------------------------------------------------------
 # The envelope. Values are synthetic; the shape and the key set are not.
@@ -451,8 +452,7 @@ class TestNoRefusalQuotesAStreamRaw:
         cannot tell two allowlisted calls apart from a third that happens to be
         spelled the same way.
         """
-        source = Path(subagent_executor.__file__).read_text(encoding="utf-8")
-        tree = ast.parse(source)
+        tree = source_tree(subagent_executor.__file__)
         # `ast.walk` is breadth-first, so an inner `def` is visited after the
         # one enclosing it and its assignment wins: every node ends up owned by
         # the *nearest* function around it.
@@ -544,8 +544,7 @@ class TestNoRefusalQuotesAStreamRaw:
         understands the inline spelling would go green on a refactor that
         reintroduced the leak one line higher.
         """
-        source = Path(subagent_executor.__file__).read_text(encoding="utf-8")
-        tree = ast.parse(source)
+        tree = source_tree(subagent_executor.__file__)
         owners = []
         for function in ast.walk(tree):
             if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):

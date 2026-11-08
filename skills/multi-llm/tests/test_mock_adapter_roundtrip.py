@@ -59,6 +59,7 @@ from utils.providers.base import (  # noqa: E402
 )
 
 from .mocks import mock_llm  # noqa: E402
+from tests.source_cache import source_tree
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 PROVIDERS_YAML = SKILL_DIR / "providers.yaml"
@@ -100,7 +101,7 @@ NO_ADAPTER = "<no adapter in the provider registry>"
 
 
 def _mock_ast() -> ast.Module:
-    return ast.parse(MOCK_LLM_PATH.read_text(encoding="utf-8"))
+    return source_tree(MOCK_LLM_PATH)
 
 
 def _function(name: str) -> ast.FunctionDef:

@@ -49,6 +49,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import subagent_executor as executor  # noqa: E402
 from utils.retry_ladder import MIN_ATTEMPT_BUDGET_S  # noqa: E402
 from utils.subagent_tasks import build_inputs, make_task  # noqa: E402
+from tests.source_cache import source_tree
 
 #: ``_run_lane_a``'s "no ``failure_category`` key at all": the error-line
 #: fallback an exit-0 failure takes. ``None`` is a verdict, so it cannot mark
@@ -185,10 +186,9 @@ class TestTheRecursionIsDeleted:
     def test_run_single_model_never_calls_itself(self):
         import ast
 
-        source = (
+        tree = source_tree(
             Path(__file__).parent.parent / "utils" / "review_orchestrator_base.py"
-        ).read_text(encoding="utf-8")
-        tree = ast.parse(source)
+        )
         target = next(
             node for node in ast.walk(tree)
             if isinstance(node, ast.AsyncFunctionDef)

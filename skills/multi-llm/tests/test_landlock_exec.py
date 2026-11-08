@@ -39,6 +39,7 @@ SKILL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SKILL_ROOT))
 
 from utils import landlock_exec as lx  # noqa: E402
+from tests.source_cache import source_tree  # noqa: E402
 
 WRAPPER = SKILL_ROOT / "utils" / "landlock_exec.py"
 
@@ -490,7 +491,7 @@ class TestEntries:
 
 class TestTheScriptStandsAlone:
     def test_it_imports_nothing_but_the_stdlib(self):
-        tree = ast.parse(WRAPPER.read_text(encoding="utf-8"))
+        tree = source_tree(WRAPPER)
         imported = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):

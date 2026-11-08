@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import pytest
+from tests.source_cache import source_tree
 
 SKILL_ROOT = Path(__file__).parent.parent
 REPO_ROOT = SKILL_ROOT.parent.parent
@@ -416,7 +417,7 @@ class TestTheRows:
         for node in (n for row in gate.ROWS for n in row.nodes):
             path, *parts = node.split("::")
             if path not in defined:
-                tree = ast.parse((SKILL_ROOT / path).read_text(encoding="utf-8"))
+                tree = source_tree(SKILL_ROOT / path)
                 defined[path] = {
                     f"{cls.name}::{fn.name}" for cls in tree.body
                     if isinstance(cls, ast.ClassDef) for fn in cls.body

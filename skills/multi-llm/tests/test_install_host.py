@@ -74,6 +74,7 @@ from tests.generated_distributions import (  # noqa: E402
     CODEX,
     DISTRIBUTIONS,
 )
+from tests.source_cache import source_tree  # noqa: E402
 
 #: The repository (and published-plugin) root: the directory holding `README.md`
 #: and `docs/`. Anchored on the skill root, never derived from the depth of
@@ -1335,9 +1336,7 @@ class TestWindowsSeam:
             f"{source.name}: "
             + (node.attr if isinstance(node, ast.Attribute) else node.id)
             for source in sources
-            for node in ast.walk(
-                ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
-            )
+            for node in ast.walk(source_tree(source))
             if isinstance(node, (ast.Attribute, ast.Name))
             and (getattr(node, "attr", None) or getattr(node, "id", None))
             in ("symlink", "symlink_to", "hardlink_to", "link", "mklink")

@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.llm_client import expand_env_home, invoke_with_provider  # noqa: E402
 from utils.providers.base import LLMProvider  # noqa: E402
+from tests.source_cache import source_tree
 
 
 HOME_RELATIVE = "~/.codex_work"
@@ -172,7 +173,7 @@ class TestLaneBSpawnSiteExpands:
         import ast
 
         source = Path(__file__).parent.parent / "utils" / module_name
-        tree = ast.parse(source.read_text(encoding="utf-8"))
+        tree = source_tree(source)
 
         wrapped = []
         for node in ast.walk(tree):
