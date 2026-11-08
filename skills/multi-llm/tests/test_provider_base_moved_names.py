@@ -295,6 +295,10 @@ class TestTheGuardSeesBase:
          "_provider_block"),
         ('import utils.providers.base as base_module\nbase_module.ENV_ALLOWLIST_MEASURED = {}',
          "ENV_ALLOWLIST_MEASURED"),
+        ('monkeypatch.setattr(target=base, name="env_allowlist_enabled", value=None)',
+         "env_allowlist_enabled"),
+        ('mock.patch(target="utils.providers.base.matches_any")', "matches_any"),
+        ('mock.patch.object(target=base, attribute="read_help_tokens")', "read_help_tokens"),
     ])
     def test_a_write(self, snippet, name):
         hits = MovedNameWriteScanner(base._MOVED_TO, "base").scan(_IMPORTS + snippet)
