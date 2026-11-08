@@ -74,6 +74,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.scope_policy",
         "utils.stream_bootstrap",
         "utils.text_clip",
+        "utils.yaml_io",
     )),
     1: ("state", (
         "utils.cli_common",
