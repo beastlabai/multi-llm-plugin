@@ -271,7 +271,8 @@ def _code_slot(tmp_path, monkeypatch, state, policy) -> str:
         return {"success": True, "data": [], "source": "file", "output_file": "", "details": {}}
 
     monkeypatch.setattr(rob, "get_provider", lambda _name: _NoProbe())
-    monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+    from utils import subagent_executor
+    subagent_executor._SANDBOX_PROBE_CACHE.clear()
     monkeypatch.setattr(cro, "invoke_with_file_output", dispatch)
     monkeypatch.setattr(cro, "get_project_root", lambda _p: str(tmp_path))
     kwargs = {"scope_policy": policy} if policy is not None else {}

@@ -52,6 +52,23 @@ def _session_uv_stays_reachable(monkeypatch):
         monkeypatch.setenv("MULTI_LLM_UV", _SESSION_UV)
 
 
+@pytest.fixture(autouse=True)
+def _clear_process_caches():
+    """Start and end every test with every module-level cache empty.
+
+    The caches are process-scoped on purpose (``utils/process_state.py``), so in
+    one pytest worker a probe verdict, a version read or a warn-once entry would
+    otherwise reach the next test. Every cache is registered there and emptied
+    in place here; a test that needs a cold cache mid-test calls ``.clear()`` on
+    it, never ``setattr`` (``tests/test_process_state.py``).
+    """
+    from utils import process_state
+
+    process_state.reset_all()
+    yield
+    process_state.reset_all()
+
+
 def pytest_addoption(parser):
     """The container host lane's empty-lane escape hatch (C6).
 
@@ -432,23 +449,19 @@ def _pin_opencode_debug_config(request, monkeypatch):
     (``None``, i.e. "unknown": every caller keeps its pre-existing verdict, and
     `_user_defines_provider` falls back to its file read) for every test that
     does not opt out with ``@pytest.mark.debug_config``. The per-process memo
-    is cleared around every test so one read never leaks into the next.
+    starts every test empty (`_clear_process_caches`), so one read never leaks
+    into the next.
     """
     try:
         from utils.providers import opencode as oc
     except Exception:
         yield
         return
-    memo = getattr(oc, "_USER_CONFIG_MEMO", None)
-    if memo is not None:
-        memo.clear()
     if "debug_config" not in request.keywords and hasattr(oc, "_spawn_debug_config"):
         monkeypatch.setattr(
             oc, "_spawn_debug_config", lambda argv, env, cwd, timeout: None
         )
     yield
-    if memo is not None:
-        memo.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -785,7 +798,8 @@ def _pin_real_sandbox_probes(request, monkeypatch):
     and fails the test at teardown, unless the test opts in with
     ``@pytest.mark.shell_probe``, as the gate's own tests with fake ``sh``
     probes do. The shared per-process probe
-    cache is reset around every test so one verdict never leaks into the next.
+    cache starts every test empty (`_clear_process_caches`), so one verdict
+    never leaks into the next.
     Opt out with ``@pytest.mark.sandbox_probe``.
     """
     try:
@@ -796,20 +810,9 @@ def _pin_real_sandbox_probes(request, monkeypatch):
     except Exception:
         yield
         return
-    # The one probe cache both lanes share (plan §3.6), with its decisions,
-    # version reads and once-per-process retirement lines.
-    for name in (
-        "_SANDBOX_PROBE_CACHE", "_SANDBOX_PROBE_KEY_LOCKS", "_SANDBOX_DECISIONS",
-        "_PROBE_VERSION_CACHE",
-        # The version preflight's cache feeds the walk's removed_at skip
-        # (plan §3.2): a version read by an earlier test (the mock answers
-        # 0.156.1) must not skip rung 1 in a later one.
-        "_VERSION_CACHE",
-    ):
-        if hasattr(executor, name):
-            monkeypatch.setattr(executor, name, {})
-    if hasattr(executor, "_RETIREMENTS_ANNOUNCED"):
-        monkeypatch.setattr(executor, "_RETIREMENTS_ANNOUNCED", set())
+    # The probe cache both lanes share, its decisions, the version reads that
+    # feed the walk's removed_at skip and the retirement lines start empty with
+    # every other registered cache (`_clear_process_caches`).
     if "sandbox_probe" in request.keywords:
         yield
         return

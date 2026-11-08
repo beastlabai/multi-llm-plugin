@@ -59,8 +59,10 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
     from .git_utils import git_argv
+    from .process_state import process_cache
 except ImportError:  # pragma: no cover - direct-script import shim
     from utils.git_utils import git_argv
+    from utils.process_state import process_cache
 
 CONFIG_NAME = "config.toml"
 
@@ -92,7 +94,7 @@ ENABLED = True
 #: anchor and cwd spawns no ``git``. Only answers from a successful
 #: ``git rev-parse`` are kept; a directory's toplevel is taken as fixed for the
 #: life of a run, so nothing invalidates an entry but :func:`reset`.
-_REPO_KEYS: Dict[str, Tuple[str, ...]] = {}
+_REPO_KEYS: Dict[str, Tuple[str, ...]] = process_cache("utils.codex_trust._REPO_KEYS", lock=_LOCK)
 
 
 def reset() -> None:

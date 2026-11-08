@@ -32,6 +32,7 @@ from typing import (
 # ladder must stay free of provider imports — it reads an adapter's retry
 # envelope *structurally*, through a Protocol, for exactly that reason.
 try:  # pragma: no cover - import shim mirrors the rest of utils/
+    from ..process_state import process_cache
     from ..retry_ladder import (
         STATUS_AUTH_FAILED,
         STATUS_CONTEXT_LENGTH_EXCEEDED,
@@ -41,6 +42,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         STATUS_TIMEOUT,
     )
 except ImportError:  # pragma: no cover - direct-script import shim
+    from utils.process_state import process_cache
     from utils.retry_ladder import (
         STATUS_AUTH_FAILED,
         STATUS_CONTEXT_LENGTH_EXCEEDED,
@@ -1053,7 +1055,7 @@ VENDOR_BACKEND_POLICIES: Tuple[str, ...] = (
     VENDOR_BACKEND_STRIP,
 )
 
-_ENV_POLICY_WARNED: set = set()
+_ENV_POLICY_WARNED: set = process_cache("utils.providers.base._ENV_POLICY_WARNED", set)
 
 
 def _warn_policy_once(key: str, message: str) -> None:
@@ -2323,7 +2325,9 @@ _ERROR_CONTEXT = re.compile(
 _CONTEXT_WINDOW = 48
 
 #: Compiled-pattern cache: the classifier runs on every failed dispatch.
-_STREAM_PATTERNS: Dict[str, "re.Pattern[str]"] = {}
+_STREAM_PATTERNS: Dict[str, "re.Pattern[str]"] = process_cache(
+    "utils.providers.base._STREAM_PATTERNS"
+)
 
 
 def stream_pattern(pattern: str) -> "re.Pattern[str]":
@@ -3328,11 +3332,13 @@ _FLAG_TOKEN_RE = re.compile(r"(?<![\w-])(--[A-Za-z0-9][A-Za-z0-9-]*)(?![\w-])")
 #: One help read per (resolved binary, help argv) per process. The argv is part
 #: of the key because a flag can live on a subcommand's help rather than the
 #: top-level one, and those are two different reads of the same binary.
-_HELP_TOKENS: Dict[Tuple[str, Tuple[str, ...]], FrozenSet[str]] = {}
 _HELP_TOKENS_LOCK = threading.Lock()
+_HELP_TOKENS: Dict[Tuple[str, Tuple[str, ...]], FrozenSet[str]] = process_cache(
+    "utils.providers.base._HELP_TOKENS", lock=_HELP_TOKENS_LOCK
+)
 
 #: One WARN per declined capability per process, not one per dispatch.
-_GATE_WARNED: Set[Any] = set()
+_GATE_WARNED: Set[Any] = process_cache("utils.providers.base._GATE_WARNED", set)
 
 
 def reset_flag_gate_cache() -> None:

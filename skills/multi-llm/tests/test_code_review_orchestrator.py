@@ -2328,7 +2328,7 @@ class TestTheCodeReviewFanoutGatesOnTheSandboxProbe:
 
         plan_path = tmp_path / "plan.md"
         plan_path.write_text("# Plan\n", encoding="utf-8")
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._Probed())
         monkeypatch.setattr(cro, "get_project_root", lambda _p: str(tmp_path))
 
@@ -2403,7 +2403,8 @@ class TestTheCodeReviewFanoutGatesOnTheSandboxProbe:
         adapter = adapter or self._AutoFallback
         plan_path = tmp_path / "plan.md"
         plan_path.write_text("# Plan\n", encoding="utf-8")
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        from utils import subagent_executor
+        subagent_executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: adapter())
         monkeypatch.setattr(cro, "get_project_root", lambda _p: str(tmp_path))
         monkeypatch.setattr(cro, "invoke_with_file_output", dispatch)
@@ -3666,7 +3667,8 @@ def _run_fanout_capturing_prompts(tmp_path, monkeypatch, args_overrides, *, diff
         }
 
     monkeypatch.setattr(rob, "get_provider", lambda _name: _NoProbeAdapter())
-    monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+    from utils import subagent_executor
+    subagent_executor._SANDBOX_PROBE_CACHE.clear()
     monkeypatch.setattr(cro, "get_project_root", lambda _p: str(tmp_path))
     monkeypatch.setattr(cro, "invoke_with_file_output", dispatch)
     monkeypatch.setattr(base, "PROVIDER_STAGGER_DELAY", 0.0)
@@ -4021,7 +4023,8 @@ def _scope_fanout(plan, monkeypatch, models, *, respond=None, capabilities=None,
                 "output_file": "", "details": {}}
 
     monkeypatch.setattr(rob, "get_provider", lambda _name: _NoProbeAdapter())
-    monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+    from utils import subagent_executor
+    subagent_executor._SANDBOX_PROBE_CACHE.clear()
     monkeypatch.setattr(cro, "invoke_with_file_output", dispatch)
     monkeypatch.setattr(base, "PROVIDER_STAGGER_DELAY", 0.0)
     if capabilities is not None:

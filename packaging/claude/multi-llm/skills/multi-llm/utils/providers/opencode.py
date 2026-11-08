@@ -26,6 +26,7 @@ from typing import (
 )
 
 from ..json_extractor import extract_json_from_text, strip_jsonc
+from ..process_state import process_cache
 from .base import (
     PROFILE_AGENT_READONLY,
     PROFILE_AGENT_WRITE,
@@ -457,8 +458,10 @@ def continue_loop_on_deny_allowed(
 #: preflight to hand a version in, so without this every such dispatch would
 #: land on the unread branch above: the key never emitted on ``generate`` and
 #: the "not read on this path" WARN printed on an ordinary run.
-_LANE_A_VERSION: Dict[str, str] = {}
 _LANE_A_VERSION_LOCK = threading.Lock()
+_LANE_A_VERSION: Dict[str, str] = process_cache(
+    "utils.providers.opencode._LANE_A_VERSION", lock=_LANE_A_VERSION_LOCK
+)
 
 
 def _lane_a_runner_version(provider: Any) -> str:
@@ -524,8 +527,8 @@ _ACTIVE: contextvars.ContextVar[Optional[Dict[str, Any]]] = (
     contextvars.ContextVar("multi_llm_opencode_hermetic", default=None)
 )
 
-_WARNED: set = set()
 _WARNED_LOCK = threading.Lock()
+_WARNED: set = process_cache("utils.providers.opencode._WARNED", set, lock=_WARNED_LOCK)
 
 
 def _warn_once(key: str, message: str) -> None:
@@ -771,7 +774,7 @@ def _read_help_tokens(binary: str) -> frozenset:
 
 
 _FLAG_TOKEN_RE = re.compile(r"--[A-Za-z0-9][A-Za-z0-9-]*")
-_HELP_TOKENS: Dict[str, frozenset] = {}
+_HELP_TOKENS: Dict[str, frozenset] = process_cache("utils.providers.opencode._HELP_TOKENS")
 
 
 class _UnreconstructibleProvider(Exception):
@@ -1322,7 +1325,9 @@ def _config_key_resolves(
 
 
 _USER_CONFIG_LOCK = threading.Lock()
-_USER_CONFIG_MEMO: Dict[str, Optional[DeclaredConfig]] = {}
+_USER_CONFIG_MEMO: Dict[str, Optional[DeclaredConfig]] = process_cache(
+    "utils.providers.opencode._USER_CONFIG_MEMO", lock=_USER_CONFIG_LOCK
+)
 
 
 def _user_config_memo_key(cwd: Optional[str]) -> str:

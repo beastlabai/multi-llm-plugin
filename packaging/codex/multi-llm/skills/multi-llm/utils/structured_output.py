@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from .json_extractor import extract_json_from_text
+from .process_state import process_cache
 from .providers.base import (
     MAX_STRUCTURED_OUTPUT_RETRIES,
     STRUCTURED_OUTPUT_RETRY_ENV,
@@ -460,7 +461,7 @@ def native_transport_error(
 
 
 #: One WARN per (provider, phase) per process, not one per dispatch.
-_DECLINED: set = set()
+_DECLINED: set = process_cache("utils.structured_output._DECLINED", set)
 
 
 def reset_declined_cache() -> None:

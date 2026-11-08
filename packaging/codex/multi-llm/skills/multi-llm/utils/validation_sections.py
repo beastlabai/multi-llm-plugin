@@ -26,8 +26,10 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 try:
+    from .process_state import process_cache
     from .validation_context import SELECTION_CITED
 except ImportError:  # pragma: no cover - flat-import fallback
+    from utils.process_state import process_cache  # type: ignore[no-redef]
     from utils.validation_context import SELECTION_CITED  # type: ignore[no-redef]
 
 #: The environment switch. Unset, every batch embeds the whole plan and a
@@ -92,7 +94,7 @@ _QUALIFIER_KEY = re.compile(r"\((?:§\s*)?([a-z]{0,2}\d+(?:\.\d+)*)\)")
 _RANGE = re.compile(r"^(?:§\s*)?(\d+(?:\.\d+)*)\s*-\s*(?:§\s*)?(\d+(?:\.\d+)*)$")
 
 
-_REPORTED_VALUES: set = set()
+_REPORTED_VALUES: set = process_cache("utils.validation_sections._REPORTED_VALUES", set)
 
 
 def context_setting(environ: Optional[Mapping[str, str]] = None) -> str:

@@ -28,9 +28,11 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:  # normal import (utils is a package)
     from .cli_common import skill_dir
+    from .process_state import process_cache
     from .unattended import NeedsHuman
 except ImportError:  # pragma: no cover - direct script runs with utils/ on path
     from cli_common import skill_dir  # type: ignore
+    from process_state import process_cache  # type: ignore
     from unattended import NeedsHuman  # type: ignore
 
 
@@ -110,10 +112,12 @@ _CORRUPT_INSTALL = (
     "       one means a partial or corrupt install; reinstall the skill."
 )
 
-_CACHE: Dict[str, Dict[str, Any]] = {}
 # Held across a miss, so concurrent first readers (doctor's probe threads) wait
 # for one parse instead of each running their own.
 _CACHE_LOCK = threading.Lock()
+_CACHE: Dict[str, Dict[str, Any]] = process_cache(
+    "utils.host_capabilities._CACHE", lock=_CACHE_LOCK
+)
 
 
 class UnknownHost(NeedsHuman):

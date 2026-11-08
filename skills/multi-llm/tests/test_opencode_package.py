@@ -7659,7 +7659,7 @@ def pin_render(tmp_path, monkeypatch):
     monkeypatch.syspath_prepend(str(SKILL_ROOT / "hosts"))
     import render_capabilities as renderer
 
-    monkeypatch.setattr(caps, "_CACHE", {})
+    caps.clear_cache()
     original = (SKILL_ROOT / caps.CAPABILITIES_FILE).read_text(encoding="utf-8")
     calls = []
 

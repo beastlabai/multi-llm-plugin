@@ -5804,7 +5804,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         """Lane A with the probing adapter bound and no dispatch permitted."""
         from utils import review_orchestrator_base as rob
 
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._Probed())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
 
@@ -5864,8 +5864,8 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
 
         from utils import review_orchestrator_base as rob
 
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_KEY_LOCKS", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
+        executor._SANDBOX_PROBE_KEY_LOCKS.clear()
         monkeypatch.setattr(rob, "get_provider", lambda name: name)
         probing = threading.Event()
         release = threading.Event()
@@ -5910,7 +5910,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         """`not-required` spawns nothing and the slot dispatches as before."""
         from utils import review_orchestrator_base as rob
 
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._Unprobed())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
         runs = []
@@ -5954,7 +5954,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
     def test_the_verdict_is_three_way_and_never_truthy_by_accident(self, monkeypatch):
         from utils import review_orchestrator_base as rob
 
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._AutoFallback())
         verdict = rob.sandbox_refusal("fakebwrap", None)
         assert verdict.verdict == rob.SANDBOX_DISPATCH_UNSANDBOXED
@@ -5963,7 +5963,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         assert verdict.rung == "unsandboxed"
         assert rob.sandbox_fallback_kwargs(verdict) == {"sandbox_fallback": "unsandboxed"}
 
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._FallbackOff())
         verdict = rob.sandbox_refusal("fakebwrap", None)
         assert verdict.verdict == rob.SANDBOX_REFUSE
@@ -5971,7 +5971,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         assert verdict.reason.startswith("[SANDBOX_UNAVAILABLE]")
         assert rob.sandbox_fallback_kwargs(verdict) == {}
 
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._Unprobed())
         verdict = rob.sandbox_refusal("fakeplain", None)
         assert verdict.verdict == rob.SANDBOX_DISPATCH
@@ -5984,7 +5984,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
     ):
         from utils import review_orchestrator_base as rob
 
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._AutoFallback())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
         seen = []
@@ -6011,7 +6011,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
     def test_off_refuses_exactly_as_before(self, tmp_path, monkeypatch, capsys):
         from utils import review_orchestrator_base as rob
 
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._FallbackOff())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
 
@@ -6032,7 +6032,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         slot runs as before, and the override does not fire on it."""
         from utils import review_orchestrator_base as rob
 
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._AutoFallback())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
         # The probe could not be run at all → `unknown`.
@@ -6072,7 +6072,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         from utils import review_orchestrator_base as rob
 
         self._git_repo(tmp_path)
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._AutoFallback())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
 
@@ -6113,7 +6113,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         from utils.output_handler import output_dir_path
 
         self._git_repo(tmp_path)
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._AutoFallback())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
         plan_out = output_dir_path(tmp_path / "plan.md")
@@ -6202,7 +6202,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
             "fakeplain": self._Unprobed(),
             "fakeoff": self._FallbackOff(),
         }
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda name: adapters[name])
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
 

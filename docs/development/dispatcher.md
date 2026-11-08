@@ -490,6 +490,25 @@ plan's first phase it failed "state file not found" and the host shrugged it off
 `--internal-*` re-entry rely on it); the instruction core and shims name only
 `multi_llm.py`.
 
+**Module-level caches live in one registry.** Because one interpreter runs several targets, a cache
+at module scope is shared by every phase of a run on purpose (the sandbox probe's once-per-process
+budget, [status.md](status.md)). Declare one with `utils/process_state.process_cache("<module>.<name>")`
+(pass `set` or `list` for those kinds), never as a bare `{}`. A cache the module guards with a lock
+passes it as `lock=`; one whose workers fill it under per-key locks also passes `busy=`, read under
+that lock and True while one of them is held. Nothing on a run path resets it; `tests/conftest.py`
+calls `process_state.reset_all()` around every test, which empties each registered container in
+place, under its lock. A cache whose lock stays held, or whose `busy` stays True, for `LOCK_WAIT_S`
+is left as it was, and the reset raises `CacheBusyError` naming the cache and the thread in its
+module's code: a test left a worker running. So a registered cache is cleared, never rebound, by its
+module and by tests alike (`.clear()`, `lines[:] = [...]` or `patch.dict`). The import shims' flat
+`import process_state` reaches the same registry as `utils.process_state`: whichever loads second
+returns the first. `tests/test_process_state.py` covers module level, module-level `if`/`try`/`with`
+blocks and class bodies (`<module>.<Class>.<attr>`), not instance attributes or `lru_cache`. It fails
+on an unregistered cache-named container (`CACHE_WORDS`), on any other empty container in `utils/` that
+is not in `NOT_REGISTERED` with its reason, on a rebinding, and on a cache used under a module lock it
+was not registered with. Two checks over the modules loaded in a fresh interpreter catch what syntax
+cannot see, such as a factory's return value.
+
 ## Import layers
 
 `tests/test_import_layers.py` assigns every skill module to one of seven layers (`LAYERS`: L0 core,

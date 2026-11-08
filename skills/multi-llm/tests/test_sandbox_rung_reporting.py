@@ -116,7 +116,8 @@ def _pin_probe(monkeypatch, rung):
     """The fan-out's probe answers ``unavailable`` and the walk selected
     ``rung``; everything downstream of it — the key, the gate, the notice, the
     argv, the records — is the real code."""
-    monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+    from utils import subagent_executor
+    subagent_executor._SANDBOX_PROBE_CACHE.clear()
     if rung == "unsandboxed":
         # What codex 0.156.1 measures (2026-09-24): rung 1 probed, its panic
         # classified by text, then the uncontained rung.

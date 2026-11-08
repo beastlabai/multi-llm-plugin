@@ -116,7 +116,7 @@ def fixture_tree(tmp_path, monkeypatch):
         )
         caps.clear_cache()
 
-    monkeypatch.setattr(caps, "_CACHE", {})
+    caps.clear_cache()
     monkeypatch.setattr("utils.cli_common._SKILL_DIR", root)
     return root, write
 

@@ -7,6 +7,7 @@ import shutil
 import subprocess
 from typing import Any, Collection, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from ..process_state import process_cache
 from .base import (
     PROFILE_AGENT_READONLY,
     PROFILE_AGENT_WRITE,
@@ -248,7 +249,9 @@ STRIP_VERDICT_DECLINE = "decline"
 #: sanitized against. Nothing invalidates it mid-process: a credential that
 #: changes under a running orchestrator keeps the run's first verdict, which is
 #: precisely what makes the two lanes agree for the whole run.
-_VERDICT_CACHE: Dict[Tuple[str, ...], Tuple[str, str]] = {}
+_VERDICT_CACHE: Dict[Tuple[str, ...], Tuple[str, str]] = process_cache(
+    "utils.providers.claude_code._VERDICT_CACHE"
+)
 #: Counts probe **spawns**, so the "one probe per process, never per slot" rule
 #: is observable rather than asserted. Read by tests only.
 _PROBE_SPAWNS = 0

@@ -72,7 +72,8 @@ def _completed(stdout, returncode=0, stderr=""):
 
 
 def _pin_uncontained(monkeypatch):
-    monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+    from utils import subagent_executor
+    subagent_executor._SANDBOX_PROBE_CACHE.clear()
     verdict = SandboxProbeResult(
         "unavailable", BWRAP_LINE, "unsandboxed",
         (("landlock", "retired"), ("unsandboxed", "taken")),

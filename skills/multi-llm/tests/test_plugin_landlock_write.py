@@ -1089,7 +1089,7 @@ class TestTheJailLinesAreRepeatedAtThePhasesClose:
     ):
         from utils import subagent_executor as executor
 
-        monkeypatch.setattr(executor, "_JAIL_SUMMARY_LINES", ["[CODEX_HOME_CHECK] an earlier phase"])
+        executor._JAIL_SUMMARY_LINES[:] = ["[CODEX_HOME_CHECK] an earlier phase"]
         line = "[CODEX_HOME_CHECK] codex:m: config.toml (mcp_servers.x) changed during this dispatch"
 
         def home_changed(repo_: Repo):

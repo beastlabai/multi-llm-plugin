@@ -92,7 +92,9 @@ search the copies deliberately.
   needs the same kind of reason.
 
 Imports must be side-effect free: parsing, `sys.argv` reads, and I/O belong in
-`main`, not module scope. Multiple dispatch targets run in one interpreter.
+`main`, not module scope. Multiple dispatch targets run in one interpreter, so a
+module-level cache is declared through `utils/process_state.process_cache` and
+emptied only by the suite (docs/development/dispatcher.md#import-safety).
 
 ## CLI, paths, and lifecycle contracts
 

@@ -30,6 +30,11 @@ from typing import IO, Any, Dict, Optional, Tuple, Union
 
 import yaml
 
+try:  # pragma: no cover - import shim mirrors the rest of utils/
+    from .process_state import process_cache
+except ImportError:  # pragma: no cover - direct script runs with utils/ on path
+    from process_state import process_cache  # type: ignore
+
 #: The loader :func:`safe_load` and :func:`load_file` use (see module docstring).
 SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
@@ -53,8 +58,8 @@ PathLike = Union[str, "os.PathLike[str]"]
 
 # resolved path -> (signature, parsed document). The document is never handed
 # out: load_file returns deep copies of it.
-_CACHE: Dict[str, Tuple[tuple, Any]] = {}
 _LOCK = threading.Lock()
+_CACHE: Dict[str, Tuple[tuple, Any]] = process_cache("utils.yaml_io._CACHE", lock=_LOCK)
 
 
 def safe_load(stream: Union[str, bytes, IO[str], IO[bytes]]) -> Any:

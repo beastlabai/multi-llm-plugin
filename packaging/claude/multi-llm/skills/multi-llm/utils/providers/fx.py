@@ -42,6 +42,7 @@ from .base import (
     skill_environment_path,
 )
 from .pi import parse_answer_text
+from ..process_state import process_cache
 from ..retry_ladder import STATUS_BUDGET_EXHAUSTED
 
 
@@ -152,8 +153,8 @@ _ENVELOPE_KEYS = frozenset({
     "output", "final_output", "exit_code", "model", "resolved_provider",
     "session_id", "steps", "tool_calls", "usage", "error", "auth_failure", "recovery",
 })
-_WARNED_KEYS: set = set()
 _WARN_LOCK = threading.Lock()
+_WARNED_KEYS: set = process_cache("utils.providers.fx._WARNED_KEYS", set, lock=_WARN_LOCK)
 _HTTP = re.compile(
     r"^(?:API request failed|API access denied|configured provider authentication failed)"
     r" · HTTP (?P<status>\d{3})(?: · (?P<body>[^\n]*))?\s*$", re.MULTILINE

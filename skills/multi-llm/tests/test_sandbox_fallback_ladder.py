@@ -798,7 +798,7 @@ class TestTheWalkSharesOneDeadline:
 @pytest.fixture
 def executor_gate(monkeypatch):
     """`_detect_sandbox` with a stand-in adapter and a clean cache."""
-    monkeypatch.setattr(executor, "_SANDBOX_DECISIONS", {})
+    executor._SANDBOX_DECISIONS.clear()
 
     def run(adapter, profile=PROFILE_AGENT_READONLY, request=None):
         monkeypatch.setattr(executor, "get_provider", lambda _name: adapter)
@@ -900,7 +900,7 @@ class TestTheExecutorGate:
 @pytest.fixture
 def fanout_gate(monkeypatch):
     def run(adapter):
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: adapter)
         return rob.sandbox_refusal("fakecodex", None)
     return run
@@ -1035,7 +1035,7 @@ class TestTheRungSurvivesTheCarriers:
 
     @pytest.mark.shell_probe
     def test_the_preflight_rung_reaches_the_spawn_as_its_id(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(executor, "_SANDBOX_DECISIONS", {})
+        executor._SANDBOX_DECISIONS.clear()
         monkeypatch.setattr(executor, "get_provider", lambda _name: _Ladder())
         executor._detect_sandbox(
             "codex", key="k", spec="codex:gpt-5.5", profile=PROFILE_AGENT_READONLY,

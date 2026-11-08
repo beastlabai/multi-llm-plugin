@@ -61,6 +61,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import process_control
     from . import structured_output
     from .launch_limiter import attempt_turn_blocking
+    from .process_state import process_cache
     from .text_clip import clip
     from .json_extractor import (
         describe_syntax_error,
@@ -201,6 +202,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
     from utils import process_control
     from utils import structured_output
     from utils.launch_limiter import attempt_turn_blocking  # type: ignore
+    from utils.process_state import process_cache  # type: ignore
     from utils.text_clip import clip  # type: ignore
     from utils.json_extractor import (
         describe_syntax_error,
@@ -2642,7 +2644,7 @@ def preflight_runner(
 
 #: Process-local version cache: detected once per *distinct* runner, never per
 #: dispatch (D3m).
-_VERSION_CACHE: Dict[str, str] = {}
+_VERSION_CACHE: Dict[str, str] = process_cache("utils.subagent_executor._VERSION_CACHE")
 
 #: The same, for the D3c auth probe: ``ok`` | ``unknown`` | ``not-required`` |
 #: ``config``, keyed ``<provider>|<needs-credentials 0/1>|<profile>|<model
@@ -2653,20 +2655,20 @@ _VERSION_CACHE: Dict[str, str] = {}
 #: prefix and hermeticity with T8.4 (whether a config declares the provider
 #: depends on both). A failed probe is never cached — it raises, and the run
 #: ends.
-_AUTH_CACHE: Dict[str, str] = {}
+_AUTH_CACHE: Dict[str, str] = process_cache("utils.subagent_executor._AUTH_CACHE")
 
 #: The same, for the D3c nested-exec verdict, keyed by ``<host id>|<runner spec>``
 #: rather than by provider: the question is about the *pair*, and a host that
 #: denies one runner's egress may hand another its own bundled CLI. A denial is
 #: never cached either — it raises.
-_NESTED_CACHE: Dict[str, str] = {}
+_NESTED_CACHE: Dict[str, str] = process_cache("utils.subagent_executor._NESTED_CACHE")
 
 #: The same, for the D3 step 3 catalog leg: ``ok`` | ``unknown`` per
 #: ``<provider>|<hermetic on/off>|<config-content digest>|<normalized model>``
 #: — not provider+model, because the effective configuration changes the
 #: answer, and a hermetic and a non-hermetic slot in one process must not share
 #: a verdict. A refusal is never cached — it raises.
-_MODEL_CACHE: Dict[str, str] = {}
+_MODEL_CACHE: Dict[str, str] = process_cache("utils.subagent_executor._MODEL_CACHE")
 
 #: The executor's per-runner sandbox **decision** for the D6 self-test: ``ok``
 #: | ``unknown`` | ``not-required`` | a **rung id** per ``<host id>|<runner
@@ -2679,7 +2681,28 @@ _MODEL_CACHE: Dict[str, str] = {}
 #: raises. A rung id (``landlock``, ``unsandboxed``) is the one
 #: ``unavailable`` that did not raise. Recorded so the notice prints once per
 #: runner rather than once per batch.
-_SANDBOX_DECISIONS: Dict[str, str] = {}
+_SANDBOX_DECISIONS: Dict[str, str] = process_cache("utils.subagent_executor._SANDBOX_DECISIONS")
+
+#: Guards :data:`_SANDBOX_PROBE_CACHE` for the dict read and write only; the
+#: probe itself runs under a per-key lock (:func:`_sandbox_probe_lock`), so one
+#: provider's slow probe never holds up another provider's slot (F5,
+#: 2026-09-17). A ``threading.Lock``: the fan-out runs the blocking probe in a
+#: worker thread, and one process may drive more than one event loop. It also
+#: guards :data:`_SANDBOX_PROBE_KEY_LOCKS` and the probe's version read below.
+_SANDBOX_PROBE_LOCK = threading.Lock()
+
+
+def _sandbox_probe_running() -> bool:
+    """Whether a sandbox probe or its version read is under way: the worker
+    holds one of the per-key locks below and writes its answer to these caches
+    when done. Read under :data:`_SANDBOX_PROBE_LOCK`, which every insert into
+    the per-key tables holds; the suite's cache reset waits on it."""
+    return any(
+        lock.locked()
+        for table in (_SANDBOX_PROBE_KEY_LOCKS, _PROBE_VERSION_LOCKS)
+        for lock in table.values()
+    )
+
 
 #: The **one** per-process sandbox probe cache (plan §3.6, 2026-09-24),
 #: replacing the fan-out's ``_FANOUT_SANDBOX_CACHE`` and this module's old
@@ -2696,28 +2719,35 @@ _SANDBOX_DECISIONS: Dict[str, str] = {}
 #:   ``agent-readonly`` declare the same ladder), so the fan-out and the
 #:   executor share **one** rung probe per codex version; the profiles' own
 #:   probes differ (one writes a byte, the other does not) and stay per profile.
-_SANDBOX_PROBE_CACHE: Dict[Tuple[str, ...], "SandboxProbeResult"] = {}
-
-#: Guards :data:`_SANDBOX_PROBE_CACHE` for the dict read and write only; the
-#: probe itself runs under a per-key lock (:func:`_sandbox_probe_lock`), so one
-#: provider's slow probe never holds up another provider's slot (F5,
-#: 2026-09-17). A ``threading.Lock``: the fan-out runs the blocking probe in a
-#: worker thread, and one process may drive more than one event loop.
-_SANDBOX_PROBE_LOCK = threading.Lock()
-_SANDBOX_PROBE_KEY_LOCKS: Dict[Tuple[str, ...], threading.Lock] = {}
+_SANDBOX_PROBE_CACHE: Dict[Tuple[str, ...], "SandboxProbeResult"] = process_cache(
+    "utils.subagent_executor._SANDBOX_PROBE_CACHE",
+    lock=_SANDBOX_PROBE_LOCK, busy=_sandbox_probe_running,
+)
+_SANDBOX_PROBE_KEY_LOCKS: Dict[Tuple[str, ...], threading.Lock] = process_cache(
+    "utils.subagent_executor._SANDBOX_PROBE_KEY_LOCKS",
+    lock=_SANDBOX_PROBE_LOCK, busy=_sandbox_probe_running,
+)
 
 #: The CLI version the sandbox probe keys on, per provider, when the version
 #: preflight (:data:`_VERSION_CACHE`) has not already read it. Read only for an
 #: adapter whose ladder declares a ``removed_at`` rung, so every other adapter
 #: spawns nothing extra.
-_PROBE_VERSION_CACHE: Dict[str, str] = {}
+_PROBE_VERSION_CACHE: Dict[str, str] = process_cache(
+    "utils.subagent_executor._PROBE_VERSION_CACHE",
+    lock=_SANDBOX_PROBE_LOCK, busy=_sandbox_probe_running,
+)
 #: One lock per provider around that version spawn, so two specs of one
 #: provider probed concurrently (``asyncio.to_thread``) spawn it once.
-_PROBE_VERSION_LOCKS: Dict[str, threading.Lock] = {}
+_PROBE_VERSION_LOCKS: Dict[str, threading.Lock] = process_cache(
+    "utils.subagent_executor._PROBE_VERSION_LOCKS",
+    lock=_SANDBOX_PROBE_LOCK, busy=_sandbox_probe_running,
+)
 
 #: ``<provider>|<version>`` pairs whose retirement line (a contained rung
 #: measured unavailable from this build) this process already printed.
-_RETIREMENTS_ANNOUNCED: Set[str] = set()
+_RETIREMENTS_ANNOUNCED: Set[str] = process_cache(
+    "utils.subagent_executor._RETIREMENTS_ANNOUNCED", set
+)
 
 #: What :func:`_detect_sandbox` returns (and ``preflight_runner`` records as
 #: ``info["sandbox"]``) for the uncontained rung — the word it has always been.
@@ -2743,7 +2773,9 @@ SANDBOX_DECISION_WRITE_BY_CONSENT = "unsandboxed-by-consent"
 #: rung id, policy, standard probe tail, walk clause)`` — so the scheduler can
 #: print it before each batch (:func:`write_rung_notice`). No path: the write
 #: target is rendered from the caller's request at print time.
-_SANDBOX_NOTICE_PARTS: Dict[str, Tuple[str, str, Optional[str], str, str]] = {}
+_SANDBOX_NOTICE_PARTS: Dict[str, Tuple[str, str, Optional[str], str, str]] = process_cache(
+    "utils.subagent_executor._SANDBOX_NOTICE_PARTS"
+)
 
 #: Lines the run's closing summary repeats (F1 item 6 and Limits): every
 #: ``[JAIL_DENIED]`` and ``[CODEX_HOME_CHECK]`` line this process printed,
@@ -2751,8 +2783,10 @@ _SANDBOX_NOTICE_PARTS: Dict[str, Tuple[str, str, Optional[str], str, str]] = {}
 #: (``landlock_dispatch.TrustEntriesNote``). Per process, like the probe
 #: cache; :func:`jail_summary_lines` renders it and :func:`run_tasks` prints
 #: the ones its own batch added (counted by :func:`jail_summary_count`).
-_JAIL_SUMMARY_LINES: List[Any] = []
 _JAIL_SUMMARY_LOCK = threading.Lock()
+_JAIL_SUMMARY_LINES: List[Any] = process_cache(
+    "utils.subagent_executor._JAIL_SUMMARY_LINES", list, lock=_JAIL_SUMMARY_LOCK
+)
 
 #: How many jailed codex children of this process are live, and how many have
 #: started, so a ``[CODEX_HOME_CHECK]`` line can say how many *other* children
@@ -2864,6 +2898,8 @@ def _sandbox_state_word(recorded: str) -> str:
     return recorded
 
 
+# The suite empties every cache above around each test (``process_state.reset_all``,
+# tests/conftest.py); these resets serve a test that needs a cold cache mid-test.
 def reset_version_cache() -> None:
     """Clear the per-process runner-version, auth, catalog, nested-exec and
     sandbox caches (tests)."""

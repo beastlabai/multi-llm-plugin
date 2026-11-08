@@ -129,8 +129,8 @@ def test_answer_format_failure_allows_file_recovery(provider):
     assert "error_code" not in result
 
 
-def test_unknown_keys_warn_once_without_discarding_answer(provider, monkeypatch):
-    monkeypatch.setattr(fx, "_WARNED_KEYS", set())
+def test_unknown_keys_warn_once_without_discarding_answer(provider):
+    fx._WARNED_KEYS.clear()
     with pytest.warns(UserWarning, match="fx version drift.*future_key"):
         assert provider.parse_output(envelope(future_key=1), "")["success"]
     import warnings

@@ -1584,7 +1584,8 @@ class TestTheAskFanoutGatesOnTheSandboxProbe:
         from utils.providers import codex as codex_module
         from utils.providers.base import PROFILE_GENERATE
 
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        from utils import subagent_executor
+        subagent_executor._SANDBOX_PROBE_CACHE.clear()
         broken = ["sh", "-c", f"echo '{self.BWRAP_LINE}' >&2; exit 1"]
         provider = registry.get_provider("codex")
         monkeypatch.setattr(
@@ -1854,7 +1855,8 @@ def break_the_codex_sandbox(monkeypatch, policy="off"):
     from utils.providers import codex as codex_module
     from utils.providers.base import PROFILE_GENERATE
 
-    monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+    from utils import subagent_executor
+    subagent_executor._SANDBOX_PROBE_CACHE.clear()
     line = "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
     broken = ["sh", "-c", f"echo '{line}' >&2; exit 1"]
     provider = registry.get_provider("codex")

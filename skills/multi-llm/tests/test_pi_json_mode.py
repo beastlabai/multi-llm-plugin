@@ -293,8 +293,8 @@ class TestTheLengthBranchKeepsTheBanner:
 class TestTheEnvelopeTestChoosesTheParser:
 
     @pytest.fixture(autouse=True)
-    def _quiet_warn(self, monkeypatch):
-        monkeypatch.setattr(base_module, "_GATE_WARNED", set())
+    def _quiet_warn(self):
+        base_module._GATE_WARNED.clear()
 
     @pytest.mark.parametrize("stdout,data", [
         ('{"answer":"OK"}', {"answer": "OK"}),
@@ -344,11 +344,11 @@ class TestTheTextModeLegIsGraded:
         return stdout, stderr
 
     def test_it_parses_to_the_0806_manifests_answer_with_one_warn(
-        self, monkeypatch, capsys
+        self, capsys
     ):
         import yaml
 
-        monkeypatch.setattr(base_module, "_GATE_WARNED", set())
+        base_module._GATE_WARNED.clear()
         stdout, stderr = self._success()
         expected = yaml.safe_load(
             (TEXT_MODE / "manifest.yaml").read_text(encoding="utf-8")

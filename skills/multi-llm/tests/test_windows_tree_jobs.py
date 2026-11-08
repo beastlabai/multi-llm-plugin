@@ -395,7 +395,7 @@ class TestWaitingLooks:
         monkeypatch.setattr(process_control, "IS_WINDOWS", False)
         monkeypatch.setattr(process_control, "_linux_process_table", lambda: None)
         monkeypatch.setattr(process_control, "_ps_process_table", ps_table)
-        monkeypatch.setattr(process_control, "_SHARED_PS_TABLE", [])
+        process_control._SHARED_PS_TABLE.clear()
         return reads
 
     def test_waits_polling_together_share_one_ps(self, ps_route):

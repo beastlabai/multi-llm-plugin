@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple, Type, Union
 
 from . import yaml_io
+from .process_state import process_cache
 from .git_utils import (
     COLLAPSE_PATH_KEYS,
     DEFAULT_COLLAPSE_PATHS,
@@ -159,7 +160,9 @@ CONFIG_WARNING_PREFIX = "multi-llm config warning:"
 
 # Provider names already warned about as "no hardcoded adapter" (re-init drift),
 # so the read-site filter warns once per name per process instead of every call.
-_WARNED_UNKNOWN_PROVIDERS: set = set()
+_WARNED_UNKNOWN_PROVIDERS: set = process_cache(
+    "utils.provider_registry._WARNED_UNKNOWN_PROVIDERS", set
+)
 
 
 class ConfigError(RuntimeError):

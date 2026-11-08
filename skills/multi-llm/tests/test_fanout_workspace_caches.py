@@ -188,7 +188,8 @@ def lane(tmp_path, monkeypatch):
         # The real adapter: the declaration under test is aider's own.
         "aider": registry.get_provider("aider"),
     }
-    monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+    from utils import subagent_executor
+    subagent_executor._SANDBOX_PROBE_CACHE.clear()
     monkeypatch.setattr(rob, "get_provider", lambda name: adapters.get(name))
     monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
     monkeypatch.setattr(cro, "get_project_root", lambda _p: str(tmp_path))

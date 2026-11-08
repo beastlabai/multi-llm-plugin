@@ -71,6 +71,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.phase_walk",
         "utils.process_capture",
         "utils.process_control",
+        "utils.process_state",
         "utils.prompt_files",
         "utils.providers.result_envelope",
         "utils.report_markdown",

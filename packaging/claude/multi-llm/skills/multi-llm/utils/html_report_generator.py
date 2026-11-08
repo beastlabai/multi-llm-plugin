@@ -27,11 +27,13 @@ try:
     )
     from . import scope_report as _scope_report
     from . import importance as _importance
+    from .process_state import process_cache
 except ImportError:
     # Direct script invocation (`python utils/html_report_generator.py`):
     # sys.path[0] is the utils/ directory, so import the sibling module directly.
     from stream_bootstrap import bootstrap_streams
     from json_extractor import sanitize_model_name
+    from process_state import process_cache  # type: ignore
     from metrics import describe_usage
     from judge_vocab import (
         JUDGE_AUTO_DECIDE,
@@ -54,7 +56,7 @@ logger = logging.getLogger(__name__)
 _ICONS_DIR = Path(__file__).parent.parent / "assets" / "icons"
 
 # Cache of loaded icon data URIs
-_icon_cache: Dict[str, str] = {}
+_icon_cache: Dict[str, str] = process_cache("utils.html_report_generator._icon_cache")
 
 
 def _load_icon_data_uri(filename: str) -> str:

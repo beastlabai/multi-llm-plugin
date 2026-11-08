@@ -72,6 +72,11 @@ from typing import (
     Tuple, TypeVar,
 )
 
+try:  # pragma: no cover - import shim mirrors the rest of utils/
+    from .process_state import process_cache
+except ImportError:  # pragma: no cover - direct script runs with utils/ on path
+    from process_state import process_cache  # type: ignore[no-redef]
+
 _T = TypeVar("_T")
 
 IS_WINDOWS = os.name == "nt"
@@ -2029,8 +2034,10 @@ def _process_table() -> Dict[int, _ProcRow]:
 #: sweeps that wait at the same time (a fan-out's slots timing out together)
 #: each spawned their own on every poll. :func:`_waiting_process_table` shares
 #: one read between them; nothing that decides a signal or a verdict reads it.
-_SHARED_PS_TABLE: List[Tuple[float, float, Dict[int, _ProcRow]]] = []
 _SHARED_PS_TABLE_LOCK = threading.Lock()
+_SHARED_PS_TABLE: List[Tuple[float, float, Dict[int, _ProcRow]]] = process_cache(
+    "utils.process_control._SHARED_PS_TABLE", list, lock=_SHARED_PS_TABLE_LOCK
+)
 
 
 def _waiting_process_table(not_before: float, max_age_s: float) -> Dict[int, _ProcRow]:

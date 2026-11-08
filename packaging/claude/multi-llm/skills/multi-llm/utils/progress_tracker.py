@@ -78,6 +78,8 @@ import sys
 import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
+from .process_state import process_cache
+
 # ---------------------------------------------------------------------------
 # The lifecycle
 # ---------------------------------------------------------------------------
@@ -1789,7 +1791,7 @@ class PhaseProgress:
 # ---------------------------------------------------------------------------
 
 #: Conditions :func:`retire_live_entries` has already reported (:func:`_warn_once`).
-_RETIRE_WARNED: set = set()
+_RETIRE_WARNED: set = process_cache("utils.progress_tracker._RETIRE_WARNED", set)
 
 
 def retire_live_entries(
