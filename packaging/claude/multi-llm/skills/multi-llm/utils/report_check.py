@@ -769,19 +769,10 @@ def _is_real_prompt(entry: Dict[str, Any]) -> bool:
     return False
 
 
-def _tool_result_texts(
-    entry: Dict[str, Any], skip: Iterable[str] = (),
-) -> Iterable[str]:
-    """The text of every ``tool_result`` block a user entry carries, in order,
-    but those answering a call whose id is in *skip*."""
-    for _call_id, text in _tool_results(entry, skip):
-        yield text
-
-
 def _tool_results(
     entry: Dict[str, Any], skip: Iterable[str] = (),
 ) -> Iterable[tuple]:
-    """``(tool_use_id, text)`` for :func:`_tool_result_texts`' results."""
+    """``(tool_use_id, text)`` for each ``tool_result`` block of *entry* not in *skip*."""
     content = _content(entry)
     if not isinstance(content, list):
         return

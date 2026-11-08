@@ -110,7 +110,7 @@ def _reply(phase_dir: Path, batch: Dict[str, Any], clusters, singletons) -> None
 
 
 def _outputs(plan: Path, phase_dir: Path):
-    rpo.reaggregate_consolidation_mode(str(phase_dir), str(plan), "plan", [])
+    rpo.reaggregate_consolidation_mode(str(phase_dir), str(plan), "plan")
     consolidated = json.loads((phase_dir / "consolidated.json").read_text(encoding="utf-8"))
     report = (phase_dir / "consolidated-report.md").read_text(encoding="utf-8")
     page = json.loads((phase_dir / CONSOLIDATED_REPORT_DATA).read_text(encoding="utf-8"))
@@ -611,6 +611,67 @@ class TestAReplyNamesOnlyItsOwnBatchsGroups:
         entries, failures = self._merge(tmp_path, groups, _tasks(groups, [0, 1]))
         assert failures["batches"] == [0]
         assert _shown(entries) == [[0], [1]]
+
+
+class TestWrongIndicesInABatchFileChangeNothing:
+    """End to end: a reply naming the right ids beside wrong indices (a
+    cluster's ``underlying_group_indices``, a singleton's ``group_index``)
+    gives the same ``consolidated.json`` entries and page as the same reply
+    with the right ones, the derived validation status included."""
+
+    STATUSES = ["valid", "needs-human-decision", "valid", "valid"]
+
+    def _run(self, tmp_path: Path, name: str, wrong: bool):
+        groups = _copies(1, others=3)
+        (tmp_path / name).mkdir()
+        plan, phase_dir = _phase(tmp_path / name, groups, self.STATUSES)
+        (batch,) = _prepare(plan, phase_dir)["batches"]
+        assert sorted(batch["group_indices"]) == [0, 1, 2, 3]
+        ids = dict(zip(batch["group_indices"], batch["group_ids"]))
+        (phase_dir / f"consolidation_batch_{batch['batch_index']}.json").write_text(json.dumps({
+            "clusters": [{
+                "title": "Config and log", "description": "d", "importance": "LOW",
+                "type": "clarification", "reasoning": "Related.",
+                "underlying_group_ids": [ids[1], ids[2]],
+                "underlying_group_indices": [3, 0] if wrong else [1, 2],
+            }],
+            "singletons": [
+                {"group_id": ids[0], "group_index": 2 if wrong else 0, "reasoning": "Alone."},
+                {"group_id": ids[3], "group_index": 99 if wrong else 3, "reasoning": "Alone."},
+            ],
+        }), encoding="utf-8")
+        entries, _report, page = _outputs(plan, phase_dir)
+        return entries, page
+
+    def test_the_outputs_match_a_reply_with_the_right_indices(self, tmp_path):
+        right = self._run(tmp_path, "right", wrong=False)
+        wrong = self._run(tmp_path, "wrong", wrong=True)
+        assert wrong == right
+        entries, page = wrong
+        assert _shown(entries) == [[0], [1, 2], [3]]
+        (cluster,) = [cg for cg in page if len(cg["underlyingGroups"]) == 2]
+        assert cluster["validationStatus"] == "needs-human-decision"
+
+
+class TestASingletonSectionKeepsItsOwnReason:
+    """A section holding one group goes to no batch (``singleton_sections``):
+    its group is a singleton that says so, in section order, and is not
+    reported as a group no batch covered (that check runs last)."""
+
+    def test_reason_order_and_no_coverage_warning(self, tmp_path, caplog):
+        groups = _copies(1, others=4)
+        ids = cons.consolidation_group_ids(groups)
+        tasks = _tasks(groups, [0, 1])
+        tasks["singleton_sections"] = {"b": [4], "c": [2], "d": [3]}
+        _write_reply(tmp_path, 0, clusters=[([ids[0], ids[1]], [0, 1])])
+        with caplog.at_level("WARNING", logger=cons.logger.name):
+            entries, failures = cons.merge_consolidation_results(str(tmp_path), tasks, groups)
+        assert [e["underlying_group_indices"] for e in entries] == [[0, 1], [4], [2], [3]]
+        assert [e["reasoning"] for e in entries[1:]] == [
+            "Singleton section — only group in this section."] * 3
+        assert not [r for r in caplog.records if "not covered" in r.getMessage()]
+        assert failures["count"] == 0
+        _assert_ids_and_indices_agree(entries, groups)
 
 
 class TestTheConsolidatedPageShowsWhatPythonSends:

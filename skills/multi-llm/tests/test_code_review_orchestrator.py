@@ -367,8 +367,8 @@ class TestValidationInputsCarryTheStampedGroupHash:
 
         captured: dict = {}
 
-        def fake_prepare(groups, **kwargs):
-            captured["prepare_groups"] = groups
+        def fake_prepare(round_):
+            captured["prepare_groups"] = round_.groups
             return {"total_batches": 1, "batching_stats": {}}
 
         def fake_merge(phase_dir, batch_metadata, grouped, validation_path):
@@ -395,7 +395,7 @@ class TestValidationInputsCarryTheStampedGroupHash:
              )), \
              patch.object(cro, "build_validation_secondary_context",
                           return_value=("", "")), \
-             patch.object(cro, "prepare_batched_validation_tasks",
+             patch.object(cro, "materialize_validation_round",
                           side_effect=fake_prepare), \
              patch.object(cro, "dispatch_subagent_tasks", return_value=True), \
              patch.object(cro, "merge_validation_batches",
@@ -407,7 +407,7 @@ class TestValidationInputsCarryTheStampedGroupHash:
 
         prepare_groups = captured.get("prepare_groups")
         merge_grouped = captured.get("merge_grouped")
-        assert prepare_groups, "no groups reached prepare_batched_validation_tasks"
+        assert prepare_groups, "no groups reached materialize_validation_round"
         assert merge_grouped, "no groups reached merge_validation_batches"
         assert all(g.get("group_hash") for g in prepare_groups), prepare_groups
         assert all(g.get("group_hash") for g in merge_grouped), merge_grouped

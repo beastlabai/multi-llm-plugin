@@ -2893,16 +2893,23 @@ class TestEveryFanOutCallSiteNamesItsOwnScript:
         from utils import review_orchestrator_base as base
 
         tree = ast.parse(inspect.getsource(base))
-        calls = [
-            node for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and getattr(node.func, "id", None) == "prepare_batched_validation_tasks"
-        ]
-        assert len(calls) >= 2, "both the fan-out and the reaggregate path prepare tasks"
-        for call in calls:
+
+        def calls_to(name):
+            return [
+                node for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and getattr(node.func, "id", None) == name
+            ]
+
+        assert len(calls_to("review_validation_round")) >= 2, (
+            "both the fan-out and the reaggregate path build their round with "
+            "review_validation_round"
+        )
+        provenances = calls_to("RoundProvenance")
+        assert provenances, "review_validation_round records the round's provenance"
+        for call in provenances:
             keywords = {kw.arg for kw in call.keywords}
             assert "orchestrator" in keywords, (
-                f"line {call.lineno} prepares validation tasks without naming "
-                f"the phase's own script, so its reaggregate_mode defaults to "
+                f"line {call.lineno} records a round without naming the "
+                f"phase's own script, so its reaggregate_mode defaults to "
                 f"review-plan"
             )

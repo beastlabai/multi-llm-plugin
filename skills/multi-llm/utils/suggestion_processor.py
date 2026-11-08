@@ -517,7 +517,7 @@ def _section_agreement(
 ) -> float:
     """Containment over cited sections, scaled by how rare those sections are.
 
-    With no weights (a one-off ``compute_similarity``) this is the plain
+    With no weights (a one-off :func:`_similarity`) this is the plain
     containment it has always been — there is no set to measure rarity over.
     """
     base = _overlap(a, b)
@@ -587,34 +587,6 @@ def _similarity(
         + WEIGHT_TITLE_RARITY * _title_rarity(a[0], b[0], token_weights)
     )
     return min(1.0, score)
-
-
-def compute_similarity(
-    s1: Dict[str, Any],
-    s2: Dict[str, Any],
-    token_weights: Optional[Mapping[str, float]] = None,
-    section_weights: Optional[Mapping[str, float]] = None,
-) -> float:
-    """
-    Compute a meaning-tracking similarity score between two suggestions.
-
-    Args:
-        s1: First suggestion
-        s2: Second suggestion
-        token_weights: Optional token → weight map from
-            ``compute_token_weights()`` over the whole set being grouped.
-            Omitted (the default), every token counts the same — fine for a
-            one-off comparison, weaker for clustering, which is why
-            ``group_similar_suggestions`` always passes one. Without it the
-            title-rarity channel is silent: rarity is a property of a set.
-        section_weights: Optional section → weight map from
-            ``compute_section_weights()``. Omitted, a shared section scores
-            plain containment, as it did before sections were weighted.
-
-    Returns:
-        Similarity score between 0 and 1
-    """
-    return _similarity(_prepare(s1), _prepare(s2), token_weights, section_weights)
 
 
 #: A theme is a label, not a sentence — it goes in a heading, a table cell and
@@ -805,60 +777,3 @@ def deduplicate_suggestions(suggestions: List[Dict[str, Any]]) -> List[Dict[str,
             unique.append(suggestion)
 
     return unique
-
-
-def merge_suggestions_by_model(
-    reviews: Dict[str, str]
-) -> List[Dict[str, Any]]:
-    """
-    Extract and merge suggestions from multiple model reviews.
-
-    Args:
-        reviews: Dictionary mapping model names to their review text
-
-    Returns:
-        Merged list of suggestions
-    """
-    all_suggestions = []
-
-    for model_name, review_text in reviews.items():
-        suggestions = extract_suggestions_from_review(review_text, model_name)
-        all_suggestions.extend(suggestions)
-
-    return deduplicate_suggestions(all_suggestions)
-
-
-def filter_by_importance(
-    groups: List[SuggestionGroup],
-    min_importance: str = "low"
-) -> List[SuggestionGroup]:
-    """
-    Filter suggestion groups by minimum importance.
-
-    Args:
-        groups: List of suggestion groups
-        min_importance: Minimum importance level, in either case
-
-    Returns:
-        Filtered list of groups
-    """
-    def group_meets_threshold(group: SuggestionGroup) -> bool:
-        return any(
-            _importance.at_least(
-                suggestion.get("importance"), _importance.normalize(min_importance, "LOW")
-            )
-            for suggestion in group.suggestions
-        )
-
-    return [g for g in groups if group_meets_threshold(g)]
-
-
-def export_groups_to_json(groups: List[SuggestionGroup]) -> str:
-    """Export suggestion groups to JSON string."""
-    return json.dumps([g.to_dict() for g in groups], indent=2)
-
-
-def import_groups_from_json(json_str: str) -> List[SuggestionGroup]:
-    """Import suggestion groups from JSON string."""
-    data = json.loads(json_str)
-    return [SuggestionGroup.from_dict(item) for item in data]

@@ -12,6 +12,7 @@ import os
 import re
 import sys
 from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -1460,25 +1461,6 @@ def _legacy_contract_reason(metadata: Dict[str, Any], phase_dir: Path) -> Option
     return legacy_context_round_reason(str(phase_dir))
 
 
-def stale_validation_reason(
-    validation_path: Path,
-    grouped_path: Path,
-    tasks_path: Optional[Path] = None,
-) -> Optional[str]:
-    """Why a ``validation.json`` must not be trusted over the batch files, or ``None``.
-
-    The reason half of :func:`validation_source_decision`, which documents the
-    rules: the ``grouped_sha256`` binding (D7), the ``batch_sha256`` +
-    ``batch_manifest`` binding to the exact batch bytes it merged (§7.1), and —
-    for a file without ``batch_sha256`` only — the legacy "a batch file is
-    newer" mtime test.
-
-    Returns:
-        ``None`` when the file may be used, else a one-line reason for the log.
-    """
-    return validation_source_decision(validation_path, grouped_path, tasks_path)[0]
-
-
 def _derive_model_from_results(validation_results: List[Dict[str, Any]]) -> Optional[str]:
     """Best-effort ``metadata.model`` for a caller that passed none.
 
@@ -1573,7 +1555,7 @@ def save_validation_results(
         batch_sha256: ``{batch_index: sha256}`` over the bytes of every batch
             merged into this file (§7.1a). An empty dict is still a binding
             (a writer that merged no batches); ``None`` omits the key and leaves
-            the file on the legacy mtime test in ``stale_validation_reason``.
+            the file on the legacy mtime test in ``validation_source_decision``.
         batch_manifest: ``{kind, round}`` of the task file those batches
             answered (§7.1a), so a hash recorded under one round is never
             matched against another round's file of the same name.
@@ -1791,83 +1773,6 @@ def prepare_validation_task(
     }
 
 
-def prepare_revalidation_task(
-    groups: List[Dict[str, Any]],
-    validation_results: List[Dict[str, Any]],
-    context: str,
-    output_path: str,
-    include_all_human: bool = False,
-    model: str = "auto"
-) -> Dict[str, Any]:
-    """
-    Prepare revalidation input for Claude Code subagent.
-
-    Similar to prepare_validation_task, but only includes items that need
-    revalidation (validation_failed status, optionally needs-human-decision).
-
-    Args:
-        groups: Original grouped suggestions/issues
-        validation_results: Previous validation results
-        context: Context for validation (plan content or diff)
-        output_path: Path where subagent should write results
-        include_all_human: If True, also revalidate needs-human-decision items
-        model: Model hint for reference
-
-    Returns:
-        Dict with:
-        - prompt: Full validation prompt for subagent (or None if nothing to revalidate)
-        - output_path: Where subagent should write results
-        - items_to_revalidate: Count of items needing revalidation
-        - item_indices: List of original indices being revalidated
-        - original_validation: The original validation results (for merging later)
-    """
-    # Identify items needing revalidation
-    items_to_revalidate = []
-    item_indices = []
-
-    for i, val in enumerate(validation_results):
-        status = val.get("status", "needs-human-decision")
-        error_type = val.get("error_type", ERROR_TYPE_UNKNOWN)
-
-        should_revalidate = (
-            status == "validation_failed" or
-            (include_all_human and status == "needs-human-decision" and
-             error_type != ERROR_TYPE_AMBIGUOUS)
-        )
-
-        if should_revalidate and i < len(groups):
-            items_to_revalidate.append(groups[i])
-            item_indices.append(i)
-
-    if not items_to_revalidate:
-        return {
-            "prompt": None,
-            "output_path": output_path,
-            "items_to_revalidate": 0,
-            "item_indices": [],
-            "original_validation": validation_results,
-            "model_hint": model,
-        }
-
-    # Prepare the validation task for the subset
-    validation_task = prepare_validation_task(
-        groups=items_to_revalidate,
-        context=context,
-        output_path=output_path,
-        model=model
-    )
-
-    return {
-        "prompt": validation_task["prompt"],
-        "output_path": output_path,
-        "items_to_revalidate": len(items_to_revalidate),
-        "item_indices": item_indices,
-        "original_validation": validation_results,
-        "suggestions_json": validation_task["suggestions_json"],
-        "model_hint": model,
-    }
-
-
 def load_validation_results(validation_path: Path) -> List[Dict[str, Any]]:
     """
     Load validation results with migration for older format files.
@@ -2081,6 +1986,117 @@ def resolved_reaggregate_command(
     return str(legacy) if legacy else None
 
 
+#: The heading a validation prompt gives its first block unless told otherwise.
+PLAN_CONTEXT_LABEL = "Plan content"
+
+
+@dataclass(frozen=True)
+class ContextBlock:
+    """One document a validation prompt embeds.
+
+    *text* is excerpted on its own per-context budget, so a long first block
+    cannot squeeze a second one out of the prompt. *label* is the block's
+    heading (``"Plan content"``, …). *document* is the bound document the text
+    was read from (§2.3 step 5): its hash becomes ``inputs.plan_sha256``
+    (label ``plan``) or ``inputs.tasks_sha256`` (label ``tasks``) instead of a
+    re-read of the live file, and over the limit its snapshot is what the
+    prompt names. ``None`` keeps the legacy behaviour: no path, and an
+    over-limit block is ``mode: truncated``. Review-code's reviewed-code block
+    (label ``reviewed-code``) is never named by path.
+    """
+
+    text: str
+    label: str = PLAN_CONTEXT_LABEL
+    document: Optional[BoundDocument] = None
+
+
+@dataclass(frozen=True)
+class RoundProvenance:
+    """Where a validation round came from: recorded on its task file, never
+    interpolated into prompt text.
+
+    * ``model``: the hint every task carries, preserved verbatim.
+    * ``orchestrator``: the script whose ``--reaggregate`` continues the round
+      (the document's durable ``reaggregate_mode``).
+    * ``phase``: the phase the published ``validation_context`` names
+      (default: the phase dir's basename).
+    * ``base_ref`` / ``head_ref``: ``inputs.diff_base``; ``<base>..<head>``
+      for a review pinned to two commits (plans/review-commits.md §2.5).
+    * ``tasks_file``: review-tasks' task list, recorded and hashed into
+      ``inputs.tasks_sha256``.
+    * ``context_plan_sha256`` / ``context_plan_file``: a commit review's
+      frozen context plan (§2.4), recorded as ``inputs.context_plan_sha256``
+      and, relative to the phase dir, ``context_plan_file``, so a resume
+      whose snapshot no longer hashes to it is refused.
+    """
+
+    model: str = "auto"
+    orchestrator: str = "review_plan_orchestrator.py"
+    phase: Optional[str] = None
+    base_ref: str = ""
+    head_ref: Optional[str] = None
+    tasks_file: Optional[str] = ""
+    context_plan_sha256: Optional[str] = None
+    context_plan_file: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ValidationRound:
+    """Everything one validation or revalidation round is materialized from
+    (:func:`materialize_validation_round`).
+
+    * ``groups``: the suggestion groups to validate; ``output_dir``: the
+      phase dir the batch results are written to.
+    * ``plan_file``: the plan's path, for provenance and the ``inputs`` hash.
+    * ``primary``: the first block (the plan, or a code fix's diff);
+      ``secondary``: an optional second one (review-tasks' task list,
+      review-code's reviewed code, a revalidation's original baseline).
+    * ``secondary_for_batch``: the second block per batch. Called with a
+      batch's indices into ``groups``, it returns that batch's ``(text,
+      document, extra_instructions)``, which replace ``secondary.text``,
+      ``secondary.document`` and ``extra_instructions`` for that batch;
+      ``secondary.text`` is then not embedded.
+    * ``reviewed_code``: the code-under-review excerpt hashed into
+      ``inputs.reviewed_code_sha256``. Passed rather than derived from the
+      second block, which may hold more than the code; it hashes the round's
+      whole excerpt even with ``secondary_for_batch``.
+    * ``extra_instructions``: capability-neutral phase guidance appended to
+      every batch prompt.
+    * ``scope``: the round's scope block (``scope_round.scope_block``),
+      rendered into every prompt (``scope_policy.validator_guidance``) and
+      recorded under ``scope``, which the merge stamps each hash-joined
+      verdict with. ``None`` is a default ``expand`` round with no baseline.
+    * ``runner_read_refusal``: who will read a ``mode: path`` source (§2.3
+      step 4a): ``None`` (a capable reader), a string (the reason no source
+      may be named by path) or a callable taking the absolute path and
+      returning ``None`` or such a reason. A ``prompt_budget`` whose
+      ``supports_workspace_reads`` is false counts as a refusal.
+    * ``kind``: ``"validation"`` or ``"revalidation"``, the task ``kind``.
+    * ``max_per_batch``: the most groups a normal batch holds.
+    * ``prompt_budget``: the D2d budget; an over-budget batch is split, and a
+      single group that still does not fit fails loudly, never truncated.
+    * ``publish``: publish ``validation_context`` for this round.
+    """
+
+    groups: List[Dict[str, Any]]
+    output_dir: str
+    primary: ContextBlock
+    plan_file: str = ""
+    secondary: Optional[ContextBlock] = None
+    secondary_for_batch: Optional[
+        Callable[[List[int]], Tuple[str, Optional[BoundDocument], str]]
+    ] = None
+    reviewed_code: Optional[str] = None
+    extra_instructions: str = ""
+    scope: Optional[Dict[str, Any]] = None
+    runner_read_refusal: Optional[Any] = None
+    provenance: RoundProvenance = RoundProvenance()
+    kind: str = "validation"
+    max_per_batch: int = 4
+    prompt_budget: Optional[PromptBudget] = None
+    publish: bool = True
+
+
 def prepare_batched_validation_tasks(
     groups: List[Dict[str, Any]],
     context: str,
@@ -2092,7 +2108,7 @@ def prepare_batched_validation_tasks(
     base_ref: str = "",
     tasks_file: str = "",
     kind: str = "validation",
-    context_label: str = "Plan content",
+    context_label: str = PLAN_CONTEXT_LABEL,
     secondary_context: str = "",
     secondary_context_label: str = "",
     reviewed_code: Optional[str] = None,
@@ -2111,6 +2127,42 @@ def prepare_batched_validation_tasks(
         Callable[[List[int]], Tuple[str, Optional[BoundDocument], str]]
     ] = None,
 ) -> Dict[str, Any]:
+    """The keyword form of :func:`materialize_validation_round`.
+
+    Every field of :class:`ValidationRound`, :class:`ContextBlock` and
+    :class:`RoundProvenance` spelled as one keyword, for the tests that still
+    call it this way; the orchestrators build a :class:`ValidationRound`.
+    """
+    has_secondary = bool(
+        secondary_context or secondary_context_label or secondary_document is not None
+    )
+    return materialize_validation_round(ValidationRound(
+        groups=groups,
+        output_dir=output_dir,
+        plan_file=plan_file,
+        primary=ContextBlock(context, context_label, context_document),
+        secondary=ContextBlock(
+            secondary_context, secondary_context_label, secondary_document,
+        ) if has_secondary else None,
+        secondary_for_batch=secondary_for_batch,
+        reviewed_code=reviewed_code,
+        extra_instructions=extra_instructions,
+        scope=scope,
+        runner_read_refusal=runner_read_refusal,
+        provenance=RoundProvenance(
+            model=model, orchestrator=orchestrator, phase=phase,
+            base_ref=base_ref, head_ref=head_ref, tasks_file=tasks_file,
+            context_plan_sha256=context_plan_sha256,
+            context_plan_file=context_plan_file,
+        ),
+        kind=kind,
+        max_per_batch=max_per_batch,
+        prompt_budget=prompt_budget,
+        publish=publish,
+    ))
+
+
+def materialize_validation_round(round_: ValidationRound) -> Dict[str, Any]:
     """
     Prepare batched validation tasks for sequential subagent processing.
 
@@ -2140,84 +2192,7 @@ def prepare_batched_validation_tasks(
     * the second block comes from ``secondary_for_batch`` when given
       (review-code: the windows its own issues cite).
 
-    Args:
-        groups: List of suggestion groups to validate
-        context: Context for validation (plan content or diff); excerpted once
-            and embedded in every batch prompt that does not carry a cited
-            selection of it
-        output_dir: Directory where subagents should write batch results
-        plan_file: Path to the plan file (provenance and the ``inputs`` hash;
-            never interpolated into prompt text)
-        model: Model hint, preserved verbatim (free-form model string or ``auto``)
-        max_per_batch: Maximum groups per batch for normal items
-        orchestrator: Name of the orchestrator script for reaggregate command
-        base_ref: Git ref for code diff context (empty string for plan reviews);
-            recorded as ``inputs.diff_base``
-        tasks_file: Path to the tasks file for review-tasks validation context;
-            recorded as provenance *and* hashed into ``inputs.tasks_sha256``
-        kind: ``"validation"`` or ``"revalidation"`` — the task ``kind``
-        context_label: What the embedded context is (``"Plan content"``, …)
-        secondary_context: An optional second document to embed beside
-            ``context`` (review-tasks: the task list its suggestions are about).
-            Excerpted **separately**, against the same per-context limit, so a
-            long plan cannot squeeze the artifact under review out of the prompt
-        secondary_context_label: What that second document is; required with it
-        reviewed_code: The code-under-review excerpt to hash into
-            ``inputs.reviewed_code_sha256`` (code-review). Passed rather than
-            derived from ``secondary_context`` because a phase is free to embed
-            more than the code in its second block, and the hash has to name
-            the code alone
-        extra_instructions: Optional capability-neutral phase guidance appended
-            to every batch prompt (e.g. the code-review issue-location guidance)
-        prompt_budget: Optional D2d budget. Over-budget batches are split; a
-            single group that still does not fit fails loudly rather than being
-            truncated.
-        context_document: The round's bound primary document (§2.3 step 5):
-            the plan read once as bytes, with its hash-bound snapshot. Its text
-            hash becomes ``inputs.plan_sha256`` (label ``plan``) instead of a
-            re-read of the live ``plan_file``, and over the limit its snapshot
-            is what the prompt names. ``None`` keeps the legacy behaviour: no
-            path, and an over-limit block is ``mode: truncated``.
-        secondary_document: The same for the second block (review-tasks'
-            tasks file, label ``tasks``; review-code's reviewed-code block,
-            label ``reviewed-code``, which is never named by path).
-        runner_read_refusal: Who will read a ``mode: path`` source (§2.3 step
-            4a, decided at materialization): ``None`` (assume a capable reader
-            — every ``agent-readonly`` adapter declares workspace reads, and a
-            native host reads), a string (the reason no source may be named by
-            path, e.g. "runner R cannot read files"), or a callable taking the
-            absolute path and returning ``None`` or such a reason (a runner
-            that cannot read outside its cwd). An explicit ``prompt_budget``
-            whose ``supports_workspace_reads`` is false counts as a refusal.
-        phase: The phase name the published ``validation_context`` carries
-            (defaults to the phase dir's basename).
-        publish: Publish ``validation_context`` for this round (the
-            materialization caller of :func:`publish_validation_context`).
-        head_ref: The commit a review pinned to two commits ends at
-            (``review-code --head-ref``, plans/review-commits.md §2.5). Then
-            ``inputs.diff_base`` records ``<base_ref>..<head_ref>``, the pair
-            the excerpts were read from; ``None`` keeps ``base_ref`` alone.
-        context_plan_sha256: A commit review's ``commit_range.plan_sha256``
-            (§2.4 "The context plan is frozen"), recorded as
-            ``inputs.context_plan_sha256`` so a resume or reaggregate whose
-            snapshot no longer hashes to it is refused. ``None`` adds no key.
-        context_plan_file: The frozen snapshot's path, recorded relative to the
-            phase directory so executor resumes can verify that raw-byte hash.
-        scope: The round's scope block (``scope_round.scope_block``): the
-            effective policy, its prompt phase and the baseline these
-            validators are shown. Rendered into every batch prompt per call
-            (``scope_policy.validator_guidance``) and recorded on the document
-            under ``scope``, which both invokers read — the native host and the
-            executor run the same prompts — and which the merge stamps each
-            hash-joined verdict with. ``None`` is a default ``expand`` round
-            with no baseline (its verdicts carry no scope authority).
-        secondary_for_batch: The second block per batch: called with a batch's
-            indices into ``groups``, it returns that batch's ``(text,
-            document, extra_instructions)``, which replace
-            ``secondary_context``, ``secondary_document`` and
-            ``extra_instructions`` for that batch. ``secondary_context`` is
-            then not embedded; ``reviewed_code`` still hashes the round's
-            whole excerpt.
+    The fields are described on :class:`ValidationRound`.
 
     Returns:
         Dict with:
@@ -2230,6 +2205,31 @@ def prepare_batched_validation_tasks(
           resolved string is rebuilt at print time by
           :func:`resolved_reaggregate_command`, never persisted (D1c)
     """
+    # The round's fields under the names the steps below read them by.
+    groups, output_dir, plan_file, kind = (
+        round_.groups, round_.output_dir, round_.plan_file, round_.kind,
+    )
+    context, context_label, context_document = (
+        round_.primary.text, round_.primary.label, round_.primary.document,
+    )
+    secondary = round_.secondary or ContextBlock("", "")
+    secondary_context, secondary_context_label, secondary_document = (
+        secondary.text, secondary.label, secondary.document,
+    )
+    provenance = round_.provenance
+    model, base_ref, head_ref, tasks_file, phase = (
+        provenance.model, provenance.base_ref, provenance.head_ref,
+        provenance.tasks_file, provenance.phase,
+    )
+    context_plan_sha256, context_plan_file = (
+        provenance.context_plan_sha256, provenance.context_plan_file,
+    )
+    runner_read_refusal, prompt_budget = round_.runner_read_refusal, round_.prompt_budget
+    max_per_batch, scope = round_.max_per_batch, round_.scope
+    secondary_for_batch, extra_instructions = (
+        round_.secondary_for_batch, round_.extra_instructions,
+    )
+
     grouped_file = str(Path(output_dir) / "grouped.json")
     context_provenance: Dict[str, str] = {}
     if context_plan_file and context_plan_sha256:
@@ -2256,7 +2256,7 @@ def prepare_batched_validation_tasks(
         diff_base=(
             f"{base_ref}..{head_ref}" if base_ref and head_ref else base_ref
         ),
-        reviewed_code=reviewed_code,
+        reviewed_code=round_.reviewed_code,
         context_plan_sha256=context_plan_sha256,
     )
     if bound_plan is not None:
@@ -2276,7 +2276,7 @@ def prepare_batched_validation_tasks(
     )
 
     if not groups:
-        if publish:
+        if round_.publish:
             publish_validation_context(output_dir, [], phase=phase)
         empty = make_task_file(kind=kind, tasks=[], inputs=inputs, task_list_key="batches", extra={
             **context_provenance,
@@ -2538,7 +2538,7 @@ def prepare_batched_validation_tasks(
         "batching_stats": stats,
         "grouped_file": grouped_file,
         "phase_dir": output_dir,
-        **durable_reaggregate_fields(orchestrator, plan_file),
+        **durable_reaggregate_fields(provenance.orchestrator, plan_file),
         "model_hint": model,
         "base_ref": base_ref,
         _scope_round.TASK_SCOPE_KEY: scope_meta,
@@ -2552,7 +2552,7 @@ def prepare_batched_validation_tasks(
         task_list_key="batches",
         extra=extra,
     )
-    if publish:
+    if round_.publish:
         # Every batch's own records: a cited plan block or a per-batch second
         # block differs between batches, and the aggregate keeps the worst.
         publish_validation_context(output_dir, published or sources, phase=phase)
@@ -3166,41 +3166,36 @@ def prepare_batched_revalidation_tasks(
         explicit_policy=scope_policy,
         phase=phase,
     )
-    batched_tasks = prepare_batched_validation_tasks(
+    batched_tasks = materialize_validation_round(ValidationRound(
         groups=items_to_revalidate,
-        context=context,
         output_dir=output_dir,
         plan_file=plan_file,
-        model=model,
-        max_per_batch=max_per_batch,
-        orchestrator=orchestrator,
-        base_ref=base_ref,
-        kind="revalidation",
-        scope=revalidation_scope,
-        **(
-            {
-                "secondary_context": original_document.text,
-                "secondary_context_label": REVALIDATION_BASELINE_LABEL,
-                "secondary_document": original_document,
-            }
-            if original_document is not None else {}
-        ),
-        context_plan_file=context_plan_file,
-        context_plan_sha256=(commit_record or {}).get("plan_sha256"),
-        extra_instructions=extra_instructions,
         # The block says which document it carries: the diff a code-fix
         # revalidation judges is labelled a diff, and the plan fallback a plan.
-        context_label={
-            "diff": "Diff context",
-            "tasks": "Tasks file",
-        }.get(kind_of_context, "Plan content"),
-        context_document=context_document if context_document is not None else (
-            bind_document_text(context, label=kind_of_context)
-            if kind_of_context == "diff" else None
+        primary=ContextBlock(
+            context,
+            {"diff": "Diff context", "tasks": "Tasks file"}.get(
+                kind_of_context, PLAN_CONTEXT_LABEL,
+            ),
+            context_document if context_document is not None else (
+                bind_document_text(context, label=kind_of_context)
+                if kind_of_context == "diff" else None
+            ),
         ),
+        secondary=ContextBlock(
+            original_document.text, REVALIDATION_BASELINE_LABEL, original_document,
+        ) if original_document is not None else None,
+        extra_instructions=extra_instructions,
+        scope=revalidation_scope,
         runner_read_refusal=runner_read_refusal,
-        phase=phase,
-    )
+        provenance=RoundProvenance(
+            model=model, orchestrator=orchestrator, phase=phase, base_ref=base_ref,
+            context_plan_sha256=(commit_record or {}).get("plan_sha256"),
+            context_plan_file=context_plan_file,
+        ),
+        kind="revalidation",
+        max_per_batch=max_per_batch,
+    ))
 
     batched_tasks["context_kind"] = kind_of_context
     if original_sources:

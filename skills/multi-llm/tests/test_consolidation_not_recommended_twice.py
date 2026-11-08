@@ -100,7 +100,7 @@ def _consolidate_natively(plan: Path, phase_dir: Path) -> None:
         respond=lambda task: echo_subagent_answer("consolidation", task["prompt"]),
     )
     assert report.ok, report.failure_summary()
-    rpo.reaggregate_consolidation_mode(str(phase_dir), str(plan), "plan", [])
+    rpo.reaggregate_consolidation_mode(str(phase_dir), str(plan), "plan")
     assert (phase_dir / "consolidated.json").exists()
 
 

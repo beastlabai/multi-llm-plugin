@@ -12,7 +12,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import (
     group_similar_suggestions,
-    export_groups_to_json,
     SuggestionGroup,
 )
 
@@ -83,13 +82,12 @@ class TestGrouping:
         result = group_similar_suggestions(suggestions)
         assert len(result) == 2
 
-    def test_export_groups_to_json(self):
-        """Test JSON export of groups."""
+    def test_a_group_record_is_what_grouped_json_holds(self):
+        """A group's record (``to_dict``), as grouped.json stores it."""
         group = SuggestionGroup("addition", "Test theme")
         group.add_suggestion({"title": "Test", "desc": "Test desc"}, "gpt-4")
 
-        json_str = export_groups_to_json([group])
-        data = json.loads(json_str)
+        data = json.loads(json.dumps([group.to_dict()]))
 
         assert len(data) == 1
         assert data[0]["theme"] == "Test theme"
@@ -111,8 +109,7 @@ class TestOutputFiles:
             }
         ]
         groups = group_similar_suggestions(suggestions)
-        json_str = export_groups_to_json(groups)
-        data = json.loads(json_str)
+        data = json.loads(json.dumps([g.to_dict() for g in groups]))
 
         assert isinstance(data, list)
         if data:

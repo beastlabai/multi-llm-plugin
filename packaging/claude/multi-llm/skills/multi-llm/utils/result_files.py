@@ -40,15 +40,21 @@ from . import status_file as _status_file
 from .json_extractor import sanitize_model_name
 from .text_clip import plain_line
 
-#: Basenames that are never a per-model result file: every artifact a phase dir
-#: holds that is also a ``*.json``. The union of what the two reaggregate globs
-#: exclude, so a retire-by-selection can never rename a file those would not
-#: have read as a model. (Re-exported by ``review_orchestrator_base``.)
+#: Name fragments of the ``*.json`` artifacts a phase dir holds beside the
+#: per-model results: a name containing one is never a model's result. The one
+#: list every reader of a phase dir's results uses, through
+#: :func:`model_result_paths` (or :func:`snapshot_candidates` for the slot).
 NON_MODEL_JSON_MARKERS = (
     'grouped', 'validation', 'salvage', 'revalidation', 'consolidated',
     'consolidation', 'issues', 'fix_tasks', 'report_data', 'subagent_batch_report',
     'subagent_dry_run', 'write_batch_report', 'write_tasks',
 )
+
+#: Whole basenames that are never a model's result. ``state.json`` belongs in
+#: the plan's output dir, one level up, but the executor reserves the name in
+#: a phase dir too (``subagent_executor.RESERVED_OUTPUT_NAMES``); a substring
+#: marker would also drop a model whose id contains ``state``.
+NON_MODEL_JSON_NAMES = frozenset({'state.json'})
 
 #: Suffix a result file no recorded model owns is renamed with.
 SET_ASIDE_SUFFIX = "set-aside"
@@ -73,12 +79,34 @@ RESULT_NOTES_KEY = "result_notes"
 Snapshot = Dict[str, Tuple[int, int]]
 
 
-def _is_candidate_name(name: str) -> bool:
+def is_model_result_name(name: str) -> bool:
+    """Whether a phase dir's file *name* can be a model's result.
+
+    A ``*.json`` that is not a dotfile (``.status.json``), not one of
+    :data:`NON_MODEL_JSON_NAMES` and contains none of
+    :data:`NON_MODEL_JSON_MARKERS`. The name says nothing about who wrote the
+    file: :func:`set_aside_unrecorded_results` decides that.
+    """
     return (
         name.endswith(".json")
         and not name.startswith(".")
+        and name not in NON_MODEL_JSON_NAMES
         and not any(marker in name for marker in NON_MODEL_JSON_MARKERS)
     )
+
+
+def model_result_paths(phase_dir: os.PathLike | str) -> List[str]:
+    """The files in *phase_dir* whose name can be a model's result, sorted.
+
+    Each path is ``os.path.join(phase_dir, name)``, the spelling a
+    ``glob(<phase_dir>/*.json)`` returns. ``[]`` when the dir cannot be listed.
+    """
+    try:
+        names = os.listdir(phase_dir)
+    except OSError:
+        return []
+    base = os.fspath(phase_dir)
+    return [os.path.join(base, name) for name in sorted(names) if is_model_result_name(name)]
 
 
 def snapshot_candidates(phase_dir: os.PathLike | str) -> Snapshot:
@@ -89,7 +117,7 @@ def snapshot_candidates(phase_dir: os.PathLike | str) -> Snapshot:
     except OSError:
         return snapshot
     for entry in entries:
-        if not _is_candidate_name(entry.name):
+        if not is_model_result_name(entry.name):
             continue
         try:
             # A regular file only, never through a link: a model can leave a

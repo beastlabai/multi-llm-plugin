@@ -1158,39 +1158,39 @@ class TestValidationContextKwargs:
     two verdicts came back quoting text no validator had been given."""
 
     def test_review_tasks_embeds_both_documents_each_labelled(self, plan_with_tasks):
-        from utils.review_orchestrator_base import validation_context_kwargs
+        from utils.review_orchestrator_base import validation_context_blocks
 
         _plan_path, tasks_path = plan_with_tasks
-        kwargs = validation_context_kwargs(
+        primary, secondary = validation_context_blocks(
             "review-tasks", "PLAN TEXT", {"tasks_file": str(tasks_path)}
         )
-        assert kwargs["context"] == "PLAN TEXT"
-        assert "T001: Create database schema" in kwargs["secondary_context"]
-        assert "Plan" in kwargs["context_label"]
-        assert "artifact under review" in kwargs["secondary_context_label"]
+        assert primary.text == "PLAN TEXT"
+        assert "T001: Create database schema" in secondary.text
+        assert "Plan" in primary.label
+        assert "artifact under review" in secondary.label
 
     def test_every_other_phase_keeps_the_single_context_default(self):
         """review-plan's prompts must not move: the defaults are the contract."""
-        from utils.review_orchestrator_base import validation_context_kwargs
+        from utils.review_orchestrator_base import validation_context_blocks
+        from utils.validation import ContextBlock
 
-        assert validation_context_kwargs("review-plan", "PLAN TEXT", None) == {
-            "context": "PLAN TEXT"
-        }
-        assert validation_context_kwargs(
+        plan_only = (ContextBlock("PLAN TEXT"), None)
+        assert validation_context_blocks("review-plan", "PLAN TEXT", None) == plan_only
+        assert validation_context_blocks(
             "review-plan", "PLAN TEXT", {"tasks_file": "/somewhere/tasks.md"}
-        ) == {"context": "PLAN TEXT"}
+        ) == plan_only
 
     def test_an_unreadable_tasks_file_degrades_to_the_plan_and_says_so(
         self, capsys, temp_dir
     ):
         """A completed fan-out is not thrown away over a missing scratch file;
         the batch still validates, against less."""
-        from utils.review_orchestrator_base import validation_context_kwargs
+        from utils.review_orchestrator_base import validation_context_blocks
+        from utils.validation import ContextBlock
 
-        kwargs = validation_context_kwargs(
+        assert validation_context_blocks(
             "review-tasks", "PLAN TEXT", {"tasks_file": str(temp_dir / "gone.md")}
-        )
-        assert kwargs == {"context": "PLAN TEXT"}
+        ) == (ContextBlock("PLAN TEXT"), None)
         assert "validating against the plan alone" in capsys.readouterr().err
 
 

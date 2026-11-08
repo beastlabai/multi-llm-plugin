@@ -45,14 +45,11 @@ from utils import (
     validate_code_review_issues,
     get_files_changed_since_ref,
     group_similar_suggestions,
-    export_groups_to_json,
     sanitize_prefix,
     intent_to_add_untracked,
     subtract_baseline,
-    PlanUpdater,
 )
 from utils.stream_bootstrap import bootstrap_streams
-from utils.text_clip import clip
 from utils import cli_common
 from utils import prior_changes
 from utils.cli_common import (
@@ -163,7 +160,11 @@ from utils.validation import (
     ensure_prompt_sidecars,
     excerpt_context_reported,
     legacy_context_round_reason,
-    prepare_batched_validation_tasks,
+    PLAN_CONTEXT_LABEL,
+    ContextBlock,
+    RoundProvenance,
+    ValidationRound,
+    materialize_validation_round,
     resolved_reaggregate_command,
 )
 from utils.subagent_prompts import (
@@ -342,26 +343,16 @@ def warn_stem_attribution(
     print("\n".join(lines), file=sys.stderr)
 
 
-#: Name fragments of the phase dir's ``*.json`` files that are not a model's
-#: result, for :func:`leftover_model_results`.
-_NOT_A_MODEL_RESULT = ('grouped', 'validation', 'salvage', 'issues', 'fix_tasks',
-                       'state', '.status', 'report_data')
-
-
 def leftover_model_results(phase_dir: Any) -> List[str]:
     """The per-model result files in *phase_dir* (``<stem>.json``), sorted.
 
     What the partial-completion guard refuses a plain re-run over when no
     ``grouped.json`` is beside them, and what ``improve_workflow.read_records``
     reads as a fan-out cut off before grouping, which its review step resumes
-    with ``--force`` (Fable review 2026-10-27, finding 1).
+    with ``--force`` (Fable review 2026-10-27, finding 1). The names are
+    ``result_files.model_result_paths``'s, the rule every phase-dir reader uses.
     """
-    import glob as glob_module
-
-    return sorted(
-        f for f in glob_module.glob(str(Path(phase_dir) / "*.json"))
-        if not any(ex in os.path.basename(f) for ex in _NOT_A_MODEL_RESULT)
-    )
+    return _result_files.model_result_paths(phase_dir)
 
 
 def save_model_result(
@@ -1467,15 +1458,6 @@ def _announce_fallback_scope(
         )
 
 
-def resolve_changed_files(state: Any, base_ref: Optional[str]) -> List[str]:
-    """The paths of :func:`resolve_review_scope`, for a caller that needs no label.
-
-    The reaggregate path uses this: it dispatches no reviewer, so it needs only
-    the paths (and the same printed lines). No order is promised.
-    """
-    return resolve_review_scope(state, base_ref).paths
-
-
 def describe_scope_source(
     source: Optional[str],
     base_ref: Optional[str],
@@ -2538,7 +2520,7 @@ def reviewed_code_for_batch(
 def reviewed_code_batch_view(
     per_batch: Optional[Dict[str, Any]], **guidance_kwargs: Any,
 ) -> Optional[Any]:
-    """``prepare_batched_validation_tasks``'s ``secondary_for_batch`` for review-code.
+    """``ValidationRound.secondary_for_batch`` for review-code.
 
     ``None`` when :func:`build_validation_secondary_context` filled no
     ``for_batch`` (``MULTI_LLM_VALIDATION_CONTEXT=full``), so every batch
@@ -2743,106 +2725,6 @@ def prepare_fixes_for_subagents(
     except (IOError, OSError) as e:
         print(f"ERROR: Failed to write fix tasks file: {e}")
         return None
-
-
-def update_plan_with_fixes(
-    plan_path: Path,
-    fix_results: List[Dict]
-) -> None:
-    """
-    Update the plan file to document what was fixed during review.
-
-    Args:
-        plan_path: Path to the plan file
-        fix_results: List of fix results
-    """
-    if not fix_results:
-        return
-
-    # Validate input
-    if not isinstance(fix_results, list):
-        print(f"ERROR: fix_results must be a list, got {type(fix_results)}")
-        return
-
-    try:
-        updater = PlanUpdater(plan_path)
-    except Exception as e:
-        print(f"ERROR: Failed to load plan file for update: {e}")
-        return
-
-    # Build the fixes section content
-    fixed_count = sum(1 for r in fix_results if r.get("fixed"))
-    failed_count = len(fix_results) - fixed_count
-
-    lines = [
-        "",
-        "<!-- REVIEW_FIXES_START -->",
-        "",
-        "## Review Fixes Applied",
-        "",
-        f"*Applied: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*",
-        "",
-        f"**Summary:** {fixed_count} fixed, {failed_count} could not be fixed",
-        "",
-    ]
-
-    # List fixed issues
-    fixed_items = [r for r in fix_results if r.get("fixed")]
-    if fixed_items:
-        lines.append("### Successfully Fixed")
-        lines.append("")
-        for item in fixed_items:
-            lines.append(f"- **{item.get('issue_title', 'Unknown')}**")
-            if item.get("changes_made"):
-                lines.append(f"  - {item['changes_made']}")
-            if item.get("files_modified"):
-                for file_mod in item["files_modified"]:
-                    path = file_mod.get("path", "unknown")
-                    summary = file_mod.get("summary", "")
-                    if summary:
-                        lines.append(f"  - `{path}`: {summary}")
-                    else:
-                        lines.append(f"  - `{path}`")
-        lines.append("")
-
-    # List failed fixes
-    failed_items = [r for r in fix_results if not r.get("fixed")]
-    if failed_items:
-        lines.append("### Could Not Fix")
-        lines.append("")
-        for item in failed_items:
-            reason = clip(item.get("reason") or "Unknown reason", 100)
-            lines.append(f"- **{item.get('issue_title', 'Unknown')}**: {reason}")
-        lines.append("")
-
-    lines.append("<!-- REVIEW_FIXES_END -->")
-    lines.append("")
-
-    # Check if section already exists and replace, or append
-    try:
-        content = updater.get_content()
-        start_marker = "<!-- REVIEW_FIXES_START -->"
-        end_marker = "<!-- REVIEW_FIXES_END -->"
-
-        start_idx = content.find(start_marker)
-        end_idx = content.find(end_marker)
-
-        if start_idx != -1 and end_idx != -1:
-            # Replace existing section
-            parts = [
-                content[:start_idx],
-                "\n".join(lines),
-                content[end_idx + len(end_marker):]
-            ]
-            updater.content = "".join(parts)
-        else:
-            # Append new section at the end
-            updater.content = content.rstrip() + "\n" + "\n".join(lines)
-
-        updater.save()
-        print(f"Updated plan with fix results: {plan_path}")
-    except Exception as e:
-        print(f"ERROR: Failed to update plan file: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -5040,14 +4922,14 @@ def _format_issue(
     return lines
 
 
-def pinned_validation_kwargs(
+def pinned_provenance(
     pinned: Optional[PinnedRange],
     plan_snapshot: Optional[str],
     plan_sha256: Optional[str],
     repo_root: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """``prepare_batched_validation_tasks``'s pinned keywords; ``{}`` when the
-    review is neither pinned nor carries a frozen context plan."""
+    """:class:`RoundProvenance`'s pinned fields; ``{}`` when the review is
+    neither pinned nor carries a frozen context plan."""
     kwargs: Dict[str, Any] = {}
     if pinned is not None:
         kwargs["head_ref"] = pinned.head
@@ -5055,6 +4937,79 @@ def pinned_validation_kwargs(
         kwargs["context_plan_sha256"] = plan_sha256
         kwargs["context_plan_file"] = os.path.join(repo_root or os.getcwd(), plan_snapshot)
     return kwargs
+
+
+def code_review_validation_round(
+    groups: List[Dict[str, Any]],
+    *,
+    args: argparse.Namespace,
+    plan_path: Path,
+    phase_dir: Path,
+    plan_document: BoundDocument,
+    base_ref: str,
+    project_root: Optional[str],
+    git_root: Optional[str],
+    pinned: Optional[PinnedRange],
+    plan_snapshot: Optional[str],
+    plan_sha256: Optional[str],
+    scope_round_policy: Any,
+    state: Any,
+) -> ValidationRound:
+    """The validation round review-code materializes, after its fan-out and on
+    ``--reaggregate``: one builder, so a reaggregate re-validates against the
+    prompt the fan-out wrote.
+
+    The plan block is the bound snapshot (§2.3 step 5), with no ``Plan file:``
+    line: a second path, the live plan, would point a validator at bytes the
+    snapshot hash does not cover. The second block is the reviewed code, each
+    batch embedding the windows its own issues cite, from one read.
+    """
+    guidance = pinned_guidance_kwargs(pinned, plan_snapshot, plan_sha256)
+    cut_report: Dict[str, Any] = {}
+    per_batch: Dict[str, Any] = {}
+    secondary, reviewed_code = build_validation_secondary_context(
+        groups, plan_path, project_root=project_root,
+        cut_report=cut_report, per_batch=per_batch,
+        **({"pinned": pinned} if pinned is not None else {}),
+    )
+    provenance = RoundProvenance(
+        model=args.validation_model,
+        orchestrator="code_review_orchestrator.py",
+        phase="code-review",
+        base_ref=base_ref,
+        **pinned_provenance(pinned, plan_snapshot, plan_sha256, git_root),
+    )
+    # The guidance, plus the dropped files to open when the reviewed-code
+    # block lost any (T7.4), outside every block a context budget can cut.
+    extra_instructions = validation_extra_instructions(cut_report, **guidance)
+    secondary_block = ContextBlock(
+        secondary, REVIEWED_CODE_CONTEXT_LABEL,
+        reviewed_code_document(secondary, cut_report),
+    )
+    batch_view = reviewed_code_batch_view(per_batch, **guidance)
+    read_refusal = materialization_read_refusal(args, str(plan_path))
+    recorded = getattr(state, "state", {}) or {}
+    # The reviewers' policy and baseline (plan §3.1), in the one task file
+    # both invokers run.
+    scope = validation_scope_block(
+        "code-review", scope_round_policy, state,
+        _scope_round.round_baseline(recorded, "code-review"),
+        plan_document=plan_document,
+        commit_review=isinstance(recorded.get("commit_range"), dict),
+    )
+    return ValidationRound(
+        groups=groups,
+        output_dir=str(phase_dir),
+        plan_file=str(plan_path),
+        primary=ContextBlock(plan_document.text, PLAN_CONTEXT_LABEL, plan_document),
+        secondary=secondary_block,
+        secondary_for_batch=batch_view,
+        reviewed_code=reviewed_code,
+        extra_instructions=extra_instructions,
+        scope=scope,
+        runner_read_refusal=read_refusal,
+        provenance=provenance,
+    )
 
 
 def pinned_guidance_kwargs(
@@ -5110,26 +5065,13 @@ async def reaggregate_from_existing_files(
         phase (``--fail-on-high`` holds there), ``EXIT_OK`` on every ending
         that leaves the phase open. Refusals ``sys.exit`` themselves.
     """
-    import glob as glob_module
-
     # Find all model result files in the code-review phase directory
     phase_dir = get_phase_dir(plan_path, 'code-review')
     pattern = str(phase_dir / "*.json")
-    # Sort for a deterministic load order — glob() returns filesystem order,
-    # which varies between machines/runs. Grouping itself is now order-
-    # independent (see group_similar_suggestions), but a stable file order
-    # keeps issues.json reproducible too.
-    all_files = sorted(glob_module.glob(pattern))
-
-    # Exclude non-model files
-    # `subagent_batch_report` is executor bookkeeping (D3i), never a model
-    # result — see the same note in review_orchestrator_base, which also explains
-    # `subagent_dry_run` (D3l) and the write scheduler's two reports.
-    exclude_patterns = ['grouped', 'validation', 'salvage', 'issues', 'fix_tasks', 'report_data', 'subagent_batch_report', 'subagent_dry_run', 'write_batch_report', 'write_tasks']
-    result_files = [
-        f for f in all_files
-        if not any(ex in os.path.basename(f) for ex in exclude_patterns)
-    ]
+    # Sorted, so issues.json is reproducible across machines; every phase-dir
+    # artifact (grouped, validation, the executor's and write scheduler's
+    # reports, ...) is left out by the one shared rule.
+    result_files = _result_files.model_result_paths(phase_dir)
     # Only the models this phase records are read: live run 10's misnamed
     # `pi_…_v4-flash.json` was loaded as a third reviewer by its stem, with
     # "scope unknown". Any other result file is named and set aside; a dir
@@ -5297,8 +5239,9 @@ async def reaggregate_from_existing_files(
         state, "code-review", args, same_round=True, phase_dir=str(phase_dir),
     )
 
-    # The same resolution as `resolve_changed_files` (the same printed lines),
-    # kept whole because a regenerated scope manifest names its source (D2.2).
+    # The fan-out's own resolution (`resolve_review_scope`, the same printed
+    # lines), kept whole because a regenerated scope manifest names its source
+    # (D2.2).
     # The scope is root-relative, so its git calls run at the root, never at a
     # subdirectory the command happened to be invoked from.
     git_root = review_git_root(project_root)
@@ -5594,59 +5537,14 @@ async def reaggregate_from_existing_files(
             # One read of the plan, bound to this phase dir's own snapshot
             # (§2.3 step 5): the plan block names it, never the live plan.
             plan_document = bind_plan_for_validation(str(plan_path), str(phase_dir))
-            plan_content = plan_document.text
-
-            # Same two contexts and the same single budget owner as the
-            # fan-out's own prep above; the two sites must materialize the same
-            # prompt or a reaggregate re-validates against a different one.
-            cut_report: Dict[str, Any] = {}
-            per_batch: Dict[str, Any] = {}
-            secondary, reviewed_code = build_validation_secondary_context(
-                grouped, plan_path, project_root=project_root,
-                cut_report=cut_report, per_batch=per_batch, **pinned_kw,
-            )
-            batched_tasks = prepare_batched_validation_tasks(
-                **pinned_validation_kwargs(pinned, plan_snapshot, plan_sha256, git_root),
-                groups=[g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
-                # No `Plan file:` line: the block names the bound
-                # snapshot, and a second path — the live plan — would
-                # point a validator at bytes the snapshot hash does not cover.
-                context=plan_content,
-                output_dir=str(phase_dir),
-                plan_file=str(plan_path),
-                model=args.validation_model,
-                orchestrator="code_review_orchestrator.py",
-                base_ref=base_ref,
-                secondary_context=secondary,
-                secondary_context_label=REVIEWED_CODE_CONTEXT_LABEL,
-                reviewed_code=reviewed_code,
-                # The guidance, plus the dropped files to open when the
-                # reviewed-code block lost any (T7.4) — outside every block
-                # a context budget can cut.
-                extra_instructions=validation_extra_instructions(
-                    cut_report,
-                    **pinned_guidance_kwargs(pinned, plan_snapshot, plan_sha256),
-                ),
-                context_document=plan_document,
-                secondary_document=reviewed_code_document(secondary, cut_report),
-                # Each batch's own windows, from the one read above.
-                secondary_for_batch=reviewed_code_batch_view(
-                    per_batch,
-                    **pinned_guidance_kwargs(pinned, plan_snapshot, plan_sha256),
-                ),
-                runner_read_refusal=materialization_read_refusal(args, str(plan_path)),
-                phase="code-review",
-                scope=validation_scope_block(
-                    "code-review", scope_round_policy, state,
-                    _scope_round.round_baseline(
-                        getattr(state, "state", {}) or {}, "code-review"
-                    ),
-                    plan_document=plan_document,
-                    commit_review=isinstance(
-                        (getattr(state, "state", {}) or {}).get("commit_range"), dict
-                    ),
-                ),
-            )
+            batched_tasks = materialize_validation_round(code_review_validation_round(
+                [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
+                args=args, plan_path=plan_path, phase_dir=phase_dir,
+                plan_document=plan_document, base_ref=base_ref,
+                project_root=project_root, git_root=git_root, pinned=pinned,
+                plan_snapshot=plan_snapshot, plan_sha256=plan_sha256,
+                scope_round_policy=scope_round_policy, state=state,
+            ))
 
             # Save validation task instructions
             with open(validation_tasks_path, 'w', encoding='utf-8') as f:
@@ -6861,7 +6759,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
         # exactly one `[PROGRESS]` line, the teardown one — and it is awaited
         # through `asyncio.to_thread` below, so the ticker gets its interval
         # for those minutes. Everything around it — grouping, the excerpts,
-        # `prepare_batched_validation_tasks`, the merge — is still synchronous,
+        # `materialize_validation_round`, the merge — is still synchronous,
         # so an interval expiring inside them is serviced only once they
         # return. Moving those off the loop as well is a larger change than
         # this one.
@@ -6931,20 +6829,6 @@ async def main(argv: Optional[List[str]] = None) -> int:
                     plan_document = plan_document_at_load or bind_plan_for_validation(
                         str(plan_path), str(phase_dir)
                     )
-                    plan_content = plan_document.text
-
-                    # No `[:30000]` here: `excerpt_context` owns the per-context
-                    # budget, and slicing first could only lose more. The plan this
-                    # was measured on is 44 374 chars, so the caller's slice ended
-                    # mid-§4.6 and §4.7–§11 — the acceptance criteria and the whole
-                    # tunable-config table — reached no validator, while four of the
-                    # nine verdicts cited exactly those sections.
-                    cut_report: Dict[str, Any] = {}
-                    per_batch: Dict[str, Any] = {}
-                    secondary, reviewed_code = build_validation_secondary_context(
-                        grouped_list, plan_path, project_root=project_root,
-                        cut_report=cut_report, per_batch=per_batch, **pinned_kw,
-                    )
                     # `grouped_list`, not `grouped`: it already carries the stable
                     # `group_hash`/`display_label` `stamp_stable_ids` stamped above
                     # (and is what `grouped.json` was written from). Handing the
@@ -6953,54 +6837,14 @@ async def main(argv: Optional[List[str]] = None) -> int:
                     # has no `group_hash`, which is the key `_overlay_human_decisions`
                     # joins on; the decisions overlay then matches nothing and
                     # reports success anyway.
-                    batched_tasks = prepare_batched_validation_tasks(
-                        **pinned_validation_kwargs(pinned, plan_snapshot, plan_sha256, git_root),
-                        groups=grouped_list,
-                        # No `Plan file:` line: the block names the bound
-                        # snapshot, and a second path — the live plan — would
-                        # point a validator at bytes the snapshot hash does
-                        # not cover.
-                        context=plan_content,
-                        output_dir=str(phase_dir),
-                        plan_file=str(plan_path),
-                        model=args.validation_model,
-                        orchestrator="code_review_orchestrator.py",
-                        base_ref=base_ref,
-                        secondary_context=secondary,
-                        secondary_context_label=REVIEWED_CODE_CONTEXT_LABEL,
-                        reviewed_code=reviewed_code,
-                        # Same builder as the `--reaggregate` site, so both
-                        # materialize the same instruction (T7.4).
-                        extra_instructions=validation_extra_instructions(
-                            cut_report,
-                            **pinned_guidance_kwargs(pinned, plan_snapshot, plan_sha256),
-                        ),
-                        context_document=plan_document,
-                        secondary_document=reviewed_code_document(
-                            secondary, cut_report
-                        ),
-                        # Each batch's own windows, from the one read above.
-                        secondary_for_batch=reviewed_code_batch_view(
-                            per_batch,
-                            **pinned_guidance_kwargs(pinned, plan_snapshot, plan_sha256),
-                        ),
-                        runner_read_refusal=materialization_read_refusal(
-                            args, str(plan_path)
-                        ),
-                        # The reviewers' policy and baseline (plan §3.1), in the
-                        # one task file both invokers run.
-                        scope=validation_scope_block(
-                            "code-review", scope_round_policy, state,
-                            _scope_round.round_baseline(
-                                getattr(state, "state", {}) or {}, "code-review"
-                            ),
-                            plan_document=plan_document,
-                            commit_review=isinstance(
-                                (getattr(state, "state", {}) or {}).get("commit_range"), dict
-                            ),
-                        ),
-                        phase="code-review",
-                    )
+                    batched_tasks = materialize_validation_round(code_review_validation_round(
+                        grouped_list,
+                        args=args, plan_path=plan_path, phase_dir=phase_dir,
+                        plan_document=plan_document, base_ref=base_ref,
+                        project_root=project_root, git_root=git_root, pinned=pinned,
+                        plan_snapshot=plan_snapshot, plan_sha256=plan_sha256,
+                        scope_round_policy=scope_round_policy, state=state,
+                    ))
 
                     # Save validation task instructions
                     validation_tasks_path = phase_dir / "validation_tasks.json"

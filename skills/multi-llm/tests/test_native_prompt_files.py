@@ -130,7 +130,7 @@ class TestConsolidationBatchesCarryTheirPromptFile:
             kind="consolidation", respond=from_the_file,
         )
         assert report.ok, report.failure_summary()
-        rpo.reaggregate_consolidation_mode(str(phase_dir), str(plan), "plan", [])
+        rpo.reaggregate_consolidation_mode(str(phase_dir), str(plan), "plan")
         assert (phase_dir / "consolidated.json").exists()
 
     def test_a_narrower_round_leaves_no_prompt_file_of_the_wider_one(self, tmp_path):

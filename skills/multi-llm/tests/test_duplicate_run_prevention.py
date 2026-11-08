@@ -293,28 +293,38 @@ class TestPhaseCompletionGuard:
 # 3. Model-level skip (skip_existing)
 # ============================================================================
 
+def run_all_models(model_specs, plan_path, timeout, max_parallel, out_dir=None,
+                   prefix=None, skip_existing=True):
+    """review-plan's fan-out (``review_orchestrator_base.run_all_models``)."""
+    from utils import review_orchestrator_base as rob
+
+    return rob.run_all_models(
+        model_specs, plan_path, "{plan_path}", lambda _spec: {"plan_path": plan_path},
+        "review-plan", "plan_review", timeout, max_parallel,
+        out_dir=out_dir, prefix=prefix, skip_existing=skip_existing,
+    )
+
+
 class TestModelLevelSkipReviewPlan:
-    """Tests for model-level skip in review_plan_orchestrator's run_all_models()."""
+    """Tests for model-level skip in review-plan's fan-out (the shared run_all_models)."""
 
     def test_run_all_models_has_skip_existing_param(self):
         """run_all_models() accepts skip_existing parameter."""
         import inspect
-        from review_plan_orchestrator import run_all_models
-        sig = inspect.signature(run_all_models)
+        from utils.review_orchestrator_base import run_all_models as base_run_all_models
+        sig = inspect.signature(base_run_all_models)
         assert "skip_existing" in sig.parameters
         assert sig.parameters["skip_existing"].default is True
 
     def test_skips_model_with_existing_results(self, temp_plan_with_model_results):
         """Models with existing valid JSON results are skipped."""
-        from review_plan_orchestrator import run_all_models
-
         plan_path = str(temp_plan_with_model_results)
         phase_dir = get_phase_dir(temp_plan_with_model_results, 'review-plan')
         out_dir = str(temp_plan_with_model_results.parent / temp_plan_with_model_results.stem)
 
         # model-a and model-b have results; model-c does not
         # We mock run_single_model so only model-c would actually run
-        with patch('review_plan_orchestrator.run_single_model', new_callable=AsyncMock) as mock_run:
+        with patch('utils.review_orchestrator_base.run_single_model', new_callable=AsyncMock) as mock_run:
             mock_run.return_value = {
                 "success": True,
                 "output": json.dumps([{"title": "New finding", "desc": "test", "importance": "LOW", "type": "addition"}]),
@@ -343,12 +353,10 @@ class TestModelLevelSkipReviewPlan:
 
     def test_does_not_skip_when_force(self, temp_plan_with_model_results):
         """Models are NOT skipped when skip_existing=False (--force)."""
-        from review_plan_orchestrator import run_all_models
-
         plan_path = str(temp_plan_with_model_results)
         out_dir = str(temp_plan_with_model_results.parent / temp_plan_with_model_results.stem)
 
-        with patch('review_plan_orchestrator.run_single_model', new_callable=AsyncMock) as mock_run:
+        with patch('utils.review_orchestrator_base.run_single_model', new_callable=AsyncMock) as mock_run:
             mock_run.return_value = {
                 "success": True,
                 "output": json.dumps([]),
@@ -376,12 +384,10 @@ class TestModelLevelSkipReviewPlan:
 
     def test_corrupt_file_triggers_rerun(self, temp_plan_with_corrupt_result, capsys):
         """Corrupt JSON files cause the model to be re-run instead of skipped."""
-        from review_plan_orchestrator import run_all_models
-
         plan_path = str(temp_plan_with_corrupt_result)
         out_dir = str(temp_plan_with_corrupt_result.parent / temp_plan_with_corrupt_result.stem)
 
-        with patch('review_plan_orchestrator.run_single_model', new_callable=AsyncMock) as mock_run:
+        with patch('utils.review_orchestrator_base.run_single_model', new_callable=AsyncMock) as mock_run:
             mock_run.return_value = {
                 "success": True,
                 "output": json.dumps([]),
@@ -412,8 +418,6 @@ class TestModelLevelSkipReviewPlan:
 
     def test_empty_file_not_skipped(self, temp_plan):
         """Empty result files (0 bytes) are not skipped."""
-        from review_plan_orchestrator import run_all_models
-
         phase_dir = get_phase_dir(temp_plan, 'review-plan')
         phase_dir.mkdir(parents=True, exist_ok=True)
         (phase_dir / f"{sanitize_model_name('test:model-a')}.json").write_text("", encoding="utf-8")  # Empty file
@@ -421,7 +425,7 @@ class TestModelLevelSkipReviewPlan:
         plan_path = str(temp_plan)
         out_dir = str(temp_plan.parent / temp_plan.stem)
 
-        with patch('review_plan_orchestrator.run_single_model', new_callable=AsyncMock) as mock_run:
+        with patch('utils.review_orchestrator_base.run_single_model', new_callable=AsyncMock) as mock_run:
             mock_run.return_value = {
                 "success": True, "output": json.dumps([]),
                 "error": None, "prompt": "test",
@@ -444,8 +448,6 @@ class TestModelLevelSkipReviewPlan:
 
     def test_non_list_json_not_skipped(self, temp_plan):
         """JSON files containing non-list data (e.g., a dict) are not skipped."""
-        from review_plan_orchestrator import run_all_models
-
         phase_dir = get_phase_dir(temp_plan, 'review-plan')
         phase_dir.mkdir(parents=True, exist_ok=True)
         (phase_dir / f"{sanitize_model_name('test:model-a')}.json").write_text(json.dumps({"error": "not a list"}), encoding="utf-8")
@@ -453,7 +455,7 @@ class TestModelLevelSkipReviewPlan:
         plan_path = str(temp_plan)
         out_dir = str(temp_plan.parent / temp_plan.stem)
 
-        with patch('review_plan_orchestrator.run_single_model', new_callable=AsyncMock) as mock_run:
+        with patch('utils.review_orchestrator_base.run_single_model', new_callable=AsyncMock) as mock_run:
             mock_run.return_value = {
                 "success": True, "output": json.dumps([]),
                 "error": None, "prompt": "test",
@@ -476,8 +478,6 @@ class TestModelLevelSkipReviewPlan:
 
     def test_skipped_result_contains_correct_data(self, temp_plan_with_model_results):
         """Skipped model results contain expected fields and data."""
-        from review_plan_orchestrator import run_all_models
-
         plan_path = str(temp_plan_with_model_results)
         out_dir = str(temp_plan_with_model_results.parent / temp_plan_with_model_results.stem)
 

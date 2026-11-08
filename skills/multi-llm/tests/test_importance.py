@@ -7,11 +7,22 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.importance import (
     IMPORTANCE_ORDER,
-    compare_importance,
-    filter_by_importance,
+    at_least,
     get_highest_importance,
     normalize_importance,
+    rank,
 )
+
+
+def filter_by_importance(items, min_importance="LOW"):
+    """The records :func:`at_least` keeps at or above *min_importance*."""
+    return [item for item in items if at_least(item.get("importance"), min_importance)]
+
+
+def compare_importance(item1, item2):
+    """-1 when *item1* ranks first, 1 when *item2* does, 0 when equal (:func:`rank`)."""
+    rank1, rank2 = rank(item1.get("importance")), rank(item2.get("importance"))
+    return (rank1 > rank2) - (rank1 < rank2)
 
 
 class TestImportanceOrder:
@@ -129,7 +140,7 @@ class TestGetHighestImportance:
 
 
 class TestFilterByImportance:
-    """Tests for the filter_by_importance function."""
+    """``at_least`` over records; a record without a level counts as MEDIUM."""
 
     def test_filter_min_low_includes_all(self):
         """Filter with min_importance='LOW' includes all items."""
@@ -212,7 +223,7 @@ class TestFilterByImportance:
 
 
 class TestCompareImportance:
-    """Tests for the compare_importance function."""
+    """``rank`` as an ordering of two records."""
 
     def test_high_vs_medium_returns_negative(self):
         """HIGH vs MEDIUM returns -1 (HIGH is more important)."""

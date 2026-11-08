@@ -182,7 +182,7 @@ order (`RANK`) and the score table (`WEIGHT`). Every reader goes through it (`no
 
 ## Grouping and section references
 
-**Grouping tracks meaning, not word count (2026-09-11).** `suggestion_processor.compute_similarity` is
+**Grouping tracks meaning, not word count (2026-09-11).** `suggestion_processor._similarity` is
 `0.33·title + 0.53·body + 0.08·reference + 0.02·type + 0.04·title-rarity` over normalized tokens (inline code spans tokenized like prose — a backticked
 identifier is the most specific thing a reviewer names — camelCase/dotted identifiers split,
 stopwords and review boilerplate removed, suffix-stemmed) weighted by IDF over the set being grouped
@@ -253,12 +253,15 @@ under-report.
 
 ## Reaggregation and result identity
 
-Reaggregation globs `{phase_dir}/*.json` and treats each file as a per-model result list.
-Non-model JSON files written into a phase dir (e.g. `report_data.json`, `consolidated_report_data.json`,
-`subagent_batch_report.json`, `state`, `.status`) MUST be added to every `exclude_patterns` list
-(`review_orchestrator_base.py` — two sites — and `code_review_orchestrator.py`) or they get parsed as suggestions
-and crash reaggregate. The executor's per-attempt diagnostics escape this by living in a
-**directory** (`{phase}/failed/`), which the glob never matches.
+Reaggregation reads `{phase_dir}/*.json` and treats each file as a per-model result list. Which
+names can be a model's result is decided in one place, `utils/result_files.model_result_paths`
+(the rule is `is_model_result_name`; the slot's `snapshot_candidates` uses it too): a non-model JSON
+file written into a phase dir (e.g. `report_data.json`, `consolidated_report_data.json`,
+`subagent_batch_report.json`) MUST be covered by `NON_MODEL_JSON_MARKERS` or `NON_MODEL_JSON_NAMES`
+there, or it gets parsed as suggestions and crashes reaggregate. Both reaggregates, the
+partial-completion guard (`leftover_model_results`) and `retire_unselected_results` read that list.
+The executor's per-attempt diagnostics escape this by living in a **directory** (`{phase}/failed/`),
+which the rule never matches.
 
 Detach's artifacts are invisible to it by construction — `.status.json` because
 `glob` skips leading-dot names, `orchestrator-run.log` and its rotated

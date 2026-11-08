@@ -468,7 +468,7 @@ class TestConsolidatedBadges:
         })
         monkeypatch.setattr(rpo, "merge_consolidation_results",
                             lambda *_a, **_k: ([dict(cg) for cg in self.CGS], {"count": 0}))
-        rpo.reaggregate_consolidation_mode(str(phase_dir), str(plan), "plan", [self.SPEC])
+        rpo.reaggregate_consolidation_mode(str(phase_dir), str(plan), "plan")
         data = self._payload((phase_dir / "consolidated-report.html").read_text(encoding="utf-8"))
         badge = data["modelMetadata"][self.SPEC]
         assert badge["sandbox"] == "fallback-plugin-landlock"

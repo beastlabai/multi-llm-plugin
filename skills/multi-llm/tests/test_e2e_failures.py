@@ -3357,8 +3357,7 @@ class TestTheFanOutBaseReadsTheAnswerTheProviderLeftOnStdout:
     ):
         """`failure_output` is keyword-only and defaults to `None`, and that is load-bearing.
 
-        `review_plan_orchestrator.save_model_result`'s backward-compatible wrapper
-        and every test call site in this suite pass the eight positional arguments
+        Every test call site in this suite passes the eight positional arguments
         and nothing else. For them the hard-failure branch must behave exactly as
         it did before the parameter existed: the error log, `False`, and not one
         salvage artifact — because a caller that supplies no failure output is

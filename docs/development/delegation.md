@@ -137,8 +137,8 @@ sibling.
 `review-tasks` embeds two labelled `## Context (…)` blocks — the plan, and
 `tasks/tasks.md`, each excerpted on its own budget so a long plan cannot squeeze the task list
 out — and hashes the task list into `inputs.tasks_sha256` so an edited tasks.md invalidates the
-file the way an edited plan does (`review_orchestrator_base.validation_context_kwargs`, both the fan-out and the reaggregate site,
-which had to start resolving the tasks file too).
+file the way an edited plan does (`review_orchestrator_base.validation_context_blocks`, read by
+`review_validation_round`, the one round builder of both the fan-out and the reaggregate site).
 
 Measured 2026-09-16: 28 of 30 suggestions named a bare `T###`,
 `'T001' in prompt` was False for all eight batches, and two verdicts came back citing text — a
@@ -200,7 +200,7 @@ recorded decision" instruction (F3, 2026-09-16).
 
 **The validation task file carries the round's scope block** (`scope`: policy, prompt phase, the
 baseline these validators are shown and the round's own baseline id;
-plans/scope-policy-and-report-tags.md §3.1). `prepare_batched_validation_tasks(scope=...)` renders
+plans/scope-policy-and-report-tags.md §3.1). `materialize_validation_round` renders `ValidationRound.scope` as
 `scope_policy.validator_guidance` into every batch prompt per call, as its own argument after the
 phase guidance (so `PLAN_VALIDATION_SCOPE_GUIDANCE` still fills in when `extra_instructions` is
 empty), and both invokers run those bytes. The reply contract gains the optional
@@ -222,7 +222,8 @@ in the summary line; with no hash it falls through as `-1` instead of raising.
 ## Code-review validation context
 
 **A code-review validation prompt carries no diff, and its first block is the plan, head-kept.**
-Both `review-code` sites hand `prepare_batched_validation_tasks` `context="Plan file: …\n\nPlan content:\n" + plan` and the second
+Both `review-code` sites build their round with `code_review_validation_round`: the first block is the
+bound plan snapshot, with no `Plan file:` line, and the second
 block is the implement record plus the cited files' line windows (`build_validation_secondary_context`); the
 144-file diff a reviewer fan-out reads never reaches a validator, so an over-limit first block is
 always the *plan* going over `VALIDATION_CONTEXT_LIMIT` (`excerpt_context` keeps the first 60 000
@@ -282,7 +283,7 @@ per-batch code windows. `full`: the round-wide plan and code blocks in every bat
 is reported once and read as `full`. The Codex plugin forwards it (`packaging/codex/mcp.json`
 `env_vars`); a name missing there never reaches the server.
 
-**The plan block** (`utils/validation_sections.py`, called from `prepare_batched_validation_tasks`).
+**The plan block** (`utils/validation_sections.py`, called from `materialize_validation_round`).
 A round qualifies (`cited_plan_for_round`) only when every batch can reach the rest of the plan:
 the switch is `cited`, the block is the bound plan with a hash-bound snapshot, the runner may read
 it (no `runner_read_refusal`; on a native host the snapshot is inside the project root), and the

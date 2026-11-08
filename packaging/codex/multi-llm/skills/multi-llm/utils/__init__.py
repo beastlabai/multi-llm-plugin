@@ -48,13 +48,8 @@ from .schema_validator import (
 from .suggestion_processor import (
     SuggestionGroup,
     extract_suggestions_from_review,
-    compute_similarity,
     group_similar_suggestions,
     deduplicate_suggestions,
-    merge_suggestions_by_model,
-    filter_by_importance,
-    export_groups_to_json,
-    import_groups_from_json,
 )
 
 from .task_decomposer import (
@@ -228,13 +223,8 @@ __all__ = [
     # suggestion_processor
     "SuggestionGroup",
     "extract_suggestions_from_review",
-    "compute_similarity",
     "group_similar_suggestions",
     "deduplicate_suggestions",
-    "merge_suggestions_by_model",
-    "filter_by_importance",
-    "export_groups_to_json",
-    "import_groups_from_json",
     # task_decomposer
     "TaskStatus",
     "Task",

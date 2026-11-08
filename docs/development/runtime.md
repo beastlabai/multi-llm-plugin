@@ -316,6 +316,7 @@ An answer answers one stop: the first status written for its task that the answe
 (`state_manager._consume_answer`, in `update_task_status_in_state`, so both legs) drops it, and
 `--task <id>` does not apply one recorded for that task (fix round 15). Printing a resolved
 path is fine — it is session-scoped; persisting one is not. Both places the review base prepares
-validation tasks pass `orchestrator=<the phase's own script>`: the fan-out call omitted it (measured 2026-09-14),
-`prepare_batched_validation_tasks` defaulted to review-plan's, and a failed review-tasks run told the session
+validation tasks build their round with `review_validation_round`, which records
+`orchestrator=<the phase's own script>`: the fan-out call once omitted it (measured 2026-09-14),
+`RoundProvenance` defaulted to review-plan's, and a failed review-tasks run told the session
 model to re-invoke `review-plan --reaggregate`.

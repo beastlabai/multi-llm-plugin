@@ -16,7 +16,6 @@ import json
 import os
 import subprocess
 import sys
-import textwrap
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -26,7 +25,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from review_plan_orchestrator import _write_status, _update_status
+from utils.status_file import update_status as _update_status, write_status as _write_status
 from utils import status_file
 from utils.json_extractor import build_unsanitize_map
 
@@ -402,42 +401,14 @@ class TestConsumersSurviveInterleavedHeartbeats:
             expect_run_id="run-a",
         )
 
-        # The exact collection reaggregate_from_existing_files performs — read from
-        # the module rather than restated, so a new phase-dir artifact that forgets
-        # its exclude pattern fails HERE instead of crashing a user's reaggregate.
-        exclude = _reaggregation_exclude_patterns()
-        result_files = sorted(
-            os.path.basename(f)
-            for f in glob.glob(str(tmp_path / "*.json"))
-            if not any(os.path.basename(f).startswith(ex)
-                       or ex in os.path.basename(f) for ex in exclude)
-        )
+        # The exact collection both reaggregates perform, through the shared
+        # rule rather than a restated list, so a new phase-dir artifact missing
+        # from it fails HERE instead of crashing a user's reaggregate.
+        from utils.result_files import model_result_paths
+
+        result_files = [os.path.basename(f) for f in model_result_paths(tmp_path)]
         assert result_files == ["cursor-agent_auto.json",
                                "gemini_gemini-2_5-flash.json"]
-
-
-def _reaggregation_exclude_patterns():
-    """The live ``exclude_patterns`` list from ``reaggregate_from_existing_files``.
-
-    Parsed out of the source rather than restated: the pitfall this guards is a new
-    non-model JSON file landing in a phase dir without being added to the list, and
-    a test carrying its own copy of the list cannot detect that.
-    """
-    import ast
-    import inspect
-
-    from utils import review_orchestrator_base
-
-    source = inspect.getsource(
-        review_orchestrator_base.reaggregate_from_existing_files
-    )
-    tree = ast.parse(textwrap.dedent(source))
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Assign)
-                and any(getattr(t, "id", "") == "exclude_patterns"
-                        for t in node.targets)):
-            return ast.literal_eval(node.value)
-    raise AssertionError("exclude_patterns not found in the reaggregation helper")
 
 
 class TestRunCompareAndSet:

@@ -153,21 +153,6 @@ def get_highest_importance(group: Dict[str, Any]) -> str:
     return group_importance(group)
 
 
-def filter_by_importance(
-    items: List[Dict[str, Any]],
-    min_importance: str = "LOW"
-) -> List[Dict[str, Any]]:
-    """The items at or above *min_importance*; an item without a level counts
-    as :data:`DEFAULT`."""
-    return [item for item in items if at_least(_value_of(item), min_importance)]
-
-
-def compare_importance(item1: Dict[str, Any], item2: Dict[str, Any]) -> int:
-    """-1 when *item1* is more important, 1 when *item2* is, 0 when equal."""
-    rank1, rank2 = rank(_value_of(item1)), rank(_value_of(item2))
-    return (rank1 > rank2) - (rank1 < rank2)
-
-
 def normalize_importance(level: str) -> str:
     """*level* in canonical spelling, MEDIUM when it names none (:func:`normalize`)."""
     return normalize(level)

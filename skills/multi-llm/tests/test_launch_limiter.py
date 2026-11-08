@@ -24,7 +24,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import ask_orchestrator  # noqa: E402
 import code_review_orchestrator as cro  # noqa: E402
-import review_plan_orchestrator as rpo  # noqa: E402
 from utils import progress_tracker  # noqa: E402
 from utils import review_orchestrator_base as base  # noqa: E402
 from utils import run_status, status_file  # noqa: E402
@@ -464,8 +463,16 @@ class TestTheBaseFanOut:
 
 
 # ---------------------------------------------------------------------------
-# The other fan-outs that stagger: review-code, review-plan's own, tasks
+# The other fan-outs that stagger: review-code, review-plan, tasks
 # ---------------------------------------------------------------------------
+
+def _review_plan_fan_out(model_specs, plan_path):
+    """review-plan's fan-out (``review_orchestrator_base.run_all_models``), no output dir."""
+    return base.run_all_models(
+        model_specs, str(plan_path), "{plan_path}", lambda _spec: {"plan_path": str(plan_path)},
+        "review-plan", "plan_review", 600, 2,
+    )
+
 
 class TestTheOtherFanOuts:
 
@@ -487,7 +494,7 @@ class TestTheOtherFanOuts:
         assert dict(dispatched)["gemini:gemini-3-flash"] == 0.0
         assert _cursor_times(dispatched) == [3.0, 3.0 + STEP]
 
-    def test_review_plans_own_loop(self, tmp_path):
+    def test_review_plans_fan_out(self, tmp_path):
         plan_path = tmp_path / "plan.md"
         plan_path.write_text("# plan\n", encoding="utf-8")
         dispatched = []
@@ -497,10 +504,8 @@ class TestTheOtherFanOuts:
             await asyncio.sleep(HOLD.get(model_spec, 0.5))
             return {"success": True}
 
-        with patch.object(rpo, "run_single_model", new=fake_model):
-            run_on_virtual_clock(rpo.run_all_models(
-                list(CONTENDED), str(plan_path), 600, 2,
-            ))
+        with patch.object(base, "run_single_model", new=fake_model):
+            run_on_virtual_clock(_review_plan_fan_out(list(CONTENDED), plan_path))
         assert dict(dispatched)["claude-code:sonnet"] == 0.0
         assert _cursor_times(dispatched) == [3.0, 3.0 + STEP]
 
@@ -568,8 +573,8 @@ class TestTheLanesWithNoLadder:
             return {"success": True, "data": "[]", "details": {}}
 
         monkeypatch.setattr(base, "invoke_with_provider", invoker)
-        results = run_on_virtual_clock(rpo.run_all_models(
-            ["cursor-agent:auto", "cursor-agent:sonnet"], str(plan), 600, 2,
+        results = run_on_virtual_clock(_review_plan_fan_out(
+            ["cursor-agent:auto", "cursor-agent:sonnet"], plan,
         ))
         assert all(r["success"] for r in results.values()), results
         assert [(spec, round(t, 6)) for spec, t in dispatched] == [

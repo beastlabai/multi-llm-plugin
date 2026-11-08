@@ -47,9 +47,12 @@ from utils.validation import (  # noqa: E402
     TASKS_BACKUP_NAME,
     TASKS_SNAPSHOT_NAME,
     VALIDATION_CONTEXT_LIMIT,
+    RoundProvenance,
     ValidationContextError,
+    ValidationRound,
     bind_document_file,
     bind_document_text,
+    materialize_validation_round,
     merge_batched_validation_results,
     prepare_batched_revalidation_tasks,
     prepare_batched_validation_tasks,
@@ -620,18 +623,19 @@ def _review_tasks_round(tmp_path, plan_text, tasks_text, *, tasks_readable=True)
     tasks = write(tmp_path / "tasks" / "tasks.md", tasks_text)
     phase = tmp_path / "plan" / "review-tasks"
     plan_doc = bind_document_file(str(plan), str(phase))
-    kwargs = rob.validation_context_kwargs(
+    primary, secondary = rob.validation_context_blocks(
         "review-tasks", plan_doc.text, {"tasks_file": str(tasks)},
         plan_document=plan_doc, phase_dir=str(phase),
     )
     if not tasks_readable:
-        doc = kwargs["secondary_document"]
+        doc = secondary.document
         doc.path, doc.in_phase_dir = None, False
         doc.reason = "snapshot could not be written"
-    result = prepare_batched_validation_tasks(
+    result = materialize_validation_round(ValidationRound(
         groups=groups(), output_dir=str(phase), plan_file=str(plan),
-        tasks_file=str(tasks), phase="review-tasks", **kwargs,
-    )
+        primary=primary, secondary=secondary,
+        provenance=RoundProvenance(tasks_file=str(tasks), phase="review-tasks"),
+    ))
     return phase, plan, tasks, result
 
 
@@ -970,7 +974,7 @@ class TestThroughTheReaggregate:
         assert not list(phase_dir.glob("validation_batch_*[0-9].json"))
 
     def test_7_1d_a_legacy_validation_json_is_retired_by_the_stale_check(self, tmp_path):
-        from utils.validation import stale_validation_reason
+        from utils.validation import validation_source_decision
 
         plan, out_dir, phase_dir = _phase(tmp_path, big_doc())
         _reaggregate(plan, out_dir, phase_dir)
@@ -982,9 +986,9 @@ class TestThroughTheReaggregate:
             "groups": [], "metadata": {"model": "old", "schema_version": "2.1",
                                        "batch_sha256": {}},
         }), encoding="utf-8")
-        reason = stale_validation_reason(
+        reason = validation_source_decision(
             phase_dir / "validation.json", phase_dir / "grouped.json"
-        )
+        )[0]
         assert reason and "contract 1" in reason
 
     def test_2_10_an_under_limit_contract_1_round_is_left_alone(self, tmp_path):

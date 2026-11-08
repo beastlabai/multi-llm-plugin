@@ -12,8 +12,9 @@ import json
 import logging
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 # Import state_manager's generate_group_id for reference (both coexist)
 # Also import CURRENT_FORMAT_VERSION and load_groups_payload for v2 envelope support
@@ -606,7 +607,7 @@ def prepare_consolidation_tasks(
     (``consolidation_batch_0.json``, ``consolidation_batch_1.json``, ...).
 
     The output is written to ``consolidation_tasks.json`` in ``phase_dir`` and
-    follows the same structural pattern as ``prepare_batched_validation_tasks()``
+    follows the same structural pattern as ``materialize_validation_round()``
     in ``utils/validation.py``.
 
     Args:
@@ -909,6 +910,38 @@ def _get_reference_for_cluster(
     return ""
 
 
+def _consolidated_entry(
+    underlying_ids: List[str],
+    underlying_indices: List[int],
+    *,
+    title: Any,
+    description: Any,
+    importance: Any,
+    reference: Any,
+    type_: Any,
+    model_count: int,
+    suggestion_count: int,
+    is_singleton: bool,
+    reasoning: Any,
+) -> Dict[str, Any]:
+    """One ``consolidated.json`` entry; ``display_index`` is set by the merge."""
+    return {
+        "consolidated_id": generate_consolidated_id(underlying_ids),
+        "display_index": 0,
+        "title": title,
+        "description": description,
+        "importance": importance,
+        "reference": reference,
+        "type": type_,
+        "underlying_group_indices": underlying_indices,
+        "underlying_group_ids": underlying_ids,
+        "model_count": model_count,
+        "original_suggestion_count": suggestion_count,
+        "is_singleton": is_singleton,
+        "reasoning": reasoning,
+    }
+
+
 def _make_singleton_consolidated(
     group_id: str,
     group_index: int,
@@ -936,23 +969,20 @@ def _make_singleton_consolidated(
     if group_type not in TYPE_PRIORITY:
         group_type = "clarification"
 
-    # A group has no importance field: its members' highest
-    # (docs/development/review-results.md, "Importance levels").
-    importance = _importance.group_importance(group)
-
-    return {
-        "title": group.get("theme", "Untitled"),
-        "description": group.get("theme", ""),
-        "importance": importance,
-        "reference": group.get("reference", ""),
-        "type": group_type,
-        "underlying_group_indices": [group_index],
-        "underlying_group_ids": [group_id],
-        "model_count": len(group.get("models", [])) or 1,
-        "original_suggestion_count": len(group.get("suggestions", [])) or 1,
-        "is_singleton": True,
-        "reasoning": reasoning or "Singleton group — no related groups to merge.",
-    }
+    return _consolidated_entry(
+        [group_id], [group_index],
+        title=group.get("theme", "Untitled"),
+        description=group.get("theme", ""),
+        # A group has no importance field: its members' highest
+        # (docs/development/review-results.md, "Importance levels").
+        importance=_importance.group_importance(group),
+        reference=group.get("reference", ""),
+        type_=group_type,
+        model_count=len(group.get("models", [])) or 1,
+        suggestion_count=len(group.get("suggestions", [])) or 1,
+        is_singleton=True,
+        reasoning=reasoning or "Singleton group — no related groups to merge.",
+    )
 
 
 def _reply_group_ids(
@@ -972,6 +1002,251 @@ def _reply_group_ids(
     return named
 
 
+@dataclass(frozen=True)
+class _BatchFailure:
+    """A batch reply the merge cannot read; *reason* starts its groups'
+    singleton reasoning."""
+
+    reason: str
+
+
+def _read_batch(
+    batch_file: Path, batch_index: int, assigned: int,
+) -> Union[Tuple[List[Any], List[Any]], _BatchFailure]:
+    """A batch reply's ``(clusters, singletons)`` lists, or why it is unusable.
+
+    Unusable: no file, not JSON, not an object, an ``error`` reply (its own
+    ``groups`` list is never read), or neither list present. Each is logged
+    with the number of *assigned* groups that become singletons.
+    """
+    if not batch_file.exists():
+        logger.warning(
+            "Consolidation batch file not found: %s — treating %d "
+            "groups as singletons",
+            batch_file, assigned,
+        )
+        return _BatchFailure(f"Batch {batch_index} file missing")
+    try:
+        with open(batch_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, IOError) as exc:
+        logger.warning(
+            "Consolidation batch %d has invalid JSON (%s) — treating "
+            "%d groups as singletons",
+            batch_index, exc, assigned,
+        )
+        return _BatchFailure(f"Batch {batch_index} invalid JSON")
+    if not isinstance(data, dict):
+        logger.warning(
+            "Consolidation batch %d is not a JSON object — treating "
+            "%d groups as singletons",
+            batch_index, assigned,
+        )
+        return _BatchFailure(f"Batch {batch_index} unexpected format")
+    if "error" in data:
+        logger.warning(
+            "Consolidation batch %d reported error '%s' — treating "
+            "%d groups as singletons",
+            batch_index, data.get("error", "unknown"), assigned,
+        )
+        return _BatchFailure(f"Batch {batch_index} error fallback")
+    clusters, singletons = data.get("clusters"), data.get("singletons")
+    if not isinstance(clusters, list) and not isinstance(singletons, list):
+        logger.warning(
+            "Consolidation batch %d missing both 'clusters' and "
+            "'singletons' keys — treating %d groups as singletons. "
+            "Errors: missing required keys",
+            batch_index, assigned,
+        )
+        return _BatchFailure(f"Batch {batch_index} schema validation failed")
+    return (
+        clusters if isinstance(clusters, list) else [],
+        singletons if isinstance(singletons, list) else [],
+    )
+
+
+def _fill_cluster_defaults(cluster: Dict[str, Any]) -> None:
+    """Give a reply's cluster the optional fields it left out, in place."""
+    cluster.setdefault("reasoning", "")
+    cluster.setdefault("description", cluster.get("title", ""))
+    cluster["importance"] = _importance.normalize(cluster.get("importance"))
+    cluster.setdefault("type", "clarification")
+    cluster.setdefault("title", "Untitled cluster")
+
+
+def _warn_duplicate(gid: str) -> None:
+    logger.warning(
+        "Duplicate group_id %s found across batches — assigned to first "
+        "occurrence",
+        gid,
+    )
+
+
+class _Claims:
+    """Which groups an entry already shows, and the singleton entries made.
+
+    Every index comes from a group's own id, never from a reply's
+    ``underlying_group_indices`` or ``group_index``, so the decision join
+    (ids) and the pages (indices) show the same groups.
+    """
+
+    def __init__(self, groups: List[Dict[str, Any]]) -> None:
+        self.groups = groups
+        self.ids = consolidation_group_ids(groups)
+        self.index: Dict[str, int] = {gid: idx for idx, gid in enumerate(self.ids)}
+        self.claimed: Set[str] = set()
+        self.singletons: List[Dict[str, Any]] = []
+
+    def singleton(self, gid: str, reasoning: str) -> None:
+        """Show *gid* alone, unless an entry already shows it."""
+        if gid in self.claimed:
+            return
+        self.claimed.add(gid)
+        idx = self.index[gid]
+        self.singletons.append(
+            _make_singleton_consolidated(gid, idx, self.groups[idx], reasoning=reasoning)
+        )
+
+    def cluster_ids(
+        self, cluster: Dict[str, Any], batch_map: Dict[str, List[str]], batch_index: Any,
+    ) -> Optional[List[str]]:
+        """The batch's groups *cluster* names that no earlier entry shows
+        (first cluster wins); ``None`` when its ids are not a list. Claims
+        nothing."""
+        reply_ids = cluster.get("underlying_group_ids", [])
+        if not isinstance(reply_ids, list):
+            return None
+        kept: List[str] = []
+        for reply_id in reply_ids:
+            for gid in _reply_group_ids(batch_map, reply_id, batch_index):
+                if gid in self.claimed:
+                    _warn_duplicate(gid)
+                elif gid not in kept:
+                    kept.append(gid)
+        return kept
+
+
+def _merge_batch(
+    claims: _Claims,
+    batch_index: Any,
+    batch_map: Dict[str, List[str]],
+    clusters: List[Any],
+    singletons: List[Any],
+) -> List[Dict[str, Any]]:
+    """Claim one batch reply's groups; return its clusters of two or more.
+
+    A cluster is what is left of it after the id checks: nothing, one group
+    (shown as a singleton with the cluster's reasoning) or a cluster. A
+    reply singleton is read by its id; its ``group_index`` is a position the
+    model copied and may get wrong.
+    """
+    for cluster in clusters:
+        if isinstance(cluster, dict):
+            _fill_cluster_defaults(cluster)
+    kept_clusters: List[Dict[str, Any]] = []
+    for cluster in clusters:
+        if not isinstance(cluster, dict):
+            continue
+        ids = claims.cluster_ids(cluster, batch_map, batch_index)
+        if not ids:
+            continue
+        if len(ids) == 1:
+            claims.singleton(ids[0], cluster.get("reasoning", ""))
+            continue
+        claims.claimed.update(ids)
+        cluster["underlying_group_ids"] = ids
+        kept_clusters.append(cluster)
+    for singleton in singletons:
+        if not isinstance(singleton, dict) or not singleton.get("group_id", ""):
+            continue
+        for gid in _reply_group_ids(batch_map, singleton["group_id"], batch_index):
+            if gid in claims.claimed:
+                _warn_duplicate(gid)
+            else:
+                claims.singleton(gid, singleton.get("reasoning", ""))
+    return kept_clusters
+
+
+def _merge_similar_clusters(
+    section_clusters: Dict[str, List[Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    """One section's clusters (from any of its batches) whose titles overlap
+    by 80% or more, merged into the first of them; every other cluster kept.
+
+    The merged cluster takes the higher importance and the union of the
+    groups, and appends the other's description and reasoning when new.
+    """
+    merged: List[Dict[str, Any]] = []
+    for section_key, clusters in section_clusters.items():
+        consumed: Set[int] = set()
+        for i, cluster in enumerate(clusters):
+            if i in consumed:
+                continue
+            for j in range(i + 1, len(clusters)):
+                if j in consumed:
+                    continue
+                other = clusters[j]
+                title_i, title_j = cluster.get("title", ""), other.get("title", "")
+                ratio = _word_overlap_ratio(title_i, title_j)
+                if ratio < 0.8:
+                    continue
+                logger.info(
+                    "Cross-batch dedup: merging '%s' and '%s' "
+                    "(overlap=%.2f) in section '%s'",
+                    title_i, title_j, ratio, section_key,
+                )
+                cluster["importance"] = _highest_importance(
+                    cluster.get("importance", "LOW"), other.get("importance", "LOW"),
+                )
+                cluster["underlying_group_ids"] = list(dict.fromkeys(
+                    cluster.get("underlying_group_ids", [])
+                    + other.get("underlying_group_ids", [])
+                ))
+                desc_i, desc_j = cluster.get("description", ""), other.get("description", "")
+                if desc_j and desc_j not in desc_i:
+                    cluster["description"] = f"{desc_i} Additionally: {desc_j}"
+                reason_i, reason_j = cluster.get("reasoning", ""), other.get("reasoning", "")
+                if reason_j and reason_j not in reason_i:
+                    cluster["reasoning"] = f"{reason_i} {reason_j}".strip()
+                consumed.add(j)
+            merged.append(cluster)
+    return merged
+
+
+def _cluster_entry(cluster: Dict[str, Any], claims: _Claims) -> Dict[str, Any]:
+    """A merged cluster's ``consolidated.json`` entry.
+
+    Its type is raised to its groups' highest-priority type when the model's
+    is lower, and its importance is never below its most important group's,
+    the level the prompt asks for.
+    """
+    groups, index = claims.groups, claims.index
+    ids = cluster.get("underlying_group_ids", [])
+    type_ = cluster.get("type", "clarification")
+    expected_type = _resolve_type_for_group_ids(ids, groups, index)
+    if TYPE_PRIORITY.get(type_.lower(), 0) < TYPE_PRIORITY.get(expected_type, 0):
+        type_ = expected_type
+    members = [groups[index[gid]] for gid in ids if gid in index]
+    importance = _importance.highest([
+        cluster.get("importance"), *(_importance.group_importance(g) for g in members),
+    ])
+    models: Set[str] = {m for g in members for m in g.get("models", [])}
+    suggestion_count = sum(len(g.get("suggestions", [])) for g in members)
+    return _consolidated_entry(
+        ids,
+        list(dict.fromkeys(index[gid] for gid in ids if gid in index)),
+        title=cluster.get("title", "Untitled"),
+        description=cluster.get("description", ""),
+        importance=importance,
+        reference=_get_reference_for_cluster(ids, groups, index),
+        type_=type_,
+        model_count=len(models) or 1,
+        suggestion_count=suggestion_count or 1,
+        is_singleton=False,
+        reasoning=cluster.get("reasoning", ""),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main merge function
 # ---------------------------------------------------------------------------
@@ -985,10 +1260,13 @@ def merge_consolidation_results(
     """
     Read consolidation batch files and merge into final consolidated groups.
 
-    Reads each ``consolidation_batch_N.json`` from *phase_dir*, validates
-    structure, handles errors gracefully, performs duplicate/missing group
-    detection, cross-batch deduplication, type validation, and produces the
-    final list of consolidated groups with stable IDs and display indices.
+    Each ``consolidation_batch_N.json`` in *phase_dir* is read through its
+    own batch's ids (:func:`_batch_id_map`), so a reply can name only the
+    groups the task file gave it (docs/development/review-results.md,
+    "Consolidation batches"). Every assigned group appears in exactly one
+    entry: the first cluster naming it, else a singleton (a reply that
+    cannot be read, a group the reply left out, a one-group section).
+    Similar clusters of a section are merged across batches.
 
     Args:
         phase_dir: Path to the review-plan phase directory containing
@@ -1009,521 +1287,58 @@ def merge_consolidation_results(
           ``description``, ``importance``, ``reference``, ``type``,
           ``underlying_group_indices``, ``underlying_group_ids``,
           ``model_count``, ``original_suggestion_count``, ``is_singleton``,
-          and ``reasoning``.
+          and ``reasoning``. Clusters come first, then singletons.
         - ``partial_failures_metadata`` is a dict with ``count``,
           ``batches`` (list of failed batch indices), and ``fallback``
           (always ``"all_singletons"``).
     """
-    phase_path = Path(phase_dir)
-
-    # Build group_id lookup: group_id -> index in groups list. One id per
-    # group (consolidation_group_ids), so same-content groups stay apart.
-    group_ids = consolidation_group_ids(groups)
+    claims = _Claims(groups)
     plain_ids = [generate_group_id(group) for group in groups]
-    group_id_to_index: Dict[str, int] = {
-        gid: idx for idx, gid in enumerate(group_ids)
-    }
+    failed_batch_indices: List[int] = []
+    section_clusters: Dict[str, List[Dict[str, Any]]] = {}
 
-    # Each batch's ids -> its groups' own ids (_batch_id_map): a reply is
-    # read through its own batch's map, so it can name only that batch's
-    # groups (docs/development/review-results.md, "Consolidation batches").
-    batch_id_maps: List[Dict[str, List[str]]] = [
-        _batch_id_map(batch_info, group_ids, plain_ids, group_id_to_index)
-        for batch_info in tasks_metadata.get("batches", [])
-    ]
+    for batch_info in tasks_metadata.get("batches", []):
+        batch_index = batch_info["batch_index"]
+        batch_map = _batch_id_map(batch_info, claims.ids, plain_ids, claims.index)
+        assigned = list(dict.fromkeys(gid for own in batch_map.values() for gid in own))
+        reply = _read_batch(
+            Path(phase_dir) / f"consolidation_batch_{batch_index}.json",
+            batch_index, len(assigned),
+        )
+        if isinstance(reply, _BatchFailure):
+            failed_batch_indices.append(batch_index)
+            for gid in assigned:
+                claims.singleton(gid, f"{reply.reason} — treated as singleton.")
+            continue
+        kept = _merge_batch(claims, batch_index, batch_map, *reply)
+        if kept:
+            section_clusters.setdefault(
+                batch_info.get("section_key", "_uncategorized"), [],
+            ).extend(kept)
+        for gid in assigned:
+            claims.singleton(
+                gid, f"Missing from batch {batch_index} output — added as singleton.",
+            )
 
-    # Collect all group_ids assigned to batches for completeness check later
-    all_batch_group_ids: Set[str] = set()
-    for batch_map in batch_id_maps:
-        for own_ids in batch_map.values():
-            all_batch_group_ids.update(own_ids)
-
-    # Also collect singleton section group IDs
-    all_singleton_group_ids: Set[str] = set()
-    singleton_sections = tasks_metadata.get("singleton_sections", {})
-    for _section_key, indices in singleton_sections.items():
+    for indices in tasks_metadata.get("singleton_sections", {}).values():
         for idx in indices:
             if 0 <= idx < len(groups):
-                all_singleton_group_ids.add(group_ids[idx])
-
-    # The full set of input group_ids we expect to cover
-    all_input_group_ids = all_batch_group_ids | all_singleton_group_ids
-
-    # Track partial failures
-    failed_batch_indices: List[int] = []
-
-    # Track which group_ids have been claimed by a cluster (for dedup)
-    claimed_group_ids: Set[str] = set()
-
-    # Collect clusters and singletons per section for cross-batch dedup
-    # Structure: section_key -> list of (cluster_dict, batch_index)
-    section_clusters: Dict[str, List[Tuple[Dict[str, Any], int]]] = {}
-    # Singletons from batch outputs (separate from singleton_sections)
-    batch_singletons: List[Dict[str, Any]] = []
-
-    # -------------------------------------------------------------------
-    # Helper to emit all assigned groups as singletons for a failed batch
-    # -------------------------------------------------------------------
-    def _emit_as_singletons(
-        assigned_gids: List[str], reason: str,
-    ) -> None:
-        """Emit all assigned group_ids as singletons into batch_singletons."""
-        for gid in assigned_gids:
-            if gid not in claimed_group_ids:
-                idx = group_id_to_index.get(gid)
-                if idx is not None and idx < len(groups):
-                    batch_singletons.append(
-                        _make_singleton_consolidated(
-                            gid, idx, groups[idx], reasoning=reason,
-                        )
-                    )
-                    claimed_group_ids.add(gid)
-
-    # -------------------------------------------------------------------
-    # Steps 1-6: Read each batch file, validate, handle errors, dedup
-    # -------------------------------------------------------------------
-    batches = tasks_metadata.get("batches", [])
-    for batch_info, batch_map in zip(batches, batch_id_maps):
-        batch_index = batch_info["batch_index"]
-        section_key = batch_info.get("section_key", "_uncategorized")
-        assigned_group_ids: List[str] = list(dict.fromkeys(
-            gid for own_ids in batch_map.values() for gid in own_ids
-        ))
-        batch_file = phase_path / f"consolidation_batch_{batch_index}.json"
-
-        # --- Read and parse ---
-        batch_data = None
-        if not batch_file.exists():
-            logger.warning(
-                "Consolidation batch file not found: %s — treating %d "
-                "groups as singletons",
-                batch_file,
-                len(assigned_group_ids),
-            )
-            failed_batch_indices.append(batch_index)
-            _emit_as_singletons(
-                assigned_group_ids,
-                f"Batch {batch_index} file missing — treated as singleton.",
-            )
-            continue
-
-        try:
-            with open(batch_file, "r", encoding="utf-8") as f:
-                batch_data = json.load(f)
-        except (json.JSONDecodeError, IOError) as exc:
-            logger.warning(
-                "Consolidation batch %d has invalid JSON (%s) — treating "
-                "%d groups as singletons",
-                batch_index,
-                exc,
-                len(assigned_group_ids),
-            )
-            failed_batch_indices.append(batch_index)
-            _emit_as_singletons(
-                assigned_group_ids,
-                f"Batch {batch_index} invalid JSON — treated as singleton.",
-            )
-            continue
-
-        if not isinstance(batch_data, dict):
-            logger.warning(
-                "Consolidation batch %d is not a JSON object — treating "
-                "%d groups as singletons",
-                batch_index,
-                len(assigned_group_ids),
-            )
-            failed_batch_indices.append(batch_index)
-            _emit_as_singletons(
-                assigned_group_ids,
-                f"Batch {batch_index} unexpected format — "
-                "treated as singleton.",
-            )
-            continue
-
-        # --- Step 3: Handle error batch files ---
-        if "error" in batch_data:
-            logger.warning(
-                "Consolidation batch %d reported error '%s' — treating "
-                "%d groups as singletons",
-                batch_index,
-                batch_data.get("error", "unknown"),
-                len(assigned_group_ids),
-            )
-            failed_batch_indices.append(batch_index)
-            # Every group the task file assigns, not the reply's own
-            # ``groups`` list: a reply never decides which groups are shown.
-            _emit_as_singletons(
-                assigned_group_ids,
-                f"Batch {batch_index} error fallback — treated as singleton.",
-            )
-            continue
-
-        # --- Step 4: Validate structure (clusters/singletons keys) ---
-        clusters_data = batch_data.get("clusters")
-        singletons_data = batch_data.get("singletons")
-
-        if (
-            not isinstance(clusters_data, list)
-            and not isinstance(singletons_data, list)
-        ):
-            logger.warning(
-                "Consolidation batch %d missing both 'clusters' and "
-                "'singletons' keys — treating %d groups as singletons. "
-                "Errors: missing required keys",
-                batch_index,
-                len(assigned_group_ids),
-            )
-            failed_batch_indices.append(batch_index)
-            _emit_as_singletons(
-                assigned_group_ids,
-                f"Batch {batch_index} schema validation failed — "
-                "treated as singleton.",
-            )
-            continue
-
-        # Ensure both are lists (one may be missing but that's ok)
-        if not isinstance(clusters_data, list):
-            clusters_data = []
-        if not isinstance(singletons_data, list):
-            singletons_data = []
-
-        # --- Step 5: Field-level salvage for clusters ---
-        for cluster in clusters_data:
-            if not isinstance(cluster, dict):
-                continue
-            # Fill default for missing optional fields
-            if "reasoning" not in cluster:
-                cluster["reasoning"] = ""
-            if "description" not in cluster:
-                cluster["description"] = cluster.get("title", "")
-            cluster["importance"] = _importance.normalize(cluster.get("importance"))
-            if "type" not in cluster:
-                cluster["type"] = "clarification"
-            if "title" not in cluster:
-                cluster["title"] = "Untitled cluster"
-            # Ensure underlying_group_ids exists
-            if "underlying_group_ids" not in cluster:
-                cluster["underlying_group_ids"] = []
-            if "underlying_group_indices" not in cluster:
-                cluster["underlying_group_indices"] = []
-
-        # --- Step 6: Duplicate detection (first-cluster-wins) ---
-        for cluster in clusters_data:
-            if not isinstance(cluster, dict):
-                continue
-            underlying_ids = cluster.get("underlying_group_ids", [])
-            if not isinstance(underlying_ids, list):
-                continue
-
-            # Keep the batch's own groups not claimed by an earlier cluster,
-            # checked before any is claimed; every index comes from an id,
-            # never from the reply's underlying_group_indices.
-            deduped_ids: List[str] = []
-            for reply_id in underlying_ids:
-                for gid in _reply_group_ids(batch_map, reply_id, batch_index):
-                    if gid in claimed_group_ids:
-                        logger.warning(
-                            "Duplicate group_id %s found across batches — "
-                            "assigned to first occurrence",
-                            gid,
-                        )
-                    elif gid not in deduped_ids:
-                        deduped_ids.append(gid)
-            claimed_group_ids.update(deduped_ids)
-
-            cluster["underlying_group_ids"] = deduped_ids
-            cluster["underlying_group_indices"] = [
-                group_id_to_index[gid] for gid in deduped_ids
-            ]
-
-            # A cluster is what is left of it: none, one group, or more
-            if len(deduped_ids) == 0:
-                continue  # Skip empty cluster
-            elif len(deduped_ids) == 1:
-                # Demote to singleton
-                gid = deduped_ids[0]
-                idx = group_id_to_index.get(gid)
-                if idx is not None and idx < len(groups):
-                    batch_singletons.append(
-                        _make_singleton_consolidated(
-                            gid, idx, groups[idx],
-                            reasoning=cluster.get("reasoning", ""),
-                        )
-                    )
-                continue
-
-            # Add to section clusters for cross-batch dedup later
-            if section_key not in section_clusters:
-                section_clusters[section_key] = []
-            section_clusters[section_key].append((cluster, batch_index))
-
-        # Process batch singletons
-        for singleton in singletons_data:
-            if not isinstance(singleton, dict):
-                continue
-            reply_id = singleton.get("group_id", "")
-            if not reply_id:
-                continue
-            # The id names the group; the reply's group_index is a position
-            # it copied and may get wrong, so the entry's index is the one
-            # its content comes from.
-            for gid in _reply_group_ids(batch_map, reply_id, batch_index):
-                if gid in claimed_group_ids:
-                    logger.warning(
-                        "Duplicate group_id %s found across batches — "
-                        "assigned to first occurrence",
-                        gid,
-                    )
-                    continue
-                claimed_group_ids.add(gid)
-                idx = group_id_to_index[gid]
-                batch_singletons.append(
-                    _make_singleton_consolidated(
-                        gid, idx, groups[idx],
-                        reasoning=singleton.get("reasoning", ""),
-                    )
+                claims.singleton(
+                    claims.ids[idx], "Singleton section — only group in this section.",
                 )
 
-        # --- Missing group detection within this batch ---
-        for gid in assigned_group_ids:
-            if gid not in claimed_group_ids:
-                idx = group_id_to_index.get(gid)
-                if idx is not None and idx < len(groups):
-                    batch_singletons.append(
-                        _make_singleton_consolidated(
-                            gid, idx, groups[idx],
-                            reasoning=f"Missing from batch {batch_index} "
-                            "output — added as singleton.",
-                        )
-                    )
-                    claimed_group_ids.add(gid)
+    consolidated_groups = [
+        _cluster_entry(cluster, claims)
+        for cluster in _merge_similar_clusters(section_clusters)
+    ] + claims.singletons
+    for i, cg in enumerate(consolidated_groups, start=1):
+        cg["display_index"] = i
 
-    # -------------------------------------------------------------------
-    # Step 7 (global): Check that every input group_id is covered
-    # -------------------------------------------------------------------
-    uncovered = all_input_group_ids - claimed_group_ids
-    if uncovered:
-        logger.warning(
-            "%d group(s) not covered by any consolidation batch — "
-            "added as singletons",
-            len(uncovered),
-        )
-        for gid in uncovered:
-            idx = group_id_to_index.get(gid)
-            if idx is not None and idx < len(groups):
-                batch_singletons.append(
-                    _make_singleton_consolidated(
-                        gid, idx, groups[idx],
-                        reasoning="Not covered by any consolidation batch "
-                        "— added as singleton.",
-                    )
-                )
-                claimed_group_ids.add(gid)
-
-    # -------------------------------------------------------------------
-    # Step 8: Cross-batch deduplication within each section
-    # -------------------------------------------------------------------
-    merged_clusters: List[Dict[str, Any]] = []
-
-    for section_key, cluster_list in section_clusters.items():
-        if len(cluster_list) <= 1:
-            # Single cluster in section — no cross-batch dedup needed
-            for cluster, _bi in cluster_list:
-                merged_clusters.append(cluster)
-            continue
-
-        # Compare titles across all clusters in this section.
-        # Track which list-positions have been merged into others.
-        consumed: Set[int] = set()
-
-        for i in range(len(cluster_list)):
-            if i in consumed:
-                continue
-            cluster_i, _bi_i = cluster_list[i]
-
-            for j in range(i + 1, len(cluster_list)):
-                if j in consumed:
-                    continue
-                cluster_j, _bi_j = cluster_list[j]
-
-                title_i = cluster_i.get("title", "")
-                title_j = cluster_j.get("title", "")
-                ratio = _word_overlap_ratio(title_i, title_j)
-
-                if ratio >= 0.8:
-                    # Merge cluster_j into cluster_i
-                    logger.info(
-                        "Cross-batch dedup: merging '%s' and '%s' "
-                        "(overlap=%.2f) in section '%s'",
-                        title_i,
-                        title_j,
-                        ratio,
-                        section_key,
-                    )
-                    # Higher importance
-                    cluster_i["importance"] = _highest_importance(
-                        cluster_i.get("importance", "LOW"),
-                        cluster_j.get("importance", "LOW"),
-                    )
-                    # Union of group_ids (preserving order, deduped)
-                    ids_i = cluster_i.get("underlying_group_ids", [])
-                    ids_j = cluster_j.get("underlying_group_ids", [])
-                    merged_ids = list(dict.fromkeys(ids_i + ids_j))
-                    cluster_i["underlying_group_ids"] = merged_ids
-
-                    indices_i = cluster_i.get(
-                        "underlying_group_indices", []
-                    )
-                    indices_j = cluster_j.get(
-                        "underlying_group_indices", []
-                    )
-                    merged_indices = list(
-                        dict.fromkeys(indices_i + indices_j)
-                    )
-                    cluster_i["underlying_group_indices"] = merged_indices
-
-                    # Combined description
-                    desc_i = cluster_i.get("description", "")
-                    desc_j = cluster_j.get("description", "")
-                    if desc_j and desc_j not in desc_i:
-                        cluster_i["description"] = (
-                            f"{desc_i} Additionally: {desc_j}"
-                        )
-
-                    # Combined reasoning
-                    reason_i = cluster_i.get("reasoning", "")
-                    reason_j = cluster_j.get("reasoning", "")
-                    if reason_j and reason_j not in reason_i:
-                        cluster_i["reasoning"] = (
-                            f"{reason_i} {reason_j}".strip()
-                        )
-
-                    consumed.add(j)
-
-            merged_clusters.append(cluster_i)
-
-    # -------------------------------------------------------------------
-    # Step 9: Type and importance validation for each merged cluster
-    # -------------------------------------------------------------------
-    for cluster in merged_clusters:
-        underlying_ids = cluster.get("underlying_group_ids", [])
-        expected_type = _resolve_type_for_group_ids(
-            underlying_ids, groups, group_id_to_index
-        )
-        current_type = cluster.get("type", "clarification").lower()
-        if TYPE_PRIORITY.get(current_type, 0) < TYPE_PRIORITY.get(
-            expected_type, 0
-        ):
-            cluster["type"] = expected_type
-        # Never below its most important group: the level the prompt asks
-        # for ("the highest importance level among the underlying groups").
-        cluster["importance"] = _importance.highest([
-            cluster.get("importance"),
-            *(
-                _importance.group_importance(groups[group_id_to_index[gid]])
-                for gid in underlying_ids if gid in group_id_to_index
-            ),
-        ])
-
-    # -------------------------------------------------------------------
-    # Step 10: Build partial_failures metadata
-    # -------------------------------------------------------------------
-    partial_failures: Dict[str, Any] = {
+    return consolidated_groups, {
         "count": len(failed_batch_indices),
         "batches": failed_batch_indices,
         "fallback": "all_singletons",
     }
-
-    # -------------------------------------------------------------------
-    # Step 11: Add singleton sections from tasks_metadata
-    # -------------------------------------------------------------------
-    for section_key, indices in singleton_sections.items():
-        for idx in indices:
-            if 0 <= idx < len(groups):
-                gid = group_ids[idx]
-                # Only add if not already claimed (edge case safety)
-                if gid not in claimed_group_ids:
-                    batch_singletons.append(
-                        _make_singleton_consolidated(
-                            gid, idx, groups[idx],
-                            reasoning="Singleton section — only group in "
-                            "this section.",
-                        )
-                    )
-                    claimed_group_ids.add(gid)
-
-    # -------------------------------------------------------------------
-    # Step 12: Build final consolidated groups list with IDs and indices
-    # -------------------------------------------------------------------
-    consolidated_groups: List[Dict[str, Any]] = []
-
-    # Add merged clusters (non-singleton)
-    for cluster in merged_clusters:
-        underlying_ids = cluster.get("underlying_group_ids", [])
-        # The ids name the groups (as for a singleton): each index is the
-        # group its id names, so the decision join and the display agree.
-        underlying_indices = list(dict.fromkeys(
-            group_id_to_index[gid] for gid in underlying_ids
-            if gid in group_id_to_index
-        ))
-
-        # Compute model count and suggestion count from underlying groups
-        model_set: Set[str] = set()
-        suggestion_count = 0
-        for gid in underlying_ids:
-            idx = group_id_to_index.get(gid)
-            if idx is not None and idx < len(groups):
-                g = groups[idx]
-                for m in g.get("models", []):
-                    model_set.add(m)
-                suggestion_count += len(g.get("suggestions", []))
-
-        consolidated_groups.append({
-            "consolidated_id": generate_consolidated_id(underlying_ids),
-            "display_index": 0,  # Will be set below
-            "title": cluster.get("title", "Untitled"),
-            "description": cluster.get("description", ""),
-            "importance": cluster.get("importance", "MEDIUM"),
-            "reference": _get_reference_for_cluster(
-                underlying_ids, groups, group_id_to_index
-            ),
-            "type": cluster.get("type", "clarification"),
-            "underlying_group_indices": underlying_indices,
-            "underlying_group_ids": underlying_ids,
-            "model_count": len(model_set) or 1,
-            "original_suggestion_count": suggestion_count or 1,
-            "is_singleton": False,
-            "reasoning": cluster.get("reasoning", ""),
-        })
-
-    # Add all singletons
-    for singleton in batch_singletons:
-        underlying_ids = singleton.get("underlying_group_ids", [])
-        consolidated_groups.append({
-            "consolidated_id": generate_consolidated_id(underlying_ids),
-            "display_index": 0,  # Will be set below
-            "title": singleton.get("title", "Untitled"),
-            "description": singleton.get("description", ""),
-            "importance": singleton.get("importance", "LOW"),
-            "reference": singleton.get("reference", ""),
-            "type": singleton.get("type", "clarification"),
-            "underlying_group_indices": singleton.get(
-                "underlying_group_indices", []
-            ),
-            "underlying_group_ids": underlying_ids,
-            "model_count": singleton.get("model_count", 1),
-            "original_suggestion_count": singleton.get(
-                "original_suggestion_count", 1
-            ),
-            "is_singleton": True,
-            "reasoning": singleton.get("reasoning", ""),
-        })
-
-    # Assign sequential display_index (1-based)
-    for i, cg in enumerate(consolidated_groups, start=1):
-        cg["display_index"] = i
-
-    return consolidated_groups, partial_failures
 
 
 # ---------------------------------------------------------------------------

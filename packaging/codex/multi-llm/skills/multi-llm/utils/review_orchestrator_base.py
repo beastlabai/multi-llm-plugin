@@ -155,12 +155,15 @@ from .validation import (
     decode_document,
     ensure_prompt_sidecars,
     legacy_context_round_reason,
-    prepare_batched_validation_tasks,
+    PLAN_CONTEXT_LABEL,
+    ContextBlock,
+    RoundProvenance,
+    ValidationRound,
+    materialize_validation_round,
     publish_from_task_document,
     verify_context_sources,
     merge_batched_validation_results,
     resolved_reaggregate_command,
-    stale_validation_reason,
     validation_source_decision,
 )
 from .subagent_tasks import (
@@ -171,7 +174,6 @@ from .subagent_tasks import (
 )
 from . import (
     group_similar_suggestions,
-    export_groups_to_json,
     apply_validation_to_groups,
     save_validation_results,
 )
@@ -203,10 +205,8 @@ MAX_LOGGED_PROMPT_LENGTH = 5000
 # The implementations moved to utils/status_file.py — unchanged semantics (same
 # atomic temp+rename, same best-effort swallow, same special-cased merge, now
 # extended to the reserved `run`/`progress` objects a detached run writes). They
-# are re-exported here, and from review_plan_orchestrator as
-# `_write_status`/`_update_status`, because this module is the status file's
-# documented owner and every existing caller and test names it through one of
-# those two paths.
+# are re-exported here because this module is the status file's documented
+# owner and existing callers and tests name them through it.
 #
 # Why they live in their own module at all: `multi_llm.py status` must be a
 # sub-second command (hosts with a 2-minute shell cap poll it in a loop), and
@@ -1040,18 +1040,18 @@ _REVIEW_TASKS_PLAN_LABEL = "Plan — the requirements the tasks must cover"
 _REVIEW_TASKS_TASKS_LABEL = "Tasks file — the artifact under review"
 
 
-def validation_context_kwargs(
+def validation_context_blocks(
     phase_name: str,
     plan_content: str,
     extra_validation_metadata: Optional[Dict[str, str]],
     *,
     plan_document: Optional[BoundDocument] = None,
     phase_dir: Optional[str] = None,
-) -> Dict[str, Any]:
-    """The inline context kwargs this phase's validation batches embed.
+) -> Tuple[ContextBlock, Optional[ContextBlock]]:
+    """The ``(primary, secondary)`` blocks this phase's validation batches embed.
 
-    Every phase but ``review-tasks`` embeds the plan alone, which is what the
-    shared defaults already say. ``review-tasks`` validates claims **about a
+    Every phase but ``review-tasks`` embeds the plan alone, under the default
+    label, with no second block. ``review-tasks`` validates claims **about a
     task list** — 28 of 30 suggestions on the measured 2026-09-16 run named a
     bare ``T###`` — and it was handed the plan and nothing else, so `'T001' in
     prompt` was `False` for every batch while the prompt told the validator to
@@ -1074,14 +1074,12 @@ def validation_context_kwargs(
     """
     if plan_document is not None:
         plan_content = plan_document.text
-    kwargs: Dict[str, Any] = {"context": plan_content}
-    if plan_document is not None:
-        kwargs["context_document"] = plan_document
+    plan_only = ContextBlock(plan_content, PLAN_CONTEXT_LABEL, plan_document)
     if phase_name != "review-tasks":
-        return kwargs
+        return plan_only, None
     tasks_file = (extra_validation_metadata or {}).get("tasks_file") or ""
     if not tasks_file:
-        return kwargs
+        return plan_only, None
     tasks_document: Optional[BoundDocument] = None
     try:
         if phase_dir:
@@ -1099,13 +1097,62 @@ def validation_context_kwargs(
             f"({exc}); validating against the plan alone.",
             file=sys.stderr,
         )
-        return kwargs
-    kwargs["context_label"] = _REVIEW_TASKS_PLAN_LABEL
-    kwargs["secondary_context"] = tasks_content
-    kwargs["secondary_context_label"] = _REVIEW_TASKS_TASKS_LABEL
-    if tasks_document is not None:
-        kwargs["secondary_document"] = tasks_document
-    return kwargs
+        return plan_only, None
+    return (
+        ContextBlock(plan_content, _REVIEW_TASKS_PLAN_LABEL, plan_document),
+        ContextBlock(tasks_content, _REVIEW_TASKS_TASKS_LABEL, tasks_document),
+    )
+
+
+def review_validation_round(
+    grouped: List[Any],
+    *,
+    args: argparse.Namespace,
+    phase_name: str,
+    phase_dir: str,
+    plan_path: Any,
+    plan_content: str,
+    plan_document: Optional[BoundDocument],
+    orchestrator_script: str,
+    extra_validation_metadata: Optional[Dict[str, str]],
+    scope_round_policy: Any,
+    scope_state: Any,
+    scope_recorded_baseline: Optional[Dict[str, Any]],
+) -> ValidationRound:
+    """The validation round a plan or tasks review materializes, after its
+    fan-out and on ``--reaggregate``: one builder for both sites.
+
+    The task file's ``reaggregate_mode`` is what every later retry hint is
+    rebuilt from (``resolved_reaggregate_command``), so ``orchestrator_script``
+    is this phase's own script, never review-plan's default. The scope block
+    carries the policy and baseline the reviewers were given (plan §3.1).
+    """
+    metadata = extra_validation_metadata or {}
+    primary, secondary = validation_context_blocks(
+        phase_name, plan_content, extra_validation_metadata,
+        plan_document=plan_document, phase_dir=phase_dir,
+    )
+    read_refusal = materialization_read_refusal(args, str(plan_path))
+    scope = validation_scope_block(
+        phase_name, scope_round_policy, scope_state, scope_recorded_baseline,
+        plan_document=plan_document,
+        tasks_document=secondary.document if secondary is not None else None,
+    )
+    return ValidationRound(
+        groups=[g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
+        output_dir=phase_dir,
+        plan_file=str(plan_path),
+        primary=primary,
+        secondary=secondary,
+        scope=scope,
+        runner_read_refusal=read_refusal,
+        provenance=RoundProvenance(
+            model=args.validation_model,
+            orchestrator=orchestrator_script,
+            phase=phase_name,
+            **({"tasks_file": metadata["tasks_file"]} if "tasks_file" in metadata else {}),
+        ),
+    )
 
 
 def _path_under(path: str, root: str) -> bool:
@@ -1499,11 +1546,6 @@ def retire_salvage_artifacts(
     return retired
 
 
-#: Basenames that are never a per-model result file (defined in the leaf
-#: ``utils/result_files.py``, which the slot's misnamed-result lookup in
-#: ``llm_client`` needs too; re-exported here under the name callers use).
-NON_MODEL_JSON_MARKERS = _result_files.NON_MODEL_JSON_MARKERS
-
 #: Suffix of a result retired because its model left the selection.
 RETIRED_UNSELECTED = "stale-unselected"
 
@@ -1593,10 +1635,8 @@ def retire_unselected_results(
     """
     respelled = respelled_result_stems(model_specs)
     retired: List[str] = []
-    for path in sorted(Path(phase_dir).glob("*.json")):
+    for path in map(Path, _result_files.model_result_paths(phase_dir)):
         name = path.name
-        if any(marker in name for marker in NON_MODEL_JSON_MARKERS):
-            continue
         stem = name[: -len(".json")]
         if stem not in respelled:
             continue
@@ -1639,7 +1679,7 @@ def retire_stale_validation(phase_dir: str, *, reason: str) -> Optional[str]:
     make it stale: the grouping is rewritten (``grouped.json`` overwritten by a
     re-run, where this is called *in the same step* as the write), and a
     reaggregate finds that the file does not bind to the ``grouped.json`` it
-    sits beside (``stale_validation_reason``). Before D7 the file survived both
+    sits beside (``validation_source_decision``). Before D7 the file survived both
     and ``reaggregate_from_existing_files`` trusted it ahead of the batch files
     it had been superseded by — exit 0, no warning, and a report carrying
     another grouping's verdicts.
@@ -2643,31 +2683,6 @@ async def dispatch_with_ladder(
                 )
             await asyncio.sleep(delay)
     return run
-
-
-def _try_pretty_print_json(text: str) -> str:
-    """Try to pretty-print text as JSON, return original if not valid JSON."""
-    if not text or not text.strip():
-        return text
-
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, dict) and 'result' in parsed:
-            inner = parsed['result']
-            if isinstance(inner, str):
-                try:
-                    inner_parsed = json.loads(inner)
-                    pretty_inner = json.dumps(inner_parsed, indent=2, ensure_ascii=False)
-                    return (
-                        f"[cursor-agent wrapper]\n"
-                        f"type: {parsed.get('type', 'unknown')}\n"
-                        f"result (pretty-printed):\n{pretty_inner}"
-                    )
-                except (json.JSONDecodeError, TypeError):
-                    pass
-        return json.dumps(parsed, indent=2, ensure_ascii=False)
-    except (json.JSONDecodeError, TypeError):
-        return text
 
 
 # ---------------------------------------------------------------------------
@@ -5088,9 +5103,7 @@ async def run_single_model(
             the slot from that. ``None`` (a direct call, a test) keeps every
             line here byte-for-byte what it was.
         retry_count: Vestigial. Retry state lives in the ladder now, which is the
-            point of §7.5 rule 1; the parameter survives only because
-            ``review_plan_orchestrator``'s backward-compatible wrapper forwards
-            it. Passing a non-zero value has no effect.
+            point of §7.5 rule 1. Passing a non-zero value has no effect.
         out_dir: Optional output directory for log files and JSON output
         prefix: Optional prefix for log file names
         run_model_specs: Every model of this fan-out, forwarded to
@@ -7199,54 +7212,6 @@ def format_suggestion_in_group(
     return lines
 
 
-def format_suggestion(
-    suggestion: dict,
-    validation_status: Optional[str] = None,
-    validation_reason: Optional[str] = None,
-) -> List[str]:
-    """Format a single suggestion for the markdown report.
-
-    Args:
-        suggestion: Suggestion dict with id, title, type, reference, desc, etc.
-        validation_status: Optional validation status string.
-        validation_reason: Optional validation reason string.
-    """
-    validation_display = {
-        "valid": "Valid",
-        "invalid": "Invalid",
-        "needs-human-decision": "? Needs Review",
-        "validation_failed": "? Validation Failed",
-    }
-    validation_str = validation_display.get(validation_status, "? Unknown") if validation_status else "? Unknown"
-    from . import report_markdown as _rm
-
-    lines = [
-        _rm.flat_suggestion_header(suggestion['id'], suggestion['title']),
-    ]
-    lines.append(_rm.checkbox_line(_rm.SKIP))
-    lines.extend([
-        f"**Validation:** {validation_str} | "
-        f"**Model:** {_rm.inline_text(suggestion.get('model', 'unknown'))} | "
-        f"**Type:** {_rm.inline_text(suggestion['type'])} | "
-        f"**Section:** {_rm.inline_text(suggestion['reference'])}",
-        "",
-    ])
-
-    if validation_reason and validation_status in ("invalid", "needs-human-decision", "validation_failed"):
-        lines.append(
-            f"> **Validation Reason:** {_rm.neutralize_model_text(validation_reason)}"
-        )
-        lines.append("")
-
-    lines.extend([
-        _rm.neutralize_model_text(suggestion['desc']),
-        "",
-        "---",
-        "",
-    ])
-    return lines
-
-
 # ---------------------------------------------------------------------------
 # Reaggregation
 # ---------------------------------------------------------------------------
@@ -7443,28 +7408,16 @@ async def reaggregate_from_existing_files(
             true the recommendation is recomputed from the reaggregated groups
             (§7.2a), exactly as the first run does.
     """
-    import glob as glob_module
-
-    pattern = os.path.join(phase_dir, "*.json")
-    all_files = glob_module.glob(pattern)
-
-    # `subagent_batch_report` is executor bookkeeping (D3i), not a model
-    # result: it lives in the phase dir and MUST be excluded or the glob
-    # below would parse it as a suggestion list and crash reaggregate.
-    # `subagent_dry_run` is the same hazard from --dry-run-subagents (D3l), which
-    # writes into THIS dir on a read phase; `write_batch_report`/`write_tasks` are
-    # the write scheduler's, which normally land in an apply/implement dir but are
-    # listed here so a shared or hand-copied phase dir cannot resurrect the bug.
-    exclude_patterns = ['grouped', 'validation', 'salvage', 'revalidation', 'consolidated', 'consolidation', 'report_data', 'subagent_batch_report', 'subagent_dry_run', 'write_batch_report', 'write_tasks']
-    result_files = [
-        f for f in all_files
-        if not any(os.path.basename(f).startswith(ex) or ex in os.path.basename(f) for ex in exclude_patterns)
-    ]
+    # Every phase-dir artifact (the executor's batch report and dry run, the
+    # write scheduler's reports, grouped and validation files) is left out by
+    # the one shared rule; parsed as a suggestion list, any of them would crash
+    # the regroup.
+    result_files = _result_files.model_result_paths(phase_dir)
     # Only the models this phase records are read (live run 10: a reviewer's
     # misnamed file was loaded as a third reviewer by its stem). Any other
     # result file is named and set aside; a dir with no recorded models keeps
     # the stem-as-identity reading below.
-    result_files = _result_files.set_aside_unrecorded_results(phase_dir, sorted(result_files))
+    result_files = _result_files.set_aside_unrecorded_results(phase_dir, result_files)
     _result_files.publish_result_notes(phase_dir)
 
     # The mode word a zero-result exit names in its `--force` retry command.
@@ -7852,36 +7805,17 @@ async def reaggregate_from_existing_files(
             # few lines later (measured 2026-09-16: an opencode-driven run
             # printed this beside 11 lines correctly naming opencode).
             print("\nPreparing batched validation for subagent execution...")
-            extra_kwargs = {}
-            if extra_validation_metadata:
-                extra_kwargs = {k: v for k, v in extra_validation_metadata.items()
-                                if k in ("tasks_file",)}
             # A re-materialized round is a new round with a new snapshot
             # (§2.3 step 5), bound from one read of the plan as it is now.
             plan_document = bind_plan_for_validation(str(plan_path), phase_dir)
-            context_kwargs = validation_context_kwargs(
-                phase_name, plan_content, extra_validation_metadata,
-                plan_document=plan_document, phase_dir=phase_dir,
-            )
-            batched_tasks = prepare_batched_validation_tasks(
-                groups=[g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
-                output_dir=phase_dir,
-                plan_file=str(plan_path),
-                model=args.validation_model,
-                orchestrator=orchestrator_script,
-                **context_kwargs,
-                runner_read_refusal=materialization_read_refusal(
-                    args, str(plan_path)
-                ),
-                phase=phase_name,
-                scope=validation_scope_block(
-                    phase_name, scope_round_policy, scope_state,
-                    scope_recorded_baseline,
-                    plan_document=plan_document,
-                    tasks_document=context_kwargs.get("secondary_document"),
-                ),
-                **extra_kwargs,
-            )
+            batched_tasks = materialize_validation_round(review_validation_round(
+                grouped, args=args, phase_name=phase_name, phase_dir=phase_dir,
+                plan_path=plan_path, plan_content=plan_content,
+                plan_document=plan_document, orchestrator_script=orchestrator_script,
+                extra_validation_metadata=extra_validation_metadata,
+                scope_round_policy=scope_round_policy, scope_state=scope_state,
+                scope_recorded_baseline=scope_recorded_baseline,
+            ))
             batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
 
             with open(validation_tasks_path, 'w', encoding='utf-8') as f:
@@ -8123,8 +8057,8 @@ async def run_review_orchestration(
         supports_consolidation: Whether this phase supports consolidation modes
         consolidation_handlers: Optional dict of consolidation mode handler functions
         pre_run_hook: Optional callable to execute before model invocation (e.g., validate tasks file)
-        extra_validation_metadata: Optional dict of extra fields to pass to prepare_batched_validation_tasks
-            and include in validation_tasks.json (e.g., {"tasks_file": "/path/to/tasks.md"})
+        extra_validation_metadata: Optional dict of extra fields for the validation round
+            (:func:`review_validation_round`) and validation_tasks.json (e.g., {"tasks_file": "/path/to/tasks.md"})
         base_ref: Optional git ref for PR-style diff context (forwarded to
             ``aggregate_results()``).
         tasks_path: Optional path to tasks JSON for task-view metadata
@@ -8242,15 +8176,7 @@ async def run_review_orchestration(
             if not os.path.isdir(phase_dir):
                 print(f"ERROR: Phase directory does not exist: {phase_dir}")
                 sys.exit(1)
-            import glob as glob_module
-            pattern_glob = os.path.join(phase_dir, "*.json")
-            exclude = ['grouped', 'validation', 'salvage', 'revalidation', 'consolidated', 'consolidation', 'report_data', 'subagent_batch_report']
-            result_files = [
-                f for f in glob_module.glob(pattern_glob)
-                if not any(os.path.basename(f).startswith(ex) or ex in os.path.basename(f) for ex in exclude)
-            ]
-            models = [os.path.basename(f).replace('.json', '') for f in result_files]
-            consolidation_handlers['reaggregate_consolidation'](phase_dir, plan_path, prefix, models)
+            consolidation_handlers['reaggregate_consolidation'](phase_dir, plan_path, prefix)
             return
 
     # Guard against re-running already-completed phase
@@ -8786,42 +8712,14 @@ async def run_review_orchestration(
                 # opencode-driven run printed this beside 11 lines correctly
                 # naming opencode).
                 print("\nPreparing batched validation for subagent execution...")
-                extra_kwargs = {}
-                if extra_validation_metadata:
-                    extra_kwargs = {k: v for k, v in extra_validation_metadata.items()
-                                    if k in ("tasks_file",)}
-                context_kwargs = validation_context_kwargs(
-                    phase_name, plan_content, extra_validation_metadata,
-                    plan_document=plan_document, phase_dir=phase_dir,
-                )
-                batched_tasks = prepare_batched_validation_tasks(
-                    groups=[g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
-                    output_dir=phase_dir,
-                    plan_file=str(plan_path),
-                    model=args.validation_model,
-                    # The document's `reaggregate_mode` is what every later
-                    # retry hint is rebuilt from (`resolved_reaggregate_command`),
-                    # so it has to be THIS phase's script. Measured 2026-09-14
-                    # on a `review-tasks` fan-out: the kwarg was missing, the
-                    # helper defaulted to review-plan's script, and the exit-3
-                    # block told the session model to re-invoke `review-plan
-                    # --reaggregate` for a review-tasks run.
-                    orchestrator=orchestrator_script,
-                    **context_kwargs,
-                    runner_read_refusal=materialization_read_refusal(
-                        args, str(plan_path)
-                    ),
-                    phase=phase_name,
-                    # The same policy and baseline the reviewers were given
-                    # (plan §3.1), in the one task file both invokers run.
-                    scope=validation_scope_block(
-                        phase_name, scope_round_policy, scope_state,
-                        scope_recorded_baseline,
-                        plan_document=plan_document,
-                        tasks_document=context_kwargs.get("secondary_document"),
-                    ),
-                    **extra_kwargs,
-                )
+                batched_tasks = materialize_validation_round(review_validation_round(
+                    grouped, args=args, phase_name=phase_name, phase_dir=phase_dir,
+                    plan_path=plan_path, plan_content=plan_content,
+                    plan_document=plan_document, orchestrator_script=orchestrator_script,
+                    extra_validation_metadata=extra_validation_metadata,
+                    scope_round_policy=scope_round_policy, scope_state=scope_state,
+                    scope_recorded_baseline=scope_recorded_baseline,
+                ))
                 batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
 
                 validation_tasks_path = os.path.join(phase_dir, "validation_tasks.json")

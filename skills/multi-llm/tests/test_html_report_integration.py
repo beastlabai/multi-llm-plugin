@@ -13,6 +13,7 @@ To run these tests:
 import json
 import os
 import sys
+from functools import partial
 from pathlib import Path
 from typing import Dict, List
 
@@ -22,7 +23,10 @@ import pytest
 SKILL_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(SKILL_DIR))
 
-from review_plan_orchestrator import aggregate_results
+from utils import review_orchestrator_base as rob  # noqa: E402
+
+#: review-plan's aggregation, as its fan-out calls it.
+aggregate_results = partial(rob.aggregate_results, phase_name="review-plan")
 from code_review_orchestrator import generate_review_report
 from utils.report_parser import load_html_selections, merge_selections
 from utils.html_report_generator import generate_html_report, write_html_report

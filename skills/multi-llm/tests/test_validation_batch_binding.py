@@ -30,7 +30,6 @@ from utils import subagent_executor as executor  # noqa: E402
 from utils.subagent_tasks import batch_manifest, file_bytes_sha256  # noqa: E402
 from utils.validation import (  # noqa: E402
     prepare_batched_validation_tasks,
-    stale_validation_reason,
     validation_source_decision,
 )
 
@@ -266,7 +265,7 @@ class TestARewrittenBatchIsReMerged:
         del data["metadata"]["batch_sha256"]["1"]
         path.write_text(json.dumps(data), encoding="utf-8")
 
-        reason = stale_validation_reason(path, phase_dir / "grouped.json")
+        reason = validation_source_decision(path, phase_dir / "grouped.json")[0]
         assert reason and "validation_batch_1.json was never merged into it" in reason
 
 
@@ -287,9 +286,9 @@ class TestARoundIsNeverMatchedAgainstAnotherRound:
         other = tmp_path / "revalidation_tasks.json"
         other.write_text(json.dumps(self._revalidation_document(tasks)), encoding="utf-8")
 
-        reason = stale_validation_reason(
+        reason = validation_source_decision(
             phase_dir / "validation.json", phase_dir / "grouped.json", other
-        )
+        )[0]
         assert reason is not None
         assert "was merged from a validation round" in reason
         assert "is a revalidation round" in reason

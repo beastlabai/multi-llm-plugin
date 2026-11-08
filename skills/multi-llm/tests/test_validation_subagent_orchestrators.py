@@ -279,35 +279,6 @@ class TestReviewPlanOrchestratorValidationPending:
 class TestApplySuggestionsOrchestratorRevalidation:
     """Tests for revalidation subagent support in apply_suggestions_orchestrator."""
 
-    def test_revalidation_task_json_structure(self):
-        """Test the structure of revalidation_task.json output."""
-        from utils.validation import prepare_revalidation_task
-
-        groups = [
-            {"theme": "Test", "category": "test", "models": [], "suggestions": []},
-        ]
-        validation_results = [
-            {"group_index": 0, "status": "validation_failed", "reason": "Error", "confidence": 0.0, "error_type": "timeout", "recoverable": True},
-        ]
-        context = "Test context"
-        output_path = "/tmp/revalidation.json"
-
-        result = prepare_revalidation_task(groups, validation_results, context, output_path)
-
-        # Verify structure
-        assert "prompt" in result
-        assert "output_path" in result
-        assert "items_to_revalidate" in result
-        assert "item_indices" in result
-        assert "original_validation" in result
-        assert "model_hint" in result
-
-        # Verify values
-        assert result["output_path"] == output_path
-        assert result["items_to_revalidate"] == 1
-        assert 0 in result["item_indices"]
-        assert result["original_validation"] == validation_results
-
     def test_dry_run_with_revalidation(self, temp_plan_with_review_results):
         """--dry-run with --revalidate shows what would be revalidated."""
         result = subprocess.run(
@@ -393,18 +364,6 @@ class TestImports:
         from utils.validation import prepare_validation_task
         assert callable(prepare_validation_task)
 
-    def test_import_prepare_revalidation_task(self):
-        """Can import prepare_revalidation_task."""
-        from utils.validation import prepare_revalidation_task
-        assert callable(prepare_revalidation_task)
-
-    def test_review_plan_orchestrator_imports_prepare_validation_task(self):
-        """review_plan_orchestrator imports prepare_validation_task."""
-        # Read the file and check for import
-        orchestrator_path = SKILL_DIR / "review_plan_orchestrator.py"
-        content = orchestrator_path.read_text(encoding="utf-8")
-        assert "prepare_validation_task" in content
-
     def test_base_class_handles_revalidation_for_apply_suggestions(self):
         """apply_suggestions_orchestrator supports revalidation via base class."""
         from apply_suggestions_orchestrator import ApplySuggestionsOrchestrator
@@ -443,22 +402,6 @@ class TestValidationTaskJsonFormat:
         parsed = json.loads(json_str)
         assert parsed == result
 
-    def test_revalidation_task_is_json_serializable(self):
-        """revalidation_task output is JSON serializable."""
-        from utils.validation import prepare_revalidation_task
-
-        groups = [{"theme": "Test", "category": "test", "models": [], "suggestions": []}]
-        validation = [{"group_index": 0, "status": "validation_failed", "reason": "Error", "confidence": 0.0, "error_type": "timeout"}]
-        result = prepare_revalidation_task(groups, validation, "context", "/tmp/out.json")
-
-        # Should be JSON serializable
-        json_str = json.dumps(result)
-        assert json_str is not None
-
-        # Should be deserializable
-        parsed = json.loads(json_str)
-        assert parsed == result
-
     def test_validation_task_prompt_is_string(self):
         """validation_task prompt is a non-empty string."""
         from utils.validation import prepare_validation_task
@@ -468,18 +411,3 @@ class TestValidationTaskJsonFormat:
 
         assert isinstance(result["prompt"], str)
         assert len(result["prompt"]) > 0
-
-    def test_revalidation_task_prompt_is_string_or_none(self):
-        """revalidation_task prompt is a string or None."""
-        from utils.validation import prepare_revalidation_task
-
-        # Case 1: Has items to revalidate - prompt should be string
-        groups = [{"theme": "Test", "category": "test", "models": [], "suggestions": []}]
-        validation = [{"group_index": 0, "status": "validation_failed", "reason": "Error", "confidence": 0.0, "error_type": "timeout"}]
-        result = prepare_revalidation_task(groups, validation, "context", "/tmp/out.json")
-        assert isinstance(result["prompt"], str)
-
-        # Case 2: No items to revalidate - prompt should be None
-        validation = [{"group_index": 0, "status": "valid", "reason": "OK", "confidence": 0.9, "error_type": "unknown"}]
-        result = prepare_revalidation_task(groups, validation, "context", "/tmp/out.json")
-        assert result["prompt"] is None

@@ -1030,9 +1030,7 @@ class TestTheConsolidatedReport:
             lambda *_a, **_k: ([dict(cg) for cg in self.CGS], {"count": 0}),
         )
 
-        rpo.reaggregate_consolidation_mode(
-            str(phase_dir), str(plan), "my-feature", [FULL_SPEC]
-        )
+        rpo.reaggregate_consolidation_mode(str(phase_dir), str(plan), "my-feature")
         html = (phase_dir / "consolidated-report.html").read_text(encoding="utf-8")
 
         assert EXPECTED_CLAUSE in html

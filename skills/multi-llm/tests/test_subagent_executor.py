@@ -1251,18 +1251,14 @@ class TestBatchOutcome:
         (tmp_path / "validation_batch_0.json").write_text(json.dumps(result), encoding="utf-8")
         assert executor.task_is_complete(task, str(tmp_path)) is True
 
-    def test_the_report_is_invisible_to_the_reaggregation_glob(self):
-        """A non-model JSON file in a phase dir must be excluded everywhere."""
-        base = Path(__file__).parent.parent
-        for source in ("utils/review_orchestrator_base.py", "code_review_orchestrator.py"):
-            text = (base / source).read_text(encoding="utf-8")
-            for line in text.splitlines():
-                if "exclude_patterns = [" in line or "exclude = [" in line:
-                    assert "subagent_batch_report" in line, (
-                        f"{source}: {line.strip()} does not exclude the executor's "
-                        f"batch report, so reaggregation would parse it as a model "
-                        f"result"
-                    )
+    def test_the_report_is_invisible_to_the_reaggregation_glob(self, tmp_path):
+        """A non-model JSON file in a phase dir must be excluded everywhere: every
+        reader takes the names from ``result_files.model_result_paths``."""
+        from utils.result_files import model_result_paths
+
+        (tmp_path / executor.BATCH_REPORT_FILENAME).write_text("{}", encoding="utf-8")
+        (tmp_path / "m_a.json").write_text("[]", encoding="utf-8")
+        assert [Path(p).name for p in model_result_paths(tmp_path)] == ["m_a.json"]
 
 
 # ---------------------------------------------------------------------------

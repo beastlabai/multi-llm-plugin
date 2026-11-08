@@ -1,7 +1,6 @@
 """Tests for filtering module."""
 
 import sys
-import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,9 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.filtering import (
     resolve_bulk_option_conflicts,
     filter_items,
-    validate_batch_mode_honored,
     validate_judge_decide_items_honored,
-    generate_batch_id,
     should_bypass_no_selection_confirmation,
     ERROR_TYPE_AMBIGUOUS,
 )
@@ -456,149 +453,6 @@ class TestMinPriority:
         # Invalid priority defaults to level 0, so all items included
         assert len(valid) == 3
         assert len(skipped) == 0
-
-
-class TestValidateBatchModeHonored:
-    """Tests for validate_batch_mode_honored function."""
-
-    def test_batch_mode_disabled_returns_true(self):
-        """Test that disabled batch mode returns True."""
-        config = {"batch_enabled": False}
-        decisions = {"group_1": {"action": "approve"}}
-
-        is_valid, warnings = validate_batch_mode_honored(config, decisions)
-
-        assert is_valid is True
-        assert len(warnings) == 0
-
-    def test_no_decisions_recorded_returns_true(self):
-        """Test that no decisions recorded returns True."""
-        config = {"batch_enabled": True}
-        decisions = {}
-
-        is_valid, warnings = validate_batch_mode_honored(config, decisions)
-
-        assert is_valid is True
-        assert len(warnings) == 0
-
-    def test_all_decisions_have_batch_context_returns_true(self):
-        """Test that all decisions with batch_context returns True."""
-        config = {"batch_enabled": True}
-        decisions = {
-            "group_1": {
-                "action": "approve",
-                "batch_context": {"batch_id": "batch_001"}
-            },
-            "group_2": {
-                "action": "skip",
-                "batch_context": {"batch_id": "batch_001"}
-            }
-        }
-
-        is_valid, warnings = validate_batch_mode_honored(config, decisions)
-
-        assert is_valid is True
-        assert len(warnings) == 0
-
-    def test_some_decisions_missing_batch_context_returns_false(self):
-        """Test that some decisions without batch_context returns False with warnings."""
-        config = {"batch_enabled": True}
-        decisions = {
-            "group_1": {
-                "action": "approve",
-                "batch_context": {"batch_id": "batch_001"}
-            },
-            "group_2": {
-                "action": "skip"  # Missing batch_context
-            },
-            "group_3": {
-                "action": "approve"  # Missing batch_context
-            }
-        }
-
-        is_valid, warnings = validate_batch_mode_honored(config, decisions)
-
-        assert is_valid is False
-        assert len(warnings) >= 1
-        assert "2 decisions" in warnings[0]
-        assert "without batch_context" in warnings[0]
-
-    def test_too_many_batch_ids_generates_warning(self):
-        """Test that too many batch_ids generates warning."""
-        config = {"batch_enabled": True}
-        decisions = {
-            "group_1": {"action": "approve", "batch_context": {"batch_id": "batch_001"}},
-            "group_2": {"action": "skip", "batch_context": {"batch_id": "batch_002"}},
-            "group_3": {"action": "approve", "batch_context": {"batch_id": "batch_003"}},
-            "group_4": {"action": "skip", "batch_context": {"batch_id": "batch_004"}},
-        }
-
-        is_valid, warnings = validate_batch_mode_honored(config, decisions)
-
-        # Still valid, but has warning about many batch IDs
-        assert is_valid is True
-        assert len(warnings) == 1
-        assert "4 different batch_ids" in warnings[0]
-
-    def test_two_batch_ids_no_warning(self):
-        """Test that up to 2 batch_ids does not generate warning."""
-        config = {"batch_enabled": True}
-        decisions = {
-            "group_1": {"action": "approve", "batch_context": {"batch_id": "batch_001"}},
-            "group_2": {"action": "skip", "batch_context": {"batch_id": "batch_002"}},
-        }
-
-        is_valid, warnings = validate_batch_mode_honored(config, decisions)
-
-        assert is_valid is True
-        assert len(warnings) == 0
-
-
-class TestGenerateBatchId:
-    """Tests for generate_batch_id function."""
-
-    def test_returns_string_starting_with_batch(self):
-        """Test that returned ID starts with 'batch_'."""
-        batch_id = generate_batch_id()
-
-        assert isinstance(batch_id, str)
-        assert batch_id.startswith("batch_")
-
-    def test_returns_string_containing_timestamp(self):
-        """Test that returned ID contains timestamp format."""
-        batch_id = generate_batch_id()
-
-        # The format is batch_YYYYMMDD_HHMMSS
-        # Extract the part after "batch_"
-        timestamp_part = batch_id[6:]  # Remove "batch_"
-
-        # Should have format YYYYMMDD_HHMMSS
-        assert len(timestamp_part) == 15  # 8 + 1 + 6
-        assert "_" in timestamp_part
-        date_part, time_part = timestamp_part.split("_")
-        assert len(date_part) == 8
-        assert len(time_part) == 6
-        assert date_part.isdigit()
-        assert time_part.isdigit()
-
-    def test_each_call_returns_unique_id(self):
-        """Test that each call returns a unique ID."""
-        batch_id1 = generate_batch_id()
-        time.sleep(1.1)  # Wait for timestamp to change
-        batch_id2 = generate_batch_id()
-
-        assert batch_id1 != batch_id2
-
-    def test_batch_id_format_is_parseable(self):
-        """Test that batch ID has a parseable date format."""
-        from datetime import datetime
-
-        batch_id = generate_batch_id()
-        timestamp_str = batch_id[6:]  # Remove "batch_"
-
-        # Should be parseable as datetime
-        parsed = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
-        assert parsed is not None
 
 
 class TestShouldBypassNoSelectionConfirmation:

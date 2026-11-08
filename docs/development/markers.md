@@ -210,7 +210,7 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[SHIM_UNCHANGED]` | `utils/host_install.py` | not for the host: operator-cli | — |
 | `[SHIM_WOULD_REMOVE]` | `utils/host_install.py` | not for the host: operator-cli | — |
 | `[SKIPPED]` | `full_workflow_orchestrator.py` | not for the host: phase-progress | — |
-| `[SKIP]` | `ask_orchestrator.py`<br>`code_review_orchestrator.py`<br>`review_plan_orchestrator.py`<br>`utils/review_orchestrator_base.py` | `SKILL.md`<br>`instructions/review-code.md`<br>`instructions/review-plan.md`<br>`instructions/review-tasks.md`<br>`references/host-capabilities.md`<br>`references/interrupted-run-recovery.md`<br>+1 more | — |
+| `[SKIP]` | `ask_orchestrator.py`<br>`code_review_orchestrator.py`<br>`utils/review_orchestrator_base.py` | `SKILL.md`<br>`instructions/review-code.md`<br>`instructions/review-plan.md`<br>`instructions/review-tasks.md`<br>`references/host-capabilities.md`<br>`references/interrupted-run-recovery.md`<br>+1 more | — |
 | `[STATE_REPLACED]` | `utils/commit_front_door.py` `STATE_REPLACED` | not for the host: run-notice | Step 6 replaced a `state.json` that did not parse (§2.1 allows it; the apply door refuses the same file loudly, so this one says it too) |
 | `[STREAM_CAP]` | `utils/process_capture.py` | not for the host: runner-diagnostic | — |
 | `[TASKS_GRAPH_OK]` | `utils/tasks_graph_check.py` | `instructions/apply-task-suggestions.md` | — |

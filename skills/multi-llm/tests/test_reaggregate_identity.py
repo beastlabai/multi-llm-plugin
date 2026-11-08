@@ -3186,7 +3186,7 @@ class TestRetireStaleValidationRound:
 
 class TestARetiredBatchIsNotValidationInProgress:
     def test_the_legacy_mtime_check_ignores_a_retired_batch(self, tmp_path):
-        """`stale_validation_reason`'s legacy leg counts batch files newer than
+        """`validation_source_decision`'s legacy leg counts batch files newer than
         a key-less `validation.json`; a retired one keeps its mtime and belongs
         to no round that file could have come from."""
         from utils import validation as validation_mod
@@ -3200,7 +3200,7 @@ class TestARetiredBatchIsNotValidationInProgress:
         _set_mtime(legacy, 1_700_000_000)
         _set_mtime(retired, 1_700_000_000 + 120)
 
-        assert validation_mod.stale_validation_reason(legacy, grouped) is None
+        assert validation_mod.validation_source_decision(legacy, grouped)[0] is None
 
 
 def _terminal(state, **over):
@@ -3613,7 +3613,7 @@ class TestFlippingALiveRowStopsItsClock:
 # 2026-09-17 run. The reaggregate path read `tracked_files` alone, so every
 # `report.md` that run's reaggregates wrote said `**Files Changed:** 0` over an
 # empty `## Changed Files` section. Nothing persists the list between the two
-# entry points; both now resolve it through `resolve_changed_files`.
+# entry points; both now resolve it through `resolve_review_scope`.
 
 
 def _state_without_tracked_files(pre_existing=()):
@@ -3705,7 +3705,7 @@ class TestResolveChangedFiles:
             "tracked_files": [{"path": "a.py"}, {"path": "b.py"}, {"path": "a.py"}, {}],
         }.get(k, d))
 
-        assert sorted(cro.resolve_changed_files(state, "abc123")) == ["a.py", "b.py"]
+        assert sorted(cro.resolve_review_scope(state, "abc123").paths) == ["a.py", "b.py"]
         # The count is the files used, not the raw entries (a duplicate and an
         # empty entry are not two more files under review).
         assert "Using 2 tracked files from implementation phase" in capsys.readouterr().out
@@ -3713,16 +3713,16 @@ class TestResolveChangedFiles:
     def test_no_tracked_files_and_no_base_ref_is_an_empty_list_with_a_warning(
         self, capsys
     ):
-        assert cro.resolve_changed_files(_state_without_tracked_files(), "") == []
+        assert cro.resolve_review_scope(_state_without_tracked_files(), "").paths == []
         assert "cannot discover changed files via git diff" in capsys.readouterr().err
 
     def test_the_diff_minus_the_baseline_otherwise(self, capsys):
         with patch.object(
             cro, "get_files_changed_since_ref", return_value=["x.py", "plans/p.md", "y.py"]
         ):
-            files = cro.resolve_changed_files(
+            files = cro.resolve_review_scope(
                 _state_without_tracked_files(pre_existing=["plans/"]), "abc123"
-            )
+            ).paths
         assert files == ["x.py", "y.py"]
         assert "Filtered out 1 pre-existing files" in capsys.readouterr().out
 
@@ -3755,7 +3755,6 @@ class TestResolveReviewScopeLabelsItsBranch:
         scope = cro.resolve_review_scope(state, "abc123")
 
         assert scope.source == "tracked_files"
-        assert sorted(scope.paths) == sorted(cro.resolve_changed_files(state, "abc123"))
         assert sorted(scope.paths) == ["a.py", "b.py", "c.py"]
         assert scope.task_ids == {"a.py": "T001", "b.py": "implementation"}
 
@@ -3765,17 +3764,15 @@ class TestResolveReviewScopeLabelsItsBranch:
             cro, "get_files_changed_since_ref", return_value=["x.py", "plans/p.md", "y.py"]
         ), patch.object(cro, "list_worktree_untracked_files", return_value=[]):
             scope = cro.resolve_review_scope(state, "abc123")
-            paths = cro.resolve_changed_files(state, "abc123")
 
         assert scope.source == "git_diff"
-        assert scope.paths == paths == ["x.py", "y.py"]
+        assert scope.paths == ["x.py", "y.py"]
         assert scope.task_ids == {}
 
     def test_the_none_branch(self, capsys):
         state = _state_without_tracked_files()
         scope = cro.resolve_review_scope(state, "")
         assert scope == cro.ReviewScope([], "none", {})
-        assert scope.paths == cro.resolve_changed_files(state, "")
 
     def test_a_recorded_files_scope_wins_over_tracked_files(self, capsys):
         """`--files` (decision 11.1) is checked first, whatever else state holds."""
@@ -3790,7 +3787,6 @@ class TestResolveReviewScopeLabelsItsBranch:
 
         assert scope == cro.ReviewScope(["b.py", "a.py"], "files_flag", {})
         assert "Using 2 files given with --files" in capsys.readouterr().out
-        assert cro.resolve_changed_files(state, "abc123") == ["b.py", "a.py"]
 
     def test_an_empty_recorded_files_scope_falls_through(self, capsys):
         state = _dict_state({

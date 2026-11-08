@@ -740,17 +740,10 @@ class TestSidecarIsNeverAModelResult:
         assert set(result_files.snapshot_candidates(phase_dir)) == {"m_a.json"}
         assert [Path(p).name for p in cro.leftover_model_results(phase_dir)] == ["m_a.json"]
 
-    @pytest.mark.parametrize("source", ["utils/review_orchestrator_base.py", "code_review_orchestrator.py"])
-    def test_every_exclude_list_matches_it(self, tmp_path, source):
+    def test_the_reaggregation_rule_skips_it(self, tmp_path):
+        """Both reaggregates read ``result_files.model_result_paths``."""
         phase_dir = self._phase_dir(tmp_path)
-        text = (SKILL_ROOT / source).read_text(encoding="utf-8")
-        lists = [json.loads(m.group(1).replace("'", '"'))
-                 for m in re.finditer(r"exclude_patterns = (\[[^\]]*\])", text)]
-        assert lists, source
-        for patterns in lists:
-            kept = [p.name for p in sorted(phase_dir.glob("*.json"))
-                    if not any(p.name.startswith(ex) or ex in p.name for ex in patterns)]
-            assert kept == ["m_a.json"], (source, patterns)
+        assert [Path(p).name for p in result_files.model_result_paths(phase_dir)] == ["m_a.json"]
 
 
 class TestImportedSelectionsCarryNoScope:

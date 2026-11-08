@@ -3,8 +3,7 @@
 
 This module holds the primitives that were previously inline in
 ``utils/review_orchestrator_base.py`` (``write_status``/``update_status``, which
-still re-exports them under the same names, as do
-``review_plan_orchestrator._write_status``/``_update_status``). They live in a
+still re-exports them under the same names). They live in a
 module of their own for one reason: ``status`` has to be a *sub-second* command
 (a file read plus a liveness probe, polled by hosts with a 2-minute shell cap),
 and importing the review orchestration base pulls in the provider client, the
