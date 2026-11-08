@@ -1513,7 +1513,10 @@ def _review_args(plan: Path, models: List[str], **overrides):
         models=list(models),
         interactive=False,
         quick=False,
-        timeout=5,
+        # Wide enough that §7.5 rule 4 dispatches gemini's slot: a budget too
+        # small for one worst-case attempt of its declared envelope (243 s) is
+        # refused with nothing spawned. The dispatch is canned, so nothing waits.
+        timeout=1800,
         max_parallel=2,
         base_ref=None,
         skip_validation=True,

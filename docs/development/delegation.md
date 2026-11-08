@@ -315,7 +315,7 @@ declares `retries_rate_limit: true` gets no identical rate-limit re-dispatch, be
 a chain its own CLI already ran.
 
 The ladder is provider-free by construction (the envelope is read structurally) and each lane keeps
-only its own three-line loop: `subagent_executor._dispatch_task` blocks, `review_orchestrator_base.run_single_model` awaits — the
+only its own three-line loop: `subagent_executor._dispatch_task` blocks, `review_orchestrator_base.dispatch_with_ladder` awaits — the
 latter because it runs inside `asyncio.gather` under two semaphores, where a blocking retry
 loop would serialize the whole fan-out. Each failed attempt writes `{phase}/failed/{task_id}.attemptN.json` with the
 prompt elided to its sha256; attempt numbering restarts per invocation, so an existing file of that
@@ -328,9 +328,10 @@ a sentence composed for a human. The executor asks it for a run with no usable r
 (`_classify_failed_run`) and lets the verdict replace the parse failure's status when it is one
 that changes the slot's fate (auth, invalid model, sandbox, rate limit, context length, budget, or
 a structural `runner_error`). Any other verdict, `None` included, leaves the parse failure's own
-status, rung 4 or 5: one transport retry. The review fan-out (`run_single_model`, review-plan and
-review-tasks) takes it from `details["failure_category"]`, which `llm_client.invoke_with_provider`
-sets on a **non-zero exit** while it still holds the streams; only the category leaves that
+status, rung 4 or 5: one transport retry. The review fan-out (`dispatch_with_ladder`, the one
+loop behind review-plan's and review-tasks' `run_single_model` and review-code's
+`run_single_review`) takes it from `details["failure_category"]`, which
+`llm_client.invoke_with_provider` sets on a **non-zero exit** while it still holds the streams; only the category leaves that
 function, never the streams. The fan-out applies it the same way: `None` (the adapter recognised
 nothing) is `runner_error`, connection and server errors are rung 4 through
 `review_orchestrator_base._LADDER_STATUS_BY_CATEGORY`, and every other category reaches the ladder
@@ -358,7 +359,16 @@ the fan-out.
 row as a deadline kill, through both lanes' real paths (`invoke_with_file_output` into
 `run_single_model`, and `dispatch_task` with the spawn stubbed and the profile gate lifted) and
 asserts the same number of dispatches, apart from the two deliberate verdicts above.
-`code_review_orchestrator` has no ladder.
+`tests/test_code_review_ladder.py` drives the same verdicts through review-code's slot and asserts it
+dispatches each as often as review-plan's. On both review lanes the slot's deadline starts
+(`slot_ladder`) before its prompt and result baselines are prepared, which it pays for. A slot that
+raises is a failed result carrying `Exception: <type>: <message>`, redacted (`slot_exception_error`),
+never a deadline loss. When a dispatch raises, the attempts before it keep their spend, audits and
+home checks, the raising attempt counts as unaudited, and the write, mode and home checks run as
+after a return, so a write in the window still fails the slot by path. The raising attempt's home
+check is the ladder loop's own read-back of the jailed children it armed (see
+[providers](providers.md)), and a write it fails is recorded with `source: exception`. Cancellation
+(`CancelledError`, `KeyboardInterrupt`) is not caught there: the fan-out's teardown retires the slot.
 
 A batch with any failed or incomplete task writes `{phase}/subagent_batch_report.json`, refuses to reaggregate and
 exits **3 even under `--yes`** — and **never** falls back to salvage. Resume is

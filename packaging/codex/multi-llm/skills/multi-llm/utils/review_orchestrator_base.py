@@ -25,6 +25,8 @@ import stat
 import subprocess
 import sys
 import threading
+import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, List, NamedTuple, Optional, Sequence, Tuple, Union
@@ -80,6 +82,9 @@ from .llm_client import (
     SANDBOX_BYPASSED,
     STDOUT_OUTPUT_LOCATION,
     _INCIDENTAL_RUNG_IDS,
+    _redact,
+    armed_homes_window,
+    raised_attempt_home_checks,
     sandbox_fallback_rung_of,
     sandbox_record_word,
     sandbox_word_is_incidental,
@@ -114,6 +119,7 @@ from .providers.base import (
     context_length_message,
 )
 from .retry_ladder import (
+    Action,
     RetryLadder,
     STATUS_CONTEXT_LENGTH_EXCEEDED,
     STATUS_OK,
@@ -2298,6 +2304,233 @@ _LADDER_STATUS_BY_CATEGORY = {
 STATUS_JAIL_DENIED = "jail_denied"
 
 
+def attempt_ladder_status(
+    result: Dict[str, Any], details: Dict[str, Any]
+) -> Optional[str]:
+    """The ladder status of one finished review fan-out attempt.
+
+    One classification per failed attempt. A non-zero exit or a deadline kill
+    carries the adapter's own verdict on ``details`` (read by
+    ``invoke_with_provider`` while it held the streams), and that is what the
+    ladder obeys, as on the executor lane; a verdict of ``None`` (nothing
+    recognised) is ``runner_error``, one transport retry. Any other failure (an
+    exit-0 run whose answer did not parse, a launch failure) has no such key
+    and falls back to the shared classifier over the error line alone, where an
+    unrecognised line is never retried; the boundary-aware matcher keeps a
+    model that wrote "reviewed 429 files" from reading as a rate limit. A jail
+    denial wins over every verdict: the ladder does not know its status, so it
+    is never retried and never moved to another rung.
+    See docs/development/delegation.md#read-and-analyze-executor.
+    """
+    if result.get("success"):
+        return STATUS_OK
+    if is_jail_denied(details):
+        return STATUS_JAIL_DENIED
+    if FAILURE_CATEGORY_KEY in details:
+        category = details[FAILURE_CATEGORY_KEY] or STATUS_RUNNER_ERROR
+    else:
+        category = classify_streams(str(result.get("error", "")), "")
+    return _LADDER_STATUS_BY_CATEGORY.get(category, category)
+
+
+def slot_exception_error(exc: BaseException) -> str:
+    """The recorded reason of a fan-out slot that raised: the exception's type
+    and message, through the one redaction boundary (§4.5), because it reaches
+    ``.status.json``, ``error_<model>.log`` and the report."""
+    return _redact(f"Exception: {type(exc).__name__}: {exc}")
+
+
+def slot_ladder(
+    provider_name: str, timeout: float, *, anchor: Any
+) -> RetryLadder:
+    """One review fan-out slot's :class:`~utils.retry_ladder.RetryLadder`.
+
+    §7.5 rule 1: its deadline starts HERE, so a lane builds it where the
+    slot's budget starts (before its prompt and result baselines are
+    prepared, which are charged to the same budget) and hands it to
+    :func:`dispatch_with_ladder`. The declared vendor envelope turns on rule
+    4's pre-dispatch admission test and rule 6(b)'s refusal to re-issue a
+    rate-limit dispatch a CLI already exhausted internally; ``getattr``
+    because unmeasured adapters declare ``None``, which rule 6(c) reads as
+    "assume one request".
+    """
+    return RetryLadder(
+        timeout=timeout,
+        retries=get_subagent_retries(anchor=anchor),
+        envelope=getattr(get_provider(provider_name), "internal_retries", None),
+        now=time.monotonic,
+    )
+
+
+@dataclass
+class LadderRun:
+    """What one review fan-out slot's ladder loop leaves behind.
+
+    ``result`` and ``details`` are the last returned attempt's (``None`` and
+    ``{}`` when no attempt returned); ``usage``, ``audits`` and
+    ``home_checks`` span every attempt, because a retry replaces ``details``
+    and the last attempt alone would understate the spend and let a clean
+    retry excuse an earlier attempt that wrote (plan §4.3). ``exception`` is
+    set when a dispatch raised, which ended the slot; that attempt read
+    nothing back, so its audit is ``None`` and its home check is the loop's
+    own read-back of the jailed children it armed (``None`` when it armed
+    none).
+    """
+
+    ladder: RetryLadder
+    #: The slot's whole budget as the lane resolved it, quoted in the reasons.
+    timeout: Any = None
+    result: Optional[Dict[str, Any]] = None
+    details: Dict[str, Any] = field(default_factory=dict)
+    status: Optional[str] = None
+    action: Optional[Action] = None
+    attempt_timeout: Optional[int] = None
+    usage: Optional[Dict[str, Any]] = None
+    audits: List[Any] = field(default_factory=list)
+    home_checks: List[Any] = field(default_factory=list)
+    exception: Optional[Exception] = None
+
+    @property
+    def refused(self) -> bool:
+        """§7.5 rule 4 refused the slot before anything was spawned."""
+        return self.result is None and self.exception is None
+
+    def refusal_reason(self, target: str) -> str:
+        """Rule 4's reason for a slot no attempt was started for."""
+        return budget_exhausted_reason(
+            self.ladder, target=target, timeout=self.timeout
+        )
+
+    def stop_error(self, model_spec: str) -> str:
+        """The recorded reason of a slot whose last attempt failed.
+
+        A rate limit keeps the attempt's own error first (an adapter's
+        ``[USAGE_LIMIT]`` sentence says the fix is another model, not a wait)
+        and adds whether the backoffs ran out or §7.5 rule 6(b) refused an
+        identical re-dispatch; a context overflow is terminal and names the two
+        remedies a human can apply (§7.6(a)); anything else is the attempt's
+        own error. A retry the ladder granted and the deadline then refused, or
+        a grant ``record()`` refused for want of budget, adds the parenthetical
+        that says the budget ended the slot.
+        """
+        action = self.action
+        note = ""
+        if action is not None and action.retry:
+            note = (
+                f" (no retry: the per-slot wall-clock budget of "
+                f"{self.timeout}s is exhausted — {self.ladder.stop_reason})"
+            )
+        elif (
+            action is not None and action.note
+            and self.status != STATUS_RATE_LIMITED
+        ):
+            note = f" ({action.note})"
+        error = (self.result or {}).get("error", "Unknown error")
+        if self.status == STATUS_RATE_LIMITED:
+            return f"{error} (Rate limited (429) - {action.reason}{note})"
+        if self.status == STATUS_CONTEXT_LENGTH_EXCEEDED:
+            return context_length_message(model_spec)
+        return f"{error}{note}"
+
+
+async def dispatch_with_ladder(
+    dispatch: Callable[[int], Any],
+    *,
+    ladder: RetryLadder,
+    model_spec: str,
+    display_name: str,
+    timeout: float,
+    start_line: Callable[[int, int], str],
+    jail_summary_key: Any,
+    tracker: Optional[FanoutProgress] = None,
+) -> LadderRun:
+    """Run one review fan-out slot's attempts under the shared retry ladder.
+
+    The one loop both review lanes use (``run_single_model`` for review-plan
+    and review-tasks, ``code_review_orchestrator.run_single_review`` for
+    review-code); the policy is :class:`~utils.retry_ladder.RetryLadder`'s.
+    ``ladder`` is the slot's :func:`slot_ladder`, built where the slot's
+    budget starts; ``timeout`` is that budget as the lane resolved it.
+    ``dispatch(attempt_timeout)`` is the lane's own awaited invocation;
+    ``start_line(attempt_index, attempt_timeout)`` is its start print. §7.5
+    rule 1: every attempt is spawned with what is LEFT of the one deadline,
+    so ``dispatch`` must never be handed a fresh copy of ``timeout``.
+
+    A dispatch that raises an ``Exception`` ends the slot (never retried) and
+    is kept on ``LadderRun.exception`` with everything the earlier attempts
+    recorded, so the lane runs the same write, mode and home checks as after
+    a return before recording it. Its ``details["home_check"]`` went down
+    with it, so every attempt runs in ``llm_client.armed_homes_window`` and a
+    raised one's jailed children are compared here, against the invoker's
+    own before-snapshots; a home that cannot be compared is ``unaudited`` and
+    fails the slot closed. Cancellation (``asyncio.CancelledError``,
+    ``KeyboardInterrupt``) is a ``BaseException`` and is not caught: it
+    leaves this loop unchanged and the fan-out's teardown retires the slot.
+
+    Awaited, not Lane B's blocking loop: the slot runs inside
+    ``asyncio.gather`` under two semaphores, where a blocking retry loop would
+    serialize the fan-out. The tracker gets ``running`` at every attempt and
+    ``retrying`` at every backoff; terminal transitions stay the lane's.
+    See docs/development/delegation.md#read-and-analyze-executor.
+    """
+    run = LadderRun(ladder=ladder, timeout=timeout)
+    while (slice_s := ladder.next_attempt()) is not None:
+        # `round`, not `int`: the invokers take whole seconds, and truncating
+        # would spend up to a second of the slot's budget on every attempt.
+        # Rule 3 keeps the slice at least MIN_ATTEMPT_BUDGET_S, so the floor
+        # never reaches 0.
+        attempt_timeout = max(1, int(round(slice_s)))
+        print(start_line(ladder.attempt_index, attempt_timeout))
+        if tracker is not None:
+            # `timeout_s` is the slot's whole budget, not what remains: as the
+            # table's denominator a shrinking slice would overstate the budget.
+            tracker.running(
+                model_spec, attempt=ladder.attempt_index, timeout_s=timeout
+            )
+        armed: List[Any] = []
+        try:
+            with armed_homes_window() as armed:
+                result = await dispatch(attempt_timeout)
+        except Exception as exc:  # noqa: BLE001 - recorded as the slot's ending
+            # Nothing of this attempt was read back: a `None` audit keeps the
+            # combined verdict from reading clean (plan §4.3), so a tree
+            # change in the window still fails the slot closed. A write to
+            # `$CODEX_HOME` outlives the jail, so its home is compared here.
+            run.exception = exc
+            run.audits.append(None)
+            homes = (
+                await asyncio.to_thread(raised_attempt_home_checks, armed)
+                if armed else []
+            )
+            run.home_checks.extend(homes or [None])
+            break
+        details = result.get("details") or {}
+        run.result, run.details, run.attempt_timeout = result, details, attempt_timeout
+        run.usage = accumulate_usage(run.usage, details)
+        run.audits.append(details.get("readonly_audit"))
+        run.home_checks.append(details.get("home_check"))
+        # The jail's own lines for this attempt: its `[JAIL_DENIED]` line
+        # (kept for the closing summary) and the in-stream denial count.
+        report_jail_outcome(display_name, details, jail_summary_key)
+        run.status = attempt_ladder_status(result, details)
+        run.action = ladder.record(run.status)
+        if not run.action.retry:
+            break
+        if run.action.delay:
+            # The ladder is pure, so the test fast-backoff switch is applied
+            # here, at the one place a review lane sleeps.
+            delay = get_backoff_delay(run.action.delay)
+            print(f"[{display_name}] {run.status}, retrying in {delay}s...")
+            if tracker is not None:
+                # `retrying` for the sleep; the next attempt's `running` ends it.
+                # The backoff is charged to the same deadline.
+                tracker.retrying(
+                    model_spec, attempt=ladder.attempt_index, retry_after_s=delay,
+                )
+            await asyncio.sleep(delay)
+    return run
+
+
 def _try_pretty_print_json(text: str) -> str:
     """Try to pretty-print text as JSON, return original if not valid JSON."""
     if not text or not text.strip():
@@ -3965,7 +4198,10 @@ def bypass_write_not_attributed(provider_name: str, paths: Sequence[str]) -> str
 #   or plugin files persists into the user's later Codex sessions, outside any
 #   jail. The invoker (`llm_client.invoke_with_provider`) fingerprints the set
 #   around the child and hands the comparison back on `details["home_check"]`;
-#   the lane applies the verdict here.
+#   the lane applies the verdict here. An attempt that raises returns no
+#   `details`, so `dispatch_with_ladder` makes the same comparison itself for
+#   every jailed child the attempt armed, and a home it cannot compare is
+#   recorded `unaudited`, which takes the verdict a change takes.
 #
 # Both take today's verdict on a narrower signal: fail closed, output
 # discarded, unless `bypass_stream_audit_clears` accepts the slot's own stream
@@ -4135,8 +4371,9 @@ def mode_check_not_attributed(
 def merge_home_checks(records: Sequence[Any]) -> Optional[Dict[str, Any]]:
     """Every attempt's ``details["home_check"]`` of one slot, folded into one
     record: changed files, config key names and foreign trust tables unioned
-    in order, the most other live children any attempt saw. ``None`` when no
-    attempt carried one."""
+    in order, the most other live children any attempt saw, and
+    ``unaudited`` when any attempt's home could not be compared. ``None``
+    when no attempt carried one."""
     merged: Optional[Dict[str, Any]] = None
     for record in records or ():
         if not isinstance(record, dict):
@@ -4147,6 +4384,8 @@ def merge_home_checks(records: Sequence[Any]) -> Optional[Dict[str, Any]]:
                 "changed": [], "config_keys": [], "foreign_trust": [],
                 "other_live_children": 0,
             }
+        if record.get("unaudited"):
+            merged["unaudited"] = True
         for key in ("changed", "config_keys", "foreign_trust"):
             for item in record.get(key) or ():
                 if item not in merged[key]:
@@ -4174,19 +4413,31 @@ def home_check_line(provider_name: str, record: Dict[str, Any], *, kept: bool) -
     security-relevant set changed (F1 Limits): each changed file, and for
     ``config.toml`` the changed table or key names — never a value, the file
     can hold MCP server tokens — how many other children of this run were live
-    in the window, and the verdict."""
+    in the window, and the verdict. A record with no change but
+    ``unaudited`` (an attempt that raised, whose home could not be compared)
+    says the home was not checked instead."""
     n = int(record.get("other_live_children") or 0)
     others = (
         f"{n} other {provider_name} child{'ren' if n != 1 else ''} of this run "
         f"{'was' if n == 1 else 'were'} live in the window"
     )
-    line = (
-        f"{CODEX_HOME_CHECK_MARKER} {provider_name}: {record.get('home') or '$CODEX_HOME'} "
-        f"changed during this slot on the plugin's Landlock jail, which does not "
-        f"stop writes there: {_describe_home_change(record)}; {others}; the "
-        f"change persists into later {provider_name} sessions and was not "
-        f"reverted — review those files"
-    )
+    home = record.get("home") or "$CODEX_HOME"
+    if not record.get("changed") and record.get("unaudited"):
+        line = (
+            f"{CODEX_HOME_CHECK_MARKER} {provider_name}: {home} was not checked: "
+            f"this slot's attempt on the plugin's Landlock jail, which does not "
+            f"stop writes there, raised and the home could not be compared "
+            f"afterwards; {others}; a change there would persist into later "
+            f"{provider_name} sessions — review those files"
+        )
+    else:
+        line = (
+            f"{CODEX_HOME_CHECK_MARKER} {provider_name}: {home} "
+            f"changed during this slot on the plugin's Landlock jail, which does not "
+            f"stop writes there: {_describe_home_change(record)}; {others}; the "
+            f"change persists into later {provider_name} sessions and was not "
+            f"reverted — review those files"
+        )
     if kept:
         return line + (
             "; not attributed: this slot's own action stream shows only "
@@ -4354,7 +4605,7 @@ async def run_incidental_checks(
                 violations.append(violation)
     if home_check_applies(sandbox):
         record = merge_home_checks(home_checks)
-        if record is not None and record.get("changed"):
+        if record is not None and (record.get("changed") or record.get("unaudited")):
             kept = bypass_stream_audit_clears(audits)
             line = home_check_line(provider_name, record, kept=kept)
             print(f"[{display_name}] {line}")
@@ -4515,11 +4766,11 @@ async def run_single_model(
     1800 s (§7.5's opening paragraph). Being a tail call inside an ``async def``
     it also kept its retry state in a place no budget could see.
 
-    The loop below is the sketch in §7.1.b, and its only lane-specific lines are
-    the ``await``ed dispatch and the ``await asyncio.sleep``. It is deliberately
-    **not** Lane B's loop: this coroutine is awaited inside ``asyncio.gather``
-    under two semaphores, so a blocking retry loop here would serialize the whole
-    fan-out. What the two lanes share is the policy object.
+    The loop is :func:`dispatch_with_ladder`, the one review-code's slot runs
+    too; this function supplies only its ``await``ed dispatch. It is
+    deliberately **not** Lane B's loop: this coroutine is awaited inside
+    ``asyncio.gather`` under two semaphores, so a blocking retry loop here would
+    serialize the whole fan-out. What the two lanes share is the policy object.
 
     Args:
         model_spec: Model specification (e.g., 'cursor-agent:auto')
@@ -4855,7 +5106,7 @@ async def run_single_model(
             return {
                 "success": False,
                 "output": None,
-                "error": f"Exception: {type(e).__name__}: {e}",
+                "error": slot_exception_error(e),
                 "prompt": prompt,
                 "stdout": "",
                 "stderr": "",
@@ -4866,36 +5117,13 @@ async def run_single_model(
 
     result: Optional[Dict[str, Any]] = None
     details: Dict[str, Any] = {}
-    # What the slot has spent across EVERY attempt, not the last one's
-    # `details`: the loop below rebinds that on each pass, so a record
-    # built from it reports the winning attempt alone. `None` until an
-    # adapter reports something, which is what keeps "never reported"
-    # distinguishable from a measured zero.
-    slot_usage: Optional[Dict[str, Any]] = None
-    #: Every attempt's `details['readonly_audit']` (plan §4.3), `None` included.
-    slot_audits: List[Any] = []
-    #: Every attempt's `details['home_check']` on the plugin's jail (F1 Limits).
-    slot_home_checks: List[Any] = []
     stderr_text = ""
     source = "unknown"
-    status: Optional[str] = None
-    action = None
 
     try:
-        # §7.5 rule 1: ONE deadline for this slot, taken once, here. Every
-        # attempt below is spawned with what is LEFT of it — the whole of M9's
-        # budget half. The declared vendor envelope (§7.6(b)) turns on rule 4's
-        # pre-dispatch admission test and rule 6(b)'s refusal to re-issue a
-        # rate-limit dispatch a CLI already exhausted internally; `getattr`
-        # because the eleven unmeasured adapters declare `None`, which rule 6(c)
-        # reads as "assume one request", never "assume the worst".
-        provider = get_provider(provider_name)
-        ladder = RetryLadder(
-            timeout=effective_timeout,
-            retries=get_subagent_retries(anchor=plan_path),
-            envelope=getattr(provider, "internal_retries", None),
-            now=time.monotonic,
-        )
+        # §7.5 rule 1: ONE deadline for this slot, taken here, before the
+        # placeholder prompt and the result baselines below, which it pays for.
+        ladder = slot_ladder(provider_name, effective_timeout, anchor=plan_path)
         # A placeholder only until the first attempt names its real output file:
         # rule 4 can refuse this slot before any dispatch, and the result dict
         # still owes its caller a `prompt`. The output-location block is already
@@ -4934,36 +5162,8 @@ async def run_single_model(
             requested_result_baseline, out_dir, invoke_phase, model_spec
         )
 
-        while (slice_s := ladder.next_attempt()) is not None:
-            # Never a fresh copy of `effective_timeout`: `next_attempt()` returns
-            # what is left of the one deadline, and rule 3 guarantees it is at
-            # least MIN_ATTEMPT_BUDGET_S, so the floor below can never be 0.
-            # `round`, not `int`: `invoke_with_file_output` takes whole seconds,
-            # and truncating would silently spend up to a second of the slot's
-            # budget on every attempt — including the first, whose slice is
-            # `effective_timeout` minus the microseconds since the ladder was
-            # constructed. The ≤ 0.5 s of overshoot the other way is bounded and
-            # sits inside the fan-out's `base_timeout × 2` of slack.
-            attempt_timeout = max(1, int(round(slice_s)))
-            print(
-                f"[{display_name}] Starting review with file-based output "
-                f"(attempt {ladder.attempt_index}, timeout: {attempt_timeout}s "
-                f"of a {effective_timeout}s slot)..."
-            )
-            if tracker is not None:
-                # Once per ladder attempt, which is what carries a retried slot
-                # back out of `retrying` and into `running` with the new attempt
-                # number. `timeout_s` stays `effective_timeout` — the slot's
-                # whole budget — and is deliberately not `attempt_timeout`,
-                # which is what *remains* and shrinks every round: rendered as
-                # the denominator it would overstate the budget left.
-                tracker.running(
-                    model_spec,
-                    attempt=ladder.attempt_index,
-                    timeout_s=effective_timeout,
-                )
-
-            result = await asyncio.to_thread(
+        async def _dispatch(attempt_timeout: int) -> Dict[str, Any]:
+            return await asyncio.to_thread(
                 invoke_with_file_output,
                 prompt_template=prompt_template,
                 model_spec=model_spec,
@@ -4981,109 +5181,52 @@ async def run_single_model(
                 **sandbox_fallback_kwargs(sandbox),
             )
 
-            details = result.get("details", {})
-            slot_usage = accumulate_usage(slot_usage, details)
-            # Plan §4.3: every attempt's verdict, in order, for the AND at the
-            # end — a retry replaces `details`, so the last one alone would let
-            # a clean retry excuse an earlier attempt that wrote.
-            slot_audits.append(details.get("readonly_audit"))
-            slot_home_checks.append(details.get("home_check"))
-            # The jail's own lines for this attempt: its `[JAIL_DENIED]` line
-            # (kept for the closing summary) and the in-stream denial count.
-            report_jail_outcome(display_name, details, summary_key)
+        # The shared ladder loop (§7.1.b), the one review-code's slot runs too.
+        run = await dispatch_with_ladder(
+            _dispatch,
+            ladder=ladder,
+            model_spec=model_spec,
+            display_name=display_name,
+            timeout=effective_timeout,
+            start_line=lambda attempt, attempt_timeout: (
+                f"[{display_name}] Starting review with file-based output "
+                f"(attempt {attempt}, timeout: {attempt_timeout}s "
+                f"of a {effective_timeout}s slot)..."
+            ),
+            jail_summary_key=summary_key,
+            tracker=tracker,
+        )
+        result, details, status = run.result, run.details, run.status
+        slot_usage = run.usage
+        if result is not None:
             stderr_text = details.get("stderr", "")
             source = result.get("source", "unknown")
             output_file = result.get("output_file", "")
-
-            # The prompt this attempt really sent, reconstructed for the record:
-            # `invoke_with_file_output` renders the same three values from the
-            # same spec and the same `attempt_timeout`, so this stays the text
-            # the child saw rather than a file-flavoured approximation of it.
+            # The prompt the last attempt really sent, reconstructed for the
+            # record: `invoke_with_file_output` renders the same three values
+            # from the same spec and the same `attempt_timeout`, so this stays
+            # the text the child saw.
             prompt = prompt_template.format(
                 **full_prompt_context,
                 output_json_path=output_file,
                 output_location=render_output_location(
                     output_file, model_spec, anchor=plan_path
                 ),
-                working_limits=render_working_limits(attempt_timeout),
+                working_limits=render_working_limits(run.attempt_timeout),
             )
-
-            # Only for an attempt that answered — same rule as the code-review
-            # fan-out: a failed attempt carries `output_file` and no `source`,
-            # and the line then promised a file nothing would write.
+            # Only for an attempt that answered: a failed attempt carries
+            # `output_file` and no `source`, and the line would promise a file
+            # nothing writes.
             if output_file and result.get("success"):
                 print(f"[{display_name}] {describe_output_file(output_file, source)}")
 
-            # ONE classification per failed slot. A non-zero exit or a deadline
-            # kill carries the adapter's own verdict on `details` (read by
-            # `invoke_with_provider` while it held the streams), and that is
-            # what the ladder obeys, as on the executor lane. A verdict of
-            # `None` (nothing recognised) is `runner_error`, one transport
-            # retry: the executor keeps its own rung-4/5 parse failure when the
-            # adapter names nothing. Any other failure (an exit-0 run whose
-            # answer did not parse, a launch failure) has no such key and falls
-            # back to the shared classifier over the error line alone, where an
-            # unrecognised line is never retried; adding `stderr_text` would
-            # duplicate the same prose and let one copy supply the error-context
-            # word for a bare token in the other. Both paths use the
-            # boundary-aware matcher, so a model that wrote "reviewed 429 files"
-            # is not a rate limit. See
-            # docs/development/delegation.md#read-and-analyze-executor.
-            if result.get("success"):
-                failure_category = None
-            elif FAILURE_CATEGORY_KEY in details:
-                failure_category = details[FAILURE_CATEGORY_KEY] or STATUS_RUNNER_ERROR
-            else:
-                failure_category = classify_streams(str(result.get("error", "")), "")
-            status = (
-                STATUS_OK if result.get("success")
-                else _LADDER_STATUS_BY_CATEGORY.get(failure_category, failure_category)
-            )
-            if not result.get("success") and is_jail_denied(details):
-                # F1 item 6: the plugin's jail denied the turn, or could not
-                # be set up for it. Non-retryable and never moved to another
-                # rung — a status the ladder does not know is "never retried",
-                # whatever the text classifies as.
-                status = STATUS_JAIL_DENIED
-
-            # One `record` call is the whole retry decision, identical to Lane
-            # B's: rung 1 is terminal, rung 3 backs off with jitter at most three
-            # times without consuming the transport budget, rungs 2/4/5 spend
-            # `driver.subagent_retries`, everything else is never retried — and
-            # every one of those decisions is taken against the same deadline the
-            # dispatches are charged to. `retry_count < 3` and `retry_count < 1`
-            # are gone; they were two counters neither of which saw a clock.
-            action = ladder.record(status)
-            if not action.retry:
-                break
-            if action.delay:
-                # The ladder is pure, so the test fast-backoff switch cannot live
-                # there. Applying it here, at the one place this lane really
-                # sleeps, keeps MULTI_LLM_TEST_FAST_BACKOFF=1 an exact 10 ms.
-                delay = get_backoff_delay(action.delay)
-                print(f"[{display_name}] {status}, retrying in {delay}s...")
-                if tracker is not None:
-                    # The entry stays `retrying` for the sleep and returns to
-                    # `running` at the next attempt's start print above.
-                    # `elapsed_s` is not reset by it: the backoff is charged to
-                    # the same slot deadline, so a reset would claim budget the
-                    # slot does not have.
-                    tracker.retrying(
-                        model_spec,
-                        attempt=ladder.attempt_index,
-                        retry_after_s=delay,
-                    )
-                await asyncio.sleep(delay)
-
         duration = time.time() - start_time
 
-        if result is None:
+        if run.refused:
             # §7.5 rule 4: the slot was refused before anything was spawned. It
             # is recorded as its own outcome rather than dispatched to be killed
             # part-way through a retry chain the harness cannot see.
-            reason = budget_exhausted_reason(
-                ladder, target=display_name, timeout=effective_timeout
-            )
+            reason = run.refusal_reason(display_name)
             print(f"[{display_name}] {reason}")
             # `stdout` stays `""`, and this one is not a hole. `result is None`
             # means `next_attempt()` refused the slot before the first dispatch,
@@ -5106,12 +5249,12 @@ async def run_single_model(
         # is failed with the paths whatever its last attempt reported, and the
         # `output` is dropped so `save_model_result` never parses it. Placed
         # after the `result is None` return because nothing ran on that path.
-        violation = await _bypass_write_check(slot_audits)
+        violation = await _bypass_write_check(run.audits)
         if violation is None:
             # The plugin's jail: the mode check and the home check, once,
             # after the last attempt, ahead of every branch below — the same
             # fail-closed place the porcelain check's verdict takes.
-            violation = await _incidental_check(slot_home_checks, slot_audits)
+            violation = await _incidental_check(run.home_checks, run.audits)
         if violation is not None:
             return {
                 "success": False, "output": None, "error": violation,
@@ -5119,39 +5262,34 @@ async def run_single_model(
                 **salvage_text_fields(details),
                 "stderr": stderr_text,
                 "duration_seconds": duration, "model_spec": model_spec,
-                "source": source,
+                "source": "exception" if run.exception is not None else source,
                 **served_model_fields(details),
                 **usage_total_fields(slot_usage),
             }
 
-        # The ladder granted a retry and `next_attempt()` then refused it: what
-        # ended this slot is the budget, not the last attempt's error. Lane B
-        # appends the same sentence (`subagent_executor.py`'s STOP_DEADLINE leg),
-        # because without it the recorded reason names a transport failure that
-        # the harness had, and did not spend, retries for.
-        budget_note = ""
-        if action is not None and action.retry:
-            budget_note = (
-                f" (no retry: the per-slot wall-clock budget of "
-                f"{effective_timeout}s is exhausted — {ladder.stop_reason})"
-            )
-        elif (
-            action is not None and action.note and status != STATUS_RATE_LIMITED
-        ):
-            # The usual shape since fix round 6: `record()` applies the same
-            # admission test (rules 3 and 4) to the grant, so the refusal comes
-            # back as the action's own note. A rate limit's branch below quotes
-            # `action.reason`, which already carries it.
-            budget_note = f" ({action.note})"
+        if run.exception is not None:
+            # A dispatch raised, which ended the slot; recorded as that
+            # exception after the checks above, with what every attempt before
+            # it spent. `stdout` stays `""`: an earlier attempt's excerpt has
+            # no relation to this error.
+            error_msg = slot_exception_error(run.exception)
+            print(f"[{display_name}] {error_msg}")
+            return {
+                "success": False, "output": None,
+                "error": error_msg, "prompt": prompt,
+                "stdout": "", "stderr": "",
+                "duration_seconds": duration, "model_spec": model_spec,
+                "source": "exception",
+                **usage_total_fields(slot_usage),
+            }
 
         if status == STATUS_RATE_LIMITED:
             # Either the ≤ 3 backoffs are spent, or §7.5 rule 6(b) refused an
             # identical re-dispatch against an adapter whose CLI already ran its
-            # own 429 chain. `action.reason` names which, and — for 6(b) — the
-            # declared envelope that decided it.
+            # own 429 chain; `LadderRun.stop_error` names which.
             return {
                 "success": False, "output": None,
-                "error": f"Rate limited (429) - {action.reason}{budget_note}",
+                "error": run.stop_error(model_spec),
                 # Stage U: a 429 chain is not free — the attempts before the
                 # last one were served and billed — so the record names what
                 # the slot spent getting nowhere.
@@ -5181,7 +5319,7 @@ async def run_single_model(
         if status == STATUS_CONTEXT_LENGTH_EXCEEDED:
             return {
                 "success": False, "output": None,
-                "error": context_length_message(model_spec),
+                "error": run.stop_error(model_spec),
                 # Terminal, never re-dispatched (§7.6(a)) — which is exactly why
                 # whatever the model managed to emit before the window closed is
                 # the only copy anyone will ever get. An overflow hit part-way
@@ -5216,7 +5354,7 @@ async def run_single_model(
                 **usage_total_fields(slot_usage),
             }
         else:
-            error_details = f"{result.get('error', 'Unknown error')}{budget_note}"
+            error_details = run.stop_error(model_spec)
             file_error = result.get("file_error", "")
             if file_error:
                 print(f"[{display_name}] File error: {file_error}")
@@ -5252,7 +5390,7 @@ async def run_single_model(
 
     except Exception as e:
         duration = time.time() - start_time
-        error_msg = f"Exception: {type(e).__name__}: {e}"
+        error_msg = slot_exception_error(e)
         print(f"[{display_name}] {error_msg}")
         try:
             prompt_for_log = prompt

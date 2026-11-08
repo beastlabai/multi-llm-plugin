@@ -1,6 +1,7 @@
 """LLM client wrapper for multi-provider LLM subprocess calls."""
 
 import contextlib
+import contextvars
 import json
 import os
 import re
@@ -13,7 +14,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Collection, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import Any, Collection, Dict, Iterator, List, NamedTuple, Optional, Sequence, Tuple, Union
 
 from . import structured_output
 from . import process_control
@@ -1756,6 +1757,111 @@ def _exit0_left_no_answer(hook_text: Optional[str], stdout: Optional[str]) -> bo
     return not answered or _turn_failed(stdout)
 
 
+def _home_check_record(
+    change: Any, before: Any, after: Any, *, codex_home: str, live: set,
+) -> Optional[Dict[str, Any]]:
+    """One jailed child's ``details["home_check"]``: only when the home's
+    security-relevant set changed or a foreign trust table appeared, else
+    ``None``. Shared by the invoker's own read-back and
+    :func:`raised_attempt_home_checks`, so both name a change the same way."""
+    if change is None or not (change.changed or change.foreign_trust):
+        return None
+    record = change.to_dict()
+    if _landlock.HOME_CONFIG in change.changed:
+        names = _config_key_names(
+            getattr(before, "config_text", None),
+            getattr(after, "config_text", None),
+        )
+        if names:
+            record["config_keys"] = names
+    record["home"] = _landlock.render_home(codex_home)
+    record["other_live_children"] = len(live)
+    return record
+
+
+@dataclass
+class _ArmedHome:
+    """What one jailed child's home check needs once its attempt has raised:
+    the home as the child saw it, the run cwd its trust table is expected
+    for, the invoker's before-snapshot, and the set of same-provider children
+    live beside it (``_live_child``'s, frozen once the child is gone)."""
+
+    codex_home: str
+    cwd: str
+    before: Any
+    live: set
+
+
+#: The jailed children the current fan-out attempt armed, or ``None`` outside
+#: :func:`armed_homes_window`. ``asyncio.to_thread`` copies the context into
+#: the dispatch's worker thread, so the invoker appends to the lane's list.
+_ARMED_HOMES: "contextvars.ContextVar[Optional[List[_ArmedHome]]]" = (
+    contextvars.ContextVar("multi_llm_armed_homes", default=None)
+)
+
+
+@contextlib.contextmanager
+def armed_homes_window() -> Iterator[List[_ArmedHome]]:
+    """Collect every jailed child one review fan-out attempt arms.
+
+    An attempt that raises returns no ``details``, so its ``home_check`` is
+    lost with it; the lane wraps each attempt in this window and, only on a
+    raise, hands the list to :func:`raised_attempt_home_checks`. Nothing is
+    read or written on the normal path."""
+    armed: List[_ArmedHome] = []
+    token = _ARMED_HOMES.set(armed)
+    try:
+        yield armed
+    finally:
+        _ARMED_HOMES.reset(token)
+
+
+def _note_armed_home(jail: "_JailedAttempt") -> None:
+    """Record a jailed child about to spawn in the lane's window, if any."""
+    armed = _ARMED_HOMES.get()
+    if armed is not None and jail.context is not None:
+        armed.append(_ArmedHome(
+            codex_home=jail.context.codex_home, cwd=jail.cwd,
+            before=jail.home_before, live=jail.live,
+        ))
+
+
+def raised_attempt_home_checks(armed: Sequence[_ArmedHome]) -> List[Dict[str, Any]]:
+    """The home check of every jailed child an attempt that raised had armed.
+
+    The comparison the invoker makes after a child exits, against its own
+    before-snapshot, so the record is the one the attempt would have returned
+    (only when something changed). A home that cannot be compared (no
+    before-snapshot, or none after: unreadable or gone) is recorded as
+    ``unaudited``: the attempt's own check never ran, so the lane fails it
+    closed (F1 Limits; see the home-check block in
+    ``review_orchestrator_base``). Blocking; the lane hands it to a thread.
+    """
+    records: List[Dict[str, Any]] = []
+    for entry in armed:
+        after = None
+        if entry.before is not None:
+            try:
+                after = _landlock.home_snapshot(entry.codex_home, [entry.cwd])
+            except Exception:  # noqa: BLE001 - recorded as unaudited below
+                after = None
+        change = _landlock.compare_home(entry.before, after)
+        if change is None:
+            records.append({
+                "home": _landlock.render_home(entry.codex_home),
+                "changed": [], "config_keys": [], "foreign_trust": [],
+                "other_live_children": len(entry.live), "unaudited": True,
+            })
+            continue
+        record = _home_check_record(
+            change, entry.before, after,
+            codex_home=entry.codex_home, live=entry.live,
+        )
+        if record is not None:
+            records.append(record)
+    return records
+
+
 def _jail_after_child(
     details: Dict[str, Any],
     jail: Optional[_JailedAttempt],
@@ -1788,22 +1894,17 @@ def _jail_after_child(
     if jail is None or jail.context is None:
         return None, ""
     context = jail.context
+    after = None
     try:
         after = _landlock.home_snapshot(context.codex_home, [jail.cwd])
         change = _landlock.compare_home(jail.home_before, after)
     except Exception:  # noqa: BLE001 - a check never ends a slot
         change = None
-    if change is not None and (change.changed or change.foreign_trust):
-        record = change.to_dict()
-        if _landlock.HOME_CONFIG in change.changed:
-            names = _config_key_names(
-                getattr(jail.home_before, "config_text", None),
-                getattr(after, "config_text", None),
-            )
-            if names:
-                record["config_keys"] = names
-        record["home"] = _landlock.render_home(context.codex_home)
-        record["other_live_children"] = len(jail.live)
+    record = _home_check_record(
+        change, jail.home_before, after,
+        codex_home=context.codex_home, live=jail.live,
+    )
+    if record is not None:
         details["home_check"] = record
     try:
         denials = _landlock.jail_denied_edits(stdout or "", context, cwd=jail.cwd)
@@ -2291,6 +2392,9 @@ def invoke_with_provider(
         with _live_child(provider_name) as live_overlap:
             if jail is not None:
                 jail.live = live_overlap
+                # For the lane, in case this attempt raises before its
+                # `details["home_check"]` is returned (armed_homes_window).
+                _note_armed_home(jail)
             result = _run_provider_cli(
                 cmd,
                 capture_output=True,

@@ -93,6 +93,8 @@ from utils.review_orchestrator_base import (
     validation_scope_block,
     backfill_deadline_losses,
     dispatch_salvage_tasks,
+    dispatch_with_ladder,
+    slot_ladder,
     dispatch_subagent_tasks,
     exec_subagents_requested,
     grouped_coverage_gap,
@@ -134,7 +136,6 @@ from utils.review_orchestrator_base import (
     mode_check_applies,
     mode_snapshot,
     print_closing_summary,
-    report_jail_outcome,
     run_incidental_checks,
     record_sandbox_bypassed,
     recorded_served_models,
@@ -146,6 +147,7 @@ from utils.review_orchestrator_base import (
     salvage_requested_models,
     sandbox_fallback_kwargs,
     sandbox_refusal,
+    slot_exception_error,
     spawn_fanout_slot,
     unexpected_writes,
     update_status,
@@ -212,6 +214,7 @@ from utils.llm_client import (
     invoke_with_provider,
     misnamed_result_baseline,
     render_diff_access,
+    requested_result_baseline,
     sandbox_record_word,
 )
 from utils.git_utils import (
@@ -3500,6 +3503,9 @@ async def run_single_review(
         timeout if timeout is not None
         else get_provider_timeout(provider_name, anchor=str(plan_path))
     )
+    # §7.5 rule 1: ONE deadline for this slot, taken here, before the prompt
+    # measurement and the result baselines below, which it pays for.
+    ladder = slot_ladder(provider_name, effective_timeout, anchor=str(plan_path))
 
     # The inline cap above bounds the `{diff_access}` block alone, but the
     # prompt that goes on argv also carries the implementation record, the
@@ -3530,57 +3536,83 @@ async def run_single_review(
                 tracker.failed(model_spec, error=unsupported, source="not-dispatched")
             return False, None, unsupported
 
-    print(f"[{display_name}] Starting code review with file-based output (timeout: {effective_timeout}s)...")
-    # The dispatch starts here, so the row stops being `queued`/`staggering`.
-    # `attempt=1` and no `retrying` transition anywhere below, because this lane
-    # has no retry ladder to report: it is one `invoke_with_file_output` call per
-    # slot, and whatever the adapter retries internally it does inside that one
-    # attempt. `timeout_s` is passed for the case the seed cannot know about —
-    # a per-slot override that gave this model a budget its provider default
-    # does not have.
-    if tracker is not None:
-        tracker.running(model_spec, attempt=1, timeout_s=effective_timeout)
-
-    # The misnamed-result baseline is the slot's, taken before its dispatch and
-    # handed down, as the review base's ladder does for every attempt.
+    # The misnamed-result and requested-result baselines are the slot's, taken
+    # once before its first attempt and handed to every attempt, as the review
+    # base does: a file an attempt wrote before it was killed is still this
+    # slot's answer when a retry writes nothing, and one already there when the
+    # slot started is never read as this slot's.
     misnamed_baseline = (
         await asyncio.to_thread(
             misnamed_result_baseline, out_dir, "code_review", model_spec
         )
         if run_model_specs is not None else None
     )
+    requested_baseline = await asyncio.to_thread(
+        requested_result_baseline, out_dir, "code_review", model_spec
+    )
 
-    # Use asyncio.to_thread to run the synchronous invoke_with_file_output
-    # in a thread pool, allowing concurrent execution
-    result = await asyncio.to_thread(
-        invoke_with_file_output,
-        prompt_template=prompt_template,
+    async def _dispatch(attempt_timeout: int) -> Dict[str, Any]:
+        return await asyncio.to_thread(
+            invoke_with_file_output,
+            prompt_template=prompt_template,
+            model_spec=model_spec,
+            prompt_context=prompt_context,
+            output_dir=out_dir,
+            phase="code_review",
+            timeout=attempt_timeout,
+            log_file=str(log_file),
+            prefer_arrays=True,
+            cwd=project_root,
+            anchor=str(plan_path),
+            # Every model of the fan-out, so a result written under the wrong
+            # name is read from where the model put it (live run 10, pi).
+            run_model_specs=run_model_specs,
+            misnamed_baseline=misnamed_baseline,
+            requested_baseline=requested_baseline,
+            **sandbox_fallback_kwargs(sandbox),
+        )
+
+    # The review base's ladder loop (§7.1.b), shared with review-plan: one
+    # deadline per slot, every attempt spawned with what is left of it, the
+    # adapter's verdict deciding each retry, a jail denial never retried, and
+    # the tracker's `running`/`retrying` transitions at each attempt and
+    # backoff. Terminal transitions stay below. See
+    # docs/development/delegation.md#read-and-analyze-executor.
+    run = await dispatch_with_ladder(
+        _dispatch,
+        ladder=ladder,
         model_spec=model_spec,
-        prompt_context=prompt_context,
-        output_dir=out_dir,
-        phase="code_review",
-        timeout=int(effective_timeout),
-        log_file=str(log_file),
-        prefer_arrays=True,
-        cwd=project_root,
-        anchor=str(plan_path),
-        # Every model of the fan-out, so a result written under the wrong name
-        # is read from where the model put it (live run 10, pi).
-        run_model_specs=run_model_specs,
-        misnamed_baseline=misnamed_baseline,
-        **sandbox_fallback_kwargs(sandbox),
+        display_name=display_name,
+        timeout=effective_timeout,
+        start_line=lambda attempt, attempt_timeout: (
+            f"[{display_name}] Starting code review with file-based output "
+            f"(attempt {attempt}, timeout: {attempt_timeout}s "
+            f"of a {effective_timeout}s slot)..."
+        ),
+        jail_summary_key=phase_dir,
+        tracker=tracker,
     )
 
     duration = time.time() - start_time
+    if run.refused:
+        # §7.5 rule 4: what is left of the slot cannot hold one worst-case
+        # attempt of this adapter's declared envelope, so nothing was spawned.
+        reason = run.refusal_reason(display_name)
+        print(f"[{display_name}] {reason}")
+        if tracker is not None:
+            tracker.failed(model_spec, error=reason, source="not-dispatched")
+        return False, None, reason
+    # The last returned attempt's; `{}` when the first dispatch raised.
+    result = run.result or {}
     output_file = result.get("output_file", "")
-    source = result.get("source", "unknown")
+    source = "exception" if run.exception is not None else result.get("source", "unknown")
 
     # §3.6: record which model served this slot before any of the branches
     # below return, so a fallback that fired is attributed even on the paths
     # that end in salvage. Only ever populated when a fallback is configured.
     # The D6 override's provenance (2026-09-17) lands in the same collector,
     # with or without a served model beside it.
-    details = result.get("details", {}) or {}
+    details = run.details
     if served_models is not None:
         entry: Dict[str, Any] = {}
         if details.get("served_model"):
@@ -3599,10 +3631,10 @@ async def run_single_review(
             served_models[model_spec] = entry
     # Stage U: and what it spent, recorded here for the same reason and before
     # the same branches — a slot that ends in salvage, or fails outright, spent
-    # what it spent. Absent when the adapter reported nothing; never `{}`, which
-    # would read as a free review.
+    # what it spent, summed over every attempt. Absent when the adapter reported
+    # nothing; never `{}`, which would read as a free review.
     if usage is not None:
-        spent = details.get("usage")
+        spent = run.usage
         if isinstance(spent, dict) and spent:
             usage[model_spec] = spent
 
@@ -3614,9 +3646,9 @@ async def run_single_review(
         ignore_prefixes = fanout_ignore_prefixes(
             plan_path, project_root, anchor=plan_path
         )
-        # Plan §4.3: one `invoke_with_file_output` call per slot, so its one
-        # attempt's verdict is the whole window's.
-        audits = [details.get("readonly_audit")]
+        # Plan §4.3: every attempt's verdict, ANDed, so a clean retry cannot
+        # excuse an earlier attempt that wrote.
+        audits = run.audits
         if tracker is not None:
             tracker.record_readonly_audit(
                 model_spec, combine_audits(audits).to_dict()
@@ -3647,21 +3679,34 @@ async def run_single_review(
                 tracker.failed(model_spec, error=violation, source=source)
             return False, None, violation
 
-    # The plugin's own jail: its `[JAIL_DENIED]` line and in-stream denial
-    # count, then the mode check and the home check's verdict — fail closed
-    # unless the slot's own audited stream clears it, exactly as above.
-    report_jail_outcome(display_name, details, phase_dir)
+    # The plugin's own jail (its `[JAIL_DENIED]` line and in-stream denial
+    # count were printed per attempt by the ladder loop): the mode check and
+    # the home check's verdict over every attempt — fail closed unless the
+    # slot's own audited streams clear it, exactly as above.
     incidental = await run_incidental_checks(
         sandbox, provider_name=provider_name, display_name=display_name,
         model_spec=model_spec, project_root=project_root, plan_path=plan_path,
-        mode_before=mode_before, home_checks=[details.get("home_check")],
-        audits=[details.get("readonly_audit")], tracker=tracker,
+        mode_before=mode_before, home_checks=run.home_checks,
+        audits=run.audits, tracker=tracker,
         summary_key=phase_dir,
     )
     if incidental is not None:
         if tracker is not None:
             tracker.failed(model_spec, error=incidental, source=source)
         return False, None, incidental
+
+    if run.exception is not None:
+        # A dispatch raised, which ended the slot; recorded as that exception
+        # after the checks above, with what every attempt before it spent, as
+        # the review base records it.
+        error_msg = slot_exception_error(run.exception)
+        spent = describe_usage(run.usage)
+        if spent:
+            error_msg = f"{error_msg} (spent {spent})"
+        print(f"[{display_name}] {error_msg}")
+        if tracker is not None:
+            tracker.failed(model_spec, error=error_msg, source="exception")
+        return False, None, error_msg
 
     print(f"[{display_name}] Log saved to: {log_file}")
     # Only for a slot that answered: a failed invocation carries `output_file`
@@ -3672,7 +3717,10 @@ async def run_single_review(
         print(f"[{display_name}] {describe_output_file(output_file, source)}")
 
     if not result["success"]:
-        error_msg = result.get("error", "Unknown error")
+        # The ladder's own reason when it ended the slot (the 429 chain, a
+        # context overflow's remedies, a budget that refused the retry), and
+        # the attempt's error otherwise, as on the review base.
+        error_msg = run.stop_error(model_spec)
         # What the failed slot spent, on the one string every artifact of a
         # failure carries: this return's `error` is what `save_model_result`
         # writes to `error_<model>.log` and what `.status.json` records under
@@ -3681,7 +3729,7 @@ async def run_single_review(
         # 2026-09-17: $25.05 and 137 348 output tokens went into a claude-code
         # slot that ended on a usage cap, and the only place either number
         # existed was the raw envelope in `log_<model>.txt`.
-        spent = describe_usage(details.get("usage"))
+        spent = describe_usage(run.usage)
         if spent:
             error_msg = f"{error_msg} (spent {spent})"
         file_error = result.get("file_error", "")
@@ -4148,30 +4196,20 @@ async def run_all_reviews(
                         **scope_kwargs,
                     )
         except Exception as exc:
-            # F5, 2026-09-20: two lanes, one event, two different answers. A
-            # slot that raises is printed as `Review exception:` below and
-            # dropped from `completed` without ever being keyed into `results`,
-            # so this is the only place its *spec* is still known — and without
-            # this it reached no terminal transition at all and was retired by
-            # the teardown sweep as `cancelled` with `source: null`, where
-            # `run_models_concurrent` records `source: "exception"` and the
-            # exception's own text. The base lane is the one that is right: an
-            # exception IS this slot's ending, and the sweep's two wordings are
-            # for slots that have no ending of their own.
+            # An exception IS this slot's ending: it is recorded as a failed
+            # result with its own type and message (redacted), as the review
+            # base's `run_single_model` records it, so `failed_models`, the
+            # error log and the map name one cause. Re-raised, it would be
+            # dropped by the gather below and `backfill_deadline_losses` would
+            # call it a deadline loss.
             #
             # `Exception` and deliberately not `BaseException`: a
             # `CancelledError` arriving here is the deadline's own
-            # `task.cancel()`, and retiring it as an exception would stamp the
-            # empty `str(CancelledError())` over the wording the sweep is about
-            # to write. It is re-raised unchanged either way, because
-            # `return_exceptions=True` is the contract the gather below is
-            # written against.
-            tracker.failed(
-                model_spec,
-                error=str(exc) or type(exc).__name__,
-                source="exception",
-            )
-            raise
+            # `task.cancel()`, and the sweep's wording is the one for it.
+            error = slot_exception_error(exc)
+            print(f"[{display_name}] {error}")
+            tracker.failed(model_spec, error=error, source="exception")
+            return (model_spec, (False, None, error))
         return (model_spec, result)
 
     # Seeded before the coroutines exist, so a poller reads a *complete* map

@@ -1649,15 +1649,16 @@ class TestEveryEndingRetiresEverySlotOnThisFanout:
                 cro.run_all_reviews(specs, plan_path, tmp_path, 30, 2)
             )
 
-        # The raising slot never reaches `results` — it is printed as `Review
-        # exception:` and dropped — which is exactly why the map has to carry
-        # its reason.
-        assert list(results) == [specs[0]]
+        # The raising slot is a failed result carrying the exception, so
+        # `failed_models` names it rather than `backfill_deadline_losses`
+        # calling it a deadline loss, and the map names the same cause.
+        expected = "Exception: RuntimeError: provider exploded"
+        assert results[specs[1]] == (False, None, expected)
         phase_dir = cro.get_phase_dir(plan_path, "code-review")
         models = status_file.read_status(str(phase_dir))["progress"]["models"]
         loser = models[specs[1]]
         assert loser["state"] == "failed"
-        assert loser["error"] == "provider exploded", loser
+        assert loser["error"] == expected, loser
         assert loser["source"] == "exception", loser
         # Not the sweep's wording, which is what it used to get.
         assert loser["error"] != progress_tracker.CANCELLED_ERROR

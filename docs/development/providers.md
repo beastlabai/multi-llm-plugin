@@ -248,7 +248,11 @@ A fan-out slot on it skips the porcelain check (`porcelain_check_applies` still 
 `unsandboxed` alone, by decision) and runs the mode check (`[MODE_CHECK]`: a
 flipped executable bit on a tracked file, fail-closed unless the stream audit clears it) and the
 home check (`[CODEX_HOME_CHECK]`: a change to `$CODEX_HOME`'s config, instruction or
-plugin files — fail-closed in the fan-out, warn-only in the executor lane).
+plugin files — fail-closed in the fan-out, warn-only in the executor lane). A review fan-out
+attempt that raises returns no `details["home_check"]`, so `dispatch_with_ladder` compares the
+home of every jailed child the attempt armed (`llm_client.armed_homes_window`) against the
+invoker's own before-snapshot, and a home it cannot compare is reported as not checked and fails
+the slot closed.
 
 A trust-only `[projects."…"]` table never fails it (codex adds one per session directory, and
 concurrent sessions share the home), but every one besides the run's own cwd that appeared during
