@@ -124,6 +124,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
     )),
     3: ("execution", (
         "utils.batch_done",
+        "utils.batch_ledger",
         "utils.batch_prompt",
         "utils.check_records",
         "utils.check_reply",
@@ -156,6 +157,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.write_phase_bridge",
         "utils.write_prompt",
         "utils.write_record",
+        "utils.write_outcomes",
         "utils.write_safety",
         "utils.write_verdict",
     )),

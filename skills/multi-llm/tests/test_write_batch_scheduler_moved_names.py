@@ -1,5 +1,5 @@
 """The contract for the names `utils.write_batch_scheduler` re-exports from the
-six helper modules split out of it (stated in the scheduler's module docstring):
+seven helper modules split out of it (stated in the scheduler's module docstring):
 
 * **Reads work.** `write_batch_scheduler.X`, `from utils.write_batch_scheduler
   import X`, `dir()`, `inspect.getmembers` and the scheduler's `__all__` see
@@ -11,8 +11,8 @@ six helper modules split out of it (stated in the scheduler's module docstring):
   helper modules spell a moved name `_<owner>.X`, never a copy, so one patch
   of the owner reaches the loop and every other helper.
 * **The modules import down only**: `commit_write_guard`, `check_records`,
-  `verification_lines`, `human_task_plan`, `stop_answers`, `batch_prompt`, and
-  none of them imports the scheduler.
+  `verification_lines`, `human_task_plan`, `stop_answers`, `batch_prompt`,
+  `write_outcomes`, and none of them imports the scheduler.
 """
 
 import ast
@@ -36,6 +36,7 @@ from utils import (  # noqa: E402
     stop_answers,
     verification_lines,
     write_batch_scheduler,
+    write_outcomes,
 )
 
 #: Lowest first: each module may import only the ones before it.
@@ -46,6 +47,7 @@ OWNERS = {
     "human_task_plan": human_task_plan,
     "stop_answers": stop_answers,
     "batch_prompt": batch_prompt,
+    "write_outcomes": write_outcomes,
 }
 SCHEDULER = "write_batch_scheduler"
 
@@ -94,7 +96,7 @@ class TestTheMovedNamesTable:
     def test_it_lists_exactly_what_each_owner_defines(self, owner):
         assert set(write_batch_scheduler._MOVED[owner]) == _top_level_definitions(owner)
 
-    def test_it_names_the_six_owners(self):
+    def test_it_names_the_seven_owners(self):
         assert list(write_batch_scheduler._MOVED) == list(OWNERS)
 
     def test_the_scheduler_defines_and_binds_none_of_them(self):
@@ -228,7 +230,7 @@ class TestTheLayering:
         above = set(order[order.index(module_name) + 1:]) | {SCHEDULER}
         assert not _imported_modules(module_name) & above
 
-    def test_the_scheduler_imports_all_six(self):
+    def test_the_scheduler_imports_all_seven(self):
         assert set(OWNERS) <= _imported_modules(SCHEDULER)
 
 

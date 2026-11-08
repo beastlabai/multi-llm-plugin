@@ -17,6 +17,7 @@ from . import cli_common, detach, host_capabilities, status_views
 from .advisory import note_swallowed
 from .cli_common import dispatcher_command
 from .status_views import _IMPLEMENT_PHASE
+from .task_ledger import mirror_ids
 
 
 def why_line(why: str) -> str:
@@ -448,7 +449,7 @@ def _write_mirror_as_counts(mirror: Dict[str, Any]) -> Dict[str, Any]:
 
     ``ok`` counts every batch the mirror records as ``ok`` — the ones this run
     applied and the ones a resume skipped because their result file was already
-    on disk — and ``failed_task_ids`` is carried as recorded.
+    on disk — and ``failed_task_ids`` is the rows' (``task_ledger.mirror_ids``).
     """
     tasks = mirror.get("tasks") if isinstance(mirror.get("tasks"), list) else []
     counts: Dict[str, int] = {}
@@ -459,7 +460,7 @@ def _write_mirror_as_counts(mirror: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "counts": counts,
         "ok": counts.get("ok", 0),
-        "failed_task_ids": list(mirror.get("failed_task_ids") or []),
+        "failed_task_ids": list(mirror_ids(mirror, "failed_task_ids") or []),
     }
 
 
@@ -488,7 +489,7 @@ def _failed_batches_moved_nothing(view: Dict[str, Any]) -> bool:
     mirror = progress.get("write_subagents") if isinstance(progress, dict) else None
     if not isinstance(mirror, dict):
         return False
-    failed_ids = set(mirror.get("failed_task_ids") or [])
+    failed_ids = set(mirror_ids(mirror, "failed_task_ids") or [])
     rows = [
         row for row in (mirror.get("tasks") or [])
         if isinstance(row, dict) and row.get("task_id") in failed_ids

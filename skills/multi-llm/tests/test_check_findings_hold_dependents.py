@@ -38,6 +38,7 @@ import implement_orchestrator  # noqa: E402
 import multi_llm  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils import run_status  # noqa: E402
+from utils.task_ledger import mirror_ids  # noqa: E402
 from utils.state_manager import get_or_create_state  # noqa: E402
 
 FINDINGS = [
@@ -153,7 +154,7 @@ class TestTheDependentsAreNotRun:
         )["progress"]["write_subagents"]
         assert write["blocked_by_check"] == {"T004": "T002"}
         assert write["not_run_task_ids"] == ["T004"]
-        assert write["check_findings_task_ids"] == ["T002"]
+        assert mirror_ids(write, "check_findings_task_ids") == ["T002"]
         line = ", ".join(run_status._mirror_text("write_subagents", write))
         assert "check findings T002" in line
         assert "not run (upstream check T002 reported problems) T004" in line

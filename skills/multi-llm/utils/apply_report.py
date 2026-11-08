@@ -17,7 +17,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .cli_common import record_artifacts
 from .human_decisions import (
@@ -129,20 +129,12 @@ class ApplyPhaseReport:
         than the phase's own convention.
 
         Read from :meth:`_phase_rows`, so a ``--resume`` still names the files
-        an earlier run of this phase changed.
+        an earlier run of this phase changed (``batch_ledger.touched_files``,
+        partial applications included).
         """
-        touched: List[str] = []
-        seen: Set[str] = set()
-        for row in self._phase_rows():
-            if not self._row_ok(row) and (
-                row.get("write_outcome") != "partial-application"
-            ):
-                continue
-            for touched_path in row.get("files_touched") or []:
-                if touched_path and touched_path not in seen:
-                    seen.add(touched_path)
-                    touched.append(touched_path)
-        return touched
+        from .batch_ledger import touched_files
+
+        return touched_files(self._phase_rows(), include_partial=True)
 
     def _phase_rows(self) -> List[Dict[str, Any]]:
         """Every batch row of this phase, earlier runs' first (#28).

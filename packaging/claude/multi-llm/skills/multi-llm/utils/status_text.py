@@ -18,7 +18,12 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import detach, host_capabilities, metrics, status_file, task_ledger
 from .advisory import note_swallowed
-from .task_ledger import BUCKET_LABELS as _BUCKET_LABELS, bucket_clauses as _bucket_clauses
+from .task_ledger import (
+    MIRROR_ACCEPTED_LABELS as _MIRROR_ACCEPTED_LABELS,
+    MIRROR_SKIP_LABELS as _MIRROR_SKIP_LABELS,
+    bucket_clauses as _bucket_clauses,
+    mirror_ids as _mirror_ids,
+)
 from .cli_common import dispatcher_command
 from .progress_tracker import (
     STATE_DONE,
@@ -1723,17 +1728,19 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     if not (len(outcomes) == 1 and outcomes.get("applied") == ok):
         for outcome, count in sorted(outcomes.items()):
             parts.append(f"{outcome} {count}")
-    failed = mirror.get("failed_task_ids") or []
+    # The id lists the rows carry are read from them (`task_ledger.mirror_ids`;
+    # an older mirror's own list as it recorded it).
+    failed = _mirror_ids(mirror, "failed_task_ids") or []
     if failed:
         parts.append(f"failed {', '.join(map(str, failed))}")
     # Racing re-run 4 (2026-10-05): a check task that ran and reported
     # problems is named, never only counted under its label.
-    flagged = mirror.get("check_findings_task_ids")
+    flagged = _mirror_ids(mirror, "check_findings_task_ids")
     if isinstance(flagged, list) and flagged:
         parts.append(f"check findings {', '.join(map(str, flagged))}")
     # Fix round 14: a code batch applied its edits, then a check it ran
     # failed — never only an `ok` count.
-    failing = mirror.get("batch_check_task_ids")
+    failing = _mirror_ids(mirror, "batch_check_task_ids")
     if isinstance(failing, list) and failing:
         # Fix round 15: a check that could not run is named so (the prefix is
         # `subagent_executor.BATCH_CHECK_COULD_NOT_RUN`, spelled here so this
@@ -1800,12 +1807,11 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     accepted_failed = [
         str(t) for t in accepted if str(t) not in with_findings and str(t) not in shown
     ]
-    if accepted_checks:
-        parts.append(
-            f"{task_ledger.ACCEPTED_WITH_FINDINGS_LABEL} {', '.join(accepted_checks)}")
-    if accepted_failed:
-        parts.append(
-            f"{task_ledger.ACCEPTED_AFTER_FAILING_LABEL} {', '.join(accepted_failed)}")
+    # In the tally's words (`task_ledger.bucket_clauses`), label then ids.
+    parts += _bucket_clauses(
+        {"accepted_findings": accepted_checks, "accepted_failed": accepted_failed},
+        {}, _MIRROR_ACCEPTED_LABELS, sep=" ",
+    )
     # F9: `skipped_task_ids`/`human_task_strategy` (resolved before dispatch,
     # `write_batch_scheduler._mirror_status`) were on `.status.json` already
     # but rendered nowhere, so the one task `--yes`'s default strategy defers
@@ -1830,23 +1836,18 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
         if str(task_id) not in declined and str(task_id) not in with_them
         and str(task_id) not in waits_on
     ]
-    if deferred:
-        strategy = mirror.get("human_task_strategy")
-        suffix = f" ({strategy})" if strategy else ""
-        parts.append(f"{_BUCKET_LABELS['deferred']}: {', '.join(deferred)}{suffix}")
     waiting = [
         str(task_id) for task_id in skipped_ids if str(task_id) in waits_on
     ]
-    if waiting:
-        parts.extend(_bucket_clauses(
-            {"deferred_dependents": waiting}, waits_on,
-            (("deferred_dependents", _BUCKET_LABELS["deferred_dependents"]),),
-        ))
-    # The skip buckets in the words `status` names them by from state.json.
-    if declined:
-        parts.append(f"{_BUCKET_LABELS['declined']}: {', '.join(declined)}")
-    if with_them:
-        parts.append(f"{_BUCKET_LABELS['declined_dependents']}: {', '.join(with_them)}")
+    strategy = mirror.get("human_task_strategy")
+    # The skip buckets in the words `status` names them by from state.json
+    # (`task_ledger.bucket_clauses`); the deferral says its strategy.
+    parts += _bucket_clauses(
+        {"deferred": deferred, "deferred_dependents": waiting,
+         "declined": declined, "declined_dependents": with_them},
+        waits_on, _MIRROR_SKIP_LABELS,
+        suffix={"deferred": f" ({strategy})" if strategy else ""},
+    )
     # F4: `driver.verify_command`'s outcome. Without it a run that applied every
     # batch and then failed the repository's own check renders as
     # `apply_code_fixes 3/3 batches ok` with no failed id anywhere — the only

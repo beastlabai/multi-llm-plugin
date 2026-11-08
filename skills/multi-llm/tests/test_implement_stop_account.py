@@ -36,6 +36,7 @@ import multi_llm  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils import run_status  # noqa: E402
 from utils import status_file  # noqa: E402
+from utils.task_ledger import mirror_ids  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
 from utils.output_handler import get_phase_dir  # noqa: E402
 from utils.state_manager import get_or_create_state  # noqa: E402
@@ -264,7 +265,7 @@ class TestTheStopAccountsForEveryTask:
         mirror = json.loads((repo.phase_dir / ".status.json").read_text())
         write = mirror["progress"]["write_subagents"]
         assert write["not_run_task_ids"] == ["T003", "T004"]
-        assert write["failed_task_ids"] == ["T002"]
+        assert mirror_ids(write, "failed_task_ids") == ["T002"]
         # ok + failed + not run == total (the deferred manual task is beside
         # it, as before): 1 + 1 + 2 == 4.
         assert write["total"] == 4
@@ -385,7 +386,7 @@ class TestAcceptingTheFailure:
         mirror = json.loads((repo.phase_dir / ".status.json").read_text())
         write = mirror["progress"]["write_subagents"]
         assert write["accepted_task_ids"] == ["T002"]
-        assert write["total"] == 2 and write["completed"] == 2
+        assert write["total"] == 2 and len(write["tasks"]) == 2
         # Fix round 20 (run 8 #6): kept from the earlier run, not dispatched,
         # and named in the `resume: kept` line's words; fix round 22: with
         # T001, which the earlier run finished too.

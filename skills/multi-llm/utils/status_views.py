@@ -24,6 +24,7 @@ from . import detach, process_control, status_file
 from .advisory import note_swallowed
 from .cli_common import EXIT_NEEDS_HUMAN, EXIT_NOTHING_TO_DO, EXIT_OK
 from .progress_tracker import STATE_FAILED
+from .task_ledger import mirror_ids
 from .output_handler import (
     PHASE_DIR_NAMES,
     PHASE_DIRECTORIES,
@@ -422,12 +423,12 @@ def _a_dispatch_failed(view: Dict[str, Any]) -> bool:
     """Whether something the run dispatched failed: a write task whose
     runner ran and failed (the write mirror's ``runner_failed_task_ids``;
     a mirror written before fix round 23 has only ``failed_task_ids``, read
-    as is), a read task, or a fan-out model."""
+    as is by ``task_ledger.mirror_ids``), a read task, or a fan-out model."""
     progress = view.get("progress") if isinstance(view.get("progress"), dict) else {}
     write = progress.get("write_subagents")
     if isinstance(write, dict):
         ran = write.get("runner_failed_task_ids")
-        if ran if isinstance(ran, list) else write.get("failed_task_ids"):
+        if ran if isinstance(ran, list) else mirror_ids(write, "failed_task_ids"):
             return True
     read = progress.get("subagents")
     if isinstance(read, dict) and read.get("failed_task_ids"):

@@ -68,6 +68,7 @@ from utils.write_batch_scheduler import (  # noqa: E402
     resolve_human_task_plan,
 )
 from tests.harness.native_invoker import native_dispatcher  # noqa: E402
+from utils.task_ledger import mirror_ids  # noqa: E402
 from tests.mock_launchers import (  # noqa: E402
     MOCK_LLM,
     install_mock_llm,
@@ -1294,7 +1295,9 @@ class TestVerificationOnlyImplementTask:
         )["progress"]["write_subagents"]
         assert mirror["tasks"][0]["outcome_label"] == "check-findings"
         assert mirror["tasks"][0]["check_findings"] == self.FINDINGS
-        assert mirror["check_findings_task_ids"] == ["T009"]
+        # Read from the rows (STATE-6: the mirror writes no id list its rows carry).
+        assert "check_findings_task_ids" not in mirror
+        assert mirror_ids(mirror, "check_findings_task_ids") == ["T009"]
         status_text = ", ".join(run_status._mirror_text("write_subagents", mirror))
         assert "check findings T009" in status_text, status_text
         assert "verified" not in status_text, status_text
@@ -3362,13 +3365,14 @@ class TestAdditivityAndDetach:
         progress = status["progress"]["write_subagents"]
         assert progress["total"] == 2
         assert progress["batches_dispatched"] == [0, 1]
-        assert progress["finalized"] is True
+        # A finalized run's phase state, beside the mirror (STATE-6).
+        assert status["state"] == "complete"
         assert [t["task_id"] for t in progress["tasks"]] == [
             "apply-batch-0", "apply-batch-1",
         ]
         assert all(t["write_outcome"] == executor.WRITE_APPLIED
                    for t in progress["tasks"])
-        assert progress["failed_task_ids"] == []
+        assert mirror_ids(progress, "failed_task_ids") == []
 
     def test_status_json_carries_item_counts_distinct_from_batch_counts(
         self, env
@@ -3502,12 +3506,11 @@ class TestAdditivityAndDetach:
                   result={"status": "failed", "ids": [],
                           "files_touched": ["plans/p.md"], "summary": "broke"})
         env.scheduler([env.apply_task(0), env.apply_task(1)]).run()
-        progress = json.loads(
-            (env.phase_dir / ".status.json").read_text()
-        )["progress"]["write_subagents"]
+        status = json.loads((env.phase_dir / ".status.json").read_text())
+        progress = status["progress"]["write_subagents"]
         assert progress["stopped_at_batch"] == 0
-        assert progress["finalized"] is False
-        assert progress["failed_task_ids"] == ["apply-batch-0"]
+        assert status["state"] == "subagents_failed"
+        assert mirror_ids(progress, "failed_task_ids") == ["apply-batch-0"]
 
     def test_a_run_ends_in_exactly_one_terminal_state(self, env):
         """0 or 3, never both, and never a report that says neither."""
@@ -4094,7 +4097,7 @@ class TestTheEmptyDiffBranch:
         progress = json.loads(
             (env.phase_dir / ".status.json").read_text()
         )["progress"]["write_subagents"]
-        assert progress["failed_task_ids"] == ["apply-batch-0"]
+        assert mirror_ids(progress, "failed_task_ids") == ["apply-batch-0"]
 
     def test_resume_does_not_count_a_recorded_failure_as_done(self, env):
         """A schema-valid `{"status": "failed"}` result file on disk is the
@@ -5193,7 +5196,7 @@ class TestTheInFlightMirrorNamesADispatchInProgress:
         )["progress"]["write_subagents"]
         assert [row["task_id"] for row in mirror["in_flight"]] == ["apply-batch-0"]
         assert mirror["in_flight"][0]["dispatched_at"]
-        assert mirror["completed"] == 0
+        assert mirror["tasks"] == []
         # The patch touched only `in_flight` — the fuller fields survive.
         assert mirror["total"] == 1
 

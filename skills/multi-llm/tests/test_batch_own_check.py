@@ -28,6 +28,7 @@ import pytest
 from tests import test_write_executor
 from tests.test_write_executor import FakeState
 from utils import subagent_executor as executor
+from utils.task_ledger import mirror_ids
 from utils.subagent_tasks import (
     PRIOR_CHANGES_TOKEN,
     build_inputs,
@@ -211,7 +212,7 @@ class TestAFailingCheckOfAnAppliedBatch:
         # The status mirror, the progress line and the notice a poll relays.
         mirror = json.loads((env.phase_dir / ".status.json").read_text())
         write = mirror["progress"]["write_subagents"]
-        assert write["batch_check_task_ids"] == ["apply-fix-batch-0"]
+        assert mirror_ids(write, "batch_check_task_ids") == ["apply-fix-batch-0"]
         assert write["tasks"][0]["batch_check_findings"] == [FAILING]
         view = {"progress": mirror["progress"]}
         assert "own check fails apply-fix-batch-0" in ", ".join(

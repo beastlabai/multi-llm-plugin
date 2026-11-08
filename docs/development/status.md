@@ -523,6 +523,19 @@ bucket of a skip (`skip_bucket`) and of every implement task (`classify`, behind
 native view (from the reasons in `state.json`) all go through it, so one skip reads the same on
 every surface (`tests/test_task_ledger.py`). It imports nothing from the package.
 
+The executor's write mirror words its accepted and skipped tasks through the same
+`bucket_clauses` (`MIRROR_ACCEPTED_LABELS`, `MIRROR_SKIP_LABELS`: the mirror's own order and
+separators), and it writes no id list its own `tasks` rows already carry: the tasks not `ok`, the
+checks with findings and the code batches whose own check failed are read from the rows
+(`task_ledger.mirror_ids`, `MIRROR_ROW_LISTS`), and a mirror written before that keeps its
+recorded `failed_task_ids`, `check_findings_task_ids` and `batch_check_task_ids`, read as they are.
+The mirror carries no `completed`, `finalized` or `pending_human_task_ids` either: no reader used
+them (the finished tasks are the rows; a finalized phase is the file's `state: complete`). The
+lists `state.json` cannot answer for one run stay in it: the skips, the accepted and kept tasks,
+the tasks not run and the checks that held them, `runner_failed_task_ids`. The change is one way:
+an older reader shows less of a new mirror ([write-scheduler.md](write-scheduler.md#a-batchs-records)).
+Whether both legs leave the same record is `tests/test_write_legs_parity.py`.
+
 The unapplied-task-groups notice, which is the optional `--apply-task-suggestions` entry's
 `why`, names the valid groups waiting and what skipping them means, worded as the
 `--resume` its command is once a run of the phase started (`check_workflow_prerequisites.unapplied_task_groups_notice`, fix

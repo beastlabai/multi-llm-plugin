@@ -44,6 +44,10 @@ __all__ = [
     "classify",
     "bucket_clauses",
     "kept_named",
+    "MIRROR_ACCEPTED_LABELS",
+    "MIRROR_SKIP_LABELS",
+    "MIRROR_ROW_LISTS",
+    "mirror_ids",
 ]
 
 
@@ -127,6 +131,18 @@ VIEW_MERGE: Dict[str, str] = {
 TALLY_DONE: Tuple[str, ...] = (
     "completed", "check_findings", "accepted_findings", "accepted_failed",
     "completed_manual",
+)
+
+#: The buckets the executor's write mirror names a run's answered and
+#: skipped tasks in (``status_text._mirror_text``), in the order its line
+#: names them, in the tally's words: the accepted ones as ``<label> <ids>``,
+#: the skips as ``<label>: <ids>`` (:func:`bucket_clauses`).
+MIRROR_ACCEPTED_LABELS: Tuple[Tuple[str, str], ...] = tuple(
+    (key, BUCKET_LABELS[key]) for key in ("accepted_findings", "accepted_failed")
+)
+MIRROR_SKIP_LABELS: Tuple[Tuple[str, str], ...] = tuple(
+    (key, BUCKET_LABELS[key])
+    for key in ("deferred", "deferred_dependents", "declined", "declined_dependents")
 )
 
 
@@ -290,11 +306,15 @@ def classify(state: Any) -> TaskLedger:
 def bucket_clauses(
     buckets: Mapping[str, Sequence[str]], waits_on: Mapping[str, str],
     labels: Sequence[Tuple[str, str]], *, live: bool = False,
+    sep: str = ": ", suffix: Optional[Mapping[str, str]] = None,
 ) -> List[str]:
-    """``<label>: <ids>`` per non-empty bucket, in *labels*' order. The
-    dependents of a deferred manual task read "skipped (depends on manual
-    T005): T006", one clause per manual task; a task not run yet reads
-    "pending" while the run is *live*."""
+    """``<label><sep><ids><suffix>`` per non-empty bucket, in *labels*' order:
+    the one place a task bucket is worded, on ``status``'s tally and the
+    write mirror's line alike. The dependents of a deferred manual task read
+    "skipped (depends on manual T005): T006", one clause per manual task; a
+    task not run yet reads "pending" while the run is *live*; *suffix* adds
+    a bucket's own tail (the mirror's deferral strategy)."""
+    suffix = suffix or {}
     parts: List[str] = []
     for key, label in labels:
         ids = list(buckets.get(key) or [])
@@ -308,7 +328,7 @@ def bucket_clauses(
             continue
         if key == "not_run" and live:
             label = "pending"
-        parts.append(f"{label}: {', '.join(ids)}")
+        parts.append(f"{label}{sep}{', '.join(ids)}{suffix.get(key, '')}")
     return parts
 
 
@@ -323,3 +343,35 @@ def kept_named(ids: Sequence[str], labels: Mapping[str, str], *, limit: int = 8)
         f"{t} ({labels[str(t)]})" for t in ids if str(t) in labels
     )
     return ", ".join(part for part in (shown, labelled) if part)
+
+
+# -- the write mirror's rows -----------------------------------------------------
+
+#: The per-task id lists of the executor's write mirror
+#: (``write_batch_scheduler._mirror_status``) that its own ``tasks`` rows
+#: already carry, each with the row test it is read by: every row not ``ok``,
+#: every row naming a check's findings, every row naming a code batch's own
+#: failing check. The mirror stopped writing them; :func:`mirror_ids` reads
+#: them from the rows, and a mirror written before that still has its list.
+MIRROR_ROW_LISTS: Dict[str, Callable[[Mapping[str, Any]], bool]] = {
+    "failed_task_ids": lambda row: row.get("status") != "ok",
+    "check_findings_task_ids": lambda row: (
+        isinstance(row.get("check_findings"), list) and bool(row["check_findings"])),
+    "batch_check_task_ids": lambda row: (
+        isinstance(row.get("batch_check_findings"), list)
+        and bool(row["batch_check_findings"])),
+}
+
+
+def mirror_ids(mirror: Mapping[str, Any], key: str) -> Any:
+    """A write mirror's *key* list (a :data:`MIRROR_ROW_LISTS` key): as the
+    mirror records it, when it does (an older mirror), else the ids of its
+    ``tasks`` rows that pass the key's test, in row order."""
+    if key in mirror:
+        return mirror[key]
+    rows = mirror.get("tasks")
+    test = MIRROR_ROW_LISTS[key]
+    return [
+        row.get("task_id") for row in (rows if isinstance(rows, list) else [])
+        if isinstance(row, dict) and test(row)
+    ]

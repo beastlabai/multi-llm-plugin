@@ -1521,15 +1521,9 @@ def _record_implement_write_artifacts(
 
     repo_root = _write_safety.repo_root_for_report(plan_file)
 
-    touched: List[str] = []
-    seen: set = set()
-    for outcome in getattr(result, "outcomes", None) or []:
-        if not getattr(outcome, "ok", False):
-            continue
-        for touched_path in getattr(outcome, "files_touched", None) or []:
-            if touched_path and touched_path not in seen:
-                seen.add(touched_path)
-                touched.append(touched_path)
+    from utils.batch_ledger import touched_files
+
+    touched = touched_files(getattr(result, "outcomes", None) or [], include_partial=False)
     for index, touched_path in enumerate(touched, start=1):
         # The report's `/`-spelled relative path, joined natively: on Windows a
         # bare join gave `C:\repo\src/main.py`, a second spelling of the file.

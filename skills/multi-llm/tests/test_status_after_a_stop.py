@@ -31,6 +31,7 @@ from tests.test_check_gate_fixture import (  # noqa: F401  (the fixture)
 )
 from tests.test_implement_stop_account import _implement
 from utils import run_status, status_file
+from utils.task_ledger import mirror_ids
 
 KEPT_FOUR = (
     "(4 kept from an earlier run: T001, T003, T004, T002 (its check reported "
@@ -114,7 +115,7 @@ class TestTheMirrorNamesTheTasksWhoseRunnerFailed:
     def test_a_refusal_fails_no_runner(self, repo, capsys):
         _first_run(repo, capsys)
         mirror = self._write_mirror(repo)
-        assert mirror["failed_task_ids"] == ["T005"]
+        assert mirror_ids(mirror, "failed_task_ids") == ["T005"]
         assert mirror["runner_failed_task_ids"] == []
 
     def test_a_task_whose_runner_failed_is_named(self, repo, capsys, monkeypatch):

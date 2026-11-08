@@ -29,10 +29,12 @@ courtesy: *a run that dispatched every batch and produced no summary, no
 one.*
 
 **One job per module.** This module is the loop: :class:`WriteBatchScheduler`,
-its result and :func:`run_write_phase`. The helpers both legs share live in six
+its result and :func:`run_write_phase`. The helpers both legs share live in seven
 modules below it, lowest first: ``commit_write_guard``, ``check_records``,
-``verification_lines``, ``human_task_plan``, ``stop_answers`` and
-``batch_prompt`` (docs/development/write-scheduler.md#where-the-schedulers-helpers-live).
+``verification_lines``, ``human_task_plan``, ``stop_answers``, ``batch_prompt``
+and ``write_outcomes`` (docs/development/write-scheduler.md#where-the-schedulers-helpers-live).
+A batch's records are read together, and its verdict stamped, through
+``batch_ledger``.
 Every name that moved there is still readable here (:data:`_MOVED`), **for
 reading only**: ``write_batch_scheduler.X`` and ``from .write_batch_scheduler
 import X`` return the owner's current object, but a patch or assignment here
@@ -73,6 +75,13 @@ from . import verification_lines as _verification_lines
 from . import human_task_plan as _human_task_plan
 from . import stop_answers as _stop_answers
 from . import batch_prompt as _batch_prompt
+from . import write_outcomes as _write_outcomes
+from .batch_ledger import (
+    outcome_from_verdict,
+    read_verdict_checks,
+    touched_files,
+    verdict_record,
+)
 from .task_ledger import (
     ACCEPTED_REASON_PREFIX,
     ACCEPTED_WITH_FINDINGS_MARK,
@@ -108,14 +117,11 @@ from .subagent_executor import (
     STATUS_OK,
     STATUS_PARTIAL,
     STATUS_REJECTED,
-    STATUS_SCHEMA_INVALID,
-    STATUS_UNPARSEABLE,
     WRITE_APPLIED,
     WRITE_CLEAN_FAILURE,
     WRITE_NO_OP,
     WRITE_PARTIAL,
     WRITE_POLICY_VIOLATION,
-    WRITE_SCHEMA_REJECTED,
     BatchReport,
     ExecutorError,
     ResultRejected,
@@ -137,7 +143,6 @@ from .subagent_executor import (
     check_findings_from,
     check_record,
     declined_items,
-    declined_record,
     read_check_reply,
     row_batch_check_accepted,
     row_batch_check_findings,
@@ -289,7 +294,7 @@ __all__ = [
 # The names that moved to the helper modules beside this one
 # ---------------------------------------------------------------------------
 
-#: Every top-level name of the six modules split out of this one, by owner.
+#: Every top-level name of the seven modules split out of this one, by owner.
 #: They are read-only re-exports (see the module docstring): reading one here
 #: returns the owner's current binding, and ``dir()`` lists them. Nothing is
 #: copied into this module, so a patch of the owner shows through here, and
@@ -455,6 +460,16 @@ _MOVED: Dict[str, Tuple[str, ...]] = {
         "last_phase_end",
         "with_result_contract",
     ),
+    "write_outcomes": (
+        "REFUSED_SKIP_WAY_FORWARD",
+        "ResumeContext",
+        "already_kept",
+        "check_partial_skips",
+        "classify_attempt",
+        "partial_skip_refusal",
+        "partial_when_bytes_moved",
+        "resume_why",
+    ),
 }
 _MOVED_TO: Dict[str, str] = {
     name: module for module, names in _MOVED.items() for name in names
@@ -552,13 +567,6 @@ VERIFY_EXIT_NOT_RUN = 127
 
 EXIT_OK = 0
 EXIT_NEEDS_HUMAN = 3
-
-#: What a refused ``--human-task <batch>=skip`` leaves the user (fix round
-#: 18), on the refusal's printed block and its stop headline alike.
-REFUSED_SKIP_WAY_FORWARD = (
-    "Resume without it to dispatch the batch again, or restore the batch "
-    "first (util restore-batch) and then resume."
-)
 
 #: The review each apply kind applies — the first entry of
 #: ``check_workflow_prerequisites.PHASE_PREREQUISITES`` for that phase, which
@@ -3128,39 +3136,14 @@ class WriteBatchScheduler:
             output_path, _recorded_id, recorded = evidence
             self.log(f"[write-subagents] {task_id} already complete — skipping")
             data = json.loads(Path(output_path).read_text(encoding="utf-8"))
-            verdict = data.get("verdict")
-            if not isinstance(verdict, dict):
-                verdict = {}
-            outcome = TaskOutcome(
-                task_id=task_id, kind=self.kind, runner=self.invoker,
-                status=STATUS_OK, profile=profile, skipped=True,
-                write_outcome=(verdict.get("write_outcome")
-                               or recorded.get("write_outcome")
-                               or (WRITE_NO_OP if data.get("status") == "no-op"
-                                   else WRITE_APPLIED)),
-                summary=data.get("summary"),
-                reason=verdict.get("reason") or recorded.get("reason"),
-                verification_only=bool(verdict.get("verification_only")),
+            # The outcome its verdict stamp records (`batch_ledger`, the
+            # stamp's round trip): its check's label, what its own checks
+            # reported, an apply batch's declined items, the files it moved.
+            outcome = outcome_from_verdict(
+                data, recorded, task, kind=self.kind, runner=self.invoker,
+                profile=profile, output_path=output_path,
+                files_on_record=lambda: self._recorded_files_touched(output_path),
             )
-            if outcome.verification_only and isinstance(verdict.get("check"), dict):
-                # The skip keeps the earlier run's `check-findings` label.
-                outcome.check_findings = row_check_findings(verdict)
-            if isinstance(verdict.get("batch_check"), dict):
-                # And a code batch keeps what its own checks reported.
-                outcome.batch_check = row_batch_check_findings(verdict)
-            # Fix round 22: and what its check reported again of findings
-            # the user accepted, still named beside that check.
-            outcome.batch_check_accepted = row_batch_check_accepted(verdict)
-            outcome.batch_check_repeats = row_batch_check_repeats(verdict)
-            outcome.batch_check_note = row_batch_check_note(verdict)
-            if self.kind in APPLY_WRITE_KINDS:
-                # Fix round 18: and an apply batch the items it declined, or
-                # that an answer recorded as skipped, so the resumed row
-                # still names them (the batch is finished; nothing re-asks).
-                outcome.declined = row_declined(verdict)
-                outcome.skipped_items = row_declined(
-                    {"declined": verdict.get("skipped_items")}
-                )
             if kept_findings:
                 outcome.reason = (
                     f"NOT RE-RUN: nothing in the repository changed since "
@@ -3171,24 +3154,6 @@ class WriteBatchScheduler:
                     f"{task_id}=done, or run it again anyway with "
                     f"--human-task {task_id}=retry."
                 )
-            outcome.output_path = output_path
-            # The files the earlier run verified for this batch, so a resumed
-            # run's finalization (`--touched`) and summary still name them.
-            if "files_touched" in verdict:
-                outcome.files_touched = list(verdict["files_touched"])
-            elif "files_touched" in recorded:
-                outcome.files_touched = list(recorded["files_touched"])
-            else:
-                outcome.files_touched = self._recorded_files_touched(output_path)
-            outcome.expected_ids = list(task.get("expected_ids") or [])
-            outcome.returned_ids = list(data.get("ids") or [])
-            observed = recorded.get("observed") or {}
-            outcome.sha256_before = verdict.get("sha256_before") or {
-                path: row.get("sha256_before") for path, row in observed.items()
-            }
-            outcome.sha256_after = verdict.get("sha256_after") or {
-                path: row.get("sha256_after") for path, row in observed.items()
-            }
             # One line per skip, before the early return: this branch reaches
             # neither `_audit_terminal` nor `_record_batch_effects`, so without it
             # a resumed run's audit log is silent about every task it declared
@@ -3325,27 +3290,10 @@ class WriteBatchScheduler:
             outcome.snapshot_dir = snapshot.directory
             if not outcome.duration_seconds:
                 outcome.duration_seconds = time.time() - started
-            if outcome.write_outcome is None and not outcome.ok:
-                # The four-outcome axis is total, so a dispatch that never reached
-                # the classification still says which bucket it fell in. Rungs 5
-                # and 6 are both "the runner did not return the batch result
-                # contract" — prose and a well-formed wrong object are the same
-                # failure to a consumer — so they share the schema-rejection
-                # outcome. Rungs 1-4 (no child, no auth, timeout, runner error) are
-                # transport failures, not write outcomes, and are deliberately left
-                # unlabelled. Either becomes a partial application in
-                # `_audit_terminal` when the batch moved bytes (fix round 9).
-                if outcome.status in (STATUS_SCHEMA_INVALID, STATUS_UNPARSEABLE):
-                    outcome.write_outcome = WRITE_SCHEMA_REJECTED
-                elif outcome.status == STATUS_PARTIAL:
-                    # T4.8: `dispatch_task`'s pre-retry check found bytes moved
-                    # under a turn a denial ended — the same outcome, and the
-                    # same stop, as `_classify`'s partial-application branch.
-                    outcome.write_outcome = WRITE_PARTIAL
-                    outcome.reason = (
-                        f"{outcome.reason} The pre-batch snapshot is kept at "
-                        f"{snapshot.directory}."
-                    )
+            # A dispatch `_classify` never saw still gets its write outcome
+            # (`write_outcomes.classify_attempt`); `_audit_terminal` makes it
+            # a partial application when the batch moved bytes.
+            _write_outcomes.classify_attempt(outcome, snapshot_dir=snapshot.directory)
 
             self._audit_terminal(outcome, snapshot, profile)
         finally:
@@ -3374,52 +3322,17 @@ class WriteBatchScheduler:
         return outcome
 
     def _check_partial_skips(self) -> List[str]:
-        """Check each ``--human-task <batch>=skip`` answer before any dispatch.
-
-        Fix round 18 (Codex racing run 7, apply-code-fixes 08 and 08b): a
-        batch applied one fix and left the other out of its report; the stop
-        and its resume offered only ``--resume``, which dispatched the batch
-        again and stopped the same way. The answer keeps such a batch as it
-        stands and records the items it left out as skipped at the user's
-        request. It applies only to a batch of this run whose own result
-        carries the stop's verdict — a partial application whose readable
-        report attested some items and left others out (``unapplied_ids``) —
-        for the same items, from the same inputs, with every file it moved
-        still holding the bytes it left. Anything else is refused (exit 3,
-        nothing dispatched), never guessed at: keeping a batch the user since
-        restored, or one that now holds other items, would record edits that
-        are not there. An answer for a batch an earlier answer already kept
-        is taken as done. Returns the refusal lines, or ``[]``.
-        """
+        """Check each ``--human-task <batch>=skip`` answer before any dispatch
+        (``write_outcomes.check_partial_skips``, each batch's evidence read by
+        :meth:`_partial_skip_evidence`): the refusal lines, or ``[]``. A
+        refused answer is kept in ``_refused_skips`` for the stop record."""
         if not self.partial_skips:
             return []
-        by_id = {str(task.get("task_id", "")): task for task in self.tasks}
-        self._refused_skips = {}
-        for task_id in self.partial_skips:
-            task = by_id.get(task_id)
-            if self.kind not in APPLY_WRITE_KINDS:
-                why = "only an apply phase's batch takes this answer"
-            elif task is None:
-                why = (
-                    f"this run holds no batch {task_id} (its batches: "
-                    f"{', '.join(sorted(by_id)) or 'none'})"
-                )
-            else:
-                why = self._partial_skip_evidence(task)
-            if why:
-                self._refused_skips[task_id] = why
-        if not self._refused_skips:
-            return []
-        return [
-            "",
-            f"ERROR: {self.phase} cannot take the answer below, so nothing was "
-            f"dispatched and no file was changed:",
-            *(
-                f"  - --human-task {task_id}=skip: {why}."
-                for task_id, why in self._refused_skips.items()
-            ),
-            REFUSED_SKIP_WAY_FORWARD,
-        ]
+        self._refused_skips, lines = _write_outcomes.check_partial_skips(
+            self.partial_skips, kind=self.kind, phase=self.phase,
+            tasks=self.tasks, evidence=self._partial_skip_evidence,
+        )
+        return lines
 
     def _record_answer_refusal(self, result: SchedulerResult) -> None:
         """Keep a refused ``--human-task <batch>=skip`` where the tool routes
@@ -3484,7 +3397,8 @@ class WriteBatchScheduler:
 
     def _partial_skip_evidence(self, task: Dict[str, Any]) -> Optional[str]:
         """Why *task* cannot be kept at the user's request, or ``None`` when it
-        can (recorded in ``_kept_at_request``) or already was."""
+        can (recorded in ``_kept_at_request``) or already was: its result file
+        read here, the rules in ``write_outcomes.partial_skip_refusal``."""
         task_id = str(task.get("task_id", ""))
         try:
             path = resolve_output_target(task, self.phase_dir)
@@ -3500,67 +3414,21 @@ class WriteBatchScheduler:
         except (OSError, ValueError):
             return f"{task_id}'s result ({path.name}) cannot be read"
         verdict = data.get("verdict") if isinstance(data, dict) else None
-        if not isinstance(verdict, dict):
-            return f"{task_id}'s result ({path.name}) carries no verdict"
-        already_kept = verdict.get("ok") is True and bool(verdict.get("skipped_items"))
-        expected = sorted(str(i) for i in (task.get("expected_ids") or []))
-        if not already_kept and (
-            verdict.get("write_outcome") != WRITE_PARTIAL
-            or not verdict.get("unapplied_ids")
-        ):
-            return (
-                f"{task_id} did not stop as a partial application whose report "
-                f"left items out (its last verdict: "
-                f"{verdict.get('write_outcome') or 'none'}); only such a batch "
-                f"can be kept as it stands"
-            )
-        recorded = verdict.get("expected_ids")
-        if (
-            str(verdict.get("task_id") or "") != task_id
-            or not isinstance(recorded, list)
-            or sorted(str(i) for i in recorded) != expected
-        ):
-            return (
-                f"{task_id} now holds other items than the batch that stopped "
-                f"(the selection changed since)"
-            )
-        fingerprint = str(verdict.get("inputs_fingerprint") or "")
-        if fingerprint and fingerprint != self._task_fingerprint(task):
-            return (
-                f"the plan, the review or the batching {task_id} was made from "
-                f"changed since it stopped"
-            )
-        if already_kept:
-            # A repeated answer belongs to the same batch, not merely the
-            # same positional result file. It is idempotent only when the
-            # dispatch loop will actually keep this completion. Do not
-            # compare its old file hashes: later completed batches may
-            # legitimately have edited the shared plan or task list.
-            if self._result_counts_as_done(
+        why = _write_outcomes.partial_skip_refusal(
+            task_id, verdict, result_name=path.name,
+            expected_ids=task.get("expected_ids") or [],
+            fingerprint=lambda: self._task_fingerprint(task),
+            counts_as_done=lambda: self._result_counts_as_done(
                 task, path, task_id, int(task.get("batch_index", 0)), sibling=False,
-            ):
-                return None
-            return (
-                f"{task_id}'s earlier kept result no longer counts as completed; "
-                f"this answer cannot keep a batch that would be dispatched again"
-            )
-        after = verdict.get("sha256_after")
-        moved = sorted(
-            str(relative) for relative, digest in (
-                after.items() if isinstance(after, dict) else ()
-            )
-            if file_sha256(os.path.join(self.repo_root, str(relative))) != digest
+            ),
+            current_digest=lambda relative: file_sha256(
+                os.path.join(self.repo_root, relative)),
         )
-        if moved:
-            return (
-                f"{', '.join(moved[:5])}{', …' if len(moved) > 5 else ''} "
-                f"changed since {task_id} stopped (restored, or edited by "
-                f"hand), so what it applied is no longer what is on disk"
-            )
-        self._kept_at_request[task_id] = {
-            "path": str(path), "data": data, "verdict": verdict,
-        }
-        return None
+        if why is None and not _write_outcomes.already_kept(verdict):
+            self._kept_at_request[task_id] = {
+                "path": str(path), "data": data, "verdict": verdict,
+            }
+        return why
 
     def _keep_at_request(
         self, task: Dict[str, Any], batch_index: int, result: SchedulerResult,
@@ -3605,11 +3473,7 @@ class WriteBatchScheduler:
             )
             for item in unapplied
         }
-        if isinstance(verdict.get("batch_check"), dict):
-            outcome.batch_check = row_batch_check_findings(verdict)
-        outcome.batch_check_accepted = row_batch_check_accepted(verdict)
-        outcome.batch_check_repeats = row_batch_check_repeats(verdict)
-        outcome.batch_check_note = row_batch_check_note(verdict)
+        read_verdict_checks(outcome, verdict)
         snapshot = os.path.join(self.safety_dir, "pre_batch", task_id)
         if os.path.isdir(snapshot):
             outcome.snapshot_dir = snapshot
@@ -4150,44 +4014,10 @@ class WriteBatchScheduler:
         self, outcome: TaskOutcome, snapshot: TaskSnapshot
     ) -> None:
         """A failed dispatch that never reached ``_classify`` and moved bytes
-        is a partial application.
-
-        ``dispatch_task``'s pre-retry check (T4.8, widened in fix round 8)
-        makes one of an attempt that would have re-sent the batch, but not of
-        the report re-ask's own failure (the re-ask is exempt from that check:
-        its retry re-sends the re-ask) nor of a reply rung 6 never retries. So
-        a re-ask that replied in prose again, or timed out on every try,
-        ended ``unparseable_result`` / ``schema-rejection`` or an unlabelled
-        ``timeout`` beside the files the batch had changed. The row read "schema rejected" for work whose
-        bytes moved, and the stop's wording was not the partial's (fix round
-        9, review of round 8). *outcome*'s ``files_touched`` is the byte
-        comparison :meth:`_audit_terminal` just filled; when it names a file,
-        the outcome becomes the same partial application ``_classify``
-        records, with what failed kept in the reason — the stop, the restore
-        command and ``--resume`` then treat it as any partial. A rung-7
-        refusal keeps its own verdict.
-        """
-        if outcome.ok or outcome.status in (STATUS_PARTIAL, STATUS_REJECTED):
-            return
-        if outcome.write_outcome not in (None, WRITE_SCHEMA_REJECTED):
-            return
-        moved = [str(path) for path in (outcome.files_touched or [])] + [
-            str(path) for path in (outcome.unrestorable or [])
-            if str(path) not in (outcome.files_touched or [])
-        ]
-        if not moved:
-            return
-        what = outcome.reason or outcome.status
-        outcome.status = STATUS_PARTIAL
-        outcome.write_outcome = WRITE_PARTIAL
-        outcome.reason = (
-            f"PARTIAL APPLICATION: {len(moved)} file(s) changed "
-            f"({', '.join(moved[:5])}{', …' if len(moved) > 5 else ''}) but "
-            f"the batch did not finish: {what}. The batch loop stops here, the "
-            f"pre-batch snapshot is kept at {snapshot.directory}, and the phase "
-            f"is NOT marked completed — an automatic revert would destroy the "
-            f"half-applied state a human needs to inspect."
-        )
+        is a partial application (``write_outcomes.partial_when_bytes_moved``,
+        over the byte comparison :meth:`_audit_terminal` just filled)."""
+        _write_outcomes.partial_when_bytes_moved(
+            outcome, snapshot_dir=snapshot.directory)
 
     # -- D3l post-run containment: the OBSERVED set, not the declared one ---
 
@@ -5963,82 +5793,15 @@ class WriteBatchScheduler:
             data = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
                 return
-            data["verdict"] = {
-                "write_outcome": outcome.write_outcome,
-                "status": outcome.status,
-                "ok": outcome.ok,
-                "files_touched": outcome.files_touched,
-                "sha256_before": outcome.sha256_before,
-                "sha256_after": outcome.sha256_after,
-                "reason": outcome.reason,
-            }
-            if outcome.verification_only:
-                # The same two keys the report rows carry; a resume skip
-                # reads them back so its row keeps the label.
-                data["verdict"]["verification_only"] = True
-                data["verdict"]["outcome_label"] = outcome.outcome_label
-                if outcome.check_findings is not None:
-                    # The bounded findings the label rests on, for a resume
-                    # skip to carry (the reply's own `check` stays above).
-                    data["verdict"]["check"] = check_record(outcome.check_findings)
-                if (
-                    (not outcome.ok and not outcome.files_touched and not outcome.not_rerun)
-                    or (outcome.ok and outcome.check_findings)
-                ):
-                    # A failed check that moved nothing, or one that reported
-                    # problems (fix round 11): what the tree looked like when
-                    # it ran, so a `--resume` that changed nothing does not
-                    # run it again (`_unchanged_since_failure`,
-                    # `_check_findings_rerun`).
-                    data["verdict"]["tree_fingerprint"] = self._tree_fingerprint()
-            if outcome.batch_check is not None:
-                # What the batch's own checks said, for a resume skip to carry.
-                data["verdict"]["batch_check"] = check_record(outcome.batch_check)
-            if outcome.batch_check_accepted:
-                # Fix round 22: what it reported again of accepted findings.
-                data["verdict"]["batch_check_accepted"] = {
-                    check_id: list(found)
-                    for check_id, found in outcome.batch_check_accepted.items()
-                }
-            if outcome.batch_check_repeats:
-                # Fix round 28: what it reported that a check task reported.
-                data["verdict"]["batch_check_repeats"] = {
-                    check_id: list(found)
-                    for check_id, found in outcome.batch_check_repeats.items()
-                }
-            if outcome.batch_check_note:
-                # Fix round 28: its own words about its checks.
-                data["verdict"]["batch_check_note"] = outcome.batch_check_note
-            if outcome.runner_notes:
-                data["verdict"]["runner_notes"] = outcome.runner_notes
-            # Fix round 18: the items it declined (a resume skip carries
-            # them), the items a partial application left out of both lists
-            # (what `--human-task <id>=skip` answers), and the items such an
-            # answer recorded as skipped at the user's request.
-            if outcome.declined:
-                data["verdict"]["declined"] = declined_record(outcome.declined)
-            if outcome.unapplied_ids:
-                data["verdict"]["unapplied_ids"] = list(outcome.unapplied_ids)
-            if outcome.skipped_items:
-                data["verdict"]["skipped_items"] = declined_record(outcome.skipped_items)
-            # The batch's identity beyond its positional name (2026-10-02):
-            # the items it was materialized for and the inputs binding they
-            # were materialized from, so a resume whose selection renumbered
-            # the batch finds this result by its items (`_done_evidence`)
-            # and still compares the inputs — the fingerprint file is keyed
-            # by the positional id, which the renumbering reassigns.
-            task = self._task_by_id(outcome.task_id)
-            if task is not None:
-                data["verdict"]["task_id"] = outcome.task_id
-                data["verdict"]["expected_ids"] = [
-                    str(i) for i in (task.get("expected_ids") or [])
-                ]
-                data["verdict"]["inputs_fingerprint"] = self._task_fingerprint(task)
-            # Plan step 3 (2026-09-30): the verdict names the rung it was
-            # reached on — additive, and only when there was one.
-            rung = self._dispatch_rungs.get(outcome.task_id)
-            if rung:
-                data["verdict"]["sandbox_rung"] = rung
+            # `batch_ledger.verdict_record`: what the stamp holds and why,
+            # read back by a resume skip (`outcome_from_verdict`).
+            data["verdict"] = verdict_record(
+                outcome,
+                task=self._task_by_id(outcome.task_id),
+                inputs_fingerprint=self._task_fingerprint,
+                tree_fingerprint=self._tree_fingerprint,
+                sandbox_rung=self._dispatch_rungs.get(outcome.task_id),
+            )
             temp = path.with_name(path.name + ".tmp")
             temp.write_text(json.dumps(data, indent=2), encoding="utf-8")
             os.replace(str(temp), str(path))
@@ -7828,83 +7591,32 @@ class WriteBatchScheduler:
         self, result: SchedulerResult, failed: Sequence[TaskOutcome] = (),
     ) -> Optional[str]:
         """What this stop's plain ``--resume`` does on an unchanged tree
-        (:func:`compose_resume_why`, fix round 22), recorded on the stop as
-        ``resume_why`` beside its ``answers``: every failed task, not only
-        the answerable ones, since a resume dispatches a half-applied batch
-        again too. A failed check task is not run again while the files are
-        unchanged (:meth:`_unchanged_since_failure`), and a check whose
-        findings hold tasks back neither (:meth:`_check_findings_rerun`) —
-        each only when its verdict carries the tree it ran on, or the run
-        already kept it (fix round 23: a timeout, a prose reply or a crash
-        leaves no result file to stamp, and the resume runs it again)."""
-        already = set(result.human_plan.skipped)
-        manual = {
-            str(t.get("task_id", "")) for t in self.tasks
-            if t.get("executor_role") == "human" or t.get("is_human")
-        }
-
-        def undone_with(task_id: str) -> List[str]:
-            return [
-                dep for dep in self._dependents_of(task_id)
-                if dep not in already and dep not in manual
-                and self._task_by_id(dep) is not None
-            ]
-
-        refused = [o for o in failed if o.task_id in self._refused_before_dispatch]
-        blocked = result.blocked_by_check if self.kind == "implement" else {}
-        checks = self._blocking_checks(result) if blocked else []
-        # Fix round 23 (review of round 22, relay #6): what the resume keeps,
-        # counted as `status` counted it before it moved here — the rows the
-        # mirror records `ok`, for implement every task of the decomposition
-        # state.json records done — and whether a failed row moved bytes.
-        kept = sum(1 for o in result.outcomes if o.status == STATUS_OK)
-        if self.kind == "implement":
-            kept = max(kept, _stop_answers.implement_tasks_done(self.state))
-        failed_rows = [o for o in result.outcomes if not o.ok]
-        half_applied = any(
-            o.files_touched or o.unrestorable or o.write_outcome == WRITE_PARTIAL
-            for o in failed_rows
-        )
+        (``write_outcomes.resume_why``), recorded on the stop as
+        ``resume_why`` beside its ``answers``. A check is judged on the tree
+        as the stop leaves it, taken once and only when a check needs
+        judging (:meth:`_verdict_holds_tree`, the comparison
+        :meth:`_unchanged_since_failure` and :meth:`_check_findings_rerun`
+        make)."""
         tree: List[Optional[str]] = []
 
         def kept_on(task_id: str, *, failed_check: bool) -> bool:
-            # The tree as the stop leaves it, taken once and only when a
-            # check needs judging: what the next resume compares against.
             if not tree:
                 tree.append(self._tree_fingerprint())
             return self._verdict_holds_tree(task_id, tree[0], failed=failed_check)
 
-        return _stop_answers.compose_resume_why(
-            refused=[o.task_id for o in refused],
-            policy={
-                o.task_id for o in refused
-                if o.write_outcome == WRITE_POLICY_VIOLATION
-            },
-            outside={
-                o.task_id for o in refused
-                if any(getattr(hit, "outside", False)
-                       for hit in self._refused_policy_hits.get(o.task_id) or [])
-            },
-            failed=[
-                _stop_answers.FailedAnswerable(
-                    task_id=o.task_id, not_rerun=bool(o.not_rerun),
-                    check=self.kind == "implement" and not declared_file_set(
-                        self._task_by_id(o.task_id) or {})
-                    and (bool(o.not_rerun)
-                         or kept_on(o.task_id, failed_check=True)),
-                )
-                for o in failed if o not in refused
-            ],
-            checks=checks,
-            rerun_checks={
-                check_id for check_id in checks
-                if not kept_on(check_id, failed_check=False)
-            },
-            blocked=blocked,
-            undone_with=undone_with,
-            unit="tasks" if self.kind == "implement" else "batches",
-            kept=kept,
-            half_applied=half_applied,
+        return _write_outcomes.resume_why(
+            result.outcomes, failed, _write_outcomes.ResumeContext(
+                kind=self.kind,
+                tasks=self.tasks,
+                skipped=set(result.human_plan.skipped),
+                refused_before_dispatch=self._refused_before_dispatch,
+                refused_policy_hits=self._refused_policy_hits,
+                blocked=result.blocked_by_check,
+                blocking_checks=lambda: self._blocking_checks(result),
+                dependents_of=self._dependents_of,
+                implement_done=lambda: _stop_answers.implement_tasks_done(self.state),
+                kept_on=kept_on,
+            ),
         )
 
     def _verdict_holds_tree(
@@ -8391,7 +8103,7 @@ class WriteBatchScheduler:
             return (
                 f"{self.phase} {stop.get('what')}", None, [],
                 ["Nothing was dispatched and no file was changed.",
-                 REFUSED_SKIP_WAY_FORWARD],
+                 _write_outcomes.REFUSED_SKIP_WAY_FORWARD],
                 ".",
             )
         if stop.get("kind") == "manual-gate":
@@ -9592,19 +9304,10 @@ class WriteBatchScheduler:
         already dirty (the baseline subtracts it) left ``tracked_files`` the
         moment the resumed run recorded its own.
         """
-        touched: List[str] = []
-        sources: List[Sequence[str]] = []
-        for row in (result.earlier_rows if result is not None else []):
-            if row.get("status") == STATUS_OK:
-                sources.append(row.get("files_touched") or [])
-        for outcome in (result.outcomes if result is not None else []):
-            if outcome.ok:
-                sources.append(outcome.files_touched)
-        for paths in sources:
-            for path in paths:
-                if isinstance(path, str) and path and path not in touched:
-                    touched.append(path)
-        return touched
+        if result is None:
+            return []
+        return touched_files(
+            [*result.earlier_rows, *result.outcomes], include_partial=False)
 
     def _record_batch_tracking(self, result: SchedulerResult) -> None:
         """Record what this code phase has changed so far, after each batch.
@@ -10307,13 +10010,9 @@ class WriteBatchScheduler:
                         # a clean run as short by exactly its deferred tasks.
                         "total": total,
                         "ok": ok_count,
-                        # F10: was `dispatched`, and counted FINISHED tasks —
-                        # for an 11-minute single-task batch it read
-                        # `dispatched: 0` the whole time, which a reader
-                        # cannot tell from a stall. Renamed to say what it
-                        # actually counts; `in_flight` below is the dispatched
-                        # count this used to be mistaken for.
-                        "completed": len(outcomes),
+                        # F10: the tasks dispatched and NOT yet finished, so
+                        # an 11-minute single-task batch never reads as a
+                        # stall. (The finished count is the `tasks` rows.)
                         "in_flight": [
                             {"task_id": task_id, "dispatched_at": started}
                             for task_id, started in in_flight
@@ -10348,7 +10047,6 @@ class WriteBatchScheduler:
                         # run is the "not configured" notice in the log.
                         **({"verification": result.verification}
                            if result.verification else {}),
-                        "finalized": result.finalized,
                         "human_task_strategy": result.human_plan.strategy,
                         "skipped_task_ids": sorted(result.human_plan.skipped),
                         # Fix round 14: which of those the user skipped
@@ -10361,7 +10059,11 @@ class WriteBatchScheduler:
                         # Fix round 17: which of the rest wait on a deferred
                         # manual task, named apart from it on `status`.
                         **_human_task_plan._deferred_split(result.human_plan),
-                        "pending_human_task_ids": list(result.human_plan.pending),
+                        # One row per finished task. The id lists its rows
+                        # already carry (the tasks not `ok`, the checks with
+                        # findings, the code batches whose own check failed)
+                        # are read from them (`task_ledger.mirror_ids`), never
+                        # written beside them.
                         "tasks": [
                             {
                                 "task_id": o.task_id,
@@ -10389,14 +10091,11 @@ class WriteBatchScheduler:
                             }
                             for o in outcomes
                         ],
-                        "failed_task_ids": [
-                            o.task_id for o in outcomes if not o.ok
-                        ],
                         # Fix round 23 (review of round 22, #4): which of
-                        # them a runner ran in this run — not one refused
-                        # before dispatch, nor a failed check not run again
-                        # — so `status` says "nothing crashed" only of a
-                        # stop no runner failed. Always written: an older
+                        # the failed tasks a runner ran in this run — not one
+                        # refused before dispatch, nor a failed check not run
+                        # again — so `status` says "nothing crashed" only of
+                        # a stop no runner failed. Always written: an older
                         # mirror without it is read by `failed_task_ids`.
                         "runner_failed_task_ids": [
                             o.task_id for o in outcomes
@@ -10420,16 +10119,6 @@ class WriteBatchScheduler:
                         **({"completed_by_hand_task_ids": sorted(
                             set(result.human_plan.completed) & set(kept_ids)
                         )} if set(result.human_plan.completed) & set(kept_ids)
-                           else {}),
-                        **({"check_findings_task_ids": [
-                            o.task_id for o in outcomes
-                            if o.ok and o.check_findings
-                        ]} if any(o.ok and o.check_findings for o in outcomes)
-                           else {}),
-                        **({"batch_check_task_ids": [
-                            o.task_id for o in outcomes
-                            if o.ok and o.batch_check
-                        ]} if any(o.ok and o.batch_check for o in outcomes)
                            else {}),
                         # Fix round 23: a task whose own check repeated only
                         # the findings the user accepted, by the checks.

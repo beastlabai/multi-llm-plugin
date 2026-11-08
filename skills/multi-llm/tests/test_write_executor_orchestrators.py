@@ -1092,7 +1092,7 @@ class TestFullStackDetachedImplement:
         status = json.loads((phase_dir / ".status.json").read_text())
         progress = status["progress"]["write_subagents"]
         assert progress["total"] == 3
-        assert progress["finalized"] is True
+        assert status["state"] == "complete"
         assert [t["task_id"] for t in progress["tasks"]] == ["T001", "T002", "T003"]
 
     def test_resume_after_a_mid_batch_kill_redispatches_only_the_incomplete(

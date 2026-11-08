@@ -125,9 +125,9 @@ counts (`run_status.implement_task_tally`: every task of the decomposition, ever
 check accepted with its findings apart (`accepted_with_findings_task_ids`) — fix round 16, run 6's resumes read
 "1/1 batches ok" against seven tasks.
 
-The mirror's dispatch counter — renamed `completed`, it used to count FINISHED tasks as
+The mirror's finished tasks are its `tasks` rows; its dispatch counter used to count them as
 `dispatched`, so a single-task batch running minutes read `dispatched: 0` the whole
-time, indistinguishable from a stall — is joined by `in_flight` (`{task_id, dispatched_at}`,
+time, indistinguishable from a stall. The tasks still running are `in_flight` (`{task_id, dispatched_at}`,
 patched by `_begin_sweep` at dispatch time so it is visible before the task finishes),
 rendered as `in flight: <task_id> (since <duration>)` (F10, 2026-09-16). And `write_batch_scheduler._mirror_status` writes the
 phase-level `state` (`complete` / `subagents_failed` /

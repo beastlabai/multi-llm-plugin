@@ -19,6 +19,7 @@ import json
 import pytest
 
 from tests.test_write_executor import FakeState, env  # noqa: F401
+from utils.task_ledger import mirror_ids
 from tests.test_write_batch_declined import (
     SKIP_FLAGS,
     _codex_08_respond,
@@ -73,7 +74,7 @@ class TestTheSchedulerRecordsTheRefusal:
         assert mirror["stop"]["kind"] == "answer-refused"
         assert "answers" not in mirror["stop"]
         # The earlier run's rows stand: this run dispatched nothing.
-        assert mirror["failed_task_ids"] == ["apply-batch-0"]
+        assert mirror_ids(mirror, "failed_task_ids") == ["apply-batch-0"]
         assert [row["task_id"] for row in mirror["tasks"]] == ["apply-batch-0"]
 
     def test_an_answer_for_another_batch_leaves_the_right_one_offered(self, env):

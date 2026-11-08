@@ -74,7 +74,7 @@ from .output_handler import (
     phase_dir_path,
 )
 from .state_manager import (
-    StateManager, _parse_completion_time, predates_review, stamp_or_mtime,
+    StateManager, _parse_completion_time, predates_review,
 )
 
 #: The step word of review-plan's advisory consolidation pass. Not a mode and
@@ -2011,20 +2011,14 @@ class ImproveWorkflow(fwo.FullWorkflow):
         and this report is also what a finished run's exit 2 prints, which
         writes nothing (§2.3, §2.4; Fable review 2026-10-09).
         """
+        from .batch_ledger import BatchLedger, touched_files
         from .git_utils import get_project_root
-        from .retry_ladder import STATUS_OK
-        from .subagent_executor import WRITE_PARTIAL
-        from .write_batch_scheduler import WRITE_BATCH_REPORT_FILENAME
 
-        report_path = apply_dir / WRITE_BATCH_REPORT_FILENAME
-        try:
-            report = json.loads(report_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        ledger = BatchLedger(apply_dir)
+        rows = ledger.rows()
+        if rows is None:
             return []
-        rows = report.get("tasks") if isinstance(report, dict) else None
-        if not isinstance(rows, list):
-            return []
-        written_at = stamp_or_mtime(report.get("written_at"), report_path)
+        written_at = ledger.written_at()
         try:
             completed = StateManager(self.plan_path, read_only=True).get(
                 "phases_completed")
@@ -2039,18 +2033,10 @@ class ImproveWorkflow(fwo.FullWorkflow):
             return []
         root = Path(get_project_root(str(self.plan_path)) or os.getcwd())
         paths: List[Path] = []
-        for row in rows:
-            if not isinstance(row, dict) or not (
-                row.get("status") == STATUS_OK
-                or row.get("write_outcome") == WRITE_PARTIAL
-            ):
-                continue
-            touched = row.get("files_touched")
-            for name in touched if isinstance(touched, list) else []:
-                if isinstance(name, str) and name:
-                    path = root / name
-                    if path not in paths:
-                        paths.append(path)
+        for name in touched_files(rows, include_partial=True):
+            path = root / name
+            if path not in paths:
+                paths.append(path)
         return paths
 
 

@@ -45,7 +45,8 @@ whatever its `check` lists, and so is `failed` listing no finding;
 The findings reach the rows' `check`, the verdict stamp, summary.md's
 `## Check Findings` and accounting line, the batch log line, `[CHECK_FINDINGS]` lines (on a
 stop as at the end of a run, since fix round 14; on the native leg from `util batch-done --check findings`,
-`check_findings_line`, fix round 26), the mirror's `check_findings`/`check_findings_task_ids`,
+`check_findings_line`, fix round 26), the mirror rows' `check_findings` (the check ids `status`
+names are read from them, `task_ledger.mirror_ids`),
 implement's result `notice`, the prior-changes line and `state.json`'s
 `task_check_findings` (`state_manager.set_task_check_findings_in_state`; on the native leg `util batch-done --check passed|findings --finding …`), which
 `status`'s trailer (while implement is unfinished, then until code-review is completed
@@ -229,7 +230,7 @@ nothing (a `not_run` reason with no `ran` included) is no check; a
 both legs; since fix round 16 every one-line surface says it is the batch's own report and quotes
 it, `quoted_findings`), summary.md's `## Check Findings` (`batch_check_section`, both
 summaries; the outcome cell/heading reads "applied, its check fails"), the mirror
-(`batch_check_task_ids`, per-task `batch_check_findings`), `status`'s progress line
+(per-task `batch_check_findings`, which `status` reads its ids from), `status`'s progress line
 (`own check fails …`) and the result `notice` (`write_result_notice`; a terminal
 poll rebuilds it from the run's mirror, `run_status._write_result_notice`); on the native leg
 `util batch-done --own-check passed|findings|none` records a code batch's and prints `[BATCH_CHECK_FAILED]` (fix round 18:

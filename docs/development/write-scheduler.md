@@ -12,6 +12,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Retry after edits](#retry-after-edits)
 - [Declined items and partial applications](#declined-items-and-partial-applications)
 - [One record writer for both legs](#one-record-writer-for-both-legs)
+- [A batch's records](#a-batchs-records)
 - [Dispatch counts](#dispatch-counts)
 - [Prior-batch context](#prior-batch-context)
 - [Prompt order](#prompt-order)
@@ -21,10 +22,10 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 
 ## Where the scheduler's helpers live
 
-**`utils/write_batch_scheduler.py` is the loop; what both legs share lives in six modules below
+**`utils/write_batch_scheduler.py` is the loop; what both legs share lives in seven modules below
 it.** The scheduler holds `WriteBatchScheduler`, `SchedulerResult`, `run_write_phase` and the
 constants and helpers only the loop reads. The helpers that the executor's loop, `util
-write-prompt`, `util batch-done`, implement's native handoff and `status` all call live in six
+write-prompt`, `util batch-done`, implement's native handoff and `status` all call live in seven
 modules, lowest first. Each imports only the ones before it, and none imports the scheduler:
 
 | Module | What it owns |
@@ -35,6 +36,7 @@ modules, lowest first. Each imports only the ones before it, and none imports th
 | `utils/human_task_plan.py` | The failure strategies, `HumanTaskPlan` and its resolution from `--human-task` answers (`resolve_human_task_plan`), the manual gates (`plan_manual_gates`) and the labels an answered task is recorded under. |
 | `utils/stop_answers.py` | A stop's answers and the resume's why on both legs (`compose_stop_answers`, `native_stop_answers`, `compose_resume_why`, `native_resume_why`) and its headline (`fit_stop_headline`). |
 | `utils/batch_prompt.py` | The dispatched prompt: `bind_prior_changes`, `with_result_contract` and the contract texts it appends, where a dispatched prompt is kept, and the code write kinds. |
+| `utils/write_outcomes.py` | The partial-application and resume rules around the verdict table, pure over `TaskOutcome`: the outcome of a dispatch the table never saw (`classify_attempt`, `partial_when_bytes_moved`), whether a `--human-task <batch>=skip` answer can keep a stopped batch (`check_partial_skips`, `partial_skip_refusal`), and what a stop's plain `--resume` does (`resume_why` over a `ResumeContext`). The scheduler reads what is on disk and passes it in, lazily. |
 
 **The scheduler re-exports every moved name for reading only** (`write_batch_scheduler._MOVED`, the
 contract `git_utils` and `run_status` already follow): `write_batch_scheduler.X` returns the owner's
@@ -42,7 +44,8 @@ current object, and a patch of `write_batch_scheduler.X` reaches no code. The sc
 helper modules read a moved name through its owner at each call (`_check_records.decomposition_graph`),
 never a copy, so one patch of the owner reaches them all. Patch the owner:
 `tests/test_write_batch_scheduler_moved_names.py` fails a test that patches a moved name on the
-scheduler, and holds the layering. `tests/test_import_layers.py` puts all six at L3.
+scheduler, and holds the layering. `tests/test_import_layers.py` puts all seven at L3, and
+`utils/batch_ledger.py` beside them ([A batch's records](#a-batchs-records)).
 
 ## Write scheduler contract
 
@@ -234,7 +237,7 @@ ordinal against a task denominator and an `implement` dependency level with k ta
 one batch of k — every one of those k entries recorded the same ordinal, so a parallelizable plan
 ended at `batch 9/14`, never reached `N/N` and never printed
 `ALL BATCHES COMPLETE`, F3 2026-09-17 — and a resume skip counts too, the same way
-`_mirror_status` counts it in `completed`).
+`_mirror_status` records it among its `tasks` rows).
 
 `metrics.finish_phase_in_state` **returns** `(elapsed_ms, line)` instead of printing the closing
 `[ETA] … phase complete` line, mirroring `record_metric_in_state`, so the CLI leg prints it and the
@@ -670,6 +673,10 @@ quietly).
 
 ## Declined items and partial applications
 
+Tests: `tests/test_write_outcomes.py` (the rules), `tests/test_write_batch_declined.py`,
+`tests/test_write_retry_redispatch.py`, `tests/test_write_resume_verdicts.py`,
+`tests/test_refused_answers.py`, `tests/test_resume_why.py`, `tests/test_stop_resume_wording.py`.
+
 **An apply batch may decline an item, and a partial application its resume would only repeat has a
 way out** (fix round 18, Codex racing run 7's 08/08b: a batch left a fix out on purpose, said so
 only in `notes`, and stopped on every resume). The three apply kinds' result contract
@@ -752,7 +759,55 @@ and the moved repeats' rows and stamps on the executor.
 
 A new per-task fact is a `BatchFacts` field that both builders set, or that one leaves at its
 default for a reason `tests/test_write_record.py` (`LEG_DEFAULTS`) names; that test fails
-otherwise.
+otherwise. `tests/test_write_legs_parity.py` runs one implement scenario through both legs from
+the same starting state and compares the whole `state.json`: every key equal, or named in its
+`ONE_LEG_KEYS` with the reason only one leg writes it, and the same ledger and tally.
+
+## A batch's records
+
+**One batch's outcome is recorded seven times, and `utils/batch_ledger.py` is where they are read
+together.** The result file's `verdict`, the audit log's `completed` line, `state.json`'s
+`task_status` and `processed_<phase>`, `write_batch_report.json`, `subagent_batch_report.json`
+and the `.status.json` write mirror each have a reason to exist, and each is written at its own
+time: the crash windows depend on the order (the result file lands before the batch's effects are
+recorded), so all seven stay.
+
+- **The verdict's round trip.** `verdict_record` builds the stamp `_stamp_verdict` writes on the
+  result file, and `outcome_from_verdict` reads it back for a resume skip, each field from the
+  verdict first, then the audit line, for a result file written before the verdict carried it.
+  `read_verdict_checks` is the part a kept-at-request batch reads too. `VERDICT_FIELDS` says, for
+  every `TaskOutcome` field, whether the stamp carries it and the skip reads it back, or why not;
+  `tests/test_batch_ledger.py` fails a field with no row, and a stamped field that does not
+  survive the round trip.
+- **What a phase changed.** `touched_files(rows, include_partial=...)` is the one reader of
+  `files_touched`, over report rows or `TaskOutcome`s, and its call states the filter:
+  `tracked_files` (`WriteBatchScheduler._touched_files`) and implement's handed-back files take the
+  `ok` rows only, so a stopped batch's half-applied edits are never recorded as the phase's code;
+  an apply's handed-back files (`ApplyPhaseReport.touched_files`, the improve workflow's summary)
+  include the partial applications, whose edits the stop keeps. `BatchLedger(phase_dir)` reads the
+  report's rows and its `written_at` for the latter.
+- **The agreement check.** `BatchLedger.disagreements(state)` names every record that differs from
+  the report on whether a batch finished or what its checks reported, and every record a batch
+  should have and lacks: this run's row in `subagent_batch_report.json` and in the write mirror;
+  the mirror row's check findings and own-check findings, which its rebuilt lists come from, and
+  the checks its `batch_check_accepted` and `batch_check_repeats` maps name; the audit's
+  `completed` line of a row a runner ran; the task's `task_status` entry, an apply batch's
+  `processed_<phase>` items and an implement task's four check-finding maps in `state.json`; and an
+  older mirror's id lists against its own rows. Its docstring names each record that may be
+  absent and why (an earlier run's row has no row in this run's executor report or mirror; a row
+  not `ok` has no check facts); nothing missing is skipped otherwise. It is for tests: the records a
+  characterisation run leaves when it ends must agree (`tests/test_batch_ledger.py`,
+  `tests/test_write_legs_parity.py`, whose second scenario puts accepted and repeated findings on
+  both legs).
+- **The write mirror is read one way.** It writes no id list its `tasks` rows already carry, nor
+  `completed`, `finalized` or `pending_human_task_ids`
+  ([status.md](status.md#status-parity-across-execution-paths)). A current reader renders an older
+  mirror, whose recorded lists it reads as they are; an older reader shows less of a current mirror,
+  since the lists it reads are gone. That is accepted, because one install writes and reads its own
+  mirrors, so the writer adds no transitional keys. The container golden bundles
+  (`tests/golden/container/*/bundle.json`) still carry the removed keys; they are regenerated in the
+  Docker lane, as a reviewed re-capture ([tests/container/README.md](../../skills/multi-llm/tests/container/README.md#the-golden-gate-and-how-to-move-it)),
+  never edited by hand.
 
 ## Dispatch counts
 
