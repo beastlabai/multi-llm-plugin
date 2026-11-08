@@ -197,8 +197,8 @@ at the census's repo-relative path and the policy is asked about that path unres
 (`violation_relative`); a link anywhere below the root is refused, never followed (the census
 never walks one). A path spelled with a `.` or `..` component or a trailing separator is refused
 before either way of opening is tried: such a spelling can name another file than its lexically
-normalised form, the one the walk opens. `src/a.py/` names no file, yet the resolving check drops
-the trailing separator and permits it, and the walk would open `src/a.py`; `src/link/../a.py`
+normalised form, the one the walk opens. "src/a.py/" names no file, yet the resolving check drops
+the trailing separator and permits it, and the walk would open "src/a.py"; "src/link/../a.py"
 names what lies beside the link's target. The census never spells a path so, so this changes
 nothing it retains; it keeps the answer from resting on the caller's spelling. The walk is sounder
 than reading the descriptor's path back (`/proc/self/fd` is Linux-only and can be unmounted, and
