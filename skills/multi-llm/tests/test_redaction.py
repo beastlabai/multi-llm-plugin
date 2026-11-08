@@ -778,8 +778,13 @@ class TestNoFalsePositivesOnBenignCorpora:
     #:
     #: The nested-exec reply sentinel formerly added another source hit.
     #: Renaming that constant to ``NESTED_PROBE_MARKER`` removes the hit without
-    #: changing the echoed text or any redaction rule. Eight known hits remain.
-    KNOWN_SOURCE_HITS = 8
+    #: changing the echoed text or any redaction rule.
+    #:
+    #: A ninth is the environment inventory's row for the same variable
+    #: provider_registry already names: ``GIT_CREDENTIAL_HELPER =
+    #: "MULTI_LLM_GIT_CREDENTIAL_HELPER"`` in ``utils/env_vars.py``. A name,
+    #: never a value; not a pattern that got looser.
+    KNOWN_SOURCE_HITS = 9
 
 
     def test_utils_source_tree_is_a_diagnostic_not_a_gate(self):
@@ -794,7 +799,8 @@ class TestNoFalsePositivesOnBenignCorpora:
             f"redact_text now fires on {len(hits)} lines of the harness's own source, "
             f"above the {self.KNOWN_SOURCE_HITS} known ones (`token = group_id` in "
             "human_decisions.py, `token_count=token_count` and `token_count=args.tokens` in metrics.py, "
-            "`ENV_GIT_CREDENTIAL_HELPER_VAR` in provider_registry.py, `nested_exec_credentials` in "
+            "`ENV_GIT_CREDENTIAL_HELPER_VAR` in provider_registry.py and its inventory row "
+            "`GIT_CREDENTIAL_HELPER` in env_vars.py, `nested_exec_credentials` in "
             "subagent_executor.py, `OMP_CREDENTIAL_ENV` + `credential_helper=credential_helper` "
             "in providers/omp.py, and `FX_CREDENTIAL_ENV` in providers/fx.py). This corpus is a "
             "diagnostic rather than a gate, but a count that moved means a pattern got "
