@@ -13164,10 +13164,18 @@ class WriteBatchScheduler:
                 except subprocess.TimeoutExpired:
                     verdict = self._kill_verify_tree(proc, pgid, job)
                     exit_code = VERIFY_EXIT_TIMEOUT
-                    note = (
-                        f"\n(killed after {timeout}s: SIGTERM then SIGKILL to the "
-                        f"command's whole process group — verdict {verdict})"
-                    )
+                    if verdict == "skipped":
+                        # Nothing was sent: the kill could not trust the
+                        # command's pid to name it any more.
+                        note = (
+                            f"\n(timed out after {timeout}s: termination attempted, "
+                            f"but no signal was sent — verdict {verdict})"
+                        )
+                    else:
+                        note = (
+                            f"\n(killed after {timeout}s: SIGTERM then SIGKILL to the "
+                            f"command's whole process group — verdict {verdict})"
+                        )
             finally:
                 if job is not None:
                     job.close()
@@ -13180,14 +13188,16 @@ class WriteBatchScheduler:
 
         ``start_time=None`` is how an unverified kill is *requested*: this pid is
         a child still held open here, not a record read off disk, so there is
-        nothing to corroborate and no recycled pid to protect. *job* is the
-        command's Windows Job Object, the group's stand-in there.
+        nothing to corroborate and no recycled pid to protect; as ``child``,
+        unreaped until the wait below, it anchors its pid and group through the
+        kill where the owned kill runs (Linux, glibc or musl; see ``kill_tree``).
+        *job* is the command's Windows Job Object, the group's stand-in there.
         """
         try:
             verdict = _process_control.kill_tree(
                 proc.pid, start_time=None, pgid=pgid,
                 escalate_after_s=VERIFY_KILL_GRACE_S, poll_interval_s=0.05,
-                job=job,
+                job=job, child=proc,
             )
         except Exception:  # noqa: BLE001 - teardown must never mask the timeout
             if job is None or not job.terminate():

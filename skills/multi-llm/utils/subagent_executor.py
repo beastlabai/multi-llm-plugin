@@ -7192,11 +7192,12 @@ def _kill_timed_out(
     ``start_time=None`` is how an unverified kill is *requested* (see
     ``process_control.kill_tree``): this pid is not a record read off disk, it is
     a child this process is still holding open, so there is nothing to
-    corroborate and nothing to recycle. The verdict is advisory — the child is
-    an unreaped zombie until :func:`_drain_after_kill` collects it, so the probe
-    that decides it cannot see the difference; what matters is that the signals
-    reached the group. *job* is the child's Windows Job Object, the group's
-    stand-in there (``None`` elsewhere).
+    corroborate and nothing to recycle. *proc* goes along as ``child``: unreaped
+    until :func:`_drain_after_kill` collects it, it anchors its pid and group
+    through the kill where the owned kill runs (Linux, glibc or musl; see
+    ``kill_tree``), which counts its zombie as exited. The verdict is advisory:
+    what matters is that the signals reached the group. *job* is the child's
+    Windows Job Object, the group's stand-in there (``None`` elsewhere).
     """
     try:
         process_control.kill_tree(
@@ -7206,6 +7207,7 @@ def _kill_timed_out(
             escalate_after_s=TIMEOUT_KILL_GRACE_S,
             poll_interval_s=0.05,
             job=job,
+            child=proc,
         )
     except Exception:  # noqa: BLE001 - teardown must never mask the timeout
         if job is not None and job.terminate():

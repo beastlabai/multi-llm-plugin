@@ -672,6 +672,7 @@ def kill_tree(
     escalate_after_s: float = DEFAULT_ESCALATE_AFTER_S,
     poll_interval_s: float = 0.1,
     job: Optional[TreeJob] = None,
+    child: Optional["subprocess.Popen[Any]"] = None,
 ) -> str:
     """Terminate *pid* and every process it spawned. Returns a verdict string.
 
@@ -680,7 +681,34 @@ def kill_tree(
     the SIGKILL window) or ``skipped`` (identity could not be corroborated — the
     pid may have been recycled, so signalling it would hit an unrelated process).
 
-    Two identity rules, and they are the whole contract:
+    *child* is the ``Popen`` this process holds for *pid*, not yet reaped. On
+    Linux with glibc or musl, in an ABI whose ``struct sigaction`` layout was
+    checked (:func:`_sigaction_abi`), it takes a path of its own
+    (:func:`_posix_kill_owned`): its zombie counts as exited, the grace ends
+    once nothing of its group runs, and the group then always gets one SIGKILL
+    by number before the kill confirms it gone, so members that joined late
+    are included, seen or not. Nothing reaps the child there: its ``Popen``
+    reads the real exit status afterwards. Everywhere else (macOS, the BSDs,
+    Bionic, any other C library or machine) *child* is ignored and the kill is
+    the one below, since that path's proof was checked for Linux and those C
+    libraries only (docs/development/runtime.md, "An owned child's kill").
+
+    That path is safe only under a lifecycle contract its caller keeps (the
+    same doc section). The caller holds the only waiter on *child* and does
+    not wait on it until ``kill_tree`` returns. Nothing in the process reaps
+    children it does not name (``os.wait``, ``waitpid(-1)`` and the like; a
+    test fails the plugin's sources on them). Children become zombies: SIGCHLD
+    is neither ``SIG_IGN`` nor ``SA_NOCLDWAIT``, read from the kernel. Then the
+    child's pid and the number of the group it leads cannot be recycled during
+    the kill. The kill rereads the child and the disposition right before each
+    signal, which narrows a breach of the contract but cannot close it: once
+    either is known to fail it sends nothing more, and once the disposition
+    cannot be read the rest of the kill is the one below. A *child* that does
+    not anchor *pid* on entry (reaped, another pid, a group it does not lead,
+    children reaped at exit, a disposition that cannot be read) is ignored,
+    and the kill is the one below.
+
+    Two identity rules for every other target, and they are its whole contract:
 
     * ``start_time`` supplied and the probe cannot corroborate it ⇒ ``skipped``,
       **no signal**. ``kill_tree`` is reached by routine paths (``util runs
@@ -712,6 +740,27 @@ def kill_tree(
         if IS_WINDOWS and job is not None:  # pragma: no cover - Windows
             job.terminate()
         return "gone"
+    if child is not None and not IS_WINDOWS:
+        tree = _owned_tree(child, pid, pgid)
+        if tree is not None:
+            return _posix_kill_owned(
+                tree, escalate_after_s, poll_interval_s,
+                by_number=lambda grace: _kill_by_number(
+                    pid, start_time, pgid, grace, poll_interval_s, job),
+            )
+    return _kill_by_number(pid, start_time, pgid, escalate_after_s, poll_interval_s, job)
+
+
+def _kill_by_number(
+    pid: int,
+    start_time: Optional[str],
+    pgid: Optional[int],
+    escalate_after_s: float,
+    poll_interval_s: float,
+    job: Optional[TreeJob],
+) -> str:
+    """:func:`kill_tree` for a target known only by its numbers: its two
+    identity rules, then the kill of the group or the pid."""
     verdict = probe(pid, start_time) if pid else DEAD
     if verdict == UNKNOWN and start_time:
         return "skipped"
@@ -839,6 +888,352 @@ def _posix_kill_tree(
             return "killed"
         time.sleep(poll_interval_s)
     return "survived" if process_alive(pid) else "killed"
+
+
+#: ``os.waitid`` where the platform has it, else ``None``: the kernel's own
+#: answer to "has this child exited", asked with ``WNOWAIT`` so it never reaps.
+#: Every Linux Python has it; the owned kill does not run without it.
+_waitid = getattr(os, "waitid", None)
+
+#: ``SA_NOCLDWAIT`` on the machines below, under glibc and musl alike.
+_SA_NOCLDWAIT = 0x2
+
+_X86_MACHINES = frozenset({"x86_64", "i386", "i486", "i586", "i686"})
+
+#: The programs whose ``struct sigaction`` is laid out as a handler, a 1024-bit
+#: mask, an ``int`` of flags and a restorer, with ``SA_NOCLDWAIT`` at ``0x2``:
+#: read in both libraries' sources (glibc's generic ``bits/sigaction.h``,
+#: overridden for none of these; musl's ``signal.h`` and its per-machine
+#: ``bits/signal.h``). Each is known by the dynamic loader it names, which is
+#: the C library's and the ABI's own (musl's, ``ld-musl-$(ARCH).so.1``, is its
+#: C library too), paired with the kernel machines that run it,
+#: since Alpha, SPARC and SuperH name their glibc loader ``ld-linux.so.2`` as
+#: i386 does. Loader name -> (C library, machines). Not here: x32, 32-bit Arm
+#: (on an aarch64 kernel too), MIPS (flags first), RISC-V, PowerPC, s390x and
+#: every other ABI not read.
+_CHECKED_LOADERS: Dict[str, Tuple[str, frozenset]] = {
+    "ld-linux-x86-64.so.2": ("glibc", _X86_MACHINES),
+    "ld-linux.so.2": ("glibc", _X86_MACHINES),
+    "ld-linux-aarch64.so.1": ("glibc", frozenset({"aarch64"})),
+    "ld-musl-x86_64.so.1": ("musl", _X86_MACHINES),
+    "ld-musl-i386.so.1": ("musl", _X86_MACHINES),
+    "ld-musl-aarch64.so.1": ("musl", frozenset({"aarch64"})),
+}
+
+#: :func:`_sigaction_abi`'s answer once worked out.
+_SIGACTION_ABI: List[Optional[str]] = []
+
+#: The built ``sigaction`` call and its struct, once :func:`_sigchld_action`
+#: has built them (``[None]`` when they cannot be).
+_SIGACTION: List[Optional[Tuple[Any, Any]]] = []
+
+
+def _glibc_version() -> Optional[str]:
+    """glibc's name for itself (``glibc 2.39``), from
+    ``confstr(_CS_GNU_LIBC_VERSION)``; ``None`` under any other C library, which
+    has no such name or refuses it (musl: ``EINVAL``)."""
+    try:
+        version = os.confstr("CS_GNU_LIBC_VERSION")
+    except (AttributeError, ValueError, OSError):
+        return None
+    if isinstance(version, str) and version.startswith("glibc "):
+        return version
+    return None
+
+
+def _program_interpreter(path: str = "/proc/self/exe") -> Optional[str]:
+    """The dynamic loader the ELF file at *path* names (its ``PT_INTERP``): for
+    this process's own executable, the loader the kernel started it with.
+    ``None`` for a static executable, a file that is not ELF, or one that
+    cannot be read."""
+    import struct
+
+    try:
+        with open(path, "rb") as exe:
+            header = exe.read(64)
+            if len(header) < 52 or header[:4] != b"\x7fELF":
+                return None
+            if header[4] not in (1, 2) or header[5] not in (1, 2):
+                return None
+            wide = header[4] == 2
+            order = "<" if header[5] == 1 else ">"
+            if wide:
+                (table_at,) = struct.unpack_from(order + "Q", header, 32)
+                size, count = struct.unpack_from(order + "HH", header, 54)
+            else:
+                (table_at,) = struct.unpack_from(order + "I", header, 28)
+                size, count = struct.unpack_from(order + "HH", header, 42)
+            if size < (56 if wide else 32) or size * count > 65536:
+                return None
+            exe.seek(table_at)
+            table = exe.read(size * count)
+            for index in range(len(table) // size):
+                entry = table[index * size:(index + 1) * size]
+                if struct.unpack_from(order + "I", entry, 0)[0] != 3:  # PT_INTERP
+                    continue
+                if wide:
+                    (offset,) = struct.unpack_from(order + "Q", entry, 8)
+                    (length,) = struct.unpack_from(order + "Q", entry, 32)
+                else:
+                    (offset,) = struct.unpack_from(order + "I", entry, 4)
+                    (length,) = struct.unpack_from(order + "I", entry, 16)
+                exe.seek(offset)
+                name = exe.read(min(length, 4096)).split(b"\0", 1)[0]
+                return name.decode("ascii") or None
+    except (OSError, ValueError, struct.error, UnicodeDecodeError):
+        return None
+    return None
+
+
+def _identify_sigaction_abi() -> Optional[str]:
+    """See :func:`_sigaction_abi`."""
+    if sys.platform != "linux" or hasattr(sys, "getandroidapilevel"):
+        return None  # another kernel, or Android's Bionic (Python < 3.13)
+    interpreter = _program_interpreter()
+    if interpreter is None:
+        return None  # static, or not read: no loader names the ABI
+    library, machines = _CHECKED_LOADERS.get(interpreter.rsplit("/", 1)[-1], (None, ()))
+    try:
+        machine = os.uname().machine
+    except (AttributeError, OSError):
+        return None
+    if library is None or machine not in machines:
+        return None
+    # glibc names itself and musl refuses the name: each must agree with its loader.
+    if (_glibc_version() is not None) != (library == "glibc"):
+        return None
+    return library
+
+
+def _sigaction_abi() -> Optional[str]:
+    """``glibc`` or ``musl`` when this process runs on one under Linux, in an
+    ABI whose ``struct sigaction`` layout was checked (:data:`_CHECKED_LOADERS`),
+    identified positively: its executable names that ABI's loader, the kernel's
+    machine runs it, and glibc names itself (musl does not). There
+    :func:`_sigchld_action` knows the layout, and the owned kill's proof holds
+    (docs/development/runtime.md, "An owned child's kill"). ``None`` anywhere
+    else: another kernel, Bionic, any other C library, a statically linked
+    program (no loader to name it), an ABI not checked. Worked out once.
+    """
+    if not _SIGACTION_ABI:
+        _SIGACTION_ABI.append(_identify_sigaction_abi())
+    return _SIGACTION_ABI[0]
+
+
+def _sigchld_action() -> Optional[Tuple[int, int]]:
+    """SIGCHLD's handler and flags as the kernel holds them, read with
+    ``sigaction(SIGCHLD, NULL, &old)``; ``None`` where that cannot be read,
+    which includes every platform :func:`_sigaction_abi` does not name: there
+    the struct's layout is not known, and no call is made.
+
+    ``signal.getsignal`` answers from Python's own record of the handlers set
+    through the ``signal`` module: it misses ``SA_NOCLDWAIT``, a flag, and any
+    disposition a native library set.
+    """
+    if _sigaction_abi() is None:
+        return None
+    try:
+        if not _SIGACTION:
+            import ctypes
+
+            words = 1024 // (8 * ctypes.sizeof(ctypes.c_ulong))
+
+            class _SigAction(ctypes.Structure):
+                _fields_ = [
+                    ("handler", ctypes.c_void_p),
+                    ("mask", ctypes.c_ulong * words),
+                    ("flags", ctypes.c_int),
+                    ("restorer", ctypes.c_void_p),
+                ]
+
+            call = ctypes.CDLL(None, use_errno=True).sigaction
+            call.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(_SigAction)]
+            call.restype = ctypes.c_int
+            _SIGACTION.append((call, _SigAction))
+        built = _SIGACTION[0]
+        if built is None:
+            return None
+        call, struct = built
+        old = struct()
+        if call(int(signal.SIGCHLD), None, old) != 0:
+            return None
+        return int(old.handler or 0), int(old.flags)
+    except Exception:  # noqa: BLE001 - unread: the owned kill does not run on it
+        if not _SIGACTION:
+            _SIGACTION.append(None)
+        return None
+
+
+def _children_become_zombies() -> Optional[bool]:
+    """Does a child of this process stay a zombie until it is waited for?
+
+    ``False`` with SIGCHLD set to ``SIG_IGN`` or flagged ``SA_NOCLDWAIT``: the
+    kernel then reaps every child at its exit. ``None`` when the kernel's
+    answer cannot be read (:func:`_sigchld_action`). ``signal.getsignal`` only
+    ever refuses: a ``SIG_IGN`` set through the ``signal`` module is a ``no``,
+    but its default handler proves nothing, since it never sees a flag or a
+    native library's setting.
+    """
+    if signal.getsignal(signal.SIGCHLD) == signal.SIG_IGN:
+        return False
+    action = _sigchld_action()
+    if action is None:
+        return None
+    handler, flags = action
+    return handler != int(signal.SIG_IGN) and not flags & _SA_NOCLDWAIT
+
+
+class _OwnedTree(NamedTuple):
+    """A child of this process that :func:`kill_tree` was handed, unreaped."""
+
+    pid: int
+    #: The group the child leads (its number is the child's pid), or ``None``:
+    #: the child is then signalled alone.
+    group: Optional[int]
+
+
+def _owned_child_exited(pid: int) -> Optional[bool]:
+    """Has *pid*, an unreaped child of this process, exited? ``None`` when it is
+    no such child (never this process's, or reaped already), or when there is
+    no ``waitid`` to ask. ``WNOWAIT`` leaves the zombie to its ``Popen``."""
+    if _waitid is None:
+        return None
+    try:
+        exited = _waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except OSError:
+        return None
+    return exited is not None
+
+
+def _owned_anchor(pid: int) -> Optional[bool]:
+    """Does *pid* anchor the owned kill right now? ``True`` while it is this
+    process's unreaped child in a process whose children become zombies,
+    ``False`` once either is known not to hold, ``None`` when the disposition
+    cannot be read (:func:`_children_become_zombies`). A reading, taken right
+    before each signal: it cannot stop a reap that follows it
+    (docs/development/runtime.md, "An owned child's kill")."""
+    zombies = _children_become_zombies()
+    if zombies is False or _owned_child_exited(pid) is None:
+        return False
+    return zombies
+
+
+def _owned_tree(child: Any, pid: int, pgid: Optional[int]) -> Optional[_OwnedTree]:
+    """*pid*'s tree when *child* anchors it, else ``None``.
+
+    The anchor (docs/development/runtime.md, "An owned child's kill"): a pid is
+    not reused until its process is reaped, only its parent reaps it, and this
+    process does so through *child* once :func:`kill_tree` has returned. Until
+    then the pid names that child and nothing else, and so does the number of
+    the group it leads, since no new process can take that number to lead a
+    group or a session of its own. That holds only under the contract the doc
+    states: nothing else in this process waits on *child* or reaps children it
+    does not name, and children become zombies (SIGCHLD neither ``SIG_IGN`` nor
+    ``SA_NOCLDWAIT``, read from the kernel, so only where :func:`_sigaction_abi`
+    names the C library). Only the group the child leads is anchored: a group
+    of any other number is not.
+    """
+    if getattr(child, "pid", None) != pid or getattr(child, "returncode", 0) is not None:
+        return None
+    if _owned_anchor(int(pid)) is not True:
+        return None
+    group = _resolve_pgid(pgid, pid)
+    if group is not None and group != pid:
+        return None
+    return _OwnedTree(int(pid), group)
+
+
+def _signal_owned(tree: _OwnedTree, sig: int) -> Optional[bool]:
+    """*sig* to the child's group, else to the child alone, each only while
+    the anchor holds (:func:`_owned_anchor`, read right before it). ``True``
+    once sent; nothing sent and ``False`` once the anchor is known to fail,
+    ``None`` once it cannot be read."""
+    anchor = _owned_anchor(tree.pid)
+    if anchor is not True:
+        return anchor
+    if tree.group is not None:
+        try:
+            os.killpg(tree.group, sig)
+            return True
+        except OSError:
+            pass
+        anchor = _owned_anchor(tree.pid)
+        if anchor is not True:
+            return anchor
+    try:
+        os.kill(tree.pid, sig)
+    except OSError:
+        pass
+    return True
+
+
+def _owned_tree_runs(tree: _OwnedTree, not_before: float, max_age_s: float) -> bool:
+    """Does anything of *tree* run: the child until it has exited (a zombie
+    has), then any process in its group that is not a zombie, whenever it
+    joined. A waiting look (:func:`_waiting_process_table`).
+
+    ``False`` only means one look saw nothing run. A look is not atomic: a
+    member can fork a child after the table's names were read and exit before
+    its own row was, leaving the child unlisted. So ``False`` is proof only
+    once every member has its SIGKILL (:func:`_posix_kill_owned`).
+    """
+    if _owned_child_exited(tree.pid) is False:
+        return True
+    if tree.group is None:
+        return False
+    return _Liveness(not_before, max_age_s).group_running(tree.group)
+
+
+def _await_owned_tree(tree: _OwnedTree, until: float, poll_interval_s: float) -> bool:
+    """Poll until nothing of *tree* runs (``True``) or *until* passes
+    (``False``), never sleeping past *until*."""
+    began = time.monotonic()
+    while True:
+        if not _owned_tree_runs(tree, began, poll_interval_s):
+            return True
+        now = time.monotonic()
+        if now >= until:
+            return False
+        time.sleep(max(0.0, min(poll_interval_s, until - now)))
+
+
+def _posix_kill_owned(
+    tree: _OwnedTree,
+    escalate_after_s: float,
+    poll_interval_s: float,
+    *,
+    by_number: Callable[[float], str],
+) -> str:
+    """SIGTERM, the grace, then always one SIGKILL to the group, confirm.
+
+    The grace ends early once a look sees nothing of *tree* run, but no look
+    alone proves the tree gone (:func:`_owned_tree_runs`), so the SIGKILL goes
+    out either way: by the group's number, which stays the child's while the
+    anchor holds, and with only the child's zombie left it changes nothing. On
+    Linux a process that has its SIGKILL can fork no other (the fork is
+    abandoned), so a look after it that sees nothing run does prove the group
+    gone: ``killed``. ``survived`` when something still runs
+    :data:`_KILL_CONFIRM_S` after the SIGKILL, or when the anchor was known to
+    fail before the SIGKILL (:func:`_owned_anchor`) and it was not sent;
+    ``skipped`` when it was known to fail before the SIGTERM, and nothing was
+    sent. Once the anchor cannot be read, the rest of the kill is *by_number*
+    (:func:`_kill_by_number`, given the grace still owed): the owned path
+    sends nothing it has not verified.
+    """
+    sent = _signal_owned(tree, signal.SIGTERM)
+    if sent is None:
+        return by_number(max(escalate_after_s, 0.0))
+    if not sent:
+        return "skipped"
+    _await_owned_tree(tree, time.monotonic() + max(escalate_after_s, 0.0), poll_interval_s)
+    sent = _signal_owned(tree, signal.SIGKILL)
+    if sent is None:
+        return by_number(0.0)
+    if not sent:
+        return "survived"
+    if _await_owned_tree(tree, time.monotonic() + _KILL_CONFIRM_S, poll_interval_s):
+        return "killed"
+    return "survived"
 
 
 def taskkill_tree(pid: int, *, timeout: float = 30.0) -> None:  # pragma: no cover

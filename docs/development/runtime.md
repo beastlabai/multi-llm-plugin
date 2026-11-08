@@ -292,6 +292,80 @@ It is the façade `plans/windows-macos-portability.md` owns; per that plan's seq
 first, so its signatures are a cross-plan interface. A test fails any other runtime module that
 imports `fcntl` or `msvcrt`.
 
+**An owned child's kill.** `kill_tree(pid, child=proc)` is the POSIX kill of a `Popen` child this
+process still holds unreaped: the executor's timed-out runner and the timed-out verify command. It
+rests on one kernel rule. POSIX returns a pid to the system only when its process is waited for,
+and only the parent waits. A fork never takes a pid that is still in use, and a group or session
+number is always its creator's pid. So while the child is unreaped, its pid and the number of the
+group it leads name that tree and nothing else.
+
+That holds only under a lifecycle contract, and the caller keeps it, not the kill:
+
+- the caller holds the only waiter on `proc`, and waits on it only after `kill_tree` returns;
+- nothing in the process reaps children it does not name: no `os.wait()`, `os.waitpid(-1, …)`,
+  `waitpid(0, …)` or `waitpid(-pgid, …)`, `wait3`, `wait4`, `waitid(P_ALL | P_PGID, …)`;
+- children become zombies: SIGCHLD is neither `SIG_IGN` nor flagged `SA_NOCLDWAIT`, either of
+  which has the kernel reap every child at its exit.
+
+`tests/test_no_child_reaper.py` fails any plugin source (`skills/multi-llm/`, `packaging/`) that
+reaps an unnamed child or sets SIGCHLD's disposition: by name, alias, keyword, or by number to a
+call that sets one. It reads the syntax, so a signal held in a variable is outside it. The detach
+double-fork's `waitpid(intermediate, 0)` names its own child and is allowed. The kill itself reads
+the contract right before each signal: the child with `waitid(…, WNOWAIT)`, the disposition with
+`sigaction(SIGCHLD, NULL, &old)`. `signal.getsignal` can only refuse: it sees a `SIG_IGN` set
+through Python's `signal` module, never `SA_NOCLDWAIT` or a native library's setting, so its
+`SIG_DFL` proves nothing. Once the child or the disposition is known to fail, the kill sends
+nothing more. Once the disposition cannot be read, the owned path sends nothing more and the rest
+of the kill is the one by number below. A reading cannot hold the anchor: another thread can reap
+between it and the signal. So the check narrows a breach of the contract, and it does not close it.
+
+Under the contract the kill counts the child's zombie as exited and never reaps it, so its `Popen`
+reads the real exit status. After the SIGTERM it waits out the grace, or less once a look at the
+process table sees nothing of the group run. A look is not atomic. A member can fork after the
+table's names were read and exit before its own row was, so the new child is not listed. So no look
+alone ends the kill. The group always gets one SIGKILL by number, which with only the child's
+zombie left changes nothing. On Linux a process with a SIGKILL pending can fork no other:
+`copy_process` abandons the fork under the same locks `killpg` takes. So a look after it that sees
+nothing run proves the group gone, and only then is the verdict `killed`; otherwise it is
+`survived`. A member this process may not signal (another user's) is outside that proof, and so is
+a process that joins the group from elsewhere in its session after the SIGKILL. Only the group whose
+number is the child's own pid is anchored. Every other target (a detached worker, a pid or group
+read off disk) is known only by number, and `kill_tree` treats it by its identity rules instead.
+
+**Where the owned kill runs.** Its proof has two halves, each checked for one platform only, so
+`_sigaction_abi` gates it on both:
+
+- the kernel's: the group SIGKILL leaves no member forking. Linux's `copy_process` publishes a new
+  process under `tasklist_lock` held for writing, after checking for a pending fatal signal, and a
+  group signal holds that lock for reading, so a fork either finishes before the SIGKILL and gets
+  it, or is abandoned. XNU's `killpg` collects the group's pids, drops the lock, then signals, so a
+  member can finish a fork the SIGKILL never reaches. Current FreeBSD looks sound (`pg_killsx`
+  coordinates with fork), but it has not been run here: a later extension, not a default.
+- the C library's: SIGCHLD's disposition is read through `struct sigaction`, whose layout is the
+  C library's and the ABI's. glibc's generic layout (a handler, a 1024-bit mask, an `int` of
+  flags, a restorer; `SA_NOCLDWAIT` 2) holds for x86_64, i386 and aarch64 programs, which override
+  none of it, and musl uses the same layout and value there. MIPS puts the flags first; Bionic
+  (Android's) does on 64-bit Arm. The ABI is the program's, not the kernel's (`uname` says
+  `aarch64` under a 32-bit Arm userland), so it is read off the dynamic loader the executable
+  names: `ld-linux-x86-64.so.2`, `ld-linux.so.2` or `ld-linux-aarch64.so.1` for glibc, which must
+  also name itself through `confstr(_CS_GNU_LIBC_VERSION)`; `ld-musl-<arch>.so.1` for musl, which
+  is its libc too and refuses that name. The loader is paired with the kernel's machine, since
+  Alpha, SPARC and SuperH call their glibc loader `ld-linux.so.2` as i386 does. A static program
+  names no loader and is not named. Android is refused by `sys.getandroidapilevel` on Python
+  before 3.13, which reports `linux` there, and by `sys.platform == "android"` from 3.13.
+
+| Platform | Kill of an owned child |
+|----------|------------------------|
+| Linux, glibc or musl, x86_64, i386 or aarch64 programs | the owned kill |
+| Linux, any other C library (Bionic, uClibc), a static program, or another ABI (32-bit Arm even on an aarch64 kernel, x32, MIPS, RISC-V, PowerPC, s390x, …) | by number |
+| macOS, FreeBSD and the other BSDs, glibc on another kernel | by number |
+| Windows | its Job Object (`kill_tree`'s Windows path) |
+
+By number, the `child` argument is ignored and the kill is the one it was before the owned path:
+the child's zombie still counts as running, so a timeout kill sits out the grace and the
+`_KILL_CONFIRM_S` (5 s) SIGKILL window, then reports `survived`. Slow and pessimistic, never
+aimed at a number the proof does not cover.
+
 ## Durable retry commands
 
 **Nothing durable stores a skill-dir-absolute command.** The plugin cache is keyed by commit hash,

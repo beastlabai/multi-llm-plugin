@@ -907,8 +907,9 @@ _ALLOWED_ABSOLUTE = {
     f"{PAYLOAD}/multi_llm.py": {"/dev/null"},
     f"{PAYLOAD}/utils/git_utils.py": {"/dev/null"},
     f"{PAYLOAD}/utils/git_diff.py": {"/dev/null"},
+    # `/proc/self/exe`: the loader the executable names, the owned kill's ABI check.
     f"{PAYLOAD}/utils/process_control.py": {
-        "/dev/fd", "/dev/null", "/proc", "/proc/self/fd"},
+        "/dev/fd", "/dev/null", "/proc", "/proc/self/fd", "/proc/self/exe"},
     f"{PAYLOAD}/utils/run_registry.py": {"/proc"},
     # `/dev/shm` beside `/tmp`: step 1b's denied toolchain paths, named in the
     # repo-wide developer message (plan codex-sandbox-unavailable step 1b).
