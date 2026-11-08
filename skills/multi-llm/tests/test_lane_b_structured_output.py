@@ -775,23 +775,25 @@ class TestAReplyThatIsNotJson:
     ):
         """Fix round 8: the diagnosis re-ran the candidate scan over the whole
         reply — twice per attempt, once for the reason and once for the
-        re-ask — and that scan is quadratic on unclosed brackets (a 300 KB
-        reply took 43 s, charged to the task's deadline)."""
+        re-ask — and that scan was then quadratic on unclosed brackets (a
+        300 KB reply took 43 s, charged to the task's deadline). The scan is
+        ``_balanced_spans``, which every candidate reader goes through."""
         from utils import json_extractor
 
         scans = []
-        real = json_extractor.find_json_candidates
+        real = json_extractor._balanced_spans
 
-        def counting(text, char_type="array"):
+        def counting(text, char_type):
             scans.append(len(text))
             return real(text, char_type)
 
-        monkeypatch.setattr(json_extractor, "find_json_candidates", counting)
+        monkeypatch.setattr(json_extractor, "_balanced_spans", counting)
         stream = _opencode_stream(self.BROKEN)
         executor.extract_result(
             get_provider("opencode"), stream, "", prefer_arrays=False
         )
         per_extraction = len(scans)
+        assert per_extraction > 0, "the counter no longer sees the scan"
         scans.clear()
         lane.respond(stream)
 
