@@ -68,7 +68,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .git_utils import pin_repo_root
-from .process_control import FileMutex
+from .process_control import FileMutex, descriptor_owning_handle, handle_of_descriptor
 from .provider_registry import get_write_paths
 from .state_manager import _parse_completion_time, predates_review
 from .subagent_tasks import declared_file_set
@@ -2370,7 +2370,6 @@ class _HeldCopyCalls:  # pragma: no cover - Windows
 
     def __init__(self) -> None:
         import ctypes
-        import msvcrt
         from ctypes import wintypes
 
         set_info = ctypes.WinDLL("kernel32", use_last_error=True).SetFileInformationByHandle
@@ -2386,7 +2385,7 @@ class _HeldCopyCalls:  # pragma: no cover - Windows
             _fields_ = [("ReplaceIfExists", wintypes.DWORD), ("RootDirectory", wintypes.HANDLE),
                         ("FileNameLength", wintypes.DWORD), ("FileName", wintypes.WCHAR * 1)]
 
-        self._ctypes, self._msvcrt, self._set_info = ctypes, msvcrt, set_info
+        self._ctypes, self._set_info = ctypes, set_info
         self._basic_info, self._rename_info = Basic, Rename
         self._disposition_info = wintypes.BOOLEAN  # FILE_DISPOSITION_INFO's one field
 
@@ -2397,7 +2396,7 @@ class _HeldCopyCalls:  # pragma: no cover - Windows
             path, self._ACCESS, self._FILE_SHARE_READ, _winapi.NULL,
             self._OPEN_EXISTING, self._FILE_FLAG_OPEN_REPARSE_POINT, _winapi.NULL)
         try:
-            return self._msvcrt.open_osfhandle(handle, os.O_NOINHERIT)
+            return descriptor_owning_handle(handle)
         except BaseException:
             _winapi.CloseHandle(handle)
             raise
@@ -2425,7 +2424,7 @@ class _HeldCopyCalls:  # pragma: no cover - Windows
 
     def _set(self, held: int, kind: int, info: Any) -> None:
         ctypes = self._ctypes
-        if not self._set_info(self._msvcrt.get_osfhandle(held), kind,
+        if not self._set_info(handle_of_descriptor(held), kind,
                               ctypes.byref(info), ctypes.sizeof(info)):
             raise ctypes.WinError(ctypes.get_last_error())
 

@@ -300,6 +300,21 @@ def _drop_fd_lock(fd: int) -> None:
     fcntl.flock(fd, fcntl.LOCK_UN)
 
 
+def descriptor_owning_handle(handle: int) -> int:  # pragma: no cover - Windows
+    """Windows: wrap the Win32 file *handle* in a non-inheritable C runtime
+    descriptor that owns it (closing the descriptor closes the handle)."""
+    import msvcrt
+
+    return msvcrt.open_osfhandle(handle, os.O_NOINHERIT)
+
+
+def handle_of_descriptor(fd: int) -> int:  # pragma: no cover - Windows
+    """Windows: the Win32 handle behind C runtime descriptor *fd*."""
+    import msvcrt
+
+    return msvcrt.get_osfhandle(fd)
+
+
 class LockUnavailable(Exception):
     """Another process holds the lock. Carries the recorded holder, if any."""
 
