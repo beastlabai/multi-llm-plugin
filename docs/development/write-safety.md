@@ -184,6 +184,94 @@ sibling declaring its own files while THIS task is being classified, so
 `_begin_sweep`/`_undeclared_writes` now add a task's declared set on dispatch and remove
 it on classification instead.
 
+**The rollback store reads each file once, through the descriptor the policy was asked about**
+(Codex review of U57, 2026-11-08). The retention pass (`_store_blob`) keeps its resolving policy
+check, then opens the file with `WritePolicy.open_permitted` and hashes and copies from that one
+read, so a blob always holds the bytes its name is the digest of. Before, the resolving check asked
+about the root on its first resolution only, and the default `allow: ["**"]` matches any path, so
+a file or a folder above it swapped for a link right after that resolution was read through the
+link; and each file was read twice by path, to hash and to copy. On Linux and macOS
+(`OPENS_WITHOUT_FOLLOWING`) each component below the root is opened through its parent's
+descriptor with `O_NOFOLLOW`, as `prompt_files` walks the phase dir, so the file opened is the one
+at the census's repo-relative path and the policy is asked about that path unresolved
+(`violation_relative`); a link anywhere below the root is refused, never followed (the census
+never walks one). A path spelled with a `.` or `..` component or a trailing separator is refused
+before either way of opening is tried: such a spelling can name another file than its lexically
+normalised form, the one the walk opens. `src/a.py/` names no file, yet the resolving check drops
+the trailing separator and permits it, and the walk would open `src/a.py`; `src/link/../a.py`
+names what lies beside the link's target. The census never spells a path so, so this changes
+nothing it retains; it keeps the answer from resting on the caller's spelling. The walk is sounder
+than reading the descriptor's path back (`/proc/self/fd` is Linux-only and can be unmounted, and
+macOS's `F_GETPATH` can spell the path differently from the pinned root) or comparing `fstat`
+with a `stat` of the resolved path (a link put back between the resolution and the `stat`
+passes). Windows has no `dir_fd` and no `O_NOFOLLOW`: the file is opened
+by path, the resolving check runs again after the open, and the path's own entry must be a regular
+file with the descriptor's `(st_dev, st_ino)` (`lstat` against `fstat`, as
+`result_files.read_regular_text` checks). It reads once and only adds checks, so it is never
+weaker than before; what it cannot see is a directory junction above the file that is there for
+the open, gone for the resolving check and back for the identity check. Either way the open never
+waits on a FIFO (`O_NONBLOCK`). On Linux and macOS the blob takes the source's times, extended
+attributes, mode and flags from the descriptor, `fstat`-ed after the read as `shutil.copy2` stats
+after copying, because restore copies them back onto the file (`_replace_with_payload`). The
+pending copy is created exclusively and never through a link, its times and mode set through
+its own descriptor (by path once closed, on Windows without `CopyFile2`): its name is predictable
+(digest, pid, thread), and `shutil.copy2` wrote through a link a runner planted there. Restore
+writes a blob's bytes and `copystat` (`_replace_with_payload`), so streams and encryption are kept
+in the store, not put back by it. Tests: `tests/test_write_sweep_sees_the_same.py`.
+
+**On Windows the blob is `CopyFile2`'s copy, checked against the bytes read; a refused copy is
+removed, or named when it cannot be** (Codex reviews of U80, 2026-11-08). With Python 3.12+ a copy
+from the descriptor's bytes would drop what base's `shutil.copy2` kept there through `CopyFile2`:
+NTFS alternate data streams, file attributes and EFS encryption (a plaintext blob of an encrypted
+file at rest). So `write_copy` calls `CopyFile2` itself, with `copy2`'s
+`COPY_FILE_ALLOW_DECRYPTED_DESTINATION` plus `COPY_FILE_FAIL_IF_EXISTS` and `COPY_FILE_COPY_SYMLINK`,
+and checks the result: the pending name must be a plain new file (a regular file with one link and
+no reparse point), the source path must still name the file the descriptor read (`lstat` against
+`fstat`), and the copy, read back, must hold exactly the bytes read and hashed through the
+descriptor. Where `CopyFile2` refuses access it falls back to the descriptor copy, as `copy2` falls
+back to `copyfile`; any other failure keeps nothing. Before 3.12 there is no `CopyFile2`, `copy2`
+was `copyfile` plus `copystat` there, and the descriptor copy keeps the same. `shutil.copy2`
+overwrites its destination, so an exclusively created placeholder could be swapped for a link before
+it opened it; the pending name is cleared instead (a link there removed, never followed) and
+`CopyFile2` creates it. `CopyFileEx`
+documents what the flags do with a link already at the destination: with `COPY_FILE_FAIL_IF_EXISTS`
+alone the copy fails "only if the target of the symbolic link exists", so a dangling link is followed
+and its target created; with `COPY_FILE_COPY_SYMLINK` as well it "fails in all cases". The
+`CopyFile2` page says nothing either way, so the check after the copy does not rest on it: a pending
+name that is a link or another reparse point once the copy is made has its entry removed, nothing is
+kept, and the pass warns, naming the link's target, since a copy that went through the link is there
+and a file at a path someone else chose is not the pass's to delete. At the source the flag copies a
+link as a link and changes nothing else ("If the source file is not a symbolic link, there is no
+change in behavior"); the source was checked to be a regular file, so a link there is a swap and its
+link copy is refused. `CopyFile2` keeps the source's attributes, read-only included, and Windows will
+not delete a read-only file, so removing a refused copy clears that attribute first: only when the
+name still holds the copy read back (same `(st_dev, st_ino)`), a regular file with no other name and
+no reparse point, and on the entry itself (`os.chmod(..., follow_symlinks=False)` on 3.13+ and 3.12's
+`os.chmod` are both `SetFileAttributesW` on the path, the call CPython makes for `lchmod`). A refused
+copy can hold bytes other than the file's, another file's from outside the repository included (the
+junction case below), so one that still cannot be removed is never dropped like an ordinary failed
+copy: `write_copy` raises `CopyNotContained`, the file gets no rollback point, the pass logs a
+warning naming what is left for the user to delete, the retention warning gives that as the file's
+reason, and its size counts against the store budget. The same holds, on every platform, for a
+descriptor copy that fails part-way.
+
+What these checks leave open, precisely:
+
+1. Between clearing the pending name and `CopyFile2` creating it, a link planted there makes the
+   copy fail, as documented for `CopyFileEx` (a Windows test plants a dangling one there and asserts
+   its target is never created). Were `CopyFile2` to follow it instead, the check after the copy
+   still refuses the copy and names the link's target, but the file written there stays.
+2. The folders above the pending name (`rollback_store/ab/`) are created and reached by path, so a
+   junction planted at one redirects where the copy is created, as it redirected base's `copy2`
+   (hardening the store's path is a design of its own).
+3. While the descriptor is held, Windows refuses to delete or rename the source file (Python's
+   `os.open` does not share delete), so `CopyFile2`'s reopen by path reaches that file unless a
+   directory junction above it is redirected for the copy alone and put back for the identity check.
+   A copy of another file's bytes then fails the bytes check and is removed as above; what the race
+   can still carry into a blob is another file's streams, attributes and times, never its main bytes.
+4. Between the copy and its check, only a writer of the store folder can replace the pending copy,
+   and such a writer could read the copy anyway.
+
 ## Backups
 
 **Backup before modification**: Always backup files before any salvage or modification operation.

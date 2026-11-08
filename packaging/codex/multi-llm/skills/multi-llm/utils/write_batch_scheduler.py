@@ -39,6 +39,7 @@ import os
 import posixpath
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -160,13 +161,16 @@ from .write_safety import (
     TaskSnapshot,
     WritePolicy,
     WriteSafetyError,
+    CopyNotContained,
     admit_disjoint_groups,
     file_sha256,
     overlapping_pairs,
+    read_capped,
     relative_to_root,
     resolve_repo_root,
     claim_external_safety_dir,
     safety_dir,
+    write_copy,
 )
 from .write_verdict import (
     DECLARED_NAMES_ROWS,
@@ -4842,6 +4846,11 @@ class WriteBatchScheduler:
         #: closing utilisation line, rather than in a warning of their own
         #: (see :meth:`_retain`).
         self._unretained_denied: Dict[str, bool] = {}
+        #: ``relative -> path`` for each file whose copy the retention pass
+        #: refused and could not clean up (:meth:`_report_copy_left`), and
+        #: the paths already counted against the budget.
+        self._copies_left: Dict[str, str] = {}
+        self._copies_left_counted: set = set()
         #: ``{spec: version}`` for every distinct runner this run actually
         #: preflighted (F12), populated as ``_dispatch_executor`` dispatches —
         #: the read path fills the same-shaped field from
@@ -8024,6 +8033,8 @@ class WriteBatchScheduler:
 
     def _skip_reason(self, relative: str) -> str:
         """Why :meth:`_store_blob` kept no bytes for ``relative``."""
+        if relative in self._copies_left:
+            return f"its refused copy is left at {self._copies_left[relative]}"
         absolute = os.path.join(self.repo_root, relative)
         if self.policy.violation(absolute, exact=False) is not None:
             return "denied by driver.write_paths"
@@ -8040,7 +8051,14 @@ class WriteBatchScheduler:
     def _store_blob(
         self, relative: str, stamp: Tuple[int, int]
     ) -> Optional[str]:
-        """Put one file's bytes in the store, or ``None`` when it is not retained."""
+        """Put one file's bytes in the store, or ``None`` when it is not retained.
+
+        The file is read once, through the descriptor the policy was asked
+        about, so the bytes stored are the bytes hashed and never bytes from
+        wherever a link swapped in since leads; Windows' ``CopyFile2`` copy is
+        checked against them (docs/development/write-safety.md, the rollback
+        store's reads).
+        """
         size = stamp[0]
         if size > MAX_SNAPSHOT_BYTES:
             return None
@@ -8054,9 +8072,28 @@ class WriteBatchScheduler:
         # trusted from an earlier look (docs/development/write-safety.md).
         if self.policy.violation(absolute, exact=False) is not None:
             return None
-        digest = file_sha256(absolute)
-        if digest is None:
+        opened = self.policy.open_permitted(absolute)
+        if opened is None:
             return None
+        source, info = opened
+        try:
+            return self._store_opened(source, info, relative, absolute)
+        finally:
+            os.close(source)
+
+    def _store_opened(
+        self, source: int, info: os.stat_result, relative: str, absolute: str
+    ) -> Optional[str]:
+        """:meth:`_store_blob` for the file open as *source* (``fstat`` *info*),
+        opened by the name *absolute*."""
+        try:
+            data = read_capped(source, MAX_SNAPSHOT_BYTES, size_hint=info.st_size)
+        except OSError:
+            return None
+        if data is None:
+            return None
+        size = len(data)
+        digest = hashlib.sha256(data).hexdigest()
         blob = self._blob_path(digest)
         if os.path.isfile(blob):
             # F12: the blob may be this run's own earlier copy (a second
@@ -8080,13 +8117,42 @@ class WriteBatchScheduler:
             # crash mid-copy can never leave a truncated blob that a later
             # restore would write over a good file.
             pending = f"{blob}.{os.getpid()}.{threading.get_ident()}.tmp"
-            shutil.copy2(absolute, pending)
+            write_copy(pending, data, source, path=absolute)
             os.replace(pending, blob)
+        except CopyNotContained as left:
+            self._report_copy_left(relative, left)
+            return None
         except OSError:
             return None
         self._counted_digests.add(digest)
         self._retained_bytes += size
         return digest
+
+    def _report_copy_left(self, relative: str, left: CopyNotContained) -> None:
+        """Say, every time, that the store could not clean up after a copy
+        of ``relative`` it refused, and count what is left against the budget.
+
+        A refused copy is refused because it may hold bytes other than the
+        file's, another file's from outside the repository included, so one
+        left behind is named for the user to check and delete, never dropped
+        like an ordinary failed copy (docs/development/write-safety.md, the
+        rollback store's reads).
+        """
+        self._copies_left[relative] = left.pending
+        if left.pending not in self._copies_left_counted:
+            self._copies_left_counted.add(left.pending)
+            try:
+                named = os.lstat(left.pending)
+            except OSError:
+                named = None
+            if named is not None and stat.S_ISREG(named.st_mode):
+                self._retained_bytes += named.st_size
+        self.log(
+            f"[write-subagents] WARNING: {relative} has no rollback point: {left}. "
+            f"A copy the rollback store refused can hold another file's bytes, "
+            f"one from outside {self.repo_root} included: check what is left "
+            f"there and delete it by hand."
+        )
 
     def _undeclared_writes(
         self, task_id: str, snapshot: TaskSnapshot

@@ -50,6 +50,7 @@ that grants the executor more than the repo, is outside what this can enforce.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -71,6 +72,11 @@ from .process_control import FileMutex
 from .provider_registry import get_write_paths
 from .state_manager import _parse_completion_time, predates_review
 from .subagent_tasks import declared_file_set
+
+try:  # pragma: no cover - Windows only
+    import _winapi
+except ImportError:
+    _winapi = None
 
 
 __all__ = [
@@ -95,6 +101,10 @@ __all__ = [
     "relative_to_root",
     "admit_disjoint_groups",
     "file_sha256",
+    "OPENS_WITHOUT_FOLLOWING",
+    "CopyNotContained",
+    "read_capped",
+    "write_copy",
     "redact_argv",
     "redact_text",
 ]
@@ -501,6 +511,371 @@ def file_sha256(path: str) -> Optional[str]:
         return None
 
 
+_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+
+#: How :meth:`WritePolicy.open_permitted` opens the file it hands back: never
+#: blocking on a FIFO swapped in, never inherited by a child, binary on Windows.
+_READ_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_NONBLOCK", 0)
+    | _CLOEXEC
+    | getattr(os, "O_NOINHERIT", 0)
+    | getattr(os, "O_BINARY", 0)
+)
+
+#: Whether a file below the root can be reached one component at a time, each
+#: opened through its parent's descriptor and never through a link (Linux,
+#: macOS). Windows' ``os.open`` takes no ``dir_fd`` and has no ``O_NOFOLLOW``.
+OPENS_WITHOUT_FOLLOWING = bool(
+    hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
+    and os.open in os.supports_dir_fd
+)
+
+
+def _open_below_root(root: str, parts: Sequence[str]) -> Optional[int]:
+    """``root/parts`` opened for reading, every component below *root*
+    opened through its parent's descriptor without following a link; ``None``
+    when one is a link, is gone or is not a directory where one must be.
+    *root* itself is opened by path: a link above the repository is the
+    user's (``prompt_files`` walks the phase dir the same way)."""
+    try:
+        folder = os.open(root, os.O_RDONLY | os.O_DIRECTORY | _CLOEXEC)
+    except OSError:
+        return None
+    try:
+        for name in parts[:-1]:
+            child = os.open(
+                name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _CLOEXEC,
+                dir_fd=folder,
+            )
+            os.close(folder)
+            folder = child
+        return os.open(parts[-1], _READ_FLAGS | os.O_NOFOLLOW, dir_fd=folder)
+    except OSError:
+        return None
+    finally:
+        os.close(folder)
+
+
+def read_capped(handle: int, limit: int, *, size_hint: int = 0) -> Optional[bytes]:
+    """Every byte left in the descriptor *handle*, or ``None`` once more than
+    *limit* came (the file grew past the cap since it was last measured).
+    *size_hint* (its ``st_size``) sizes the first read, so a file that did not
+    grow costs one read and one at the end."""
+    chunks: List[bytes] = []
+    total = 0
+    want = min(max(size_hint, 0), limit) + 1
+    while True:
+        chunk = os.read(handle, want)
+        if not chunk:
+            return b"".join(chunks)
+        total += len(chunk)
+        if total > limit:
+            return None
+        chunks.append(chunk)
+        want = 1 << 16
+
+
+#: Windows (Python 3.12+): ``CopyFile2``, the call ``shutil.copy2`` makes
+#: there. It keeps what a copy of a descriptor's bytes cannot: NTFS alternate
+#: data streams, file attributes and EFS encryption.
+_COPY_FILE2 = getattr(_winapi, "CopyFile2", None)
+#: ``shutil.copy2``'s flag, plus ``COPY_FILE_FAIL_IF_EXISTS`` (0x1 in
+#: WinBase.h), so the copy itself is the exclusive creation of *pending*, and
+#: ``COPY_FILE_COPY_SYMLINK`` (0x800): without it ``CopyFileEx`` is documented
+#: to fail on a link already at the destination only when the link's target
+#: exists, so a dangling one is followed; with both it fails on any link
+#: there. At the source it copies a link as a link, and the source was
+#: checked to be a regular file, so a link there is a swap, refused after the
+#: copy (docs/development/write-safety.md, the rollback store's reads).
+_COPY_FILE2_FLAGS = (getattr(_winapi, "COPY_FILE_ALLOW_DECRYPTED_DESTINATION", 0x8)
+                     | getattr(_winapi, "COPY_FILE_FAIL_IF_EXISTS", 0x1)
+                     | getattr(_winapi, "COPY_FILE_COPY_SYMLINK", 0x800))
+#: The ``CopyFile2`` refusal ``shutil.copy2`` answers with a plain copy.
+_ERROR_ACCESS_DENIED = getattr(_winapi, "ERROR_ACCESS_DENIED", 5)
+
+
+class CopyNotContained(OSError):
+    """:func:`write_copy` cannot show that what it copied is gone or stayed
+    where it put it: a refused copy, or a name already at *pending*, that it
+    could not remove, or a link at *pending* once ``CopyFile2`` had copied,
+    which the copy may have been written through. ``pending`` names the
+    place. What is left there, or at the link's target, can be another
+    file's bytes, one from outside the repository included, so the caller
+    says so instead of dropping it like any other failed copy."""
+
+    def __init__(self, pending: str, message: str) -> None:
+        super().__init__(message)
+        self.pending = pending
+
+
+def write_copy(pending: str, data: bytes, source: int, *,
+               path: Optional[str] = None) -> None:
+    """*data*, just read from the descriptor *source*, as the new file
+    *pending*, with what ``shutil.copy2`` keeps of the source's metadata.
+    Raises ``OSError``; nothing is left at *pending* then, or it raises
+    :class:`CopyNotContained`, naming what is.
+
+    Created exclusively and never through a link: a name already at
+    *pending* (a killed run's leftover, or a link planted at that
+    predictable name) is removed, never written through.
+
+    * Windows on Python 3.12+ (``CopyFile2``), with *path* the name *source*
+      was opened by: copied by path with ``CopyFile2``, as ``shutil.copy2``
+      copies there, so the copy keeps the source's alternate data streams,
+      attributes and EFS encryption, and ``COPY_FILE_FAIL_IF_EXISTS`` with
+      ``COPY_FILE_COPY_SYMLINK`` makes the copy the exclusive creation, never
+      through a link. Then *pending* must be a plain new file (no link, no
+      reparse point, no other name), *path* must still name the file
+      *source* reads (``lstat`` against ``fstat``) and *pending* must hold
+      exactly *data*, so a blob never holds bytes other than the ones read
+      and hashed; otherwise *pending* is removed, its read-only attribute
+      (which ``CopyFile2`` copies) cleared first, as is whatever a failed
+      ``CopyFile2`` left there. Where ``CopyFile2`` refuses access,
+      ``shutil.copy2`` falls back to a plain copy, and so does this.
+    * Elsewhere: *data* is written, and the times, extended attributes,
+      mode and flags come from the descriptor *source*, ``fstat``-ed now,
+      after the read, as ``copy2`` stats after copying, never from a path
+      that can name another file by now. The times and mode are set through
+      the new file's descriptor where the platform can (not Windows)."""
+    if path is not None and _COPY_FILE2 is not None:
+        try:
+            _copy_file2(os.fsdecode(path), os.fsdecode(pending))
+        except CopyNotContained:
+            raise
+        except BaseException as failure:
+            # Whatever a failed copy left at *pending* (part of a copy) goes.
+            _discard_after(failure, pending, None)
+            if getattr(failure, "winerror", None) != _ERROR_ACCESS_DENIED:
+                raise
+        else:
+            made: List[Tuple[int, int]] = []
+            try:
+                if not _copied_unchanged(path, pending, data, source, made):
+                    raise OSError(
+                        f"{path} changed while it was copied to {pending}")
+            except BaseException as failure:
+                _discard_after(failure, pending, made[0] if made else None)
+                raise
+            return
+    info = os.fstat(source)
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+             | _CLOEXEC | getattr(os, "O_NOINHERIT", 0) | getattr(os, "O_BINARY", 0))
+    try:
+        handle = os.open(pending, flags, 0o600)
+    except FileExistsError:
+        _discard(pending)
+        handle = os.open(pending, flags, 0o600)
+    by_descriptor = os.utime in os.supports_fd and os.chmod in os.supports_fd
+    created: Optional[Tuple[int, int]] = None
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            opened = os.fstat(stream.fileno())
+            created = (opened.st_dev, opened.st_ino)
+            stream.write(data)
+            stream.flush()
+            _copy_xattrs(source, stream.fileno())
+            if by_descriptor:
+                _copy_times_and_mode(stream.fileno(), info)
+        if not by_descriptor:  # pragma: no cover - Windows, once the file is closed
+            _copy_times_and_mode(pending, info)
+        if hasattr(info, "st_flags") and hasattr(os, "chflags"):  # pragma: no cover - BSD, macOS
+            try:
+                os.chflags(pending, info.st_flags, follow_symlinks=(
+                    os.chflags not in os.supports_follow_symlinks))
+            except OSError as exc:
+                if exc.errno not in (errno.EOPNOTSUPP, errno.ENOTSUP):
+                    raise
+    except BaseException as failure:
+        _discard_after(failure, pending, created)
+        raise
+
+
+def _copy_file2(path: str, pending: str) -> None:
+    """``CopyFile2`` of *path* to the new file *pending*. A name already
+    there (a leftover, or a link planted there, dangling or not) is removed
+    first, never followed, or nothing is copied; a link put back in between
+    makes the copy fail (``COPY_FILE_FAIL_IF_EXISTS`` with
+    ``COPY_FILE_COPY_SYMLINK``), and :func:`_copied_unchanged` refuses one
+    whatever ``CopyFile2`` made of it."""
+    _discard(pending)
+    _COPY_FILE2(path, pending, _COPY_FILE2_FLAGS)
+
+
+def _copied_unchanged(path: str, pending: str, data: bytes, source: int,
+                      made: List[Tuple[int, int]]) -> bool:
+    """Whether *pending* is the plain new file ``CopyFile2`` made of *path*,
+    *path* is still the file the descriptor *source* reads, and *pending*
+    holds exactly *data*, the bytes read through *source*. *made* gets
+    *pending*'s ``(st_dev, st_ino)`` once it is known to name the file read
+    back. Raises :class:`CopyNotContained` when *pending* is not a plain file
+    once the copy was made: a link there may have taken the copy elsewhere."""
+    named = os.lstat(pending)
+    if not _plain_new_file(named):
+        raise CopyNotContained(pending, _not_the_copy(pending, named))
+    handle = os.open(pending, _READ_FLAGS | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(handle)
+        if not _names_file(pending, opened):
+            return False
+        made.append((opened.st_dev, opened.st_ino))
+        if not _names_file(path, os.fstat(source)):
+            return False
+        return read_capped(handle, len(data)) == data
+    finally:
+        os.close(handle)
+
+
+def _plain_new_file(named: os.stat_result) -> bool:
+    """Whether a name's own entry (*named*, its ``lstat``) is what a copy
+    just made is: a regular file with no other name and no reparse point."""
+    return (stat.S_ISREG(named.st_mode) and named.st_nlink == 1
+            and not getattr(named, "st_file_attributes", 0)
+            & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _not_the_copy(pending: str, named: os.stat_result) -> str:
+    """Why *pending* (``lstat`` *named*) is not the copy just made there."""
+    if stat.S_ISLNK(named.st_mode) or (
+            getattr(named, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+        try:
+            target = os.readlink(pending)
+        except OSError:
+            return (f"{pending} was a reparse point once the copy was made, so "
+                    f"the copy may have been written wherever it leads")
+        return (f"{pending} was a link to {target} once the copy was made, so "
+                f"the copy may have been written there")
+    return f"{pending} was not a plain new file once the copy was made"
+
+
+def _spelled_plainly(path: str) -> bool:
+    """Whether *path* has no ``.`` or ``..`` component and no trailing
+    separator. Spelled so, a path can name another file than its lexically
+    normalised form, the one the descriptor walk opens: ``src/a.py/`` names
+    no file (a directory that is not there), ``src/link/../a.py`` names what
+    lies beside the link's target. The resolving check
+    (:meth:`WritePolicy.violation`) drops a trailing separator and takes
+    ``..`` after the link before it, so it can permit such a spelling for
+    another file than the walk would open. Refused instead, the answer never
+    rests on how the caller spells a path (the census never spells one so)."""
+    separators = os.sep + (os.altsep or "")
+    if not path or path[-1] in separators:
+        return False
+    parts = re.split("[" + re.escape(separators) + "]", path)
+    return os.curdir not in parts and os.pardir not in parts
+
+
+def _names_file(path: str, opened: os.stat_result) -> bool:
+    """Whether *path*'s own entry, never followed, is a regular file and the
+    one *opened* (a descriptor's ``fstat``) describes."""
+    try:
+        named = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(named.st_mode) and (
+        (named.st_dev, named.st_ino) == (opened.st_dev, opened.st_ino)
+    )
+
+
+def _discard(path: str, made: Optional[Tuple[int, int]] = None) -> None:
+    """Remove *path*'s own entry, never what a link there names, if there is
+    one; raise :class:`CopyNotContained` when something is left there.
+
+    *made*, the ``(st_dev, st_ino)`` of the file this pass made there, must
+    still be what the name holds; otherwise that file has gone elsewhere and
+    nothing is removed. Windows will not delete a read-only file, and
+    ``CopyFile2`` copies the attribute from the source, so when the removal
+    is refused the attribute is cleared and the removal tried once more
+    (:func:`_clear_readonly`)."""
+    try:
+        named = os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise CopyNotContained(path, f"{path} could not be examined ({exc})") from exc
+    if made is not None and (named.st_dev, named.st_ino) != made:
+        raise CopyNotContained(
+            path, f"{path} no longer held the copy made there, so that copy "
+                  f"could not be removed")
+    error = _unlink(path)
+    if error is not None and _clear_readonly(path, named):
+        error = _unlink(path)
+    if error is not None:
+        raise CopyNotContained(path, f"{path} could not be removed ({error})") from error
+
+
+def _discard_after(failure: BaseException, pending: str,
+                   made: Optional[Tuple[int, int]]) -> None:
+    """:func:`_discard` *pending* once a copy to it failed with *failure*.
+    What cannot be removed is raised as :class:`CopyNotContained`, chained
+    to *failure*; an interrupt goes on as it is."""
+    try:
+        _discard(pending, made)
+    except CopyNotContained as left:
+        if isinstance(failure, Exception):
+            raise left from failure
+
+
+def _unlink(path: str) -> Optional[OSError]:
+    """Remove the entry *path* (a link itself, never its target); the error
+    when it stays."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return exc
+    return None
+
+
+def _clear_readonly(path: str, named: os.stat_result) -> bool:
+    """Clear the read-only attribute of *path*'s own entry, *named* its
+    ``lstat`` (Windows); whether it was cleared. Only for a plain file
+    (:func:`_plain_new_file`): no reparse point, and no other name, whose
+    file's attribute would change too. Set on the entry itself: ``os.chmod``
+    without following (3.13+) and 3.12's ``os.chmod`` are both
+    ``SetFileAttributesW`` on the path, the call CPython makes for
+    ``lchmod`` there."""
+    if not (getattr(named, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_READONLY
+            and _plain_new_file(named)):
+        return False
+    try:
+        if os.chmod in os.supports_follow_symlinks:
+            os.chmod(path, stat.S_IREAD | stat.S_IWRITE, follow_symlinks=False)
+        else:  # pragma: no cover - Windows before 3.13
+            os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+    except OSError:
+        return False
+    return True
+
+
+def _copy_times_and_mode(target: Any, info: os.stat_result) -> None:
+    """``shutil.copystat``'s times, then mode (in its order), onto *target*:
+    a descriptor, or a path where descriptors take neither."""
+    os.utime(target, ns=(info.st_atime_ns, info.st_mtime_ns))
+    os.chmod(target, stat.S_IMODE(info.st_mode))
+
+
+def _copy_xattrs(source: int, target: int) -> None:
+    """``shutil.copystat``'s extended attributes, descriptor to descriptor,
+    skipping what it skips; a no-op where there are none (macOS, Windows)."""
+    if not hasattr(os, "listxattr"):  # pragma: no cover - macOS, Windows
+        return
+    try:
+        names = os.listxattr(source)
+    except OSError as exc:
+        if exc.errno not in (errno.ENOTSUP, errno.ENODATA, errno.EINVAL):
+            raise
+        return
+    for name in names:
+        try:
+            os.setxattr(target, name, os.getxattr(source, name))
+        except OSError as exc:
+            if exc.errno not in (errno.EPERM, errno.ENOTSUP, errno.ENODATA,
+                                 errno.EINVAL, errno.EACCES):
+                raise
+
+
 # ---------------------------------------------------------------------------
 # D3l — the declared write policy
 # ---------------------------------------------------------------------------
@@ -867,6 +1242,8 @@ class WritePolicy:
             for path, rule in dict(self.exact_deny or {}).items()
             if _exact_key(path)
         }
+        #: ``(root, realpath(root))`` for :meth:`open_permitted`'s walk.
+        self._resolved_root: Optional[Tuple[str, str]] = None
 
     def deny_exact(self, paths: Iterable[str], rule: str) -> List[str]:
         """Add *paths* (repo-relative, git's form) to the exact-path deny
@@ -937,9 +1314,9 @@ class WritePolicy:
         relative = relative_to_root(path, self.root)
         if _outside_root(relative):
             return f"outside the pinned repo root {self.root}"
-        for pattern, matcher in zip(self.deny, self._deny):
-            if matcher.match(relative):
-                return f"driver.write_paths.deny pattern {pattern!r}"
+        rule = self._deny_rule(relative)
+        if rule is not None:
+            return rule
         if exact:
             return self.exact_rule(path)
         return None
@@ -955,7 +1332,29 @@ class WritePolicy:
         denied = self.denied(path, exact=exact)
         if denied is not None:
             return denied
-        relative = relative_to_root(path, self.root)
+        return self._allow_rule(relative_to_root(path, self.root))
+
+    def violation_relative(self, relative: str) -> Optional[str]:
+        """``violation(path, exact=False)`` for the repo-relative POSIX
+        *relative* as it stands, never resolved.
+
+        Only for a path the caller reached from the root without following a
+        link (:meth:`open_permitted`): resolving it again would ask about
+        wherever a link swapped in since leads, not about the file in hand.
+        """
+        if _outside_root(relative):
+            return f"outside the pinned repo root {self.root}"
+        return self._deny_rule(relative) or self._allow_rule(relative)
+
+    def _deny_rule(self, relative: str) -> Optional[str]:
+        """The first deny pattern matching the repo-relative *relative*, named."""
+        for pattern, matcher in zip(self.deny, self._deny):
+            if matcher.match(relative):
+                return f"driver.write_paths.deny pattern {pattern!r}"
+        return None
+
+    def _allow_rule(self, relative: str) -> Optional[str]:
+        """Why no allow pattern admits the repo-relative *relative*, or ``None``."""
         if not self._allow:
             return "driver.write_paths.allow is empty, so nothing may be written"
         for matcher in self._allow:
@@ -965,6 +1364,79 @@ class WritePolicy:
             f"no driver.write_paths.allow pattern matches it "
             f"(allow: {', '.join(self.allow)})"
         )
+
+    def open_permitted(self, path: str) -> Optional[Tuple[int, os.stat_result]]:
+        """A read-only descriptor of the regular file at *path*, and its
+        ``fstat``, when the file that descriptor reads is one
+        ``violation(path, exact=False)`` permits; ``None`` otherwise. The
+        caller closes the descriptor.
+
+        The check is bound to the descriptor, not to an earlier look at the
+        path: whatever *path* resolved to a moment ago, the descriptor is what
+        gets read (docs/development/write-safety.md, the rollback store's
+        reads).
+
+        * Where :data:`OPENS_WITHOUT_FOLLOWING` (Linux, macOS), *path* is taken
+          lexically below the root and each component is opened through its
+          parent's descriptor, never through a link. The file opened is the one
+          at that repo-relative path, so the policy is asked about the path
+          itself (:meth:`violation_relative`). A link anywhere below the root
+          is refused, never followed.
+        * Elsewhere (Windows: no ``dir_fd``, no ``O_NOFOLLOW``) the file is
+          opened by path, then asked about again by :meth:`violation`, which
+          resolves, and the path's own entry must then be a regular file with
+          the descriptor's ``(st_dev, st_ino)`` (``lstat`` against ``fstat``,
+          as ``result_files.read_regular_text`` checks). A link at the file's
+          own name is refused whenever it was there; what this cannot see is a
+          directory junction above the file that is there for the open, gone
+          for the resolving check and back for the identity check.
+
+        Either way a path spelled with a ``.`` or ``..`` component or a
+        trailing separator is refused (:func:`_spelled_plainly`), so the
+        answer never depends on how the caller spells a path.
+        """
+        if not _spelled_plainly(path):
+            return None
+        joined = path if os.path.isabs(path) else os.path.join(self.root, path)
+        if not OPENS_WITHOUT_FOLLOWING:
+            return self._open_by_path(joined)
+        # The root as `violation` sees it (resolved), once per root.
+        if self._resolved_root is None or self._resolved_root[0] != self.root:
+            self._resolved_root = (self.root, os.path.realpath(self.root))
+        root = self._resolved_root[1]
+        relative = os.path.relpath(joined, root)
+        parts = relative.split(os.sep)
+        if (relative == os.curdir or os.pardir in parts or "" in parts
+                or self.violation_relative("/".join(parts)) is not None):
+            return None
+        handle = _open_below_root(root, parts)
+        if handle is None:
+            return None
+        try:
+            opened = os.fstat(handle)
+            if stat.S_ISREG(opened.st_mode):
+                return handle, opened
+        except OSError:
+            pass
+        os.close(handle)
+        return None
+
+    def _open_by_path(self, path: str) -> Optional[Tuple[int, os.stat_result]]:
+        """:meth:`open_permitted` where a path cannot be walked by descriptor."""
+        try:
+            handle = os.open(path, _READ_FLAGS)
+        except OSError:
+            return None
+        try:
+            opened = os.fstat(handle)
+            if (stat.S_ISREG(opened.st_mode)
+                    and self.violation(path, exact=False) is None
+                    and _names_file(path, opened)):
+                return handle, opened
+        except OSError:
+            pass
+        os.close(handle)
+        return None
 
     def hit(self, path: str) -> Optional[PolicyHit]:
         """``path``'s :class:`PolicyHit`, or ``None`` when the policy permits
