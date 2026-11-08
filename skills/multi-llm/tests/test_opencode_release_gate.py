@@ -32,6 +32,7 @@ import tarfile
 import textwrap
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -242,12 +243,28 @@ def write_row8(root: Path, *, stamp: str, host: str, image_id: str = IMAGE_ID,
     return records
 
 
-@pytest.fixture(scope="module")
+class Built(NamedTuple):
+    """The session's one staged package, packed once, with that tarball's facts."""
+
+    package: Path
+    tarball: Path
+    facts: dict
+
+
+@pytest.fixture(scope="session")
 def built(tmp_path_factory):
-    """One staged package for the module; every :class:`GateRun` copies it."""
-    destination = tmp_path_factory.mktemp("opencode-gate") / "pkg"
-    pkg_build.build(destination=destination, allow_dirty=True)
-    return destination
+    """One staged package and its tarball for the whole session.
+
+    Nothing writes into these paths: every :class:`GateRun` copies the tree and
+    the tarball into its own directory, so a test that rewrites its package,
+    stamp or tarball only ever touches its own copy. Under ``-n`` each worker
+    builds its own.
+    """
+    root = tmp_path_factory.mktemp("opencode-gate")
+    package = root / "pkg"
+    pkg_build.build(destination=package, allow_dirty=True)
+    tarball = make_tarball(package, root / "built.tgz")
+    return Built(package, tarball, pkg_build.tarball_facts(tarball))
 
 
 class GateRun:
@@ -261,18 +278,24 @@ class GateRun:
     under development); everything else is real: HEAD, the pins, the registry.
     """
 
-    def __init__(self, tmp_path: Path, monkeypatch, built: Path | None = None):
+    def __init__(self, tmp_path: Path, monkeypatch, built: Built | None = None):
         monkeypatch.setattr(gate, "dirty_paths", lambda root=gate.REPO_ROOT: [])
         self.root = tmp_path
         self.dir = tmp_path / "gate"
         self.package = tmp_path / "pkg"
+        self.tarball = tmp_path / "opencode-multi-llm-gated.tgz"
         if built is not None:
-            shutil.copytree(built, self.package)
+            # The shared tarball was packed from this same tree, so copying it
+            # is the pack; the facts are the shared ones re-pointed at the copy.
+            shutil.copytree(built.package, self.package)
+            shutil.copy2(built.tarball, self.tarball)
+            self.facts = {**built.facts, "path": str(self.tarball),
+                          "files": list(built.facts["files"])}
         else:
             pkg_build.build(destination=self.package, allow_dirty=True)
+            make_tarball(self.package, self.tarball)
+            self.facts = pkg_build.tarball_facts(self.tarball)
         self.digest = (self.package / "dist" / "tree.sha256").read_text("utf-8").strip()
-        self.tarball = make_tarball(self.package, tmp_path / "opencode-multi-llm-gated.tgz")
-        self.facts = pkg_build.tarball_facts(self.tarball)
         self.host = gate.host_pin()
         self.registry = gate.single_registry()
         self.calls: list = []

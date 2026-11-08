@@ -1055,14 +1055,16 @@ class TestTagResolution:
 @pytest.fixture(scope="module")
 def exported(tmp_path_factory):
     """A release-gate record exported by a full passing gate session, through
-    the gate's own writers (``GateRun``), for the module."""
-    from tests.test_opencode_release_gate import GateRun, pkg_build
+    the gate's own writers (``GateRun``), for the module.
 
-    built = tmp_path_factory.mktemp("exported-build") / "pkg"
-    pkg_build.build(destination=built, allow_dirty=True)
+    ``GateRun`` builds and packs its own package here. The gate module's shared
+    ``built`` is a fixture of that module: imported into this one, pytest gives
+    it a second cache and it builds again, so it would share nothing."""
+    from tests.test_opencode_release_gate import GateRun
+
     root = tmp_path_factory.mktemp("exported")
     with pytest.MonkeyPatch.context() as monkeypatch:
-        run = GateRun(root, monkeypatch, built)
+        run = GateRun(root, monkeypatch)
         run.full()
         run.stamp()
         path = run.export()

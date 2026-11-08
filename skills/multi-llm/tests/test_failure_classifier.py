@@ -959,6 +959,13 @@ def _substring_classifier_sites(rel, tree):
             if isinstance(target, ast.Name):
                 literal_lists[target.id] = (node.lineno, items)
 
+    # One pass indexes every comprehension by its element node, so the
+    # `any(... for ...)` lookup below is a dict hit rather than a second walk.
+    comprehension_of = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.GeneratorExp, ast.ListComp)):
+            comprehension_of[id(node.elt)] = node
+
     sites = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Compare):
@@ -971,17 +978,15 @@ def _substring_classifier_sites(rel, tree):
                 sites.append((rel, node.lineno, repr(left.value)))
         elif isinstance(left, ast.Name):
             # `any(pattern in error_lower for pattern in <NAME>)`
-            for comp in ast.walk(tree):
-                if not isinstance(comp, (ast.GeneratorExp, ast.ListComp)):
-                    continue
-                if comp.elt is not node:
-                    continue
-                for generator in comp.generators:
-                    iterated = generator.iter
-                    if isinstance(iterated, ast.Name):
-                        found = literal_lists.get(iterated.id)
-                        if found and any(_banned(v) for v in found[1]):
-                            sites.append((rel, found[0], iterated.id))
+            comp = comprehension_of.get(id(node))
+            if comp is None:
+                continue
+            for generator in comp.generators:
+                iterated = generator.iter
+                if isinstance(iterated, ast.Name):
+                    found = literal_lists.get(iterated.id)
+                    if found and any(_banned(v) for v in found[1]):
+                        sites.append((rel, found[0], iterated.id))
     return sites
 
 
