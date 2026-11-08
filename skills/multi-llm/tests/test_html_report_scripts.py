@@ -741,7 +741,11 @@ class TestHostileMetadataStaysText:
         # The page rendered (an empty page passes the checks above), and the
         # hostile values are its text.
         text = "".join(parsed.text)
-        for value in (EVIL_STATUS, EVIL_IMPORTANCE.upper(), EVIL_REFERENCE if "review-plan" in kind
+        # An importance naming no level reads as MEDIUM on the flat and PR
+        # pages (utils/importance.py), so the hostile value is replaced, not
+        # shown; the consolidated page still shows it, as escaped text.
+        importance_text = EVIL_IMPORTANCE.upper() if kind == "consolidated" else "MEDIUM"
+        for value in (EVIL_STATUS, importance_text, EVIL_REFERENCE if "review-plan" in kind
                       or kind == "consolidated" else EVIL_PATH):
             assert value in text, (value, text[:2000])
         if kind != "consolidated":
