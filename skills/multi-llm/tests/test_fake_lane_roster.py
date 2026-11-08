@@ -6,7 +6,7 @@ that ``tests/mocks/mock_llm.py`` can stand in for that CLI, and the fake binary
 is the only coverage such a row will ever get, because redirection to a local
 stub was measured and found impossible for it. This file is what turns that
 promise into something a test types out loud, in the same
-declaration-vs-implementation spirit as ``tests/test_providers.py``.
+declaration-vs-implementation spirit as ``tests/test_provider_contract.py``.
 
 **Adding an identity is five parts, and no part is optional:**
 

@@ -37,7 +37,7 @@ def _registry_provider_names():
     """Every provider id in the registry, so the sweeps below cannot miss a new one.
 
     Deliberately the same shape (and the same docstring sentence) as
-    ``tests/test_providers.py::_registered_provider_names`` — that helper's
+    ``tests/provider_test_support.py::_registered_provider_names`` — that helper's
     docstring *is* M0.a's requirement, and a second module implementing the same
     rule differently would be the drift the rule exists to prevent. It is a
     twin rather than an import because ``@pytest.mark.parametrize`` evaluates its

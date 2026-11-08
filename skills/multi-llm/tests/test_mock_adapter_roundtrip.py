@@ -23,7 +23,7 @@ declares:
    which must return the content that went in, with ``parse_usage`` agreeing
    with the declared ``usage_support``.
 
-This is ``tests/test_providers.py``'s declaration-vs-implementation discipline
+This is ``tests/test_provider_contract.py``'s declaration-vs-implementation discipline
 applied to the mock: nothing here is new *behaviour*, it is the first assertion
 over behaviour the mock was already assumed to have.
 
@@ -414,7 +414,7 @@ class TestMockWireFormatSurvivesTheAdapter:
             assert usage is None, (
                 f"{identity} declares usage_support='none' but recovered {usage!r} "
                 f"from the mock's stream; the declaration and the extractor "
-                f"disagree (tests/test_providers.py owns the same invariant from "
+                f"disagree (tests/test_provider_contract.py owns the same invariant from "
                 f"the adapter's side)."
             )
             return

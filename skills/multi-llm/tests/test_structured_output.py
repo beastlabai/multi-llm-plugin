@@ -405,7 +405,7 @@ class TestSchemaKeywordIsInertWhenUnset:
 
     @staticmethod
     def _table():
-        from tests.test_providers import (
+        from tests.test_provider_timeouts import (
             PRE_L5_ARGV,
             PRE_L5_ARGV_MODELS,
             PRE_L5_ARGV_PROMPT,

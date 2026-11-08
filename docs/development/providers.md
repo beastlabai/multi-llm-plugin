@@ -97,7 +97,7 @@ implementing `build_agent_command(prompt, model, profile)` with the runner's **o
 `--sandbox read-only`, opencode `--agent plan`, claude
 `--allowed-tools`/`--disallowed-tools`) and declaring it in `agent_profiles`. There is
 no fabricated read-only mode: an adapter without one raises `ProfileUnsupported` and is refused as
-a runner with the reason named. `tests/test_providers.py` (and `tests/test_subagent_executor.py`) cross-check
+a runner with the reason named. `tests/test_provider_contract.py` (and `tests/test_subagent_executor.py`) cross-check
 declaration against implementation in both directions, for profiles **and** for
 `parse_usage`/`usage_support`, so the capability data cannot drift from the code.
 

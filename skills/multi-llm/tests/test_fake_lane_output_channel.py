@@ -175,7 +175,7 @@ class TestTheMockRosterTracksTheDeclaration:
     """`mock_llm.READ_ONLY_IDENTITIES` cannot drift from the adapters."""
 
     def test_every_read_only_identity_is_a_declared_read_only_adapter(self):
-        from tests.test_providers import TestDeclaredOutputChannel
+        from tests.test_provider_contract import TestDeclaredOutputChannel
 
         sys.path.insert(0, str(MOCK_LLM.parent))
         import mock_llm
@@ -192,7 +192,7 @@ class TestTheMockRosterTracksTheDeclaration:
         not exist.
         """
         from tests.harness.skill_runner import SkillRunner
-        from tests.test_providers import TestDeclaredOutputChannel
+        from tests.test_provider_contract import TestDeclaredOutputChannel
 
         sys.path.insert(0, str(MOCK_LLM.parent))
         import mock_llm
@@ -209,7 +209,7 @@ class TestTheMockRosterTracksTheDeclaration:
         """The exception cannot outlive what it excuses: every member must be
         on the declared roster, have a fake identity, and NOT refuse there."""
         from tests.harness.skill_runner import SkillRunner
-        from tests.test_providers import TestDeclaredOutputChannel
+        from tests.test_provider_contract import TestDeclaredOutputChannel
 
         sys.path.insert(0, str(MOCK_LLM.parent))
         import mock_llm

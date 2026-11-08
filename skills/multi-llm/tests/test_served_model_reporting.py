@@ -1,7 +1,7 @@
 """§3.6 (task L7) — `served_model` travels from the envelope to every report.
 
 The adapter half (``utils/providers/claude_code.py``) is covered by
-``tests/test_providers.py::TestClaudeCodeServedModel``. This file covers the
+``tests/test_provider_claude_code.py::TestClaudeCodeServedModel``. This file covers the
 *carriage*: adapter → ``invoke_with_provider`` → ``invoke_with_file_output`` →
 the fan-out result records → the markdown/HTML surfaces that name a model.
 

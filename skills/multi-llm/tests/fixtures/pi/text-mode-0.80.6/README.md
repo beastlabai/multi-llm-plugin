@@ -5,7 +5,7 @@
 > (plans/opencode-validator-false-rate-limit-and-denied-turn.md §7), and the
 > graded set is the json-mode one in the parent directory. Nothing here is
 > collected by the capture-row globs (`test_provider_fixture_rows._discover`,
-> `test_stderr_diagnosis._capture_rows`, `test_providers._provider_capture_rows`
+> `test_stderr_diagnosis._capture_rows`, `test_provider_failure_classification._provider_capture_rows`
 > read only `tests/fixtures/pi/*`), so this manifest is no longer graded. The one
 > exception is `success.*`, which `tests/test_pi_json_mode.py` reads **by explicit
 > path** to grade `PiProvider.parse_output`'s text-mode back-compat leg (a pi that

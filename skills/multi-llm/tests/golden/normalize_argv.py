@@ -82,12 +82,12 @@ _ROW_DERIVED = {
     # §7 step 6: a flag whose VALUE is derived from the slot's `timeout_s=` is
     # row-derived argv, not policy. qwen-code's `--max-wall-time` is the first
     # such flag to reach this table — agy's `--print-timeout` never did, because
-    # agy is `lane: fake` and its coverage lives entirely in test_providers.py.
+    # agy is `lane: fake` and its coverage lives entirely in test_provider_agy.py.
     #
     # Keeping the seconds verbatim would freeze ONE run's slot length into the
     # pinned row and redden every other one, so the placeholder pins the SHAPE
     # (flag present, one value, right position). The VALUE is pinned elsewhere,
-    # deliberately: test_providers.py's derivation table plus the raw-call-log
+    # deliberately: test_provider_qwen_code.py's derivation table plus the raw-call-log
     # assertion that the logged number is numeric and strictly under the row's
     # own timeout. Without that second half the placeholder would happily
     # normalize a wrong number to green.
@@ -101,7 +101,7 @@ _ROW_DERIVED = {
     # so the two shapes could never match and omp's generate dispatch was filed
     # `profile: probe` with a literal `"--max-time": "1195"` in the pinned row.
     # The value's own correctness is pinned where `--max-wall-time`'s is:
-    # `test_providers.py`'s derivation table (`None → None`, `1200 → "1195"`,
+    # `test_provider_omp.py`'s derivation table (`None → None`, `1200 → "1195"`,
     # the floor, the omission and the WARNING).
     "--max-time": PLACEHOLDER_TIMEOUT,
     # omp renders two values that are neither policy nor row-derived but

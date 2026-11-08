@@ -62,7 +62,7 @@ from .test_no_committed_secrets import _synthesize  # noqa: E402
 
 
 # Availability is the adapter's own `CursorAgentProvider.is_available()`, which
-# `tests/test_providers.py` covers.
+# `tests/test_provider_cursor_agent.py` covers.
 
 
 class TestSaveLog:

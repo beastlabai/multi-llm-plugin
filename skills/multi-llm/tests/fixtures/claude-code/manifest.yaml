@@ -262,7 +262,7 @@ rows:
       SERVER-side half of the shape is captured instead, as the extra
       `zero-byte-response` row below (failserver `--mode empty`: accept the
       request, write zero bytes, close), and `parse_output`'s own empty branch is
-      covered by unit assertion in test_providers.py.
+      covered by unit assertion in test_provider_claude_code.py.
 
   auth-error:
     stdout: auth-error.stdout.txt

@@ -271,7 +271,7 @@ def negative_tokens_in_env(env):
 def _registered_provider_names():
     """Every provider id in the registry, so the sweeps below cannot miss a new one.
 
-    A local twin of the same helper in `tests/test_providers.py`, for the reason
+    A local twin of the same helper in `tests/provider_test_support.py`, for the reason
     recorded there: `@pytest.mark.parametrize` evaluates its argument while the
     class body runs, so the roster has to be importable at that moment.
     """

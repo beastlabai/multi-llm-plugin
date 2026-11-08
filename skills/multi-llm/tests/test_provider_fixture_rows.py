@@ -2,7 +2,7 @@
 
 **Why this module exists.** Seven providers ship parser fixtures under
 ``tests/fixtures/<provider>/``; each set is consumed by a hand-written class in
-``test_providers.py`` (copilot's is ~450 lines). Nothing discovered fixture
+a ``test_provider_*.py`` file (copilot's is ~450 lines). Nothing discovered fixture
 directories and nothing asserted that a provider *had* one — which is exactly
 why nine missing sets went unnoticed for as long as they did. Replicating the
 hand-written pattern nine more times would leave the tenth omission just as
@@ -108,7 +108,7 @@ CANONICAL_ROWS = (
 # --------------------------------------------------------------------------- #
 
 #: Group A — fixtures ARE committed, but are still consumed by a hand-written
-#: class in ``test_providers.py`` rather than by a manifest. The value is that
+#: class in a ``test_provider_*.py`` file rather than by a manifest. The value is that
 #: class's name and both it and the fixture directory are asserted to exist, so
 #: this table cannot be used to park a provider that has no fixtures at all.
 #: Migrating one of these to a manifest is a strict improvement and deletes its
@@ -227,9 +227,12 @@ def test_group_a_exemptions_really_have_committed_fixtures(provider):
         f"{provider} claims committed fixtures but {directory} is empty/absent"
     )
     consumer = MANIFEST_PENDING[provider]
-    source = (Path(__file__).parent / "test_providers.py").read_text(encoding="utf-8")
+    source = "".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(Path(__file__).parent.glob("test_provider_*.py"))
+    )
     assert f"class {consumer}" in source, (
-        f"{provider}'s declared consumer {consumer} is gone from test_providers.py; "
+        f"{provider}'s declared consumer {consumer} is gone from the test_provider_*.py files; "
         f"its fixtures are now ungraded"
     )
 

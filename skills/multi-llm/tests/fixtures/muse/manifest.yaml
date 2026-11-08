@@ -543,4 +543,4 @@ rows:
       process was killed before it wrote a line — a harness artifact, not a CLI
       behaviour — and manufacturing one with `timeout(1)` is the zero-byte-hang
       trap §6 step 3 forbids. The parser's empty branch is still covered, by
-      unit assertion in test_providers.py.
+      unit assertion in test_provider_muse.py.

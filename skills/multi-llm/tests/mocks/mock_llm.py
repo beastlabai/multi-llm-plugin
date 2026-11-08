@@ -832,7 +832,7 @@ FILE_INSTRUCTION_RE = re.compile(
 #: literal rather than imported from `utils.providers`: this file is a stand-in
 #: for a third-party binary and must not depend on the product it fakes — the
 #: pin that keeps the two in step is
-#: `test_providers.TestDeclaredOutputChannel.CANNOT_WRITE_FILES`, and
+#: `test_provider_contract.TestDeclaredOutputChannel.CANNOT_WRITE_FILES`, and
 #: `test_fake_lane_output_channel.py` asserts this set against it.
 #:
 #: The other three declared read-only adapters (`aider` `/ask`, `qwen-code`
@@ -1259,7 +1259,7 @@ def format_agy_output(content: str) -> str:
     no credential-free route to a successful run at any price.
 
     The shape below is therefore the repo's existing record of real runs —
-    `AgyProvider`'s docstring and `tests/test_providers.TestAgyProvider._envelope`
+    `AgyProvider`'s docstring and `tests/test_provider_agy.TestAgyProvider._envelope`
     — with every key corroborated **offline** against the installed binary itself
     (agy 1.1.13, `agy --version`), whose Go JSON struct tags carry `ConversationID
     json:"conversation_id"`, `Status json:"status"`, `Response json:"response"`,

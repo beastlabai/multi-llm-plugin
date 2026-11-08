@@ -79,7 +79,7 @@ MODELS = {
     # cannot cause the failure it guards. The measurement such a row would have
     # carried (under `--approval-mode yolo` with the explicit allow-list,
     # `write` and `edit` really created and edited files) is pinned in
-    # `tests/test_providers.py::TestOmpProvider` instead.
+    # `tests/test_provider_omp.py::TestOmpProvider` instead.
     "omp": "openrouter/openai/gpt-5.6-luna",
     "opencode": "openai/gpt-5.5",
     "pi": "anthropic/claude-opus-4-8",
@@ -377,7 +377,7 @@ class TestDocumentedEndpointRecipesStillWork:
 # The argv <-> `supports_file_output` guard
 # --------------------------------------------------------------------------- #
 #
-# `TestDeclaredOutputChannel` (test_providers.py) pins WHICH adapters declare
+# `TestDeclaredOutputChannel` (test_provider_contract.py) pins WHICH adapters declare
 # they cannot write the review result file. It cannot see WHY, so an adapter
 # that later gains a read-only mode and forgets to declare it keeps that roster
 # green while its users get "JSON parsing failed from both file and stdout" —
@@ -653,8 +653,8 @@ class TestReadOnlyArgvMatchesTheDeclaration:
         )
 
     def test_the_roster_the_argv_produces_is_the_roster_that_is_pinned(self):
-        """This file's *why* and test_providers.py's *what* cannot drift apart."""
-        from tests.test_providers import TestDeclaredOutputChannel
+        """This file's *why* and test_provider_contract.py's *what* cannot drift apart."""
+        from tests.test_provider_contract import TestDeclaredOutputChannel
 
         derived = {
             name

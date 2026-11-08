@@ -989,7 +989,7 @@ read_only_modes:
       In-repo and enforced, which is why §3.5 counts it among the three
       positives: build_agent_command's agent-readonly leg renders both flags,
       AGENTS.md names it as this adapter's own denial mechanism, and
-      tests/test_providers.py cross-checks the declaration against the
+      tests/test_provider_*.py cross-check the declaration against the
       implementation in both directions.
   cline:
     mechanism: null
@@ -1371,7 +1371,7 @@ defaults:
     # KiloCode silently ignores unsupported variants. These suffixes match
     # `kilocode models <backend> --refresh --verbose` (7.8.15, 2026-10-22),
     # captured in tests/fixtures/kilocode/model_variants.json and checked by
-    # tests/test_providers.py::TestKiloCodeDefaultModelSpecs.
+    # tests/test_provider_kilocode.py::TestKiloCodeDefaultModelSpecs.
     - kilocode:openrouter/moonshotai/kimi-k3:max
     - kilocode:openrouter/nvidia/nemotron-3-ultra-550b-a55b:high
     - kilocode:openrouter/z-ai/glm-5.3:max

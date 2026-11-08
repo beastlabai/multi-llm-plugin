@@ -23,7 +23,7 @@ Three things can regress, and they are the §6.1 matrix's three ship-gate tests:
   refusal.
 
 Everything here is parametrized over `_registry_names()`. That helper is the
-local twin of `test_providers._registered_provider_names()`, forced by the same
+local twin of `provider_test_support._registered_provider_names()`, forced by the same
 parametrize-at-class-body-time problem, and its docstring is the requirement.
 """
 
@@ -54,7 +54,7 @@ def _registry_names():
 
     Resolved at class-definition time because `@pytest.mark.parametrize`
     evaluates its argument while the class body runs — the same constraint that
-    forces `test_providers.py`'s local twin at its own class bodies.
+    forces `provider_test_support.py`'s local twin at its own class bodies.
 
     **No test in this module may name an adapter or a count** (M0.a): the
     specifications M10 came from were written against thirteen adapters and the

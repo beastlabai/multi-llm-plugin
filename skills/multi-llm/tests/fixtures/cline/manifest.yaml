@@ -234,7 +234,7 @@ rows:
       channels would mean the process was killed before it wrote a line, which
       is a harness artifact rather than a CLI behaviour — and manufacturing one
       with `timeout(1)` is the known zero-byte-hang trap §6 step 3 forbids. parse_output's no-run_result branch
-      is still covered, by the fallback assertion in test_providers.py.
+      is still covered, by the fallback assertion in test_provider_cline.py.
 
   auth-error:
     stdout: auth-error.stdout.txt

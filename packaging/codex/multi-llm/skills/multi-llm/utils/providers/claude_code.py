@@ -132,7 +132,7 @@ PERMISSION_MODE_ACCEPT_EDITS = "acceptEdits"
 # `--` before the prompt is one of the two fixes verified working (1 request,
 # exit 0); it is the one chosen here because it keeps the prompt at `argv[-1]`,
 # which every `cmd[:-1]` override, `build_agent_command_for_transport` and the
-# cross-adapter `agent-write` invariant in `tests/test_providers.py` rely on.
+# cross-adapter `agent-write` invariant in the provider tests (`tests/test_provider_*.py`) rely on.
 PROMPT_SEPARATOR = "--"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -426,7 +426,7 @@ def _stripped_vendor_backends(
 # occur zero times in the shipped binary (control: the API-key variable occurs
 # 185 times), and a request-timeout value expressed in seconds is ignored while
 # the millisecond one aborts an 8 s request at 2.37 s. `get_env` must therefore
-# never emit them; `tests/test_providers.py` asserts their absence in both
+# never emit them; the provider tests (`tests/test_provider_*.py`) asserts their absence in both
 # directions (not in the env, not as a key anywhere in this module).
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -723,7 +723,7 @@ class ClaudeCodeProvider(LLMProvider):
 
     # Subagent-runner declarations (D3e/D3j/D3m). `agent-write` is the
     # `--permission-mode acceptEdits` invocation below; `supports_file_edits`
-    # tracks it so `tests/test_providers.py` can cross-check the declaration
+    # tracks it so the provider tests (`tests/test_provider_*.py`) can cross-check the declaration
     # against the implemented branch in both directions.
     agent_profiles = (PROFILE_GENERATE, PROFILE_AGENT_READONLY, PROFILE_AGENT_WRITE)
     supports_file_edits = True

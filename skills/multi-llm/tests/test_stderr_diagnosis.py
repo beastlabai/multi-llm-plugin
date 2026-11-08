@@ -76,7 +76,7 @@ explicit path twice: :data:`PI_CLASSIFY_0_80_6` is the floor no recaptured row
 may fall below (:class:`TestNoPiClassifyCellWorsened`), and its ``auth-error``
 stderr is still the vendor-JSON sample omp's table borrows.
 
-C4's and C3's tests live here rather than in ``test_providers.py`` on purpose:
+C4's and C3's tests live here rather than in the ``test_provider_*.py`` files on purpose:
 they are one subject read end to end, and the hand-written per-adapter classes
 in that module grade parsing. The channel each override declares is pinned
 *there*, in ``_DESCRIBE_FAILURE_CHANNELS``, whose roster is derived from the

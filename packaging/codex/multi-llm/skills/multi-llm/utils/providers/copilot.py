@@ -385,7 +385,7 @@ def token_limits_for(model: str) -> Tuple[int, int]:
     own decision to make, not a ride-along on this one. It is deliberately not
     built here.
 
-    ``tests/test_providers.py::TestCopilotHasNoConfigurableTokenLimits`` pins the
+    ``tests/test_provider_copilot.py::TestCopilotHasNoConfigurableTokenLimits`` pins the
     absence: the same pair comes back for a model with and without a
     ``providers.yaml`` block carrying those keys, so the key cannot be re-added
     half-way.

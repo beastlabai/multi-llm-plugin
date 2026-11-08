@@ -24,7 +24,7 @@ from .base import (
 #
 # No `model_caps` here on purpose. kilocode's per-model narrowing is *captured*
 # rather than hand-written — `tests/fixtures/kilocode/model_variants.json`, from
-# `kilocode models <backend> --verbose` — and `tests/test_providers.py` already
+# `kilocode models <backend> --verbose` — and `tests/test_provider_kilocode.py` already
 # grades every configured spec against it. Restating a slice of that capture
 # here would give the same fact two owners and one of them no refresh command.
 EFFORT_LADDER = ReasoningLadder(

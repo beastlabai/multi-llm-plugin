@@ -277,7 +277,7 @@ first.
 Adapters: `claude-code` `--permission-mode acceptEdits`, `codex`
 `--sandbox workspace-write`, `opencode` `--agent build`, each with a non-argv
 (`stdin`) transport and never a `--yolo`-class bypass;
-`tests/test_providers.py` cross-checks `agent-write` against `supports_file_edits` in both
+`tests/test_provider_contract.py` cross-checks `agent-write` against `supports_file_edits` in both
 directions. `utils/write_phase_bridge.py` is the one conversion from each phase's existing batch payload
 into materialized write tasks (stable `prior_changes_id`, declared file set, monotonic result
 names).

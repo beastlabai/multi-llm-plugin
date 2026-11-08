@@ -335,7 +335,7 @@ OMP_REQUIRED_FLAGS: Tuple[str, ...] = (
 #: and ~25× the steady state, and unlike qwen's 30 s it idles nothing that
 #: matters — the only slices it costs are ``timeout_s ≤ 5``, where the flag is
 #: omitted (see :func:`max_time_value`) and where no omp dispatch could have
-#: finished anyway. ``tests/test_providers.py`` pins this value as a literal
+#: finished anyway. ``tests/test_provider_omp.py`` pins this value as a literal
 #: alongside the renderings it produces (``1200 → "1195"``, ``25 → "20"``), so
 #: the constant and that table move together or not at all.
 OMP_SHUTDOWN_MARGIN_S = 5

@@ -1,7 +1,7 @@
 """Stage U — what a run spent travels from the envelope to every report.
 
 The adapter half (``parse_usage`` itself) is each adapter's own, covered in
-``tests/test_providers.py``. This file covers the *carriage*: adapter →
+``tests/test_provider_*.py``. This file covers the *carriage*: adapter →
 ``invoke_with_provider`` → ``invoke_with_file_output`` → the fan-out result
 records → ``.status.json`` → ``report.md`` / ``report.html`` /
 ``report_data.json`` → and back out again through ``--reaggregate``.

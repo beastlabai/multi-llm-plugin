@@ -481,7 +481,7 @@ def _registry_names():
 
     Resolved at class-definition time because `@pytest.mark.parametrize`
     evaluates its argument while the class body runs — the same constraint that
-    forces `test_providers.py`'s and `test_availability.py`'s local twins.
+    forces `provider_test_support.py`'s and `test_availability.py`'s local twins.
 
     **No test in this section may name an adapter or a count** (M0.a): §5.3's
     metadata rows were specified for thirteen adapters and the registry holds

@@ -20,7 +20,7 @@ the product never ships.
 So the rule is: **anything an adapter declares through ``get_env()`` must survive
 the wrapper.** This test is what makes that a property of the code rather than a
 comment, in the same declaration-vs-implementation spirit as
-``tests/test_providers.py``'s profile cross-checks.
+``tests/test_provider_contract.py``'s profile cross-checks.
 """
 
 from __future__ import annotations

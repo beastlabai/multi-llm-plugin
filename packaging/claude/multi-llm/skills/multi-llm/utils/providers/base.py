@@ -2401,7 +2401,7 @@ def matches_any(patterns: Collection[str], haystack: str) -> bool:
 # audited on 2026-08-16 and measured clean (``stream_pattern`` gives a numeric
 # token its own boundaries, and a bare token additionally needs an
 # ``_ERROR_CONTEXT`` word within 48 characters), with
-# ``tests/test_providers.py::TestClassifyFailure`` pinning it. This section adds
+# ``tests/test_provider_failure_classification.py::TestClassifyFailure`` pinning it. This section adds
 # categories beside them, and then makes every other classifier in the tree call
 # this one instead of growing its own.
 #
@@ -2894,7 +2894,7 @@ def match_streams(
     Additive beside :func:`classify_streams`, which is untouched: the same
     parameters, the same steps in the same order, and ``match.status`` always
     equals what :func:`classify_streams` returns for the same arguments
-    (``tests/test_providers.py::TestMatchStreams`` pins it over every
+    (``tests/test_provider_failure_classification.py::TestMatchStreams`` pins it over every
     ``classify_streams`` case in the suite). What it adds is the pattern that
     fired and its position, so ``subagent_executor._classify_failed_run`` can
     quote the text that actually decided a verdict instead of a stream tail
@@ -3459,7 +3459,7 @@ class LLMProvider(ABC):
     # pattern above: none of the thirteen shipped adapters has to change to keep
     # importing, instantiating and serving the ``generate`` path, and the model
     # fan-out — which never asks for a profile — is unaffected entirely. An
-    # adapter opts in by overriding them, and ``tests/test_providers.py``
+    # adapter opts in by overriding them, and the provider tests (``tests/test_provider_*.py``)
     # cross-checks every declaration against the members actually implemented so
     # the data cannot drift from the code.
     # ------------------------------------------------------------------

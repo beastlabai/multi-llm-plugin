@@ -646,7 +646,7 @@ def is_landlock_global_panic(stderr: str) -> bool:
 
     stderr only: a Rust panic is written there, never into the ``--json``
     event stream on stdout, and :meth:`CodexProvider.describe_failure` reads
-    the one channel it declares (``tests/test_providers.py``'s channel table).
+    the one channel it declares (``tests/test_provider_failure_classification.py``'s channel table).
     """
     return LANDLOCK_GLOBAL_PANIC in " ".join((stderr or "").split())
 

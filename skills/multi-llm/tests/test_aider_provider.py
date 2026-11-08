@@ -2,7 +2,7 @@
 
 Plan: plans/ask-answer-recovery-and-false-success.md §4 — T4.1 (D4.1) and the
 provider side of T4.2 (D4.2). The argv pins, the fixture rows and the salvage
-sweep live elsewhere (``TestAiderProvider`` in ``test_providers.py``,
+sweep live elsewhere (``TestAiderProvider`` in ``test_provider_aider.py``,
 ``tests/fixtures/aider/manifest.yaml``, ``test_salvage_text.py``); this module
 holds what those cannot say:
 

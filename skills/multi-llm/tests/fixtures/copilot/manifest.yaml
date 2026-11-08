@@ -3,7 +3,7 @@
 #
 # The BYTES here are older than this file: every `*.jsonl` was captured by the
 # 2026-08-17 §6 probe and committed with a README, but consumed only by the
-# hand-written `TestCopilotProvider` in tests/test_providers.py — so copilot sat
+# hand-written `TestCopilotProvider` in tests/test_provider_copilot.py — so copilot sat
 # in that module's `MANIFEST_PENDING` table and NOTHING pinned its
 # classification. That gap is why this manifest exists: `classify_failure` on
 # the committed `success.jsonl` read **`rate_limited`** on a run that had

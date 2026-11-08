@@ -224,7 +224,7 @@ rows:
       a harness artifact rather than a CLI behaviour — and manufacturing one with
       `timeout(1)` is the known zero-byte-hang trap §6 step 3 forbids.
       parse_output's empty branch is still covered, by unit assertion in
-      test_providers.py::TestAiderProvider.
+      test_provider_aider.py::TestAiderProvider.
 
   auth-error:
     stdout: auth-error.stdout.txt
