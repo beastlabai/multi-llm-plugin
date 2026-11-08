@@ -27,6 +27,9 @@ executor leg's ``WriteBatchScheduler`` writes for the same batch:
   ``ApplyOrchestratorBase`` step 23 drops groups on under ``--resume``.
   A ``failed`` record keeps the batch eligible for re-dispatch, as the
   executor leg re-dispatches a failed batch;
+* for the two shared-artifact kinds, ``batch_snapshot_records[<phase dir
+  word>][<task id>]``: ``run`` and, when the batch's pre-batch snapshot is
+  bound to it, ``snapshot_generation`` (:func:`write_prompt.completion_stamp`);
 * for the two code kinds (``implement``, ``apply_code_fixes``),
   ``tracked_files`` from the dirty-tree census, as the scheduler records it
   after each batch (:func:`_tracked_after_batch`).
@@ -188,7 +191,8 @@ try:
     )
     from .write_prompt import (
         WritePromptError, changed_since_bound, check_tree_fingerprint,
-        discard_check_tree, load_write_task,
+        completion_stamp, discard_check_tree, load_write_task,
+        record_completion_stamp,
     )
 except ImportError:  # pragma: no cover - direct script invocation
     from utils import known_checks as _known_checks  # type: ignore
@@ -255,7 +259,8 @@ except ImportError:  # pragma: no cover - direct script invocation
     )
     from utils.write_prompt import (  # type: ignore
         WritePromptError, changed_since_bound, check_tree_fingerprint,
-        discard_check_tree, load_write_task,
+        completion_stamp, discard_check_tree, load_write_task,
+        record_completion_stamp,
     )
 
 
@@ -816,6 +821,10 @@ def record_batch(
     # as the executor does from its verdict's stamp. `util finalize-tracking`
     # re-stamps it with the tree the run ends on.
     tree = check_tree_fingerprint(phase_dir) if check_findings else None
+    # A shared-artifact batch's record names its run and its pre-batch
+    # snapshot's generation: what the next `util write-prompt` checks instead
+    # of clock times (docs/development/write-safety.md).
+    stamp = completion_stamp(phase_dir, kind, task)
     target = Path(state_file) if state_file else phase_dir.parent / "state.json"
     if not target.is_file():
         raise WritePromptError(
@@ -841,6 +850,7 @@ def record_batch(
             _commit_release(state, task_id, kind)
 
         update_task_status_in_state(state, task_id, status, reason)
+        record_completion_stamp(state, _processed_phase_word(phase_dir), task_id, stamp)
         blocked: List[str] = []
         accepted_again: Dict[str, List[str]] = {}
         echoed: Dict[str, List[str]] = {}

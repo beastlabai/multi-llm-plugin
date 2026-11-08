@@ -220,17 +220,185 @@ class TestTheNativeLeg:
 
         assert not (outside / "prompts").exists()
         assert "is a symlink" in capsys.readouterr().err
+        assert not (tmp_path / ".multi-llm").exists()
 
-    def test_a_folder_swapped_between_the_read_and_the_write_is_refused(
+    def _other_repository(self, tmp_path_factory):
+        """Repository B, with a valid apply phase of its own."""
+        other = tmp_path_factory.mktemp("repo-b")
+        _git_init(other)
+        plan = other / "plans" / "feature.md"
+        plan.parent.mkdir()
+        plan.write_text("# B's plan\n", encoding="utf-8")
+        out = other / "plans" / "feature"
+        out.mkdir()
+        phase_dir, _tasks = _materialize(
+            plan, out, "apply_suggestions", _suggestion_batches(), "apply-suggestions")
+        return other, phase_dir
+
+    @pytest.mark.parametrize("mode", [[], ["--stdout"], ["--output", "PROMPT"]])
+    def test_a_phase_dir_link_into_another_repository_writes_nothing_there(
+        self, plan_dir, tmp_path, tmp_path_factory, capsys, mode
+    ):
+        """The Codex review of U31 (#1): repo A's phase dir replaced by a link
+        to a valid apply phase in repo B. The pin refused the link but the
+        refusal waited for the prompt write, and the snapshot, found again
+        through the phase path, was taken in B's `.multi-llm/tmp` first. Now
+        the link is refused before anything is read through it or written,
+        in every output mode."""
+        phase_dir = self._phase(plan_dir)
+        other, theirs = self._other_repository(tmp_path_factory)
+        os.rename(phase_dir, phase_dir.with_name("apply-suggestions.moved"))
+        os.symlink(theirs, phase_dir, target_is_directory=True)
+        extra = [tmp_path / "out.txt" if part == "PROMPT" else part for part in mode]
+
+        code = write_prompt.main([
+            "--phase-dir", str(phase_dir), "--task-id", "apply-batch-0",
+            *map(str, extra)])
+
+        assert code == 1
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "is a symlink" in captured.err
+        assert not (other / ".multi-llm").exists()
+        assert not (theirs / "prompts").exists()
+        assert not (tmp_path / ".multi-llm").exists()
+        assert not (tmp_path / "out.txt").exists()
+
+    def test_a_same_repository_phase_dir_link_leaves_the_baseline_alone(
+        self, plan_dir, tmp_path, capsys
+    ):
+        """Even a link to a phase dir in the same repository: refused before
+        the bound baseline of batch 0 could be replaced."""
+        plan, _out = plan_dir
+        phase_dir = self._phase(plan_dir)
+        before = plan.read_bytes()
+        assert self._main(phase_dir) == 0
+        slot_files = Path(os.path.realpath(tmp_path)) / ".multi-llm" / "tmp"
+
+        def the_slot():
+            return {path.name: path.read_bytes() for path in slot_files.iterdir()
+                    if path.name.startswith("batch_snapshot_plan_feature-")}
+
+        bound = the_slot()
+        assert before in bound.values()
+        plan.write_bytes(before + b"\nedited by batch 0\n")
+        elsewhere = tmp_path / "elsewhere"
+        os.rename(phase_dir, elsewhere)
+        os.symlink(elsewhere, phase_dir, target_is_directory=True)
+        capsys.readouterr()
+
+        assert self._main(phase_dir) == 1
+
+        assert "is a symlink" in capsys.readouterr().err
+        assert the_slot() == bound
+
+    def test_nothing_is_recorded_for_a_linked_phase_dir(
         self, plan_dir, tmp_path, monkeypatch, capsys
+    ):
+        """No side effect at all before the pin: the commit re-check (which
+        records a stale batch), the check-tree record, the commit bind and
+        the snapshot are never reached."""
+        phase_dir = self._phase(plan_dir)
+        outside = tmp_path / "outside"
+        os.rename(phase_dir, outside)
+        os.symlink(outside, phase_dir, target_is_directory=True)
+        reached = []
+        for name in ("commit_stale_check", "render_write_prompt", "record_check_tree",
+                     "discard_check_tree", "commit_bind", "prepare_batch_snapshot"):
+            monkeypatch.setattr(
+                write_prompt, name,
+                lambda *_a, _name=name, **_k: reached.append(_name))
+
+        assert self._main(phase_dir) == 1
+        assert reached == []
+
+    def test_a_missing_phase_dir_still_names_what_is_missing(self, plan_dir, capsys):
+        _plan, out = plan_dir
+        assert self._main(out / "apply-suggestions") == 3
+        err = capsys.readouterr().err
+        assert "No write_tasks.json" in err and "is a symlink" not in err
+
+    @pytest.mark.parametrize("bound", [False, True])
+    def test_a_link_at_the_snapshot_name_is_never_written_through(
+        self, plan_dir, tmp_path, capsys, bound
+    ):
+        """The pre-batch snapshot (``.multi-llm/tmp/batch_snapshot_plan_*``)
+        is written like the prompt. A link a subagent left at the name the
+        next copy takes is replaced, never written through; before any
+        binding, a file there is a copy no binding names, and refused."""
+        from utils import batch_done
+        plan, out = plan_dir
+        phase_dir = self._phase(plan_dir)
+        (out / "state.json").write_text(json.dumps({"task_status": {}}), encoding="utf-8")
+        task_id = "apply-batch-0"
+        if bound:
+            assert self._main(phase_dir) == 0
+            plan.write_bytes(plan.read_bytes() + b"\nbatch 0 landed\n")
+            assert batch_done.main([
+                "--phase-dir", str(phase_dir), "--task-id", task_id,
+                "--status", "completed"]) == 0
+            task_id = "apply-batch-1"
+        victim = tmp_path.parent / f"{tmp_path.name}-victim.txt"
+        victim.write_text("the user's own file\n", encoding="utf-8")
+        slot = write_prompt.snapshot_slot(
+            "apply_suggestions", "feature", os.path.realpath(phase_dir), str(plan))
+        copy = (Path(os.path.realpath(tmp_path)) / ".multi-llm" / "tmp"
+                / write_prompt.snapshot_copy_name(
+                    slot, write_prompt._sha256(plan.read_bytes())))
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(victim, copy)
+        capsys.readouterr()
+
+        code = self._main(phase_dir, task_id)
+
+        assert victim.read_text() == "the user's own file\n"
+        if bound:
+            assert code == 0
+            assert not copy.is_symlink()
+            assert copy.read_bytes() == plan.read_bytes()
+        else:
+            assert code == 3
+            assert "with no binding naming them" in capsys.readouterr().err
+            assert copy.is_symlink()
+
+    @pytest.mark.parametrize("linked", [".multi-llm", ".multi-llm/tmp"])
+    def test_a_linked_temp_dir_is_refused_and_nothing_lands_outside(
+        self, plan_dir, tmp_path, capsys, linked
+    ):
+        phase_dir = self._phase(plan_dir)
+        outside = tmp_path.parent / f"{tmp_path.name}-outside"
+        outside.mkdir()
+        link = tmp_path / linked
+        link.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(outside, link, target_is_directory=True)
+
+        assert self._main(phase_dir) == 1
+
+        assert list(outside.iterdir()) == []
+        captured = capsys.readouterr()
+        assert "pre-batch snapshot" in captured.err and "is a symlink" in captured.err
+        assert write_prompt.MARKER_PATH not in captured.out
+
+    @pytest.mark.parametrize("kind,subdir,task_id,refused_by", [
+        # The snapshot reads the task file through the pin: refused there.
+        ("apply_suggestions", "apply-suggestions", "apply-batch-0",
+         "cannot take the pre-batch snapshot"),
+        # No snapshot: the prompt's own write refuses it.
+        ("implement", "implement", "T001", "cannot write"),
+    ])
+    def test_a_folder_swapped_between_the_read_and_the_write_is_refused(
+        self, plan_dir, tmp_path, monkeypatch, capsys, kind, subdir, task_id,
+        refused_by,
     ):
         """The plan's output folder becomes a link to a folder elsewhere
         holding a phase dir of the same name, after the task file was read."""
         plan, out = plan_dir
         _git_init(plan.parent.parent)
-        phase_dir = self._phase(plan_dir)
+        batches = (_suggestion_batches() if kind == "apply_suggestions"
+                   else _implement_batches())
+        phase_dir, _tasks = _materialize(plan, out, kind, batches, subdir)
         elsewhere = tmp_path / "elsewhere"
-        (elsewhere / "apply-suggestions").mkdir(parents=True)
+        (elsewhere / subdir).mkdir(parents=True)
         real_render = write_prompt.render_write_prompt
 
         def render_then_swap(*args, **kwargs):
@@ -240,10 +408,12 @@ class TestTheNativeLeg:
 
         monkeypatch.setattr(write_prompt, "render_write_prompt", render_then_swap)
 
-        assert self._main(phase_dir) == 1
+        assert self._main(phase_dir, task_id) == 1
 
-        assert not (elsewhere / "apply-suggestions" / "prompts").exists()
-        assert "cannot write" in capsys.readouterr().err
+        assert not (elsewhere / subdir / "prompts").exists()
+        err = capsys.readouterr().err
+        assert refused_by in err and "is a symlink" in err
+        assert list(tmp_path.glob(".multi-llm/tmp/batch_snapshot_*")) == []
 
     def test_a_check_tree_record_is_never_written_through_a_link(self, plan_dir, tmp_path):
         plan, out = plan_dir

@@ -37,7 +37,11 @@ go to stdout — ``[WRITE_PROMPT] <path>``, ``[WRITE_PROMPT_LINES] <n>`` and
 ``[WRITE_PROMPT_CONTEXT] <entries> prior-batch entries bound`` — so the host
 can hand the subagent "read this file in full and follow it", the contract
 the review phases' ``prompt_path`` already uses. ``--stdout`` prints the
-prompt text itself instead, and nothing else. After a commit review
+prompt text itself instead, and nothing else. For the two shared-artifact
+phases it also takes the batch's pre-batch snapshot (kept when the same batch
+is bound again) and prints ``[WRITE_SNAPSHOT] <path>`` and
+``[WRITE_ARTIFACT] <path>`` after the three markers (on stderr under
+``--stdout``): :func:`prepare_batch_snapshot`. After a commit review
 (plans/review-commits.md §2.7) an apply-code-fixes batch whose fix files
 changed since the apply guard decided gets no prompt at all: one
 ``[COMMIT_FIXES_STALE]`` line replaces the markers (in both modes), the batch
@@ -45,8 +49,14 @@ is already recorded, and the exit is 0 (:func:`commit_stale_check`); a batch
 that passes has the watched set's disk ids recorded as its prompt is bound,
 which its ``util batch-done`` compares with (:func:`commit_bind`). Exit 3 names the problem: no
 ``write_tasks.json`` (run the phase's orchestrator first), an unknown task id
-(the known ids are listed), a human task (it never dispatches) or a prompt
-without the token (a producer bug, the scheduler's own refusal).
+(the known ids are listed), a human task (it never dispatches), a prompt
+without the token (a producer bug, the scheduler's own refusal) or a
+shared-artifact batch whose snapshot cannot be taken or kept (no repository,
+no artifact, an earlier batch of the run not recorded yet, the slot's evidence
+damaged or its bound baseline altered, the slot bound to another batch of the
+run that is not recorded, another call holding the slot, a slot lock its file
+system cannot take). A phase dir that is a link is refused with exit 1 before
+anything is read through it or written.
 
 The prior-changes log is the plan dir's ``prior_changes.jsonl`` — the parent
 of the phase dir, where the executor leg appends — scoped to this phase as
@@ -59,15 +69,21 @@ Import is side-effect free: argparse and all I/O live inside :func:`main`.
 from __future__ import annotations
 
 import argparse
+import errno
+import hashlib
 import json
 import os
+import re
+import secrets
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from . import known_checks as _known_checks
+    from . import process_control as _process_control
     from . import prior_changes as _prior_changes
     from . import prompt_files as _prompt_files
     from .git_utils import (
@@ -117,6 +133,7 @@ try:
     )
 except ImportError:  # pragma: no cover - direct script invocation
     from utils import known_checks as _known_checks  # type: ignore
+    from utils import process_control as _process_control  # type: ignore
     from utils import prior_changes as _prior_changes  # type: ignore
     from utils import prompt_files as _prompt_files  # type: ignore
     from utils.git_utils import (  # type: ignore
@@ -188,6 +205,16 @@ __all__ = [
     "render_write_prompt",
     "default_output_path",
     "phase_dir_pin",
+    "MARKER_SNAPSHOT",
+    "MARKER_ARTIFACT",
+    "SNAPSHOT_ROLES",
+    "BatchSnapshot",
+    "snapshot_slot",
+    "snapshot_copy_name",
+    "snapshot_binding_name",
+    "prepare_batch_snapshot",
+    "completion_stamp",
+    "record_completion_stamp",
     "main",
 ]
 
@@ -962,6 +989,679 @@ def changed_since_bound(
     )
 
 
+# ---------------------------------------------------------------------------
+# The pre-batch snapshot of a shared-artifact batch
+# ---------------------------------------------------------------------------
+#
+# On the native leg the host verifies an apply-suggestions or
+# apply-task-suggestions batch by a byte diff of its one artifact (the plan,
+# the tasks file) against a copy taken before the subagent ran: the artifact
+# is often untracked, and git's diffs ignore untracked files. This command
+# takes that copy as it binds the prompt. The copy serves that diff and a
+# human who puts the file back by hand; it lies in the repository, which the
+# batch's subagent can write, so its checksums catch an accidental change and
+# prove nothing against a subagent (no command restores from it). The rules,
+# docs/development/write-safety.md:
+#
+# * One slot per phase dir and artifact, `<slot>` =
+#   `batch_snapshot_<plan|tasks>_<plan stem>-<key>` in `<repo root>/.multi-llm/tmp`,
+#   the root taken from the pin, never found again through the phase path.
+# * A generation is a copy `<slot>.<sha12>.md` and the binding
+#   `<slot>.binding.json` naming it. The binding is renamed into place last:
+#   it is the commit point, and the previous generation's copy goes only after.
+# * Every call that reads, checks, takes or publishes a slot holds `<slot>.lock`;
+#   a lock the file system cannot take at all is refused as such, never
+#   reported as another call holding it.
+# * The binding names one batch of one run (the sha256 of `write_tasks.json`)
+#   and carries a random generation id. The same batch bound again keeps it;
+#   another batch of the run replaces it only once the bound batch has a
+#   `util batch-done` record carrying that generation; a new emit of the phase
+#   replaces it. A binding with any field missing or malformed, a binding or
+#   copy that cannot be read, and copies no binding names are refused, never
+#   read as a new slot.
+# * A batch is bound only once every earlier batch of its run has a record
+#   carrying the run, so two batches never wait on each other.
+# * Records are told apart by these identities, which `util batch-done` keeps
+#   beside the batch's status (:func:`completion_stamp`), never by comparing
+#   clock times.
+
+#: The marker lines naming the snapshot and the file it copies.
+MARKER_SNAPSHOT = "[WRITE_SNAPSHOT]"
+MARKER_ARTIFACT = "[WRITE_ARTIFACT]"
+
+#: The word in each shared-artifact kind's snapshot name.
+SNAPSHOT_ROLES = {"apply_suggestions": "plan", "apply_task_suggestions": "tasks"}
+
+#: The self-ignoring workspace temp dir, under the repository root.
+WORKSPACE_TMP = (".multi-llm", "tmp")
+
+#: The binding's and the lock's names beside a slot's copies.
+SNAPSHOT_BINDING_SUFFIX = ".binding.json"
+SNAPSHOT_LOCK_SUFFIX = ".lock"
+SNAPSHOT_BINDING_VERSION = 3
+
+#: How long a call waits for another call holding the slot's lock (seconds).
+SNAPSHOT_LOCK_TIMEOUT_S = 10.0
+
+#: The binding keys that say which batch a baseline belongs to.
+BINDING_IDENTITY = (
+    "task_id", "run", "phase_dir", "phase_identity", "artifact", "expected_ids",
+)
+
+#: The task statuses that record a finished batch.
+_RECORDED_STATUSES = ("completed", "failed", "skipped")
+
+#: Hex digits of the slot key and of a copy's generation in its name.
+_NAME_HEX = 12
+
+#: Hex digits of a binding's ``generation`` id.
+_GENERATION_HEX = 32
+
+#: Where ``util batch-done`` keeps a shared-artifact batch's
+#: :func:`completion_stamp` in ``state.json``:
+#: ``{<phase dir word>: {<task id>: {run, snapshot_generation}}}``.
+SNAPSHOT_RECORDS_KEY = "batch_snapshot_records"
+RECORD_RUN_KEY = "run"
+RECORD_GENERATION_KEY = "snapshot_generation"
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def snapshot_slot(kind: str, plan_stem: str, phase_dir: str, artifact: str) -> str:
+    """``batch_snapshot_<plan|tasks>_<plan stem>-<key>``, *key* the first hex
+    digits of the sha256 of the pinned phase dir and the artifact's absolute
+    path: two plans of one name in different folders never share a slot."""
+    key = _sha256(f"{phase_dir}\0{artifact}".encode("utf-8", "surrogateescape"))
+    return f"batch_snapshot_{SNAPSHOT_ROLES[kind]}_{plan_stem}-{key[:_NAME_HEX]}"
+
+
+def snapshot_copy_name(slot: str, sha256: str) -> str:
+    """``<slot>.<sha12>.md``: one generation's copy."""
+    return f"{slot}.{sha256[:_NAME_HEX]}.md"
+
+
+def snapshot_binding_name(slot: str) -> str:
+    """``<slot>.binding.json``: the generation's commit point."""
+    return slot + SNAPSHOT_BINDING_SUFFIX
+
+
+def _plan_stem(phase_dir: Path, kind: str, artifact: Path) -> str:
+    """The plan file's name without its extension: the artifact's own for
+    apply-suggestions (the plan is its artifact), else the plan ``state.json``
+    records, else the plan's output folder (named after the plan)."""
+    if kind == "apply_suggestions":
+        return artifact.stem
+    plan = _known_checks.read_state(phase_dir.parent).get("plan_path")
+    if isinstance(plan, str) and plan.strip():
+        return Path(plan).stem
+    return phase_dir.parent.name
+
+
+def _snapshot_root(pin: "_prompt_files.PhasePin", task_id: str) -> str:
+    """The repository root holding the pinned phase dir, from the pin."""
+    root, problem = pin_repo_root(pin.root)
+    if root is None or problem or os.path.realpath(root) != os.path.realpath(pin.root):
+        raise WritePromptError(
+            f"Cannot take {task_id}'s pre-batch snapshot: "
+            f"{problem or f'no git repository holds {pin.path}'}. multi-llm "
+            f"requires running inside a git repository. {task_id} was not "
+            f"handed out."
+        )
+    return root
+
+
+def _read_run(pin: "_prompt_files.PhasePin") -> Tuple[str, Dict[str, Any]]:
+    """``(run, document)``: the pinned phase dir's ``write_tasks.json``, read
+    without following a link (``OSError`` for a phase dir swapped since), and
+    its sha256 — the run its batches belong to, since only the phase's emit
+    writes it (a native emit stamps its time)."""
+    raw = _prompt_files.read_in_phase_dir(pin, WRITE_TASK_FILENAME)
+    try:
+        document = json.loads(raw)
+    except ValueError as exc:
+        raise WritePromptError(
+            f"{Path(pin.path) / WRITE_TASK_FILENAME} is not JSON ({exc})") from exc
+    if not isinstance(document, dict):
+        raise WritePromptError(
+            f"{Path(pin.path) / WRITE_TASK_FILENAME} is not a JSON object")
+    return _sha256(raw), document
+
+
+def _read_plan_state(phase_dir: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """``(state, None)``: the plan dir's ``state.json``; ``(None, why)`` when
+    it is missing, unreadable or not an object — evidence that cannot say
+    whether a batch was recorded, never read as "nothing recorded"."""
+    path = Path(phase_dir).parent / "state.json"
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, f"{path} does not exist"
+    except (OSError, ValueError) as exc:
+        return None, f"{path} cannot be read ({exc})"
+    if not isinstance(state, dict) or not isinstance(state.get("task_status", {}), dict):
+        return None, f"{path} is not a state file (no task_status object)"
+    return state, None
+
+
+def _parse_stamp(value: Any) -> Optional[datetime]:
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _recorded_with(
+    state: Dict[str, Any], phase_word: str, task_id: str, key: str, value: str,
+) -> bool:
+    """Whether ``state.json`` holds *task_id*'s ``util batch-done`` record
+    stamped ``key == value``: a recorded ``task_status`` and, written beside
+    it in the same locked write, the :func:`completion_stamp` under
+    :data:`SNAPSHOT_RECORDS_KEY`. ``task_status`` is one map for every run
+    of the phase, and a ``--resume`` numbers its batches afresh, so a status
+    alone can be an earlier run's; the stamp is an identity, so a clock set
+    back or forward cannot hide a record or pass an old one off."""
+    if (state.get("task_status") or {}).get(task_id) not in _RECORDED_STATUSES:
+        return False
+    records = state.get(SNAPSHOT_RECORDS_KEY)
+    phase = records.get(phase_word) if isinstance(records, dict) else None
+    entry = phase.get(task_id) if isinstance(phase, dict) else None
+    return isinstance(entry, dict) and entry.get(key) == value
+
+
+def _batch_index(task: Dict[str, Any]) -> Optional[int]:
+    try:
+        return int(task.get("batch_index"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _order_refusal(
+    pin: "_prompt_files.PhasePin", document: Dict[str, Any], task: Dict[str, Any],
+    task_id: str, run: str,
+) -> Optional[str]:
+    """Why *task_id* cannot be bound before an earlier batch of its run, or
+    ``None``. The batches of a shared-artifact phase edit one file one at a
+    time, in order, and the slot holds one baseline: a later batch bound
+    first would wait for the earlier one while the earlier one waited for it.
+    An earlier batch counts once its record carries *run*, the sha256 of the
+    ``write_tasks.json`` it was made under."""
+    own = _batch_index(task)
+    if own is None:
+        return None
+    earlier = []
+    for batch in document.get("batches") or document.get("tasks") or []:
+        if not isinstance(batch, dict) or batch.get("is_human"):
+            continue
+        if str(batch.get("executor_role") or "") == "human":
+            continue
+        index = _batch_index(batch)
+        if index is not None and index < own:
+            earlier.append(batch)
+    if not earlier:
+        return None
+    ids = [str(batch.get("task_id") or "") for batch in earlier]
+    state, problem = _read_plan_state(pin.path)
+    if state is None:
+        return (
+            f"{task_id} cannot be bound: whether the batches before it "
+            f"({', '.join(ids)}) have their `util batch-done` records cannot be "
+            f"told, because {problem}. Nothing was written and {task_id} was not "
+            f"handed out. Put state.json back, or re-run the phase's "
+            f"orchestrator with --resume, then run this command again."
+        )
+    phase_word = Path(pin.path).name
+    for batch_id in ids:
+        if not _recorded_with(state, phase_word, batch_id, RECORD_RUN_KEY, run):
+            return (
+                f"{task_id} cannot be bound yet: {batch_id}, an earlier batch of "
+                f"this run, has no `util batch-done` record from this run. The "
+                f"batches run one at a time, in order, and {task_id}'s pre-batch "
+                f"snapshot would take the place of the one {batch_id} is checked "
+                f"against. Run {batch_id} first — bind it with this command, then "
+                f"the loop's steps for it — or, if it already ran, verify it and "
+                f"record it with util batch-done; then run this command again. "
+                f"Nothing was written and {task_id} was not handed out."
+            )
+    return None
+
+
+def _workspace_pin(root: str) -> "_prompt_files.PhasePin":
+    return _prompt_files.PhasePin(root=root, parts=WORKSPACE_TMP[:1])
+
+
+def _open_workspace(root: str) -> "_prompt_files.PromptFolder":
+    """``<root>/.multi-llm/tmp``, created (self-ignoring) when absent and
+    reached without following a link. Raises ``OSError`` when it or
+    ``.multi-llm`` is a link or a file."""
+    try:
+        os.mkdir(os.path.join(root, WORKSPACE_TMP[0]))
+    except FileExistsError:
+        pass  # a link there is refused by the walk below
+    folder = _prompt_files.PromptFolder.open(_workspace_pin(root), folder=WORKSPACE_TMP[1])
+    try:
+        if ".gitignore" not in folder.names():
+            folder.write(".gitignore", "*\n")
+    except BaseException:
+        folder.close()
+        raise
+    return folder
+
+
+@dataclass
+class _SlotNow:
+    """A slot as it is on disk: its binding (``None`` when there is none or
+    it is damaged), the bytes of the copy the binding names (``None`` when
+    that copy is gone or unreadable), every copy of the slot, and why the
+    binding cannot be used."""
+
+    binding: Optional[Dict[str, Any]]
+    held: Optional[bytes]
+    copies: List[str]
+    damage: Optional[str]
+
+
+def _is_hex(value: Any, length: int) -> bool:
+    return (isinstance(value, str) and len(value) == length
+            and not value.strip("0123456789abcdef"))
+
+
+def _binding_problem(binding: Any, slot: str, identity: Dict[str, Any]) -> Optional[str]:
+    """Why *binding* is not one this command wrote for *slot*, or ``None``.
+    Every field the transitions read is checked for presence and shape
+    first: a binding missing one is damaged evidence, never another run's."""
+    if not isinstance(binding, dict):
+        return "is not a JSON object"
+    if binding.get("version") != SNAPSHOT_BINDING_VERSION:
+        return f"is not a version {SNAPSHOT_BINDING_VERSION} binding"
+    for key in ("task_id", "phase_dir", "artifact", "copy", "taken_at"):
+        if not isinstance(binding.get(key), str) or not binding[key]:
+            return f"has no {key}"
+    for key, length in (("run", 64), ("sha256", 64), ("generation", _GENERATION_HEX)):
+        if not _is_hex(binding.get(key), length):
+            return f"has no {key}"
+    ids = binding.get("expected_ids")
+    if not isinstance(ids, list) or not all(isinstance(item, str) for item in ids):
+        return "has no expected_ids"
+    phase_identity = binding.get("phase_identity")
+    if (not isinstance(phase_identity, list) or len(phase_identity) != 2
+            or not all(type(part) is int for part in phase_identity)):
+        return "has no phase_identity"
+    if binding["copy"] != snapshot_copy_name(slot, binding["sha256"]):
+        return f"names {binding['copy']!r}, not a copy of its own slot"
+    if binding["phase_dir"] != identity["phase_dir"] or binding["artifact"] != identity["artifact"]:
+        return "names another phase dir or file than the one its slot is for"
+    if _parse_stamp(binding["taken_at"]) is None:
+        return "has no time it was taken"
+    return None
+
+
+def _same_batch(binding: Dict[str, Any], identity: Dict[str, Any]) -> bool:
+    """Whether a checked binding names the batch *identity* describes."""
+    return all(binding.get(key) == identity[key] for key in BINDING_IDENTITY)
+
+
+def _read_slot(
+    folder: "_prompt_files.PromptFolder", slot: str, identity: Dict[str, Any],
+) -> _SlotNow:
+    """The slot as it is now (no link followed at any name)."""
+    names = folder.names()
+    copy_name = re.compile(re.escape(slot) + r"\.[0-9a-f]{%d}\.md" % _NAME_HEX)
+    copies = sorted(name for name in names if copy_name.fullmatch(name))
+    binding_name = snapshot_binding_name(slot)
+    shown = os.path.join(folder.path, binding_name)
+    if binding_name not in names:
+        return _SlotNow(None, None, copies, None)
+    try:
+        raw = folder.read_bytes(binding_name)
+    except FileNotFoundError:
+        return _SlotNow(None, None, copies, None)
+    except OSError as exc:
+        return _SlotNow(None, None, copies, f"{shown} cannot be read ({exc})")
+    try:
+        binding: Any = json.loads(raw)
+    except ValueError as exc:
+        return _SlotNow(None, None, copies, f"{shown} is not JSON ({exc})")
+    problem = _binding_problem(binding, slot, identity)
+    if problem:
+        return _SlotNow(None, None, copies, f"{shown} {problem}")
+    try:
+        held: Optional[bytes] = folder.read_bytes(binding["copy"])
+    except OSError:
+        held = None
+    return _SlotNow(binding, held, copies, None)
+
+
+@dataclass
+class BatchSnapshot:
+    """One shared-artifact batch's pre-batch snapshot: the slot, the file it
+    copies, its binding and its bytes, with the slot's lock held until
+    :meth:`release`. ``kept`` when the batch was bound before and its
+    generation stays; else :meth:`commit` publishes a new one, after which
+    the copies in ``obsolete`` (the previous generation's, and any no
+    binding named) are removed."""
+
+    root: str
+    slot: str
+    artifact: Path
+    binding: Dict[str, Any]
+    data: bytes
+    kept: bool = False
+    previous: Optional[str] = None
+    obsolete: Tuple[str, ...] = ()
+    folder: Optional["_prompt_files.PromptFolder"] = field(default=None, repr=False)
+    lock: Optional[int] = field(default=None, repr=False)
+
+    @property
+    def path(self) -> Path:
+        return Path(self.root, *WORKSPACE_TMP, str(self.binding["copy"]))
+
+    def commit(self) -> None:
+        """Publish the generation: the copy, then the binding naming it, each
+        a new file renamed into place (never through a link). A failure
+        leaves the previous generation whole. Nothing for a kept one."""
+        if self.kept:
+            return
+        if self.folder is None:
+            raise OSError(f"the slot {self.slot} is not open")
+        name = str(self.binding["copy"])
+        self.folder.write_bytes(name, self.data)
+        try:
+            self.folder.write(
+                snapshot_binding_name(self.slot), json.dumps(self.binding, indent=2) + "\n")
+        except BaseException:
+            if name != self.previous:
+                self._remove(name)
+            raise
+        for old in sorted({*self.obsolete, *(self.previous,)} - {None, name}):
+            self._remove(str(old))
+
+    def _remove(self, name: str) -> None:
+        try:
+            if self.folder is not None:
+                self.folder.remove(name)
+        except OSError:
+            pass  # a leftover copy no binding names: the next call refuses it
+
+    def release(self) -> None:
+        """Drop the slot's lock and close it. Idempotent."""
+        lock, self.lock = self.lock, None
+        if lock is not None:
+            _process_control.release_fd_lock(lock)
+            try:
+                os.close(lock)
+            except OSError:
+                pass
+        folder, self.folder = self.folder, None
+        if folder is not None:
+            folder.close()
+
+
+def _batch_identity(
+    pin: "_prompt_files.PhasePin", task: Dict[str, Any], task_id: str, kind: str,
+    run: str,
+) -> Tuple[str, Path, str, Dict[str, Any]]:
+    """``(root, artifact, slot, identity)`` of a shared-artifact batch in the
+    pinned phase dir."""
+    phase_dir = Path(pin.path)
+    declared = declared_file_set(task)
+    if len(declared) != 1:
+        raise WritePromptError(
+            f"Task {task_id} declares {len(declared)} files, not its one "
+            f"artifact, so it has no pre-batch snapshot: re-run the phase's "
+            f"orchestrator to re-materialize {WRITE_TASK_FILENAME}."
+        )
+    root = _snapshot_root(pin, task_id)
+    artifact = Path(declared[0])
+    if not artifact.is_absolute():
+        artifact = Path(root) / artifact
+    artifact = Path(os.path.normpath(str(artifact)))
+    phase_identity = pin.identity or _prompt_files.identify(pin).identity
+    identity = {
+        "task_id": task_id,
+        "run": run,
+        "phase_dir": pin.path,
+        "phase_identity": [int(part) for part in phase_identity or ()],
+        "artifact": str(artifact),
+        "expected_ids": [str(item) for item in task.get("expected_ids") or []],
+    }
+    slot = snapshot_slot(kind, _plan_stem(phase_dir, kind, artifact), pin.path, str(artifact))
+    return root, artifact, slot, identity
+
+
+def _take_slot_lock(
+    folder: "_prompt_files.PromptFolder", slot: str, task_id: str,
+) -> int:
+    lock = folder.open_lock(slot + SNAPSHOT_LOCK_SUFFIX)
+    shown = os.path.join(folder.path, slot + SNAPSHOT_LOCK_SUFFIX)
+    try:
+        taken = _process_control.wait_for_fd_lock(lock, timeout_s=SNAPSHOT_LOCK_TIMEOUT_S)
+    except OSError as exc:
+        os.close(lock)
+        cause = exc.strerror or str(exc)
+        name = errno.errorcode.get(exc.errno or 0)
+        raise WritePromptError(
+            f"Cannot lock {shown}: {cause}{f' ({name})' if name else ''}. No other "
+            f"call holds it: the lock cannot be taken there at all, so running "
+            f"this command again gives the same answer. A file system without "
+            f"file locks (some network or FUSE mounts) answers this way: run "
+            f"multi-llm from a checkout on a local disk. Nothing was written and "
+            f"{task_id} was not handed out."
+        ) from exc
+    if taken:
+        return lock
+    os.close(lock)
+    raise WritePromptError(
+        f"Another `util write-prompt` holds {shown}: it is binding a batch of "
+        f"this phase now and did not finish within {SNAPSHOT_LOCK_TIMEOUT_S:g} s. "
+        f"Let it finish, then run this command again. Nothing was written and "
+        f"{task_id} was not handed out."
+    )
+
+
+def _way_out(artifact: Path, files: List[str], task_id: str) -> str:
+    listed = ", ".join(files) if files else "none"
+    return (
+        f"Nothing was written and {task_id} was not handed out. Way out, for a "
+        f"human: if a batch of this phase stopped half-applied, compare {artifact} "
+        f"with the copies ({listed}) and put the right bytes back by hand; then "
+        f"delete those files and run this command again (with no binding and no "
+        f"copy left, it takes a new snapshot)."
+    )
+
+
+def prepare_batch_snapshot(
+    pin: "_prompt_files.PhasePin", kind: str, task: Dict[str, Any],
+) -> Optional[BatchSnapshot]:
+    """The pre-batch snapshot a shared-artifact batch is handed out with,
+    its slot's lock held (the caller releases it).
+
+    ``None`` for a kind that has none (apply-code-fixes and implement are
+    checked otherwise). The batch bound again (the same binding identity):
+    its generation, ``kept``, once its copy still hashes to the binding.
+    Another batch: a copy of the artifact, read now under the lock and
+    published by :meth:`BatchSnapshot.commit` after the prompt. Raises
+    :class:`WritePromptError` (exit 3, nothing written) when there is no
+    repository, an earlier batch of the run is not recorded yet, the slot
+    is held by another call for too long or its lock cannot be taken on its
+    file system at all, its evidence is damaged (a binding that cannot be
+    read or misses a field, copies no binding names, a state file that cannot
+    say whether the bound batch was recorded), the bound baseline of this
+    batch was altered or removed, it belongs to another batch of this run
+    with no record made for it, or the artifact cannot be read;
+    ``OSError`` when the phase dir or the temp dir is a link.
+    """
+    if kind not in SNAPSHOT_ROLES:
+        return None
+    task_id = str(task.get("task_id") or "")
+    run, document = _read_run(pin)
+    root, artifact, slot, identity = _batch_identity(pin, task, task_id, kind, run)
+    refused = _order_refusal(pin, document, task, task_id, run)
+    if refused:
+        raise WritePromptError(refused)
+    folder = _open_workspace(root)
+    lock: Optional[int] = None
+    try:
+        lock = _take_slot_lock(folder, slot, task_id)
+        snapshot = _decide(pin, folder, root, slot, artifact, identity, kind, task_id)
+    except BaseException:
+        if lock is not None:
+            _process_control.release_fd_lock(lock)
+            os.close(lock)
+        folder.close()
+        raise
+    snapshot.folder, snapshot.lock = folder, lock
+    return snapshot
+
+
+def _decide(
+    pin: "_prompt_files.PhasePin", folder: "_prompt_files.PromptFolder", root: str,
+    slot: str, artifact: Path, identity: Dict[str, Any], kind: str, task_id: str,
+) -> BatchSnapshot:
+    """The slot's transition for *task_id*, under the slot's lock."""
+    now = _read_slot(folder, slot, identity)
+    shown = [os.path.join(folder.path, name) for name in now.copies]
+    binding_path = os.path.join(folder.path, snapshot_binding_name(slot))
+    if now.damage:
+        raise WritePromptError(
+            f"{now.damage}, so nothing says whose pre-batch baseline the slot "
+            f"holds, and binding {task_id} would replace it. "
+            + _way_out(artifact, [binding_path, *shown], task_id))
+    bound = now.binding
+    previous: Optional[str] = None
+    if bound is None:
+        if now.copies:
+            raise WritePromptError(
+                f"{', '.join(shown)} lie in {folder.path} with no binding naming "
+                f"them (it was deleted, or a write was cut short), so nothing says "
+                f"whose pre-batch baseline they hold, and binding {task_id} would "
+                f"replace it. " + _way_out(artifact, shown, task_id))
+    elif _same_batch(bound, identity):
+        held = now.held
+        if held is None or _sha256(held) != bound["sha256"]:
+            state = "it is gone" if held is None else (
+                f"recorded {bound['sha256'][:12]}, now {_sha256(held)[:12]}")
+            raise WritePromptError(
+                f"{task_id} was bound before, and its pre-batch snapshot "
+                f"{os.path.join(folder.path, bound['copy'])} no longer holds the "
+                f"bytes it was taken with ({state}). A new copy of {artifact} "
+                f"could carry {task_id}'s own edits, so none is taken. "
+                + _way_out(artifact, [binding_path, *shown], task_id))
+        return BatchSnapshot(root, slot, artifact, bound, held, kept=True)
+    elif bound["run"] == identity["run"] and bound.get("phase_identity") == identity["phase_identity"]:
+        # Another batch of this run: replaced once that batch is recorded.
+        earlier = bound["task_id"]
+        state, problem = _read_plan_state(pin.path)
+        if state is None:
+            raise WritePromptError(
+                f"{binding_path} holds the pre-batch baseline of {earlier}, bound "
+                f"earlier in this run, and whether {earlier} has its `util "
+                f"batch-done` record cannot be told, because {problem}; binding "
+                f"{task_id} would replace that baseline. Nothing was written and "
+                f"{task_id} was not handed out. Put state.json back, or re-run the "
+                f"phase's orchestrator with --resume (a new run takes a new "
+                f"snapshot), then run this command again."
+            )
+        if not _recorded_with(
+            state, Path(pin.path).name, earlier,
+            RECORD_GENERATION_KEY, bound["generation"],
+        ):
+            raise WritePromptError(
+                f"{os.path.join(folder.path, bound['copy'])} is the pre-batch "
+                f"snapshot of {earlier}, bound earlier in this run, and {earlier} "
+                f"has no `util batch-done` record made for this snapshot (one "
+                f"carrying its generation, {bound['generation'][:12]}): binding "
+                f"{task_id} would replace its baseline. Finish {earlier} first — verify it "
+                f"against that snapshot and record it with util batch-done — or, "
+                f"after a partial application, stop the loop there (the snapshot "
+                f"holds {earlier}'s pre-batch bytes to compare with, or to copy "
+                f"back by hand). {task_id} was not handed out and the snapshot is "
+                f"unchanged."
+            )
+        previous = bound["copy"]
+    else:
+        # A new emit of the phase (a --resume, a re-run): a new run.
+        previous = bound["copy"]
+    try:
+        data = artifact.read_bytes()
+    except OSError as exc:
+        raise WritePromptError(
+            f"Cannot read {artifact}, the file {task_id} edits, to take its "
+            f"pre-batch snapshot: {exc}. {task_id} was not handed out."
+        ) from exc
+    digest = _sha256(data)
+    binding = {
+        "version": SNAPSHOT_BINDING_VERSION,
+        "kind": kind,
+        **identity,
+        "root": root,
+        "copy": snapshot_copy_name(slot, digest),
+        "sha256": digest,
+        "size": len(data),
+        "generation": secrets.token_hex(_GENERATION_HEX // 2),
+        "taken_at": datetime.now().isoformat(timespec="microseconds"),
+    }
+    return BatchSnapshot(
+        root, slot, artifact, binding, data,
+        previous=previous, obsolete=tuple(now.copies),
+    )
+
+
+def completion_stamp(phase_dir: Path, kind: str, task: Dict[str, Any]) -> Dict[str, str]:
+    """What ``util batch-done`` records beside a shared-artifact batch's
+    status (:func:`record_completion_stamp`), so this command can tell whose
+    record it is without comparing clocks: ``run`` (:data:`RECORD_RUN_KEY`), the sha256 of
+    ``write_tasks.json`` now, and — when the slot's binding names this very
+    batch — ``snapshot_generation`` (:data:`RECORD_GENERATION_KEY`), the
+    binding's generation. Empty for another kind. Read without the slot's
+    lock: a binding is only ever replaced whole, and not before this batch
+    has a record. Whatever cannot be read is left out, never an error: a
+    record without a stamp counts for nothing here, and the refusal that
+    follows names the files."""
+    if kind not in SNAPSHOT_ROLES:
+        return {}
+    task_id = str(task.get("task_id") or "")
+    try:
+        pin = phase_dir_pin(Path(phase_dir))
+        run, _document = _read_run(pin)
+    except (OSError, WritePromptError):
+        return {}
+    stamp = {RECORD_RUN_KEY: run}
+    try:
+        root, _artifact, slot, identity = _batch_identity(pin, task, task_id, kind, run)
+        folder = _prompt_files.PromptFolder.open(
+            _workspace_pin(root), create=False, folder=WORKSPACE_TMP[1])
+    except (OSError, WritePromptError):
+        return stamp
+    try:
+        bound = _read_slot(folder, slot, identity).binding
+    except OSError:
+        bound = None
+    finally:
+        folder.close()
+    if bound is not None and _same_batch(bound, identity):
+        stamp[RECORD_GENERATION_KEY] = bound["generation"]
+    return stamp
+
+
+def record_completion_stamp(
+    state: Dict[str, Any], phase_word: str, task_id: str, stamp: Dict[str, str],
+) -> None:
+    """Keep *stamp* (:func:`completion_stamp`) as *task_id*'s under
+    :data:`SNAPSHOT_RECORDS_KEY` in a raw ``state.json`` dict, replacing an
+    earlier one; nothing for an empty stamp (another kind)."""
+    if not stamp:
+        return
+    records = state.get(SNAPSHOT_RECORDS_KEY)
+    if not isinstance(records, dict):
+        records = state[SNAPSHOT_RECORDS_KEY] = {}
+    phase = records.get(phase_word)
+    if not isinstance(phase, dict):
+        phase = records[phase_word] = {}
+    phase[task_id] = dict(stamp)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="multi_llm.py util write-prompt",
@@ -1000,13 +1700,26 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     # The phase dir as it is now, before anything is read from it: the
-    # prompt and the check's tree record are written to this directory or
-    # not at all (fix round 17).
+    # prompt, the check's tree record and the pre-batch snapshot are written
+    # for this directory or not at all (fix round 17), so a phase dir that is
+    # a link or not a directory is refused here, before any side effect.
     try:
-        pin: Optional[_prompt_files.PhasePin] = phase_dir_pin(Path(args.phase_dir))
-        pin_problem: Optional[OSError] = None
+        pin = phase_dir_pin(Path(args.phase_dir))
     except OSError as exc:
-        pin, pin_problem = None, exc
+        if isinstance(exc, FileNotFoundError):
+            # No phase dir yet: the render names what is missing.
+            try:
+                render_write_prompt(Path(args.phase_dir), args.task_id)
+            except (WritePromptError, ExecutorError) as missing:
+                message = getattr(missing, "message", None) or str(missing)
+                print(f"ERROR: {message}", file=sys.stderr)
+                return int(getattr(missing, "exit_code", 3) or 3)
+        print(
+            f"ERROR: cannot use the phase dir {args.phase_dir}: {exc}. Nothing "
+            f"was written and {args.task_id} was not handed out.",
+            file=sys.stderr,
+        )
+        return 1
     # plans/review-commits.md §2.7: re-checked before the prompt is bound; a
     # batch whose fix files changed since the apply guard decided gets none.
     stale = commit_stale_check(Path(args.phase_dir), args.task_id)
@@ -1084,22 +1797,68 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         return 3
 
-    # Advisory, on stderr so `--stdout` stays the prompt text alone.
-    for line in ordering_warnings(Path(args.phase_dir), args.task_id):
-        print(line, file=sys.stderr)
+    # A shared-artifact batch's pre-batch snapshot: its refusals come after
+    # every other one and before anything is recorded for the batch; the
+    # slot's lock is held until the call ends, and a new generation is
+    # published once the prompt is.
+    try:
+        snapshot = prepare_batch_snapshot(pin, str(info.get("kind") or ""), _task)
+    except WritePromptError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return exc.exit_code
+    except OSError as exc:
+        print(f"ERROR: cannot take the pre-batch snapshot: {exc}", file=sys.stderr)
+        return 1
+    try:
+        # Advisory, on stderr so `--stdout` stays the prompt text alone.
+        for line in ordering_warnings(Path(args.phase_dir), args.task_id):
+            print(line, file=sys.stderr)
+        return _hand_out(args, pin, text, info, _task, snapshot)
+    finally:
+        if snapshot is not None:
+            snapshot.release()
 
-    if is_check_task(str(info.get("kind") or ""), _task):
+
+def _hand_out(
+    args: argparse.Namespace, pin: "_prompt_files.PhasePin", text: str,
+    info: Dict[str, Any], task: Dict[str, Any], snapshot: Optional[BatchSnapshot],
+) -> int:
+    """Record what the batch is held to, publish its prompt and its
+    snapshot, and print the markers that hand it out."""
+    snapshot_lines = [] if snapshot is None else [
+        f"{MARKER_SNAPSHOT} {snapshot.path}", f"{MARKER_ARTIFACT} {snapshot.artifact}",
+    ]
+
+    def committed() -> bool:
+        """The new generation published, before the markers hand the batch out."""
+        if snapshot is None:
+            return True
+        try:
+            snapshot.commit()
+        except OSError as exc:
+            print(
+                f"ERROR: cannot write the pre-batch snapshot {snapshot.path}: "
+                f"{exc}. The previous one is unchanged and {args.task_id} was "
+                f"not handed out.",
+                file=sys.stderr,
+            )
+            return False
+        return True
+
+    if is_check_task(str(info.get("kind") or ""), task):
         # What `util batch-done` holds this check to: it changes no file.
-        if pin is not None:
-            record_check_tree(Path(args.phase_dir), args.task_id, pin)
-        else:
-            discard_check_tree(Path(args.phase_dir), args.task_id)
+        record_check_tree(Path(args.phase_dir), args.task_id, pin)
 
     # plans/review-commits.md §2.7: the watched set as this batch is handed
     # out, what its `util batch-done` compares with. No-op without a guard.
     commit_bind(Path(args.phase_dir), args.task_id)
 
     if args.stdout:
+        # The prompt text alone on stdout; the snapshot's markers beside it.
+        if not committed():
+            return 1
+        for line in snapshot_lines:
+            print(line, file=sys.stderr)
         sys.stdout.write(text)
         sys.stdout.flush()
         return 0
@@ -1113,12 +1872,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text, encoding="utf-8")
         else:
-            if pin is None:
-                raise pin_problem or OSError(f"{args.phase_dir} cannot be opened")
             with _prompt_files.PromptFolder.open(pin) as folder:
                 folder.write(target.name, text)
     except OSError as exc:
+        # The previous generation of the snapshot is left as it was.
         print(f"ERROR: cannot write {target}: {exc}", file=sys.stderr)
+        return 1
+    if not committed():
         return 1
     lines = text.count("\n") + (0 if text.endswith("\n") else 1)
     print(f"{MARKER_PATH} {target}")
@@ -1127,6 +1887,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         f"{MARKER_CONTEXT} {info['context_entries']} prior-batch entries bound "
         f"({info['phase']}, from {Path(info['output_dir']) / _prior_changes.FILENAME})"
     )
+    for line in snapshot_lines:
+        print(line)
     return 0
 
 

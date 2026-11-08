@@ -129,7 +129,7 @@ When validation failed due to parsing errors or timeouts, you can retry:
 ### Resume/State Options
 
 - `--resume`: Resume from last checkpoint, skip already-processed items
-- `--fresh`: Discard this phase's recorded progress (decisions, processed items, prior-changes log) and dispatch every batch again. The target file must already be back at its pre-run bytes (copy it from the phase's backup, or roll the batches back with `util restore-batch`): a target still carrying the previous run's edits is refused (exit 3), since every batch would land twice. Earlier rollback points are kept aside, never overwritten.
+- `--fresh`: Discard this phase's recorded progress (decisions, processed items, prior-changes log) and dispatch every batch again. Put the plan back at its pre-run bytes first, or every batch lands twice: copy it from `{phase}/backup.md` (the plan as this phase found it when it emitted its batches); after an `--exec-subagents` run, `util restore-batch` can roll the batches back newest-first instead. The native loop keeps no rollback point per batch: its per-batch snapshot holds only the last bound batch's pre-batch bytes (the next batch replaces it), and `util restore-batch` has nothing of a native run's. Only after an `--exec-subagents` run is a target still carrying that run's edits refused (exit 3); after a native run, check the plan yourself. Earlier rollback points are kept aside, never overwritten.
 - `--skip-human-review`: [DEPRECATED] Use `--skip-all-human` instead
 
 ### Batch Review Mode
@@ -237,9 +237,9 @@ Where `{total_batches}` is the length of the `batches` array.
 ### The Python write executor: `--exec-subagents` (an alternative to this loop)
 
 Everything from here to the end of the batch loop is the **native-subagent** path:
-this agent binds each batch's prompt with `util write-prompt`, snapshots the
-artifact, spawns a subagent on the bound prompt file, diffs against the snapshot
-and appends to the prior-changes log.
+this agent binds each batch's prompt with `util write-prompt` (which also
+snapshots the artifact), spawns a subagent on the bound prompt file, diffs against
+the snapshot and appends to the prior-changes log.
 
 A host with no native subagent tool runs the *same* loop in Python instead. Add
 `--exec-subagents` to the orchestrator invocation above and the phase schedules
@@ -290,27 +290,13 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util write-prompt \
      --phase-dir "{plan}/apply-suggestions" --task-id "{task.task_id}"
    ```
-   `{task.task_id}` is this batch's `task_id` from `write_tasks.json` (`apply-batch-0`, `apply-batch-1`, … in dispatch order). The command rewrites the batch's prompt with the prior-batch context bound **now** — from `{plan}/prior_changes.jsonl` as it is at this moment, i.e. the batches step 8 has already appended — and the result contract appended: exactly the text the `--exec-subagents` executor would dispatch for this batch. It writes it to `{plan}/apply-suggestions/prompts/{task.task_id}.prompt.txt` and prints three lines: `[WRITE_PROMPT] <path>`, `[WRITE_PROMPT_LINES] <n>` and `[WRITE_PROMPT_CONTEXT] …`. Note the path and the line count for step 3. Never substitute `{prior_changes_context}` yourself and never hand the subagent `batch.prompt` from the JSON: the literal token must never reach a subagent.
+   `{task.task_id}` is this batch's `task_id` from `write_tasks.json` (`apply-batch-0`, `apply-batch-1`, … in dispatch order). The command rewrites the batch's prompt with the prior-batch context bound **now** — from `{plan}/prior_changes.jsonl` as it is at this moment, i.e. the batches step 8 has already appended — and the result contract appended: exactly the text the `--exec-subagents` executor would dispatch for this batch. It writes it to `{plan}/apply-suggestions/prompts/{task.task_id}.prompt.txt` and prints three lines: `[WRITE_PROMPT] <path>`, `[WRITE_PROMPT_LINES] <n>` and `[WRITE_PROMPT_CONTEXT] …`, then the two snapshot lines step 2 describes. Note the path and the line count for step 3. Never substitute `{prior_changes_context}` yourself and never hand the subagent `batch.prompt` from the JSON: the literal token must never reach a subagent.
 
-   **Error handling**: an exit 3 names the problem (no `write_tasks.json` — re-run the orchestrator; an unknown task id — the known ids are listed). Do not fall back to the raw `batch.prompt`; stop and report.
+   **Error handling**: an exit 3 names the problem (no `write_tasks.json` — re-run the orchestrator; an unknown task id — the known ids are listed; no snapshot — outside a git repository, a plan it cannot read, a snapshot lock the file system cannot take at all (`Cannot lock …`), or a snapshot whose files are damaged or no longer the copy it took: the message names the files and the user's manual way out). Do not fall back to the raw `batch.prompt`; stop and report. Only two exits 3 are worth running this command again for; every other one is a stop. An earlier batch of this run has no step-7 record yet (the snapshot still belongs to it): run the batch the message names first — bind it with this command, then its steps, or the partial-application stop below — then run this command again. Another `util write-prompt` holds the snapshot's lock (it is binding a batch now): let it finish, then run this command again.
 
    A `[WRITE_PROMPT_ORDER]` line (on stderr; the prompt is still written) names an earlier batch whose summary this prompt does not carry — recorded but not appended yet, or not finished: do what it says, then run this `util write-prompt` again before spawning the subagent.
 
-2. **Read current plan state and snapshot it** — Always read the latest plan file version before each batch, then capture a pre-batch snapshot so the batch's effect can be verified in step 5 **without** relying on git. (Plan files are frequently untracked — freshly created — and every `git diff` variant silently ignores fully-untracked files, so git CANNOT detect whether a batch changed the plan. Snapshot the file and diff against the snapshot instead.)
-
-   The snapshot lives in the **workspace temp dir** at a deterministic path (each batch overwrites it; no cleanup step; the dir is self-gitignored). Resolve the project root first — if the command fails or prints nothing, STOP with the error: "multi-llm requires running inside a git repository":
-   ```bash
-   git rev-parse --show-toplevel
-   ```
-   The snapshot path is `{project_root}/.multi-llm/tmp/batch_snapshot_plan_{plan_stem}.md`, where `{project_root}` is the output of the command above and `{plan_stem}` is the plan filename without extension.
-
-   Also resolve the **plan file's absolute path** now — call it `{plan_abs}`. The plan argument is commonly relative (e.g. `plans/my-feature.md`), but a host's file-reading and file-writing tools require OS-native absolute paths, so a relative path cannot be handed to them directly. If the plan path is already absolute, use it as-is; otherwise join `{project_root}` with the relative plan path (e.g. `{project_root}/plans/my-feature.md`).
-
-   **Shell variables do NOT survive between Bash calls** — each Bash invocation is a fresh process, so do not stash these values in variables like `PROJECT_ROOT` or `BATCH_SNAPSHOT` for later steps. Note the concrete absolute snapshot path and `{plan_abs}` now and substitute them literally wherever later steps reference them.
-
-   Capture the snapshot with your host's file tools, not Bash: read `{plan_abs}`, then write its exact content to the snapshot path (use the absolute path — join the resolved project root with `.multi-llm/tmp/batch_snapshot_plan_{plan_stem}.md`; a host file-write that creates parent directories needs no mkdir step and no Bash copy command). If `{project_root}/.multi-llm/tmp/.gitignore` does not exist yet, also write it with content `*` so the temp dir ignores itself.
-
-   Keep the concrete absolute snapshot path and `{plan_abs}` for step 5.
+2. **Note the pre-batch snapshot** — step 1's command has already copied the plan, byte for byte, to the workspace temp dir (`.multi-llm/tmp/batch_snapshot_plan_<plan stem>-…` under the repository root, a name of its own per plan and phase; the dir ignores itself) and printed `[WRITE_SNAPSHOT] <snapshot path>` and `[WRITE_ARTIFACT] <plan path>`, both absolute. Keep both paths for step 5; take no copy of your own. Step 5 diffs against this snapshot instead of asking git: plan files are frequently untracked (freshly created), and every `git diff` variant silently ignores fully-untracked files. The snapshot belongs to this batch: running `util write-prompt` for it again keeps it, and no later batch's call replaces it before this batch has its step-7 record. It is a convenience copy in the repository, where the subagent can write too: its checksum catches an accidental change, not a deliberate one.
 
 3. **Spawn a subagent** whose whole prompt is: read the file at the `[WRITE_PROMPT]` path in full — through line `[WRITE_PROMPT_LINES]`, paging if a single read stops short — and follow it verbatim.
    - Use `general-purpose` subagent type
@@ -323,10 +309,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
    ```bash
    diff -u "{snapshot_path}" "{plan_path}"   # empty output = byte-identical (unchanged); non-empty = file changed
    ```
-   Substitute `{snapshot_path}` and `{plan_path}` with the **concrete absolute paths** noted in step 2 (the snapshot path and `{plan_abs}` — the same resolved absolute plan path used for the step-2 Read, not the possibly-relative plan argument). Do NOT write `$BATCH_SNAPSHOT` or `$PLAN_PATH` here — shell variables assigned in earlier Bash calls do not exist in this fresh Bash process, and an unset variable would make `diff` compare the wrong files or fail. If the snapshot path was not carried forward, recompute and diff in one single invocation, embedding the root as an inline command substitution (not as a `PROJECT_ROOT=...` assignment prefix, which the permission allowlist does not cover):
-   ```bash
-   diff -u "$(git rev-parse --show-toplevel)/.multi-llm/tmp/batch_snapshot_plan_{plan_stem}.md" "{plan_path}"
-   ```
+   `{snapshot_path}` and `{plan_path}` are the `[WRITE_SNAPSHOT]` and `[WRITE_ARTIFACT]` paths from step 1, written out literally (a shell variable from an earlier Bash call does not exist in this one). If you no longer have them, run step 1's command again for this same batch: it keeps this batch's snapshot and prints the same two lines.
    Classify the result:
    - **Success**: The snapshot diff is non-empty AND the expected changes are present (spot-check by `grep`-ing the plan for distinctive text from this batch's suggestions).
    - **Failure (clean)**: The subagent reported failure AND the snapshot diff is empty (plan byte-identical to the pre-batch snapshot).
@@ -336,9 +319,9 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
    The snapshot diff is the authoritative, fully git-independent check — no git intent-to-add step is needed here (flows that genuinely need untracked files visible to git diffs, like code review, handle that inside their Python orchestrator via `utils/git_utils.intent_to_add_untracked`).
 
-   There is **no snapshot cleanup step**: the snapshot lives in the self-gitignored workspace temp dir and is simply overwritten by the next batch. On **partial application** the loop stops (below), so the snapshot file still holds the pre-batch content for the human reviewer to inspect.
+   There is **no snapshot cleanup step**: the snapshot lives in the self-gitignored workspace temp dir, and the next batch's `util write-prompt` replaces it once this batch is recorded. On **partial application** the loop stops (below), so the snapshot file still holds the pre-batch content for the human reviewer to inspect.
 
-   **Partial application handling**: If verification detects a partial application, **stop the batch loop and surface the issue for human review**. Do not continue to subsequent batches. Log the partial application details and prompt the human operator to resolve the state before resuming. When the reply's report attests at least one suggestion applied (in `ids`, with a `status` other than `failed`) and leaves others out of both `ids` and `declined`, give the user both ways forward and let them choose: restore the batch (`util restore-batch`) or fix the cause, then resume; **or** keep what the batch applied and go on without the suggestions it left out — record it with step 7's `util batch-done` as `--status completed` plus one `--skipped <id>` per suggestion left out, append its summary (step 8) and continue with the next batch. A resume that does neither hands the same batch out again and stops the same way.
+   **Partial application handling**: If verification detects a partial application, **stop the batch loop and surface the issue for human review**. Do not continue to subsequent batches. Log the partial application details and prompt the human operator to resolve the state before resuming. When the reply's report attests at least one suggestion applied (in `ids`, with a `status` other than `failed`) and leaves others out of both `ids` and `declined`, give the user both ways forward and let them choose: put the plan back and fix the cause, then resume — the step-2 snapshot holds the plan as it was before this batch, so read the step-5 diff and copy it back by hand (`cp "{snapshot_path}" "{plan_path}"`, which also undoes every edit made to the plan since the snapshot, the user's included). It is a convenience copy, not tamper-proof evidence: the batch's subagent could write it too, so read the diff before trusting it. This loop has no other per-batch rollback point — `util restore-batch` has nothing of a native batch's, and `{plan}/apply-suggestions/backup.md` holds the plan from before the whole phase; **or** keep what the batch applied and go on without the suggestions it left out — record it with step 7's `util batch-done` as `--status completed` plus one `--skipped <id>` per suggestion left out, append its summary (step 8) and continue with the next batch. A resume that does neither hands the same batch out again and stops the same way.
 
 6. **Extract summary** — The subagent's reply ends with one JSON object (`{"status", "ids", "declined", "files_touched", "summary", "notes"}`: the result contract the prompt file carries). Take its `summary` as the one-line summary; its `status` (`applied` / `no-op` / `failed`) and `files_touched` are evidence for step 5, never a substitute for the snapshot diff. If the reply carries no such object, compress the reply into a single sentence instead.
 

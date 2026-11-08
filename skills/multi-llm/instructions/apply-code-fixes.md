@@ -134,7 +134,7 @@ When validation failed due to parsing errors or timeouts, you can retry:
 ### Resume/State Options
 
 - `--resume`: Resume from last checkpoint, skip already-processed items
-- `--fresh`: Discard this phase's recorded progress (decisions, processed items, prior-changes log) and dispatch every batch again. The target file must already be back at its pre-run bytes (copy it from the phase's backup, or roll the batches back with `util restore-batch`): a target still carrying the previous run's edits is refused (exit 3), since every batch would land twice. Earlier rollback points are kept aside, never overwritten.
+- `--fresh`: Discard this phase's recorded progress (decisions, processed items, prior-changes log) and dispatch every batch again. Put the files the previous run's batches edited back first, or every batch lands twice: after an `--exec-subagents` run, `util restore-batch` rolls the batches back newest-first; the native loop takes no snapshot of them, so undo its batches by hand (`git diff -- <the files>` shows their edits, together with any other uncommitted edit to the same files). This phase edits no single target file, so nothing checks for you that the previous run's edits are gone. Earlier rollback points are kept aside, never overwritten.
 - `--skip-human-review`: [DEPRECATED] Use `--skip-all-human` instead
 
 ### Batch Review Mode
@@ -236,8 +236,8 @@ Where `{total_batches}` is the length of the `batches` array.
 ### The Python write executor: `--exec-subagents` (an alternative to this loop)
 
 Everything from here to the end of the batch loop is the **native-subagent** path:
-this agent binds each batch's prompt with `util write-prompt`, snapshots the
-artifact, spawns a subagent on the bound prompt file, diffs against the snapshot
+this agent binds each batch's prompt with `util write-prompt`, spawns a subagent
+on the bound prompt file, checks the target files against their pre-batch state
 and appends to the prior-changes log.
 
 A host with no native subagent tool runs the *same* loop in Python instead. Add
@@ -307,7 +307,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
    - **Partial application**: Some but not all expected changes are present, or the subagent failed but file modifications were detected.
    - **Declined items** (fix round 18): an item the reply lists in `declined` with a reason was left unapplied on purpose (for example, the implementation record calls that code deliberate). It is never applied and never a partial application: a batch whose every item is in `ids` or in `declined` is a success (a no-op when it changed nothing), whatever word its `status` carries, `failed` included: record it `--status completed`. An item in neither list, an id in both, or a `declined` entry without a reason is a partial application.
 
-   **Partial application handling**: If verification detects a partial application, **stop the batch loop and surface the issue for human review**. Do not continue to subsequent batches. Log the partial application details and prompt the human operator to resolve the state before resuming. When the reply's report attests at least one fix applied (in `ids`, with a `status` other than `failed`) and leaves others out of both `ids` and `declined`, give the user both ways forward and let them choose: restore the batch (`util restore-batch`) or fix the cause, then resume; **or** keep what the batch applied and go on without the fixes it left out — record it with step 6's `util batch-done` as `--status completed` plus one `--skipped <id>` per fix left out, append its summary (step 7) and continue with the next batch. A resume that does neither hands the same batch out again and stops the same way.
+   **Partial application handling**: If verification detects a partial application, **stop the batch loop and surface the issue for human review**. Do not continue to subsequent batches. Log the partial application details and prompt the human operator to resolve the state before resuming. When the reply's report attests at least one fix applied (in `ids`, with a `status` other than `failed`) and leaves others out of both `ids` and `declined`, give the user both ways forward and let them choose: undo the batch by hand — this loop takes no snapshot of the files a batch edits, so `util restore-batch` has nothing of this batch's to put back: `git diff -- <the batch's files>` shows its edits, together with any earlier batch's uncommitted edits to the same files, which stay — or fix the cause, then resume; **or** keep what the batch applied and go on without the fixes it left out — record it with step 6's `util batch-done` as `--status completed` plus one `--skipped <id>` per fix left out, append its summary (step 7) and continue with the next batch. A resume that does neither hands the same batch out again and stops the same way.
 
 5. **Extract summary** — The subagent's reply ends with one JSON object (`{"status", "ids", "declined", "files_touched", "summary", "notes"}`: the result contract the prompt file carries). Take its `summary` as the one-line summary; its `status` (`applied` / `no-op` / `failed`) and `files_touched` are evidence for step 4, never a substitute for the file check. If the reply carries no such object, compress the reply into a single sentence instead.
 
@@ -410,8 +410,8 @@ target), without running it or writing the config.
 If the command fails:
 - Report which fix may have caused the issue
 - Record the command, its exit code and the tail of its output in the summary
-- Do **not** revert anything — every batch was already verified against its own
-  pre-batch snapshot, and the half-applied state is what a human needs to read
+- Do **not** revert anything — each batch was verified when it finished (step 4),
+  and the failing state is what a human needs to read
 - The phase is **not** complete: stop and hand the failure to a human
 
 On the `--exec-subagents` leg the executor does all of this itself, from the same

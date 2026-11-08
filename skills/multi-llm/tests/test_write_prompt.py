@@ -14,6 +14,7 @@ same state. That identity is what this file pins.
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -78,12 +79,29 @@ def _implement_batches():
 
 @pytest.fixture
 def plan_dir(tmp_path):
+    # A repository: a shared-artifact batch's snapshot lives under its root,
+    # and outside one `util write-prompt` refuses the batch.
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
     plan = tmp_path / "plans" / "feature.md"
     plan.parent.mkdir(parents=True)
     plan.write_text("# Feature\n\n## Step 2\n\nBody.\n", encoding="utf-8")
     out = tmp_path / "plans" / "feature"
     out.mkdir()
     return plan, out
+
+
+def _recorded(out, phase_dir, task_id, capsys):
+    """*task_id* recorded `completed` by the real `util batch-done`: a
+    shared-artifact batch is bound only after the ones before it, and only a
+    record carrying the run counts (test_batch_snapshot.py)."""
+    from utils import batch_done
+    state = out / "state.json"
+    if not state.exists():
+        state.write_text(json.dumps({"task_status": {}}), encoding="utf-8")
+    assert batch_done.main([
+        "--phase-dir", str(phase_dir), "--task-id", task_id, "--status", "completed",
+    ]) == 0
+    capsys.readouterr()
 
 
 def _materialize(plan, out, kind, batches, phase_subdir):
@@ -180,6 +198,7 @@ class TestTheCommand:
         phase_dir, tasks = _materialize(
             plan, out, "apply_suggestions", _suggestion_batches(), "apply-suggestions")
         prior_changes.append(str(out), "b0", "apply-suggestions", "first batch")
+        _recorded(out, phase_dir, "apply-batch-0", capsys)
         code = write_prompt.main([
             "--phase-dir", str(phase_dir), "--task-id", "apply-batch-1",
         ])
@@ -379,7 +398,7 @@ class TestAPromptBoundOutOfOrderSaysSo:
 
     def test_recorded_but_not_appended_is_named(self, plan_dir, capsys):
         out, phase_dir, tasks = self._setup(plan_dir)
-        self._state(out, {"apply-batch-0": "completed"})
+        _recorded(out, phase_dir, "apply-batch-0", capsys)
         code, stdout, warnings = self._bind(phase_dir, "apply-batch-1", capsys)
         assert code == 0
         assert stdout.startswith("[WRITE_PROMPT] ")  # still written
@@ -399,12 +418,27 @@ class TestAPromptBoundOutOfOrderSaysSo:
         assert "batch 0 done" in text
 
     def test_an_unfinished_earlier_batch_is_named(self, plan_dir, capsys):
+        plan, out = plan_dir
+        batches = [_implement_batches()[0], {"batch_index": 1, "can_parallelize": False,
+                   "tasks": [{"id": "T003", "title": "Next", "prompt": PROMPT,
+                              "files_to_create": ["src/c.py"], "depends_on": ["T001"],
+                              "executor_role": "agent"}]}]
+        phase_dir, _tasks = _materialize(plan, out, "implement", batches, "implement")
+        self._state(out, {})
+        code, stdout, warnings = self._bind(phase_dir, "T003", capsys)
+        assert code == 0 and stdout.startswith("[WRITE_PROMPT] ")  # still written
+        assert len(warnings) == 1
+        assert "T001, an earlier batch, has no `util batch-done` record" in warnings[0]
+
+    def test_a_shared_artifact_batch_waits_for_the_earlier_one(self, plan_dir, capsys):
+        """The two shared-artifact phases refuse instead (exit 3): their one
+        snapshot slot would otherwise pass from the earlier batch to this one
+        (test_batch_snapshot.py, TestTheBatchesGoInOrder)."""
         out, phase_dir, _tasks = self._setup(plan_dir)
         self._state(out, {})
-        _code, _stdout, warnings = self._bind(phase_dir, "apply-batch-1", capsys)
-        assert len(warnings) == 1
-        assert "apply-batch-0, an earlier batch, has no `util batch-done` record" in (
-            warnings[0])
+        code, stdout, _warnings = self._bind(phase_dir, "apply-batch-1", capsys)
+        assert code == 3 and stdout == ""
+        assert not (phase_dir / "prompts" / "apply-batch-1.prompt.txt").exists()
 
     def test_the_first_batch_a_skipped_one_and_no_state_say_nothing(
         self, plan_dir, capsys
@@ -418,7 +452,7 @@ class TestAPromptBoundOutOfOrderSaysSo:
 
     def test_stdout_mode_keeps_stdout_the_prompt_alone(self, plan_dir, capsys):
         out, phase_dir, tasks = self._setup(plan_dir)
-        self._state(out, {"apply-batch-0": "completed"})
+        _recorded(out, phase_dir, "apply-batch-0", capsys)
         code, stdout, warnings = self._bind(phase_dir, "apply-batch-1", capsys, "--stdout")
         assert code == 0 and len(warnings) == 1
         assert stdout == _executor_rendering(

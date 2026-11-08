@@ -91,6 +91,73 @@ everything at exit 0, wiping a later batch's edit and the user's own; adversaria
 2026-10-02); a partial application never reverts itself — the exit-3 message names the command,
 because an automatic revert would destroy the state a human needs to inspect.
 
+**The native leg's per-batch snapshot is not a `pre_batch/` slot.** For apply-suggestions and
+apply-task-suggestions, `util write-prompt` copies the batch's one artifact (the plan, the tasks
+file) byte for byte into the workspace temp dir (`write_prompt.prepare_batch_snapshot`,
+2026-11-08; the host used to copy it in a turn of its own), and the host's byte diff against it
+decides the batch. It is a convenience copy: it lies in the repository, which the batch's subagent
+can write, so its checksums catch an accidental change and prove nothing against a subagent. No
+command restores from it; the apply instructions tell a human how to copy it back by hand, and
+that code-fix batches have none. Trustworthy native rollback needs the executor's protected
+storage, a larger design (plans/apply-phase-throughput.md; Codex review 2 of U31, #2). The rules:
+
+- *The phase dir is pinned first.* A phase dir that is a link (or not a directory) is refused
+  (exit 1) before anything is read through it or written — no commit re-check record, check-tree
+  record, commit bind or snapshot — in every output mode, and the snapshot's root is the pinned
+  phase dir's repository, taken from the pin (`git_utils.pin_repo_root` must agree with it), never
+  found again through the phase path. `write_tasks.json` is read for the run stamp through the
+  pin too, so a folder swapped after the pin is refused as a link (Codex review of U31, #1).
+- *One slot per phase dir and artifact.* The slot is
+  `.multi-llm/tmp/batch_snapshot_<plan|tasks>_<plan stem>-<key>`, the key 12 hex digits of the
+  sha256 of the pinned phase dir and the artifact's absolute path, so two plans of one name in
+  different folders never share one (review 2, #8). The host takes the paths from the
+  `[WRITE_SNAPSHOT]` / `[WRITE_ARTIFACT]` markers; binding the same batch again prints them again.
+- *A generation is published whole.* A generation is a copy `<slot>.<sha12>.md` and the binding
+  `<slot>.binding.json` naming it (`task_id`, `expected_ids`, the phase dir and its
+  `(st_dev, st_ino)`, the run — the sha256 of `write_tasks.json`, which only an emit writes — the
+  artifact, the copy's name and sha256, a random `generation` id, the time it was taken). Every
+  field is checked for presence and shape before a transition is chosen: a binding missing one
+  (its `phase_identity`, say) is damaged evidence, never another run's (review 3, #1). The copy
+  is written first, the
+  binding renamed into place last as the commit point, and the previous generation's copy is
+  removed only after; a failure at either write leaves the previous generation whole (review 2,
+  #3). Both are written after the prompt file and before the markers hand the batch out, never
+  through a link (`prompt_files.PromptFolder`).
+- *One call at a time.* Every call holds `<slot>.lock` (opened without following a link,
+  `process_control.wait_for_fd_lock`, 10 s) from reading the slot through publishing it, so two
+  hosts binding at once cannot take one batch's edits as its baseline; a call that waits too long
+  is refused (exit 3) with nothing written, and tells the host to run it again (review 2, #4). A
+  lock the file system cannot take at all (`EOPNOTSUPP`, `ENOLCK`: any errno outside
+  `process_control.LOCK_CONTENTION_ERRNOS`) is raised at once, never waited out, and refused
+  (exit 3) naming the cause and saying a retry gives the same answer (review 3, #3).
+- *Transitions.* The same batch bound again keeps its generation (refused, exit 3, when its copy
+  no longer hashes to the binding: a new copy could carry the batch's own edits). Another batch of
+  the run replaces it only once the bound batch has a `util batch-done` record made for this
+  generation — a recorded `task_status` and, beside it, the binding's `generation` as its
+  `snapshot_generation`: `task_status` is one map for every run, and a `--resume` numbers its
+  batches afresh. A new emit of the phase (a `--resume`, a re-run) is a new run and replaces it.
+- *Identities, not clocks.* `util batch-done` keeps `write_prompt.completion_stamp` for a
+  shared-artifact batch in `state.json`'s `batch_snapshot_records[<phase>][<task id>]`, in the
+  same locked write as its `task_status`: `run` (the sha256 of `write_tasks.json` as it records)
+  and, when the slot's binding names that batch, `snapshot_generation`. The `processed_<phase>`
+  records keep the one shape both legs write. Records used to be dated against the binding's and
+  the emit's local wall-clock stamps, so a clock set back between binding and recording hid a
+  real record (review 3, #2).
+- *Damaged evidence is not a new slot.* A binding that cannot be read, is not JSON or not this
+  version's, or names another phase dir or file than its slot's; copies no binding names (a
+  deleted binding, a cut-short write); a `state.json` that is missing, unreadable or has no
+  `task_status` object where a transition needs it — each refuses (exit 3), naming the files and
+  the human's way out: compare the artifact with the copies, put it back by hand if a batch
+  half-applied, delete the slot's files and run again (review 2, #5).
+- *In order.* Before the slot is touched, a batch is refused (exit 3) while an earlier batch of
+  its run (lower `batch_index`, not a human task) has no record from this run — one whose
+  stamp names this run. The batches edit one file one at a
+  time, and without this a batch bound early and the batch before it each waited on the other
+  (review 2, #6). The `[WRITE_PROMPT_ORDER]` warning stays advisory for the other kinds.
+- Outside a repository, or with an artifact it cannot read, the call refuses (exit 3).
+  apply-code-fixes and implement take no native snapshot: their instructions send a human to undo
+  a native batch by hand.
+
 `driver.max_concurrent_write_subagents` and `driver.write_paths` are `driver.*` keys like any other:
 closed set, fail-fast validation, typed accessors (`get_max_concurrent_write_subagents`, `get_write_paths`,
 which fills each half of the policy per key so setting only `deny` is never an

@@ -57,6 +57,7 @@ inside a budget that ends before the abort SIGKILLs the worker.
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
 import signal
@@ -540,7 +541,8 @@ class FileMutex:
         """Wait for the lock; ``True`` when it was taken. Never raises.
 
         ``False`` means *proceed unserialized or give up* — the file could not
-        be opened (a phase dir that does not exist) or the wait expired.
+        be opened (a phase dir that does not exist), its file system cannot
+        lock it, or the wait expired.
         """
         if self._fd is not None:
             return True
@@ -551,21 +553,18 @@ class FileMutex:
             fd = os.open(self.path, flags, 0o644)
         except (OSError, IOError, ValueError):
             return False
-        deadline = time.monotonic() + max(0.0, float(timeout_s))
-        while True:
+        try:
+            taken = wait_for_fd_lock(fd, timeout_s=timeout_s, poll_interval_s=poll_interval_s)
+        except OSError:
+            taken = False  # the file system cannot lock it: never raised here
+        if not taken:
             try:
-                _take_fd_lock(fd)
-            except (OSError, IOError):
-                if time.monotonic() >= deadline:
-                    try:
-                        os.close(fd)
-                    except OSError:
-                        pass
-                    return False
-                time.sleep(poll_interval_s)
-                continue
-            self._fd = fd
-            return True
+                os.close(fd)
+            except OSError:
+                pass
+            return False
+        self._fd = fd
+        return True
 
     def release(self) -> None:
         """Drop the lock, keeping the file. Idempotent, never raises."""
@@ -573,9 +572,7 @@ class FileMutex:
         if fd is None:
             return
         try:
-            _drop_fd_lock(fd)
-        except (OSError, IOError):
-            pass
+            release_fd_lock(fd)
         finally:
             try:
                 os.close(fd)
@@ -585,6 +582,54 @@ class FileMutex:
     @property
     def held(self) -> bool:
         return self._fd is not None
+
+
+#: What a non-blocking lock attempt fails with while another descriptor holds
+#: the lock (``flock``'s ``EWOULDBLOCK``, ``fcntl``'s ``EACCES``/``EAGAIN``,
+#: ``msvcrt``'s ``EACCES``/``EDEADLOCK``): worth waiting on. Any other errno
+#: (an unsupported operation, no lock records left) is the file system's
+#: answer, and waiting never changes it.
+LOCK_CONTENTION_ERRNOS = frozenset(
+    code for code in (
+        errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES, errno.EINTR,
+        getattr(errno, "EDEADLK", None),
+    ) if code is not None
+)
+
+
+def wait_for_fd_lock(
+    fd: int,
+    *,
+    timeout_s: float = DEFAULT_MUTEX_TIMEOUT_S,
+    poll_interval_s: float = 0.005,
+) -> bool:
+    """:class:`FileMutex`'s bounded wait, on a descriptor the caller opened
+    itself (for instance without following a link). ``True`` once the
+    exclusive lock is taken, ``False`` when another holder kept it until the
+    wait expired. Raises the ``OSError`` at once when the lock cannot be
+    taken at all (an errno outside :data:`LOCK_CONTENTION_ERRNOS`, such as
+    ``EOPNOTSUPP`` on a file system without locks). The caller drops it with
+    :func:`release_fd_lock` and closes *fd*."""
+    deadline = time.monotonic() + max(0.0, float(timeout_s))
+    while True:
+        try:
+            _take_fd_lock(fd)
+        except (OSError, IOError) as exc:
+            if exc.errno not in LOCK_CONTENTION_ERRNOS:
+                raise
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(poll_interval_s)
+            continue
+        return True
+
+
+def release_fd_lock(fd: int) -> None:
+    """Drop the lock :func:`wait_for_fd_lock` took on *fd*. Never raises."""
+    try:
+        _drop_fd_lock(fd)
+    except (OSError, IOError):
+        pass
 
 
 # ---------------------------------------------------------------------------

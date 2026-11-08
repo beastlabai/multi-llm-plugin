@@ -363,7 +363,12 @@ seams — `write_batch_scheduler.bind_prior_changes` (late, from the **plan dir'
 that moment, phase-scoped) and `with_result_contract` — writes it to `{phase}/prompts/<id>.prompt.txt` and
 prints `[WRITE_PROMPT] <path>` / `[WRITE_PROMPT_LINES] <n>` / `[WRITE_PROMPT_CONTEXT] …`
 (`--stdout` prints the text alone); `tests/test_write_prompt.py` pins it byte-identical to
-`WriteBatchScheduler`'s dispatch text for the same state.
+`WriteBatchScheduler`'s dispatch text for the same state. For apply-suggestions and
+apply-task-suggestions it also takes the batch's pre-batch snapshot, bound to the batch and kept
+when the same batch is bound again (`prepare_batch_snapshot`, 2026-11-08), and prints
+`[WRITE_SNAPSHOT] <path>` / `[WRITE_ARTIFACT] <path>` after the three markers (on stderr under
+`--stdout`), which the host's diff step reads (no command restores from it); the rules are in
+[write safety](write-safety.md#write-safety-controls).
 
 The executor leg keeps the same file (fix round 16, run 6 #10b: T007's prompt with the accepted
 findings was in no artifact on either tool route): `WriteBatchScheduler._keep_dispatched_prompt` writes each dispatch's
