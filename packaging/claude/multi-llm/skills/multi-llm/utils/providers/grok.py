@@ -210,8 +210,8 @@ class GrokProvider(LLMProvider):
     answer still do (326 s), and a 5xx and a zero-byte response run **four such
     ladders back to back: 60 chat requests over ~1,340 s**, silent throughout —
     past the 1200 s slot providers.yaml gives grok (``grok.default_timeout``;
-    the class's own :attr:`default_timeout`, 600 s, is only the fallback for a
-    config without the row), so the slot was killed with zero bytes on both
+    the shared :data:`~utils.providers.base.DEFAULT_TIMEOUT_S` is only the
+    fallback for a config without the row), so the slot was killed with zero bytes on both
     channels and the transport retry re-ran the same silent ladder.
     :meth:`get_env` bounds it with grok's own ``models.max_retries``
     (:data:`GROK_MAX_RETRIES`, through the ``GROK_CONFIG`` overlay): measured,
@@ -283,10 +283,6 @@ class GrokProvider(LLMProvider):
     @property
     def name(self) -> str:
         return "grok"
-
-    @property
-    def default_timeout(self) -> int:
-        return 600
 
     @property
     def internal_retries(self) -> InternalRetryEnvelope:

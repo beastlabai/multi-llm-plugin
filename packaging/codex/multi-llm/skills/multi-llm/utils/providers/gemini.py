@@ -310,10 +310,6 @@ class GeminiProvider(LLMProvider):
     def name(self) -> str:
         return "gemini"
 
-    @property
-    def default_timeout(self) -> int:
-        return 900  # Gemini can be slower
-
     def is_available(self) -> bool:
         return shutil.which("gemini") is not None
 

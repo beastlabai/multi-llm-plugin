@@ -456,14 +456,6 @@ class QwenCodeProvider(LLMProvider):
     def name(self) -> str:
         return "qwen-code"
 
-    @property
-    def default_timeout(self) -> int:
-        # 1200 s, matching the providers.yaml block. `--max-wall-time` is derived
-        # from the caller's resolved timeout and held 30 s under it, so this
-        # value is also what bounds qwen's own unbounded 429/stall paths on a
-        # default run.
-        return 1200
-
     def is_available(self) -> bool:
         return shutil.which("qwen") is not None
 

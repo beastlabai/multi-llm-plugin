@@ -621,10 +621,6 @@ class PiProvider(LLMProvider):
     def name(self) -> str:
         return "pi"
 
-    @property
-    def default_timeout(self) -> int:
-        return 600
-
     def is_available(self) -> bool:
         return shutil.which("pi") is not None
 

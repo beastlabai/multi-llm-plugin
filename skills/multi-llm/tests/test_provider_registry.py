@@ -390,6 +390,36 @@ class TestGetProviderTimeout:
         # Should return default fallback
         assert timeout == 1200
 
+    @pytest.mark.parametrize("name", sorted(registry._PROVIDERS))
+    def test_no_adapter_declares_a_timeout_of_its_own(self, name):
+        """providers.yaml's row is the one per-provider number.
+
+        An adapter that overrides ``default_timeout`` carries a second number
+        that only answers when the row is missing, and reads as authoritative
+        while disagreeing with the row (13 of 19 did). Every adapter inherits
+        the shared fallback instead.
+        """
+        from utils.providers.base import LLMProvider
+
+        cls = type(registry._PROVIDERS[name])
+        assert cls.default_timeout is LLMProvider.default_timeout, (
+            f"{cls.__name__} overrides default_timeout. Set the provider's "
+            f"timeout in providers.yaml (providers.{name}.default_timeout) and "
+            f"delete the override; see docs/configuration.md#provider-blocks."
+        )
+
+    @pytest.mark.config_override
+    def test_a_provider_without_a_row_gets_the_shared_fallback(self, reg, monkeypatch):
+        """No row, or a row without the key: DEFAULT_TIMEOUT_S, for any adapter."""
+        from utils.providers.base import DEFAULT_TIMEOUT_S
+
+        base = {"providers": {"codex": {"models": ["gpt-6-luna"]}}}
+        monkeypatch.setattr(reg, "_load_base_config", lambda: copy.deepcopy(base))
+        _reset_cache()
+
+        assert get_provider_timeout("gemini") == DEFAULT_TIMEOUT_S
+        assert get_provider_timeout("codex") == DEFAULT_TIMEOUT_S
+
 
 class TestGetProviderMaxConcurrent:
     """Tests for provider max concurrent retrieval."""

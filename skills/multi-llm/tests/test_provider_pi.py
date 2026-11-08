@@ -44,8 +44,11 @@ class TestPiProvider:
         assert provider.name == "pi"
 
     def test_default_timeout(self, provider):
-        """Test that default_timeout is set correctly."""
-        assert provider.default_timeout == 600
+        """No per-adapter timeout: docs/configuration.md#provider-blocks."""
+        from utils.providers.base import DEFAULT_TIMEOUT_S
+
+        # The shared fallback; the timeout a run uses is providers.yaml's row.
+        assert provider.default_timeout == DEFAULT_TIMEOUT_S
 
     @patch("shutil.which")
     def test_is_available_true(self, mock_which, provider):

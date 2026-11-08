@@ -179,9 +179,9 @@ class MuseProvider(LLMProvider):
     #   to be killed part-way through the same chain (review 24, pins #3); at
     #   985 the ladder refuses that retry and says why. The slot that runs is
     #   providers.yaml's `muse.default_timeout`, 1800 s, which holds one whole
-    #   chain, so the rich diagnosis is seen; the class's own
-    #   `default_timeout` (600) is only the fallback for a config without the
-    #   row, and a 600 s slot is refused before the spawn.
+    #   chain, so the rich diagnosis is seen; the shared `DEFAULT_TIMEOUT_S`
+    #   (1200) is only the fallback for a config without the row, and would
+    #   also hold one chain.
     #
     # * `retries_rate_limit = True` — the `rate-limit` row IS the 5xx row's
     #   envelope to two decimal places: muse's ladder does not distinguish a 429
@@ -248,10 +248,6 @@ class MuseProvider(LLMProvider):
     @property
     def name(self) -> str:
         return "muse"
-
-    @property
-    def default_timeout(self) -> int:
-        return 600
 
     def is_available(self) -> bool:
         return shutil.which("muse") is not None

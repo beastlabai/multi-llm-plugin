@@ -32,7 +32,7 @@ bounded by an explicit ``--tools`` allow-list. omp's own factory default **is**
 ``yolo`` over every tool, so there is no safe default to fall back on and the
 explicit flag is what makes both the default and the user's ``config.yml``
 irrelevant. The bypass is declared (``read_only_modes.omp.bypass_exception`` in
-``providers.yaml``, ``yolo`` in ``tests/test_read_only_modes.py``'s
+``tests/read_only_modes.yaml``, ``yolo`` in ``tests/test_read_only_modes.py``'s
 ``NEGATIVE_VALUE_TOKENS``) and was accepted by the repository owner on
 2026-09-17 for the ``generate`` profile only.
 
@@ -962,10 +962,6 @@ class OmpProvider(LLMProvider):
     @property
     def name(self) -> str:
         return "omp"
-
-    @property
-    def default_timeout(self) -> int:
-        return 600
 
     def is_available(self) -> bool:
         return shutil.which("omp") is not None

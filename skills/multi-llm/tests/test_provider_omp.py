@@ -66,7 +66,10 @@ class TestOmpProvider:
     # ── identity ─────────────────────────────────────────────────────────
     def test_identity(self, provider):
         assert provider.name == "omp"
-        assert provider.default_timeout == 600
+        from utils.providers.base import DEFAULT_TIMEOUT_S
+
+        # The shared fallback; the timeout a run uses is providers.yaml's row.
+        assert provider.default_timeout == DEFAULT_TIMEOUT_S
         assert provider.version_cmd == ("omp", "--version")
         assert provider.verified_version == "18.8.3"
         assert provider.usage_support == base_module.USAGE_FULL

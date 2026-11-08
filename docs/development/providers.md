@@ -9,6 +9,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Adding a provider adapter](#adding-a-provider-adapter)
 - [Configuration and runner resolution](#configuration-and-runner-resolution)
 - [Read-only provider contracts](#read-only-provider-contracts)
+- [Model catalog snapshots](#model-catalog-snapshots)
 - [Provider output channels](#provider-output-channels)
 - [Capturing a CLI's streams](#capturing-a-clis-streams)
 - [Usage reporting](#usage-reporting)
@@ -43,8 +44,8 @@ Then work through the steps in order. Each test named fails until its step is do
 
 | Step | Where | What to add | Fails until then |
 | --- | --- | --- | --- |
-| 1 | `utils/providers/<name>.py` | One concrete `LLMProvider` subclass with the five abstract members: `name`, `default_timeout`, `is_available` (`shutil.which` of the binary), `build_command`, `parse_output`. Add `EFFORT_LADDER = ReasoningLadder(provider=..., rungs=...)` and `REASONING_EFFORTS = EFFORT_LADDER.accepted`; a CLI with no effort control declares `ReasoningLadder(provider=..., declined="<the measurement>")` and no `REASONING_EFFORTS`. Decide each declaration the argv shows: `prompt_argv_index`, `supported_prompt_transports`, `agent_profiles`, `supports_file_output`, `runs_shell_in_generate`, `internal_retries`. Copy the closest sibling: `grok.py` for a JSON envelope, `kilocode.py` for plain stdout. | `test_reasoning_effort_ladder.py`; `test_provider_housekeeping.py`: the prompt index against the argv, a `STOPS_FILE_WRITES` or `REVIEWED_STILL_WRITES` row for each restriction-shaped argv atom, a `SHELL_EVIDENCE` row for a non-`None` shell declaration |
-| 2 | `providers.yaml` | A `providers.<name>` block (`default_timeout`, `max_concurrent`, `models`, the first being the default) and a `read_only_modes.<name>` row: `mechanism: null` and `probed: null` until probed ([read-only contracts](#read-only-provider-contracts)). Insert the block where it should sit in `--init`'s order. | `test_provider_roster.py`, `test_read_only_modes.py` |
+| 1 | `utils/providers/<name>.py` | One concrete `LLMProvider` subclass with the four abstract members: `name`, `is_available` (`shutil.which` of the binary), `build_command`, `parse_output`. Do not override `default_timeout`: the timeout is the `providers.yaml` row of step 2, and every adapter inherits the one fallback, `DEFAULT_TIMEOUT_S`. Add `EFFORT_LADDER = ReasoningLadder(provider=..., rungs=...)` and `REASONING_EFFORTS = EFFORT_LADDER.accepted`; a CLI with no effort control declares `ReasoningLadder(provider=..., declined="<the measurement>")` and no `REASONING_EFFORTS`. Decide each declaration the argv shows: `prompt_argv_index`, `supported_prompt_transports`, `agent_profiles`, `supports_file_output`, `runs_shell_in_generate`, `internal_retries`. Copy the closest sibling: `grok.py` for a JSON envelope, `kilocode.py` for plain stdout. | `test_reasoning_effort_ladder.py`; `test_provider_registry.py` (no `default_timeout` override); `test_provider_housekeeping.py`: the prompt index against the argv, a `STOPS_FILE_WRITES` or `REVIEWED_STILL_WRITES` row for each restriction-shaped argv atom, a `SHELL_EVIDENCE` row for a non-`None` shell declaration |
+| 2 | `providers.yaml`, `tests/read_only_modes.yaml` | A `providers.<name>` block (`default_timeout`, `max_concurrent`, `models`, the first being the default) in `providers.yaml`, inserted where it should sit in `--init`'s order; and a `read_only_modes.<name>` row in `tests/read_only_modes.yaml`: `mechanism: null` and `probed: null` until probed ([read-only contracts](#read-only-provider-contracts)). If the CLI lists its models, add a catalog route ([model catalog snapshots](#model-catalog-snapshots)); otherwise an `UNCHECKED` row naming why. | `test_provider_roster.py`, `test_read_only_modes.py`, `test_model_catalogs.py` |
 | 3 | `templates/config/providers.override.yaml` | Regenerate it: from `skills/multi-llm/`, `uv run --project . -- python -c "import init_config as c; c.TEMPLATE_PATH.write_text(c.build_template_text())"`. | `test_provider_registry.py::TestTemplateBaseParity` |
 | 4 | `ENV_ALLOWLIST_PROFILES` in `utils/providers/base.py` | A `RunnerEnvProfile`: CA family (`node` or `native`), the env prefixes the CLI owns, its home and config variable names. | `test_env_allowlist.py` |
 | 5 | Test tables | `MODELS` in `test_provider_housekeeping.py`; `PRE_L5_ARGV` and `PRE_L5_ARGV_MODELS` in `test_provider_timeouts.py` (also read by `test_structured_output.py`); `TRANSPORT_CASES` in `test_provider_contract.py`; a `ROWS` entry in `test_answer_text.py`. Each holds a real model id from step 2, never a placeholder. The `ROWS` entry passes only when the answer is readable: a clean `{"type": "result"}` or `{"response": ...}` envelope, plain stdout (`answer_framing = "plain"`), or a `salvage_text` hook. | those files |
@@ -454,7 +455,7 @@ the list is *absent* rather than denied.
 Accepted by the repository owner on 2026-09-17 for `generate` only.
 
 A runner whose only unattended mode is such a flag gets an explicit `None` row in
-`providers.yaml`'s `read_only_modes:` table **and a named exception recorded beside it**
+the `read_only_modes:` table (`skills/multi-llm/tests/read_only_modes.yaml`) **and a named exception recorded beside it**
 (`bypass_exception:` — the token, the profile, why it survives, what retires it), never a silent
 precedent; `agy`'s `--dangerously-skip-permissions` and omp's `yolo` are the
 two entries that disposition currently holds; the first is queued behind a probe, and omp's is the
@@ -471,7 +472,12 @@ three pinned above needs one, so that row is empty today.
 it scans every registered adapter's `build_command`/`get_env` (plus
 `agent-readonly`) and goes red on any such token that is not a declared exception — and
 equally red on a declared exception whose token is gone, so an exception cannot outlive the flag it
-excuses.
+excuses. The table sat in the base `providers.yaml` until 2026-11-08, with the guard reading the base
+layer alone so no project layer could add an exception; nothing at run time ever read it. It now
+lives under `tests/`, which keeps that guarantee because no config layer is looked up there, takes
+11 KB out of the shipped file, and stays outside `code_review.collapse_paths`' fixture globs, so a
+changed `bypass_exception:` reaches reviewers as a whole diff. A `read_only_modes:` key back in
+`providers.yaml` fails the guard.
 
 **What the profile cannot contain, the prompt has to say.** `agent-write` containment is
 file-granular and repo-rooted — and for opencode deliberately outside `HERMETIC_PROFILES`
@@ -503,6 +509,42 @@ Since N4 (2026-09-16), a human task's own materialized entry skips the framing, 
 checklist plus one "this task is deferred to a human; nothing dispatches it" line instead, because a
 task whose whole job is the browser/manual work those sections forbid should not read a prompt that
 forbids it.
+
+## Model catalog snapshots
+
+`is_model_valid` compares a spec with `providers.yaml` itself, so it cannot see a retired id
+(`cursor-agent:cursor-grok-4.7-high` once passed the whole suite while not existing), and at run
+time only opencode's `_detect_model` asks the CLI. `tests/test_model_catalogs.py` closes the gap
+offline: every model id the base config names (`providers.<name>.models`, `defaults.*`, the
+`driver` runners), with its `:effort` split off the way `build_command` splits it (the ladder's
+`accepted_inbound`, which only codex widens), must appear in a committed snapshot of its CLI's
+catalog. It reads committed files only, so it runs in CI with no credentials.
+
+- **Snapshots** are `skills/multi-llm/tests/fixtures/model_catalogs/<source>.json`:
+  `{captured, cli_version, command, ids}`, ids sorted and unique. kilocode's existing capture
+  (`tests/fixtures/kilocode/model_variants.json`, which also records each model's variants) feeds
+  the same check through `tests/model_catalogs.load_snapshot`.
+- **Routes** (`ROUTES` in the test) map a provider to its source and an id into that catalog:
+  verbatim for codex and opencode, `openrouter/<slug>` to `<slug>` for cline, goose, aider and pi,
+  plain slugs for kimi, qwen-code, copilot and fx, omp's selectors for omp.
+- **Gaps are named, never silent.** `UNCHECKED = {provider: reason}` holds every adapter without
+  a committed snapshot, and `UNCHECKED_MODELS` every id outside a checked source's coverage
+  (kilocode's native `openai/` and `google/` backends). Both directions are tested: an adapter in
+  neither table fails, and so does an `UNCHECKED` row whose source now has a snapshot or an
+  `UNCHECKED_MODELS` row that no longer applies.
+- **Refresh** with `make refresh-model-catalogs [SOURCES=...]`, run by a person logged in to the
+  CLIs it lists, never in CI (the script refuses when `CI` is set) and never on the dispatch
+  path, so `status` stays subprocess-free. Sources are defined in `tests/model_catalogs.py`
+  `SOURCES` with their parser; a CLI whose output format has not been captured here (cursor-agent,
+  agy, grok) has no source, because a guessed parser writes a wrong snapshot. Review the diff,
+  then move the providers the new snapshot serves out of `UNCHECKED`.
+- **Staleness** is a warning, not a failure: a snapshot over 45 days old prints one in the test
+  run's summary naming the refresh command.
+
+First capture (2026-11-08): only codex, from `codex debug models --bundled`, which reads the
+catalog shipped in the binary with no login and no network; with kilocode's capture that makes
+two checked providers. opencode, omp and the OpenRouter-served adapters need a network capture,
+and cursor-agent, agy and grok a logged-in one plus a parser.
 
 ## Provider output channels
 

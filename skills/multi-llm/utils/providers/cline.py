@@ -242,8 +242,9 @@ class ClineProvider(LLMProvider):
     #: 6 requests over 295.9 s), and 60 s or more is ignored for that ladder; a
     #: stalled request is ONE request that cline gives up on after 360 s
     #: (``The operation timed out.``, the new ``stall`` row, ``timeout``).
-    #: Nothing measured here reaches ``default_timeout``'s 600 s, though a 429
-    #: chain ending in a stall (295 + 360 s, inferred) would; ``internal_retries``
+    #: Nothing measured here reaches the 1200 s slot ``providers.yaml`` gives
+    #: cline, nor would a 429 chain ending in a stall (295 + 360 s, inferred),
+    #: though a slot under 655 s would be reached; ``internal_retries``
     #: below declares what was measured.
     verified_version = "3.0.70"
 
@@ -310,10 +311,6 @@ class ClineProvider(LLMProvider):
     @property
     def name(self) -> str:
         return "cline"
-
-    @property
-    def default_timeout(self) -> int:
-        return 600
 
     def is_available(self) -> bool:
         return shutil.which("cline") is not None

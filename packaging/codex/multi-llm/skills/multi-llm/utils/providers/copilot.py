@@ -545,14 +545,6 @@ class CopilotProvider(LLMProvider):
     def name(self) -> str:
         return "copilot"
 
-    @property
-    def default_timeout(self) -> int:
-        # 1200 s, matching the providers.yaml block. It has to clear copilot's
-        # own ~86 s internal rate-limit chain -- and, where a backend sends
-        # `Retry-After`, an unbounded one -- before the harness's bound bites,
-        # since the CLI exposes no knob to shorten either (see internal_retries).
-        return 1200
-
     def is_available(self) -> bool:
         return shutil.which("copilot") is not None
 

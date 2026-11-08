@@ -2,8 +2,8 @@
 
 Three guards, and they answer three different questions:
 
-* **The table covers the registry.** ``providers.yaml``'s ``read_only_modes:``
-  block carries one row per registered adapter, checked against
+* **The table covers the registry.** ``tests/read_only_modes.yaml``'s
+  ``read_only_modes:`` block carries one row per registered adapter, checked against
   ``provider_registry._PROVIDERS`` rather than against a roster written here.
   Nothing in this module names an adapter or a count — the specification it
   implements was written for thirteen adapters and the registry has grown
@@ -31,8 +31,8 @@ such a flag gets an explicit ``null`` row **plus a named
 ``bypass_exception:``** naming the token, the profile, why it survives and what
 retires it. It is not a way to wave a flag through — the guard is equally red on
 an exception whose token is no longer emitted, so an exception cannot outlive
-the flag it excuses, and the declaration lives in the base ``providers.yaml``
-layer only, where no user override can reach it.
+the flag it excuses, and the declaration lives in ``tests/read_only_modes.yaml``,
+a file no config layer reads, so no user override can reach it.
 """
 import ast
 import re
@@ -42,6 +42,7 @@ from unittest import mock
 import pytest
 
 import utils.providers.base as base_module
+from utils import yaml_io
 from utils.provider_registry import _PROVIDERS, load_base_config
 from tests.roster_check import assert_covers_registry, row_for
 from utils.providers.base import (
@@ -69,10 +70,10 @@ EXCEPTION_KEYS = frozenset({"token", "profile", "reason", "retires_when"})
 # The `--yolo`-class negative set (§3.5), as code rather than config
 # ---------------------------------------------------------------------------
 #
-# Deliberately NOT read from `providers.yaml`: the vocabulary of the guard is
-# policy and must not be reachable by any config layer, or a project-local
-# override could narrow the set until the scan passed. Only the *exceptions*
-# are data, and those are read from the base layer alone.
+# Deliberately NOT read from any YAML: the vocabulary of the guard is policy
+# and must not be reachable by any config layer, or a project-local override
+# could narrow the set until the scan passed. Only the *exceptions* are data,
+# and those are read from tests/read_only_modes.yaml, which no layer reaches.
 
 #: Whole argv tokens. `-f` is cursor's retired write bypass (§3.1), kept in the
 #: set so it cannot come back under any adapter.
@@ -328,18 +329,20 @@ def _env_for(name):
     return _PROVIDERS[name].get_env(_model_for(name))
 
 
+#: The table's one home. Under tests/, never in a config file: a per-project
+#: `.multi-llm/providers.yaml` or a `MULTI_LLM_PROVIDERS_CONFIG` deep-merges over
+#: the base like any other layer, so a table read through the config would let a
+#: user's file add a `bypass_exception:` and silence this guard. No layer is ever
+#: looked up here. The file's header carries the row rules.
+READ_ONLY_MODES_PATH = Path(__file__).with_name("read_only_modes.yaml")
+
+
 def read_only_modes():
-    """The `read_only_modes:` block from the BASE layer only.
-
-    Base, never `load_config()`: a per-project `.multi-llm/providers.yaml` or a
-    `MULTI_LLM_PROVIDERS_CONFIG` deep-merges over base like any other layer, so
-    reading the merged view would let a user's file add a `bypass_exception:` and
-    silence this guard. What ships is what is checked.
-    """
-    return load_base_config().get("read_only_modes") or {}
+    """The `read_only_modes:` block of tests/read_only_modes.yaml."""
+    return (yaml_io.load_file(READ_ONLY_MODES_PATH) or {}).get("read_only_modes") or {}
 
 
-_ROWS_WHERE = "read_only_modes: in skills/multi-llm/providers.yaml"
+_ROWS_WHERE = "read_only_modes: in skills/multi-llm/tests/read_only_modes.yaml"
 _ROWS_HINT = (
     "An unprobed adapter's row is `mechanism: null` and `probed: null`, never a "
     "guess; a probed one names the flag and the probe."
@@ -386,6 +389,17 @@ class TestTheTableIsOneRowPerRegisteredAdapter:
     def test_the_row_set_is_exactly_the_registry(self):
         assert_covers_registry(
             read_only_modes(), _ROWS_WHERE, what="a read-only row", hint=_ROWS_HINT
+        )
+
+    def test_the_table_is_in_no_config_file(self):
+        """A `read_only_modes:` block in the base providers.yaml is read by nothing.
+
+        This guard reads tests/read_only_modes.yaml only, so rows written back
+        into the shipped config would look authoritative and rot unchecked.
+        """
+        assert "read_only_modes" not in load_base_config(), (
+            "providers.yaml declares `read_only_modes:` again. The table lives in "
+            "skills/multi-llm/tests/read_only_modes.yaml; move the rows there."
         )
 
     @pytest.mark.parametrize("name", _registered_provider_names())
@@ -632,7 +646,7 @@ class TestTheYoloClassNegativeSet:
             f"consumes a document, never a diff — so a write bypass there grants "
             f"edit access no phase asked for. Use the runner's own read-only "
             f"mechanism, or, if it has none, record a `null` row plus a named "
-            f"`bypass_exception:` in providers.yaml's read_only_modes table. An "
+            f"`bypass_exception:` in tests/read_only_modes.yaml. An "
             f"exception declared for another profile does not reach this one."
         )
 
@@ -772,7 +786,8 @@ class TestTheYoloClassNegativeSet:
 
         Without this, an exception survives the removal of its flag and quietly
         pre-authorizes the *next* person to add one back. With it, retiring the
-        flag forces the entry out of `providers.yaml` in the same change.
+        flag forces the entry out of `tests/read_only_modes.yaml` in the same
+        change.
         """
         declared = _rows_with_exceptions().get(name)
         if declared is None:
@@ -785,7 +800,7 @@ class TestTheYoloClassNegativeSet:
             emitted |= set(negative_tokens_in_argv(readonly))
 
         assert declared["token"] in emitted, (
-            f"{name}: providers.yaml still excuses {declared['token']!r} but the "
+            f"{name}: tests/read_only_modes.yaml still excuses {declared['token']!r} but the "
             f"adapter no longer emits it. Delete the bypass_exception — a stale "
             f"exception is a standing permission nobody re-reviewed."
         )

@@ -353,16 +353,6 @@ class KimiProvider(LLMProvider):
     def name(self) -> str:
         return "kimi"
 
-    @property
-    def default_timeout(self) -> int:
-        # 1200 s, matching the providers.yaml block. Generous on purpose: with
-        # the retry knob pinned to a single attempt a dispatch is one request,
-        # and a *stalled* upstream ends inside the child only at kimi's own
-        # ~300 s request timeout (measured at 2.1.1, see internal_retries) --
-        # a value no knob sets, so this outer timeout is the bound the plugin
-        # owns.
-        return 1200
-
     def is_available(self) -> bool:
         return shutil.which("kimi") is not None
 

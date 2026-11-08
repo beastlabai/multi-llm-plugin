@@ -77,7 +77,7 @@ EFFORT_LADDER = ReasoningLadder(
 #: ``--yolo`` is in the ``--yolo``-class negative set that
 #: ``tests/test_read_only_modes.py`` scans for over *every* adapter's
 #: ``build_command``/``get_env``, and cursor-agent declares no
-#: ``bypass_exception`` in ``providers.yaml``'s ``read_only_modes:`` table — so
+#: ``bypass_exception`` in ``tests/read_only_modes.yaml`` — so
 #: the flag cannot return without that guard going red, wherever in this file it
 #: is reintroduced. ``--mode ask`` is this adapter's row in that table, one of
 #: its three probed positives; ``--trust`` is deliberately **not** part of the
@@ -1292,11 +1292,6 @@ class CursorAgentProvider(LLMProvider):
     def name(self) -> str:
         """Return the provider identifier."""
         return "cursor-agent"
-
-    @property
-    def default_timeout(self) -> int:
-        """Return the default timeout in seconds."""
-        return 600
 
     def is_available(self) -> bool:
         """Check if cursor-agent CLI is available in PATH."""

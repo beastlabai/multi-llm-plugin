@@ -438,13 +438,6 @@ class VibeProvider(LLMProvider):
     def name(self) -> str:
         return "vibe"
 
-    @property
-    def default_timeout(self) -> int:
-        # 1200 s, matching the providers.yaml block. It has to clear vibe's own
-        # declared inner bound (3 x 90 s + backoff) with room for the harness's
-        # shutdown margin, which is the invariant §3.3 states for any inner cap.
-        return 1200
-
     def is_available(self) -> bool:
         return shutil.which("vibe") is not None
 

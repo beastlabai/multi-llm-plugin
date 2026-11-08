@@ -201,10 +201,6 @@ class GooseProvider(LLMProvider):
     def name(self) -> str:
         return "goose"
 
-    @property
-    def default_timeout(self) -> int:
-        return 600
-
     def is_available(self) -> bool:
         return shutil.which("goose") is not None
 

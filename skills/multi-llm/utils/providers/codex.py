@@ -1261,10 +1261,6 @@ class CodexProvider(LLMProvider):
     def name(self) -> str:
         return "codex"
 
-    @property
-    def default_timeout(self) -> int:
-        return 600
-
     def is_available(self) -> bool:
         return shutil.which("codex") is not None
 

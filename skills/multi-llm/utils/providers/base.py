@@ -3349,6 +3349,16 @@ def read_help_tokens(
         return _HELP_TOKENS[key]
 
 
+#: The slot timeout, in seconds, for a provider the merged config has no
+#: ``providers.<name>.default_timeout`` for. The per-provider number lives in
+#: ``providers.yaml`` alone; the base layer ships a row for every registered
+#: adapter (``tests/test_provider_roster.py``), so this is reached only by a
+#: config read that failed or a test double. One value for every adapter, so
+#: no class carries a second number that looks authoritative and is not
+#: (docs/configuration.md#provider-blocks).
+DEFAULT_TIMEOUT_S = 1200
+
+
 class LLMProvider(ABC):
     """Abstract base class for LLM CLI providers.
 
@@ -3502,7 +3512,7 @@ class LLMProvider(ABC):
     # ``build_command``, which is what every Lane A review/ask fan-out slot
     # runs. ``supports_workspace_reads``/``reads_outside_cwd``/
     # ``read_scope_flag`` say nothing about it, and neither does
-    # ``providers.yaml``'s ``read_only_modes`` (the record of write-restricting
+    # ``tests/read_only_modes.yaml`` (the record of write-restricting
     # mechanisms). ``llm_client.render_diff_access`` renders the code-review
     # prompt's ``{diff_access}`` block from these two, so the orchestrator never
     # branches on a provider name (plan: review-run-scope-salvage-and-failure-
@@ -4516,14 +4526,14 @@ class LLMProvider(ABC):
         pass
 
     @property
-    @abstractmethod
     def default_timeout(self) -> int:
-        """Default timeout in seconds for this provider.
+        """The fallback slot timeout, :data:`DEFAULT_TIMEOUT_S`, for every adapter.
 
-        Returns:
-            The default number of seconds to wait before timing out.
+        Not the timeout a run uses: that is ``providers.<name>.default_timeout``
+        from the merged config (``provider_registry.get_provider_timeout``).
+        This answers only when that row is missing.
         """
-        pass
+        return DEFAULT_TIMEOUT_S
 
     @abstractmethod
     def is_available(self) -> bool:

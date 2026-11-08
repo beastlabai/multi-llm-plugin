@@ -795,10 +795,6 @@ class AiderProvider(LLMProvider):
     def name(self) -> str:
         return "aider"
 
-    @property
-    def default_timeout(self) -> int:
-        return 600
-
     def is_available(self) -> bool:
         return shutil.which("aider") is not None
 

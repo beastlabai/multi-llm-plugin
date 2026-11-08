@@ -213,10 +213,6 @@ class KiloCodeProvider(LLMProvider):
     def name(self) -> str:
         return "kilocode"
 
-    @property
-    def default_timeout(self) -> int:
-        return 600
-
     def is_available(self) -> bool:
         return any(shutil.which(name) is not None for name in BINARY_NAMES)
 

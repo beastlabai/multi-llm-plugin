@@ -38,7 +38,12 @@ from .git_utils import (
     get_project_root_from_dir,
 )
 from .providers import PROVIDER_CLASSES
-from .providers.base import GIT_HELPER_AUTO, GIT_HELPER_POLICIES, LLMProvider
+from .providers.base import (
+    DEFAULT_TIMEOUT_S,
+    GIT_HELPER_AUTO,
+    GIT_HELPER_POLICIES,
+    LLMProvider,
+)
 
 
 def _build_registry(
@@ -820,10 +825,10 @@ def get_provider_timeout(provider_name: str,
     config = load_config(anchor=anchor)
     providers = config.get("providers", {})
     if provider_name in providers:
-        return providers[provider_name].get("default_timeout", 1200)
-    # Fallback to provider's built-in default
+        return providers[provider_name].get("default_timeout", DEFAULT_TIMEOUT_S)
+    # No row: the shared fallback (every adapter's `default_timeout` is it).
     provider = get_provider(provider_name)
-    return provider.default_timeout if provider else 1200
+    return provider.default_timeout if provider else DEFAULT_TIMEOUT_S
 
 
 # ---------------------------------------------------------------------------

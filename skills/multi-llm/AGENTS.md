@@ -144,7 +144,8 @@ silently become the validator.
 be refused explicitly. Do not add a permission bypass to make a provider run;
 profile-scoped exceptions and sandbox fallback conditions are specified in the
 [provider contract](../../docs/development/providers.md#read-only-provider-contracts)
-and guarded by `tests/test_read_only_modes.py`. `agent-write` also requires an
+and guarded by `tests/test_read_only_modes.py`, which reads its table from
+`tests/read_only_modes.yaml`, never from a config layer. `agent-write` also requires an
 explicit declaration consistent with real file-edit support and prompt
 transport. Keep runner environments isolated from the skill's Python venv.
 

@@ -51,7 +51,7 @@ MIN_INNER_TIMEOUT_S = 60
 
 #: What `--print-timeout` rendered before the resolved timeout was threaded in.
 #: It is not a fourth number — `20m` IS 1200 s, the same value `providers.yaml`
-#: configures and :attr:`AgyProvider.default_timeout` falls back to — but it is
+#: configures and the shared ``DEFAULT_TIMEOUT_S`` falls back to — but it is
 #: the spelling that made the two deadlines an exact tie. It survives for one
 #: reason only: `timeout_s=None` must render this adapter's pre-L5 argv
 #: byte-for-byte, so dropping the single `timeout_s=` call site in
@@ -183,16 +183,6 @@ class AgyProvider(LLMProvider):
     def name(self) -> str:
         return "agy"
 
-    @property
-    def default_timeout(self) -> int:
-        # 1200, matching `providers.yaml`'s `providers.agy.default_timeout`
-        # (§9.6.d). This is the fallback twin of the configured number, not a
-        # second number: the provider ships in base config, so
-        # `get_provider_timeout` returns the yaml value and never reaches here.
-        # It read 600 while the yaml read 1200 and the argv read `20m` — three
-        # numbers for one fact, which is the disagreement L5 removes.
-        return 1200
-
     def is_available(self) -> bool:
         return shutil.which("agy") is not None
 
@@ -236,8 +226,8 @@ class AgyProvider(LLMProvider):
             # assumption that a read/analyze prompt needs no tool approval is a
             # guess, and if it is wrong every agy slot becomes an unexplained
             # timeout. So it takes the second disposition: a `null` row plus a
-            # named `bypass_exception:` in `providers.yaml`'s `read_only_modes:`
-            # table, which is what keeps `tests/test_read_only_modes.py` green
+            # named `bypass_exception:` in `tests/read_only_modes.yaml`'s
+            # `read_only_modes:` table, which keeps `tests/test_read_only_modes.py` green
             # here and red everywhere else. The exception cannot outlive the
             # flag — that guard also fails if the declaration stays after the
             # token goes.

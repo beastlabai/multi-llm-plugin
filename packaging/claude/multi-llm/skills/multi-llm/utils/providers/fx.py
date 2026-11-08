@@ -289,10 +289,6 @@ class FxProvider(LLMProvider):
     def name(self) -> str:
         return "fx"
 
-    @property
-    def default_timeout(self) -> int:
-        return 1200
-
     def is_available(self) -> bool:
         return shutil.which("fx") is not None
 

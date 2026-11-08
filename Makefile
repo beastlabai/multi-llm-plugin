@@ -296,6 +296,10 @@ help:
 	@echo "  make claude-hook-uninstall         remove that hook (and only that hook)"
 	@echo "  make claude-publish                from master: fetch, every release check, print the push and tag it would make"
 	@echo "  make claude-publish PUSH=1         the same, then push master and the claude-v<version> tag (never forced)"
+	@echo
+	@echo "Model catalog snapshots (run by a person, logged in; never CI)"
+	@echo
+	@echo "  make refresh-model-catalogs [SOURCES=\"codex opencode\"]  re-capture the catalogs tests/test_model_catalogs.py checks"
 
 # One line naming what is missing (binary absent vs daemon unreachable), rather
 # than a page of CLI errors.
@@ -1227,3 +1231,12 @@ test-for:
 
 tests-map:
 	@$(TESTS_FOR) --write
+
+# --- Model catalog snapshots (tests/test_model_catalogs.py) ------------------ #
+# Run by a person, never in CI: most listings need a login or the network, and
+# the script refuses when CI is set. Rewrites tests/fixtures/model_catalogs/
+# <source>.json for each source; review the diff before committing.
+# SOURCES=<names> limits the run (default: every source in tests/model_catalogs.py).
+.PHONY: refresh-model-catalogs
+refresh-model-catalogs:
+	cd skills/multi-llm && uv run --project . -- python -m tests.model_catalogs $(SOURCES)

@@ -813,11 +813,6 @@ class ClaudeCodeProvider(LLMProvider):
         """Return the provider identifier."""
         return "claude-code"
 
-    @property
-    def default_timeout(self) -> int:
-        """Return the default timeout in seconds."""
-        return 600
-
     def is_available(self) -> bool:
         """Check if Claude Code CLI is available in PATH."""
         return shutil.which("claude") is not None
@@ -1363,7 +1358,7 @@ class ClaudeCodeProvider(LLMProvider):
 
         The same value §7.5 rule 1 takes its deadline from: ``providers.yaml``'s
         ``default_timeout`` (**1800** for claude-code) or the configured
-        override, falling back to this adapter's own ``default_timeout`` (600)
+        override, falling back to the shared ``default_timeout`` (1200)
         when the provider is absent from config or the read fails.
 
         ``get_env`` has no anchor to thread either, so it reads the same §9.3.b
