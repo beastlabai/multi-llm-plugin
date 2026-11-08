@@ -36,6 +36,17 @@ harness and plugin validation; `pyproject.toml` defines the test markers and
 normal exclusions. Tests marked `live` need provider CLIs and API access;
 container, package, and Codex-jail tests have separate prerequisites.
 
+## Searching the code
+
+This directory is the source of truth. `packaging/claude/multi-llm/` and
+`packaging/codex/multi-llm/` hold generated copies of it (build output from
+`make claude-regen codex-regen`); edit here and regenerate, never in the copies.
+The root `.ignore` hides those trees from `rg` and Claude Code's Grep, so symbol
+searches return source hits only. `git grep` does not read `.ignore`, and Claude
+Code's Glob bypasses it by default (unless `CLAUDE_CODE_GLOB_NO_IGNORE=false`);
+exclude `packaging/*/multi-llm/` yourself there, or use `rg --no-ignore` to
+search the copies deliberately.
+
 ## Ownership and source of truth
 
 - **`multi_llm.py`** is the public entrypoint. It normalizes positional arguments
