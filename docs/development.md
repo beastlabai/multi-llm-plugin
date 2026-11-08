@@ -40,6 +40,30 @@ need a Docker daemon: `pyproject.toml` sets `addopts = -m 'not container'`, so a
 bare `pytest` stays green without one, and each container-marked module also
 carries a daemon probe that skips with a named reason.
 
+### CI trial: parallel suite
+
+`.github/workflows/test.yml` has a second job, `test-parallel`, beside the gating
+`test` job: the same suite and the same `-m "not live and not container and not
+package and not codex_jail"` selection on ubuntu, macOS and Windows, run with
+`pytest -n auto --dist loadfile` (pytest-xdist, from the `dev` dependency group).
+`loadfile` keeps each test file on one worker. Locally, four workers finish the
+suite in about six minutes.
+
+The leg is **non-blocking** (`continue-on-error: true`) and its checks are named
+`test-parallel (<os>)`, so no required check changes. It is a one-week trial,
+because hosted runners are slower than a developer machine and tests that time a
+2 to 3 s child can flake there. Compare it with the serial legs on the same
+commits: pass rate, flakes (a failure the serial leg does not share) and wall time.
+
+- **Promote it** when the week is clean: make `test-parallel` the gating job, by
+  moving the `-n auto --dist loadfile` flags into `test`'s command and deleting
+  the trial job, so the check names `test (<os>)` stay the required ones.
+- **Fall back to file shards** if Windows stays too slow or the flakes do not go
+  away: split the file list over a matrix instead, each shard still running whole
+  files.
+- **Drop it** if neither holds; the serial job is unchanged and nothing depends
+  on this one.
+
 ---
 
 ## Containerized E2E tests (Docker)
