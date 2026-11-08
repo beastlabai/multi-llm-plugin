@@ -2910,6 +2910,34 @@ class TestSecuritySet:
         assert "exactly as the runner left" not in outcome.reason
         assert "not the runner's" in outcome.reason
 
+    def test_a_denied_path_whose_restore_is_refused_is_not_called_unbacked(
+        self, env, monkeypatch,
+    ):
+        """Codex review 1 of U87: a path the snapshot holds, whose restore
+        refused (its folder replaced meanwhile, say), was reported as "no
+        rollback point exists", though the snapshot keeps it. The reason now
+        gives the restore's own words instead."""
+        secret = env.root / ".env"
+        secret.write_text("TOKEN=original\n", encoding="utf-8")
+        env.edits([{"path": ".env", "mode": "patch", "content": "LEAKED=1\n"}],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": [".env"], "summary": "edited .env"})
+        task = env.apply_task(0, declared_files=[str(env.plan)],
+                             snapshot_files=[str(env.plan), str(secret)])
+
+        def refused(*_args, **_kwargs):
+            raise OSError("its folder was replaced (the snapshot is kept)")
+
+        monkeypatch.setattr(write_safety, "_replace_with_payload", refused)
+        outcome = env.scheduler([task]).run().outcomes[0]
+
+        assert outcome.status == executor.STATUS_POLICY_VIOLATION
+        assert "no rollback point" not in outcome.reason
+        assert ("Not restored (.env: its folder was replaced (the snapshot is "
+                "kept)): left on disk as it is now, so inspect it by hand."
+                ) in outcome.reason
+        assert "LEAKED=1" in secret.read_text()
+
     def test_a_denied_path_with_no_rollback_point_is_not_called_restored(self, env):
         """#27 (2026-10-02): the message said "restored from the pre-batch
         snapshot (.multi-llm/providers.yaml: skipped: not in this task's

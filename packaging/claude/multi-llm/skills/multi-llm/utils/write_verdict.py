@@ -371,6 +371,11 @@ DECLARED_NAMES_ROWS = frozenset({
 })
 
 
+#: ``TaskSnapshot.restore``'s state for a path its snapshot holds nothing
+#: for: the one ``skipped:`` state that says no rollback point was taken.
+NOT_IN_SNAPSHOT = "skipped: not in this task's snapshot"
+
+
 @dataclass(frozen=True)
 class PolicyRestore:
     """What restoring a policy violation's paths did, one list per outcome."""
@@ -380,6 +385,10 @@ class PolicyRestore:
     from_guard: Tuple[str, ...] = ()
     #: No rollback point, so left on disk.
     stranded: Tuple[str, ...] = ()
+    #: Left on disk for another reason, each with the restore's own: a
+    #: rollback point it refused to write (the file's folder replaced
+    #: meanwhile, say), one gone or altered, the guard's copy missing or stale.
+    refused: Tuple[Tuple[str, str], ...] = ()
 
     @classmethod
     def from_report(
@@ -397,9 +406,41 @@ class PolicyRestore:
                 path for path, state in report.items() if state in guard
             )),
             stranded=tuple(sorted(
-                path for path, state in report.items() if state.startswith("skipped:")
+                path for path, state in report.items() if state == NOT_IN_SNAPSHOT
+            )),
+            refused=tuple(sorted(
+                (path, state[len("skipped:"):].strip())
+                for path, state in report.items()
+                if state.startswith("skipped:") and state != NOT_IN_SNAPSHOT
             )),
         )
+
+    def not_restored(self) -> str:
+        """The sentences naming what is left on disk: no rollback point, or
+        the restore's own reason for each path, never one for the other."""
+        left = ""
+        if self.stranded:
+            many = len(self.stranded) != 1
+            # A path the sweep could not retain bytes for (a policy-denied one
+            # above all: its bytes are never copied into an executor artifact)
+            # is not restored, and says so.
+            left += (
+                f" Not restored, because no rollback point exists "
+                f"({_names(self.stranded)}): left on disk as "
+                f"{'they are' if many else 'it is'} now, so inspect "
+                f"{'them' if many else 'it'} by hand."
+            )
+        if self.refused:
+            many = len(self.refused) != 1
+            reasons = "; ".join(
+                f"{path}: {without_closing_mark(why)}" for path, why in self.refused[:5]
+            ) + ("; …" if len(self.refused) > 5 else "")
+            left += (
+                f" Not restored ({reasons}): left on disk as "
+                f"{'they are' if many else 'it is'} now, so inspect "
+                f"{'them' if many else 'it'} by hand."
+            )
+        return left
 
 
 def findings_clause(findings: Sequence[Any]) -> str:
@@ -449,7 +490,7 @@ def policy_reason(policy: PolicyFacts, restore: PolicyRestore) -> str:
     # it, so the reason never names the runner as the author; each path is in
     # exactly one of the lists.
     many = len(policy.paths) != 1
-    restored, from_guard, stranded = restore.restored, restore.from_guard, restore.stranded
+    restored, from_guard = restore.restored, restore.from_guard
     return (
         f"{policy.message} "
         f"{'These paths' if many else 'This path'} changed during this "
@@ -468,16 +509,7 @@ def policy_reason(policy: PolicyFacts, restore: PolicyRestore) -> str:
             f"{', '.join(from_guard)}."
             if from_guard else ""
         )
-        + (
-            # A path the sweep could not retain bytes for (a policy-denied one
-            # above all: its bytes are never copied into an executor artifact)
-            # is not restored, and says so.
-            f" Not restored, because no rollback point exists "
-            f"({_names(stranded)}): left on disk as "
-            f"{'they are' if len(stranded) != 1 else 'it is'} now, so "
-            f"inspect {'them' if len(stranded) != 1 else 'it'} by hand."
-            if stranded else ""
-        )
+        + restore.not_restored()
         + " The loop stops here."
     )
 

@@ -282,16 +282,16 @@ that is not, came back as plaintext. There `_replace_with_payload` now restores 
 `_restored_by_copy_file2` and `_publish_held`:
 
 1. The payload is opened and held, so it can be neither deleted nor renamed meanwhile. A read-only
-   payload takes the plain restore instead, exactly as before: `CopyFile2` would copy the attribute,
-   and Windows opens a read-only file for writing to nobody, so its copy could not be held as in
-   step 3, and reopening it to clear the attribute would give up the exclusion.
+   payload takes the staged restore below instead: `CopyFile2` would copy the attribute, and
+   Windows opens a read-only file for writing to nobody, so its copy could not be held as in step 3,
+   and reopening it to clear the attribute would give up the exclusion.
 2. The payload's own name must be that regular file (`lstat` against `fstat`), and the bytes read
    through the descriptor must hash to the manifest's digest (`restore_path`, the commit write
    policy's restore, has no digest: the copy is checked against the bytes read). `CopyFile2` copies
    it to the temp name beside the file with `COPY_FILE_FAIL_IF_EXISTS` and `COPY_FILE_COPY_SYMLINK`,
    so any name already there, a link included, fails the copy and is left as it is, never removed
-   or followed, as the plain restore's exclusive creation refuses it. A failed copy that left
-   nothing there takes the plain restore; one that left something skips the file and names it.
+   or followed, as the staged restore's exclusive creation refuses it. A failed copy that left
+   nothing there takes the staged restore; one that left something skips the file and names it.
 3. The copy is bound once: opened by path as itself (`FILE_FLAG_OPEN_REPARSE_POINT`) to read, write,
    delete and set attributes, shared for reading alone (`_HeldCopyCalls.bind`). A handle already
    open on it to write or delete refuses the bind (a sharing violation): the file is skipped and the
@@ -317,10 +317,10 @@ longer hashes to its manifest is never written), and every folder above the file
 without following a link, where on Windows a directory junction, or any reparse point naming another
 path, now counts as a link: `lstat` reports a junction as a directory, so a junction planted above the
 file used to lead the restore, and the delete leg, outside the repository (other reparse points, a
-OneDrive placeholder for one, hold the file itself and are not refused). Linux and macOS restore as
-before. Windows before 3.12, a read-only payload, and a Windows where these calls cannot be loaded
-write the file as before (the plain copy), but every Windows restore refuses a junction above it: the
-refusal is in the revalidation.
+OneDrive placeholder for one, hold the file itself and are not refused). Every other restore
+(Linux, macOS, and on Windows a read-only payload, Python before 3.12 or a failed `CopyFile2` that
+left nothing) is the staged restore below; every Windows restore refuses a junction above the file:
+the refusal is in the revalidation.
 
 What a Windows restore with `CopyFile2` keeps, for a file that is not read-only: the payload's bytes,
 checked; its alternate data streams; its attributes (hidden, system, ...); its times; and the
@@ -329,9 +329,9 @@ payload's EFS encryption, though not unconditionally. `COPY_FILE_ALLOW_DECRYPTED
 where the destination cannot be encrypted (a volume or share without EFS) instead of failing, and a
 payload that was itself written as plaintext (the snapshot's `copy2` under the same flag) has no
 encryption to give. In each case the file comes back as base's restore wrote every file: plaintext
-unless its folder encrypts new files. A read-only file comes back as base restored it: its bytes,
-times and read-only attribute, without its streams, other attributes or encryption. What it leaves
-open:
+unless its folder encrypts new files. A read-only file comes back through the staged restore: its
+bytes, times and attributes (read-only, hidden, system, ...), without its streams or encryption.
+What it leaves open:
 
 1. The folders above the file are revalidated by path and then reached by path by the copy, the bind
    and the rename: a junction planted at one in between redirects them, as it redirected the plain
@@ -346,10 +346,163 @@ open:
 4. The file put back is encrypted when its payload is. A payload made in an encrypted folder (a phase
    folder inside one) is encrypted whatever its file was, so a file that was not comes back encrypted
    when it lies outside that folder; the manifest records no attributes to tell.
-5. Where the plain copy restores (Linux, macOS, Windows before 3.12, a read-only payload on Windows),
-   the payload is hashed against the manifest by path and then read again by path to be copied, so a
-   writer of the snapshot folder in between could put other bytes back. Unchanged; the `CopyFile2`
-   restore reads it once.
+
+**Every other restore stages the payload's bytes itself, in a file bound to one descriptor (one
+handle on Windows) from its creation to its rename, and never reached by its name** (Codex review 3
+of U82, code health U87, 2026-11-08). The plain restore wrote the payload into a temp file beside
+the file, closed it, then ran `shutil.copystat(payload, tmp)` and `os.replace(tmp, target)` by path.
+Whoever can write the file's folder (a provider CLI running in the repository) could swap the temp
+name, just before `copystat`, for a hard link or a symlink to a file outside the repository: that
+file then took the payload's mode and times (`copystat` follows a symlink), and the link was renamed
+over the repository's file, reported `restored`. A rewrite of the temp file before the rename put
+back bytes nobody hashed. Linux and macOS took that path for every file, Windows for a read-only
+payload since U82. Now (`_restored_through_descriptor` and `_stage_and_rename`, Linux and macOS):
+
+1. The payload is opened without following a link and read once; its folder's revalidation is
+   unchanged. The target's folder is reached from the pinned root one component at a time, each
+   opened `O_DIRECTORY|O_NOFOLLOW` relative to the one above (`_open_below_root`, the walk the
+   write policy's reads take), and held by that descriptor (`_HeldFolder`); every name in it is
+   reached relative to that descriptor (`openat`, `linkat`, `fstatat`, `renameat`). A link
+   planted at any folder on the way after the revalidation is refused, never followed.
+2. The staged file is made with no name where Linux can (`O_TMPFILE`, mode 0600; ext4 and tmpfs
+   make one, measured on kernel 7.0.0), so nothing can reach it by a name while it is written.
+   Where the kernel or the folder's filesystem refuses `O_TMPFILE`, or `/proc/self/fd` (the one way
+   an unprivileged process names such a file: `linkat` with `AT_EMPTY_PATH` needs
+   `CAP_DAC_READ_SEARCH`) is missing, it is made as the temp name with `O_CREAT|O_EXCL|O_NOFOLLOW`,
+   mode 0600: a name already there, a link included, is left as it is and named.
+3. Through its descriptor alone: the payload's bytes are written, flushed (`fsync`) and read back;
+   the hash of the bytes read from the payload must be the manifest's digest (`restore_path`, the
+   commit write policy's restore, has none: its caller checked its copy), and the bytes read back
+   must be the same. Then the times (`futimens`), extended attributes (descriptor to descriptor, as
+   the store copies them), mode (`fchmod`) and, on BSD and macOS, file flags, in `copystat`'s
+   order. Python has no `fchflags`, so the flags go through libc's (`ctypes`); where it cannot be
+   called (not loadable, or a stub failing with `ENOSYS`) the file goes back without its flags and
+   a WARNING names them: set by the temp name, as the first round did (`lchflags`), they reached a
+   hard link swapped in there (Codex review 1 of U87).
+4. An unnamed file must still have no name (another one given it through `/proc` is refused), and is
+   named the temp name with `linkat`, which never replaces a name: one there is left as it is and
+   named. Then, for both ways, the temp name must still be the staged file (`fstatat` without
+   following against `fstat`), a regular file with no other name (`st_nlink == 1`), and it is
+   renamed over the file. Before the `linkat` and again before the rename, the folder held must
+   still be the folder at its path: a fresh walk from the root reaches the same `(st_dev, st_ino)`
+   as `fstat` of the descriptor held. A writer of a folder above can move the folder away and put
+   another at its path; the first round then published the file in the moved folder and reported
+   `restored` (Codex review 1 of U87). Once renamed, the folder must still be in place and the
+   file's name the staged file; otherwise the restore says so, naming where the file went (the
+   folder's path now, through `/proc/self/fd`, on Linux), instead of `restored`.
+5. A refusal puts nothing back and keeps the snapshot. Once the staged file has a name (made by it,
+   or an unnamed one once linked) it is never removed: POSIX removes a name, not a file, and
+   between any check of the name and `unlinkat` another process can swap its own file in, which the
+   removal would delete, its only name perhaps (reproduced on base and in the first round). It is
+   left, named and recorded ("... was left at <path> ...; check it and delete it by hand
+   (`rm -- <path>`): until it is gone, no write check counts it as a batch's file and no rollback
+   replaces or deletes it"; see the leftover record below). A name found where the staged file was to be is
+   left and named too, but it is not the restore's, so it is not recorded. An unnamed file refused
+   before it is named leaves nothing.
+
+`restore_path`'s symlink (the commit write policy putting a link back) follows the same rules
+(`_restored_link`): the link is made at the temp name relative to the held folder (`symlinkat`,
+never over a name there), and just before the rename (`renameat`) that name must still be the link
+made (`fstatat`: a link, its identity) reading the saved text (`readlinkat`), with the folder still
+in place; once renamed, the target must be that link and the folder still in place, else `skipped`.
+Once made, it is never removed. Base made, renamed and removed it by path, unchecked: a regular file
+swapped in for it was installed and reported `restored`. Windows reaches the names by path with the
+same checks, without the folder's.
+
+On Windows (`_restored_through_handle`) the staged file is created through the handle U82's
+`CopyFile2` restore holds its copy by (`_HeldCopyCalls.create`: `CreateFile` with `CREATE_NEW` and
+`FILE_FLAG_OPEN_REPARSE_POINT`, to read, write, delete and set attributes, shared for reading alone),
+so a name already there, a link included, fails the creation and is left, named, and from its
+creation nobody else can open it to write, rename or delete it. The payload's own name must be the
+file read (`lstat` against `fstat`), its bytes are written through the handle and must hash to the
+digest, and U82's sequence does the rest through that handle (`_publish_bound`): one name and no
+reparse point, flushed, read back and hashed, the payload's attributes and times (the read-only
+attribute included, which a read-only file needs), renamed over the file. Windows deletes no
+read-only file, through a handle neither, so when the rename fails after the attribute was set it is
+cleared through the handle first, then the file is deleted through it. Where the handle calls cannot
+be loaded nothing is put back (base restored by path there). The Win32 surface is U82's: one more
+disposition to the same `CreateFile`.
+
+What the staged restore leaves open, precisely:
+
+1. Between the last check of the temp name (and of the folder) and `rename(2)`. POSIX has no rename
+   that takes a descriptor, and `linkat` never replaces a name, so even an `O_TMPFILE` file needs the
+   temp name for the rename (`renameat2` exchanging names would only move the window to removing the
+   old file). What is swapped in there is what the rename moves over the file, which the folder's
+   writer could move there itself; nothing is set by a name, so the file it links to keeps its bytes,
+   mode and times, and the check after the rename reports the file not restored. A folder replaced
+   there gets the file in the moved folder, which the check after the rename reports too.
+   `O_TMPFILE` removes every window before the name exists: the swap before the metadata, the
+   rewrite by name before the flush, another name given by name.
+2. POSIX has no mandatory exclusion: a writer that opened the staged file before its read-back (by
+   the temp name, or an unnamed file through `/proc/<pid>/fd`, as any process of the same user can)
+   and still holds it can write it after the hash, before the rename. It could write the file once
+   it is back anyway. Windows' sharing excludes it.
+3. A refused restore can leave its staged file, or link, beside the file for the user to remove,
+   named in its result: the price of never removing a name another process may have swapped in. It
+   shows in `git status` until the user removes it.
+4. The pinned root itself is opened by path (a link above the repository is the user's). On
+   Windows the folders are reached by path as before (the `CopyFile2` restore's item 1).
+5. The flags call is untested on BSD and macOS: it runs emulated here (an `st_flags` the payload
+   reports, a `fchflags` that records the inode it reaches). A file whose flags include
+   `UF_IMMUTABLE` refuses the rename there, as base's `copystat` then `os.replace` did, and is left.
+6. `restore_path` has no digest: a copy changed between its caller's check and the restore's open is
+   put back (the bytes read are what is checked).
+
+The identity checks compare `(st_dev, st_ino)` of a name and of the descriptor, so a filesystem
+whose inode numbers are not stable across lookups (some FUSE mounts) fails them: the restore is then
+skipped and says why, never done unchecked.
+
+**A staged file kept for the user is recorded, and every write check leaves exactly it out**
+(Codex review 2 of U87, 2026-11-08). The staged name was `.<name>.restore.<pid>.tmp`. A file kept
+there after a failed rename was, to another batch whose containment sweep was open, an undeclared
+new file: the sweep adopted it into that batch's snapshot and its rollback deleted it, the very
+removal the restore refuses; and a second restore of the same file in the same process found the
+name taken and was refused. Now:
+
+- Each attempt stages under a name of its own, `.<name>.restore.<pid>.<token>.tmp`, the token
+  random (`_staging_name`): a kept file never blocks a retry, and the name cannot be known before
+  the attempt makes it.
+- The restore raises its own kept entry as `_StagingLeft` with its identity, `(st_dev, st_ino,
+  st_ctime_ns)`, read through the staged file's descriptor (the link's `lstat`, once it is still the
+  link made; on Windows the handle's, or for `CopyFile2`'s copy an `lstat` of a regular file with
+  one name that is still the file the copy made). `_replace_with_payload` and `_restored_link`
+  record it, path and identity, in `$XDG_STATE_HOME/multi-llm/write-safety/restore-leftovers/<key of
+  the repo root>.json` (`_leftovers_update`, under a `FileMutex`): beside the out-of-grant rollback
+  evidence, which a jailed batch cannot write, so a batch cannot record files of its own. The change
+  time is part of the identity because a filesystem can give a removed file's inode number to the
+  next file made, and no call sets it. A name swapped in for the staged file, or a link found at
+  its name, is not the restore's and is never recorded.
+- `restore_leftovers(root)` reads the record; `RestoreLeftovers.holds(path)` is true only for a
+  recorded path whose entry, never followed, has the recorded identity. The scheduler's census
+  (`WriteBatchScheduler._census`) skips those entries and hands back the paths it skipped, and the
+  differences between a batch's first and final census (`_swept_moves`) leave those paths out on
+  both sides: a file the first census saw before the restore recorded it is then neither a new nor
+  a deleted file, never adopted (with `existed=True`, which would send it to the replace leg) and
+  never a deletion attributed to the batch (Codex review 3 of U87). Both legs of a rollback
+  (`TaskSnapshot.restore`, `restore_path`) refuse one, `--force` included: neither replaces nor
+  deletes it, and its record stays, even for a snapshot that adopted it before it was recorded or
+  in an older release. The porcelain write check (`porcelain_snapshot`) drops it, so the user
+  deleting it while a read-only slot runs is no write of the slot's. There is no name-pattern
+  exemption: a file a batch makes with a staging-like name, or at a kept file's path once that is
+  gone, is swept as any other.
+- An entry that is gone, or whose path now holds another file, leaves the record at its next read
+  (any census, porcelain snapshot or restore in that repository); an empty record is removed. A
+  record that cannot be written leaves the entry unprotected, and the restore's message says so.
+- The record is never changed without its lock, and never from a read that failed: when the
+  `FileMutex` cannot be taken in time (a stopped holder), or the record cannot be read, the kept
+  entry is not recorded and the restore's message says it is unprotected and how to remove it,
+  while a census reads the record as it stands and writes nothing. Either way no other process's
+  entry is dropped (Codex review 3 of U87: a timed-out writer once went on unlocked, and the holder's
+  write then dropped its entry, which a later rollback deleted). Content that is not a record at
+  all is replaced: no entry in it can be read.
+
+What the record does not close: a first census taken in the instant between the staged file's
+naming and the failed rename's record sees the file; if the user deletes it before the batch's final
+census, that batch reads the deletion as its own, and its rollback puts the file back from the bytes
+the first census retained. The porcelain write check, taken in the same instant, reads the file's
+later absence from its snapshot as a write of the slot's (detection only, nothing is removed). A
+`CopyFile2` copy, made by its name, has no identity from before it was made.
 
 **The store's discard removes it whole, or names what it cannot.** `_discard_rollback_store` used
 `shutil.rmtree(..., ignore_errors=True)`, and Windows will not delete a read-only file, which a blob
@@ -369,7 +522,19 @@ there is refused and named, never cleared). Tests: `tests/test_write_sweep_sees_
 restore and discard tests at its end; the held copy's sequence, the hard link swapped in before the
 bind, the writer holding the copy, the copy changed before the bind and the calls that never name the
 copy run emulated everywhere and natively on Windows; the streams, EFS, junction, read-only blob and
-held-copy sharing cases run on Windows CI, the EFS one skipping where EFS is unavailable).
+held-copy sharing cases run on Windows CI, the EFS one skipping where EFS is unavailable) and
+`tests/test_restore_staged_file.py` (the staged restore's adversaries, on both POSIX staging ways:
+a hard link or symlink swapped in before the metadata, a rewrite before the flush, another name
+given to the staged file, a swap between the last check and the rename, the staged file reached by
+no path; the folder replaced during the flush or just before the rename, a link planted above it; a
+failed rename leaving the staged name, which a removal would have lost to a swap; the flags through
+the descriptor, or left off and named, emulated; `restore_path`'s symlink swapped once made or at
+the rename, its folder replaced, a failed rename, a name already there, by descriptor and by path;
+the Windows staging over the emulated handle calls; Codex's U82 round 3 repros). The Windows staging
+runs natively on Windows CI as the sweep tests' `staged copy` restore. A policy violation's reason
+says "no rollback point exists" only for a path the snapshot holds nothing for; any other path left
+on disk is named with the restore's own reason (`PolicyRestore.not_restored`), so a refusal with
+the snapshot kept is never reported as a missing one.
 
 ## Backups
 

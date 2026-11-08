@@ -56,16 +56,19 @@ import json
 import os
 import posixpath
 import re
+import secrets
+import shlex
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .git_utils import pin_repo_root
 from .process_control import FileMutex, descriptor_owning_handle, handle_of_descriptor
@@ -103,6 +106,8 @@ __all__ = [
     "file_sha256",
     "OPENS_WITHOUT_FOLLOWING",
     "CopyNotContained",
+    "RestoreLeftovers",
+    "restore_leftovers",
     "read_capped",
     "write_copy",
     "remove_tree",
@@ -533,29 +538,37 @@ OPENS_WITHOUT_FOLLOWING = bool(
 )
 
 
-def _open_below_root(root: str, parts: Sequence[str]) -> Optional[int]:
+def _open_below_root(root: str, parts: Sequence[str], *,
+                     folder: bool = False) -> Optional[int]:
     """``root/parts`` opened for reading, every component below *root*
     opened through its parent's descriptor without following a link; ``None``
     when one is a link, is gone or is not a directory where one must be.
-    *root* itself is opened by path: a link above the repository is the
-    user's (``prompt_files`` walks the phase dir the same way)."""
+    With *folder*, ``root/parts`` is a directory too, its descriptor handed
+    back (*root*'s own for no *parts*): the rollback restore holds the folder
+    it puts a file back in this way (:class:`_HeldFolder`). *root* itself is
+    opened by path: a link above the repository is the user's
+    (``prompt_files`` walks the phase dir the same way)."""
     try:
-        folder = os.open(root, os.O_RDONLY | os.O_DIRECTORY | _CLOEXEC)
+        handle = os.open(root, os.O_RDONLY | os.O_DIRECTORY | _CLOEXEC)
     except OSError:
         return None
     try:
-        for name in parts[:-1]:
+        for name in (parts if folder else parts[:-1]):
             child = os.open(
                 name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _CLOEXEC,
-                dir_fd=folder,
+                dir_fd=handle,
             )
-            os.close(folder)
-            folder = child
-        return os.open(parts[-1], _READ_FLAGS | os.O_NOFOLLOW, dir_fd=folder)
+            os.close(handle)
+            handle = child
+        if folder:
+            opened, handle = handle, -1
+            return opened
+        return os.open(parts[-1], _READ_FLAGS | os.O_NOFOLLOW, dir_fd=handle)
     except OSError:
         return None
     finally:
-        os.close(folder)
+        if handle >= 0:
+            os.close(handle)
 
 
 def read_capped(handle: int, limit: int, *, size_hint: int = 0) -> Optional[bytes]:
@@ -608,6 +621,26 @@ class CopyNotContained(OSError):
     def __init__(self, pending: str, message: str) -> None:
         super().__init__(message)
         self.pending = pending
+
+
+#: A file's identity as the leftover record keeps it: ``(st_dev, st_ino,
+#: st_ctime_ns)``. The change time is in it because a filesystem can give a
+#: removed file's inode number to the next file made, and no call sets it.
+_Identity = Tuple[int, int, int]
+
+
+class _StagingLeft(CopyNotContained):
+    """:class:`CopyNotContained` for a restore's own staged entry, kept at
+    *pending* after a failure for the user to check and remove; *identity*
+    is its :data:`_Identity`, ``None`` where it could not be read. The
+    restore records it (:func:`_record_left`) and ``unrecorded`` says why
+    when it could not (docs/development/write-safety.md, restore)."""
+
+    def __init__(self, pending: str, message: str,
+                 identity: Optional[_Identity]) -> None:
+        super().__init__(pending, message)
+        self.identity = identity
+        self.unrecorded: Optional[str] = None
 
 
 def write_copy(pending: str, data: bytes, source: int, *,
@@ -1958,6 +1991,7 @@ class TaskSnapshot:
         """
         wanted = list(paths) if paths is not None else [e.relative for e in self.entries]
         report: Dict[str, str] = {}
+        leftovers: Optional[RestoreLeftovers] = None
         for relative in wanted:
             entry = self.entry_for(relative)
             if entry is None:
@@ -1977,6 +2011,14 @@ class TaskSnapshot:
             if target is None:
                 # The delete leg, with a parent directory already gone.
                 report[relative] = "deleted (already absent)"
+                continue
+            # A staged entry a restore kept for the user is neither replaced
+            # nor deleted, even when a snapshot adopted it, --force included
+            # (docs/development/write-safety.md, restore).
+            if leftovers is None:
+                leftovers = restore_leftovers(self.root)
+            if leftovers.holds(str(target)):
+                report[relative] = _kept_for_the_user(str(target))
                 continue
             symlinked = _is_symlink(target)
             if expected is not None and not force:
@@ -2015,7 +2057,8 @@ class TaskSnapshot:
                     )
                     continue
                 try:
-                    _replace_with_payload(source, target, sha256=entry.sha256)
+                    _replace_with_payload(source, target, root=self.root,
+                                          sha256=entry.sha256)
                 except CopyNotContained as left:
                     report[relative] = _skipped_leaving(left)
                     continue
@@ -2058,6 +2101,8 @@ def restore_path(root: str, relative: str, source: Optional[str]) -> str:
         return f"skipped: {exc}"
     if target is None:
         return "deleted (already absent)"
+    if restore_leftovers(root).holds(str(target)):
+        return _kept_for_the_user(str(target))
     if source is None:
         try:
             if stat.S_ISDIR(os.lstat(str(target)).st_mode):
@@ -2070,18 +2115,9 @@ def restore_path(root: str, relative: str, source: Optional[str]) -> str:
         return "deleted"
     try:
         if os.path.islink(source):
-            tmp = target.with_name(f".{target.name}.restore.{os.getpid()}.tmp")
-            os.symlink(os.readlink(source), str(tmp))
-            try:
-                os.replace(str(tmp), str(target))
-            except BaseException:
-                try:
-                    os.unlink(str(tmp))
-                except OSError:
-                    pass
-                raise
+            _restored_link(os.readlink(source), target, root)
         else:
-            _replace_with_payload(Path(source), target)
+            _replace_with_payload(Path(source), target, root=root)
     except CopyNotContained as left:
         return _skipped_leaving(left)
     except OSError as exc:
@@ -2096,8 +2132,184 @@ def _short(digest: Optional[str]) -> str:
 def _skipped_leaving(left: CopyNotContained) -> str:
     """A restore's ``skipped`` state when its refused copy is left behind, or
     may have gone through a link: named for the user to check, as the
-    rollback store's pass names a copy of its own it could not remove."""
-    return f"skipped: {left}; check what is left there and delete it by hand"
+    rollback store's pass names a copy of its own it could not remove. For
+    the restore's own staged entry (:class:`_StagingLeft`) it also says how
+    to remove it, and whether the write checks leave it alone meanwhile
+    (:func:`restore_leftovers`)."""
+    if not isinstance(left, _StagingLeft):
+        return f"skipped: {left}; check what is left there and delete it by hand"
+    if left.unrecorded is None:
+        meanwhile = ("until it is gone, no write check counts it as a batch's "
+                     "file and no rollback replaces or deletes it")
+    else:
+        meanwhile = (f"it could not be recorded as the restore's ({left.unrecorded}), "
+                     f"so a write check can count it as a batch's file meanwhile")
+    return (f"skipped: {left}; check it and delete it by hand "
+            f"({_removal_command(left.pending)}): {meanwhile}")
+
+
+def _kept_for_the_user(path: str) -> str:
+    """A rollback's ``skipped`` state for a staged entry a restore kept for
+    the user (:func:`restore_leftovers`), on either leg."""
+    return (f"skipped: {path} is a file a restore left for you to check, so no "
+            f"rollback replaces or deletes it; delete it by hand once checked "
+            f"({_removal_command(path)})")
+
+
+def _removal_command(path: str) -> str:
+    """The command that deletes the entry *path* itself (a link, never its
+    target), for a message."""
+    if os.name == "nt":  # pragma: no cover - Windows
+        return f'del /f "{path}"'
+    return f"rm -- {shlex.quote(path)}"
+
+
+#: Where the staged entries a restore kept for the user are recorded, one
+#: file per repository, beside the out-of-grant rollback evidence
+#: (:data:`STATE_SUBDIR`), which a jailed batch cannot write
+#: (docs/development/write-safety.md, restore).
+LEFTOVERS_SUBDIR = "restore-leftovers"
+#: The record's in-process lock; :class:`FileMutex` serializes processes.
+_LEFTOVERS_LOCK = threading.Lock()
+
+
+class RestoreLeftovers:
+    """The staged entries a restore kept in one repository for the user to
+    check and remove, as recorded: each its absolute path and
+    :data:`_Identity` (:func:`restore_leftovers`)."""
+
+    def __init__(self, entries: Sequence[Tuple[str, _Identity]]) -> None:
+        self._entries = {os.path.normcase(path): identity for path, identity in entries}
+
+    def __bool__(self) -> bool:
+        return bool(self._entries)
+
+    def holds(self, path: str) -> bool:
+        """Whether the absolute *path* is one of them: that path, and the
+        entry there (never followed) that very file. Another file at the
+        path, a model's with the same name included, is not."""
+        identity = self._entries.get(os.path.normcase(path))
+        return identity is not None and _identity_at(path) == identity
+
+
+def restore_leftovers(root: str) -> RestoreLeftovers:
+    """The staged entries a restore kept under the repository *root* for the
+    user (:class:`_StagingLeft`), each still at its path. The write checks
+    leave exactly these out: the containment sweep's census and the
+    differences it computes, the porcelain write check, and both legs of a
+    rollback (replace and delete). An entry that is gone, or with
+    another file at its path, leaves the record here: whatever is there is
+    an ordinary file again. Never raises: an unreadable record holds none
+    (docs/development/write-safety.md, restore)."""
+    try:
+        return RestoreLeftovers(_leftovers_update(root))
+    except OSError:
+        return RestoreLeftovers(())
+
+
+def _record_left(root: str, left: _StagingLeft) -> None:
+    """Record *left*, kept under the repository *root*, for
+    :func:`restore_leftovers`; ``left.unrecorded`` says why when it cannot
+    be."""
+    if left.identity is None:
+        left.unrecorded = "its file identity could not be read"
+    elif not os.path.isabs(left.pending):
+        left.unrecorded = "the folder it is in was moved"
+    else:
+        try:
+            _leftovers_update(root, (os.path.abspath(left.pending), left.identity))
+        except OSError as exc:
+            left.unrecorded = str(exc)
+
+
+def _forget_gone(root: str) -> None:
+    """Drop the recorded leftovers under *root* that are gone, once a
+    restore there put its file back."""
+    try:
+        _leftovers_update(root)
+    except OSError:
+        pass
+
+
+def _leftovers_update(
+    root: str, kept: Optional[Tuple[str, _Identity]] = None,
+) -> List[Tuple[str, _Identity]]:
+    """*root*'s record (:data:`LEFTOVERS_SUBDIR`), under its lock: the
+    entries still at their paths, *kept* added; rewritten when that changed
+    it, removed once empty. Raises ``OSError`` without changing it when the
+    record cannot be read, or when *kept* is given and the lock cannot be
+    taken."""
+    resolved = os.path.realpath(root)
+    record = os.path.join(state_home(), STATE_SUBDIR, LEFTOVERS_SUBDIR,
+                          _phase_key(os.path.normcase(resolved)) + ".json")
+    if kept is None and not os.path.exists(record):
+        return []
+    with _LEFTOVERS_LOCK:
+        os.makedirs(os.path.dirname(record), mode=0o700, exist_ok=True)
+        mutex = FileMutex(record + ".lock")
+        if not mutex.acquire():
+            # Never rewritten without the lock: the write could drop an entry
+            # another process published meanwhile. *kept* stays unrecorded
+            # (``_StagingLeft.unrecorded``); a read takes the record as it is.
+            if kept is not None:
+                raise OSError(f"the lock on {record} could not be taken")
+            return [(path, identity) for path, identity in _read_leftovers(record) or ()
+                    if _identity_at(path) == identity]
+        try:
+            recorded = _read_leftovers(record)
+            live = [(path, identity) for path, identity in recorded or ()
+                    if _identity_at(path) == identity]
+            if kept is not None:
+                live = [entry for entry in live if os.path.normcase(entry[0])
+                        != os.path.normcase(kept[0])] + [kept]
+            if live and live != recorded:
+                _atomic_write(record, json.dumps({"root": resolved, "left": [
+                    {"path": path, "dev": dev, "ino": ino, "ctime_ns": ctime}
+                    for path, (dev, ino, ctime) in live]}, indent=2) + "\n")
+            elif not live and recorded != []:
+                try:
+                    os.unlink(record)
+                except FileNotFoundError:
+                    pass
+            return live
+        finally:
+            mutex.release()
+
+
+def _read_leftovers(record: str) -> Optional[List[Tuple[str, _Identity]]]:
+    """The entries in *record*; ``[]`` when there is none, ``None`` when its
+    content is not one. Raises the ``OSError`` of a read that failed, which
+    says nothing about its entries."""
+    try:
+        data = json.loads(Path(record).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except ValueError:
+        return None
+    entries = data.get("left") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        return None
+    out: List[Tuple[str, _Identity]] = []
+    for item in entries:
+        if not isinstance(item, dict):
+            return None
+        path = item.get("path")
+        identity = (item.get("dev"), item.get("ino"), item.get("ctime_ns"))
+        if not (isinstance(path, str) and os.path.isabs(path)
+                and all(type(part) is int for part in identity)):
+            return None
+        out.append((path, identity))  # type: ignore[arg-type]
+    return out
+
+
+def _identity_at(path: str, dir_fd: Optional[int] = None) -> Optional[_Identity]:
+    """The :data:`_Identity` of the entry at *path* (relative to *dir_fd*),
+    never followed."""
+    try:
+        info = os.lstat(path, dir_fd=dir_fd)
+    except (OSError, ValueError):
+        return None
+    return info.st_dev, info.st_ino, info.st_ctime_ns
 
 
 def _is_symlink(path: Path) -> bool:
@@ -2190,55 +2402,612 @@ def _revalidated_target(
     return current / parts[-1]
 
 
-def _replace_with_payload(source: Path, target: Path, *,
+def _replace_with_payload(source: Path, target: Path, *, root: str,
                           sha256: Optional[str] = None) -> None:
-    """Write ``source``'s bytes as a new file and ``os.replace`` it over ``target``.
+    """Put ``source``'s bytes back as a new file and swap it in for ``target``'s
+    own entry; *root* is the pinned repo root ``target`` was revalidated under
+    (:func:`_revalidated_target`).
 
     Never ``shutil.copy2`` onto the destination: it opens the destination for
     writing and follows it, so a snapshotted regular file that has since become a
-    symlink would have the saved bytes written *through* the link. ``os.replace``
-    swaps the directory entry itself — atomic, and no-follow — and the temp file is
-    created ``O_EXCL`` in the same revalidated directory, so it cannot land on an
-    existing symlink and the rename cannot cross a filesystem.
+    symlink would have the saved bytes written *through* the link. A rename swaps
+    the directory entry itself — atomic, and no-follow — and the new file is
+    staged in the same revalidated directory, so the rename cannot cross a
+    filesystem.
 
-    On Windows with ``CopyFile2`` (Python 3.12+) a payload that is not read-only
-    goes back as ``CopyFile2``'s copy instead, checked and swapped in through one
-    handle that excludes every other writer (:func:`_restored_by_copy_file2`), so
-    the file keeps the payload's alternate data streams, attributes and EFS
-    encryption, which the snapshot's ``shutil.copy2`` kept; that copy must hash
-    to ``sha256``, the manifest's digest, when it is given. A read-only payload,
-    and every case that function hands back, is restored below, as on the other
-    platforms, where ``sha256`` is unused: the caller checked the payload
-    against it.
+    The staged file is reached through one descriptor (one handle on Windows)
+    from its creation to its rename, never by its path, because whoever can
+    write the file's folder can swap that name for a link to another file, a
+    hard link to one outside the repository included, at any moment
+    (docs/development/write-safety.md, restore). The bytes read through the
+    payload's descriptor must hash to ``sha256``, the manifest's digest, when it
+    is given (``restore_path`` gives none: its caller checked its copy), and the
+    staged file, read back after the flush, must hold them.
+
+    * Windows with ``CopyFile2`` (Python 3.12+), a payload that is not
+      read-only: ``CopyFile2``'s copy, checked and swapped in through one handle
+      that excludes every other writer (:func:`_restored_by_copy_file2`), so
+      the file keeps the payload's alternate data streams, attributes and EFS
+      encryption, which the snapshot's ``shutil.copy2`` kept.
+    * Linux and macOS: :func:`_restored_through_descriptor`, in ``target``'s
+      folder as reached from *root* (:class:`_HeldFolder`).
+    * Windows otherwise (a read-only payload, Python before 3.12, a failed
+      ``CopyFile2`` that left nothing): :func:`_restored_through_handle`.
+
+    Raises ``OSError`` when nothing was put back, :class:`CopyNotContained`
+    when something is left beside the file for the user to look at; the
+    restore's own staged file left there (:class:`_StagingLeft`) is recorded
+    first, for the write checks to leave alone (:func:`restore_leftovers`).
     """
-    tmp = target.with_name(f".{target.name}.restore.{os.getpid()}.tmp")
-    if _COPY_FILE2 is not None and _restored_by_copy_file2(
-            str(source), str(tmp), str(target), sha256):
-        return
-    handle = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    tmp = _staging_name(target)
     try:
-        with os.fdopen(handle, "wb") as stream:
-            with open(str(source), "rb") as payload:
-                shutil.copyfileobj(payload, stream)
-            stream.flush()
-            os.fsync(stream.fileno())
-        # What `copy2` preserved, minus the destination-following write.
-        shutil.copystat(str(source), str(tmp))
-        os.replace(str(tmp), str(target))
-    except BaseException:
-        try:
-            os.unlink(str(tmp))
-        except OSError:
+        if _COPY_FILE2 is not None and _restored_by_copy_file2(
+                str(source), str(tmp), str(target), sha256):
             pass
+        elif _STAGES_BY_DESCRIPTOR:
+            _restored_through_descriptor(str(source), tmp, target, sha256, root)
+        else:
+            _restored_through_handle(_held_copy_calls(), str(source), str(tmp),
+                                     str(target), sha256)
+    except _StagingLeft as left:
+        _record_left(root, left)
         raise
+    _forget_gone(root)
+
+
+def _staging_name(target: Path) -> Path:
+    """The name a restore stages *target*'s file or link under, beside it:
+    hidden, this process's, and new for each attempt
+    (:func:`_staging_token`), so an entry an earlier attempt kept there for
+    the user never blocks a later one, and the name cannot be known before
+    the attempt makes it."""
+    return target.with_name(
+        f".{target.name}.restore.{os.getpid()}.{_staging_token()}.tmp")
+
+
+def _staging_token() -> str:
+    """A random token for one staging name (:func:`_staging_name`)."""
+    return secrets.token_hex(4)
+
+
+#: Whether a restore can stage its file through descriptors alone (Linux,
+#: macOS): its folder reached from the repo root without following a link and
+#: held by a descriptor, every name in it reached relative to that descriptor,
+#: the file's times and mode set through its own descriptor. Windows stages
+#: through a handle instead.
+_STAGES_BY_DESCRIPTOR = bool(
+    OPENS_WITHOUT_FOLLOWING and hasattr(os, "fchmod") and os.utime in os.supports_fd
+    and os.stat in os.supports_dir_fd and os.rename in os.supports_dir_fd
+    and os.symlink in os.supports_dir_fd and os.readlink in os.supports_dir_fd
+)
+#: ``O_TMPFILE`` (Linux): a file made with no name in a folder, so nobody can
+#: reach it by a name until it is given one (``0`` where there is none).
+_O_TMPFILE = getattr(os, "O_TMPFILE", 0)
+#: Where a process's own descriptors are named, the one way an unprivileged
+#: process gives an ``O_TMPFILE`` file a name (``linkat(2)`` with
+#: ``AT_EMPTY_PATH`` needs ``CAP_DAC_READ_SEARCH``; open(2), ``O_TMPFILE``).
+_PROC_SELF_FD = "/proc/self/fd"
+#: How ``open(2)`` refuses ``O_TMPFILE`` where the kernel (``EISDIR``) or the
+#: folder's filesystem (``EOPNOTSUPP``) cannot make one.
+_NO_TMPFILE = tuple(getattr(errno, name) for name in (
+    "EISDIR", "EOPNOTSUPP", "ENOTSUP", "EINVAL") if hasattr(errno, name))
+#: How the staged file is made by its name where it cannot be made unnamed:
+#: exclusively, never through a link already there.
+_STAGE_FLAGS = (os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                | _CLOEXEC)
+
+
+@dataclass(frozen=True)
+class _HeldFolder:
+    """The folder a restore puts a file back in (Linux, macOS), reached from
+    the pinned repo root one component at a time without following a link
+    (:func:`_open_below_root`) and held by the descriptor *fd*, which every
+    name in it is reached through. A writer of a folder above it can move it
+    away and put another folder at its path at any moment, so it must still
+    be the folder at its path (:meth:`in_place`) before anything is
+    published in it, and again before the restore says ``restored``
+    (docs/development/write-safety.md, restore). *root* and *parts* are the
+    walk; *shown* is the folder's path as the restore names it."""
+
+    fd: int
+    root: str
+    parts: Tuple[str, ...]
+    shown: str
+
+    @classmethod
+    def open(cls, root: str, target: Path) -> "_HeldFolder":
+        """*target*'s folder below *root*, which :func:`_revalidated_target`
+        derived *target* under; ``OSError`` when a component on the way is
+        gone, a link or not a folder."""
+        resolved = str(Path(root).resolve())
+        try:
+            parts = tuple(target.parent.relative_to(resolved).parts)
+        except ValueError:
+            raise OSError(f"{target} is not below the pinned repo root "
+                          f"{resolved}, so nothing was put back") from None
+        handle = _open_below_root(resolved, parts, folder=True)
+        if handle is None:
+            raise OSError(f"{target.parent} could not be reached from the pinned "
+                          f"repo root {resolved} without following a link, so "
+                          f"nothing was put back")
+        return cls(handle, resolved, parts, str(target.parent))
+
+    def in_place(self) -> bool:
+        """Whether a fresh walk from the root, without following a link,
+        reaches the folder held (``(st_dev, st_ino)`` against ``fstat``)."""
+        fresh = _open_below_root(self.root, self.parts, folder=True)
+        if fresh is None:
+            return False
+        try:
+            now, held = os.fstat(fresh), os.fstat(self.fd)
+        except OSError:
+            return False
+        finally:
+            os.close(fresh)
+        return (now.st_dev, now.st_ino) == (held.st_dev, held.st_ino)
+
+    def where(self, name: str, spelled: str) -> str:
+        """Where *name* in the folder held is, for a message: *spelled*, its
+        path as the restore spelled it, while the folder is in place; once it
+        was moved, its path now (through :data:`_PROC_SELF_FD`, Linux), else
+        *name* in the folder that was at its path."""
+        if self.in_place():
+            return spelled
+        try:
+            now = os.readlink(f"{_PROC_SELF_FD}/{self.fd}")
+        except OSError:
+            now = ""
+        if os.path.isabs(now):
+            return os.path.join(now, name)
+        return f"{name} in the folder that was at {self.shown}"
+
+
+def _folder_moved(folder: _HeldFolder, target: str) -> str:
+    return (f"{folder.shown} is no longer the folder the restore opened: it was "
+            f"moved or replaced while {target} was being put back, so nothing "
+            f"was put back (the snapshot is kept)")
+
+
+def _restored_through_descriptor(source: str, tmp: Path, target: Path,
+                                 sha256: Optional[str], root: str) -> None:
+    """:func:`_replace_with_payload` on Linux and macOS
+    (docs/development/write-safety.md, restore).
+
+    The payload is opened without following a link and read once. The
+    target's folder is reached from *root* without following a link and held
+    (:class:`_HeldFolder`), and every name in it (the staged file's, the
+    target's) is reached relative to that descriptor. The staged file is made
+    with no name where Linux can (``O_TMPFILE``) and is named *tmp* only once
+    its bytes are checked and its metadata set, or else made as *tmp*
+    exclusively, never through a link, and held by its descriptor from then
+    on. Through that descriptor alone: the payload's bytes are written,
+    flushed and read back; the hash of the bytes read must be *sha256* when it
+    is given; and the file takes the payload's times, extended attributes,
+    mode and file flags, as ``shutil.copystat`` gave them. Then the name *tmp*
+    must still be that file, a regular file with no other name (``lstat``
+    against ``fstat``), the folder must still be the one at its path, and the
+    file is renamed over *target*; once renamed, the folder must still be in
+    place and *target* must name the file.
+
+    A refusal leaves the file as it was and the snapshot kept. Once the
+    staged file has a name it is never removed (:func:`_leave_staged`): it
+    is left and raised as :class:`CopyNotContained`, named, as is a name
+    found where the staged file was to be."""
+    payload = os.open(source, _READ_FLAGS | os.O_NOFOLLOW)
+    try:
+        if not stat.S_ISREG(os.fstat(payload).st_mode):
+            raise OSError(f"{source} is no longer the snapshot's payload file")
+        folder = _HeldFolder.open(root, target)
+        try:
+            _stage_and_rename(payload, folder, source, str(tmp), str(target), sha256)
+        finally:
+            os.close(folder.fd)
+    finally:
+        os.close(payload)
+
+
+def _stage_and_rename(payload: int, folder: _HeldFolder, source: str, tmp: str,
+                      target: str, sha256: Optional[str]) -> None:
+    """The staged file's whole life in :func:`_restored_through_descriptor`:
+    *payload* the payload's descriptor, *folder* the target's folder."""
+    name, target_name = os.path.basename(tmp), os.path.basename(target)
+    staged, named = _staged(folder.fd, name, tmp)
+    try:
+        made = os.fstat(staged)
+        digest = _copy_hashed(payload, staged)
+        if sha256 is not None and digest != sha256:
+            raise OSError(
+                f"the snapshot payload no longer matches the manifest (recorded "
+                f"{_short(sha256)}, payload {_short(digest)}); nothing written")
+        os.fsync(staged)
+        if _descriptor_sha256(staged) != digest:
+            raise OSError(f"{tmp} does not hold the bytes of {source}")
+        info = os.fstat(payload)
+        # What `copy2` preserved, in `copystat`'s order, through the descriptor.
+        os.utime(staged, ns=(info.st_atime_ns, info.st_mtime_ns))
+        _copy_xattrs(payload, staged)
+        os.fchmod(staged, stat.S_IMODE(info.st_mode))
+        flags = getattr(info, "st_flags", 0)
+        if flags != getattr(os.fstat(staged), "st_flags", 0):
+            _set_flags(staged, flags, target)
+        if not named:
+            if os.fstat(staged).st_nlink:
+                raise OSError(_given_another_name(tmp, target))
+            if not folder.in_place():
+                raise OSError(_folder_moved(folder, target))
+            _link_unnamed(staged, folder.fd, name, tmp)
+            named = True
+        _check_staged(folder.fd, name, staged, tmp, target)
+        if not folder.in_place():
+            raise OSError(_folder_moved(folder, target))
+        try:
+            os.replace(name, target_name, src_dir_fd=folder.fd, dst_dir_fd=folder.fd)
+        except OSError as exc:
+            raise _respelled(exc, tmp, target) from exc
+        named = False
+    except BaseException as failure:
+        # A name found where the staged file was to be (CopyNotContained) is
+        # not the staged file's, and is left as it is already.
+        if named and not isinstance(failure, CopyNotContained):
+            _leave_staged(folder, name, tmp, failure, "the file staged to put back",
+                          _identity_of(staged))
+        raise
+    finally:
+        os.close(staged)
+    if not folder.in_place():
+        raise OSError(
+            f"{folder.shown} was moved or replaced while {target} was being put "
+            f"back, so what is at {target} now is not the snapshot's file (the "
+            f"file put back is at {folder.where(target_name, target)}); check "
+            f"both (the snapshot is kept)")
+    try:
+        put_back = os.lstat(target_name, dir_fd=folder.fd)
+    except OSError:
+        put_back = None
+    if put_back is None or (put_back.st_dev, put_back.st_ino) != (made.st_dev, made.st_ino):
+        raise OSError(
+            f"{target} did not name the file put back once it was renamed there: "
+            f"another file was swapped in for {tmp} just before the rename, or "
+            f"over {target} just after it, so what is at {target} now is not "
+            f"the snapshot's file; check it (the snapshot is kept)")
+
+
+def _staged(folder: int, name: str, tmp: str) -> Tuple[int, bool]:
+    """A new file to stage a restore in, open to read and write, and whether
+    it is named: with no name (``O_TMPFILE``) where the folder's filesystem
+    can make one and :data:`_PROC_SELF_FD` can name it later, else made as
+    *name* in *folder*, exclusively and never through a link. A name already
+    there is left as it is and raised as :class:`CopyNotContained`."""
+    if _O_TMPFILE:
+        try:
+            handle = os.open(".", _O_TMPFILE | os.O_RDWR | _CLOEXEC, 0o600, dir_fd=folder)
+        except OSError as exc:
+            if exc.errno not in _NO_TMPFILE:
+                raise _respelled(exc, os.path.dirname(tmp)) from exc
+        else:
+            if os.path.exists(f"{_PROC_SELF_FD}/{handle}"):
+                return handle, False
+            os.close(handle)
+    try:
+        return os.open(name, _STAGE_FLAGS, 0o600, dir_fd=folder), True
+    except FileExistsError as exc:
+        raise _already_there(tmp) from exc
+    except OSError as exc:
+        raise _respelled(exc, tmp) from exc
+
+
+def _link_unnamed(staged: int, folder: int, name: str, tmp: str) -> None:
+    """Give the unnamed file *staged* the name *name* in *folder*. A link
+    is never made over a name already there, a link included: that name is
+    left as it is and raised as :class:`CopyNotContained`."""
+    try:
+        os.link(f"{_PROC_SELF_FD}/{staged}", name, dst_dir_fd=folder,
+                follow_symlinks=True)
+    except FileExistsError as exc:
+        raise _already_there(tmp) from exc
+    except OSError as exc:
+        raise _respelled(exc, tmp) from exc
+
+
+def _check_staged(folder: int, name: str, staged: int, tmp: str, target: str) -> None:
+    """Refuse to rename *name* unless it is still the file *staged* holds,
+    a regular file with no other name. A name swapped in is raised as
+    :class:`CopyNotContained` (left as it is); another name given to the
+    staged file as ``OSError``."""
+    try:
+        named = os.lstat(name, dir_fd=folder)
+    except OSError as exc:
+        raise OSError(f"{tmp}, the file staged to put back, could not be examined "
+                      f"({exc}), so nothing was put back") from exc
+    opened = os.fstat(staged)
+    if (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino):
+        what = ("a link" if stat.S_ISLNK(named.st_mode) else
+                "another file" if stat.S_ISREG(named.st_mode) else "something else")
+        raise CopyNotContained(
+            tmp, f"{tmp} was {what} by the time the file staged there was to be "
+                 f"renamed over {target}, so nothing was put back, and what is at "
+                 f"{tmp} was left as it is")
+    if not stat.S_ISREG(named.st_mode) or opened.st_nlink != 1:
+        raise OSError(_given_another_name(tmp, target))
+
+
+def _given_another_name(tmp: str, target: str) -> str:
+    return (f"{tmp}, the file staged to put back, was given another name before "
+            f"it could be renamed over {target}, so nothing was put back")
+
+
+def _leave_staged(folder: Optional[_HeldFolder], name: str, tmp: str,
+                  failure: BaseException, what: str,
+                  made: Optional[_Identity]) -> None:
+    """Once a restore failed with *failure* after *what* (:data:`_Identity`
+    *made*) was given the name *name* (*tmp* in full): leave that
+    name, and raise it as :class:`_StagingLeft` naming it, chained to
+    *failure*, for the user to check and remove; an interrupt goes on as it
+    is. The name is never removed: POSIX removes a name, not a file, and
+    between any check of the name and ``unlink(2)`` another process can swap
+    its own file in, which the removal would then delete, its only name
+    perhaps (docs/development/write-safety.md, restore)."""
+    if not isinstance(failure, Exception):
+        return
+    where = folder.where(name, tmp) if folder is not None else tmp
+    raise _StagingLeft(
+        where, f"{failure}; {what} was left at {where}: a restore never removes "
+               f"a name it made, as another file can be swapped in for it between "
+               f"a check and the removal", made) from failure
+
+
+def _identity_of(descriptor: int) -> Optional[_Identity]:
+    """The :data:`_Identity` of the file open as *descriptor*."""
+    try:
+        info = os.fstat(descriptor)
+    except OSError:
+        return None
+    return info.st_dev, info.st_ino, info.st_ctime_ns
+
+
+def _set_flags(staged: int, flags: int, target: str) -> None:
+    """The payload's file flags (BSD, macOS) onto the staged file through its
+    descriptor, as ``copystat`` sets them (a filesystem without flags is
+    skipped). Python has no ``fchflags``, so libc's (:func:`_fchflags`).
+    Where it cannot be called the file goes back without them and a warning
+    names them: set by its name they could land on another file, a hard link
+    to one outside the repository swapped in for that name included
+    (docs/development/write-safety.md, restore)."""
+    call = _fchflags()
+    if call is not None:
+        try:
+            call(staged, flags)
+            return
+        except OSError as exc:
+            if exc.errno in (errno.EOPNOTSUPP, errno.ENOTSUP):
+                return
+            if exc.errno != errno.ENOSYS:  # a libc stub: no such call after all
+                raise
+    print(f"WARNING: {target} is restored without its file flags "
+          f"({_flag_names(flags)}): they can be set here only by the file's "
+          f"name, which another file can be swapped in for; set them by hand "
+          f"once it is back", file=sys.stderr)
+
+
+def _fchflags() -> Optional[Callable[[int, int], None]]:
+    """libc's ``fchflags(2)`` (BSD, macOS) as ``call(descriptor, flags)``,
+    raising ``OSError``; ``None`` where Python has no ``chflags`` (no file
+    flags there) or libc's cannot be loaded. Looked up on each call: a
+    restore that needs it is rare."""
+    if not hasattr(os, "chflags"):
+        return None
+    try:
+        import ctypes
+        import ctypes.util
+
+        function = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True).fchflags
+    except (ImportError, OSError, AttributeError):  # pragma: no cover - BSD, macOS
+        return None
+    # The flags are `__uint32_t` on macOS, `unsigned int` on OpenBSD and
+    # `unsigned long` on FreeBSD, NetBSD and DragonFly (fchflags(2)).
+    wide = sys.platform.startswith(("freebsd", "netbsd", "dragonfly"))
+    function.argtypes = [ctypes.c_int, ctypes.c_ulong if wide else ctypes.c_uint]
+    function.restype = ctypes.c_int
+
+    def call(descriptor: int, flags: int) -> None:  # pragma: no cover - BSD, macOS
+        if function(descriptor, flags) != 0:
+            code = ctypes.get_errno()
+            raise OSError(code, os.strerror(code))
+
+    return call
+
+
+def _flag_names(flags: int) -> str:
+    """*flags* as ``stat``'s names (``UF_HIDDEN|SF_ARCHIVED``), bits without
+    one in hex."""
+    names, rest = [], flags
+    for name in sorted(dir(stat)):
+        bit = getattr(stat, name)
+        if (name[:3] in ("UF_", "SF_") and isinstance(bit, int) and bit > 0
+                and not bit & (bit - 1) and rest & bit):
+            names.append(name)
+            rest &= ~bit
+    if rest:
+        names.append(hex(rest))
+    return "|".join(names) or "0x0"
+
+
+def _restored_link(text: str, target: Path, root: str) -> None:
+    """``restore_path``'s symlink: a link reading *text* put back at
+    *target*, under a file's rules (docs/development/write-safety.md,
+    restore). It is made as the staged name beside *target*, never over a
+    name already there (left as it is, named); just before the rename that
+    name must still be the link made (``lstat``) and read *text*
+    (``readlink``), and once renamed *target* must be. On Linux and macOS
+    every name is reached relative to *target*'s folder, held as
+    :class:`_HeldFolder`, which must still be the folder at its path before
+    the rename and after it; Windows reaches them by path. Once made, the
+    link is never removed (:func:`_leave_staged`), and is recorded for the
+    write checks to leave alone (:func:`restore_leftovers`)."""
+    tmp = str(_staging_name(target))
+    try:
+        if not _STAGES_BY_DESCRIPTOR:
+            _link_and_rename(None, text, tmp, str(target))
+        else:
+            folder = _HeldFolder.open(root, target)
+            try:
+                _link_and_rename(folder, text, tmp, str(target))
+            finally:
+                os.close(folder.fd)
+    except _StagingLeft as left:
+        _record_left(root, left)
+        raise
+    _forget_gone(root)
+
+
+def _link_and_rename(folder: Optional[_HeldFolder], text: str, tmp: str,
+                     target: str) -> None:
+    """The link's whole life in :func:`_restored_link`: every name relative
+    to *folder*'s descriptor, or by its full path without one (Windows)."""
+    fd = folder.fd if folder is not None else None
+    if folder is not None:
+        name, target_name = os.path.basename(tmp), os.path.basename(target)
+    else:
+        name, target_name = tmp, target
+    try:
+        os.symlink(text, name, dir_fd=fd)
+    except FileExistsError as exc:
+        raise _already_there(tmp) from exc
+    except OSError as exc:
+        raise _respelled(exc, tmp) from exc
+    made: Optional[Tuple[int, int, str]] = None
+    try:
+        made = _link_at(fd, name)
+        # Windows may spell a link's text back otherwise than it was given.
+        if made is None or (folder is not None and made[2] != text):
+            raise CopyNotContained(tmp, _not_the_link(tmp, target))
+        if folder is not None and not folder.in_place():
+            raise OSError(_folder_moved(folder, target))
+        if _link_at(fd, name) != made:
+            raise CopyNotContained(tmp, _not_the_link(tmp, target))
+        try:
+            os.replace(name, target_name, src_dir_fd=fd, dst_dir_fd=fd)
+        except OSError as exc:
+            raise _respelled(exc, tmp, target) from exc
+    except BaseException as failure:
+        if not isinstance(failure, CopyNotContained):
+            now = _identity_at(name, fd)
+            _leave_staged(folder, name, tmp, failure, "the link made to put back",
+                          now if made is not None and now is not None
+                          and now[:2] == made[:2] else None)
+        raise
+    if folder is not None and not folder.in_place():
+        raise OSError(
+            f"{folder.shown} was moved or replaced while {target} was being put "
+            f"back, so what is at {target} now is not the link put back (it is "
+            f"at {folder.where(target_name, target)}); check both")
+    if _link_at(fd, target_name) != made:
+        raise OSError(
+            f"{target} did not name the link put back once it was renamed there: "
+            f"another file was swapped in for {tmp} just before the rename, or "
+            f"over {target} just after it, so what is at {target} now is not "
+            f"the link restored; check it")
+
+
+def _link_at(fd: Optional[int], name: str) -> Optional[Tuple[int, int, str]]:
+    """``(st_dev, st_ino, text)`` of the symlink *name* (relative to *fd*),
+    without following it; ``None`` when it is gone or not a symlink."""
+    try:
+        info = os.lstat(name, dir_fd=fd)
+        if not stat.S_ISLNK(info.st_mode):
+            return None
+        return info.st_dev, info.st_ino, os.readlink(name, dir_fd=fd)
+    except OSError:
+        return None
+
+
+def _not_the_link(tmp: str, target: str) -> str:
+    return (f"{tmp} was no longer the link made there by the time it was to be "
+            f"renamed over {target}, so nothing was put back, and what is at "
+            f"{tmp} was left as it is")
+
+
+def _already_there(tmp: str) -> CopyNotContained:
+    return CopyNotContained(
+        tmp, f"{tmp} was already there, so nothing was put back, and it was left "
+             f"as it is")
+
+
+def _respelled(exc: OSError, path: str, other: Optional[str] = None) -> OSError:
+    """*exc*, from a call made relative to a folder's descriptor, spelled with
+    the full *path* (and *other*) it reached."""
+    if other is None:
+        return OSError(exc.errno, exc.strerror, path)
+    return OSError(exc.errno, exc.strerror, path, None, other)
+
+
+def _copy_hashed(source: int, target: int) -> str:
+    """Copy every byte left in the descriptor *source* to *target*; the
+    sha256 of the bytes read."""
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(source, 1024 * 1024)
+        if not chunk:
+            return digest.hexdigest()
+        digest.update(chunk)
+        view = memoryview(chunk)
+        while view:
+            view = view[os.write(target, view):]
+
+
+def _restored_through_handle(calls: Any, source: str, tmp: str, target: str,
+                             sha256: Optional[str]) -> None:
+    """:func:`_replace_with_payload` on Windows where ``CopyFile2`` does not
+    restore (docs/development/write-safety.md, restore on Windows).
+
+    The payload is opened and held (Windows will neither delete nor rename
+    it meanwhile), and its own name must be that regular file. *tmp* is made
+    as a new file through the one handle :func:`_publish_bound` holds it by
+    (:meth:`_HeldCopyCalls.create`): never through a link or over any name
+    already there, which is left as it is, and shared for reading alone from
+    its creation. The payload's bytes are written through it, and the bytes
+    read must hash to *sha256* when it is given; :func:`_publish_bound` does
+    the rest. Raises ``OSError`` when the handle calls cannot be loaded:
+    nothing is then put back, as a restore by path could change another
+    file."""
+    if calls is None:
+        raise OSError(
+            f"the Windows calls that hold {tmp} while it is put back could not "
+            f"be loaded, so nothing was put back")
+    payload = os.open(source, _READ_FLAGS)
+    try:
+        if not _names_file(source, os.fstat(payload)):
+            raise OSError(f"{source} is no longer the snapshot's payload file")
+        try:
+            held = calls.create(tmp)
+        except FileExistsError as exc:
+            raise _already_there(tmp) from exc
+        try:
+            digest = _copy_hashed(payload, held)
+            if sha256 is not None and digest != sha256:
+                raise OSError(
+                    f"the snapshot payload no longer matches the manifest "
+                    f"(recorded {_short(sha256)}, payload {_short(digest)}); "
+                    f"nothing written")
+            read = os.fstat(payload)
+        except BaseException as failure:
+            try:
+                _dispose_held(calls, held, tmp, failure)
+            finally:
+                os.close(held)
+            raise
+        _publish_bound(calls, held, source, tmp, target, digest, read)
+    finally:
+        os.close(payload)
 
 
 def _restored_by_copy_file2(source: str, tmp: str, target: str,
                             sha256: Optional[str]) -> bool:
     """:func:`_replace_with_payload` through ``CopyFile2`` (Windows on Python
     3.12+): ``True`` once *target* is restored, ``False`` when nothing was done
-    and the plain copy restores instead (docs/development/write-safety.md,
-    restore on Windows). Raises ``OSError`` when nothing was put back, and
+    and :func:`_restored_through_handle` restores instead, writing the
+    payload's bytes itself (docs/development/write-safety.md, restore on
+    Windows). Raises ``OSError`` when nothing was put back, and
     :class:`CopyNotContained` when something may be left at *tmp*.
 
     The payload *source* is opened and held, so Windows will neither delete
@@ -2271,20 +3040,22 @@ def _restored_by_copy_file2(source: str, tmp: str, target: str,
                 f"{_short(sha256)}, payload {_short(digest)}); nothing written")
         try:
             _COPY_FILE2(source, tmp, _COPY_FILE2_FLAGS)
+            copied = _identity_at(tmp)
         except OSError as failure:
             if not os.path.lexists(tmp):
                 return False
-            raise CopyNotContained(
+            raise _left_by_name(
                 tmp, f"CopyFile2 could not copy {source} to {tmp} ({failure}), "
                      f"and what is at {tmp} was left as it is") from failure
-        _publish_held(calls, source, tmp, target, payload, digest, read)
+        _publish_held(calls, source, tmp, target, payload, digest, read, copied)
         return True
     finally:
         os.close(payload)
 
 
 def _publish_held(calls: Any, source: str, tmp: str, target: str, payload: int,
-                  digest: str, read: os.stat_result) -> None:
+                  digest: str, read: os.stat_result,
+                  copied: Optional[_Identity] = None) -> None:
     """Check *tmp*, ``CopyFile2``'s copy of *source* (open as *payload*,
     ``fstat`` *read*), and swap it in for *target*'s own entry, all through one
     handle on it that excludes every other writer (Windows;
@@ -2294,47 +3065,100 @@ def _publish_held(calls: Any, source: str, tmp: str, target: str, payload: int,
     there), to read, write, delete and set attributes, shared for reading
     alone: a handle already open on it to write or delete refuses the bind,
     and while it is held nobody can open it to write, rename or delete it.
-    Then, through that handle alone: the copy must be a regular file with one
-    name and no reparse point (``os.fstat``, ``GetFileInformationByHandle``);
-    it is flushed (``FlushFileBuffers``); *source* must still name the file
-    *payload* reads; the copy, read back after the flush, must hash to
-    *digest*; it takes *read*'s attributes and times, as ``copystat`` gives
-    them; and it is renamed over *target*, replacing that entry, before the
-    handle closes. Any failure deletes it through the handle (the name bound:
-    never a link's target or another name of its file) and raises
-    ``OSError``; a copy that cannot be bound, or deleted, raises
-    :class:`CopyNotContained` naming it. Nothing here changes, removes or
-    renames *tmp* by its path: between two calls a name can be swapped for a
-    link to another file, a hard link to one outside the repository
-    included."""
+    :func:`_publish_bound` does the rest, and checks too that *source* still
+    names the file *payload* reads; a copy that cannot be bound raises
+    :class:`CopyNotContained` naming it, the restore's own (*copied*, its
+    identity once made, :func:`_left_by_name`) or not."""
     try:
         held = calls.bind(tmp)
     except OSError as exc:
-        raise CopyNotContained(
+        raise _left_by_name(
             tmp, f"{tmp}, the copy just made, could not be held for its checks "
-                 f"({exc}), so nothing was put back") from exc
+                 f"({exc}), so nothing was put back", copied) from exc
+    _publish_bound(calls, held, source, tmp, target, digest, read, payload=payload)
+
+
+def _publish_bound(calls: Any, held: int, source: str, tmp: str, target: str,
+                   digest: str, read: os.stat_result, *,
+                   payload: Optional[int] = None) -> None:
+    """Swap *held*, a handle on *tmp* holding *source*'s bytes that excludes
+    every other writer (:meth:`_HeldCopyCalls.bind` or ``create``), in for
+    *target*'s own entry, and close it (Windows).
+
+    Through that handle alone: the file must be a regular file with one name
+    and no reparse point (``os.fstat``, ``GetFileInformationByHandle``); it is
+    flushed (``FlushFileBuffers``); *source* must still name the file the
+    descriptor *payload* reads, when it is given (``CopyFile2`` copied it by
+    path); the file, read back after the flush, must hash to *digest*; it
+    takes *read*'s attributes and times, as ``copystat`` gives them; and it is
+    renamed over *target*, replacing that entry, before the handle closes.
+    Any failure deletes it through the handle (the name bound: never a link's
+    target or another name of its file), its read-only attribute cleared
+    first when this set it, and raises ``OSError``; a file that cannot be
+    deleted raises :class:`CopyNotContained` naming it. Nothing here changes,
+    removes or renames *tmp* by its path: between two calls a name can be
+    swapped for a link to another file, a hard link to one outside the
+    repository included."""
+    attributes, read_only = _settable_attributes(read), False
     try:
         info = os.fstat(held)
         if not _plain_new_file(info):
             raise CopyNotContained(tmp, _not_the_copy(tmp, info))
         os.fsync(held)
-        if not _names_file(source, os.fstat(payload)):
+        if payload is not None and not _names_file(source, os.fstat(payload)):
             raise OSError(f"{source} changed while it was copied to {tmp}")
         if _descriptor_sha256(held) != digest:
             raise OSError(f"{tmp} does not hold the bytes of {source}")
-        calls.set_basic(held, _settable_attributes(read), read.st_atime_ns,
-                        read.st_mtime_ns)
+        calls.set_basic(held, attributes, read.st_atime_ns, read.st_mtime_ns)
+        read_only = bool(attributes & stat.FILE_ATTRIBUTE_READONLY)
         calls.rename(held, target)
     except BaseException as failure:
-        try:
-            calls.dispose(held)
-        except OSError as exc:
-            if isinstance(failure, Exception):
-                raise CopyNotContained(
-                    tmp, f"{tmp} could not be removed ({exc})") from failure
+        if read_only:
+            # Windows deletes no read-only file, through a handle neither.
+            try:
+                calls.set_basic(held, attributes & ~stat.FILE_ATTRIBUTE_READONLY
+                                or _FILE_ATTRIBUTE_NORMAL,
+                                read.st_atime_ns, read.st_mtime_ns)
+            except OSError:
+                pass  # the deletion then fails, and says so
+        _dispose_held(calls, held, tmp, failure)
         raise
     finally:
         os.close(held)
+
+
+def _left_by_name(tmp: str, message: str,
+                  copied: Optional[_Identity] = None) -> CopyNotContained:
+    """What ``CopyFile2``'s restore left at *tmp*, the copy it made by that
+    name (Windows): the restore's own (:class:`_StagingLeft`) while a
+    regular file with one name is there, and the file read as *copied*
+    (:data:`_Identity`) once the copy was made, when that is given; anything
+    else there, a link or another name of a file swapped in included, is
+    not its own. Made by its name, the copy has no identity from before:
+    one is read now (docs/development/write-safety.md, restore on
+    Windows)."""
+    try:
+        info = os.lstat(tmp)
+    except OSError:
+        return CopyNotContained(tmp, message)
+    identity = (info.st_dev, info.st_ino, info.st_ctime_ns)
+    if (not stat.S_ISREG(info.st_mode) or _names_another_path(info)
+            or info.st_nlink != 1
+            or (copied is not None and copied[:2] != identity[:2])):
+        return CopyNotContained(tmp, message)
+    return _StagingLeft(tmp, message, identity)
+
+
+def _dispose_held(calls: Any, held: int, tmp: str, failure: BaseException) -> None:
+    """Delete the file *held* through its handle once a restore through it
+    failed with *failure*; what cannot be deleted is raised as
+    :class:`CopyNotContained` naming *tmp*, chained to *failure*."""
+    try:
+        calls.dispose(held)
+    except OSError as exc:
+        if isinstance(failure, Exception):
+            raise _StagingLeft(tmp, f"{tmp} could not be removed ({exc})",
+                               _identity_of(held)) from failure
 
 
 #: The attributes ``FileBasicInfo`` sets (``FILE_ATTRIBUTE_VALID_SET_FLAGS``,
@@ -2352,16 +3176,17 @@ def _settable_attributes(info: os.stat_result) -> int:
 
 
 class _HeldCopyCalls:  # pragma: no cover - Windows
-    """The Windows calls :func:`_publish_held` makes on its one handle.
-    ``_winapi.CreateFile`` binds it, wrapped as a C runtime descriptor, so
-    ``os.fstat`` (``GetFileInformationByHandle``), ``os.fsync``
-    (``FlushFileBuffers``), ``os.read`` and ``os.close`` go through it; and
-    ``SetFileInformationByHandle`` sets its attributes and times, renames it
-    and deletes it."""
+    """The Windows calls a restore makes on the one handle it holds the file
+    it puts back by (:func:`_publish_bound`). ``_winapi.CreateFile`` binds
+    it, or creates the file and binds it, wrapped as a C runtime descriptor,
+    so ``os.fstat`` (``GetFileInformationByHandle``), ``os.fsync``
+    (``FlushFileBuffers``), ``os.read``, ``os.write`` and ``os.close`` go
+    through it; and ``SetFileInformationByHandle`` sets its attributes and
+    times, renames it and deletes it."""
 
     #: GENERIC_READ | GENERIC_WRITE | DELETE | FILE_WRITE_ATTRIBUTES.
     _ACCESS = 0x80000000 | 0x40000000 | 0x00010000 | 0x0100
-    _FILE_SHARE_READ, _OPEN_EXISTING = 0x1, 3
+    _FILE_SHARE_READ, _CREATE_NEW, _OPEN_EXISTING = 0x1, 1, 3
     _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
     #: ``FILE_INFO_BY_HANDLE_CLASS``.
     _BASIC, _RENAME, _DISPOSITION = 0, 3, 4
@@ -2392,9 +3217,18 @@ class _HeldCopyCalls:  # pragma: no cover - Windows
     def bind(self, path: str) -> int:
         """*path* itself, opened to read, write, delete and set attributes,
         shared for reading alone; a C runtime descriptor."""
+        return self._open(path, self._OPEN_EXISTING)
+
+    def create(self, path: str) -> int:
+        """*path* made as a new file and opened as :meth:`bind` opens one;
+        ``FileExistsError`` when any name is there already, a link included
+        (``CREATE_NEW`` on the name itself, never followed)."""
+        return self._open(path, self._CREATE_NEW)
+
+    def _open(self, path: str, disposition: int) -> int:
         handle = _winapi.CreateFile(
             path, self._ACCESS, self._FILE_SHARE_READ, _winapi.NULL,
-            self._OPEN_EXISTING, self._FILE_FLAG_OPEN_REPARSE_POINT, _winapi.NULL)
+            disposition, self._FILE_FLAG_OPEN_REPARSE_POINT, _winapi.NULL)
         try:
             return descriptor_owning_handle(handle)
         except BaseException:

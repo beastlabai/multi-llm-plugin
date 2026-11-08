@@ -4040,6 +4040,16 @@ def porcelain_snapshot(
     records = _porcelain_records(completed.stdout)
     if records is None:
         return None
+    # A staged file a rollback restore kept for the user is no slot's write
+    # (docs/development/write-safety.md, restore): exactly that file, as the
+    # write executor's sweep leaves it out.
+    from .write_safety import restore_leftovers
+
+    leftovers = restore_leftovers(root)
+    if leftovers:
+        real_root = os.path.realpath(root)
+        records = [(status, path) for status, path in records
+                   if not leftovers.holds(os.path.join(real_root, path))]
 
     prefixes = _normalized_prefixes(ignore_prefixes)
     zone_prefixes = [_normalized_prefixes(zone) for zone in zones]

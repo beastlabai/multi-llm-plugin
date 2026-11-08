@@ -599,9 +599,9 @@ def test_a_batch_that_changed_its_declared_file_walks_the_tree_twice(env):
     walks = []
     census = WriteBatchScheduler._census
 
-    def counted(self):
+    def counted(self, *args, **kwargs):
         walks.append(1)
-        return census(self)
+        return census(self, *args, **kwargs)
 
     env.monkeypatch.setattr(WriteBatchScheduler, "_census", counted)
     env.edits([_patch_edit(env.plan)], result=APPLIED_S0)

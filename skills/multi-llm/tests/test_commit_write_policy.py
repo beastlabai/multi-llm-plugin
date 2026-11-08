@@ -664,7 +664,7 @@ class TestTheProtectedCheckDoesNotNeedTheSweep:
 
         assert result.exit_code == 3
         reason = result.outcomes[0].reason
-        assert "Not restored, because no rollback point exists (src/b.py)" in reason
+        assert "Not restored (src/b.py: the commit review kept no copy of it)" in reason
 
     def test_a_copy_older_than_a_later_edit_is_never_written_over_it(self, env, monkeypatch):
         """The user edited protected ``b.py`` after the guard took its copy,
@@ -684,8 +684,8 @@ class TestTheProtectedCheckDoesNotNeedTheSweep:
         )
 
         assert result.exit_code == 3
-        assert "Not restored, because no rollback point exists (src/b.py)" in \
-            result.outcomes[0].reason
+        assert ("Not restored (src/b.py: the copy the commit review kept is not what "
+                "it held before the batch)") in result.outcomes[0].reason
         assert (env.root / "src/b.py").read_text() == "b = 'clobbered'\n"
 
     def test_an_edit_between_batches_is_the_users_not_a_violation(self, env, monkeypatch):
@@ -731,6 +731,41 @@ class TestTheProtectedCheckDoesNotNeedTheSweep:
         assert not outcome.ok
         assert "It also changed src/b.py, which the commit review protects" in outcome.reason
         assert (env.root / "src/b.py").read_text() == "b = 'drifted'\n"
+
+    def test_a_refused_restore_of_the_guards_copy_is_not_called_unbacked(
+        self, env, monkeypatch,
+    ):
+        """Codex review 1 of U87: a protected write in a dispatch that never
+        reached classification, whose restore from the guard's copy was
+        refused, was reported as "no rollback point exists", though the copy
+        is kept. The reason now gives the restore's own words instead."""
+        from utils import write_batch_scheduler as wbs
+        from utils import write_safety
+
+        head = _committed_repo(env)
+        (env.root / "src/b.py").write_text("b = 'drifted'\n", encoding="utf-8")
+        guard = _guard_with_copies(env, head, {"src/b.py": _disk_blob(env.root, "src/b.py")})
+        monkeypatch.setattr(wbs, "SWEEP_MAX_FILES", 1)
+        state = _guarded_state(env, guard)
+
+        def refused(*_args, **_kwargs):
+            raise OSError("its folder was replaced")
+
+        monkeypatch.setattr(write_safety, "_replace_with_payload", refused)
+
+        def respond(task, prompt):
+            (env.root / "src/b.py").write_text("b = 'clobbered'\n", encoding="utf-8")
+            return "no json here at all"
+
+        result = env.scheduler([_fix_task(env, 0, "src/a.py")], kind="apply_code_fixes",
+                               state=state, respond=respond, log=lambda line: None).run()
+
+        reason = result.outcomes[0].reason
+        assert "It also changed src/b.py, which the commit review protects" in reason
+        assert "no rollback point" not in reason
+        assert ("Not restored (src/b.py: its folder was replaced): left on disk as "
+                "it is now, so inspect it by hand.") in reason
+        assert (env.root / "src/b.py").read_text() == "b = 'clobbered'\n"
 
     def test_an_undeclared_write_to_the_context_plan_fails_like_a_protected_write(
         self, env, monkeypatch,

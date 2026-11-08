@@ -21,8 +21,10 @@ tree that exercises every rule they decide on and asserts the exact answer:
 * a restore puts a payload that is not read-only back as ``CopyFile2``'s
   copy on Windows (emulated elsewhere), checked and swapped in through one
   handle held on it alone, keeping its streams, attributes and encryption
-  and refusing a copy of anything else; and the store's discard names what
-  it cannot remove, never trying it again.
+  and refusing a copy of anything else; every other restore stages the
+  payload's bytes itself, through one descriptor or handle from creation to
+  rename (the adversarial cases: tests/test_restore_staged_file.py); and the
+  store's discard names what it cannot remove, never trying it again.
 
 No model runs; the scheduler is the real one over a real git repository.
 """
@@ -931,20 +933,30 @@ def test_a_path_spelled_with_dots_or_a_trailing_separator_is_never_opened(
 
 
 # ---------------------------------------------------------------------------
-# Restore and the store's discard (docs/development/write-safety.md, restore
-# on Windows): a payload that is not read-only goes back as ``CopyFile2``'s
-# copy, checked and swapped in through one handle held on it alone, and the
-# store is removed whole, or what is left is named.
+# Restore and the store's discard (docs/development/write-safety.md, restore):
+# a payload that is not read-only goes back on Windows as ``CopyFile2``'s
+# copy, checked and swapped in through one handle held on it alone; every
+# other restore stages the payload's bytes itself, through one descriptor or
+# handle; and the store is removed whole, or what is left is named.
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(params=["plain copy", "CopyFile2"])
+#: The ``restoring`` ways, by what writes the file put back.
+STAGED, STAGED_BY_HANDLE, COPY_FILE2 = (
+    "staged copy", "staged copy, Windows calls", "CopyFile2")
+
+
+@pytest.fixture(params=[STAGED, STAGED_BY_HANDLE, COPY_FILE2])
 def restoring(request, monkeypatch):
     """Each way a restore writes the file it puts back: the payload's bytes
-    and ``copystat`` (Linux, macOS, Windows before 3.12, a read-only payload
-    anywhere), or ``CopyFile2``'s copy held through one handle (Windows on
-    Python 3.12+, emulated elsewhere)."""
-    if request.param == "plain copy":
+    staged by the restore itself, through descriptors (Linux, macOS) or
+    through one handle (Windows: a read-only payload, Python before 3.12;
+    emulated elsewhere), or ``CopyFile2``'s copy held through one handle
+    (Windows on Python 3.12+ for a payload that is not read-only, emulated
+    elsewhere)."""
+    if request.param == STAGED:
         monkeypatch.setattr(write_safety, "_COPY_FILE2", None, raising=False)
+    elif request.param == STAGED_BY_HANDLE:
+        _staging_by_handle(monkeypatch)
     else:
         _restoring_by_copy_file2(monkeypatch)
     return request.param
@@ -957,16 +969,18 @@ def _winerror(code: int, message: str, path) -> PermissionError:
 
 
 class _HeldCopy:
-    """The Windows calls a ``CopyFile2`` restore makes on the one handle it
-    holds on its copy (``write_safety._HeldCopyCalls``), over POSIX.
+    """The Windows calls a restore makes on the one handle it holds on the
+    file it puts back (``write_safety._HeldCopyCalls``), over POSIX.
 
     ``bind`` opens the name itself: a link as the link, never followed (as
     ``FILE_FLAG_OPEN_REPARSE_POINT`` does); a read-only file is refused, as
     Windows opens one for writing to nobody, and so is a file in *writers*,
-    one another writer holds open (a sharing violation). Windows keeps the
-    bound name on the file while it is held (no delete sharing), so
+    one another writer holds open (a sharing violation). ``create`` makes the
+    name as a new file, failing on any name there, a link included. Windows
+    keeps the bound name on the file while it is held (no delete sharing), so
     ``rename`` and ``dispose`` act on that name, checked to still be the
-    file bound. *calls* records each call with the name it reached."""
+    file bound; ``dispose`` refuses a read-only file, as Windows deletes
+    none. *calls* records each call with the name it reached."""
 
     def __init__(self) -> None:
         self.writers: set = set()
@@ -996,6 +1010,12 @@ class _HeldCopy:
         self.calls.append(("bind", os.fspath(path)))
         return held
 
+    def create(self, path):
+        held = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        self.bound[held] = os.fspath(path)
+        self.calls.append(("create", os.fspath(path)))
+        return held
+
     def _name_of(self, held) -> str:
         path = self.bound[held]
         named, opened = self._lstat(path), self._fstat(held)
@@ -1006,8 +1026,11 @@ class _HeldCopy:
     def set_basic(self, held, attributes, atime_ns, mtime_ns):
         self.calls.append(("set_basic", self._name_of(held)))
         self._utime(held, ns=(atime_ns, mtime_ns))
+        mode = stat.S_IMODE(self._fstat(held).st_mode)
         if attributes & stat.FILE_ATTRIBUTE_READONLY:
-            self._fchmod(held, stat.S_IMODE(self._fstat(held).st_mode) & ~0o222)
+            self._fchmod(held, mode & ~0o222)
+        elif not mode & stat.S_IWUSR:
+            self._fchmod(held, mode | stat.S_IWUSR)
 
     def rename(self, held, target):
         path = self._name_of(held)
@@ -1018,6 +1041,8 @@ class _HeldCopy:
     def dispose(self, held):
         path = self._name_of(held)
         self.calls.append(("dispose", path))
+        if not self._fstat(held).st_mode & stat.S_IWUSR:
+            raise _winerror(5, "access is denied", path)
         self._unlink(path)
 
 
@@ -1034,6 +1059,28 @@ def _restoring_by_copy_file2(monkeypatch):
         return calls
     calls = _HeldCopy()
     monkeypatch.setattr(write_safety, "_held_copy_calls", lambda: calls, raising=False)
+    return calls
+
+
+def _staging_by_handle(monkeypatch):
+    """The restore Windows makes where ``CopyFile2`` does not restore (a
+    read-only payload, Python before 3.12): the payload's bytes written into
+    a file it creates and holds through one handle. Emulated off Windows;
+    on Windows it is the ``staged copy`` way. Returns the handle calls."""
+    if os.name == "nt":
+        pytest.skip("on Windows the staged copy is held through these calls already")
+    monkeypatch.setattr(write_safety, "_COPY_FILE2", None, raising=False)
+    monkeypatch.setattr(write_safety, "_STAGES_BY_DESCRIPTOR", False, raising=False)
+    calls = _HeldCopy()
+    monkeypatch.setattr(write_safety, "_held_copy_calls", lambda: calls, raising=False)
+    settable = write_safety._settable_attributes
+
+    def as_on_windows(info):
+        # Windows' fstat reports a file without write permission as read-only.
+        read_only = 0 if info.st_mode & stat.S_IWUSR else stat.FILE_ATTRIBUTE_READONLY
+        return settable(info) & ~0x80 | read_only or settable(info)
+
+    monkeypatch.setattr(write_safety, "_settable_attributes", as_on_windows)
     return calls
 
 
@@ -1066,16 +1113,42 @@ def _snapshot_of(env, *relatives):
     return snapshot, payload
 
 
+#: The token in every restore's staging name here, so a test can name the
+#: staged file, or plant something at its name, beforehand; a restore draws a
+#: new one for each attempt (``write_safety._staging_token``).
+STAGING_TOKEN = "0123abcd"
+
+
+@pytest.fixture(autouse=True)
+def _staging_token_pinned(monkeypatch):
+    """Every restore here stages under :func:`_restore_tmp`'s name."""
+    monkeypatch.setattr(write_safety, "_staging_token", lambda: STAGING_TOKEN)
+
+
 def _restore_tmp(target: Path) -> Path:
-    return target.with_name(f".{target.name}.restore.{os.getpid()}.tmp")
+    return target.with_name(f".{target.name}.restore.{os.getpid()}.{STAGING_TOKEN}.tmp")
+
+
+#: How a restore's ``skipped`` state ends once it left a staged file of its
+#: own for the user, recorded (``write_safety.restore_leftovers``).
+KEPT_FOR_THE_USER = ("until it is gone, no write check counts it as a batch's "
+                     "file and no rollback replaces or deletes it")
+
+
+def _kept_for_the_user(state: str) -> None:
+    """*state* names a staged file the restore kept, says how to delete it
+    and that the write checks leave it alone meanwhile."""
+    assert "check it and delete it by hand (" in state, state
+    assert state.endswith(KEPT_FOR_THE_USER), state
 
 
 def test_a_restore_puts_back_the_payloads_bytes_and_times(env, monkeypatch, restoring):
-    """Either way the file put back holds the payload's bytes and its
+    """Every way the file put back holds the payload's bytes and its
     modification time, and no temp file is left beside it; where
     ``CopyFile2`` copies, it copied the payload, and the copy was bound,
     given the payload's attributes and times, and renamed over the file,
-    each through the handle."""
+    each through the handle; where the restore stages the bytes through the
+    Windows calls, the file was created by them instead of bound."""
     target = env.root / "src" / "a.py"
     os.utime(target, ns=(1_600_000_000_000_000_000, 1_650_000_000_987_654_300))
     original = target.read_bytes()
@@ -1096,10 +1169,11 @@ def test_a_restore_puts_back_the_payloads_bytes_and_times(env, monkeypatch, rest
     assert target.stat().st_mtime_ns == 1_650_000_000_987_654_300
     assert not os.path.lexists(_restore_tmp(target))
     assert [os.path.normcase(source) for source in copies] == (
-        [os.path.normcase(str(payload))] if restoring == "CopyFile2" else [])
-    calls = write_safety._held_copy_calls() if restoring == "CopyFile2" else None
+        [os.path.normcase(str(payload))] if restoring == COPY_FILE2 else [])
+    calls = write_safety._held_copy_calls() if restoring != STAGED else None
     if isinstance(calls, _HeldCopy):
-        assert [name for name, _path in calls.calls] == ["bind", "set_basic", "rename"]
+        assert [name for name, _path in calls.calls] == [
+            "bind" if restoring == COPY_FILE2 else "create", "set_basic", "rename"]
 
 
 def test_the_refusal_rules_hold_either_way(env, restoring):
@@ -1160,29 +1234,32 @@ def test_a_read_only_file_comes_back_read_only(env, restoring):
         os.chmod(target, stat.S_IREAD | stat.S_IWRITE)
 
 
-def test_a_read_only_payload_takes_the_plain_restore(env, monkeypatch, restoring):
-    """A read-only payload is restored as on every other platform, where
-    ``CopyFile2`` copies too: its copy would be read-only, which Windows
-    opens for writing to nobody, so it could not be held. Nothing is copied
-    by ``CopyFile2`` and nothing is bound; the plain restore's temp file is
-    flushed before it takes the payload's mode, and is read-only when it
-    replaces the file (seamed: ``os.fsync`` and ``os.replace`` record the
-    file each reaches, in order)."""
+def test_a_read_only_payload_is_staged_by_the_restore_itself(env, monkeypatch, restoring):
+    """A read-only payload is never copied by ``CopyFile2``, even where it
+    copies: its copy would be read-only, which Windows opens for writing to
+    nobody, so it could not be held. The restore writes the payload's bytes
+    into a file it holds from its creation instead: never bound by name
+    afterwards, flushed before it takes the payload's mode, and read-only
+    when it replaces the file (seamed: ``os.fsync`` and the rename record
+    the file each reaches, in order; the Windows calls record themselves)."""
     copies: list = []
     bound: list = []
-    if restoring == "CopyFile2":
-        calls = write_safety._held_copy_calls()
-        copy, bind = write_safety._COPY_FILE2, calls.bind
+    calls = write_safety._held_copy_calls() if restoring != STAGED else None
+    if restoring == COPY_FILE2:
+        copy = write_safety._COPY_FILE2
 
         def recording(source, destination, flags):
             copies.append(source)
             return copy(source, destination, flags)
 
+        monkeypatch.setattr(write_safety, "_COPY_FILE2", recording)
+    if calls is not None:
+        bind = calls.bind
+
         def binding(path):
             bound.append(path)
             return bind(path)
 
-        monkeypatch.setattr(write_safety, "_COPY_FILE2", recording)
         monkeypatch.setattr(calls, "bind", binding)
     target = env.root / "src" / "a.py"
     os.chmod(target, stat.S_IREAD)
@@ -1196,8 +1273,8 @@ def test_a_read_only_payload_takes_the_plain_restore(env, monkeypatch, restoring
         return real_fsync(handle)
 
     def replace(source, destination, *args, **kwargs):
-        if os.path.normcase(os.fspath(destination)) == os.path.normcase(str(target)):
-            named = os.lstat(source)
+        if os.path.basename(os.fspath(destination)) == target.name:
+            named = os.lstat(source, dir_fd=kwargs.get("src_dir_fd"))
             events.append(("replace", (named.st_dev, named.st_ino),
                            bool(stat.S_IMODE(named.st_mode) & stat.S_IWRITE)))
         return real_replace(source, destination, *args, **kwargs)
@@ -1213,10 +1290,19 @@ def test_a_read_only_payload_takes_the_plain_restore(env, monkeypatch, restoring
 
         assert target.read_bytes() == original
         assert not stat.S_IMODE(target.stat().st_mode) & stat.S_IWRITE
+        assert not os.path.lexists(_restore_tmp(target))
     finally:
         os.chmod(target, stat.S_IREAD | stat.S_IWRITE)
 
     assert copies == [] and bound == []
+    # Windows stages it through the handle calls (emulated: STAGED_BY_HANDLE);
+    # elsewhere through descriptors, whatever CopyFile2 would do.
+    by_handle = restoring == STAGED_BY_HANDLE or os.name == "nt"
+    if isinstance(calls, _HeldCopy):
+        assert [name for name, _path in calls.calls] == (
+            ["create", "set_basic", "rename"] if by_handle else [])
+    if by_handle:
+        return
     replaced = [event for event in events if event[0] == "replace"]
     assert len(replaced) == 1, events
     _, put_back, writable = replaced[0]
@@ -1392,7 +1478,7 @@ def test_a_copy_a_writer_holds_open_is_refused(env, monkeypatch):
 
     assert report["src/a.py"].startswith("skipped:")
     assert "could not be held for its checks" in report["src/a.py"]
-    assert report["src/a.py"].endswith("check what is left there and delete it by hand")
+    _kept_for_the_user(report["src/a.py"])
     assert target.read_bytes() == b"runner change\n"
     assert _restore_tmp(target).read_bytes().startswith(b"the writer's bytes\n")
     assert payload.exists()
@@ -1528,11 +1614,11 @@ def test_the_copy_is_never_changed_removed_or_renamed_by_its_name(
 
 
 def test_the_held_restore_calls_nothing_that_changes_a_file_by_name():
-    """Statically, for what a ``CopyFile2`` restore runs once its payload is
-    open: no ``os`` or ``shutil`` call that changes, removes or renames a
-    file by its path, and none of the helpers that do (the store's
-    ``_discard`` and its read-only clearing, ``_copy_file2``'s clearing of
-    the name first)."""
+    """Statically, for what a Windows restore runs once its payload is open
+    (``CopyFile2``'s, and the one staging the bytes through a handle): no
+    ``os`` or ``shutil`` call that changes, removes or renames a file by its
+    path, and none of the helpers that do (the store's ``_discard`` and its
+    read-only clearing, ``_copy_file2``'s clearing of the name first)."""
     import ast
     import inspect
     import textwrap
@@ -1542,7 +1628,9 @@ def test_the_held_restore_calls_nothing_that_changes_a_file_by_name():
                "copyfile", "move", "rmtree"}
     helpers = {"_discard", "_discard_after", "_unlink", "_clear_readonly",
                "_copy_file2", "_copy_times_and_mode"}
-    for function in (write_safety._restored_by_copy_file2, write_safety._publish_held):
+    for function in (write_safety._restored_by_copy_file2, write_safety._publish_held,
+                     write_safety._publish_bound, write_safety._dispose_held,
+                     write_safety._restored_through_handle):
         tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
         found = set()
         for node in ast.walk(tree):
@@ -1557,13 +1645,11 @@ def test_the_held_restore_calls_nothing_that_changes_a_file_by_name():
         assert not found, (function.__name__, found)
 
 
-def test_a_payload_rewritten_after_its_check_is_never_put_back(env, monkeypatch):
+def test_a_payload_rewritten_after_its_check_is_never_put_back(env, monkeypatch, restoring):
     """The payload is hashed by path against the manifest, then copied. One
-    rewritten in between is caught where ``CopyFile2`` copies: the bytes read
-    through the descriptor it holds must hash to the manifest's digest, so
-    nothing is copied. (The plain copy reads the payload by path once more,
-    unchecked: docs/development/write-safety.md, what restore leaves open.)"""
-    _restoring_by_copy_file2(monkeypatch)
+    rewritten in between is caught every way: the bytes read through the
+    descriptor the restore holds on it must hash to the manifest's digest,
+    so nothing is put back and nothing is left beside the file."""
     target = env.root / "src" / "a.py"
     snapshot, payload = _snapshot_of(env)
     target.write_bytes(b"a = 2\n")
@@ -1669,15 +1755,13 @@ def test_a_link_planted_at_the_restore_copys_name_is_never_written_through(
     env, tmp_path, restoring, planted,
 ):
     """The temp name is predictable (the file's name and the pid). A link a
-    runner planted there is never written through nor removed: the plain
-    copy's exclusive creation refuses the name, and so does ``CopyFile2``'s
-    (``COPY_FILE_FAIL_IF_EXISTS`` with ``COPY_FILE_COPY_SYMLINK``), so the
-    file is skipped, the link's target is neither written nor, for a
-    dangling link, created, and the link stays for the user to look at."""
-    if restoring == "plain copy" and os.name == "nt":
-        pytest.skip("on Windows the plain copy serves Python before 3.12 alone, "
-                    "and what its exclusive creation does with a dangling link "
-                    "is not pinned here")
+    runner planted there is never written through nor removed: the staged
+    copy's exclusive creation (``O_EXCL``, the ``linkat`` naming an
+    ``O_TMPFILE`` file, Windows' ``CREATE_NEW`` on the name itself) refuses
+    the name, and so does ``CopyFile2``'s (``COPY_FILE_FAIL_IF_EXISTS`` with
+    ``COPY_FILE_COPY_SYMLINK``), so the file is skipped, the link's target is
+    neither written nor, for a dangling link, created, and the link stays,
+    named for the user to look at."""
     target = env.root / "src" / "a.py"
     snapshot, _payload = _snapshot_of(env)
     target.write_bytes(b"a = 2\n")
@@ -1695,19 +1779,18 @@ def test_a_link_planted_at_the_restore_copys_name_is_never_written_through(
     assert report["src/a.py"].startswith("skipped:")
     assert target.read_bytes() == b"a = 2\n"
     assert os.path.islink(_restore_tmp(target))
-    if restoring == "CopyFile2":
-        assert report["src/a.py"].endswith(
-            "was left as it is; check what is left there and delete it by hand")
+    assert report["src/a.py"].endswith(
+        "was left as it is; check what is left there and delete it by hand")
 
 
 @pytest.mark.parametrize("left", ["nothing", "part of a copy"])
 @pytest.mark.parametrize("winerror", [5, 112], ids=["access denied", "disk full"])
-def test_a_failed_restore_copy_takes_the_plain_restore_or_is_named(
+def test_a_failed_restore_copy_takes_the_staged_restore_or_is_named(
     env, monkeypatch, winerror, left,
 ):
     """A ``CopyFile2`` that fails and leaves nothing at the temp name hands
-    the file to the plain restore, which puts it back as it always did (its
-    bytes and ``copystat``'s times). One that leaves something there skips
+    the file to the staged restore, which puts back the bytes it writes
+    itself, with ``copystat``'s times. One that leaves something there skips
     the file and names it: what is there is never removed by its name, and
     may not be the restore's."""
     _restoring_by_copy_file2(monkeypatch)
@@ -1732,7 +1815,7 @@ def test_a_failed_restore_copy_takes_the_plain_restore_or_is_named(
         assert not os.path.lexists(_restore_tmp(target))
     else:
         assert report["src/a.py"].startswith("skipped: CopyFile2 could not copy")
-        assert report["src/a.py"].endswith("check what is left there and delete it by hand")
+        _kept_for_the_user(report["src/a.py"])
         assert target.read_bytes() == b"a = 2\n"
         assert _restore_tmp(target).read_bytes() == b"part of a copy"
 

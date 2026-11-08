@@ -4135,20 +4135,14 @@ class WriteBatchScheduler:
             outcome.task_id, snapshot.restore(watched), commit_apply, guard,
         )
         back = sorted(p for p, state in report.items() if not state.startswith("skipped:"))
-        left = sorted(p for p, state in report.items() if state.startswith("skipped:"))
         many = len(watched) != 1
         outcome.reason = (
             f"{outcome.reason or outcome.status} It also changed "
             f"{', '.join(watched)}, which the commit review protects (this apply "
             f"never writes {'them' if many else 'it'})."
             + (f" Put back as before the batch: {', '.join(back)}." if back else "")
-            + (
-                f" Not restored, because no rollback point exists "
-                f"({', '.join(left)}): left on disk as "
-                f"{'they are' if len(left) != 1 else 'it is'} now, so inspect "
-                f"{'them' if len(left) != 1 else 'it'} by hand."
-                if left else ""
-            )
+            # No rollback point, or the restore's own reason: never one for the other.
+            + PolicyRestore.from_report(report).not_restored()
         )
         self.audit.restored(task_id=outcome.task_id, report=report, force=False)
 
@@ -4332,7 +4326,9 @@ class WriteBatchScheduler:
             ))
         return tuple(excluded)
 
-    def _census(self) -> Optional[Dict[str, Tuple[int, int]]]:
+    def _census(
+        self, kept: Optional["set[str]"] = None,
+    ) -> Optional[Dict[str, Tuple[int, int]]]:
         """``repo-relative -> (size, mtime_ns)`` for every file under the root.
 
         ``None`` means *not usable* — the tree is over :data:`SWEEP_MAX_FILES` —
@@ -4345,7 +4341,17 @@ class WriteBatchScheduler:
         sibling whose name only shares the prefix, ``plans-old/`` beside
         ``plans/``). A per-file ``Path.resolve()`` (``relative_to_root``) would
         put syscalls on every entry of a tree this size.
+
+        A staged file a rollback restore kept for the user is left out too,
+        exactly that file at its path (``write_safety.restore_leftovers``):
+        never adopted, deleted or attributed to a batch; a file of the same
+        name that is not that file is censused as any other. Its relative
+        path goes into ``kept`` when given, for :meth:`_swept_moves` to leave
+        out of both sides of the difference.
         """
+        from .write_safety import restore_leftovers
+
+        leftovers = restore_leftovers(self.repo_root)
         excluded = self._sweep_exclusions()
         excluded_paths = frozenset(excluded)
         excluded_trees = tuple(path + os.sep for path in excluded)
@@ -4361,6 +4367,10 @@ class WriteBatchScheduler:
             for entry in entries:
                 path = entry.path
                 if path in excluded_paths or path.startswith(excluded_trees):
+                    continue
+                if leftovers and leftovers.holds(path):
+                    if kept is not None:
+                        kept.add(path[prefix:].replace(os.sep, "/"))
                     continue
                 try:
                     if entry.is_dir(follow_symlinks=False):
@@ -4616,7 +4626,8 @@ class WriteBatchScheduler:
             # Registering a new census and closing this one share the lock,
             # so a sibling cannot start writing between this read and removal
             # from the overlap bookkeeping.
-            after = self._census() if before is not None else None
+            kept: "set[str]" = set()
+            after = self._census(kept) if before is not None else None
             self._declared_by_task.pop(task_id, None)
             self._dispatch_started.pop(task_id, None)
             # Fix round 15: the windows of the siblings that overlapped this
@@ -4648,7 +4659,7 @@ class WriteBatchScheduler:
             # The tree grew past the cap DURING the run (an `npm install`):
             # not "nothing moved", the sweep could not look (W1).
             return UndeclaredWrites(observed=False)
-        moved = self._swept_moves(before, after, ignored, retained)
+        moved = self._swept_moves(before, after, ignored, retained, kept)
         moved -= self._ignored_and_harmless(task_id, moved, sources, after)
         observed = UndeclaredWrites(paths=sorted(moved))
         for sibling, (sib_before, sib_after, sib_retained) in windows.items():
@@ -4712,6 +4723,7 @@ class WriteBatchScheduler:
         after: Dict[str, Tuple[int, int]],
         ignored: "set[str]",
         retained: Dict[str, str],
+        kept: Collection[str] = (),
     ) -> "set[str]":
         """The paths outside ``ignored`` whose BYTES moved between two censuses.
 
@@ -4724,10 +4736,16 @@ class WriteBatchScheduler:
         same rule on the undeclared side). A path with no retained digest —
         denied, oversized, past the budget — stays moved: no bytes to compare
         is no reason to look away.
+
+        ``kept`` holds the staged files a rollback restore kept for the user
+        that the final census found (:meth:`_census`), left out on both
+        sides: one the first census saw before the restore recorded it is
+        neither a new file nor a deletion of the batch's
+        (docs/development/write-safety.md, restore).
         """
         moved: set = set()
         for relative, stamp in after.items():
-            if relative in ignored:
+            if relative in ignored or relative in kept:
                 continue
             previous = before.get(relative)
             if previous == stamp:
@@ -4741,6 +4759,7 @@ class WriteBatchScheduler:
         moved.update(
             relative for relative in before
             if relative not in after and relative not in ignored
+            and relative not in kept
         )
         return moved
 
@@ -4873,9 +4892,10 @@ class WriteBatchScheduler:
             retained = dict(self._retained_before.get(task_id) or {})
             sources = dict(self._ignore_sources_before.get(task_id) or {})
             ignored = set(self._sweep_ignored.get(task_id, ()))
-            after = self._census() if before is not None else None
+            kept: "set[str]" = set()
+            after = self._census(kept) if before is not None else None
         if before is not None and after is not None:
-            swept = self._swept_moves(before, after, ignored, retained)
+            swept = self._swept_moves(before, after, ignored, retained, kept)
             moved.update(
                 swept - self._ignored_and_harmless(task_id, swept, sources, after)
             )
