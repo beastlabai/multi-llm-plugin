@@ -225,9 +225,9 @@ class TestTheLaunchWriteDropsAPredecessorsMap:
         with patch.object(cro, "parse_args",
                           return_value=_make_args(plan_path)), \
              patch.object(cro, "get_or_create_state", return_value=fake_state), \
-             patch.object(cro, "resolve_models",
+             patch("utils.interactive.resolve_models",
                           return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref",
                           side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "report_progress", record), \
@@ -294,9 +294,9 @@ class TestMainWrapsPipelineWithIntentToAdd:
 
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=fake_state), \
-             patch.object(cro, "resolve_models",
+             patch("utils.interactive.resolve_models",
                           return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref",
                           side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "intent_to_add_untracked",
@@ -384,9 +384,9 @@ class TestValidationInputsCarryTheStampedGroupHash:
 
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=fake_state), \
-             patch.object(cro, "resolve_models",
+             patch("utils.interactive.resolve_models",
                           return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref",
                           side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "intent_to_add_untracked", side_effect=fake_ctx), \
@@ -464,9 +464,9 @@ class TestValidationInputsCarryTheStampedGroupHash:
 
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=fake_state), \
-             patch.object(cro, "resolve_models",
+             patch("utils.interactive.resolve_models",
                           return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref",
                           side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "intent_to_add_untracked", side_effect=fake_ctx), \
@@ -596,9 +596,9 @@ class TestAFanoutModelLostToTheGatherDeadline:
 
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=fake_state), \
-             patch.object(cro, "resolve_models",
+             patch("utils.interactive.resolve_models",
                           return_value=["cursor-agent:auto", "claude-code:sonnet"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref",
                           side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "run_all_reviews", new=fake_run_all_reviews):
@@ -676,8 +676,8 @@ class TestAnInProcessSalvageMovesTheMapWithTheReport:
 
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=fake_state), \
-             patch.object(cro, "resolve_models", return_value=list(specs)), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.resolve_models", return_value=list(specs)), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref",
                           side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "dispatch_salvage_tasks", new=fake_salvage), \
@@ -808,8 +808,8 @@ class TestEmptyReviewReplacesPreviousFindings:
 
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=fake_state), \
-             patch.object(cro, "resolve_models", return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.resolve_models", return_value=["cursor-agent:auto"]), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref", side_effect=lambda ref: ref or "HEAD~1"), \
              patch.object(cro, "build_unsanitize_map", return_value={"cursor-agent_auto": "cursor-agent:auto"}), \
              patch.object(cro, "run_all_reviews", new=AsyncMock(return_value={"cursor-agent:auto": (True, [], None)})), \
@@ -899,8 +899,8 @@ class TestOneModelsMalformedElementCannotStrandTheOthers:
 
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=fake_state), \
-             patch.object(cro, "resolve_models", return_value=models), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.resolve_models", return_value=models), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref", side_effect=lambda ref: ref or "HEAD~1"), \
              patch.object(cro, "build_unsanitize_map", return_value={
                  "cursor-agent_kimi-k3-high": "cursor-agent:kimi-k3-high",
@@ -1813,8 +1813,8 @@ class TestThePhaseTickerCoversTheRestOfThePhase:
 
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=fake_state), \
-             patch.object(cro, "resolve_models", return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.resolve_models", return_value=["cursor-agent:auto"]), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "run_single_review", new=fake_review), \
              patch.object(cro, "run_all_reviews", new=watched_fanout), \
@@ -1931,8 +1931,8 @@ class TestThePhaseTickerCoversTheRestOfThePhase:
         with _realtime_ticker() as emitted, \
              patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=fake_state), \
-             patch.object(cro, "resolve_models", return_value=list(specs)), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.resolve_models", return_value=list(specs)), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref",
                           side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "dispatch_salvage_tasks", new=blocking_salvage), \
@@ -2075,9 +2075,9 @@ class TestTheHostValidationHandOffIsTerminal:
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state",
                           return_value=self._fake_state()), \
-             patch.object(cro, "resolve_models",
+             patch("utils.interactive.resolve_models",
                           return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref",
                           side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "get_project_root", return_value=str(tmp_path)), \
@@ -2178,9 +2178,9 @@ class TestTheValidationStretchIsNamedBeforeItIsDispatched:
              patch.object(cro, "get_or_create_state",
                           return_value=TestTheHostValidationHandOffIsTerminal
                           ._fake_state()), \
-             patch.object(cro, "resolve_models",
+             patch("utils.interactive.resolve_models",
                           return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref",
                           side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "get_project_root", return_value=str(tmp_path)), \
@@ -3187,9 +3187,9 @@ class TestTheValidationTaskFileMainWrites:
 
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=fake_state), \
-             patch.object(cro, "resolve_models",
+             patch("utils.interactive.resolve_models",
                           return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref",
                           side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "get_project_root", return_value=str(tmp_path)), \
@@ -3327,9 +3327,9 @@ class TestTheValidatorIsToldToOpenTheFilesItLost:
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state",
                           return_value=self._fake_state(cited)), \
-             patch.object(cro, "resolve_models",
+             patch("utils.interactive.resolve_models",
                           return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref",
                           side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "get_project_root", return_value=str(root)), \
@@ -3677,8 +3677,8 @@ def _run_fanout_capturing_prompts(tmp_path, monkeypatch, args_overrides, *, diff
 
     args = _make_args(plan_path, **{"files": [], "files_from": None, **args_overrides})
     with patch.object(cro, "parse_args", return_value=args), \
-         patch.object(cro, "resolve_models", return_value=["cursor-agent:auto"]), \
-         patch.object(cro, "is_model_valid", return_value=True), \
+         patch("utils.interactive.resolve_models", return_value=["cursor-agent:auto"]), \
+         patch("utils.interactive.is_model_valid", return_value=True), \
          patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"), \
          patch.object(cro, "get_files_changed_since_ref",
                       side_effect=(lambda _ref: list(diff)) if diff is not None
@@ -4034,8 +4034,8 @@ def _scope_fanout(plan, monkeypatch, models, *, respond=None, capabilities=None,
                       **arg_overrides)
     with contextlib.ExitStack() as stack:
         stack.enter_context(patch.object(cro, "parse_args", return_value=args))
-        stack.enter_context(patch.object(cro, "resolve_models", return_value=list(models)))
-        stack.enter_context(patch.object(cro, "is_model_valid", return_value=True))
+        stack.enter_context(patch("utils.interactive.resolve_models", return_value=list(models)))
+        stack.enter_context(patch("utils.interactive.is_model_valid", return_value=True))
         if not real_report:
             stack.enter_context(
                 patch.object(cro, "generate_review_report", return_value="# report\n"))

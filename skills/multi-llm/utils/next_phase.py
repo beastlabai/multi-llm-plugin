@@ -1155,10 +1155,10 @@ def fronted_mode_word(mode_word: str) -> str:
 
 def _pinned_brief(text: str) -> Optional[str]:
     """The brief a pinned ``<base12>..<head12>`` names
-    (``commit_review.brief_for_pinned``, no git call beyond the root), or
+    (``commit_paths.brief_for_pinned``, no git call beyond the root), or
     ``None`` for other text or outside a repository."""
     try:
-        from .commit_review import brief_for_pinned
+        from .commit_paths import brief_for_pinned
 
         brief = brief_for_pinned(str(text))
     except Exception:  # noqa: BLE001 - not a pinned range here

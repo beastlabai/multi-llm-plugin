@@ -51,7 +51,7 @@ apply phase's one hook calls it, keyed on the endpoints state pins
 The guard lives under whichever record ``pinned_endpoints`` sourced
 (``commit_range.guard``, or ``head_ref.guard`` after a direct run), and the
 review round that replaces the groups removes it (§2.1). Every git call goes
-through ``git_utils._run_git`` / ``git_argv``.
+through ``git_utils.run_git`` / ``git_argv``.
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ from .commit_range import (
     render_fix_block,
     resolve_commit_strict,
 )
-from .commit_review import (
+from .commit_paths import (
     SLUG_PATTERN,
     CommitReviewError,
     commit_review_artifact,
@@ -91,14 +91,14 @@ from .commit_review import (
     repo_root_of,
 )
 from .git_utils import (
-    _run_git,
-    _run_git_for_paths,
     blobs_in_commit,
     deleting_commit,
     git_argv,
     git_path,
     paths_changed_since,
     paths_in_commit,
+    run_git,
+    run_git_for_paths,
     subtract_baseline,
 )
 from .text_clip import clip, plain_line
@@ -404,7 +404,7 @@ def protected_paths(head: str, *, cwd: str, plan_path: Optional[str] = None,
     must not take an unanswered question as an empty set.
     """
     found: List[str] = []
-    stdout, stderr, rc = _run_git_for_paths(
+    stdout, stderr, rc = run_git_for_paths(
         "diff", "--name-only", "--no-renames", "-z", head, "--", cwd=cwd,
     )
     if rc != 0:
@@ -412,7 +412,7 @@ def protected_paths(head: str, *, cwd: str, plan_path: Optional[str] = None,
               f"{(stderr or '').strip()[:200]}", file=sys.stderr)
         return None
     found.extend(name for name in stdout.split("\0") if name)
-    stdout, stderr, rc = _run_git_for_paths(
+    stdout, stderr, rc = run_git_for_paths(
         "ls-files", "--others", "--exclude-standard", "-z", cwd=cwd,
     )
     if rc != 0:
@@ -420,7 +420,7 @@ def protected_paths(head: str, *, cwd: str, plan_path: Optional[str] = None,
               f"{(stderr or '').strip()[:200]}", file=sys.stderr)
         return None
     found.extend(name for name in stdout.split("\0") if name)
-    stdout, stderr, rc = _run_git_for_paths("ls-files", "-v", "-z", cwd=cwd)
+    stdout, stderr, rc = run_git_for_paths("ls-files", "-v", "-z", cwd=cwd)
     if rc != 0:
         print(f"Warning: git ls-files -v failed: "
               f"{(stderr or '').strip()[:200]}", file=sys.stderr)
@@ -1450,12 +1450,12 @@ def _scan(folder: Path) -> Tuple[List[_Review], List[_Review], List[Path]]:
 
 def _head_sha(cwd: str) -> str:
     """``HEAD``'s full SHA; on an unborn ``HEAD`` §2.2's exit 2."""
-    stdout, _, rc = _run_git("rev-parse", "--verify", "--quiet", "HEAD^{commit}",
+    stdout, _, rc = run_git("rev-parse", "--verify", "--quiet", "HEAD^{commit}",
                              check=False, cwd=cwd)
     sha = stdout.strip()
     if rc == 0 and _FULL_SHA.fullmatch(sha):
         return sha
-    stdout, _, rc = _run_git("symbolic-ref", "-q", "HEAD", check=False, cwd=cwd)
+    stdout, _, rc = run_git("symbolic-ref", "-q", "HEAD", check=False, cwd=cwd)
     branch = stdout.strip()
     if rc == 0 and branch:
         short = branch[len("refs/heads/"):] if branch.startswith("refs/heads/") else branch
@@ -1472,12 +1472,12 @@ def _ancestry(head: str, current: str, cwd: str) -> Optional[int]:
         return 0
     if not _FULL_SHA.fullmatch(head):
         return -1
-    _, _, rc = _run_git("merge-base", "--is-ancestor", head, current, check=False, cwd=cwd)
+    _, _, rc = run_git("merge-base", "--is-ancestor", head, current, check=False, cwd=cwd)
     if rc == 1:
         return None
     if rc != 0:
         return -1
-    stdout, _, rc = _run_git("rev-list", "--count", f"{head}..{current}", check=False, cwd=cwd)
+    stdout, _, rc = run_git("rev-list", "--count", f"{head}..{current}", check=False, cwd=cwd)
     text = stdout.strip()
     return int(text) if rc == 0 and text.isdigit() else 0
 

@@ -965,6 +965,12 @@ def _run_git_for_paths(*args: str, cwd: Optional[str] = None) -> Tuple[str, str,
     )
 
 
+#: The two runners' public names, for other modules. The underscore spellings
+#: stay for this module's own calls and the tests that patch them.
+run_git = _run_git
+run_git_for_paths = _run_git_for_paths
+
+
 def rename_map(
     base_ref: str, head: str, *, cwd: Optional[str] = None,
 ) -> Optional[Dict[str, str]]:

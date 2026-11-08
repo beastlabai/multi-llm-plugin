@@ -1003,7 +1003,7 @@ def no_subprocess(monkeypatch):
     monkeypatch.setattr(subprocess, "run", refuse)
     monkeypatch.setattr(subprocess, "Popen", refuse)
     monkeypatch.setattr(git_utils, "_run_git", refuse)
-    monkeypatch.setattr(cr_mod, "_run_git", refuse)
+    monkeypatch.setattr(cr_mod, "run_git", refuse)
 
 
 @pytest.mark.parametrize("text,kind", [

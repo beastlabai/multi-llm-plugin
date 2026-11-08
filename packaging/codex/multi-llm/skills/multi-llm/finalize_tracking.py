@@ -39,7 +39,7 @@ from utils import (
     list_untracked_files,
     subtract_baseline,
 )
-from utils.commit_review import commit_review_artifact, commit_reviews_folder_rel
+from utils.commit_paths import commit_review_artifact, commit_reviews_folder_rel
 from utils.git_utils import (
     GitError,
     get_project_root_from_dir,
@@ -599,7 +599,7 @@ def _drop_workflow_files(paths, workflow: List[str], say=print) -> List[str]:
     phases edit; a census that kept them handed review-code the plan and
     ``tasks.md`` as code (2026-10-05, Codex racing run 3). Every commit
     review's brief and report folder goes too, as a class
-    (``commit_review.commit_review_artifact``, plans/review-commits.md §2.4),
+    (``commit_paths.commit_review_artifact``, plans/review-commits.md §2.4),
     whatever plan this state has and whether or not a committed review sits
     in an un-ignored folder; the folder is read for the repository the census
     runs in, and when the accessor refuses it nothing extra is dropped.

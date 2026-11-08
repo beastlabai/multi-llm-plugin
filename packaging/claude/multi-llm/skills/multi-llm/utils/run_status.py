@@ -536,10 +536,10 @@ def _document_word(plan_path: Path) -> str:
     """``commit brief`` when *plan_path*'s ``state.json`` records a
     ``commit_range``, else ``plan``: what a line ``status`` prints calls the
     document it reads (plans/review-commits.md §2.8, "'Commit brief', never
-    'plan'"), through the one owner of the word, ``commit_review.document_label``.
+    'plan'"), through the one owner of the word, ``commit_paths.document_label``.
     Read-only; an unreadable state is a plan."""
     try:
-        from .commit_review import document_label, read_commit_range
+        from .commit_paths import document_label, read_commit_range
 
         return document_label({"commit_range": read_commit_range(plan_path)})
     except Exception:  # noqa: BLE001 - advisory: the plan's word stands
@@ -4789,7 +4789,7 @@ def status_plan_value(value: str) -> str:
     * an existing path is taken as it is, as before: a plan, or a commit
       brief, which is also a root range's pinned spelling;
     * the pinned ``<base12>..<head12>`` names its brief by name
-      (``commit_review.brief_for_pinned``, no git call), so every view,
+      (``commit_paths.brief_for_pinned``, no git call), so every view,
       ``--abort`` and ``--sweep`` see the brief; with no brief there it is
       exit 3 ``[COMMIT_REVIEW_NOT_FOUND]``, naming the review that makes one;
     * other range text, ``..`` syntax or a phrase the pure phrase matcher
@@ -4801,10 +4801,10 @@ def status_plan_value(value: str) -> str:
     """
     if os.path.exists(value):
         return value
-    from . import commit_range, commit_review
+    from . import commit_paths, commit_range
 
     try:
-        brief = commit_review.brief_for_pinned(value)
+        brief = commit_paths.brief_for_pinned(value)
     except Exception as exc:  # noqa: BLE001 - no folder to find it in
         raise StatusSpellingRefused(
             f"[COMMIT_REVIEW_NOT_FOUND] {value}: {' '.join(str(exc).split())}"

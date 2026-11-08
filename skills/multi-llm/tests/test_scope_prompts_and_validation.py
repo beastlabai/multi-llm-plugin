@@ -1021,8 +1021,8 @@ class TestCodeReviewRound:
         _release_run_anchor()
         with patch.object(cro, "parse_args", return_value=args), \
                 patch.object(cro, "get_or_create_state", return_value=fake_state), \
-                patch.object(cro, "resolve_models", return_value=["cursor-agent:auto"]), \
-                patch.object(cro, "is_model_valid", return_value=True), \
+                patch("utils.interactive.resolve_models", return_value=["cursor-agent:auto"]), \
+                patch("utils.interactive.is_model_valid", return_value=True), \
                 patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"), \
                 patch.object(cro, "intent_to_add_untracked", side_effect=_Ctx), \
                 patch.object(cro, "run_all_reviews", new=reviews), \

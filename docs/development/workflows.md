@@ -356,11 +356,12 @@ rejected: apply's `review_subdir`, all-of `PHASE_PREREQUISITES`, `REVIEW_PHASE_B
 all have had to learn it, where sharing the phase costs one rendering hook (`utils/commit_spelling.py`,
 keyed on `Mode.commit_view_of`). None of the three rows is `is_workflow_phase`, so `full` never runs
 them. `utils/commit_range.py` owns the grammar and every rendered line (block, fix block, drift line,
-result payload, read rule); `utils/commit_review.py` the path layer and the front-door core the three
-doors and `util commit-brief` share; `utils/commit_brief.py` the header bytes, identity, snapshot and
+result payload, read rule); `utils/commit_paths.py` the path layer (where a brief lives and what is
+one); `utils/commit_front_door.py` the front-door core the three doors and `util commit-brief` share
+(`utils/commit_review.py` is its old name, kept as an alias); `utils/commit_brief.py` the header bytes, identity, snapshot and
 restart archive; `utils/commit_apply.py` the apply guard.
 
-The core (`commit_review.prepare` for steps 1 to 6, `front_door` adds 7):
+The core (`commit_front_door.prepare` for steps 1 to 6, `front_door` adds 7):
 
 1. resolve the range to two full SHAs (`resolve_range`; a brief path reads `commit_range` back through
    `resolve_recorded`; a no-argument apply picks the review on record, `commit_apply.select_review`);
@@ -387,7 +388,7 @@ the review step under it instead of taking it again, so the round stays owned th
 `brief and state left unchanged`. **Under `--detach` the launcher publishes nothing:** it writes the
 header, `commit_range` and any new context-plan snapshot to `<phase dir>/.commit-stage-<hex>.json`,
 names it with the hidden `--commit-stage` (dropped from replay like `--revs`), and the worker applies
-it right after `_acquire_lock` (`commit_review.apply_stage`), before the phase reads the brief. A refused or re-attached
+it right after `_acquire_lock` (`commit_front_door.apply_stage`), before the phase reads the brief. A refused or re-attached
 launch deletes its stage and a worker that loses the lock applies nothing; a brief that does not exist yet
 is the exception, created by the launcher with an exclusive create. The restart's synthesised
 `--force --rerun-all` never takes over a live run: in `detach.launch` only a typed `--force` does, which
@@ -459,7 +460,7 @@ prints what was cut. The fencing and the caps are presentation only: neither ent
   answers, so it is archived and restarted, and step 6 still prints `[STATE_REPLACED]`. Under
   `--detach`, `[COMMIT_REVIEW_RESTARTED]` and `[COMMIT_DECISIONS_DROPPED]` print only after the launch,
   once a worker has consumed the stage; a refused launch restarted nothing and says nothing.
-- **Briefs are never under review.** `commit_review.commit_review_artifact(path, folder)` matches
+- **Briefs are never under review.** `commit_paths.commit_review_artifact(path, folder)` matches
   `<folder>/<slug>.md` and anything under `<folder>/<slug>/` by string, and `_drop_workflow_paths` and
   `finalize_tracking._drop_workflow_files` drop those on every mode, whatever the run's plan.
 
@@ -554,7 +555,16 @@ line's `commit_fixes` read too. A new review round removes `guard`, so the next 
 `ask` mode (`ask_orchestrator.py`) is a read-only free-text Q&A side-channel:
 markdown output, no JSON schema / grouping / validation, output under `{plan}/ask/<question-slug>-<hash8>/`. It
 shares concurrency mechanics with the review modes via `run_models_concurrent` in
-`review_orchestrator_base.py`.
+`review_orchestrator_base.py`, and its model-selection preamble with them through
+`interactive.select_models`.
+
+`_main` is a sequence of stages, each with its inputs and outputs explicit: `_resolve_inputs`
+(question, plan, hash) → `_accept_partial_entry` or `_prepare_fanout` (models, question dir,
+prompt parts, all in the foreground) → `_cross_detach_boundary` → `_hold_question_dir` (the
+foreground lock, held until `main` returns) → `_record_launch` → `AskRun`. `AskRun` holds what
+the slots share: `skip_existing_answer` and `ask_one` are its methods, `close` sets the deadline's
+answers aside and writes `answers.md`, and `report` prints the closing report.
+`tests/test_ask_run.py` drives `ask_one` directly.
 
 Each ask slot is single-shot: one `invoke_with_provider` call, no retry ladder. A call that
 raises is a failed slot carrying `Exception: <type>: <message>`, redacted

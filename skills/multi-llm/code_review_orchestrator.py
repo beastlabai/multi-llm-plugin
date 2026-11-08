@@ -190,16 +190,14 @@ from utils.subagent_tasks import (
     read_task_file,
     write_salvage_task_file,
 )
-from utils.interactive import resolve_models
+from utils.interactive import ModelSelectionError, select_models
 from utils import unattended as unattended_mod
-from utils.unattended import NeedsHuman
 from utils.provider_registry import (
     get_all_model_specs,
     get_collapse_paths,
     parse_model_spec,
     get_provider_timeout,
     get_provider_max_concurrent,
-    is_model_valid,
     set_run_anchor,
 )
 from utils.json_extractor import (
@@ -250,11 +248,11 @@ from utils.git_utils import (
     rename_map,
     validate_git_ref,
     write_review_diff,
-    _run_git,
+    run_git,
 )
 from utils.html_report_generator import generate_html_report, write_html_report, model_label, served_model_label, VALIDATION_ORDER, UNKNOWN_STATUS_RANK
 from utils.html_report_generator import failed_models_line
-from utils.commit_review import commit_review_artifact, commit_reviews_folder_rel
+from utils.commit_paths import commit_review_artifact, commit_reviews_folder_rel
 from utils.commit_range import (
     RangeError,
     display_range,
@@ -1363,7 +1361,7 @@ def _drop_workflow_paths(
     """*paths* without the workflow's own files, saying once what went.
 
     Besides this run's *workflow* entries, every commit review's brief and
-    report folder goes as a class (``commit_review.commit_review_artifact``,
+    report folder goes as a class (``commit_paths.commit_review_artifact``,
     plans/review-commits.md §2.4), on every mode and whatever plan the run
     has: a range holding a commit of another review's files, or a diff across
     one, would otherwise review them. The folder is read for *repo_root*
@@ -2021,7 +2019,7 @@ def _removed_lines(
     <base> <head> -- <name>`` removes; for a path absent at ``head`` that is
     the whole file as ``base`` had it. ``None`` when the diff fails."""
     try:
-        stdout, _, rc = _run_git(
+        stdout, _, rc = run_git(
             *attribute_source_args(pinned.head), "--literal-pathspecs", "diff", "--no-renames", "--no-color",
             pinned.base_ref, pinned.head, "--", name, check=False, cwd=cwd,
         )
@@ -5890,11 +5888,11 @@ def _plan_file_label(plan_path: Path, args: Any = None) -> str:
     ``state.json`` records a ``commit_range``: the phase's own lines never call
     a commit brief a plan (plans/review-commits.md §2.8, "'Commit brief',
     never 'plan'"), through the one owner of the word,
-    ``commit_review.document_label``. *args* carrying a front door's stage
+    ``commit_paths.document_label``. *args* carrying a front door's stage
     (:func:`landed_stage`) is a commit brief too: a detached launch of a new
     brief has its ``commit_range`` only in that stage until the worker's
     boundary, after this label prints. Read-only; no state is a plan."""
-    from utils.commit_review import document_label, read_commit_range
+    from utils.commit_paths import document_label, read_commit_range
 
     record = read_commit_range(plan_path)
     if record is None and landed_stage(args):
@@ -6124,7 +6122,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
         # Fix round 28 (live run 12 #11): said as done, never as an error. A
         # commit review says it as the mode the user typed, of its commit
         # brief (plans/review-commits.md §2.8).
-        from utils.commit_review import document_label
+        from utils.commit_paths import document_label
         from utils.commit_spelling import commit_view, spell_mode
 
         sys.exit(report_already_completed(
@@ -6199,49 +6197,20 @@ async def main(argv: Optional[List[str]] = None) -> int:
         print("ERROR: --quick and --interactive are mutually exclusive.")
         sys.exit(1)
 
-    # Handle model selection using the priority-based resolver
-    # Priority: CLI --models > --interactive flag > --quick flag > YAML defaults > Interactive selection
+    # Model selection (`interactive.select_models`). Priority: CLI --models >
+    # --interactive flag > --quick flag > YAML defaults > Interactive selection.
     # D6 row 2: under --yes the ladder stops at defaults.models and an
     # unresolvable set is exit 3 — never a rendered multi-select.
     unattended = bool(getattr(args, "yes", False))
     try:
-        model_specs = resolve_models(
-            cli_models=args.models,
-            interactive=args.interactive,
-            quick=args.quick,
+        model_specs = select_models(
+            args,
             mode='code-review',  # Mode-specific defaults from providers.yaml
             anchor=str(plan_path),  # per-project config discovery follows the plan-derived root
             unattended=unattended,
         )
-    except NeedsHuman as e:
-        sys.exit(unattended_mod.fail_closed(e.message, site_id=e.site))
-    except RuntimeError as e:
-        print(f"ERROR: {e}")
-        available = get_all_model_specs(anchor=str(plan_path))
-        print(f"Use --models flag. Available: {', '.join(available[:5])}...")
-        sys.exit(1)
-
-    if not model_specs:
-        print("ERROR: No models selected.")
-        sys.exit(1)
-
-    # Display how models were selected
-    if args.models:
-        print(f"Using models from --models flag: {', '.join(model_specs)}")
-    elif args.interactive:
-        print(f"Using interactively selected models: {', '.join(model_specs)}")
-    elif args.quick:
-        print(f"Using quick models from providers.yaml: {', '.join(model_specs)}")
-    else:
-        print(f"Using default models from providers.yaml: {', '.join(model_specs)}")
-
-    # Validate model specs against the registry
-    invalid_models = [m for m in model_specs if not is_model_valid(m, anchor=str(plan_path))]
-    if invalid_models:
-        print(f"WARNING: Unknown models (proceeding anyway): {', '.join(invalid_models)}")
-        # Anchored to match the rejection above (§9.3.c).
-        available = get_all_model_specs(anchor=str(plan_path))
-        print(f"Available models: {', '.join(available[:10])}...")
+    except ModelSelectionError as e:
+        sys.exit(e.exit_code)
 
     print(f"{_plan_file_label(plan_path, args)}: {plan_path}")
     print(f"Output directory: {out_dir}")
@@ -6309,17 +6278,17 @@ async def main(argv: Optional[List[str]] = None) -> int:
                     "Base ref is the empty tree: the repository had no commit "
                     "when this workflow started, so every file under review is new"
                 )
-            log_out, _, log_rc = _run_git(
+            log_out, _, log_rc = run_git(
                 "log", "-1", "--format=%h %s", base_ref, check=False
             )
             if log_rc == 0 and log_out.strip():
                 print(f"Base ref commit: {log_out.strip()}")
 
-            _, _, anc_rc = _run_git(
+            _, _, anc_rc = run_git(
                 "merge-base", "--is-ancestor", base_ref, "HEAD", check=False
             )
             if anc_rc == 0:
-                count_out, _, count_rc = _run_git(
+                count_out, _, count_rc = run_git(
                     "rev-list", "--count", f"{base_ref}..HEAD", check=False
                 )
                 ahead = int(count_out.strip()) if count_rc == 0 and count_out.strip() else 0

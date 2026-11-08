@@ -1,6 +1,6 @@
 """The commit brief writer: the generated header, its identity, and the restart archive.
 
-A commit review has no plan, so the front doors (``utils/commit_review.py``)
+A commit review has no plan, so the front doors (``utils/commit_front_door.py``)
 write a **commit brief** that stands in for one (plans/review-commits.md
 §2.4). Every reviewer reads the whole brief before it opens a diff, the
 validation round binds it, and a host appends ``## Code Fixes Applied`` below
@@ -33,10 +33,8 @@ is met:
   round into ``restarted-<stamp>/`` and :func:`count_decisions` counts, with
   the readers apply uses, the decisions that will not carry over.
 
-The header's markers and the path layer live in ``utils/commit_review.py``,
-which imports this module; the markers are read from it lazily, so either
-module can be imported first. Every git call goes through
-``git_utils._run_git``.
+The header's markers and the path layer live in ``utils/commit_paths.py``.
+Every git call goes through ``git_utils.run_git``.
 """
 
 from __future__ import annotations
@@ -63,7 +61,8 @@ from .commit_range import (
     pinned_spelling,
     render_window_line,
 )
-from .git_utils import GitError, _run_git, attribute_source_args, git_path
+from .commit_paths import BRIEF_END_MARKER, BRIEF_MARKER
+from .git_utils import GitError, attribute_source_args, git_path, run_git
 from .text_clip import clip, plain_line
 
 PathLike = Union[str, os.PathLike]
@@ -130,11 +129,7 @@ _MESSAGE_FORMAT = "%H%n%an%n%B"
 
 
 def _markers() -> Tuple[str, str]:
-    """``(BRIEF_MARKER, BRIEF_END_MARKER)`` from the path layer, read at call
-    time: ``commit_review`` imports this module, so a module-level import
-    here would make the two depend on their import order."""
-    from .commit_review import BRIEF_END_MARKER, BRIEF_MARKER
-
+    """``(BRIEF_MARKER, BRIEF_END_MARKER)``, the path layer's markers."""
     return BRIEF_MARKER, BRIEF_END_MARKER
 
 
@@ -213,7 +208,7 @@ def _read_messages(cr: CommitRange, listed: Sequence[Commit], cwd: str) -> Dict[
     if not listed:
         return {}
     spec = f"{cr.base}..{cr.head}" if cr.base is not None else cr.head
-    stdout, stderr, rc = _run_git(
+    stdout, stderr, rc = run_git(
         "log", "-z", "--first-parent", f"--max-count={len(listed)}",
         f"--format={_MESSAGE_FORMAT}", spec, "--", check=False, cwd=cwd,
     )
@@ -230,7 +225,7 @@ def _read_messages(cr: CommitRange, listed: Sequence[Commit], cwd: str) -> Dict[
     for commit in listed:
         if commit.sha in found:
             continue
-        stdout, stderr, rc = _run_git("show", "-s", "--format=%an%x00%B", commit.sha, "--",
+        stdout, stderr, rc = run_git("show", "-s", "--format=%an%x00%B", commit.sha, "--",
                                       check=False, cwd=cwd)
         if rc != 0:
             raise GitError(f"git show -s {commit.sha[:12]} failed: {stderr.strip()}")
@@ -242,7 +237,7 @@ def _read_messages(cr: CommitRange, listed: Sequence[Commit], cwd: str) -> Dict[
 def _read_stat(cr: CommitRange, cwd: str) -> Tuple[List[str], Optional[str]]:
     """``git diff --stat <diff_base> <head>`` as (per-file lines, summary
     line or None). The summary is git's last line ("N files changed, …")."""
-    stdout, stderr, rc = _run_git(*attribute_source_args(cr.head), "diff", "--stat", "--no-color",
+    stdout, stderr, rc = run_git(*attribute_source_args(cr.head), "diff", "--stat", "--no-color",
                                   diff_base(cr, cwd=cwd), cr.head, "--", check=False, cwd=cwd)
     if rc != 0:
         raise GitError(f"git diff --stat failed: {stderr.strip()}")

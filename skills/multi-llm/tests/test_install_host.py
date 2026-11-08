@@ -66,6 +66,7 @@ import multi_llm  # noqa: E402
 import render_capabilities as renderer  # noqa: E402
 from utils import host_capabilities as caps  # noqa: E402
 from utils import host_install as hi  # noqa: E402
+from utils import host_shim  # noqa: E402
 
 from tests.generated_distributions import (  # noqa: E402
     AUTHORED_MANIFEST,
@@ -1322,13 +1323,21 @@ class TestWindowsSeam:
         assert "Git for Windows" in hi.GIT_BASH_MISSING
 
     def test_the_installer_never_reaches_for_a_symlink_api(self):
-        """No symlink, no junction, no elevation — enforced, not just documented."""
-        tree = ast.parse(
-            Path(hi.__file__).read_text(encoding="utf-8"), filename=hi.__file__
-        )
+        """No symlink, no junction, no elevation — enforced, not just documented.
+
+        Scans the installer and every module it is split into.
+        """
+        utils_dir = Path(hi.__file__).parent
+        sources = [Path(hi.__file__), utils_dir / "host_paths.py",
+                   utils_dir / "host_shim.py",
+                   *sorted((utils_dir / "host_routes").glob("*.py"))]
         offenders = [
-            node.attr if isinstance(node, ast.Attribute) else node.id
-            for node in ast.walk(tree)
+            f"{source.name}: "
+            + (node.attr if isinstance(node, ast.Attribute) else node.id)
+            for source in sources
+            for node in ast.walk(
+                ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+            )
             if isinstance(node, (ast.Attribute, ast.Name))
             and (getattr(node, "attr", None) or getattr(node, "id", None))
             in ("symlink", "symlink_to", "hardlink_to", "link", "mklink")
@@ -1377,6 +1386,7 @@ class TestCli:
         monkeypatch.setenv("HOME", env["HOME"])
         monkeypatch.setenv("USERPROFILE", env["USERPROFILE"])
         monkeypatch.setattr(hi, "skill_dir", lambda: skill)
+        monkeypatch.setattr(host_shim, "skill_dir", lambda: skill)
         assert multi_llm.main(["install-host", "codex"]) == 0
         out = capsys.readouterr().out
         assert "[SHIM_INSTALLED]" in out
@@ -1392,6 +1402,7 @@ class TestCli:
         monkeypatch.setenv("HOME", env["HOME"])
         monkeypatch.setenv("USERPROFILE", env["USERPROFILE"])
         monkeypatch.setattr(hi, "skill_dir", lambda: skill)
+        monkeypatch.setattr(host_shim, "skill_dir", lambda: skill)
         assert multi_llm.main(["install-host", "--check", "--all"]) == 2
         capsys.readouterr()
         for host_id in INSTALLABLE:
@@ -1406,6 +1417,7 @@ class TestCli:
         self, skill, env, project, ready, monkeypatch, capsys
     ):
         monkeypatch.setattr(hi, "skill_dir", lambda: skill)
+        monkeypatch.setattr(host_shim, "skill_dir", lambda: skill)
         assert multi_llm.main(["install-host", "codex", "--all"]) == 3
         assert "not both" in capsys.readouterr().err
 
@@ -1427,6 +1439,7 @@ class TestCli:
         monkeypatch.setenv("HOME", env["HOME"])
         monkeypatch.setenv("USERPROFILE", env["USERPROFILE"])
         monkeypatch.setattr(hi, "skill_dir", lambda: skill)
+        monkeypatch.setattr(host_shim, "skill_dir", lambda: skill)
         assert multi_llm.main(["install-host", "codex"]) == 0
         payload = parse_result_line(capsys.readouterr().out)
         assert payload["mode"] == "install-host"
@@ -1442,6 +1455,7 @@ class TestCli:
         monkeypatch.setenv("HOME", env["HOME"])
         monkeypatch.setenv("USERPROFILE", env["USERPROFILE"])
         monkeypatch.setattr(hi, "skill_dir", lambda: skill)
+        monkeypatch.setattr(host_shim, "skill_dir", lambda: skill)
         assert multi_llm.main(["install-host", "codex"]) == 0
         capsys.readouterr()
         assert multi_llm.main(["uninstall-host", "codex", "--dry-run"]) == 0

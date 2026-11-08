@@ -1562,8 +1562,8 @@ def _run_cro_review(tmp_path: Path, replies: Dict[str, Dict[str, Any]], **arg_ov
                       return_value=_review_args(plan, models, **arg_overrides)), \
          patch.object(cro, "get_project_root", return_value=str(tmp_path)), \
          patch.object(cro, "get_or_create_state", return_value=_review_state()), \
-         patch.object(cro, "resolve_models", return_value=models), \
-         patch.object(cro, "is_model_valid", return_value=True), \
+         patch("utils.interactive.resolve_models", return_value=models), \
+         patch("utils.interactive.is_model_valid", return_value=True), \
          patch.object(cro, "validate_git_ref", side_effect=lambda ref: ref or "HEAD~1"), \
          patch.object(cro, "intent_to_add_untracked",
                       side_effect=lambda files, **_: contextlib.nullcontext()), \
@@ -3481,8 +3481,8 @@ class TestAFanOutCutOffMidRun:
         with patch.object(cro, "parse_args", return_value=_review_args(plan, models)), \
              patch.object(cro, "get_project_root", return_value=str(tmp_path)), \
              patch.object(cro, "get_or_create_state", return_value=_review_state()), \
-             patch.object(cro, "resolve_models", return_value=models), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.resolve_models", return_value=models), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref", side_effect=lambda ref: ref or "HEAD~1"), \
              patch.object(cro, "intent_to_add_untracked",
                           side_effect=lambda files, **_: contextlib.nullcontext()), \

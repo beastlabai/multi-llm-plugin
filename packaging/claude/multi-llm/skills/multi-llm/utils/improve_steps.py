@@ -490,7 +490,7 @@ def pin_commit_range(
                 "state.json (util commit-brief recorded them)."
             )
     from . import commit_range as range_mod
-    from .commit_review import CommitReviewError, repo_root_of
+    from .commit_paths import CommitReviewError, repo_root_of
     from .output_handler import output_dir_path
 
     shown = iw._display_path(args.plan)

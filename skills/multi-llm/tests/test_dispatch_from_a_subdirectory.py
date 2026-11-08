@@ -167,7 +167,7 @@ BRIEF = "plans/commit-reviews/root-e4f5a6b7c8d9.md"
 
 @pytest.fixture
 def brief_rule(repo, monkeypatch):
-    """The repo's commit brief, and ``utils.commit_review.is_commit_brief``
+    """The repo's commit brief, and ``utils.commit_paths.is_commit_brief``
     (another task's module, the brief rule's one owner) as a stand-in that
     accepts exactly that file; records each question it was asked."""
     import types
@@ -185,10 +185,10 @@ def brief_rule(repo, monkeypatch):
         asked.append((str(candidate), cwd))
         return os.path.realpath(str(candidate)) == str(path)
 
-    stand_in = types.ModuleType("utils.commit_review")
+    stand_in = types.ModuleType("utils.commit_paths")
     stand_in.is_commit_brief = is_commit_brief
-    monkeypatch.setitem(sys.modules, "utils.commit_review", stand_in)
-    monkeypatch.setattr(utils, "commit_review", stand_in, raising=False)
+    monkeypatch.setitem(sys.modules, "utils.commit_paths", stand_in)
+    monkeypatch.setattr(utils, "commit_paths", stand_in, raising=False)
     return asked
 
 

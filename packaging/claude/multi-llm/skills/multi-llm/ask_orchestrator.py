@@ -57,9 +57,10 @@ import shlex
 import sys
 import tempfile
 import threading
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -72,14 +73,12 @@ from utils.cli_common import (
 )
 from utils.output_handler import get_phase_dir, slugify_question
 from utils.prompt_loader import load_prompt
-from utils.interactive import resolve_models
+from utils.interactive import ModelSelectionError, select_models
 from utils import unattended as unattended_mod
-from utils.unattended import NeedsHuman
 from utils.provider_registry import (
     get_all_model_specs,
     get_provider,
     get_provider_timeout,
-    is_model_valid,
     parse_model_spec,
     set_run_anchor,
 )
@@ -1828,6 +1827,11 @@ def _accept_partials_locked(
 # ---------------------------------------------------------------------------
 # Main orchestration
 # ---------------------------------------------------------------------------
+#
+# `_main` runs the stages below in order. Everything up to the detach boundary
+# (question resolution, model resolution, plan hashing, the question dir's
+# collision/resume guard) stays in the foreground; the lock is taken after
+# `maybe_detach`, and `held` keeps it until `main` returns.
 
 async def main(argv: Optional[List[str]] = None) -> int:
     # What the run holds for its lifetime (the question dir's lock, on the
@@ -1843,7 +1847,57 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
     bootstrap_streams()
 
     args = parse_args(argv)
+    inputs = _resolve_inputs(args)
+    if isinstance(inputs, int):
+        return inputs
+    if args.accept_partial:
+        return _accept_partial_entry(inputs)
 
+    setup = _prepare_fanout(inputs)
+    if isinstance(setup, int):
+        return setup
+    _cross_detach_boundary(setup)
+    refused = _hold_question_dir(args, setup.question_dir, held)
+    if refused is not None:
+        return refused
+    _record_launch(setup)
+
+    run = AskRun.start(setup)
+    results = await run.fan_out()
+    closing = await run.close(results)
+    return run.report(results, closing)
+
+
+@dataclass
+class AskInputs:
+    """What every ask resolves first: the verbatim question and the plan."""
+
+    args: argparse.Namespace
+    question: str
+    #: ``realpath`` of ``--plan-file``, the run's anchor.
+    plan_path: str
+    plan_content: str
+    plan_hash: str
+
+
+@dataclass
+class AskSetup:
+    """The fan-out's foreground answers, all settled before the detach boundary."""
+
+    inputs: AskInputs
+    model_specs: List[str]
+    #: ``--yes``: D6 row 2's auto-selection is recorded, and the closing report
+    #: decides without a prompt.
+    unattended: bool
+    slug: str
+    question_dir: str
+    template: str
+    inline_plan: str
+    project_root: str
+
+
+def _resolve_inputs(args: argparse.Namespace) -> Union["AskInputs", int]:
+    """The question and the plan, or the exit code that refuses them."""
     # Resolve the verbatim question and require non-empty content.
     question = resolve_question(args)
     if not question.strip():
@@ -1865,37 +1919,52 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
     set_run_anchor(plan_path)
 
     plan_content = read_plan(plan_path)
-    plan_hash = compute_plan_hash(plan_content)
+    return AskInputs(
+        args=args, question=question, plan_path=plan_path,
+        plan_content=plan_content, plan_hash=compute_plan_hash(plan_content),
+    )
 
-    # D3.4: `--accept-partial` dispatches nothing, so it needs no model
-    # resolution (which could itself end the run at D6 row 2) and never reaches
-    # the detach boundary: it resolves the question dir exactly as a resume does
-    # and works on the files there.
-    if args.accept_partial:
-        # It runs in the foreground or not at all. Silently dropping a
-        # caller's `--detach` (the opencode package plugin composes it onto
-        # every launch) would hand back a foreground result with no run banner
-        # in place of the detached launch that was asked for. So, like every
-        # other flag a mode cannot honour, it is refused here, ahead of
-        # `get_phase_dir`'s mkdir, so nothing on disk changes.
-        if getattr(args, "detach", False):
-            return unattended_mod.fail_closed(
-                "ERROR: --accept-partial runs in the foreground only: it "
-                "dispatches nothing and finishes in seconds, so it cannot be "
-                "combined with --detach, which would launch a background run "
-                "that never happens. Nothing was changed. Re-run it without "
-                "--detach."
-            )
-        slug = slugify_question(question)
-        phase_dir = str(get_phase_dir(Path(plan_path), "ask"))
-        question_dir, is_resume = resolve_question_dir(phase_dir, slug, question)
-        return accept_partials(
-            args=args,
-            question=question,
-            plan_path=plan_path,
-            question_dir=question_dir,
-            is_resume=is_resume,
+
+def _accept_partial_entry(inputs: AskInputs) -> int:
+    """``--accept-partial``: work on the files of the question dir a resume finds.
+
+    D3.4: it dispatches nothing, so it needs no model resolution (which could
+    itself end the run at D6 row 2) and never reaches the detach boundary: it
+    resolves the question dir exactly as a resume does and works on the files
+    there.
+    """
+    args = inputs.args
+    # It runs in the foreground or not at all. Silently dropping a
+    # caller's `--detach` (the opencode package plugin composes it onto
+    # every launch) would hand back a foreground result with no run banner
+    # in place of the detached launch that was asked for. So, like every
+    # other flag a mode cannot honour, it is refused here, ahead of
+    # `get_phase_dir`'s mkdir, so nothing on disk changes.
+    if getattr(args, "detach", False):
+        return unattended_mod.fail_closed(
+            "ERROR: --accept-partial runs in the foreground only: it "
+            "dispatches nothing and finishes in seconds, so it cannot be "
+            "combined with --detach, which would launch a background run "
+            "that never happens. Nothing was changed. Re-run it without "
+            "--detach."
         )
+    slug = slugify_question(inputs.question)
+    phase_dir = str(get_phase_dir(Path(inputs.plan_path), "ask"))
+    question_dir, is_resume = resolve_question_dir(phase_dir, slug, inputs.question)
+    return accept_partials(
+        args=args,
+        question=inputs.question,
+        plan_path=inputs.plan_path,
+        question_dir=question_dir,
+        is_resume=is_resume,
+    )
+
+
+def _prepare_fanout(inputs: "AskInputs") -> Union["AskSetup", int]:
+    """The models, the question dir and the prompt's parts, or the exit code."""
+    args = inputs.args
+    plan_path = inputs.plan_path
+    question = inputs.question
 
     # Mutual exclusivity check (mirror review orchestrators).
     if args.quick and args.interactive:
@@ -1906,33 +1975,15 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
     # an unresolvable set is exit 3 — `ask` never renders a picker unattended.
     unattended = bool(getattr(args, "yes", False))
     try:
-        model_specs = resolve_models(
-            cli_models=args.models,
-            interactive=args.interactive,
-            quick=args.quick,
+        model_specs = select_models(
+            args,
             mode="ask",
             anchor=plan_path,  # per-project config discovery follows the plan-derived root
             unattended=unattended,
+            announce=False,
         )
-    except NeedsHuman as e:
-        return unattended_mod.fail_closed(e.message, site_id=e.site)
-    except RuntimeError as e:
-        print(f"ERROR: {e}")
-        available = get_all_model_specs(anchor=plan_path)
-        print(f"Use --models flag. Available: {', '.join(available[:5])}...")
-        return 1
-
-    if not model_specs:
-        print("ERROR: No models selected.")
-        return 1
-
-    # Model validation = warn-and-proceed (match existing orchestrators).
-    invalid_models = [m for m in model_specs if not is_model_valid(m, anchor=plan_path)]
-    if invalid_models:
-        print(f"WARNING: Unknown models (proceeding anyway): {', '.join(invalid_models)}")
-        # Anchored to match the rejection above (§9.3.c).
-        available = get_all_model_specs(anchor=plan_path)
-        print(f"Available models: {', '.join(available[:10])}...")
+    except ModelSelectionError as e:
+        return e.exit_code
 
     # Compute slug + resolve the per-question directory (collision/resume guard).
     slug = slugify_question(question)
@@ -1947,7 +1998,7 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
             try:
                 with open(status_path, "r", encoding="utf-8") as f:
                     prior = json.load(f)
-                if prior.get("plan_hash") and prior.get("plan_hash") != plan_hash:
+                if prior.get("plan_hash") and prior.get("plan_hash") != inputs.plan_hash:
                     print("WARNING: plan file has changed since these answers were "
                           "generated; existing answers may be stale — re-run with "
                           "--rerun-all to refresh every model's answer.")
@@ -1955,7 +2006,7 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
                 pass
 
     template = load_prompt(ASK_PROMPT_FILE)
-    inline_plan, truncated = build_inline_plan(plan_content, plan_path)
+    inline_plan, truncated = build_inline_plan(inputs.plan_content, plan_path)
     # D4.2: a path-only adapter (aider) is handed the whole plan by `--read` and
     # gets no inlined copy, so the warning is printed only when some model's
     # prompt really carries the truncated copy. An aider-only roster would
@@ -1972,35 +2023,53 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
               f"truncated (a marker points models at the full plan path).")
 
     project_root = get_project_root(plan_path) or os.path.dirname(plan_path) or "."
-    skip_existing = not args.rerun_all
 
     print(f"Question slug: {slug}")
     print(f"Output directory: {question_dir}")
     print(f"Models: {', '.join(model_specs)}")
-    print(f"Plan: {plan_path} ({len(plan_content)} bytes)")
+    print(f"Plan: {plan_path} ({len(inputs.plan_content)} bytes)")
     if args.rerun_all:
         print("Rerun-all: re-asking all models (ignoring existing answer files)")
     print("")
+    return AskSetup(
+        inputs=inputs, model_specs=model_specs, unattended=unattended, slug=slug,
+        question_dir=question_dir, template=template, inline_plan=inline_plan,
+        project_root=project_root,
+    )
 
-    # --- the detach boundary -------------------------------------------------
-    # `ask` runs live at {plan}/ask/<slug>-<hash8>/, so the run this fork owns is
-    # this question's dir — which is also why `status` needs `--question`/`--run-id`
-    # to pick one. Everything above (question resolution, the collision/resume
-    # guard, model resolution, plan hashing) stays in the foreground.
+
+def _cross_detach_boundary(setup: AskSetup) -> None:
+    """The detach boundary: the launching side exits here with the launch's code.
+
+    `ask` runs live at {plan}/ask/<slug>-<hash8>/, so the run this fork owns is
+    this question's dir — which is also why `status` needs `--question`/`--run-id`
+    to pick one. Everything before this (question resolution, the
+    collision/resume guard, model resolution, plan hashing) stays in the
+    foreground.
+    """
     detach_outcome = maybe_detach(
-        args=args,
+        args=setup.inputs.args,
         mode="ask",
-        phase_dir=question_dir,
-        plan_file=plan_path,
+        phase_dir=setup.question_dir,
+        plan_file=setup.inputs.plan_path,
         phase="ask",
-        ask_slug=slug,
-        model_specs=model_specs,
+        ask_slug=setup.slug,
+        model_specs=setup.model_specs,
     )
     if detach_outcome is not None:
         sys.exit(detach_outcome)
 
+
+def _hold_question_dir(
+    args: argparse.Namespace, question_dir: str, held: contextlib.ExitStack,
+) -> Optional[int]:
+    """Take the foreground ask's lock on *question_dir* for the run's lifetime.
+
+    Returns the exit code of a refusal, or ``None`` once the lock is held (or
+    on the detached worker, which already holds it).
+    """
     # One writer per question dir, whatever the lane. The detached worker took
-    # `{question_dir}/.lock` at the boundary just above (`RunHandle`). A
+    # `{question_dir}/.lock` at the boundary (`RunHandle`). A
     # foreground ask writes no `run` record, so this lock is its liveness. It is
     # held until `main` returns, and the OS drops it if the process dies. It is
     # what `classify_run` reports as `lock_held`, and what refuses a second ask
@@ -2017,15 +2086,22 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
                 "then re-run."
             )
         held.callback(lock.release)
+    return None
 
+
+def _record_launch(setup: AskSetup) -> None:
+    """The launch's checkpoint: the run's identity, its D6 resolution, the counters."""
+    args = setup.inputs.args
+    question_dir = setup.question_dir
+    model_specs = setup.model_specs
     write_status(question_dir, {
         "phase": "ask",
         "state": "models_running",
         "started_at": datetime.now().isoformat(),
         "models_requested": list(model_specs),
-        "question": question,
-        "question_slug": slug,
-        "plan_hash": plan_hash,
+        "question": setup.inputs.question,
+        "question_slug": setup.slug,
+        "plan_hash": setup.inputs.plan_hash,
         "answers_md": os.path.join(question_dir, "answers.md"),
         # Drop the predecessor's per-model map with the same move `claim_run`
         # makes on the detached lane, and for the reason spelled out in the
@@ -2036,7 +2112,7 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
         # it.
         "progress": None,
     })
-    if unattended and not args.models and not args.quick:
+    if setup.unattended and not args.models and not args.quick:
         # D6 row 2, recorded rather than merely applied (see review base).
         unattended_mod.record_resolution(
             question_dir,
@@ -2044,7 +2120,7 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
             "defaults.models: " + ", ".join(model_specs),
         )
     # Counters only, deliberately: the per-model map is written by the tracker's
-    # seed inside the fan-out (below), and `progress` merges key by key at its
+    # seed inside the fan-out, and `progress` merges key by key at its
     # top level, so a `models` key here would only race the seed to write the
     # same thing twice.
     report_progress(
@@ -2052,55 +2128,115 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
         models_total=len(model_specs), models_done=0, models_succeeded=0,
     )
 
-    # The fan-out's per-model map, and the [PROGRESS] ticker that narrates it.
-    #
-    # Built against `question_dir` and **not** the `ask` phase dir the other
-    # three modes' pattern would predict: ask's checkpoint lives one level
-    # below, at `{plan}/ask/<slug>-<hash8>/.status.json` (see
-    # `resolve_question_dir`), because two different questions asked about one
-    # plan are two independent runs with two answer sets and two `.status.json`
-    # files. A tracker anchored on `{plan}/ask/` would merge both questions'
-    # models into a single map — and hand a poller a map it cannot attribute to
-    # either question. It is the same fact that makes the Layer 2 poll select by
-    # `--question` and never by `--phase ask`.
-    #
-    # `timeout=args.timeout` mirrors `ask_one`'s own budget rule (the CLI
-    # override when given, each provider's configured timeout otherwise), so a
-    # queued row renders `0m00s/30m` against the budget the slot will really
-    # get rather than a blank denominator.
-    #
-    # Constructed **above** the two coroutines rather than beside the
-    # `run_models_concurrent` call it is passed to, because `ask_one` now takes
-    # a transition of its own (the `running` one below) and a closure reading a
-    # name defined forty lines further down is a trap the next edit springs.
-    #
-    # The division of labour with the helper: it seeds the map before the tasks
-    # exist, marks the stagger wait, turns every slot terminal from the result
-    # `ask_one` (or `skip_existing_answer`) returned, names the deadline as the
-    # sweep reason, and cancels *and awaits* the ticker in its `finally` before
-    # returning. What it cannot do is say when a slot left the queue for a
-    # provider — only the coroutine that dispatches sees that — which is why
-    # `ask_one` calls `tracker.running()` itself, exactly as
-    # `run_single_model` and `run_single_review` do on the other two lanes.
-    tracker = FanoutProgress(
-        question_dir, model_specs, anchor=plan_path, timeout=args.timeout,
-    )
 
-    # Every spec `ask_one` got past the sandbox gate to dispatch (where it drops
-    # the model's stale partial and origin record). Only a dispatched slot can
-    # have written this run's answer file or partial, so the closing report
-    # reads it twice: D3.3's deadline move touches only these specs' answer
-    # files, and a failed spec outside it names its partial as an earlier run's.
-    dispatched_specs: Set[str] = set()
-    # Failed specs whose answer file could be neither moved nor copied aside,
-    # so it is still at its canonical path (`set_answer_file_aside`). The
-    # closing report keeps them out of the scan: the slot stays failed.
-    answers_left_in_place: Set[str] = set()
-    # Each dispatched slot's provider call, so the closing report can stop and
-    # join the ones the deadline cut before it sets their answer files aside.
-    provider_calls: Dict[str, ProviderCall] = {}
+@dataclass
+class AskClosing:
+    """What the closing report is built from, once answers.md is written."""
 
-    def skip_existing_answer(model_spec: str, index: int) -> Optional[Dict[str, Any]]:
+    completed: List[str]
+    failed_models: Dict[str, str]
+    earlier_partials: List[str]
+    answers_md: str
+    state: str
+
+
+@dataclass
+class AskRun:
+    """One ask fan-out over a question dir.
+
+    The slots (:meth:`skip_existing_answer`, :meth:`ask_one`) read the fields
+    above the line and fill the three below it, which :meth:`close` reads.
+    """
+
+    args: argparse.Namespace
+    question: str
+    plan_path: str
+    question_dir: str
+    project_root: str
+    template: str
+    inline_plan: str
+    model_specs: List[str]
+    unattended: bool
+    #: Not ``--rerun-all``: a model with a non-empty answer is not asked again.
+    skip_existing: bool
+    tracker: FanoutProgress
+    # ---
+    #: Every spec `ask_one` got past the sandbox gate to dispatch (where it drops
+    #: the model's stale partial and origin record). Only a dispatched slot can
+    #: have written this run's answer file or partial, so the closing report
+    #: reads it twice: D3.3's deadline move touches only these specs' answer
+    #: files, and a failed spec outside it names its partial as an earlier run's.
+    dispatched_specs: Set[str] = field(default_factory=set)
+    #: Failed specs whose answer file could be neither moved nor copied aside,
+    #: so it is still at its canonical path (`set_answer_file_aside`). The
+    #: closing report keeps them out of the scan: the slot stays failed.
+    answers_left_in_place: Set[str] = field(default_factory=set)
+    #: Each dispatched slot's provider call, so the closing report can stop and
+    #: join the ones the deadline cut before it sets their answer files aside.
+    provider_calls: Dict[str, ProviderCall] = field(default_factory=dict)
+
+    @classmethod
+    def start(cls, setup: AskSetup) -> "AskRun":
+        """The run for *setup*, with the fan-out's progress map built first."""
+        args = setup.inputs.args
+        # The fan-out's per-model map, and the [PROGRESS] ticker that narrates it.
+        #
+        # Built against `question_dir` and **not** the `ask` phase dir the other
+        # three modes' pattern would predict: ask's checkpoint lives one level
+        # below, at `{plan}/ask/<slug>-<hash8>/.status.json` (see
+        # `resolve_question_dir`), because two different questions asked about one
+        # plan are two independent runs with two answer sets and two `.status.json`
+        # files. A tracker anchored on `{plan}/ask/` would merge both questions'
+        # models into a single map — and hand a poller a map it cannot attribute to
+        # either question. It is the same fact that makes the Layer 2 poll select by
+        # `--question` and never by `--phase ask`.
+        #
+        # `timeout=args.timeout` mirrors `ask_one`'s own budget rule (the CLI
+        # override when given, each provider's configured timeout otherwise), so a
+        # queued row renders `0m00s/30m` against the budget the slot will really
+        # get rather than a blank denominator.
+        #
+        # The division of labour with the helper: it seeds the map before the tasks
+        # exist, marks the stagger wait, turns every slot terminal from the result
+        # `ask_one` (or `skip_existing_answer`) returned, names the deadline as the
+        # sweep reason, and cancels *and awaits* the ticker in its `finally` before
+        # returning. What it cannot do is say when a slot left the queue for a
+        # provider — only the coroutine that dispatches sees that — which is why
+        # `ask_one` calls `tracker.running()` itself, exactly as
+        # `run_single_model` and `run_single_review` do on the other two lanes.
+        tracker = FanoutProgress(
+            setup.question_dir, setup.model_specs, anchor=setup.inputs.plan_path,
+            timeout=args.timeout,
+        )
+        return cls(
+            args=args,
+            question=setup.inputs.question,
+            plan_path=setup.inputs.plan_path,
+            question_dir=setup.question_dir,
+            project_root=setup.project_root,
+            template=setup.template,
+            inline_plan=setup.inline_plan,
+            model_specs=setup.model_specs,
+            unattended=setup.unattended,
+            skip_existing=not args.rerun_all,
+            tracker=tracker,
+        )
+
+    async def fan_out(self) -> Dict[str, Any]:
+        """Every model's slot, then the provider calls the deadline cut, joined."""
+        results = await run_models_concurrent(
+            self.model_specs, self.ask_one, self.args.timeout, self.args.max_parallel,
+            skip_predicate=self.skip_existing_answer,
+            anchor=self.plan_path,
+            tracker=self.tracker,
+        )
+        # A slot the deadline cut may still have its CLI running; it is stopped and
+        # joined here, ahead of D3.3's one-time move in `close`, which it could
+        # otherwise outlive and write its answer file behind.
+        await stop_unreturned_provider_calls(self.provider_calls)
+        return results
+
+    def skip_existing_answer(self, model_spec: str, index: int) -> Optional[Dict[str, Any]]:
         # Cheap, synchronous resume check (runs before stagger/semaphores):
         # short-circuit models that already have a non-empty answer so resume
         # stays fast. Returns None when the model must (re)run.
@@ -2118,19 +2254,28 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
         # with nothing left to do, and the write that claims the question dir
         # drops the predecessor's `progress` wholesale, so there is no earlier
         # entry to fall back on. (`claim_run` does that on the detached lane; on
-        # the foreground one the launch write above does — F1, 2026-09-20.)
+        # the foreground one the launch write does — F1, 2026-09-20.)
         # There is no separate `skipped` state; the distinction lives in
         # `source`.
-        if not skip_existing:
+        if not self.skip_existing:
             return None
         sanitized = sanitize_model_name(model_spec)
-        answer_path = os.path.realpath(os.path.join(question_dir, f"answer_{sanitized}.md"))
+        answer_path = os.path.realpath(os.path.join(self.question_dir, f"answer_{sanitized}.md"))
         if read_nonempty_answer(answer_path) is not None:
             print(f"[SKIP] {model_spec} - already has a non-empty answer")
             return {"model": model_spec, "success": True, "error": None, "source": "resume"}
         return None
 
-    async def ask_one(model_spec: str, index: int) -> Dict[str, Any]:
+    async def ask_one(self, model_spec: str, index: int) -> Dict[str, Any]:
+        # The run's fields under the names this body has always used.
+        args, question, plan_path = self.args, self.question, self.plan_path
+        question_dir, project_root = self.question_dir, self.project_root
+        template, inline_plan = self.template, self.inline_plan
+        skip_existing, tracker = self.skip_existing, self.tracker
+        dispatched_specs = self.dispatched_specs
+        answers_left_in_place = self.answers_left_in_place
+        provider_calls = self.provider_calls
+
         provider_name, _ = parse_model_spec(model_spec, anchor=plan_path)
 
         # D6 step 3, the review fan-out's gate on the third lane that reaches
@@ -2413,190 +2558,195 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
         return {"model": model_spec, "success": False, "error": error,
                 "source": failed_source}
 
-    results = await run_models_concurrent(
-        model_specs, ask_one, args.timeout, args.max_parallel,
-        skip_predicate=skip_existing_answer,
-        anchor=plan_path,
-        tracker=tracker,
-    )
-    # A slot the deadline cut may still have its CLI running; it is stopped and
-    # joined here, ahead of D3.3's one-time move below, which it could otherwise
-    # outlive and write its answer file behind.
-    await stop_unreturned_provider_calls(provider_calls)
+    async def close(self, results: Dict[str, Any]) -> AskClosing:
+        """Set the deadline's answers aside, resolve the failed map, write answers.md."""
+        question_dir = self.question_dir
+        model_specs = self.model_specs
+        tracker = self.tracker
+        answers_left_in_place = self.answers_left_in_place
+        plan_path = self.plan_path
+        question = self.question
+        dispatched_specs = self.dispatched_specs
 
-    # T5: the fan-out is not the phase, and a ticker that dies with it leaves
-    # the rest of the run silent. `run_models_concurrent` returns the moment the
-    # last slot does — having cancelled *and awaited* its own ticker first, so
-    # no [PROGRESS] line can interleave with the per-model summary — but ask
-    # then rescans the question dir, resolves the failed map and rewrites
-    # answers.md, which on a large answer set is the second silence this feature
-    # exists to remove. This second ticker is what reports that window — with
-    # one line rather than a line per interval, for the reason spelled out under
-    # the yield below. It holds
-    # no per-model map and writes nothing at all (it re-reads the checkpoint and
-    # prints), so the terminal map the sweep froze stays byte-for-byte as it was
-    # and a table rendered afterwards still shows each model's real duration
-    # rather than a clock that kept running.
-    phase_progress = PhaseProgress(question_dir, anchor=plan_path)
-    phase_progress.start_ticker()
-    # One turn of the loop, so the task actually starts. `start_ticker` only
-    # *schedules* it, and everything below this line is synchronous — the answer
-    # scan, the failed map and the answers.md rewrite are all plain file I/O —
-    # so without a yield here the ticker would never get a turn at all, would be
-    # cancelled before its body ever ran, and would print nothing: not its
-    # interval lines and not the teardown line that names the terminal step.
-    # Given the turn, it reaches its first `await` and the teardown cancel lands
-    # there, which is what guarantees that last line. (What this lane gets is
-    # therefore that one line and no interval lines at all — ask's post-fan-out
-    # window is short and wholly synchronous, so an interval expiring inside it
-    # cannot be serviced until it ends. F6, 2026-09-20: the parenthesis here
-    # used to say a lane whose post-fan-out work awaits "also gets the interval
-    # lines", offered as the contrast that made ask's single line the exception
-    # — and on the review lanes' executor path it was false, because their
-    # `dispatch_subagent_tasks` blocked the loop for the whole validation
-    # window. Those two call sites are `asyncio.to_thread`-awaited now, so the
-    # contrast is true as stated; ask has no such call to await.)
-    await asyncio.sleep(0)
-    try:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # T5: the fan-out is not the phase, and a ticker that dies with it leaves
+        # the rest of the run silent. `run_models_concurrent` returns the moment the
+        # last slot does — having cancelled *and awaited* its own ticker first, so
+        # no [PROGRESS] line can interleave with the per-model summary — but ask
+        # then rescans the question dir, resolves the failed map and rewrites
+        # answers.md, which on a large answer set is the second silence this feature
+        # exists to remove. This second ticker is what reports that window — with
+        # one line rather than a line per interval, for the reason spelled out under
+        # the yield below. It holds
+        # no per-model map and writes nothing at all (it re-reads the checkpoint and
+        # prints), so the terminal map the sweep froze stays byte-for-byte as it was
+        # and a table rendered afterwards still shows each model's real duration
+        # rather than a clock that kept running.
+        phase_progress = PhaseProgress(question_dir, anchor=plan_path)
+        phase_progress.start_ticker()
+        # One turn of the loop, so the task actually starts. `start_ticker` only
+        # *schedules* it, and everything below this line is synchronous — the answer
+        # scan, the failed map and the answers.md rewrite are all plain file I/O —
+        # so without a yield here the ticker would never get a turn at all, would be
+        # cancelled before its body ever ran, and would print nothing: not its
+        # interval lines and not the teardown line that names the terminal step.
+        # Given the turn, it reaches its first `await` and the teardown cancel lands
+        # there, which is what guarantees that last line. (What this lane gets is
+        # therefore that one line and no interval lines at all — ask's post-fan-out
+        # window is short and wholly synchronous, so an interval expiring inside it
+        # cannot be serviced until it ends. F6, 2026-09-20: the parenthesis here
+        # used to say a lane whose post-fan-out work awaits "also gets the interval
+        # lines", offered as the contrast that made ask's single line the exception
+        # — and on the review lanes' executor path it was false, because their
+        # `dispatch_subagent_tasks` blocked the loop for the whole validation
+        # window. Those two call sites are `asyncio.to_thread`-awaited now, so the
+        # contrast is true as stated; ask has no such call to await.)
+        await asyncio.sleep(0)
+        try:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # D3.3: the fan-out's deadline is a timeout too. A slot it cancelled
-        # never returned from `ask_one`, so step 1 never judged its answer file,
-        # and the scan below would count it. Moved to its partial first, the
-        # spec stays failed (`DEADLINE_ERROR`, from the backfill below). Its
-        # provider call was stopped and joined above, so nothing writes the
-        # file after this.
-        set_aside_unreturned_answers(
-            question_dir, model_specs, results, dispatched_specs,
-            left_in_place=answers_left_in_place,
+            # D3.3: the fan-out's deadline is a timeout too. A slot it cancelled
+            # never returned from `ask_one`, so step 1 never judged its answer file,
+            # and the scan below would count it. Moved to its partial first, the
+            # spec stays failed (`DEADLINE_ERROR`, from the backfill below). Its
+            # provider call was stopped and joined above, so nothing writes the
+            # file after this.
+            set_aside_unreturned_answers(
+                question_dir, model_specs, results, dispatched_specs,
+                left_in_place=answers_left_in_place,
+            )
+
+            # Read-only scan to determine which models succeeded, so we can build the
+            # failed map before writing answers.md exactly once (no transient on-disk
+            # version missing the ## Failed Models section).
+            completed = [
+                spec for spec, _ in collect_completed(question_dir, model_specs)
+                if spec not in answers_left_in_place
+            ]
+            completed_set = set(completed)
+
+            # Every requested model is either completed (has a usable answer file)
+            # or failed, and the map is built in the same three steps the review
+            # lanes build theirs — F4, 2026-09-20. It used to be one loop over
+            # `model_specs` ending in a bare `or "No answer produced (model did not
+            # complete)"`, which made this lane the **third** wording for the one
+            # cause the other two name once: a slot the fan-out's deadline
+            # cancelled was reported that sentence in `answers.md` and in
+            # `models_failed` while the map's own swept entry — written by the same
+            # run, one file over — said `no result (cancelled at the fan-out
+            # deadline)`. One cause, two labels, and the table and the report
+            # disagreeing about a model is precisely what `DEADLINE_ERROR` exists
+            # to stop.
+            #
+            # 1. What the fan-out itself returned: a slot that ran and lost carries
+            #    its own reason, which is more informative than any backfill.
+            failed_models: Dict[str, str] = {}
+            for spec, res in results.items():
+                if not isinstance(res, dict) or res.get("success"):
+                    continue
+                failed_models[spec] = res.get("error") or "No usable answer produced"
+            # 2. F11's backfill, the same call with the same helper the review base
+            #    and review-code make: a spec in neither `results` nor
+            #    `failed_models` never returned at all, and it is named
+            #    `DEADLINE_ERROR` here and in the map by one pass. The tracker's own
+            #    sweep has normally already retired it with that same string (the
+            #    transitions are idempotent, so the first writer wins); this is the
+            #    belt that catches a fan-out which returned by a path the sweep
+            #    missed.
+            backfill_deadline_losses(model_specs, results, failed_models, tracker=tracker)
+            # 3. Reconcile against the disk scan, which is this lane's source of
+            #    truth for "answered" (`collect_completed` reads the answer files,
+            #    and `answers.md` and `models_completed` are built from the same
+            #    scan). A slot with a file is completed whatever its result said; a
+            #    slot with neither a file nor a reason claimed success and wrote
+            #    nothing, which is a different cause from the deadline and keeps the
+            #    sentence that has always described it.
+            reconcile_failed_map(model_specs, completed_set, failed_models)
+            # A failed run's answer file that could not be set aside is still on
+            # disk under its answer name; the failure line says so (D3.2).
+            for spec in answers_left_in_place:
+                if spec in failed_models:
+                    failed_models[spec] += (
+                        " — its answer file could not be set aside, so it was left "
+                        f"in place as answer_{sanitize_model_name(spec)}.md "
+                        "(not counted)"
+                    )
+
+            # Write answers.md once, with the resolved failed-models section. A
+            # failed spec this run never dispatched (a sandbox refusal) kept any
+            # partial the last run left, and its line says so (D3.2).
+            earlier_partials = [s for s in failed_models if s not in dispatched_specs]
+            answers_md, completed = write_answers_md(
+                question_dir, question, plan_path, model_specs, failed_models, timestamp,
+                earlier_partials=earlier_partials, withheld=answers_left_in_place,
+            )
+
+            state = ask_run_state(completed, failed_models)
+
+            # A detached ask hands its answers back through `status`, not through a
+            # stdout nobody read (no-op in the foreground).
+            record_output_files(question_dir, answers=answers_md)
+            # Both counters, and they do not mean the same thing — getting them the
+            # wrong way round is exactly the bug the plan's "a live progress line
+            # cannot use the second meaning" bullet describes. `models_done` counts
+            # **finished slots**, read off the map the fan-out just froze: every slot
+            # is terminal by now, so on a lossy run it still reads 4/4 instead of
+            # walking backwards to the 3/4 a success count would write at the end of a
+            # run whose numerator had already reached 4. `models_succeeded` carries
+            # what this restatement has always computed, `len(completed)` — and that
+            # number is deliberately the *disk* scan (`collect_completed`), the same
+            # source `answers.md` and `models_completed` are built from, so the report,
+            # the checkpoint and the progress line cannot disagree about which models
+            # answered.
+            #
+            # Counters only: no `models` key, so `update_status`'s one-level merge
+            # leaves the frozen map exactly as the fan-out's sweep wrote it.
+            models_done = tracker.counts()[0]
+            report_progress(
+                question_dir, step="complete", models_total=len(model_specs),
+                models_done=models_done, models_succeeded=len(completed),
+            )
+        finally:
+            # Stopped only *after* the terminal `progress.step` is on disk: the
+            # ticker's teardown line re-reads the checkpoint, so stopping it any
+            # earlier would leave the log's last [PROGRESS] trailing off at
+            # `fanout`. Cancel-and-await, so that line lands before the run's own
+            # report rather than in the middle of it.
+            await phase_progress.stop_ticker()
+        return AskClosing(
+            completed=completed, failed_models=failed_models,
+            earlier_partials=earlier_partials, answers_md=answers_md, state=state,
         )
 
-        # Read-only scan to determine which models succeeded, so we can build the
-        # failed map before writing answers.md exactly once (no transient on-disk
-        # version missing the ## Failed Models section).
-        completed = [
-            spec for spec, _ in collect_completed(question_dir, model_specs)
-            if spec not in answers_left_in_place
-        ]
-        completed_set = set(completed)
-
-        # Every requested model is either completed (has a usable answer file)
-        # or failed, and the map is built in the same three steps the review
-        # lanes build theirs — F4, 2026-09-20. It used to be one loop over
-        # `model_specs` ending in a bare `or "No answer produced (model did not
-        # complete)"`, which made this lane the **third** wording for the one
-        # cause the other two name once: a slot the fan-out's deadline
-        # cancelled was reported that sentence in `answers.md` and in
-        # `models_failed` while the map's own swept entry — written by the same
-        # run, one file over — said `no result (cancelled at the fan-out
-        # deadline)`. One cause, two labels, and the table and the report
-        # disagreeing about a model is precisely what `DEADLINE_ERROR` exists
-        # to stop.
-        #
-        # 1. What the fan-out itself returned: a slot that ran and lost carries
-        #    its own reason, which is more informative than any backfill.
-        failed_models: Dict[str, str] = {}
-        for spec, res in results.items():
-            if not isinstance(res, dict) or res.get("success"):
-                continue
-            failed_models[spec] = res.get("error") or "No usable answer produced"
-        # 2. F11's backfill, the same call with the same helper the review base
-        #    and review-code make: a spec in neither `results` nor
-        #    `failed_models` never returned at all, and it is named
-        #    `DEADLINE_ERROR` here and in the map by one pass. The tracker's own
-        #    sweep has normally already retired it with that same string (the
-        #    transitions are idempotent, so the first writer wins); this is the
-        #    belt that catches a fan-out which returned by a path the sweep
-        #    missed.
-        backfill_deadline_losses(model_specs, results, failed_models, tracker=tracker)
-        # 3. Reconcile against the disk scan, which is this lane's source of
-        #    truth for "answered" (`collect_completed` reads the answer files,
-        #    and `answers.md` and `models_completed` are built from the same
-        #    scan). A slot with a file is completed whatever its result said; a
-        #    slot with neither a file nor a reason claimed success and wrote
-        #    nothing, which is a different cause from the deadline and keeps the
-        #    sentence that has always described it.
-        reconcile_failed_map(model_specs, completed_set, failed_models)
-        # A failed run's answer file that could not be set aside is still on
-        # disk under its answer name; the failure line says so (D3.2).
-        for spec in answers_left_in_place:
-            if spec in failed_models:
-                failed_models[spec] += (
-                    " — its answer file could not be set aside, so it was left "
-                    f"in place as answer_{sanitize_model_name(spec)}.md "
-                    "(not counted)"
-                )
-
-        # Write answers.md once, with the resolved failed-models section. A
-        # failed spec this run never dispatched (a sandbox refusal) kept any
-        # partial the last run left, and its line says so (D3.2).
-        earlier_partials = [s for s in failed_models if s not in dispatched_specs]
-        answers_md, completed = write_answers_md(
-            question_dir, question, plan_path, model_specs, failed_models, timestamp,
-            earlier_partials=earlier_partials, withheld=answers_left_in_place,
+    def report(self, results: Dict[str, Any], closing: AskClosing) -> int:
+        """The closing report and the run's exit code."""
+        # The answers this run produced itself — a slot that returned `file` or
+        # `fallback` — so the counts line can say how many were kept from an
+        # earlier run instead (the `resume` and `not-dispatched` slots, D7.2).
+        produced = {
+            spec for spec, res in results.items()
+            if isinstance(res, dict) and res.get("success")
+            and res.get("source") in ("file", "fallback")
+        }
+        exit_code = close_ask_run(
+            question_dir=self.question_dir,
+            question=self.question,
+            plan_path=self.plan_path,
+            model_specs=self.model_specs,
+            completed=closing.completed,
+            failed_models=closing.failed_models,
+            earlier_partials=closing.earlier_partials,
+            answers_md=closing.answers_md,
+            state=closing.state,
+            produced=produced,
+            unattended=self.unattended,
+            # D2 row 6: the caller's flags.
+            retry_flags=cli_common.current_replay_flags(mode="ask"),
         )
-
-        state = ask_run_state(completed, failed_models)
-
-        # A detached ask hands its answers back through `status`, not through a
-        # stdout nobody read (no-op in the foreground).
-        record_output_files(question_dir, answers=answers_md)
-        # Both counters, and they do not mean the same thing — getting them the
-        # wrong way round is exactly the bug the plan's "a live progress line
-        # cannot use the second meaning" bullet describes. `models_done` counts
-        # **finished slots**, read off the map the fan-out just froze: every slot
-        # is terminal by now, so on a lossy run it still reads 4/4 instead of
-        # walking backwards to the 3/4 a success count would write at the end of a
-        # run whose numerator had already reached 4. `models_succeeded` carries
-        # what this restatement has always computed, `len(completed)` — and that
-        # number is deliberately the *disk* scan (`collect_completed`), the same
-        # source `answers.md` and `models_completed` are built from, so the report,
-        # the checkpoint and the progress line cannot disagree about which models
-        # answered.
-        #
-        # Counters only: no `models` key, so `update_status`'s one-level merge
-        # leaves the frozen map exactly as the fan-out's sweep wrote it.
-        models_done = tracker.counts()[0]
-        report_progress(
-            question_dir, step="complete", models_total=len(model_specs),
-            models_done=models_done, models_succeeded=len(completed),
-        )
-    finally:
-        # Stopped only *after* the terminal `progress.step` is on disk: the
-        # ticker's teardown line re-reads the checkpoint, so stopping it any
-        # earlier would leave the log's last [PROGRESS] trailing off at
-        # `fanout`. Cancel-and-await, so that line lands before the run's own
-        # report rather than in the middle of it.
-        await phase_progress.stop_ticker()
-
-    # The answers this run produced itself — a slot that returned `file` or
-    # `fallback` — so the counts line can say how many were kept from an
-    # earlier run instead (the `resume` and `not-dispatched` slots, D7.2).
-    produced = {
-        spec for spec, res in results.items()
-        if isinstance(res, dict) and res.get("success")
-        and res.get("source") in ("file", "fallback")
-    }
-    exit_code = close_ask_run(
-        question_dir=question_dir,
-        question=question,
-        plan_path=plan_path,
-        model_specs=model_specs,
-        completed=completed,
-        failed_models=failed_models,
-        earlier_partials=earlier_partials,
-        answers_md=answers_md,
-        state=state,
-        produced=produced,
-        unattended=unattended,
-        # D2 row 6: the caller's flags.
-        retry_flags=cli_common.current_replay_flags(mode="ask"),
-    )
-    # Plan codex-sandbox-unavailable F1 (2026-09-30): every
-    # `[CODEX_HOME_CHECK]` and `[JAIL_DENIED]` line of this run's slots,
-    # repeated as its last word — a home change outlives the run.
-    print_closing_summary(question_dir)
-    return exit_code
+        # Plan codex-sandbox-unavailable F1 (2026-09-30): every
+        # `[CODEX_HOME_CHECK]` and `[JAIL_DENIED]` line of this run's slots,
+        # repeated as its last word — a home change outlives the run.
+        print_closing_summary(self.question_dir)
+        return exit_code
 
 
 if __name__ == "__main__":

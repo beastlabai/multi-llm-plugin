@@ -1131,9 +1131,9 @@ class FullWorkflow:
 
     def _document_title(self) -> str:
         """``Plan``, or ``Commit brief`` when the plan's ``state.json``
-        records a ``commit_range`` (``commit_review.document_label``)."""
+        records a ``commit_range`` (``commit_paths.document_label``)."""
         try:
-            from utils.commit_review import document_label, read_commit_range
+            from utils.commit_paths import document_label, read_commit_range
 
             return document_label(
                 {"commit_range": read_commit_range(self.plan_path)}).capitalize()

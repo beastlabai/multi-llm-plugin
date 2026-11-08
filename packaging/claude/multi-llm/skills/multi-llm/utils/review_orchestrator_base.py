@@ -50,17 +50,14 @@ from .cli_common import (
 )
 from .output_handler import sanitize_prefix, get_phase_dir
 from .prompt_loader import load_prompt
-from .interactive import resolve_models
+from .interactive import ModelSelectionError, select_models
 from . import unattended as _unattended
-from .unattended import NeedsHuman
 from .provider_registry import (
-    get_all_model_specs,
     parse_model_spec,
     get_provider,
     get_provider_timeout,
     get_provider_max_concurrent,
     get_subagent_retries,
-    is_model_valid,
     set_run_anchor,
 )
 from .json_extractor import (
@@ -7968,7 +7965,7 @@ def already_completed_lines(
     the next phase is the result's ``user_next_step`` as on any exit 2.
 
     *document* is what the user calls the input: ``plan``, or ``commit brief``
-    for a commit review (``commit_review.document_label``; plans/review-
+    for a commit review (``commit_paths.document_label``; plans/review-
     commits.md §2.8 "'Commit brief', never 'plan'"), whose caller also passes
     the commit mode the user typed as *mode_word*."""
     try:
@@ -8181,48 +8178,19 @@ async def run_review_orchestration(
         print("ERROR: --quick and --interactive are mutually exclusive.")
         sys.exit(1)
 
-    # Handle model selection (D6 row 2: auto-select `defaults.models` when
-    # nothing was named; fail closed with exit 3 when nothing resolves).
+    # Model selection (`interactive.select_models`; D6 row 2: auto-select
+    # `defaults.models` when nothing was named; fail closed with exit 3 when
+    # nothing resolves).
     unattended = bool(getattr(args, "yes", False))
     try:
-        model_specs = resolve_models(
-            cli_models=args.models,
-            interactive=args.interactive,
-            quick=args.quick,
+        model_specs = select_models(
+            args,
             mode=phase_name,
             anchor=plan_path,  # per-project config discovery follows the plan-derived root
             unattended=unattended,
         )
-    except NeedsHuman as e:
-        sys.exit(_unattended.fail_closed(e.message, site_id=e.site))
-    except RuntimeError as e:
-        print(f"ERROR: {e}")
-        available = get_all_model_specs(anchor=plan_path)
-        print(f"Use --models flag. Available: {', '.join(available[:5])}...")
-        sys.exit(1)
-
-    if not model_specs:
-        print("ERROR: No models selected.")
-        sys.exit(1)
-
-    # Display selection
-    if args.models:
-        print(f"Using models from --models flag: {', '.join(model_specs)}")
-    elif args.interactive:
-        print(f"Using interactively selected models: {', '.join(model_specs)}")
-    elif args.quick:
-        print(f"Using quick models from providers.yaml: {', '.join(model_specs)}")
-    else:
-        print(f"Using default models from providers.yaml: {', '.join(model_specs)}")
-
-    # Validate model specs
-    invalid_models = [m for m in model_specs if not is_model_valid(m, anchor=plan_path)]
-    if invalid_models:
-        print(f"WARNING: Unknown models (proceeding anyway): {', '.join(invalid_models)}")
-        # Anchored to match the rejection above: an anchored `is_model_valid`
-        # paired with a CWD-discovered suggestion list is its own bug (§9.3.c).
-        available = get_all_model_specs(anchor=plan_path)
-        print(f"Available models: {', '.join(available[:10])}...")
+    except ModelSelectionError as e:
+        sys.exit(e.exit_code)
 
     # Run pre-run hook (e.g., validate tasks file existence)
     if pre_run_hook:

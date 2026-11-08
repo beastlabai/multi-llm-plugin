@@ -266,14 +266,14 @@ class TestAMergeInTheRange:
         assert [c["sha"] for c in record["commits"]] == [second_merge, first_merge, m1]
 
         walks = []
-        real = ca._run_git
+        real = ca.run_git
 
         def spy(*args, **kwargs):
             if "--ancestry-path" in args:
                 walks.append(args)
             return real(*args, **kwargs)
 
-        monkeypatch.setattr(ca, "_run_git", spy)
+        monkeypatch.setattr(ca, "run_git", spy)
         # Line 1 predates the range, so every group falls to the model's claim.
         groups = [group("a.py", [1, 1], claim=s0), group("a.py", [1, 1], claim=s0[:9]),
                   group("a.py", [1, 1], claim=s1[:7]), group(None, None, claim=s2),

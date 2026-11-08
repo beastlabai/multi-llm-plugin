@@ -27,7 +27,7 @@ fall back to another commit. So this module is the single place that:
   text from the same data.
 
 It is pure apart from git calls, and every git call goes through
-``git_utils._run_git`` (``tests/test_git_utils.py`` fails a runtime git list
+``git_utils.run_git`` (``tests/test_git_utils.py`` fails a runtime git list
 literal anywhere else).
 """
 
@@ -41,7 +41,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .cli_common import EXIT_NEEDS_HUMAN, EXIT_NOTHING_TO_DO
-from .git_utils import GitError, _run_git, attribute_source_args, empty_tree_id
+from .git_utils import GitError, attribute_source_args, empty_tree_id, run_git
 from .text_clip import clip, plain_line
 
 # ---------------------------------------------------------------------------
@@ -546,12 +546,12 @@ def _named(names: Sequence[str], limit: int = NAMED_MAX) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Git helpers (every call through git_utils._run_git)
+# Git helpers (every call through git_utils.run_git)
 # ---------------------------------------------------------------------------
 
 
 def _git(cwd: str, *args: str) -> Tuple[str, str, int]:
-    return _run_git(*args, check=False, cwd=cwd)
+    return run_git(*args, check=False, cwd=cwd)
 
 
 def _verify(cwd: str, rev: str, peel: str = "commit") -> Optional[str]:

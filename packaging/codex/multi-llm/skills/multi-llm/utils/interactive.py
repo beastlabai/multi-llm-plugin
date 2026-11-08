@@ -16,8 +16,8 @@ import sys
 from typing import Dict, List, Optional
 
 from .json_extractor import sanitize_model_name
-from .provider_registry import load_config
-from .unattended import NeedsHuman, row
+from .provider_registry import get_all_model_specs, is_model_valid, load_config
+from .unattended import NeedsHuman, fail_closed, row
 
 
 def _availability_reason(provider_name: str) -> str:
@@ -687,3 +687,77 @@ def resolve_models(
                                  "pick them now"),
         site=row(2).site_id,
     )
+
+
+class ModelSelectionError(Exception):
+    """:func:`select_models` stopped the run; its message is already printed.
+
+    ``exit_code`` is what the caller exits with: 3 for a gate nobody may
+    answer unattended, 1 for a configuration that resolves to nothing.
+    """
+
+    def __init__(self, exit_code: int):
+        super().__init__(exit_code)
+        self.exit_code = exit_code
+
+
+def select_models(
+    args,
+    *,
+    mode: str,
+    anchor: Optional[str],
+    unattended: bool,
+    announce: bool = True,
+) -> List[str]:
+    """The model-selection preamble the review lanes and ``ask`` share.
+
+    :func:`resolve_models` from the parsed flags (``--models``,
+    ``--interactive``, ``--quick``), then the printed outcome: the error and a
+    short list of available specs when nothing resolves, ``Using ...`` naming
+    where the models came from (*announce*), and a warn-and-proceed line for
+    specs the registry does not know. *anchor* is the plan-derived discovery
+    anchor, passed through as the caller spells it.
+
+    Raises:
+        ModelSelectionError: Selection stopped the run (exit 3 for a gate
+            :class:`NeedsHuman` raised, 1 otherwise), message already printed.
+    """
+    try:
+        model_specs = resolve_models(
+            cli_models=args.models,
+            interactive=args.interactive,
+            quick=args.quick,
+            mode=mode,
+            anchor=anchor,
+            unattended=unattended,
+        )
+    except NeedsHuman as e:
+        raise ModelSelectionError(fail_closed(e.message, site_id=e.site)) from None
+    except RuntimeError as e:
+        print(f"ERROR: {e}")
+        available = get_all_model_specs(anchor=anchor)
+        print(f"Use --models flag. Available: {', '.join(available[:5])}...")
+        raise ModelSelectionError(1) from None
+
+    if not model_specs:
+        print("ERROR: No models selected.")
+        raise ModelSelectionError(1)
+
+    if announce:
+        if args.models:
+            print(f"Using models from --models flag: {', '.join(model_specs)}")
+        elif args.interactive:
+            print(f"Using interactively selected models: {', '.join(model_specs)}")
+        elif args.quick:
+            print(f"Using quick models from providers.yaml: {', '.join(model_specs)}")
+        else:
+            print(f"Using default models from providers.yaml: {', '.join(model_specs)}")
+
+    # Warn and proceed. The suggestion list is read against the same anchor
+    # as the check, or a project's own models would be called unknown.
+    invalid_models = [m for m in model_specs if not is_model_valid(m, anchor=anchor)]
+    if invalid_models:
+        print(f"WARNING: Unknown models (proceeding anyway): {', '.join(invalid_models)}")
+        available = get_all_model_specs(anchor=anchor)
+        print(f"Available models: {', '.join(available[:10])}...")
+    return model_specs

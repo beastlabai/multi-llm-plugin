@@ -2065,7 +2065,7 @@ class ImproveWorkflow(fwo.FullWorkflow):
 def entry_point(mode: str, argv: Optional[Sequence[str]] = None) -> int:
     """``improve_plan_orchestrator.main`` / ``improve_code_orchestrator.main``,
     and the fronted main of the improve-commits front door
-    (``utils/commit_review.py``), which calls it with ``--plan-file <brief>
+    (``utils/commit_front_door.py``), which calls it with ``--plan-file <brief>
     --base-ref <base> --head-ref <head>`` recorded as ``improve-commits``.
 
     In order: parse; refuse ``--interactive`` (before the workflow sets

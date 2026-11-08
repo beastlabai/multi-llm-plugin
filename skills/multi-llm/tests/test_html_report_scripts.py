@@ -817,8 +817,8 @@ class TestTheSlotNamesTheReviewer:
 
         with patch.object(cro, "parse_args", return_value=_make_args(plan_path)), \
              patch.object(cro, "get_or_create_state", return_value=state), \
-             patch.object(cro, "resolve_models", return_value=[slot]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.resolve_models", return_value=[slot]), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "run_all_reviews",
                           new=AsyncMock(return_value={slot: (True, [issue], None)})), \

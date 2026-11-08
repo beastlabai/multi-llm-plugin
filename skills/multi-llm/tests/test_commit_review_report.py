@@ -675,8 +675,8 @@ class TestTheCallSites:
         state = _fake_state(record, base)
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=state), \
-             patch.object(cro, "resolve_models", return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.resolve_models", return_value=["cursor-agent:auto"]), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref", side_effect=lambda ref: ref or "HEAD~1"), \
              patch.object(cro, "build_unsanitize_map",
                           return_value={"cursor-agent_auto": "cursor-agent:auto"}), \
@@ -716,8 +716,8 @@ class TestTheCallSites:
             "pre_existing_changes": []}.get(key, default)
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=state), \
-             patch.object(cro, "resolve_models", return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.resolve_models", return_value=["cursor-agent:auto"]), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref", side_effect=lambda ref: ref or "HEAD~1"), \
              patch.object(cro, "run_all_reviews", new=AsyncMock(return_value={
                  "cursor-agent:auto": (True, [dict(FINDING)], None)})):

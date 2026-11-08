@@ -43,7 +43,7 @@ if str(SKILL_DIR) not in sys.path:
 import modes as mode_table  # noqa: E402
 import multi_llm  # noqa: E402  (side-effect free at import: main() does the work)
 from utils import (  # noqa: E402
-    cli_common, commit_range, commit_review, detach, host_capabilities,
+    cli_common, commit_front_door, commit_range, detach, host_capabilities,
     next_phase, provider_registry, subagent_executor, subagent_tasks, unattended,
 )
 
@@ -237,7 +237,7 @@ _RESULT_LINES_KEY = "lines"
 def _context_plan_flag() -> str:
     """:data:`_CONTEXT_PLAN_FLAG`, once the front door's parser defines it."""
     parser = argparse.ArgumentParser(add_help=False)
-    commit_review.add_commit_options(parser)
+    commit_front_door.add_commit_options(parser)
     if _CONTEXT_PLAN_FLAG not in parser._option_string_actions:
         raise RuntimeError(
             f"the commit front door no longer defines {_CONTEXT_PLAN_FLAG}; the "

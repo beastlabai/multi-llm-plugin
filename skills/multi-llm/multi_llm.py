@@ -150,7 +150,7 @@ UTIL_COMMANDS: Dict[str, Tuple[Optional[str], str, str]] = {
                       "Plan an --improve-plan/--improve-code/--improve-commits "
                       "run: each step's decision and flags (read-only; the "
                       "native leg's planner)."),
-    "commit-brief": ("utils.commit_review", "commit_brief_main",
+    "commit-brief": ("utils.commit_front_door", "commit_brief_main",
                      "Resolve a commit range, print its commit block and write "
                      "or reuse its commit brief (a commit mode's preparation, "
                      "launching nothing)."),
@@ -423,7 +423,7 @@ def _revs_flags(words: Sequence[str]) -> List[str]:
 def _names_a_commit_brief(word: str) -> bool:
     """Whether *word* is a commit brief's path: it ends in
     :data:`_COMMIT_BRIEF_SUFFIX` (``.md``), names an existing file and
-    ``commit_review.is_commit_brief`` accepts it.
+    ``commit_paths.is_commit_brief`` accepts it.
 
     One helper decides what a brief is (its marker on line 1, or a
     ``<commit_reviews_dir>/<slug>.md`` path); this only finds the file. A
@@ -435,14 +435,14 @@ def _names_a_commit_brief(word: str) -> bool:
     """
     if not word.endswith(_COMMIT_BRIEF_SUFFIX):
         return False
-    from utils import commit_review
+    from utils import commit_paths
 
     if os.path.isfile(word):
-        return bool(commit_review.is_commit_brief(word))
+        return bool(commit_paths.is_commit_brief(word))
     root = _root_holding(word)
     if root is None:
         return False
-    return bool(commit_review.is_commit_brief(os.path.join(root, word), cwd=root))
+    return bool(commit_paths.is_commit_brief(os.path.join(root, word), cwd=root))
 
 
 def _root_holding(path: str) -> Optional[str]:
@@ -1528,7 +1528,7 @@ def _typed_plan(argv: Sequence[str]) -> Tuple[Optional[str], Optional[str]]:
     ``improve-commits`` is recorded with its pinned range, not a plan
     (``--revs <base12>..<head12>``, plans/review-commits.md §2.1, "What step
     7 records"): the plan is the brief that spelling names
-    (``commit_review.brief_for_pinned``), and the typed spelling is the
+    (``commit_paths.brief_for_pinned``), and the typed spelling is the
     pinned range itself, which every command printed for it carries (§2.8).
     """
     plan_file = flag_value(argv, "--plan-file")
@@ -1550,10 +1550,10 @@ def _typed_plan(argv: Sequence[str]) -> Tuple[Optional[str], Optional[str]]:
 
 def _brief_for_pinned(text: str) -> Optional[str]:
     """The brief a commit review's pinned ``<base12>..<head12>`` names
-    (``commit_review.brief_for_pinned``: by name, no git call beyond the
+    (``commit_paths.brief_for_pinned``: by name, no git call beyond the
     root), absolute, or ``None`` for any other text or outside a repository."""
     try:
-        from utils.commit_review import brief_for_pinned
+        from utils.commit_paths import brief_for_pinned
 
         brief = brief_for_pinned(str(text))
     except Exception:  # noqa: BLE001 - not a pinned range here

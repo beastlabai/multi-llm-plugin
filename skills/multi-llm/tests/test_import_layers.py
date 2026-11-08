@@ -82,6 +82,10 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.cli_version_cache",
         "utils.git_utils",
         "utils.host_capabilities",
+        "utils.host_paths",
+        "utils.host_routes",
+        "utils.host_routes.*",
+        "utils.host_shim",
         "utils.metrics",
         "utils.output_handler",
         "utils.run_registry",
@@ -106,6 +110,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.check_reply",
         "utils.check_tree",
         "utils.code_fix_batcher",
+        "utils.commit_paths",
         "utils.commit_range",
         "utils.detach",
         "utils.human_decisions",
@@ -165,6 +170,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "finalize_tracking",
         "update_plan_tasks",
         "utils.commit_brief",
+        "utils.commit_front_door",
         "utils.commit_review",
         "utils.improve_workflow",
     )),
@@ -205,7 +211,7 @@ KNOWN_UPWARD: Dict[Tuple[str, str], str] = {
         "_VERSION_CACHE, _PROBE_VERSION_CACHE: belong in providers.base",
     ("utils.providers.result_envelope", "utils.providers.base"):
         "STATUS_* are defined in retry_ladder (L0); the two CATEGORY_* constants belong there too",
-    ("utils.commit_review", "multi_llm"):
+    ("utils.commit_front_door", "multi_llm"):
         "_split_positionals, _revs_flags: belong in modes or cli_common",
     # The run record lives in detach (L3).
     ("utils.result_files", "utils.detach"):
@@ -237,16 +243,9 @@ KNOWN_UPWARD: Dict[Tuple[str, str], str] = {
     ("utils.write_batch_scheduler", "utils.commit_apply"):
         "save_guard, recheck_files, repin_after_batch and the rest of the commit guard: "
         "belong in a commit-guard module at L3",
-    # commit_review (L5) also holds the commit paths everything below needs.
-    ("utils.commit_apply", "utils.commit_review"):
-        "CommitReviewError, SLUG_PATTERN, commit_review_artifact, output_dir_for_brief and "
-        "siblings: belong in a commit-paths module at L3",
-    ("utils.commit_report", "utils.commit_review"):
-        "document_label: belongs in a commit-paths module at L3",
-    ("utils.apply_orchestrator_base", "utils.commit_review"):
-        "document_label, is_commit_brief, read_commit_range: belong in a commit-paths module at L3",
-    ("utils.detach", "utils.commit_review"):
-        "apply_stage, stage_takes_over: belong in a commit-paths module at L3",
+    # The front door (L5) also holds the stage a detached worker applies.
+    ("utils.detach", "utils.commit_front_door"):
+        "apply_stage, stage_takes_over: belong in a commit-stage module at L3",
     ("utils.llm_client", "utils.commit_range"):
         "pinned_head_read_rule: belongs in a commit-paths module, or becomes a parameter",
 }

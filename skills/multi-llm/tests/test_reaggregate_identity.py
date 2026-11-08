@@ -814,8 +814,8 @@ def _run_cro_fanout(tmp_path, issues_by_model, *, skip_validation=True,
         stack.enter_context(patch.object(cro, "parse_args", return_value=args))
         stack.enter_context(
             patch.object(cro, "get_or_create_state", return_value=_fanout_state()))
-        stack.enter_context(patch.object(cro, "resolve_models", return_value=models))
-        stack.enter_context(patch.object(cro, "is_model_valid", return_value=True))
+        stack.enter_context(patch("utils.interactive.resolve_models", return_value=models))
+        stack.enter_context(patch("utils.interactive.is_model_valid", return_value=True))
         stack.enter_context(
             patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"))
         stack.enter_context(
@@ -2062,7 +2062,7 @@ def _run_cro_fanout_resolving_models(tmp_path, models):
         stack.enter_context(patch.object(cro, "parse_args", return_value=args))
         stack.enter_context(
             patch.object(cro, "get_or_create_state", return_value=_fanout_state()))
-        stack.enter_context(patch.object(cro, "is_model_valid", return_value=True))
+        stack.enter_context(patch("utils.interactive.is_model_valid", return_value=True))
         stack.enter_context(
             patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"))
         stack.enter_context(

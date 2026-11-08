@@ -2101,7 +2101,7 @@ def get_commit_reviews_dir(anchor: Optional[Union[str, Path]] = None) -> Path:
     """``code_review.commit_reviews_dir`` as an absolute folder in the anchor's repository.
 
     The one reader of the key (plans/review-commits.md §2.4): the commit-review
-    path layer (``utils/commit_review.py``), the front doors and the
+    path layer (``utils/commit_paths.py``), the front doors and the
     no-argument apply lookup all call it and none reads the YAML. The merged
     value, or :data:`DEFAULT_COMMIT_REVIEWS_DIR` when no layer has one, is
     joined to the git root of *anchor* (a brief path, or a directory such as

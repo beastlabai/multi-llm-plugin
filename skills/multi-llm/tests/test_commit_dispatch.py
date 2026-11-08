@@ -20,7 +20,7 @@ the dispatcher is where the words become the one flag a front door parses:
   ``run_status.main`` maps a pinned ``<base12>..<head12>`` to its brief by name
   and refuses other range text.
 
-``utils/commit_review.py`` and ``utils/commit_range.py`` are other tasks'
+``utils/commit_paths.py``, ``utils/commit_front_door.py`` and ``utils/commit_range.py`` are other tasks'
 modules; the three functions the dispatcher and ``status`` call are faked here
 (``is_commit_brief``, ``brief_for_pinned``, ``match_phrase``), so these rows
 pin the dispatcher's own decisions whether or not the real modules have
@@ -97,12 +97,17 @@ def _fake_commit_range():
 def fakes(monkeypatch):
     """The fake modules in ``sys.modules`` and on the ``utils`` package (both,
     so ``from utils import commit_review`` and ``from . import commit_review``
-    find them whether or not the real one was imported first). Yields the
+    find them whether or not the real one was imported first). The one fake
+    stands for the path layer (``commit_paths``), the front door
+    (``commit_front_door``) and their old name (``commit_review``), so a patch
+    through any of the three reaches every caller. Yields the
     ``is_commit_brief`` call log."""
     import utils
 
     calls = []
-    for name, module in (("commit_review", _fake_commit_review(calls)),
+    review = _fake_commit_review(calls)
+    for name, module in (("commit_review", review), ("commit_paths", review),
+                         ("commit_front_door", review),
                          ("commit_range", _fake_commit_range())):
         monkeypatch.setitem(sys.modules, f"utils.{name}", module)
         monkeypatch.setattr(utils, name, module, raising=False)
@@ -417,14 +422,14 @@ class TestTheFlagsTheFrontDoorsOwn:
 class TestUtilCommitBrief:
     def test_it_is_a_util_command_routed_to_the_front_door_core(self):
         module, attr, summary = multi_llm.UTIL_COMMANDS["commit-brief"]
-        assert (module, attr) == ("utils.commit_review", "commit_brief_main")
+        assert (module, attr) == ("utils.commit_front_door", "commit_brief_main")
         assert "commit brief" in summary
 
     def test_it_takes_the_typed_tokens_verbatim(self, here, seen, capsys):
         argv = ["last", "2", "commits", "--focus", "x", "--quick"]
         code, _out, err = _run(["util", "commit-brief", *argv], capsys)
         assert code == 0, err
-        assert seen == [{"module": "utils.commit_review",
+        assert seen == [{"module": "utils.commit_front_door",
                          "attr": "commit_brief_main", "argv": argv}]
 
     @pytest.mark.parametrize("tokens, flag, typed", CONFLICTS)

@@ -1339,7 +1339,7 @@ class RunHandle:
         if not self.commit_stage:
             return
         try:
-            from .commit_review import apply_stage
+            from .commit_front_door import apply_stage
 
             apply_stage(self.commit_stage)
         except Exception as exc:  # noqa: BLE001 - any failure stops the worker
@@ -1967,7 +1967,7 @@ def launch(
         # A commit front door's restart adds `--force --rerun-all` to restart
         # the round; only a `--force` the user typed takes a live run over
         # (plans/review-commits.md §2.1), and the stage records which it was.
-        from .commit_review import stage_takes_over
+        from .commit_front_door import stage_takes_over
 
         force = stage_takes_over(getattr(args, "commit_stage", None))
     if_not_running = bool(getattr(args, "if_not_running", False))

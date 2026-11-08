@@ -1078,9 +1078,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         when the plan's ``state.json`` records a ``commit_range``: the phase's
         own lines never call a commit brief a plan (plans/review-commits.md
         §2.8), through the one owner of the word,
-        ``commit_review.document_label``. Read-only; no state is a plan."""
+        ``commit_paths.document_label``. Read-only; no state is a plan."""
         try:
-            from .commit_review import document_label, read_commit_range
+            from .commit_paths import document_label, read_commit_range
 
             word = document_label({"commit_range": read_commit_range(
                 os.path.abspath(str(self.args.plan_file)))})
@@ -2025,7 +2025,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
 
         - a ``state.json`` that exists but does not parse, or holds no JSON
           object, is refused for any plan;
-        - a commit brief (``commit_review.is_commit_brief``) whose state is
+        - a commit brief (``commit_paths.is_commit_brief``) whose state is
           missing or pins no endpoints is refused.
 
         The file is only read here, never written. The front door's own
@@ -2036,7 +2036,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if not self.guards_commit_fixes:
             return
         from .commit_range import SLUG_PATTERN, pinned_endpoints, pinned_spelling
-        from .commit_review import is_commit_brief
+        from .commit_paths import is_commit_brief
         from .output_handler import output_dir_path
 
         plan = Path(self.plan_path)

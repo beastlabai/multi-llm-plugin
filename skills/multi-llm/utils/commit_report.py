@@ -15,7 +15,7 @@ commits: it asks this module, keyed on ``state.json``'s ``commit_range``
   user's file), and the drift list;
 - **the report header and lines.** The commit block, the focus and context
   plan under it, the "Commit brief" label (through
-  :func:`commit_review.document_label`, the one owner of that word), each
+  :func:`commit_paths.document_label`, the one owner of that word), each
   finding's "Introduced by" line, and the apply commands the export help
   names, as one payload that ``report_data.json`` keeps (``commitRange``) so
   a regenerated report renders the same header, filter and badges without
@@ -52,7 +52,7 @@ from .commit_range import (
     render_commit_block,
     render_drift_line,
 )
-from .commit_review import document_label
+from .commit_paths import document_label
 from .text_clip import clip, plain_line
 
 #: The two review templates (``prompts/``).
