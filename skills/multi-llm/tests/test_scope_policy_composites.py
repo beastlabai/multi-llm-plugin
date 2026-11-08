@@ -38,7 +38,7 @@ from utils.cli_common import RESULT_MARKER  # noqa: E402
 from utils.output_handler import output_dir_path  # noqa: E402
 from utils.state_manager import StateManager  # noqa: E402
 
-from tests.test_improve_orchestrator import (  # noqa: E402,F401
+from tests.support.improve_world import (  # noqa: E402
     APPLY_FLAGS,
     CODE,
     MODES,
@@ -49,13 +49,10 @@ from tests.test_improve_orchestrator import (  # noqa: E402,F401
     _main,
     _plan,
     _write_state,
-    repo,
-    stub,
+    improve_repo,  # noqa: F401 - the repo fixture
+    improve_stub,  # noqa: F401 - the stub fixture
 )
-from tests.test_full_workflow_orchestrator import (  # noqa: E402,F401
-    _plan as _full_plan,
-    stub_phases,
-)
+from tests.support.full_workflow_world import _plan as _full_plan  # noqa: E402
 
 PRESERVE = ["--scope-policy", "preserve"]
 EXPAND = ["--scope-policy", "expand"]

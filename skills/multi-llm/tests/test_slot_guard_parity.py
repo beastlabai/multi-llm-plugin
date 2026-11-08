@@ -35,6 +35,7 @@ import sys
 import tempfile
 import threading
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -58,6 +59,10 @@ from utils.providers.base import (  # noqa: E402
     SANDBOX_INCIDENTAL_MARKER,
 )
 from utils.subagent_executor import SandboxProbeResult  # noqa: E402
+from tests.support.gitrepo import git  # noqa: E402
+
+#: Hermetic git (tests/support/gitrepo.py), returning the CompletedProcess.
+_git = partial(git, text_out=False)
 
 # POSIX file modes and a real git tree; Windows runs no plugin jail.
 pytestmark = pytest.mark.skipif(
@@ -283,13 +288,6 @@ SCENARIOS: Dict[str, Scenario] = {
 # ---------------------------------------------------------------------------
 # The rig: a scratch repo, the pinned probe, the spies and the stub
 # ---------------------------------------------------------------------------
-
-
-def _git(repo, *args):
-    return subprocess.run(
-        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args],
-        cwd=str(repo), check=True, capture_output=True, text=True,
-    )
 
 
 @pytest.fixture

@@ -33,22 +33,13 @@ from harness import SkillRunner  # noqa: E402
 from utils import cli_common, detach  # noqa: E402
 from utils.cli_common import parse_result_line  # noqa: E402
 
-from tests.test_generate_tasks_orchestrator import (  # noqa: E402
-    PLAN_BODY,
-    _valid_document,
-)
+from tests.support.generate_tasks_world import PLAN_BODY, _valid_document  # noqa: E402
 from tests.source_cache import source_tree
+from tests.support.gitrepo import git as _git  # noqa: E402
 
 SKILL_ROOT = Path(__file__).parent.parent
 PLAN = "plans/x.md"
 NOTICE = "multi-llm: running from the repository root"
-
-
-def _git(repo, *args):
-    subprocess.run(
-        ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
-        cwd=repo, check=True, capture_output=True,
-    )
 
 
 @pytest.fixture

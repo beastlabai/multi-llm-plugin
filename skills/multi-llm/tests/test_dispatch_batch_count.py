@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tests.test_check_gate_fixture import _first_run, repo  # noqa: E402,F401
+from tests.support.gate_fixture import _first_run  # noqa: E402
 
 BATCH_LINE = re.compile(r"^\[write-subagents\] batch (\d+): (T\d{3}) ", re.M)
 

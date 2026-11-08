@@ -82,6 +82,60 @@ def test_imports_are_attributed_and_ranked(tmp_path):
     assert [item.test for item in mapping["utils.providers"]] == ["test_p.py"]
 
 
+def test_a_support_modules_imports_count_for_the_tests_that_import_it(tmp_path):
+    """A helper moved out of a test file into ``tests/support`` keeps that file's
+    edges: what the support module imports, directly or through another support
+    module, counts for each test file that imports it."""
+    tests_dir = _scratch(tmp_path)
+    (tmp_path / "utils" / "beta.py").write_text("", encoding="utf-8")
+    (tmp_path / "utils" / "gamma.py").write_text("", encoding="utf-8")
+    (tests_dir / "support").mkdir()
+    (tests_dir / "support" / "world.py").write_text(
+        "from utils import beta\nfrom tests.support.base import X\n", encoding="utf-8")
+    (tests_dir / "support" / "base.py").write_text("import utils.gamma\nX = 1\n", encoding="utf-8")
+    (tests_dir / "test_user.py").write_text("from tests.support.world import thing\n", encoding="utf-8")
+    (tests_dir / "test_other.py").write_text("from tests.support import base\n", encoding="utf-8")
+    mapping = tests_for.build_map(tests_dir, tests_for.source_modules(tmp_path), sweeps=())
+    assert [item.test for item in mapping["utils.beta"]] == ["test_user.py"]
+    assert [item.test for item in mapping["utils.gamma"]] == ["test_other.py", "test_user.py"]
+    assert {item.via for item in mapping["utils.gamma"]} == {"support"}
+    # A direct import outranks the same edge through a support module.
+    (tests_dir / "test_user.py").write_text(
+        "from tests.support.world import thing\nimport utils.beta\n", encoding="utf-8")
+    mapping = tests_for.build_map(tests_dir, tests_for.source_modules(tmp_path), sweeps=())
+    assert [item.via for item in mapping["utils.beta"]] == ["import"]
+
+
+def test_a_registered_plugins_fixture_counts_for_the_tests_that_request_it(tmp_path):
+    """A fixture served through ``conftest.py``'s ``pytest_plugins`` has no import
+    in the test file; requesting it by name still brings the plugin's edges, unless
+    the file defines or imports a fixture of that name itself (Codex, U41)."""
+    tests_dir = _scratch(tmp_path)
+    (tmp_path / "utils" / "beta.py").write_text("", encoding="utf-8")
+    (tests_dir / "support").mkdir()
+    (tests_dir / "support" / "world.py").write_text(
+        "import pytest\nfrom utils import beta\n\n"
+        "@pytest.fixture(name='repo')\ndef _repo():\n    return beta\n", encoding="utf-8")
+    (tests_dir / "conftest.py").write_text(
+        "pytest_plugins = ['tests.support.world']\n", encoding="utf-8")
+    (tests_dir / "test_uses.py").write_text("def test_x(repo):\n    pass\n", encoding="utf-8")
+    (tests_dir / "test_local.py").write_text(
+        "import pytest\n\n@pytest.fixture\ndef repo():\n    return 1\n\n"
+        "def test_y(repo):\n    pass\n", encoding="utf-8")
+    (tests_dir / "test_imported.py").write_text(
+        "from tests.support.other import repo\n\ndef test_z(repo):\n    pass\n",
+        encoding="utf-8")
+    mapping = tests_for.build_map(tests_dir, tests_for.source_modules(tmp_path), sweeps=())
+    assert [item.test for item in mapping["utils.beta"]] == ["test_uses.py"]
+
+
+def test_the_status_punctuation_tests_still_cover_the_provider_registry():
+    """The one edge U41's move lost before plugin fixtures were followed."""
+    mapping = tests_for.build_map(tests_for.TESTS_DIR, tests_for.source_modules(tests_for.TESTS_DIR.parent))
+    assert "test_status_why_punctuation.py" in [
+        item.test for item in mapping["utils.provider_registry"]]
+
+
 def test_module_spellings_resolve_to_one_module():
     modules = tests_for.source_modules()
     assert tests_for.resolve("utils/text_clip.py", modules) == "utils.text_clip"

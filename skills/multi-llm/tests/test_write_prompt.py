@@ -14,7 +14,6 @@ same state. That identity is what this file pins.
 import json
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -30,65 +29,14 @@ from utils.subagent_tasks import PRIOR_CHANGES_TOKEN  # noqa: E402
 from utils.write_batch_scheduler import RESULT_IDS_HEADING  # noqa: E402
 from tests.scheduler_support import make_scheduler  # noqa: E402
 from utils.subagent_executor import CHECK_FINDING_MAX_CHARS, check_findings_from  # noqa: E402
-from utils.write_phase_bridge import (  # noqa: E402
-    WRITE_TASK_FILENAME,
-    materialize_write_tasks,
-    write_task_file_for_phase,
+from utils.write_phase_bridge import WRITE_TASK_FILENAME  # noqa: E402
+from tests.support.write_prompt_world import (
+    PROMPT,
+    _implement_batches,
+    _materialize,
+    _suggestion_batches,
+    prompt_plan_dir,  # noqa: F401 - the plan_dir fixture
 )
-
-
-PROMPT = (
-    "# Apply these suggestions\n\n"
-    "## Prior changes\n\n" + PRIOR_CHANGES_TOKEN + "\n\n"
-    "## Suggestions\n\n1. Add email validation\n2. Enforce password rules\n\n"
-    "## Return Format\n\nSummarize each item.\n"
-)
-
-
-def _suggestion_batches():
-    return [
-        {
-            "section_key": "step_2",
-            "prompt": PROMPT,
-            "suggestions": [
-                {"group_id": "g-email", "title": "Add email validation"},
-                {"group_id": "g-password", "title": "Enforce password rules"},
-            ],
-        },
-        {
-            "section_key": "step_3",
-            "prompt": PROMPT.replace("Add email validation", "Add rate limiting"),
-            "suggestions": [{"group_id": "g-rate", "title": "Add rate limiting"}],
-        },
-    ]
-
-
-def _implement_batches():
-    return [
-        {"batch_index": 0, "can_parallelize": False, "tasks": [
-            {"id": "T001", "title": "Foundation", "prompt": PROMPT,
-             "files_to_create": ["src/a.py"], "depends_on": [],
-             "executor_role": "agent"},
-        ]},
-        {"batch_index": 1, "can_parallelize": False, "tasks": [
-            {"id": "T002", "title": "Manual step", "prompt": PROMPT,
-             "files_to_create": [], "depends_on": ["T001"],
-             "executor_role": "human"},
-        ]},
-    ]
-
-
-@pytest.fixture
-def plan_dir(tmp_path):
-    # A repository: a shared-artifact batch's snapshot lives under its root,
-    # and outside one `util write-prompt` refuses the batch.
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
-    plan = tmp_path / "plans" / "feature.md"
-    plan.parent.mkdir(parents=True)
-    plan.write_text("# Feature\n\n## Step 2\n\nBody.\n", encoding="utf-8")
-    out = tmp_path / "plans" / "feature"
-    out.mkdir()
-    return plan, out
 
 
 def _recorded(out, phase_dir, task_id, capsys):
@@ -103,18 +51,6 @@ def _recorded(out, phase_dir, task_id, capsys):
         "--phase-dir", str(phase_dir), "--task-id", task_id, "--status", "completed",
     ]) == 0
     capsys.readouterr()
-
-
-def _materialize(plan, out, kind, batches, phase_subdir):
-    phase_dir = out / phase_subdir
-    phase_dir.mkdir(parents=True, exist_ok=True)
-    tasks = materialize_write_tasks(
-        kind=kind, batches=batches, phase_dir=str(phase_dir), plan_file=str(plan),
-    )
-    write_task_file_for_phase(
-        kind=kind, tasks=tasks, phase_dir=str(phase_dir), plan_file=str(plan),
-    )
-    return phase_dir, tasks
 
 
 def _executor_rendering(kind, out, phase, task):

@@ -34,9 +34,18 @@ from utils import subagent_prompts  # noqa: E402
 from utils import subagent_tasks  # noqa: E402
 from utils.schema_validator import validate_with_schema_file  # noqa: E402
 from utils.write_batch_scheduler import with_result_contract  # noqa: E402
+from tests.support.declined_world import (  # noqa: E402
+    CODEX_08_REPLY,
+    REASON,
+    SKIP_FLAGS,
+    _PairRig,
+    _codex_08_respond,
+    _codex_08_tasks,
+    _respond_with,
+    _two_item_task,
+)
 
 APPLY_KINDS = ("apply_suggestions", "apply_task_suggestions", "apply_code_fixes")
-REASON = "the implementation record says T011 removed the clamp on purpose"
 
 
 def _prompts(log: Path):
@@ -144,22 +153,6 @@ class TestTheReader:
 # ===========================================================================
 # The runner's reading: a declined item is neither applied nor missing
 # ===========================================================================
-
-def _two_item_task(env, index=0, ids=("s0", "s1"), **over):
-    return env.apply_task(index, expected_ids=list(ids), **over)
-
-
-def _respond_with(env, reply, *, edit=True):
-    seen = []
-
-    def respond(task, prompt):
-        seen.append(prompt)
-        if edit:
-            env.plan.write_text(env.plan.read_text() + f"edit {len(seen)}\n")
-        return dict(reply)
-
-    respond.seen = seen  # type: ignore[attr-defined]
-    return respond
 
 
 class TestABatchThatDeclinesAnItem:
@@ -395,42 +388,12 @@ class TestAResumeKeepsADeclinedBatch:
 # Every surface names a declined item and its reason (the real orchestrator)
 # ===========================================================================
 
-from tests.test_write_executor_orchestrators import (  # noqa: E402
-    APPLY_PLAN, _ApplyRig, _validation, repo,  # noqa: F401
+from tests.support.write_orchestrators import (  # noqa: E402,F401
+    APPLY_PLAN,
+    _ApplyRig,
+    _validation,
+    orchestrator_repo,  # noqa: F401 - the repo fixture
 )
-
-
-def _alpha_pair_groups():
-    """Two suggestions on one section (one batch) and one on another."""
-    def group(n, section, step):
-        return {"theme": f"theme {n}", "category": "c", "models": ["m"],
-                "suggestions": [{
-                    "title": f"suggestion {n}", "desc": f"Do {n}.",
-                    "type": "addition", "reference": f"## Step {step}: {section}",
-                    "importance": "MEDIUM", "source_model": "m",
-                }]}
-    return [group("A1", "Alpha", 1), group("A2", "Alpha", 1), group("B", "Beta", 2)]
-
-
-class _PairRig(_ApplyRig):
-    """The apply-suggestions orchestrator over a review whose first batch
-    holds two items."""
-
-    def _review_pair(self, repo):
-        from utils.state_manager import get_or_create_state
-
-        plan = repo.root / "plans" / "apply.md"
-        plan.write_text(APPLY_PLAN, encoding="utf-8")
-        review = repo.root / "plans" / "apply" / "review-plan"
-        review.mkdir(parents=True, exist_ok=True)
-        (review / "grouped.json").write_text(
-            json.dumps(_alpha_pair_groups()), encoding="utf-8")
-        (review / "validation.json").write_text(
-            json.dumps(_validation(["valid"] * 3)), encoding="utf-8")
-        state = get_or_create_state(plan)
-        state.mark_phase_completed("review-plan")
-        state.save()
-        return plan
 
 
 class TestADeclinedItemIsNamedOnEverySurface(_PairRig):
@@ -564,35 +527,11 @@ class TestTheNativeApplyEmitStampsItsBatchList(_PairRig):
 # The way forward from a partial application a resume would only repeat
 # ===========================================================================
 
-CODEX_08_REPLY = {
-    # Codex racing run 7, apply-code-fixes 08: fix 2 applied and attested,
-    # fix 1 left alone on purpose and said so only in `notes`.
-    "status": "applied", "ids": ["s1"], "files_touched": ["plans/p.md"],
-    "summary": "applied suggestion 2; kept the deliberate T011 decision",
-    "notes": "Suggestion 1: Not applied; T011 records it as deliberate. "
-             "Suggestion 2: applied.",
-}
-SKIP_FLAGS = ["--resume", "--human-task", "apply-batch-0=skip"]
 SKIP_WHY = (
     "keep what apply-batch-0 applied and go on without suggestion 1 (`s0`): "
     "it is recorded as not applied, skipped at your request, and the batches "
     "after it run"
 )
-
-
-def _codex_08_respond(env, calls):
-    def respond(task, prompt):
-        calls.append(task["task_id"])
-        env.plan.write_text(env.plan.read_text() + f"{task['task_id']}\n")
-        if task["task_id"] == "apply-batch-0":
-            return dict(CODEX_08_REPLY)
-        return {"status": "applied", "ids": ["s2"],
-                "files_touched": ["plans/p.md"], "summary": "applied s2"}
-    return respond
-
-
-def _codex_08_tasks(env):
-    return [_two_item_task(env), env.apply_task(1, expected_ids=["s2"])]
 
 
 class TestThePartialApplicationOffersAWayForward:
@@ -1030,9 +969,10 @@ class TestAReportThatLeavesItemsOutIsReAskedOnce:
 # The native leg: the host records a declined item, and a kept batch
 # ===========================================================================
 
-from tests.test_batch_done import (  # noqa: E402
-    INSTRUCTIONS, _materialize, _run, _state, _suggestion_batches, plan_dir,  # noqa: F401
+from tests.support.batch_done_world import (  # noqa: E402
+    INSTRUCTIONS, _materialize, _state, _suggestion_batches,
 )
+from tests.support.main_runs import _run  # noqa: E402
 from utils import batch_done  # noqa: E402
 from utils.schema_validator import validate_state_file  # noqa: E402
 from utils.state_manager import StateManager  # noqa: E402
@@ -1130,7 +1070,7 @@ class TestTheNativeLegRecordsADeclinedItem:
         assert task_id not in (_state(out).get("task_status") or {})
 
     def test_implement_has_no_decline(self, plan_dir, capsys):
-        from tests.test_batch_done import _implement_batches
+        from tests.support.batch_done_world import _implement_batches
 
         plan, out = plan_dir
         StateManager(plan).save()

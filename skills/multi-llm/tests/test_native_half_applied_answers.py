@@ -27,14 +27,8 @@ import json
 
 import pytest
 
-from tests.test_check_gate_fixture import (  # noqa: E402
-    CHECK_GATE,
-    FINDINGS,
-    PLAN,
-    _check,
-    _policy,
-)
-from tests.test_implement_stop_account import make_repo  # noqa: E402
+from tests.support.gate_fixture import CHECK_GATE, FINDINGS, PLAN, _check, _policy  # noqa: E402
+from tests.support.implement_world import make_repo  # noqa: E402
 
 import multi_llm  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402

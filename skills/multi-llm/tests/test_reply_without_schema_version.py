@@ -26,13 +26,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import multi_llm  # noqa: E402
-from tests.test_generate_tasks_orchestrator import (  # noqa: E402
-    RESULT_NAME,
-    _materialize,
-    _phase_dir,
-    _plan,
-    _tasks_md,
-    _valid_document,
+from tests.support.generate_tasks_world import (  # noqa: E402
+    RESULT_NAME, _materialize, _phase_dir, _plan, _tasks_md, _valid_document,
 )
 import generate_tasks_orchestrator as gto  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402

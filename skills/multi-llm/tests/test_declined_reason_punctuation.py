@@ -27,9 +27,8 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 if str(SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_DIR))
 
-from tests.test_batch_done import (  # noqa: E402,F401
-    _materialize, _run, _state, _suggestion_batches, plan_dir,
-)
+from tests.support.batch_done_world import _materialize, _state, _suggestion_batches  # noqa: E402
+from tests.support.main_runs import _run  # noqa: E402
 from utils import batch_done  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
 from utils import write_batch_scheduler as scheduler  # noqa: E402
@@ -201,7 +200,7 @@ def test_the_executors_sentences_add_no_second_mark(reason):
     assert with_closing_mark(words) == f"fix 1 (`c8`) — {reason}"
 
 
-from tests.test_write_batch_declined import _respond_with, _two_item_task  # noqa: E402
+from tests.support.declined_world import _respond_with, _two_item_task  # noqa: E402
 from tests.test_write_executor import env  # noqa: E402,F401 - the fixture
 from utils import subagent_executor as _executor  # noqa: E402
 

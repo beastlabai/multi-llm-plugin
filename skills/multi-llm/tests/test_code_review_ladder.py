@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from functools import partial
 from pathlib import Path
 from unittest.mock import patch
 
@@ -35,6 +36,10 @@ from utils.providers.base import (  # noqa: E402
     SANDBOX_BYPASSED_MARKER,
 )
 from utils.providers.codex import CodexProvider  # noqa: E402
+from tests.support.gitrepo import git  # noqa: E402
+
+#: Hermetic git (tests/support/gitrepo.py), returning the CompletedProcess.
+_git = partial(git, text_out=False)
 
 #: "No ``failure_category`` key at all": the error-line fallback an exit-0
 #: failure takes. ``None`` is a verdict, so it cannot mark absence.
@@ -391,14 +396,6 @@ _JAILED = rob.SandboxVerdict(
     rob.SANDBOX_DISPATCH_UNSANDBOXED, "[SANDBOX_INCIDENTAL] simulated",
     "plugin-landlock", incidental=True,
 )
-
-
-def _git(repo, *args):
-    return subprocess.run(
-        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com",
-         "-c", "commit.gpgsign=false", *args],
-        cwd=str(repo), check=True, capture_output=True, text=True,
-    )
 
 
 def _repo(tmp_path):

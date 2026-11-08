@@ -34,8 +34,10 @@ from utils.subagent_executor import (  # noqa: E402
     SKIPPED_SECTION_HEADING,
 )
 
-from tests.test_write_executor_orchestrators import repo  # noqa: E402,F401
-from tests.test_write_batch_declined import REASON, _PairRig  # noqa: E402
+from tests.support.write_orchestrators import (  # noqa: E402
+    orchestrator_repo,  # noqa: F401 - the repo fixture
+)
+from tests.support.declined_world import REASON, _PairRig  # noqa: E402
 
 INSTRUCTIONS = SKILL_DIR / "instructions"
 
@@ -128,9 +130,7 @@ class TestTheRunbooksSayTheSame:
         assert f"never under `{applied_heading}`" in text
 
     def test_the_record_tells_the_host_where_it_goes(self, tmp_path, capsys):
-        from tests.test_batch_done import (
-            _materialize, _state, _suggestion_batches,
-        )
+        from tests.support.batch_done_world import _materialize, _state, _suggestion_batches
         from utils.state_manager import StateManager
 
         plan = tmp_path / "plans" / "feature.md"

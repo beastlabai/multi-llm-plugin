@@ -42,6 +42,7 @@ import sys
 import tempfile
 import threading
 import time
+from functools import partial
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -66,6 +67,10 @@ from utils.providers.base import (  # noqa: E402
 )
 from utils.providers.codex import PLUGIN_LANDLOCK_RUNG, CodexProvider  # noqa: E402
 from utils.subagent_executor import SandboxProbeResult  # noqa: E402
+from tests.support.gitrepo import git  # noqa: E402
+
+#: Hermetic git (tests/support/gitrepo.py), returning the CompletedProcess.
+_git = partial(git, text_out=False)
 
 # The fan-out's jailed slots are measured through POSIX things: a shebang fake
 # codex on PATH, 0700 slot directories, tracked file modes, hardlinks on a
@@ -120,13 +125,6 @@ def _pin_verdict(monkeypatch, rung):
         )
     monkeypatch.setattr(base, "_fanout_sandbox_verdict", lambda _p, _cwd: verdict)
     return verdict
-
-
-def _git(repo, *args):
-    return subprocess.run(
-        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args],
-        cwd=str(repo), check=True, capture_output=True, text=True,
-    )
 
 
 def _stream(command=None, *, output="", findings=True):

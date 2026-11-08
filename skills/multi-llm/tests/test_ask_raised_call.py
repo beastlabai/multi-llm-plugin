@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,10 @@ from utils.providers.base import (  # noqa: E402
     SANDBOX_BYPASSED_MARKER,
 )
 from utils.providers.codex import CodexProvider  # noqa: E402
+from tests.support.gitrepo import git  # noqa: E402
+
+#: Hermetic git (tests/support/gitrepo.py), returning the CompletedProcess.
+_git = partial(git, text_out=False)
 
 CODEX = "codex:gpt-5.5"
 QUESTION = "Q"
@@ -58,14 +63,6 @@ JAILED = rob.SandboxVerdict(
 @pytest.fixture(autouse=True)
 def fast_backoff(monkeypatch):
     monkeypatch.setenv("MULTI_LLM_TEST_FAST_BACKOFF", "1")
-
-
-def _git(repo, *args):
-    return subprocess.run(
-        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com",
-         "-c", "commit.gpgsign=false", *args],
-        cwd=str(repo), check=True, capture_output=True, text=True,
-    )
 
 
 def _codex_stream(*items):

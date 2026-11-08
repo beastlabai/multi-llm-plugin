@@ -25,13 +25,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_implement_stop_account import (  # noqa: E402
-    CHECK_GATE,
-    PLAN,
-    _dispatched_titles,
-    _implement,
-    _statuses,
-    make_repo,
+from tests.support.implement_world import (  # noqa: E402
+    CHECK_GATE, PLAN, _dispatched_titles, _implement, _statuses, make_repo,
 )
 
 import implement_orchestrator  # noqa: E402
@@ -40,27 +35,11 @@ from utils import provider_registry as registry  # noqa: E402
 from utils import run_status  # noqa: E402
 from utils.task_ledger import mirror_ids  # noqa: E402
 from utils.state_manager import get_or_create_state  # noqa: E402
+from tests.support.implement_world import implement_repo  # noqa: F401 - the repo fixture
+from tests.support.check_findings import FINDINGS, _check_finds
 
-FINDINGS = [
-    "npx html-validate index.html: index.html:1 doctype must be lowercase",
-    "npx html-validate index.html: index.html:9 aria-label misused",
-]
 #: The `[CHECK_FINDINGS]` line both legs print for T002 (fix round 26).
 NATIVE_AND_EXECUTOR_LINE = f"[CHECK_FINDINGS] T002 2 problem(s): {'; '.join(FINDINGS)}"
-
-
-@pytest.fixture
-def repo(tmp_path, monkeypatch):
-    yield make_repo(tmp_path, monkeypatch)
-    registry._config = None
-    registry._config_key = None
-
-
-def _check_finds(repo, findings=FINDINGS) -> None:
-    repo.monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS", CHECK_GATE)
-    repo.monkeypatch.setenv("MOCK_LLM_WRITE_CHECK", json.dumps(
-        {"passed": False, "findings": list(findings)}
-    ))
 
 
 def _check_passes(repo) -> None:

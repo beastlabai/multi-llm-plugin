@@ -883,7 +883,7 @@ class TestTheExecutorGate:
         assert executor._SANDBOX_DECISIONS == {}
 
     def test_agent_write_takes_the_jail_under_auto(self, executor_gate, tmp_path, monkeypatch):
-        from tests.test_plugin_landlock_executor import install_fake_wrapper
+        from tests.support.landlock_world import install_fake_wrapper
 
         install_fake_wrapper(tmp_path / "wrapper", monkeypatch, probe="deny")
         repo = tmp_path / "repo"

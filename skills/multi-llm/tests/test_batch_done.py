@@ -33,94 +33,22 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import multi_llm  # noqa: E402
 import apply_suggestions_orchestrator  # noqa: E402
 from utils import batch_done  # noqa: E402
 from utils import prior_changes  # noqa: E402
-from utils.cli_common import parse_result_line  # noqa: E402
 from utils.state_manager import StateManager  # noqa: E402
-from utils.subagent_tasks import PRIOR_CHANGES_TOKEN  # noqa: E402
-from utils.write_phase_bridge import (  # noqa: E402
-    WRITE_TASK_FILENAME,
-    materialize_write_tasks,
-    write_task_file_for_phase,
-)
+from utils.write_phase_bridge import WRITE_TASK_FILENAME  # noqa: E402
 
 from tests.test_apply_suggestions_integration import TestFixtures  # noqa: E402
-
-
-INSTRUCTIONS = Path(__file__).parent.parent / "instructions"
-
-PROMPT = "# Apply\n\n" + PRIOR_CHANGES_TOKEN + "\n\n1. Do the thing.\n"
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def plan_dir(tmp_path):
-    plan = tmp_path / "plans" / "feature.md"
-    plan.parent.mkdir(parents=True)
-    plan.write_text("# Feature\n\n## Step 2\n\nBody.\n", encoding="utf-8")
-    out = tmp_path / "plans" / "feature"
-    out.mkdir()
-    return plan, out
-
-
-def _suggestion_batches():
-    return [
-        {
-            "section_key": "step_2",
-            "prompt": PROMPT,
-            "suggestions": [
-                {"group_id": "g-email", "title": "Add email validation"},
-                {"group_id": "g-password", "title": "Enforce password rules"},
-            ],
-        },
-        {
-            "section_key": "step_3",
-            "prompt": PROMPT,
-            "suggestions": [{"group_id": "g-rate", "title": "Add rate limiting"}],
-        },
-    ]
-
-
-def _implement_batches():
-    return [
-        {"batch_index": 0, "can_parallelize": False, "tasks": [
-            {"id": "T001", "title": "Foundation", "prompt": PROMPT,
-             "files_to_create": ["src/a.py"], "depends_on": [],
-             "executor_role": "agent"},
-        ]},
-        {"batch_index": 1, "can_parallelize": False, "tasks": [
-            {"id": "T002", "title": "Manual step", "prompt": PROMPT,
-             "files_to_create": [], "depends_on": ["T001"],
-             "executor_role": "human"},
-        ]},
-    ]
-
-
-def _materialize(plan, out, kind, batches, phase_subdir):
-    phase_dir = out / phase_subdir
-    phase_dir.mkdir(parents=True, exist_ok=True)
-    tasks = materialize_write_tasks(
-        kind=kind, batches=batches, phase_dir=str(phase_dir), plan_file=str(plan),
-    )
-    write_task_file_for_phase(
-        kind=kind, tasks=tasks, phase_dir=str(phase_dir), plan_file=str(plan),
-    )
-    return phase_dir, tasks
-
-
-def _run(argv, capsys):
-    code = multi_llm.main(list(argv))
-    captured = capsys.readouterr()
-    return code, captured.out, captured.err, parse_result_line(captured.out)
-
-
-def _state(out):
-    return json.loads((out / "state.json").read_text(encoding="utf-8"))
+from tests.support.main_runs import _run
+from tests.support.batch_done_world import (
+    INSTRUCTIONS,
+    PROMPT,
+    _implement_batches,
+    _materialize,
+    _state,
+    _suggestion_batches,
+)
 
 
 # ---------------------------------------------------------------------------

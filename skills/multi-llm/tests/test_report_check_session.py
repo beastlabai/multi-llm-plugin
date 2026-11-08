@@ -26,15 +26,8 @@ import pytest
 SKILL_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(SKILL_ROOT))
 
-from tests.test_report_check import (  # noqa: E402
-    COMMAND,
-    OPTIONAL,
-    WHY,
-    Transcript,
-    block_output,
-    decision_of,
-    report,
-    run_check,
+from tests.support.transcripts import (  # noqa: E402
+    COMMAND, OPTIONAL, Transcript, WHY, block_output, decision_of, report, run_check,
 )
 from utils import report_check  # noqa: E402
 

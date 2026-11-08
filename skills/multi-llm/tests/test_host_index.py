@@ -65,7 +65,9 @@ from utils.validation import (  # noqa: E402
 )
 
 from tests.scope_apply_fixtures import run_apply, write_review  # noqa: E402
-from tests.test_write_executor_orchestrators import repo  # noqa: E402,F401
+from tests.support.write_orchestrators import (  # noqa: E402
+    orchestrator_repo,  # noqa: F401 - the repo fixture
+)
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 

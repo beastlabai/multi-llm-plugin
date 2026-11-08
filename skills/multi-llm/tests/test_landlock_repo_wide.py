@@ -50,7 +50,7 @@ from utils.providers.base import (  # noqa: E402
     JailRequest,
 )
 from tests.test_landlock_dispatch import _run  # noqa: E402
-from tests.test_landlock_exec import require_landlock  # noqa: E402
+from tests.support.landlock_kernel import require_landlock  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt",

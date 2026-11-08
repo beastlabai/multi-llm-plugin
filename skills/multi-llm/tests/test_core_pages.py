@@ -14,7 +14,6 @@ from __future__ import annotations
 import hashlib
 import random
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -26,6 +25,10 @@ sys.path.insert(0, str(SKILL_ROOT))
 import modes as mode_table  # noqa: E402
 import multi_llm  # noqa: E402
 from utils.cli_common import RESULT_MARKER  # noqa: E402
+from tests.support.gitrepo import make_repo_fixture  # noqa: E402
+
+#: The ``repo`` fixture: a fresh repository (tests/support/gitrepo.py) at the cwd.
+repo_fixture = make_repo_fixture()
 
 CORE_MODES = [mode.name for mode in mode_table.MODES if mode.instruction_file]
 NO_CORE_MODES = [mode.name for mode in mode_table.MODES if not mode.instruction_file]
@@ -43,15 +46,6 @@ END = re.compile(
     + r" mode=(?P<mode>\S+) page=(?P<page>\d+)/(?P<count>\d+) sha=(?P<sha>[0-9a-f]{12})"
 )
 BANNER_CLOSE = "=== the core begins on the next line ===\n"
-
-
-@pytest.fixture
-def repo(tmp_path, monkeypatch):
-    root = tmp_path / "repo"
-    root.mkdir()
-    subprocess.run(["git", "init", "-q", str(root)], check=True)
-    monkeypatch.chdir(root)
-    return root.resolve()
 
 
 def _run(argv, capsys):

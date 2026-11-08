@@ -26,9 +26,9 @@ from utils import scope_policy_runs as runs  # noqa: E402
 from utils.output_handler import output_dir_path  # noqa: E402
 from utils.state_manager import StateManager  # noqa: E402
 
-from tests.test_write_executor_orchestrators import (  # noqa: E402,F401
+from tests.support.write_orchestrators import (  # noqa: E402
     _seed_generate_tasks,
-    repo,
+    orchestrator_repo,  # noqa: F401 - the repo fixture
 )
 
 PRESERVE_HEADING = "## Scope Policy: Preserve"

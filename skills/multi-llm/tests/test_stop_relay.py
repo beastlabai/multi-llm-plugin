@@ -24,14 +24,9 @@ import pytest
 import modes  # noqa: E402
 import multi_llm  # noqa: E402
 from utils.cli_common import ERROR_MAX_CHARS  # noqa: E402
-from tests.test_check_gate_fixture import (  # noqa: E402,F401
-    DENY,
-    _check,
-    _policy,
-    repo,
-)
-from tests import test_write_executor_orchestrators as _orchestrators  # noqa: E402
-from tests.test_write_executor_orchestrators import _ApplyRig  # noqa: E402
+from tests.support.gate_fixture import DENY, _check, _policy  # noqa: E402
+from tests.support import write_orchestrators  # noqa: E402
+from tests.support.write_orchestrators import _ApplyRig  # noqa: E402
 
 #: The fixture's T002 is a check that reports problems: the line leads with
 #: it (fix round 24); "Nothing ran" only when no check ran.
@@ -44,9 +39,9 @@ NOT_SET = "driver.verify_command is not set"
 
 @pytest.fixture
 def apply_repo(tmp_path, monkeypatch):
-    """``test_write_executor_orchestrators``' repo, under its own name here:
+    """``tests.support.write_orchestrators``' repo, under its own name here:
     this module's ``repo`` is the check-gate fixture's."""
-    yield from _orchestrators.repo.__wrapped__(tmp_path, monkeypatch)
+    yield from write_orchestrators.orchestrator_repo.__wrapped__(tmp_path, monkeypatch)
 
 
 def _result(out: str) -> dict:

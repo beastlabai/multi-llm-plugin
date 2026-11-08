@@ -21,12 +21,8 @@ from __future__ import annotations
 import json
 
 import multi_llm  # noqa: E402
-from tests.test_check_gate_fixture import (  # noqa: E402,F401
-    _check,
-    _first_run,
-    repo,
-)
-from tests.test_implement_stop_account import _implement  # noqa: E402
+from tests.support.gate_fixture import _check, _first_run  # noqa: E402,F401
+from tests.support.implement_world import _implement  # noqa: E402
 from utils import run_status  # noqa: E402
 
 #: Fix round 20 (run 8 #6): "accepted with its check findings", the words of

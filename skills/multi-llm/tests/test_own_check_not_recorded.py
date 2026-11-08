@@ -23,7 +23,7 @@ import json
 import re
 from pathlib import Path
 
-from tests.test_check_findings_hold_dependents import repo  # noqa: F401 - fixture
+from tests.support.implement_world import implement_repo  # noqa: F401 - the repo fixture
 
 import implement_orchestrator  # noqa: E402
 import multi_llm  # noqa: E402

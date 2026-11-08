@@ -19,9 +19,12 @@ reason, and ``tests/test_module_tests_map.py`` keeps them honest):
   subprocess, so they import nothing; the entry points a suite runs are derived
   from the mode names and orchestrator names it passes, and the rest is declared.
 
-It is **advisory**. The map still misses coverage through ``runpy``, through a
-helper module that re-exports a source module, and through another source
-module that imports the one you changed; it counts a hub like
+It is **advisory**. It follows the ``tests/support`` modules a test imports
+(their imports count as the test's), but still misses coverage through
+``runpy``, through any other helper module that re-exports a source module,
+through a suite-wide fixture a test names without importing (``tests/conftest.py``
+registers those), and through another source module that imports the one you
+changed; it counts a hub like
 ``utils.state_manager`` as covered by most of the suite. Use it to pick a
 focused first run; the CI command stays the gate.
 
@@ -66,8 +69,9 @@ class Importer(NamedTuple):
     test: str  # file name under tests/, e.g. ``test_status_file.py``
     names: bool  # True when it does ``from <module> import <names>``
     #: ``import`` (a static import), ``dynamic`` (a literal ``import_module`` /
-    #: ``__import__``), ``sweep`` (a declared computed load), ``harness`` (a
-    #: subprocess suite that drives the module's entry point).
+    #: ``__import__``), ``support`` (through a ``tests/support`` module the test
+    #: imports), ``sweep`` (a declared computed load), ``harness`` (a subprocess
+    #: suite that drives the module's entry point).
     via: str = "import"
 
 
@@ -88,6 +92,11 @@ class HarnessSuite(NamedTuple):
 
 #: Glob of the suites that run the skill as a subprocess.
 HARNESS_GLOB = "test_e2e_*.py"
+
+#: The shared test helpers. A test that imports one of these modules covers what
+#: that module imports (followed through other support modules), so moving a
+#: helper there from a test file keeps the test file's edges.
+SUPPORT_PACKAGE = "tests.support"
 
 #: Tests that load modules through a computed name (a loop over a roster), which
 #: no literal-import scan can see. One row per file, with the reason.
@@ -263,6 +272,118 @@ def _imports_of(tree: ast.AST, modules: Dict[str, str]) -> Dict[str, Tuple[bool,
     return found
 
 
+def _support_imports(tree: ast.AST) -> Set[str]:
+    """``tests.support`` modules a parsed file imports (``from tests.support import x`` too)."""
+    found: Set[str] = set()
+    prefix = SUPPORT_PACKAGE + "."
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found.update(alias.name for alias in node.names if alias.name.startswith(prefix))
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            if node.module.startswith(prefix):
+                found.add(node.module)
+            elif node.module == SUPPORT_PACKAGE:
+                found.update(prefix + alias.name for alias in node.names)
+    return found
+
+
+def _fixture_names(tree: ast.AST) -> Set[str]:
+    """The fixture names a parsed module defines (``name=`` honoured)."""
+    found: Set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for deco in node.decorator_list:
+            call = deco if isinstance(deco, ast.Call) else None
+            target = call.func if call else deco
+            dotted = ast.unparse(target) if hasattr(ast, "unparse") else ""
+            if not dotted.endswith("fixture"):
+                continue
+            name = node.name
+            for keyword in (call.keywords if call else ()):
+                if keyword.arg == "name" and isinstance(keyword.value, ast.Constant):
+                    name = str(keyword.value.value)
+            found.add(name)
+    return found
+
+
+def _requested_names(tree: ast.AST) -> Set[str]:
+    """Every parameter name of a function in a parsed test file: the fixtures it
+    may request (a superset, which only ever adds a map edge)."""
+    names: Set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names.update(arg.arg for arg in node.args.args + node.args.kwonlyargs)
+    return names
+
+
+def _imported_names(tree: ast.AST) -> Set[str]:
+    """Names a parsed file binds by import: a fixture it imports is not a plugin's."""
+    names: Set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            names.update(alias.asname or alias.name for alias in node.names)
+    return names
+
+
+def _plugin_fixtures(tests_dir: Path) -> Dict[str, Set[str]]:
+    """``conftest.py``'s ``pytest_plugins`` support modules -> their fixture names:
+    a test that requests one is covered by what that module imports, with no
+    import of its own to show it."""
+    try:
+        tree = ast.parse((tests_dir / "conftest.py").read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return {}
+    plugins: List[str] = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "pytest_plugins" for t in node.targets)
+                and isinstance(node.value, (ast.List, ast.Tuple))):
+            plugins = [e.value for e in node.value.elts
+                       if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+    found: Dict[str, Set[str]] = {}
+    for plugin in plugins:
+        if not plugin.startswith(SUPPORT_PACKAGE + "."):
+            continue
+        path = tests_dir / "support" / (plugin.rsplit(".", 1)[-1] + ".py")
+        try:
+            found[plugin] = _fixture_names(ast.parse(path.read_text(encoding="utf-8")))
+        except (OSError, SyntaxError, UnicodeDecodeError):
+            continue
+    return found
+
+
+def _support_edges(
+    tests_dir: Path, modules: Dict[str, str],
+) -> Dict[str, Dict[str, Tuple[bool, str]]]:
+    """Each ``tests/support`` module -> the source modules it covers, through the
+    support modules it imports in turn: ``{source module: (names, how)}``."""
+    direct: Dict[str, Dict[str, Tuple[bool, str]]] = {}
+    imports: Dict[str, Set[str]] = {}
+    for path in sorted((tests_dir / "support").glob("*.py")):
+        name = f"{SUPPORT_PACKAGE}.{path.stem}"
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        direct[name] = _imports_of(tree, modules)
+        imports[name] = _support_imports(tree)
+    covered: Dict[str, Dict[str, Tuple[bool, str]]] = {}
+    for name in direct:
+        seen, todo = {name}, [name]
+        while todo:
+            for other in imports.get(todo.pop(), set()):
+                if other not in seen:
+                    seen.add(other)
+                    todo.append(other)
+        found: Dict[str, Tuple[bool, str]] = {}
+        for helper in sorted(seen):
+            for module, edge in direct.get(helper, {}).items():
+                found.setdefault(module, edge)
+        covered[name] = found
+    return covered
+
+
 def _mode_entry_points(root: Path) -> Dict[str, str]:
     """Mode word -> orchestrator module, read from ``modes.py`` without importing it."""
     try:
@@ -326,9 +447,10 @@ def build_map(
 ) -> Dict[str, List[Importer]]:
     """Source module (dotted) -> the test files that cover it, sorted by file name.
 
-    Edges: static imports, literal dynamic imports, the declared ``sweeps``, and
-    for each ``test_e2e_*`` suite the orchestrators it drives (derived) plus the
-    modules its ``HARNESS_SUITES`` row declares. A sweep or suite row naming a test
+    Edges: static imports, literal dynamic imports, what an imported
+    ``tests/support`` module imports, the declared ``sweeps``, and for each
+    ``test_e2e_*`` suite the orchestrators it drives (derived) plus the modules
+    its ``HARNESS_SUITES`` row declares. A sweep or suite row naming a test
     file absent from ``tests_dir`` is skipped, so a scratch tree is unaffected.
     """
     modules = modules if modules is not None else source_modules(tests_dir.parent)
@@ -343,6 +465,8 @@ def build_map(
             edges[module][test] = Importer(test, names or bool(old and old.names), via)
 
     trees: Dict[str, ast.AST] = {}
+    support = _support_edges(tests_dir, modules)
+    plugins = _plugin_fixtures(tests_dir)
     for path in sorted(tests_dir.glob("test_*.py")):
         try:
             trees[path.name] = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -350,6 +474,13 @@ def build_map(
             continue  # pytest reports a broken test file; the map just skips it
         for module, (names, via) in _imports_of(trees[path.name], modules).items():
             add(module, path.name, names, via)
+        helpers = set(_support_imports(trees[path.name]))
+        requested = (_requested_names(trees[path.name]) - _fixture_names(trees[path.name])
+                     - _imported_names(trees[path.name]))
+        helpers.update(plugin for plugin, names in plugins.items() if names & requested)
+        for helper in sorted(helpers):
+            for module in support.get(helper, {}):
+                add(module, path.name, False, "support")
     for sweep in sweeps:
         if sweep.test in trees:
             for module in modules:
@@ -453,7 +584,8 @@ def render_query(
             tags.append("from-import")
         if item.via != "import":
             tags.append({"dynamic": "dynamic import", "sweep": "declared sweep",
-                         "harness": "e2e harness"}.get(item.via, item.via))
+                         "harness": "e2e harness", "support": "via tests/support"}
+                        .get(item.via, item.via))
         suffix = f"  ({', '.join(tags)})" if tags else ""
         lines.append(f"  tests/{item.test}{suffix}")
     if top is not None and len(importers) > top:
@@ -489,10 +621,12 @@ def render_map(
         "Which `tests/test_*.py` files cover each source module, from a static AST scan:",
         "`import x`, `from x import y`, `from utils import foo`, a literal",
         "`importlib.import_module(\"x\")` / `__import__(\"x\")`, plus two declared tables in",
-        "`tests/tools/tests_for.py` (listed at the end). **Advisory:** the scan still",
-        "misses coverage through `runpy`, through a helper module that re-exports a",
-        "source module, and through another source module that imports the one you",
-        "changed; it never replaces the CI command. For a ranked list that also weighs",
+        "`tests/tools/tests_for.py` (listed at the end). A `tests/support` module a test",
+        "imports counts its imports as the test's. **Advisory:** the scan still misses",
+        "coverage through `runpy`, through any other helper module that re-exports a",
+        "source module, through a suite-wide fixture a test names without importing, and",
+        "through another source module that imports the one you changed; it never",
+        "replaces the CI command. For a ranked list that also weighs",
         "file size, and to run just those files, use `make test-for MODULE=utils/foo.py`.",
         "",
         "Files are ordered by name match, then a `from x import names` import, then name;",

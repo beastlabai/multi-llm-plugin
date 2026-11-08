@@ -58,10 +58,7 @@ from utils.subagent_tasks import (  # noqa: E402
     make_write_task,
 )
 from utils.write_batch_scheduler import WriteBatchScheduler  # noqa: E402
-from tests.test_plugin_landlock_executor import (  # noqa: E402
-    _slot_dirs,
-    use_own_temp_base,
-)
+from tests.support.landlock_world import _slot_dirs, use_own_temp_base  # noqa: E402
 
 RUNG = SANDBOX_RUNG_PLUGIN_LANDLOCK
 NOTICE_STEM = "[SANDBOX_INCIDENTAL]"
@@ -978,10 +975,8 @@ class TestTheApplyBaseHandsOverItsArtifact:
     apply-code-fixes, and turns a target the scheduler refuses into exit 3."""
 
     def _orchestrator(self, tmp_path, monkeypatch, *, single=True):
-        from tests.test_apply_orchestrator_base import (
-            MockApplyOrchestrator,
-            _make_args,
-            _setup_plan_with_output,
+        from tests.support.apply_base import (
+            MockApplyOrchestrator, _make_args, _setup_plan_with_output,
         )
         from utils import write_phase_bridge
 

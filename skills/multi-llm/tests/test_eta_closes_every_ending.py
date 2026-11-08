@@ -22,18 +22,13 @@ import re
 
 import pytest
 
-from tests.test_check_gate_fixture import (  # noqa: F401  (the fixture)
-    ALLOW,
-    FINDINGS,
-    _check,
-    _policy,
-    repo,
-)
-from tests.test_dispatch_counts import _emit, _etas, _util
-from tests.test_implement_stop_account import _implement, make_repo
+from tests.support.gate_fixture import ALLOW, FINDINGS, _check, _policy
+from tests.support.dispatch_world import _emit, _etas, _util
+from tests.support.implement_world import make_repo
 from utils import metrics
 from utils import provider_registry as registry
 from utils.state_manager import get_or_create_state
+from tests.support.dispatch_world import _run
 
 #: A check last, holding the last two tasks (the reviewer's repro).
 TRAILING_CHECK = """# Trailing check
@@ -91,12 +86,6 @@ Extend it.
 
 def _eta_lines(text: str) -> list:
     return [line for line in text.splitlines() if line.startswith("[ETA] implement:")]
-
-
-def _run(repo, capsys, *flags) -> tuple:
-    code = _implement(repo, *flags)
-    captured = capsys.readouterr()
-    return code, captured.out + captured.err
 
 
 def _stored_total(repo) -> int:

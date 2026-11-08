@@ -24,10 +24,11 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_check_findings_hold_dependents import (  # noqa: F401 - fixture
-    FINDINGS, _check_finds, repo,
+from tests.support.check_findings import FINDINGS, _check_finds
+from tests.support.implement_world import (
+    _implement,
+    implement_repo,  # noqa: F401 - the repo fixture
 )
-from tests.test_implement_stop_account import _implement
 
 import implement_orchestrator  # noqa: E402
 import multi_llm  # noqa: E402

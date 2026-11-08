@@ -28,7 +28,7 @@ for entry in (str(SKILL_ROOT), str(REPO_ROOT / "packaging")):
 
 import modes  # noqa: E402
 
-from tests.test_next_step_relay_rules import RELAY_SURFACES, _flat  # noqa: E402
+from tests.support.relay_rules import RELAY_SURFACES, _flat  # noqa: E402
 
 #: Fix round 24 (live run 10, OpenCode 08 wrote it twice): the copied
 #: section says it, and only when complete; the host never writes it.

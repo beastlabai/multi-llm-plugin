@@ -19,9 +19,7 @@ import json
 
 import pytest
 
-from tests.test_check_gate_fixture import (  # noqa: F401 - the fixture
-    _first_run, repo,
-)
+from tests.support.gate_fixture import _first_run
 from utils import next_phase
 
 

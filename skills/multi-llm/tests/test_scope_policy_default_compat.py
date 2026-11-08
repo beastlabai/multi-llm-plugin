@@ -32,7 +32,9 @@ from tests.scope_apply_fixtures import (  # noqa: E402
     judge_record, native_snapshot, normalize, run_apply, write_code_review,
     write_review,
 )
-from tests.test_write_executor_orchestrators import repo  # noqa: E402,F401
+from tests.support.write_orchestrators import (  # noqa: E402
+    orchestrator_repo,  # noqa: F401 - the repo fixture
+)
 
 GOLDEN = Path(__file__).parent / "golden" / "scope_policy_default_apply.json"
 

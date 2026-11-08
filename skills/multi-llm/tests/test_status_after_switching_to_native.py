@@ -30,11 +30,8 @@ from pathlib import Path
 import pytest
 
 import multi_llm  # noqa: E402
-from tests.test_check_gate_fixture import (  # noqa: F401  (the fixture)
-    _first_run,
-    repo,
-)
-from tests.test_implement_stop_account import _implement
+from tests.support.gate_fixture import _first_run
+from tests.support.implement_world import _implement
 from utils import run_status, status_file
 from utils.write_phase_bridge import WRITE_TASK_FILENAME
 

@@ -24,8 +24,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tests.test_write_prompt import (  # noqa: E402
-    PROMPT, _materialize, _suggestion_batches, plan_dir,  # noqa: F401
+from tests.support.write_prompt_world import (  # noqa: E402
+    PROMPT,
+    _materialize,
+    _suggestion_batches,
+    prompt_plan_dir,  # noqa: F401 - the plan_dir fixture
 )
 from utils import batch_done, process_control, prompt_files, write_prompt  # noqa: E402
 from utils.write_phase_bridge import (  # noqa: E402
@@ -168,7 +171,7 @@ class TestThePreBatchSnapshot:
         ("apply_code_fixes", "apply-fixes", "apply-fix-batch-0"),
     ])
     def test_the_other_write_kinds_take_none(self, plan_dir, capsys, kind, subdir, task_id):
-        from tests.test_write_prompt import _implement_batches
+        from tests.support.write_prompt_world import _implement_batches
         plan, out = plan_dir
         batches = _implement_batches() if kind == "implement" else [{
             "file_key": "src/a.py", "prompt": PROMPT,

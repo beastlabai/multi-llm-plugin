@@ -32,11 +32,10 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_check_gate_fixture import (  # noqa: E402
-    NOTE, _check, _first_run, _implement, _policy, repo,  # noqa: F401 - the fixture
-)
-from tests.test_implement_stop_account import _dispatched_titles, _statuses  # noqa: E402
+from tests.support.gate_fixture import NOTE, _check, _first_run, _policy  # noqa: E402,F401
+from tests.support.implement_world import _dispatched_titles, _implement, _statuses  # noqa: E402
 from utils import run_status  # noqa: E402
+from tests.support.stop_results import FIRST_STOP_FLAGS, multi_llm_util
 
 
 def _status_run(repo, capsys) -> str:
@@ -82,19 +81,6 @@ class TestAPlainResumeKeepsTheAnswersOnRecord:
         assert _dispatched_titles(repo) == [NOTE]
         statuses = _statuses(repo)
         assert statuses["T005"] == "skipped" and statuses["T006"] == "skipped"
-
-
-#: The answers the check-gate first stop offers, in the order a user weighs
-#: them: the combined go-on-without-fixing command, then T005's (refused before
-#: dispatch), then T002's (its findings hold T007).
-FIRST_STOP_FLAGS = [
-    ["--resume", "--human-task", "T002=done", "--human-task", "T005=skip"],
-    ["--resume", "--human-task", "T005=skip"],
-    ["--resume", "--human-task", "T005=done"],
-    ["--resume", "--human-task", "T002=done"],
-    ["--resume", "--human-task", "T002=skip"],
-    ["--resume", "--human-task", "T002=retry"],
-]
 
 
 class TestTheStopRecordsItsAnswers:
@@ -192,9 +178,7 @@ WARNING = ("T003 depends on T004, listed after it: a task added by an edit "
 class TestAnApplyPhasesNotesReachTheResult:
 
     def _orchestrator(self, tmp_path):
-        from tests.test_apply_orchestrator_base import (
-            _FakeOutcome, _FakeSchedulerResult, _orchestrator_on,
-        )
+        from tests.support.apply_base import _FakeOutcome, _FakeSchedulerResult, _orchestrator_on
 
         orch = _orchestrator_on(tmp_path, yes=True)
         orch.write_tasks = [{"task_id": "apply-batch-0", "expected_ids": ["a", "b"]}]
@@ -267,7 +251,7 @@ class TestAnApplyPhasesNotesReachTheResult:
     def test_the_executor_leg_publishes_them_when_it_finishes(self, tmp_path, capsys):
         """The wiring: `_write_outputs` publishes the notes after the RESULT
         block, on the leg that dispatched."""
-        from tests.test_apply_orchestrator_base import (
+        from tests.support.apply_base import (
             MockApplyOrchestrator, _FakeOutcome, _FakeSchedulerResult, _make_args,
             _setup_plan_with_output,
         )
@@ -309,7 +293,8 @@ class TestStatusReadsANativeImplementFromState:
     `util batch-done`, and `status --view run` showed none of them."""
 
     def _native_stop(self, repo, capsys):
-        from tests.test_check_gate_fixture import FINDINGS, TestTheNativeLeg
+        from tests.support.gate_fixture import FINDINGS
+        from tests.test_check_gate_fixture import TestTheNativeLeg
 
         leg = TestTheNativeLeg()
         leg._emit(repo, capsys)
@@ -369,7 +354,7 @@ class TestClosingADeferredManualTask:
 
     @pytest.fixture
     def done_repo(self, tmp_path, monkeypatch):
-        from tests.test_implement_stop_account import _check_passes, make_repo
+        from tests.support.implement_world import _check_passes, make_repo
         from utils import provider_registry as registry
 
         obj = make_repo(tmp_path, monkeypatch)
@@ -419,7 +404,7 @@ class TestClosingADeferredManualTask:
         completion, so review-code read stale. Only a batch something was
         dispatched in counts."""
         import multi_llm
-        from tests.test_implement_stop_account import CHECK_GATE, make_repo
+        from tests.support.implement_world import CHECK_GATE, make_repo
         from utils import provider_registry as registry
         from utils.state_manager import get_or_create_state
 
@@ -528,12 +513,6 @@ Open the page and race.
         ) in core
 
 
-def multi_llm_util(argv) -> int:
-    import multi_llm
-
-    return multi_llm.main(["util", *argv])
-
-
 class TestTheResumeCostCountsEveryKeptTask:
 
     def test_an_unchanged_resume_keeps_the_four_done_before_it(self, repo, capsys):
@@ -558,7 +537,7 @@ class TestASingleTaskRerunStillReopensImplement:
         self, tmp_path, monkeypatch, capsys,
     ):
         import implement_orchestrator
-        from tests.test_implement_stop_account import _check_passes, make_repo
+        from tests.support.implement_world import _check_passes, make_repo
         from utils import provider_registry as registry
         from utils.state_manager import get_or_create_state
 

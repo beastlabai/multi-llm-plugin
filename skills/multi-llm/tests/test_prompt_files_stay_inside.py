@@ -28,8 +28,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tests.test_write_executor import _patch_edit, env  # noqa: E402,F401
-from tests.test_write_prompt import (  # noqa: E402
-    _implement_batches, _materialize, _suggestion_batches, plan_dir,  # noqa: F401
+from tests.support.write_prompt_world import (  # noqa: E402
+    _implement_batches,
+    _materialize,
+    _suggestion_batches,
+    prompt_plan_dir,  # noqa: F401 - the plan_dir fixture
 )
 from utils import subagent_executor as executor  # noqa: E402
 from utils import write_prompt  # noqa: E402

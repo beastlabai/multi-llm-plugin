@@ -25,9 +25,12 @@ import pytest
 
 import implement_orchestrator  # noqa: E402
 import multi_llm  # noqa: E402
-from tests.test_check_gate_fixture import _check, _implement  # noqa: E402
-from tests.test_check_gate_fixture import repo as gate_repo  # noqa: E402,F401
-from tests.test_check_findings_hold_dependents import repo  # noqa: E402,F401
+from tests.support.gate_fixture import _check  # noqa: E402
+from tests.support.implement_world import _implement  # noqa: E402
+from tests.support.gate_fixture import repo as gate_repo  # noqa: E402,F401
+from tests.support.implement_world import (  # noqa: E402
+    implement_repo,  # noqa: F401 - the repo fixture
+)
 from tests.test_write_executor import env  # noqa: E402,F401
 from utils import batch_done  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
@@ -193,7 +196,7 @@ class TestTheExecutorReadsIt:
     ):
         """A run whose code tasks all say they ran nothing (with a stray
         `passed: true`) puts none of them on the tests line."""
-        from tests.test_check_gate_fixture import ALLOW, _policy
+        from tests.support.gate_fixture import ALLOW, _policy
 
         _policy(gate_repo, ALLOW)
         _check(gate_repo, passed=True)

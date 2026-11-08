@@ -3,7 +3,10 @@
 import json
 
 import implement_orchestrator
-from tests.test_write_executor_orchestrators import repo, _seed_generate_tasks  # noqa: F401
+from tests.support.write_orchestrators import (
+    _seed_generate_tasks,
+    orchestrator_repo,  # noqa: F401 - the repo fixture
+)
 from utils import detach, status_file, unattended
 from utils.output_handler import get_phase_dir, get_output_dir
 

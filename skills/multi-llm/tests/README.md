@@ -40,8 +40,11 @@ guessing:
   which drive the skill as a subprocess; the orchestrators a suite runs are
   derived from the mode words and orchestrator names it passes). A new
   `test_e2e_*.py` needs a `HARNESS_SUITES` row or `test_module_tests_map.py` fails.
-- Still not covered: `runpy`, a helper module that re-exports a source module, a
-  computed import nobody declared, and coverage through another source module.
+- A `tests/support` module a test imports counts its own imports as the test's
+  (followed through the support modules it imports in turn).
+- Still not covered: `runpy`, any other helper module that re-exports a source
+  module, a suite-wide fixture a test names without importing it, a computed
+  import nobody declared, and coverage through another source module.
   The map picks a focused first run; it is never a reason to skip the CI command.
 - After a test's imports or a declared route change, run `make tests-map` and
   commit `MODULE_TESTS.md`; `test_module_tests_map.py` fails until you do. Adding
@@ -102,9 +105,37 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.filtering import filter_items
 ```
 
+### Shared fixtures and helpers: `tests/support/`
+
+A helper or fixture that more than one test file uses lives in
+[`support/`](support/), never in a `test_*.py` file another test imports: a
+test module changes with its own tests, and one used as a library broke its
+importers silently. Each module there is one "world" (the check-gate repository,
+the implement world, transcripts for the report-check hook, ...), described in
+its docstring. [`support/__init__.py`](support/__init__.py) has the rules, and
+`test_support_package.py` checks them:
+
+- A module listed in `conftest.py`'s `pytest_plugins` registers its fixtures for
+  every test: name them as parameters and import nothing (`repo` is the
+  check-gate world's, `workdir`, `plan_dir`, `runner_env`, `stub_phases`). A
+  file that defines a fixture of the same name overrides it.
+- A module that is not registered defines each fixture as
+  `@pytest.fixture(name="repo") def implement_repo(...)`; import the function
+  name (`from tests.support.implement_world import implement_repo  # noqa:
+  F401 - the repo fixture`) to get the fixture in that file. To reuse one under
+  another name, go through the module (`write_orchestrators.orchestrator_repo.__wrapped__`),
+  since importing the function binds its fixture name.
+- [`support/gitrepo.py`](support/gitrepo.py) runs git hermetically (`git`,
+  `init_repo`, `commit_file`, `make_repo_fixture`): the developer's
+  `~/.gitconfig` never reaches a test repository.
+- Some older test modules still re-export a moved name (a `__getattr__` at the
+  top, or a `# noqa: F401` import) because a file another change is editing
+  imports it from there; import it from `tests.support` instead.
+
 ### Fixture Pattern
 
-Common fixtures are defined in `conftest.py`:
+Fixtures every test may need, and the isolation that runs for every test, are
+defined in `conftest.py`:
 
 ```python
 @pytest.fixture
@@ -169,7 +200,8 @@ The state file includes a `plan_hash` that must match the actual plan content. I
 
 1. **Unit tests**: Add to the appropriate `test_*.py` file or create a new one
 2. **Integration tests**: Add to `test_apply_suggestions_integration.py` or create a new integration test file
-3. **Fixtures**: Add common fixtures to `conftest.py`
+3. **Fixtures**: Add a fixture or helper that several files share to a
+   `support/` module (see above); `conftest.py` holds the suite-wide isolation
 
 ### Example: Adding a Unit Test
 

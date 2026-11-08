@@ -64,7 +64,7 @@ from utils.providers.base import (  # noqa: E402
     WRITE_SCOPE_REPO_WIDE,
     WRITE_SCOPE_TASKS,
 )
-from tests.test_landlock_exec import require_landlock  # noqa: E402
+from tests.support.landlock_kernel import require_landlock  # noqa: E402
 
 # The rung and its wrapper are Linux-only (Landlock); the dispatch half never
 # runs where the wrapper cannot, and its POSIX assumptions (uids, 0700, /dev

@@ -30,11 +30,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import implement_orchestrator  # noqa: E402
 from tests.test_write_executor import _patch_edit, env  # noqa: E402,F401
-from tests.test_write_executor_orchestrators import (  # noqa: E402,F401
+from tests.support.write_orchestrators import (  # noqa: E402
     IMPLEMENT_WRITE_IDS,
     _phase_dir,
     _seed_generate_tasks,
-    repo,
+    orchestrator_repo,  # noqa: F401 - the repo fixture
 )
 from utils import subagent_executor as executor  # noqa: E402
 from utils import subagent_prompts  # noqa: E402

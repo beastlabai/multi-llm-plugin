@@ -26,8 +26,8 @@ from pathlib import Path
 import pytest
 
 import modes
-from tests.test_check_gate_fixture import _first_run, repo  # noqa: F401 - the fixture
-from tests.test_next_step_relay_rules import RELAY_SURFACES, _flat
+from tests.support.gate_fixture import _first_run
+from tests.support.relay_rules import RELAY_SURFACES, _flat
 from utils import cli_common, run_status, status_file
 from utils.text_clip import without_closing_mark
 
@@ -147,7 +147,8 @@ class TestTheManualSectionReadsWellEnoughToCopy:
         assert np_.manual_close_lead() == np_.manual_close_lead(2)
 
     def test_the_builder_counts_the_tasks_its_command_records(self, tmp_path):
-        from tests.test_manual_tasks_on_completion import P, TITLES, _complete_plan
+        from tests.support.next_phase_world import P
+        from tests.support.manual_tasks import TITLES, _complete_plan
         from utils import next_phase as np_
 
         plan = _complete_plan(tmp_path, tasks={
@@ -324,9 +325,15 @@ class TestApplyTaskSuggestionsNamesTheFileItEdited:
             f"edited {TASKS_TARGET}")
 
 
-from tests.test_write_executor_orchestrators import (  # noqa: E402
-    _ApplyRig, repo as write_repo,  # noqa: F401 - the fixture
-)
+from tests.support import write_orchestrators  # noqa: E402
+from tests.support.write_orchestrators import _ApplyRig  # noqa: E402
+
+
+@pytest.fixture
+def write_repo(tmp_path, monkeypatch):
+    """``tests.support.write_orchestrators``' repo, under its own name here:
+    this module's ``repo`` is the check-gate fixture's."""
+    yield from write_orchestrators.orchestrator_repo.__wrapped__(tmp_path, monkeypatch)
 
 
 class TestTheExecutorRecordsTheFileItsBatchesEdited(_ApplyRig):
@@ -363,7 +370,7 @@ class TestAToolRoutesOutputLeavesTheSectionToTheStep:
 
     def _poll_complete(self, tmp_path, capsys, monkeypatch, route):
         import modes as mode_table
-        from tests.test_manual_tasks_on_completion import _complete_plan
+        from tests.support.manual_tasks import _complete_plan
         from utils.output_handler import output_dir_path
 
         if route:

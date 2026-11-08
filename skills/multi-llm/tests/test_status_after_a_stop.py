@@ -25,11 +25,8 @@ from pathlib import Path
 import pytest
 
 import multi_llm  # noqa: E402
-from tests.test_check_gate_fixture import (  # noqa: F401  (the fixture)
-    _first_run,
-    repo,
-)
-from tests.test_implement_stop_account import _implement
+from tests.support.gate_fixture import _first_run
+from tests.support.implement_world import _implement
 from utils import run_status, status_file
 from utils.task_ledger import mirror_ids
 
@@ -119,7 +116,7 @@ class TestTheMirrorNamesTheTasksWhoseRunnerFailed:
         assert mirror["runner_failed_task_ids"] == []
 
     def test_a_task_whose_runner_failed_is_named(self, repo, capsys, monkeypatch):
-        from tests.test_check_gate_fixture import _check
+        from tests.support.gate_fixture import _check
 
         _check(repo, passed=False)
         monkeypatch.setenv(

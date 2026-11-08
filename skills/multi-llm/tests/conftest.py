@@ -30,6 +30,19 @@ from .harness import (
     AssertionHelpers,
 )
 
+#: The shared fixture modules registered for every test, so a test names their
+#: fixtures as parameters and imports nothing for them. A module listed here
+#: defines no autouse fixture and no fixture name another listed module (or this
+#: file) defines; ``tests/support/__init__.py`` has the rules and
+#: ``tests/test_support_package.py`` checks them.
+pytest_plugins = [
+    "tests.support.batch_done_world",
+    "tests.support.full_workflow_world",
+    "tests.support.gate_fixture",
+    "tests.support.main_runs",
+    "tests.support.subagent_world",
+]
+
 
 #: The uv this test session runs under, resolved once at import — before any
 #: test narrows PATH to a mock bin directory.

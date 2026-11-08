@@ -24,9 +24,9 @@ if str(SKILL_ROOT) not in sys.path:
 from utils import host_capabilities, run_status  # noqa: E402
 from utils import next_phase as np_  # noqa: E402
 
-from tests.test_manual_tasks_on_completion import (  # noqa: E402,F401
-    P, _complete_plan, _run, workdir,
-)
+from tests.support.next_phase_world import P  # noqa: E402
+from tests.support.manual_tasks import _complete_plan  # noqa: E402
+from tests.support.main_runs import _run  # noqa: E402
 
 ADVICE = "keeping a --human-task answer only for each task you did"
 

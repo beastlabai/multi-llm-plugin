@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import re
 
-from tests.test_batch_done import PROMPT, _materialize, plan_dir  # noqa: F401
-from tests.test_dispatch_counts import _util
+from tests.support.batch_done_world import PROMPT, _materialize
+from tests.support.dispatch_world import _util
 from tests.test_write_executor import FakeState, _patch_edit, env  # noqa: F401
 from utils import metrics
 from utils.state_manager import StateManager

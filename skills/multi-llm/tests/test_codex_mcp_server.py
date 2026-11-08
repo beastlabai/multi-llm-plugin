@@ -2728,8 +2728,8 @@ class TestTheOutputLeavesTheBlockToTheStep:
     def test_a_real_complete_poll_says_the_manual_note_once(
         self, harness, tmp_path, monkeypatch, capsys,
     ):
-        from tests.test_manual_tasks_on_completion import _complete_plan
-        from tests.test_next_command_emitters import _terminal_record
+        from tests.support.manual_tasks import _complete_plan
+        from tests.support.next_command_world import _terminal_record
 
         plan = _complete_plan(tmp_path / "project")
         _terminal_record(plan, "apply-fixes", mode="apply-code-fixes",
@@ -2750,8 +2750,8 @@ class TestTheOutputLeavesTheBlockToTheStep:
     def test_a_real_poll_says_the_optional_why_once(
         self, harness, tmp_path, monkeypatch, capsys,
     ):
-        from tests.test_next_command_emitters import _terminal_record, build
-        from tests.test_next_phase import P, UP_TO_TASKS, WHY_REVIEW_TASKS, S
+        from tests.support.next_command_world import _terminal_record, build
+        from tests.support.next_phase_world import P, S, UP_TO_TASKS, WHY_REVIEW_TASKS
 
         root = tmp_path / "project"
         root.mkdir()
@@ -3889,7 +3889,9 @@ class TestTheStopLineBesideTheSection:
         assert envelope["result"]["error"] == STOP_LINE
 
 
-from tests.test_write_executor_orchestrators import repo  # noqa: E402,F401
+from tests.support.write_orchestrators import (  # noqa: E402
+    orchestrator_repo,  # noqa: F401 - the repo fixture
+)
 
 
 class TestAManualGateStopBesideItsSection:
@@ -3903,9 +3905,9 @@ class TestAManualGateStopBesideItsSection:
     def test_the_error_names_the_gate_and_the_section_the_way_on(
             self, harness, repo, capsys):
         sys.path.insert(0, str(SKILL_ROOT))
-        from tests.test_manual_task_gate import (
-            IMPLEMENT_WRITE_IDS, _clean_env, _manual, _run, _seed_generate_tasks,
-        )
+        from tests.support.write_orchestrators import IMPLEMENT_WRITE_IDS, _seed_generate_tasks
+        from tests.support.main_runs import _clean_env, _run
+        from tests.support.manual_gate import _manual
 
         _clean_env(repo.monkeypatch)
         _seed_generate_tasks(repo)

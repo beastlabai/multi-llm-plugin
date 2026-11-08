@@ -23,16 +23,16 @@ from utils import cli_common, commit_review  # noqa: E402
 from utils import improve_workflow as iw  # noqa: E402
 from utils.cli_common import RESULT_MARKER  # noqa: E402
 
-from tests.test_commit_front_door import (  # noqa: E402,F401
+from tests.support.commit_door import (  # noqa: E402
     FOLDER,
     _brief_of,
     _complete_review,
     _door,
     _review,
     _sha,
-    fronted,
-    repo,
-    seams,
+    door_fronted,  # noqa: F401 - the fronted fixture
+    door_repo,  # noqa: F401 - the repo fixture
+    door_seams,  # noqa: F401 - the seams fixture
 )
 
 PRESERVE = ["--scope-policy", "preserve"]

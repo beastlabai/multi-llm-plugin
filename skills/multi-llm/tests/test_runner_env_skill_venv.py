@@ -45,11 +45,11 @@ from utils.providers.base import (  # noqa: E402
     PROFILE_GENERATE,
 )
 from utils.providers.codex import PLUGIN_LANDLOCK_RUNG, CodexProvider  # noqa: E402
-from tests.test_plugin_landlock_executor import (  # noqa: E402,F401
+from tests.support.landlock_world import (  # noqa: E402
     _plan_request,
-    jail_home,
-    repo,
-    wrapper,
+    landlock_jail_home,  # noqa: F401 - the jail_home fixture
+    landlock_repo,  # noqa: F401 - the repo fixture
+    landlock_wrapper,  # noqa: F401 - the wrapper fixture
 )
 
 NAMES = ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT")

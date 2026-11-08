@@ -24,14 +24,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tests.test_json_extractor import (  # noqa: E402
-    _FENCE_ALPHABETS,
-    _FENCE_EDGE_CASES,
-    _FIRST_READER_EDGE_CASES,
-    _WALK_ALPHABETS,
-    _document_mix,
-    _fence_mix,
-    _fenced_fixture_texts,
+from tests.support.json_corpus import (  # noqa: E402
+    _FENCE_ALPHABETS, _FENCE_EDGE_CASES, _FIRST_READER_EDGE_CASES, _WALK_ALPHABETS, _document_mix,
+    _fence_mix, _fenced_fixture_texts,
 )
 from utils import schema_validator, suggestion_processor  # noqa: E402
 from utils.review_orchestrator_base import extract_json_array  # noqa: E402

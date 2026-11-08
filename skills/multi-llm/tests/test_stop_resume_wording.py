@@ -20,14 +20,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tests.test_check_gate_fixture import (  # noqa: E402,F401
-    ALLOW,
-    PLAN,
-    _first_run,
-    _policy,
-    repo,
-)
-from tests.test_implement_stop_account import _implement  # noqa: E402
+from tests.support.gate_fixture import ALLOW, PLAN, _first_run, _policy  # noqa: E402
+from tests.support.implement_world import _implement  # noqa: E402
 from tests.test_write_executor import _patch_edit, env  # noqa: E402,F401
 from utils import run_status  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402

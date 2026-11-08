@@ -47,30 +47,15 @@ from utils.next_phase import (  # noqa: E402
 from utils.output_handler import output_dir_path  # noqa: E402
 from utils.state_manager import StateManager  # noqa: E402
 
-from tests.test_next_phase import (  # noqa: E402
-    ALL_REQUIRED,
-    CR_CLEAN,
-    CR_FINDING,
-    NOTICE_ONE_GROUP,
-    P,
-    ROUTES,
-    ROUTE_IDS,
-    RP_VALID,
-    RT_ACTIONABLE,
-    RT_CLEAN,
-    UP_TO_CODE_REVIEW,
-    UP_TO_IMPLEMENT,
-    UP_TO_REVIEW_TASKS,
-    UP_TO_TASKS,
-    WHY_REVIEW_TASKS,
-    S,
-    _build,
-    _merge,
+from tests.support.next_phase_world import (  # noqa: E402
+    ALL_REQUIRED, CR_CLEAN, CR_FINDING, NOTICE_ONE_GROUP, P, ROUTES, ROUTE_IDS, RP_VALID,
+    RT_ACTIONABLE, RT_CLEAN, S, UP_TO_CODE_REVIEW, UP_TO_IMPLEMENT, UP_TO_REVIEW_TASKS,
+    UP_TO_TASKS, WHY_REVIEW_TASKS, _merge,
 )
+from tests.support.main_runs import _run
+from tests.support.next_command_world import PLUGIN, SKILL_ROOT, _target, _terminal_record, build
 
-SKILL_ROOT = Path(__file__).parent.parent
 REAL_LOAD_TARGET = multi_llm._load_target
-PLUGIN = "/multi-llm:multi-llm "
 BLOCK_MARKERS = (
     NEXT_COMMAND_MARKER, NEXT_COMMAND_OPTIONAL_WHY_MARKER,
     NEXT_COMMAND_OPTIONAL_MARKER, WORKFLOW_COMPLETE_MARKER,
@@ -114,55 +99,6 @@ MODE_IDS = [row[0] for row in MODE_ROWS]
 # Helpers
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
-def workdir(tmp_path, monkeypatch):
-    """cwd at the fixture root, so ``plans/foo.md`` is a relative plan path."""
-    monkeypatch.chdir(tmp_path)
-    for name in ("MULTI_LLM_HOST", "MULTI_LLM_ROUTE", detach.PLAN_ARG_ENV,
-                 detach.WORKER_ENV):
-        monkeypatch.delenv(name, raising=False)
-    return tmp_path
-
-
-def build(workdir, spec):
-    """``tests/test_next_phase._build``, from inside the repository.
-
-    A plan's first ``StateManager`` records ``git rev-parse HEAD`` from the
-    process's cwd, which the ``workdir`` fixture moved out of any repository.
-    """
-    here = os.getcwd()
-    os.chdir(SKILL_ROOT)
-    try:
-        return _build(workdir, spec)
-    finally:
-        os.chdir(here)
-
-
-def _target(monkeypatch, body=None, code=0):
-    """Stub every mode's target: run *body(argv)* (if any), return *code*."""
-    seen = {}
-
-    def loader(module_path, attr):
-        def target(argv):
-            seen["argv"] = list(argv)
-            if body is not None:
-                result = body(argv)
-                if result is not None:
-                    return result
-            return code
-
-        return target
-
-    monkeypatch.setattr(multi_llm, "_load_target", loader)
-    return seen
-
-
-def _run(argv, capsys):
-    """``multi_llm.main(argv)`` → (exit code, stdout, stderr, result payload)."""
-    code = multi_llm.main(list(argv))
-    captured = capsys.readouterr()
-    return code, captured.out, captured.err, cli_common.parse_result_line(captured.out)
-
 
 def _block(text):
     return [
@@ -172,7 +108,7 @@ def _block(text):
 
 
 def _expected_payload(expect, prefix):
-    from tests.test_next_phase import with_markdown
+    from tests.support.next_phase_world import with_markdown
 
     if expect == "complete":
         return with_markdown({"phase": None, "command": None, "complete": True})
@@ -231,20 +167,6 @@ def _select_route(tmp_path, monkeypatch, host, route):
             _link_skill_root(tmp_path, monkeypatch, "plugins", "cache", "multi-llm")
     elif route:
         monkeypatch.setenv("MULTI_LLM_ROUTE", route)
-
-
-def _terminal_record(plan, phase_dir_name, **run):
-    """A finished detached run's checkpoint, without spawning anything."""
-    phase_dir = output_dir_path(plan) / phase_dir_name
-    phase_dir.mkdir(parents=True, exist_ok=True)
-    status_file.write_status(str(phase_dir), {
-        "phase": phase_dir_name, "state": "complete",
-    })
-    record = {"run_id": "run-t5-0001", "state": "done", "exit_code": 0,
-              "detached": True}
-    record.update(run)
-    status_file.claim_run(str(phase_dir), record)
-    return phase_dir
 
 
 # ---------------------------------------------------------------------------

@@ -63,15 +63,14 @@ for _path in (str(SKILL_ROOT), str(REPO_ROOT / "packaging")):
 import modes as mode_table  # noqa: E402
 import multi_llm  # noqa: E402
 from common import payload  # noqa: E402
-from tests.test_report_check import (  # noqa: E402
-    COMMAND, Transcript, block_output, report,
+from tests.support.transcripts import COMMAND, Transcript, block_output, report  # noqa: E402
+from tests.support.hook_settle_world import (  # noqa: E402
+    BACKGROUND_PHASE, LAUNCHED, LOOKUP, denied, reply, stop_input, tool_result, tool_use,
+    wakeup_input, write_later,
 )
-from tests.test_hook_transcript_settle import (  # noqa: E402
-    BACKGROUND_PHASE, LAUNCHED, LOOKUP, denied, own_call_entry, reply, stop_input,
-    tool_result, tool_use, wakeup_input, write_later,
-)
-from tests.test_hook_transcript_settle import line as transcript_line  # noqa: E402
-from tests.test_wakeup_check import hook_input, phase, racing_03  # noqa: E402
+from tests.support.wakeup_world import own_call_entry  # noqa: E402
+from tests.support.hook_settle_world import line as transcript_line  # noqa: E402
+from tests.support.wakeup_world import hook_input, phase, racing_03  # noqa: E402
 from utils import cli_common, unattended  # noqa: E402
 
 

@@ -26,13 +26,8 @@ import json
 import pytest
 
 import multi_llm  # noqa: E402
-from tests.test_check_gate_fixture import (  # noqa: F401 - `repo` is a fixture
-    NOTE,
-    _dispatched_prompt,
-    _statuses,
-    repo,
-)
-from tests.test_implement_stop_account import _implement  # noqa: E402
+from tests.support.gate_fixture import NOTE, _dispatched_prompt
+from tests.support.implement_world import _implement, _statuses  # noqa: E402
 from utils.state_manager import get_or_create_state  # noqa: E402
 from utils.write_batch_scheduler import (  # noqa: E402
     BATCH_CHECK_ACCEPTED_MARKER,
@@ -40,21 +35,19 @@ from utils.write_batch_scheduler import (  # noqa: E402
     accepted_checks_section,
     split_accepted_findings,
 )
-
-#: T002's finding as OpenCode's check recorded it in run 9.
-ACCEPTED = "node scripts/check.mjs: retries must be 3 (found 2)"
-#: What T007's own check reported when it ran the same check again (run 9).
-RERUN = "node scripts/check.mjs: check failed: retries must be 3 (found 2) (exit 1)"
-#: The Claude Code host's wording of the same T002 finding (run 9, native leg).
-NATIVE = (
-    "node scripts/check.mjs exited 1 and printed 'check failed: retries must be "
-    "3 (found 2)'. src/config.json has retries=2 (set by T001), but the check "
-    "requires 3."
+from tests.support.accepted_rerun import (
+    ACCEPTED,
+    NATIVE,
+    RERUN,
+    RESUME,
+    _first_stop,
+    _own_check,
+    _result_line,
+    _row,
 )
+
 #: A problem the user never accepted, from the same command.
 NEW = "node scripts/check.mjs: mode must be strict (found loose)"
-
-RESUME = ("--resume", "--human-task", "T002=done", "--human-task", "T005=skip")
 
 
 # -- the match --------------------------------------------------------------
@@ -140,41 +133,11 @@ def test_the_released_task_is_told_the_failure_is_accepted_and_not_its_own():
 # -- the executor leg -------------------------------------------------------
 
 
-def _first_stop(repo, capsys) -> None:
-    """Run 1: T002's check reports ACCEPTED (with its command), T005 is
-    refused by the write policy, T007 waits on T002."""
-    repo.monkeypatch.setenv("MOCK_LLM_WRITE_CHECK", json.dumps(
-        {"passed": False, "findings": [ACCEPTED]}))
-    assert _implement(repo) == 3
-    capsys.readouterr()
-    repo.log.unlink(missing_ok=True)
-
-
-def _own_check(repo, findings) -> None:
-    """T007's reply carries its own `check` with *findings*."""
-    repo.monkeypatch.setenv("MOCK_LLM_WRITE_BATCH_CHECK", json.dumps(
-        {"passed": False, "findings": list(findings)}))
-    repo.monkeypatch.setenv("MOCK_LLM_WRITE_BATCH_CHECK_IF_PROMPT_HAS", f"Title: {NOTE}\n")
-
-
 def _resume(repo) -> int:
     """The accept answers, through the dispatcher (its result line)."""
     return multi_llm.main([
         "implement", str(repo.plan), "--yes", "--exec-subagents", *RESUME,
     ])
-
-
-def _result_line(text: str) -> dict:
-    line = next(
-        line for line in reversed(text.splitlines())
-        if line.startswith("MULTI_LLM_RESULT: ")
-    )
-    return json.loads(line.split(": ", 1)[1])
-
-
-def _row(repo, task_id: str) -> dict:
-    report = json.loads((repo.phase_dir / "write_batch_report.json").read_text())
-    return next(row for row in report["tasks"] if row["task_id"] == task_id)
 
 
 class TestTheExecutorLeg:

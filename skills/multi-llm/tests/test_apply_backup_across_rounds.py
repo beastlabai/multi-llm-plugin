@@ -23,10 +23,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tests.test_write_executor_orchestrators import (  # noqa: E402,F401
+from tests.support.write_orchestrators import (  # noqa: E402
     APPLY_PLAN,
     _ApplyRig,
-    repo,
+    orchestrator_repo,  # noqa: F401 - the repo fixture
 )
 
 #: Where `keep_backup_aside` moves round one's backup: the sha256 of the

@@ -32,16 +32,8 @@ import json
 import pytest
 
 import multi_llm  # noqa: E402
-from tests.test_check_gate_fixture import (  # noqa: F401 - `repo` is a fixture
-    ALLOW,
-    CHECK_GATE,
-    DENY,
-    NOTE,
-    PLAN,
-    _policy,
-    _statuses,
-)
-from tests.test_implement_stop_account import _implement, make_repo  # noqa: E402
+from tests.support.gate_fixture import ALLOW, CHECK_GATE, DENY, NOTE, PLAN, _policy
+from tests.support.implement_world import _implement, _statuses, make_repo  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils.state_manager import get_or_create_state  # noqa: E402
 from utils.write_batch_scheduler import (  # noqa: E402

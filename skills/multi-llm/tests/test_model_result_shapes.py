@@ -51,7 +51,7 @@ from utils.llm_client import ERROR_PARSE_ERROR, invoke_with_file_output  # noqa:
 from utils.review_orchestrator_base import MAX_RESULT_DEPTH, write_model_result  # noqa: E402
 from utils.result_files import REJECTED_RESULT_SUFFIX  # noqa: E402
 from tests.test_code_review_orchestrator import _make_args  # noqa: E402
-from tests.test_reaggregate_identity import _run_cro_reaggregate  # noqa: E402
+from tests.support.reaggregate_world import _run_cro_reaggregate  # noqa: E402
 
 #: The title that makes :func:`_failing_encoder` refuse a record list.
 ENCODER_FAILS = "The encoder cannot write this one"

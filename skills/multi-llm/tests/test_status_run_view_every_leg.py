@@ -39,11 +39,11 @@ from utils.write_phase_bridge import (  # noqa: E402
     write_task_file_for_phase,
 )
 
-from tests.test_native_implement_report import (  # noqa: E402,F401
+from tests.support.native_report_world import (  # noqa: E402
     PLAN_ARG,
     _emit,
     _util,
-    repo,
+    native_repo,  # noqa: F401 - the repo fixture
 )
 
 TYPED = "plans/p.md"

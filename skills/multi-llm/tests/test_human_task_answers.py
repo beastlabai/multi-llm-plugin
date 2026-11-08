@@ -41,26 +41,21 @@ from utils import write_batch_scheduler as scheduler  # noqa: E402
 from utils.state_manager import StateManager, get_or_create_state  # noqa: E402
 from utils.task_decomposer import Task, TaskStatus  # noqa: E402
 
-from tests.test_implement_stop_account import (  # noqa: E402
-    PLAN, _check_fails, _check_passes, _dispatched_titles, _implement,
-    _run_one_that_stops, _statuses, make_repo,
+from tests.support.implement_world import (  # noqa: E402
+    PLAN,
+    PLAN_WITH_CODE_DEPENDENT,
+    _check_fails,
+    _check_passes,
+    _dispatched_titles,
+    _implement,
+    _run_one_that_stops,
+    _statuses,
+    implement_repo,  # noqa: F401 - the repo fixture
+    make_repo,
 )
 
-PLAN_WITH_CODE_DEPENDENT = PLAN + """
-### T006: Edit: after the manual step
-Needs the manual play-through first.
-- Depends on: T005
-- Files to modify: src/main.py
-"""
 
 PLAN_NO_HUMAN = PLAN.split("### T005", 1)[0]
-
-
-@pytest.fixture
-def repo(tmp_path, monkeypatch):
-    yield make_repo(tmp_path, monkeypatch)
-    registry._config = None
-    registry._config_key = None
 
 
 @pytest.fixture
@@ -406,7 +401,7 @@ class TestALaterResumeKeepsEveryAnsweredTask:
         assert _implement(repo, "--resume", "--human-task", "T002=done") == 3
         assert "1 accepted after failing (T002)" in _account_line(repo)
         # Run 3: T004 passes now.
-        from tests.test_implement_stop_account import EDIT_GATE
+        from tests.support.implement_world import EDIT_GATE
 
         repo.monkeypatch.setenv("MOCK_LLM_EDITS_IF_PROMPT_HAS", EDIT_GATE)
         _check_passes(repo)

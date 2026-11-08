@@ -60,12 +60,8 @@ from utils.providers.base import (  # noqa: E402
 from utils.state_manager import StateManager  # noqa: E402
 from utils.write_safety import AuditLog, safety_dir  # noqa: E402
 from tests.mock_launchers import is_this_interpreter  # noqa: E402
-from tests.test_plugin_landlock_executor import (  # noqa: E402
-    BWRAP_LINE,
-    F6_LEAD,
-    FakeWrapper,
-    _slot_dirs,
-    use_own_temp_base,
+from tests.support.landlock_world import (  # noqa: E402
+    BWRAP_LINE, F6_LEAD, FakeWrapper, _slot_dirs, use_own_temp_base,
 )
 
 # Windows runs no plugin jail (codex has its own sandbox there), and this suite
@@ -1471,7 +1467,7 @@ class TestTheRealJailThroughTheScheduler:
 
     @pytest.fixture
     def jailed(self, tmp_path, monkeypatch):
-        from tests.test_landlock_exec import require_landlock
+        from tests.support.landlock_kernel import require_landlock
         require_landlock()
         yield Scratch(tmp_path, monkeypatch, real_jail=True)
         registry._config = None
@@ -1678,7 +1674,7 @@ class TestARootLevelFileLandsOnTheRealJail:
 
     @pytest.fixture
     def jailed(self, tmp_path, monkeypatch):
-        from tests.test_landlock_exec import require_landlock
+        from tests.support.landlock_kernel import require_landlock
         require_landlock()
         yield Scratch(tmp_path, monkeypatch, real_jail=True)
         registry._config = None

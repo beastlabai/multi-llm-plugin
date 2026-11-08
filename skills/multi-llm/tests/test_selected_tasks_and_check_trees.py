@@ -3,16 +3,12 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
 import implement_orchestrator as implement
 from tests.scheduler_support import make_scheduler
-from tests.test_implement_stop_account import (
-    _dispatched_titles, _implement, make_repo,
-)
-from utils import provider_registry as registry
+from tests.support.implement_world import _dispatched_titles, _implement
 from utils.batch_done import record_batch
 from utils.state_manager import (
     get_or_create_state, set_task_batch_check_in_state,
@@ -24,13 +20,7 @@ from utils.write_prompt import (
     record_check_tree,
 )
 from utils.write_safety import TaskSnapshot
-
-
-@pytest.fixture
-def repo(tmp_path, monkeypatch):
-    yield make_repo(tmp_path, monkeypatch)
-    registry._config = None
-    registry._config_key = None
+from tests.support.implement_world import implement_repo  # noqa: F401 - the repo fixture
 
 
 def _emit(repo, *flags):

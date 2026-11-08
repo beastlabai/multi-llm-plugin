@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import os
 import stat
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -23,17 +22,12 @@ sys.path.insert(0, str(SKILL_ROOT))
 import modes as mode_table  # noqa: E402
 import multi_llm  # noqa: E402
 from utils.cli_common import RESULT_MARKER, render_instruction_text, skill_dir  # noqa: E402
+from tests.support.gitrepo import make_repo_fixture  # noqa: E402
+
+#: The ``repo`` fixture: a fresh repository (tests/support/gitrepo.py) at the cwd.
+repo_fixture = make_repo_fixture()
 
 CORE_MODES = [mode.name for mode in mode_table.MODES if mode.instruction_file]
-
-
-@pytest.fixture
-def repo(tmp_path, monkeypatch):
-    root = tmp_path / "repo"
-    root.mkdir()
-    subprocess.run(["git", "init", "-q", str(root)], check=True)
-    monkeypatch.chdir(root)
-    return root.resolve()
 
 
 def _run(argv, capsys):

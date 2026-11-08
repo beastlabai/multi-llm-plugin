@@ -560,7 +560,7 @@ class TestImplementsResultLineSaysTheCheckFails:
         self, tmp_path, monkeypatch, capsys,
     ):
         import multi_llm
-        from tests.test_implement_stop_account import make_repo
+        from tests.support.implement_world import make_repo
         from utils import provider_registry as registry
         from utils.cli_common import parse_result_line
 
@@ -595,7 +595,7 @@ class TestTheApplyReport:
     both, from the scheduler's rows)."""
 
     def _orchestrator(self, tmp_path, rows, unverified=None):
-        from tests.test_apply_orchestrator_base import _orchestrator_on
+        from tests.support.apply_base import _orchestrator_on
 
         class Result:
             outcomes = []

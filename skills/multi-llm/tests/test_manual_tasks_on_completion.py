@@ -25,38 +25,28 @@ import os
 import sys
 from pathlib import Path
 
-import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import check_workflow_prerequisites as prereq  # noqa: E402
 import multi_llm  # noqa: E402
-from utils import cli_common, detach, report_check, run_status, status_file  # noqa: E402
+from utils import cli_common, report_check, run_status, status_file  # noqa: E402
 from utils import next_phase as np_  # noqa: E402
 from utils.output_handler import output_dir_path  # noqa: E402
 from utils.state_manager import StateManager  # noqa: E402
 
-from tests.test_next_phase import (  # noqa: E402
-    ALL_REQUIRED, CR_FINDING, P, S, _build, with_markdown,
-)
-from tests.test_report_check import Transcript, decision_of, run_check  # noqa: E402
-from tests.test_write_executor_orchestrators import (  # noqa: E402,F401
+from tests.support.next_phase_world import ALL_REQUIRED, P, S, _build, with_markdown  # noqa: E402
+from tests.support.transcripts import Transcript, decision_of, run_check  # noqa: E402
+from tests.support.write_orchestrators import (  # noqa: E402
     IMPLEMENT_WRITE_IDS,
     _seed_generate_tasks,
-    repo,
+    orchestrator_repo,  # noqa: F401 - the repo fixture
 )
+from tests.support.main_runs import _run
+from tests.support.manual_tasks import DEFERRED, SKILL_ROOT, TITLES, _complete_plan
 
-SKILL_ROOT = Path(__file__).parent.parent
 PLUGIN = "/multi-llm:multi-llm "
 
-TITLES = {
-    "T001": "Page shell",
-    "T010": "Static validation of the inline module",
-    "T011": "Manual playthrough over the static server",
-    "T012": "Manual file:// load and blocked-CDN fallback check",
-}
-DEFERRED = {"T001": "completed", "T010": "completed",
-            "T011": "skipped", "T012": "skipped"}
 MANUAL = [
     {"id": "T011", "title": TITLES["T011"]},
     {"id": "T012", "title": TITLES["T012"]},
@@ -87,21 +77,6 @@ def close_note(prefix: str, plan: str, ids) -> str:
     command = f"{prefix}--implement {plan} --resume {answers}"
     assert np_.manual_close_note(command, len(ids)).count(command) == 1
     return np_.manual_close_note(command, len(ids))
-
-
-def _complete_plan(root: Path, *, titles=True, tasks=None) -> Path:
-    """Every required phase on record, two implement tasks deferred."""
-    here = os.getcwd()
-    os.chdir(SKILL_ROOT)  # the first StateManager runs `git rev-parse HEAD`
-    try:
-        plan = _build(root, S(ALL_REQUIRED, tasks=tasks or DEFERRED, files=CR_FINDING))
-    finally:
-        os.chdir(here)
-    if titles:
-        state = StateManager(plan)
-        state.record_task_titles(TITLES)
-        state.save()
-    return plan
 
 
 def _workflow(plan: Path) -> dict:
@@ -348,21 +323,6 @@ class TestTheCompleteAnswerNamesThem:
 # ---------------------------------------------------------------------------
 # The emitters
 # ---------------------------------------------------------------------------
-
-@pytest.fixture
-def workdir(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    for name in ("MULTI_LLM_HOST", "MULTI_LLM_ROUTE", detach.PLAN_ARG_ENV,
-                 detach.WORKER_ENV):
-        monkeypatch.delenv(name, raising=False)
-    return tmp_path
-
-
-def _run(argv, capsys):
-    code = multi_llm.main(list(argv))
-    captured = capsys.readouterr()
-    return code, captured.out, captured.err, cli_common.parse_result_line(captured.out)
-
 
 class TestTheEmittersCarryThem:
     def test_util_next_command(self, workdir, capsys):

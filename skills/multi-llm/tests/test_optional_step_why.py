@@ -22,12 +22,7 @@ if str(SKILL_ROOT) not in sys.path:
 import check_workflow_prerequisites as prereq  # noqa: E402
 from utils import next_phase  # noqa: E402
 
-from tests.test_workflow_prerequisites import (  # noqa: E402
-    _put,
-    _record,
-    _status,
-    _workflow_plan,
-)
+from tests.support.workflow_world import _put, _record, _status, _workflow_plan  # noqa: E402
 
 
 def _review_tasks_left(plan, groups: int, *, validated: bool) -> None:

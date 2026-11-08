@@ -29,8 +29,7 @@ from utils import cli_common, detach, next_phase, process_control, run_status, s
 from utils.state_manager import get_or_create_state
 
 import tests.test_check_gate_fixture as gate
-from tests.test_check_gate_fixture import _first_run, repo  # noqa: F401
-from tests.test_manual_tasks_on_completion import workdir  # noqa: F401
+from tests.support.gate_fixture import _first_run
 
 TYPED = "plans/p.md"
 CODEX_TOOL = "$multi-llm:multi-llm "
@@ -325,7 +324,7 @@ class TestThePlansManualTasksAndNextStep:
     route ran detached."""
 
     def _plan(self, workdir, route="package", state="done", exit_code=0):
-        from tests.test_manual_tasks_on_completion import _complete_plan
+        from tests.support.manual_tasks import _complete_plan
 
         plan = _complete_plan(workdir)
         phase = plan.parent / plan.stem / "apply-fixes"

@@ -33,7 +33,6 @@ import asyncio
 import json
 import os
 import shlex
-import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,6 +49,7 @@ from utils import cli_common, improve_workflow, next_phase, run_status, status_f
 from utils.cli_common import parse_result_line  # noqa: E402
 from utils.commit_review import BRIEF_END_MARKER, BRIEF_MARKER, output_dir_for_brief  # noqa: E402
 from utils.state_manager import StateManager  # noqa: E402
+from tests.support.gitrepo import git as _git  # noqa: E402
 
 BASE = "a1b2c3d4e5f6" + "0" * 28
 HEAD = "e4f5a6b7c8d9" + "1" * 28
@@ -88,11 +88,6 @@ def _clean(command: str) -> None:
         assert not any(t == flag or t.startswith(flag + "=") for t in tokens), command
     for word in ("review-code", "apply-code-fixes", "--review-code", "--apply-code-fixes"):
         assert word not in tokens, command
-
-
-def _git(root: Path, *args: str) -> str:
-    return subprocess.run(["git", *args], cwd=str(root), check=True,
-                          capture_output=True, text=True).stdout
 
 
 @pytest.fixture

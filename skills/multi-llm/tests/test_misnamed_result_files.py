@@ -38,13 +38,8 @@ from utils import review_orchestrator_base as rob  # noqa: E402
 from utils.llm_client import ERROR_PARSE_ERROR, ERROR_TIMEOUT, invoke_with_file_output  # noqa: E402
 from utils.status_file import read_status, write_status  # noqa: E402
 
-from tests.test_reaggregate_identity import (  # noqa: E402
-    _cro_phase,
-    _cro_report_md,
-    _phase,
-    _reaggregate,
-    _reported_results,
-    _run_cro_reaggregate,
+from tests.support.reaggregate_world import (  # noqa: E402
+    _cro_phase, _cro_report_md, _phase, _reaggregate, _reported_results, _run_cro_reaggregate,
     _suggestions,
 )
 

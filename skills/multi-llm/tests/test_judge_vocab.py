@@ -32,11 +32,8 @@ SKILL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SKILL_ROOT))
 
 import display_decisions  # noqa: E402
-from tests.test_apply_orchestrator_base import (  # noqa: E402
-    MockApplyOrchestrator,
-    _FakeOutcome,
-    _FakeSchedulerResult,
-    _make_args,
+from tests.support.apply_base import (  # noqa: E402
+    MockApplyOrchestrator, _FakeOutcome, _FakeSchedulerResult, _make_args,
     _setup_plan_with_output,
 )
 from utils import html_report_generator  # noqa: E402

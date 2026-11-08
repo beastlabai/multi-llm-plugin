@@ -19,7 +19,6 @@ from __future__ import annotations
 import pytest
 
 import multi_llm  # noqa: E402
-from tests.test_check_gate_fixture import repo  # noqa: F401 - `repo` is a fixture
 from utils.write_batch_scheduler import with_result_contract  # noqa: E402
 
 LINE = (

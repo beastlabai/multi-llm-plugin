@@ -31,7 +31,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import code_review_orchestrator as cro
-from tests.test_json_extractor import USAGE_CAP_ENVELOPE
+from tests.support.json_corpus import USAGE_CAP_ENVELOPE
 from utils import llm_client
 from utils.provider_registry import get_provider
 from utils.providers.base import STATUS_RATE_LIMITED, classify_streams
