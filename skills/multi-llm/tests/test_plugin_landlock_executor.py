@@ -512,6 +512,7 @@ class TestTheWalk:
         assert (rung, walk) == (None, (("plugin-landlock", "unknown"),))
         assert wrapper.records() == []
 
+    @pytest.mark.shell_probe
     def test_the_rung_gets_what_is_left_of_the_one_deadline(self, repo, wrapper, monkeypatch):
         seen = []
         real = executor._run_sandbox_probe
@@ -548,6 +549,7 @@ class TestTheWalk:
 # The gate (F1 items 4 and 6; step 3; step 6)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.shell_probe
 class TestTheReadOnlyGate:
     def test_auto_takes_the_rung_with_one_incidental_line(self, repo, wrapper, gate, capsys):
         assert gate(_JailLadder()) == "plugin-landlock"
@@ -600,6 +602,7 @@ class TestTheReadOnlyGate:
         assert executor._SANDBOX_DECISIONS == {}
 
 
+@pytest.mark.shell_probe
 class TestTheWriteGate:
     def test_auto_takes_the_rung_for_a_plan_file_grant(self, repo, wrapper, gate, capsys):
         request = _plan_request(repo)
@@ -712,6 +715,7 @@ class TestTheWriteGate:
         assert wrapper.records() == []
 
 
+@pytest.mark.shell_probe
 class TestF5BelowTheRung:
     """Plan step 6: a full-access chat is consent — only below the jail."""
 
@@ -782,6 +786,7 @@ class TestStepFourWording:
                  _plan_request(repo) if request else None)
         return excinfo.value.message
 
+    @pytest.mark.shell_probe
     def test_the_parts_come_in_order(self, repo, wrapper, gate):
         wrapper.set(probe="absent")
         message = self._refusal(gate, repo)
@@ -792,6 +797,7 @@ class TestStepFourWording:
         end = message.index("Nothing was dispatched.")
         assert lead == 0 and lead < reason < rung < tail < end
 
+    @pytest.mark.shell_probe
     def test_kept_off_names_its_case(self, repo, wrapper, gate, monkeypatch):
         message = self._refusal(gate, repo, _JailLadder(opt_in=False))
         assert "does not take this job: write jobs are not enabled on it" in message
@@ -803,6 +809,7 @@ class TestStepFourWording:
         assert f"does not take this job: skipped by {SKIP_RUNG_ENV}" in message
 
     @pytest.mark.parametrize("mode, note", [("absent", ABSENT_NOTE), ("abi2", ABI2_NOTE)])
+    @pytest.mark.shell_probe
     def test_landlock_unavailable_names_the_note_and_the_sudo_repair(self, repo, wrapper, gate, mode, note):
         wrapper.set(probe=mode)
         message = self._refusal(gate, repo)
@@ -810,6 +817,7 @@ class TestStepFourWording:
         assert note.split("landlock_exec: ", 1)[1] in message
         assert "which needs sudo" in message
 
+    @pytest.mark.shell_probe
     def test_a_failed_self_test_names_the_control_and_doctor_without_sudo(self, repo, wrapper, gate):
         wrapper.set(probe="positive")
         message = self._refusal(gate, repo)
@@ -817,6 +825,7 @@ class TestStepFourWording:
         assert "`plugin-landlock` row" in message
         assert "sudo" not in message
 
+    @pytest.mark.shell_probe
     def test_a_newer_codex_names_both_versions(self, repo, wrapper, gate, monkeypatch):
         wrapper.set(probe="not_denied")
         monkeypatch.setitem(executor._VERSION_CACHE, "fakecodex", "99.0.0")
@@ -1602,6 +1611,7 @@ class TestPreviewsAndBudgets:
         assert _slot_dirs() is not None
 
 
+@pytest.mark.shell_probe
 class TestNoPathInSharedState:
     def test_no_decision_or_cache_value_holds_a_path(
         self, repo, wrapper, gate, runner_env, tmp_path, monkeypatch,
@@ -1631,6 +1641,7 @@ class TestNoPathInSharedState:
             assert str(tmp_path) not in key
 
 
+@pytest.mark.shell_probe
 def test_a_changed_seed_is_named_as_the_truncation_control(repo, wrapper, gate):
     """The parent's byte comparison caught a truncation the canary reported as
     denied: the refusal names the truncation control, never the canary's own

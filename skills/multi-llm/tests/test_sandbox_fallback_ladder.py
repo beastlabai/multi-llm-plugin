@@ -519,12 +519,14 @@ class TestTheRungArgvInvariants:
 class TestTheWalkTable:
     """One test per row of the plan's walk table."""
 
+    @pytest.mark.shell_probe
     def test_canary_denied_takes_the_rung(self):
         verdict = executor.sandbox_verdict(_Ladder(landlock=CANARY_DENIED), PROFILE_GENERATE)
         assert (verdict.state, verdict.rung) == ("unavailable", "landlock")
         assert BWRAP_LINE in verdict.tail
         assert verdict.walk == (("landlock", "taken"),)
 
+    @pytest.mark.shell_probe
     def test_a_canary_whose_write_landed_rejects_the_rung_and_moves_on(self):
         verdict = executor.sandbox_verdict(_Ladder(landlock=CANARY_LANDED), PROFILE_GENERATE)
         assert verdict.rung == "unsandboxed"
@@ -533,6 +535,7 @@ class TestTheWalkTable:
         )
 
     @pytest.mark.parametrize("script", [USAGE_EXIT_0, BARE_EXIT_0])
+    @pytest.mark.shell_probe
     def test_an_exit_0_without_the_canary_marker_is_not_containment(self, script):
         """Exit 0 is not containment: a CLI that exits 0 without running the
         canary to completion never measured a boundary, so the rung is not
@@ -543,6 +546,7 @@ class TestTheWalkTable:
             ("landlock", "absent"), JAIL_ABSENT, ("unsandboxed", "taken"),
         )
 
+    @pytest.mark.shell_probe
     def test_an_echoed_canary_script_cannot_forge_the_marker(self):
         """A CLI that prints its argv (the canary's source) and exits 0 ran
         nothing: whatever else it reads as, the landlock rung is not taken."""
@@ -553,6 +557,7 @@ class TestTheWalkTable:
         assert verdict.walk[0][0] == "landlock"
         assert verdict.walk[0][1] != "taken"
 
+    @pytest.mark.shell_probe
     def test_a_real_sandbox_failure_moves_on(self):
         verdict = executor.sandbox_verdict(_Ladder(landlock=SANDBOX_BROKEN), PROFILE_GENERATE)
         assert verdict.rung == "unsandboxed"
@@ -560,6 +565,7 @@ class TestTheWalkTable:
             ("landlock", "unavailable"), JAIL_ABSENT, ("unsandboxed", "taken"),
         )
 
+    @pytest.mark.shell_probe
     def test_an_inconclusive_tail_skips_that_rung_only(self):
         """An older codex that does not know the flag reaches rung 2 — today."""
         verdict = executor.sandbox_verdict(_Ladder(landlock=FLAG_UNKNOWN), PROFILE_GENERATE)
@@ -568,6 +574,7 @@ class TestTheWalkTable:
             ("landlock", "absent"), JAIL_ABSENT, ("unsandboxed", "taken"),
         )
 
+    @pytest.mark.shell_probe
     def test_a_timeout_stops_the_walk_with_no_rung(self):
         verdict = executor.sandbox_verdict(
             _Ladder(landlock=HANGS), PROFILE_GENERATE, timeout=0.5,
@@ -576,6 +583,7 @@ class TestTheWalkTable:
         assert verdict.rung is None
         assert verdict.walk == (("landlock", "unprobed"),)
 
+    @pytest.mark.shell_probe
     def test_a_spawn_failure_stops_the_walk_with_no_rung(self, monkeypatch):
         real = executor._run_sandbox_probe
 
@@ -599,6 +607,7 @@ class TestTheWalkTable:
             probe_workdir=codex_module.LANDLOCK_CANARY_WORKDIR,
         )
 
+    @pytest.mark.shell_probe
     def test_the_walk_sets_the_canary_dir_up_outside_and_removes_what_it_made(
         self, tmp_path
     ):
@@ -612,6 +621,7 @@ class TestTheWalkTable:
         assert (rung, walk) == ("landlock", (("landlock", "taken"),))
         assert list(tmp_path.iterdir()) == []
 
+    @pytest.mark.shell_probe
     def test_the_walk_leaves_a_pre_existing_canary_dir_alone(self, tmp_path):
         (tmp_path / ".multi-llm" / "tmp").mkdir(parents=True)
         rung, _ = executor._walk_fallback_rungs(
@@ -656,6 +666,7 @@ class TestTheWalkTable:
         assert rung is None
         assert walk == (("landlock", "unknown"),)
 
+    @pytest.mark.shell_probe
     def test_an_in_sandbox_setup_failure_is_never_taken(self):
         """The canary's own setup-failure exit carries no marker: not taken."""
         script = (
@@ -669,6 +680,7 @@ class TestTheWalkTable:
     @pytest.mark.parametrize("profile_probe, state", [
         ("exit 0", "ok"), (FLAG_UNKNOWN, "unknown"),
     ])
+    @pytest.mark.shell_probe
     def test_no_walk_unless_the_profile_probe_said_unavailable(
         self, profile_probe, state, monkeypatch
     ):
@@ -686,6 +698,7 @@ class TestTheWalkTable:
         assert (verdict.state, verdict.rung, verdict.walk) == (state, None, ())
         assert len(calls) == 1
 
+    @pytest.mark.shell_probe
     def test_the_write_profile_walks_the_jail_alone_and_never_falls_through(self):
         """Rewritten 2026-09-30 (plan step 3): the write profile walks its
         one-rung write ladder. Where the jail is absent (the suite's guard
@@ -701,6 +714,7 @@ class TestTheWalkTable:
 
 
 class TestTheVerdictShape:
+    @pytest.mark.shell_probe
     def test_a_two_value_unpack_raises_instead_of_dropping_the_rung(self):
         verdict = executor.sandbox_verdict(_Ladder(), PROFILE_GENERATE)
         with pytest.raises(ValueError):
@@ -727,6 +741,7 @@ class TestTheWalkSharesOneDeadline:
                "child, which holds the probe's pipes, so the probe overruns "
                "its budget (measured 5.8 s of a 1 s budget)",
     )
+    @pytest.mark.shell_probe
     def test_a_slow_first_probe_leaves_the_rung_unprobed_inside_one_budget(self):
         """The profile probe spends most of the budget; the rung probe gets
         only what is left of it, and the whole call stays inside one budget."""
@@ -795,6 +810,7 @@ def executor_gate(monkeypatch):
     return run
 
 
+@pytest.mark.shell_probe
 class TestTheExecutorGate:
     def test_auto_takes_the_contained_rung_and_records_its_id(self, executor_gate, capsys):
         state = executor_gate(_Ladder(policy="auto"))
@@ -890,6 +906,7 @@ def fanout_gate(monkeypatch):
     return run
 
 
+@pytest.mark.shell_probe
 class TestTheFanoutGate:
     def test_auto_takes_the_contained_rung_which_is_not_a_bypass(self, fanout_gate):
         verdict = fanout_gate(_Ladder(policy="auto"))
@@ -1016,6 +1033,7 @@ class TestTheRungSurvivesTheCarriers:
         assert calls == ["landlock"] * 4
         assert argv[3] == "read-only" and argv.count(FLAG_VALUE) == 1
 
+    @pytest.mark.shell_probe
     def test_the_preflight_rung_reaches_the_spawn_as_its_id(self, monkeypatch, tmp_path):
         monkeypatch.setattr(executor, "_SANDBOX_DECISIONS", {})
         monkeypatch.setattr(executor, "get_provider", lambda _name: _Ladder())

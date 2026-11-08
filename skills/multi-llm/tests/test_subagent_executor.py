@@ -5153,6 +5153,7 @@ class TestSandboxUnavailable:
         blocked = probe[:-1] + [_WINDOWS_WRITE_PROBE.replace("os.getpid()", "0")]
         assert subprocess.run(blocked, cwd=tmp_path).returncode == 1
 
+    @pytest.mark.shell_probe
     def test_a_read_only_batch_is_refused_when_the_sandbox_cannot_start(
         self, tmp_path, runner_env, monkeypatch, capsys
     ):
@@ -5210,6 +5211,7 @@ class TestSandboxUnavailable:
             return [_SH, "-c", f"echo '{_BWRAP_BROKEN_LINE}' >&2; exit 1"]
         return command
 
+    @pytest.mark.shell_probe
     def test_a_read_only_batch_dispatches_unsandboxed_by_default(
         self, tmp_path, runner_env, monkeypatch, capsys
     ):
@@ -5316,6 +5318,7 @@ class TestSandboxUnavailable:
         return install_fake_wrapper(tmp_path / "wrapper", monkeypatch, probe="absent")
 
     @pytest.mark.parametrize("leg", ["off", "opt-in-off", "landlock-absent"])
+    @pytest.mark.shell_probe
     def test_a_write_batch_is_refused_under_each_leg_the_jail_cannot_serve(
         self, tmp_path, runner_env, monkeypatch, capsys, leg
     ):
@@ -5351,6 +5354,7 @@ class TestSandboxUnavailable:
         if leg == "opt-in-off":
             assert provider.sandbox_fallback_policy(PROFILE_AGENT_WRITE) is None
 
+    @pytest.mark.shell_probe
     def test_a_write_batch_takes_the_plugin_landlock_rung(
         self, tmp_path, runner_env, monkeypatch, capsys
     ):
@@ -5384,6 +5388,7 @@ class TestSandboxUnavailable:
         assert "scope plan-file" in line and "plan.md" in line
 
     @pytest.mark.parametrize("leg", ["off", "opt-in-off", "landlock-absent"])
+    @pytest.mark.shell_probe
     def test_a_codex_session_model_write_falls_to_the_floor_which_is_refused_too(
         self, tmp_path, runner_env, monkeypatch, capsys, leg
     ):
@@ -5435,6 +5440,7 @@ class TestSandboxUnavailable:
         ) in capsys.readouterr().out
         assert "unsandboxed" not in executor._SANDBOX_DECISIONS.values()
 
+    @pytest.mark.shell_probe
     def test_an_unknown_verdict_never_widens_under_auto(
         self, tmp_path, runner_env, monkeypatch, capsys
     ):
@@ -5457,6 +5463,7 @@ class TestSandboxUnavailable:
         assert "[SANDBOX_BYPASSED]" not in captured.out
         assert "recording sandbox 'unknown'" in captured.err
 
+    @pytest.mark.shell_probe
     def test_off_refuses_a_read_only_batch_exactly_as_before(
         self, tmp_path, runner_env, monkeypatch, capsys
     ):
@@ -5478,6 +5485,7 @@ class TestSandboxUnavailable:
         assert excinfo.value.reason_code == "sandbox_unavailable"
         assert "[SANDBOX_BYPASSED]" not in capsys.readouterr().out
 
+    @pytest.mark.shell_probe
     def test_a_failing_self_test_refuses_before_dispatch(
         self, tmp_path, runner_env, monkeypatch, capsys
     ):
@@ -5500,6 +5508,7 @@ class TestSandboxUnavailable:
         # A refusal is never cached.
         assert executor._SANDBOX_DECISIONS == {}
 
+    @pytest.mark.shell_probe
     def test_a_passing_self_test_dispatches_and_is_probed_once(
         self, tmp_path, runner_env, monkeypatch
     ):
@@ -5531,6 +5540,7 @@ class TestSandboxUnavailable:
         assert readonly["sandbox"] == "not-required"
         assert len(runs) == 1
 
+    @pytest.mark.shell_probe
     def test_a_self_test_that_times_out_dispatches_with_unknown(
         self, tmp_path, runner_env, monkeypatch, capsys
     ):
@@ -5549,6 +5559,7 @@ class TestSandboxUnavailable:
         assert "recording sandbox 'unknown'" in err
         assert "Dispatching anyway" in err
 
+    @pytest.mark.shell_probe
     def test_the_windows_probe_kills_a_grandchild_holding_its_pipes(
         self, tmp_path, monkeypatch
     ):
@@ -5639,6 +5650,7 @@ class TestSandboxUnavailable:
         assert "subprocess" not in imported
         assert "sandbox_probe_command" not in source
 
+    @pytest.mark.shell_probe
     def test_a_cli_that_does_not_understand_the_probe_dispatches_with_unknown(
         self, tmp_path, runner_env, monkeypatch, capsys
     ):
@@ -5730,6 +5742,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         monkeypatch.setattr(rob, "invoke_with_provider", no_dispatch)
         return rob
 
+    @pytest.mark.shell_probe
     def test_the_fanout_refuses_a_slot_whose_sandbox_cannot_start(
         self, fanout, tmp_path, capsys
     ):
@@ -5749,6 +5762,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         # stream for a salvage request to ask a repair pass about.
         assert fanout.failure_output_from_result(result) == ""
 
+    @pytest.mark.shell_probe
     def test_the_probe_runs_once_for_two_slots_of_the_same_provider(
         self, fanout, tmp_path, monkeypatch
     ):
@@ -5863,6 +5877,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
             f"the model's shell and this machine)"
         )
 
+    @pytest.mark.shell_probe
     def test_the_verdict_is_three_way_and_never_truthy_by_accident(self, monkeypatch):
         from utils import review_orchestrator_base as rob
 
@@ -5890,6 +5905,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         assert verdict.reason is None
         assert not verdict.refused and not verdict.bypass
 
+    @pytest.mark.shell_probe
     def test_the_fanout_dispatches_unsandboxed_with_the_flag_and_the_marker(
         self, tmp_path, monkeypatch, capsys
     ):
@@ -5918,6 +5934,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         assert f"[fakebwrap:m1] {self._bypass_line('fakebwrap')}" in out
         assert "[SANDBOX_UNAVAILABLE]" not in out
 
+    @pytest.mark.shell_probe
     def test_off_refuses_exactly_as_before(self, tmp_path, monkeypatch, capsys):
         from utils import review_orchestrator_base as rob
 
@@ -5972,6 +5989,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         subprocess.run(["git", "add", "tracked.txt"], cwd=root, check=True, env=env)
         subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=root, check=True, env=env)
 
+    @pytest.mark.shell_probe
     def test_a_bypassed_slot_that_writes_outside_its_contract_is_failed_by_path(
         self, tmp_path, monkeypatch, capsys
     ):
@@ -6011,6 +6029,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         assert (tmp_path / "leak.md").exists()
         assert (tmp_path / "tracked.txt").read_text(encoding="utf-8") == "v2\n"
 
+    @pytest.mark.shell_probe
     def test_the_plugins_own_artifact_trees_are_not_blamed_on_the_model(
         self, tmp_path, monkeypatch
     ):
@@ -6089,6 +6108,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         assert not rob.porcelain_check_applies(V(rob.SANDBOX_DISPATCH, None))
         assert not rob.porcelain_check_applies(V(rob.SANDBOX_REFUSE, "x"))
 
+    @pytest.mark.shell_probe
     def test_a_rung_two_slot_in_a_fanout_fails_naming_the_boundaryless_count(
         self, tmp_path, monkeypatch, capsys
     ):

@@ -211,6 +211,7 @@ def _dispatch_writing(root: Path, *cache_dirs: str):
     return dispatch
 
 
+@pytest.mark.shell_probe
 class TestTheReviewPlanLane:
     """``run_single_model``: one ``ignore_prefixes`` for both snapshots and the
     comparison, computed in the slot's task where the roster lives."""
@@ -255,6 +256,7 @@ class TestTheReviewPlanLane:
         assert "fails closed" in result["error"]
 
 
+@pytest.mark.shell_probe
 class TestTheReviewCodeLane:
     """``run_single_review``: the before snapshot and the after check each
     compute the prefixes, and both take the roster-aware form."""

@@ -153,6 +153,7 @@ def _retired_lines(text):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.shell_probe
 class TestTheBypassLineNamesTheRungTried:
     def test_a_first_run_with_a_cold_cache_and_no_prior_record(self, lanes, capsys):
         lanes.use(_Codexish(version="0.155.1", landlock=UNRELATED_ERROR))
@@ -192,6 +193,7 @@ class TestTheBypassLineNamesTheRungTried:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.shell_probe
 class TestAtOrAboveRemovedAt:
     @pytest.mark.parametrize("version", ["0.156.1", "0.157.0"])
     def test_the_fanout_spawns_no_rung_probe_and_says_so_once(
@@ -243,6 +245,7 @@ class TestAtOrAboveRemovedAt:
         assert len(lines) == 1 and "unavailable since fakecodex 0.156.1 (measured)" in lines[0]
 
 
+@pytest.mark.shell_probe
 class TestUnderContained:
     """`sandbox_fallback: contained` refuses the slot — and still says why."""
 
@@ -264,6 +267,7 @@ class TestUnderContained:
         assert "this run refused fakecodex:m" in line
 
 
+@pytest.mark.shell_probe
 class TestBetweenDeprecatedAtAndRemovedAt:
     def test_a_passing_probe_uses_the_rung_and_announces_nothing(self, lanes, capsys):
         lanes.use(_Codexish(version="0.155.1", landlock=CANARY_DENIED))
@@ -354,6 +358,7 @@ class TestThePanicIsClassifiedByText:
         (f"echo \"{PANIC_LINE}\" >&2; exit 1", "retired"),
         (EXIT_101_OTHER, "unavailable"),
     ])
+    @pytest.mark.shell_probe
     def test_the_walk_reads_the_text_not_the_exit_code(self, script, outcome):
         tails = []
         rung, walk = executor._walk_fallback_rungs(
@@ -371,6 +376,7 @@ class TestThePanicIsClassifiedByText:
 
 
 class TestOneProbePerVersion:
+    @pytest.mark.shell_probe
     def test_both_lanes_in_one_process_spawn_exactly_one_rung_probe(self, lanes):
         lanes.use(_Codexish(version="0.155.1", landlock=UNRELATED_ERROR))
         assert lanes.fanout().bypass
@@ -380,6 +386,7 @@ class TestOneProbePerVersion:
         # One version read too: the preflight's own, or the probe's.
         assert sum(1 for argv in lanes.probes if "codex-cli" in argv[-1]) == 1
 
+    @pytest.mark.shell_probe
     def test_a_new_version_is_a_new_probe(self, lanes):
         lanes.use(_Codexish(version="0.155.1", landlock=UNRELATED_ERROR))
         lanes.fanout()
@@ -388,6 +395,7 @@ class TestOneProbePerVersion:
         lanes.fanout()
         assert len(lanes.rung_probes()) == 2
 
+    @pytest.mark.shell_probe
     def test_concurrent_specs_read_the_version_once(self, lanes):
         import threading
 

@@ -2270,6 +2270,7 @@ class TestTheValidationStretchIsNamedBeforeItIsDispatched:
 _BWRAP_BROKEN_LINE = "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
 
 
+@pytest.mark.shell_probe
 class TestTheCodeReviewFanoutGatesOnTheSandboxProbe:
     """`run_single_review` is its own dispatch lane, so it asks for itself.
 

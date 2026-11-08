@@ -937,6 +937,7 @@ def _audit_of(name_or_stream):
     return audit_codex_stream(text).to_dict()
 
 
+@pytest.mark.shell_probe
 class TestTheReviewPlanCallSite:
     """review-plan's file-output lane: the retry ladder's attempts are ANDed."""
 

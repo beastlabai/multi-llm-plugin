@@ -49,18 +49,20 @@ These test the orchestrators end-to-end using subprocess calls:
 ## Running Integration Tests
 
 Integration tests use mock data in `plans/test-plan/` to avoid calling real LLMs.
+Each test builds its own copy under pytest's `tmp_path`, so the tests never
+touch the skill's `plans/` directory and are safe to split across xdist workers.
 
 ```bash
 # Run integration tests
 uv run -- pytest tests/test_apply_suggestions_integration.py -v
 
-# Regenerate test fixtures if they become stale
+# Write the same fixture tree into the skill's plans/ to inspect it
 uv run -- python tests/test_apply_suggestions_integration.py --setup-fixtures
 ```
 
 ### Integration Test Fixtures
 
-The integration tests use a self-contained test plan at `plans/test-plan/`:
+The integration tests use a self-contained test plan at `plans/test-plan/` (per test, under `tmp_path`):
 
 ```
 plans/

@@ -3,7 +3,8 @@
 Integration tests for apply_suggestions_orchestrator.py
 
 These tests run the orchestrator with various options and verify the output.
-They use mock data in plans/test-plan/ to avoid calling real LLMs.
+They use mock data in a per-test copy of plans/test-plan/ (under tmp_path) to
+avoid calling real LLMs.
 
 To run these tests:
     uv run -- pytest tests/test_apply_suggestions_integration.py -v
@@ -360,13 +361,22 @@ def run_orchestrator(*args, no_confirm: bool = True) -> subprocess.CompletedProc
 
 
 @pytest.fixture(autouse=True)
-def setup_fixtures():
-    """Give every test a clean, complete set of fixtures.
+def setup_fixtures(tmp_path, monkeypatch):
+    """Give every test a clean, complete set of fixtures in its own directory.
 
     Function-scoped (not module-scoped) so no test can observe files written by
     a previous test or by a previous run of the suite: tests pass from a clean
-    tree, in any order, and when run twice in a row.
+    tree, in any order, and when run twice in a row. The three path constants
+    are pointed at this test's ``tmp_path`` because the tree is rebuilt with an
+    ``rmtree`` per test: on the shared ``SKILL_DIR / "plans"`` two xdist workers
+    would delete each other's fixtures mid-run. Every helper reads the constants
+    at call time; ``--setup-fixtures`` below still writes the real tree.
     """
+    module = sys.modules[__name__]
+    plans_dir = tmp_path / "plans"
+    monkeypatch.setattr(module, "PLANS_DIR", plans_dir)
+    monkeypatch.setattr(module, "TEST_PLAN_DIR", plans_dir / "test-plan")
+    monkeypatch.setattr(module, "TEST_PLAN_FILE", plans_dir / "test-plan.md")
     setup_test_fixtures(force=True)
     yield
 

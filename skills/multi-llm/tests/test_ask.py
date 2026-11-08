@@ -1518,6 +1518,7 @@ class TestRoutingAndDocs:
 # D6 step 3 — ask's lane asks the same pre-dispatch sandbox question
 # ---------------------------------------------------------------------------
 
+@pytest.mark.shell_probe
 class TestTheAskFanoutGatesOnTheSandboxProbe:
     """`ask_one` is the third lane that reaches `generate`, so it asks too.
 
@@ -2107,6 +2108,7 @@ class TestEveryAskSourceLandsOnTheMap:
         assert models["claude-code:haiku"]["source"] == "file"
         assert {e["state"] for e in models.values()} == {"done"}
 
+    @pytest.mark.shell_probe
     def test_the_pre_dispatch_refusal_lands_as_not_dispatched(
         self, plan, monkeypatch, progress_lines
     ):
@@ -3339,6 +3341,7 @@ class _AnySpec(dict):
         return dict(self._behavior)
 
 
+@pytest.mark.shell_probe
 class TestPartialsAroundTheTwoEarlyReturns:
     """D3.2: the porcelain-violation return keeps stdout text too; the sandbox
     refusal keeps an earlier run's partial untouched and says whose it is."""
@@ -3767,6 +3770,7 @@ class TestProvenance:
         assert provenance_of(d, spec) is None
         assert failed_line(d, spec) == "claude-code exited with code 1"
 
+    @pytest.mark.shell_probe
     def test_a_refused_slot_keeps_the_earlier_answer_s_line(self, plan, monkeypatch):
         break_the_codex_sandbox(monkeypatch, policy="off")
         d = qdir(plan, "Q")
