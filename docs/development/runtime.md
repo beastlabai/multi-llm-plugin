@@ -325,7 +325,7 @@ process table sees nothing of the group run. A look is not atomic. A member can 
 table's names were read and exit before its own row was, so the new child is not listed. So no look
 alone ends the kill. The group always gets one SIGKILL by number, which with only the child's
 zombie left changes nothing. On Linux a process with a SIGKILL pending can fork no other:
-`copy_process` abandons the fork under the same locks `killpg` takes. So a look after it that sees
+*copy_process* abandons the fork under the same locks `killpg` takes. So a look after it that sees
 nothing run proves the group gone, and only then is the verdict `killed`; otherwise it is
 `survived`. A member this process may not signal (another user's) is outside that proof, and so is
 a process that joins the group from elsewhere in its session after the SIGKILL. Only the group whose
@@ -335,11 +335,11 @@ read off disk) is known only by number, and `kill_tree` treats it by its identit
 **Where the owned kill runs.** Its proof has two halves, each checked for one platform only, so
 `_sigaction_abi` gates it on both:
 
-- the kernel's: the group SIGKILL leaves no member forking. Linux's `copy_process` publishes a new
-  process under `tasklist_lock` held for writing, after checking for a pending fatal signal, and a
+- the kernel's: the group SIGKILL leaves no member forking. Linux's *copy_process* publishes a new
+  process under *tasklist_lock* held for writing, after checking for a pending fatal signal, and a
   group signal holds that lock for reading, so a fork either finishes before the SIGKILL and gets
   it, or is abandoned. XNU's `killpg` collects the group's pids, drops the lock, then signals, so a
-  member can finish a fork the SIGKILL never reaches. Current FreeBSD looks sound (`pg_killsx`
+  member can finish a fork the SIGKILL never reaches. Current FreeBSD looks sound (*pg_killsx*
   coordinates with fork), but it has not been run here: a later extension, not a default.
 - the C library's: SIGCHLD's disposition is read through `struct sigaction`, whose layout is the
   C library's and the ABI's. glibc's generic layout (a handler, a 1024-bit mask, an `int` of
