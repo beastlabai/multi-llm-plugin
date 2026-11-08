@@ -458,8 +458,8 @@ class TestTheReviewCodeRoundSurvivesEveryShape:
         with patch.object(cro, "parse_args",
                           return_value=_make_args(plan, models=list(results))), \
                 patch.object(cro, "get_or_create_state", return_value=state), \
-                patch.object(cro, "resolve_models", return_value=list(results)), \
-                patch.object(cro, "is_model_valid", return_value=True), \
+                patch("utils.interactive.resolve_models", return_value=list(results)), \
+                patch("utils.interactive.is_model_valid", return_value=True), \
                 patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"), \
                 patch.object(cro, "run_all_reviews", new=AsyncMock(return_value=results)), \
                 patch.object(cro, "get_phase_dir", return_value=phase_dir), \
@@ -635,8 +635,8 @@ class TestReviewCodeSetsARefusedProviderFileAside:
         with patch.object(cro, "parse_args",
                           return_value=_make_args(plan, models=list(results))), \
                 patch.object(cro, "get_or_create_state", return_value=state), \
-                patch.object(cro, "resolve_models", return_value=list(results)), \
-                patch.object(cro, "is_model_valid", return_value=True), \
+                patch("utils.interactive.resolve_models", return_value=list(results)), \
+                patch("utils.interactive.is_model_valid", return_value=True), \
                 patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"), \
                 patch.object(cro, "run_all_reviews", new=fake_run_all_reviews), \
                 patch.object(cro, "get_phase_dir", return_value=phase_dir):
