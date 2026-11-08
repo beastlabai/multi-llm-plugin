@@ -138,6 +138,13 @@ uv run --project skills/multi-llm -- python skills/multi-llm/hosts/render_capabi
 uv run --project skills/multi-llm -- python skills/multi-llm/hosts/render_capabilities.py --check  # CI staleness guard
 ```
 
+[`docs/development/markers.md`](development/markers.md), the registry of bracket markers
+(`[BATCH_DONE]` and the rest), is rendered from the skill's and `packaging/`'s sources and
+the instructions by `skills/multi-llm/tests/tools/render_markers.py` (`--check` for the
+staleness guard); `tests/test_markers_registry.py` fails when it is stale, when a marker
+is neither handled by an instruction nor listed as not-for-the-host, and when a printed
+marker is built from parts the scan cannot list.
+
 ---
 
 ## Vendored report scripts

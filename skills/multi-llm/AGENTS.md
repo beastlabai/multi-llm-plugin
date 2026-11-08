@@ -84,7 +84,12 @@ search the copies deliberately.
   contracts.
 - **`utils/process_control.py`** owns platform-specific process, lock, and
   teardown primitives. Keep `fcntl`, `msvcrt`, and `ctypes` process internals
-  there.
+  there. Two `ctypes` users sit outside it on purpose, neither doing process
+  control: `utils/prompt_files.py` removes prompt files on Windows through
+  handles it holds open, and `utils/landlock_exec.py` makes the Landlock
+  syscalls in a stdlib-only `-I -S` interpreter that must not import this
+  package (docs/development/runtime.md#process-primitives). A new `ctypes` use
+  needs the same kind of reason.
 
 Imports must be side-effect free: parsing, `sys.argv` reads, and I/O belong in
 `main`, not module scope. Multiple dispatch targets run in one interpreter.
@@ -228,6 +233,8 @@ rules. Each has a contents list; load the sections relevant to the change.
   [Status views and progress](../../docs/development/status.md).
 - **Tool supervision, stop hooks, report relay, native apply counts:**
   [Host result delivery](../../docs/development/host-reporting.md).
+- **Bracket markers (`[BATCH_DONE]` and the rest): who emits, who reads, never rename:**
+  [Marker registry](../../docs/development/markers.md), generated.
 
 ## Maintaining this guide
 

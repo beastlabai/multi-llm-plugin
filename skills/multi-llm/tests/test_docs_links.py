@@ -33,6 +33,13 @@ page's only map of the split and is hand-written, so a seventh ``docs/`` page --
 or a rename -- leaves it silently incomplete. It is tied to the directory it
 indexes here rather than maintained by hand.
 
+A fifth property covers what the development docs *claim about the code*
+(section 3 below): every backticked ``snake_case`` name (private ones included)
+and ``.py`` path in ``docs/development*``, and ``AGENTS.md`` resolves in tracked
+source, config or tests -- never in Markdown, the generated ``packaging/*/multi-llm``
+copies or this file -- so a renamed function or a moved module fails here instead
+of leaving a doc that sends an agent to a file that is not there.
+
 Deliberate scoping decisions:
 
 * **Fenced code blocks are not markdown.** Headings are collected outside
@@ -56,8 +63,13 @@ Deliberate scoping decisions:
 
 from __future__ import annotations
 
+import fnmatch
+import functools
+import os
 import re
+import subprocess
 from pathlib import Path
+from typing import Dict, FrozenSet, Iterable, List, Optional, Sequence, Tuple
 
 import pytest
 
@@ -383,6 +395,288 @@ class TestTheDocumentationTableIndexesTheDocsDirectory:
             f"{sorted(TABLE_NON_DOCS_ROWS)}. A new one is a decision about what "
             "the table indexes: record it in TABLE_NON_DOCS_ROWS with the reason."
         )
+
+
+# ---------------------------------------------------------------------------
+# 3. Names and paths the development docs claim exist (LLM-8)
+# ---------------------------------------------------------------------------
+
+SKILL_ROOT = REPO_ROOT / "skills" / "multi-llm"
+
+#: This file, repo-relative. Its allowlist and its examples name things that do not
+#: exist, so it never counts as a place a name resolves.
+THIS_FILE = Path(__file__).resolve().relative_to(REPO_ROOT).as_posix()
+
+#: The generated copies of the skill (``packaging/<host>/multi-llm/``): a name or a
+#: file they hold is the skill's own, read a second time, so it proves nothing.
+GENERATED_MIRROR_RE = re.compile(r"^packaging/[^/]+/multi-llm/")
+
+#: Where the docs mean a qualified ``.py`` path from, tried in order: the repo root,
+#: the skill root (``utils/x.py``) and the skill's ``utils/`` (``providers/base.py``).
+PY_PATH_ROOTS = ("", "skills/multi-llm/", "skills/multi-llm/utils/")
+
+
+def _claim_documents() -> List[Path]:
+    """The development guide, its topic pages and the agent guide that routes to them."""
+    return (
+        [REPO_ROOT / "docs" / "development.md", SKILL_ROOT / "AGENTS.md"]
+        + sorted((DOCS_DIR / "development").glob("*.md"))
+    )
+
+
+#: A backticked span that is a ``snake_case`` name: optional dotted owners, an optional
+#: ``()``. The last component holds an underscore between words (``invoke_with_provider``)
+#: or starts with one (``_load``, ``_record_progress``); a bare lower-case word is prose.
+#: Only the last component has to resolve: ``StateManager._load_or_create`` is checked
+#: as ``_load_or_create``. ALL_CAPS and CamelCase names are not in scope.
+SNAKE_SPAN_RE = re.compile(
+    r"^(?:[A-Za-z_]\w*\.)*"
+    r"(_+[a-z][a-z0-9]*(?:_[a-z0-9]+)*|[a-z][a-z0-9]*(?:_[a-z0-9]+)+)"
+    r"(?:\(\))?$"
+)
+
+#: A backticked ``.py`` path, optionally followed by ``:line`` or ``::test``.
+PY_PATH_SPAN_RE = re.compile(r"^[\w./<>*-]+\.py(?:::?[\w.\[\]-]+)?$")
+
+INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+
+_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+#: Names that are real in the prose and absent from the tracked tree, each with the
+#: reason. Keep it short: every entry is a claim the test stops checking. The test
+#: fails on an entry the docs no longer contain, and on one that resolves after all,
+#: so the list cannot outlive its use.
+CLAIM_ALLOWLIST: Dict[str, str] = {
+    "save_agent_log":
+        "a function recorded as removed (providers.md says it had no callers and is gone)",
+    "features.code_mode.default_exec_yield_time_ms":
+        "a Codex configuration key (host-reporting.md), owned by the codex binary",
+    "packaging/opencode/first_release.py":
+        "a file recorded as removed, with the git command that restores it (hosts.md)",
+    "x/y.py": "placeholder module path in an illustration (hosts.md)",
+    "x/y/__init__.py": "placeholder package path in an illustration (hosts.md)",
+    "a.py": "placeholder file name in an illustration (workflows.md)",
+    "b.py": "placeholder file name in an illustration (workflows.md)",
+}
+
+#: Text files that count as source, config or tests when looking for a name. Never
+#: Markdown: an instruction or a reference that repeats a stale name would vouch for it.
+_SOURCE_SUFFIXES = (
+    ".py", ".yaml", ".yml", ".toml", ".json", ".sh", ".js", ".mjs", ".ts",
+    ".cfg", ".txt", ".html",
+)
+_MAX_SOURCE_BYTES = 2_000_000
+
+
+@functools.lru_cache(maxsize=1)
+def _tracked_files() -> Tuple[str, ...]:
+    """Repo-relative files git tracks or would track (untracked, not ignored).
+
+    Untracked-but-not-ignored files count so a doc and the file it names can be
+    written in one change before either is added. ``plans/`` is local-only and
+    never counts. Falls back to a directory walk where git is unavailable.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+            cwd=REPO_ROOT, capture_output=True, text=True, check=True,
+        ).stdout.splitlines()
+    except (OSError, subprocess.CalledProcessError):
+        out = []
+        for root, dirs, names in os.walk(REPO_ROOT):
+            dirs[:] = [d for d in dirs if d not in {".git", ".venv", "node_modules", "__pycache__"}]
+            out += [os.path.relpath(os.path.join(root, n), REPO_ROOT) for n in names]
+    return tuple(
+        sorted(f for f in out if (REPO_ROOT / f).is_file() and not f.startswith("plans/"))
+    )
+
+
+def _authoritative(files: Iterable[str]) -> List[str]:
+    """The files a claimed name may resolve against: source, config and tests.
+
+    Never Markdown (``docs/``, the instructions, the references, READMEs), never the
+    generated ``packaging/*/multi-llm/`` copies, never ``plans/``, and never this file.
+    """
+    return [
+        f for f in files
+        if (f.endswith(_SOURCE_SUFFIXES) or Path(f).name == "Makefile")
+        and not f.startswith(("docs/", "plans/"))
+        and not GENERATED_MIRROR_RE.match(f)
+        and f != THIS_FILE
+    ]
+
+
+def _words_in(root: Path, files: Iterable[str]) -> FrozenSet[str]:
+    """Every identifier-shaped word in *files* (relative to *root*)."""
+    words: set = set()
+    for rel in files:
+        path = root / rel
+        try:
+            if path.stat().st_size > _MAX_SOURCE_BYTES:
+                continue
+            words.update(_WORD_RE.findall(path.read_text(encoding="utf-8", errors="ignore")))
+        except OSError:
+            continue
+    return frozenset(words)
+
+
+@functools.lru_cache(maxsize=1)
+def _source_words() -> FrozenSet[str]:
+    """Every identifier-shaped word in the tracked source, config and tests.
+
+    A name resolves when it appears anywhere in them. That is a deliberately loose
+    test of *existence*: it catches a deleted or renamed symbol, not one that moved
+    to another module.
+    """
+    return _words_in(REPO_ROOT, _authoritative(_tracked_files()))
+
+
+def _py_path_resolves(span: str, tracked: Optional[Sequence[str]] = None) -> bool:
+    """Does a documented ``.py`` path name a tracked file (or, for a pattern, any)?
+
+    A qualified path (``utils/x.py``) is looked up only under the roots it is meant
+    from (:data:`PY_PATH_ROOTS`), never by its tail anywhere; a bare file name
+    (``x.py``) anywhere. The generated copies never count. ``*`` and ``<name>`` are
+    patterns and need at least one match.
+    """
+    files = [
+        f for f in (_tracked_files() if tracked is None else tracked)
+        if not GENERATED_MIRROR_RE.match(f)
+    ]
+    path = re.split(r"::?", span, maxsplit=1)[0]
+    if path.startswith("./"):
+        path = path[2:]
+    pattern = re.sub(r"<[^>]*>", "*", path)
+    if "/" in pattern:
+        targets = [root + pattern for root in PY_PATH_ROOTS]
+    else:
+        targets = [pattern, "*/" + pattern]
+    return any(fnmatch.fnmatchcase(f, target) for target in targets for f in files)
+
+
+def _kind(span: str) -> Optional[str]:
+    """``"name"``, ``"path"`` or ``None`` for one backticked span."""
+    if SNAKE_SPAN_RE.match(span):
+        return "name"
+    if PY_PATH_SPAN_RE.match(span):
+        return "path"
+    return None
+
+
+def _resolves(span: str) -> bool:
+    if _kind(span) == "name":
+        return SNAKE_SPAN_RE.match(span).group(1) in _source_words()
+    return _py_path_resolves(span)
+
+
+def _claims() -> List[Tuple[str, int, str, str]]:
+    """``(kind, line, document, span)`` for every checkable backticked span."""
+    found = []
+    for path in _claim_documents():
+        for number, line in _outside_fences(path.read_text(encoding="utf-8")):
+            for span in INLINE_CODE_RE.findall(line):
+                kind = _kind(span)
+                if kind:
+                    found.append((kind, number, _where(path, number), span))
+    return found
+
+
+class TestTheDevelopmentDocsNameThingsThatExist:
+    def test_every_backticked_snake_case_name_resolves_in_source_or_tests(self):
+        unresolved = [
+            f"{where}: `{span}`"
+            for kind, _, where, span in _claims()
+            if kind == "name" and span not in CLAIM_ALLOWLIST and not _resolves(span)
+        ]
+        assert not unresolved, (
+            "names the development docs cite that no tracked source, config or test "
+            "contains (renamed or deleted? fix the doc, or, for a runtime artifact or "
+            "placeholder, add it to CLAIM_ALLOWLIST with the reason):\n  "
+            + "\n  ".join(unresolved)
+        )
+
+    def test_every_backticked_py_path_names_a_tracked_file(self):
+        missing = [
+            f"{where}: `{span}`"
+            for kind, _, where, span in _claims()
+            if kind == "path" and span not in CLAIM_ALLOWLIST and not _resolves(span)
+        ]
+        assert not missing, (
+            "`.py` paths the development docs cite that match no tracked file (moved or "
+            "deleted? fix the doc, or add a placeholder to CLAIM_ALLOWLIST with the "
+            "reason):\n  " + "\n  ".join(missing)
+        )
+
+    def test_the_allowlist_is_small_and_every_entry_is_still_needed(self):
+        assert len(CLAIM_ALLOWLIST) <= 10, (
+            "the allowlist is the part of the docs the test does not check; a longer one "
+            "means the docs or the test need fixing instead"
+        )
+        cited = {span for _, _, _, span in _claims()}
+        stale = sorted(set(CLAIM_ALLOWLIST) - cited)
+        assert not stale, f"allowlist entries no development doc cites any more: {stale}"
+        resolving = sorted(span for span in CLAIM_ALLOWLIST if _resolves(span))
+        assert not resolving, f"allowlist entries that resolve after all; drop them: {resolving}"
+        assert all(reason.strip() for reason in CLAIM_ALLOWLIST.values())
+
+    def test_the_claim_check_has_claims_to_check(self):
+        """Non-vacuity: a changed docs layout or a broken regex must not pass silently."""
+        claims = _claims()
+        assert sum(1 for k, *_ in claims if k == "name") >= 500, len(claims)
+        assert sum(1 for k, *_ in claims if k == "path") >= 100, len(claims)
+        assert len(_source_words()) > 5000
+
+    def test_the_resolvers_reject_what_they_should(self):
+        assert _py_path_resolves("utils/process_control.py")
+        assert _py_path_resolves("tests/test_docs_links.py::TestX")
+        assert _py_path_resolves("utils/providers/<name>.py")
+        assert not _py_path_resolves("utils/no_such_module.py")
+        assert not _py_path_resolves("utils/providers/<name>_nope.py")
+        assert "qq_no_such_symbol" not in _source_words()
+        assert "invoke_with_provider" in _source_words()
+
+    def test_private_names_are_claims_and_a_stale_one_fails(self):
+        assert _kind("_record_progress") == "name"
+        assert _kind("StateManager._load_or_create") == "name"
+        assert _kind("_brand_new_stale_function()") == "name"
+        assert SNAKE_SPAN_RE.match("StateManager._load_or_create").group(1) == "_load_or_create"
+        assert _resolves("_record_progress") and _resolves("StateManager._load_or_create")
+        # This file names it, and this file never vouches for a name.
+        assert not _resolves("_brand_new_stale_function()")
+        assert not _resolves("StateManager._brand_new_stale_method")
+        assert _kind("status") is None and _kind("__init__") is None
+
+    def test_markdown_generated_copies_and_this_file_never_vouch_for_a_name(self, tmp_path):
+        files = {
+            "skills/multi-llm/utils/real.py": "def real_function(): pass\n",
+            "skills/multi-llm/references/summary-format.md": "`md_only_name`\n",
+            "packaging/codex/multi-llm/skills/multi-llm/utils/gone.py": "mirror_only_name = 1\n",
+            "docs/development/page.md": "`doc_only_name`\n",
+            "docs/schema.json": '{"doc_json_name": 1}\n',
+            THIS_FILE: "ALLOWLIST = {'allowlisted_only_name': 'why'}\n",
+        }
+        for rel, text in files.items():
+            (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / rel).write_text(text, encoding="utf-8")
+        words = _words_in(tmp_path, _authoritative(files))
+        assert "real_function" in words
+        assert not words & {
+            "md_only_name", "mirror_only_name", "doc_only_name", "doc_json_name",
+            "allowlisted_only_name",
+        }
+
+    def test_a_qualified_path_resolves_only_under_its_roots(self):
+        mirror = ["packaging/claude/multi-llm/skills/multi-llm/utils/process_control.py"]
+        elsewhere = ["vendor/lib/utils/process_control.py"]
+        skill = ["skills/multi-llm/utils/process_control.py"]
+        assert not _py_path_resolves("utils/process_control.py", mirror)
+        assert not _py_path_resolves("utils/process_control.py", elsewhere)
+        assert _py_path_resolves("utils/process_control.py", skill)
+        assert _py_path_resolves("skills/multi-llm/utils/process_control.py", skill)
+        assert _py_path_resolves("process_control.py", elsewhere)
+        assert not _py_path_resolves("process_control.py", mirror)
+        assert _py_path_resolves("providers/base.py", ["skills/multi-llm/utils/providers/base.py"])
+        assert not _py_path_resolves("utils/providers/<name>.py", mirror)
 
 
 if __name__ == "__main__":  # pragma: no cover - parity with the sibling suites

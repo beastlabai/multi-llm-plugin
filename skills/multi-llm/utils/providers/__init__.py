@@ -3,10 +3,10 @@
 The adapter roster is **derived, never hand-maintained**: every concrete
 :class:`LLMProvider` subclass defined in this package is imported, bound into
 the package namespace and exported. ``PROVIDER_CLASSES`` maps class name →
-class, and ``provider_registry._PROVIDERS`` instantiates exactly this set, so
-dropping a module in this directory registers it and deleting one unregisters
-it. ``tests/test_provider_housekeeping.py`` asserts the exports and the
-registry agree in both directions. The tables that must stay hand-kept (measured
+class, and ``provider_registry._PROVIDERS`` is built from it (one instance per
+class, keyed by provider name), so dropping a module in this directory registers
+it and deleting one unregisters it. ``tests/test_provider_housekeeping.py``
+asserts the exports and the registry agree in both directions. The tables that must stay hand-kept (measured
 config rows, fixtures, docs) are compared with the registry by the roster tests;
 the order to fill them in is docs/development/providers.md#adding-a-provider-adapter.
 """
