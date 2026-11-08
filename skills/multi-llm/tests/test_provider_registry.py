@@ -2825,6 +2825,121 @@ class TestRunAnchor:
         assert registry.get_provider_timeout("gemini") == 4242
 
 
+#: Two repositories that disagree on every value a write batch reads.
+_REPO_A_CONFIG = """\
+default_provider: codex
+driver:
+  subagent_runner: codex:gpt-5.5
+  max_concurrent_write_subagents: 4
+  verify_command: echo repo-a
+providers:
+  codex:
+    max_concurrent: 3
+"""
+_REPO_B_CONFIG = """\
+default_provider: claude-code
+driver:
+  subagent_runner: claude-code:sonnet
+  max_concurrent_write_subagents: 1
+  verify_command: echo repo-b
+providers:
+  codex:
+    max_concurrent: 2
+"""
+
+
+def _anchor_beside_snapshot_reads():
+    """Every snapshot reader, called with an ``anchor`` and a ``snapshot``."""
+    from utils import subagent_executor as executor
+
+    return {
+        "write cap": lambda anchor, snap: registry.get_max_concurrent_write_subagents(
+            anchor=anchor, snapshot=snap),
+        "provider cap": lambda anchor, snap: get_provider_max_concurrent(
+            "codex", anchor=anchor, snapshot=snap),
+        "runner ladder": lambda anchor, snap: registry.resolve_subagent_runner(
+            "full", anchor=anchor, snapshot=snap),
+        "task runner": lambda anchor, snap: executor.resolve_task_runner(
+            {"task_id": "t"}, anchor=anchor, snapshot=snap),
+        "task runner from a hint": lambda anchor, snap: executor.resolve_task_runner(
+            {"task_id": "t", "model_hint": "codex:gpt-5.5"},
+            anchor=anchor, snapshot=snap),
+        "task runner source": lambda anchor, snap: executor.resolve_task_runner_source(
+            {"task_id": "t"}, anchor=anchor, snapshot=snap),
+        "driver config": lambda anchor, snap: registry.get_driver_config(
+            anchor=anchor, snapshot=snap),
+        "default provider": lambda anchor, snap: parse_model_spec(
+            "m", anchor=anchor, snapshot=snap),
+        "prefixed spec": lambda anchor, snap: parse_model_spec(
+            "codex:m", anchor=anchor, snapshot=snap),
+    }
+
+
+@pytest.mark.config_override
+class TestASnapshotAnswersForItsOwnRepository:
+    """A config snapshot reads the repository ``load_config_snapshot`` was
+    anchored on, and an anchor passed beside one is refused, never ignored
+    (anchor=B with a snapshot of A used to read A's caps, runner and
+    ``verify_command``). Two disposable repositories, a CWD in neither."""
+
+    @pytest.fixture
+    def repos(self, tmp_path, monkeypatch):
+        plans = []
+        for name, config in (("a", _REPO_A_CONFIG), ("b", _REPO_B_CONFIG)):
+            root = _git_repo(tmp_path / name)
+            _write_yaml(root / ".multi-llm" / "providers.yaml", config)
+            plan = root / "plans" / "p.md"
+            _write_yaml(plan, "# plan\n")
+            plans.append(str(plan))
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        _reset_cache()
+        return tuple(plans)
+
+    def test_each_snapshot_reads_its_own_repository(self, repos):
+        from utils import subagent_executor as executor
+
+        plan_a, plan_b = repos
+        for anchor, write_cap, codex_cap, runner, verify, default in (
+            (plan_a, 4, 3, "codex:gpt-5.5", "echo repo-a", "codex"),
+            (plan_b, 1, 2, "claude-code:sonnet", "echo repo-b", "claude-code"),
+        ):
+            snap = registry.load_config_snapshot(anchor=anchor)
+            assert registry.get_max_concurrent_write_subagents(snapshot=snap) == write_cap
+            assert get_provider_max_concurrent("codex", snapshot=snap) == codex_cap
+            assert registry.resolve_subagent_runner("full", snapshot=snap) == (
+                runner, "project")
+            assert executor.resolve_task_runner({"task_id": "t"}, snapshot=snap) == runner
+            assert registry.get_driver_config(snapshot=snap)["verify_command"] == verify
+            assert parse_model_spec("m", snapshot=snap) == (default, "m")
+            # The same values an anchored load gives.
+            assert registry.get_max_concurrent_write_subagents(anchor=anchor) == write_cap
+            assert get_provider_max_concurrent("codex", anchor=anchor) == codex_cap
+            assert executor.resolve_task_runner({"task_id": "t"}, anchor=anchor) == runner
+            assert registry.get_verify_command(anchor=anchor) == verify
+
+    @pytest.mark.parametrize("read", sorted(_anchor_beside_snapshot_reads()))
+    def test_an_anchor_beside_another_repositorys_snapshot_is_refused(self, repos, read):
+        plan_a, plan_b = repos
+        snap_a = registry.load_config_snapshot(anchor=plan_a)
+        with pytest.raises(TypeError, match="not both"):
+            _anchor_beside_snapshot_reads()[read](plan_b, snap_a)
+
+    @pytest.mark.parametrize("read", sorted(_anchor_beside_snapshot_reads()))
+    def test_an_anchor_beside_its_own_snapshot_is_refused_too(self, repos, read):
+        """One source per read: telling the two apart would cost the git
+        discovery the snapshot saves."""
+        plan_a, _ = repos
+        snap_a = registry.load_config_snapshot(anchor=plan_a)
+        with pytest.raises(TypeError, match="not both"):
+            _anchor_beside_snapshot_reads()[read](plan_a, snap_a)
+
+    def test_a_snapshot_must_be_a_load(self, repos):
+        with pytest.raises(TypeError, match="load_config_snapshot"):
+            registry.get_driver_config(snapshot={"driver": {"verify_command": "x"}})
+
+
 # ---------------------------------------------------------------------------
 # §9.3.e — the guard test, so there is never an eleventh site
 # ---------------------------------------------------------------------------
@@ -2861,7 +2976,37 @@ ANCHORED_ACCESSORS = frozenset({
     # ...and the `code_review:` block's two.
     "get_collapse_paths",
     "get_commit_reviews_dir",
+    # ...and the one load several reads share (`snapshot=` below).
+    "load_config_snapshot",
 })
+
+#: Every function that reads a config snapshot handed to it, by a keyword-only
+#: ``snapshot`` parameter: the registry's accessors, the executor's runner
+#: resolution and the write scheduler's per-batch helpers (the documented
+#: scheduler path, docs/development/write-safety.md). A ``snapshot=`` argument
+#: to one of them is a load only when it traces to an anchored
+#: ``load_config_snapshot`` call (:func:`_snapshot_traces_to_anchored_load`).
+SNAPSHOT_READERS = frozenset({
+    "parse_model_spec",
+    "get_driver_config",
+    "_driver_view",
+    "resolve_subagent_runner",
+    "get_max_concurrent_write_subagents",
+    "get_provider_max_concurrent",
+    "resolve_task_runner",
+    "resolve_task_runner_source",
+    "_resolve_task_source",
+    "_provider_limits",
+    "_resolve_batch_runners",
+    "_batch_ceiling",
+})
+
+#: The modules the readers live in, relative to the skill root.
+_SNAPSHOT_MODULES = (
+    "utils/provider_registry.py",
+    "utils/subagent_executor.py",
+    "utils/write_batch_scheduler.py",
+)
 
 #: Directories that are not this skill's runtime source.
 _NOT_RUNTIME_DIRS = {"tests", "__pycache__", ".venv", "plans", "assets", "templates"}
@@ -2890,7 +3035,13 @@ def _runtime_python_files():
         yield root, path
 
 
-def _call_is_anchored(node: ast.Call) -> bool:
+def _callee(node: ast.Call):
+    func = node.func
+    return (func.id if isinstance(func, ast.Name)
+            else func.attr if isinstance(func, ast.Attribute) else None)
+
+
+def _hands_on_anchor(node: ast.Call) -> bool:
     """True when the call hands an anchor on, by keyword or by forwarding."""
     for keyword in node.keywords:
         if keyword.arg == "anchor":
@@ -2906,28 +3057,122 @@ def _call_is_anchored(node: ast.Call) -> bool:
     return False
 
 
-def _unanchored_accessor_calls(path: Path):
-    """``<enclosing function>::<callee>`` for every unanchored accessor call."""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    stack, found = [], []
+def _is_anchored_snapshot_load(node) -> bool:
+    return (isinstance(node, ast.Call) and _callee(node) == "load_config_snapshot"
+            and _hands_on_anchor(node))
+
+
+def _own_scope(function):
+    """The nodes of *function*'s body, not of the functions or classes inside it."""
+    pending = list(ast.iter_child_nodes(function))
+    while pending:
+        node = pending.pop()
+        yield node
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef, ast.Lambda)):
+            pending.extend(ast.iter_child_nodes(node))
+
+
+def _snapshot_traces_to_anchored_load(value, function) -> bool:
+    """True when a ``snapshot=`` *value* is a load for an anchor.
+
+    It is one when it is an anchored ``load_config_snapshot(...)`` call, or a
+    name every binding of which in the enclosing *function* is one, or the
+    ``snapshot`` parameter of a :data:`SNAPSHOT_READERS` function, which hands
+    on what its own callers passed (those calls are checked the same way).
+    ``snapshot=None`` and anything else is not: it names no load at all.
+    """
+    if _is_anchored_snapshot_load(value):
+        return True
+    if not isinstance(value, ast.Name) or function is None:
+        return False
+    args = function.args
+    params = {a.arg for a in args.posonlyargs + args.args + args.kwonlyargs}
+    if value.id in params:
+        return function.name in SNAPSHOT_READERS and value.id == "snapshot"
+    stores = good = 0
+    for node in _own_scope(function):
+        if isinstance(node, ast.Name) and node.id == value.id and isinstance(
+                node.ctx, ast.Store):
+            stores += 1
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == value.id
+                and _is_anchored_snapshot_load(node.value)):
+            good += 1
+    return stores > 0 and stores == good
+
+
+def _call_is_anchored(node: ast.Call, function=None) -> bool:
+    """True when the call hands an anchor on, by keyword or by forwarding.
+
+    A ``snapshot=`` read counts only when its snapshot traces to an anchored
+    ``load_config_snapshot`` (:func:`_snapshot_traces_to_anchored_load`).
+    """
+    if _hands_on_anchor(node):
+        return True
+    return any(
+        keyword.arg == "snapshot"
+        and _snapshot_traces_to_anchored_load(keyword.value, function)
+        for keyword in node.keywords
+    )
+
+
+def _walk_calls(tree):
+    """``(call, qualified enclosing name, innermost enclosing function)``."""
+    stack, functions = [], []
 
     def visit(node):
-        pushed = False
+        pushed = is_function = False
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             stack.append(node.name)
             pushed = True
+            if not isinstance(node, ast.ClassDef):
+                functions.append(node)
+                is_function = True
         if isinstance(node, ast.Call):
-            func = node.func
-            name = (func.id if isinstance(func, ast.Name)
-                    else func.attr if isinstance(func, ast.Attribute) else None)
-            if name in ANCHORED_ACCESSORS and not _call_is_anchored(node):
-                found.append(f"{'.'.join(stack) or '<module>'}::{name}")
+            yield node, ".".join(stack) or "<module>", (
+                functions[-1] if functions else None)
         for child in ast.iter_child_nodes(node):
-            visit(child)
+            yield from visit(child)
         if pushed:
             stack.pop()
+        if is_function:
+            functions.pop()
 
-    visit(tree)
+    yield from visit(tree)
+
+
+def _unanchored_calls_in(source: str):
+    """``<enclosing function>::<callee>`` for every unanchored accessor call."""
+    return [
+        f"{where}::{_callee(call)}"
+        for call, where, function in _walk_calls(ast.parse(source))
+        if _callee(call) in ANCHORED_ACCESSORS
+        and not _call_is_anchored(call, function)
+    ]
+
+
+def _unanchored_accessor_calls(path: Path):
+    return _unanchored_calls_in(path.read_text(encoding="utf-8"))
+
+
+def _untraced_snapshot_calls_in(source: str):
+    """``<enclosing function>::<callee>`` for every snapshot reader call whose
+    ``snapshot=`` names no anchored load, or that passes an ``anchor=`` beside
+    it outside a reader (``require_one_config_source`` refuses the pair; only
+    a reader forwards both, one of them None)."""
+    found = []
+    for call, where, function in _walk_calls(ast.parse(source)):
+        if _callee(call) not in SNAPSHOT_READERS:
+            continue
+        keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+        if "snapshot" not in keywords:
+            continue
+        forwarding = function is not None and function.name in SNAPSHOT_READERS
+        if not _snapshot_traces_to_anchored_load(keywords["snapshot"], function) or (
+                "anchor" in keywords and not forwarding):
+            found.append(f"{where}::{_callee(call)}")
     return found
 
 
@@ -2962,6 +3207,95 @@ class TestNoUnanchoredAccessorCall:
             if "anchor" not in inspect.signature(func).parameters:
                 missing.append(name)
         assert not missing, f"declared anchored but takes no anchor=: {missing}"
+
+    def test_every_snapshot_argument_traces_to_an_anchored_load(self):
+        """A ``snapshot=`` read is anchored only through the load it names."""
+        offenders = []
+        for root, path in _runtime_python_files():
+            relative = path.relative_to(root).as_posix()
+            offenders.extend(
+                f"{relative}::{site}"
+                for site in _untraced_snapshot_calls_in(path.read_text(encoding="utf-8"))
+            )
+        assert not offenders, (
+            "a snapshot reader was handed a snapshot that is not an anchored "
+            "load_config_snapshot(anchor=...) in the same function or a reader's "
+            f"own snapshot parameter, or an anchor beside it: {offenders}"
+        )
+
+    def test_the_snapshot_readers_are_the_keyword_only_snapshot_parameters(self):
+        """:data:`SNAPSHOT_READERS` is exactly the functions in the config
+        modules that take ``snapshot`` keyword-only, so every snapshot handed
+        to one is a keyword the walk above sees."""
+        root = Path(__file__).parent.parent
+        declared = set()
+        for relative in _SNAPSHOT_MODULES:
+            tree = ast.parse((root / relative).read_text(encoding="utf-8"))
+            declared.update(
+                node.name for node in ast.walk(tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and any(arg.arg == "snapshot" for arg in node.args.kwonlyargs)
+            )
+        assert declared == set(SNAPSHOT_READERS)
+
+
+class TestTheGuardsReadSnapshots:
+    """The two guards above on hand-written sources: a ``snapshot=`` is an
+    anchor only through an anchored load in the same call chain."""
+
+    @staticmethod
+    def _flagged(body: str):
+        source = "def caller(task, a, b):\n" + "".join(
+            f"    {line}\n" for line in body.strip().splitlines())
+        return _unanchored_calls_in(source), _untraced_snapshot_calls_in(source)
+
+    def test_snapshot_none_is_not_an_anchor(self):
+        unanchored, untraced = self._flagged(
+            "get_max_concurrent_write_subagents(snapshot=None)")
+        assert unanchored == ["caller::get_max_concurrent_write_subagents"]
+        assert untraced == ["caller::get_max_concurrent_write_subagents"]
+
+    def test_a_snapshot_of_an_unanchored_load_is_not_an_anchor(self):
+        unanchored, untraced = self._flagged(
+            "snap = load_config_snapshot()\n"
+            "get_provider_max_concurrent('codex', snapshot=snap)")
+        assert unanchored == ["caller::load_config_snapshot",
+                              "caller::get_provider_max_concurrent"]
+        assert untraced == ["caller::get_provider_max_concurrent"]
+
+    def test_an_anchored_load_in_the_same_function_is(self):
+        assert self._flagged(
+            "snap = load_config_snapshot(anchor=a)\n"
+            "get_driver_config(snapshot=snap)\n"
+            "resolve_task_runner(task, snapshot=snap)\n"
+            "parse_model_spec('x', snapshot=load_config_snapshot(anchor=a))"
+        ) == ([], [])
+
+    def test_a_rebound_name_is_not(self):
+        unanchored, untraced = self._flagged(
+            "snap = load_config_snapshot(anchor=a)\n"
+            "snap = None\n"
+            "get_driver_config(snapshot=snap)")
+        assert unanchored == ["caller::get_driver_config"]
+        assert untraced == ["caller::get_driver_config"]
+
+    def test_an_anchor_beside_a_snapshot_is_refused(self):
+        _, untraced = self._flagged(
+            "snap = load_config_snapshot(anchor=a)\n"
+            "resolve_task_runner(task, anchor=b, snapshot=snap)")
+        assert untraced == ["caller::resolve_task_runner"]
+
+    def test_a_parameter_counts_only_inside_a_reader(self):
+        source = (
+            "def helper(snapshot):\n"
+            "    return get_max_concurrent_write_subagents(snapshot=snapshot)\n"
+            "def _batch_ceiling(self, runners, *, snapshot):\n"
+            "    return get_max_concurrent_write_subagents(snapshot=snapshot)\n"
+        )
+        assert _unanchored_calls_in(source) == [
+            "helper::get_max_concurrent_write_subagents"]
+        assert _untraced_snapshot_calls_in(source) == [
+            "helper::get_max_concurrent_write_subagents"]
 
 
 # ---------------------------------------------------------------------------

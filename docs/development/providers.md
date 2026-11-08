@@ -33,7 +33,16 @@ every file it read was settled (older than `yaml_io.SETTLE_S`) before the read a
 signature through it. Each load is one snapshot: the merged dict plus the layer that supplied
 each `driver.*` value, so a value and its provenance never come from two loads. Code that runs
 or logs a value with its source reads both in one call (`get_verify_settings` for
-`driver.verify_command`, `_driver_view` inside the registry). Which layer files a load reads is
+`driver.verify_command`, `_driver_view` inside the registry). Code that reads several values for
+one decision loads once (`load_config_snapshot(anchor=...)`) and passes `snapshot=` to the accessors
+that take it, so the values come from the same files for one git lookup; the write scheduler does
+this once per batch. A snapshot answers for the anchor it was loaded with, so a read takes
+`snapshot=` or `anchor=`, never both: `require_one_config_source` raises on the pair rather than
+let a snapshot of one repository answer a read anchored on another, since checking that the two
+agree would cost the git lookup the snapshot saves. The anchor guard in
+`tests/test_provider_registry.py` counts a `snapshot=` as anchored only when it traces to an
+anchored `load_config_snapshot` in the same function or arrives through a reader's own `snapshot`
+parameter (`SNAPSHOT_READERS`). Which layer files a load reads is
 never cached: every access asks git for the project root (`git rev-parse --show-toplevel`, about
 1.5 ms) and checks whether `.multi-llm/providers.yaml` is there. git's answer depends on more than
 a process can cheaply watch (a re-pointed checkout symlink, a `.git` created or removed,

@@ -87,6 +87,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         get_subagent_timeout,
         is_model_valid,
         parse_model_spec,
+        require_one_config_source,
         resolve_subagent_runner,
     )
     from . import landlock_dispatch
@@ -224,6 +225,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         get_subagent_timeout,
         is_model_valid,
         parse_model_spec,
+        require_one_config_source,
         resolve_subagent_runner,
     )
     from utils import landlock_dispatch  # type: ignore[no-redef]
@@ -2235,6 +2237,7 @@ def resolve_task_runner(
     *,
     anchor: Optional[str] = None,
     recorded: Optional[Dict[str, str]] = None,
+    snapshot: Any = None,
 ) -> str:
     """Resolve one task's runner spec, once, at batch start (D2e/D3o).
 
@@ -2243,8 +2246,14 @@ def resolve_task_runner(
     not one a since-edited config would pick) → the task's own ``model_hint`` when
     it is a concrete ``provider:model`` and not ``auto`` → ``capability_tier``
     (``cheap`` → ``driver.subagent_runner_cheap``) → ``driver.subagent_runner``.
+    ``snapshot`` (``provider_registry.load_config_snapshot``) is the config load
+    the ``driver`` keys are read from, so resolving many tasks costs one load.
+    It stands for the anchor it was loaded with, so it is never passed beside
+    ``anchor`` (``require_one_config_source`` raises).
     """
-    return resolve_task_runner_source(task, anchor=anchor, recorded=recorded)[0]
+    return resolve_task_runner_source(
+        task, anchor=anchor, recorded=recorded, snapshot=snapshot,
+    )[0]
 
 
 def resolve_task_runner_source(
@@ -2252,6 +2261,7 @@ def resolve_task_runner_source(
     *,
     anchor: Optional[str] = None,
     recorded: Optional[Dict[str, str]] = None,
+    snapshot: Any = None,
 ) -> Tuple[str, str]:
     """:func:`resolve_task_runner`, plus the ``key`` naming what supplied the spec.
 
@@ -2269,7 +2279,7 @@ def resolve_task_runner_source(
       ``project``, ``session``, ``host capabilities`` or ``base``/``default``.
     """
     spec, key, _layer = _resolve_task_source(
-        task, anchor=anchor, recorded=recorded
+        task, anchor=anchor, recorded=recorded, snapshot=snapshot,
     )
     return spec, key
 
@@ -2280,6 +2290,7 @@ def _resolve_task_source(
     anchor: Optional[str] = None,
     recorded: Optional[Dict[str, str]] = None,
     skip_session: bool = False,
+    snapshot: Any = None,
 ) -> Tuple[str, str, str]:
     """:func:`resolve_task_runner_source`, plus the raw ladder *layer* word.
 
@@ -2291,8 +2302,11 @@ def _resolve_task_source(
     ladder and therefore have no rung of their own.
 
     ``skip_session`` is forwarded to the ladder so the fallback re-resolution
-    cannot return the session spec that was just refused.
+    cannot return the session spec that was just refused. ``anchor`` and
+    ``snapshot`` are refused together before any rung, so a task the recorded
+    runner or its hint answers refuses the pair as the ladder would.
     """
+    require_one_config_source(anchor, snapshot)
     task_id = str(task.get("task_id", ""))
     if recorded and task_id in recorded:
         return (
@@ -2305,7 +2319,7 @@ def _resolve_task_source(
         return hint.strip(), f"tasks[{task_id}].model_hint", ""
     tier = str(task.get("capability_tier") or "full")
     spec, layer = resolve_subagent_runner(
-        tier, anchor=anchor, skip_session=skip_session
+        tier, anchor=anchor, skip_session=skip_session, snapshot=snapshot,
     )
     driver_key = "driver.subagent_runner_cheap" if tier == "cheap" else "driver.subagent_runner"
     return spec, f"{driver_key} ({layer})", layer

@@ -96,10 +96,13 @@ closed set, fail-fast validation, typed accessors (`get_max_concurrent_write_sub
 which fills each half of the policy per key so setting only `deny` is never an
 accidental deny-all). The write ceiling (`WriteBatchScheduler.write_ceiling`, the minimum of that key, the
 runner providers' `max_concurrent` and the host's ceiling, pinned to 1 for a shared-artifact phase) is
-resolved once per scheduler over every task's runner (`_ceiling_legs`, beside `host_max`), because resolving
-a runner spawns git. That number is an upper bound only. Each batch resolves its own tasks' runners once
-(`_resolve_batch_runners`) and is admitted under the lowest of the phase's number, the driver key as it
-reads now and the current `max_concurrent` of the providers those runners name (`_batch_ceiling`). The
+resolved once per scheduler over every task's runner, from one config snapshot (`_ceiling_legs`, beside
+`host_max`). That number is an upper bound only. Each batch loads one config snapshot when it starts
+(`_batch_runners_and_ceiling`), resolves its own tasks' runners from it once (`_resolve_batch_runners`) and
+is admitted under the lowest of the phase's number, the driver key in that snapshot and the
+`max_concurrent` it gives the providers those runners name (`_batch_ceiling`). Every config load asks git
+for the project root, so a phase's ceiling costs one discovery per batch plus one for the phase, however
+many tasks or providers a batch holds (`tests/test_write_ceiling_cache.py`). The
 rollback-storage preflight and the dispatch use that same resolution (`_runner_for`). So a config edit, or
 a CLI that went missing between batches, can lower a later batch's ceiling but never raise it, and a
 batch's ceiling always binds the runners it actually runs. The batch report and the dry-run record give

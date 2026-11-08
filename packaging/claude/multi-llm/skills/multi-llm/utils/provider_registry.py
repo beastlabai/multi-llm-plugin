@@ -517,6 +517,59 @@ def load_config(anchor: Optional[Union[str, Path]] = None,
     return _load_snapshot(anchor, permissive).config
 
 
+def load_config_snapshot(
+    anchor: Optional[Union[str, Path]] = None,
+) -> _ConfigSnapshot:
+    """One load of the layered config, for a caller that reads several values.
+
+    Discovery runs once here, as for any other access; the accessors that
+    take ``snapshot=`` then read this load instead of loading again, so the
+    values come from the same files and cost one git lookup together. The
+    snapshot stands for *anchor*: an accessor takes it or an anchor, never
+    both (:func:`require_one_config_source`). Hold it for one decision only
+    (one write batch's admission, say): a later read must load again to see
+    an edited layer or a changed project root.
+    """
+    return _load_snapshot(anchor)
+
+
+def require_one_config_source(
+    anchor: Optional[Union[str, Path]],
+    snapshot: Optional[_ConfigSnapshot],
+) -> None:
+    """Refuse a read given both a discovery ``anchor`` and a config ``snapshot``.
+
+    A snapshot answers for the project its :func:`load_config_snapshot` call
+    was anchored on, so an anchor passed beside it would be ignored and the
+    read would answer for another repository: its caps, its runner, its
+    executed ``verify_command``. Checking that the two name one project would
+    cost the git discovery the snapshot exists to save, so the pair is
+    refused outright (docs/development/providers.md#configuration-and-runner-resolution).
+    """
+    if snapshot is None:
+        return
+    if anchor is not None:
+        raise TypeError(
+            "pass anchor= or snapshot=, not both: a config snapshot answers for "
+            "the project load_config_snapshot(anchor=...) was given, so the "
+            f"anchor {str(anchor)!r} would be ignored"
+        )
+    if not isinstance(snapshot, _ConfigSnapshot):
+        raise TypeError(
+            "snapshot= takes what load_config_snapshot() returns, got "
+            f"{type(snapshot).__name__}"
+        )
+
+
+def _config_snapshot_for(
+    anchor: Optional[Union[str, Path]],
+    snapshot: Optional[_ConfigSnapshot],
+) -> _ConfigSnapshot:
+    """``snapshot`` when given, else a load for ``anchor``; never both."""
+    require_one_config_source(anchor, snapshot)
+    return snapshot if snapshot is not None else _load_snapshot(anchor)
+
+
 def _load_snapshot(anchor: Optional[Union[str, Path]] = None,
                    permissive: Optional[bool] = None) -> _ConfigSnapshot:
     """The cached :class:`_ConfigSnapshot` for *anchor*, loaded on a miss.
@@ -676,17 +729,25 @@ def get_provider(name: str) -> Optional[LLMProvider]:
     return _PROVIDERS.get(name)
 
 
-def parse_model_spec(spec: str, anchor: Optional[Union[str, Path]] = None) -> Tuple[str, str]:
+def parse_model_spec(
+    spec: str,
+    anchor: Optional[Union[str, Path]] = None,
+    *,
+    snapshot: Optional[_ConfigSnapshot] = None,
+) -> Tuple[str, str]:
     """Parse 'provider:model' format.
 
     Returns (provider_name, model_name).
-    If no provider prefix, uses default_provider from config.
+    If no provider prefix, uses default_provider from config: from
+    ``snapshot`` when given (:func:`load_config_snapshot`), else a load for
+    ``anchor``; never both (:func:`require_one_config_source`).
     """
+    require_one_config_source(anchor, snapshot)
     if ":" in spec:
         provider, model = spec.split(":", 1)
         return provider, model
 
-    config = load_config(anchor=anchor)
+    config = snapshot.config if snapshot is not None else load_config(anchor=anchor)
     default = config.get("default_provider", "cursor-agent")
     return default, spec
 
@@ -1244,27 +1305,37 @@ def _validate_path_glob(key: str, name: str, pattern: str) -> None:
     )
 
 
-def get_driver_config(anchor: Optional[Union[str, Path]] = None) -> dict:
+def get_driver_config(
+    anchor: Optional[Union[str, Path]] = None,
+    *,
+    snapshot: Optional[_ConfigSnapshot] = None,
+) -> dict:
     """The merged ``driver:`` block, with every key present (D3).
 
     Reads go through this and the typed accessors below — never ad-hoc
     ``config["driver"]`` indexing — so a config layer that omitted a key still
-    yields a complete block.
+    yields a complete block. Read from ``snapshot`` when given
+    (:func:`load_config_snapshot`), else from a load for ``anchor``; never
+    both (:func:`require_one_config_source`).
     """
-    return _driver_view(anchor)[0]
+    return _driver_view(anchor, snapshot=snapshot)[0]
 
 
 def _driver_view(
     anchor: Optional[Union[str, Path]] = None,
+    *,
+    snapshot: Optional[_ConfigSnapshot] = None,
 ) -> Tuple[dict, Dict[str, str]]:
     """``(complete driver block, provenance per key)`` from one config load.
 
     A caller that needs a value and the layer that supplied it reads both
     here, never through two loads: the layer files can change between two
     loads, and a value from one snapshot logged as coming from another layer
-    would misname what runs (``driver.verify_command`` is executed).
+    would misname what runs (``driver.verify_command`` is executed). With
+    ``snapshot`` the view is read from that load, and an ``anchor`` beside it
+    is refused (:func:`require_one_config_source`).
     """
-    snapshot = _load_snapshot(anchor)
+    snapshot = _config_snapshot_for(anchor, snapshot)
     driver = snapshot.config.get("driver")
     driver = dict(driver) if isinstance(driver, dict) else {}
     merged = dict(DRIVER_FALLBACKS)
@@ -1470,6 +1541,8 @@ def resolve_subagent_runner(
     anchor: Optional[Union[str, Path]] = None,
     host_id: Optional[str] = None,
     skip_session: bool = False,
+    *,
+    snapshot: Optional[_ConfigSnapshot] = None,
 ) -> Tuple[str, str]:
     """The resolved runner spec **and the layer that supplied it** (D2e/D3/D3o).
 
@@ -1506,12 +1579,15 @@ def resolve_subagent_runner(
         skip_session: skip the session rung entirely. The fallback path passes it
             after the session model failed preflight, so the re-resolution cannot
             return the spec that was just refused.
+        snapshot: the config load to read the ``driver`` keys from
+            (:func:`load_config_snapshot`); a load for ``anchor`` when omitted.
+            Never both (:func:`require_one_config_source`).
 
     Returns:
         ``(spec, layer)``, where ``layer`` is one of ``env``, ``project``,
         :data:`SESSION_LAYER`, :data:`HOST_DEFAULT_LAYER`, ``base`` or ``default``.
     """
-    driver, driver_layers = _driver_view(anchor=anchor)
+    driver, driver_layers = _driver_view(anchor=anchor, snapshot=snapshot)
     key = "subagent_runner_cheap" if tier == "cheap" else "subagent_runner"
     configured = driver.get(key)
     layer = driver_layers.get(key, "default")
@@ -1565,7 +1641,9 @@ def get_max_concurrent_subagents(anchor: Optional[Union[str, Path]] = None) -> i
 
 
 def get_max_concurrent_write_subagents(
-    anchor: Optional[Union[str, Path]] = None
+    anchor: Optional[Union[str, Path]] = None,
+    *,
+    snapshot: Optional[_ConfigSnapshot] = None,
 ) -> int:
     """``driver.max_concurrent_write_subagents`` — the write gate (default 1, D3h).
 
@@ -1575,8 +1653,11 @@ def get_max_concurrent_write_subagents(
     two agents editing one file. Raising this only *permits* parallelism —
     ``can_parallelize`` and the dispatch-time pairwise-disjoint admission check
     still have to agree, and a shared-artifact phase is pinned to 1 regardless.
+    Read from ``snapshot`` when given (:func:`load_config_snapshot`), never
+    beside an ``anchor`` (:func:`require_one_config_source`).
     """
-    return max(1, int(get_driver_config(anchor=anchor)["max_concurrent_write_subagents"]))
+    driver = get_driver_config(anchor=anchor, snapshot=snapshot)
+    return max(1, int(driver["max_concurrent_write_subagents"]))
 
 
 def get_verify_command(anchor: Optional[Union[str, Path]] = None) -> Optional[str]:
@@ -2182,7 +2263,10 @@ def get_subagent_timeout(
 
 
 def get_provider_max_concurrent(
-    provider_name: str, anchor: Optional[Union[str, Path]] = None
+    provider_name: str,
+    anchor: Optional[Union[str, Path]] = None,
+    *,
+    snapshot: Optional[_ConfigSnapshot] = None,
 ) -> Optional[int]:
     """Get the max concurrent limit for a provider, if configured.
 
@@ -2194,8 +2278,12 @@ def get_provider_max_concurrent(
             through to ``load_config`` exactly like the ``driver`` accessors so a
             project-local ``.multi-llm/providers.yaml`` still binds when the run
             starts outside that project. Omitted, discovery falls back to CWD.
+        snapshot: the config load to read instead
+            (:func:`load_config_snapshot`); never beside an ``anchor``
+            (:func:`require_one_config_source`).
     """
-    config = load_config(anchor=anchor)
+    require_one_config_source(anchor, snapshot)
+    config = snapshot.config if snapshot is not None else load_config(anchor=anchor)
     providers = config.get("providers", {})
     if provider_name in providers:
         return providers[provider_name].get("max_concurrent")

@@ -76,6 +76,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         get_provider_max_concurrent,
         get_verify_command,
         get_verify_settings,
+        load_config_snapshot,
         parse_model_spec,
     )
     from .subagent_executor import (
@@ -194,6 +195,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         get_provider_max_concurrent,
         get_verify_command,
         get_verify_settings,
+        load_config_snapshot,
         parse_model_spec,
     )
     from utils.subagent_executor import (
@@ -5404,46 +5406,68 @@ class WriteBatchScheduler:
     def _ceiling_legs(self) -> Tuple[int, Dict[str, Optional[int]]]:
         """``driver.max_concurrent_write_subagents`` and the provider caps, once.
 
-        Resolved on the first call and kept, as ``host_max`` is in ``__init__``:
-        resolving every task's runner spawns git per task, so it is not repeated
-        per batch. It is kept only as an upper bound. :meth:`_batch_ceiling`
-        reads the current values for each batch and binds to any lower one, so
-        a config change can lower a later batch's ceiling but never raise it
-        above this one (``docs/development/write-safety.md``). A failed
-        resolution caches nothing and raises again on the next call.
+        Resolved on the first call, every task's runner from one config
+        snapshot, and kept as ``host_max`` is in ``__init__``: the phase's upper
+        bound. :meth:`_batch_ceiling` reads the current values for each batch
+        and binds to any lower one, so a config change can lower a later
+        batch's ceiling but never raise it above this one
+        (``docs/development/write-safety.md``). A failed resolution caches
+        nothing and raises again on the next call.
         """
         if self._ceiling_legs_cache is None:
-            configured = get_max_concurrent_write_subagents(anchor=self.anchor)
+            snapshot = load_config_snapshot(anchor=self.anchor)
+            configured = get_max_concurrent_write_subagents(snapshot=snapshot)
             specs = [self.forced_runner] if self.forced_runner else [
-                resolve_task_runner(task, anchor=self.anchor) for task in self.tasks
+                resolve_task_runner(task, snapshot=snapshot) for task in self.tasks
             ]
-            self._ceiling_legs_cache = (configured, self._provider_limits(specs))
+            self._ceiling_legs_cache = (
+                configured, self._provider_limits(specs, snapshot=snapshot),
+            )
         return self._ceiling_legs_cache
 
-    def _provider_limits(self, specs: Iterable[str]) -> Dict[str, Optional[int]]:
-        """``max_concurrent`` of each provider ``specs`` name, read now."""
+    def _provider_limits(
+        self, specs: Iterable[str], *, snapshot: Any,
+    ) -> Dict[str, Optional[int]]:
+        """``max_concurrent`` of each provider ``specs`` name, from ``snapshot``."""
         limits: Dict[str, Optional[int]] = {}
         for spec in dict.fromkeys(specs):
-            provider_name, _ = parse_model_spec(spec, anchor=self.anchor)
+            provider_name, _ = parse_model_spec(spec, snapshot=snapshot)
             limits[provider_name] = get_provider_max_concurrent(
-                provider_name, anchor=self.anchor
+                provider_name, snapshot=snapshot
             )
         return limits
 
-    def _resolve_batch_runners(
+    def _batch_runners_and_ceiling(
         self, tasks: Sequence[Dict[str, Any]],
+    ) -> Tuple[Dict[str, str], int]:
+        """One batch's runners (:meth:`_resolve_batch_runners`) and the ceiling
+        it is admitted under (:meth:`_batch_ceiling`), from one config snapshot.
+
+        The snapshot is loaded when the batch starts, so it sees an edit made
+        since the last batch, and both read it: one config load, so one git
+        discovery, per batch however many tasks it holds. The snapshot stands
+        for ``self.anchor``, so the reads take it alone, never beside an anchor
+        (``provider_registry.require_one_config_source``).
+        """
+        snapshot = load_config_snapshot(anchor=self.anchor)
+        runners = self._resolve_batch_runners(tasks, snapshot=snapshot)
+        return runners, self._batch_ceiling(runners, snapshot=snapshot)
+
+    def _resolve_batch_runners(
+        self, tasks: Sequence[Dict[str, Any]], *, snapshot: Any,
     ) -> Dict[str, str]:
         """The runner spec of each of one batch's tasks, by task id, resolved once.
 
-        ``--runner``, else the task's own chain, read when the batch starts: the
-        configuration or the installed CLIs may have changed since an earlier
-        batch. The batch's ceiling, the rollback-storage preflight and the
-        dispatch all read this map (:meth:`_runner_for`), so they name one
-        runner per task and the ceiling binds the providers that really run.
+        ``--runner``, else the task's own chain, read from the batch's config
+        ``snapshot``: the configuration or the installed CLIs may have changed
+        since an earlier batch. The batch's ceiling, the rollback-storage
+        preflight and the dispatch all read this map (:meth:`_runner_for`), so
+        they name one runner per task and the ceiling binds the providers that
+        really run.
         """
         return {
             str(task.get("task_id", "")):
-                self.forced_runner or resolve_task_runner(task, anchor=self.anchor)
+                self.forced_runner or resolve_task_runner(task, snapshot=snapshot)
             for task in tasks
         }
 
@@ -5458,7 +5482,7 @@ class WriteBatchScheduler:
             spec = resolve_task_runner(task, anchor=self.anchor)
         return spec
 
-    def _batch_ceiling(self, runners: Mapping[str, str]) -> int:
+    def _batch_ceiling(self, runners: Mapping[str, str], *, snapshot: Any) -> int:
         """The ceiling one batch is admitted under: never above :meth:`write_ceiling`.
 
         The phase's number is the upper bound. Under it the driver key and the
@@ -5466,13 +5490,14 @@ class WriteBatchScheduler:
         specs it dispatches on) are read again, so a lower value in the current
         configuration, or a task that now resolves to a provider with a tighter
         cap, binds this batch; a raised value leaves it at the phase's number.
-        These reads go through the registry's config cache and spawn nothing.
-        Called on the loop's thread before the batch's workers start; what it
-        read is kept for :meth:`_ceiling_record`.
+        Every one of these values comes from the batch's config ``snapshot``
+        (:meth:`_batch_runners_and_ceiling`), never a load per key or per
+        provider. Called on the loop's thread before the batch's workers
+        start; what it read is kept for :meth:`_ceiling_record`.
         """
         phase = self.write_ceiling()
-        configured = get_max_concurrent_write_subagents(anchor=self.anchor)
-        limits = self._provider_limits(runners.values())
+        configured = get_max_concurrent_write_subagents(snapshot=snapshot)
+        limits = self._provider_limits(runners.values(), snapshot=snapshot)
         caps = [limit for limit in limits.values() if limit is not None]
         ceiling = max(1, min([phase, configured, *caps]))
         self._admitted_ceilings.append(ceiling)
@@ -6733,8 +6758,7 @@ class WriteBatchScheduler:
     ) -> List[TaskOutcome]:
         # One resolution of this batch's runners, read by its ceiling, its
         # rollback-storage preflight and its dispatches (`_runner_for`).
-        self._batch_runners = self._resolve_batch_runners(tasks)
-        ceiling = self._batch_ceiling(self._batch_runners)
+        self._batch_runners, ceiling = self._batch_runners_and_ceiling(tasks)
         clashes = overlapping_pairs(tasks, root=self.repo_root)
         groups = admit_disjoint_groups(tasks, ceiling=ceiling, root=self.repo_root)
         if ceiling > 1 and clashes:
@@ -14923,10 +14947,9 @@ class WriteBatchScheduler:
         for batch_index, batch_tasks in ordered:
             # As `_run_batch`: one resolution per batch, for its ceiling and
             # each entry's runner.
-            runners = self._resolve_batch_runners(batch_tasks)
+            runners, ceiling = self._batch_runners_and_ceiling(batch_tasks)
             groups = admit_disjoint_groups(
-                batch_tasks, ceiling=self._batch_ceiling(runners),
-                root=self.repo_root,
+                batch_tasks, ceiling=ceiling, root=self.repo_root,
             )
             group_of = {
                 str(task.get("task_id", "")): position
