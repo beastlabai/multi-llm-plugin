@@ -448,7 +448,6 @@ def expected_payload(
     prefix: str = "skills/multi-llm",
     strip: str = "skills/multi-llm",
     allowlist: Optional[Sequence[str]] = None,
-    extra_allowlist: Sequence[str] = (),
 ) -> Tuple[str, ...]:
     """The allowlist expansion, payload-relative: what a staged tree — or a
     tarball built from one — must contain **exactly**.
@@ -463,7 +462,7 @@ def expected_payload(
     patterns = tuple(allowlist) if allowlist is not None else runtime_allowlist(base)
     return tuple(sorted(
         path[len(strip_prefix):]
-        for path in selected_files(base, prefix, (*patterns, *extra_allowlist))
+        for path in selected_files(base, prefix, patterns)
         if path.startswith(strip_prefix)
     ))
 
@@ -503,7 +502,6 @@ def stage(
     required: Sequence[str] = REQUIRED_INVENTORY,
     required_trees: Sequence[str] = REQUIRED_TREES,
     required_extra: Sequence[str] = (),
-    extra_allowlist: Sequence[str] = (),
 ) -> Tuple[str, ...]:
     """Copy the allowlisted payload into *destination*, then account for it.
 
@@ -520,14 +518,6 @@ def stage(
     ls-files`` never selected (untracked), and the static list has no way to
     know the module exists at all. The caller derives that set and passes it
     here; this function only merges and checks it.
-
-    *extra_allowlist* admits repo-root-relative globs for **this one build**, on
-    top of the manifest's list (or *allowlist*). It exists so one distribution
-    can carry a host-only file without broadening the manifest's list, which
-    every other distribution and the container image also read: Claude Code's
-    ``legacy/`` escape hatch is the case, and the Codex and OpenCode builders
-    pass nothing here. A file it admits is staged but not required: a caller
-    that needs it present names it in *required_extra* too.
 
     The write is **atomic against the destination**: staging happens in a temp
     directory on the same filesystem (see :func:`_staging_parent` for *which*
@@ -553,7 +543,7 @@ def stage(
         )
 
     patterns = tuple(allowlist) if allowlist is not None else runtime_allowlist(root)
-    chosen = selected_files(root, prefix, (*patterns, *extra_allowlist))
+    chosen = selected_files(root, prefix, patterns)
     if not chosen:
         raise PayloadError(
             f"the allowlist selected no files under {prefix}. Either the prefix "

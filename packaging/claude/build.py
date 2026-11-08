@@ -21,7 +21,6 @@ staged                                from
 ``hooks/report-check.sh``             the root hook script, verbatim
 ``hooks/wakeup-check.sh``             the root hook script, verbatim
 ``LICENSE``                           the repo root's, verbatim
-``skills/multi-llm/legacy/…``         :data:`LEGACY_FILES`, Claude Code only
 ====================================  =========================================
 
 **Why the tree is committed.** A Claude Code marketplace entry names a directory
@@ -40,15 +39,6 @@ whose manifest and hooks live outside that subtree. So the complete plugin root 
 assembled in a scratch directory, swept and validated as one tree, and only then
 swapped into place: a failure at any step leaves the previous complete plugin
 intact.
-
-**The legacy files are named, not globbed.** ``MULTI_LLM_LEGACY_INSTRUCTIONS=1``
-serves ``legacy/instructions/<mode>.md``, and a missing frozen copy silently falls
-back to the current core rather than failing. A non-empty directory therefore
-proves nothing, so the build requires exactly :data:`LEGACY_FILES`, both ways.
-``legacy/README.md`` ships as the operator documentation the runtime's stderr
-notice points at, the one exception to the rule that development documentation
-stays out of a payload. None of this widens the shared allowlist: the Codex and
-OpenCode builders pass no extension and carry none of these files.
 """
 
 from __future__ import annotations
@@ -106,38 +96,6 @@ PLUGIN_FILES: Mapping[str, str] = {
 #: The hook scripts, which must stay executable: ``hooks.json`` runs each by path.
 HOOK_SCRIPTS: Tuple[str, ...] = (
     "hooks/doctor.sh", "hooks/report-check.sh", "hooks/wakeup-check.sh",
-)
-
-#: The complete frozen core, relative to ``skills/multi-llm/legacy/``. Exactly
-#: these files, or the build fails: see the module docstring.
-LEGACY_FILES: Tuple[str, ...] = (
-    "README.md",
-    "instructions/apply-code-fixes.md",
-    "instructions/apply-suggestions.md",
-    "instructions/apply-task-suggestions.md",
-    "instructions/ask.md",
-    "instructions/full-workflow.md",
-    "instructions/generate-tasks.md",
-    "instructions/implement.md",
-    "instructions/init-config.md",
-    "instructions/review-code.md",
-    "instructions/review-plan.md",
-    "instructions/review-tasks.md",
-    "references/human-decision-batch.md",
-    "references/resume-detection.md",
-    "references/salvage-handling.md",
-    "references/uv-check.md",
-    "references/wave-batching.md",
-)
-
-#: Skill-relative legacy paths, as ``stage``'s ``required_extra`` wants them.
-LEGACY_REQUIRED: Tuple[str, ...] = tuple(f"legacy/{name}" for name in LEGACY_FILES)
-
-#: Repo-relative legacy paths, as ``stage``'s ``extra_allowlist`` wants them. Each
-#: is a literal path with no glob character, so a new file under ``legacy/`` is
-#: not admitted by accident; the exact-inventory check then names it.
-LEGACY_ALLOWLIST: Tuple[str, ...] = tuple(
-    f"skills/multi-llm/legacy/{name}" for name in LEGACY_FILES
 )
 
 #: Everything outside ``skills/multi-llm`` that decides what this plugin ships, and
@@ -212,21 +170,6 @@ def _inventory_problems(tree: Path, expected_payload: Sequence[str]) -> List[str
     }
     problems = [f"missing: {path}" for path in sorted(expected - present)]
     problems += [f"unexpected: {path}" for path in sorted(present - expected)]
-    return problems
-
-
-def _legacy_problems(root: Path) -> List[str]:
-    """Tracked ``legacy/`` equals :data:`LEGACY_FILES`, both ways."""
-    prefix = "skills/multi-llm/legacy"
-    tracked = {
-        path[len(prefix) + 1:] for path in payload.tracked_files(root, prefix)
-    }
-    wanted = set(LEGACY_FILES)
-    # On disk as well as in the index: --allow-dirty reads the working tree, where a
-    # tracked file can already be gone.
-    present = {name for name in tracked if (root / prefix / name).is_file()}
-    problems = [f"missing: legacy/{name}" for name in sorted(wanted - present)]
-    problems += [f"not in LEGACY_FILES: legacy/{name}" for name in sorted(tracked - wanted)]
     return problems
 
 
@@ -386,13 +329,9 @@ def _refuse_symlinked_inputs(checkout: Path) -> None:
 
 def _refuse_untracked_inputs(checkout: Path) -> None:
     """``--allow-dirty`` tolerates *modified* inputs, never an untracked one."""
-    patterns = (*payload.runtime_allowlist(checkout), *LEGACY_ALLOWLIST)
-    untracked = list(payload.untracked_admitted(checkout, "skills/multi-llm", patterns))
-    legacy_prefix = "skills/multi-llm/legacy"
-    out = payload._git(  # noqa: SLF001 — the one shared git runner
-        checkout, "ls-files", "--others", "--exclude-standard", "-z", "--", legacy_prefix,
-    )
-    untracked += [path for path in out.split("\0") if path and path not in untracked]
+    untracked = list(payload.untracked_admitted(
+        checkout, "skills/multi-llm", payload.runtime_allowlist(checkout),
+    ))
     for source in PLUGIN_FILES.values():
         probe = payload._git(  # noqa: SLF001
             checkout, "ls-files", "--others", "--exclude-standard", "--", source,
@@ -436,16 +375,6 @@ def build(
     else:
         _refuse_untracked_inputs(checkout)
 
-    legacy_gaps = _legacy_problems(checkout)
-    if legacy_gaps:
-        raise PayloadError(
-            "the legacy inventory is not the one this plugin ships:\n"
-            + "\n".join(f"    {line}" for line in legacy_gaps)
-            + "\nA missing frozen copy silently falls back to the current core when "
-            "MULTI_LLM_LEGACY_INSTRUCTIONS=1 is set, so the build requires the exact "
-            "list. Restore the file, or change LEGACY_FILES on purpose."
-        )
-
     _refuse_symlinked_inputs(checkout)
 
     version = project_version(skill_base)
@@ -465,13 +394,12 @@ def build(
         # mkdtemp is 0700; the installed plugin is an ordinary directory.
         os.chmod(scratch, 0o755)
 
-        # 1. The payload: the shared allowlist plus the Claude-only legacy files.
+        # 1. The payload: the shared allowlist.
         staged = payload.stage(
             checkout,
             scratch / PAYLOAD_RELATIVE,
             allow_dirty=allow_dirty,
-            required_extra=(*target_module_paths(skill_base), *LEGACY_REQUIRED),
-            extra_allowlist=LEGACY_ALLOWLIST,
+            required_extra=target_module_paths(skill_base),
         )
         os.chmod(scratch / PAYLOAD_RELATIVE, 0o755)
         _normalise_payload_modes(checkout, scratch / PAYLOAD_RELATIVE)
@@ -574,10 +502,10 @@ def release_problems(
 
     Claude Code installs follow ``master`` and cache by manifest version, so a
     shipped byte that moves under an unmoved version reaches nobody who already
-    has that version. The rule is over the **whole generated tree**, hooks and
-    legacy files included, which the shared-payload digest deliberately does not
-    cover. The git tree id is the comparison: it covers bytes and the executable
-    bit, and it needs no recorded digest file in the plugin.
+    has that version. The rule is over the **whole generated tree**, hooks
+    included, which the shared-payload digest deliberately does not cover. The
+    git tree id is the comparison: it covers bytes and the executable bit, and it
+    needs no recorded digest file in the plugin.
 
     *base* is the pull request's target. It catches the same edit before any
     ``claude-v*`` tag exists, and on a branch whose release tag has not been cut.

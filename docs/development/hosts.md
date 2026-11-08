@@ -143,12 +143,10 @@ manifest, whose one non-zero `${CLAUDE_SKILL_DIR}` row is `SKILL.md` — the Cla
 shim, where the host expands the variable at load time. Each verb is resolved to exactly one
 concrete mechanism *in the shim*; the matrix is never on an agent read path.
 
-**The way back is `legacy/`**: the frozen pre-refactor tree, served instead of the
-rewritten core when `MULTI_LLM_LEGACY_INSTRUCTIONS=1` (read path only, Claude Code only, unmaintained — see
-`legacy/README.md`), so the rewrite can be backed out without reverting the dispatcher, the
-executor or the unattended work with it. The regression guard is `tests/test_instruction_refactor_guard.py`: a
-normalized golden bundle of one fully mocked workflow run over `tests/fixtures/e2e/plans/auth-feature.md` ×
-`full_workflow.yaml`, captured on the `phase3-pre-refactor` tag and reproduced with a **zero**
+**The frozen pre-refactor core (`legacy/`) was removed on 2026-11-08**; it lives at tag `phase3-pre-refactor`,
+and `MULTI_LLM_LEGACY_INSTRUCTIONS=1` now only earns a stderr line saying so. The regression guard is
+`tests/test_instruction_refactor_guard.py`: a normalized golden bundle of one fully mocked workflow run over
+`tests/fixtures/e2e/plans/auth-feature.md` × `full_workflow.yaml`, captured on the `phase3-pre-refactor` tag and reproduced with a **zero**
 diff outside `tests/golden/expected_changes.yaml`.
 
 **No spelled invocation in the corpus** (plans/next-phase-command.md T6): the lint also forbids, as
@@ -339,9 +337,9 @@ guide; the procedures below are the same ones.
 
 **Staging covers the whole plugin, not just the payload.** `payload.stage`'s swap and sweep reach
 `skills/multi-llm/` alone, and this plugin's manifest and hooks live outside it. So `build()` assembles the
-complete plugin in a scratch directory: the shared allowlist plus the legacy files through
-`stage(extra_allowlist=…)`, then the manifest, hooks and licence with the mode the git index records. It
-sweeps the complete root for credentials and asserts the result before anything moves: the exact file
+complete plugin in a scratch directory: the shared allowlist through `stage`, then the manifest, hooks and
+licence with the mode the git index records. It sweeps the complete root for credentials and asserts the result
+before anything moves: the exact file
 list both ways, the manifest's name, version and `hooks` pointer, every hook command resolving from
 `${CLAUDE_PLUGIN_ROOT}` to a file in the tree, each hook script executable, `SKILL.md`, the marketplace
 entry, and the `claude-code` entry of `DISTRIBUTION_BUDGETS` in `packaging/common/payload.py`. Only then is
@@ -353,35 +351,6 @@ untracked ones. `make claude-package` is the clean rebuild after it, which must 
 registry. `make claude-package-container` installs the plugin in the test image through the published sparse
 form and grades what a session really loads: Docker, no key, no network. `make claude-check-release` is the moved-tree rule below, and `make claude-check-bump` adds the
 shared-version check and reads the registry.
-
-**The legacy files are a Claude-only inventory, named rather than globbed.**
-`MULTI_LLM_LEGACY_INSTRUCTIONS=1` serves `legacy/instructions/<mode>.md`, and a missing frozen copy silently
-falls back to the current core, so a non-empty directory proves nothing. The build requires exactly these
-17 files under `skills/multi-llm/legacy/`, both ways:
-
-```text
-README.md
-instructions/apply-code-fixes.md
-instructions/apply-suggestions.md
-instructions/apply-task-suggestions.md
-instructions/ask.md
-instructions/full-workflow.md
-instructions/generate-tasks.md
-instructions/implement.md
-instructions/init-config.md
-instructions/review-code.md
-instructions/review-plan.md
-instructions/review-tasks.md
-references/human-decision-batch.md
-references/resume-detection.md
-references/salvage-handling.md
-references/uv-check.md
-references/wave-batching.md
-```
-
-`legacy/README.md` is the one exception to the rule that development documentation stays out of a payload,
-because the runtime's stderr notice points operators at it. The shared allowlist is not widened, so the
-Codex and OpenCode builders carry none of these files.
 
 **`docs/` is in no host's payload, and two links point at it online.** `SKILL.md` and
 `instructions/init-config.md` name the user documentation by URL:
@@ -419,7 +388,7 @@ changes stay off `master` until ready to release. Every change is held to this f
 on `master`, tag or no tag, because `packaging/claude/build.py --check-release` also compares with
 `CLAUDE_RELEASE_BASE`, which the `package` job sets to a pull request's target, or on a push to the commit
 `master` was at before it. It compares
-git tree ids, so hooks, legacy files and the executable bit all count, none of which the shared-payload digest
+git tree ids, so hooks and the executable bit both count, neither of which the shared-payload digest
 sees. The shared-version check itself (`--check-bump`) reads the registry and stays out of the `tests` workflow.
 
 ## Detecting the active route

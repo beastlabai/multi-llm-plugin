@@ -50,9 +50,6 @@ class Distribution:
     #: Files this host's builder writes itself, which therefore differ from any
     #: authored file: ``plugin-relative -> what they are rendered from``.
     rendered: Mapping[str, str]
-    #: Payload-relative prefixes this host does not ship. A file here has no authored
-    #: original to be graded as, because the build would never have put it there.
-    not_shipped: Tuple[str, ...] = ()
 
     @property
     def manifest(self) -> str:
@@ -76,7 +73,6 @@ CODEX = Distribution(
         "dist/tree.sha256": "packaging/codex/build.py",
         f"{PAYLOAD}SKILL.md": f"{PAYLOAD}hosts/codex/plugin-skill.md.tmpl",
     },
-    not_shipped=("legacy/",),
 )
 
 CLAUDE = Distribution(
@@ -116,8 +112,5 @@ def authored_source(path: str) -> Optional[str]:
             return distribution.copied[relative]
         if not relative.startswith(PAYLOAD):
             return None
-        inner = relative[len(PAYLOAD):]
-        if inner.startswith(distribution.not_shipped):
-            return None
-        return f"{PAYLOAD}{inner}"
+        return relative
     return None

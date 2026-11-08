@@ -23,7 +23,6 @@ still loads the root directly during development, but that layout is not what us
 | `hooks/hooks.json`, `hooks/doctor.sh`, `hooks/report-check.sh`, `hooks/wakeup-check.sh` | the root `hooks/`, verbatim, with the mode git records |
 | `LICENSE` | the repository root |
 | `skills/multi-llm/` | the shared runtime allowlist, the product-under-test section of `skills/multi-llm/tests/container/context_manifest.txt` |
-| `skills/multi-llm/legacy/` | the Claude-only inventory below |
 
 ## Commands
 
@@ -46,10 +45,9 @@ and hooks live outside that directory. So `build()` assembles the complete plugi
 directory beside the destination and checks it as one tree. A failure at any step leaves the
 previous complete plugin in place.
 
-1. Refuse dirty inputs (`make claude-regen` tolerates modified ones, never untracked ones), and
-   refuse a tracked `legacy/` that differs from the inventory below.
-2. Stage the shared allowlist plus the legacy files. The required inventory is the static list,
-   every `target_module` in `modes.py`, and the legacy files.
+1. Refuse dirty inputs (`make claude-regen` tolerates modified ones, never untracked ones).
+2. Stage the shared allowlist. The required inventory is the static list and every
+   `target_module` in `modes.py`.
 3. Copy the manifest, hooks and licence from their authored sources, with the mode the git index
    records rather than whatever the checkout's umask produced.
 4. Sweep the complete plugin root for credentials. `payload.stage`'s own sweep saw only the
@@ -59,37 +57,6 @@ previous complete plugin in place.
    resolving from `${CLAUDE_PLUGIN_ROOT}` to a file in the tree; each hook script executable;
    `SKILL.md` present; the marketplace entry naming this tree; the budget below.
 6. Swap the finished tree into place.
-
-## The legacy inventory
-
-`MULTI_LLM_LEGACY_INSTRUCTIONS=1` serves `legacy/instructions/<mode>.md`, and a missing frozen
-copy silently falls back to the current core rather than failing. A non-empty directory therefore
-proves nothing, so the build requires exactly these 17 files under `skills/multi-llm/legacy/`,
-both ways (`LEGACY_FILES` in `build.py`):
-
-```text
-README.md
-instructions/apply-code-fixes.md
-instructions/apply-suggestions.md
-instructions/apply-task-suggestions.md
-instructions/ask.md
-instructions/full-workflow.md
-instructions/generate-tasks.md
-instructions/implement.md
-instructions/init-config.md
-instructions/review-code.md
-instructions/review-plan.md
-instructions/review-tasks.md
-references/human-decision-batch.md
-references/resume-detection.md
-references/salvage-handling.md
-references/uv-check.md
-references/wave-batching.md
-```
-
-`legacy/README.md` is the one exception to the rule that development documentation stays out of a
-payload: the runtime's stderr notice points operators at it. None of this widens the shared
-allowlist, so the Codex and OpenCode builders pass no extension and carry none of these files.
 
 ## The two online documentation links
 
@@ -191,8 +158,8 @@ shipped file also carries a bump and is itself a release. Pull requests are held
 moment the tree is on `master`, tag or no tag, because the check also compares with their target.
 
 The rule is `packaging/claude/build.py --check-release`, and it runs on pull requests in the
-`package` job. It compares git tree ids, so it covers the whole tree: hooks, legacy files and the
-executable bit, none of which the shared-payload digest sees. The version must be strictly newer
+`package` job. It compares git tree ids, so it covers the whole tree: hooks and the executable
+bit, neither of which the shared-payload digest sees. The version must be strictly newer
 than the compared commit's, and build metadata does not count. The shared-version check itself
 stays out of the `tests` workflow.
 

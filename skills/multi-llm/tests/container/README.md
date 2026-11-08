@@ -1021,7 +1021,7 @@ the tmpfs home's `noexec` each one exits 126 while the session carries on, so
 | `claude-package-seed` | The install equals the generated tree byte for byte and bit for bit; no test file, no symlink, within budget; the marketplace clone is sparse and partial and no test blob arrived |
 | `claude-package-session` | A session's own `init` event names the plugin at its cache path and the namespaced skill, with no plugin error; the doctor hook's output shows it really ran; the Stop hooks fired without error |
 | `claude-package-invocation` | The published `/multi-llm:multi-llm` string, typed: the stub saw the skill's body, `${CLAUDE_SKILL_DIR}` expanded to the cache path, and the argument |
-| `claude-package-dispatch` | The dispatcher from the cache copy: `--help`, `util instructions`, the legacy switch, `doctor`, `install-host --check`, `status` |
+| `claude-package-dispatch` | The dispatcher from the cache copy: `--help`, `util instructions`, `doctor`, `install-host --check`, `status` |
 | `claude-package-upgrade` | A new release is invisible until `marketplace update`; the documented update reaches it and a session loads it; a byte moved under an unmoved version reaches nobody |
 
 That last reading is the fact `packaging/claude/build.py --check-release` stands on. If a

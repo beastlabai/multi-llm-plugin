@@ -27,7 +27,7 @@ admits under ``skills/multi-llm/``, with the allowlist *and* the bytes taken fro
 that commit (``git show``, ``git ls-tree``, ``git cat-file``): never from the
 working tree, which is not what any tag carries, and never from a checked-in
 digest file, which is a claim about bytes rather than the bytes. Each
-distribution's own files (Claude's manifest, hooks, licence and ``legacy/``;
+distribution's own files (Claude's manifest, hooks and licence;
 Codex's ``.codex-plugin/``, ``.mcp.json`` and ``mcp/``; OpenCode's ``dist/`` and
 ``package.json``) are outside it: Claude's moved-tree rule, Codex's own-tree rule
 and npm's no-reuse rule already cover them. Blob bytes equal a fresh checkout's

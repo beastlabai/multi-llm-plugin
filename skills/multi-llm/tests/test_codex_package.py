@@ -316,8 +316,7 @@ A2B_ENV_VARS = (
     "MULTI_LLM_GIT_CREDENTIAL_HELPER", "MULTI_LLM_HOST", "MULTI_LLM_UV",
     "MULTI_LLM_UV_RUN_ARGS", "MULTI_LLM_SKILL_DIR", "MULTI_LLM_MAX_DETACHED",
     "MULTI_LLM_HEARTBEAT_INTERVAL_S", "MULTI_LLM_HANDSHAKE_TIMEOUT_S",
-    "MULTI_LLM_REPLAY_FLAGS", "MULTI_LLM_LEGACY_INSTRUCTIONS",
-    "MULTI_LLM_CODEX_UNSANDBOXED_WRITES",
+    "MULTI_LLM_REPLAY_FLAGS", "MULTI_LLM_CODEX_UNSANDBOXED_WRITES",
     "UV_PROJECT_ENVIRONMENT", "UV_CACHE_DIR", "UV_OFFLINE",
     "PWD",
 )
@@ -343,6 +342,9 @@ NOT_FORWARDED = frozenset({
     # The launcher supplies its own log per worker and the dispatcher consumes
     # it before pre-flight; forwarding a host value could target a stale log.
     "MULTI_LLM_WORKER_LOG",
+    # Read only to answer that the legacy core it once switched to is gone. That
+    # core never shipped to Codex, so a forwarded value would change nothing.
+    "MULTI_LLM_LEGACY_INSTRUCTIONS",
     # The same handshake's typed plan (plans/next-phase-command.md T5):
     # `detach.child_env` sets it per launch for the worker alone, which pops it.
     # The server spawns invokers, never workers, so a forwarded one could only
@@ -1066,7 +1068,7 @@ class TestBuild:
 
     def test_payload_manifest(self):
         """(tree) What the Git route installs: the required set present, and
-        nothing else — no symlink, no test/legacy/plan file, a clean sweep."""
+        nothing else — no symlink, no test or plan file, a clean sweep."""
         files = _files(PLUGIN_DIR)
         for required in codex_build.PLUGIN_FILES:
             assert required in files, required
@@ -1076,7 +1078,7 @@ class TestBuild:
         assert not links, links
         for relative in files:
             inner = relative[len(PAYLOAD) + 1:] if relative.startswith(PAYLOAD + "/") else ""
-            assert not inner.startswith(("tests/", "legacy/", "plans/")), relative
+            assert not inner.startswith(("tests/", "plans/")), relative
             assert inner not in ("AGENTS.md", "CLAUDE.md"), relative
         payload_files = {
             name[len(PAYLOAD) + 1:] for name in files if name.startswith(PAYLOAD + "/")

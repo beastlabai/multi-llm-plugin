@@ -6811,7 +6811,7 @@ class TestStaging:
         assert staged == expected
 
         # The regressions the old denylist caught, kept as regressions.
-        for forbidden in ("tests/", "legacy/", ".venv/", "__pycache__/",
+        for forbidden in ("tests/", ".venv/", "__pycache__/",
                           ".pytest_cache/", "plans/"):
             assert not any(path.startswith(forbidden) for path in staged), (
                 f"{forbidden} reached the payload"
@@ -7113,7 +7113,7 @@ class TestPack:
                 f"{required} is not in the tarball"
             )
         assert any("skills/multi-llm/instructions/" in n for n in listing)
-        for forbidden in ("/tests/", "/legacy/", "/.venv/", "__pycache__",
+        for forbidden in ("/tests/", "/.venv/", "__pycache__",
                           ".pytest_cache"):
             assert not any(forbidden in name for name in listing), (
                 f"{forbidden} reached the tarball"

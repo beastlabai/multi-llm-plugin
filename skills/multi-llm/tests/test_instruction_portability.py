@@ -1325,119 +1325,41 @@ class TestNegativeSpellings:
 
 
 # ===========================================================================
-# The legacy escape hatch
+# The removed legacy core
 # ===========================================================================
 
-class TestLegacyInstructionHatch:
-    """A way back from the ~5k-line rewrite that does not revert the Python work.
+class TestLegacyInstructionsRemoved:
+    """The frozen pre-refactor core is gone (docs/development/hosts.md). Its switch
+    is answered with one stderr line and the current core: a run never stops on it."""
 
-    The golden guard proves the modes its fixture exercises, not the interactive
-    corners a real user hits on day two — so the pre-refactor core is *moved*, not
-    deleted, and one environment variable switches the read path back to it.
-    """
+    NOTICE = "[LEGACY_INSTRUCTIONS]"
 
-    LEGACY = SKILL_ROOT / "legacy"
-
-    #: The modes that postdate the rewrite (plans/improve-plan-and-improve-code.md
-    #: §2.4, and the three commit modes of plans/review-commits.md §2.9): there
-    #: is no pre-refactor text to freeze, and a frozen copy of the new core would
-    #: go stale the first time the real one is fixed. The runtime already serves
-    #: the current core for them (`_legacy_instruction_path` returns None when no
-    #: copy exists), so the exemption is test-side only.
-    NO_FROZEN_COPY = {"improve-plan", "improve-code", "review-commits",
-                      "apply-commit-fixes", "improve-commits"}
-
-    def test_every_served_mode_has_a_frozen_copy(self):
-        without_copy = set()
-        for mode in mode_table.MODES:
-            if mode.instruction_file is None:
-                continue
-            if not (self.LEGACY / mode_table.instruction_path(mode.name)).exists():
-                without_copy.add(mode.name)
-            if mode.name in self.NO_FROZEN_COPY:
-                continue
-            assert (self.LEGACY / mode_table.instruction_path(mode.name)).exists(), (
-                f"no frozen pre-refactor copy for mode '{mode.name}'; the escape "
-                "hatch would silently serve the rewritten core instead"
-            )
-        # Exactly the exempt set: a new mode without a copy still fails above,
-        # and an exempt mode that gains a copy or leaves the table fails here.
-        assert without_copy == self.NO_FROZEN_COPY, (
-            f"served modes with no frozen copy {sorted(without_copy)} != the "
-            f"exempt set {sorted(self.NO_FROZEN_COPY)}"
-        )
-
-    @pytest.mark.parametrize("mode", sorted(NO_FROZEN_COPY))
-    def test_a_mode_with_no_frozen_copy_serves_the_current_core(
-        self, mode, monkeypatch, capsys
+    def test_the_variable_serves_the_current_core_with_one_notice(
+        self, monkeypatch, capsys
     ):
-        """With the hatch open, a mode that postdates the rewrite gets exactly
-        what it gets with the hatch closed, and no `[LEGACY_INSTRUCTIONS]`
-        notice: that notice is printed only when a frozen core is served."""
         monkeypatch.delenv(multi_llm.LEGACY_INSTRUCTIONS_ENV, raising=False)
-        assert multi_llm.main(["util", "instructions", mode]) == 0
+        assert multi_llm.main(["util", "instructions", "review-plan"]) == 0
         closed = capsys.readouterr()
         monkeypatch.setenv(multi_llm.LEGACY_INSTRUCTIONS_ENV, "1")
-        assert multi_llm.main(["util", "instructions", mode]) == 0
+        assert multi_llm.main(["util", "instructions", "review-plan"]) == 0
         opened = capsys.readouterr()
         assert opened.out == closed.out
-        assert "[LEGACY_INSTRUCTIONS]" not in opened.err
+        notices = [line for line in opened.err.splitlines() if self.NOTICE in line]
+        assert len(notices) == 1, opened.err
+        assert "removed" in notices[0]
+        assert "current instructions are served" in notices[0]
+        # stdout is the core a host may pipe into a prompt.
+        assert self.NOTICE not in opened.out
+        assert self.NOTICE not in closed.err
 
-    def test_the_frozen_copies_are_the_pre_refactor_text(self):
-        """They still name the host's tools — that is the point of keeping them."""
-        legacy = (self.LEGACY / "instructions" / "review-plan.md").read_text(
-            encoding="utf-8"
-        )
-        assert "${CLAUDE_SKILL_DIR}" in legacy
-        assert "AskUserQuestion" in legacy
-        assert "run_in_background" in legacy
-
-    def test_the_hatch_is_closed_by_default(self, monkeypatch, capsys):
-        monkeypatch.delenv(multi_llm.LEGACY_INSTRUCTIONS_ENV, raising=False)
-        assert multi_llm.main(["util", "instructions", "review-plan"]) == 0
-        captured = capsys.readouterr()
-        assert "${CLAUDE_SKILL_DIR}" not in captured.out
-        assert "AskUserQuestion" not in captured.out
-        assert "LEGACY_INSTRUCTIONS" not in captured.err
-
-    def test_the_hatch_serves_the_frozen_core_rendered(self, monkeypatch, capsys):
-        monkeypatch.setenv(multi_llm.LEGACY_INSTRUCTIONS_ENV, "1")
-        assert multi_llm.main(["util", "instructions", "review-plan"]) == 0
-        captured = capsys.readouterr()
-        assert "AskUserQuestion" in captured.out, "the legacy text was not served"
-        # Rendered, not raw: the renderer substitutes every spelling, so the
-        # legacy corpus's `${CLAUDE_SKILL_DIR}` arrives resolved too.
-        for token in FORBIDDEN_IN_RENDERED:
-            assert token not in captured.out, f"{token} survived legacy rendering"
-        assert str(cli_common.skill_dir()) in captured.out
-        # The notice goes to stderr: stdout is the core, and a host may pipe it
-        # straight into a prompt.
-        assert "[LEGACY_INSTRUCTIONS]" in captured.err
-
-    def test_an_unset_value_other_than_one_does_not_open_it(self, monkeypatch,
-                                                            capsys):
+    def test_any_other_value_prints_nothing(self, monkeypatch, capsys):
         for value in ("0", "", "true", "yes"):
             monkeypatch.setenv(multi_llm.LEGACY_INSTRUCTIONS_ENV, value)
             assert multi_llm.main(["util", "instructions", "review-plan"]) == 0
-            captured = capsys.readouterr()
-            assert "AskUserQuestion" not in captured.out, value
+            assert self.NOTICE not in capsys.readouterr().err, value
 
-    def test_legacy_is_outside_every_lint_and_manifest_scan(self):
-        """A frozen copy that had to pass the new rules would not be a copy."""
-        scanned = {_rel(p) for p in _scanned_files()}
-        assert not any(rel.startswith("legacy/") for rel in scanned), scanned
-        assert not any(
-            _rel(p).startswith("legacy/") for p in _lint_corpus_files()
-        )
-        assert not any(rel.startswith("legacy/") for rel in PLACEHOLDER_MANIFEST)
-
-    def test_the_hatch_is_documented(self):
-        readme = (self.LEGACY / "README.md").read_text(encoding="utf-8")
-        assert multi_llm.LEGACY_INSTRUCTIONS_ENV in readme
-        assert "Claude Code only" in readme
-        # The exempt modes are named, so nobody goes looking for their copy.
-        for mode in sorted(self.NO_FROZEN_COPY):
-            assert f"`{mode}`" in readme, mode
+    def test_no_frozen_core_ships(self):
+        assert not (SKILL_ROOT / "legacy").exists()
 
 
 # ===========================================================================

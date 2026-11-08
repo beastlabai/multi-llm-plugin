@@ -172,29 +172,10 @@ UTIL_COMMANDS: Dict[str, Tuple[Optional[str], str, str]] = {
 COMMIT_BRIEF_UTIL = "commit-brief"
 
 
-#: The instruction-refactor escape hatch. Set to ``1`` and ``util instructions``
-#: serves the frozen pre-refactor core from ``legacy/`` instead of the host-neutral
-#: one — a way back from the ~5k-line markdown rewrite that does **not** revert the
-#: dispatcher, the executor or the unattended work with it. Read path only: same
-#: modes, same flags, same exit codes. See ``legacy/README.md``.
+#: Once served a frozen pre-refactor core; that core is gone (see
+#: docs/development/hosts.md). Still read so a set variable is answered on stderr,
+#: never with a stop: the current core is served either way.
 LEGACY_INSTRUCTIONS_ENV = "MULTI_LLM_LEGACY_INSTRUCTIONS"
-
-#: Where the frozen copies live, relative to the skill root.
-LEGACY_INSTRUCTIONS_DIR = "legacy"
-
-
-def _legacy_instruction_path(relative: str) -> Optional[Path]:
-    """The frozen pre-refactor file for *relative*, when the hatch is open.
-
-    ``None`` when the variable is unset (the overwhelmingly common case, and the
-    only one that costs nothing) or when no frozen copy exists for that mode —
-    a partial legacy tree falls back to the current core rather than failing,
-    because the hatch is a mitigation and must not become a new failure mode.
-    """
-    if os.environ.get(LEGACY_INSTRUCTIONS_ENV) != "1":
-        return None
-    candidate = skill_dir() / LEGACY_INSTRUCTIONS_DIR / relative
-    return candidate if candidate.exists() else None
 
 
 class DispatchError(Exception):
@@ -1118,18 +1099,13 @@ def _run_util_instructions(args: Sequence[str], ctx: ResultContext) -> int:
         print(f"{CORE_END_MARKER} {mode.name}")
         return EXIT_OK
     path = skill_dir() / relative
-    legacy = _legacy_instruction_path(relative)
-    if legacy is not None:
-        # Announced on stderr, never stdout: `util instructions` writes the core
-        # itself to stdout and a host may be piping it straight into a prompt.
+    if os.environ.get(LEGACY_INSTRUCTIONS_ENV) == "1":
+        # stderr, never stdout: stdout is the core, which a host may pipe into a prompt.
         print(
-            f"[LEGACY_INSTRUCTIONS] serving the pre-refactor core from "
-            f"{legacy.parent.name}/{legacy.name} because "
-            f"{LEGACY_INSTRUCTIONS_ENV}=1 (see legacy/README.md; Claude Code "
-            "only, frozen, unmaintained).",
+            f"[LEGACY_INSTRUCTIONS] {LEGACY_INSTRUCTIONS_ENV}=1 is ignored: the legacy "
+            "instruction core was removed, so the current instructions are served.",
             file=sys.stderr,
         )
-        path = legacy
     if not path.exists():
         raise DispatchError(
             f"ERROR: core instruction file missing: {path}\n"

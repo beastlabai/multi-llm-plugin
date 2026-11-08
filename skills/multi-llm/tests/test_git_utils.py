@@ -2653,7 +2653,7 @@ class TestThePluginsGitCallsRunNothingPlanted:
         offenders = []
         for path in sorted(skill_root.rglob("*.py")):
             rel = path.relative_to(skill_root).as_posix()
-            if rel.startswith(("tests/", ".venv/", "legacy/", "packaging/")):
+            if rel.startswith(("tests/", ".venv/", "packaging/")):
                 continue
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             admitted = set()

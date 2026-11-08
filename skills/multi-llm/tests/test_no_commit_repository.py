@@ -419,7 +419,7 @@ SCENARIO = {
 #: The variables a developer shell may export that would move a host, a route
 #: or the repository git acts on away from the one composed here.
 _SCRUBBED_ENV = (
-    "MULTI_LLM_HOST", "MULTI_LLM_HOST_SESSION_MODEL", "MULTI_LLM_LEGACY_INSTRUCTIONS",
+    "MULTI_LLM_HOST", "MULTI_LLM_HOST_SESSION_MODEL",
     "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
     detach.PLAN_ARG_ENV, detach.WORKER_ENV,
 )

@@ -7,7 +7,7 @@ each row builds a throwaway repository with this one's shape where the rule look
 (the version owner, the generated tree) and tags it as a release history would be
 tagged. Nothing here touches the network or this repository's own tags.
 
-**The whole tree is the rule, not the shared digest.** Hook scripts and legacy files
+**The whole tree is the rule, not the shared digest.** Hook scripts and the licence
 sit outside :func:`release_history.shared_payload_digest`, and Claude Code caches by
 manifest version, so an edit to either under an unmoved version reaches nobody who
 has that version. The rows for those two assert both halves: the digest did not
@@ -47,7 +47,7 @@ _spec.loader.exec_module(claude_build)
 
 TREE = claude_build.PLUGIN_RELATIVE
 HOOK = "hooks/doctor.sh"
-LEGACY = "skills/multi-llm/legacy/README.md"
+LICENCE = "LICENSE"
 SHIPPED = "skills/multi-llm/multi_llm.py"
 
 #: The allowlist the shared digest reads, in the two headings the real manifest has.
@@ -95,7 +95,7 @@ class Repo:
         self.with_tree = with_tree
         if with_tree:
             self.write_tree(HOOK, "#!/bin/sh\necho doctor\n")
-            self.write_tree(LEGACY, "# frozen core\n")
+            self.write_tree(LICENCE, "licence\n")
 
     def write(self, relative: str, text: str) -> None:
         path = self.root / relative
@@ -183,7 +183,7 @@ class TestAgainstTheNewestTag:
         assert "claude-v<version>" in line
         assert "packaging/claude/README.md" in line
 
-    @pytest.mark.parametrize("relative", [HOOK, LEGACY], ids=["hook", "legacy"])
+    @pytest.mark.parametrize("relative", [HOOK, LICENCE], ids=["hook", "licence"])
     def test_an_edit_outside_the_shared_digest_is_refused(self, repo, relative):
         """The shared check is satisfied by this commit; this rule is not."""
         repo.commit("0.1.0", tag="claude-v0.1.0")
@@ -687,12 +687,6 @@ def _flat(path: Path) -> str:
 class TestTheDocuments:
     """Each of these is a fact copied out of the code or a procedure a release
     depends on, so a change on either side has to reach the other."""
-
-    @BOTH_DOCUMENTS
-    def test_the_legacy_inventory_is_the_build_s_exactly(self, document):
-        blocks = re.findall(r"^```text\n(.*?)^```", document.read_text("utf-8"), re.M | re.S)
-        listed = [block.split() for block in blocks if "instructions/ask.md" in block]
-        assert listed == [list(claude_build.LEGACY_FILES)]
 
     @BOTH_DOCUMENTS
     def test_the_online_links_are_the_shipped_ones(self, document):

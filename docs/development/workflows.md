@@ -315,8 +315,7 @@ A live run owning a dir the composite writes (its `sequence` dirs,
 with its status and abort commands, never joined, `--force` included, and
 `ImproveWorkflow.run_mode` holds each step's phase-dir `.lock` while it runs
 (`full` gets neither). `--interactive` is exit 3 before
-`--yes` is implied. Legacy: no frozen copy; with `MULTI_LLM_LEGACY_INSTRUCTIONS=1` both serve
-the current core with no notice, and `test_every_served_mode_has_a_frozen_copy` exempts exactly these two.
+`--yes` is implied.
 
 ## Commit reviews
 

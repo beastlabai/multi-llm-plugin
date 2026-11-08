@@ -426,8 +426,7 @@ class World:
         env = self.runner._build_env()
         # The route and host pick only the spelling of a printed command; a
         # developer shell exporting either would move every `command` asserted here.
-        for name in ("MULTI_LLM_ROUTE", "MULTI_LLM_HOST", "MULTI_LLM_HOST_SESSION_MODEL",
-                     "MULTI_LLM_LEGACY_INSTRUCTIONS"):
+        for name in ("MULTI_LLM_ROUTE", "MULTI_LLM_HOST", "MULTI_LLM_HOST_SESSION_MODEL"):
             env.pop(name, None)
         env.update(extra)
         return env

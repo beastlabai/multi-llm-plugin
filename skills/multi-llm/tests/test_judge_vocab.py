@@ -215,7 +215,7 @@ _LEGACY_LITERAL = re.compile(
 def _runtime_modules():
     for path in sorted(SKILL_ROOT.rglob("*.py")):
         rel = path.relative_to(SKILL_ROOT).as_posix()
-        if rel.startswith(("tests/", ".venv/", "legacy/")) or "/." in rel:
+        if rel.startswith(("tests/", ".venv/")) or "/." in rel:
             continue
         yield rel, path
 
@@ -264,14 +264,12 @@ class TestWritersUseOnlyTheNewNames:
         # below it shares, so it is held only to naming no old key.
         delegating = SKILL_ROOT / "instructions" / "apply-commit-fixes.md"
         assert not LEGACY_TOKEN.search(delegating.read_text(encoding="utf-8"))
-        apply_files = [
-            *sorted(path for path in (SKILL_ROOT / "instructions").glob("apply-*.md")
-                    if path != delegating),
-            *sorted((SKILL_ROOT / "legacy" / "instructions").glob("apply-*.md")),
-        ]
-        references = [SKILL_ROOT / "references" / "human-decision-batch.md",
-                      SKILL_ROOT / "legacy" / "references" / "human-decision-batch.md"]
-        assert len(apply_files) == 6
+        apply_files = sorted(
+            path for path in (SKILL_ROOT / "instructions").glob("apply-*.md")
+            if path != delegating
+        )
+        references = [SKILL_ROOT / "references" / "human-decision-batch.md"]
+        assert len(apply_files) == 3
         read = "`batch_context.decision_source` is `judge_auto_decide` or `judge_auto_decide_salvage`"
         for path in apply_files:
             text = path.read_text(encoding="utf-8")
